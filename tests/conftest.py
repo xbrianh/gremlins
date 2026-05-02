@@ -1,0 +1,60 @@
+import pathlib
+import re
+import shutil
+import sys
+
+import pytest
+
+from gremlins.clients.fake import FakeClaudeClient
+
+TESTS_DIR = pathlib.Path(__file__).resolve().parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+
+# Shared minimal event stream used across test modules.
+MINIMAL_EVENTS = [
+    {"type": "system", "subtype": "init", "session_id": "test-session-1"},
+    {"type": "result", "subtype": "success"},
+]
+
+# Label the detail reviewer emits (default sonnet model). Shared so the
+# orchestrator smoke tests and the GR_ID-isolation regression tests stay
+# in sync if the label scheme changes.
+REVIEW_LABELS = {
+    "review-code:detail:sonnet",
+}
+
+
+class ReviewCreatingClient(FakeClaudeClient):
+    """FakeClaudeClient that writes the review output file when a review-code
+    label is called. Extracts the output path from the prompt so it lands at
+    exactly the path run_review_code_stage expects to exist after the reviewer
+    finishes. Shared between test_orchestrator_local and test_state_isolation."""
+
+    def run(self, prompt, *, label, **kwargs):
+        if label.startswith("review-code:"):
+            m = re.search(r"`([^`]+\.md)`\s+is the canonical", prompt)
+            assert m, f"regex did not match review-code prompt for label {label!r}"
+            out = pathlib.Path(m.group(1))
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text("# Review\n\n## Findings\nNone.\n")
+        return super().run(prompt, label=label, **kwargs)
+
+
+def common_local_patches(monkeypatch):
+    """Apply monkeypatches shared across local-orchestrator smoke tests."""
+    monkeypatch.setattr(shutil, "which", lambda n: "/fake/claude" if n == "claude" else None)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.local.install_signal_handlers", lambda c: None
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_gr_id(monkeypatch):
+    # If the test process inherits GR_ID from a parent gremlin (e.g. an
+    # implement stage running `python -m pytest`), gremlins.state.set_stage
+    # would shell out to set-stage.sh against the parent's state.json and
+    # corrupt its `stage` / `sub_stage` fields. Default-deny here; tests that
+    # genuinely need GR_ID set it explicitly via monkeypatch.setenv, which
+    # overrides this delenv.
+    monkeypatch.delenv("GR_ID", raising=False)

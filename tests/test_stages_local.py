@@ -1,0 +1,286 @@
+import pathlib
+import subprocess
+
+import pytest
+from conftest import MINIMAL_EVENTS, ReviewCreatingClient
+
+from gremlins.clients.fake import FakeClaudeClient
+from gremlins.stages.address_code import run_address_code_stage
+from gremlins.stages.implement import _render_spec_block, run_implement_stage
+from gremlins.stages.plan import run_plan_stage
+from gremlins.stages.review_code import run_review_code_stage
+
+
+def _init_git_repo(path: pathlib.Path) -> None:
+    """Create a git repo with a first commit so HEAD exists and the tree is clean."""
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=path, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=path, check=True, capture_output=True,
+    )
+    (path / "README.md").write_text("init\n")
+    subprocess.run(["git", "add", "README.md"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=path, check=True, capture_output=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# _render_spec_block
+# ---------------------------------------------------------------------------
+
+def test_render_spec_block_empty_string():
+    assert _render_spec_block("") == ""
+
+
+def test_render_spec_block_whitespace_only():
+    assert _render_spec_block("   \n  ") == ""
+
+
+def test_render_spec_block_nonempty():
+    result = _render_spec_block("my spec content")
+    assert "Overarching goal (north star)" in result
+    assert "my spec content" in result
+    assert "~~~~" in result
+    assert "read-only context" in result
+
+
+def test_render_spec_block_truncates_at_50000():
+    long_spec = "x" * 60000
+    result = _render_spec_block(long_spec)
+    # no newlines → falls back to hard 50000-char cut
+    assert "x" * 50000 in result
+    assert "truncated" in result
+    assert "60000 chars total" in result
+
+
+def test_render_spec_block_truncates_at_newline_boundary():
+    # 49990 x's, a newline, then a run of z's that push past the 50000 limit.
+    # Using 'z' avoids false positives from the header prose (which contains 'y').
+    long_spec = "x" * 49990 + "\n" + "z" * 10100
+    result = _render_spec_block(long_spec)
+    # cut at the newline before 50000 → no z's in the body
+    assert "z" not in result
+    assert "truncated" in result
+
+
+def test_render_spec_block_no_truncation_note_when_short():
+    result = _render_spec_block("short spec")
+    assert "truncated" not in result
+
+
+# ---------------------------------------------------------------------------
+# implement stage spec_text rendering
+# ---------------------------------------------------------------------------
+
+def test_implement_renders_spec_block_when_present(tmp_path, monkeypatch):
+    git_dir = tmp_path / "repo"
+    git_dir.mkdir()
+    _init_git_repo(git_dir)
+    monkeypatch.chdir(git_dir)
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    class _CommittingClient(FakeClaudeClient):
+        def run(self, prompt, *, label, **kwargs):
+            (git_dir / "newfile.txt").write_text("change\n")
+            subprocess.run(["git", "add", "newfile.txt"], cwd=git_dir, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "implement"], cwd=git_dir, check=True, capture_output=True)
+            return super().run(prompt, label=label, **kwargs)
+
+    client = _CommittingClient(fixtures={"implement": MINIMAL_EVENTS})
+    run_implement_stage(
+        client=client,
+        impl_model="sonnet",
+        plan_text="task 1: do something",
+        code_style="Be good.",
+        session_dir=session_dir,
+        is_git=True,
+        spec_text="overall spec body",
+    )
+    prompt = client.calls[0].prompt
+    assert "Overarching goal (north star)" in prompt
+    assert "overall spec body" in prompt
+    assert prompt.index("overall spec body") < prompt.index("task 1: do something")
+
+
+def test_implement_omits_spec_block_when_absent(tmp_path, monkeypatch):
+    git_dir = tmp_path / "repo"
+    git_dir.mkdir()
+    _init_git_repo(git_dir)
+    monkeypatch.chdir(git_dir)
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    class _CommittingClient(FakeClaudeClient):
+        def run(self, prompt, *, label, **kwargs):
+            (git_dir / "newfile.txt").write_text("change\n")
+            subprocess.run(["git", "add", "newfile.txt"], cwd=git_dir, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "implement"], cwd=git_dir, check=True, capture_output=True)
+            return super().run(prompt, label=label, **kwargs)
+
+    client = _CommittingClient(fixtures={"implement": MINIMAL_EVENTS})
+    run_implement_stage(
+        client=client,
+        impl_model="sonnet",
+        plan_text="task 1: do something",
+        code_style="Be good.",
+        session_dir=session_dir,
+        is_git=True,
+        spec_text="",
+    )
+    prompt = client.calls[0].prompt
+    assert "Overarching goal" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# plan stage
+# ---------------------------------------------------------------------------
+
+def test_plan_stage_raises_when_file_absent(tmp_path):
+    client = FakeClaudeClient(fixtures={"plan": MINIMAL_EVENTS})
+    plan_file = tmp_path / "plan.md"
+    # FakeClaudeClient won't create the plan file — stage must raise.
+    with pytest.raises(RuntimeError, match="plan stage did not produce"):
+        run_plan_stage(
+            client=client,
+            plan_model="sonnet",
+            plan_file=plan_file,
+            instructions="do stuff",
+            raw_path=tmp_path / "stream-plan.jsonl",
+            code_style="Be good.",
+        )
+    assert len(client.calls) == 1
+    assert client.calls[0].label == "plan"
+    assert client.calls[0].model == "sonnet"
+
+
+def test_plan_stage_succeeds_when_file_exists(tmp_path):
+    plan_file = tmp_path / "plan.md"
+
+    class _WritingClient(FakeClaudeClient):
+        def run(self, prompt, *, label, **kwargs):
+            plan_file.write_text("# Plan\nDo stuff.\n")
+            return super().run(prompt, label=label, **kwargs)
+
+    client = _WritingClient(fixtures={"plan": MINIMAL_EVENTS})
+    run_plan_stage(
+        client=client,
+        plan_model="haiku",
+        plan_file=plan_file,
+        instructions="do stuff",
+        raw_path=tmp_path / "stream-plan.jsonl",
+        code_style="Be good.",
+    )
+    assert plan_file.exists()
+    assert client.calls[0].label == "plan"
+    assert client.calls[0].model == "haiku"
+
+
+# ---------------------------------------------------------------------------
+# implement stage
+# ---------------------------------------------------------------------------
+
+def test_implement_stage_raises_on_empty_diff(tmp_path, monkeypatch):
+    git_dir = tmp_path / "repo"
+    git_dir.mkdir()
+    _init_git_repo(git_dir)
+    monkeypatch.chdir(git_dir)
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    client = FakeClaudeClient(fixtures={"implement": MINIMAL_EVENTS})
+    with pytest.raises(RuntimeError, match="no changes"):
+        run_implement_stage(
+            client=client,
+            impl_model="sonnet",
+            plan_file=session_dir / "plan.md",
+            plan_text="# Plan\nDo stuff.\n",
+            code_style="Be good.",
+            session_dir=session_dir,
+            is_git=True,
+        )
+    assert len(client.calls) == 1
+    assert client.calls[0].label == "implement"
+
+
+# ---------------------------------------------------------------------------
+# address-code stage
+# ---------------------------------------------------------------------------
+
+def test_address_code_stage_calls_client_with_review_content(tmp_path):
+    session_dir = tmp_path
+    review_text = "# Detail Review\n\n## Findings\nLooks good.\n"
+    (session_dir / "review-code-detail-sonnet.md").write_text(review_text)
+
+    client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
+    run_address_code_stage(
+        client=client,
+        session_dir=session_dir,
+        address_model="sonnet",
+        is_git=False,
+        code_style="",
+    )
+
+    assert len(client.calls) == 1
+    call = client.calls[0]
+    assert call.label == "address-code"
+    assert call.model == "sonnet"
+    assert "Detail Review" in call.prompt
+
+
+# ---------------------------------------------------------------------------
+# code_style block appears in plan, review, and address prompts
+# ---------------------------------------------------------------------------
+
+def test_plan_stage_includes_code_style(tmp_path):
+    client = FakeClaudeClient(fixtures={"plan": MINIMAL_EVENTS})
+    plan_file = tmp_path / "plan.md"
+    with pytest.raises(RuntimeError, match="plan stage did not produce"):
+        run_plan_stage(
+            client=client,
+            plan_model="sonnet",
+            plan_file=plan_file,
+            instructions="do stuff",
+            raw_path=tmp_path / "stream.jsonl",
+            code_style="Be good.",
+        )
+    assert "Be good." in client.calls[0].prompt
+
+
+def test_review_code_stage_includes_code_style(tmp_path):
+    client = ReviewCreatingClient(
+        fixtures={"review-code:detail:sonnet": MINIMAL_EVENTS}
+    )
+    run_review_code_stage(
+        client=client,
+        session_dir=tmp_path,
+        plan_text="",
+        detail="sonnet",
+        is_git=False,
+        code_style="Be good.",
+    )
+    assert "Be good." in client.calls[0].prompt
+
+
+def test_address_code_stage_includes_code_style(tmp_path):
+    (tmp_path / "review-code-detail-sonnet.md").write_text(
+        "# Detail Review\n\n## Findings\nNone.\n"
+    )
+    client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
+    run_address_code_stage(
+        client=client,
+        session_dir=tmp_path,
+        address_model="sonnet",
+        is_git=False,
+        code_style="Be good.",
+    )
+    assert "Be good." in client.calls[0].prompt
