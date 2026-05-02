@@ -1,12 +1,15 @@
 """Row building and table printing."""
 
 import os
+from typing import Any
 
 from gremlins.fleet.constants import FMT
 from gremlins.fleet.state import display_id, humanize_age, kind_short, render_sub_stage
 
 
-def build_row(gr_id, sf, wdir, state, live):
+def build_row(
+    gr_id: str, sf: str, wdir: str, state: dict[str, Any], live: str
+) -> dict[str, Any]:
     """Return a dict of display fields for a gremlin row."""
     raw_kind = state.get("kind", "")
     k = kind_short(raw_kind)
@@ -64,7 +67,7 @@ def build_row(gr_id, sf, wdir, state, live):
     }
 
 
-def print_table(rows):
+def print_table(rows: list[dict[str, Any]]) -> None:
     """Print header + rows using the fixed format string."""
     print(
         FMT % ("KIND", "ID", "STAGE", "LIVENESS", "AGE", "BOSS", "MODEL", "DESCRIPTION")

@@ -5,6 +5,7 @@ import datetime
 import json
 import os
 import time
+from typing import Any
 
 from gremlins.fleet.duration import parse_duration
 from gremlins.fleet.render import build_row, print_table
@@ -19,12 +20,12 @@ from gremlins.fleet.state import (
 
 
 def collect_rows(
-    here_root=None,
-    kind_filter=None,
-    since_secs=None,
-    liveness_filter=None,
-    include_closed=False,
-):
+    here_root: str | None = None,
+    kind_filter: str | None = None,
+    since_secs: float | None = None,
+    liveness_filter: set[str] | None = None,
+    include_closed: bool = False,
+) -> list[dict[str, Any]]:
     """
     Collect and return a list of row dicts, sorted by started_at ascending.
 
@@ -35,7 +36,7 @@ def collect_rows(
     include_closed    — if True, include closed gremlins (for drill-in / --recent).
     """
     now = time.time()
-    rows = []
+    rows: list[dict[str, Any]] = []
     for gr_id, sf, wdir in iter_state_files():
         if not include_closed and os.path.isfile(os.path.join(wdir, "closed")):
             continue
@@ -43,7 +44,7 @@ def collect_rows(
         state = load_state(sf)
         if not state:
             continue
-        gr_id_from_state = state.get("id") or gr_id
+        gr_id_from_state: str = str(state.get("id") or gr_id)
         if not gr_id_from_state:
             continue
 
@@ -56,12 +57,12 @@ def collect_rows(
 
         # --kind filter
         if kind_filter is not None:
-            if kind_short(state.get("kind", "")) != kind_filter:
+            if kind_short(str(state.get("kind") or "")) != kind_filter:
                 continue
 
         # --since filter
         if since_secs is not None:
-            started_at = state.get("started_at") or ""
+            started_at: str = str(state.get("started_at") or "")
             epoch = iso_to_epoch(started_at)
             if epoch is None or (now - epoch) > since_secs:
                 continue
@@ -81,7 +82,7 @@ def collect_rows(
 
 def do_list(args: argparse.Namespace, here_root: str | None = None) -> None:
     """Default list view."""
-    liveness_filter = None
+    liveness_filter: set[str] | None = None
     if args.running or args.dead or args.stalled:
         liveness_filter = set()
         if args.running:
@@ -150,7 +151,7 @@ def do_recent(args: argparse.Namespace, here_root: str | None = None) -> None:
 
 def do_drill_in(target: str) -> None:
     """Print every field of a uniquely-matched gremlin in a labeled block."""
-    matches = []
+    matches: list[tuple[str, str, str]] = []
     for gr_id, sf, wdir in iter_state_files():
         if target in gr_id:
             matches.append((gr_id, sf, wdir))
@@ -173,7 +174,7 @@ def do_drill_in(target: str) -> None:
         return
 
     live = liveness_of_state_file(sf)
-    started_at = state.get("started_at") or ""
+    started_at: str = str(state.get("started_at") or "")
     age = humanize_age(started_at)
 
     # Convert started_at to local time for display.
@@ -217,13 +218,13 @@ def do_drill_in(target: str) -> None:
     print(f"  state directory: {wdir}")
     log_path = os.path.join(wdir, "log")
     artifacts_dir = os.path.join(wdir, "artifacts")
-    artifact_paths = []
+    artifact_paths: list[str] = []
     if os.path.isdir(artifacts_dir):
         for fname in sorted(os.listdir(artifacts_dir)):
             fpath = os.path.join(artifacts_dir, fname)
             if os.path.isfile(fpath):
                 artifact_paths.append(fpath)
-    rescue_reports = []
+    rescue_reports: list[str] = []
     try:
         for fname in sorted(os.listdir(wdir)):
             if fname.startswith("rescue-") and fname.endswith(".md"):
