@@ -11,7 +11,6 @@ import dataclasses
 import json
 import os
 import pathlib
-import shlex
 import subprocess
 import sys
 import time
@@ -34,12 +33,15 @@ class ShellEnv:
 
 
 def install_fake_bin(bin_dir: pathlib.Path, name: str, target: pathlib.Path) -> None:
+    if " " in sys.executable:
+        raise RuntimeError(
+            f"sys.executable contains spaces; POSIX shebang lines have no quoting mechanism "
+            f"and will fail to exec. Move Python to a path without spaces: {sys.executable!r}"
+        )
     bin_dir.mkdir(parents=True, exist_ok=True)
     wrapper = bin_dir / name
-    # Quote both paths in case sys.executable or target contains spaces
-    # (e.g. macOS framework Pythons or custom install locations).
     wrapper.write_text(
-        f"#!/usr/bin/env bash\nexec {shlex.quote(sys.executable)} {shlex.quote(str(target))} \"$@\"\n",
+        f"#!{sys.executable}\nimport runpy, sys\nrunpy.run_path({str(target)!r}, run_name='__main__')\n",
         encoding="utf-8",
     )
     wrapper.chmod(0o755)

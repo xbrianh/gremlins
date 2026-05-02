@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import pathlib
-import shlex
 import sys
 
 from gremlins.clients.claude import SubprocessClaudeClient
@@ -17,7 +16,6 @@ TESTS_DIR = pathlib.Path(__file__).resolve().parent
 # ---------------------------------------------------------------------------
 
 _STUB_CLAUDE_SRC = """\
-#!/usr/bin/env python3
 import json, os, sys
 
 env_out = os.environ.get("STUB_ENV_OUT")
@@ -33,16 +31,9 @@ sys.stdout.flush()
 
 def _install_stub_claude(bin_dir: pathlib.Path) -> None:
     bin_dir.mkdir(parents=True, exist_ok=True)
-    stub_py = bin_dir / "_stub_claude.py"
-    stub_py.write_text(_STUB_CLAUDE_SRC, encoding="utf-8")
-    stub_py.chmod(0o755)
-    wrapper = bin_dir / "claude"
-    wrapper.write_text(
-        f"#!/usr/bin/env bash\nexec {shlex.quote(sys.executable)} "
-        f"{shlex.quote(str(stub_py))} \"$@\"\n",
-        encoding="utf-8",
-    )
-    wrapper.chmod(0o755)
+    stub = bin_dir / "claude"
+    stub.write_text(f"#!{sys.executable}\n" + _STUB_CLAUDE_SRC, encoding="utf-8")
+    stub.chmod(0o755)
 
 
 # ---------------------------------------------------------------------------

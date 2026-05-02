@@ -14,28 +14,17 @@ import json
 import os
 import pathlib
 import re
-import shlex
 import subprocess
-import sys
 import time
 
 import pytest
+
+from fixtures.shell_env import install_fake_bin
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 FIXTURES_DIR = pathlib.Path(__file__).resolve().parent / "fixtures"
 FAKE_CLAUDE = FIXTURES_DIR / "fake_claude.py"
 FAKE_GH = FIXTURES_DIR / "fake_gh.py"
-
-
-def _install_fake_bin(bin_dir: pathlib.Path, name: str, target: pathlib.Path) -> None:
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    wrapper = bin_dir / name
-    wrapper.write_text(
-        f"#!/usr/bin/env bash\nexec {shlex.quote(sys.executable)} "
-        f"{shlex.quote(str(target))} \"$@\"\n",
-        encoding="utf-8",
-    )
-    wrapper.chmod(0o755)
 
 
 def _setup_claude_home(home: pathlib.Path) -> None:
@@ -102,7 +91,7 @@ def lenv(tmp_path, monkeypatch):
     _setup_claude_home(home)
 
     bin_dir = tmp_path / "bin"
-    _install_fake_bin(bin_dir, "claude", FAKE_CLAUDE)
+    install_fake_bin(bin_dir, "claude", FAKE_CLAUDE)
 
     state_root = tmp_path / "state"
     state_root.mkdir(parents=True, exist_ok=True)
@@ -114,6 +103,7 @@ def lenv(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
     monkeypatch.setenv("FAKE_CLAUDE_LOG", str(tmp_path / "fake_claude.log"))
     monkeypatch.setenv("GIT_OPTIONAL_LOCKS", "0")
+    monkeypatch.setenv("GREMLINS_TEST_NOOP_PIPELINE", "1")
     old_path = os.environ.get("PATH", "")
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{old_path}")
     monkeypatch.delenv("PYTHONPATH", raising=False)
@@ -134,7 +124,7 @@ def lenv(tmp_path, monkeypatch):
 @pytest.fixture
 def lenv_with_gh(tmp_path, monkeypatch, lenv):
     """Like lenv but also installs a fake `gh` binary and a bare origin."""
-    _install_fake_bin(lenv.bin_dir, "gh", FAKE_GH)
+    install_fake_bin(lenv.bin_dir, "gh", FAKE_GH)
     # Re-init the repo with a bare origin (deletes the old repo dir, so re-chdir).
     import shutil
     shutil.rmtree(lenv.repo, ignore_errors=True)
@@ -167,8 +157,6 @@ def test_launch_returns_gr_id(lenv):
     assert gr_id, "expected a non-empty GR_ID"
     assert re.match(r"^[a-z0-9-]+-[0-9a-f]{6}$", gr_id), \
         f"GR_ID has unexpected shape: {gr_id!r}"
-    state_dir = _gremlins_state_root(lenv) / gr_id
-    _wait_for_finished(state_dir, timeout=60)
 
 
 def test_launch_creates_state_layout(lenv):
@@ -193,7 +181,6 @@ def test_launch_creates_state_layout(lenv):
     assert state["pipeline_args"] == ["-i", "sonnet"]
     assert "test instructions" in state["instructions"]
     assert "workdir" in state and state["workdir"]
-    _wait_for_finished(state_dir, timeout=60)
 
 
 def test_launch_writes_worktree(lenv):
@@ -209,7 +196,6 @@ def test_launch_writes_worktree(lenv):
         capture_output=True, text=True, check=True,
     )
     assert str(workdir) in r.stdout
-    _wait_for_finished(state_dir, timeout=60)
 
 
 def test_launch_persists_pipeline_args(lenv):
@@ -222,7 +208,6 @@ def test_launch_persists_pipeline_args(lenv):
     )
     state = _read_state(_gremlins_state_root(lenv) / gr_id)
     assert state["pipeline_args"] == ["-p", "opus", "-i", "sonnet"]
-    _wait_for_finished(_gremlins_state_root(lenv) / gr_id, timeout=60)
 
 
 def test_launch_persists_impl_model_explicit(lenv):
@@ -235,7 +220,6 @@ def test_launch_persists_impl_model_explicit(lenv):
     )
     state = _read_state(_gremlins_state_root(lenv) / gr_id)
     assert state["impl_model"] == "opus"
-    _wait_for_finished(_gremlins_state_root(lenv) / gr_id, timeout=60)
 
 
 def test_launch_persists_impl_model_default(lenv):
@@ -247,7 +231,6 @@ def test_launch_persists_impl_model_default(lenv):
     )
     state = _read_state(_gremlins_state_root(lenv) / gr_id)
     assert state["impl_model"] == "sonnet"
-    _wait_for_finished(_gremlins_state_root(lenv) / gr_id, timeout=60)
 
 
 def test_launch_persists_impl_model_gh_space_form(lenv_with_gh):
@@ -261,7 +244,6 @@ def test_launch_persists_impl_model_gh_space_form(lenv_with_gh):
     )
     state = _read_state(_gremlins_state_root(lenv) / gr_id)
     assert state["impl_model"] == "opus"
-    _wait_for_finished(_gremlins_state_root(lenv) / gr_id, timeout=60)
 
 
 def test_launch_persists_impl_model_gh_equals_form(lenv_with_gh):
@@ -275,7 +257,6 @@ def test_launch_persists_impl_model_gh_equals_form(lenv_with_gh):
     )
     state = _read_state(_gremlins_state_root(lenv) / gr_id)
     assert state["impl_model"] == "haiku"
-    _wait_for_finished(_gremlins_state_root(lenv) / gr_id, timeout=60)
 
 
 def test_launch_plan_normalized_to_absolute(lenv):
@@ -290,7 +271,6 @@ def test_launch_plan_normalized_to_absolute(lenv):
     assert os.path.isabs(persisted), f"expected absolute path, got: {persisted!r}"
     assert pathlib.Path(persisted).name == "my-plan.md"
     assert state["description"].startswith("My Plan Heading")
-    _wait_for_finished(_gremlins_state_root(lenv) / gr_id, timeout=60)
 
 
 def test_launch_h1_as_description(lenv):
@@ -301,7 +281,6 @@ def test_launch_h1_as_description(lenv):
     gr_id = launcher.launch("localgremlin", plan=str(plan_file))
     state = _read_state(_gremlins_state_root(lenv) / gr_id)
     assert state["description"].startswith("Hello World Feature")
-    _wait_for_finished(_gremlins_state_root(lenv) / gr_id, timeout=60)
 
 
 def test_launch_invalid_kind_raises(lenv):
@@ -348,7 +327,6 @@ def test_launch_spawned_process_detached(lenv):
             f"child pgid {child_pgid} should differ from parent pgid {parent_pgid}"
     except ProcessLookupError:
         pass  # already exited; that's fine
-    _wait_for_finished(state_dir, timeout=60)
 
 
 def test_launch_concurrent_no_collision(lenv):
@@ -359,8 +337,6 @@ def test_launch_concurrent_no_collision(lenv):
         for i in range(5)
     ]
     assert len(set(ids)) == len(ids), f"GR_ID collision among: {ids}"
-    for gr_id in ids:
-        _wait_for_finished(_gremlins_state_root(lenv) / gr_id, timeout=60)
 
 
 def test_launch_explicit_project_root(lenv):
@@ -375,7 +351,6 @@ def test_launch_explicit_project_root(lenv):
     state = _read_state(state_root / gr_id)
     assert state["project_root"] == str(lenv.repo)
     assert state["parent_id"] == parent_id
-    _wait_for_finished(state_root / gr_id, timeout=60)
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +359,7 @@ def test_launch_explicit_project_root(lenv):
 
 def test_resume_patches_state(lenv, monkeypatch):
     """resume() bumps rescue_count, clears markers, and patches state.json."""
+    monkeypatch.delenv("GREMLINS_TEST_NOOP_PIPELINE")
     launcher = _launcher()
     monkeypatch.setenv("FAKE_CLAUDE_FAIL_AT", "plan")
     gr_id = launcher.launch("localgremlin", pipeline_args=("-i", "sonnet"), instructions="test resume")
@@ -451,8 +427,9 @@ def test_resume_refuses_finished_success(lenv):
 # _run-pipeline subcommand (terminal state)
 # ---------------------------------------------------------------------------
 
-def test_run_pipeline_writes_terminal_state_on_success(lenv):
+def test_run_pipeline_writes_terminal_state_on_success(lenv, monkeypatch):
     """_run-pipeline writes exit_code=0 + status=done + finished marker on success."""
+    monkeypatch.delenv("GREMLINS_TEST_NOOP_PIPELINE")
     plan_file = lenv.repo / "plan.md"
     plan_file.write_text("# Test Plan\n\n## Tasks\n- [ ] Touch a file\n", encoding="utf-8")
     launcher = _launcher()
@@ -468,6 +445,7 @@ def test_run_pipeline_writes_terminal_state_on_success(lenv):
 
 def test_run_pipeline_writes_terminal_state_on_failure(lenv, monkeypatch):
     """_run-pipeline writes exit_code!=0 + status=stopped + finished marker on failure."""
+    monkeypatch.delenv("GREMLINS_TEST_NOOP_PIPELINE")
     monkeypatch.setenv("FAKE_CLAUDE_FAIL_AT", "plan")
     launcher = _launcher()
     gr_id = launcher.launch("localgremlin", instructions="fail test")
@@ -479,8 +457,9 @@ def test_run_pipeline_writes_terminal_state_on_failure(lenv, monkeypatch):
     assert (state_dir / "finished").exists()
 
 
-def test_run_pipeline_cleans_up_worktree_on_success(lenv):
+def test_run_pipeline_cleans_up_worktree_on_success(lenv, monkeypatch):
     """On exit_code=0 and localgremlin, _run-pipeline removes the git worktree."""
+    monkeypatch.delenv("GREMLINS_TEST_NOOP_PIPELINE")
     plan_file = lenv.repo / "plan.md"
     plan_file.write_text("# Plan\n\n## Tasks\n- [ ] x\n", encoding="utf-8")
     launcher = _launcher()
@@ -499,8 +478,9 @@ def test_run_pipeline_cleans_up_worktree_on_success(lenv):
 # Full pipeline smoke test
 # ---------------------------------------------------------------------------
 
-def test_full_localgremlin_pipeline(lenv):
+def test_full_localgremlin_pipeline(lenv, monkeypatch):
     """plan → implement → review → address all run once in order."""
+    monkeypatch.delenv("GREMLINS_TEST_NOOP_PIPELINE")
     launcher = _launcher()
     gr_id = launcher.launch("localgremlin", instructions="test full pipeline")
     state_dir = _gremlins_state_root(lenv) / gr_id
@@ -543,8 +523,6 @@ def test_launch_ghgremlin_state_layout(lenv_with_gh):
     workdir = pathlib.Path(state["workdir"])
     assert workdir.is_dir(), f"worktree directory should exist: {workdir}"
 
-    _wait_for_finished(state_dir, timeout=60)
-
 
 # ---------------------------------------------------------------------------
 # PYTHONSAFEPATH worktree-rename regression
@@ -572,8 +550,6 @@ def test_launch_passes_base_ref_to_worktree_setup(lenv, monkeypatch):
     head_sha = r.stdout.strip()
 
     gr_id = launcher.launch("localgremlin", instructions="base_ref test", base_ref=head_sha)
-    state_dir = _gremlins_state_root(lenv) / gr_id
-    _wait_for_finished(state_dir, timeout=60)
 
     assert captured.get("base_ref") == head_sha, \
         f"expected base_ref={head_sha!r}, got {captured.get('base_ref')!r}"
@@ -588,6 +564,7 @@ def test_pipeline_survives_worktree_pipeline_rename(lenv, monkeypatch):
     With the fix, python loads gremlins from HOME/.claude/gremlins/ and the
     worktree rename is harmless.
     """
+    monkeypatch.delenv("GREMLINS_TEST_NOOP_PIPELINE")
     # Add a gremlins/ stub to the repo so the worktree shadows $HOME/.claude/gremlins/.
     pipeline_stub = lenv.repo / "gremlins"
     pipeline_stub.mkdir()
@@ -639,7 +616,6 @@ def test_launch_threads_spec_path_into_pipeline_args(lenv):
     assert "--spec" in state["pipeline_args"]
     idx = state["pipeline_args"].index("--spec")
     assert state["pipeline_args"][idx + 1] == str(spec_file.resolve())
-    _wait_for_finished(_gremlins_state_root(lenv) / gr_id, timeout=60)
 
 
 def test_launch_rejects_missing_spec_path(lenv):

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -247,6 +248,8 @@ def _resolve_plan_source(
 
 def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     args = _parse_gh_args(argv)
+    if os.environ.get("GREMLINS_TEST_NOOP_PIPELINE"):
+        return 0
 
     if shutil.which("claude") is None:
         die("claude CLI not found")

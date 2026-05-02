@@ -104,6 +104,8 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     install_signal_handlers(client)
 
     args = _parse_local_args(argv)
+    if os.environ.get("GREMLINS_TEST_NOOP_PIPELINE"):
+        return 0
     instructions = " ".join(args.instructions)
 
     if shutil.which("claude") is None:
