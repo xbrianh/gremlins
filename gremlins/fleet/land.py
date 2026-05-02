@@ -8,13 +8,14 @@ import secrets
 import shutil
 import subprocess
 import time
+from typing import Any, cast
 
 from gremlins.fleet import constants as _constants
 from gremlins.fleet.resolve import resolve_gremlin
 from gremlins.fleet.state import liveness_of_state_file, load_state
 
 
-def expected_branch(state: dict, gr_id: str):
+def expected_branch(state: dict[str, Any], gr_id: str):
     """Return the durable branch name for a gremlin, or None if there isn't one."""
     kind = state.get("kind", "")
     if kind == "localgremlin":
@@ -22,13 +23,13 @@ def expected_branch(state: dict, gr_id: str):
     return None
 
 
-def _print_cost(state: dict) -> None:
+def _print_cost(state: dict[str, Any]) -> None:
     cost = state.get("total_cost_usd")
     if isinstance(cost, (int, float)) and cost > 0:
         print(f"total cost: ${cost:.4f}")
 
 
-def _persist_land_cost(sf: str, state: dict, additional_cost: float) -> None:
+def _persist_land_cost(sf: str, state: dict[str, Any], additional_cost: float) -> None:
     """Fold a land-time `claude -p` cost into state.json's total_cost_usd.
 
     Writes through to disk so the value `_print_cost` reports — and any later
@@ -37,7 +38,7 @@ def _persist_land_cost(sf: str, state: dict, additional_cost: float) -> None:
     the updated total. Best-effort: cost accounting must not crash a
     successful land.
     """
-    if not isinstance(additional_cost, (int, float)) or additional_cost <= 0:
+    if additional_cost <= 0:
         return
     try:
         with open(sf, encoding="utf-8") as f:
@@ -55,7 +56,7 @@ def _persist_land_cost(sf: str, state: dict, additional_cost: float) -> None:
         pass
 
 
-def _resolve_landing_cwd(state: dict) -> str:
+def _resolve_landing_cwd(state: dict[str, Any]) -> str:
     """Return a project_root suitable as cwd for `gh pr merge --delete-branch`.
 
     For boss-launched children, state.project_root is the boss's worktree, which
@@ -72,7 +73,7 @@ def _resolve_landing_cwd(state: dict) -> str:
     # Pre-seed cycle protection with the starting state's id so a pathological
     # cycle that loops back through the starting gremlin trips on first revisit.
     seen = {state.get("id") or ""}
-    current = state
+    current: dict[str, Any] = state
     while True:
         pid = current.get("parent_id") or ""
         if not pid:
@@ -92,10 +93,10 @@ def _resolve_landing_cwd(state: dict) -> str:
             # Unreadable parent state — fall back to own_root rather than
             # returning a possibly-detached intermediate ancestor.
             return own_root
-        current = parent_state
+        current = cast(dict[str, Any], parent_state)
 
 
-def _fast_forward_main(cwd):
+def _fast_forward_main(cwd: str | None):
     """Attempt to fast-forward local main to origin/main after a gh PR merge."""
     r = subprocess.run(
         ["git", "fetch", "origin"], capture_output=True, text=True, cwd=cwd
@@ -148,8 +149,8 @@ def _cleanup_gremlin(
     gr_id: str,
     sf: str,
     wdir: str,
-    state: dict,
-    cwd,
+    state: dict[str, Any],
+    cwd: str | None,
     *,
     delete_branch: bool = True,
     check_cwd: bool = False,
@@ -237,11 +238,17 @@ def do_rm(target: str) -> bool:
         print(f"gremlin {gr_id} is still live ({live}) — use 'stop' first, then rm")
         return False
 
-    project_root = state.get("project_root") or ""
+    project_root = str(state.get("project_root") or "")
     cwd_for_git = project_root if project_root and os.path.isdir(project_root) else None
 
     if not _cleanup_gremlin(
-        gr_id, sf, wdir, state, cwd_for_git, delete_branch=True, check_cwd=True
+        gr_id,
+        sf,
+        wdir,
+        cast(dict[str, Any], state),
+        cwd_for_git,
+        delete_branch=True,
+        check_cwd=True,
     ):
         return False
 
@@ -300,8 +307,8 @@ def _compose_commit_message(plan_path: str):
 
 
 def _gather_commit_inputs(
-    wdir: str, state: dict, branch: str, merge_base: str, cwd
-) -> dict:
+    wdir: str, state: dict[str, Any], branch: str, merge_base: str, cwd: str | None
+) -> dict[str, Any]:
     """Collect all available context for commit message synthesis."""
     inputs = {"description": state.get("description", "")}
 
@@ -343,11 +350,11 @@ def _gather_commit_inputs(
     return inputs
 
 
-def _parse_commit_output(text: str) -> tuple:
+def _parse_commit_output(text: str) -> tuple[str, str]:
     """Split model output into (subject, body) on the first blank line."""
     lines = text.strip().splitlines()
     subject = ""
-    body_lines = []
+    body_lines: list[str] = []
     past_blank = False
     for line in lines:
         if not subject:
@@ -367,7 +374,7 @@ def _parse_commit_output(text: str) -> tuple:
     return subject, body
 
 
-def _run_claude_p_text(prompt: str, timeout: int = 60) -> tuple:
+def _run_claude_p_text(prompt: str, timeout: int = 60) -> tuple[str, float]:
     """Run `claude -p` and return (stdout text, total_cost_usd).
 
     Uses `--output-format json` so the single result object carries both the
@@ -405,9 +412,9 @@ def _run_claude_p_text(prompt: str, timeout: int = 60) -> tuple:
     return text, cost
 
 
-def _synthesize_commit_message_ai(inputs: dict) -> tuple:
+def _synthesize_commit_message_ai(inputs: dict[str, Any]) -> tuple[str, str, float]:
     """Call `claude -p` to produce a commit message from gathered inputs."""
-    parts = []
+    parts: list[str] = []
 
     if inputs.get("description"):
         parts.append(f"Gremlin description: {inputs['description']}")
@@ -445,8 +452,8 @@ Output only the commit message text, nothing else."""
 
 
 def _build_commit_message(
-    wdir: str, state: dict, branch: str, merge_base: str, cwd
-) -> tuple:
+    wdir: str, state: dict[str, Any], branch: str, merge_base: str, cwd: str | None
+) -> tuple[str, str, float]:
     """Return (subject, body, cost_usd) using AI synthesis with fallback to regex extraction."""
     inputs = _gather_commit_inputs(wdir, state, branch, merge_base, cwd)
 
@@ -478,7 +485,7 @@ def _inside_worktree(workdir: str) -> bool:
     return cwd_real == worktree_real or cwd_real.startswith(worktree_real + os.sep)
 
 
-def _preflight_land(state: dict, cwd) -> tuple:
+def _preflight_land(state: dict[str, Any], cwd: str | None) -> tuple[str, bool]:
     """Shared land preflight. Returns (current_branch, ok)."""
     workdir = state.get("workdir") or ""
     if _inside_worktree(workdir):
@@ -515,8 +522,8 @@ def _squash_land(
     gr_id: str,
     sf: str,
     wdir: str,
-    state: dict,
-    cwd,
+    state: dict[str, Any],
+    cwd: str | None,
     source_ref: str,
     source_label: str,
     current: str,
@@ -605,8 +612,8 @@ def _ff_land(
     gr_id: str,
     sf: str,
     wdir: str,
-    state: dict,
-    cwd,
+    state: dict[str, Any],
+    cwd: str | None,
     source_ref: str,
     source_label: str,
     current: str,
@@ -659,7 +666,7 @@ def _ff_land(
 
 
 def _land_local(
-    gr_id: str, sf: str, wdir: str, state: dict, mode: str, into_dir: str = ""
+    gr_id: str, sf: str, wdir: str, state: dict[str, Any], mode: str, into_dir: str = ""
 ) -> bool:
     """Land a local gremlin branch (mode: 'squash' or 'ff'). If into_dir is given, land there instead of project_root."""
     setup_kind = state.get("setup_kind", "")
@@ -712,7 +719,9 @@ def _land_local(
     )
 
 
-def _land_boss(gr_id: str, sf: str, wdir: str, state: dict, mode: str) -> bool:
+def _land_boss(
+    gr_id: str, sf: str, wdir: str, state: dict[str, Any], mode: str
+) -> bool:
     """Land a boss gremlin's chain of squash commits onto the current branch."""
     workdir = state.get("workdir") or ""
     if not workdir or not os.path.isdir(workdir):
@@ -750,7 +759,9 @@ def _land_boss(gr_id: str, sf: str, wdir: str, state: dict, mode: str) -> bool:
     )
 
 
-def _land_gh(gr_id: str, sf: str, wdir: str, state: dict, force: bool = False) -> bool:
+def _land_gh(
+    gr_id: str, sf: str, wdir: str, state: dict[str, Any], force: bool = False
+) -> bool:
     """Merge a gh gremlin's PR and clean up."""
     pr_url = state.get("pr_url", "")
     if not pr_url:
@@ -790,7 +801,7 @@ def _land_gh(gr_id: str, sf: str, wdir: str, state: dict, force: bool = False) -
     pr_state = pr_info.get("state", "")
     mergeable = pr_info.get("mergeable", "")
     review_decision = pr_info.get("reviewDecision") or ""
-    checks = pr_info.get("statusCheckRollup") or []
+    checks: list[Any] = pr_info.get("statusCheckRollup") or []
 
     if pr_state == "MERGED":
         print("PR already merged.")
