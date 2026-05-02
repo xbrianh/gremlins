@@ -10,7 +10,6 @@ import shutil
 import pytest
 
 import gremlins.git as git_mod
-import gremlins.launcher as launcher_mod
 import gremlins.orchestrators.boss as boss_mod
 from gremlins.orchestrators.boss import (
     _resolve_plan_source,

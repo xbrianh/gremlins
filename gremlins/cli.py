@@ -32,7 +32,6 @@ from .fleet import main as fleet_main
 from .fleet.session_summary import main as _session_summary_main
 from .handoff import main as handoff_main
 from .launcher import VALID_KINDS, launch, resume, write_terminal_state
-from .orchestrators.boss import boss_main
 from .orchestrators.gh import gh_main
 from .orchestrators.local import address_main, local_main, review_main
 from .state import (
@@ -65,6 +64,8 @@ def main(argv: list[str] | None = None) -> int:
     if sub == "gh":
         return gh_main(rest)
     if sub == "boss":
+        from .orchestrators.boss import boss_main
+
         return boss_main(rest)
     if sub == "fleet":
         return fleet_main(rest)

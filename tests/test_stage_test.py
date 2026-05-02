@@ -5,7 +5,6 @@ import json
 import pytest
 from conftest import MINIMAL_EVENTS
 
-import gremlins.launcher as launcher_mod
 import gremlins.orchestrators.boss as boss_mod
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.stages.test import run_test_stage

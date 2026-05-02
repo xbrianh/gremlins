@@ -37,7 +37,6 @@ import pathlib
 import subprocess
 
 import gremlins.fleet.rescue as rescue_mod
-import gremlins.launcher as _launcher_mod
 from gremlins import fleet
 
 from fixtures.shell_env import (
