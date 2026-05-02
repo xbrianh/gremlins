@@ -22,8 +22,10 @@ import sys
 from gremlins.prompts import load_code_style
 
 CLAUDE_FLAGS = [
-    "--permission-mode", "bypassPermissions",
-    "--output-format", "text",
+    "--permission-mode",
+    "bypassPermissions",
+    "--output-format",
+    "text",
 ]
 
 
@@ -55,7 +57,9 @@ def auto_name_out(plan_path: pathlib.Path) -> pathlib.Path:
         n += 1
 
 
-def collect_git_context(base_ref: str | None, rev: str | None = None) -> tuple[str, str, str]:
+def collect_git_context(
+    base_ref: str | None, rev: str | None = None
+) -> tuple[str, str, str]:
     """Return (branch_name, git_log, git_diff) since merge-base with base_ref.
 
     If rev is given, inspect that ref instead of HEAD (useful when the caller
@@ -108,13 +112,21 @@ def build_prompt(
     code_style: str = "",
 ) -> str:
     diff_body = git_diff[:50000] if git_diff else "(empty — no changes yet)"
-    diff_trunc = f"\n(diff truncated to 50000 chars; {len(git_diff)} chars total)" if len(git_diff) > 50000 else ""
+    diff_trunc = (
+        f"\n(diff truncated to 50000 chars; {len(git_diff)} chars total)"
+        if len(git_diff) > 50000
+        else ""
+    )
     log_body = git_log if git_log else "(no commits yet — branch just started)"
 
     spec_section = ""
     if spec_text is not None:
         spec_body = spec_text[:50000]
-        spec_trunc = f"\n(spec truncated to 50000 chars; {len(spec_text)} chars total)" if len(spec_text) > 50000 else ""
+        spec_trunc = (
+            f"\n(spec truncated to 50000 chars; {len(spec_text)} chars total)"
+            if len(spec_text) > 50000
+            else ""
+        )
         spec_section = f"""## Overarching goal (north star)
 
 This is the original chain spec. It does not change between handoffs and is read-only context for understanding what the chain as a whole is working toward. Use it to judge whether the rolling input plan below is on track and to scope the next step coherently. Do not echo it into the updated plan — it stays in `--spec`.
@@ -272,13 +284,18 @@ Do not print the document to stdout. Do not explain what you changed.
 
 def sanitize_rolling_plan(out_path: pathlib.Path, timeout: int | None) -> None:
     if not out_path.exists():
-        sys.stderr.write(f"warning: sanitize skipped — rolling plan not found: {out_path}\n")
+        sys.stderr.write(
+            f"warning: sanitize skipped — rolling plan not found: {out_path}\n"
+        )
         return
     try:
         plan_text = out_path.read_text(encoding="utf-8")
     except OSError as exc:
-        sys.stderr.write(f"warning: sanitize skipped — could not read rolling plan: {exc}\n")
+        sys.stderr.write(
+            f"warning: sanitize skipped — could not read rolling plan: {exc}\n"
+        )
         return
+
     def restore_original(reason: str) -> None:
         try:
             out_path.write_text(plan_text, encoding="utf-8")
@@ -294,7 +311,9 @@ def sanitize_rolling_plan(out_path: pathlib.Path, timeout: int | None) -> None:
     cmd = ["claude", "-p", "--model", "haiku", *CLAUDE_FLAGS, prompt]
     print("==> sanitizing rolling plan", flush=True)
     try:
-        result = subprocess.run(cmd, timeout=sanitize_timeout, capture_output=True, text=True)
+        result = subprocess.run(
+            cmd, timeout=sanitize_timeout, capture_output=True, text=True
+        )
     except subprocess.TimeoutExpired:
         restore_original("sanitize pass timed out")
         return
@@ -316,15 +335,28 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     usage = "usage: handoff.sh --plan <path> [--spec <path>] [--out <path>] [--base <ref>] [--rev <ref>] [--model <model>] [--timeout <secs>]"
     parser = argparse.ArgumentParser(add_help=False, usage=usage)
     parser.add_argument("--plan", dest="plan", required=True)
-    parser.add_argument("--spec", dest="spec", default=None,
-                        help="overarching chain spec used as read-only north-star context")
+    parser.add_argument(
+        "--spec",
+        dest="spec",
+        default=None,
+        help="overarching chain spec used as read-only north-star context",
+    )
     parser.add_argument("--out", dest="out", default=None)
     parser.add_argument("--base", dest="base", default=None)
     parser.add_argument("--model", dest="model", default="sonnet")
-    parser.add_argument("--timeout", dest="timeout", type=int, default=None,
-                        help="timeout in seconds for the main handoff agent (default: no timeout); the sanitize pass is capped at min(timeout, 60)s")
-    parser.add_argument("--rev", dest="rev", default=None,
-                        help="inspect this ref instead of HEAD (e.g. a target branch name)")
+    parser.add_argument(
+        "--timeout",
+        dest="timeout",
+        type=int,
+        default=None,
+        help="timeout in seconds for the main handoff agent (default: no timeout); the sanitize pass is capped at min(timeout, 60)s",
+    )
+    parser.add_argument(
+        "--rev",
+        dest="rev",
+        default=None,
+        help="inspect this ref instead of HEAD (e.g. a target branch name)",
+    )
     return parser.parse_args(argv)
 
 
@@ -358,18 +390,28 @@ def main(argv: list[str]) -> int:
     if args.spec is not None:
         spec_path = pathlib.Path(args.spec).resolve()
         if not spec_path.exists():
-            sys.stderr.write(f"warning: --spec does not exist, continuing without north-star context: {spec_path}\n")
+            sys.stderr.write(
+                f"warning: --spec does not exist, continuing without north-star context: {spec_path}\n"
+            )
         elif not spec_path.is_file():
-            sys.stderr.write(f"warning: --spec is not a file, continuing without north-star context: {spec_path}\n")
+            sys.stderr.write(
+                f"warning: --spec is not a file, continuing without north-star context: {spec_path}\n"
+            )
         elif spec_path.stat().st_size == 0:
-            sys.stderr.write(f"warning: --spec is empty, continuing without north-star context: {spec_path}\n")
+            sys.stderr.write(
+                f"warning: --spec is empty, continuing without north-star context: {spec_path}\n"
+            )
         else:
             try:
                 spec_text = spec_path.read_text(encoding="utf-8")
             except UnicodeDecodeError:
-                sys.stderr.write(f"warning: --spec is not valid UTF-8, continuing without north-star context: {spec_path}\n")
+                sys.stderr.write(
+                    f"warning: --spec is not valid UTF-8, continuing without north-star context: {spec_path}\n"
+                )
             except OSError as exc:
-                sys.stderr.write(f"warning: failed to read --spec, continuing without north-star context: {spec_path}: {exc}\n")
+                sys.stderr.write(
+                    f"warning: failed to read --spec, continuing without north-star context: {spec_path}: {exc}\n"
+                )
 
     if args.out:
         out_path = pathlib.Path(args.out).resolve()
@@ -426,17 +468,23 @@ def main(argv: list[str]) -> int:
 
     exit_state = state.get("exit_state")
     if exit_state not in ("next-plan", "chain-done", "bail"):
-        sys.stderr.write(f"error: signal file has unrecognized exit_state: {exit_state!r}\n")
+        sys.stderr.write(
+            f"error: signal file has unrecognized exit_state: {exit_state!r}\n"
+        )
         return 1
 
     print(f"==> handoff complete: {exit_state}", flush=True)
     if exit_state == "next-plan":
         child_plan = state.get("child_plan")
         if not child_plan:
-            sys.stderr.write("error: signal file exit_state is next-plan but child_plan is null\n")
+            sys.stderr.write(
+                "error: signal file exit_state is next-plan but child_plan is null\n"
+            )
             return 1
         if not pathlib.Path(child_plan).exists():
-            sys.stderr.write(f"error: child plan path in signal file does not exist: {child_plan}\n")
+            sys.stderr.write(
+                f"error: child plan path in signal file does not exist: {child_plan}\n"
+            )
             return 1
         print(f"    updated plan: {out_path}", flush=True)
         print(f"    child plan:   {child_plan}", flush=True)

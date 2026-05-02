@@ -14,7 +14,9 @@ import subprocess
 from ..clients.claude import ClaudeClient
 from ..state import check_bail, emit_bail
 
-PROMPT_TEMPLATE_PATH = pathlib.Path(__file__).resolve().parent.parent / "prompts" / "test_fix.md"
+PROMPT_TEMPLATE_PATH = (
+    pathlib.Path(__file__).resolve().parent.parent / "prompts" / "test_fix.md"
+)
 
 
 def _diff_text(is_git: bool, cwd: pathlib.Path) -> str:
@@ -22,10 +24,18 @@ def _diff_text(is_git: bool, cwd: pathlib.Path) -> str:
         return ""
     try:
         unstaged = subprocess.run(
-            ["git", "diff"], capture_output=True, text=True, cwd=cwd, check=False,
+            ["git", "diff"],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            check=False,
         )
         staged = subprocess.run(
-            ["git", "diff", "--cached"], capture_output=True, text=True, cwd=cwd, check=False,
+            ["git", "diff", "--cached"],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            check=False,
         )
         return (unstaged.stdout + staged.stdout).strip()
     except Exception:
@@ -68,7 +78,7 @@ def run_test_stage(
         bail_section = (
             "\n\nIf you cannot fix the failure (e.g. the test checks behaviour you "
             "legitimately cannot implement), run:\n"
-            "  `python -m gremlins.cli bail other \"<one-line reason>\"`\n"
+            '  `python -m gremlins.cli bail other "<one-line reason>"`\n'
             "before finishing."
         )
 
@@ -80,8 +90,11 @@ def run_test_stage(
         for attempt in range(1, max_attempts + 1):
             log_file = session_dir / f"test-attempt-{attempt}.log"
             result = subprocess.run(
-                test_cmd, shell=True, cwd=cwd,
-                capture_output=True, text=True,
+                test_cmd,
+                shell=True,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
             )
             log_file.write_text(result.stdout + result.stderr, encoding="utf-8")
 
@@ -89,7 +102,10 @@ def run_test_stage(
                 print(f"    test attempt {attempt}: green", flush=True)
                 return
 
-            print(f"    test attempt {attempt}: failed (exit {result.returncode})", flush=True)
+            print(
+                f"    test attempt {attempt}: failed (exit {result.returncode})",
+                flush=True,
+            )
 
             if attempt == max_attempts:
                 break

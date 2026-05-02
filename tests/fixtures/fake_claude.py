@@ -30,17 +30,25 @@ def emit_event(evt: dict) -> None:
 
 
 def emit_minimal_stream(session_id: str, *, extra: list = None) -> None:
-    emit_event({
-        "type": "system", "subtype": "init",
-        "session_id": session_id,
-        "model": "fake", "cwd": os.getcwd(),
-    })
+    emit_event(
+        {
+            "type": "system",
+            "subtype": "init",
+            "session_id": session_id,
+            "model": "fake",
+            "cwd": os.getcwd(),
+        }
+    )
     for evt in extra or []:
         emit_event(evt)
-    emit_event({
-        "type": "result", "subtype": "success",
-        "num_turns": 1, "total_cost_usd": 0,
-    })
+    emit_event(
+        {
+            "type": "result",
+            "subtype": "success",
+            "num_turns": 1,
+            "total_cost_usd": 0,
+        }
+    )
 
 
 def emit_pr_create_stream(session_id: str, pr_url: str) -> None:
@@ -48,14 +56,31 @@ def emit_pr_create_stream(session_id: str, pr_url: str) -> None:
     emit_minimal_stream(
         session_id,
         extra=[
-            {"type": "assistant", "message": {"content": [
-                {"type": "tool_use", "id": tu_id, "name": "Bash",
-                 "input": {"command": "gh pr create --base main"}},
-            ]}},
-            {"type": "user", "message": {"content": [
-                {"type": "tool_result", "tool_use_id": tu_id,
-                 "content": pr_url},
-            ]}},
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": tu_id,
+                            "name": "Bash",
+                            "input": {"command": "gh pr create --base main"},
+                        },
+                    ]
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tu_id,
+                            "content": pr_url,
+                        },
+                    ]
+                },
+            },
         ],
     )
 
@@ -65,14 +90,31 @@ def emit_issue_create_stream(session_id: str, issue_url: str) -> None:
     emit_minimal_stream(
         session_id,
         extra=[
-            {"type": "assistant", "message": {"content": [
-                {"type": "tool_use", "id": tu_id, "name": "Bash",
-                 "input": {"command": "gh issue create --title foo"}},
-            ]}},
-            {"type": "user", "message": {"content": [
-                {"type": "tool_result", "tool_use_id": tu_id,
-                 "content": issue_url},
-            ]}},
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": tu_id,
+                            "name": "Bash",
+                            "input": {"command": "gh issue create --title foo"},
+                        },
+                    ]
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tu_id,
+                            "content": issue_url,
+                        },
+                    ]
+                },
+            },
         ],
     )
 
@@ -116,13 +158,15 @@ def git_commit_changes(message: str) -> bool:
         subprocess.run(["git", "add", "-A"], check=False, capture_output=True)
         r = subprocess.run(
             ["git", "diff", "--cached", "--quiet"],
-            check=False, capture_output=True,
+            check=False,
+            capture_output=True,
         )
         if r.returncode == 0:
             return False  # nothing staged
         subprocess.run(
             ["git", "commit", "-m", message],
-            check=False, capture_output=True,
+            check=False,
+            capture_output=True,
         )
         return True
     except OSError:
@@ -150,10 +194,14 @@ def handle_implement(prompt: str, session_id: str) -> int:
         pd = pathlib.Path("gremlins")
         if pd.is_dir():
             pd.rename("gremlins-renamed")
-    in_git = subprocess.run(
-        ["git", "rev-parse", "--git-dir"],
-        capture_output=True, check=False,
-    ).returncode == 0
+    in_git = (
+        subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            capture_output=True,
+            check=False,
+        ).returncode
+        == 0
+    )
     if in_git:
         # Commit so HEAD advances (post-impl invariant for both local and gh).
         git_commit_changes("impl: fake implementation")
@@ -167,8 +215,7 @@ def handle_review(prompt: str, session_id: str) -> int:
         out_path = pathlib.Path(out_file)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(
-            "# Review (fake)\n\n## Summary\nFake review.\n\n"
-            "## Findings\nNo issues.\n",
+            "# Review (fake)\n\n## Summary\nFake review.\n\n## Findings\nNo issues.\n",
             encoding="utf-8",
         )
     emit_minimal_stream(session_id)
@@ -176,10 +223,14 @@ def handle_review(prompt: str, session_id: str) -> int:
 
 
 def handle_address(prompt: str, session_id: str) -> int:
-    in_git = subprocess.run(
-        ["git", "rev-parse", "--git-dir"],
-        capture_output=True, check=False,
-    ).returncode == 0
+    in_git = (
+        subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            capture_output=True,
+            check=False,
+        ).returncode
+        == 0
+    )
     if in_git:
         # Make a no-op edit so address commit lands.
         target = pathlib.Path("fake_impl.txt")
@@ -208,10 +259,24 @@ def handle_ghplan(prompt: str, session_id: str) -> int:
 
 def handle_plan_title(prompt: str, session_id: str) -> int:
     # `--plan <file>` flow asks for a one-line GitHub issue title.
-    emit_event({"type": "system", "subtype": "init", "session_id": session_id,
-                "model": "fake", "cwd": os.getcwd()})
-    emit_event({"type": "result", "subtype": "success", "num_turns": 1,
-                "total_cost_usd": 0.0, "result": "Test issue title from fake claude"})
+    emit_event(
+        {
+            "type": "system",
+            "subtype": "init",
+            "session_id": session_id,
+            "model": "fake",
+            "cwd": os.getcwd(),
+        }
+    )
+    emit_event(
+        {
+            "type": "result",
+            "subtype": "success",
+            "num_turns": 1,
+            "total_cost_usd": 0.0,
+            "result": "Test issue title from fake claude",
+        }
+    )
     return 0
 
 
@@ -289,14 +354,16 @@ def main(argv):
     stage = classify_stage(prompt)
     session_id = f"sess-{stage}-{uuid.uuid4().hex[:6]}"
 
-    log_invocation({
-        "stage": stage,
-        "model": args.model,
-        "output_format": args.output_format,
-        "resume_session": args.resume,
-        "cwd": os.getcwd(),
-        "prompt_head": prompt[:200],
-    })
+    log_invocation(
+        {
+            "stage": stage,
+            "model": args.model,
+            "output_format": args.output_format,
+            "resume_session": args.resume,
+            "cwd": os.getcwd(),
+            "prompt_head": prompt[:200],
+        }
+    )
 
     maybe_fail_at(stage)
 
@@ -319,7 +386,9 @@ def main(argv):
     }
     h = handlers.get(stage)
     if h is None:
-        sys.stderr.write(f"fake claude: unrecognized stage for prompt head: {prompt[:120]!r}\n")
+        sys.stderr.write(
+            f"fake claude: unrecognized stage for prompt head: {prompt[:120]!r}\n"
+        )
         if os.environ.get("FAKE_CLAUDE_ALLOW_UNKNOWN_STAGE") == "1":
             emit_minimal_stream(session_id)
             return 0

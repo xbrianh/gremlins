@@ -1,4 +1,5 @@
 """Tests for gremlins.orchestrators.boss."""
+
 from __future__ import annotations
 
 import json
@@ -27,6 +28,7 @@ FIXTURES_DIR = pathlib.Path(__file__).parent / "fixtures"
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_gremlin_state(tmp_path, gr_id="test-boss-aabb12"):
     """Write minimal state.json and directory for boss_main."""
     state_dir = tmp_path / gr_id
@@ -35,13 +37,17 @@ def _make_gremlin_state(tmp_path, gr_id="test-boss-aabb12"):
     project_root.mkdir()
     workdir = tmp_path / "workdir"
     workdir.mkdir()
-    (state_dir / "state.json").write_text(json.dumps({
-        "id": gr_id,
-        "kind": "bossgremlin",
-        "project_root": str(project_root),
-        "workdir": str(workdir),
-        "status": "running",
-    }))
+    (state_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "id": gr_id,
+                "kind": "bossgremlin",
+                "project_root": str(project_root),
+                "workdir": str(workdir),
+                "status": "running",
+            }
+        )
+    )
     return state_dir, project_root, workdir
 
 
@@ -58,12 +64,17 @@ def _common_boss_patches(monkeypatch, tmp_path, gr_id):
     monkeypatch.setattr(boss_mod, "get_current_branch", lambda p: "main")
     # Stub git_head_of_workdir so tests don't need a real git worktree.
     # Individual tests that care about specific SHA values can override this.
-    monkeypatch.setattr(git_mod, "git_head_of_workdir", lambda w: "aaaa1111bbbb2222cccc3333dddd4444eeee5555")
+    monkeypatch.setattr(
+        git_mod,
+        "git_head_of_workdir",
+        lambda w: "aaaa1111bbbb2222cccc3333dddd4444eeee5555",
+    )
 
 
 # ---------------------------------------------------------------------------
 # _summarize_for_log
 # ---------------------------------------------------------------------------
+
 
 def test_summarize_empty():
     assert _summarize_for_log("") == ""
@@ -74,7 +85,10 @@ def test_summarize_single_line():
 
 
 def test_summarize_collapses_newlines():
-    assert _summarize_for_log("line one\nline two\nline three") == "line one line two line three"
+    assert (
+        _summarize_for_log("line one\nline two\nline three")
+        == "line one line two line three"
+    )
 
 
 def test_summarize_truncates():
@@ -93,6 +107,7 @@ def test_summarize_exact_limit():
 # get_child_bail_reason / get_child_bail_detail
 # ---------------------------------------------------------------------------
 
+
 def test_get_child_bail_reason_missing_state(tmp_path):
     orig = boss_mod.STATE_ROOT
     boss_mod.STATE_ROOT = str(tmp_path)
@@ -105,10 +120,14 @@ def test_get_child_bail_reason_missing_state(tmp_path):
 def test_get_child_bail_reason_reads_bail_reason(tmp_path):
     child_dir = tmp_path / "child-aaa"
     child_dir.mkdir()
-    (child_dir / "state.json").write_text(json.dumps({
-        "bail_reason": "structural",
-        "bail_class": "something_else",
-    }))
+    (child_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "bail_reason": "structural",
+                "bail_class": "something_else",
+            }
+        )
+    )
     orig = boss_mod.STATE_ROOT
     boss_mod.STATE_ROOT = str(tmp_path)
     try:
@@ -141,7 +160,9 @@ def test_get_child_bail_detail_missing(tmp_path):
 def test_get_child_bail_detail_reads_field(tmp_path):
     child_dir = tmp_path / "child-ccc"
     child_dir.mkdir()
-    (child_dir / "state.json").write_text(json.dumps({"bail_detail": "phase A failed: no plan found"}))
+    (child_dir / "state.json").write_text(
+        json.dumps({"bail_detail": "phase A failed: no plan found"})
+    )
     orig = boss_mod.STATE_ROOT
     boss_mod.STATE_ROOT = str(tmp_path)
     try:
@@ -153,6 +174,7 @@ def test_get_child_bail_detail_reads_field(tmp_path):
 # ---------------------------------------------------------------------------
 # init_boss_state / save / load round-trip
 # ---------------------------------------------------------------------------
+
 
 def test_init_boss_state_schema(tmp_path):
     state = init_boss_state(
@@ -199,6 +221,7 @@ def test_save_load_round_trip(tmp_path):
 # Resume fixture: load sample boss_state.json
 # ---------------------------------------------------------------------------
 
+
 def test_resume_fixture_parses():
     """boss_state_sample.json loads without error and has the expected shape."""
     fixture = FIXTURES_DIR / "boss_state_sample.json"
@@ -211,8 +234,15 @@ def test_resume_fixture_parses():
     assert all("id" in c and "outcome" in c for c in state["children"])
 
     required_record_keys = {
-        "timestamp", "n", "plan_in", "plan_out", "signal_file",
-        "exit_state", "child_plan", "bail_reason", "operator_followups",
+        "timestamp",
+        "n",
+        "plan_in",
+        "plan_out",
+        "signal_file",
+        "exit_state",
+        "child_plan",
+        "bail_reason",
+        "operator_followups",
     }
     assert all(required_record_keys <= set(r.keys()) for r in state["handoff_records"])
 
@@ -236,6 +266,7 @@ def test_resume_fixture_handoff_exit_states():
 # Child sequencing: handoff → launch → wait → land → handoff → chain-done
 # ---------------------------------------------------------------------------
 
+
 def test_chain_done_after_one_child(tmp_path, monkeypatch):
     """Boss completes: handoff1→next-plan, child runs and lands, handoff2→chain-done."""
     gr_id = "test-boss-aabb12"
@@ -248,12 +279,23 @@ def test_chain_done_after_one_child(tmp_path, monkeypatch):
     child_plan.write_text("# Child plan\n")
 
     calls = []
-    handoff_results = iter([
-        ("next-plan", {"exit_state": "next-plan", "child_plan": str(child_plan), "operator_followups": []}),
-        ("chain-done", {"exit_state": "chain-done", "operator_followups": []}),
-    ])
+    handoff_results = iter(
+        [
+            (
+                "next-plan",
+                {
+                    "exit_state": "next-plan",
+                    "child_plan": str(child_plan),
+                    "operator_followups": [],
+                },
+            ),
+            ("chain-done", {"exit_state": "chain-done", "operator_followups": []}),
+        ]
+    )
 
-    def fake_run_handoff(gr_id, state_dir, boss_state, project_root, boss_workdir, model):
+    def fake_run_handoff(
+        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+    ):
         exit_state, sig = next(handoff_results)
         n = boss_state["handoff_count"] + 1
         out_path = os.path.join(state_dir, f"handoff-{n:03d}.md")
@@ -261,17 +303,19 @@ def test_chain_done_after_one_child(tmp_path, monkeypatch):
         boss_state["handoff_count"] = n
         boss_state["current_plan"] = out_path
         boss_state["operator_followups"] = sig.get("operator_followups", [])
-        boss_state["handoff_records"].append({
-            "timestamp": "2026-01-01T00:00:00Z",
-            "n": n,
-            "plan_in": boss_state["spec_path"],
-            "plan_out": out_path,
-            "signal_file": out_path.replace(".md", ".state.json"),
-            "exit_state": exit_state,
-            "child_plan": sig.get("child_plan"),
-            "bail_reason": None,
-            "operator_followups": sig.get("operator_followups", []),
-        })
+        boss_state["handoff_records"].append(
+            {
+                "timestamp": "2026-01-01T00:00:00Z",
+                "n": n,
+                "plan_in": boss_state["spec_path"],
+                "plan_out": out_path,
+                "signal_file": out_path.replace(".md", ".state.json"),
+                "exit_state": exit_state,
+                "child_plan": sig.get("child_plan"),
+                "bail_reason": None,
+                "operator_followups": sig.get("operator_followups", []),
+            }
+        )
         calls.append(("handoff", exit_state))
         return exit_state, sig
 
@@ -313,7 +357,9 @@ def test_chain_uses_ghgremlin_for_gh_kind(tmp_path, monkeypatch):
     state_dir, project_root, workdir = _make_gremlin_state(tmp_path, gr_id)
     _common_boss_patches(monkeypatch, tmp_path, gr_id)
     monkeypatch.setattr(boss_mod, "get_default_branch", lambda p: "main")
-    monkeypatch.setattr(boss_mod, "get_remote_branch_sha", lambda p, b: "deadbeef12345678")
+    monkeypatch.setattr(
+        boss_mod, "get_remote_branch_sha", lambda p, b: "deadbeef12345678"
+    )
 
     spec = tmp_path / "spec.md"
     spec.write_text("# Spec\n")
@@ -321,12 +367,23 @@ def test_chain_uses_ghgremlin_for_gh_kind(tmp_path, monkeypatch):
     child_plan.write_text("# Child plan\n")
 
     launch_kinds = []
-    handoff_results = iter([
-        ("next-plan", {"exit_state": "next-plan", "child_plan": str(child_plan), "operator_followups": []}),
-        ("chain-done", {"exit_state": "chain-done", "operator_followups": []}),
-    ])
+    handoff_results = iter(
+        [
+            (
+                "next-plan",
+                {
+                    "exit_state": "next-plan",
+                    "child_plan": str(child_plan),
+                    "operator_followups": [],
+                },
+            ),
+            ("chain-done", {"exit_state": "chain-done", "operator_followups": []}),
+        ]
+    )
 
-    def fake_run_handoff(gr_id, state_dir, boss_state, project_root, boss_workdir, model):
+    def fake_run_handoff(
+        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+    ):
         exit_state, sig = next(handoff_results)
         n = boss_state["handoff_count"] + 1
         out_path = os.path.join(state_dir, f"handoff-{n:03d}.md")
@@ -334,13 +391,19 @@ def test_chain_uses_ghgremlin_for_gh_kind(tmp_path, monkeypatch):
         boss_state["handoff_count"] = n
         boss_state["current_plan"] = out_path
         boss_state["operator_followups"] = sig.get("operator_followups", [])
-        boss_state["handoff_records"].append({
-            "timestamp": "2026-01-01T00:00:00Z", "n": n,
-            "plan_in": boss_state["spec_path"], "plan_out": out_path,
-            "signal_file": "", "exit_state": exit_state,
-            "child_plan": sig.get("child_plan"), "bail_reason": None,
-            "operator_followups": sig.get("operator_followups", []),
-        })
+        boss_state["handoff_records"].append(
+            {
+                "timestamp": "2026-01-01T00:00:00Z",
+                "n": n,
+                "plan_in": boss_state["spec_path"],
+                "plan_out": out_path,
+                "signal_file": "",
+                "exit_state": exit_state,
+                "child_plan": sig.get("child_plan"),
+                "bail_reason": None,
+                "operator_followups": sig.get("operator_followups", []),
+            }
+        )
         return exit_state, sig
 
     def fake_launch_child(gr_id, launch_kind, child_plan_path):
@@ -370,19 +433,28 @@ def test_chain_bail_on_handoff(tmp_path, monkeypatch):
     spec = tmp_path / "spec.md"
     spec.write_text("# Spec\n")
 
-    def fake_run_handoff(gr_id, state_dir, boss_state, project_root, boss_workdir, model):
+    def fake_run_handoff(
+        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+    ):
         n = boss_state["handoff_count"] + 1
         out_path = os.path.join(state_dir, f"handoff-{n:03d}.md")
         pathlib.Path(out_path).write_text("# Handoff\n")
         boss_state["handoff_count"] = n
         boss_state["current_plan"] = out_path
         boss_state["operator_followups"] = []
-        boss_state["handoff_records"].append({
-            "timestamp": "2026-01-01T00:00:00Z", "n": n,
-            "plan_in": boss_state["spec_path"], "plan_out": out_path,
-            "signal_file": "", "exit_state": "bail",
-            "child_plan": None, "bail_reason": "spec is done", "operator_followups": [],
-        })
+        boss_state["handoff_records"].append(
+            {
+                "timestamp": "2026-01-01T00:00:00Z",
+                "n": n,
+                "plan_in": boss_state["spec_path"],
+                "plan_out": out_path,
+                "signal_file": "",
+                "exit_state": "bail",
+                "child_plan": None,
+                "bail_reason": "spec is done",
+                "operator_followups": [],
+            }
+        )
         return "bail", {"exit_state": "bail", "reason": "spec is done"}
 
     monkeypatch.setattr(boss_mod, "run_handoff", fake_run_handoff)
@@ -395,6 +467,7 @@ def test_chain_bail_on_handoff(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # Handoff signal parsing: operator_followups separation from child_plan
 # ---------------------------------------------------------------------------
+
 
 def test_operator_followups_stored_in_boss_state(tmp_path, monkeypatch):
     """operator_followups from handoff signal are persisted in boss_state, not forwarded to child.
@@ -414,19 +487,26 @@ def test_operator_followups_stored_in_boss_state(tmp_path, monkeypatch):
     operator_items = ["After landing: run sync.sh push", "After landing: verify e2e"]
     launch_args = []  # (launch_kind, child_plan_path) captured per call
 
-    handoff_results = iter([
-        (
-            "next-plan",
-            {
-                "exit_state": "next-plan",
-                "child_plan": str(child_plan),
-                "operator_followups": operator_items,
-            },
-        ),
-        ("chain-done", {"exit_state": "chain-done", "operator_followups": operator_items}),
-    ])
+    handoff_results = iter(
+        [
+            (
+                "next-plan",
+                {
+                    "exit_state": "next-plan",
+                    "child_plan": str(child_plan),
+                    "operator_followups": operator_items,
+                },
+            ),
+            (
+                "chain-done",
+                {"exit_state": "chain-done", "operator_followups": operator_items},
+            ),
+        ]
+    )
 
-    def fake_run_handoff(gr_id, state_dir, boss_state, project_root, boss_workdir, model):
+    def fake_run_handoff(
+        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+    ):
         exit_state, sig = next(handoff_results)
         n = boss_state["handoff_count"] + 1
         out_path = os.path.join(state_dir, f"handoff-{n:03d}.md")
@@ -434,13 +514,19 @@ def test_operator_followups_stored_in_boss_state(tmp_path, monkeypatch):
         boss_state["handoff_count"] = n
         boss_state["current_plan"] = out_path
         boss_state["operator_followups"] = sig.get("operator_followups", [])
-        boss_state["handoff_records"].append({
-            "timestamp": "2026-01-01T00:00:00Z", "n": n,
-            "plan_in": boss_state["spec_path"], "plan_out": out_path,
-            "signal_file": "", "exit_state": exit_state,
-            "child_plan": sig.get("child_plan"), "bail_reason": None,
-            "operator_followups": sig.get("operator_followups", []),
-        })
+        boss_state["handoff_records"].append(
+            {
+                "timestamp": "2026-01-01T00:00:00Z",
+                "n": n,
+                "plan_in": boss_state["spec_path"],
+                "plan_out": out_path,
+                "signal_file": "",
+                "exit_state": exit_state,
+                "child_plan": sig.get("child_plan"),
+                "bail_reason": None,
+                "operator_followups": sig.get("operator_followups", []),
+            }
+        )
         return exit_state, sig
 
     def fake_launch_child(gr_id, launch_kind, child_plan_path):
@@ -472,6 +558,7 @@ def test_operator_followups_stored_in_boss_state(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # Resume path: boss_state.json with current_child_id set
 # ---------------------------------------------------------------------------
+
 
 def test_resume_picks_up_in_flight_child(tmp_path, monkeypatch):
     """When boss_state.json has current_child_id, boss resumes from the wait loop."""
@@ -505,19 +592,28 @@ def test_resume_picks_up_in_flight_child(tmp_path, monkeypatch):
 
     calls = []
 
-    def fake_run_handoff(gr_id, state_dir, boss_state, project_root, boss_workdir, model):
+    def fake_run_handoff(
+        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+    ):
         n = boss_state["handoff_count"] + 1
         out_path = os.path.join(state_dir, f"handoff-{n:03d}.md")
         pathlib.Path(out_path).write_text(f"# Handoff {n}\n")
         boss_state["handoff_count"] = n
         boss_state["current_plan"] = out_path
         boss_state["operator_followups"] = []
-        boss_state["handoff_records"].append({
-            "timestamp": "2026-01-01T00:00:00Z", "n": n,
-            "plan_in": str(spec), "plan_out": out_path,
-            "signal_file": "", "exit_state": "chain-done",
-            "child_plan": None, "bail_reason": None, "operator_followups": [],
-        })
+        boss_state["handoff_records"].append(
+            {
+                "timestamp": "2026-01-01T00:00:00Z",
+                "n": n,
+                "plan_in": str(spec),
+                "plan_out": out_path,
+                "signal_file": "",
+                "exit_state": "chain-done",
+                "child_plan": None,
+                "bail_reason": None,
+                "operator_followups": [],
+            }
+        )
         calls.append("handoff")
         return "chain-done", {"exit_state": "chain-done", "operator_followups": []}
 
@@ -563,19 +659,28 @@ def test_resume_fixture_in_boss_main(tmp_path, monkeypatch):
 
     calls = []
 
-    def fake_run_handoff(gr_id, state_dir, boss_state, project_root, boss_workdir, model):
+    def fake_run_handoff(
+        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+    ):
         n = boss_state["handoff_count"] + 1
         out_path = os.path.join(state_dir, f"handoff-{n:03d}.md")
         pathlib.Path(out_path).write_text(f"# Handoff {n}\n")
         boss_state["handoff_count"] = n
         boss_state["current_plan"] = out_path
         boss_state["operator_followups"] = []
-        boss_state["handoff_records"].append({
-            "timestamp": "2026-01-01T00:00:00Z", "n": n,
-            "plan_in": str(spec), "plan_out": out_path,
-            "signal_file": "", "exit_state": "chain-done",
-            "child_plan": None, "bail_reason": None, "operator_followups": [],
-        })
+        boss_state["handoff_records"].append(
+            {
+                "timestamp": "2026-01-01T00:00:00Z",
+                "n": n,
+                "plan_in": str(spec),
+                "plan_out": out_path,
+                "signal_file": "",
+                "exit_state": "chain-done",
+                "child_plan": None,
+                "bail_reason": None,
+                "operator_followups": [],
+            }
+        )
         calls.append("handoff")
         return "chain-done", {"exit_state": "chain-done", "operator_followups": []}
 
@@ -600,6 +705,7 @@ def test_resume_fixture_in_boss_main(tmp_path, monkeypatch):
 # Rescue-then-land
 # ---------------------------------------------------------------------------
 
+
 def test_rescue_then_land(tmp_path, monkeypatch):
     """Child fails rescue once then succeeds; outcome recorded as rescued-then-landed."""
     gr_id = "test-boss-rescue-gg9900"
@@ -623,12 +729,23 @@ def test_rescue_then_land(tmp_path, monkeypatch):
     calls = []
     rescue_call_count = [0]
 
-    handoff_results = iter([
-        ("next-plan", {"exit_state": "next-plan", "child_plan": str(child_plan), "operator_followups": []}),
-        ("chain-done", {"exit_state": "chain-done", "operator_followups": []}),
-    ])
+    handoff_results = iter(
+        [
+            (
+                "next-plan",
+                {
+                    "exit_state": "next-plan",
+                    "child_plan": str(child_plan),
+                    "operator_followups": [],
+                },
+            ),
+            ("chain-done", {"exit_state": "chain-done", "operator_followups": []}),
+        ]
+    )
 
-    def fake_run_handoff(gr_id, state_dir, boss_state, project_root, boss_workdir, model):
+    def fake_run_handoff(
+        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+    ):
         exit_state, sig = next(handoff_results)
         n = boss_state["handoff_count"] + 1
         out_path = os.path.join(state_dir, f"handoff-{n:03d}.md")
@@ -636,13 +753,19 @@ def test_rescue_then_land(tmp_path, monkeypatch):
         boss_state["handoff_count"] = n
         boss_state["current_plan"] = out_path
         boss_state["operator_followups"] = sig.get("operator_followups", [])
-        boss_state["handoff_records"].append({
-            "timestamp": "2026-01-01T00:00:00Z", "n": n,
-            "plan_in": boss_state["spec_path"], "plan_out": out_path,
-            "signal_file": "", "exit_state": exit_state,
-            "child_plan": sig.get("child_plan"), "bail_reason": None,
-            "operator_followups": sig.get("operator_followups", []),
-        })
+        boss_state["handoff_records"].append(
+            {
+                "timestamp": "2026-01-01T00:00:00Z",
+                "n": n,
+                "plan_in": boss_state["spec_path"],
+                "plan_out": out_path,
+                "signal_file": "",
+                "exit_state": exit_state,
+                "child_plan": sig.get("child_plan"),
+                "bail_reason": None,
+                "operator_followups": sig.get("operator_followups", []),
+            }
+        )
         calls.append(("handoff", exit_state))
         return exit_state, sig
 
@@ -678,7 +801,10 @@ def test_rescue_then_land(tmp_path, monkeypatch):
     ]
 
     final_state = load_boss_state(str(state_dir))
-    assert final_state["children"][0] == {"id": child_id, "outcome": "rescued-then-landed"}
+    assert final_state["children"][0] == {
+        "id": child_id,
+        "outcome": "rescued-then-landed",
+    }
 
 
 def test_bail_after_rescue_refused(tmp_path, monkeypatch):
@@ -695,26 +821,43 @@ def test_bail_after_rescue_refused(tmp_path, monkeypatch):
     child_id = "bail-child-jj5566"
     child_dir = tmp_path / child_id
     child_dir.mkdir()
-    (child_dir / "state.json").write_text(json.dumps({
-        "exit_code": 1,
-        "bail_reason": "unsalvageable",
-    }))
+    (child_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "exit_code": 1,
+                "bail_reason": "unsalvageable",
+            }
+        )
+    )
     (child_dir / "finished").write_text("")
 
-    def fake_run_handoff(gr_id, state_dir, boss_state, project_root, boss_workdir, model):
+    def fake_run_handoff(
+        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+    ):
         n = boss_state["handoff_count"] + 1
         out_path = os.path.join(state_dir, f"handoff-{n:03d}.md")
         pathlib.Path(out_path).write_text(f"# Handoff {n}\n")
         boss_state["handoff_count"] = n
         boss_state["current_plan"] = out_path
         boss_state["operator_followups"] = []
-        boss_state["handoff_records"].append({
-            "timestamp": "2026-01-01T00:00:00Z", "n": n,
-            "plan_in": boss_state["spec_path"], "plan_out": out_path,
-            "signal_file": "", "exit_state": "next-plan",
-            "child_plan": str(child_plan), "bail_reason": None, "operator_followups": [],
-        })
-        return "next-plan", {"exit_state": "next-plan", "child_plan": str(child_plan), "operator_followups": []}
+        boss_state["handoff_records"].append(
+            {
+                "timestamp": "2026-01-01T00:00:00Z",
+                "n": n,
+                "plan_in": boss_state["spec_path"],
+                "plan_out": out_path,
+                "signal_file": "",
+                "exit_state": "next-plan",
+                "child_plan": str(child_plan),
+                "bail_reason": None,
+                "operator_followups": [],
+            }
+        )
+        return "next-plan", {
+            "exit_state": "next-plan",
+            "child_plan": str(child_plan),
+            "operator_followups": [],
+        }
 
     monkeypatch.setattr(boss_mod, "run_handoff", fake_run_handoff)
     monkeypatch.setattr(boss_mod, "launch_child", lambda *a: child_id)
@@ -734,6 +877,7 @@ def test_bail_after_rescue_refused(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # _resolve_plan_source: file path, issue ref, idempotent rescue
 # ---------------------------------------------------------------------------
+
 
 def test_resolve_plan_source_file(tmp_path):
     """File path inputs are copied verbatim into <state-dir>/spec.md."""
@@ -768,7 +912,8 @@ def test_resolve_plan_source_issue_ref(tmp_path, monkeypatch):
 
     monkeypatch.setattr(boss_mod, "get_repo", lambda: "owner/repo")
     monkeypatch.setattr(
-        boss_mod, "view_issue",
+        boss_mod,
+        "view_issue",
         lambda ref, repo: {
             "number": 42,
             "url": "https://github.com/owner/repo/issues/42",
@@ -776,6 +921,7 @@ def test_resolve_plan_source_issue_ref(tmp_path, monkeypatch):
         },
     )
     import shutil as _shutil
+
     monkeypatch.setattr(_shutil, "which", lambda n: "/fake/gh" if n == "gh" else None)
 
     spec_path, issue_url, issue_num = _resolve_plan_source("42", str(state_dir))
@@ -807,6 +953,7 @@ def test_resolve_plan_source_cross_repo_issue_ref(tmp_path, monkeypatch):
     monkeypatch.setattr(boss_mod, "get_repo", lambda: "owner/repo")
     monkeypatch.setattr(boss_mod, "view_issue", fake_view_issue)
     import shutil as _shutil
+
     monkeypatch.setattr(_shutil, "which", lambda n: "/fake/gh" if n == "gh" else None)
 
     spec_path, issue_url, issue_num = _resolve_plan_source(
@@ -825,6 +972,7 @@ def test_resolve_plan_source_unknown_shape(tmp_path, monkeypatch):
     state_dir.mkdir()
     monkeypatch.setattr(boss_mod, "get_repo", lambda: "owner/repo")
     import shutil as _shutil
+
     monkeypatch.setattr(_shutil, "which", lambda n: "/fake/gh" if n == "gh" else None)
 
     with pytest.raises(SystemExit):
@@ -844,7 +992,11 @@ def test_resolve_plan_source_idempotent(tmp_path, monkeypatch):
         raise AssertionError("view_issue should not be called when snapshot exists")
 
     monkeypatch.setattr(boss_mod, "view_issue", boom)
-    monkeypatch.setattr(boss_mod, "get_repo", lambda: (_ for _ in ()).throw(AssertionError("get_repo should not be called")))
+    monkeypatch.setattr(
+        boss_mod,
+        "get_repo",
+        lambda: (_ for _ in ()).throw(AssertionError("get_repo should not be called")),
+    )
 
     spec_path, issue_url, issue_num = _resolve_plan_source("42", str(state_dir))
 
@@ -860,13 +1012,18 @@ def test_resolve_plan_source_idempotent_recovers_issue_metadata(tmp_path, monkey
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     (state_dir / "spec.md").write_text("# Already snapshotted\n")
-    (state_dir / "state.json").write_text(json.dumps({
-        "issue_url": "https://github.com/owner/repo/issues/77",
-        "issue_num": "77",
-    }))
+    (state_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "issue_url": "https://github.com/owner/repo/issues/77",
+                "issue_num": "77",
+            }
+        )
+    )
 
     monkeypatch.setattr(
-        boss_mod, "view_issue",
+        boss_mod,
+        "view_issue",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not refetch")),
     )
 
@@ -887,13 +1044,16 @@ def test_resolve_plan_source_persists_issue_metadata_on_first_fetch(
     state_root = xdg_home / "claude-gremlins"
     state_dir = state_root / "test-boss-persist-aa1122"
     state_dir.mkdir(parents=True)
-    (state_dir / "state.json").write_text(json.dumps({"id": "test-boss-persist-aa1122"}))
+    (state_dir / "state.json").write_text(
+        json.dumps({"id": "test-boss-persist-aa1122"})
+    )
     monkeypatch.setenv("XDG_STATE_HOME", str(xdg_home))
     monkeypatch.setenv("GR_ID", "test-boss-persist-aa1122")
 
     monkeypatch.setattr(boss_mod, "get_repo", lambda: "owner/repo")
     monkeypatch.setattr(
-        boss_mod, "view_issue",
+        boss_mod,
+        "view_issue",
         lambda ref, repo: {
             "number": 99,
             "url": "https://github.com/owner/repo/issues/99",
@@ -901,6 +1061,7 @@ def test_resolve_plan_source_persists_issue_metadata_on_first_fetch(
         },
     )
     import shutil as _shutil
+
     monkeypatch.setattr(_shutil, "which", lambda n: "/fake/gh" if n == "gh" else None)
 
     spec_path, issue_url, issue_num = _resolve_plan_source("99", str(state_dir))
@@ -915,6 +1076,7 @@ def test_resolve_plan_source_persists_issue_metadata_on_first_fetch(
 # ---------------------------------------------------------------------------
 # boss_main smoke test: --plan <issue-ref> end-to-end snapshot
 # ---------------------------------------------------------------------------
+
 
 def test_boss_main_plan_issue_ref_snapshots_spec(tmp_path, monkeypatch):
     """boss_main with --plan <issue-ref> fetches the issue and snapshots spec.md."""
@@ -932,7 +1094,8 @@ def test_boss_main_plan_issue_ref_snapshots_spec(tmp_path, monkeypatch):
 
     monkeypatch.setattr(boss_mod, "get_repo", lambda: "owner/repo")
     monkeypatch.setattr(
-        boss_mod, "view_issue",
+        boss_mod,
+        "view_issue",
         lambda ref, repo: {
             "number": 80,
             "url": "https://github.com/owner/repo/issues/80",
@@ -940,23 +1103,33 @@ def test_boss_main_plan_issue_ref_snapshots_spec(tmp_path, monkeypatch):
         },
     )
     import shutil as _shutil
+
     monkeypatch.setattr(_shutil, "which", lambda n: "/fake/gh" if n == "gh" else None)
 
     # Short-circuit handoff at the very first step so we don't have to mock
     # an entire chain — we just want to verify spec.md and boss_state.json.
-    def fake_run_handoff(gr_id, state_dir, boss_state, project_root, boss_workdir, model):
+    def fake_run_handoff(
+        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+    ):
         n = boss_state["handoff_count"] + 1
         out_path = os.path.join(state_dir, f"handoff-{n:03d}.md")
         pathlib.Path(out_path).write_text("# Handoff\n")
         boss_state["handoff_count"] = n
         boss_state["current_plan"] = out_path
         boss_state["operator_followups"] = []
-        boss_state["handoff_records"].append({
-            "timestamp": "2026-01-01T00:00:00Z", "n": n,
-            "plan_in": boss_state["spec_path"], "plan_out": out_path,
-            "signal_file": "", "exit_state": "chain-done",
-            "child_plan": None, "bail_reason": None, "operator_followups": [],
-        })
+        boss_state["handoff_records"].append(
+            {
+                "timestamp": "2026-01-01T00:00:00Z",
+                "n": n,
+                "plan_in": boss_state["spec_path"],
+                "plan_out": out_path,
+                "signal_file": "",
+                "exit_state": "chain-done",
+                "child_plan": None,
+                "bail_reason": None,
+                "operator_followups": [],
+            }
+        )
         return "chain-done", {"exit_state": "chain-done", "operator_followups": []}
 
     monkeypatch.setattr(boss_mod, "run_handoff", fake_run_handoff)
@@ -986,6 +1159,7 @@ def test_boss_main_plan_issue_ref_snapshots_spec(tmp_path, monkeypatch):
 # land_child: boss worktree as landing target for local chains
 # ---------------------------------------------------------------------------
 
+
 def test_land_child_uses_boss_workdir_for_local_chain(tmp_path, monkeypatch):
     """For local chains, land_child is called with into_dir=boss_workdir so children
     land into the boss's isolated worktree rather than the user's project_root."""
@@ -1000,12 +1174,23 @@ def test_land_child_uses_boss_workdir_for_local_chain(tmp_path, monkeypatch):
 
     land_calls = []
 
-    handoff_results = iter([
-        ("next-plan", {"exit_state": "next-plan", "child_plan": str(child_plan), "operator_followups": []}),
-        ("chain-done", {"exit_state": "chain-done", "operator_followups": []}),
-    ])
+    handoff_results = iter(
+        [
+            (
+                "next-plan",
+                {
+                    "exit_state": "next-plan",
+                    "child_plan": str(child_plan),
+                    "operator_followups": [],
+                },
+            ),
+            ("chain-done", {"exit_state": "chain-done", "operator_followups": []}),
+        ]
+    )
 
-    def fake_run_handoff(gr_id, state_dir, boss_state, project_root, boss_workdir, model):
+    def fake_run_handoff(
+        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+    ):
         exit_state, sig = next(handoff_results)
         n = boss_state["handoff_count"] + 1
         out_path = os.path.join(state_dir, f"handoff-{n:03d}.md")
@@ -1013,13 +1198,19 @@ def test_land_child_uses_boss_workdir_for_local_chain(tmp_path, monkeypatch):
         boss_state["handoff_count"] = n
         boss_state["current_plan"] = out_path
         boss_state["operator_followups"] = sig.get("operator_followups", [])
-        boss_state["handoff_records"].append({
-            "timestamp": "2026-01-01T00:00:00Z", "n": n,
-            "plan_in": boss_state["spec_path"], "plan_out": out_path,
-            "signal_file": "", "exit_state": exit_state,
-            "child_plan": sig.get("child_plan"), "bail_reason": None,
-            "operator_followups": sig.get("operator_followups", []),
-        })
+        boss_state["handoff_records"].append(
+            {
+                "timestamp": "2026-01-01T00:00:00Z",
+                "n": n,
+                "plan_in": boss_state["spec_path"],
+                "plan_out": out_path,
+                "signal_file": "",
+                "exit_state": exit_state,
+                "child_plan": sig.get("child_plan"),
+                "bail_reason": None,
+                "operator_followups": sig.get("operator_followups", []),
+            }
+        )
         return exit_state, sig
 
     def fake_launch_child(gr_id, launch_kind, child_plan_path):
@@ -1055,7 +1246,9 @@ def test_land_child_no_into_dir_for_gh_chain(tmp_path, monkeypatch):
     state_dir, project_root, workdir = _make_gremlin_state(tmp_path, gr_id)
     _common_boss_patches(monkeypatch, tmp_path, gr_id)
     monkeypatch.setattr(boss_mod, "get_default_branch", lambda p: "main")
-    monkeypatch.setattr(boss_mod, "get_remote_branch_sha", lambda p, b: "deadbeef12345678")
+    monkeypatch.setattr(
+        boss_mod, "get_remote_branch_sha", lambda p, b: "deadbeef12345678"
+    )
 
     spec = tmp_path / "spec.md"
     spec.write_text("# Spec\n")
@@ -1064,12 +1257,23 @@ def test_land_child_no_into_dir_for_gh_chain(tmp_path, monkeypatch):
 
     land_calls = []
 
-    handoff_results = iter([
-        ("next-plan", {"exit_state": "next-plan", "child_plan": str(child_plan), "operator_followups": []}),
-        ("chain-done", {"exit_state": "chain-done", "operator_followups": []}),
-    ])
+    handoff_results = iter(
+        [
+            (
+                "next-plan",
+                {
+                    "exit_state": "next-plan",
+                    "child_plan": str(child_plan),
+                    "operator_followups": [],
+                },
+            ),
+            ("chain-done", {"exit_state": "chain-done", "operator_followups": []}),
+        ]
+    )
 
-    def fake_run_handoff(gr_id, state_dir, boss_state, project_root, boss_workdir, model):
+    def fake_run_handoff(
+        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+    ):
         exit_state, sig = next(handoff_results)
         n = boss_state["handoff_count"] + 1
         out_path = os.path.join(state_dir, f"handoff-{n:03d}.md")
@@ -1077,13 +1281,19 @@ def test_land_child_no_into_dir_for_gh_chain(tmp_path, monkeypatch):
         boss_state["handoff_count"] = n
         boss_state["current_plan"] = out_path
         boss_state["operator_followups"] = sig.get("operator_followups", [])
-        boss_state["handoff_records"].append({
-            "timestamp": "2026-01-01T00:00:00Z", "n": n,
-            "plan_in": boss_state["spec_path"], "plan_out": out_path,
-            "signal_file": "", "exit_state": exit_state,
-            "child_plan": sig.get("child_plan"), "bail_reason": None,
-            "operator_followups": sig.get("operator_followups", []),
-        })
+        boss_state["handoff_records"].append(
+            {
+                "timestamp": "2026-01-01T00:00:00Z",
+                "n": n,
+                "plan_in": boss_state["spec_path"],
+                "plan_out": out_path,
+                "signal_file": "",
+                "exit_state": exit_state,
+                "child_plan": sig.get("child_plan"),
+                "bail_reason": None,
+                "operator_followups": sig.get("operator_followups", []),
+            }
+        )
         return exit_state, sig
 
     def fake_launch_child(gr_id, launch_kind, child_plan_path):
@@ -1114,6 +1324,7 @@ def test_land_child_no_into_dir_for_gh_chain(tmp_path, monkeypatch):
 # Boss base-ref: current_head tracking and child launch
 # ---------------------------------------------------------------------------
 
+
 def test_boss_launches_child_against_current_head(tmp_path, monkeypatch):
     """launch_child passes current_head from state.json as base_ref to launcher.launch."""
     import gremlins.launcher as launcher_mod
@@ -1123,33 +1334,49 @@ def test_boss_launches_child_against_current_head(tmp_path, monkeypatch):
     state_dir.mkdir()
     expected_sha = "deadbeef12345678deadbeef12345678deadbeef"
     project_root_path = str(tmp_path / "repo")
-    (state_dir / "state.json").write_text(json.dumps({
-        "id": gr_id,
-        "project_root": project_root_path,
-        "current_head": expected_sha,
-    }))
+    (state_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "id": gr_id,
+                "project_root": project_root_path,
+                "current_head": expected_sha,
+            }
+        )
+    )
 
     captured = {}
 
-    def fake_launch(kind, *, plan=None, parent_id=None, project_root=None,
-                    base_ref="HEAD", pipeline_args=(), **kw):
+    def fake_launch(
+        kind,
+        *,
+        plan=None,
+        parent_id=None,
+        project_root=None,
+        base_ref="HEAD",
+        pipeline_args=(),
+        **kw,
+    ):
         captured["base_ref"] = base_ref
         captured["project_root"] = project_root
         return "child-abc-123456"
 
     # boss_state.json required by launch_child to load spec_path
-    (state_dir / "boss_state.json").write_text(json.dumps({
-        "spec_path": "/some/spec.md",
-        "chain_kind": "local",
-        "chain_base_ref": expected_sha,
-        "target_branch": "main",
-        "current_plan": "/some/spec.md",
-        "handoff_count": 0,
-        "current_child_id": None,
-        "children": [],
-        "handoff_records": [],
-        "operator_followups": [],
-    }))
+    (state_dir / "boss_state.json").write_text(
+        json.dumps(
+            {
+                "spec_path": "/some/spec.md",
+                "chain_kind": "local",
+                "chain_base_ref": expected_sha,
+                "target_branch": "main",
+                "current_plan": "/some/spec.md",
+                "handoff_count": 0,
+                "current_child_id": None,
+                "children": [],
+                "handoff_records": [],
+                "operator_followups": [],
+            }
+        )
+    )
 
     monkeypatch.setattr(boss_mod, "STATE_ROOT", str(tmp_path))
     monkeypatch.setattr(launcher_mod, "launch", fake_launch)
@@ -1180,12 +1407,23 @@ def test_boss_records_current_head_after_land(tmp_path, monkeypatch):
     patch_calls = []
     monkeypatch.setattr(boss_mod, "patch_state", lambda **kw: patch_calls.append(kw))
 
-    handoff_results = iter([
-        ("next-plan", {"exit_state": "next-plan", "child_plan": str(child_plan), "operator_followups": []}),
-        ("chain-done", {"exit_state": "chain-done", "operator_followups": []}),
-    ])
+    handoff_results = iter(
+        [
+            (
+                "next-plan",
+                {
+                    "exit_state": "next-plan",
+                    "child_plan": str(child_plan),
+                    "operator_followups": [],
+                },
+            ),
+            ("chain-done", {"exit_state": "chain-done", "operator_followups": []}),
+        ]
+    )
 
-    def fake_run_handoff(gr_id, state_dir, boss_state, project_root, boss_workdir, model):
+    def fake_run_handoff(
+        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+    ):
         exit_state, sig = next(handoff_results)
         n = boss_state["handoff_count"] + 1
         out_path = os.path.join(state_dir, f"handoff-{n:03d}.md")
@@ -1193,13 +1431,19 @@ def test_boss_records_current_head_after_land(tmp_path, monkeypatch):
         boss_state["handoff_count"] = n
         boss_state["current_plan"] = out_path
         boss_state["operator_followups"] = sig.get("operator_followups", [])
-        boss_state["handoff_records"].append({
-            "timestamp": "2026-01-01T00:00:00Z", "n": n,
-            "plan_in": boss_state["spec_path"], "plan_out": out_path,
-            "signal_file": "", "exit_state": exit_state,
-            "child_plan": sig.get("child_plan"), "bail_reason": None,
-            "operator_followups": sig.get("operator_followups", []),
-        })
+        boss_state["handoff_records"].append(
+            {
+                "timestamp": "2026-01-01T00:00:00Z",
+                "n": n,
+                "plan_in": boss_state["spec_path"],
+                "plan_out": out_path,
+                "signal_file": "",
+                "exit_state": exit_state,
+                "child_plan": sig.get("child_plan"),
+                "bail_reason": None,
+                "operator_followups": sig.get("operator_followups", []),
+            }
+        )
         return exit_state, sig
 
     def fake_launch_child(gr_id, launch_kind, child_plan_path):
@@ -1234,6 +1478,7 @@ def test_boss_records_current_head_after_land(tmp_path, monkeypatch):
 # launch_child spec_path passthrough
 # ---------------------------------------------------------------------------
 
+
 def test_launch_child_forwards_spec_path(tmp_path, monkeypatch):
     """When boss_state has spec_path set, launch_child passes it as spec_path= to launcher.launch."""
     import gremlins.launcher as launcher_mod
@@ -1242,28 +1487,44 @@ def test_launch_child_forwards_spec_path(tmp_path, monkeypatch):
     state_dir = tmp_path / gr_id
     state_dir.mkdir()
     spec_path = "/path/to/boss/spec.md"
-    (state_dir / "state.json").write_text(json.dumps({
-        "id": gr_id,
-        "project_root": str(tmp_path / "repo"),
-        "current_head": "abc123def456abc1",
-    }))
-    (state_dir / "boss_state.json").write_text(json.dumps({
-        "spec_path": spec_path,
-        "chain_kind": "local",
-        "chain_base_ref": "abc123def456abc1",
-        "target_branch": "main",
-        "current_plan": spec_path,
-        "handoff_count": 0,
-        "current_child_id": None,
-        "children": [],
-        "handoff_records": [],
-        "operator_followups": [],
-    }))
+    (state_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "id": gr_id,
+                "project_root": str(tmp_path / "repo"),
+                "current_head": "abc123def456abc1",
+            }
+        )
+    )
+    (state_dir / "boss_state.json").write_text(
+        json.dumps(
+            {
+                "spec_path": spec_path,
+                "chain_kind": "local",
+                "chain_base_ref": "abc123def456abc1",
+                "target_branch": "main",
+                "current_plan": spec_path,
+                "handoff_count": 0,
+                "current_child_id": None,
+                "children": [],
+                "handoff_records": [],
+                "operator_followups": [],
+            }
+        )
+    )
 
     captured = {}
 
-    def fake_launch(kind, *, plan=None, parent_id=None, project_root=None,
-                    base_ref="HEAD", pipeline_args=(), **kw):
+    def fake_launch(
+        kind,
+        *,
+        plan=None,
+        parent_id=None,
+        project_root=None,
+        base_ref="HEAD",
+        pipeline_args=(),
+        **kw,
+    ):
         captured.update(kw)
         captured["plan"] = plan
         return "child-spec-ee1122"
@@ -1284,28 +1545,44 @@ def test_launch_child_no_spec_path_when_absent(tmp_path, monkeypatch):
     gr_id = "test-boss-nospec-ff2233"
     state_dir = tmp_path / gr_id
     state_dir.mkdir()
-    (state_dir / "state.json").write_text(json.dumps({
-        "id": gr_id,
-        "project_root": str(tmp_path / "repo"),
-        "current_head": "abc123def456abc1",
-    }))
-    (state_dir / "boss_state.json").write_text(json.dumps({
-        "spec_path": "",
-        "chain_kind": "local",
-        "chain_base_ref": "abc123def456abc1",
-        "target_branch": "main",
-        "current_plan": "",
-        "handoff_count": 0,
-        "current_child_id": None,
-        "children": [],
-        "handoff_records": [],
-        "operator_followups": [],
-    }))
+    (state_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "id": gr_id,
+                "project_root": str(tmp_path / "repo"),
+                "current_head": "abc123def456abc1",
+            }
+        )
+    )
+    (state_dir / "boss_state.json").write_text(
+        json.dumps(
+            {
+                "spec_path": "",
+                "chain_kind": "local",
+                "chain_base_ref": "abc123def456abc1",
+                "target_branch": "main",
+                "current_plan": "",
+                "handoff_count": 0,
+                "current_child_id": None,
+                "children": [],
+                "handoff_records": [],
+                "operator_followups": [],
+            }
+        )
+    )
 
     captured = {}
 
-    def fake_launch(kind, *, plan=None, parent_id=None, project_root=None,
-                    base_ref="HEAD", pipeline_args=(), **kw):
+    def fake_launch(
+        kind,
+        *,
+        plan=None,
+        parent_id=None,
+        project_root=None,
+        base_ref="HEAD",
+        pipeline_args=(),
+        **kw,
+    ):
         captured.update(kw)
         return "child-nospec-gg3344"
 

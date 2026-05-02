@@ -58,7 +58,7 @@ def die(msg: str) -> None:
 
 def _parse_gh_args(argv: list[str]) -> argparse.Namespace:
     usage = (
-        'usage: gremlins.cli gh [-r <ref>] [--resume-from <stage>] '
+        "usage: gremlins.cli gh [-r <ref>] [--resume-from <stage>] "
         '[--plan <path|issue-ref>] [--spec <path>] [--model <model>] "<instructions>"'
     )
     parser = argparse.ArgumentParser(add_help=False, usage=usage)
@@ -196,15 +196,29 @@ def _resolve_plan_source(
             die("--plan: title agent returned empty output")
 
         r = subprocess.run(
-            ["gh", "issue", "create", "--repo", repo, "--title", issue_title, "--body-file", plan_source],
-            capture_output=True, text=True, check=False,
+            [
+                "gh",
+                "issue",
+                "create",
+                "--repo",
+                repo,
+                "--title",
+                issue_title,
+                "--body-file",
+                plan_source,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
         )
         if r.returncode != 0:
             die(f"--plan: failed to create GitHub issue: {r.stderr.strip()}")
         create_out = r.stdout + r.stderr
         m = re.search(r"https://github\.com/[^ )]+/issues/[0-9]+", create_out)
         if not m:
-            die(f"--plan: could not extract issue URL from gh output: {create_out.strip()}")
+            die(
+                f"--plan: could not extract issue URL from gh output: {create_out.strip()}"
+            )
         issue_url = m.group(0)
         issue_num = issue_url.split("/")[-1]
 
@@ -215,7 +229,9 @@ def _resolve_plan_source(
         # Issue reference
         target_repo, issue_ref = _parse_issue_ref(plan_source, repo)
         if target_repo is None:
-            die(f"--plan: not a readable file or recognized issue reference: {plan_source}")
+            die(
+                f"--plan: not a readable file or recognized issue reference: {plan_source}"
+            )
 
         try:
             issue_data = view_issue(issue_ref, target_repo)
@@ -239,7 +255,10 @@ def _resolve_plan_source(
 
         # Use issue_body + newline to match the `cp` semantics of the file path above.
         plan_md.write_text(issue_body + "\n", encoding="utf-8")
-        print(f"==> [1/6] plan supplied via --plan (issue {target_repo}#{issue_ref})", flush=True)
+        print(
+            f"==> [1/6] plan supplied via --plan (issue {target_repo}#{issue_ref})",
+            flush=True,
+        )
 
     patch_state(issue_url=issue_url, issue_num=issue_num)
     _update_description_from_plan(plan_md, state_file)
@@ -379,7 +398,11 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
             try:
                 spec_text = spec_file.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError) as exc:
-                print(f"warning: could not read spec.md ({exc}); proceeding without north-star context", flush=True, file=sys.stderr)
+                print(
+                    f"warning: could not read spec.md ({exc}); proceeding without north-star context",
+                    flush=True,
+                    file=sys.stderr,
+                )
         result = run_implement_stage(
             client=client,
             impl_model=model,
@@ -419,8 +442,15 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
                 )
             if impl_handoff_branch:
                 count_r = subprocess.run(
-                    ["git", "rev-list", "--count", f"{base_ref}..{impl_handoff_branch}"],
-                    capture_output=True, text=True, check=False,
+                    [
+                        "git",
+                        "rev-list",
+                        "--count",
+                        f"{base_ref}..{impl_handoff_branch}",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
                 )
                 if count_r.returncode != 0:
                     die(
@@ -469,7 +499,10 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     def stage_wait_copilot() -> None:
         _ensure_pr_url()
         set_stage("wait-copilot")
-        print("==> [5/6] waiting for Copilot review (20s interval, 10min timeout)", flush=True)
+        print(
+            "==> [5/6] waiting for Copilot review (20s interval, 10min timeout)",
+            flush=True,
+        )
         state = run_wait_copilot_stage(
             repo=repo,
             pr_num=pr_url_holder["num"],

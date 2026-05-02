@@ -48,15 +48,16 @@ def die(msg: str) -> None:
 # Full local pipeline (plan → implement → review-code → address-code)
 # ---------------------------------------------------------------------------
 
+
 def _parse_local_args(argv: list[str]) -> argparse.Namespace:
     # Short-only model flags to preserve the bash `getopts "p:i:x:a:b:c:"`
     # contract — no `--plan-model` etc. leak in via argparse's default
     # long-form expansion. Long-form flags: `--resume-from` (rescue relaunch step)
     # and `--plan` (skip the plan stage, read plan from a file instead).
     usage = (
-        'usage: gremlins.cli local [-p <plan-model>] [-i <impl-model>] '
-        '[-x <address-model>] [-b <detail-review-model>] '
-        '[--resume-from <stage>] [--plan <path>] [--spec <path>] '
+        "usage: gremlins.cli local [-p <plan-model>] [-i <impl-model>] "
+        "[-x <address-model>] [-b <detail-review-model>] "
+        "[--resume-from <stage>] [--plan <path>] [--spec <path>] "
         '[--test "<command>"] [--test-max-attempts <n>] [-t <test-fix-model>] '
         '"<instructions>"'
     )
@@ -66,13 +67,15 @@ def _parse_local_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("-x", dest="address", default="sonnet")
     parser.add_argument("-b", dest="detail", default="sonnet")
     parser.add_argument("-t", dest="test_fix_model", default="sonnet")
-    parser.add_argument("--resume-from", dest="resume_from", default=None,
-                        choices=VALID_RESUME_STAGES)
+    parser.add_argument(
+        "--resume-from", dest="resume_from", default=None, choices=VALID_RESUME_STAGES
+    )
     parser.add_argument("--plan", dest="plan_path", default=None)
     parser.add_argument("--spec", dest="spec_path", default=None)
     parser.add_argument("--test", dest="test_cmd", default=None)
-    parser.add_argument("--test-max-attempts", dest="test_max_attempts",
-                        type=int, default=3)
+    parser.add_argument(
+        "--test-max-attempts", dest="test_max_attempts", type=int, default=3
+    )
     parser.add_argument("instructions", nargs="*")
     args = parser.parse_args(argv)
     # launch.sh resume may pass an empty-string positional when a --plan
@@ -88,7 +91,13 @@ def _parse_local_args(argv: list[str]) -> argparse.Namespace:
     else:
         if not args.instructions:
             die(usage)
-    for m in (args.plan_model, args.impl, args.address, args.detail, args.test_fix_model):
+    for m in (
+        args.plan_model,
+        args.impl,
+        args.address,
+        args.detail,
+        args.test_fix_model,
+    ):
         if not MODEL_RE.match(m):
             die(f"invalid model: {m}")
     if args.test_max_attempts <= 0:
@@ -162,16 +171,22 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
             if is_git:
                 porcelain = subprocess.run(
                     ["git", "status", "--porcelain"],
-                    capture_output=True, text=True, check=False,
+                    capture_output=True,
+                    text=True,
+                    check=False,
                 )
                 has_dirty = bool(porcelain.stdout.strip())
                 r = subprocess.run(
                     ["git", "rev-list", "--count", "HEAD"],
-                    capture_output=True, text=True, check=False,
+                    capture_output=True,
+                    text=True,
+                    check=False,
                 )
-                has_commits = (r.returncode == 0 and int(r.stdout.strip() or "0") > 0)
+                has_commits = r.returncode == 0 and int(r.stdout.strip() or "0") > 0
                 if not has_dirty and not has_commits:
-                    die(f"--resume-from {args.resume_from} requires implementation changes in the worktree")
+                    die(
+                        f"--resume-from {args.resume_from} requires implementation changes in the worktree"
+                    )
             else:
                 has_files = False
                 for dirpath, dirnames, filenames in os.walk("."):
@@ -187,24 +202,34 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
                         has_files = True
                         break
                 if not has_files:
-                    die(f"--resume-from {args.resume_from} requires implementation changes in the worktree")
+                    die(
+                        f"--resume-from {args.resume_from} requires implementation changes in the worktree"
+                    )
         if start_idx >= VALID_RESUME_STAGES.index("address-code"):
             if not review_code_file.exists() or review_code_file.stat().st_size == 0:
-                die(f"--resume-from {args.resume_from} requires existing {review_code_file}")
+                die(
+                    f"--resume-from {args.resume_from} requires existing {review_code_file}"
+                )
 
     # Stage callables. plan_text is read just-in-time so a mid-stage failure
     # plus resume picks up whatever the plan stage produced.
-    plan_text_holder: dict = {}
+    plan_text_holder: dict[str, str] = {}
 
     def stage_plan() -> None:
         if args.plan_path:
             if plan_copied_from_source:
-                print(f"==> [1/5] plan supplied via --plan (copied) -> {plan_file}", flush=True)
+                print(
+                    f"==> [1/5] plan supplied via --plan (copied) -> {plan_file}",
+                    flush=True,
+                )
             else:
                 print(f"==> [1/5] plan reused from snapshot -> {plan_file}", flush=True)
         else:
             set_stage("plan")
-            print(f"==> [1/5] planning (model: {args.plan_model}) -> {plan_file}", flush=True)
+            print(
+                f"==> [1/5] planning (model: {args.plan_model}) -> {plan_file}",
+                flush=True,
+            )
             run_plan_stage(
                 client=client,
                 plan_model=args.plan_model,
@@ -224,9 +249,15 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
             try:
                 spec_text = spec_file.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError) as exc:
-                print(f"warning: could not read spec.md ({exc}); proceeding without north-star context", flush=True, file=sys.stderr)
+                print(
+                    f"warning: could not read spec.md ({exc}); proceeding without north-star context",
+                    flush=True,
+                    file=sys.stderr,
+                )
         set_stage("implement")
-        print(f"==> [2/5] implementing (model: {args.impl}, from {plan_file})", flush=True)
+        print(
+            f"==> [2/5] implementing (model: {args.impl}, from {plan_file})", flush=True
+        )
         run_implement_stage(
             client=client,
             impl_model=args.impl,
@@ -239,7 +270,9 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         )
 
     def stage_review_code() -> None:
-        plan_text = plan_text_holder.get("text") or plan_file.read_text(encoding="utf-8")
+        plan_text = plan_text_holder.get("text") or plan_file.read_text(
+            encoding="utf-8"
+        )
         set_stage("review-code")
         print(
             f"==> [3/5] reviewing code (model: {args.detail})",
@@ -310,10 +343,10 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
 # Standalone review-code (was localreview.py)
 # ---------------------------------------------------------------------------
 
+
 def _parse_review_args(argv: list[str]) -> argparse.Namespace:
     usage = (
-        "usage: gremlins.cli review [--dir <path>] [--plan <path>] "
-        "[-b <detail-model>]"
+        "usage: gremlins.cli review [--dir <path>] [--plan <path>] [-b <detail-model>]"
     )
     parser = argparse.ArgumentParser(add_help=False, usage=usage)
     parser.add_argument("--dir", dest="dir", default=".")
@@ -360,24 +393,40 @@ def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         # Refuse to spawn three reviewers on an empty diff. HEAD~1 may not
         # exist (initial commit); in that case we require dirty tree to have
         # something worth reviewing.
-        head1_exists = subprocess.run(
-            ["git", "rev-parse", "--verify", "HEAD~1"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-        ).returncode == 0
+        head1_exists = (
+            subprocess.run(
+                ["git", "rev-parse", "--verify", "HEAD~1"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            ).returncode
+            == 0
+        )
         has_commit_diff = False
         if head1_exists:
-            has_commit_diff = subprocess.run(
-                ["git", "diff", "--quiet", "HEAD~1", "HEAD"],
+            has_commit_diff = (
+                subprocess.run(
+                    ["git", "diff", "--quiet", "HEAD~1", "HEAD"],
+                    check=False,
+                ).returncode
+                != 0
+            )
+        has_dirty = bool(
+            subprocess.run(
+                ["git", "status", "--porcelain"],
+                capture_output=True,
+                text=True,
                 check=False,
-            ).returncode != 0
-        has_dirty = bool(subprocess.run(
-            ["git", "status", "--porcelain"],
-            capture_output=True, text=True, check=False,
-        ).stdout.strip())
+            ).stdout.strip()
+        )
         if not has_commit_diff and not has_dirty:
             if not head1_exists:
-                die("nothing to review: no commit history beyond HEAD and working tree is clean")
-            die("nothing to review: HEAD~1..HEAD has no changes and working tree is clean")
+                die(
+                    "nothing to review: no commit history beyond HEAD and working tree is clean"
+                )
+            die(
+                "nothing to review: HEAD~1..HEAD has no changes and working tree is clean"
+            )
 
     print(
         f"==> reviewing code (model: {args.detail})",
@@ -398,6 +447,7 @@ def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
 # ---------------------------------------------------------------------------
 # Standalone address-code (was localaddress.py)
 # ---------------------------------------------------------------------------
+
 
 def _parse_address_args(argv: list[str]) -> argparse.Namespace:
     usage = "usage: gremlins.cli address [--dir <path>] [-x <address-model>]"

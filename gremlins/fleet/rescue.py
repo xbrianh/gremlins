@@ -20,8 +20,9 @@ from gremlins.fleet.state import liveness_of_state_file, load_state
 from gremlins.fleet.stop import do_stop
 
 
-def build_rescue_prompt(state, log_tail, state_file_path, log_file_path,
-                        marker_path: str):
+def build_rescue_prompt(
+    state, log_tail, state_file_path, log_file_path, marker_path: str
+):
     """Build the diagnosis-step prompt. The marker contract is the same in
     interactive and headless modes — the agent never knows the difference and
     the wrapper reads the marker to decide whether to invoke the relaunch step.
@@ -38,7 +39,10 @@ def build_rescue_prompt(state, log_tail, state_file_path, log_file_path,
     log_tail_safe = log_tail.replace("```", "` ` `")
 
     pipeline_paths = [
-        ("~/.claude/gremlins/", "orchestrators, stages, state helpers, launcher — drives all gremlin kinds"),
+        (
+            "~/.claude/gremlins/",
+            "orchestrators, stages, state helpers, launcher — drives all gremlin kinds",
+        ),
     ]
     parent_state_dir = (
         os.path.join(_constants.STATE_ROOT, parent_id) if parent_id else ""
@@ -67,16 +71,14 @@ def build_rescue_prompt(state, log_tail, state_file_path, log_file_path,
             f"    - `{workdir}` — the gremlin runs here at the chain's base ref."
         )
     else:
-        context_lines.append(
-            "    - (no workdir recorded in state — skip this section)"
-        )
+        context_lines.append("    - (no workdir recorded in state — skip this section)")
     pr_quoted = f'"{project_root}"' if project_root else "<project_root>"
     context_lines += [
         "",
         "- **Product repo at current default branch** (catches fixes that landed",
         "  after the chain started — the worktree's base ref will not see them):",
         f"    - `git -C {pr_quoted} log -20 origin/HEAD`",
-        f"    - `git -C {pr_quoted} diff \"$(git -C {pr_quoted} merge-base HEAD origin/HEAD)\"..origin/HEAD`",
+        f'    - `git -C {pr_quoted} diff "$(git -C {pr_quoted} merge-base HEAD origin/HEAD)"..origin/HEAD`',
         "  Use this when you suspect the failure was already addressed elsewhere.",
     ]
     if parent_state_dir:
@@ -99,11 +101,11 @@ def build_rescue_prompt(state, log_tail, state_file_path, log_file_path,
 Kind: {kind}
 Description: {description}
 Failed at stage: {stage}
-Stage order for {kind}: {' → '.join(stages)}
+Stage order for {kind}: {" → ".join(stages)}
 State dir: {os.path.dirname(state_file_path)}
-Worktree: {workdir or '(unknown)'}
-Project root: {project_root or '(unknown)'}
-Parent (boss) id: {parent_id or '(none)'}
+Worktree: {workdir or "(unknown)"}
+Project root: {project_root or "(unknown)"}
+Parent (boss) id: {parent_id or "(none)"}
 
 ## Failure log (last ~200 lines)
 
@@ -220,13 +222,16 @@ def _write_bail(sf: str, wdir: str, bail_reason: str, bail_detail: str = "") -> 
     worse than before headless rescue ran.
     """
     now_iso = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    _atomic_patch_state(sf, {
-        "bail_reason": bail_reason,
-        "bail_detail": bail_detail,
-        "status": "bailed",
-        "exit_code": 2,
-        "ended_at": now_iso,
-    })
+    _atomic_patch_state(
+        sf,
+        {
+            "bail_reason": bail_reason,
+            "bail_detail": bail_detail,
+            "status": "bailed",
+            "exit_code": 2,
+            "ended_at": now_iso,
+        },
+    )
     try:
         pathlib.Path(os.path.join(wdir, "finished")).touch()
     except OSError:
@@ -362,7 +367,10 @@ def _read_rescue_marker(marker_path: str):
         if len(summary) > 500:
             summary = summary[:497] + "..."
     else:
-        return "bad_marker", f"marker summary must be a string, got {type(raw_summary).__name__}"
+        return (
+            "bad_marker",
+            f"marker summary must be a string, got {type(raw_summary).__name__}",
+        )
 
     if status not in ("fixed", "transient", "structural", "unsalvageable"):
         return "bad_marker", f"marker has invalid status: {status!r}"
@@ -399,9 +407,12 @@ def _run_headless_diagnosis(workdir: str, prompt: str, marker_path: str):
     # down materially when scanning state).
     env["GREMLIN_SKIP_SUMMARY"] = "1"
     cmd = [
-        "claude", "-p",
-        "--permission-mode", "bypassPermissions",
-        "--output-format", "text",
+        "claude",
+        "-p",
+        "--permission-mode",
+        "bypassPermissions",
+        "--output-format",
+        "text",
         prompt,
     ]
     try:
@@ -451,13 +462,16 @@ def _recreate_worktree(state: dict) -> tuple:
     # with "is already registered" when the directory was deleted by the host.
     subprocess.run(
         ["git", "worktree", "prune"],
-        capture_output=True, cwd=project_root,
+        capture_output=True,
+        cwd=project_root,
     )
 
     if branch:
         r = subprocess.run(
             ["git", "worktree", "add", workdir, branch],
-            capture_output=True, text=True, cwd=project_root,
+            capture_output=True,
+            text=True,
+            cwd=project_root,
         )
         if r.returncode == 0:
             return True, f"recreated from branch {branch!r}"
@@ -468,7 +482,9 @@ def _recreate_worktree(state: dict) -> tuple:
     ref = worktree_base or "HEAD"
     r = subprocess.run(
         ["git", "worktree", "add", "--detach", workdir, ref],
-        capture_output=True, text=True, cwd=project_root,
+        capture_output=True,
+        text=True,
+        cwd=project_root,
     )
     if r.returncode == 0:
         suffix = f" (branch {branch!r} was gone)" if branch_err else ""
@@ -476,7 +492,10 @@ def _recreate_worktree(state: dict) -> tuple:
     fallback_err = r.stderr.strip()
 
     if branch_err:
-        return False, f"branch {branch!r}: {branch_err}; fallback {ref!r}: {fallback_err}"
+        return (
+            False,
+            f"branch {branch!r}: {branch_err}; fallback {ref!r}: {fallback_err}",
+        )
     return False, f"worktree add --detach {ref!r}: {fallback_err}"
 
 
@@ -500,7 +519,9 @@ def do_rescue(target: str, headless: bool = False) -> bool:
         print(f"gremlin {gr_id} finished successfully — nothing to rescue")
         return False
     if live.startswith("stalled:"):
-        print(f"gremlin {gr_id} is stalled but its process is still alive — stopping it first...")
+        print(
+            f"gremlin {gr_id} is stalled but its process is still alive — stopping it first..."
+        )
         if not do_stop(target):
             print("error: could not stop the stalled gremlin — aborting rescue")
             return False
@@ -575,8 +596,10 @@ def do_rescue(target: str, headless: bool = False) -> bool:
         if headless:
             if bail_class in EXCLUDED_BAIL_CLASSES:
                 reason = f"excluded_class:{bail_class}"
-                detail = state.get("bail_detail") \
+                detail = (
+                    state.get("bail_detail")
                     or f"upstream stage bailed with bail_class={bail_class}"
+                )
                 _write_bail(sf, wdir, reason, detail)
                 print(f"headless rescue refused: {reason}")
                 report["verdict"] = reason
@@ -626,9 +649,8 @@ def do_rescue(target: str, headless: bool = False) -> bool:
             os.makedirs(artifacts_dir, exist_ok=True)
         except OSError as exc:
             artifacts_dir_error = exc
-        if (
-            not os.path.isdir(artifacts_dir)
-            or not os.access(artifacts_dir, os.W_OK | os.X_OK)
+        if not os.path.isdir(artifacts_dir) or not os.access(
+            artifacts_dir, os.W_OK | os.X_OK
         ):
             reason = "wrapper_artifacts_dir_unavailable"
             if artifacts_dir_error is not None:
@@ -688,7 +710,9 @@ def do_rescue(target: str, headless: bool = False) -> bool:
                     f"Diagnosis step (headless): running diagnosis agent "
                     f"(timeout: {HEADLESS_DIAGNOSIS_TIMEOUT_SECS}s, marker: {marker_path})..."
                 )
-                status, err_msg = _run_headless_diagnosis(scratch_dir, prompt, marker_path)
+                status, err_msg = _run_headless_diagnosis(
+                    scratch_dir, prompt, marker_path
+                )
 
                 if status == "timeout":
                     _write_bail(sf, wdir, "diagnosis_timeout", err_msg)
@@ -726,9 +750,13 @@ def do_rescue(target: str, headless: bool = False) -> bool:
                 if status == "unsalvageable":
                     _write_bail(sf, wdir, "unsalvageable", err_msg)
                     if err_msg:
-                        print(f"Diagnosis step: agent declared the failure unsalvageable ({err_msg})")
+                        print(
+                            f"Diagnosis step: agent declared the failure unsalvageable ({err_msg})"
+                        )
                     else:
-                        print("Diagnosis step: agent declared the failure unsalvageable.")
+                        print(
+                            "Diagnosis step: agent declared the failure unsalvageable."
+                        )
                     report["verdict"] = "unsalvageable"
                     report["summary"] = err_msg
                     return False
@@ -738,9 +766,13 @@ def do_rescue(target: str, headless: bool = False) -> bool:
                 # agent's summary on the success path so a post-mortem reader
                 # can see WHAT was diagnosed.
                 if err_msg:
-                    print(f"Diagnosis step complete (status: {status}, diagnosis: {err_msg}); handing off to relaunch step...")
+                    print(
+                        f"Diagnosis step complete (status: {status}, diagnosis: {err_msg}); handing off to relaunch step..."
+                    )
                 else:
-                    print(f"Diagnosis step complete (status: {status}); handing off to relaunch step...")
+                    print(
+                        f"Diagnosis step complete (status: {status}); handing off to relaunch step..."
+                    )
                 report["verdict"] = status
                 report["summary"] = err_msg
             else:
@@ -748,9 +780,12 @@ def do_rescue(target: str, headless: bool = False) -> bool:
                 print(f"Marker: {marker_path}")
                 print()
                 cmd = [
-                    "claude", "-p",
-                    "--permission-mode", "bypassPermissions",
-                    "--output-format", "stream-json",
+                    "claude",
+                    "-p",
+                    "--permission-mode",
+                    "bypassPermissions",
+                    "--output-format",
+                    "stream-json",
                     "--verbose",
                     prompt,
                 ]
@@ -758,7 +793,12 @@ def do_rescue(target: str, headless: bool = False) -> bool:
                     p = subprocess.Popen(cmd, cwd=scratch_dir, stdout=subprocess.PIPE)
                 except FileNotFoundError:
                     print("error: 'claude' CLI not found in PATH")
-                    _write_bail(sf, wdir, "diagnosis_claude_error", "'claude' CLI not found in PATH")
+                    _write_bail(
+                        sf,
+                        wdir,
+                        "diagnosis_claude_error",
+                        "'claude' CLI not found in PATH",
+                    )
                     report["verdict"] = "diagnosis_claude_error"
                     report["summary"] = "'claude' CLI not found in PATH"
                     return False
@@ -777,7 +817,9 @@ def do_rescue(target: str, headless: bool = False) -> bool:
                             p.kill()
                         except Exception:
                             pass
-                    print("\nRescue aborted by user. Gremlin state preserved — rerun /gremlins rescue, rm, or close.")
+                    print(
+                        "\nRescue aborted by user. Gremlin state preserved — rerun /gremlins rescue, rm, or close."
+                    )
                     aborted[0] = True
                     return False
 
@@ -787,7 +829,9 @@ def do_rescue(target: str, headless: bool = False) -> bool:
                     detail = f"claude -p exited {rc}"
                     _write_bail(sf, wdir, "diagnosis_claude_error", detail)
                     print(f"Diagnosis: rescue agent exited with code {rc}.")
-                    print(f"Inspect the log at {log_path} and worktree at {workdir} for details.")
+                    print(
+                        f"Inspect the log at {log_path} and worktree at {workdir} for details."
+                    )
                     report["verdict"] = "diagnosis_claude_error"
                     report["summary"] = detail
                     return False
@@ -802,14 +846,18 @@ def do_rescue(target: str, headless: bool = False) -> bool:
                         f"Diagnosis: agent flagged a structural problem in the pipeline "
                         f"or sibling artifacts that requires a human edit ({msg})"
                     )
-                    print("Gremlin marked dead:bailed:structural — rerun /gremlins rescue after fixing the named pipeline file or sibling plan.")
+                    print(
+                        "Gremlin marked dead:bailed:structural — rerun /gremlins rescue after fixing the named pipeline file or sibling plan."
+                    )
                     report["verdict"] = "structural"
                     report["summary"] = msg
                     return False
                 if status == "unsalvageable":
                     _write_bail(sf, wdir, "unsalvageable", msg)
                     if msg:
-                        print(f"Diagnosis: agent declared the failure unsalvageable ({msg})")
+                        print(
+                            f"Diagnosis: agent declared the failure unsalvageable ({msg})"
+                        )
                     else:
                         print("Diagnosis: agent declared the failure unsalvageable.")
                     # The bail is recorded but interactive callers can still rerun
@@ -817,7 +865,9 @@ def do_rescue(target: str, headless: bool = False) -> bool:
                     # running/finished/stalled), so make that explicit — the
                     # `dead:bailed:unsalvageable` liveness can otherwise look
                     # terminal at a glance.
-                    print("Gremlin marked dead:bailed:unsalvageable — rerun /gremlins rescue if you want to try again.")
+                    print(
+                        "Gremlin marked dead:bailed:unsalvageable — rerun /gremlins rescue if you want to try again."
+                    )
                     report["verdict"] = "unsalvageable"
                     report["summary"] = msg
                     return False
@@ -836,7 +886,9 @@ def do_rescue(target: str, headless: bool = False) -> bool:
                 # status ∈ {"fixed", "transient"} → proceed to the relaunch step.
                 if msg:
                     print(f"Diagnosis summary: {msg}")
-                print(f"Diagnosis complete (status: {status}); handing off to relaunch step...")
+                print(
+                    f"Diagnosis complete (status: {status}); handing off to relaunch step..."
+                )
                 report["verdict"] = status
                 report["summary"] = msg
         finally:
@@ -850,6 +902,7 @@ def do_rescue(target: str, headless: bool = False) -> bool:
         report["relaunch_attempted"] = True
         try:
             from gremlins.launcher import resume as _resume
+
             _resume(gr_id)
         except Exception as exc:
             detail = str(exc)

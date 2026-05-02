@@ -17,7 +17,9 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 HELPER = REPO_ROOT / "skills" / "_lib" / "python.sh"
 
 
-def _make_fake_python(dirpath: pathlib.Path, name: str, version: tuple[int, int]) -> pathlib.Path:
+def _make_fake_python(
+    dirpath: pathlib.Path, name: str, version: tuple[int, int]
+) -> pathlib.Path:
     """Create an executable shell script that mimics `python -c` version checks.
 
     The version is encoded as a single (major*100 + minor) integer so the
@@ -27,7 +29,8 @@ def _make_fake_python(dirpath: pathlib.Path, name: str, version: tuple[int, int]
     p = dirpath / name
     major, minor = version
     encoded = major * 100 + minor
-    p.write_text(textwrap.dedent(f"""\
+    p.write_text(
+        textwrap.dedent(f"""\
         #!/usr/bin/env bash
         # Fake python: mimics `python -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'`
         # by exiting based on the hardcoded version stamped at file creation.
@@ -39,7 +42,8 @@ def _make_fake_python(dirpath: pathlib.Path, name: str, version: tuple[int, int]
             fi
         fi
         echo "Python {major}.{minor}.0"
-    """))
+    """)
+    )
     p.chmod(0o755)
     return p
 
@@ -102,7 +106,9 @@ def test_helper_exits_127_when_no_compatible_candidate(tmp_path):
     assert "no python interpreter (>=3.11) found" in result.stderr
 
 
-@pytest.mark.skipif(not HELPER.exists(), reason="skills/_lib/python.sh not present in this repo")
+@pytest.mark.skipif(
+    not HELPER.exists(), reason="skills/_lib/python.sh not present in this repo"
+)
 def test_real_helper_picks_compatible_interpreter():
     """End-to-end: source the actual helper and verify it picks an interpreter that runs Python >=3.11."""
     script = f'set -e; . "{HELPER}"; "$CLAUDE_PY" -c "import sys; assert sys.version_info >= (3, 11); print(sys.executable)"'

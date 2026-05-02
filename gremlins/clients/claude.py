@@ -23,10 +23,11 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 CLAUDE_FLAGS_BASE = [
-    "--permission-mode", "bypassPermissions",
+    "--permission-mode",
+    "bypassPermissions",
     "--verbose",
 ]
 
@@ -48,7 +49,7 @@ class CompletedRun:
     exit_code: int
     session_id: str | None = None
     text_result: str | None = None
-    events: list[dict] | None = None
+    events: list[dict[str, Any]] | None = None
     cost_usd: float | None = None
 
 
@@ -64,21 +65,19 @@ class ClaudeClient(Protocol):
         resume_session: str | None = None,
         extra_flags: Sequence[str] = (),
         capture_events: bool = False,
-        on_event: Callable[[dict], None] | None = None,
-    ) -> CompletedRun:
-        ...
+        on_event: Callable[[dict[str, Any]], None] | None = None,
+    ) -> CompletedRun: ...
 
-    def reap_all(self) -> None:
-        ...
+    def reap_all(self) -> None: ...
 
     @property
-    def total_cost_usd(self) -> float:
-        ...
+    def total_cost_usd(self) -> float: ...
 
 
 # ---------------------------------------------------------------------------
 # Stream-JSON event tracing
 # ---------------------------------------------------------------------------
+
 
 def _trunc(s, n: int = 200) -> str:
     if s is None:
@@ -216,6 +215,7 @@ def stream_events(
 # SubprocessClaudeClient
 # ---------------------------------------------------------------------------
 
+
 class SubprocessClaudeClient:
     """Production ClaudeClient: spawns ``claude -p`` subprocesses.
 
@@ -317,7 +317,7 @@ class SubprocessClaudeClient:
 
         session_id: str | None = None
         text_chunks: list[str] = []
-        events: list[dict] | None = None  # populated only in stream-json mode
+        events: list[dict[str, Any]] | None = None  # populated only in stream-json mode
         prefix = f"[{label}] " if label else ""
         cost_usd: float | None = None
         stream_result_text: str | None = None
@@ -348,9 +348,7 @@ class SubprocessClaudeClient:
             self._untrack(p)
 
         if rc != 0:
-            raise RuntimeError(
-                f"claude -p (model={model}, label={label}) exited {rc}"
-            )
+            raise RuntimeError(f"claude -p (model={model}, label={label}) exited {rc}")
 
         if output_format == "stream-json":
             text_result = stream_result_text

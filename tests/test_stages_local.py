@@ -16,23 +16,32 @@ def _init_git_repo(path: pathlib.Path) -> None:
     subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
-        cwd=path, check=True, capture_output=True,
+        cwd=path,
+        check=True,
+        capture_output=True,
     )
     subprocess.run(
         ["git", "config", "user.name", "Test"],
-        cwd=path, check=True, capture_output=True,
+        cwd=path,
+        check=True,
+        capture_output=True,
     )
     (path / "README.md").write_text("init\n")
-    subprocess.run(["git", "add", "README.md"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "add", "README.md"], cwd=path, check=True, capture_output=True
+    )
     subprocess.run(
         ["git", "commit", "-m", "init"],
-        cwd=path, check=True, capture_output=True,
+        cwd=path,
+        check=True,
+        capture_output=True,
     )
 
 
 # ---------------------------------------------------------------------------
 # _render_spec_block
 # ---------------------------------------------------------------------------
+
 
 def test_render_spec_block_empty_string():
     assert _render_spec_block("") == ""
@@ -78,6 +87,7 @@ def test_render_spec_block_no_truncation_note_when_short():
 # implement stage spec_text rendering
 # ---------------------------------------------------------------------------
 
+
 def test_implement_renders_spec_block_when_present(tmp_path, monkeypatch):
     git_dir = tmp_path / "repo"
     git_dir.mkdir()
@@ -90,8 +100,18 @@ def test_implement_renders_spec_block_when_present(tmp_path, monkeypatch):
     class _CommittingClient(FakeClaudeClient):
         def run(self, prompt, *, label, **kwargs):
             (git_dir / "newfile.txt").write_text("change\n")
-            subprocess.run(["git", "add", "newfile.txt"], cwd=git_dir, check=True, capture_output=True)
-            subprocess.run(["git", "commit", "-m", "implement"], cwd=git_dir, check=True, capture_output=True)
+            subprocess.run(
+                ["git", "add", "newfile.txt"],
+                cwd=git_dir,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "implement"],
+                cwd=git_dir,
+                check=True,
+                capture_output=True,
+            )
             return super().run(prompt, label=label, **kwargs)
 
     client = _CommittingClient(fixtures={"implement": MINIMAL_EVENTS})
@@ -122,8 +142,18 @@ def test_implement_omits_spec_block_when_absent(tmp_path, monkeypatch):
     class _CommittingClient(FakeClaudeClient):
         def run(self, prompt, *, label, **kwargs):
             (git_dir / "newfile.txt").write_text("change\n")
-            subprocess.run(["git", "add", "newfile.txt"], cwd=git_dir, check=True, capture_output=True)
-            subprocess.run(["git", "commit", "-m", "implement"], cwd=git_dir, check=True, capture_output=True)
+            subprocess.run(
+                ["git", "add", "newfile.txt"],
+                cwd=git_dir,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "implement"],
+                cwd=git_dir,
+                check=True,
+                capture_output=True,
+            )
             return super().run(prompt, label=label, **kwargs)
 
     client = _CommittingClient(fixtures={"implement": MINIMAL_EVENTS})
@@ -143,6 +173,7 @@ def test_implement_omits_spec_block_when_absent(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # plan stage
 # ---------------------------------------------------------------------------
+
 
 def test_plan_stage_raises_when_file_absent(tmp_path):
     client = FakeClaudeClient(fixtures={"plan": MINIMAL_EVENTS})
@@ -188,6 +219,7 @@ def test_plan_stage_succeeds_when_file_exists(tmp_path):
 # implement stage
 # ---------------------------------------------------------------------------
 
+
 def test_implement_stage_raises_on_empty_diff(tmp_path, monkeypatch):
     git_dir = tmp_path / "repo"
     git_dir.mkdir()
@@ -216,6 +248,7 @@ def test_implement_stage_raises_on_empty_diff(tmp_path, monkeypatch):
 # address-code stage
 # ---------------------------------------------------------------------------
 
+
 def test_address_code_stage_calls_client_with_review_content(tmp_path):
     session_dir = tmp_path
     review_text = "# Detail Review\n\n## Findings\nLooks good.\n"
@@ -240,6 +273,7 @@ def test_address_code_stage_calls_client_with_review_content(tmp_path):
 # ---------------------------------------------------------------------------
 # code_style block appears in plan, review, and address prompts
 # ---------------------------------------------------------------------------
+
 
 def test_plan_stage_includes_code_style(tmp_path):
     client = FakeClaudeClient(fixtures={"plan": MINIMAL_EVENTS})

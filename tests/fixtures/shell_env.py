@@ -61,21 +61,51 @@ def setup_fake_home(home: pathlib.Path) -> None:
 
 def init_git_repo(path: pathlib.Path, *, with_origin: bool = False) -> None:
     path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
     (path / "README.md").write_text("init\n")
-    subprocess.run(["git", "add", "README.md"], cwd=path, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "add", "README.md"], cwd=path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "init"], cwd=path, check=True, capture_output=True
+    )
 
     if with_origin:
         # Create a bare repo as `origin` and push so ghgremlin's
         # `git fetch origin <default>` and `worktree add origin/<default>`
         # have something real to resolve against.
         bare = path.parent / f"{path.name}.git"
-        subprocess.run(["git", "init", "--bare", "-b", "main", str(bare)], check=True, capture_output=True)
-        subprocess.run(["git", "remote", "add", "origin", str(bare)], cwd=path, check=True, capture_output=True)
-        subprocess.run(["git", "push", "-u", "origin", "main"], cwd=path, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "init", "--bare", "-b", "main", str(bare)],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "remote", "add", "origin", str(bare)],
+            cwd=path,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "push", "-u", "origin", "main"],
+            cwd=path,
+            check=True,
+            capture_output=True,
+        )
 
 
 def setup_shell_env(
@@ -118,8 +148,13 @@ def setup_shell_env(
     # test runs (e.g. read-only commands like `git status` skip the index lock).
     env["GIT_OPTIONAL_LOCKS"] = "0"
     return ShellEnv(
-        home=home, bin_dir=bin_dir, state_root=state_root, repo=repo,
-        env=env, fake_claude_log=fake_claude_log, fake_gh_log=fake_gh_log,
+        home=home,
+        bin_dir=bin_dir,
+        state_root=state_root,
+        repo=repo,
+        env=env,
+        fake_claude_log=fake_claude_log,
+        fake_gh_log=fake_gh_log,
     )
 
 

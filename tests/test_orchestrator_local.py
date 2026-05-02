@@ -1,4 +1,3 @@
-
 from conftest import (
     MINIMAL_EVENTS,
 )
@@ -18,6 +17,7 @@ from gremlins.orchestrators.local import address_main, local_main, review_main
 # ---------------------------------------------------------------------------
 # local_main smoke test (--plan mode: skips plan, runs implement→review→address)
 # ---------------------------------------------------------------------------
+
 
 def test_local_main_plan_mode(tmp_path, monkeypatch):
     session_dir = tmp_path / "session"
@@ -61,6 +61,7 @@ def test_local_main_plan_mode(tmp_path, monkeypatch):
 # review_main smoke test
 # ---------------------------------------------------------------------------
 
+
 def test_review_main_calls_client(tmp_path, monkeypatch):
     _common_patches(monkeypatch)
     monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
@@ -77,6 +78,7 @@ def test_review_main_calls_client(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # address_main smoke test
 # ---------------------------------------------------------------------------
+
 
 def test_address_main_calls_client(tmp_path, monkeypatch):
     (tmp_path / "review-code-detail-sonnet.md").write_text(

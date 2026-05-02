@@ -14,7 +14,7 @@ def do_log(target: str) -> bool:
     if match is None:
         return False
 
-    gr_id, sf, wdir = match
+    gr_id, _, wdir = match
     log_path = os.path.join(wdir, "log")
     if not os.path.isfile(log_path):
         sys.stderr.write(f"error: no log file for gremlin {gr_id} at {log_path}\n")

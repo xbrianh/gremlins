@@ -13,8 +13,14 @@ from gremlins import fleet as gremlins
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _write_state(state_dir: pathlib.Path, payload: dict, *,
-                 finished: bool = False, log_text: str | None = None) -> str:
+
+def _write_state(
+    state_dir: pathlib.Path,
+    payload: dict,
+    *,
+    finished: bool = False,
+    log_text: str | None = None,
+) -> str:
     state_dir.mkdir(parents=True, exist_ok=True)
     sf = state_dir / "state.json"
     sf.write_text(json.dumps(payload))
@@ -25,8 +31,9 @@ def _write_state(state_dir: pathlib.Path, payload: dict, *,
     return str(sf)
 
 
-def _setup_dead_gremlin(tmp_path, monkeypatch, gr_id="test-id-aabb12",
-                        **state_overrides):
+def _setup_dead_gremlin(
+    tmp_path, monkeypatch, gr_id="test-id-aabb12", **state_overrides
+):
     """Build a state-root with a single dead gremlin, monkeypatch STATE_ROOT."""
     state_root = tmp_path / "state-root"
     state_root.mkdir()
@@ -49,21 +56,32 @@ def _setup_dead_gremlin(tmp_path, monkeypatch, gr_id="test-id-aabb12",
 
 
 def _init_git_repo(path: pathlib.Path) -> None:
-    subprocess.run(["git", "init", "-b", "main"], cwd=path,
-                   check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@test.com"],
-                   cwd=path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"],
-                   cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
     (path / "README.md").write_text("init\n")
     subprocess.run(["git", "add", "."], cwd=path, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=path,
-                   check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"], cwd=path, check=True, capture_output=True
+    )
 
 
 # ---------------------------------------------------------------------------
 # liveness_of_state_file — state transitions
 # ---------------------------------------------------------------------------
+
 
 def test_liveness_running_with_live_pid_and_fresh_log(tmp_path):
     sf = _write_state(
@@ -127,37 +145,58 @@ def test_liveness_stalled_when_log_is_old(tmp_path, monkeypatch):
 # build_row — rescue marker (state transition: dead → rescued → running)
 # ---------------------------------------------------------------------------
 
+
 def test_build_row_rescue_suffix_singular():
-    state = {"kind": "localgremlin", "stage": "implement",
-             "rescue_count": 1, "started_at": ""}
+    state = {
+        "kind": "localgremlin",
+        "stage": "implement",
+        "rescue_count": 1,
+        "started_at": "",
+    }
     row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
     assert "(rescue)" in row["live"]
 
 
 def test_build_row_rescue_suffix_multiple():
-    state = {"kind": "localgremlin", "stage": "implement",
-             "rescue_count": 3, "started_at": ""}
+    state = {
+        "kind": "localgremlin",
+        "stage": "implement",
+        "rescue_count": 3,
+        "started_at": "",
+    }
     row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
     assert "(rescue x3)" in row["live"]
 
 
 def test_build_row_no_rescue_suffix_when_zero():
-    state = {"kind": "localgremlin", "stage": "implement",
-             "rescue_count": 0, "started_at": ""}
+    state = {
+        "kind": "localgremlin",
+        "stage": "implement",
+        "rescue_count": 0,
+        "started_at": "",
+    }
     row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
     assert "(rescue" not in row["live"]
 
 
 def test_build_row_model_from_impl_model():
-    state = {"kind": "localgremlin", "stage": "implement",
-             "started_at": "", "impl_model": "opus"}
+    state = {
+        "kind": "localgremlin",
+        "stage": "implement",
+        "started_at": "",
+        "impl_model": "opus",
+    }
     row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
     assert row["model"] == "opus"
 
 
 def test_build_row_model_falls_back_to_model_field():
-    state = {"kind": "ghgremlin", "stage": "implement",
-             "started_at": "", "model": "opus"}
+    state = {
+        "kind": "ghgremlin",
+        "stage": "implement",
+        "started_at": "",
+        "model": "opus",
+    }
     row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
     assert row["model"] == "opus"
 
@@ -171,6 +210,7 @@ def test_build_row_model_missing_field_shows_dash():
 # ---------------------------------------------------------------------------
 # Phase A marker contract — _read_rescue_marker
 # ---------------------------------------------------------------------------
+
 
 def _write_marker(path: pathlib.Path, payload) -> str:
     if isinstance(payload, str):
@@ -214,24 +254,27 @@ def test_marker_summary_must_be_string(tmp_path):
 
 
 def test_marker_fixed(tmp_path):
-    p = _write_marker(tmp_path / "m.json",
-                       {"status": "fixed", "summary": "patched state.json"})
+    p = _write_marker(
+        tmp_path / "m.json", {"status": "fixed", "summary": "patched state.json"}
+    )
     status, msg = gremlins._read_rescue_marker(p)
     assert status == "fixed"
     assert msg == "patched state.json"
 
 
 def test_marker_transient(tmp_path):
-    p = _write_marker(tmp_path / "m.json",
-                       {"status": "transient", "summary": "network flake"})
+    p = _write_marker(
+        tmp_path / "m.json", {"status": "transient", "summary": "network flake"}
+    )
     status, msg = gremlins._read_rescue_marker(p)
     assert status == "transient"
     assert msg == "network flake"
 
 
 def test_marker_structural_with_summary(tmp_path):
-    p = _write_marker(tmp_path / "m.json",
-                       {"status": "structural", "summary": "bug in foo.sh"})
+    p = _write_marker(
+        tmp_path / "m.json", {"status": "structural", "summary": "bug in foo.sh"}
+    )
     status, msg = gremlins._read_rescue_marker(p)
     assert status == "structural"
     assert msg == "bug in foo.sh"
@@ -253,16 +296,16 @@ def test_marker_unsalvageable_without_summary_uses_fallback(tmp_path):
 
 
 def test_marker_summary_collapses_whitespace(tmp_path):
-    p = _write_marker(tmp_path / "m.json",
-                       {"status": "fixed", "summary": "line one\nline two\t  end"})
+    p = _write_marker(
+        tmp_path / "m.json", {"status": "fixed", "summary": "line one\nline two\t  end"}
+    )
     status, msg = gremlins._read_rescue_marker(p)
     assert "\n" not in msg
     assert "line one" in msg and "line two" in msg
 
 
 def test_marker_summary_capped_to_500_chars(tmp_path):
-    p = _write_marker(tmp_path / "m.json",
-                       {"status": "fixed", "summary": "x" * 1000})
+    p = _write_marker(tmp_path / "m.json", {"status": "fixed", "summary": "x" * 1000})
     status, msg = gremlins._read_rescue_marker(p)
     assert len(msg) <= 500
     assert msg.endswith("...")
@@ -272,12 +315,19 @@ def test_marker_summary_capped_to_500_chars(tmp_path):
 # rescue --headless: bail-class exclusion
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("bail_class", [
-    "reviewer_requested_changes", "security", "secrets",
-])
+
+@pytest.mark.parametrize(
+    "bail_class",
+    [
+        "reviewer_requested_changes",
+        "security",
+        "secrets",
+    ],
+)
 def test_rescue_headless_excludes_class(tmp_path, monkeypatch, capsys, bail_class):
     gr_dir, _ = _setup_dead_gremlin(
-        tmp_path, monkeypatch,
+        tmp_path,
+        monkeypatch,
         bail_class=bail_class,
         bail_detail="upstream-set detail",
     )
@@ -294,8 +344,9 @@ def test_rescue_headless_does_not_exclude_other_class(tmp_path, monkeypatch):
     """`other` is the only attempted class — verify it gets past the exclusion check."""
     gr_dir, _ = _setup_dead_gremlin(tmp_path, monkeypatch, bail_class="other")
     # Stub the diagnosis step so the rescue terminates without claude.
-    monkeypatch.setattr(gremlins, "_run_headless_diagnosis",
-                        lambda *a, **kw: ("structural", "fake"))
+    monkeypatch.setattr(
+        gremlins, "_run_headless_diagnosis", lambda *a, **kw: ("structural", "fake")
+    )
     ok = gremlins.do_rescue("test-id-aabb12", headless=True)
     assert ok is False
     new = json.loads((gr_dir / "state.json").read_text())
@@ -307,10 +358,10 @@ def test_rescue_headless_does_not_exclude_other_class(tmp_path, monkeypatch):
 # rescue --headless: attempt cap enforcement
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize("rescue_count", [3, 4, 10])
 def test_rescue_headless_at_or_above_cap_refuses(tmp_path, monkeypatch, rescue_count):
-    gr_dir, _ = _setup_dead_gremlin(tmp_path, monkeypatch,
-                                      rescue_count=rescue_count)
+    gr_dir, _ = _setup_dead_gremlin(tmp_path, monkeypatch, rescue_count=rescue_count)
     ok = gremlins.do_rescue("test-id-aabb12", headless=True)
     assert ok is False
     new = json.loads((gr_dir / "state.json").read_text())
@@ -319,11 +370,15 @@ def test_rescue_headless_at_or_above_cap_refuses(tmp_path, monkeypatch, rescue_c
 
 
 def test_rescue_headless_below_cap_proceeds_past_check(tmp_path, monkeypatch):
-    gr_dir, _ = _setup_dead_gremlin(tmp_path, monkeypatch,
-                                      rescue_count=gremlins.RESCUE_CAP - 1)
+    gr_dir, _ = _setup_dead_gremlin(
+        tmp_path, monkeypatch, rescue_count=gremlins.RESCUE_CAP - 1
+    )
     # Stub diagnosis so we don't actually run claude
-    monkeypatch.setattr(gremlins, "_run_headless_diagnosis",
-                        lambda *a, **kw: ("structural", "agent flagged"))
+    monkeypatch.setattr(
+        gremlins,
+        "_run_headless_diagnosis",
+        lambda *a, **kw: ("structural", "agent flagged"),
+    )
     ok = gremlins.do_rescue("test-id-aabb12", headless=True)
     assert ok is False
     new = json.loads((gr_dir / "state.json").read_text())
@@ -351,6 +406,7 @@ def test_rescue_headless_running_refused(tmp_path, monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 # do_close — close flow
 # ---------------------------------------------------------------------------
+
 
 def test_close_dead_gremlin_marks_closed(tmp_path, monkeypatch, capsys):
     gr_dir, _ = _setup_dead_gremlin(tmp_path, monkeypatch)
@@ -396,21 +452,32 @@ def test_close_not_found(tmp_path, monkeypatch, capsys):
 # do_land / _land_local — squash path
 # ---------------------------------------------------------------------------
 
+
 def test_land_local_squash_lands_branch_and_deletes_it(tmp_path, monkeypatch, capsys):
     project_root = tmp_path / "project"
     project_root.mkdir()
     _init_git_repo(project_root)
 
     branch = "bg/localgremlin/test-id-aabb12"
-    subprocess.run(["git", "checkout", "-b", branch], cwd=project_root,
-                   check=True, capture_output=True)
+    subprocess.run(
+        ["git", "checkout", "-b", branch],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+    )
     (project_root / "feature.txt").write_text("feature work\n")
-    subprocess.run(["git", "add", "."], cwd=project_root,
-                   check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "feat: add feature.txt"],
-                   cwd=project_root, check=True, capture_output=True)
-    subprocess.run(["git", "checkout", "main"], cwd=project_root,
-                   check=True, capture_output=True)
+    subprocess.run(
+        ["git", "add", "."], cwd=project_root, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "feat: add feature.txt"],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "checkout", "main"], cwd=project_root, check=True, capture_output=True
+    )
 
     state_root = tmp_path / "state-root"
     state_root.mkdir()
@@ -436,30 +503,44 @@ def test_land_local_squash_lands_branch_and_deletes_it(tmp_path, monkeypatch, ca
     _write_state(gr_dir, state, finished=True)
 
     monkeypatch.setattr(gremlins, "STATE_ROOT", str(state_root))
-    monkeypatch.setattr(gremlins, "_synthesize_commit_message_ai",
-                        lambda inputs: ("Add feature.txt to repo",
-                                         "Adds feature.txt with placeholder content.",
-                                         0.0))
+    monkeypatch.setattr(
+        gremlins,
+        "_synthesize_commit_message_ai",
+        lambda inputs: (
+            "Add feature.txt to repo",
+            "Adds feature.txt with placeholder content.",
+            0.0,
+        ),
+    )
     monkeypatch.chdir(project_root)
 
-    ok = gremlins._land_local(gr_id, str(gr_dir / "state.json"),
-                                str(gr_dir), state, mode="squash")
+    ok = gremlins._land_local(
+        gr_id, str(gr_dir / "state.json"), str(gr_dir), state, mode="squash"
+    )
     assert ok is True
 
     log_out = subprocess.run(
-        ["git", "log", "--oneline", "main"], cwd=project_root,
-        capture_output=True, text=True, check=True,
+        ["git", "log", "--oneline", "main"],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout
     assert "Add feature.txt to repo" in log_out
 
     branches = subprocess.run(
-        ["git", "branch", "--list", branch], cwd=project_root,
-        capture_output=True, text=True, check=True,
+        ["git", "branch", "--list", branch],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout
     assert branches.strip() == ""
 
 
-def test_land_local_squash_folds_commit_synthesis_cost_into_total(tmp_path, monkeypatch, capsys):
+def test_land_local_squash_folds_commit_synthesis_cost_into_total(
+    tmp_path, monkeypatch, capsys
+):
     """Squash-land must add the commit-message `claude -p` cost to total_cost_usd
     so the printed total — and the persisted state — cover land-time spend."""
     project_root = tmp_path / "project"
@@ -467,15 +548,25 @@ def test_land_local_squash_folds_commit_synthesis_cost_into_total(tmp_path, monk
     _init_git_repo(project_root)
 
     branch = "bg/localgremlin/test-id-cost12"
-    subprocess.run(["git", "checkout", "-b", branch], cwd=project_root,
-                   check=True, capture_output=True)
+    subprocess.run(
+        ["git", "checkout", "-b", branch],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+    )
     (project_root / "feature.txt").write_text("feature work\n")
-    subprocess.run(["git", "add", "."], cwd=project_root,
-                   check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "feat: add feature.txt"],
-                   cwd=project_root, check=True, capture_output=True)
-    subprocess.run(["git", "checkout", "main"], cwd=project_root,
-                   check=True, capture_output=True)
+    subprocess.run(
+        ["git", "add", "."], cwd=project_root, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "feat: add feature.txt"],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "checkout", "main"], cwd=project_root, check=True, capture_output=True
+    )
 
     state_root = tmp_path / "state-root"
     state_root.mkdir()
@@ -502,8 +593,11 @@ def test_land_local_squash_folds_commit_synthesis_cost_into_total(tmp_path, monk
     sf_path = _write_state(gr_dir, state, finished=True)
 
     monkeypatch.setattr(gremlins, "STATE_ROOT", str(state_root))
-    monkeypatch.setattr(gremlins, "_synthesize_commit_message_ai",
-                        lambda inputs: ("Add feature.txt to repo", "", 0.05))
+    monkeypatch.setattr(
+        gremlins,
+        "_synthesize_commit_message_ai",
+        lambda inputs: ("Add feature.txt to repo", "", 0.05),
+    )
     monkeypatch.chdir(project_root)
 
     ok = gremlins._land_local(gr_id, sf_path, str(gr_dir), state, mode="squash")
@@ -526,7 +620,9 @@ def test_land_local_refuses_non_worktree_branch_setup(tmp_path, monkeypatch, cap
     assert "only worktree-branch gremlins" in capsys.readouterr().out
 
 
-def test_land_local_refuses_when_branch_missing_from_state(tmp_path, monkeypatch, capsys):
+def test_land_local_refuses_when_branch_missing_from_state(
+    tmp_path, monkeypatch, capsys
+):
     state = {
         "id": "x",
         "kind": "localgremlin",
@@ -547,8 +643,14 @@ def test_land_local_into_dir_nonexistent_fails(tmp_path, monkeypatch, capsys):
         "branch": "bg/localgremlin/x",
         "project_root": str(tmp_path / "project"),
     }
-    ok = gremlins._land_local("x", "/sf", "/wdir", state, mode="squash",
-                               into_dir=str(tmp_path / "nonexistent"))
+    ok = gremlins._land_local(
+        "x",
+        "/sf",
+        "/wdir",
+        state,
+        mode="squash",
+        into_dir=str(tmp_path / "nonexistent"),
+    )
     assert ok is False
     assert "--into directory does not exist" in capsys.readouterr().out
 
@@ -563,26 +665,45 @@ def test_land_local_into_dir_lands_in_worktree(tmp_path, monkeypatch, capsys):
     branch = f"bg/localgremlin/{gr_id}"
 
     # Create feature branch with a commit.
-    subprocess.run(["git", "checkout", "-b", branch], cwd=project_root,
-                   check=True, capture_output=True)
+    subprocess.run(
+        ["git", "checkout", "-b", branch],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+    )
     (project_root / "wt_feature.txt").write_text("from worktree\n")
-    subprocess.run(["git", "add", "wt_feature.txt"], cwd=project_root,
-                   check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "add wt_feature.txt"], cwd=project_root,
-                   check=True, capture_output=True)
-    subprocess.run(["git", "checkout", "main"], cwd=project_root,
-                   check=True, capture_output=True)
+    subprocess.run(
+        ["git", "add", "wt_feature.txt"],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "add wt_feature.txt"],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "checkout", "main"], cwd=project_root, check=True, capture_output=True
+    )
 
     # Create a detached worktree from main (simulating the boss worktree).
     into_dir = tmp_path / "boss_worktree"
-    subprocess.run(["git", "worktree", "add", "--detach", str(into_dir), "HEAD"],
-                   cwd=project_root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "worktree", "add", "--detach", str(into_dir), "HEAD"],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+    )
 
     state_root = tmp_path / "state-root"
     gr_dir = state_root / gr_id
     artifacts_dir = gr_dir / "artifacts"
     artifacts_dir.mkdir(parents=True)
-    (artifacts_dir / "plan.md").write_text("# Add wt_feature\n\n## Context\nAdd wt_feature.txt.\n")
+    (artifacts_dir / "plan.md").write_text(
+        "# Add wt_feature\n\n## Context\nAdd wt_feature.txt.\n"
+    )
     workdir = tmp_path / "child_worktree"
     workdir.mkdir()
     state = {
@@ -600,12 +721,16 @@ def test_land_local_into_dir_lands_in_worktree(tmp_path, monkeypatch, capsys):
     pathlib.Path(sf).write_text(json.dumps(state))
 
     monkeypatch.setattr(gremlins, "STATE_ROOT", str(state_root))
-    monkeypatch.setattr(gremlins, "_synthesize_commit_message_ai",
-                        lambda inputs: ("Add wt_feature.txt", "", 0.0))
+    monkeypatch.setattr(
+        gremlins,
+        "_synthesize_commit_message_ai",
+        lambda inputs: ("Add wt_feature.txt", "", 0.0),
+    )
     monkeypatch.chdir(into_dir)
 
-    ok = gremlins._land_local(gr_id, sf, str(gr_dir), state, mode="squash",
-                               into_dir=str(into_dir))
+    ok = gremlins._land_local(
+        gr_id, sf, str(gr_dir), state, mode="squash", into_dir=str(into_dir)
+    )
     assert ok is True
 
     # Feature must appear in the boss worktree, not in project_root.
@@ -620,15 +745,25 @@ def test_land_proceeds_with_untracked_files_present(tmp_path, monkeypatch, capsy
     _init_git_repo(project_root)
 
     branch = "bg/localgremlin/test-id-untr12"
-    subprocess.run(["git", "checkout", "-b", branch], cwd=project_root,
-                   check=True, capture_output=True)
+    subprocess.run(
+        ["git", "checkout", "-b", branch],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+    )
     (project_root / "feature.txt").write_text("feature work\n")
-    subprocess.run(["git", "add", "."], cwd=project_root,
-                   check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "feat: add feature.txt"],
-                   cwd=project_root, check=True, capture_output=True)
-    subprocess.run(["git", "checkout", "main"], cwd=project_root,
-                   check=True, capture_output=True)
+    subprocess.run(
+        ["git", "add", "."], cwd=project_root, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "feat: add feature.txt"],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "checkout", "main"], cwd=project_root, check=True, capture_output=True
+    )
 
     # Drop an untracked file into the working tree on main.
     (project_root / "scratch.tmp").write_text("scratch\n")
@@ -657,12 +792,16 @@ def test_land_proceeds_with_untracked_files_present(tmp_path, monkeypatch, capsy
     _write_state(gr_dir, state, finished=True)
 
     monkeypatch.setattr(gremlins, "STATE_ROOT", str(state_root))
-    monkeypatch.setattr(gremlins, "_synthesize_commit_message_ai",
-                        lambda inputs: ("Add feature.txt to repo", "", 0.0))
+    monkeypatch.setattr(
+        gremlins,
+        "_synthesize_commit_message_ai",
+        lambda inputs: ("Add feature.txt to repo", "", 0.0),
+    )
     monkeypatch.chdir(project_root)
 
-    ok = gremlins._land_local(gr_id, str(gr_dir / "state.json"),
-                               str(gr_dir), state, mode="squash")
+    ok = gremlins._land_local(
+        gr_id, str(gr_dir / "state.json"), str(gr_dir), state, mode="squash"
+    )
     assert ok is True
     # Untracked file must still be present after land.
     assert (project_root / "scratch.tmp").exists()
@@ -675,15 +814,25 @@ def test_land_refuses_with_tracked_modifications(tmp_path, monkeypatch, capsys):
     _init_git_repo(project_root)
 
     branch = "bg/localgremlin/test-id-dirty1"
-    subprocess.run(["git", "checkout", "-b", branch], cwd=project_root,
-                   check=True, capture_output=True)
+    subprocess.run(
+        ["git", "checkout", "-b", branch],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+    )
     (project_root / "feature.txt").write_text("feature work\n")
-    subprocess.run(["git", "add", "."], cwd=project_root,
-                   check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "feat: add feature.txt"],
-                   cwd=project_root, check=True, capture_output=True)
-    subprocess.run(["git", "checkout", "main"], cwd=project_root,
-                   check=True, capture_output=True)
+    subprocess.run(
+        ["git", "add", "."], cwd=project_root, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "feat: add feature.txt"],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "checkout", "main"], cwd=project_root, check=True, capture_output=True
+    )
 
     # Dirty the tracked README.md on main.
     (project_root / "README.md").write_text("modified\n")
@@ -710,8 +859,9 @@ def test_land_refuses_with_tracked_modifications(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(gremlins, "STATE_ROOT", str(state_root))
     monkeypatch.chdir(project_root)
 
-    ok = gremlins._land_local(gr_id, str(gr_dir / "state.json"),
-                               str(gr_dir), state, mode="squash")
+    ok = gremlins._land_local(
+        gr_id, str(gr_dir / "state.json"), str(gr_dir), state, mode="squash"
+    )
     assert ok is False
     assert "working tree is not clean" in capsys.readouterr().out
 
@@ -725,15 +875,25 @@ def test_squash_land_failure_preserves_untracked_files(tmp_path, monkeypatch):
     # Create a conflicting branch: adds a file that will conflict with an
     # untracked file of the same name already present in the working tree.
     branch = "bg/localgremlin/test-id-conf12"
-    subprocess.run(["git", "checkout", "-b", branch], cwd=project_root,
-                   check=True, capture_output=True)
+    subprocess.run(
+        ["git", "checkout", "-b", branch],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+    )
     (project_root / "conflict.txt").write_text("from branch\n")
-    subprocess.run(["git", "add", "."], cwd=project_root,
-                   check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "feat: add conflict.txt"],
-                   cwd=project_root, check=True, capture_output=True)
-    subprocess.run(["git", "checkout", "main"], cwd=project_root,
-                   check=True, capture_output=True)
+    subprocess.run(
+        ["git", "add", "."], cwd=project_root, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "feat: add conflict.txt"],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "checkout", "main"], cwd=project_root, check=True, capture_output=True
+    )
 
     # Drop an untracked file with the same name — this will cause the squash merge to fail.
     (project_root / "conflict.txt").write_text("pre-existing untracked\n")
@@ -763,8 +923,9 @@ def test_squash_land_failure_preserves_untracked_files(tmp_path, monkeypatch):
 
     # The merge will fail (untracked file would be overwritten), but the
     # pre-existing untracked file must survive — git clean -fd must not run.
-    ok = gremlins._land_local(gr_id, str(gr_dir / "state.json"),
-                               str(gr_dir), state, mode="squash")
+    ok = gremlins._land_local(
+        gr_id, str(gr_dir / "state.json"), str(gr_dir), state, mode="squash"
+    )
     assert ok is False
     assert (project_root / "conflict.txt").read_text() == "pre-existing untracked\n"
 
@@ -772,6 +933,7 @@ def test_squash_land_failure_preserves_untracked_files(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # Misc small-surface helpers
 # ---------------------------------------------------------------------------
+
 
 def test_atomic_patch_state_round_trip(tmp_path):
     sf = tmp_path / "state.json"
@@ -818,6 +980,7 @@ def test_parse_duration_invalid():
 # liveness — dead:host-terminated (pid gone + workdir missing)
 # ---------------------------------------------------------------------------
 
+
 def test_liveness_host_terminated_when_pid_gone_and_workdir_missing(tmp_path):
     workdir = tmp_path / "workdir"
     # workdir is NOT created — simulates host-terminated teardown
@@ -852,7 +1015,10 @@ def test_liveness_crashed_when_pid_gone_and_no_workdir_in_state(tmp_path):
 # rescue — dead:host-terminated handling
 # ---------------------------------------------------------------------------
 
-def test_rescue_host_terminated_project_root_gone_bails_headless(tmp_path, monkeypatch, capsys):
+
+def test_rescue_host_terminated_project_root_gone_bails_headless(
+    tmp_path, monkeypatch, capsys
+):
     """When project_root is also missing, headless rescue should bail with host_terminated_unrecoverable."""
     state_root = tmp_path / "state-root"
     state_root.mkdir()
@@ -882,7 +1048,9 @@ def test_rescue_host_terminated_project_root_gone_bails_headless(tmp_path, monke
     assert "host" in out.lower() or "terminated" in out.lower() or "gone" in out.lower()
 
 
-def test_rescue_host_terminated_worktree_recreation_failure_bails_headless(tmp_path, monkeypatch, capsys):
+def test_rescue_host_terminated_worktree_recreation_failure_bails_headless(
+    tmp_path, monkeypatch, capsys
+):
     """When worktree recreation fails, headless rescue should bail with host_terminated_unrecoverable."""
     state_root = tmp_path / "state-root"
     state_root.mkdir()
@@ -904,7 +1072,9 @@ def test_rescue_host_terminated_worktree_recreation_failure_bails_headless(tmp_p
     }
     _write_state(gr_dir, state)
     monkeypatch.setattr(gremlins, "STATE_ROOT", str(state_root))
-    monkeypatch.setattr(gremlins, "_recreate_worktree", lambda s: (False, "git not a repo"))
+    monkeypatch.setattr(
+        gremlins, "_recreate_worktree", lambda s: (False, "git not a repo")
+    )
 
     ok = gremlins.do_rescue(gr_id, headless=True)
     assert ok is False
@@ -913,7 +1083,9 @@ def test_rescue_host_terminated_worktree_recreation_failure_bails_headless(tmp_p
     assert (gr_dir / "finished").exists()
 
 
-def test_rescue_host_terminated_recreates_worktree_and_proceeds(tmp_path, monkeypatch, capsys):
+def test_rescue_host_terminated_recreates_worktree_and_proceeds(
+    tmp_path, monkeypatch, capsys
+):
     """When worktree recreation succeeds, rescue continues to the diagnosis step."""
     state_root = tmp_path / "state-root"
     state_root.mkdir()
@@ -941,8 +1113,11 @@ def test_rescue_host_terminated_recreates_worktree_and_proceeds(tmp_path, monkey
         return True, "recreated from branch 'bg/localgremlin/test-id-htdd12'"
 
     monkeypatch.setattr(gremlins, "_recreate_worktree", fake_recreate)
-    monkeypatch.setattr(gremlins, "_run_headless_diagnosis",
-                        lambda *a, **kw: ("structural", "fake structural"))
+    monkeypatch.setattr(
+        gremlins,
+        "_run_headless_diagnosis",
+        lambda *a, **kw: ("structural", "fake structural"),
+    )
 
     ok = gremlins.do_rescue(gr_id, headless=True)
     assert ok is False  # structural bail, not host-terminated

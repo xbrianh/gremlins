@@ -40,24 +40,31 @@ def main(argv: list[str] | None = None) -> int:
     rest = argv[1:]
     if sub == "local":
         from .orchestrators.local import local_main
+
         return local_main(rest)
     if sub == "review":
         from .orchestrators.local import review_main
+
         return review_main(rest)
     if sub == "address":
         from .orchestrators.local import address_main
+
         return address_main(rest)
     if sub == "gh":
         from .orchestrators.gh import gh_main
+
         return gh_main(rest)
     if sub == "boss":
         from .orchestrators.boss import boss_main
+
         return boss_main(rest)
     if sub == "fleet":
         from .fleet import main as fleet_main
+
         return fleet_main(rest)
     if sub == "handoff":
         from .handoff import main as handoff_main
+
         return handoff_main(rest)
     if sub == "launch":
         return _launch_main(rest)
@@ -67,6 +74,7 @@ def main(argv: list[str] | None = None) -> int:
         return _bail_main(rest)
     if sub == "session-summary":
         from .fleet.session_summary import main as _session_summary_main
+
         return _session_summary_main(rest)
     if sub == "_run-pipeline":
         return _run_pipeline_main(rest)
@@ -89,12 +97,19 @@ def _launch_main(argv: list[str]) -> int:
     p.add_argument("--description", default=None)
     p.add_argument("--parent", dest="parent_id", default=None)
     p.add_argument("--print-id", action="store_true")
-    p.add_argument("--instructions", "-c", default=None,
-                   help="Instructions string (mutually exclusive with --plan).")
-    p.add_argument("--base-ref", default="HEAD",
-                   help="Git ref to branch the worktree from (default: HEAD). "
-                        "Applies to local gremlins only; ignored for gh gremlins, "
-                        "which always anchor to origin/<default-branch>.")
+    p.add_argument(
+        "--instructions",
+        "-c",
+        default=None,
+        help="Instructions string (mutually exclusive with --plan).",
+    )
+    p.add_argument(
+        "--base-ref",
+        default="HEAD",
+        help="Git ref to branch the worktree from (default: HEAD). "
+        "Applies to local gremlins only; ignored for gh gremlins, "
+        "which always anchor to origin/<default-branch>.",
+    )
     args, rest = p.parse_known_args(argv)
 
     instructions = args.instructions
@@ -119,11 +134,7 @@ def _launch_main(argv: list[str]) -> int:
     log_path = state_dir / "log"
     sf = state_dir / "state.json"
 
-    info = (
-        f"gremlin id:  {gr_id}\n"
-        f"log:         {log_path}\n"
-        f"state file:  {sf}\n"
-    )
+    info = f"gremlin id:  {gr_id}\nlog:         {log_path}\nstate file:  {sf}\n"
     if args.print_id:
         sys.stderr.write(info)
         sys.stdout.write(gr_id + "\n")
@@ -170,8 +181,6 @@ def _run_pipeline_main(argv: list[str]) -> int:
     rc = 1
     try:
         rc = main([kind_subcommand, *args])
-        if not isinstance(rc, int):
-            rc = 0 if rc is None else 1
     except SystemExit as e:
         rc = e.code if isinstance(e.code, int) else 1
     except BaseException:
@@ -179,6 +188,7 @@ def _run_pipeline_main(argv: list[str]) -> int:
         traceback.print_exc()
     finally:
         from .launcher import write_terminal_state
+
         write_terminal_state(gr_id, exit_code=rc)
     sys.exit(rc)
 
@@ -223,10 +233,14 @@ def _bail_main(argv: list[str]) -> int:
 def _get_state_root():
     import os
     import pathlib
-    return pathlib.Path(
-        os.environ.get("XDG_STATE_HOME")
-        or os.path.join(os.path.expanduser("~"), ".local", "state")
-    ) / "claude-gremlins"
+
+    return (
+        pathlib.Path(
+            os.environ.get("XDG_STATE_HOME")
+            or os.path.join(os.path.expanduser("~"), ".local", "state")
+        )
+        / "claude-gremlins"
+    )
 
 
 if __name__ == "__main__":

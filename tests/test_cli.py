@@ -26,6 +26,7 @@ def _make_state(tmp_path: pathlib.Path, gr_id: str) -> pathlib.Path:
 # bail subcommand — with GR_ID set
 # ---------------------------------------------------------------------------
 
+
 def test_bail_writes_bail_class_and_detail(tmp_path, monkeypatch):
     gr_id = "test-gremlin-001"
     sf = _make_state(tmp_path, gr_id)
@@ -79,12 +80,15 @@ def test_bail_invalid_class_exits_nonzero(tmp_path, monkeypatch):
     assert exc_info.value.code != 0
 
 
-@pytest.mark.parametrize("bail_class", [
-    "reviewer_requested_changes",
-    "security",
-    "secrets",
-    "other",
-])
+@pytest.mark.parametrize(
+    "bail_class",
+    [
+        "reviewer_requested_changes",
+        "security",
+        "secrets",
+        "other",
+    ],
+)
 def test_bail_all_valid_classes_accepted(tmp_path, monkeypatch, bail_class):
     gr_id = f"test-gremlin-{bail_class}"
     sf = _make_state(tmp_path, gr_id)

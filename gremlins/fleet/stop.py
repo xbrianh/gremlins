@@ -43,7 +43,7 @@ def do_stop(target: str) -> bool:
         print(f"error: no PID in state for {gr_id}")
         return False
     try:
-        pid = int(pid)
+        pid = int(str(pid))
     except (ValueError, TypeError):
         print(f"error: invalid PID {pid!r} in state for {gr_id}")
         return False
@@ -53,7 +53,8 @@ def do_stop(target: str) -> bool:
     try:
         ps_result = subprocess.run(
             ["ps", "-o", "pgid=", "-p", str(pid)],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         pgid_str = ps_result.stdout.strip()
         if pgid_str:
@@ -90,7 +91,7 @@ def do_stop(target: str) -> bool:
             pathlib.Path(finished_path).touch()
         except OSError:
             pass
-        now_iso = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         state["status"] = "stopped"
         state["exit_code"] = 130
         state["ended_at"] = now_iso

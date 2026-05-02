@@ -100,7 +100,9 @@ def run_commit_pr_stage(
             f"'Closes #{issue_num}' in the PR body."
         )
     else:
-        branch_clause = "Name the branch with a short descriptive slug derived from the plan title."
+        branch_clause = (
+            "Name the branch with a short descriptive slug derived from the plan title."
+        )
         closes_clause = (
             "Do NOT include any 'Closes #N' or 'Fixes #N' link in the commit "
             "message or PR body."

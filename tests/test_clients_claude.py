@@ -40,6 +40,7 @@ def _install_stub_claude(bin_dir: pathlib.Path) -> None:
 # Tests
 # ---------------------------------------------------------------------------
 
+
 def test_subprocess_client_sets_gremlin_skip_summary(tmp_path, monkeypatch):
     bin_dir = tmp_path / "bin"
     _install_stub_claude(bin_dir)

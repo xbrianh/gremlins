@@ -1,6 +1,5 @@
 """Stage-level tests for the gh pipeline stages (ghreview, ghaddress)."""
 
-
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
