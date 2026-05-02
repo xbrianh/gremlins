@@ -7,6 +7,7 @@ import pathlib
 import shutil
 import subprocess
 import tempfile
+from typing import Any, cast
 
 from gremlins.clients.claude import stream_events
 from gremlins.fleet import constants as _constants
@@ -22,7 +23,11 @@ from gremlins.launcher import resume as _resume
 
 
 def build_rescue_prompt(
-    state, log_tail, state_file_path, log_file_path, marker_path: str
+    state: dict[str, Any],
+    log_tail: str,
+    state_file_path: str,
+    log_file_path: str,
+    marker_path: str,
 ):
     """Build the diagnosis-step prompt. The marker contract is the same in
     interactive and headless modes — the agent never knows the difference and
@@ -182,7 +187,7 @@ Constraints:
 """
 
 
-def _atomic_patch_state(sf: str, patch: dict) -> bool:
+def _atomic_patch_state(sf: str, patch: dict[str, Any]) -> bool:
     """Merge `patch` into state.json atomically. Returns True on success.
 
     Used by headless rescue's bail paths so a partial write can't leave
@@ -239,7 +244,7 @@ def _write_bail(sf: str, wdir: str, bail_reason: str, bail_detail: str = "") -> 
         pass
 
 
-def write_rescue_report(wdir: str, report: dict) -> None:
+def write_rescue_report(wdir: str, report: dict[str, Any]) -> None:
     """Write a Markdown rescue report to <wdir>/rescue-<UTC-ts>-<pid>.md.
 
     Best-effort: never raises (same "never break a session" principle as the
@@ -268,7 +273,7 @@ def write_rescue_report(wdir: str, report: dict) -> None:
         # land in the same %S — don't silently overwrite each other.
         ts = datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%S_%fZ")
         path = os.path.join(wdir, f"rescue-{ts}-{os.getpid()}.md")
-        state = report.get("state") or {}
+        state: dict[str, Any] = report.get("state") or {}
         gr_id = state.get("id") or os.path.basename(wdir)
         kind = state.get("kind") or ""
         description = state.get("description") or ""
@@ -354,8 +359,9 @@ def _read_rescue_marker(marker_path: str):
     if not isinstance(marker, dict):
         return "bad_marker", "marker file is not a JSON object"
 
-    status = marker.get("status")
-    raw_summary = marker.get("summary", "")
+    marker_obj: dict[str, Any] = cast(dict[str, Any], marker)
+    status = marker_obj.get("status")
+    raw_summary = marker_obj.get("summary", "")
     # Normalize summary: must be a string. We persist it into state.json as
     # bail_detail and print it in logs (plain text, single line for boss
     # log readability), so reject objects/arrays and collapse whitespace
@@ -442,7 +448,7 @@ def _run_headless_diagnosis(workdir: str, prompt: str, marker_path: str):
     return _read_rescue_marker(marker_path)
 
 
-def _recreate_worktree(state: dict) -> tuple:
+def _recreate_worktree(state: dict[str, Any]) -> tuple[bool, str]:
     """Attempt to recreate a missing worktree from the gremlin's branch or base ref.
 
     Tries the named branch first (preserves in-progress commits for localgremlin),
@@ -538,7 +544,7 @@ def do_rescue(target: str, headless: bool = False) -> bool:
         return False
 
     if live == "dead:host-terminated":
-        project_root_check = state.get("project_root") or ""
+        project_root_check: str = str(state.get("project_root") or "")
         print(f"gremlin {gr_id}: worktree is gone (host likely terminated externally)")
         if not project_root_check or not os.path.isdir(project_root_check):
             detail = (
@@ -561,7 +567,7 @@ def do_rescue(target: str, headless: bool = False) -> bool:
         print(f"  worktree recreated: {detail}; resuming rescue...")
         live = liveness_of_state_file(sf, state)
 
-    rescue_count_raw = state.get("rescue_count") or 0
+    rescue_count_raw: Any = state.get("rescue_count") or 0
     try:
         rescue_count = int(rescue_count_raw)
     except (ValueError, TypeError):
@@ -597,7 +603,7 @@ def do_rescue(target: str, headless: bool = False) -> bool:
         if headless:
             if bail_class in EXCLUDED_BAIL_CLASSES:
                 reason = f"excluded_class:{bail_class}"
-                detail = (
+                detail: str = str(
                     state.get("bail_detail")
                     or f"upstream stage bailed with bail_class={bail_class}"
                 )
@@ -804,8 +810,9 @@ def do_rescue(target: str, headless: bool = False) -> bool:
                     report["summary"] = "'claude' CLI not found in PATH"
                     return False
                 try:
-                    stream_events(p.stdout, prefix="[rescue] ")
-                    p.stdout.close()
+                    if p.stdout is not None:
+                        stream_events(p.stdout, prefix="[rescue] ")
+                        p.stdout.close()
                     rc = p.wait()
                 except KeyboardInterrupt:
                     try:
