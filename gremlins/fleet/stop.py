@@ -42,8 +42,11 @@ def do_stop(target: str) -> bool:
     if pid is None:
         print(f"error: no PID in state for {gr_id}")
         return False
+    if not isinstance(pid, (int, str)):
+        print(f"error: invalid PID {pid!r} in state for {gr_id}")
+        return False
     try:
-        pid = int(str(pid))
+        pid = int(pid)
     except (ValueError, TypeError):
         print(f"error: invalid PID {pid!r} in state for {gr_id}")
         return False

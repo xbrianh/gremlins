@@ -181,8 +181,6 @@ def _run_pipeline_main(argv: list[str]) -> int:
     rc = 1
     try:
         rc = main([kind_subcommand, *args])
-        if not isinstance(rc, int):
-            rc = 0 if rc is None else 1
     except SystemExit as e:
         rc = e.code if isinstance(e.code, int) else 1
     except BaseException:

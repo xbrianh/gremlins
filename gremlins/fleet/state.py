@@ -92,9 +92,9 @@ def liveness_of_state_file(sf: str, state: dict[str, object] | None = None) -> s
 
     if gr_status == "running":
         # PID gone but no finish marker → crashed silently.
-        if gr_pid is not None and gr_pid != "null":
+        if gr_pid is not None and gr_pid != "null" and isinstance(gr_pid, (int, str)):
             try:
-                os.kill(int(str(gr_pid)), 0)
+                os.kill(int(gr_pid), 0)
             except (OSError, ValueError):
                 workdir = str(state.get("workdir") or "")
                 if workdir and not os.path.isdir(workdir):
