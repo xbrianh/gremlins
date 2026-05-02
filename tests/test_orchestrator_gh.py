@@ -6,9 +6,12 @@ Uses FakeClaudeClient throughout — no real claude subprocess or gh CLI calls
 
 import json
 import pathlib
+import shutil
 import subprocess
 
 import pytest
+
+import gremlins.orchestrators.gh as _gh_mod
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.git import (
@@ -106,10 +109,8 @@ IMPL_EVENTS = [
 
 def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
     """Apply standard monkeypatches for gh_main smoke tests."""
-    import shutil as _shutil
-
     monkeypatch.setattr(
-        _shutil, "which", lambda n: f"/fake/{n}" if n in ("claude", "gh") else None
+        shutil, "which", lambda n: f"/fake/{n}" if n in ("claude", "gh") else None
     )
     monkeypatch.setattr(
         "gremlins.orchestrators.gh.install_signal_handlers", lambda c: None
@@ -650,8 +651,6 @@ def test_gh_main_resume_prefers_persisted_model_over_sonnet_default(
         },
     )
 
-    import gremlins.orchestrators.gh as _gh_mod
-
     def _fake_read(sf, field):
         if field == "issue_url":
             return "https://github.com/owner/repo/issues/99"
@@ -720,8 +719,6 @@ def test_resume_from_implement(tmp_path, monkeypatch):
 
     # Simulate that the state.json has issue_url so _read_state_field can return it.
     # We need to reach into the patched resolve_state_file to make the pre-loop read work.
-    import gremlins.orchestrators.gh as _gh_mod
-
     def _fake_read(sf, field):
         if field == "issue_url":
             return "https://github.com/owner/repo/issues/99"
@@ -748,8 +745,6 @@ def test_resume_from_ghreview(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
     session_dir, state_file = _patch_common(monkeypatch, tmp_path)
-
-    import gremlins.orchestrators.gh as _gh_mod
 
     def _fake_read(sf, field):
         if field == "issue_url":
@@ -1011,8 +1006,6 @@ def test_resume_from_commit_pr_skips_implement(tmp_path, monkeypatch):
     )
 
     session_dir, state_file = _patch_common(monkeypatch, tmp_path)
-
-    import gremlins.orchestrators.gh as _gh_mod
 
     def _fake_read(sf, field):
         if field == "issue_url":

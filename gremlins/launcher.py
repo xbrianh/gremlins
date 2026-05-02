@@ -20,6 +20,8 @@ import shutil
 import subprocess
 import sys
 
+from . import git as _git_mod
+
 VALID_KINDS = {"ghgremlin", "localgremlin", "bossgremlin"}
 
 _KIND_SUBCOMMAND = {
@@ -223,8 +225,6 @@ def launch(
     Synchronous through spawn; does not wait for the pipeline to finish.
     Raises ValueError on bad arguments, RuntimeError on infrastructure failure.
     """
-    from . import git as _git_mod
-
     if kind not in VALID_KINDS:
         raise ValueError(
             f"invalid kind: {kind!r} (allowed: {', '.join(sorted(VALID_KINDS))})"
@@ -473,8 +473,6 @@ def write_terminal_state(gr_id: str, exit_code: int) -> None:
     touches the finished marker, patches state.json, and on success removes
     the worktree (except bossgremlin). Best-effort throughout.
     """
-    from . import git as _git_mod
-
     state_dir = _state_root() / gr_id
     sf = state_dir / "state.json"
 

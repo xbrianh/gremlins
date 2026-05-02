@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import shutil
 
 import pytest
 
 import gremlins.git as git_mod
+import gremlins.launcher as launcher_mod
 import gremlins.orchestrators.boss as boss_mod
 from gremlins.orchestrators.boss import (
     _resolve_plan_source,
@@ -920,9 +922,7 @@ def test_resolve_plan_source_issue_ref(tmp_path, monkeypatch):
             "body": "# Issue Spec\nFetched from gh.\n",
         },
     )
-    import shutil as _shutil
-
-    monkeypatch.setattr(_shutil, "which", lambda n: "/fake/gh" if n == "gh" else None)
+    monkeypatch.setattr(shutil, "which", lambda n: "/fake/gh" if n == "gh" else None)
 
     spec_path, issue_url, issue_num = _resolve_plan_source("42", str(state_dir))
 
@@ -952,9 +952,7 @@ def test_resolve_plan_source_cross_repo_issue_ref(tmp_path, monkeypatch):
 
     monkeypatch.setattr(boss_mod, "get_repo", lambda: "owner/repo")
     monkeypatch.setattr(boss_mod, "view_issue", fake_view_issue)
-    import shutil as _shutil
-
-    monkeypatch.setattr(_shutil, "which", lambda n: "/fake/gh" if n == "gh" else None)
+    monkeypatch.setattr(shutil, "which", lambda n: "/fake/gh" if n == "gh" else None)
 
     spec_path, issue_url, issue_num = _resolve_plan_source(
         "other/proj#7", str(state_dir)
@@ -971,9 +969,7 @@ def test_resolve_plan_source_unknown_shape(tmp_path, monkeypatch):
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     monkeypatch.setattr(boss_mod, "get_repo", lambda: "owner/repo")
-    import shutil as _shutil
-
-    monkeypatch.setattr(_shutil, "which", lambda n: "/fake/gh" if n == "gh" else None)
+    monkeypatch.setattr(shutil, "which", lambda n: "/fake/gh" if n == "gh" else None)
 
     with pytest.raises(SystemExit):
         _resolve_plan_source("not-a-ref", str(state_dir))
@@ -1060,9 +1056,7 @@ def test_resolve_plan_source_persists_issue_metadata_on_first_fetch(
             "body": "# Spec\nbody.\n",
         },
     )
-    import shutil as _shutil
-
-    monkeypatch.setattr(_shutil, "which", lambda n: "/fake/gh" if n == "gh" else None)
+    monkeypatch.setattr(shutil, "which", lambda n: "/fake/gh" if n == "gh" else None)
 
     spec_path, issue_url, issue_num = _resolve_plan_source("99", str(state_dir))
 
@@ -1102,9 +1096,7 @@ def test_boss_main_plan_issue_ref_snapshots_spec(tmp_path, monkeypatch):
             "body": "# Plan from issue\nDo a thing.\n",
         },
     )
-    import shutil as _shutil
-
-    monkeypatch.setattr(_shutil, "which", lambda n: "/fake/gh" if n == "gh" else None)
+    monkeypatch.setattr(shutil, "which", lambda n: "/fake/gh" if n == "gh" else None)
 
     # Short-circuit handoff at the very first step so we don't have to mock
     # an entire chain — we just want to verify spec.md and boss_state.json.
@@ -1327,8 +1319,6 @@ def test_land_child_no_into_dir_for_gh_chain(tmp_path, monkeypatch):
 
 def test_boss_launches_child_against_current_head(tmp_path, monkeypatch):
     """launch_child passes current_head from state.json as base_ref to launcher.launch."""
-    import gremlins.launcher as launcher_mod
-
     gr_id = "test-boss-basref-aa1122"
     state_dir = tmp_path / gr_id
     state_dir.mkdir()
@@ -1379,7 +1369,7 @@ def test_boss_launches_child_against_current_head(tmp_path, monkeypatch):
     )
 
     monkeypatch.setattr(boss_mod, "STATE_ROOT", str(tmp_path))
-    monkeypatch.setattr(launcher_mod, "launch", fake_launch)
+    monkeypatch.setattr(boss_mod, "_launch", fake_launch)
 
     result = boss_mod.launch_child(gr_id, "localgremlin", "/tmp/child-plan.md")
 
@@ -1481,8 +1471,6 @@ def test_boss_records_current_head_after_land(tmp_path, monkeypatch):
 
 def test_launch_child_forwards_spec_path(tmp_path, monkeypatch):
     """When boss_state has spec_path set, launch_child passes it as spec_path= to launcher.launch."""
-    import gremlins.launcher as launcher_mod
-
     gr_id = "test-boss-spec-dd9900"
     state_dir = tmp_path / gr_id
     state_dir.mkdir()
@@ -1530,7 +1518,7 @@ def test_launch_child_forwards_spec_path(tmp_path, monkeypatch):
         return "child-spec-ee1122"
 
     monkeypatch.setattr(boss_mod, "STATE_ROOT", str(tmp_path))
-    monkeypatch.setattr(launcher_mod, "launch", fake_launch)
+    monkeypatch.setattr(boss_mod, "_launch", fake_launch)
 
     result = boss_mod.launch_child(gr_id, "localgremlin", "/tmp/child-plan.md")
 
@@ -1540,8 +1528,6 @@ def test_launch_child_forwards_spec_path(tmp_path, monkeypatch):
 
 def test_launch_child_no_spec_path_when_absent(tmp_path, monkeypatch):
     """When boss_state has no spec_path, launch_child passes spec_path=None."""
-    import gremlins.launcher as launcher_mod
-
     gr_id = "test-boss-nospec-ff2233"
     state_dir = tmp_path / gr_id
     state_dir.mkdir()
@@ -1587,7 +1573,7 @@ def test_launch_child_no_spec_path_when_absent(tmp_path, monkeypatch):
         return "child-nospec-gg3344"
 
     monkeypatch.setattr(boss_mod, "STATE_ROOT", str(tmp_path))
-    monkeypatch.setattr(launcher_mod, "launch", fake_launch)
+    monkeypatch.setattr(boss_mod, "_launch", fake_launch)
 
     boss_mod.launch_child(gr_id, "localgremlin", "/tmp/child-plan.md")
 

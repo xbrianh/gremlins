@@ -27,6 +27,7 @@ import time
 
 from .. import git as _git_mod
 from ..gh_utils import get_repo, parse_issue_ref, view_issue
+from ..launcher import launch as _launch
 from ..state import patch_state, set_stage
 
 STATE_ROOT = os.path.join(
@@ -398,8 +399,6 @@ def run_handoff(
 
 def launch_child(gr_id: str, launch_kind: str, child_plan: str) -> str:
     """Launch a child gremlin via the Python launcher. Returns child gremlin ID."""
-    from ..launcher import launch as _launch
-
     gremlin_state = load_json(os.path.join(STATE_ROOT, gr_id, "state.json"))
     project_root = gremlin_state.get("project_root") or None
     base_ref = gremlin_state.get("current_head") or "HEAD"

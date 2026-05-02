@@ -14,8 +14,11 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import time
+
+import gremlins.git as git_mod
 
 import pytest
 from fixtures.shell_env import install_fake_bin
@@ -156,8 +159,6 @@ def lenv_with_gh(tmp_path, monkeypatch, lenv):
     """Like lenv but also installs a fake `gh` binary and a bare origin."""
     install_fake_bin(lenv.bin_dir, "gh", FAKE_GH)
     # Re-init the repo with a bare origin (deletes the old repo dir, so re-chdir).
-    import shutil
-
     shutil.rmtree(lenv.repo, ignore_errors=True)
     _init_git_repo(lenv.repo, with_origin=True)
     monkeypatch.chdir(lenv.repo)
@@ -613,8 +614,6 @@ def test_launch_ghgremlin_state_layout(lenv_with_gh):
 
 def test_launch_passes_base_ref_to_worktree_setup(lenv, monkeypatch):
     """launch(base_ref=<sha>) calls setup_worktree_branch with base_ref=<sha>."""
-    from gremlins import git as git_mod
-
     captured = {}
     real_setup = git_mod.setup_worktree_branch
 

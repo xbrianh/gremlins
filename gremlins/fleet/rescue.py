@@ -10,6 +10,7 @@ import tempfile
 
 from gremlins.clients.claude import stream_events
 from gremlins.fleet import constants as _constants
+from gremlins.launcher import resume as _resume
 from gremlins.fleet.constants import (
     EXCLUDED_BAIL_CLASSES,
     HEADLESS_DIAGNOSIS_TIMEOUT_SECS,
@@ -901,8 +902,6 @@ def do_rescue(target: str, headless: bool = False) -> bool:
         print(f"Relaunch step: resuming gremlin {gr_id} in the background...")
         report["relaunch_attempted"] = True
         try:
-            from gremlins.launcher import resume as _resume
-
             _resume(gr_id)
         except Exception as exc:
             detail = str(exc)

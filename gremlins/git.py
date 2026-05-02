@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 
 
 def in_git_repo() -> bool:
@@ -291,9 +293,7 @@ def setup_worktree_branch(
 
     Raises RuntimeError on failure.
     """
-    import tempfile as _tempfile
-
-    workdir = _tempfile.mkdtemp(prefix="aibg-localgremlin.")
+    workdir = tempfile.mkdtemp(prefix="aibg-localgremlin.")
     os.rmdir(workdir)
     branch = f"{branch_prefix}/{gr_id}"
     r = _git(
@@ -312,9 +312,7 @@ def setup_detached_worktree(project_root: str, base_ref: str) -> str:
 
     Raises RuntimeError on failure.
     """
-    import tempfile as _tempfile
-
-    workdir = _tempfile.mkdtemp(prefix="aibg-gremlin.")
+    workdir = tempfile.mkdtemp(prefix="aibg-gremlin.")
     os.rmdir(workdir)
     r = _git(
         ["worktree", "add", "--detach", workdir, base_ref],
@@ -331,11 +329,8 @@ def setup_detached_worktree(project_root: str, base_ref: str) -> str:
 
 def setup_copy(project_root: str) -> str:
     """Non-git fallback: copy project root into a fresh temp dir. Returns workdir path."""
-    import shutil as _shutil
-    import tempfile as _tempfile
-
-    workdir = _tempfile.mkdtemp(prefix="aibg-gremlin.")
-    _shutil.copytree(project_root, workdir, dirs_exist_ok=True)
+    workdir = tempfile.mkdtemp(prefix="aibg-gremlin.")
+    shutil.copytree(project_root, workdir, dirs_exist_ok=True)
     return workdir
 
 
