@@ -33,7 +33,6 @@ typeCheckingMode = "strict"
 # TODO: these modules need strict-mode cleanup; excluded to land this pass cleanly.
 # Pick them off in follow-on PRs.
 exclude = [
-    "gremlins/orchestrators/boss.py",
     "gremlins/orchestrators/gh.py",
     "gremlins/fleet/land.py",
     "gremlins/fleet/rescue.py",

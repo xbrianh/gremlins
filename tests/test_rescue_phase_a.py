@@ -199,9 +199,7 @@ def test_rescue_fixed_verdict_invokes_launcher_resume(tmp_path, monkeypatch):
 
     resume_calls = []
 
-    monkeypatch.setattr(
-        rescue_mod, "_resume", lambda gr_id: resume_calls.append(gr_id)
-    )
+    monkeypatch.setattr(rescue_mod, "_resume", lambda gr_id: resume_calls.append(gr_id))
 
     sh.env["FAKE_CLAUDE_RESCUE_VERDICT"] = "fixed"
     sh.env["FAKE_CLAUDE_RESCUE_SUMMARY"] = "edited state.json"
