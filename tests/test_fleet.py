@@ -7,10 +7,10 @@ import subprocess
 
 import pytest
 
-from gremlins import fleet as gremlins
 import gremlins.fleet.constants as _constants
 import gremlins.fleet.land as _land
 import gremlins.fleet.rescue as _rescue
+from gremlins import fleet as gremlins
 
 # ---------------------------------------------------------------------------
 # Helpers
