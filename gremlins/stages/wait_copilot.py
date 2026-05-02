@@ -6,6 +6,8 @@ import subprocess
 import time
 from collections.abc import Callable
 
+from ..gh_utils import check_copilot_review
+
 
 def run_request_copilot_stage(*, repo: str, pr_num: str) -> None:
     """Add copilot-pull-request-reviewer to the PR's reviewer list."""
@@ -47,8 +49,6 @@ def run_wait_copilot_stage(
 
     Returns the final review state string.
     """
-    from ..gh_utils import check_copilot_review
-
     if review_checker is None:
 
         def _default_checker() -> str | None:

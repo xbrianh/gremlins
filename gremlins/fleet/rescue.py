@@ -18,6 +18,7 @@ from gremlins.fleet.constants import (
 from gremlins.fleet.resolve import GREMLIN_STAGES, resolve_gremlin
 from gremlins.fleet.state import liveness_of_state_file, load_state
 from gremlins.fleet.stop import do_stop
+from gremlins.launcher import resume as _resume
 
 
 def build_rescue_prompt(
@@ -901,8 +902,6 @@ def do_rescue(target: str, headless: bool = False) -> bool:
         print(f"Relaunch step: resuming gremlin {gr_id} in the background...")
         report["relaunch_attempted"] = True
         try:
-            from gremlins.launcher import resume as _resume
-
             _resume(gr_id)
         except Exception as exc:
             detail = str(exc)

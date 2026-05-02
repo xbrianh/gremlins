@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import pathlib
+import subprocess
 import time
 
+import gremlins.fleet.constants as _const
+import gremlins.fleet.session_summary as ss
 from gremlins.fleet.session_summary import (
     _collect_gremlins,
     _prune_old_state,
@@ -81,9 +85,7 @@ def _invoke(
         monkeypatch.delenv("GREMLIN_SKIP_SUMMARY", raising=False)
 
     # Patch git so project_root resolves to itself (no git call needed in tests).
-    import subprocess as _subprocess
-
-    original_run = _subprocess.run
+    original_run = subprocess.run
 
     def fake_run(cmd, **kwargs):
         if cmd[:3] == ["git", "-C", project_root]:
@@ -95,9 +97,7 @@ def _invoke(
             return R()
         return original_run(cmd, **kwargs)
 
-    monkeypatch.setattr(_subprocess, "run", fake_run)
-
-    import io
+    monkeypatch.setattr(subprocess, "run", fake_run)
 
     monkeypatch.setattr("sys.stdin", io.StringIO(hook_input))
 
@@ -253,8 +253,6 @@ def test_stalled_gremlin_shown_as_stalled(tmp_path, monkeypatch, capsys):
     # Make the log file appear old to trigger stall heuristic.
     old_time = time.time() - 4000
     os.utime(str(wdir / "log"), (old_time, old_time))
-
-    import gremlins.fleet.constants as _const
 
     monkeypatch.setattr(_const, "BG_STALL_SECS", 100)
 
@@ -414,8 +412,6 @@ def test_description_shown_in_summary(tmp_path, monkeypatch, capsys):
 
 def test_always_exits_zero_on_exception(monkeypatch, capsys):
     # Force an exception inside _run by making os.path.isdir raise.
-    import gremlins.fleet.session_summary as ss
-
     def boom(*a, **kw):
         raise RuntimeError("simulated failure")
 

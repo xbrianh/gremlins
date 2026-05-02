@@ -34,6 +34,7 @@ from __future__ import annotations
 import datetime
 import json
 import pathlib
+import subprocess
 
 from fixtures.shell_env import (
     install_fake_bin,
@@ -41,11 +42,12 @@ from fixtures.shell_env import (
     setup_shell_env,
 )
 
+import gremlins.fleet.rescue as rescue_mod
+from gremlins import fleet
+
 
 def _load_gremlins_module():
     """Return the fleet module — the canonical home for do_rescue."""
-    from gremlins import fleet
-
     return fleet
 
 
@@ -197,10 +199,8 @@ def test_rescue_fixed_verdict_invokes_launcher_resume(tmp_path, monkeypatch):
 
     resume_calls = []
 
-    import gremlins.launcher as _launcher_mod
-
     monkeypatch.setattr(
-        _launcher_mod, "resume", lambda gr_id: resume_calls.append(gr_id)
+        rescue_mod, "_resume", lambda gr_id: resume_calls.append(gr_id)
     )
 
     sh.env["FAKE_CLAUDE_RESCUE_VERDICT"] = "fixed"
@@ -271,8 +271,6 @@ def test_rescue_nonzero_exit_records_diagnosis_claude_error(tmp_path, monkeypatc
 
 def test_rescue_claude_not_found_records_diagnosis_claude_error(tmp_path, monkeypatch):
     """Missing claude binary → do_rescue returns False with diagnosis_claude_error."""
-    import subprocess as _subprocess
-
     sh = setup_shell_env(tmp_path)
     state_dir = _make_failed_gremlin(sh.state_root, sh.repo)
 
@@ -282,14 +280,14 @@ def test_rescue_claude_not_found_records_diagnosis_claude_error(tmp_path, monkey
     gremlins_mod = _load_gremlins_module()
     _patch_state_root(gremlins_mod, sh.state_root, monkeypatch)
 
-    original_popen = _subprocess.Popen
+    original_popen = subprocess.Popen
 
     def popen_raise_if_claude(cmd, *args, **kwargs):
         if cmd and cmd[0] == "claude":
             raise FileNotFoundError("claude not found")
         return original_popen(cmd, *args, **kwargs)
 
-    monkeypatch.setattr(_subprocess, "Popen", popen_raise_if_claude)
+    monkeypatch.setattr(subprocess, "Popen", popen_raise_if_claude)
     # Also patch it in the fleet module's own subprocess reference.
     monkeypatch.setattr(gremlins_mod.subprocess, "Popen", popen_raise_if_claude)
 

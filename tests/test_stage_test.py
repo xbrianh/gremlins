@@ -5,7 +5,6 @@ import json
 import pytest
 from conftest import MINIMAL_EVENTS
 
-import gremlins.launcher as launcher_mod
 import gremlins.orchestrators.boss as boss_mod
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.stages.test import run_test_stage
@@ -272,7 +271,7 @@ def test_launch_child_forwards_test_flags(tmp_path, monkeypatch):
         return "child-testcmd-bb2233"
 
     monkeypatch.setattr(boss_mod, "STATE_ROOT", str(tmp_path))
-    monkeypatch.setattr(launcher_mod, "launch", fake_launch)
+    monkeypatch.setattr(boss_mod, "_launch", fake_launch)
 
     result = boss_mod.launch_child(gr_id, "localgremlin", "/tmp/child-plan.md")
 
@@ -335,7 +334,7 @@ def test_launch_child_no_test_flags_when_absent(tmp_path, monkeypatch):
         return "child-notest-dd4455"
 
     monkeypatch.setattr(boss_mod, "STATE_ROOT", str(tmp_path))
-    monkeypatch.setattr(launcher_mod, "launch", fake_launch)
+    monkeypatch.setattr(boss_mod, "_launch", fake_launch)
 
     boss_mod.launch_child(gr_id, "localgremlin", "/tmp/child-plan.md")
 
