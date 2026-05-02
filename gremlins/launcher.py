@@ -320,7 +320,7 @@ def launch(
         setup_kind = "copy"
         workdir = _git_mod.setup_copy(project_root)
 
-    now_iso = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     state = {
         "id": gr_id,
         "kind": kind,
@@ -409,7 +409,7 @@ def resume(gr_id: str) -> None:
         except FileNotFoundError:
             pass
 
-    now_iso = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     rescue_count = 0
     try:
         rescue_count = int(state.get("rescue_count") or 0)
@@ -484,7 +484,7 @@ def write_terminal_state(gr_id: str, exit_code: int) -> None:
     except OSError:
         pass
 
-    now_iso = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     status = "done" if exit_code == 0 else "stopped"
     try:
         data = json.loads(sf.read_text(encoding="utf-8"))

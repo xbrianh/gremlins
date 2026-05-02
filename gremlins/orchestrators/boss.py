@@ -84,7 +84,7 @@ signal.signal(signal.SIGTERM, _sigterm_handler)
 
 
 def log(msg: str) -> None:
-    ts = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    ts = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     print(f"[{ts}] {msg}", flush=True)
 
 
@@ -369,7 +369,7 @@ def run_handoff(
     else:
         followups = []
 
-    now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     boss_state["handoff_records"].append(
         {
             "timestamp": now,

@@ -193,7 +193,9 @@ def test_launch_returns_gr_id(lenv):
         f"GR_ID has unexpected shape: {gr_id!r}"
     )
     state_dir = _gremlins_state_root(lenv) / gr_id
-    _wait_for_finished(state_dir, timeout=60)
+    assert _wait_for_finished(state_dir, timeout=60), (
+        f"pipeline did not finish; log:\n{(state_dir / 'log').read_text(errors='replace')[-2000:]}"
+    )
 
 
 def test_launch_creates_state_layout(lenv):
@@ -641,7 +643,9 @@ def test_launch_passes_base_ref_to_worktree_setup(lenv, monkeypatch):
         "localgremlin", instructions="base_ref test", base_ref=head_sha
     )
     state_dir = _gremlins_state_root(lenv) / gr_id
-    _wait_for_finished(state_dir, timeout=60)
+    assert _wait_for_finished(state_dir, timeout=60), (
+        f"pipeline did not finish; log:\n{(state_dir / 'log').read_text(errors='replace')[-2000:]}"
+    )
 
     assert captured.get("base_ref") == head_sha, (
         f"expected base_ref={head_sha!r}, got {captured.get('base_ref')!r}"

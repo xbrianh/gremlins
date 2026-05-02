@@ -221,7 +221,7 @@ def _write_bail(sf: str, wdir: str, bail_reason: str, bail_detail: str = "") -> 
     write either piece leaves the gremlin in its prior state, which is no
     worse than before headless rescue ran.
     """
-    now_iso = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     _atomic_patch_state(
         sf,
         {
@@ -265,7 +265,7 @@ def write_rescue_report(wdir: str, report: dict) -> None:
         # second — wrapper-refusal paths return in well under a second, so a
         # scripted retry loop or operator-driven back-to-back invocation can
         # land in the same %S — don't silently overwrite each other.
-        ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%S_%fZ")
+        ts = datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%S_%fZ")
         path = os.path.join(wdir, f"rescue-{ts}-{os.getpid()}.md")
         state = report.get("state") or {}
         gr_id = state.get("id") or os.path.basename(wdir)
@@ -283,7 +283,7 @@ def write_rescue_report(wdir: str, report: dict) -> None:
         summary = report.get("summary") or ""
         relaunch_outcome = report.get("relaunch_outcome") or ""
         relaunch_reason = report.get("relaunch_reason") or ""
-        ts_human = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        ts_human = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         # Prefer the explicit boolean recorded by do_rescue (set only when
         # subprocess.run is actually invoked). Fall back to inferring from
@@ -675,7 +675,7 @@ def do_rescue(target: str, headless: bool = False) -> bool:
         # on the same marker_path — without uniqueness, the new run could read a
         # stale marker from the prior attempt and treat it as the new agent's
         # output.
-        ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%S_%fZ")
+        ts = datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%S_%fZ")
         marker_path = os.path.join(artifacts_dir, f"rescue-{ts}-{os.getpid()}.done")
         # Best-effort unlink: even though the timestamp is unique per run, removing
         # any pre-existing marker at this path is cheap insurance against weird
