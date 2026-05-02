@@ -5,6 +5,7 @@ import os
 import signal
 import sys
 import time
+import types
 
 from gremlins.fleet import constants as _constants
 from gremlins.fleet.close import do_close
@@ -16,7 +17,7 @@ from gremlins.fleet.stop import do_stop
 from gremlins.fleet.views import do_drill_in, do_list, do_recent
 
 
-def parse_args(argv=None):
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="gremlins.sh",
         description="On-demand status of background gremlins.",
@@ -43,53 +44,75 @@ def parse_args(argv=None):
         add_help=True,
     )
     parser.add_argument(
-        "--here", action="store_true",
+        "--here",
+        action="store_true",
         help="Only gremlins whose project_root matches this repo.",
     )
     parser.add_argument(
-        "--running", action="store_true",
+        "--running",
+        action="store_true",
         help="Show only running gremlins.",
     )
     parser.add_argument(
-        "--dead", action="store_true",
+        "--dead",
+        action="store_true",
         help="Show only dead gremlins.",
     )
     parser.add_argument(
-        "--stalled", action="store_true",
+        "--stalled",
+        action="store_true",
         help="Show only stalled gremlins.",
     )
     parser.add_argument(
-        "--kind", choices=["local", "gh", "boss"], metavar="local|gh|boss",
+        "--kind",
+        choices=["local", "gh", "boss"],
+        metavar="local|gh|boss",
         help="Filter to a specific gremlin kind.",
     )
     parser.add_argument(
-        "--since", metavar="DURATION",
+        "--since",
+        metavar="DURATION",
         help="Show only gremlins started within DURATION (e.g. 30s, 5m, 2h, 1d).",
     )
     parser.add_argument(
-        "--recent", nargs="?", const=24, type=int, metavar="N",
+        "--recent",
+        nargs="?",
+        const=24,
+        type=int,
+        metavar="N",
         help="Show recently-finished gremlins started within N hours (default 24). "
-             "Mutually exclusive with --running/--dead/--stalled.",
+        "Mutually exclusive with --running/--dead/--stalled.",
     )
     parser.add_argument(
-        "--watch", nargs="?", const=2, type=int, metavar="SEC",
+        "--watch",
+        nargs="?",
+        const=2,
+        type=int,
+        metavar="SEC",
         help="Refresh the view every SEC seconds (default 2). "
-             "Mutually exclusive with positional id argument.",
+        "Mutually exclusive with positional id argument.",
     )
     parser.add_argument(
-        "id_prefix", nargs="?", metavar="id-prefix",
+        "id_prefix",
+        nargs="?",
+        metavar="id-prefix",
         help="Substring to drill into a single gremlin. Mutually exclusive with --watch.",
     )
     parser.add_argument(
-        "--all", action="store_true", help=argparse.SUPPRESS,
+        "--all",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
     return parser.parse_args(argv)
 
 
-def render_view(args, here_root):
+def render_view(args: argparse.Namespace, here_root: str | None) -> None:
     """Render whichever view the flags request. Used by both normal and --watch path."""
     if args.recent is not None and (args.running or args.dead or args.stalled):
-        print("error: --recent cannot be combined with --running/--dead/--stalled", file=sys.stderr)
+        print(
+            "error: --recent cannot be combined with --running/--dead/--stalled",
+            file=sys.stderr,
+        )
         return
 
     if args.recent is not None:
@@ -105,13 +128,20 @@ def _dispatch_subcommand(argv: list[str]):
     """
     raw = list(argv)
     non_flags = [a for a in raw if not a.startswith("-")]
-    if not non_flags or non_flags[0] not in ("stop", "rescue", "rm", "close", "land", "log"):
+    if not non_flags or non_flags[0] not in (
+        "stop",
+        "rescue",
+        "rm",
+        "close",
+        "land",
+        "log",
+    ):
         return False, False
 
     subcommand = non_flags[0]
     # Find the index of the subcommand in raw argv and take the next non-flag.
     sc_idx = next(i for i, a in enumerate(raw) if a == subcommand)
-    trailing = [a for a in raw[sc_idx + 1:] if not a.startswith("-")]
+    trailing = [a for a in raw[sc_idx + 1 :] if not a.startswith("-")]
     if not trailing:
         print(f"usage: gremlins {subcommand} <id-prefix>")
         sys.exit(1)
@@ -186,7 +216,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
         interval = max(1, args.watch)
         stop = [False]
 
-        def _handle_sigint(signum, frame):
+        def _handle_sigint(signum: int, frame: types.FrameType | None) -> None:
             stop[0] = True
 
         signal.signal(signal.SIGINT, _handle_sigint)

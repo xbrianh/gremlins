@@ -11,7 +11,9 @@ import pathlib
 
 from ..clients.claude import ClaudeClient
 
-PROMPT_TEMPLATE_PATH = pathlib.Path(__file__).resolve().parent.parent / "prompts" / "plan.md"
+PROMPT_TEMPLATE_PATH = (
+    pathlib.Path(__file__).resolve().parent.parent / "prompts" / "plan.md"
+)
 
 
 def run_plan_stage(
@@ -24,7 +26,9 @@ def run_plan_stage(
     code_style: str,
 ) -> None:
     template = PROMPT_TEMPLATE_PATH.read_text(encoding="utf-8")
-    prompt = template.format(plan_file=plan_file, instructions=instructions, code_style=code_style)
+    prompt = template.format(
+        plan_file=plan_file, instructions=instructions, code_style=code_style
+    )
     client.run(prompt, label="plan", model=plan_model, raw_path=raw_path)
     if not plan_file.exists() or plan_file.stat().st_size == 0:
         raise RuntimeError(f"plan stage did not produce {plan_file}")

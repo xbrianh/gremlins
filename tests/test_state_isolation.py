@@ -62,7 +62,8 @@ def test_autouse_isolate_gr_id_unsets_gr_id_under_inherited_env(tmp_path):
     # autouse fixture from gremlins.tests.conftest so we are exercising
     # the actual fixture under test, not a re-implementation.
     inner_conftest = tmp_path / "conftest.py"
-    inner_conftest.write_text(textwrap.dedent("""
+    inner_conftest.write_text(
+        textwrap.dedent("""
         # Re-export the autouse _isolate_gr_id fixture from the real
         # gremlins.tests.conftest so the inner pytest run picks it up.
         # importlib avoids the name collision pytest sees when this
@@ -73,9 +74,11 @@ def test_autouse_isolate_gr_id_unsets_gr_id_under_inherited_env(tmp_path):
         _mod = _u.module_from_spec(_spec)
         _spec.loader.exec_module(_mod)
         _isolate_gr_id = _mod._isolate_gr_id
-    """))
+    """)
+    )
     test_file = tmp_path / "test_inner.py"
-    test_file.write_text(textwrap.dedent("""
+    test_file.write_text(
+        textwrap.dedent("""
         import os
 
         def test_gr_id_unset_inside_pytest():
@@ -83,7 +86,8 @@ def test_autouse_isolate_gr_id_unsets_gr_id_under_inherited_env(tmp_path):
                 "autouse _isolate_gr_id fixture failed to remove inherited "
                 f"GR_ID={os.environ.get('GR_ID')!r}"
             )
-    """))
+    """)
+    )
     tests_dir = pathlib.Path(__file__).resolve().parent
     repo_root = tests_dir.parent.parent
     env = dict(os.environ)
@@ -91,7 +95,15 @@ def test_autouse_isolate_gr_id_unsets_gr_id_under_inherited_env(tmp_path):
     env["GREMLINS_TESTS_DIR"] = str(tests_dir)
     env["PYTHONPATH"] = str(repo_root) + os.pathsep + str(tests_dir)
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", str(test_file), "-q", "-p", "no:cacheprovider"],
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(test_file),
+            "-q",
+            "-p",
+            "no:cacheprovider",
+        ],
         env=env,
         capture_output=True,
         text=True,
@@ -127,8 +139,8 @@ def _assert_no_state_clobber(parent_state_file, original_content, parent_mtime):
 
 
 def test_local_main_does_not_clobber_external_state(tmp_path, monkeypatch):
-    parent_state_file, original_content, parent_mtime = (
-        _stage_parent_state(tmp_path, monkeypatch)
+    parent_state_file, original_content, parent_mtime = _stage_parent_state(
+        tmp_path, monkeypatch
     )
 
     session_dir = tmp_path / "session-local"
@@ -161,8 +173,8 @@ def test_local_main_does_not_clobber_external_state(tmp_path, monkeypatch):
 
 
 def test_review_main_does_not_clobber_external_state(tmp_path, monkeypatch):
-    parent_state_file, original_content, parent_mtime = (
-        _stage_parent_state(tmp_path, monkeypatch)
+    parent_state_file, original_content, parent_mtime = _stage_parent_state(
+        tmp_path, monkeypatch
     )
 
     review_dir = tmp_path / "review-dir"
@@ -178,8 +190,8 @@ def test_review_main_does_not_clobber_external_state(tmp_path, monkeypatch):
 
 
 def test_address_main_does_not_clobber_external_state(tmp_path, monkeypatch):
-    parent_state_file, original_content, parent_mtime = (
-        _stage_parent_state(tmp_path, monkeypatch)
+    parent_state_file, original_content, parent_mtime = _stage_parent_state(
+        tmp_path, monkeypatch
     )
 
     address_dir = tmp_path / "address-dir"
@@ -199,6 +211,7 @@ def test_address_main_does_not_clobber_external_state(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # set_stage direct tests
 # ---------------------------------------------------------------------------
+
 
 def _make_state_dir(tmp_path, gr_id):
     """Create state dir with a minimal state.json and return the file path."""
@@ -283,6 +296,7 @@ def test_set_stage_noop_when_state_json_missing(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # emit_bail direct tests
 # ---------------------------------------------------------------------------
+
 
 def test_emit_bail_writes_bail_class(tmp_path, monkeypatch):
     """emit_bail writes bail_class to state.json."""

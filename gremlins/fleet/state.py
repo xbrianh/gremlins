@@ -6,11 +6,13 @@ import os
 import re
 import subprocess
 import time
+from collections.abc import Iterator
+from typing import cast
 
 from gremlins.fleet import constants as _constants
 
 
-def iso_to_epoch(iso: str):
+def iso_to_epoch(iso: str) -> float | None:
     """Parse ISO-8601 string to a UTC epoch float. Returns None on failure."""
     if not iso:
         return None
@@ -44,7 +46,7 @@ def display_id(gr_id: str) -> str:
     return gr_id
 
 
-def render_sub_stage(sub) -> str:
+def render_sub_stage(sub: str | dict[str, object] | None) -> str:
     """Format sub_stage: dict → key=val,... ; string passthrough; empty → ''."""
     if sub is None or sub == "":
         return ""
@@ -55,7 +57,7 @@ def render_sub_stage(sub) -> str:
     return str(sub)
 
 
-def liveness_of_state_file(sf: str, state=None) -> str:
+def liveness_of_state_file(sf: str, state: dict[str, object] | None = None) -> str:
     """
     Classify a gremlin's liveness from its state.json path.
     Returns one of: running, dead:<reason>, stalled:<reason>.
@@ -68,7 +70,7 @@ def liveness_of_state_file(sf: str, state=None) -> str:
     if state is None:
         try:
             with open(sf, encoding="utf-8") as fh:
-                state = json.load(fh)
+                state = cast(dict[str, object], json.load(fh))
         except Exception:
             return ""
 
@@ -90,11 +92,11 @@ def liveness_of_state_file(sf: str, state=None) -> str:
 
     if gr_status == "running":
         # PID gone but no finish marker → crashed silently.
-        if gr_pid is not None and gr_pid != "null":
+        if gr_pid is not None and gr_pid != "null" and isinstance(gr_pid, (int, str)):
             try:
                 os.kill(int(gr_pid), 0)
             except (OSError, ValueError):
-                workdir = state.get("workdir") or ""
+                workdir = str(state.get("workdir") or "")
                 if workdir and not os.path.isdir(workdir):
                     return "dead:host-terminated"
                 return f"dead:crashed (pid {gr_pid} gone)"
@@ -118,7 +120,7 @@ def liveness_of_state_file(sf: str, state=None) -> str:
     return f"dead:{gr_status or 'unknown'}"
 
 
-def iter_state_files():
+def iter_state_files() -> Iterator[tuple[str, str, str]]:
     """Yield (gr_id, state_file_path, wdir) for every gremlin in STATE_ROOT."""
     if not os.path.isdir(_constants.STATE_ROOT):
         return
@@ -133,11 +135,11 @@ def iter_state_files():
             yield name, sf, wdir
 
 
-def load_state(sf: str):
+def load_state(sf: str) -> dict[str, object] | None:
     """Load state.json, returning a dict or None on failure."""
     try:
         with open(sf, encoding="utf-8") as fh:
-            return json.load(fh)
+            return json.load(fh)  # type: ignore[no-any-return]
     except Exception:
         return None
 
@@ -157,7 +159,9 @@ def git_toplevel() -> str:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         )
         return result.stdout.strip()
     except Exception:

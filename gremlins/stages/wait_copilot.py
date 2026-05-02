@@ -11,11 +11,18 @@ def run_request_copilot_stage(*, repo: str, pr_num: str) -> None:
     """Add copilot-pull-request-reviewer to the PR's reviewer list."""
     r = subprocess.run(
         [
-            "gh", "pr", "edit", pr_num,
-            "--repo", repo,
-            "--add-reviewer", "copilot-pull-request-reviewer",
+            "gh",
+            "pr",
+            "edit",
+            pr_num,
+            "--repo",
+            repo,
+            "--add-reviewer",
+            "copilot-pull-request-reviewer",
         ],
-        capture_output=True, text=True, check=False,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     if r.returncode != 0:
         raise RuntimeError(
@@ -43,8 +50,11 @@ def run_wait_copilot_stage(
     from ..gh_utils import check_copilot_review
 
     if review_checker is None:
-        def review_checker() -> str | None:
+
+        def _default_checker() -> str | None:
             return check_copilot_review(repo, pr_num)
+
+        review_checker = _default_checker
 
     deadline = time.time() + timeout
     while True:

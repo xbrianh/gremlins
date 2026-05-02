@@ -30,10 +30,13 @@ _KIND_SUBCOMMAND = {
 
 
 def _state_root() -> pathlib.Path:
-    return pathlib.Path(
-        os.environ.get("XDG_STATE_HOME")
-        or os.path.join(os.path.expanduser("~"), ".local", "state")
-    ) / "claude-gremlins"
+    return (
+        pathlib.Path(
+            os.environ.get("XDG_STATE_HOME")
+            or os.path.join(os.path.expanduser("~"), ".local", "state")
+        )
+        / "claude-gremlins"
+    )
 
 
 def _slugify(text: str, max_len: int = 40) -> str:
@@ -132,7 +135,7 @@ def _extract_impl_model(pipeline_args: list, kind: str) -> str:
             if a == "--model" and i + 1 < len(args):
                 return args[i + 1]
             if a.startswith("--model="):
-                return a[len("--model="):]
+                return a[len("--model=") :]
         return "sonnet"
 
 
@@ -156,7 +159,9 @@ def _build_spawn_env(gr_id: str) -> dict:
     env = os.environ.copy()
     claude_home = os.path.join(os.path.expanduser("~"), ".claude")
     existing_pp = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = f"{claude_home}{os.pathsep}{existing_pp}" if existing_pp else claude_home
+    env["PYTHONPATH"] = (
+        f"{claude_home}{os.pathsep}{existing_pp}" if existing_pp else claude_home
+    )
     env["PYTHONSAFEPATH"] = "1"
     env["GR_ID"] = gr_id
     return env
@@ -174,8 +179,15 @@ def _spawn_pipeline(
 
     log_mode: "w" (truncate, default for first launch) or "a" (append, for resumes).
     """
-    cmd = [sys.executable, "-m", "gremlins.cli", "_run-pipeline",
-           gr_id, kind_subcommand, *pipeline_args]
+    cmd = [
+        sys.executable,
+        "-m",
+        "gremlins.cli",
+        "_run-pipeline",
+        gr_id,
+        kind_subcommand,
+        *pipeline_args,
+    ]
     env = _build_spawn_env(gr_id)
     log_path = state_dir / "log"
     log_fh = open(log_path, log_mode)
@@ -203,7 +215,7 @@ def launch(
     parent_id: str | None = None,
     project_root: str | None = None,
     base_ref: str = "HEAD",
-    pipeline_args: tuple = (),
+    pipeline_args: tuple[str, ...] = (),
     spec_path: str | None = None,
 ) -> str:
     """Set up state dir + worktree, spawn the pipeline detached, return gremlin id.
@@ -252,7 +264,9 @@ def launch(
     if project_root is None:
         r = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, check=False,
+            capture_output=True,
+            text=True,
+            check=False,
         )
         if r.returncode == 0 and r.stdout.strip():
             project_root = r.stdout.strip()
@@ -279,13 +293,18 @@ def launch(
     if _git_mod.is_git_repo(project_root):
         if kind == "localgremlin":
             setup_kind = "worktree-branch"
-            workdir, branch = _git_mod.setup_worktree_branch(project_root, gr_id, base_ref=base_ref)
+            workdir, branch = _git_mod.setup_worktree_branch(
+                project_root, gr_id, base_ref=base_ref
+            )
         elif kind == "ghgremlin":
             default_branch = _git_mod.resolve_default_branch(project_root)
-            refspec = f"refs/heads/{default_branch}:refs/remotes/origin/{default_branch}"
+            refspec = (
+                f"refs/heads/{default_branch}:refs/remotes/origin/{default_branch}"
+            )
             fr = subprocess.run(
                 ["git", "-C", project_root, "fetch", "origin", "--quiet", refspec],
-                capture_output=True, text=True,
+                capture_output=True,
+                text=True,
             )
             if fr.returncode != 0:
                 raise RuntimeError(
@@ -301,7 +320,7 @@ def launch(
         setup_kind = "copy"
         workdir = _git_mod.setup_copy(project_root)
 
-    now_iso = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     state = {
         "id": gr_id,
         "kind": kind,
@@ -328,7 +347,9 @@ def launch(
     if instructions:
         spawn_args.append(instructions)
 
-    proc = _spawn_pipeline(state_dir, workdir, gr_id, _KIND_SUBCOMMAND[kind], spawn_args)
+    proc = _spawn_pipeline(
+        state_dir, workdir, gr_id, _KIND_SUBCOMMAND[kind], spawn_args
+    )
 
     (state_dir / "pid").write_text(str(proc.pid), encoding="utf-8")
     _patch_state(state_dir, pid=proc.pid)
@@ -375,9 +396,7 @@ def resume(gr_id: str) -> None:
             pass  # process is gone
 
     if (state_dir / "finished").is_file() and exit_code == 0:
-        raise RuntimeError(
-            f"gremlin {gr_id} finished successfully — nothing to resume"
-        )
+        raise RuntimeError(f"gremlin {gr_id} finished successfully — nothing to resume")
 
     # Rewind stage if it never advanced past "starting"
     if not stage or stage == "starting":
@@ -390,7 +409,7 @@ def resume(gr_id: str) -> None:
         except FileNotFoundError:
             pass
 
-    now_iso = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     rescue_count = 0
     try:
         rescue_count = int(state.get("rescue_count") or 0)
@@ -399,8 +418,15 @@ def resume(gr_id: str) -> None:
 
     _delete_patch_state(
         state_dir,
-        ("exit_code", "ended_at", "sub_stage", "stage_updated_at",
-         "bail_class", "bail_reason", "bail_detail"),
+        (
+            "exit_code",
+            "ended_at",
+            "sub_stage",
+            "stage_updated_at",
+            "bail_class",
+            "bail_reason",
+            "bail_detail",
+        ),
         status="running",
         stage=stage,
         rescued_at=now_iso,
@@ -432,8 +458,9 @@ def resume(gr_id: str) -> None:
             spawn_args.append(instructions)
 
     kind_subcommand = _KIND_SUBCOMMAND[kind]
-    proc = _spawn_pipeline(state_dir, workdir, gr_id, kind_subcommand, spawn_args,
-                           log_mode="a")
+    proc = _spawn_pipeline(
+        state_dir, workdir, gr_id, kind_subcommand, spawn_args, log_mode="a"
+    )
 
     (state_dir / "pid").write_text(str(proc.pid), encoding="utf-8")
     _patch_state(state_dir, pid=proc.pid)
@@ -457,16 +484,14 @@ def write_terminal_state(gr_id: str, exit_code: int) -> None:
     except OSError:
         pass
 
-    now_iso = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     status = "done" if exit_code == 0 else "stopped"
     try:
         data = json.loads(sf.read_text(encoding="utf-8"))
         data["status"] = status
         data["ended_at"] = now_iso
         data["exit_code"] = exit_code
-        tmp = sf.with_name(
-            f"state.json.{os.getpid()}.{secrets.token_hex(4)}.tmp"
-        )
+        tmp = sf.with_name(f"state.json.{os.getpid()}.{secrets.token_hex(4)}.tmp")
         tmp.write_text(json.dumps(data), encoding="utf-8")
         os.replace(tmp, sf)
     except Exception:

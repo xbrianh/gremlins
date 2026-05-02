@@ -30,7 +30,9 @@ from ..gh_utils import get_repo, parse_issue_ref, view_issue
 from ..state import patch_state, set_stage
 
 STATE_ROOT = os.path.join(
-    os.environ.get("XDG_STATE_HOME", os.path.join(os.path.expanduser("~"), ".local", "state")),
+    os.environ.get(
+        "XDG_STATE_HOME", os.path.join(os.path.expanduser("~"), ".local", "state")
+    ),
     "claude-gremlins",
 )
 
@@ -54,6 +56,7 @@ def _gremlins_cli_env() -> dict:
     )
     env["PYTHONSAFEPATH"] = "1"
     return env
+
 
 POLL_INTERVAL = 5  # seconds between finished-marker polls
 HANDOFF_TIMEOUT = int(os.environ.get("BOSSGREMLIN_HANDOFF_TIMEOUT", "3600"))
@@ -81,7 +84,7 @@ signal.signal(signal.SIGTERM, _sigterm_handler)
 
 
 def log(msg: str) -> None:
-    ts = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    ts = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     print(f"[{ts}] {msg}", flush=True)
 
 
@@ -126,7 +129,9 @@ def run_proc(cmd: list, **kwargs) -> int:
 def get_head_ref(project_root: str) -> str:
     r = subprocess.run(
         ["git", "rev-parse", "HEAD"],
-        capture_output=True, text=True, cwd=project_root,
+        capture_output=True,
+        text=True,
+        cwd=project_root,
     )
     if r.returncode != 0:
         die(f"git rev-parse HEAD failed in {project_root}: {r.stderr.strip()}")
@@ -136,7 +141,9 @@ def get_head_ref(project_root: str) -> str:
 def get_current_branch(project_root: str) -> str:
     r = subprocess.run(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-        capture_output=True, text=True, cwd=project_root,
+        capture_output=True,
+        text=True,
+        cwd=project_root,
     )
     if r.returncode != 0:
         return ""
@@ -148,13 +155,24 @@ def get_default_branch(project_root: str) -> str:
     """Resolve the repo's default branch via gh CLI. Calls die() on failure."""
     try:
         r = subprocess.run(
-            ["gh", "repo", "view", "--json", "defaultBranchRef",
-             "-q", ".defaultBranchRef.name"],
-            capture_output=True, text=True, cwd=project_root,
+            [
+                "gh",
+                "repo",
+                "view",
+                "--json",
+                "defaultBranchRef",
+                "-q",
+                ".defaultBranchRef.name",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=project_root,
             timeout=GH_VIEW_TIMEOUT,
         )
     except FileNotFoundError:
-        die("gh CLI not found on PATH — required to resolve default branch for gh chain")
+        die(
+            "gh CLI not found on PATH — required to resolve default branch for gh chain"
+        )
     except subprocess.TimeoutExpired:
         die(f"gh repo view timed out after {GH_VIEW_TIMEOUT}s in {project_root}")
     if r.returncode != 0:
@@ -175,11 +193,15 @@ def fetch_origin_branch(project_root: str, branch: str, *, context: str) -> None
     try:
         fetch = subprocess.run(
             ["git", "fetch", "origin", refspec],
-            capture_output=True, text=True, cwd=project_root,
+            capture_output=True,
+            text=True,
+            cwd=project_root,
             timeout=HANDOFF_FETCH_TIMEOUT,
         )
     except subprocess.TimeoutExpired:
-        die(f"git fetch origin {refspec} timed out after {HANDOFF_FETCH_TIMEOUT}s {context}")
+        die(
+            f"git fetch origin {refspec} timed out after {HANDOFF_FETCH_TIMEOUT}s {context}"
+        )
     if fetch.returncode != 0:
         die(f"git fetch origin {refspec} failed {context}: {fetch.stderr.strip()}")
 
@@ -189,18 +211,27 @@ def get_remote_branch_sha(project_root: str, branch: str) -> str:
     fetch_origin_branch(project_root, branch, context="at chain start")
     r = subprocess.run(
         ["git", "rev-parse", f"refs/remotes/origin/{branch}"],
-        capture_output=True, text=True, cwd=project_root,
+        capture_output=True,
+        text=True,
+        cwd=project_root,
     )
     if r.returncode != 0:
         die(f"git rev-parse refs/remotes/origin/{branch} failed: {r.stderr.strip()}")
     return r.stdout.strip()
 
 
-def init_boss_state(spec_path: str, chain_kind: str, chain_base_ref: str,
-                    target_branch: str, state_dir: str,
-                    issue_url: str = "", issue_num: str = "",
-                    test_cmd: str = "", test_max_attempts: int = 3,
-                    test_fix_model: str = "") -> dict:
+def init_boss_state(
+    spec_path: str,
+    chain_kind: str,
+    chain_base_ref: str,
+    target_branch: str,
+    state_dir: str,
+    issue_url: str = "",
+    issue_num: str = "",
+    test_cmd: str = "",
+    test_max_attempts: int = 3,
+    test_fix_model: str = "",
+) -> dict:
     boss_state = {
         "spec_path": spec_path,
         "chain_kind": chain_kind,
@@ -239,8 +270,14 @@ def save_boss_state(state_dir: str, boss_state: dict) -> None:
     save_json(os.path.join(state_dir, "boss_state.json"), boss_state)
 
 
-def run_handoff(gr_id: str, state_dir: str, boss_state: dict,
-                project_root: str, boss_workdir: str, model: str) -> tuple:
+def run_handoff(
+    gr_id: str,
+    state_dir: str,
+    boss_state: dict,
+    project_root: str,
+    boss_workdir: str,
+    model: str,
+) -> tuple:
     """Run handoff agent. Returns (exit_state, signal dict).
 
     Updates boss_state in place (handoff_count, current_plan, handoff_records).
@@ -286,16 +323,23 @@ def run_handoff(gr_id: str, state_dir: str, boss_state: dict,
     # passing --spec would render the same document twice in the prompt.
     forward_spec = bool(spec_path) and spec_path != current_plan
     spec_log = spec_path if forward_spec else "(none)"
-    log(f"handoff {n}: plan={current_plan}, spec={spec_log}, base={base_ref[:12]}, rev={rev_label}, cwd={handoff_cwd}")
+    log(
+        f"handoff {n}: plan={current_plan}, spec={spec_log}, base={base_ref[:12]}, rev={rev_label}, cwd={handoff_cwd}"
+    )
     spec_args = ["--spec", spec_path] if forward_spec else []
     cmd = _gremlins_cli_cmd(
         "handoff",
-        "--plan", current_plan,
+        "--plan",
+        current_plan,
         *spec_args,
-        "--out", out_path,
-        "--base", base_ref,
-        "--model", model,
-        "--timeout", str(HANDOFF_TIMEOUT),
+        "--out",
+        out_path,
+        "--base",
+        base_ref,
+        "--model",
+        model,
+        "--timeout",
+        str(HANDOFF_TIMEOUT),
         *rev_args,
     )
     rc = run_proc(cmd, cwd=handoff_cwd, env=_gremlins_cli_env())
@@ -325,18 +369,20 @@ def run_handoff(gr_id: str, state_dir: str, boss_state: dict,
     else:
         followups = []
 
-    now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    boss_state["handoff_records"].append({
-        "timestamp": now,
-        "n": n,
-        "plan_in": current_plan,
-        "plan_out": out_path,
-        "signal_file": signal_path,
-        "exit_state": exit_state,
-        "child_plan": sig.get("child_plan"),
-        "bail_reason": sig.get("reason"),
-        "operator_followups": followups,
-    })
+    now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    boss_state["handoff_records"].append(
+        {
+            "timestamp": now,
+            "n": n,
+            "plan_in": current_plan,
+            "plan_out": out_path,
+            "signal_file": signal_path,
+            "exit_state": exit_state,
+            "child_plan": sig.get("child_plan"),
+            "bail_reason": sig.get("reason"),
+            "operator_followups": followups,
+        }
+    )
     boss_state["handoff_count"] = n
     boss_state["operator_followups"] = followups
     if os.path.isfile(out_path):
@@ -373,9 +419,15 @@ def launch_child(gr_id: str, launch_kind: str, child_plan: str) -> str:
 
     log(f"launching child ({launch_kind}): {child_plan}, base={base_ref[:12]}")
     try:
-        child_id = _launch(launch_kind, plan=child_plan, parent_id=gr_id,
-                           project_root=project_root, base_ref=base_ref,
-                           spec_path=spec_path, pipeline_args=tuple(extra))
+        child_id = _launch(
+            launch_kind,
+            plan=child_plan,
+            parent_id=gr_id,
+            project_root=project_root,
+            base_ref=base_ref,
+            spec_path=spec_path,
+            pipeline_args=tuple(extra),
+        )
     except (ValueError, RuntimeError) as exc:
         die(f"launcher failed: {exc}")
 
@@ -483,10 +535,13 @@ def land_child(child_id: str, into_dir: str = "") -> bool:
 
 def rescue_child(child_id: str) -> bool:
     log(f"rescuing child {child_id} (headless)")
-    return run_proc(
-        _gremlins_cli_cmd("fleet", "rescue", "--headless", child_id),
-        env=_gremlins_cli_env(),
-    ) == 0
+    return (
+        run_proc(
+            _gremlins_cli_cmd("fleet", "rescue", "--headless", child_id),
+            env=_gremlins_cli_env(),
+        )
+        == 0
+    )
 
 
 def _parse_boss_args(argv: list[str]) -> argparse.Namespace:
@@ -679,11 +734,15 @@ def boss_main(argv: list[str]) -> int:
             # chain to origin/<default-branch> so handoff diffs land cleanly.
             target_branch = get_default_branch(project_root)
             chain_base_ref = get_remote_branch_sha(project_root, target_branch)
-            log(f"base ref: {chain_base_ref[:12]} (origin/{target_branch}), target branch: {target_branch}")
+            log(
+                f"base ref: {chain_base_ref[:12]} (origin/{target_branch}), target branch: {target_branch}"
+            )
         else:
             chain_base_ref = get_head_ref(project_root)
             target_branch = get_current_branch(project_root)
-            log(f"base ref: {chain_base_ref[:12]}, target branch: {target_branch or '(detached)'}")
+            log(
+                f"base ref: {chain_base_ref[:12]}, target branch: {target_branch or '(detached)'}"
+            )
         boss_state = init_boss_state(
             spec_path=spec_path,
             chain_kind=chain_kind,
@@ -704,7 +763,9 @@ def boss_main(argv: list[str]) -> int:
             patch_state(current_head=initial_head)
     else:
         boss_state = load_boss_state(state_dir)
-        log(f"resuming chain: kind={chain_kind}, completed children: {len(boss_state['children'])}")
+        log(
+            f"resuming chain: kind={chain_kind}, completed children: {len(boss_state['children'])}"
+        )
 
     # Main loop: handoff → launch → wait → land/rescue → repeat
     while True:
@@ -749,7 +810,9 @@ def boss_main(argv: list[str]) -> int:
             # next-plan: launch the next child
             child_plan = sig.get("child_plan")
             if not child_plan or not os.path.isfile(child_plan):
-                die(f"handoff returned next-plan but child_plan not found: {child_plan!r}")
+                die(
+                    f"handoff returned next-plan but child_plan not found: {child_plan!r}"
+                )
 
             check_stop()
             current_child_id = launch_child(gr_id, launch_kind, child_plan)
@@ -758,7 +821,9 @@ def boss_main(argv: list[str]) -> int:
             # Stop the freshly launched child if a stop was requested during
             # or just after launch (pre-wait window).
             if _stop_requested:
-                log(f"stop requested — stopping newly launched child {current_child_id}")
+                log(
+                    f"stop requested — stopping newly launched child {current_child_id}"
+                )
                 subprocess.run(
                     _gremlins_cli_cmd("fleet", "stop", current_child_id),
                     capture_output=True,
@@ -787,11 +852,15 @@ def boss_main(argv: list[str]) -> int:
 
                 if child_succeeded:
                     # Already finished successfully and closed — treat as landed
-                    log(f"child {current_child_id} already finished and closed — treating as landed")
-                    boss_state["children"].append({
-                        "id": current_child_id,
-                        "outcome": "landed",
-                    })
+                    log(
+                        f"child {current_child_id} already finished and closed — treating as landed"
+                    )
+                    boss_state["children"].append(
+                        {
+                            "id": current_child_id,
+                            "outcome": "landed",
+                        }
+                    )
                     boss_state["current_child_id"] = None
                     save_boss_state(state_dir, boss_state)
                     continue
@@ -835,7 +904,11 @@ def boss_main(argv: list[str]) -> int:
                         die(f"boss workdir not usable for local land: {boss_workdir!r}")
                     into_dir = boss_workdir
                 if land_child(current_child_id, into_dir=into_dir):
-                    if chain_kind == "local" and boss_workdir and os.path.isdir(boss_workdir):
+                    if (
+                        chain_kind == "local"
+                        and boss_workdir
+                        and os.path.isdir(boss_workdir)
+                    ):
                         new_head = _git_mod.git_head_of_workdir(boss_workdir)
                         if not new_head:
                             die(
@@ -846,18 +919,24 @@ def boss_main(argv: list[str]) -> int:
                         patch_state(current_head=new_head)
                     outcome = "rescued-then-landed" if was_rescued else "landed"
                     log(f"child {current_child_id} {outcome}")
-                    boss_state["children"].append({"id": current_child_id, "outcome": outcome})
+                    boss_state["children"].append(
+                        {"id": current_child_id, "outcome": outcome}
+                    )
                     boss_state["current_child_id"] = None
                     save_boss_state(state_dir, boss_state)
                     break  # inner loop done; outer loop continues to next handoff
                 else:
                     # The pipeline succeeded but land itself failed (e.g. merge
                     # conflict, branch protection rejection, squash conflict).
-                    log(f"landing failed for {current_child_id} — operator action required")
-                    boss_state["children"].append({
-                        "id": current_child_id,
-                        "outcome": "land-failed",
-                    })
+                    log(
+                        f"landing failed for {current_child_id} — operator action required"
+                    )
+                    boss_state["children"].append(
+                        {
+                            "id": current_child_id,
+                            "outcome": "land-failed",
+                        }
+                    )
                     boss_state["current_child_id"] = None
                     save_boss_state(state_dir, boss_state)
                     die(
@@ -893,16 +972,22 @@ def boss_main(argv: list[str]) -> int:
                         log(f"  detail: {bail_detail}")
                 else:
                     # Other headless-rescue bail reasons also populate bail_detail.
-                    log(f"rescue refused for {current_child_id} ({bail_reason or 'no bail_reason'})")
+                    log(
+                        f"rescue refused for {current_child_id} ({bail_reason or 'no bail_reason'})"
+                    )
                     if bail_detail:
                         log(f"  detail: {bail_detail}")
-                boss_state["children"].append({
-                    "id": current_child_id,
-                    "outcome": f"bailed:{bail_reason}" if bail_reason else "bailed",
-                })
+                boss_state["children"].append(
+                    {
+                        "id": current_child_id,
+                        "outcome": f"bailed:{bail_reason}" if bail_reason else "bailed",
+                    }
+                )
                 boss_state["current_child_id"] = None
                 save_boss_state(state_dir, boss_state)
-                die(f"chain halted: child {current_child_id} failed and rescue was refused")
+                die(
+                    f"chain halted: child {current_child_id} failed and rescue was refused"
+                )
 
             was_rescued = True
             log(f"rescue relaunched {current_child_id} — waiting again")

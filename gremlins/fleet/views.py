@@ -1,5 +1,6 @@
 """List, recent, and drill-in views."""
 
+import argparse
 import datetime
 import json
 import os
@@ -17,8 +18,13 @@ from gremlins.fleet.state import (
 )
 
 
-def collect_rows(here_root=None, kind_filter=None, since_secs=None,
-                 liveness_filter=None, include_closed=False):
+def collect_rows(
+    here_root=None,
+    kind_filter=None,
+    since_secs=None,
+    liveness_filter=None,
+    include_closed=False,
+):
     """
     Collect and return a list of row dicts, sorted by started_at ascending.
 
@@ -73,7 +79,7 @@ def collect_rows(here_root=None, kind_filter=None, since_secs=None,
     return rows
 
 
-def do_list(args, here_root=None):
+def do_list(args: argparse.Namespace, here_root: str | None = None) -> None:
     """Default list view."""
     liveness_filter = None
     if args.running or args.dead or args.stalled:
@@ -115,7 +121,7 @@ def do_list(args, here_root=None):
     print_table(rows)
 
 
-def do_recent(args, here_root=None):
+def do_recent(args: argparse.Namespace, here_root: str | None = None) -> None:
     """--recent [N]: show dead gremlins started within N hours."""
     n_hours = args.recent
     since_secs = n_hours * 3600
@@ -142,7 +148,7 @@ def do_recent(args, here_root=None):
     print_table(rows)
 
 
-def do_drill_in(target: str):
+def do_drill_in(target: str) -> None:
     """Print every field of a uniquely-matched gremlin in a labeled block."""
     matches = []
     for gr_id, sf, wdir in iter_state_files():
@@ -153,7 +159,9 @@ def do_drill_in(target: str):
         print(f"no gremlin matched: {target}")
         return
     if len(matches) > 1:
-        print(f"ambiguous id '{target}' matched {len(matches)} gremlins — use a longer prefix:")
+        print(
+            f"ambiguous id '{target}' matched {len(matches)} gremlins — use a longer prefix:"
+        )
         for gr_id, _, _ in matches:
             print(f"  {gr_id}")
         return
@@ -172,11 +180,15 @@ def do_drill_in(target: str):
     local_start = ""
     epoch = iso_to_epoch(started_at)
     if epoch is not None:
-        local_start = datetime.datetime.fromtimestamp(epoch).strftime("%Y-%m-%d %H:%M:%S %Z")
+        local_start = datetime.datetime.fromtimestamp(epoch).strftime(
+            "%Y-%m-%d %H:%M:%S %Z"
+        )
 
     print(f"gremlin: {gr_id}")
     print(f"  liveness : {live}")
-    print(f"  closed   : {'yes' if os.path.isfile(os.path.join(wdir, 'closed')) else 'no'}")
+    print(
+        f"  closed   : {'yes' if os.path.isfile(os.path.join(wdir, 'closed')) else 'no'}"
+    )
     print(f"  age      : {age}")
     if local_start:
         print(f"  started  : {local_start}")

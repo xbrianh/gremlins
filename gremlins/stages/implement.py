@@ -32,13 +32,18 @@ from ..git import (
     sweep_stale_handoff_branches,
 )
 
-PROMPT_LOCAL_PATH = pathlib.Path(__file__).resolve().parent.parent / "prompts" / "implement_local.md"
-PROMPT_GH_PATH = pathlib.Path(__file__).resolve().parent.parent / "prompts" / "implement_gh.md"
+PROMPT_LOCAL_PATH = (
+    pathlib.Path(__file__).resolve().parent.parent / "prompts" / "implement_local.md"
+)
+PROMPT_GH_PATH = (
+    pathlib.Path(__file__).resolve().parent.parent / "prompts" / "implement_gh.md"
+)
 
 
 @dataclasses.dataclass
 class ImplStageResult:
     """Returned by ``run_implement_stage`` when ``kind='gh'``."""
+
     pre_state: PreImplState
     outcome: ImplOutcome
     handoff_branch: str  # empty string when outcome is DirtyOnly (no branch created)
@@ -59,7 +64,10 @@ def changes_outside_git(sentinel: pathlib.Path, session_dir: pathlib.Path) -> bo
         dp = pathlib.Path(dirpath)
         try:
             dp_resolved = dp.resolve()
-            if dp_resolved == session_resolved or session_resolved in dp_resolved.parents:
+            if (
+                dp_resolved == session_resolved
+                or session_resolved in dp_resolved.parents
+            ):
                 dirnames[:] = []
                 continue
         except Exception:
@@ -79,7 +87,7 @@ def _render_spec_block(spec_text: str) -> str:
         return ""
     trunc = ""
     if len(spec_text) > 50000:
-        cut = spec_text.rfind('\n', 0, 50000)
+        cut = spec_text.rfind("\n", 0, 50000)
         body = spec_text[:cut] if cut > 0 else spec_text[:50000]
         trunc = f"\n(spec truncated; {len(spec_text)} chars total)"
     else:
@@ -166,7 +174,9 @@ def run_implement_stage(
         post_head = git_head()
         porcelain = subprocess.run(
             ["git", "status", "--porcelain"],
-            capture_output=True, text=True, check=False,
+            capture_output=True,
+            text=True,
+            check=False,
         )
         if post_head == pre_head and not porcelain.stdout.strip():
             raise RuntimeError("implementation stage produced no changes; aborting")
@@ -225,7 +235,9 @@ def _run_implement_gh(
     outcome = classify_impl_outcome(pre_state, cwd=cwd)
 
     if isinstance(outcome, EmptyImpl):
-        raise RuntimeError("implementation step produced no changes; refusing to open empty PR")
+        raise RuntimeError(
+            "implementation step produced no changes; refusing to open empty PR"
+        )
     if isinstance(outcome, DivergentHead):
         raise RuntimeError(
             f"implementation changed HEAD from {outcome.pre_head} to {outcome.post_head} "

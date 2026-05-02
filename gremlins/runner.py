@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import signal
 import sys
+import types
 from collections.abc import Callable, Sequence
 
 from .clients.claude import ClaudeClient
@@ -27,7 +28,7 @@ def install_signal_handlers(client: ClaudeClient) -> None:
     exit. Pass the live ClaudeClient (real or fake) — its ``reap_all`` is
     what gets called."""
 
-    def handler(signum, frame):
+    def handler(signum: int, frame: types.FrameType | None) -> None:
         try:
             client.reap_all()
         finally:
@@ -45,9 +46,7 @@ def run_stages(stages: Sequence[Stage], *, resume_from: str | None = None) -> No
     start_idx = 0
     if resume_from is not None:
         if resume_from not in names:
-            raise ValueError(
-                f"unknown resume stage {resume_from!r}; valid: {names}"
-            )
+            raise ValueError(f"unknown resume stage {resume_from!r}; valid: {names}")
         start_idx = names.index(resume_from)
     for _name, fn in list(stages)[start_idx:]:
         fn()

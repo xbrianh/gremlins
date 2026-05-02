@@ -15,7 +15,9 @@ def get_repo() -> str:
     """Return the current repo's ``owner/name`` via ``gh repo view``."""
     r = subprocess.run(
         ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-        capture_output=True, text=True, check=False,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     if r.returncode != 0:
         raise RuntimeError(
@@ -24,9 +26,7 @@ def get_repo() -> str:
     return r.stdout.strip()
 
 
-def parse_issue_ref(
-    plan_source: str, repo: str
-) -> tuple[str | None, str | None]:
+def parse_issue_ref(plan_source: str, repo: str) -> tuple[str | None, str | None]:
     """Parse an issue reference string into ``(target_repo, issue_num)``.
 
     Recognized shapes (matching ghgremlin's --plan contract):
@@ -66,10 +66,18 @@ def view_issue(issue_ref: str, repo: str) -> dict:
     try:
         r = subprocess.run(
             [
-                "gh", "issue", "view", issue_ref, "--repo", repo,
-                "--json", "number,url,body",
+                "gh",
+                "issue",
+                "view",
+                issue_ref,
+                "--repo",
+                repo,
+                "--json",
+                "number,url,body",
             ],
-            capture_output=True, text=True, check=False,
+            capture_output=True,
+            text=True,
+            check=False,
             timeout=VIEW_ISSUE_TIMEOUT,
         )
     except subprocess.TimeoutExpired as exc:
@@ -133,7 +141,9 @@ def extract_gh_url(
                 continue
             body = c.get("content")
             if isinstance(body, list):
-                text = "\n".join((p.get("text") or "") for p in body if isinstance(p, dict))
+                text = "\n".join(
+                    (p.get("text") or "") for p in body if isinstance(p, dict)
+                )
             elif isinstance(body, str):
                 text = body
             else:
@@ -160,10 +170,15 @@ def check_copilot_review(repo: str, pr_num: str) -> str | None:
     """Return the first non-PENDING Copilot review state, or None if not ready."""
     r = subprocess.run(
         [
-            "gh", "api", f"repos/{repo}/pulls/{pr_num}/reviews",
-            "--jq", '.[] | select(.user.login | test("[Cc]opilot")) | .state',
+            "gh",
+            "api",
+            f"repos/{repo}/pulls/{pr_num}/reviews",
+            "--jq",
+            '.[] | select(.user.login | test("[Cc]opilot")) | .state',
         ],
-        capture_output=True, text=True, check=False,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     if r.returncode != 0:
         return None

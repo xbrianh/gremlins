@@ -45,11 +45,13 @@ from fixtures.shell_env import (
 def _load_gremlins_module():
     """Return the fleet module — the canonical home for do_rescue."""
     from gremlins import fleet
+
     return fleet
 
 
-def _make_failed_gremlin(state_root: pathlib.Path, workdir: pathlib.Path,
-                         gr_id: str = "victim-abcdef") -> pathlib.Path:
+def _make_failed_gremlin(
+    state_root: pathlib.Path, workdir: pathlib.Path, gr_id: str = "victim-abcdef"
+) -> pathlib.Path:
     """Create the on-disk shape of a gremlin that crashed and is awaiting rescue.
 
     Returns the state dir path.
@@ -65,7 +67,9 @@ def _make_failed_gremlin(state_root: pathlib.Path, workdir: pathlib.Path,
         "workdir": str(workdir),
         "project_root": str(workdir.parent),
         "description": "test gremlin",
-        "started_at": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "started_at": datetime.datetime.now(datetime.UTC).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
         "rescue_count": 0,
     }
     (state_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
@@ -81,7 +85,6 @@ def _patch_state_root(gremlins_mod, state_root: pathlib.Path, monkeypatch):
         "STATE_ROOT",
         str(state_root / "claude-gremlins"),
     )
-
 
 
 def test_rescue_diagnosis_runs_in_scratch_dir_not_worktree(tmp_path, monkeypatch):
@@ -108,10 +111,12 @@ def test_rescue_diagnosis_runs_in_scratch_dir_not_worktree(tmp_path, monkeypatch
     assert len(rescue_calls) == 1, log
     cwd = rescue_calls[0]["cwd"]
     # cwd must be a scratch dir, not the worktree.
-    assert pathlib.Path(cwd).resolve() != sh.repo.resolve(), \
+    assert pathlib.Path(cwd).resolve() != sh.repo.resolve(), (
         f"diagnosis must run in scratch, not worktree ({cwd})"
-    assert "gremlin-rescue-" in cwd, \
+    )
+    assert "gremlin-rescue-" in cwd, (
         f"expected scratch dir prefix gremlin-rescue-, got {cwd}"
+    )
 
 
 def test_rescue_unsalvageable_records_bail(tmp_path, monkeypatch):
@@ -193,7 +198,10 @@ def test_rescue_fixed_verdict_invokes_launcher_resume(tmp_path, monkeypatch):
     resume_calls = []
 
     import gremlins.launcher as _launcher_mod
-    monkeypatch.setattr(_launcher_mod, "resume", lambda gr_id: resume_calls.append(gr_id))
+
+    monkeypatch.setattr(
+        _launcher_mod, "resume", lambda gr_id: resume_calls.append(gr_id)
+    )
 
     sh.env["FAKE_CLAUDE_RESCUE_VERDICT"] = "fixed"
     sh.env["FAKE_CLAUDE_RESCUE_SUMMARY"] = "edited state.json"
@@ -332,6 +340,12 @@ def test_rescue_diagnosis_streams_events_to_stderr(tmp_path, monkeypatch, capsys
 
     captured = capsys.readouterr()
     rescue_lines = [ln for ln in captured.err.splitlines() if ln.startswith("[rescue]")]
-    assert len(rescue_lines) >= 2, f"Expected [rescue]-prefixed events on stderr; got: {captured.err!r}"
-    assert any("init" in ln for ln in rescue_lines), f"Expected init event line: {rescue_lines}"
-    assert any("text:" in ln for ln in rescue_lines), f"Expected text event line: {rescue_lines}"
+    assert len(rescue_lines) >= 2, (
+        f"Expected [rescue]-prefixed events on stderr; got: {captured.err!r}"
+    )
+    assert any("init" in ln for ln in rescue_lines), (
+        f"Expected init event line: {rescue_lines}"
+    )
+    assert any("text:" in ln for ln in rescue_lines), (
+        f"Expected text event line: {rescue_lines}"
+    )

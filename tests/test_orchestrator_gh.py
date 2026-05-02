@@ -28,6 +28,7 @@ from gremlins.orchestrators.gh import _parse_gh_args, _parse_issue_ref, gh_main
 # Helper: minimal stream-json event list containing a PR URL in a tool_result
 # ---------------------------------------------------------------------------
 
+
 def _issue_events(issue_url: str = "https://github.com/owner/repo/issues/42") -> list:
     return [
         {"type": "system", "subtype": "init", "session_id": "session-plan-1"},
@@ -102,18 +103,25 @@ IMPL_EVENTS = [
 # Common patches for gh_main smoke tests
 # ---------------------------------------------------------------------------
 
+
 def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
     """Apply standard monkeypatches for gh_main smoke tests."""
     import shutil as _shutil
 
-    monkeypatch.setattr(_shutil, "which", lambda n: f"/fake/{n}" if n in ("claude", "gh") else None)
-    monkeypatch.setattr("gremlins.orchestrators.gh.install_signal_handlers", lambda c: None)
+    monkeypatch.setattr(
+        _shutil, "which", lambda n: f"/fake/{n}" if n in ("claude", "gh") else None
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.install_signal_handlers", lambda c: None
+    )
     monkeypatch.setattr("gremlins.orchestrators.gh.get_repo", lambda: "owner/repo")
     monkeypatch.setattr("gremlins.orchestrators.gh.load_code_style", lambda: "Be good.")
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    monkeypatch.setattr("gremlins.orchestrators.gh.resolve_session_dir", lambda: session_dir)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.resolve_session_dir", lambda: session_dir
+    )
 
     state_file = tmp_path / "state.json"
     initial = {
@@ -125,7 +133,9 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
     if state_data:
         initial.update(state_data)
     state_file.write_text(json.dumps(initial))
-    monkeypatch.setattr("gremlins.orchestrators.gh.resolve_state_file", lambda: state_file)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.resolve_state_file", lambda: state_file
+    )
 
     # patch_state reads/writes state_file — let it use the real implementation
     # (no-op without GR_ID but the file is explicitly patched via resolve_state_file)
@@ -158,15 +168,19 @@ def _make_gh_subprocess(
         sub = cmd[1] if len(cmd) > 1 else ""
         # gh issue view ... --json body --jq .body
         if sub == "issue" and "view" in cmd and "--jq" in cmd:
-            return subprocess.CompletedProcess(cmd, 0, stdout=issue_body + "\n", stderr="")
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=issue_body + "\n", stderr=""
+            )
         # gh issue view ... --json number,url,body  (for --plan issue-ref resolution)
         if sub == "issue" and "view" in cmd and "--json" in cmd:
             num = cmd[3] if len(cmd) > 3 else "42"
-            data = json.dumps({
-                "number": int(num),
-                "url": f"https://github.com/owner/repo/issues/{num}",
-                "body": issue_body,
-            })
+            data = json.dumps(
+                {
+                    "number": int(num),
+                    "url": f"https://github.com/owner/repo/issues/{num}",
+                    "body": issue_body,
+                }
+            )
             return subprocess.CompletedProcess(cmd, 0, stdout=data, stderr="")
         # gh pr edit (request-copilot)
         if sub == "pr" and "edit" in cmd:
@@ -176,7 +190,9 @@ def _make_gh_subprocess(
             return subprocess.CompletedProcess(cmd, 0, stdout=pr_diff, stderr="")
         # gh api (wait-copilot)
         if sub == "api":
-            return subprocess.CompletedProcess(cmd, 0, stdout=copilot_state + "\n", stderr="")
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=copilot_state + "\n", stderr=""
+            )
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     return fake_run
@@ -186,13 +202,28 @@ def _make_gh_subprocess(
 # classify_impl_outcome — all four branches (pure git, real temp repo)
 # ---------------------------------------------------------------------------
 
+
 def _init_git_repo(path: pathlib.Path) -> None:
     subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
     (path / "README.md").write_text("init\n")
-    subprocess.run(["git", "add", "README.md"], cwd=path, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "add", "README.md"], cwd=path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "init"], cwd=path, check=True, capture_output=True
+    )
 
 
 def test_classify_empty_impl(tmp_path):
@@ -214,8 +245,12 @@ def test_classify_head_advanced(tmp_path):
     _init_git_repo(tmp_path)
     pre = record_pre_impl_state(cwd=str(tmp_path))
     (tmp_path / "feat.txt").write_text("feature\n")
-    subprocess.run(["git", "add", "feat.txt"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "feat"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "add", "feat.txt"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "feat"], cwd=tmp_path, check=True, capture_output=True
+    )
     outcome = classify_impl_outcome(pre, cwd=str(tmp_path))
     assert isinstance(outcome, HeadAdvanced)
     assert outcome.commit_count == 1
@@ -226,11 +261,25 @@ def test_classify_divergent_head(tmp_path):
     pre = record_pre_impl_state(cwd=str(tmp_path))
 
     # Create an orphan branch (diverges from the init commit)
-    subprocess.run(["git", "checkout", "--orphan", "orphan"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "rm", "-rf", "."], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "checkout", "--orphan", "orphan"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "rm", "-rf", "."], cwd=tmp_path, check=True, capture_output=True
+    )
     (tmp_path / "orphan.txt").write_text("orphan\n")
-    subprocess.run(["git", "add", "orphan.txt"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "orphan commit"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "add", "orphan.txt"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "orphan commit"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
 
     outcome = classify_impl_outcome(pre, cwd=str(tmp_path))
     assert isinstance(outcome, DivergentHead)
@@ -240,18 +289,27 @@ def test_classify_divergent_head(tmp_path):
 # impl-handoff branch lifecycle (real temp git repo)
 # ---------------------------------------------------------------------------
 
+
 def test_handoff_branch_lifecycle(tmp_path):
     """create_handoff_branch creates a branch at current HEAD; sweep_stale removes merged ones."""
     _init_git_repo(tmp_path)
 
     # Make an implementation commit
     (tmp_path / "impl.txt").write_text("work\n")
-    subprocess.run(["git", "add", "impl.txt"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "impl"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "add", "impl.txt"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "impl"], cwd=tmp_path, check=True, capture_output=True
+    )
 
     pre = PreImplState(
         head=subprocess.run(
-            ["git", "rev-parse", "HEAD~1"], cwd=tmp_path, capture_output=True, text=True, check=True
+            ["git", "rev-parse", "HEAD~1"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout.strip(),
         branch="",
     )
@@ -262,7 +320,10 @@ def test_handoff_branch_lifecycle(tmp_path):
     # Verify we're on the handoff branch
     current = subprocess.run(
         ["git", "symbolic-ref", "--short", "HEAD"],
-        cwd=tmp_path, capture_output=True, text=True, check=True,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
     assert current == handoff
 
@@ -270,15 +331,25 @@ def test_handoff_branch_lifecycle(tmp_path):
     stale_branch = "ghgremlin-impl-handoff-9999"
     subprocess.run(
         ["git", "branch", stale_branch],
-        cwd=tmp_path, check=True, capture_output=True,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
     )
 
     # sweep_stale should delete the merged stale branch
     sweep_stale_handoff_branches(handoff, cwd=str(tmp_path))
 
     refs = subprocess.run(
-        ["git", "for-each-ref", "--format=%(refname:short)", "refs/heads/ghgremlin-impl-handoff-*"],
-        cwd=tmp_path, capture_output=True, text=True, check=True,
+        [
+            "git",
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/heads/ghgremlin-impl-handoff-*",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.splitlines()
     # Stale merged branch should be gone; current handoff should still exist
     assert handoff in refs
@@ -288,6 +359,7 @@ def test_handoff_branch_lifecycle(tmp_path):
 # ---------------------------------------------------------------------------
 # _parse_gh_args — arg parsing unit tests
 # ---------------------------------------------------------------------------
+
 
 def test_parse_instructions():
     args = _parse_gh_args(["add a login page"])
@@ -326,6 +398,7 @@ def test_parse_plan_and_instructions_mutual_exclusion():
 # _parse_issue_ref unit tests
 # ---------------------------------------------------------------------------
 
+
 def test_parse_issue_ref_numeric():
     repo, ref = _parse_issue_ref("42", "owner/repo")
     assert repo == "owner/repo"
@@ -362,6 +435,7 @@ def test_parse_issue_ref_invalid():
 # gh_main — smoke test: --plan issue-ref mode (plan stage skipped)
 # ---------------------------------------------------------------------------
 
+
 class _CommittingClient(FakeClaudeClient):
     """FakeClaudeClient that creates a git commit when the implement label runs."""
 
@@ -373,10 +447,17 @@ class _CommittingClient(FakeClaudeClient):
         if label == "implement" and self._git_dir is not None:
             # Simulate implement creating a commit
             (self._git_dir / "impl.txt").write_text("impl\n")
-            subprocess.run(["git", "add", "impl.txt"], cwd=self._git_dir, check=True, capture_output=True)
+            subprocess.run(
+                ["git", "add", "impl.txt"],
+                cwd=self._git_dir,
+                check=True,
+                capture_output=True,
+            )
             subprocess.run(
                 ["git", "commit", "-m", "impl: add impl.txt"],
-                cwd=self._git_dir, check=True, capture_output=True,
+                cwd=self._git_dir,
+                check=True,
+                capture_output=True,
             )
         return super().run(prompt, label=label, **kwargs)
 
@@ -389,7 +470,8 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
     session_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
     monkeypatch.setattr(
-        subprocess, "run",
+        subprocess,
+        "run",
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
 
@@ -436,13 +518,22 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
     session_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
     monkeypatch.setattr(
-        subprocess, "run",
+        subprocess,
+        "run",
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_ghreview_stage", lambda **kw: None)
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_wait_copilot_stage", lambda **kw: "APPROVED")
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_request_copilot_stage", lambda **kw: None)
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_ghaddress_stage", lambda **kw: None)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_ghreview_stage", lambda **kw: None
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_wait_copilot_stage", lambda **kw: "APPROVED"
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_request_copilot_stage", lambda **kw: None
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_ghaddress_stage", lambda **kw: None
+    )
 
     client = _CommittingClient(
         git_dir=tmp_path,
@@ -456,7 +547,9 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
     assert result == 0
 
     for call in client.calls:
-        assert call.model == "claude-opus-4-7", f"stage {call.label!r} got model={call.model!r}"
+        assert call.model == "claude-opus-4-7", (
+            f"stage {call.label!r} got model={call.model!r}"
+        )
 
 
 def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
@@ -470,13 +563,22 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
     session_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
     monkeypatch.setattr(
-        subprocess, "run",
+        subprocess,
+        "run",
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_ghreview_stage", lambda **kw: None)
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_wait_copilot_stage", lambda **kw: "APPROVED")
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_request_copilot_stage", lambda **kw: None)
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_ghaddress_stage", lambda **kw: None)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_ghreview_stage", lambda **kw: None
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_wait_copilot_stage", lambda **kw: "APPROVED"
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_request_copilot_stage", lambda **kw: None
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_ghaddress_stage", lambda **kw: None
+    )
 
     client = _CommittingClient(
         git_dir=tmp_path,
@@ -501,7 +603,9 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
     )
 
 
-def test_gh_main_resume_prefers_persisted_model_over_sonnet_default(tmp_path, monkeypatch):
+def test_gh_main_resume_prefers_persisted_model_over_sonnet_default(
+    tmp_path, monkeypatch
+):
     """Regression: on resume with no --model, a persisted state.json.model must
     win over the fresh-launch "sonnet" fallback. Locks in the other half of the
     invariant called out in gh.py — a future refactor that switched argparse to
@@ -516,16 +620,27 @@ def test_gh_main_resume_prefers_persisted_model_over_sonnet_default(tmp_path, mo
         "issue_num": "99",
         "model": "claude-opus-4-7",
     }
-    session_dir, state_file = _patch_common(monkeypatch, tmp_path, state_data=state_data)
+    session_dir, state_file = _patch_common(
+        monkeypatch, tmp_path, state_data=state_data
+    )
 
     monkeypatch.setattr(
-        subprocess, "run",
+        subprocess,
+        "run",
         _make_gh_subprocess(issue_body="# Resumed Plan\nDo more stuff.\n"),
     )
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_ghreview_stage", lambda **kw: None)
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_wait_copilot_stage", lambda **kw: "APPROVED")
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_request_copilot_stage", lambda **kw: None)
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_ghaddress_stage", lambda **kw: None)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_ghreview_stage", lambda **kw: None
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_wait_copilot_stage", lambda **kw: "APPROVED"
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_request_copilot_stage", lambda **kw: None
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_ghaddress_stage", lambda **kw: None
+    )
 
     client = _CommittingClient(
         git_dir=tmp_path,
@@ -547,7 +662,9 @@ def test_gh_main_resume_prefers_persisted_model_over_sonnet_default(tmp_path, mo
         return ""
 
     monkeypatch.setattr(_gh_mod, "_read_state_field", _fake_read)
-    monkeypatch.setattr(_gh_mod, "_fetch_issue_body", lambda num, repo: "# Resumed Plan\nDo stuff.\n")
+    monkeypatch.setattr(
+        _gh_mod, "_fetch_issue_body", lambda num, repo: "# Resumed Plan\nDo stuff.\n"
+    )
 
     # Invoke with NO --model — resume path should restore "claude-opus-4-7"
     # from state.json rather than falling through to the "sonnet" default.
@@ -571,16 +688,27 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         "issue_url": "https://github.com/owner/repo/issues/99",
         "issue_num": "99",
     }
-    session_dir, state_file = _patch_common(monkeypatch, tmp_path, state_data=state_data)
+    session_dir, state_file = _patch_common(
+        monkeypatch, tmp_path, state_data=state_data
+    )
 
     monkeypatch.setattr(
-        subprocess, "run",
+        subprocess,
+        "run",
         _make_gh_subprocess(issue_body="# Resumed Plan\nDo more stuff.\n"),
     )
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_ghreview_stage", lambda **kw: None)
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_wait_copilot_stage", lambda **kw: "APPROVED")
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_request_copilot_stage", lambda **kw: None)
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_ghaddress_stage", lambda **kw: None)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_ghreview_stage", lambda **kw: None
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_wait_copilot_stage", lambda **kw: "APPROVED"
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_request_copilot_stage", lambda **kw: None
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_ghaddress_stage", lambda **kw: None
+    )
 
     client = _CommittingClient(
         git_dir=tmp_path,
@@ -602,7 +730,9 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         return ""
 
     monkeypatch.setattr(_gh_mod, "_read_state_field", _fake_read)
-    monkeypatch.setattr(_gh_mod, "_fetch_issue_body", lambda num, repo: "# Resumed Plan\nDo stuff.\n")
+    monkeypatch.setattr(
+        _gh_mod, "_fetch_issue_body", lambda num, repo: "# Resumed Plan\nDo stuff.\n"
+    )
 
     result = gh_main(["--plan", "99", "--resume-from", "implement"], client=client)
     assert result == 0
@@ -633,16 +763,24 @@ def test_resume_from_ghreview(tmp_path, monkeypatch):
         return ""
 
     monkeypatch.setattr(_gh_mod, "_read_state_field", _fake_read)
-    monkeypatch.setattr(_gh_mod, "_fetch_issue_body", lambda num, repo: "# Plan\nContent.\n")
+    monkeypatch.setattr(
+        _gh_mod, "_fetch_issue_body", lambda num, repo: "# Plan\nContent.\n"
+    )
 
     ghreview_called = []
     monkeypatch.setattr(
         "gremlins.orchestrators.gh.run_ghreview_stage",
         lambda **kw: ghreview_called.append(kw["pr_url"]),
     )
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_wait_copilot_stage", lambda **kw: "APPROVED")
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_request_copilot_stage", lambda **kw: None)
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_ghaddress_stage", lambda **kw: None)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_wait_copilot_stage", lambda **kw: "APPROVED"
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_request_copilot_stage", lambda **kw: None
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_ghaddress_stage", lambda **kw: None
+    )
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
 
     client = FakeClaudeClient(fixtures={})
@@ -694,10 +832,18 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
 
     monkeypatch.setattr(subprocess, "run", fake_gh_run)
 
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_ghreview_stage", lambda **kw: None)
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_wait_copilot_stage", lambda **kw: "APPROVED")
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_request_copilot_stage", lambda **kw: None)
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_ghaddress_stage", lambda **kw: None)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_ghreview_stage", lambda **kw: None
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_wait_copilot_stage", lambda **kw: "APPROVED"
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_request_copilot_stage", lambda **kw: None
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_ghaddress_stage", lambda **kw: None
+    )
 
     # Each fixture carries a distinct non-zero cost so a regression that drops
     # any one stage shows up as the total being short by exactly that amount.
@@ -780,6 +926,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
 # Regression: --resume-from commit-pr must not re-run implement
 # ---------------------------------------------------------------------------
 
+
 def test_code_style_forwarded_to_ghreview_and_ghaddress(tmp_path, monkeypatch):
     """code_style is threaded into run_ghreview_stage and run_ghaddress_stage."""
     _init_git_repo(tmp_path)
@@ -788,7 +935,8 @@ def test_code_style_forwarded_to_ghreview_and_ghaddress(tmp_path, monkeypatch):
     session_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
     monkeypatch.setattr(
-        subprocess, "run",
+        subprocess,
+        "run",
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
 
@@ -801,9 +949,15 @@ def test_code_style_forwarded_to_ghreview_and_ghaddress(tmp_path, monkeypatch):
         captured["ghaddress"] = kw
 
     monkeypatch.setattr("gremlins.orchestrators.gh.run_ghreview_stage", record_ghreview)
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_wait_copilot_stage", lambda **kw: "APPROVED")
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_request_copilot_stage", lambda **kw: None)
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_ghaddress_stage", record_ghaddress)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_wait_copilot_stage", lambda **kw: "APPROVED"
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_request_copilot_stage", lambda **kw: None
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_ghaddress_stage", record_ghaddress
+    )
 
     client = _CommittingClient(
         git_dir=tmp_path,
@@ -832,20 +986,29 @@ def test_resume_from_commit_pr_skips_implement(tmp_path, monkeypatch):
 
     # Simulate a completed implement stage: one commit above the init commit.
     (tmp_path / "impl.txt").write_text("impl content\n")
-    subprocess.run(["git", "add", "impl.txt"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "add", "impl.txt"], cwd=tmp_path, check=True, capture_output=True
+    )
     subprocess.run(
         ["git", "commit", "-m", "feat: add impl.txt"],
-        cwd=tmp_path, check=True, capture_output=True,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
     )
 
     base_ref = subprocess.run(
         ["git", "rev-parse", "HEAD~1"],
-        cwd=tmp_path, capture_output=True, text=True, check=True,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
 
     # Create the impl-handoff branch at the impl commit.
     handoff_branch = "ghgremlin-impl-handoff-9999"
-    subprocess.run(["git", "branch", handoff_branch], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "branch", handoff_branch], cwd=tmp_path, check=True, capture_output=True
+    )
 
     session_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
@@ -865,12 +1028,22 @@ def test_resume_from_commit_pr_skips_implement(tmp_path, monkeypatch):
         return ""
 
     monkeypatch.setattr(_gh_mod, "_read_state_field", _fake_read)
-    monkeypatch.setattr(_gh_mod, "_fetch_issue_body", lambda num, repo: "# Plan\nDo stuff.\n")
+    monkeypatch.setattr(
+        _gh_mod, "_fetch_issue_body", lambda num, repo: "# Plan\nDo stuff.\n"
+    )
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_ghreview_stage", lambda **kw: None)
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_wait_copilot_stage", lambda **kw: "APPROVED")
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_request_copilot_stage", lambda **kw: None)
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_ghaddress_stage", lambda **kw: None)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_ghreview_stage", lambda **kw: None
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_wait_copilot_stage", lambda **kw: "APPROVED"
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_request_copilot_stage", lambda **kw: None
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_ghaddress_stage", lambda **kw: None
+    )
 
     client = FakeClaudeClient(fixtures={"commit-pr": _pr_events()})
 
@@ -883,7 +1056,9 @@ def test_resume_from_commit_pr_skips_implement(tmp_path, monkeypatch):
 
     # The commit-pr prompt must contain content from the impl diff.
     commit_pr_call = next(c for c in client.calls if c.label == "commit-pr")
-    assert "impl content" in commit_pr_call.prompt or "impl.txt" in commit_pr_call.prompt
+    assert (
+        "impl content" in commit_pr_call.prompt or "impl.txt" in commit_pr_call.prompt
+    )
 
     # No resume_session: commit-pr must open a fresh session.
     assert commit_pr_call.resume_session is None

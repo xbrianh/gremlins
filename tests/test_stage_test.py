@@ -1,4 +1,5 @@
 """Tests for gremlins.stages.test."""
+
 import json
 
 import pytest
@@ -13,8 +14,17 @@ from gremlins.stages.test import run_test_stage
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _run(tmp_path, *, test_cmd, max_attempts=3, client=None, is_git=False,
-         code_style="Be good.", test_fix_model="sonnet"):
+
+def _run(
+    tmp_path,
+    *,
+    test_cmd,
+    max_attempts=3,
+    client=None,
+    is_git=False,
+    code_style="Be good.",
+    test_fix_model="sonnet",
+):
     if client is None:
         client = FakeClaudeClient(fixtures={})
     run_test_stage(
@@ -33,6 +43,7 @@ def _run(tmp_path, *, test_cmd, max_attempts=3, client=None, is_git=False,
 # ---------------------------------------------------------------------------
 # No-op when test_cmd is None
 # ---------------------------------------------------------------------------
+
 
 def test_noop_when_no_test_cmd(tmp_path, capsys):
     client = FakeClaudeClient(fixtures={})
@@ -56,6 +67,7 @@ def test_noop_when_no_test_cmd(tmp_path, capsys):
 # Green on first try
 # ---------------------------------------------------------------------------
 
+
 def test_green_on_first_try(tmp_path):
     client = _run(tmp_path, test_cmd="true")
     assert len(client.calls) == 0
@@ -65,6 +77,7 @@ def test_green_on_first_try(tmp_path):
 # ---------------------------------------------------------------------------
 # Fix then green
 # ---------------------------------------------------------------------------
+
 
 def test_fix_then_green(tmp_path):
     flag = tmp_path / "flag.txt"
@@ -100,13 +113,16 @@ def test_fix_then_green(tmp_path):
 # Attempts exhausted → RuntimeError + bail
 # ---------------------------------------------------------------------------
 
+
 def test_attempts_exhausted_bails(tmp_path, monkeypatch):
     monkeypatch.delenv("GR_ID", raising=False)
 
-    client = FakeClaudeClient(fixtures={
-        "test-fix-1": MINIMAL_EVENTS,
-        "test-fix-2": MINIMAL_EVENTS,
-    })
+    client = FakeClaudeClient(
+        fixtures={
+            "test-fix-1": MINIMAL_EVENTS,
+            "test-fix-2": MINIMAL_EVENTS,
+        }
+    )
 
     with pytest.raises(RuntimeError, match="exhausted 3 attempts"):
         run_test_stage(
@@ -150,6 +166,7 @@ def test_attempts_exhausted_with_max_1(tmp_path):
 # code_style appears verbatim in fix prompt
 # ---------------------------------------------------------------------------
 
+
 def test_code_style_in_fix_prompt(tmp_path):
     flag = tmp_path / "flag.txt"
     flag.write_text("fail\n")
@@ -180,6 +197,7 @@ def test_code_style_in_fix_prompt(tmp_path):
 # Log file content
 # ---------------------------------------------------------------------------
 
+
 def test_log_file_captures_output(tmp_path):
     client = FakeClaudeClient(fixtures={})
 
@@ -204,35 +222,52 @@ def test_log_file_captures_output(tmp_path):
 # boss: launch_child forwards --test flags via pipeline_args
 # ---------------------------------------------------------------------------
 
+
 def test_launch_child_forwards_test_flags(tmp_path, monkeypatch):
     gr_id = "test-boss-testcmd-aa1122"
     state_dir = tmp_path / gr_id
     state_dir.mkdir()
-    (state_dir / "state.json").write_text(json.dumps({
-        "id": gr_id,
-        "project_root": str(tmp_path / "repo"),
-        "current_head": "abc123def456abc1",
-    }))
-    (state_dir / "boss_state.json").write_text(json.dumps({
-        "spec_path": "/some/spec.md",
-        "chain_kind": "local",
-        "chain_base_ref": "abc123def456abc1",
-        "target_branch": "main",
-        "current_plan": "/some/spec.md",
-        "handoff_count": 0,
-        "current_child_id": None,
-        "children": [],
-        "handoff_records": [],
-        "operator_followups": [],
-        "test_cmd": "pytest -x",
-        "test_max_attempts": 5,
-        "test_fix_model": "opus",
-    }))
+    (state_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "id": gr_id,
+                "project_root": str(tmp_path / "repo"),
+                "current_head": "abc123def456abc1",
+            }
+        )
+    )
+    (state_dir / "boss_state.json").write_text(
+        json.dumps(
+            {
+                "spec_path": "/some/spec.md",
+                "chain_kind": "local",
+                "chain_base_ref": "abc123def456abc1",
+                "target_branch": "main",
+                "current_plan": "/some/spec.md",
+                "handoff_count": 0,
+                "current_child_id": None,
+                "children": [],
+                "handoff_records": [],
+                "operator_followups": [],
+                "test_cmd": "pytest -x",
+                "test_max_attempts": 5,
+                "test_fix_model": "opus",
+            }
+        )
+    )
 
     captured_pipeline_args = []
 
-    def fake_launch(kind, *, plan=None, parent_id=None, project_root=None,
-                    base_ref="HEAD", pipeline_args=(), **kw):
+    def fake_launch(
+        kind,
+        *,
+        plan=None,
+        parent_id=None,
+        project_root=None,
+        base_ref="HEAD",
+        pipeline_args=(),
+        **kw,
+    ):
         captured_pipeline_args.extend(pipeline_args)
         return "child-testcmd-bb2233"
 
@@ -255,31 +290,47 @@ def test_launch_child_no_test_flags_when_absent(tmp_path, monkeypatch):
     gr_id = "test-boss-notest-cc3344"
     state_dir = tmp_path / gr_id
     state_dir.mkdir()
-    (state_dir / "state.json").write_text(json.dumps({
-        "id": gr_id,
-        "project_root": str(tmp_path / "repo"),
-        "current_head": "abc123def456abc1",
-    }))
-    (state_dir / "boss_state.json").write_text(json.dumps({
-        "spec_path": "/some/spec.md",
-        "chain_kind": "local",
-        "chain_base_ref": "abc123def456abc1",
-        "target_branch": "main",
-        "current_plan": "/some/spec.md",
-        "handoff_count": 0,
-        "current_child_id": None,
-        "children": [],
-        "handoff_records": [],
-        "operator_followups": [],
-        "test_cmd": "",
-        "test_max_attempts": 3,
-        "test_fix_model": "",
-    }))
+    (state_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "id": gr_id,
+                "project_root": str(tmp_path / "repo"),
+                "current_head": "abc123def456abc1",
+            }
+        )
+    )
+    (state_dir / "boss_state.json").write_text(
+        json.dumps(
+            {
+                "spec_path": "/some/spec.md",
+                "chain_kind": "local",
+                "chain_base_ref": "abc123def456abc1",
+                "target_branch": "main",
+                "current_plan": "/some/spec.md",
+                "handoff_count": 0,
+                "current_child_id": None,
+                "children": [],
+                "handoff_records": [],
+                "operator_followups": [],
+                "test_cmd": "",
+                "test_max_attempts": 3,
+                "test_fix_model": "",
+            }
+        )
+    )
 
     captured_pipeline_args = []
 
-    def fake_launch(kind, *, plan=None, parent_id=None, project_root=None,
-                    base_ref="HEAD", pipeline_args=(), **kw):
+    def fake_launch(
+        kind,
+        *,
+        plan=None,
+        parent_id=None,
+        project_root=None,
+        base_ref="HEAD",
+        pipeline_args=(),
+        **kw,
+    ):
         captured_pipeline_args.extend(pipeline_args)
         return "child-notest-dd4455"
 

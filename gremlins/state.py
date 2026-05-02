@@ -25,7 +25,7 @@ BAIL_CLASS_SECRETS = "secrets"
 BAIL_CLASS_OTHER = "other"
 
 
-def set_stage(stage: str, sub_stage=None) -> None:
+def set_stage(stage: str, sub_stage: object = None) -> None:
     """Write stage and stage_updated_at to state.json. No-op without GR_ID, empty stage, or missing state.json."""
     try:
         if not stage or not os.environ.get("GR_ID"):
@@ -52,10 +52,13 @@ def resolve_session_dir() -> pathlib.Path:
     ``$STATE_ROOT/direct/<ts>-<rand>/artifacts/`` so they're visually separated
     from real gremlins and can be pruned on a simpler age-based heuristic.
     """
-    state_root = pathlib.Path(
-        os.environ.get("XDG_STATE_HOME")
-        or os.path.join(os.path.expanduser("~"), ".local", "state")
-    ) / "claude-gremlins"
+    state_root = (
+        pathlib.Path(
+            os.environ.get("XDG_STATE_HOME")
+            or os.path.join(os.path.expanduser("~"), ".local", "state")
+        )
+        / "claude-gremlins"
+    )
     gr_id = os.environ.get("GR_ID", "")
     if gr_id and not GR_ID_RE.match(gr_id):
         # Malformed GR_ID — treat as a direct invocation rather than raising a
@@ -92,14 +95,17 @@ def resolve_state_file() -> pathlib.Path | None:
     gr_id = os.environ.get("GR_ID", "")
     if not gr_id or not GR_ID_RE.match(gr_id):
         return None
-    state_root = pathlib.Path(
-        os.environ.get("XDG_STATE_HOME")
-        or os.path.join(os.path.expanduser("~"), ".local", "state")
-    ) / "claude-gremlins"
+    state_root = (
+        pathlib.Path(
+            os.environ.get("XDG_STATE_HOME")
+            or os.path.join(os.path.expanduser("~"), ".local", "state")
+        )
+        / "claude-gremlins"
+    )
     return state_root / gr_id / "state.json"
 
 
-def patch_state(_delete=(), **fields) -> None:
+def patch_state(_delete: tuple[str, ...] = (), **fields: object) -> None:
     """Merge keyword fields into state.json atomically, deleting any keys in _delete.
 
     No-op when GR_ID is unset, when state.json doesn't exist, or when the
@@ -113,9 +119,7 @@ def patch_state(_delete=(), **fields) -> None:
         for key in _delete:
             data.pop(key, None)
         data.update(fields)
-        tmp = sf.with_name(
-            f"{sf.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
-        )
+        tmp = sf.with_name(f"{sf.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
         tmp.write_text(json.dumps(data), encoding="utf-8")
         os.replace(tmp, sf)
     except Exception:

@@ -66,6 +66,20 @@ def build_row(gr_id, sf, wdir, state, live):
 
 def print_table(rows):
     """Print header + rows using the fixed format string."""
-    print(FMT % ("KIND", "ID", "STAGE", "LIVENESS", "AGE", "BOSS", "MODEL", "DESCRIPTION"))
+    print(
+        FMT % ("KIND", "ID", "STAGE", "LIVENESS", "AGE", "BOSS", "MODEL", "DESCRIPTION")
+    )
     for r in rows:
-        print(FMT % (r["kind"], r["sid"], r["stage"], r["live"], r["age"], r["boss"], r["model"], r["desc"]))
+        print(
+            FMT
+            % (
+                r["kind"],
+                r["sid"],
+                r["stage"],
+                r["live"],
+                r["age"],
+                r["boss"],
+                r["model"],
+                r["desc"],
+            )
+        )

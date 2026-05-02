@@ -43,7 +43,9 @@ class ReviewCreatingClient(FakeClaudeClient):
 
 def common_local_patches(monkeypatch):
     """Apply monkeypatches shared across local-orchestrator smoke tests."""
-    monkeypatch.setattr(shutil, "which", lambda n: "/fake/claude" if n == "claude" else None)
+    monkeypatch.setattr(
+        shutil, "which", lambda n: "/fake/claude" if n == "claude" else None
+    )
     monkeypatch.setattr(
         "gremlins.orchestrators.local.install_signal_handlers", lambda c: None
     )

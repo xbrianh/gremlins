@@ -21,7 +21,7 @@ import time
 from gremlins.fleet.state import liveness_of_state_file
 
 
-def main(argv) -> int:
+def main(argv: list[str]) -> int:
     """Run the session-summary hook. Always returns 0."""
     try:
         return _run()
@@ -42,7 +42,9 @@ def _run() -> int:
     cwd_from_input = hook_input.get("cwd") or ""
 
     project_root = _resolve_project_root(cwd_from_input)
-    running, finished, newly_summarized_dirs = _collect_gremlins(state_root, project_root)
+    running, finished, newly_summarized_dirs = _collect_gremlins(
+        state_root, project_root
+    )
 
     # UserPromptSubmit with no new finishes → emit nothing (don't spam every prompt).
     if hook_event == "UserPromptSubmit" and not finished:
@@ -88,7 +90,9 @@ def _resolve_project_root(cwd_from_input: str) -> str:
         try:
             result = subprocess.run(
                 ["git", "-C", root, "rev-parse", "--show-toplevel"],
-                capture_output=True, text=True, check=True,
+                capture_output=True,
+                text=True,
+                check=True,
             )
             top = result.stdout.strip()
             if top:
@@ -147,29 +151,33 @@ def _collect_gremlins(state_root: str, project_root: str):
         ):
             # exit_code None → empty string (no suffix rendered)
             exit_code_str = "" if exit_code is None else str(exit_code)
-            finished.append({
-                "id": gr_id,
-                "kind": kind,
-                "status": gr_status,
-                "exit_code": exit_code_str,
-                "description": description,
-                "log": log,
-                "wdir": wdir,
-            })
+            finished.append(
+                {
+                    "id": gr_id,
+                    "kind": kind,
+                    "status": gr_status,
+                    "exit_code": exit_code_str,
+                    "description": description,
+                    "log": log,
+                    "wdir": wdir,
+                }
+            )
             newly_summarized_dirs.append(wdir)
             continue
 
         if gr_status == "running":
             live = liveness_of_state_file(sf, state=state)
-            running.append({
-                "id": gr_id,
-                "kind": kind,
-                "live": live,
-                "stage": stage,
-                "pid": str(pid) if pid is not None else "",
-                "description": description,
-                "log": log,
-            })
+            running.append(
+                {
+                    "id": gr_id,
+                    "kind": kind,
+                    "live": live,
+                    "stage": stage,
+                    "pid": str(pid) if pid is not None else "",
+                    "description": description,
+                    "log": log,
+                }
+            )
 
     return running, finished, newly_summarized_dirs
 
@@ -183,13 +191,13 @@ def _render_summary(running: list, finished: list) -> str:
         stage_disp = g["stage"] or "?"
         live = g["live"]
         if live.startswith("dead:"):
-            reason = live[len("dead:"):]
+            reason = live[len("dead:") :]
             running_block += (
                 f"- `{g['id']}` ({g['kind']}): **{reason}**"
                 f" (stage: {stage_disp}){desc_suffix} — log: {g['log']}\n"
             )
         elif live.startswith("stalled:"):
-            reason = live[len("stalled:"):]
+            reason = live[len("stalled:") :]
             running_block += (
                 f"- `{g['id']}` ({g['kind']}): **stalled?**"
                 f" ({reason}, stage: {stage_disp}, pid {pid_str}){desc_suffix} — log: {g['log']}\n"
@@ -215,7 +223,9 @@ def _render_summary(running: list, finished: list) -> str:
     if finished_block:
         if summary:
             summary += "\n"
-        summary += f"**Background gremlins — finished since last check:**\n{finished_block}"
+        summary += (
+            f"**Background gremlins — finished since last check:**\n{finished_block}"
+        )
 
     return summary
 
@@ -233,12 +243,14 @@ def _emit(hook_event: str, raw_summary: str) -> None:
     sys.stderr.write(raw_summary)
     sys.stderr.flush()
 
-    output = json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": event_out,
-            "additionalContext": full,
+    output = json.dumps(
+        {
+            "hookSpecificOutput": {
+                "hookEventName": event_out,
+                "additionalContext": full,
+            }
         }
-    })
+    )
     sys.stdout.write(output + "\n")
     sys.stdout.flush()
 
