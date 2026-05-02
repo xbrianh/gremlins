@@ -23,7 +23,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import IO, Any, Protocol
 
 CLAUDE_FLAGS_BASE = [
     "--permission-mode",
@@ -147,13 +147,13 @@ def _emit_event(prefix: str, evt: dict) -> None:
 
 
 def stream_events(
-    stdout,
+    stdout: IO[bytes],
     *,
     prefix: str = "",
     raw_path: pathlib.Path | None = None,
     capture: bool = False,
-    on_event: Callable[[dict], None] | None = None,
-) -> tuple[str | None, float | None, str | None, list[dict] | None]:
+    on_event: Callable[[dict[str, Any]], None] | None = None,
+) -> tuple[str | None, float | None, str | None, list[dict[str, Any]] | None]:
     """Read stream-json lines from stdout, render via _emit_event.
 
     Returns (session_id, cost_usd, result_text, events).
