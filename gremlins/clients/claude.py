@@ -286,7 +286,7 @@ class SubprocessClaudeClient:
         resume_session: str | None = None,
         extra_flags: Sequence[str] = (),
         capture_events: bool = False,
-        on_event: Callable[[dict], None] | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> CompletedRun:
         cmd = ["claude", "-p"]
         if model is not None:

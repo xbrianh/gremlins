@@ -23,6 +23,7 @@ import re
 import shutil
 import subprocess
 import sys
+from typing import NoReturn
 
 from ..clients.claude import ClaudeClient, SubprocessClaudeClient
 from ..gh_utils import extract_gh_url, get_repo, parse_issue_ref, view_issue
@@ -50,7 +51,7 @@ VALID_STAGES = [
 ]
 
 
-def die(msg: str) -> None:
+def die(msg: str) -> NoReturn:
     sys.stderr.write(f"error: {msg}\n")
     sys.stderr.flush()
     sys.exit(1)
@@ -150,7 +151,7 @@ def _resolve_plan_source(
     model: str | None,
     client: ClaudeClient,
     state_file: pathlib.Path | None,
-) -> tuple:
+) -> tuple[str, str, str]:
     """Resolve --plan <source> into (issue_url, issue_num, issue_body).
 
     On resume (plan_md already exists): reload from snapshot + state.json.
@@ -228,7 +229,7 @@ def _resolve_plan_source(
     else:
         # Issue reference
         target_repo, issue_ref = _parse_issue_ref(plan_source, repo)
-        if target_repo is None:
+        if target_repo is None or issue_ref is None:
             die(
                 f"--plan: not a readable file or recognized issue reference: {plan_source}"
             )
@@ -415,6 +416,8 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
             spec_text=spec_text,
         )
         impl_result_holder["result"] = result
+        if result is None:
+            die("implement stage did not produce a result")
         # Persist for commit-pr resume: base_ref and handoff branch are all
         # that's needed to reconstruct the diff and outcome on a fresh process.
         patch_state(

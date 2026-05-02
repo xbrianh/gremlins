@@ -101,7 +101,7 @@ def view_issue(issue_ref: str, repo: str) -> dict[str, Any]:
 
 
 def extract_gh_url(
-    events: list[dict],
+    events: list[dict[str, Any]],
     url_pattern: str,
     cmd_pattern: str,
     label: str,
