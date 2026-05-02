@@ -24,6 +24,8 @@ import signal
 import subprocess
 import sys
 import time
+import types
+from typing import Any, NoReturn, cast
 
 from .. import git as _git_mod
 from ..gh_utils import get_repo, parse_issue_ref, view_issue
@@ -45,11 +47,11 @@ STATE_ROOT = os.path.join(
 _GREMLINS_PARENT = str(pathlib.Path(__file__).resolve().parents[2])
 
 
-def _gremlins_cli_cmd(*args: str) -> list:
+def _gremlins_cli_cmd(*args: str) -> list[str]:
     return [sys.executable, "-m", "gremlins.cli", *args]
 
 
-def _gremlins_cli_env() -> dict:
+def _gremlins_cli_env() -> dict[str, str]:
     env = os.environ.copy()
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = (
@@ -70,7 +72,7 @@ _current_proc = None
 _stop_requested = False
 
 
-def _sigterm_handler(signum, frame):
+def _sigterm_handler(signum: int, frame: types.FrameType | None) -> None:
     global _stop_requested
     _stop_requested = True
     log("received SIGTERM — stopping after current operation")
@@ -89,7 +91,7 @@ def log(msg: str) -> None:
     print(f"[{ts}] {msg}", flush=True)
 
 
-def die(msg: str) -> None:
+def die(msg: str) -> NoReturn:
     log(f"fatal: {msg}")
     sys.exit(1)
 
@@ -100,19 +102,19 @@ def check_stop() -> None:
         sys.exit(130)
 
 
-def load_json(path: str) -> dict:
+def load_json(path: str) -> dict[str, Any]:
     with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
-def save_json(path: str, data: dict) -> None:
+def save_json(path: str, data: dict[str, Any]) -> None:
     tmp = f"{path}.tmp.{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, path)
 
 
-def run_proc(cmd: list, **kwargs) -> int:
+def run_proc(cmd: list[str], **kwargs: Any) -> int:
     """Run subprocess, returning exit code. Forwards SIGTERM on stop."""
     global _current_proc
     proc = subprocess.Popen(cmd, **kwargs)
@@ -232,8 +234,8 @@ def init_boss_state(
     test_cmd: str = "",
     test_max_attempts: int = 3,
     test_fix_model: str = "",
-) -> dict:
-    boss_state = {
+) -> dict[str, Any]:
+    boss_state: dict[str, Any] = {
         "spec_path": spec_path,
         "chain_kind": chain_kind,
         "chain_base_ref": chain_base_ref,
@@ -263,22 +265,22 @@ def init_boss_state(
     return boss_state
 
 
-def load_boss_state(state_dir: str) -> dict:
+def load_boss_state(state_dir: str) -> dict[str, Any]:
     return load_json(os.path.join(state_dir, "boss_state.json"))
 
 
-def save_boss_state(state_dir: str, boss_state: dict) -> None:
+def save_boss_state(state_dir: str, boss_state: dict[str, Any]) -> None:
     save_json(os.path.join(state_dir, "boss_state.json"), boss_state)
 
 
 def run_handoff(
     gr_id: str,
     state_dir: str,
-    boss_state: dict,
+    boss_state: dict[str, Any],
     project_root: str,
     boss_workdir: str,
     model: str,
-) -> tuple:
+) -> tuple[str, dict[str, Any]]:
     """Run handoff agent. Returns (exit_state, signal dict).
 
     Updates boss_state in place (handoff_count, current_plan, handoff_records).
@@ -300,7 +302,9 @@ def run_handoff(
     chain_kind = boss_state.get("chain_kind")
     target_branch = boss_state.get("target_branch", "")
 
-    rev_args: list = []
+    rev_args: list[str] = []
+    rev_label: str = ""
+    handoff_cwd: str = ""
     if chain_kind == "local":
         if not boss_workdir or not os.path.isdir(boss_workdir):
             die(f"boss workdir not usable for local chain handoff: {boss_workdir!r}")
@@ -366,7 +370,9 @@ def run_handoff(
     # followups so a chain that started under an older handoff still reads.
     raw_followups = sig.get("operator_followups")
     if isinstance(raw_followups, list):
-        followups = [str(item) for item in raw_followups if str(item).strip()]
+        followups = [
+            str(item) for item in cast(list[Any], raw_followups) if str(item).strip()
+        ]
     else:
         followups = []
 
@@ -408,7 +414,7 @@ def launch_child(gr_id: str, launch_kind: str, child_plan: str) -> str:
     test_cmd = boss_state.get("test_cmd") or None
     test_max = boss_state.get("test_max_attempts")
     test_model = boss_state.get("test_fix_model") or None
-    extra: list = []
+    extra: list[str] = []
     if test_cmd:
         extra += ["--test", test_cmd]
         if test_max is not None:
@@ -625,8 +631,11 @@ def _resolve_plan_source(plan: str, state_dir: str) -> tuple[str, str, str]:
         # Re-parse against the resolved repo to populate issue_ref for the
         # bare-number form.
         target_repo, issue_ref = parse_issue_ref(plan, target_repo)
-        if target_repo is None:
+        if target_repo is None or issue_ref is None:
             die(f"--plan: not a readable file or recognized issue reference: {plan}")
+
+    if issue_ref is None:
+        die(f"--plan: not a readable file or recognized issue reference: {plan}")
 
     try:
         issue_data = view_issue(issue_ref, target_repo)
@@ -786,7 +795,7 @@ def boss_main(argv: list[str]) -> int:
 
             if exit_state == "chain-done":
                 log("chain complete")
-                followups = boss_state.get("operator_followups") or []
+                followups: list[Any] = boss_state.get("operator_followups") or []
                 if followups:
                     log(
                         f"operator follow-ups ({len(followups)}) — owed by the "

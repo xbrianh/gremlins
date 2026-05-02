@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+from typing import Any
 
 
 def get_repo() -> str:
@@ -55,7 +56,7 @@ def parse_issue_ref(plan_source: str, repo: str) -> tuple[str | None, str | None
 VIEW_ISSUE_TIMEOUT = 30  # seconds; bounds `gh issue view` shell-out
 
 
-def view_issue(issue_ref: str, repo: str) -> dict:
+def view_issue(issue_ref: str, repo: str) -> dict[str, Any]:
     """Fetch ``number``, ``url``, ``body`` for an issue via ``gh issue view``.
 
     Returns the parsed JSON dict. Raises ``RuntimeError`` when ``gh`` fails,
