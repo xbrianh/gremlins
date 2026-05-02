@@ -42,6 +42,7 @@ from fixtures.shell_env import (
     setup_shell_env,
 )
 
+import gremlins.fleet.constants as _constants
 import gremlins.fleet.rescue as rescue_mod
 from gremlins import fleet
 
@@ -80,10 +81,10 @@ def _make_failed_gremlin(
     return state_dir
 
 
-def _patch_state_root(gremlins_mod, state_root: pathlib.Path, monkeypatch):
-    """Point the loaded gremlins module at our test STATE_ROOT."""
+def _patch_state_root(state_root: pathlib.Path, monkeypatch):
+    """Patch constants.STATE_ROOT to point at the test state root."""
     monkeypatch.setattr(
-        gremlins_mod,
+        _constants,
         "STATE_ROOT",
         str(state_root / "claude-gremlins"),
     )
@@ -102,7 +103,7 @@ def test_rescue_diagnosis_runs_in_scratch_dir_not_worktree(tmp_path, monkeypatch
         monkeypatch.setenv(k, v)
 
     gremlins_mod = _load_gremlins_module()
-    _patch_state_root(gremlins_mod, sh.state_root, monkeypatch)
+    _patch_state_root(sh.state_root, monkeypatch)
 
     ok = gremlins_mod.do_rescue("victim-abcdef", headless=False)
     # unsalvageable verdict returns False (no relaunch). That's expected.
@@ -132,7 +133,7 @@ def test_rescue_unsalvageable_records_bail(tmp_path, monkeypatch):
         monkeypatch.setenv(k, v)
 
     gremlins_mod = _load_gremlins_module()
-    _patch_state_root(gremlins_mod, sh.state_root, monkeypatch)
+    _patch_state_root(sh.state_root, monkeypatch)
 
     gremlins_mod.do_rescue("victim-abcdef", headless=False)
 
@@ -153,7 +154,7 @@ def test_rescue_structural_records_bail(tmp_path, monkeypatch):
         monkeypatch.setenv(k, v)
 
     gremlins_mod = _load_gremlins_module()
-    _patch_state_root(gremlins_mod, sh.state_root, monkeypatch)
+    _patch_state_root(sh.state_root, monkeypatch)
 
     gremlins_mod.do_rescue("victim-abcdef", headless=False)
 
@@ -179,7 +180,7 @@ def test_rescue_no_marker_records_diagnosis_no_marker(tmp_path, monkeypatch):
         monkeypatch.setenv(k, v)
 
     gremlins_mod = _load_gremlins_module()
-    _patch_state_root(gremlins_mod, sh.state_root, monkeypatch)
+    _patch_state_root(sh.state_root, monkeypatch)
 
     gremlins_mod.do_rescue("victim-abcdef", headless=False)
 
@@ -207,7 +208,7 @@ def test_rescue_fixed_verdict_invokes_launcher_resume(tmp_path, monkeypatch):
         monkeypatch.setenv(k, v)
 
     gremlins_mod = _load_gremlins_module()
-    _patch_state_root(gremlins_mod, sh.state_root, monkeypatch)
+    _patch_state_root(sh.state_root, monkeypatch)
 
     ok = gremlins_mod.do_rescue("victim-abcdef", headless=False)
     assert ok is True
@@ -230,7 +231,7 @@ def test_rescue_headless_excluded_class_refused(tmp_path, monkeypatch):
         monkeypatch.setenv(k, v)
 
     gremlins_mod = _load_gremlins_module()
-    _patch_state_root(gremlins_mod, sh.state_root, monkeypatch)
+    _patch_state_root(sh.state_root, monkeypatch)
 
     ok = gremlins_mod.do_rescue("victim-abcdef", headless=True)
     assert ok is False
@@ -258,7 +259,7 @@ def test_rescue_nonzero_exit_records_diagnosis_claude_error(tmp_path, monkeypatc
         monkeypatch.setenv(k, v)
 
     gremlins_mod = _load_gremlins_module()
-    _patch_state_root(gremlins_mod, sh.state_root, monkeypatch)
+    _patch_state_root(sh.state_root, monkeypatch)
 
     ok = gremlins_mod.do_rescue("victim-abcdef", headless=False)
     assert ok is False
@@ -276,7 +277,7 @@ def test_rescue_claude_not_found_records_diagnosis_claude_error(tmp_path, monkey
         monkeypatch.setenv(k, v)
 
     gremlins_mod = _load_gremlins_module()
-    _patch_state_root(gremlins_mod, sh.state_root, monkeypatch)
+    _patch_state_root(sh.state_root, monkeypatch)
 
     original_popen = subprocess.Popen
 
@@ -286,8 +287,8 @@ def test_rescue_claude_not_found_records_diagnosis_claude_error(tmp_path, monkey
         return original_popen(cmd, *args, **kwargs)
 
     monkeypatch.setattr(subprocess, "Popen", popen_raise_if_claude)
-    # Also patch it in the fleet module's own subprocess reference.
-    monkeypatch.setattr(gremlins_mod.subprocess, "Popen", popen_raise_if_claude)
+    # Also patch it in the rescue module's own subprocess reference.
+    monkeypatch.setattr(rescue_mod.subprocess, "Popen", popen_raise_if_claude)
 
     ok = gremlins_mod.do_rescue("victim-abcdef", headless=False)
     assert ok is False
@@ -330,7 +331,7 @@ def test_rescue_diagnosis_streams_events_to_stderr(tmp_path, monkeypatch, capsys
         monkeypatch.setenv(k, v)
 
     gremlins_mod = _load_gremlins_module()
-    _patch_state_root(gremlins_mod, sh.state_root, monkeypatch)
+    _patch_state_root(sh.state_root, monkeypatch)
 
     gremlins_mod.do_rescue("victim-abcdef", headless=False)
 
