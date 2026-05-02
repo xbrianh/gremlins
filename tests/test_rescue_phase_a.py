@@ -43,6 +43,7 @@ from fixtures.shell_env import (
 )
 
 import gremlins.fleet.rescue as rescue_mod
+import gremlins.fleet.constants as _constants
 from gremlins import fleet
 
 
@@ -83,7 +84,7 @@ def _make_failed_gremlin(
 def _patch_state_root(gremlins_mod, state_root: pathlib.Path, monkeypatch):
     """Point the loaded gremlins module at our test STATE_ROOT."""
     monkeypatch.setattr(
-        gremlins_mod,
+        _constants,
         "STATE_ROOT",
         str(state_root / "claude-gremlins"),
     )
@@ -286,8 +287,8 @@ def test_rescue_claude_not_found_records_diagnosis_claude_error(tmp_path, monkey
         return original_popen(cmd, *args, **kwargs)
 
     monkeypatch.setattr(subprocess, "Popen", popen_raise_if_claude)
-    # Also patch it in the fleet module's own subprocess reference.
-    monkeypatch.setattr(gremlins_mod.subprocess, "Popen", popen_raise_if_claude)
+    # Also patch it in the rescue module's own subprocess reference.
+    monkeypatch.setattr(rescue_mod.subprocess, "Popen", popen_raise_if_claude)
 
     ok = gremlins_mod.do_rescue("victim-abcdef", headless=False)
     assert ok is False

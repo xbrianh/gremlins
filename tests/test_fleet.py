@@ -8,6 +8,9 @@ import subprocess
 import pytest
 
 from gremlins import fleet as gremlins
+import gremlins.fleet.constants as _constants
+import gremlins.fleet.land as _land
+import gremlins.fleet.rescue as _rescue
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -51,7 +54,7 @@ def _setup_dead_gremlin(
     }
     state.update(state_overrides)
     _write_state(gr_dir, state, finished=True)
-    monkeypatch.setattr(gremlins, "STATE_ROOT", str(state_root))
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     return gr_dir, workdir
 
 
@@ -137,7 +140,7 @@ def test_liveness_stalled_when_log_is_old(tmp_path, monkeypatch):
     log_path = tmp_path / "g" / "log"
     old = os.path.getmtime(log_path) - 10000
     os.utime(log_path, (old, old))
-    monkeypatch.setattr(gremlins, "BG_STALL_SECS", 100)
+    monkeypatch.setattr(_constants, "BG_STALL_SECS", 100)
     assert gremlins.liveness_of_state_file(sf).startswith("stalled:")
 
 
@@ -221,35 +224,35 @@ def _write_marker(path: pathlib.Path, payload) -> str:
 
 
 def test_marker_missing_file(tmp_path):
-    status, msg = gremlins._read_rescue_marker(str(tmp_path / "missing.json"))
+    status, msg = _rescue._read_rescue_marker(str(tmp_path / "missing.json"))
     assert status == "no_marker"
     assert "did not write" in msg
 
 
 def test_marker_unparseable(tmp_path):
     p = _write_marker(tmp_path / "m.json", "not json")
-    status, msg = gremlins._read_rescue_marker(p)
+    status, msg = _rescue._read_rescue_marker(p)
     assert status == "bad_marker"
     assert "unreadable" in msg
 
 
 def test_marker_not_a_json_object(tmp_path):
     p = _write_marker(tmp_path / "m.json", [1, 2, 3])
-    status, msg = gremlins._read_rescue_marker(p)
+    status, msg = _rescue._read_rescue_marker(p)
     assert status == "bad_marker"
     assert "not a JSON object" in msg
 
 
 def test_marker_invalid_status(tmp_path):
     p = _write_marker(tmp_path / "m.json", {"status": "bogus"})
-    status, msg = gremlins._read_rescue_marker(p)
+    status, msg = _rescue._read_rescue_marker(p)
     assert status == "bad_marker"
     assert "invalid status" in msg
 
 
 def test_marker_summary_must_be_string(tmp_path):
     p = _write_marker(tmp_path / "m.json", {"status": "fixed", "summary": [1, 2]})
-    status, msg = gremlins._read_rescue_marker(p)
+    status, msg = _rescue._read_rescue_marker(p)
     assert status == "bad_marker"
 
 
@@ -257,7 +260,7 @@ def test_marker_fixed(tmp_path):
     p = _write_marker(
         tmp_path / "m.json", {"status": "fixed", "summary": "patched state.json"}
     )
-    status, msg = gremlins._read_rescue_marker(p)
+    status, msg = _rescue._read_rescue_marker(p)
     assert status == "fixed"
     assert msg == "patched state.json"
 
@@ -266,7 +269,7 @@ def test_marker_transient(tmp_path):
     p = _write_marker(
         tmp_path / "m.json", {"status": "transient", "summary": "network flake"}
     )
-    status, msg = gremlins._read_rescue_marker(p)
+    status, msg = _rescue._read_rescue_marker(p)
     assert status == "transient"
     assert msg == "network flake"
 
@@ -275,14 +278,14 @@ def test_marker_structural_with_summary(tmp_path):
     p = _write_marker(
         tmp_path / "m.json", {"status": "structural", "summary": "bug in foo.sh"}
     )
-    status, msg = gremlins._read_rescue_marker(p)
+    status, msg = _rescue._read_rescue_marker(p)
     assert status == "structural"
     assert msg == "bug in foo.sh"
 
 
 def test_marker_structural_without_summary_uses_fallback(tmp_path):
     p = _write_marker(tmp_path / "m.json", {"status": "structural"})
-    status, msg = gremlins._read_rescue_marker(p)
+    status, msg = _rescue._read_rescue_marker(p)
     assert status == "structural"
     assert msg  # non-empty fallback
     assert "structural" in msg.lower()
@@ -290,7 +293,7 @@ def test_marker_structural_without_summary_uses_fallback(tmp_path):
 
 def test_marker_unsalvageable_without_summary_uses_fallback(tmp_path):
     p = _write_marker(tmp_path / "m.json", {"status": "unsalvageable"})
-    status, msg = gremlins._read_rescue_marker(p)
+    status, msg = _rescue._read_rescue_marker(p)
     assert status == "unsalvageable"
     assert "unsalvageable" in msg.lower()
 
@@ -299,14 +302,14 @@ def test_marker_summary_collapses_whitespace(tmp_path):
     p = _write_marker(
         tmp_path / "m.json", {"status": "fixed", "summary": "line one\nline two\t  end"}
     )
-    status, msg = gremlins._read_rescue_marker(p)
+    status, msg = _rescue._read_rescue_marker(p)
     assert "\n" not in msg
     assert "line one" in msg and "line two" in msg
 
 
 def test_marker_summary_capped_to_500_chars(tmp_path):
     p = _write_marker(tmp_path / "m.json", {"status": "fixed", "summary": "x" * 1000})
-    status, msg = gremlins._read_rescue_marker(p)
+    status, msg = _rescue._read_rescue_marker(p)
     assert len(msg) <= 500
     assert msg.endswith("...")
 
@@ -345,7 +348,7 @@ def test_rescue_headless_does_not_exclude_other_class(tmp_path, monkeypatch):
     gr_dir, _ = _setup_dead_gremlin(tmp_path, monkeypatch, bail_class="other")
     # Stub the diagnosis step so the rescue terminates without claude.
     monkeypatch.setattr(
-        gremlins, "_run_headless_diagnosis", lambda *a, **kw: ("structural", "fake")
+        _rescue, "_run_headless_diagnosis", lambda *a, **kw: ("structural", "fake")
     )
     ok = gremlins.do_rescue("test-id-aabb12", headless=True)
     assert ok is False
@@ -375,7 +378,7 @@ def test_rescue_headless_below_cap_proceeds_past_check(tmp_path, monkeypatch):
     )
     # Stub diagnosis so we don't actually run claude
     monkeypatch.setattr(
-        gremlins,
+        _rescue,
         "_run_headless_diagnosis",
         lambda *a, **kw: ("structural", "agent flagged"),
     )
@@ -442,7 +445,7 @@ def test_close_running_refused(tmp_path, monkeypatch, capsys):
 def test_close_not_found(tmp_path, monkeypatch, capsys):
     state_root = tmp_path / "state-root"
     state_root.mkdir()
-    monkeypatch.setattr(gremlins, "STATE_ROOT", str(state_root))
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     ok = gremlins.do_close("nonexistent-id")
     assert ok is False
     assert "no gremlin matched" in capsys.readouterr().out
@@ -502,9 +505,9 @@ def test_land_local_squash_lands_branch_and_deletes_it(tmp_path, monkeypatch, ca
     }
     _write_state(gr_dir, state, finished=True)
 
-    monkeypatch.setattr(gremlins, "STATE_ROOT", str(state_root))
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     monkeypatch.setattr(
-        gremlins,
+        _land,
         "_synthesize_commit_message_ai",
         lambda inputs: (
             "Add feature.txt to repo",
@@ -514,7 +517,7 @@ def test_land_local_squash_lands_branch_and_deletes_it(tmp_path, monkeypatch, ca
     )
     monkeypatch.chdir(project_root)
 
-    ok = gremlins._land_local(
+    ok = _land._land_local(
         gr_id, str(gr_dir / "state.json"), str(gr_dir), state, mode="squash"
     )
     assert ok is True
@@ -592,15 +595,15 @@ def test_land_local_squash_folds_commit_synthesis_cost_into_total(
     }
     sf_path = _write_state(gr_dir, state, finished=True)
 
-    monkeypatch.setattr(gremlins, "STATE_ROOT", str(state_root))
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     monkeypatch.setattr(
-        gremlins,
+        _land,
         "_synthesize_commit_message_ai",
         lambda inputs: ("Add feature.txt to repo", "", 0.05),
     )
     monkeypatch.chdir(project_root)
 
-    ok = gremlins._land_local(gr_id, sf_path, str(gr_dir), state, mode="squash")
+    ok = _land._land_local(gr_id, sf_path, str(gr_dir), state, mode="squash")
     assert ok is True
 
     persisted = json.loads(pathlib.Path(sf_path).read_text())
@@ -615,7 +618,7 @@ def test_land_local_refuses_non_worktree_branch_setup(tmp_path, monkeypatch, cap
         "setup_kind": "cp-snapshot",  # not worktree-branch
         "branch": "bg/localgremlin/x",
     }
-    ok = gremlins._land_local("x", "/sf", "/wdir", state, mode="squash")
+    ok = _land._land_local("x", "/sf", "/wdir", state, mode="squash")
     assert ok is False
     assert "only worktree-branch gremlins" in capsys.readouterr().out
 
@@ -629,7 +632,7 @@ def test_land_local_refuses_when_branch_missing_from_state(
         "setup_kind": "worktree-branch",
         "branch": "",
     }
-    ok = gremlins._land_local("x", "/sf", "/wdir", state, mode="squash")
+    ok = _land._land_local("x", "/sf", "/wdir", state, mode="squash")
     assert ok is False
     assert "no branch field" in capsys.readouterr().out
 
@@ -643,7 +646,7 @@ def test_land_local_into_dir_nonexistent_fails(tmp_path, monkeypatch, capsys):
         "branch": "bg/localgremlin/x",
         "project_root": str(tmp_path / "project"),
     }
-    ok = gremlins._land_local(
+    ok = _land._land_local(
         "x",
         "/sf",
         "/wdir",
@@ -720,15 +723,15 @@ def test_land_local_into_dir_lands_in_worktree(tmp_path, monkeypatch, capsys):
     sf = str(gr_dir / "state.json")
     pathlib.Path(sf).write_text(json.dumps(state))
 
-    monkeypatch.setattr(gremlins, "STATE_ROOT", str(state_root))
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     monkeypatch.setattr(
-        gremlins,
+        _land,
         "_synthesize_commit_message_ai",
         lambda inputs: ("Add wt_feature.txt", "", 0.0),
     )
     monkeypatch.chdir(into_dir)
 
-    ok = gremlins._land_local(
+    ok = _land._land_local(
         gr_id, sf, str(gr_dir), state, mode="squash", into_dir=str(into_dir)
     )
     assert ok is True
@@ -791,15 +794,15 @@ def test_land_proceeds_with_untracked_files_present(tmp_path, monkeypatch, capsy
     }
     _write_state(gr_dir, state, finished=True)
 
-    monkeypatch.setattr(gremlins, "STATE_ROOT", str(state_root))
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     monkeypatch.setattr(
-        gremlins,
+        _land,
         "_synthesize_commit_message_ai",
         lambda inputs: ("Add feature.txt to repo", "", 0.0),
     )
     monkeypatch.chdir(project_root)
 
-    ok = gremlins._land_local(
+    ok = _land._land_local(
         gr_id, str(gr_dir / "state.json"), str(gr_dir), state, mode="squash"
     )
     assert ok is True
@@ -856,10 +859,10 @@ def test_land_refuses_with_tracked_modifications(tmp_path, monkeypatch, capsys):
     }
     _write_state(gr_dir, state, finished=True)
 
-    monkeypatch.setattr(gremlins, "STATE_ROOT", str(state_root))
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     monkeypatch.chdir(project_root)
 
-    ok = gremlins._land_local(
+    ok = _land._land_local(
         gr_id, str(gr_dir / "state.json"), str(gr_dir), state, mode="squash"
     )
     assert ok is False
@@ -918,12 +921,12 @@ def test_squash_land_failure_preserves_untracked_files(tmp_path, monkeypatch):
     }
     _write_state(gr_dir, state, finished=True)
 
-    monkeypatch.setattr(gremlins, "STATE_ROOT", str(state_root))
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     monkeypatch.chdir(project_root)
 
     # The merge will fail (untracked file would be overwritten), but the
     # pre-existing untracked file must survive — git clean -fd must not run.
-    ok = gremlins._land_local(
+    ok = _land._land_local(
         gr_id, str(gr_dir / "state.json"), str(gr_dir), state, mode="squash"
     )
     assert ok is False
@@ -938,14 +941,14 @@ def test_squash_land_failure_preserves_untracked_files(tmp_path, monkeypatch):
 def test_atomic_patch_state_round_trip(tmp_path):
     sf = tmp_path / "state.json"
     sf.write_text(json.dumps({"a": 1, "b": 2}))
-    ok = gremlins._atomic_patch_state(str(sf), {"b": 99, "c": 3})
+    ok = _rescue._atomic_patch_state(str(sf), {"b": 99, "c": 3})
     assert ok is True
     new = json.loads(sf.read_text())
     assert new == {"a": 1, "b": 99, "c": 3}
 
 
 def test_atomic_patch_state_unreadable_file(tmp_path):
-    ok = gremlins._atomic_patch_state(str(tmp_path / "missing.json"), {"a": 1})
+    ok = _rescue._atomic_patch_state(str(tmp_path / "missing.json"), {"a": 1})
     assert ok is False
 
 
@@ -954,7 +957,7 @@ def test_write_bail_marks_terminal(tmp_path):
     wdir.mkdir()
     sf = wdir / "state.json"
     sf.write_text(json.dumps({"id": "x", "status": "dead", "exit_code": 2}))
-    gremlins._write_bail(str(sf), str(wdir), "structural", "the agent said so")
+    _rescue._write_bail(str(sf), str(wdir), "structural", "the agent said so")
     new = json.loads(sf.read_text())
     assert new["bail_reason"] == "structural"
     assert new["bail_detail"] == "the agent said so"
@@ -1037,7 +1040,7 @@ def test_rescue_host_terminated_project_root_gone_bails_headless(
         "rescue_count": 0,
     }
     _write_state(gr_dir, state)
-    monkeypatch.setattr(gremlins, "STATE_ROOT", str(state_root))
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
 
     ok = gremlins.do_rescue(gr_id, headless=True)
     assert ok is False
@@ -1071,9 +1074,9 @@ def test_rescue_host_terminated_worktree_recreation_failure_bails_headless(
         "rescue_count": 0,
     }
     _write_state(gr_dir, state)
-    monkeypatch.setattr(gremlins, "STATE_ROOT", str(state_root))
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     monkeypatch.setattr(
-        gremlins, "_recreate_worktree", lambda s: (False, "git not a repo")
+        _rescue, "_recreate_worktree", lambda s: (False, "git not a repo")
     )
 
     ok = gremlins.do_rescue(gr_id, headless=True)
@@ -1106,15 +1109,15 @@ def test_rescue_host_terminated_recreates_worktree_and_proceeds(
         "rescue_count": 0,
     }
     _write_state(gr_dir, state)
-    monkeypatch.setattr(gremlins, "STATE_ROOT", str(state_root))
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
 
     def fake_recreate(s):
         workdir.mkdir(exist_ok=True)
         return True, "recreated from branch 'bg/localgremlin/test-id-htdd12'"
 
-    monkeypatch.setattr(gremlins, "_recreate_worktree", fake_recreate)
+    monkeypatch.setattr(_rescue, "_recreate_worktree", fake_recreate)
     monkeypatch.setattr(
-        gremlins,
+        _rescue,
         "_run_headless_diagnosis",
         lambda *a, **kw: ("structural", "fake structural"),
     )
