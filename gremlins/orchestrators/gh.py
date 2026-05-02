@@ -416,7 +416,8 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
             spec_text=spec_text,
         )
         impl_result_holder["result"] = result
-        assert result is not None
+        if result is None:
+            die("implement stage did not produce a result")
         # Persist for commit-pr resume: base_ref and handoff branch are all
         # that's needed to reconstruct the diff and outcome on a fresh process.
         patch_state(
