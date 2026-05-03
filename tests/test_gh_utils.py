@@ -62,10 +62,11 @@ def test_get_required_check_names_timeout_raises_runtime_error():
     assert PR_URL in msg
 
 
-def test_get_required_check_names_nonzero_returns_empty():
-    with patch("subprocess.run", return_value=_fail()):
-        result = get_required_check_names(PR_URL)
-    assert result == set()
+def test_get_required_check_names_nonzero_raises_runtime_error():
+    with patch("subprocess.run", return_value=_fail("auth error")):
+        with pytest.raises(RuntimeError) as exc_info:
+            get_required_check_names(PR_URL)
+    assert "auth error" in str(exc_info.value)
 
 
 def test_get_required_check_names_empty_array_returns_empty():
@@ -111,6 +112,20 @@ def test_get_pr_ci_status_optional_pending_excluded():
 
     assert len(result["checks"]) == 1
     assert result["checks"][0]["name"] == "required-check"
+
+
+def test_get_pr_ci_status_required_check_not_started_returns_pending_placeholder():
+    """Required checks configured but not yet in statusCheckRollup: synthetic pending entry returned."""
+    rollup: list = []
+    with patch("subprocess.run", side_effect=[
+        _ok(json.dumps({"statusCheckRollup": rollup, "reviewDecision": ""})),
+        _ok(json.dumps([{"name": "required-check"}])),
+    ]):
+        result = get_pr_ci_status(PR_URL)
+
+    assert len(result["checks"]) == 1
+    assert result["checks"][0]["name"] == "__required_pending__"
+    assert result["checks"][0]["status"] == "IN_PROGRESS"
 
 
 def test_get_pr_ci_status_no_required_checks_returns_empty():

@@ -176,8 +176,9 @@ def get_required_check_names(pr_url: str) -> set[str]:
     """Return the set of required check names for a PR via branch protection.
 
     Shells out to ``gh pr checks <pr_url> --required --json name``. Returns an
-    empty set when there are no required checks, branch protection is off, or the
-    call fails for any reason (non-zero exit, bad JSON, timeout).
+    empty set when there are no required checks or branch protection is off
+    (``gh`` exits 0 with an empty array). Raises ``RuntimeError`` on timeout,
+    non-zero exit, or unparseable JSON.
     """
     try:
         r = subprocess.run(
@@ -194,11 +195,15 @@ def get_required_check_names(pr_url: str) -> set[str]:
             f"authentication and network connectivity"
         ) from exc
     if r.returncode != 0:
-        return set()
+        raise RuntimeError(
+            f"could not fetch required check names for {pr_url!r}: {r.stderr.strip()}"
+        )
     try:
         data = json.loads(r.stdout)
-    except json.JSONDecodeError:
-        return set()
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"could not parse required check names response: {exc}"
+        ) from exc
     return {entry["name"] for entry in data if "name" in entry}
 
 
@@ -238,6 +243,11 @@ def get_pr_ci_status(pr_url: str) -> dict[str, Any]:
             c for c in all_checks
             if (c.get("name") or c.get("context")) in required_names
         ]
+        if not checks:
+            # Required checks are configured but none have started reporting yet.
+            # Return a synthetic pending entry so the poller keeps waiting rather
+            # than treating the empty list as "no checks / done".
+            checks = [{"__typename": "CheckRun", "name": "__required_pending__", "status": "IN_PROGRESS"}]
     else:
         checks = []
     return {
