@@ -24,6 +24,7 @@ from typing import Any, cast
 from . import git as _git_mod
 
 VALID_KINDS = {"ghgremlin", "localgremlin", "bossgremlin"}
+MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 _KIND_SUBCOMMAND = {
     "localgremlin": "_local",

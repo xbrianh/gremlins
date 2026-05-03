@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import pathlib
 
 import pytest
 
-from gremlins.cli import main
+from gremlins.cli import (
+    _validate_boss_args,
+    _validate_gh_args,
+    _validate_local_args,
+    main,
+)
 
 
 def _make_state(tmp_path: pathlib.Path, gr_id: str) -> pathlib.Path:
@@ -135,3 +141,74 @@ def test_run_pipeline_valid_id_proceeds(tmp_path, monkeypatch):
     with pytest.raises(SystemExit):
         main(["_run-pipeline", "valid-gremlin-abc123", "_local"])
     # If we reach here, validate_gr_id passed; pipeline may exit for any reason.
+
+
+# ---------------------------------------------------------------------------
+# Pre-launch validators — invalid invocations must exit non-zero without
+# touching XDG_STATE_HOME.
+# ---------------------------------------------------------------------------
+
+
+def _no_state_created(tmp_path: pathlib.Path) -> bool:
+    return not (tmp_path / "claude-gremlins").exists()
+
+
+def test_local_no_args_exits_nonzero_no_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+
+    rc = main(["local"])
+
+    assert rc != 0
+    assert _no_state_created(tmp_path)
+
+
+def test_gh_invalid_model_exits_nonzero_no_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+
+    rc = main(["gh", "--model", "!!!"])
+
+    assert rc != 0
+    assert _no_state_created(tmp_path)
+
+
+def test_boss_missing_chain_kind_exits_nonzero_no_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+
+    rc = main(["boss", "--plan", "x.md"])
+
+    assert rc != 0
+    assert _no_state_created(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Pre-launch validators — valid invocations must not raise.
+# ---------------------------------------------------------------------------
+
+
+def test_local_with_positional_instructions_passes():
+    ns = argparse.Namespace(
+        plan=None, instructions=None, positional_instructions="fix the bug"
+    )
+    _validate_local_args(ns)  # must not raise
+
+
+def test_local_with_plan_passes():
+    ns = argparse.Namespace(
+        plan="plan.md", instructions=None, positional_instructions=None
+    )
+    _validate_local_args(ns)  # must not raise
+
+
+def test_local_with_instructions_flag_passes():
+    ns = argparse.Namespace(
+        plan=None, instructions="fix the bug", positional_instructions=None
+    )
+    _validate_local_args(ns)  # must not raise
+
+
+def test_gh_valid_model_passes():
+    _validate_gh_args(["--model", "claude-sonnet-4"])  # must not raise
+
+
+def test_boss_valid_chain_kind_passes():
+    _validate_boss_args(["--chain-kind", "local"])  # must not raise

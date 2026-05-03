@@ -33,7 +33,7 @@ import traceback
 from .fleet import main as fleet_main
 from .fleet.session_summary import main as _session_summary_main
 from .handoff import main as handoff_main
-from .launcher import launch, resume, write_terminal_state
+from .launcher import MODEL_RE, launch, resume, write_terminal_state
 from .orchestrators.gh import gh_main
 from .orchestrators.local import address_main, local_main, review_main
 from .state import (
@@ -92,6 +92,34 @@ def main(argv: list[str] | None = None, *, gr_id: str | None = None) -> int:
     return 1
 
 
+def _validate_local_args(args: argparse.Namespace) -> None:
+    if args.plan or args.instructions or args.positional_instructions:
+        return
+    raise ValueError(
+        "localgremlin requires instructions: pass them as a positional argument, "
+        "--plan <path>, or -c/--instructions <text>"
+    )
+
+
+def _validate_gh_args(rest: list[str]) -> None:
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument("--model", default=None)
+    args, _ = p.parse_known_args(rest)
+    if args.model is not None and not MODEL_RE.match(args.model):
+        raise ValueError(f"invalid model: {args.model!r}")
+
+
+def _validate_boss_args(rest: list[str]) -> None:
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument("--chain-kind", default=None)
+    args, _ = p.parse_known_args(rest)
+    if args.chain_kind not in ("local", "gh"):
+        got = repr(args.chain_kind) if args.chain_kind is not None else "missing"
+        raise ValueError(
+            f"--chain-kind is required and must be 'local' or 'gh' ({got})"
+        )
+
+
 def _self_background_main(kind: str, argv: list[str]) -> int:
     """Launch a background gremlin of the given kind and print its id/log/state."""
     p = argparse.ArgumentParser(
@@ -116,12 +144,24 @@ def _self_background_main(kind: str, argv: list[str]) -> int:
         "which always anchor to origin/<default-branch>.",
     )
     p.add_argument("--spec", dest="spec_path", default=None)
+    if kind == "localgremlin":
+        p.add_argument("positional_instructions", nargs="?", default=None)
+    else:
+        # Keep the namespace attribute consistent so downstream code always sees it.
+        p.set_defaults(positional_instructions=None)
     args, rest = p.parse_known_args(argv)
 
     try:
+        if kind == "localgremlin":
+            _validate_local_args(args)
+        elif kind == "ghgremlin":
+            _validate_gh_args(rest)
+        elif kind == "bossgremlin":
+            _validate_boss_args(rest)
+        instructions = args.instructions or args.positional_instructions
         gr_id = launch(
             kind,
-            instructions=args.instructions,
+            instructions=instructions,
             plan=args.plan,
             description=args.description,
             parent_id=args.parent_id,
