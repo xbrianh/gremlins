@@ -55,6 +55,7 @@ def parse_issue_ref(plan_source: str, repo: str) -> tuple[str | None, str | None
 
 VIEW_ISSUE_TIMEOUT = 30  # seconds; bounds `gh issue view` shell-out
 GET_PR_CI_STATUS_TIMEOUT = 30  # seconds; bounds `gh pr view` shell-out in poll loop
+GET_REQUIRED_CHECK_NAMES_TIMEOUT = 30  # seconds; bounds `gh pr checks --required` shell-out
 
 
 def view_issue(issue_ref: str, repo: str) -> dict[str, Any]:
@@ -171,12 +172,45 @@ def extract_gh_url(
     raise RuntimeError(f"failed to extract {label} URL from claude output events")
 
 
+def get_required_check_names(pr_url: str) -> set[str]:
+    """Return the set of required check names for a PR via branch protection.
+
+    Shells out to ``gh pr checks <pr_url> --required --json name``. Returns an
+    empty set when there are no required checks, branch protection is off, or the
+    call fails for any reason (non-zero exit, bad JSON, timeout).
+    """
+    try:
+        r = subprocess.run(
+            ["gh", "pr", "checks", pr_url, "--required", "--json", "name"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=GET_REQUIRED_CHECK_NAMES_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"timed out after {GET_REQUIRED_CHECK_NAMES_TIMEOUT}s fetching required "
+            f"check names for {pr_url!r} via `gh pr checks`; check GitHub CLI "
+            f"authentication and network connectivity"
+        ) from exc
+    if r.returncode != 0:
+        return set()
+    try:
+        data = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return set()
+    return {entry["name"] for entry in data if "name" in entry}
+
+
 def get_pr_ci_status(pr_url: str) -> dict[str, Any]:
     """Return CI check status and review decision for a PR.
 
     Returns dict with:
-    - 'checks': list of check objects from statusCheckRollup (may be empty)
+    - 'checks': list of required check objects from statusCheckRollup (may be empty)
     - 'review_decision': reviewDecision string (e.g. 'REVIEW_REQUIRED', 'APPROVED', '')
+
+    Checks are filtered to only those listed as required by branch protection. When no
+    required checks are configured the list is empty and the ci-gate stage skips.
     """
     try:
         r = subprocess.run(
@@ -197,8 +231,17 @@ def get_pr_ci_status(pr_url: str) -> dict[str, Any]:
         data = json.loads(r.stdout)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"could not parse PR CI status response: {exc}") from exc
+    all_checks = data.get("statusCheckRollup") or []
+    required_names = get_required_check_names(pr_url)
+    if required_names:
+        checks = [
+            c for c in all_checks
+            if (c.get("name") or c.get("context")) in required_names
+        ]
+    else:
+        checks = []
     return {
-        "checks": data.get("statusCheckRollup") or [],
+        "checks": checks,
         "review_decision": data.get("reviewDecision") or "",
     }
 
