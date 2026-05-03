@@ -114,6 +114,7 @@ def _self_background_main(kind: str, argv: list[str]) -> int:
         "Applies to local gremlins only; ignored for gh gremlins, "
         "which always anchor to origin/<default-branch>.",
     )
+    p.add_argument("--spec", dest="spec_path", default=None)
     args, rest = p.parse_known_args(argv)
 
     try:
@@ -124,6 +125,7 @@ def _self_background_main(kind: str, argv: list[str]) -> int:
             description=args.description,
             parent_id=args.parent_id,
             base_ref=args.base_ref,
+            spec_path=args.spec_path,
             pipeline_args=tuple(rest),
         )
     except (ValueError, RuntimeError) as exc:

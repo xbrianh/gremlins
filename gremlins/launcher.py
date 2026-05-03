@@ -129,7 +129,7 @@ def _default_pipeline_path(kind: str) -> str:
     p = (
         pathlib.Path(__file__).resolve().parent
         / "pipelines"
-        / f"{name.lstrip('_')}.yaml"
+        / f"{name.removeprefix('_')}.yaml"
     )
     return str(p)
 
