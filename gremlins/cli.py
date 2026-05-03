@@ -101,12 +101,23 @@ def _validate_local_args(args: argparse.Namespace) -> None:
     )
 
 
-def _validate_gh_args(rest: list[str]) -> None:
+def _validate_gh_args(args: argparse.Namespace, rest: list[str]) -> None:
+    from .orchestrators.gh import VALID_STAGES
+
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--model", default=None)
-    args, _ = p.parse_known_args(rest)
-    if args.model is not None and not MODEL_RE.match(args.model):
-        raise ValueError(f"invalid model: {args.model!r}")
+    p.add_argument("--resume-from", default=None)
+    parsed, _ = p.parse_known_args(rest)
+
+    if args.plan is None and args.instructions is None and parsed.resume_from is None:
+        raise ValueError("instructions or --plan required")
+    if parsed.resume_from is not None and parsed.resume_from not in VALID_STAGES:
+        raise ValueError(
+            f"invalid --resume-from: {parsed.resume_from} "
+            f"(allowed: {' '.join(VALID_STAGES)})"
+        )
+    if parsed.model is not None and not MODEL_RE.match(parsed.model):
+        raise ValueError(f"invalid model: {parsed.model!r}")
 
 
 def _validate_boss_args(rest: list[str]) -> None:
@@ -155,7 +166,7 @@ def _self_background_main(kind: str, argv: list[str]) -> int:
         if kind == "localgremlin":
             _validate_local_args(args)
         elif kind == "ghgremlin":
-            _validate_gh_args(rest)
+            _validate_gh_args(args, rest)
         elif kind == "bossgremlin":
             _validate_boss_args(rest)
         instructions = args.instructions or args.positional_instructions
