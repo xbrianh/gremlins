@@ -215,6 +215,7 @@ def get_pr_ci_status(pr_url: str) -> dict[str, Any]:
     Returns dict with:
     - 'checks': list of required check objects from statusCheckRollup (may be empty)
     - 'review_decision': reviewDecision string (e.g. 'REVIEW_REQUIRED', 'APPROVED', '')
+    - 'head_sha': current PR headRefOid (commit SHA), or '' if unavailable
 
     Checks are filtered to only those listed as required by branch protection. When no
     required checks are configured the list is empty and the ci-gate stage skips.

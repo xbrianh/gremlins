@@ -92,8 +92,10 @@ def _poll_until_done(
         # would otherwise pass the checks-complete test before new CI even starts.
         if required_sha and head_sha and head_sha != required_sha:
             if time.time() >= deadline:
-                logger.info("ci-gate: poll timed out after %ds", timeout)
-                return checks, review_decision
+                raise RuntimeError(
+                    f"ci-gate: timed out waiting for GitHub to reflect pushed SHA "
+                    f"{required_sha[:8]} (still showing {head_sha[:8]}) after {timeout}s"
+                )
             logger.debug(
                 "ci-gate: PR head %s != expected %s, waiting for push to propagate",
                 head_sha[:8],
