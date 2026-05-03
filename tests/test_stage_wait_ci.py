@@ -8,7 +8,8 @@ from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.stages.context import StageContext
-from gremlins.stages.wait_ci import WaitCiOptions, run as run_wait_ci
+from gremlins.stages.wait_ci import WaitCiOptions
+from gremlins.stages.wait_ci import run as run_wait_ci
 
 PR_URL = "https://github.com/owner/repo/pull/42"
 

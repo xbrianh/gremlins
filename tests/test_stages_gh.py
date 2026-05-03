@@ -4,8 +4,10 @@ from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.stages.context import StageContext
-from gremlins.stages.ghaddress import GhaddressOptions, run as run_ghaddress
-from gremlins.stages.ghreview import GhreviewOptions, run as run_ghreview
+from gremlins.stages.ghaddress import GhaddressOptions
+from gremlins.stages.ghaddress import run as run_ghaddress
+from gremlins.stages.ghreview import GhreviewOptions
+from gremlins.stages.ghreview import run as run_ghreview
 
 
 def _make_ctx(client, tmp_path):

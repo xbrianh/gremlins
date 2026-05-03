@@ -10,7 +10,8 @@ from conftest import MINIMAL_EVENTS
 import gremlins.orchestrators.boss as boss_mod
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.stages.context import StageContext
-from gremlins.stages.test import TestOptions, run as run_test
+from gremlins.stages.test import TestOptions
+from gremlins.stages.test import run as run_test
 
 
 def _make_ctx(client: Any, tmp_path: Any) -> StageContext:

@@ -5,11 +5,15 @@ import pytest
 from conftest import MINIMAL_EVENTS, ReviewCreatingClient
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.stages.address_code import AddressCodeOptions, run as run_address_code
+from gremlins.stages.address_code import AddressCodeOptions
+from gremlins.stages.address_code import run as run_address_code
 from gremlins.stages.context import StageContext
-from gremlins.stages.implement import ImplementOptions, _render_spec_block, run as run_implement
-from gremlins.stages.plan import PlanOptions, run as run_plan
-from gremlins.stages.review_code import ReviewCodeOptions, run as run_review_code
+from gremlins.stages.implement import ImplementOptions, _render_spec_block
+from gremlins.stages.implement import run as run_implement
+from gremlins.stages.plan import PlanOptions
+from gremlins.stages.plan import run as run_plan
+from gremlins.stages.review_code import ReviewCodeOptions
+from gremlins.stages.review_code import run as run_review_code
 
 
 def _make_ctx(client, session_dir):
