@@ -178,9 +178,9 @@ def get_required_check_names(pr_url: str) -> set[str]:
     """Return the set of required check names for a PR via branch protection.
 
     Shells out to ``gh pr checks <pr_url> --required --json name``. Returns an
-    empty set when there are no required checks or branch protection is off
-    (``gh`` exits 0 with an empty array). Raises ``RuntimeError`` on timeout,
-    non-zero exit, or unparseable JSON.
+    empty set when there are no required checks or branch protection is off.
+    Raises ``RuntimeError`` on timeout, unrecognized non-zero exit, or
+    unparseable JSON.
     """
     try:
         r = subprocess.run(
@@ -197,6 +197,10 @@ def get_required_check_names(pr_url: str) -> set[str]:
             f"authentication and network connectivity"
         ) from exc
     if r.returncode != 0:
+        # `gh pr checks --required` exits 1 with this stderr when no branch
+        # protection / no required checks are configured for the base branch.
+        if "no required checks reported" in r.stderr:
+            return set()
         raise RuntimeError(
             f"could not fetch required check names for {pr_url!r}: {r.stderr.strip()}"
         )

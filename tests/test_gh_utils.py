@@ -75,6 +75,14 @@ def test_get_required_check_names_empty_array_returns_empty():
     assert result == set()
 
 
+def test_get_required_check_names_no_protection_returns_empty():
+    no_protection = _fail("no required checks reported on the 'main' branch")
+    no_protection.returncode = 1
+    with patch("subprocess.run", return_value=no_protection):
+        result = get_required_check_names(PR_URL)
+    assert result == set()
+
+
 def test_get_required_check_names_returns_names():
     data = [{"name": "lint"}, {"name": "tests"}]
     with patch("subprocess.run", return_value=_ok(json.dumps(data))):
