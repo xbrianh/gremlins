@@ -326,7 +326,12 @@ def run_handoff(
     spec_log = spec_path if forward_spec else "(none)"
     logger.info(
         "handoff %d: plan=%s, spec=%s, base=%s, rev=%s, cwd=%s",
-        n, current_plan, spec_log, base_ref[:12], rev_label, handoff_cwd,
+        n,
+        current_plan,
+        spec_log,
+        base_ref[:12],
+        rev_label,
+        handoff_cwd,
     )
     spec_args = ["--spec", spec_path] if forward_spec else []
     cmd = _gremlins_cli_cmd(
@@ -394,7 +399,9 @@ def run_handoff(
 
     logger.info("handoff %d result: %s", n, exit_state)
     if followups:
-        logger.info("  operator follow-ups carried by handoff %d: %d", n, len(followups))
+        logger.info(
+            "  operator follow-ups carried by handoff %d: %d", n, len(followups)
+        )
         for item in followups:
             logger.info("    - %s", item)
     return exit_state, sig
@@ -419,7 +426,9 @@ def launch_child(gr_id: str, launch_kind: str, child_plan: str) -> str:
         if test_model:
             extra += ["-t", test_model]
 
-    logger.info("launching child (%s): %s, base=%s", launch_kind, child_plan, base_ref[:12])
+    logger.info(
+        "launching child (%s): %s, base=%s", launch_kind, child_plan, base_ref[:12]
+    )
     try:
         child_id = _launch(
             launch_kind,
@@ -651,7 +660,13 @@ def _resolve_plan_source(plan: str, state_dir: str) -> tuple[str, str, str]:
     # Persist the issue identifiers to state.json immediately so a crash
     # between this point and init_boss_state() doesn't strip them on rescue.
     patch_state(issue_url=issue_url, issue_num=issue_num)
-    logger.info("plan source (issue %s#%s): %s -> %s", target_repo, issue_ref, issue_url, spec_dest)
+    logger.info(
+        "plan source (issue %s#%s): %s -> %s",
+        target_repo,
+        issue_ref,
+        issue_url,
+        spec_dest,
+    )
     return spec_dest, issue_url, issue_num
 
 
@@ -731,7 +746,12 @@ def boss_main(argv: list[str]) -> int:
             )
         spec_path, issue_url, issue_num = _resolve_plan_source(args.plan, state_dir)
         if issue_url:
-            logger.info("chain start: kind=%s, spec=%s, issue=%s", chain_kind, spec_path, issue_url)
+            logger.info(
+                "chain start: kind=%s, spec=%s, issue=%s",
+                chain_kind,
+                spec_path,
+                issue_url,
+            )
         else:
             logger.info("chain start: kind=%s, spec=%s", chain_kind, spec_path)
         _maybe_set_description_from_spec(state_dir)
@@ -743,14 +763,17 @@ def boss_main(argv: list[str]) -> int:
             chain_base_ref = get_remote_branch_sha(project_root, target_branch)
             logger.info(
                 "base ref: %s (origin/%s), target branch: %s",
-                chain_base_ref[:12], target_branch, target_branch,
+                chain_base_ref[:12],
+                target_branch,
+                target_branch,
             )
         else:
             chain_base_ref = get_head_ref(project_root)
             target_branch = get_current_branch(project_root)
             logger.info(
                 "base ref: %s, target branch: %s",
-                chain_base_ref[:12], target_branch or "(detached)",
+                chain_base_ref[:12],
+                target_branch or "(detached)",
             )
         boss_state = init_boss_state(
             spec_path=spec_path,
@@ -774,7 +797,8 @@ def boss_main(argv: list[str]) -> int:
         boss_state = load_boss_state(state_dir)
         logger.info(
             "resuming chain: kind=%s, completed children: %d",
-            chain_kind, len(boss_state["children"]),
+            chain_kind,
+            len(boss_state["children"]),
         )
 
     # Main loop: handoff → launch → wait → land/rescue → repeat
@@ -831,7 +855,10 @@ def boss_main(argv: list[str]) -> int:
             # Stop the freshly launched child if a stop was requested during
             # or just after launch (pre-wait window).
             if _stop_requested:
-                logger.info("stop requested — stopping newly launched child %s", current_child_id)
+                logger.info(
+                    "stop requested — stopping newly launched child %s",
+                    current_child_id,
+                )
                 subprocess.run(
                     _gremlins_cli_cmd("fleet", "stop", current_child_id),
                     capture_output=True,
@@ -860,7 +887,10 @@ def boss_main(argv: list[str]) -> int:
 
                 if child_succeeded:
                     # Already finished successfully and closed — treat as landed
-                    logger.info("child %s already finished and closed — treating as landed", current_child_id)
+                    logger.info(
+                        "child %s already finished and closed — treating as landed",
+                        current_child_id,
+                    )
                     boss_state["children"].append(
                         {
                             "id": current_child_id,
@@ -934,7 +964,10 @@ def boss_main(argv: list[str]) -> int:
                 else:
                     # The pipeline succeeded but land itself failed (e.g. merge
                     # conflict, branch protection rejection, squash conflict).
-                    logger.info("landing failed for %s — operator action required", current_child_id)
+                    logger.info(
+                        "landing failed for %s — operator action required",
+                        current_child_id,
+                    )
                     boss_state["children"].append(
                         {
                             "id": current_child_id,
@@ -978,7 +1011,8 @@ def boss_main(argv: list[str]) -> int:
                     # Other headless-rescue bail reasons also populate bail_detail.
                     logger.info(
                         "rescue refused for %s (%s)",
-                        current_child_id, bail_reason or "no bail_reason",
+                        current_child_id,
+                        bail_reason or "no bail_reason",
                     )
                     if bail_detail:
                         logger.info("  detail: %s", bail_detail)

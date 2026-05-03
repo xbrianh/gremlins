@@ -4,7 +4,6 @@ import pathlib
 from typing import Any
 
 import pytest
-
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
@@ -49,9 +48,11 @@ def _make_getter(responses: list[tuple[list[dict[str, Any]], str]]):
 
 def test_no_checks_skips(tmp_path: pathlib.Path) -> None:
     client = FakeClaudeClient(fixtures={})
-    getter = _make_getter([
-        ([], ""),
-    ])
+    getter = _make_getter(
+        [
+            ([], ""),
+        ]
+    )
     run_wait_ci_stage(
         client=client,
         model="sonnet",
@@ -66,9 +67,11 @@ def test_no_checks_skips(tmp_path: pathlib.Path) -> None:
 def test_review_required_no_checks_bails(tmp_path: pathlib.Path) -> None:
     """REVIEW_REQUIRED is checked before the no-checks short-circuit."""
     client = FakeClaudeClient(fixtures={})
-    getter = _make_getter([
-        ([], "REVIEW_REQUIRED"),
-    ])
+    getter = _make_getter(
+        [
+            ([], "REVIEW_REQUIRED"),
+        ]
+    )
     with pytest.raises(RuntimeError, match="PR blocked by required human review"):
         run_wait_ci_stage(
             client=client,
@@ -83,10 +86,12 @@ def test_review_required_no_checks_bails(tmp_path: pathlib.Path) -> None:
 
 def test_all_checks_passing_returns(tmp_path: pathlib.Path) -> None:
     client = FakeClaudeClient(fixtures={})
-    getter = _make_getter([
-        ([_PASSING_CHECK], "APPROVED"),
-        ([_PASSING_CHECK], "APPROVED"),
-    ])
+    getter = _make_getter(
+        [
+            ([_PASSING_CHECK], "APPROVED"),
+            ([_PASSING_CHECK], "APPROVED"),
+        ]
+    )
     run_wait_ci_stage(
         client=client,
         model="sonnet",
@@ -123,9 +128,11 @@ def test_checks_pending_then_passing(tmp_path: pathlib.Path) -> None:
 
 def test_review_required_bails(tmp_path: pathlib.Path) -> None:
     client = FakeClaudeClient(fixtures={})
-    getter = _make_getter([
-        ([_PASSING_CHECK], "REVIEW_REQUIRED"),
-    ])
+    getter = _make_getter(
+        [
+            ([_PASSING_CHECK], "REVIEW_REQUIRED"),
+        ]
+    )
     with pytest.raises(RuntimeError, match="PR blocked by required human review"):
         run_wait_ci_stage(
             client=client,
@@ -164,16 +171,20 @@ def test_fix_on_failure_then_pass(tmp_path: pathlib.Path) -> None:
 
 def test_exhausted_bails(tmp_path: pathlib.Path) -> None:
     """All 3 attempts fail → RuntimeError('ci-gate exhausted 3 attempts')."""
-    client = FakeClaudeClient(fixtures={
-        "ci-fix-1": MINIMAL_EVENTS,
-        "ci-fix-2": MINIMAL_EVENTS,
-    })
-    getter = _make_getter([
-        ([_FAILING_CHECK], ""),  # initial check
-        ([_FAILING_CHECK], ""),  # poll attempt 1
-        ([_FAILING_CHECK], ""),  # poll attempt 2
-        ([_FAILING_CHECK], ""),  # poll attempt 3
-    ])
+    client = FakeClaudeClient(
+        fixtures={
+            "ci-fix-1": MINIMAL_EVENTS,
+            "ci-fix-2": MINIMAL_EVENTS,
+        }
+    )
+    getter = _make_getter(
+        [
+            ([_FAILING_CHECK], ""),  # initial check
+            ([_FAILING_CHECK], ""),  # poll attempt 1
+            ([_FAILING_CHECK], ""),  # poll attempt 2
+            ([_FAILING_CHECK], ""),  # poll attempt 3
+        ]
+    )
     with pytest.raises(RuntimeError, match="ci-gate exhausted 3 attempts"):
         run_wait_ci_stage(
             client=client,
@@ -215,7 +226,9 @@ def test_timeout_counts_as_failed(tmp_path: pathlib.Path) -> None:
 
 def test_code_style_in_fix_prompt(tmp_path: pathlib.Path) -> None:
     """code_style content appears in the claude prompt sent for fixing."""
-    client = FakeClaudeClient(fixtures={"ci-fix-1": MINIMAL_EVENTS, "ci-fix-2": MINIMAL_EVENTS})
+    client = FakeClaudeClient(
+        fixtures={"ci-fix-1": MINIMAL_EVENTS, "ci-fix-2": MINIMAL_EVENTS}
+    )
     call_count = [0]
 
     def getter() -> tuple[list[dict[str, Any]], str]:

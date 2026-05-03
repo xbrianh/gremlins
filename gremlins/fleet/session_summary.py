@@ -185,7 +185,9 @@ def _collect_gremlins(
     return running, finished, newly_summarized_dirs
 
 
-def _render_summary(running: list[dict[str, Any]], finished: list[dict[str, Any]]) -> str:
+def _render_summary(
+    running: list[dict[str, Any]], finished: list[dict[str, Any]]
+) -> str:
     """Build the markdown summary block. Returns empty string if nothing to show."""
     running_block = ""
     for g in running:

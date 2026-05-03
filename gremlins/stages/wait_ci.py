@@ -70,7 +70,9 @@ def _collect_failure_output(failed: list[dict[str, Any]]) -> str:
         details = check.get("detailsUrl") or check.get("targetUrl") or ""
         logs = fetch_check_run_logs(details)
         header = f"## Check: {name}"
-        parts.append(f"{header}\n\n{logs}" if logs else f"{header}\n\n(no output available)")
+        parts.append(
+            f"{header}\n\n{logs}" if logs else f"{header}\n\n(no output available)"
+        )
     return "\n\n".join(parts)
 
 
