@@ -240,7 +240,14 @@ def test_gh_valid_model_passes():
 
 
 def test_boss_valid_chain_kind_passes():
-    _validate_boss_args(["--chain-kind", "local"])  # must not raise
+    _validate_boss_args(
+        ["--chain-kind", "local", "--plan", "plan.md"]
+    )  # must not raise
+
+
+def test_boss_missing_plan_raises():
+    with pytest.raises(ValueError, match="--plan is required"):
+        _validate_boss_args(["--chain-kind", "local"])
 
 
 # ---------------------------------------------------------------------------

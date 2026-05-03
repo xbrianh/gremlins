@@ -112,12 +112,15 @@ def _validate_gh_args(rest: list[str]) -> None:
 def _validate_boss_args(rest: list[str]) -> None:
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--chain-kind", default=None)
+    p.add_argument("--plan", default=None)
     args, _ = p.parse_known_args(rest)
     if args.chain_kind not in ("local", "gh"):
         got = repr(args.chain_kind) if args.chain_kind is not None else "missing"
         raise ValueError(
             f"--chain-kind is required and must be 'local' or 'gh' ({got})"
         )
+    if args.plan is None:
+        raise ValueError("--plan is required")
 
 
 def _self_background_main(kind: str, argv: list[str]) -> int:
