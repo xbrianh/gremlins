@@ -1,3 +1,4 @@
+import json
 import pathlib
 import subprocess
 
@@ -16,8 +17,8 @@ from gremlins.stages.review_code import ReviewCodeOptions
 from gremlins.stages.review_code import run as run_review_code
 
 
-def _make_ctx(client, session_dir):
-    return StageContext(client=client, session_dir=session_dir, gr_id=None)
+def _make_ctx(client, session_dir, *, gr_id=None):
+    return StageContext(client=client, session_dir=session_dir, gr_id=gr_id)
 
 
 def _init_git_repo(path: pathlib.Path) -> None:
@@ -350,3 +351,31 @@ def test_address_code_stage_includes_code_style(tmp_path):
         ),
     )
     assert "Be good." in client.calls[0].prompt
+
+
+def test_review_code_stage_writes_stage_to_state(tmp_path, make_state_dir):
+    gr_id = "test-gr-id"
+    state_dir = make_state_dir(gr_id)
+    client = ReviewCreatingClient(
+        fixtures={"review-code:detail:sonnet": MINIMAL_EVENTS}
+    )
+    ctx = _make_ctx(client, tmp_path, gr_id=gr_id)
+    run_review_code(
+        ctx,
+        ReviewCodeOptions(plan_text="", detail="sonnet", is_git=False, code_style=""),
+    )
+    data = json.loads((state_dir / "state.json").read_text())
+    assert data.get("stage") == "review-code"
+
+
+def test_address_code_stage_emits_bail_on_failure(tmp_path, make_state_dir):
+    gr_id = "test-gr-id"
+    state_dir = make_state_dir(gr_id)
+    client = FakeClaudeClient(fixtures={})
+    ctx = _make_ctx(client, tmp_path, gr_id=gr_id)
+    with pytest.raises((FileNotFoundError, RuntimeError)):
+        run_address_code(
+            ctx, AddressCodeOptions(address_model="sonnet", is_git=False, code_style="")
+        )
+    data = json.loads((state_dir / "state.json").read_text())
+    assert data.get("bail_class") == "other"

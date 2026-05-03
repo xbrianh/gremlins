@@ -1,5 +1,6 @@
 """Tests for gremlins.stages.wait_ci."""
 
+import json
 import pathlib
 from typing import Any
 
@@ -38,8 +39,8 @@ _FAILING_CHECK = {
 }
 
 
-def _make_ctx(client: Any, tmp_path: Any) -> StageContext:
-    return StageContext(client=client, session_dir=tmp_path, gr_id=None)
+def _make_ctx(client: Any, tmp_path: Any, *, gr_id: Any = None) -> StageContext:
+    return StageContext(client=client, session_dir=tmp_path, gr_id=gr_id)
 
 
 def _make_getter(responses: list[tuple[list[dict[str, Any]], str]]):
@@ -422,3 +423,47 @@ def test_code_style_in_fix_prompt(tmp_path: pathlib.Path) -> None:
     )
     assert client.calls
     assert "Always write docstrings." in client.calls[0].prompt
+
+
+def test_review_required_emits_bail_to_state(
+    tmp_path: pathlib.Path, make_state_dir
+) -> None:
+    gr_id = "test-gr-id"
+    state_dir = make_state_dir(gr_id)
+    client = FakeClaudeClient(fixtures={})
+    getter = _make_getter([([], "REVIEW_REQUIRED")])
+    with pytest.raises(RuntimeError):
+        run_wait_ci(
+            _make_ctx(client, tmp_path, gr_id=gr_id),
+            WaitCiOptions(
+                model="sonnet",
+                pr_url=PR_URL,
+                code_style="",
+                checks_getter=getter,
+            ),
+        )
+    data = json.loads((state_dir / "state.json").read_text())
+    assert data.get("bail_class") == "other"
+
+
+def test_check_bail_raises_from_state(tmp_path: pathlib.Path, make_state_dir) -> None:
+    gr_id = "test-gr-id"
+    state_dir = make_state_dir(gr_id)
+    sf = state_dir / "state.json"
+    sf.write_text(json.dumps({"id": gr_id, "bail_class": "other"}))
+
+    client = FakeClaudeClient(fixtures={"ci-fix-1": MINIMAL_EVENTS})
+    getter = _make_getter([([_FAILING_CHECK], ""), ([_FAILING_CHECK], "")])
+    with pytest.raises(RuntimeError, match="bailed"):
+        run_wait_ci(
+            _make_ctx(client, tmp_path, gr_id=gr_id),
+            WaitCiOptions(
+                model="sonnet",
+                pr_url=PR_URL,
+                code_style="",
+                poll_interval=0,
+                poll_timeout=0,
+                startup_grace_secs=0,
+                checks_getter=getter,
+            ),
+        )

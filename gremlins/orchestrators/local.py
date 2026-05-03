@@ -264,8 +264,8 @@ def local_main(
         )
 
     def stage_test() -> None:
-        set_stage(gr_id, "test")
         if args.test_cmd:
+            set_stage(gr_id, "test")
             logger.info(
                 "[5/5] running tests (cmd: %r, max-attempts: %s, model: %s)",
                 args.test_cmd,

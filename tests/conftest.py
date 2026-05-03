@@ -1,3 +1,4 @@
+import json
 import logging
 import pathlib
 import re
@@ -71,3 +72,23 @@ def _isolate_gr_id(monkeypatch):
     # genuinely need GR_ID set it explicitly via monkeypatch.setenv, which
     # overrides this delenv.
     monkeypatch.delenv("GR_ID", raising=False)
+
+
+@pytest.fixture
+def make_state_dir(tmp_path, monkeypatch):
+    """Fixture factory: set XDG_STATE_HOME and create a minimal state.json for gr_id.
+
+    Returns a callable: make_state_dir(gr_id) -> state_dir_path
+    """
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
+
+    def _factory(gr_id: str) -> pathlib.Path:
+        state_dir = xdg / "claude-gremlins" / gr_id
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / "state.json").write_text(
+            json.dumps({"id": gr_id, "stage": "", "bail_class": ""})
+        )
+        return state_dir
+
+    return _factory

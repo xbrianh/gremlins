@@ -143,6 +143,36 @@ def test_run_pipeline_valid_id_proceeds(tmp_path, monkeypatch):
     # If we reach here, validate_gr_id passed; pipeline may exit for any reason.
 
 
+def test_run_pipeline_forwards_gr_id_to_orchestrator(tmp_path, monkeypatch):
+    """_run-pipeline <gr_id> _local ... passes gr_id down to local_main."""
+    gr_id = "test-pipeline-gr"
+    state_dir = tmp_path / "xdg" / "claude-gremlins" / gr_id
+    state_dir.mkdir(parents=True)
+    (state_dir / "state.json").write_text(json.dumps({"id": gr_id}))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
+
+    from gremlins.state import set_stage
+
+    def fake_local_main(argv, *, client=None, gr_id=None):
+        set_stage(gr_id, "implement")
+        return 0
+
+    monkeypatch.setattr("gremlins.cli.local_main", fake_local_main)
+    monkeypatch.setattr(
+        "gremlins.cli.write_terminal_state", lambda gr_id, exit_code: None
+    )
+
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("# Plan\n")
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["_run-pipeline", gr_id, "_local", "--plan", str(plan_file)])
+    assert exc_info.value.code == 0
+
+    data = json.loads((state_dir / "state.json").read_text())
+    assert data.get("stage") == "implement"
+
+
 # ---------------------------------------------------------------------------
 # Pre-launch validators — invalid invocations must exit non-zero without
 # touching XDG_STATE_HOME.
