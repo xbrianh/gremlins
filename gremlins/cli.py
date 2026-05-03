@@ -34,7 +34,7 @@ from .fleet import main as fleet_main
 from .fleet.session_summary import main as _session_summary_main
 from .handoff import main as handoff_main
 from .launcher import MODEL_RE, launch, resume, write_terminal_state
-from .orchestrators.gh import gh_main
+from .orchestrators.gh import VALID_STAGES, gh_main
 from .orchestrators.local import address_main, local_main, review_main
 from .state import (
     BAIL_CLASS_OTHER,
@@ -102,15 +102,17 @@ def _validate_local_args(args: argparse.Namespace) -> None:
 
 
 def _validate_gh_args(args: argparse.Namespace, rest: list[str]) -> None:
-    from .orchestrators.gh import VALID_STAGES
-
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--model", default=None)
     p.add_argument("--resume-from", default=None)
-    parsed, _ = p.parse_known_args(rest)
+    try:
+        parsed, remainder = p.parse_known_args(rest)
+    except SystemExit as exc:
+        raise ValueError(f"invalid gh arguments (exit {exc.code})") from exc
 
-    if args.plan is None and args.instructions is None and parsed.resume_from is None:
-        raise ValueError("instructions or --plan required")
+    positional = [t for t in remainder if not t.startswith("-")]
+    if args.plan is None and args.instructions is None and parsed.resume_from is None and not positional:
+        raise ValueError("instructions, --plan, or --resume-from required")
     if parsed.resume_from is not None and parsed.resume_from not in VALID_STAGES:
         raise ValueError(
             f"invalid --resume-from: {parsed.resume_from} "

@@ -258,6 +258,16 @@ def test_gh_valid_model_passes():
     _validate_gh_args(ns, ["--model", "claude-sonnet-4"])  # must not raise
 
 
+def test_gh_valid_resume_from_passes():
+    ns = argparse.Namespace(plan=None, instructions=None)
+    _validate_gh_args(ns, ["--resume-from", "plan"])  # must not raise
+
+
+def test_gh_positional_instructions_passes():
+    ns = argparse.Namespace(plan=None, instructions=None)
+    _validate_gh_args(ns, ["fix the bug"])  # must not raise
+
+
 def test_boss_valid_chain_kind_passes():
     _validate_boss_args(["--chain-kind", "local"])  # must not raise
 
