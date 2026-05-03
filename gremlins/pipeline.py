@@ -13,7 +13,7 @@ from gremlins.stages.registry import CLIENT_FACTORIES, STAGE_REGISTRY
 
 
 def _ensure_registered() -> None:
-    importlib.import_module("gremlins.stages")
+    importlib.import_module("gremlins.stages.all")
     importlib.import_module("gremlins.clients")
 
 

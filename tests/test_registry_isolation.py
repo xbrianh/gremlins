@@ -8,25 +8,23 @@ import subprocess
 import sys
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
-REGISTRY_PATH = PROJECT_ROOT / "gremlins" / "stages" / "registry.py"
 
 
 def test_registry_does_not_pull_in_stages_or_pipeline() -> None:
-    # Load registry.py directly as a standalone module so Python does not
-    # execute stages/__init__.py (which eagerly imports all stage modules).
-    script = f"""
+    # Import registry via its normal package path so Python does execute
+    # stages/__init__.py — which is now empty and side-effect free.
+    script = """
 import sys
-import importlib.util
+import importlib
 
-spec = importlib.util.spec_from_file_location("_registry", r"{REGISTRY_PATH}")
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
+importlib.import_module("gremlins.stages.registry")
 
 stage_mods = [
     k for k in sys.modules
-    if k.startswith("gremlins.stages.") and k not in ("gremlins.stages.registry", "_registry")
+    if k.startswith("gremlins.stages.")
+    and k not in ("gremlins.stages.registry", "gremlins.stages")
 ]
-assert not stage_mods, f"unexpected stage modules: {{stage_mods}}"
+assert not stage_mods, f"unexpected stage modules: {stage_mods}"
 assert "gremlins.pipeline" not in sys.modules, "gremlins.pipeline was imported"
 print("ok")
 """
