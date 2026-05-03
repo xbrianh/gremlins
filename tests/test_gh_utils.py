@@ -85,13 +85,26 @@ def test_get_required_check_names_returns_names():
 def test_get_pr_ci_status_filters_optional_failing_check():
     """Optional check fails but required check passes: only required check returned."""
     rollup = [
-        {"__typename": "CheckRun", "name": "required-check", "status": "COMPLETED", "conclusion": "SUCCESS"},
-        {"__typename": "CheckRun", "name": "optional-check", "status": "COMPLETED", "conclusion": "FAILURE"},
+        {
+            "__typename": "CheckRun",
+            "name": "required-check",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+        },
+        {
+            "__typename": "CheckRun",
+            "name": "optional-check",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+        },
     ]
-    with patch("subprocess.run", side_effect=[
-        _ok(json.dumps({"statusCheckRollup": rollup, "reviewDecision": ""})),
-        _ok(json.dumps([{"name": "required-check"}])),
-    ]):
+    with patch(
+        "subprocess.run",
+        side_effect=[
+            _ok(json.dumps({"statusCheckRollup": rollup, "reviewDecision": ""})),
+            _ok(json.dumps([{"name": "required-check"}])),
+        ],
+    ):
         result = get_pr_ci_status(PR_URL)
 
     assert len(result["checks"]) == 1
@@ -101,13 +114,26 @@ def test_get_pr_ci_status_filters_optional_failing_check():
 def test_get_pr_ci_status_optional_pending_excluded():
     """Required check passes, optional still pending: only required check returned."""
     rollup = [
-        {"__typename": "CheckRun", "name": "required-check", "status": "COMPLETED", "conclusion": "SUCCESS"},
-        {"__typename": "CheckRun", "name": "optional-check", "status": "IN_PROGRESS", "conclusion": None},
+        {
+            "__typename": "CheckRun",
+            "name": "required-check",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+        },
+        {
+            "__typename": "CheckRun",
+            "name": "optional-check",
+            "status": "IN_PROGRESS",
+            "conclusion": None,
+        },
     ]
-    with patch("subprocess.run", side_effect=[
-        _ok(json.dumps({"statusCheckRollup": rollup, "reviewDecision": ""})),
-        _ok(json.dumps([{"name": "required-check"}])),
-    ]):
+    with patch(
+        "subprocess.run",
+        side_effect=[
+            _ok(json.dumps({"statusCheckRollup": rollup, "reviewDecision": ""})),
+            _ok(json.dumps([{"name": "required-check"}])),
+        ],
+    ):
         result = get_pr_ci_status(PR_URL)
 
     assert len(result["checks"]) == 1
@@ -117,10 +143,13 @@ def test_get_pr_ci_status_optional_pending_excluded():
 def test_get_pr_ci_status_required_check_not_started_returns_pending_placeholder():
     """Required checks configured but not yet in statusCheckRollup: synthetic pending entry returned."""
     rollup: list = []
-    with patch("subprocess.run", side_effect=[
-        _ok(json.dumps({"statusCheckRollup": rollup, "reviewDecision": ""})),
-        _ok(json.dumps([{"name": "required-check"}])),
-    ]):
+    with patch(
+        "subprocess.run",
+        side_effect=[
+            _ok(json.dumps({"statusCheckRollup": rollup, "reviewDecision": ""})),
+            _ok(json.dumps([{"name": "required-check"}])),
+        ],
+    ):
         result = get_pr_ci_status(PR_URL)
 
     assert len(result["checks"]) == 1
@@ -131,12 +160,20 @@ def test_get_pr_ci_status_required_check_not_started_returns_pending_placeholder
 def test_get_pr_ci_status_no_required_checks_returns_empty():
     """No required checks configured: checks list is empty (ci-gate will skip)."""
     rollup = [
-        {"__typename": "CheckRun", "name": "optional-check", "status": "COMPLETED", "conclusion": "FAILURE"},
+        {
+            "__typename": "CheckRun",
+            "name": "optional-check",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+        },
     ]
-    with patch("subprocess.run", side_effect=[
-        _ok(json.dumps({"statusCheckRollup": rollup, "reviewDecision": ""})),
-        _ok("[]"),
-    ]):
+    with patch(
+        "subprocess.run",
+        side_effect=[
+            _ok(json.dumps({"statusCheckRollup": rollup, "reviewDecision": ""})),
+            _ok("[]"),
+        ],
+    ):
         result = get_pr_ci_status(PR_URL)
 
     assert result["checks"] == []

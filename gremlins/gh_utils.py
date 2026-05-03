@@ -55,7 +55,9 @@ def parse_issue_ref(plan_source: str, repo: str) -> tuple[str | None, str | None
 
 VIEW_ISSUE_TIMEOUT = 30  # seconds; bounds `gh issue view` shell-out
 GET_PR_CI_STATUS_TIMEOUT = 30  # seconds; bounds `gh pr view` shell-out in poll loop
-GET_REQUIRED_CHECK_NAMES_TIMEOUT = 30  # seconds; bounds `gh pr checks --required` shell-out
+GET_REQUIRED_CHECK_NAMES_TIMEOUT = (
+    30  # seconds; bounds `gh pr checks --required` shell-out
+)
 
 
 def view_issue(issue_ref: str, repo: str) -> dict[str, Any]:
@@ -240,14 +242,21 @@ def get_pr_ci_status(pr_url: str) -> dict[str, Any]:
     required_names = get_required_check_names(pr_url)
     if required_names:
         checks = [
-            c for c in all_checks
+            c
+            for c in all_checks
             if (c.get("name") or c.get("context")) in required_names
         ]
         if not checks:
             # Required checks are configured but none have started reporting yet.
             # Return a synthetic pending entry so the poller keeps waiting rather
             # than treating the empty list as "no checks / done".
-            checks = [{"__typename": "CheckRun", "name": "__required_pending__", "status": "IN_PROGRESS"}]
+            checks = [
+                {
+                    "__typename": "CheckRun",
+                    "name": "__required_pending__",
+                    "status": "IN_PROGRESS",
+                }
+            ]
     else:
         checks = []
     return {
