@@ -29,6 +29,7 @@ class WaitCiOptions:
     max_attempts: int = 3
     poll_timeout: int = 1200
     poll_interval: int = 30
+    startup_grace_secs: int = 60
     checks_getter: Callable[[], tuple[list[dict[str, Any]], str]] | None = None
     head_sha_getter: Callable[[], str] | None = None
     fix_sha_getter: Callable[[], str] | None = None
@@ -48,6 +49,28 @@ def _is_failing(check: dict[str, Any]) -> bool:
     if check.get("__typename") == "StatusContext":
         return check.get("state") in ("FAILURE", "ERROR")
     return check.get("conclusion") in _FAILING_CONCLUSIONS
+
+
+def _fetch_checks(
+    pr_url: str,
+    checks_getter: Callable[[], tuple[list[dict[str, Any]], str]] | None,
+) -> tuple[list[dict[str, Any]], str]:
+    if checks_getter is not None:
+        return checks_getter()
+    status = get_pr_ci_status(pr_url)
+    return status["checks"], status["review_decision"]
+
+
+def _wait_for_checks(
+    options: WaitCiOptions,
+    grace_secs: int,
+) -> tuple[list[dict[str, Any]], str]:
+    deadline = time.time() + grace_secs
+    while True:
+        checks, review_decision = _fetch_checks(options.pr_url, options.checks_getter)
+        if checks or review_decision or time.time() >= deadline:
+            return checks, review_decision
+        time.sleep(options.poll_interval)
 
 
 def _bail_if_review_required(decision: str) -> None:
@@ -95,7 +118,7 @@ def _poll_until_done(
             time.sleep(interval)
             continue
 
-        if not checks or all(_is_done(c) for c in checks):
+        if checks and all(_is_done(c) for c in checks):
             return checks, review_decision
         if time.time() >= deadline:
             logger.info("ci-gate: poll timed out after %ds", timeout)
@@ -123,17 +146,14 @@ def _escape_fmt(s: str) -> str:
 
 def run(ctx: StageContext, options: WaitCiOptions) -> None:
     """Wait for CI checks to pass, fixing failures up to max_attempts times."""
-    if options.checks_getter is not None:
-        checks, review_decision = options.checks_getter()
-    else:
-        status = get_pr_ci_status(options.pr_url)
-        checks = status["checks"]
-        review_decision = status["review_decision"]
-
+    checks, review_decision = _wait_for_checks(options, options.startup_grace_secs)
     _bail_if_review_required(review_decision)
 
     if not checks:
-        logger.info("ci-gate: PR has no check-runs, skipping")
+        logger.info(
+            "ci-gate: PR has no check-runs after %ds, skipping",
+            options.startup_grace_secs,
+        )
         return
 
     template = load_prompts([BUNDLED_PROMPT_DIR / "ci_fix.md"])
