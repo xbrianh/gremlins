@@ -9,7 +9,7 @@ from gremlins.stages.address_code import AddressCodeOptions, run as run_address_
 from gremlins.stages.context import StageContext
 from gremlins.stages.implement import ImplementOptions, _render_spec_block, run as run_implement
 from gremlins.stages.plan import PlanOptions, run as run_plan
-from gremlins.stages.review_code import run_review_code_stage
+from gremlins.stages.review_code import ReviewCodeOptions, run as run_review_code
 
 
 def _make_ctx(client, session_dir):
@@ -318,13 +318,15 @@ def test_review_code_stage_includes_code_style(tmp_path):
     client = ReviewCreatingClient(
         fixtures={"review-code:detail:sonnet": MINIMAL_EVENTS}
     )
-    run_review_code_stage(
-        client=client,
-        session_dir=tmp_path,
-        plan_text="",
-        detail="sonnet",
-        is_git=False,
-        code_style="Be good.",
+    ctx = _make_ctx(client, tmp_path)
+    run_review_code(
+        ctx,
+        ReviewCodeOptions(
+            plan_text="",
+            detail="sonnet",
+            is_git=False,
+            code_style="Be good.",
+        ),
     )
     assert "Be good." in client.calls[0].prompt
 

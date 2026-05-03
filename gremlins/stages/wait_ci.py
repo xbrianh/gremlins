@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-import os
 import time
 from collections.abc import Callable
 from typing import Any
@@ -138,7 +137,7 @@ def run(ctx: StageContext, options: WaitCiOptions) -> None:
 
     template = load_prompts([BUNDLED_PROMPT_DIR / "ci_fix.md"])
     bail_section = ""
-    if os.environ.get("GR_ID"):
+    if ctx.gr_id:
         bail_section = (
             "\n\nIf you cannot fix the failure, run:\n"
             '  `python -m gremlins.cli bail other "<one-line reason>"`\n'

@@ -17,9 +17,8 @@ from ..git import in_git_repo
 from ..logging_setup import configure_logging
 from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
 from ..runner import install_signal_handlers, run_stages
-from ..stages import address_code, implement, plan, test
+from ..stages import address_code, implement, plan, review_code, test
 from ..stages.context import StageContext
-from ..stages.review_code import run_review_code_stage
 from ..state import patch_state, resolve_session_dir, set_stage
 
 logger = logging.getLogger(__name__)
@@ -237,13 +236,14 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         )
         set_stage("review-code")
         logger.info("[3/5] reviewing code (model: %s)", args.detail)
-        review_file = run_review_code_stage(
-            client=client,
-            session_dir=session_dir,
-            plan_text=plan_text,
-            detail=args.detail,
-            is_git=is_git,
-            code_style=code_style,
+        review_file = review_code.run(
+            ctx,
+            review_code.ReviewCodeOptions(
+                plan_text=plan_text,
+                detail=args.detail,
+                is_git=is_git,
+                code_style=code_style,
+            ),
         )
         logger.info("detail code review (%s): %s", args.detail, review_file)
 
@@ -384,14 +384,16 @@ def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
                 "nothing to review: HEAD~1..HEAD has no changes and working tree is clean"
             )
 
+    ctx = StageContext(client=client, session_dir=session_dir, gr_id=os.environ.get("GR_ID"))
     logger.info("reviewing code (model: %s)", args.detail)
-    review_file = run_review_code_stage(
-        client=client,
-        session_dir=session_dir,
-        plan_text=plan_text,
-        detail=args.detail,
-        is_git=is_git,
-        code_style=code_style,
+    review_file = review_code.run(
+        ctx,
+        review_code.ReviewCodeOptions(
+            plan_text=plan_text,
+            detail=args.detail,
+            is_git=is_git,
+            code_style=code_style,
+        ),
     )
     logger.info("detail code review (%s): %s", args.detail, review_file)
     return 0

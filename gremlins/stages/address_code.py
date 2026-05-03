@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import dataclasses
 import glob
-import os
 import pathlib
 import re
 
@@ -59,7 +58,7 @@ def run(ctx: StageContext, options: AddressCodeOptions) -> None:
             )
 
         bail_section = ""
-        if os.environ.get("GR_ID"):
+        if ctx.gr_id:
             bail_section = """
 
 If a finding asks you to change something that touches secrets/credentials, or you decline to address one or more findings for any other reason that should halt automated recovery, run the bail helper before finishing:

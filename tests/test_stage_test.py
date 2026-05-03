@@ -2,7 +2,6 @@
 
 import json
 import logging
-import pathlib
 from typing import Any
 
 import pytest

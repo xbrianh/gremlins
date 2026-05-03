@@ -6,10 +6,12 @@ updates the gremlin's sub_stage before and after the reviewer runs.
 
 from __future__ import annotations
 
+import dataclasses
 import pathlib
 
 from ..clients.claude import ClaudeClient
 from ..state import emit_bail, set_stage
+from .context import StageContext
 
 LENSES_DIR = pathlib.Path(__file__).resolve().parent.parent / "prompts" / "lenses"
 
@@ -76,6 +78,26 @@ Do NOT make any code changes — only write the review file.
 
 `{out_file}` is the canonical and required location for your review output in every case, including any short-circuit one-liner the lens tells you to emit. Do not emit the verdict only to chat; write it to `{out_file}` and then stop."""
     client.run(prompt, label=label, model=model, raw_path=raw_path)
+
+
+@dataclasses.dataclass
+class ReviewCodeOptions:
+    plan_text: str
+    detail: str
+    is_git: bool
+    code_style: str
+
+
+def run(ctx: StageContext, options: ReviewCodeOptions) -> pathlib.Path:
+    """Unified entry point: run the review-code stage and return the output path."""
+    return run_review_code_stage(
+        client=ctx.client,
+        session_dir=ctx.session_dir,
+        plan_text=options.plan_text,
+        detail=options.detail,
+        is_git=options.is_git,
+        code_style=options.code_style,
+    )
 
 
 def run_review_code_stage(

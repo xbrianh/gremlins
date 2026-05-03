@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-import os
 import pathlib
 import subprocess
 
@@ -67,7 +66,7 @@ def run(ctx: StageContext, options: TestOptions) -> None:
         )
 
     bail_section = ""
-    if os.environ.get("GR_ID"):
+    if ctx.gr_id:
         bail_section = (
             "\n\nIf you cannot fix the failure (e.g. the test checks behaviour you "
             "legitimately cannot implement), run:\n"
