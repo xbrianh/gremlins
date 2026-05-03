@@ -112,15 +112,17 @@ def run(ctx: StageContext, options: VerifyOptions) -> None:
                 raw_path=ctx.session_dir / f"stream-verify-{attempt}.jsonl",
             )
             _agent_bailed = True
-            check_bail(f"verify-fix-{attempt}")
+            check_bail(ctx.gr_id, f"verify-fix-{attempt}")
             _agent_bailed = False
 
         _exhausted = True
-        emit_bail("other", f"verify failed after {options.max_attempts} attempts")
+        emit_bail(
+            ctx.gr_id, "other", f"verify failed after {options.max_attempts} attempts"
+        )
         raise RuntimeError(f"verify stage exhausted {options.max_attempts} attempts")
     except (SystemExit, Exception) as exc:
         if not _exhausted and not _agent_bailed:
-            emit_bail("other", f"verify stage failed: {exc}"[:200])
+            emit_bail(ctx.gr_id, "other", f"verify stage failed: {exc}"[:200])
         raise
 
 

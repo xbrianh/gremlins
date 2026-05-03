@@ -45,7 +45,7 @@ from .state import (
 )
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, gr_id: str | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
     if not argv:
@@ -60,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     if sub == "local":
         return _self_background_main("localgremlin", rest)
     if sub == "_local":
-        return local_main(rest)
+        return local_main(rest, gr_id=gr_id)
     if sub == "review":
         return review_main(rest)
     if sub == "address":
@@ -68,13 +68,13 @@ def main(argv: list[str] | None = None) -> int:
     if sub == "gh":
         return _self_background_main("ghgremlin", rest)
     if sub == "_gh":
-        return gh_main(rest)
+        return gh_main(rest, gr_id=gr_id)
     if sub == "boss":
         return _self_background_main("bossgremlin", rest)
     if sub == "_boss":
         from .orchestrators.boss import boss_main
 
-        return boss_main(rest)
+        return boss_main(rest, gr_id=gr_id)
     if sub == "fleet":
         return fleet_main(rest)
     if sub == "handoff":
@@ -177,9 +177,12 @@ def _run_pipeline_main(argv: list[str]) -> int:
         return 1
 
     gr_id, kind_subcommand, *args = argv
+    if not gr_id:
+        sys.stderr.write("_run-pipeline: gr_id must be non-empty\n")
+        return 1
     rc = 1
     try:
-        rc = main([kind_subcommand, *args])
+        rc = main([kind_subcommand, *args], gr_id=gr_id)
     except SystemExit as e:
         rc = e.code if isinstance(e.code, int) else 1
     except BaseException:
@@ -213,7 +216,8 @@ def _bail_main(argv: list[str]) -> int:
     p.add_argument("bail_detail", nargs="?", default="")
     args = p.parse_args(argv)
 
-    emit_bail(args.bail_class, args.bail_detail)
+    gr_id = os.environ.get("GR_ID")
+    emit_bail(gr_id, args.bail_class, args.bail_detail)
     return 0
 
 

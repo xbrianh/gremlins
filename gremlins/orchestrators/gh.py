@@ -123,7 +123,9 @@ def _fetch_issue_body(issue_num: str, repo: str) -> str:
 
 
 def _update_description_from_plan(
-    plan_md: pathlib.Path, state_file: pathlib.Path | None
+    plan_md: pathlib.Path,
+    state_file: pathlib.Path | None,
+    gr_id: str | None = None,
 ) -> None:
     if state_file is None or not state_file.exists():
         return
@@ -139,7 +141,7 @@ def _update_description_from_plan(
                 h1 = m.group(1)[:60]
                 break
         if h1:
-            patch_state(description=h1)
+            patch_state(gr_id, description=h1)
     except Exception:
         pass
 
@@ -152,6 +154,7 @@ def _resolve_plan_source(
     model: str | None,
     client: ClaudeClient,
     state_file: pathlib.Path | None,
+    gr_id: str | None = None,
 ) -> tuple[str, str, str]:
     """Resolve --plan <source> into (issue_url, issue_num, issue_body)."""
     if plan_md.exists() and plan_md.stat().st_size > 0:
@@ -214,7 +217,7 @@ def _resolve_plan_source(
         issue_url = m.group(0)
         issue_num = issue_url.split("/")[-1]
 
-        patch_state(issue_url=issue_url, issue_num=issue_num)
+        patch_state(gr_id, issue_url=issue_url, issue_num=issue_num)
         logger.info("issue: %s", issue_url)
         shutil.copyfile(src, plan_md)
     else:
@@ -247,12 +250,14 @@ def _resolve_plan_source(
             "[1/8] plan supplied via --plan (issue %s#%s)", target_repo, issue_ref
         )
 
-    patch_state(issue_url=issue_url, issue_num=issue_num)
-    _update_description_from_plan(plan_md, state_file)
+    patch_state(gr_id, issue_url=issue_url, issue_num=issue_num)
+    _update_description_from_plan(plan_md, state_file, gr_id=gr_id)
     return issue_url, issue_num, issue_body
 
 
-def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
+def gh_main(
+    argv: list[str], *, client: ClaudeClient | None = None, gr_id: str | None = None
+) -> int:
     configure_logging()
     args = _parse_gh_args(argv)
     if os.environ.get("GREMLINS_TEST_NOOP_PIPELINE"):
@@ -268,8 +273,8 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     install_signal_handlers(client)
 
     repo = get_repo()
-    session_dir = resolve_session_dir()
-    state_file = resolve_state_file()
+    session_dir = resolve_session_dir(gr_id)
+    state_file = resolve_state_file(gr_id)
     plan_md = session_dir / "plan.md"
     spec_file = session_dir / "spec.md"
 
@@ -287,7 +292,7 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     if model is None:
         model = _read_state_field(state_file, "model") or "sonnet"
     if model:
-        patch_state(model=model)
+        patch_state(gr_id, model=model)
 
     instructions = " ".join(args.instructions) if args.instructions else ""
 
@@ -306,6 +311,7 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
             model=model,
             client=client,
             state_file=state_file,
+            gr_id=gr_id,
         )
     elif resume_idx > plan_stage_idx:
         issue_url = _read_state_field(state_file, "issue_url")
@@ -326,7 +332,7 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     ctx = StageContext(
         client=client,
         session_dir=session_dir,
-        gr_id=os.environ.get("GR_ID"),
+        gr_id=gr_id,
     )
 
     # Inter-stage state
@@ -352,7 +358,7 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         nonlocal issue_url, issue_num, issue_body
         if args.plan_source:
             return
-        set_stage("plan")
+        set_stage(gr_id, "plan")
         logger.info("[1/8] running ghplan")
         plan_prompt = load_prompts([BUNDLED_PROMPT_DIR / "ghplan.md"]).format(
             ref=_fmt_escape(args.ref or ""),
@@ -374,12 +380,12 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         )
         issue_num = issue_url.split("/")[-1]
         logger.info("issue: %s", issue_url)
-        patch_state(issue_url=issue_url, issue_num=issue_num)
+        patch_state(gr_id, issue_url=issue_url, issue_num=issue_num)
         issue_body = _fetch_issue_body(issue_num, repo)
 
     def stage_implement() -> None:
         nonlocal impl_result
-        set_stage("implement")
+        set_stage(gr_id, "implement")
         logger.info("[2a/8] implementing plan")
         spec_text = ""
         if spec_file.exists():
@@ -405,12 +411,13 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         if impl_result is None:
             die("implement stage did not produce a result")
         patch_state(
+            gr_id,
             impl_handoff_branch=impl_result.handoff_branch,
             impl_base_ref=impl_result.pre_state.head,
         )
 
     def stage_verify() -> None:
-        set_stage("verify")
+        set_stage(gr_id, "verify")
         logger.info("[2b/8] verifying implementation")
         verify.run(
             ctx,
@@ -423,7 +430,7 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
 
     def stage_commit_pr() -> None:
         nonlocal pr_url, pr_num
-        set_stage("commit-pr")
+        set_stage(gr_id, "commit-pr")
         logger.info("[2c/8] committing + opening PR")
 
         if impl_result is not None:
@@ -474,11 +481,11 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         )
         pr_num = pr_url.split("/")[-1]
         logger.info("PR: %s", pr_url)
-        patch_state(pr_url=pr_url)
+        patch_state(gr_id, pr_url=pr_url)
 
     def stage_request_copilot() -> None:
         _ensure_pr_url()
-        set_stage("request-copilot")
+        set_stage(gr_id, "request-copilot")
         logger.info("[3/8] requesting Copilot review")
         request_copilot.run(
             ctx,
@@ -487,7 +494,7 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
 
     def stage_ghreview() -> None:
         _ensure_pr_url()
-        set_stage("ghreview")
+        set_stage(gr_id, "ghreview")
         logger.info("[4/8] running /ghreview")
         ghreview.run(
             ctx,
@@ -500,7 +507,7 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
 
     def stage_wait_copilot() -> None:
         _ensure_pr_url()
-        set_stage("wait-copilot")
+        set_stage(gr_id, "wait-copilot")
         logger.info("[5/8] waiting for Copilot review (20s interval, 10min timeout)")
         state = wait_copilot.run(
             ctx,
@@ -510,7 +517,7 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
 
     def stage_ghaddress() -> None:
         _ensure_pr_url()
-        set_stage("ghaddress")
+        set_stage(gr_id, "ghaddress")
         logger.info("[6/8] running /ghaddress")
         ghaddress.run(
             ctx,
@@ -523,7 +530,7 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
 
     def stage_wait_ci() -> None:
         _ensure_pr_url()
-        set_stage("ci-gate")
+        set_stage(gr_id, "ci-gate")
         logger.info("[7/8] waiting for CI checks (up to 3 attempts, 20min each)")
         wait_ci.run(
             ctx,
@@ -549,7 +556,7 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
 
     total_cost = getattr(client, "total_cost_usd", 0.0)
     if total_cost is not None and total_cost > 0:
-        patch_state(total_cost_usd=total_cost)
+        patch_state(gr_id, total_cost_usd=total_cost)
 
     logger.info("done. PR: %s", pr_url or "(unknown)")
     if total_cost is not None and total_cost > 0:

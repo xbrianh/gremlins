@@ -98,6 +98,7 @@ def run(ctx: StageContext, options: ReviewCodeOptions) -> pathlib.Path:
         detail=options.detail,
         is_git=options.is_git,
         code_style=options.code_style,
+        gr_id=ctx.gr_id,
     )
 
 
@@ -109,6 +110,7 @@ def run_review_code_stage(
     detail: str,
     is_git: bool,
     code_style: str,
+    gr_id: str | None = None,
 ) -> pathlib.Path:
     """Execute the review-code stage: load the detail lens, run one reviewer,
     and return the output path. Emits bail_class=other on failure when
@@ -158,7 +160,7 @@ def run_review_code_stage(
     # Wrap so any infrastructure failure (claude -p crash, missing output
     # file, etc.) records bail_class=other before the exception propagates.
     try:
-        set_stage("review-code", {"detail": f"running ({detail})"})
+        set_stage(gr_id, "review-code", {"detail": f"running ({detail})"})
         run_review(
             client=client,
             model=detail,
@@ -170,11 +172,11 @@ def run_review_code_stage(
             label=f"review-code:detail:{detail}",
             raw_path=session_dir / f"stream-review-code-detail-{detail}.jsonl",
         )
-        set_stage("review-code", {"detail": f"done ({detail})"})
+        set_stage(gr_id, "review-code", {"detail": f"done ({detail})"})
         if not review_code.exists() or review_code.stat().st_size == 0:
             raise RuntimeError(f"review {detail} did not produce {review_code}")
     except (SystemExit, Exception) as exc:
-        emit_bail("other", f"review-code stage failed: {exc}"[:200])
+        emit_bail(gr_id, "other", f"review-code stage failed: {exc}"[:200])
         raise
 
     return review_code

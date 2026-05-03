@@ -151,7 +151,8 @@ def test_local_main_does_not_clobber_external_state(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.orchestrators.local.resolve_session_dir", lambda: session_dir
+        "gremlins.orchestrators.local.resolve_session_dir",
+        lambda gr_id=None: session_dir,
     )
     monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
     monkeypatch.setattr(
@@ -229,7 +230,7 @@ def test_set_stage_noop_when_gr_id_unset(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
     # GR_ID is already unset via autouse fixture
     mtime_before = sf.stat().st_mtime_ns
-    state_mod.set_stage("running")
+    state_mod.set_stage(None, "running")
     assert sf.stat().st_mtime_ns == mtime_before
 
 
@@ -238,9 +239,8 @@ def test_set_stage_writes_stage_and_timestamp(tmp_path, monkeypatch):
     gr_id = "gr-stage-write-test"
     xdg, sf = _make_state_dir(tmp_path, gr_id)
     monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
-    monkeypatch.setenv("GR_ID", gr_id)
 
-    state_mod.set_stage("review-code")
+    state_mod.set_stage(gr_id, "review-code")
 
     data = json.loads(sf.read_text())
     assert data["stage"] == "review-code"
@@ -256,9 +256,8 @@ def test_set_stage_with_sub_stage(tmp_path, monkeypatch):
     gr_id = "gr-substage-test"
     xdg, sf = _make_state_dir(tmp_path, gr_id)
     monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
-    monkeypatch.setenv("GR_ID", gr_id)
 
-    state_mod.set_stage("implement", sub_stage={"attempt": 2})
+    state_mod.set_stage(gr_id, "implement", sub_stage={"attempt": 2})
 
     data = json.loads(sf.read_text())
     assert data["stage"] == "implement"
@@ -270,12 +269,11 @@ def test_set_stage_removes_sub_stage_when_none(tmp_path, monkeypatch):
     gr_id = "gr-substage-del-test"
     xdg, sf = _make_state_dir(tmp_path, gr_id)
     monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
-    monkeypatch.setenv("GR_ID", gr_id)
 
-    state_mod.set_stage("implement", sub_stage={"k": 1})
+    state_mod.set_stage(gr_id, "implement", sub_stage={"k": 1})
     assert "sub_stage" in json.loads(sf.read_text())
 
-    state_mod.set_stage("review-code")
+    state_mod.set_stage(gr_id, "review-code")
     data = json.loads(sf.read_text())
     assert data["stage"] == "review-code"
     assert "sub_stage" not in data
@@ -289,8 +287,7 @@ def test_set_stage_noop_when_state_json_missing(tmp_path, monkeypatch):
     state_dir.mkdir(parents=True)
     # No state.json written
     monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
-    monkeypatch.setenv("GR_ID", gr_id)
-    state_mod.set_stage("running")  # must not raise
+    state_mod.set_stage(gr_id, "running")  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -303,9 +300,8 @@ def test_emit_bail_writes_bail_class(tmp_path, monkeypatch):
     gr_id = "gr-bail-write-test"
     xdg, sf = _make_state_dir(tmp_path, gr_id)
     monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
-    monkeypatch.setenv("GR_ID", gr_id)
 
-    state_mod.emit_bail("other", "something went wrong")
+    state_mod.emit_bail(gr_id, "other", "something went wrong")
 
     data = json.loads(sf.read_text())
     assert data["bail_class"] == "other"
@@ -317,12 +313,11 @@ def test_emit_bail_removes_bail_detail_when_empty(tmp_path, monkeypatch):
     gr_id = "gr-bail-del-test"
     xdg, sf = _make_state_dir(tmp_path, gr_id)
     monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
-    monkeypatch.setenv("GR_ID", gr_id)
 
-    state_mod.emit_bail("other", "detail")
+    state_mod.emit_bail(gr_id, "other", "detail")
     assert "bail_detail" in json.loads(sf.read_text())
 
-    state_mod.emit_bail("other")
+    state_mod.emit_bail(gr_id, "other")
     data = json.loads(sf.read_text())
     assert data["bail_class"] == "other"
     assert "bail_detail" not in data
@@ -334,7 +329,7 @@ def test_emit_bail_noop_when_gr_id_unset(tmp_path, monkeypatch):
     xdg, sf = _make_state_dir(tmp_path, gr_id)
     monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
     mtime_before = sf.stat().st_mtime_ns
-    state_mod.emit_bail("other")
+    state_mod.emit_bail(None, "other")
     assert sf.stat().st_mtime_ns == mtime_before
 
 
@@ -343,7 +338,6 @@ def test_emit_bail_noop_when_bail_class_empty(tmp_path, monkeypatch):
     gr_id = "gr-bail-empty-test"
     xdg, sf = _make_state_dir(tmp_path, gr_id)
     monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
-    monkeypatch.setenv("GR_ID", gr_id)
     mtime_before = sf.stat().st_mtime_ns
-    state_mod.emit_bail("")
+    state_mod.emit_bail(gr_id, "")
     assert sf.stat().st_mtime_ns == mtime_before

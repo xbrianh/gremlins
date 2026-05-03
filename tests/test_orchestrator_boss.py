@@ -54,7 +54,6 @@ def _make_gremlin_state(tmp_path, gr_id="test-boss-aabb12"):
 
 def _common_boss_patches(monkeypatch, tmp_path, gr_id):
     """Shared monkeypatches for boss_main integration tests."""
-    monkeypatch.setenv("GR_ID", gr_id)
     monkeypatch.setattr(boss_mod, "STATE_ROOT", str(tmp_path))
     monkeypatch.setattr(boss_mod, "_stop_requested", False)
     # Stub out set_stage so tests don't touch the developer's real ~/.local/state.
@@ -337,7 +336,7 @@ def test_chain_done_after_one_child(tmp_path, monkeypatch):
     monkeypatch.setattr(boss_mod, "launch_child", fake_launch_child)
     monkeypatch.setattr(boss_mod, "land_child", fake_land_child)
 
-    result = boss_main(["--plan", str(spec), "--chain-kind", "local"])
+    result = boss_main(["--plan", str(spec), "--chain-kind", "local"], gr_id=gr_id)
     assert result == 0
     assert calls == [
         ("handoff", "next-plan"),
@@ -420,7 +419,7 @@ def test_chain_uses_ghgremlin_for_gh_kind(tmp_path, monkeypatch):
     monkeypatch.setattr(boss_mod, "launch_child", fake_launch_child)
     monkeypatch.setattr(boss_mod, "land_child", lambda cid, into_dir="": True)
 
-    result = boss_main(["--plan", str(spec), "--chain-kind", "gh"])
+    result = boss_main(["--plan", str(spec), "--chain-kind", "gh"], gr_id=gr_id)
     assert result == 0
     assert launch_kinds == ["ghgremlin"]
 
@@ -461,7 +460,7 @@ def test_chain_bail_on_handoff(tmp_path, monkeypatch):
     monkeypatch.setattr(boss_mod, "run_handoff", fake_run_handoff)
 
     with pytest.raises(SystemExit) as exc_info:
-        boss_main(["--plan", str(spec), "--chain-kind", "local"])
+        boss_main(["--plan", str(spec), "--chain-kind", "local"], gr_id=gr_id)
     assert exc_info.value.code == 1
 
 
@@ -543,7 +542,7 @@ def test_operator_followups_stored_in_boss_state(tmp_path, monkeypatch):
     monkeypatch.setattr(boss_mod, "launch_child", fake_launch_child)
     monkeypatch.setattr(boss_mod, "land_child", lambda cid, into_dir="": True)
 
-    result = boss_main(["--plan", str(spec), "--chain-kind", "local"])
+    result = boss_main(["--plan", str(spec), "--chain-kind", "local"], gr_id=gr_id)
     assert result == 0
 
     # Boss launched exactly one child using the child_plan path from the handoff signal.
@@ -625,7 +624,7 @@ def test_resume_picks_up_in_flight_child(tmp_path, monkeypatch):
     monkeypatch.setattr(boss_mod, "run_handoff", fake_run_handoff)
     monkeypatch.setattr(boss_mod, "land_child", fake_land_child)
 
-    result = boss_main(["--plan", str(spec), "--chain-kind", "local"])
+    result = boss_main(["--plan", str(spec), "--chain-kind", "local"], gr_id=gr_id)
     assert result == 0
 
     # Boss should have landed the in-flight child first, then run handoff.
@@ -692,7 +691,7 @@ def test_resume_fixture_in_boss_main(tmp_path, monkeypatch):
     monkeypatch.setattr(boss_mod, "run_handoff", fake_run_handoff)
     monkeypatch.setattr(boss_mod, "land_child", fake_land_child)
 
-    result = boss_main(["--plan", str(spec), "--chain-kind", "gh"])
+    result = boss_main(["--plan", str(spec), "--chain-kind", "gh"], gr_id=gr_id)
     assert result == 0
 
     # Resumed with the in-flight child from the fixture.
@@ -790,7 +789,7 @@ def test_rescue_then_land(tmp_path, monkeypatch):
     monkeypatch.setattr(boss_mod, "rescue_child", fake_rescue_child)
     monkeypatch.setattr(boss_mod, "land_child", fake_land_child)
 
-    result = boss_main(["--plan", str(spec), "--chain-kind", "local"])
+    result = boss_main(["--plan", str(spec), "--chain-kind", "local"], gr_id=gr_id)
     assert result == 0
 
     assert calls == [
@@ -865,7 +864,7 @@ def test_bail_after_rescue_refused(tmp_path, monkeypatch):
     monkeypatch.setattr(boss_mod, "rescue_child", lambda cid: False)
 
     with pytest.raises(SystemExit) as exc_info:
-        boss_main(["--plan", str(spec), "--chain-kind", "local"])
+        boss_main(["--plan", str(spec), "--chain-kind", "local"], gr_id=gr_id)
     assert exc_info.value.code == 1
 
     final_state = load_boss_state(str(state_dir))
@@ -1043,7 +1042,6 @@ def test_resolve_plan_source_persists_issue_metadata_on_first_fetch(
         json.dumps({"id": "test-boss-persist-aa1122"})
     )
     monkeypatch.setenv("XDG_STATE_HOME", str(xdg_home))
-    monkeypatch.setenv("GR_ID", "test-boss-persist-aa1122")
 
     monkeypatch.setattr(boss_mod, "get_repo", lambda: "owner/repo")
     monkeypatch.setattr(
@@ -1057,7 +1055,9 @@ def test_resolve_plan_source_persists_issue_metadata_on_first_fetch(
     )
     monkeypatch.setattr(shutil, "which", lambda n: "/fake/gh" if n == "gh" else None)
 
-    spec_path, issue_url, issue_num = _resolve_plan_source("99", str(state_dir))
+    spec_path, issue_url, issue_num = _resolve_plan_source(
+        "99", str(state_dir), gr_id="test-boss-persist-aa1122"
+    )
 
     assert issue_url == "https://github.com/owner/repo/issues/99"
     assert issue_num == "99"
@@ -1125,7 +1125,7 @@ def test_boss_main_plan_issue_ref_snapshots_spec(tmp_path, monkeypatch):
 
     monkeypatch.setattr(boss_mod, "run_handoff", fake_run_handoff)
 
-    result = boss_main(["--plan", "80", "--chain-kind", "local"])
+    result = boss_main(["--plan", "80", "--chain-kind", "local"], gr_id=gr_id)
     assert result == 0
 
     snapshot = state_dir / "spec.md"
@@ -1220,7 +1220,7 @@ def test_land_child_uses_boss_workdir_for_local_chain(tmp_path, monkeypatch):
     monkeypatch.setattr(boss_mod, "launch_child", fake_launch_child)
     monkeypatch.setattr(boss_mod, "land_child", fake_land_child)
 
-    result = boss_main(["--plan", str(spec), "--chain-kind", "local"])
+    result = boss_main(["--plan", str(spec), "--chain-kind", "local"], gr_id=gr_id)
     assert result == 0
 
     assert len(land_calls) == 1
@@ -1303,7 +1303,7 @@ def test_land_child_no_into_dir_for_gh_chain(tmp_path, monkeypatch):
     monkeypatch.setattr(boss_mod, "launch_child", fake_launch_child)
     monkeypatch.setattr(boss_mod, "land_child", fake_land_child)
 
-    result = boss_main(["--plan", str(spec), "--chain-kind", "gh"])
+    result = boss_main(["--plan", str(spec), "--chain-kind", "gh"], gr_id=gr_id)
     assert result == 0
 
     assert len(land_calls) == 1
@@ -1394,7 +1394,9 @@ def test_boss_records_current_head_after_land(tmp_path, monkeypatch):
     monkeypatch.setattr(git_mod, "git_head_of_workdir", lambda w: next(head_sequence))
 
     patch_calls = []
-    monkeypatch.setattr(boss_mod, "patch_state", lambda **kw: patch_calls.append(kw))
+    monkeypatch.setattr(
+        boss_mod, "patch_state", lambda gr_id=None, **kw: patch_calls.append(kw)
+    )
 
     handoff_results = iter(
         [
@@ -1447,7 +1449,7 @@ def test_boss_records_current_head_after_land(tmp_path, monkeypatch):
     monkeypatch.setattr(boss_mod, "launch_child", fake_launch_child)
     monkeypatch.setattr(boss_mod, "land_child", lambda cid, into_dir="": True)
 
-    result = boss_main(["--plan", str(spec), "--chain-kind", "local"])
+    result = boss_main(["--plan", str(spec), "--chain-kind", "local"], gr_id=gr_id)
     assert result == 0
 
     current_head_calls = [c for c in patch_calls if "current_head" in c]
