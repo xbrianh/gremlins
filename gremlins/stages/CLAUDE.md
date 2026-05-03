@@ -22,11 +22,9 @@ sequencing logic of their own.
   <pr_url>` plus a `check_bail` call.
 - `ghaddress.py` — `run_ghaddress_stage`. Thin wrapper around `/ghaddress
   <pr_url>`.
-- `wait_copilot.py` — `run_request_copilot_stage` and
-  `run_wait_copilot_stage`. The Copilot review request + polling loop.
-
-The `request-copilot` stage is the exception — its body is inlined as a
-closure inside `../orchestrators/gh.py` rather than living here.
+- `request_copilot.py` — `run`. Requests Copilot review by adding
+  `copilot-pull-request-reviewer` to the PR's reviewer list.
+- `wait_copilot.py` — `run`. Polls until Copilot posts a non-PENDING review.
 
 ## Conventions
 
