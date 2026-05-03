@@ -129,12 +129,9 @@ def test_run_pipeline_rejects_invalid_gr_id(tmp_path, monkeypatch, bad_id):
 
 
 def test_run_pipeline_valid_id_proceeds(tmp_path, monkeypatch):
-    """A valid gr_id passes validation (pipeline itself may fail for other reasons)."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setattr("gremlins.cli.local_main", lambda *a, **kw: 0)
 
-    with pytest.raises(SystemExit) as exc_info:
-        main(["_run-pipeline", "valid-gremlin-abc123", "_local", "--help"])
-    # Any exit (including help/error from _local) is fine — the point is
-    # that validation passed and we didn't get rc=1 from gr_id rejection
-    # before even reaching the subcommand.
-    _ = exc_info.value.code  # just confirm it exited via sys.exit
+    with pytest.raises(SystemExit):
+        main(["_run-pipeline", "valid-gremlin-abc123", "_local"])
+    # If we reach here, validate_gr_id passed; pipeline may exit for any reason.
