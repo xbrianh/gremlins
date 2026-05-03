@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import logging
 import os
 import pathlib
 import re
@@ -30,7 +31,10 @@ from typing import Any, NoReturn, cast
 from .. import git as _git_mod
 from ..gh_utils import get_repo, parse_issue_ref, view_issue
 from ..launcher import launch as _launch
+from ..logging_setup import configure_logging
 from ..state import patch_state, set_stage
+
+logger = logging.getLogger(__name__)
 
 STATE_ROOT = os.path.join(
     os.environ.get(
@@ -75,7 +79,7 @@ _stop_requested = False
 def _sigterm_handler(signum: int, frame: types.FrameType | None) -> None:
     global _stop_requested
     _stop_requested = True
-    log("received SIGTERM — stopping after current operation")
+    logger.info("received SIGTERM — stopping after current operation")
     if _current_proc is not None:
         try:
             _current_proc.send_signal(signal.SIGTERM)
@@ -83,22 +87,14 @@ def _sigterm_handler(signum: int, frame: types.FrameType | None) -> None:
             pass
 
 
-signal.signal(signal.SIGTERM, _sigterm_handler)
-
-
-def log(msg: str) -> None:
-    ts = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    print(f"[{ts}] {msg}", flush=True)
-
-
 def die(msg: str) -> NoReturn:
-    log(f"fatal: {msg}")
+    logger.error("fatal: %s", msg)
     sys.exit(1)
 
 
 def check_stop() -> None:
     if _stop_requested:
-        log("stop requested — exiting")
+        logger.info("stop requested — exiting")
         sys.exit(130)
 
 
@@ -328,8 +324,9 @@ def run_handoff(
     # passing --spec would render the same document twice in the prompt.
     forward_spec = bool(spec_path) and spec_path != current_plan
     spec_log = spec_path if forward_spec else "(none)"
-    log(
-        f"handoff {n}: plan={current_plan}, spec={spec_log}, base={base_ref[:12]}, rev={rev_label}, cwd={handoff_cwd}"
+    logger.info(
+        "handoff %d: plan=%s, spec=%s, base=%s, rev=%s, cwd=%s",
+        n, current_plan, spec_log, base_ref[:12], rev_label, handoff_cwd,
     )
     spec_args = ["--spec", spec_path] if forward_spec else []
     cmd = _gremlins_cli_cmd(
@@ -395,11 +392,11 @@ def run_handoff(
     if os.path.isfile(out_path):
         boss_state["current_plan"] = out_path
 
-    log(f"handoff {n} result: {exit_state}")
+    logger.info("handoff %d result: %s", n, exit_state)
     if followups:
-        log(f"  operator follow-ups carried by handoff {n}: {len(followups)}")
+        logger.info("  operator follow-ups carried by handoff %d: %d", n, len(followups))
         for item in followups:
-            log(f"    - {item}")
+            logger.info("    - %s", item)
     return exit_state, sig
 
 
@@ -422,7 +419,7 @@ def launch_child(gr_id: str, launch_kind: str, child_plan: str) -> str:
         if test_model:
             extra += ["-t", test_model]
 
-    log(f"launching child ({launch_kind}): {child_plan}, base={base_ref[:12]}")
+    logger.info("launching child (%s): %s, base=%s", launch_kind, child_plan, base_ref[:12])
     try:
         child_id = _launch(
             launch_kind,
@@ -436,7 +433,7 @@ def launch_child(gr_id: str, launch_kind: str, child_plan: str) -> str:
     except (ValueError, RuntimeError) as exc:
         die(f"launcher failed: {exc}")
 
-    log(f"child launched: {child_id}")
+    logger.info("child launched: %s", child_id)
     check_stop()
     return child_id
 
@@ -450,10 +447,10 @@ def wait_for_child(child_id: str, gr_id: str) -> bool:
     finished_path = os.path.join(child_wdir, "finished")
     state_path = os.path.join(child_wdir, "state.json")
 
-    log(f"waiting for child {child_id}...")
+    logger.info("waiting for child %s...", child_id)
     while True:
         if _stop_requested:
-            log(f"stop requested — stopping child {child_id}")
+            logger.info("stop requested — stopping child %s", child_id)
             subprocess.run(
                 _gremlins_cli_cmd("fleet", "stop", child_id),
                 capture_output=True,
@@ -473,7 +470,7 @@ def wait_for_child(child_id: str, gr_id: str) -> bool:
                         try:
                             os.kill(int(pid), 0)
                         except (OSError, ValueError):
-                            log(f"child {child_id} crashed (pid {pid} gone)")
+                            logger.info("child %s crashed (pid %s gone)", child_id, pid)
                             break
             except Exception:
                 pass
@@ -531,7 +528,7 @@ def _summarize_for_log(text: str, limit: int = 240) -> str:
 
 
 def land_child(child_id: str, into_dir: str = "") -> bool:
-    log(f"landing child {child_id}")
+    logger.info("landing child %s", child_id)
     cmd = _gremlins_cli_cmd("fleet", "land", child_id)
     if into_dir:
         cmd += ["--into", into_dir]
@@ -539,7 +536,7 @@ def land_child(child_id: str, into_dir: str = "") -> bool:
 
 
 def rescue_child(child_id: str) -> bool:
-    log(f"rescuing child {child_id} (headless)")
+    logger.info("rescuing child %s (headless)", child_id)
     return (
         run_proc(
             _gremlins_cli_cmd("fleet", "rescue", "--headless", child_id),
@@ -585,7 +582,7 @@ def _resolve_plan_source(plan: str, state_dir: str) -> tuple[str, str, str]:
         # issue_url / issue_num it persisted to state.json so the rescue
         # doesn't silently strip the issue link from boss_state.json. (We
         # avoid re-fetching from GitHub — the snapshot is authoritative.)
-        log(f"reusing existing spec snapshot: {spec_dest}")
+        logger.info("reusing existing spec snapshot: %s", spec_dest)
         recovered_url = ""
         recovered_num = ""
         try:
@@ -608,7 +605,7 @@ def _resolve_plan_source(plan: str, state_dir: str) -> tuple[str, str, str]:
             shutil.copyfile(plan, spec_dest)
         except OSError as exc:
             die(f"--plan: failed to read/copy local plan file {plan!r}: {exc}")
-        log(f"plan source (file): {plan} → {spec_dest}")
+        logger.info("plan source (file): %s -> %s", plan, spec_dest)
         return spec_dest, "", ""
 
     if target_repo is None and issue_ref is None:
@@ -654,7 +651,7 @@ def _resolve_plan_source(plan: str, state_dir: str) -> tuple[str, str, str]:
     # Persist the issue identifiers to state.json immediately so a crash
     # between this point and init_boss_state() doesn't strip them on rescue.
     patch_state(issue_url=issue_url, issue_num=issue_num)
-    log(f"plan source (issue {target_repo}#{issue_ref}): {issue_url} → {spec_dest}")
+    logger.info("plan source (issue %s#%s): %s -> %s", target_repo, issue_ref, issue_url, spec_dest)
     return spec_dest, issue_url, issue_num
 
 
@@ -694,6 +691,8 @@ def _maybe_set_description_from_spec(state_dir: str) -> None:
 
 
 def boss_main(argv: list[str]) -> int:
+    configure_logging()
+    signal.signal(signal.SIGTERM, _sigterm_handler)
     args = _parse_boss_args(argv)
     if os.environ.get("GREMLINS_TEST_NOOP_PIPELINE"):
         return 0
@@ -732,9 +731,9 @@ def boss_main(argv: list[str]) -> int:
             )
         spec_path, issue_url, issue_num = _resolve_plan_source(args.plan, state_dir)
         if issue_url:
-            log(f"chain start: kind={chain_kind}, spec={spec_path}, issue={issue_url}")
+            logger.info("chain start: kind=%s, spec=%s, issue=%s", chain_kind, spec_path, issue_url)
         else:
-            log(f"chain start: kind={chain_kind}, spec={spec_path}")
+            logger.info("chain start: kind=%s, spec=%s", chain_kind, spec_path)
         _maybe_set_description_from_spec(state_dir)
         if chain_kind == "gh":
             # gh children open PRs from the repo's default branch and land
@@ -742,14 +741,16 @@ def boss_main(argv: list[str]) -> int:
             # chain to origin/<default-branch> so handoff diffs land cleanly.
             target_branch = get_default_branch(project_root)
             chain_base_ref = get_remote_branch_sha(project_root, target_branch)
-            log(
-                f"base ref: {chain_base_ref[:12]} (origin/{target_branch}), target branch: {target_branch}"
+            logger.info(
+                "base ref: %s (origin/%s), target branch: %s",
+                chain_base_ref[:12], target_branch, target_branch,
             )
         else:
             chain_base_ref = get_head_ref(project_root)
             target_branch = get_current_branch(project_root)
-            log(
-                f"base ref: {chain_base_ref[:12]}, target branch: {target_branch or '(detached)'}"
+            logger.info(
+                "base ref: %s, target branch: %s",
+                chain_base_ref[:12], target_branch or "(detached)",
             )
         boss_state = init_boss_state(
             spec_path=spec_path,
@@ -771,8 +772,9 @@ def boss_main(argv: list[str]) -> int:
             patch_state(current_head=initial_head)
     else:
         boss_state = load_boss_state(state_dir)
-        log(
-            f"resuming chain: kind={chain_kind}, completed children: {len(boss_state['children'])}"
+        logger.info(
+            "resuming chain: kind=%s, completed children: %d",
+            chain_kind, len(boss_state["children"]),
         )
 
     # Main loop: handoff → launch → wait → land/rescue → repeat
@@ -794,24 +796,24 @@ def boss_main(argv: list[str]) -> int:
             check_stop()
 
             if exit_state == "chain-done":
-                log("chain complete")
+                logger.info("chain complete")
                 followups: list[Any] = boss_state.get("operator_followups") or []
                 if followups:
-                    log(
-                        f"operator follow-ups ({len(followups)}) — owed by the "
-                        f"human between phase landings:"
+                    logger.info(
+                        "operator follow-ups (%d) — owed by the human between phase landings:",
+                        len(followups),
                     )
                     for item in followups:
-                        log(f"  - {item}")
+                        logger.info("  - %s", item)
                 else:
-                    log("operator follow-ups: (none)")
+                    logger.info("operator follow-ups: (none)")
                 set_stage("done")
                 save_boss_state(state_dir, boss_state)
                 return 0
 
             if exit_state == "bail":
                 reason = sig.get("reason") or "(no reason given)"
-                log(f"handoff bailed: {reason}")
+                logger.info("handoff bailed: %s", reason)
                 save_boss_state(state_dir, boss_state)
                 die(f"chain halted by handoff: {reason}")
 
@@ -829,9 +831,7 @@ def boss_main(argv: list[str]) -> int:
             # Stop the freshly launched child if a stop was requested during
             # or just after launch (pre-wait window).
             if _stop_requested:
-                log(
-                    f"stop requested — stopping newly launched child {current_child_id}"
-                )
+                logger.info("stop requested — stopping newly launched child %s", current_child_id)
                 subprocess.run(
                     _gremlins_cli_cmd("fleet", "stop", current_child_id),
                     capture_output=True,
@@ -842,7 +842,7 @@ def boss_main(argv: list[str]) -> int:
 
         else:
             # Resume path: already have a child in flight
-            log(f"resuming with in-flight child: {current_child_id}")
+            logger.info("resuming with in-flight child: %s", current_child_id)
             if child_is_closed(current_child_id):
                 # `closed` is a UI hide flag, not a success/failure signal.
                 # Inspect the finished marker and exit_code to determine outcome.
@@ -860,9 +860,7 @@ def boss_main(argv: list[str]) -> int:
 
                 if child_succeeded:
                     # Already finished successfully and closed — treat as landed
-                    log(
-                        f"child {current_child_id} already finished and closed — treating as landed"
-                    )
+                    logger.info("child %s already finished and closed — treating as landed", current_child_id)
                     boss_state["children"].append(
                         {
                             "id": current_child_id,
@@ -875,9 +873,9 @@ def boss_main(argv: list[str]) -> int:
                 else:
                     # Closed but not successfully finished — operator may have
                     # manually hidden a failed child.  Halt for operator action.
-                    log(
-                        f"child {current_child_id} is closed but did not finish successfully"
-                        f" — operator action required"
+                    logger.info(
+                        "child %s is closed but did not finish successfully — operator action required",
+                        current_child_id,
                     )
                     boss_state["current_child_id"] = None
                     save_boss_state(state_dir, boss_state)
@@ -926,7 +924,7 @@ def boss_main(argv: list[str]) -> int:
                             )
                         patch_state(current_head=new_head)
                     outcome = "rescued-then-landed" if was_rescued else "landed"
-                    log(f"child {current_child_id} {outcome}")
+                    logger.info("child %s %s", current_child_id, outcome)
                     boss_state["children"].append(
                         {"id": current_child_id, "outcome": outcome}
                     )
@@ -936,9 +934,7 @@ def boss_main(argv: list[str]) -> int:
                 else:
                     # The pipeline succeeded but land itself failed (e.g. merge
                     # conflict, branch protection rejection, squash conflict).
-                    log(
-                        f"landing failed for {current_child_id} — operator action required"
-                    )
+                    logger.info("landing failed for %s — operator action required", current_child_id)
                     boss_state["children"].append(
                         {
                             "id": current_child_id,
@@ -965,26 +961,27 @@ def boss_main(argv: list[str]) -> int:
                 # artifact that the chain can be salvaged from with a human
                 # edit, but the agent isn't the right actor.
                 if bail_reason == "structural":
-                    log(
-                        f"child {current_child_id} bailed: STRUCTURAL — "
-                        f"pipeline/sibling-artifact bug, human edit required"
+                    logger.info(
+                        "child %s bailed: STRUCTURAL — pipeline/sibling-artifact bug, human edit required",
+                        current_child_id,
                     )
                     if bail_detail:
-                        log(f"  diagnosis: {bail_detail}")
+                        logger.info("  diagnosis: %s", bail_detail)
                 elif bail_reason == "unsalvageable":
-                    log(
-                        f"child {current_child_id} bailed: UNSALVAGEABLE — run "
-                        f"cannot be recovered (giving up)"
+                    logger.info(
+                        "child %s bailed: UNSALVAGEABLE — run cannot be recovered (giving up)",
+                        current_child_id,
                     )
                     if bail_detail:
-                        log(f"  detail: {bail_detail}")
+                        logger.info("  detail: %s", bail_detail)
                 else:
                     # Other headless-rescue bail reasons also populate bail_detail.
-                    log(
-                        f"rescue refused for {current_child_id} ({bail_reason or 'no bail_reason'})"
+                    logger.info(
+                        "rescue refused for %s (%s)",
+                        current_child_id, bail_reason or "no bail_reason",
                     )
                     if bail_detail:
-                        log(f"  detail: {bail_detail}")
+                        logger.info("  detail: %s", bail_detail)
                 boss_state["children"].append(
                     {
                         "id": current_child_id,
@@ -998,4 +995,4 @@ def boss_main(argv: list[str]) -> int:
                 )
 
             was_rescued = True
-            log(f"rescue relaunched {current_child_id} — waiting again")
+            logger.info("rescue relaunched %s — waiting again", current_child_id)

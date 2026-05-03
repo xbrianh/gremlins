@@ -13,6 +13,7 @@ Exit codes:
 
 import argparse
 import json
+import logging
 import pathlib
 import re
 import shutil
@@ -20,7 +21,10 @@ import subprocess
 import sys
 from typing import Any, NoReturn, cast
 
+from gremlins.logging_setup import configure_logging
 from gremlins.prompts import load_code_style
+
+logger = logging.getLogger(__name__)
 
 CLAUDE_FLAGS = [
     "--permission-mode",
@@ -310,7 +314,7 @@ def sanitize_rolling_plan(out_path: pathlib.Path, timeout: int | None) -> None:
     sanitize_timeout = min(timeout, 60) if timeout is not None else 60
     prompt = build_sanitize_prompt(plan_text, out_path)
     cmd = ["claude", "-p", "--model", "haiku", *CLAUDE_FLAGS, prompt]
-    print("==> sanitizing rolling plan", flush=True)
+    logger.info("sanitizing rolling plan")
     try:
         result = subprocess.run(
             cmd, timeout=sanitize_timeout, capture_output=True, text=True
@@ -362,6 +366,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: list[str]) -> int:
+    configure_logging()
     args = parse_args(argv)
 
     if shutil.which("claude") is None:
@@ -447,7 +452,7 @@ def main(argv: list[str]) -> int:
     )
 
     cmd = ["claude", "-p", "--model", args.model, *CLAUDE_FLAGS, prompt]
-    print(f"==> running handoff agent (model: {args.model})", flush=True)
+    logger.info("running handoff agent (model: %s)", args.model)
     try:
         result = subprocess.run(cmd, timeout=args.timeout)
     except subprocess.TimeoutExpired:
@@ -474,7 +479,7 @@ def main(argv: list[str]) -> int:
         )
         return 1
 
-    print(f"==> handoff complete: {exit_state}", flush=True)
+    logger.info("handoff complete: %s", exit_state)
     if exit_state == "next-plan":
         child_plan = state.get("child_plan")
         if not child_plan:
@@ -487,17 +492,17 @@ def main(argv: list[str]) -> int:
                 f"error: child plan path in signal file does not exist: {child_plan}\n"
             )
             return 1
-        print(f"    updated plan: {out_path}", flush=True)
-        print(f"    child plan:   {child_plan}", flush=True)
-        print(f"    signal file:  {signal_path}", flush=True)
+        logger.info("updated plan: %s", out_path)
+        logger.info("child plan:   %s", child_plan)
+        logger.info("signal file:  %s", signal_path)
     elif exit_state == "chain-done":
-        print(f"    updated plan: {out_path}", flush=True)
-        print(f"    signal file:  {signal_path}", flush=True)
+        logger.info("updated plan: %s", out_path)
+        logger.info("signal file:  %s", signal_path)
     elif exit_state == "bail":
         reason = state.get("reason") or "(no reason given)"
-        print(f"    bail reason:  {reason}", flush=True)
-        print(f"    updated plan: {out_path}", flush=True)
-        print(f"    signal file:  {signal_path}", flush=True)
+        logger.info("bail reason:  %s", reason)
+        logger.info("updated plan: %s", out_path)
+        logger.info("signal file:  %s", signal_path)
 
     raw_followups = state.get("operator_followups")
     followups = (
@@ -506,9 +511,9 @@ def main(argv: list[str]) -> int:
         else []
     )
     if followups:
-        print(f"    operator follow-ups ({len(followups)}):", flush=True)
+        logger.info("operator follow-ups (%d):", len(followups))
         for item in followups:
-            print(f"      - {item}", flush=True)
+            logger.info("  - %s", item)
 
     sanitize_rolling_plan(out_path, args.timeout)
     return 0

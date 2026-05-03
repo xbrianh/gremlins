@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import pathlib
 import re
@@ -28,6 +29,7 @@ from typing import NoReturn
 from ..clients.claude import ClaudeClient, SubprocessClaudeClient
 from ..gh_utils import extract_gh_url, get_repo, parse_issue_ref, view_issue
 from ..git import DirtyOnly, HeadAdvanced
+from ..logging_setup import configure_logging
 from ..prompts import load_code_style
 from ..runner import install_signal_handlers, run_stages
 from ..stages.commit_pr import run_commit_pr_stage
@@ -36,6 +38,8 @@ from ..stages.ghreview import run_ghreview_stage
 from ..stages.implement import ImplStageResult, run_implement_stage
 from ..stages.wait_copilot import run_request_copilot_stage, run_wait_copilot_stage
 from ..state import patch_state, resolve_session_dir, resolve_state_file, set_stage
+
+logger = logging.getLogger(__name__)
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 REF_RE = re.compile(r"^[A-Za-z0-9._/#-]+$")
@@ -164,7 +168,7 @@ def _resolve_plan_source(
         issue_num = _read_state_field(state_file, "issue_num")
         issue_body = plan_md.read_text(encoding="utf-8")
         label = f" (issue #{issue_num})" if issue_num else ""
-        print(f"==> [1/6] plan resumed from snapshot: {plan_md}{label}", flush=True)
+        logger.info("[1/6] plan resumed from snapshot: %s%s", plan_md, label)
         return issue_url, issue_num, issue_body
 
     # Fresh launch: classify source shape
@@ -174,11 +178,7 @@ def _resolve_plan_source(
         if src.stat().st_size == 0:
             die(f"--plan: file is empty: {plan_source}")
         issue_body = src.read_text(encoding="utf-8")
-        print(
-            f"==> [1/6] plan supplied via --plan (file): {plan_source}"
-            " — posting as GitHub issue",
-            flush=True,
-        )
+        logger.info("[1/6] plan supplied via --plan (file): %s — posting as GitHub issue", plan_source)
 
         # Generate issue title via claude
         title_prompt = (
@@ -224,7 +224,7 @@ def _resolve_plan_source(
         issue_num = issue_url.split("/")[-1]
 
         patch_state(issue_url=issue_url, issue_num=issue_num)
-        print(f"    issue: {issue_url}", flush=True)
+        logger.info("issue: %s", issue_url)
         shutil.copyfile(src, plan_md)
     else:
         # Issue reference
@@ -256,10 +256,7 @@ def _resolve_plan_source(
 
         # Use issue_body + newline to match the `cp` semantics of the file path above.
         plan_md.write_text(issue_body + "\n", encoding="utf-8")
-        print(
-            f"==> [1/6] plan supplied via --plan (issue {target_repo}#{issue_ref})",
-            flush=True,
-        )
+        logger.info("[1/6] plan supplied via --plan (issue %s#%s)", target_repo, issue_ref)
 
     patch_state(issue_url=issue_url, issue_num=issue_num)
     _update_description_from_plan(plan_md, state_file)
@@ -267,6 +264,7 @@ def _resolve_plan_source(
 
 
 def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
+    configure_logging()
     args = _parse_gh_args(argv)
     if os.environ.get("GREMLINS_TEST_NOOP_PIPELINE"):
         return 0
@@ -286,7 +284,7 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     plan_md = session_dir / "plan.md"
     spec_file = session_dir / "spec.md"
 
-    print(f"==> session: {session_dir}", flush=True)
+    logger.info("session: %s", session_dir)
 
     # --spec staging: snapshot into session_dir/spec.md on first launch.
     # On resume, reuse the existing snapshot (rescue-determinism).
@@ -340,7 +338,7 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
                 "(rewind to plan?)"
             )
         issue_num = issue_url.split("/")[-1]
-        print(f"    resumed issue: {issue_url}", flush=True)
+        logger.info("resumed issue: %s", issue_url)
         issue_body = _fetch_issue_body(issue_num, repo)
 
     code_style = load_code_style()
@@ -362,7 +360,7 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
             )
         pr_url_holder["url"] = saved
         pr_url_holder["num"] = saved.split("/")[-1]
-        print(f"    resumed PR: {saved}", flush=True)
+        logger.info("resumed PR: %s", saved)
 
     def stage_plan() -> None:
         nonlocal issue_url, issue_num, issue_body
@@ -370,7 +368,7 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
             # Already resolved before the loop.
             return
         set_stage("plan")
-        print("==> [1/6] running /ghplan", flush=True)
+        logger.info("[1/6] running /ghplan")
         plan_prompt = f"/ghplan {args.ref + ' ' if args.ref else ''}{instructions}"
         completed = client.run(
             plan_prompt,
@@ -387,23 +385,19 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
             label="issue",
         )
         issue_num = issue_url.split("/")[-1]
-        print(f"    issue: {issue_url}", flush=True)
+        logger.info("issue: %s", issue_url)
         patch_state(issue_url=issue_url, issue_num=issue_num)
         issue_body = _fetch_issue_body(issue_num, repo)
 
     def stage_implement() -> None:
         set_stage("implement")
-        print("==> [2a/6] implementing plan", flush=True)
+        logger.info("[2a/6] implementing plan")
         spec_text = ""
         if spec_file.exists():
             try:
                 spec_text = spec_file.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError) as exc:
-                print(
-                    f"warning: could not read spec.md ({exc}); proceeding without north-star context",
-                    flush=True,
-                    file=sys.stderr,
-                )
+                logger.warning("could not read spec.md (%s); proceeding without north-star context", exc)
         result = run_implement_stage(
             client=client,
             impl_model=model,
@@ -427,7 +421,7 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
 
     def stage_commit_pr() -> None:
         set_stage("commit-pr")
-        print("==> [2b/6] committing + opening PR", flush=True)
+        logger.info("[2b/6] committing + opening PR")
 
         if "result" in impl_result_holder:
             result: ImplStageResult = impl_result_holder["result"]  # type: ignore[assignment]
@@ -478,19 +472,19 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         )
         pr_url_holder["url"] = pr_url
         pr_url_holder["num"] = pr_url.split("/")[-1]
-        print(f"    PR: {pr_url}", flush=True)
+        logger.info("PR: %s", pr_url)
         patch_state(pr_url=pr_url)
 
     def stage_request_copilot() -> None:
         _ensure_pr_url()
         set_stage("request-copilot")
-        print("==> [3/6] requesting Copilot review", flush=True)
+        logger.info("[3/6] requesting Copilot review")
         run_request_copilot_stage(repo=repo, pr_num=pr_url_holder["num"])
 
     def stage_ghreview() -> None:
         _ensure_pr_url()
         set_stage("ghreview")
-        print("==> [4/6] running /ghreview", flush=True)
+        logger.info("[4/6] running /ghreview")
         run_ghreview_stage(
             client=client,
             model=model,
@@ -502,20 +496,17 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     def stage_wait_copilot() -> None:
         _ensure_pr_url()
         set_stage("wait-copilot")
-        print(
-            "==> [5/6] waiting for Copilot review (20s interval, 10min timeout)",
-            flush=True,
-        )
+        logger.info("[5/6] waiting for Copilot review (20s interval, 10min timeout)")
         state = run_wait_copilot_stage(
             repo=repo,
             pr_num=pr_url_holder["num"],
         )
-        print(f"    Copilot review: {state}", flush=True)
+        logger.info("Copilot review: %s", state)
 
     def stage_ghaddress() -> None:
         _ensure_pr_url()
         set_stage("ghaddress")
-        print("==> [6/6] running /ghaddress", flush=True)
+        logger.info("[6/6] running /ghaddress")
         run_ghaddress_stage(
             client=client,
             model=model,
@@ -539,8 +530,7 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     if total_cost is not None and total_cost > 0:
         patch_state(total_cost_usd=total_cost)
 
-    print("", flush=True)
-    print(f"done. PR: {pr_url_holder.get('url', '(unknown)')}", flush=True)
+    logger.info("done. PR: %s", pr_url_holder.get("url", "(unknown)"))
     if total_cost is not None and total_cost > 0:
-        print(f"total cost: ${total_cost:.4f}", flush=True)
+        logger.info("total cost: $%.4f", total_cost)
     return 0
