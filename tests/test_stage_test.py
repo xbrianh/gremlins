@@ -1,6 +1,7 @@
 """Tests for gremlins.stages.test."""
 
 import json
+import logging
 
 import pytest
 from conftest import MINIMAL_EVENTS
@@ -44,22 +45,22 @@ def _run(
 # ---------------------------------------------------------------------------
 
 
-def test_noop_when_no_test_cmd(tmp_path, capsys):
+def test_noop_when_no_test_cmd(tmp_path, caplog):
     client = FakeClaudeClient(fixtures={})
-    run_test_stage(
-        client=client,
-        session_dir=tmp_path,
-        test_cmd=None,
-        max_attempts=3,
-        test_fix_model="sonnet",
-        is_git=False,
-        cwd=tmp_path,
-        code_style="Be good.",
-    )
+    with caplog.at_level(logging.INFO):
+        run_test_stage(
+            client=client,
+            session_dir=tmp_path,
+            test_cmd=None,
+            max_attempts=3,
+            test_fix_model="sonnet",
+            is_git=False,
+            cwd=tmp_path,
+            code_style="Be good.",
+        )
     assert len(client.calls) == 0
-    out = capsys.readouterr().out
-    assert "skipped" in out
-    assert "no --test" in out
+    assert "skipped" in caplog.text
+    assert "no --test" in caplog.text
 
 
 # ---------------------------------------------------------------------------

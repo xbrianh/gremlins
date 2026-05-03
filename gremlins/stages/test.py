@@ -7,12 +7,15 @@ max_attempts.
 
 from __future__ import annotations
 
+import logging
 import os
 import pathlib
 import subprocess
 
 from ..clients.claude import ClaudeClient
 from ..state import check_bail, emit_bail
+
+logger = logging.getLogger(__name__)
 
 PROMPT_TEMPLATE_PATH = (
     pathlib.Path(__file__).resolve().parent.parent / "prompts" / "test_fix.md"
@@ -63,7 +66,7 @@ def run_test_stage(
     When test_cmd is None, logs a skip line and returns immediately (no-op stage).
     """
     if test_cmd is None:
-        print("==> [5/5] test stage skipped (no --test)", flush=True)
+        logger.info("[5/5] test stage skipped (no --test)")
         return
 
     commit_instr = ""
@@ -99,13 +102,10 @@ def run_test_stage(
             log_file.write_text(result.stdout + result.stderr, encoding="utf-8")
 
             if result.returncode == 0:
-                print(f"    test attempt {attempt}: green", flush=True)
+                logger.info("test attempt %d: green", attempt)
                 return
 
-            print(
-                f"    test attempt {attempt}: failed (exit {result.returncode})",
-                flush=True,
-            )
+            logger.info("test attempt %d: failed (exit %d)", attempt, result.returncode)
 
             if attempt == max_attempts:
                 break

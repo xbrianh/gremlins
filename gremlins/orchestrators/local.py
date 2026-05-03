@@ -16,6 +16,7 @@ Each builds a real ``SubprocessClaudeClient`` by default; tests inject a
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import pathlib
 import re
@@ -25,6 +26,7 @@ import sys
 
 from ..clients.claude import ClaudeClient, SubprocessClaudeClient
 from ..git import in_git_repo
+from ..logging_setup import configure_logging
 from ..prompts import load_code_style
 from ..runner import install_signal_handlers, run_stages
 from ..stages.address_code import run_address_code_stage
@@ -33,6 +35,8 @@ from ..stages.plan import run_plan_stage
 from ..stages.review_code import run_review_code_stage
 from ..stages.test import run_test_stage
 from ..state import patch_state, resolve_session_dir, set_stage
+
+logger = logging.getLogger(__name__)
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 VALID_RESUME_STAGES = ["plan", "implement", "review-code", "address-code", "test"]
@@ -108,6 +112,7 @@ def _parse_local_args(argv: list[str]) -> argparse.Namespace:
 
 
 def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
+    configure_logging()
     if client is None:
         client = SubprocessClaudeClient()
     install_signal_handlers(client)
@@ -124,7 +129,7 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     plan_file = session_dir / "plan.md"
     review_code_file = session_dir / f"review-code-detail-{args.detail}.md"
 
-    print(f"==> session: {session_dir}", flush=True)
+    logger.info("session: %s", session_dir)
 
     # --plan staging happens up front (before the --resume-from precondition
     # checks below) so `--plan <path> --resume-from implement` works: the
@@ -218,18 +223,12 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     def stage_plan() -> None:
         if args.plan_path:
             if plan_copied_from_source:
-                print(
-                    f"==> [1/5] plan supplied via --plan (copied) -> {plan_file}",
-                    flush=True,
-                )
+                logger.info("[1/5] plan supplied via --plan (copied) -> %s", plan_file)
             else:
-                print(f"==> [1/5] plan reused from snapshot -> {plan_file}", flush=True)
+                logger.info("[1/5] plan reused from snapshot -> %s", plan_file)
         else:
             set_stage("plan")
-            print(
-                f"==> [1/5] planning (model: {args.plan_model}) -> {plan_file}",
-                flush=True,
-            )
+            logger.info("[1/5] planning (model: %s) -> %s", args.plan_model, plan_file)
             run_plan_stage(
                 client=client,
                 plan_model=args.plan_model,
@@ -249,15 +248,9 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
             try:
                 spec_text = spec_file.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError) as exc:
-                print(
-                    f"warning: could not read spec.md ({exc}); proceeding without north-star context",
-                    flush=True,
-                    file=sys.stderr,
-                )
+                logger.warning("could not read spec.md (%s); proceeding without north-star context", exc)
         set_stage("implement")
-        print(
-            f"==> [2/5] implementing (model: {args.impl}, from {plan_file})", flush=True
-        )
+        logger.info("[2/5] implementing (model: %s, from %s)", args.impl, plan_file)
         run_implement_stage(
             client=client,
             impl_model=args.impl,
@@ -274,10 +267,7 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
             encoding="utf-8"
         )
         set_stage("review-code")
-        print(
-            f"==> [3/5] reviewing code (model: {args.detail})",
-            flush=True,
-        )
+        logger.info("[3/5] reviewing code (model: %s)", args.detail)
         review_file = run_review_code_stage(
             client=client,
             session_dir=session_dir,
@@ -286,11 +276,11 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
             is_git=is_git,
             code_style=code_style,
         )
-        print(f"    detail code review ({args.detail}): {review_file}", flush=True)
+        logger.info("detail code review (%s): %s", args.detail, review_file)
 
     def stage_address_code() -> None:
         set_stage("address-code")
-        print(f"==> [4/5] addressing code reviews (model: {args.address})", flush=True)
+        logger.info("[4/5] addressing code reviews (model: %s)", args.address)
         run_address_code_stage(
             client=client,
             session_dir=session_dir,
@@ -302,10 +292,11 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     def stage_test() -> None:
         set_stage("test")
         if args.test_cmd:
-            print(
-                f"==> [5/5] running tests (cmd: {args.test_cmd!r}, "
-                f"max-attempts: {args.test_max_attempts}, model: {args.test_fix_model})",
-                flush=True,
+            logger.info(
+                "[5/5] running tests (cmd: %r, max-attempts: %s, model: %s)",
+                args.test_cmd,
+                args.test_max_attempts,
+                args.test_fix_model,
             )
         cwd = pathlib.Path.cwd()
         run_test_stage(
@@ -332,10 +323,9 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     if total_cost is not None and total_cost > 0:
         patch_state(total_cost_usd=total_cost)
 
-    print("", flush=True)
-    print(f"done. session artifacts in: {session_dir}", flush=True)
+    logger.info("done. session artifacts in: %s", session_dir)
     if total_cost is not None and total_cost > 0:
-        print(f"total cost: ${total_cost:.4f}", flush=True)
+        logger.info("total cost: $%.4f", total_cost)
     return 0
 
 
@@ -359,6 +349,7 @@ def _parse_review_args(argv: list[str]) -> argparse.Namespace:
 
 
 def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
+    configure_logging()
     if client is None:
         client = SubprocessClaudeClient()
     install_signal_handlers(client)
@@ -428,10 +419,7 @@ def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
                 "nothing to review: HEAD~1..HEAD has no changes and working tree is clean"
             )
 
-    print(
-        f"==> reviewing code (model: {args.detail})",
-        flush=True,
-    )
+    logger.info("reviewing code (model: %s)", args.detail)
     review_file = run_review_code_stage(
         client=client,
         session_dir=session_dir,
@@ -440,7 +428,7 @@ def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         is_git=is_git,
         code_style=code_style,
     )
-    print(f"    detail code review ({args.detail}): {review_file}", flush=True)
+    logger.info("detail code review (%s): %s", args.detail, review_file)
     return 0
 
 
@@ -461,6 +449,7 @@ def _parse_address_args(argv: list[str]) -> argparse.Namespace:
 
 
 def address_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
+    configure_logging()
     if client is None:
         client = SubprocessClaudeClient()
     install_signal_handlers(client)
@@ -476,7 +465,7 @@ def address_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     is_git = in_git_repo()
     code_style = load_code_style()
 
-    print(f"==> addressing code reviews (model: {args.address})", flush=True)
+    logger.info("addressing code reviews (model: %s)", args.address)
     run_address_code_stage(
         client=client,
         session_dir=session_dir,
