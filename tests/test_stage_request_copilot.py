@@ -41,7 +41,9 @@ def test_run_calls_gh_pr_edit(tmp_path, monkeypatch):
 
 def test_run_raises_on_nonzero_returncode(tmp_path, monkeypatch):
     def fake_run(cmd, *args, **kwargs):
-        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="review not enabled")
+        return subprocess.CompletedProcess(
+            cmd, 1, stdout="", stderr="review not enabled"
+        )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 

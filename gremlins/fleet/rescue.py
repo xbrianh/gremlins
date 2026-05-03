@@ -16,7 +16,10 @@ from gremlins.fleet.constants import (
     HEADLESS_DIAGNOSIS_TIMEOUT_SECS,
     RESCUE_CAP,
 )
-from gremlins.fleet.resolve import GREMLIN_STAGES, resolve_gremlin, stage_names_for_gremlin
+from gremlins.fleet.resolve import (
+    resolve_gremlin,
+    stage_names_for_gremlin,
+)
 from gremlins.fleet.state import liveness_of_state_file, load_state
 from gremlins.fleet.stop import do_stop
 from gremlins.launcher import resume as _resume

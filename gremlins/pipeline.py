@@ -89,7 +89,9 @@ def _parse_stage_entry(
         seen: set[str] = set()
         children: list[StageEntry] = []
         for child_raw in children_raw:
-            child = _parse_stage_entry(child_raw, yaml_dir, client_keys, depth=depth + 1)
+            child = _parse_stage_entry(
+                child_raw, yaml_dir, client_keys, depth=depth + 1
+            )
             if child.name in seen:
                 raise ValueError(
                     f"parallel group {name!r}: duplicate child name {child.name!r}"
@@ -184,7 +186,9 @@ def resolve_pipeline_path(name_or_path: str, base_dir: pathlib.Path) -> pathlib.
     project_scoped = base_dir / ".gremlins" / "pipelines" / f"{name_or_path}.yaml"
     if project_scoped.exists():
         return project_scoped.resolve()
-    bundled = pathlib.Path(__file__).resolve().parent / "pipelines" / f"{name_or_path}.yaml"
+    bundled = (
+        pathlib.Path(__file__).resolve().parent / "pipelines" / f"{name_or_path}.yaml"
+    )
     if bundled.exists():
         return bundled.resolve()
     raise FileNotFoundError(
@@ -205,6 +209,7 @@ def _bootstrap() -> None:
     from gremlins.stages.test import run as _test
     from gremlins.stages.wait_ci import run as _wait_ci
     from gremlins.stages.wait_copilot import run as _wait_copilot
+
     register_stage("plan", _plan)
     register_stage("implement", _implement)
     register_stage("review-code", _review_code)
@@ -217,6 +222,7 @@ def _bootstrap() -> None:
     register_stage("ghaddress", _ghaddress)
     register_stage("wait-ci", _wait_ci)
     from gremlins.clients.claude import SubprocessClaudeClient
+
     register_client_factory("claude", lambda _: SubprocessClaudeClient())
 
 
