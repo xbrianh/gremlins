@@ -23,7 +23,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import IO, Any, Protocol
+from typing import IO, Any, Protocol, cast
 
 CLAUDE_FLAGS_BASE = [
     "--permission-mode",
@@ -79,7 +79,7 @@ class ClaudeClient(Protocol):
 # ---------------------------------------------------------------------------
 
 
-def _trunc(s, n: int = 200) -> str:
+def _trunc(s: object, n: int = 200) -> str:
     if s is None:
         return ""
     if not isinstance(s, str):
@@ -88,7 +88,7 @@ def _trunc(s, n: int = 200) -> str:
     return s[:n] + "..." if len(s) > n else s
 
 
-def _emit_event(prefix: str, evt: dict) -> None:
+def _emit_event(prefix: str, evt: dict[str, Any]) -> None:
     t = evt.get("type")
     out = sys.stderr
     if t == "system":
@@ -99,36 +99,37 @@ def _emit_event(prefix: str, evt: dict) -> None:
             f"model={evt.get('model', '?')} cwd={evt.get('cwd', '?')}\n"
         )
     elif t == "assistant":
-        content = (evt.get("message") or {}).get("content") or []
+        msg = cast(dict[str, Any], evt.get("message") or {})
+        content = cast(list[dict[str, Any]], msg.get("content") or [])
         for c in content:
-            if not isinstance(c, dict):
-                continue
             ct = c.get("type")
             if ct == "text":
                 out.write(f"{prefix}text: {_trunc(c.get('text', ''))}\n")
             elif ct == "thinking":
-                thought = c.get("thinking", "") or ""
+                thought = str(c.get("thinking") or "")
                 out.write(f"{prefix}think: {_trunc(thought)}\n")
             elif ct == "tool_use":
-                inp = c.get("input") or {}
+                inp = cast(dict[str, Any], c.get("input") or {})
                 arg = ""
-                if isinstance(inp, dict):
-                    for k in ("file_path", "command", "pattern", "url", "output_file"):
-                        v = inp.get(k)
-                        if v:
-                            arg = v
-                            break
+                for k in ("file_path", "command", "pattern", "url", "output_file"):
+                    v = inp.get(k)
+                    if v:
+                        arg = str(v)
+                        break
                 out.write(f"{prefix}tool: {c.get('name', '?')} {_trunc(str(arg))}\n")
     elif t == "user":
-        content = (evt.get("message") or {}).get("content") or []
+        msg = cast(dict[str, Any], evt.get("message") or {})
+        content = cast(list[dict[str, Any]], msg.get("content") or [])
         for c in content:
-            if not isinstance(c, dict) or c.get("type") != "tool_result":
+            if c.get("type") != "tool_result":
                 continue
             err = " ERROR" if c.get("is_error") is True else ""
             body = c.get("content")
             if isinstance(body, list):
                 body_s = " ".join(
-                    (p.get("text") or "") for p in body if isinstance(p, dict)
+                    str(cast(dict[str, Any], p).get("text") or "")
+                    for p in cast(list[Any], body)
+                    if isinstance(p, dict)
                 )
             elif isinstance(body, str):
                 body_s = body
@@ -163,7 +164,7 @@ def stream_events(
     session_id: str | None = None
     cost_usd: float | None = None
     result_text: str | None = None
-    events: list[dict] | None = [] if capture else None
+    events: list[dict[str, Any]] | None = [] if capture else None
 
     raw = None
     if raw_path is not None:
@@ -179,6 +180,7 @@ def stream_events(
                 continue
             if not isinstance(evt, dict):
                 continue
+            evt = cast(dict[str, Any], evt)
             if (
                 session_id is None
                 and evt.get("type") == "system"
@@ -231,16 +233,16 @@ class SubprocessClaudeClient:
         # while _track/_untrack already hold it. A plain Lock would deadlock
         # in that narrow window.
         self._lock = threading.RLock()
-        self._children: list[subprocess.Popen] = []
+        self._children: list[subprocess.Popen[bytes]] = []
         self._total_cost_usd: float = 0.0
 
     # --- child-process tracking -------------------------------------------
 
-    def _track(self, p: subprocess.Popen) -> None:
+    def _track(self, p: subprocess.Popen[bytes]) -> None:
         with self._lock:
             self._children.append(p)
 
-    def _untrack(self, p: subprocess.Popen) -> None:
+    def _untrack(self, p: subprocess.Popen[bytes]) -> None:
         with self._lock:
             try:
                 self._children.remove(p)
@@ -338,10 +340,7 @@ class SubprocessClaudeClient:
             else:
                 # text mode — capture stdout, no per-event trace.
                 data = p.stdout.read()
-                if isinstance(data, bytes):
-                    text_chunks.append(data.decode("utf-8", errors="replace"))
-                else:
-                    text_chunks.append(str(data))
+                text_chunks.append(data.decode("utf-8", errors="replace"))
             p.stdout.close()
             rc = p.wait()
         finally:

@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import time
+from typing import Any, cast
 
 from gremlins.fleet.state import liveness_of_state_file
 
@@ -71,14 +72,14 @@ def _get_state_root() -> str:
     return os.path.join(xdg, "claude-gremlins")
 
 
-def _read_stdin() -> dict:
+def _read_stdin() -> dict[str, Any]:
     try:
         if not sys.stdin.isatty():
             raw = sys.stdin.read()
             if raw:
                 parsed = json.loads(raw)
                 if isinstance(parsed, dict):
-                    return parsed
+                    return cast(dict[str, Any], parsed)
     except Exception:
         pass
     return {}
@@ -102,14 +103,16 @@ def _resolve_project_root(cwd_from_input: str) -> str:
     return root
 
 
-def _collect_gremlins(state_root: str, project_root: str):
+def _collect_gremlins(
+    state_root: str, project_root: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     """Walk state files and split into running / newly-finished lists.
 
     Returns (running, finished, newly_summarized_dirs).
     """
-    running = []
-    finished = []
-    newly_summarized_dirs = []
+    running: list[dict[str, Any]] = []
+    finished: list[dict[str, Any]] = []
+    newly_summarized_dirs: list[str] = []
 
     try:
         entries = sorted(os.listdir(state_root))
@@ -182,7 +185,7 @@ def _collect_gremlins(state_root: str, project_root: str):
     return running, finished, newly_summarized_dirs
 
 
-def _render_summary(running: list, finished: list) -> str:
+def _render_summary(running: list[dict[str, Any]], finished: list[dict[str, Any]]) -> str:
     """Build the markdown summary block. Returns empty string if nothing to show."""
     running_block = ""
     for g in running:
@@ -255,7 +258,7 @@ def _emit(hook_event: str, raw_summary: str) -> None:
     sys.stdout.flush()
 
 
-def _mark_summarized(state_dirs: list) -> None:
+def _mark_summarized(state_dirs: list[str]) -> None:
     for d in state_dirs:
         try:
             pathlib.Path(d, "summarized").touch()

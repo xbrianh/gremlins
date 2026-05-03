@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from typing import Any
+from typing import Any, cast
 
 
 def get_repo() -> str:
@@ -116,34 +116,37 @@ def extract_gh_url(
     Raises ``RuntimeError`` when no URL is found.
     """
     # Collect tool_use IDs for Bash commands matching cmd_pattern.
-    matching_ids: set = set()
+    matching_ids: set[str] = set()
     for evt in events:
         if evt.get("type") != "assistant":
             continue
-        for c in (evt.get("message") or {}).get("content") or []:
-            if not isinstance(c, dict):
-                continue
+        msg = cast(dict[str, Any], evt.get("message") or {})
+        for c in cast(list[dict[str, Any]], msg.get("content") or []):
+            inp = cast(dict[str, Any], c.get("input") or {})
             if (
                 c.get("type") == "tool_use"
                 and c.get("name") == "Bash"
-                and re.search(cmd_pattern, (c.get("input") or {}).get("command") or "")
+                and re.search(cmd_pattern, str(inp.get("command") or ""))
             ):
-                matching_ids.add(c.get("id"))
+                matching_ids.add(str(c.get("id") or ""))
 
     # Scan tool_result events for those IDs.
     last_tool_url: str | None = None
     for evt in events:
         if evt.get("type") != "user":
             continue
-        for c in (evt.get("message") or {}).get("content") or []:
-            if not isinstance(c, dict) or c.get("type") != "tool_result":
+        msg = cast(dict[str, Any], evt.get("message") or {})
+        for c in cast(list[dict[str, Any]], msg.get("content") or []):
+            if c.get("type") != "tool_result":
                 continue
             if c.get("tool_use_id") not in matching_ids:
                 continue
             body = c.get("content")
             if isinstance(body, list):
                 text = "\n".join(
-                    (p.get("text") or "") for p in body if isinstance(p, dict)
+                    str(cast(dict[str, Any], p).get("text") or "")
+                    for p in cast(list[Any], body)
+                    if isinstance(p, dict)
                 )
             elif isinstance(body, str):
                 text = body
