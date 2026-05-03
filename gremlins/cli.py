@@ -92,27 +92,13 @@ def main(argv: list[str] | None = None, *, gr_id: str | None = None) -> int:
     return 1
 
 
-def _validate_local_args(args: argparse.Namespace, rest: list[str]) -> None:
-    if args.plan or args.instructions:
+def _validate_local_args(args: argparse.Namespace) -> None:
+    if args.plan or args.instructions or args.positional_instructions:
         return
-    p = argparse.ArgumentParser(add_help=False)
-    for f in ("-p", "-i", "-x", "-b", "-t"):
-        p.add_argument(f, default=None)
-    for f in (
-        "--resume-from",
-        "--plan",
-        "--spec",
-        "--test",
-        "--test-max-attempts",
-        "--pipeline",
-    ):
-        p.add_argument(f, default=None)
-    _, leftover = p.parse_known_args(rest)
-    if not any(not a.startswith("-") for a in leftover):
-        raise ValueError(
-            "localgremlin requires instructions: pass them as a positional argument, "
-            "--plan <path>, or -c/--instructions <text>"
-        )
+    raise ValueError(
+        "localgremlin requires instructions: pass them as a positional argument, "
+        "--plan <path>, or -c/--instructions <text>"
+    )
 
 
 def _validate_gh_args(rest: list[str]) -> None:
@@ -128,8 +114,9 @@ def _validate_boss_args(rest: list[str]) -> None:
     p.add_argument("--chain-kind", default=None)
     args, _ = p.parse_known_args(rest)
     if args.chain_kind not in ("local", "gh"):
+        got = repr(args.chain_kind) if args.chain_kind is not None else "missing"
         raise ValueError(
-            f"--chain-kind is required and must be 'local' or 'gh' (got {args.chain_kind!r})"
+            f"--chain-kind is required and must be 'local' or 'gh' ({got})"
         )
 
 
@@ -157,18 +144,24 @@ def _self_background_main(kind: str, argv: list[str]) -> int:
         "which always anchor to origin/<default-branch>.",
     )
     p.add_argument("--spec", dest="spec_path", default=None)
+    if kind == "localgremlin":
+        p.add_argument("positional_instructions", nargs="?", default=None)
+    else:
+        # Keep the namespace attribute consistent so downstream code always sees it.
+        p.set_defaults(positional_instructions=None)
     args, rest = p.parse_known_args(argv)
 
     try:
         if kind == "localgremlin":
-            _validate_local_args(args, rest)
+            _validate_local_args(args)
         elif kind == "ghgremlin":
             _validate_gh_args(rest)
         elif kind == "bossgremlin":
             _validate_boss_args(rest)
+        instructions = args.instructions or args.positional_instructions
         gr_id = launch(
             kind,
-            instructions=args.instructions,
+            instructions=instructions,
             plan=args.plan,
             description=args.description,
             parent_id=args.parent_id,

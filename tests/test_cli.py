@@ -172,3 +172,39 @@ def test_boss_missing_chain_kind_exits_nonzero_no_state(tmp_path, monkeypatch):
 
     assert rc != 0
     assert _no_state_created(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Pre-launch validators — valid invocations must not raise.
+# ---------------------------------------------------------------------------
+
+
+def test_local_with_positional_instructions_passes():
+    from gremlins.cli import _validate_local_args
+    import argparse
+    ns = argparse.Namespace(plan=None, instructions=None, positional_instructions="fix the bug")
+    _validate_local_args(ns)  # must not raise
+
+
+def test_local_with_plan_passes():
+    from gremlins.cli import _validate_local_args
+    import argparse
+    ns = argparse.Namespace(plan="plan.md", instructions=None, positional_instructions=None)
+    _validate_local_args(ns)  # must not raise
+
+
+def test_local_with_instructions_flag_passes():
+    from gremlins.cli import _validate_local_args
+    import argparse
+    ns = argparse.Namespace(plan=None, instructions="fix the bug", positional_instructions=None)
+    _validate_local_args(ns)  # must not raise
+
+
+def test_gh_valid_model_passes():
+    from gremlins.cli import _validate_gh_args
+    _validate_gh_args(["--model", "claude-sonnet-4"])  # must not raise
+
+
+def test_boss_valid_chain_kind_passes():
+    from gremlins.cli import _validate_boss_args
+    _validate_boss_args(["--chain-kind", "local"])  # must not raise
