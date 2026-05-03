@@ -142,7 +142,7 @@ def _self_background_main(kind: str, argv: list[str]) -> int:
         sys.stderr.write(info)
         sys.stdout.write(gr_id + "\n")
     else:
-        sys.stdout.write(info)
+        sys.stderr.write(info)
     return 0
 
 
