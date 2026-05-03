@@ -139,14 +139,12 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         "gremlins.orchestrators.gh.resolve_state_file", lambda gr_id=None: state_file
     )
 
-    # patch_state reads/writes state_file — let it use the real implementation
-    # (no-op without GR_ID but the file is explicitly patched via resolve_state_file)
+    # Stub out patch_state so tests don't write to real state files.
     monkeypatch.setattr(
         "gremlins.orchestrators.gh.patch_state", lambda gr_id=None, **kw: None
     )
 
-    # set_stage is a no-op in tests (no GR_ID env var set)
-    # — the real implementation already no-ops without GR_ID.
+    # set_stage is a no-op in tests — gr_id is not passed to gh_main.
 
     return session_dir, state_file
 
