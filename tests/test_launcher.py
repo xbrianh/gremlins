@@ -657,11 +657,11 @@ def test_pipeline_survives_worktree_pipeline_rename(lenv, monkeypatch):
     Without PYTHONSAFEPATH=1, python -m gremlins.cli imports from the worktree
     (cwd). Renaming gremlins/ during implement then causes ImportError / FileNotFoundError
     in later stages because PROMPTS_DIR is __file__-relative and the directory is gone.
-    With the fix, python loads gremlins from HOME/.claude/gremlins/ and the
-    worktree rename is harmless.
+    With the fix, python loads gremlins from the install root (derived via __file__)
+    and the worktree rename is harmless.
     """
     monkeypatch.delenv("GREMLINS_TEST_NOOP_PIPELINE")
-    # Add a gremlins/ stub to the repo so the worktree shadows $HOME/.claude/gremlins/.
+    # Add a gremlins/ stub to the repo so the worktree cwd shadows the install root.
     pipeline_stub = lenv.repo / "gremlins"
     pipeline_stub.mkdir()
     (pipeline_stub / "__init__.py").write_text("# stub\n", encoding="utf-8")
