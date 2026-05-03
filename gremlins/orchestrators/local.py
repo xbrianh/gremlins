@@ -39,6 +39,7 @@ def _parse_local_args(argv: list[str]) -> argparse.Namespace:
         "[-x <address-model>] [-b <detail-review-model>] "
         "[--resume-from <stage>] [--plan <path>] [--spec <path>] "
         '[--test "<command>"] [--test-max-attempts <n>] [-t <test-fix-model>] '
+        "[--pipeline <name-or-path>] "
         '"<instructions>"'
     )
     parser = argparse.ArgumentParser(add_help=False, usage=usage)

@@ -115,6 +115,10 @@ def _parse_stage_entry(
         raise ValueError(f"stage {name!r}: unknown type {stage_type!r}")
 
     client_key = entry.get("client")
+    if client_key is not None and not isinstance(client_key, str):
+        raise ValueError(
+            f"stage {name!r}: 'client' must be a string, got {type(client_key)!r}"
+        )
     if client_key is not None and client_key not in client_keys:
         raise ValueError(f"stage {name!r}: unknown client key {client_key!r}")
 
@@ -133,7 +137,12 @@ def load_pipeline(path: pathlib.Path) -> Pipeline:
     path = path.resolve()
     if not path.exists():
         raise FileNotFoundError(f"pipeline file not found: {path}")
-    raw = cast(dict[str, Any], yaml.safe_load(path.read_text(encoding="utf-8")))
+    parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            f"pipeline file must be a YAML mapping, got {type(parsed)!r}: {path}"
+        )
+    raw = cast(dict[str, Any], parsed)
     yaml_dir = path.parent
 
     pipeline_name = str(raw.get("name") or path.stem)
@@ -147,6 +156,8 @@ def load_pipeline(path: pathlib.Path) -> Pipeline:
         if provider not in CLIENT_FACTORIES:
             raise ValueError(f"client {key!r}: unknown provider {provider!r}")
         model = str(cfg.get("model") or "")
+        if not model:
+            raise ValueError(f"client {key!r}: missing 'model'")
         resolved_clients[key] = CLIENT_FACTORIES[provider](model)
 
     client_keys = set(resolved_clients.keys())
@@ -164,8 +175,12 @@ def load_pipeline(path: pathlib.Path) -> Pipeline:
 
 
 def resolve_pipeline_path(name_or_path: str, base_dir: pathlib.Path) -> pathlib.Path:
-    if "/" in name_or_path or name_or_path.endswith(".yaml"):
-        return pathlib.Path(name_or_path).resolve()
+    candidate = pathlib.Path(name_or_path)
+    if candidate.suffix == ".yaml" or len(candidate.parts) > 1:
+        resolved = candidate.resolve()
+        if not resolved.exists():
+            raise FileNotFoundError(f"pipeline file not found: {resolved}")
+        return resolved
     project_scoped = base_dir / ".gremlins" / "pipelines" / f"{name_or_path}.yaml"
     if project_scoped.exists():
         return project_scoped.resolve()

@@ -23,10 +23,11 @@ def stage_names_for_gremlin(state: dict) -> list[str]:
     pipeline_path = state.get("pipeline_path")
     if pipeline_path:
         try:
+            import yaml
             from gremlins.pipeline import load_pipeline
             pipeline = load_pipeline(pathlib.Path(pipeline_path))
             return [s.name for s in pipeline.stages]
-        except Exception:
+        except (FileNotFoundError, ValueError, yaml.YAMLError):
             pass
     kind = state.get("kind", "")
     return list(GREMLIN_STAGES.get(kind, []))

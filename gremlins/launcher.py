@@ -122,9 +122,9 @@ def _patch_state(state_dir: pathlib.Path, **fields: Any) -> None:
 
 
 def _default_pipeline_path(kind: str) -> str:
-    kind_map = {"localgremlin": "local", "ghgremlin": "gh"}
-    name = kind_map.get(kind)
-    if name is None:
+    # bossgremlin has no per-pipeline YAML; exclude it explicitly
+    name = _KIND_SUBCOMMAND.get(kind)
+    if name is None or kind == "bossgremlin":
         return ""
     p = pathlib.Path(__file__).resolve().parent / "pipelines" / f"{name}.yaml"
     return str(p)

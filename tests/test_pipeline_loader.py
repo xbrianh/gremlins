@@ -6,8 +6,8 @@ import pathlib
 
 import pytest
 
-import gremlins.pipeline
-from gremlins.pipeline import Pipeline, StageEntry, load_pipeline
+import gremlins.pipeline  # noqa: F401
+from gremlins.pipeline import load_pipeline
 
 
 def _write_yaml(path: pathlib.Path, content: str) -> pathlib.Path:
