@@ -39,6 +39,7 @@ def _parse_local_args(argv: list[str]) -> argparse.Namespace:
         "[-x <address-model>] [-b <detail-review-model>] "
         "[--resume-from <stage>] [--plan <path>] [--spec <path>] "
         '[--test "<command>"] [--test-max-attempts <n>] [-t <test-fix-model>] '
+        "[--pipeline <name-or-path>] "
         '"<instructions>"'
     )
     parser = argparse.ArgumentParser(add_help=False, usage=usage)
@@ -56,6 +57,7 @@ def _parse_local_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--test-max-attempts", dest="test_max_attempts", type=int, default=3
     )
+    parser.add_argument("--pipeline", dest="pipeline", default=None)
     parser.add_argument("instructions", nargs="*")
     args = parser.parse_args(argv)
     if args.resume_from:

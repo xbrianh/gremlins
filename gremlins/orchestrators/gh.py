@@ -58,7 +58,8 @@ def die(msg: str) -> NoReturn:
 def _parse_gh_args(argv: list[str]) -> argparse.Namespace:
     usage = (
         "usage: gremlins.cli gh [-r <ref>] [--resume-from <stage>] "
-        '[--plan <path|issue-ref>] [--spec <path>] [--model <model>] "<instructions>"'
+        "[--plan <path|issue-ref>] [--spec <path>] [--model <model>] "
+        '[--pipeline <name-or-path>] "<instructions>"'
     )
     parser = argparse.ArgumentParser(add_help=False, usage=usage)
     parser.add_argument("-r", dest="ref", default="")
@@ -66,6 +67,7 @@ def _parse_gh_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--plan", dest="plan_source", default=None)
     parser.add_argument("--spec", dest="spec_path", default=None)
     parser.add_argument("--model", dest="model", default=None)
+    parser.add_argument("--pipeline", dest="pipeline", default=None)
     parser.add_argument("instructions", nargs="*")
     args = parser.parse_args(argv)
 

@@ -121,6 +121,15 @@ def _patch_state(state_dir: pathlib.Path, **fields: Any) -> None:
         pass
 
 
+def _default_pipeline_path(kind: str) -> str:
+    # bossgremlin has no per-pipeline YAML; exclude it explicitly
+    name = _KIND_SUBCOMMAND.get(kind)
+    if name is None or kind == "bossgremlin":
+        return ""
+    p = pathlib.Path(__file__).resolve().parent / "pipelines" / f"{name}.yaml"
+    return str(p)
+
+
 def _extract_impl_model(pipeline_args: list[str], kind: str) -> str:
     """Extract the implementation model alias from pipeline_args.
 
@@ -340,6 +349,7 @@ def launch(
         "parent_id": parent_id or "",
         "pipeline_args": stored_pipeline_args,
         "impl_model": _extract_impl_model(stored_pipeline_args, kind),
+        "pipeline_path": _default_pipeline_path(kind),
         "stage": "starting",
         "pid": None,
     }
