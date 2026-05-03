@@ -26,9 +26,9 @@ from . import git as _git_mod
 VALID_KINDS = {"ghgremlin", "localgremlin", "bossgremlin"}
 
 _KIND_SUBCOMMAND = {
-    "localgremlin": "local",
-    "ghgremlin": "gh",
-    "bossgremlin": "boss",
+    "localgremlin": "_local",
+    "ghgremlin": "_gh",
+    "bossgremlin": "_boss",
 }
 
 
@@ -126,7 +126,11 @@ def _default_pipeline_path(kind: str) -> str:
     name = _KIND_SUBCOMMAND.get(kind)
     if name is None or kind == "bossgremlin":
         return ""
-    p = pathlib.Path(__file__).resolve().parent / "pipelines" / f"{name}.yaml"
+    p = (
+        pathlib.Path(__file__).resolve().parent
+        / "pipelines"
+        / f"{name.removeprefix('_')}.yaml"
+    )
     return str(p)
 
 
@@ -172,10 +176,13 @@ def _build_spawn_env(gr_id: str) -> dict[str, str]:
     """Build the environment for the spawned pipeline process."""
     env = os.environ.copy()
     claude_home = os.path.join(os.path.expanduser("~"), ".claude")
+    # Parent of the gremlins package directory — ensures the subprocess imports
+    # from the same source tree as the current process even in dev worktrees
+    # where ~/.claude/gremlins/ symlinks may be stale or absent.
+    pkg_root = str(pathlib.Path(__file__).resolve().parent.parent)
     existing_pp = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = (
-        f"{claude_home}{os.pathsep}{existing_pp}" if existing_pp else claude_home
-    )
+    parts = [p for p in [pkg_root, claude_home, existing_pp] if p]
+    env["PYTHONPATH"] = os.pathsep.join(parts)
     env["PYTHONSAFEPATH"] = "1"
     env["GR_ID"] = gr_id
     return env
