@@ -11,7 +11,12 @@ PR_URL = "https://github.com/owner/repo/pull/42"
 
 
 def test_get_pr_ci_status_timeout_raises_runtime_error():
-    with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="gh", timeout=GET_PR_CI_STATUS_TIMEOUT)):
+    with patch(
+        "subprocess.run",
+        side_effect=subprocess.TimeoutExpired(
+            cmd="gh", timeout=GET_PR_CI_STATUS_TIMEOUT
+        ),
+    ):
         with pytest.raises(RuntimeError) as exc_info:
             get_pr_ci_status(PR_URL)
 
