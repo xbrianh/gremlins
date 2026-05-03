@@ -1129,3 +1129,259 @@ def test_rescue_host_terminated_recreates_worktree_and_proceeds(
     assert new["bail_reason"] == "structural"
     out = capsys.readouterr().out
     assert "recreated" in out
+
+
+# ---------------------------------------------------------------------------
+# _poll_until_merged
+# ---------------------------------------------------------------------------
+
+
+def _make_gh_poll_stub(responses):
+    """Return a subprocess.run replacement that replays canned gh responses.
+
+    Each element of `responses` is either:
+      - a dict  → serialised as JSON stdout with returncode=0
+      - an Exception → raised to simulate subprocess failure
+    """
+    calls = []
+
+    def stub(cmd, **kwargs):
+        calls.append(cmd)
+        resp = responses[len(calls) - 1] if len(calls) <= len(responses) else responses[-1]
+        if isinstance(resp, Exception):
+            raise resp
+
+        class R:
+            returncode = 0
+            stdout = json.dumps(resp)
+            stderr = ""
+
+        return R()
+
+    stub.calls = calls
+    return stub
+
+
+def test_poll_until_merged_immediate(monkeypatch):
+    stub = _make_gh_poll_stub([{"state": "MERGED"}])
+    monkeypatch.setattr(_land, "subprocess", type("M", (), {"run": staticmethod(stub)})())
+    assert _land._poll_until_merged("https://gh/pr/1", None, interval=0) is True
+
+
+def test_poll_until_merged_waits_then_merges(monkeypatch):
+    responses = [
+        {"state": "OPEN", "statusCheckRollup": []},
+        {"state": "OPEN", "statusCheckRollup": []},
+        {"state": "MERGED"},
+    ]
+    stub = _make_gh_poll_stub(responses)
+    monkeypatch.setattr(_land, "subprocess", type("M", (), {"run": staticmethod(stub)})())
+    # Always return 0 so deadline is never reached; loop exits on MERGED response.
+    monkeypatch.setattr(_land, "time", type("T", (), {
+        "monotonic": staticmethod(lambda: 0),
+        "sleep": staticmethod(lambda _: None),
+    })())
+    assert _land._poll_until_merged("https://gh/pr/1", None, interval=0, timeout=50) is True
+
+
+def test_poll_until_merged_closed_returns_false(monkeypatch, capsys):
+    stub = _make_gh_poll_stub([{"state": "CLOSED"}])
+    monkeypatch.setattr(_land, "subprocess", type("M", (), {"run": staticmethod(stub)})())
+    assert _land._poll_until_merged("https://gh/pr/1", None, interval=0) is False
+    assert "closed without merging" in capsys.readouterr().out
+
+
+def test_poll_until_merged_failed_checks_returns_false(monkeypatch, capsys):
+    responses = [
+        {
+            "state": "OPEN",
+            "statusCheckRollup": [{"name": "ci/test", "conclusion": "FAILURE"}],
+        }
+    ]
+    stub = _make_gh_poll_stub(responses)
+    monkeypatch.setattr(_land, "subprocess", type("M", (), {"run": staticmethod(stub)})())
+    assert _land._poll_until_merged("https://gh/pr/1", None, interval=0) is False
+    assert "failed CI checks" in capsys.readouterr().out
+
+
+def test_poll_until_merged_timeout_returns_false(monkeypatch, capsys):
+    # deadline = monotonic() + timeout = 0 + 1 = 1; while monotonic() < 1 is False immediately.
+    call_count = [0]
+
+    def monotonic_past_deadline():
+        # First call sets the deadline (returns 0, so deadline = 1).
+        # Subsequent calls return a value >= deadline so the while exits.
+        call_count[0] += 1
+        return 0 if call_count[0] == 1 else 9999
+
+    monkeypatch.setattr(_land, "subprocess", type("M", (), {"run": staticmethod(
+        _make_gh_poll_stub([{"state": "OPEN", "statusCheckRollup": []}])
+    )})())
+    monkeypatch.setattr(_land, "time", type("T", (), {
+        "monotonic": staticmethod(monotonic_past_deadline),
+        "sleep": staticmethod(lambda _: None),
+    })())
+    assert _land._poll_until_merged("https://gh/pr/1", None, interval=0, timeout=1) is False
+    assert "timed out" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# _land_gh — core paths
+# ---------------------------------------------------------------------------
+
+
+def _make_land_gh_state(tmp_path, gr_id="gh-id-aabb12", pr_url="https://gh/pr/1"):
+    state_root = tmp_path / "state-root"
+    gr_dir = state_root / gr_id
+    gr_dir.mkdir(parents=True)
+    state = {
+        "id": gr_id,
+        "kind": "ghgremlin",
+        "status": "dead",
+        "exit_code": 0,
+        "pr_url": pr_url,
+        "project_root": str(tmp_path / "project"),
+    }
+    sf = str(gr_dir / "state.json")
+    pathlib.Path(sf).write_text(json.dumps(state))
+    return gr_id, sf, str(gr_dir), state
+
+
+def test_land_gh_already_merged(tmp_path, monkeypatch, capsys):
+    gr_id, sf, wdir, state = _make_land_gh_state(tmp_path)
+
+    def fake_run(cmd, **kwargs):
+        class R:
+            returncode = 0
+            stdout = json.dumps({"state": "MERGED", "mergeable": "MERGEABLE", "reviewDecision": "", "statusCheckRollup": []})
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(_land, "subprocess", type("M", (), {"run": staticmethod(fake_run)})())
+    monkeypatch.setattr(_land, "_fast_forward_main", lambda cwd: None)
+    monkeypatch.setattr(_land, "_cleanup_gremlin", lambda *a, **kw: True)
+
+    ok = _land._land_gh(gr_id, sf, wdir, state)
+    assert ok is True
+    assert "already merged" in capsys.readouterr().out
+
+
+def test_land_gh_closed_without_force_returns_false(tmp_path, monkeypatch, capsys):
+    gr_id, sf, wdir, state = _make_land_gh_state(tmp_path)
+
+    def fake_run(cmd, **kwargs):
+        class R:
+            returncode = 0
+            stdout = json.dumps({"state": "CLOSED", "mergeable": "MERGEABLE", "reviewDecision": "", "statusCheckRollup": []})
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(_land, "subprocess", type("M", (), {"run": staticmethod(fake_run)})())
+
+    ok = _land._land_gh(gr_id, sf, wdir, state)
+    assert ok is False
+    assert "closed" in capsys.readouterr().out.lower()
+
+
+def test_land_gh_auto_merge_waits_before_cleanup(tmp_path, monkeypatch, capsys):
+    """_land_gh must call _poll_until_merged after --auto succeeds and only clean
+    up after the poll confirms MERGED, not immediately after gh pr merge returns."""
+    gr_id, sf, wdir, state = _make_land_gh_state(tmp_path)
+
+    poll_calls = []
+
+    def fake_poll(pr_url, cwd, **kwargs):
+        poll_calls.append(pr_url)
+        return True
+
+    # Simulate: gh pr view returns OPEN, then gh pr merge --auto exits 0.
+    call_count = [0]
+
+    def fake_run(cmd, **kwargs):
+        call_count[0] += 1
+        if "view" in cmd and call_count[0] == 1:
+            # First call: preflight gh pr view
+            class R:
+                returncode = 0
+                stdout = json.dumps({"state": "OPEN", "mergeable": "MERGEABLE", "reviewDecision": "", "statusCheckRollup": []})
+                stderr = ""
+            return R()
+        # gh pr merge --auto: exits 0 (auto-merge enabled, not yet merged)
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return R()
+
+    cleanup_calls = []
+
+    def fake_cleanup(*a, **kw):
+        cleanup_calls.append(True)
+        return True
+
+    monkeypatch.setattr(_land, "subprocess", type("M", (), {"run": staticmethod(fake_run)})())
+    monkeypatch.setattr(_land, "_poll_until_merged", fake_poll)
+    monkeypatch.setattr(_land, "_fast_forward_main", lambda cwd: None)
+    monkeypatch.setattr(_land, "_cleanup_gremlin", fake_cleanup)
+
+    ok = _land._land_gh(gr_id, sf, wdir, state)
+    assert ok is True
+    assert poll_calls == [state["pr_url"]], "poll must be called before cleanup"
+    assert cleanup_calls, "cleanup must be called after poll confirms merged"
+
+
+def test_land_gh_auto_merge_poll_failure_skips_cleanup(tmp_path, monkeypatch, capsys):
+    """When poll returns False (CI failed / timeout), _land_gh must not clean up."""
+    gr_id, sf, wdir, state = _make_land_gh_state(tmp_path)
+
+    def fake_poll(pr_url, cwd, **kwargs):
+        return False
+
+    call_count = [0]
+
+    def fake_run(cmd, **kwargs):
+        call_count[0] += 1
+        if "view" in cmd and call_count[0] == 1:
+            class R:
+                returncode = 0
+                stdout = json.dumps({"state": "OPEN", "mergeable": "MERGEABLE", "reviewDecision": "", "statusCheckRollup": []})
+                stderr = ""
+            return R()
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return R()
+
+    cleanup_calls = []
+
+    monkeypatch.setattr(_land, "subprocess", type("M", (), {"run": staticmethod(fake_run)})())
+    monkeypatch.setattr(_land, "_poll_until_merged", fake_poll)
+    monkeypatch.setattr(_land, "_fast_forward_main", lambda cwd: None)
+    monkeypatch.setattr(_land, "_cleanup_gremlin", lambda *a, **kw: cleanup_calls.append(True))
+
+    ok = _land._land_gh(gr_id, sf, wdir, state)
+    assert ok is False
+    assert not cleanup_calls, "cleanup must not run when poll fails"
+
+
+def test_land_gh_failed_checks_returns_false(tmp_path, monkeypatch, capsys):
+    gr_id, sf, wdir, state = _make_land_gh_state(tmp_path)
+
+    def fake_run(cmd, **kwargs):
+        class R:
+            returncode = 0
+            stdout = json.dumps({
+                "state": "OPEN",
+                "mergeable": "MERGEABLE",
+                "reviewDecision": "",
+                "statusCheckRollup": [{"name": "ci/test", "conclusion": "FAILURE"}],
+            })
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(_land, "subprocess", type("M", (), {"run": staticmethod(fake_run)})())
+
+    ok = _land._land_gh(gr_id, sf, wdir, state)
+    assert ok is False
+    assert "failed CI checks" in capsys.readouterr().out

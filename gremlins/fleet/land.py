@@ -759,6 +759,83 @@ def _land_boss(
     )
 
 
+_POLL_INTERVAL_SECS = 15
+_POLL_TIMEOUT_SECS = 1800  # 30 minutes
+
+
+def _poll_until_merged(
+    pr_url: str,
+    cwd: str | None,
+    *,
+    interval: int = _POLL_INTERVAL_SECS,
+    timeout: int = _POLL_TIMEOUT_SECS,
+) -> bool:
+    """Poll GitHub until the PR state is MERGED (or a terminal non-merge state).
+
+    Returns True when the PR is confirmed MERGED. Returns False and prints an
+    error if the PR closes without merging, CI fails, or the timeout expires.
+    Callers must not proceed with cleanup until this returns True.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        v = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "view",
+                pr_url,
+                "--json",
+                "state,statusCheckRollup",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+        )
+        if v.returncode != 0:
+            print(f"warning: could not poll PR state: {v.stderr.strip()} — retrying")
+            time.sleep(interval)
+            continue
+
+        try:
+            info = json.loads(v.stdout)
+        except json.JSONDecodeError:
+            print("warning: could not parse PR poll response — retrying")
+            time.sleep(interval)
+            continue
+
+        state_val = info.get("state", "")
+        if state_val == "MERGED":
+            print("PR merged.")
+            return True
+        if state_val == "CLOSED":
+            print(f"error: PR was closed without merging: {pr_url}")
+            return False
+
+        checks: list[Any] = info.get("statusCheckRollup") or []
+        failed = [
+            c
+            for c in checks
+            if c.get("conclusion") in ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED")
+        ]
+        if failed:
+            names = ", ".join(c.get("name", "?") for c in failed[:3])
+            print(f"error: PR has failed CI checks: {names}")
+            print(f"  {pr_url}")
+            return False
+
+        elapsed = int(time.monotonic() - (deadline - timeout))
+        print(
+            f"Waiting for PR to merge (elapsed {elapsed}s)...",
+            flush=True,
+        )
+        time.sleep(interval)
+
+    print(
+        f"error: timed out after {timeout}s waiting for PR to merge: {pr_url}"
+    )
+    return False
+
+
 def _land_gh(
     gr_id: str, sf: str, wdir: str, state: dict[str, Any], force: bool = False
 ) -> bool:
@@ -909,7 +986,11 @@ def _land_gh(
                     print(f"error: gh pr merge failed: {err}")
                 return False
     else:
-        print("PR merged.")
+        # --auto enables auto-merge and returns immediately; the PR may not be
+        # merged yet — poll until GitHub confirms MERGED before cleaning up.
+        print("Auto-merge enabled. Waiting for PR to merge...")
+        if not _poll_until_merged(pr_url, cwd):
+            return False
 
     _fast_forward_main(cwd)
     _cleanup_gremlin(
