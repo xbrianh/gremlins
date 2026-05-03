@@ -12,6 +12,7 @@ import pathlib
 from ..clients.claude import ClaudeClient
 from ..state import emit_bail, set_stage
 from .context import StageContext
+from .registry import register_stage
 
 LENSES_DIR = pathlib.Path(__file__).resolve().parent.parent / "prompts" / "lenses"
 
@@ -177,3 +178,5 @@ def run_review_code_stage(
         raise
 
     return review_code
+
+register_stage("review-code", run)

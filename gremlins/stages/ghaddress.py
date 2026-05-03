@@ -6,6 +6,7 @@ import dataclasses
 
 from ..state import check_bail
 from .context import StageContext
+from .registry import register_stage
 
 
 @dataclasses.dataclass
@@ -25,3 +26,5 @@ def run(ctx: StageContext, options: GhaddressOptions) -> None:
         raw_path=ctx.session_dir / "stream-ghaddress.jsonl",
     )
     check_bail("/ghaddress")
+
+register_stage("ghaddress", run)

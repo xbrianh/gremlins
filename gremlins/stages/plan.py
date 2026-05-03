@@ -7,6 +7,7 @@ import pathlib
 
 from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
 from .context import StageContext
+from .registry import register_stage
 
 
 @dataclasses.dataclass
@@ -32,3 +33,6 @@ def run(ctx: StageContext, options: PlanOptions) -> None:
     )
     if not options.plan_file.exists() or options.plan_file.stat().st_size == 0:
         raise RuntimeError(f"plan stage did not produce {options.plan_file}")
+
+
+register_stage("plan", run)
