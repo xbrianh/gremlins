@@ -31,7 +31,8 @@ def run(_ctx: StageContext, options: RequestCopilotOptions) -> None:
         check=False,
     )
     if r.returncode != 0:
+        detail = r.stderr.strip() or r.stdout.strip()
         raise RuntimeError(
             f"could not request Copilot review (is it enabled in repo settings?): "
-            f"{r.stderr.strip()}"
+            f"exit {r.returncode}: {detail}"
         )
