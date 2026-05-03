@@ -1223,6 +1223,7 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
     assert client.calls == [], "no client stages should run on ci-gate resume"
     assert earlier_called == [], "earlier stages must be skipped"
     assert len(ci_calls) == 1
+    assert ci_calls[0].pr_url == "https://github.com/owner/repo/pull/200"
 
 
 # ---------------------------------------------------------------------------

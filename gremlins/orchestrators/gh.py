@@ -155,7 +155,7 @@ def _resolve_plan_source(
         issue_num = _read_state_field(state_file, "issue_num")
         issue_body = plan_md.read_text(encoding="utf-8")
         label = f" (issue #{issue_num})" if issue_num else ""
-        logger.info("[1/7] plan resumed from snapshot: %s%s", plan_md, label)
+        logger.info("[1/8] plan resumed from snapshot: %s%s", plan_md, label)
         return issue_url, issue_num, issue_body
 
     if pathlib.Path(plan_source).is_file():
@@ -164,7 +164,7 @@ def _resolve_plan_source(
             die(f"--plan: file is empty: {plan_source}")
         issue_body = src.read_text(encoding="utf-8")
         logger.info(
-            "[1/7] plan supplied via --plan (file): %s — posting as GitHub issue",
+            "[1/8] plan supplied via --plan (file): %s — posting as GitHub issue",
             plan_source,
         )
 
@@ -240,7 +240,7 @@ def _resolve_plan_source(
 
         plan_md.write_text(issue_body + "\n", encoding="utf-8")
         logger.info(
-            "[1/7] plan supplied via --plan (issue %s#%s)", target_repo, issue_ref
+            "[1/8] plan supplied via --plan (issue %s#%s)", target_repo, issue_ref
         )
 
     patch_state(issue_url=issue_url, issue_num=issue_num)
@@ -349,7 +349,7 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         if args.plan_source:
             return
         set_stage("plan")
-        logger.info("[1/7] running /ghplan")
+        logger.info("[1/8] running /ghplan")
         plan_prompt = f"/ghplan {args.ref + ' ' if args.ref else ''}{instructions}"
         completed = ctx.client.run(
             plan_prompt,
@@ -472,7 +472,7 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     def stage_request_copilot() -> None:
         _ensure_pr_url()
         set_stage("request-copilot")
-        logger.info("[3/7] requesting Copilot review")
+        logger.info("[3/8] requesting Copilot review")
         request_copilot.run(
             ctx,
             request_copilot.RequestCopilotOptions(repo=repo, pr_num=pr_num),
@@ -481,7 +481,7 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     def stage_ghreview() -> None:
         _ensure_pr_url()
         set_stage("ghreview")
-        logger.info("[4/7] running /ghreview")
+        logger.info("[4/8] running /ghreview")
         ghreview.run(
             ctx,
             ghreview.GhreviewOptions(
@@ -494,7 +494,7 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     def stage_wait_copilot() -> None:
         _ensure_pr_url()
         set_stage("wait-copilot")
-        logger.info("[5/7] waiting for Copilot review (20s interval, 10min timeout)")
+        logger.info("[5/8] waiting for Copilot review (20s interval, 10min timeout)")
         state = wait_copilot.run(
             ctx,
             wait_copilot.WaitCopilotOptions(repo=repo, pr_num=pr_num),
@@ -504,7 +504,7 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     def stage_ghaddress() -> None:
         _ensure_pr_url()
         set_stage("ghaddress")
-        logger.info("[6/7] running /ghaddress")
+        logger.info("[6/8] running /ghaddress")
         ghaddress.run(
             ctx,
             ghaddress.GhaddressOptions(
@@ -517,7 +517,7 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     def stage_wait_ci() -> None:
         _ensure_pr_url()
         set_stage("ci-gate")
-        logger.info("[7/7] waiting for CI checks (up to 3 attempts, 20min each)")
+        logger.info("[7/8] waiting for CI checks (up to 3 attempts, 20min each)")
         wait_ci.run(
             ctx,
             wait_ci.WaitCiOptions(

@@ -53,8 +53,8 @@ def _escape_fmt(s: str) -> str:
 
 def run(ctx: StageContext, options: VerifyOptions) -> None:
     commit_instr = (
-        "- After fixing, stage the changed files by name and create a single git "
-        "commit titled 'Fix verify failures'. Do not push."
+        "- After fixing, leave changes uncommitted — do not stage or commit. "
+        "The next stage (commit-pr) will handle staging and committing."
     )
 
     bail_section = ""
