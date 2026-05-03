@@ -27,4 +27,5 @@ def run(ctx: StageContext, options: GhreviewOptions) -> None:
     )
     check_bail("/ghreview")
 
+
 register_stage("ghreview", run)

@@ -135,4 +135,5 @@ def run(ctx: StageContext, options: CommitPrOptions) -> str:
     )
     return pr_url
 
+
 register_stage("commit-pr", run)

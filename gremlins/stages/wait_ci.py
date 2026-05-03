@@ -216,4 +216,5 @@ def run(ctx: StageContext, options: WaitCiOptions) -> None:
             emit_bail("other", f"ci-gate failed: {exc}"[:200])
         raise
 
+
 register_stage("wait-ci", run)

@@ -39,4 +39,5 @@ def run(_: StageContext, options: WaitCopilotOptions) -> str:
             raise RuntimeError(f"Copilot review timed out after {options.timeout}s")
         time.sleep(options.interval)
 
+
 register_stage("wait-copilot", run)

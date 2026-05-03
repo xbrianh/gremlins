@@ -27,4 +27,5 @@ def run(ctx: StageContext, options: GhaddressOptions) -> None:
     )
     check_bail("/ghaddress")
 
+
 register_stage("ghaddress", run)

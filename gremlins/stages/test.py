@@ -128,4 +128,5 @@ def run(ctx: StageContext, options: TestOptions) -> None:
             emit_bail("other", f"test stage failed: {exc}"[:200])
         raise
 
+
 register_stage("test", run)

@@ -38,4 +38,5 @@ def run(_: StageContext, options: RequestCopilotOptions) -> None:
             f"exit {r.returncode}: {detail}"
         )
 
+
 register_stage("request-copilot", run)
