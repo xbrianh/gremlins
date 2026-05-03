@@ -1,4 +1,4 @@
-"""Tests for gremlins/cli.py bail and _run-pipeline subcommands."""
+"""Tests for gremlins/cli.py bail, resume, and _run-pipeline subcommands."""
 
 from __future__ import annotations
 
@@ -251,6 +251,7 @@ def test_boss_valid_chain_kind_passes():
 @pytest.mark.parametrize(
     "bad_id",
     [
+        "",
         "../escape",
         "foo/bar",
         "foo\\bar",
@@ -275,10 +276,13 @@ def test_resume_rejects_invalid_gr_id(tmp_path, monkeypatch, bad_id):
 @pytest.mark.parametrize(
     "bad_id",
     [
+        "",
         "../escape",
         "foo/bar",
+        "foo\\bar",
         "foo..bar",
         "id with spaces",
+        "id;injection",
     ],
 )
 def test_bail_rejects_malformed_gr_id_env(tmp_path, monkeypatch, bad_id):
