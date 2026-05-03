@@ -238,7 +238,7 @@ def get_pr_ci_status(pr_url: str) -> dict[str, Any]:
         data = json.loads(r.stdout)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"could not parse PR CI status response: {exc}") from exc
-    all_checks = data.get("statusCheckRollup") or []
+    all_checks = cast(list[dict[str, Any]], data.get("statusCheckRollup") or [])
     required_names = get_required_check_names(pr_url)
     if required_names:
         checks = [
