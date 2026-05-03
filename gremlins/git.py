@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from typing import Any, cast
 
 
 def in_git_repo() -> bool:
@@ -86,9 +87,12 @@ ImplOutcome = EmptyImpl | DirtyOnly | HeadAdvanced | DivergentHead
 
 
 def _git(
-    args: list, *, cwd: str | None = None, **kwargs
-) -> subprocess.CompletedProcess:
-    return subprocess.run(["git"] + list(args), cwd=cwd, **kwargs)
+    args: list[str], *, cwd: str | None = None, **kwargs: Any
+) -> subprocess.CompletedProcess[Any]:
+    return cast(
+        subprocess.CompletedProcess[Any],
+        subprocess.run(["git"] + list(args), cwd=cwd, **kwargs),
+    )
 
 
 def record_pre_impl_state(cwd: str | None = None) -> PreImplState:
@@ -288,7 +292,7 @@ def setup_worktree_branch(
     gr_id: str,
     base_ref: str = "HEAD",
     branch_prefix: str = "bg/localgremlin",
-) -> tuple:
+) -> tuple[str, str]:
     """Add a named-branch worktree at base_ref. Returns (workdir_path, branch_name).
 
     Raises RuntimeError on failure.

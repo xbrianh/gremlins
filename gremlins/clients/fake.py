@@ -14,6 +14,7 @@ import json
 import pathlib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import Any, cast
 
 from .claude import CompletedRun
 
@@ -55,18 +56,18 @@ class FakeClaudeClient:
         # Fake never spawns; nothing to reap.
         pass
 
-    def _load_events(self, fixture: object) -> list[dict]:
+    def _load_events(self, fixture: object) -> list[dict[str, Any]]:
         if isinstance(fixture, (list, tuple)):
-            return [dict(e) for e in fixture]
+            return [cast(dict[str, Any], e) for e in cast(list[Any], fixture)]
         if isinstance(fixture, (str, pathlib.Path)):
             path = pathlib.Path(fixture)
-            events: list[dict] = []
+            events: list[dict[str, Any]] = []
             with path.open("r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
                         continue
-                    events.append(json.loads(line))
+                    events.append(cast(dict[str, Any], json.loads(line)))
             return events
         raise TypeError(f"unsupported fixture type: {type(fixture).__name__}")
 
@@ -81,7 +82,7 @@ class FakeClaudeClient:
         resume_session: str | None = None,
         extra_flags: Sequence[str] = (),
         capture_events: bool = False,
-        on_event: Callable[[dict], None] | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> CompletedRun:
         self.calls.append(
             RecordedCall(

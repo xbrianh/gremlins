@@ -29,13 +29,13 @@ def _get_diff(
     base_ref: str,
     cwd: str | None,
 ) -> str:
-    run_kw: dict = dict(capture_output=True, text=True, check=False)
-    if cwd:
-        run_kw["cwd"] = cwd
     if isinstance(outcome, HeadAdvanced):
         r = subprocess.run(
             ["git", "log", "--patch", f"{base_ref}..{impl_handoff_branch}"],
-            **run_kw,
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=cwd,
         )
         if r.returncode != 0:
             raise RuntimeError(
@@ -45,7 +45,13 @@ def _get_diff(
         diff = r.stdout.strip()
     else:
         # DirtyOnly: uncommitted changes relative to HEAD
-        r = subprocess.run(["git", "diff", "HEAD"], **run_kw)
+        r = subprocess.run(
+            ["git", "diff", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=cwd,
+        )
         if r.returncode != 0:
             raise RuntimeError(
                 f"git diff HEAD failed (rc={r.returncode}): {r.stderr.strip()}"
@@ -72,10 +78,13 @@ def run_commit_pr_stage(
     diff = _get_diff(impl_outcome, impl_handoff_branch, base_ref, cwd)
 
     if isinstance(impl_outcome, HeadAdvanced):
-        run_kw: dict = dict(capture_output=True, text=True, check=False)
-        if cwd:
-            run_kw["cwd"] = cwd
-        status_r = subprocess.run(["git", "status", "--porcelain"], **run_kw)
+        status_r = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=cwd,
+        )
         worktree_dirty = bool(status_r.stdout.strip())
         if worktree_dirty:
             action_clause = _load("commit_pr_handoff_dirty.md").format(

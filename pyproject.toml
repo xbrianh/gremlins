@@ -30,16 +30,6 @@ ignore = ["E501"]
 
 [tool.pyright]
 typeCheckingMode = "strict"
-# TODO: these modules need strict-mode cleanup; excluded to land this pass cleanly.
-# Pick them off in follow-on PRs.
 exclude = [
-    "gremlins/fleet/session_summary.py",
-    "gremlins/stages/commit_pr.py",
-    "gremlins/clients/claude.py",
-    "gremlins/clients/fake.py",
-    "gremlins/git.py",
-    "gremlins/launcher.py",
-    "gremlins/gh_utils.py",
-    "gremlins/handoff.py",
     "tests",
 ]

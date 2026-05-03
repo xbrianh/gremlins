@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import sys
+from typing import NoReturn, cast
 
 from gremlins.prompts import load_code_style
 
@@ -29,13 +30,13 @@ CLAUDE_FLAGS = [
 ]
 
 
-def die(msg: str) -> None:
+def die(msg: str) -> NoReturn:
     sys.stderr.write(f"error: {msg}\n")
     sys.stderr.flush()
     sys.exit(1)
 
 
-def run_git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
+def run_git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git"] + list(args),
         capture_output=True,
@@ -498,8 +499,8 @@ def main(argv: list[str]) -> int:
         print(f"    updated plan: {out_path}", flush=True)
         print(f"    signal file:  {signal_path}", flush=True)
 
-    followups = state.get("operator_followups") or []
-    if isinstance(followups, list) and followups:
+    followups = cast(list[str], state.get("operator_followups") or [])
+    if followups:
         print(f"    operator follow-ups ({len(followups)}):", flush=True)
         for item in followups:
             print(f"      - {item}", flush=True)
