@@ -25,6 +25,7 @@ from ..stages import (
     ghreview,
     implement,
     request_copilot,
+    verify,
     wait_ci,
     wait_copilot,
 )
@@ -40,6 +41,7 @@ REF_RE = re.compile(r"^[A-Za-z0-9._/#-]+$")
 VALID_STAGES = [
     "plan",
     "implement",
+    "verify",
     "commit-pr",
     "request-copilot",
     "ghreview",
@@ -371,7 +373,7 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     def stage_implement() -> None:
         nonlocal impl_result
         set_stage("implement")
-        logger.info("[2a/7] implementing plan")
+        logger.info("[2a/8] implementing plan")
         spec_text = ""
         if spec_file.exists():
             try:
@@ -400,10 +402,22 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
             impl_base_ref=impl_result.pre_state.head,
         )
 
+    def stage_verify() -> None:
+        set_stage("verify")
+        logger.info("[2b/8] verifying implementation")
+        verify.run(
+            ctx,
+            verify.VerifyOptions(
+                fix_model=model,
+                cwd=pathlib.Path.cwd(),
+                code_style=code_style,
+            ),
+        )
+
     def stage_commit_pr() -> None:
         nonlocal pr_url, pr_num
         set_stage("commit-pr")
-        logger.info("[2b/7] committing + opening PR")
+        logger.info("[2c/8] committing + opening PR")
 
         if impl_result is not None:
             impl_outcome = impl_result.outcome
@@ -516,6 +530,7 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     stages = [
         ("plan", stage_plan),
         ("implement", stage_implement),
+        ("verify", stage_verify),
         ("commit-pr", stage_commit_pr),
         ("request-copilot", stage_request_copilot),
         ("ghreview", stage_ghreview),
