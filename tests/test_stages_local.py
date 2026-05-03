@@ -373,7 +373,7 @@ def test_address_code_stage_emits_bail_on_failure(tmp_path, make_state_dir):
     state_dir = make_state_dir(gr_id)
     client = FakeClaudeClient(fixtures={})
     ctx = _make_ctx(client, tmp_path, gr_id=gr_id)
-    with pytest.raises((FileNotFoundError, RuntimeError)):
+    with pytest.raises(FileNotFoundError):
         run_address_code(
             ctx, AddressCodeOptions(address_model="sonnet", is_git=False, code_style="")
         )

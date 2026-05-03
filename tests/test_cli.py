@@ -143,13 +143,12 @@ def test_run_pipeline_valid_id_proceeds(tmp_path, monkeypatch):
     # If we reach here, validate_gr_id passed; pipeline may exit for any reason.
 
 
-def test_run_pipeline_forwards_gr_id_to_orchestrator(tmp_path, monkeypatch):
+def test_run_pipeline_forwards_gr_id_to_orchestrator(
+    tmp_path, monkeypatch, make_state_dir
+):
     """_run-pipeline <gr_id> _local ... passes gr_id down to local_main."""
     gr_id = "test-pipeline-gr"
-    state_dir = tmp_path / "xdg" / "claude-gremlins" / gr_id
-    state_dir.mkdir(parents=True)
-    (state_dir / "state.json").write_text(json.dumps({"id": gr_id}))
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
+    state_dir = make_state_dir(gr_id)
 
     from gremlins.state import set_stage
 
