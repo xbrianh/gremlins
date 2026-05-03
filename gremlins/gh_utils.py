@@ -170,6 +170,54 @@ def extract_gh_url(
     raise RuntimeError(f"failed to extract {label} URL from claude output events")
 
 
+def get_pr_ci_status(pr_url: str) -> dict[str, Any]:
+    """Return CI check status and review decision for a PR.
+
+    Returns dict with:
+    - 'checks': list of check objects from statusCheckRollup (may be empty)
+    - 'review_decision': reviewDecision string (e.g. 'REVIEW_REQUIRED', 'APPROVED', '')
+    """
+    r = subprocess.run(
+        ["gh", "pr", "view", pr_url, "--json", "statusCheckRollup,reviewDecision"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"could not fetch PR CI status: {r.stderr.strip()}")
+    try:
+        data = json.loads(r.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"could not parse PR CI status response: {exc}") from exc
+    return {
+        "checks": data.get("statusCheckRollup") or [],
+        "review_decision": data.get("reviewDecision") or "",
+    }
+
+
+def fetch_check_run_logs(details_url: str) -> str:
+    """Try to fetch failed-step logs for a GitHub Actions check run.
+
+    Extracts the workflow run ID from `details_url` and calls
+    `gh run view <id> --log-failed`. Returns empty string when the URL
+    doesn't match Actions or the gh call fails.
+    """
+    m = re.search(r"/actions/runs/(\d+)", details_url or "")
+    if not m:
+        return ""
+    run_id = m.group(1)
+    r = subprocess.run(
+        ["gh", "run", "view", run_id, "--log-failed"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    if r.returncode == 0:
+        return r.stdout.strip()[:10000]
+    return ""
+
+
 def check_copilot_review(repo: str, pr_num: str) -> str | None:
     """Return the first non-PENDING Copilot review state, or None if not ready."""
     r = subprocess.run(
