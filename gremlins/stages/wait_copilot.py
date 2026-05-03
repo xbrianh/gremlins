@@ -26,7 +26,9 @@ class WaitCopilotOptions:
     review_checker: Callable[[], str | None] | None = None
 
 
-def run_request_copilot_stage(_ctx: StageContext, options: RequestCopilotOptions) -> None:
+def run_request_copilot_stage(
+    _ctx: StageContext, options: RequestCopilotOptions
+) -> None:
     """Add copilot-pull-request-reviewer to the PR's reviewer list."""
     r = subprocess.run(
         [

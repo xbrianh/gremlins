@@ -384,7 +384,9 @@ def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
                 "nothing to review: HEAD~1..HEAD has no changes and working tree is clean"
             )
 
-    ctx = StageContext(client=client, session_dir=session_dir, gr_id=os.environ.get("GR_ID"))
+    ctx = StageContext(
+        client=client, session_dir=session_dir, gr_id=os.environ.get("GR_ID")
+    )
     logger.info("reviewing code (model: %s)", args.detail)
     review_file = review_code.run(
         ctx,
@@ -430,7 +432,9 @@ def address_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     except (FileNotFoundError, ValueError) as exc:
         die(f"error loading prompt: {exc}")
 
-    ctx = StageContext(client=client, session_dir=session_dir, gr_id=os.environ.get("GR_ID"))
+    ctx = StageContext(
+        client=client, session_dir=session_dir, gr_id=os.environ.get("GR_ID")
+    )
     logger.info("addressing code reviews (model: %s)", args.address)
     address_code.run(
         ctx,

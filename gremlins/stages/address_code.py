@@ -24,7 +24,7 @@ class AddressCodeOptions:
 def _model_from(path: pathlib.Path, lens: str) -> str:
     stem = path.stem
     prefix = f"review-code-{lens}-"
-    model = stem[len(prefix):] if stem.startswith(prefix) else ""
+    model = stem[len(prefix) :] if stem.startswith(prefix) else ""
     if not model or not MODEL_RE.match(model):
         raise ValueError(
             f"cannot extract a valid model name from review file: {path.name}"

@@ -56,7 +56,9 @@ def test_no_checks_skips(tmp_path: pathlib.Path) -> None:
     getter = _make_getter([([], "")])
     run_wait_ci(
         _make_ctx(client, tmp_path),
-        WaitCiOptions(model="sonnet", pr_url=PR_URL, code_style="Be good.", checks_getter=getter),
+        WaitCiOptions(
+            model="sonnet", pr_url=PR_URL, code_style="Be good.", checks_getter=getter
+        ),
     )
     assert client.calls == []
 
@@ -67,7 +69,12 @@ def test_review_required_no_checks_bails(tmp_path: pathlib.Path) -> None:
     with pytest.raises(RuntimeError, match="PR blocked by required human review"):
         run_wait_ci(
             _make_ctx(client, tmp_path),
-            WaitCiOptions(model="sonnet", pr_url=PR_URL, code_style="Be good.", checks_getter=getter),
+            WaitCiOptions(
+                model="sonnet",
+                pr_url=PR_URL,
+                code_style="Be good.",
+                checks_getter=getter,
+            ),
         )
     assert client.calls == []
 
@@ -82,7 +89,9 @@ def test_all_checks_passing_returns(tmp_path: pathlib.Path) -> None:
     )
     run_wait_ci(
         _make_ctx(client, tmp_path),
-        WaitCiOptions(model="sonnet", pr_url=PR_URL, code_style="Be good.", checks_getter=getter),
+        WaitCiOptions(
+            model="sonnet", pr_url=PR_URL, code_style="Be good.", checks_getter=getter
+        ),
     )
     assert client.calls == []
 
@@ -100,8 +109,11 @@ def test_checks_pending_then_passing(tmp_path: pathlib.Path) -> None:
     run_wait_ci(
         _make_ctx(client, tmp_path),
         WaitCiOptions(
-            model="sonnet", pr_url=PR_URL, code_style="Be good.",
-            poll_interval=0, checks_getter=getter,
+            model="sonnet",
+            pr_url=PR_URL,
+            code_style="Be good.",
+            poll_interval=0,
+            checks_getter=getter,
         ),
     )
     assert client.calls == []
@@ -113,7 +125,12 @@ def test_review_required_bails(tmp_path: pathlib.Path) -> None:
     with pytest.raises(RuntimeError, match="PR blocked by required human review"):
         run_wait_ci(
             _make_ctx(client, tmp_path),
-            WaitCiOptions(model="sonnet", pr_url=PR_URL, code_style="Be good.", checks_getter=getter),
+            WaitCiOptions(
+                model="sonnet",
+                pr_url=PR_URL,
+                code_style="Be good.",
+                checks_getter=getter,
+            ),
         )
     assert client.calls == []
 
@@ -131,8 +148,11 @@ def test_review_required_after_fix_bails(tmp_path: pathlib.Path) -> None:
         run_wait_ci(
             _make_ctx(client, tmp_path),
             WaitCiOptions(
-                model="sonnet", pr_url=PR_URL, code_style="Be good.",
-                poll_interval=0, checks_getter=getter,
+                model="sonnet",
+                pr_url=PR_URL,
+                code_style="Be good.",
+                poll_interval=0,
+                checks_getter=getter,
             ),
         )
     assert len(client.calls) == 1
@@ -151,8 +171,11 @@ def test_review_required_while_pending_bails(tmp_path: pathlib.Path) -> None:
         run_wait_ci(
             _make_ctx(client, tmp_path),
             WaitCiOptions(
-                model="sonnet", pr_url=PR_URL, code_style="Be good.",
-                poll_interval=0, checks_getter=getter,
+                model="sonnet",
+                pr_url=PR_URL,
+                code_style="Be good.",
+                poll_interval=0,
+                checks_getter=getter,
             ),
         )
     assert client.calls == []
@@ -171,8 +194,11 @@ def test_fix_on_failure_then_pass(tmp_path: pathlib.Path) -> None:
     run_wait_ci(
         _make_ctx(client, tmp_path),
         WaitCiOptions(
-            model="sonnet", pr_url=PR_URL, code_style="Be good.",
-            poll_interval=0, checks_getter=getter,
+            model="sonnet",
+            pr_url=PR_URL,
+            code_style="Be good.",
+            poll_interval=0,
+            checks_getter=getter,
         ),
     )
     assert len(client.calls) == 1
@@ -198,8 +224,11 @@ def test_exhausted_bails(tmp_path: pathlib.Path) -> None:
         run_wait_ci(
             _make_ctx(client, tmp_path),
             WaitCiOptions(
-                model="sonnet", pr_url=PR_URL, code_style="Be good.",
-                poll_interval=0, checks_getter=getter,
+                model="sonnet",
+                pr_url=PR_URL,
+                code_style="Be good.",
+                poll_interval=0,
+                checks_getter=getter,
             ),
         )
     fix_labels = [c.label for c in client.calls]
@@ -219,8 +248,12 @@ def test_timeout_counts_as_failed(tmp_path: pathlib.Path) -> None:
     run_wait_ci(
         _make_ctx(client, tmp_path),
         WaitCiOptions(
-            model="sonnet", pr_url=PR_URL, code_style="Be good.",
-            poll_timeout=0, poll_interval=0, checks_getter=getter,
+            model="sonnet",
+            pr_url=PR_URL,
+            code_style="Be good.",
+            poll_timeout=0,
+            poll_interval=0,
+            checks_getter=getter,
         ),
     )
     assert client.calls == []
@@ -247,9 +280,13 @@ def test_post_fix_waits_for_sha_propagation(tmp_path: pathlib.Path) -> None:
     run_wait_ci(
         _make_ctx(client, tmp_path),
         WaitCiOptions(
-            model="sonnet", pr_url=PR_URL, code_style="Be good.",
-            poll_interval=0, checks_getter=getter,
-            head_sha_getter=head_sha_getter, fix_sha_getter=lambda: "new_sha",
+            model="sonnet",
+            pr_url=PR_URL,
+            code_style="Be good.",
+            poll_interval=0,
+            checks_getter=getter,
+            head_sha_getter=head_sha_getter,
+            fix_sha_getter=lambda: "new_sha",
         ),
     )
     assert len(client.calls) == 1
@@ -270,8 +307,12 @@ def test_post_fix_no_sha_available_falls_back(tmp_path: pathlib.Path) -> None:
     run_wait_ci(
         _make_ctx(client, tmp_path),
         WaitCiOptions(
-            model="sonnet", pr_url=PR_URL, code_style="Be good.",
-            poll_interval=0, checks_getter=getter, fix_sha_getter=lambda: "",
+            model="sonnet",
+            pr_url=PR_URL,
+            code_style="Be good.",
+            poll_interval=0,
+            checks_getter=getter,
+            fix_sha_getter=lambda: "",
         ),
     )
     assert len(client.calls) == 1
@@ -292,8 +333,11 @@ def test_code_style_in_fix_prompt(tmp_path: pathlib.Path) -> None:
     run_wait_ci(
         _make_ctx(client, tmp_path),
         WaitCiOptions(
-            model="sonnet", pr_url=PR_URL, code_style="Always write docstrings.",
-            poll_interval=0, checks_getter=getter,
+            model="sonnet",
+            pr_url=PR_URL,
+            code_style="Always write docstrings.",
+            poll_interval=0,
+            checks_getter=getter,
         ),
     )
     assert client.calls

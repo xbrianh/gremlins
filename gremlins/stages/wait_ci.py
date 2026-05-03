@@ -200,7 +200,11 @@ def run(ctx: StageContext, options: WaitCiOptions) -> None:
             check_bail(f"ci-fix-{attempt}")
             _agent_bailed = False
 
-            _get_sha = options.fix_sha_getter if options.fix_sha_getter is not None else git_head
+            _get_sha = (
+                options.fix_sha_getter
+                if options.fix_sha_getter is not None
+                else git_head
+            )
             fix_sha = _get_sha()
 
         _exhausted = True

@@ -68,7 +68,9 @@ def run(ctx: StageContext, options: CommitPrOptions) -> str:
     """Build the commit-pr prompt, run a fresh claude session, return the PR URL."""
     issue_num = options.issue_url.split("/")[-1] if options.issue_url else ""
 
-    diff = _get_diff(options.impl_outcome, options.impl_handoff_branch, options.base_ref, options.cwd)
+    diff = _get_diff(
+        options.impl_outcome, options.impl_handoff_branch, options.base_ref, options.cwd
+    )
 
     if isinstance(options.impl_outcome, HeadAdvanced):
         status_r = subprocess.run(
