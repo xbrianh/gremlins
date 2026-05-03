@@ -175,13 +175,9 @@ def _delete_patch_state(
 def _build_spawn_env(gr_id: str) -> dict[str, str]:
     """Build the environment for the spawned pipeline process."""
     env = os.environ.copy()
-    claude_home = os.path.join(os.path.expanduser("~"), ".claude")
-    # Parent of the gremlins package directory — ensures the subprocess imports
-    # from the same source tree as the current process even in dev worktrees
-    # where ~/.claude/gremlins/ symlinks may be stale or absent.
     pkg_root = str(pathlib.Path(__file__).resolve().parent.parent)
     existing_pp = env.get("PYTHONPATH", "")
-    parts = [p for p in [pkg_root, claude_home, existing_pp] if p]
+    parts = [p for p in [pkg_root, existing_pp] if p]
     env["PYTHONPATH"] = os.pathsep.join(parts)
     env["PYTHONSAFEPATH"] = "1"
     env["GR_ID"] = gr_id
