@@ -16,6 +16,7 @@ from typing import Any
 
 from ..clients.claude import ClaudeClient
 from ..gh_utils import fetch_check_run_logs, get_pr_ci_status
+from ..git import git_head
 from ..state import check_bail, emit_bail
 
 logger = logging.getLogger(__name__)
@@ -55,18 +56,54 @@ def _poll_until_done(
     timeout: int,
     interval: int,
     checks_getter: Callable[[], tuple[list[dict[str, Any]], str]] | None = None,
+    required_sha: str = "",
+    head_sha_getter: Callable[[], str] | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
-    """Poll PR checks until all are complete or timeout. Returns (checks, review_decision)."""
+    """Poll PR checks until all are complete or timeout. Returns (checks, review_decision).
+
+    When ``required_sha`` is set (non-empty), the poll will not accept a
+    "done" result until the PR's ``headRefOid`` matches ``required_sha``.
+    This prevents treating stale check results from the previous commit as
+    a passing signal in the window between a ci-fix push and GitHub queueing
+    new CI for the new HEAD SHA.
+
+    ``head_sha_getter`` is injectable for tests: a zero-argument callable that
+    returns the PR's current headRefOid. Defaults to the value from
+    ``get_pr_ci_status`` on the real code path.
+    """
     deadline = time.time() + timeout
     review_decision = ""
     while True:
+        head_sha = ""
         if checks_getter is not None:
             checks, review_decision = checks_getter()
+            if head_sha_getter is not None:
+                head_sha = head_sha_getter()
         else:
             status = get_pr_ci_status(pr_url)
             checks = status["checks"]
             review_decision = status["review_decision"]
+            head_sha = status["head_sha"]
+
         _bail_if_review_required(review_decision)
+
+        # If we pushed a fix, don't accept "done" until GitHub's PR headRefOid
+        # reflects the new commit — stale rollup results from the previous SHA
+        # would otherwise pass the checks-complete test before new CI even starts.
+        if required_sha and head_sha and head_sha != required_sha:
+            if time.time() >= deadline:
+                raise RuntimeError(
+                    f"ci-gate: timed out waiting for GitHub to reflect pushed SHA "
+                    f"{required_sha[:8]} (still showing {head_sha[:8]}) after {timeout}s"
+                )
+            logger.debug(
+                "ci-gate: PR head %s != expected %s, waiting for push to propagate",
+                head_sha[:8],
+                required_sha[:8],
+            )
+            time.sleep(interval)
+            continue
+
         if not checks or all(_is_done(c) for c in checks):
             return checks, review_decision
         if time.time() >= deadline:
@@ -105,12 +142,22 @@ def run_wait_ci_stage(
     poll_timeout: int = 1200,
     poll_interval: int = 30,
     checks_getter: Callable[[], tuple[list[dict[str, Any]], str]] | None = None,
+    head_sha_getter: Callable[[], str] | None = None,
+    fix_sha_getter: Callable[[], str] | None = None,
 ) -> None:
     """Wait for CI checks to pass, fixing failures up to max_attempts times.
 
     ``checks_getter`` is injectable for tests: a zero-argument callable that
     returns ``(checks_list, review_decision_string)``. Defaults to a real
     ``gh pr view`` call.
+
+    ``head_sha_getter`` is injectable for tests: a zero-argument callable that
+    returns the PR's current headRefOid. Used to verify GitHub has propagated a
+    ci-fix push before accepting check results.
+
+    ``fix_sha_getter`` is injectable for tests: a zero-argument callable that
+    returns the local HEAD SHA after a ci-fix is committed and pushed. Defaults
+    to ``git_head``.
 
     Skips entirely when the PR has no checks configured. Bails when the PR is
     blocked by a required human review. Bails after max_attempts exhausted
@@ -141,6 +188,9 @@ def run_wait_ci_stage(
     _exhausted = False
     _agent_bailed = False
     _review_bailed = False
+    # After a ci-fix push, track the expected new HEAD SHA so _poll_until_done
+    # can reject stale check results from the previous commit.
+    fix_sha = ""
     try:
         for attempt in range(1, max_attempts + 1):
             logger.info(
@@ -151,7 +201,12 @@ def run_wait_ci_stage(
             )
             try:
                 final_checks, review_decision = _poll_until_done(
-                    pr_url, poll_timeout, poll_interval, checks_getter
+                    pr_url,
+                    poll_timeout,
+                    poll_interval,
+                    checks_getter,
+                    required_sha=fix_sha,
+                    head_sha_getter=head_sha_getter,
                 )
             except _ReviewRequiredError:
                 _review_bailed = True
@@ -187,6 +242,11 @@ def run_wait_ci_stage(
             _agent_bailed = True
             check_bail(f"ci-fix-{attempt}")
             _agent_bailed = False
+
+            # Capture the new HEAD SHA so the next poll can verify GitHub has
+            # propagated the push before accepting check results.
+            _get_sha = fix_sha_getter if fix_sha_getter is not None else git_head
+            fix_sha = _get_sha()
 
         _exhausted = True
         emit_bail("other", f"CI failed after {max_attempts} attempts")
