@@ -194,7 +194,25 @@ def test_local_no_args_exits_nonzero_no_state(tmp_path, monkeypatch):
 def test_gh_invalid_model_exits_nonzero_no_state(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
 
-    rc = main(["gh", "--model", "!!!"])
+    rc = main(["gh", "--model", "!!!", "-c", "fix bug"])
+
+    assert rc != 0
+    assert _no_state_created(tmp_path)
+
+
+def test_gh_bare_exits_nonzero_no_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+
+    rc = main(["gh"])
+
+    assert rc != 0
+    assert _no_state_created(tmp_path)
+
+
+def test_gh_invalid_resume_from_exits_nonzero_no_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+
+    rc = main(["gh", "--resume-from", "bogus"])
 
     assert rc != 0
     assert _no_state_created(tmp_path)
@@ -236,7 +254,18 @@ def test_local_with_instructions_flag_passes():
 
 
 def test_gh_valid_model_passes():
-    _validate_gh_args(["--model", "claude-sonnet-4"])  # must not raise
+    ns = argparse.Namespace(plan=None, instructions="fix bug")
+    _validate_gh_args(ns, ["--model", "claude-sonnet-4"])  # must not raise
+
+
+def test_gh_valid_resume_from_passes():
+    ns = argparse.Namespace(plan=None, instructions=None)
+    _validate_gh_args(ns, ["--resume-from", "plan"])  # must not raise
+
+
+def test_gh_positional_instructions_passes():
+    ns = argparse.Namespace(plan=None, instructions=None)
+    _validate_gh_args(ns, ["fix the bug"])  # must not raise
 
 
 def test_boss_valid_chain_kind_passes():

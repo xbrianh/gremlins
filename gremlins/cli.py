@@ -34,7 +34,7 @@ from .fleet import main as fleet_main
 from .fleet.session_summary import main as _session_summary_main
 from .handoff import main as handoff_main
 from .launcher import MODEL_RE, launch, resume, write_terminal_state
-from .orchestrators.gh import gh_main
+from .orchestrators.gh import VALID_STAGES, gh_main
 from .orchestrators.local import address_main, local_main, review_main
 from .state import (
     BAIL_CLASS_OTHER,
@@ -101,12 +101,30 @@ def _validate_local_args(args: argparse.Namespace) -> None:
     )
 
 
-def _validate_gh_args(rest: list[str]) -> None:
+def _validate_gh_args(args: argparse.Namespace, rest: list[str]) -> None:
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--model", default=None)
-    args, _ = p.parse_known_args(rest)
-    if args.model is not None and not MODEL_RE.match(args.model):
-        raise ValueError(f"invalid model: {args.model!r}")
+    p.add_argument("--resume-from", default=None)
+    try:
+        parsed, remainder = p.parse_known_args(rest)
+    except SystemExit as exc:
+        raise ValueError(f"invalid gh arguments (exit {exc.code})") from exc
+
+    positional = [t for t in remainder if not t.startswith("-")]
+    if (
+        args.plan is None
+        and args.instructions is None
+        and parsed.resume_from is None
+        and not positional
+    ):
+        raise ValueError("instructions, --plan, or --resume-from required")
+    if parsed.resume_from is not None and parsed.resume_from not in VALID_STAGES:
+        raise ValueError(
+            f"invalid --resume-from: {parsed.resume_from} "
+            f"(allowed: {' '.join(VALID_STAGES)})"
+        )
+    if parsed.model is not None and not MODEL_RE.match(parsed.model):
+        raise ValueError(f"invalid model: {parsed.model!r}")
 
 
 def _validate_boss_args(rest: list[str], plan: str | None) -> None:
@@ -157,7 +175,7 @@ def _self_background_main(kind: str, argv: list[str]) -> int:
         if kind == "localgremlin":
             _validate_local_args(args)
         elif kind == "ghgremlin":
-            _validate_gh_args(rest)
+            _validate_gh_args(args, rest)
         elif kind == "bossgremlin":
             _validate_boss_args(rest, args.plan)
         instructions = args.instructions or args.positional_instructions
