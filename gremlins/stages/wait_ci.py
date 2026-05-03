@@ -132,7 +132,7 @@ def run(ctx: StageContext, options: WaitCiOptions) -> None:
     _bail_if_review_required(review_decision)
 
     if not checks:
-        logger.info("ci-gate: no CI checks found, skipping")
+        logger.info("ci-gate: PR has no check-runs, skipping")
         return
 
     template = load_prompts([BUNDLED_PROMPT_DIR / "ci_fix.md"])
