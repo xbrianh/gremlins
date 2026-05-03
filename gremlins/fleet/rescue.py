@@ -16,7 +16,7 @@ from gremlins.fleet.constants import (
     HEADLESS_DIAGNOSIS_TIMEOUT_SECS,
     RESCUE_CAP,
 )
-from gremlins.fleet.resolve import GREMLIN_STAGES, resolve_gremlin
+from gremlins.fleet.resolve import GREMLIN_STAGES, resolve_gremlin, stage_names_for_gremlin
 from gremlins.fleet.state import liveness_of_state_file, load_state
 from gremlins.fleet.stop import do_stop
 from gremlins.launcher import resume as _resume
@@ -40,7 +40,7 @@ def build_rescue_prompt(
     workdir = state.get("workdir") or ""
     parent_id = state.get("parent_id") or ""
 
-    stages = GREMLIN_STAGES.get(kind, [])
+    stages = stage_names_for_gremlin(state)
 
     log_tail_safe = log_tail.replace("```", "` ` `")
 

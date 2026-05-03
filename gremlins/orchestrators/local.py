@@ -56,6 +56,7 @@ def _parse_local_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--test-max-attempts", dest="test_max_attempts", type=int, default=3
     )
+    parser.add_argument("--pipeline", dest="pipeline", default=None)
     parser.add_argument("instructions", nargs="*")
     args = parser.parse_args(argv)
     if args.resume_from:

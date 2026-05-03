@@ -7,7 +7,7 @@ name = "gremlins"
 version = "0.1.0"
 description = "Background plan/implement/review/address pipelines for Claude Code"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["pyyaml"]
 
 [project.optional-dependencies]
 dev = ["pytest", "ruff", "pyright"]
