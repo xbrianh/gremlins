@@ -7,7 +7,7 @@ review / address pipelines (`local`, `gh`, `boss`), the fleet manager
 
 ## Module layout
 
-- `cli.py` — `python -m gremlins.cli {local,review,address,gh,boss,fleet,handoff}` dispatch.
+- `cli.py` — `gremlin {local,review,address,gh,boss,fleet,handoff}` dispatch.
 - `runner.py` — `run_stages` sequencer (with `resume_from`) + SIGINT/SIGTERM handlers that reap `claude -p` children.
 - `state.py` — session-dir resolution, `set_stage` / `emit_bail` / `patch_state` / `check_bail`.
 - `git.py` — `in_git_repo`, `git_head`, branch / worktree helpers.
@@ -19,7 +19,7 @@ review / address pipelines (`local`, `gh`, `boss`), the fleet manager
 - `stages/` — per-stage bodies: `plan`, `implement`, `review_code`, `address_code`, `test`, `commit_pr`, `ghreview`, `ghaddress`, `wait_copilot`. (The `request-copilot` stage body is inlined as a closure in `orchestrators/gh.py`.)
 - `orchestrators/local.py` — `local_main`, `review_main`, `address_main`.
 - `orchestrators/gh.py` — `gh_main`. Drives the gh pipeline.
-- `orchestrators/boss.py` — `boss_main`. Subprocesses out to `python -m gremlins.cli handoff` and `python -m gremlins.cli fleet {stop,land,rescue}` between child gremlins.
+- `orchestrators/boss.py` — `boss_main`. Subprocesses out to `gremlin handoff` and `gremlin fleet {stop,land,rescue}` between child gremlins.
 - `prompts/` — externalized prompt templates (plan, implement, review lenses, etc).
 
 ## Entry points

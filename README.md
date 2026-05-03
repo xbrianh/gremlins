@@ -32,8 +32,7 @@ uv pip install -e ".[dev]"
 
 ## CLI subcommands
 
-Invoked as `python -m gremlins.cli <subcommand>` or `gremlins <subcommand>`
-after install. The authoritative list and per-subcommand description lives in
+Invoked as `gremlin <subcommand>` after install. The authoritative list and per-subcommand description lives in
 the module docstring at the top of [`gremlins/cli.py`](gremlins/cli.py).
 
 | Subcommand | Purpose |
