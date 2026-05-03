@@ -150,9 +150,12 @@ def test_review_required_after_fix_bails(tmp_path: pathlib.Path) -> None:
     client = FakeClaudeClient(fixtures={"ci-fix-1": MINIMAL_EVENTS})
     getter = _make_getter(
         [
-            ([_FAILING_CHECK], ""),                    # startup: failing, not review required
-            ([_FAILING_CHECK], ""),                    # poll attempt 1: still failing
-            ([_PASSING_CHECK], "REVIEW_REQUIRED"),     # poll attempt 2: fix pushed, approval dismissed
+            ([_FAILING_CHECK], ""),  # startup: failing, not review required
+            ([_FAILING_CHECK], ""),  # poll attempt 1: still failing
+            (
+                [_PASSING_CHECK],
+                "REVIEW_REQUIRED",
+            ),  # poll attempt 2: fix pushed, approval dismissed
         ]
     )
     with pytest.raises(RuntimeError, match="PR blocked by required human review"):
@@ -174,8 +177,11 @@ def test_review_required_while_pending_bails(tmp_path: pathlib.Path) -> None:
     client = FakeClaudeClient(fixtures={})
     getter = _make_getter(
         [
-            ([_PENDING_CHECK], ""),               # startup: pending
-            ([_PENDING_CHECK], "REVIEW_REQUIRED"),  # poll: still pending, approval dismissed
+            ([_PENDING_CHECK], ""),  # startup: pending
+            (
+                [_PENDING_CHECK],
+                "REVIEW_REQUIRED",
+            ),  # poll: still pending, approval dismissed
         ]
     )
     with pytest.raises(RuntimeError, match="PR blocked by required human review"):
