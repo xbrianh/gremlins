@@ -57,6 +57,10 @@ def die(msg: str) -> NoReturn:
     sys.exit(1)
 
 
+def _fmt_escape(s: str) -> str:
+    return s.replace("{", "{{").replace("}", "}}")
+
+
 def _parse_gh_args(argv: list[str]) -> argparse.Namespace:
     usage = (
         "usage: gremlins.cli gh [-r <ref>] [--resume-from <stage>] "
@@ -351,8 +355,8 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         set_stage("plan")
         logger.info("[1/8] running ghplan")
         plan_prompt = load_prompts([BUNDLED_PROMPT_DIR / "ghplan.md"]).format(
-            ref=args.ref or "",
-            instructions=instructions,
+            ref=_fmt_escape(args.ref or ""),
+            instructions=_fmt_escape(instructions),
         )
         completed = ctx.client.run(
             plan_prompt,

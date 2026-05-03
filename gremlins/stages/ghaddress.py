@@ -26,8 +26,8 @@ def run(ctx: StageContext, options: GhaddressOptions) -> None:
 
 If you cannot safely address one or more comments, write a bail marker before finishing — do not make speculative changes when bailing:
 
-- Comment touches **secrets** (credential management, API keys, encryption material): `gremlins bail secrets "<one-line reason>"`
-- Any other reason you decline to proceed (ambiguous ask, conflicting comments, etc.): `gremlins bail other "<one-line reason>"`
+- Comment touches **secrets** (credential management, API keys, encryption material): `python -m gremlins.cli bail secrets "<one-line reason>"`
+- Any other reason you decline to proceed (ambiguous ask, conflicting comments, etc.): `python -m gremlins.cli bail other "<one-line reason>"`
 
 Out-of-scope comments and `gh issue create` failures are not bail reasons — handle them per the instructions above. If you successfully addressed every actionable comment, do not write a bail marker — just exit normally.
 """

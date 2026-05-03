@@ -26,8 +26,8 @@ def run(ctx: StageContext, options: GhreviewOptions) -> None:
 
 After posting the review, classify your findings and — if any are blocker-severity — emit a bail marker:
 
-- **Security-related blocker** (auth gaps, injection, credential exposure, OWASP top 10): run `gremlins bail security "<one-line summary>"`
-- **Other blocker-severity findings** (correctness, design, or anything a human should weigh in on): run `gremlins bail reviewer_requested_changes "<one-line summary>"`
+- **Security-related blocker** (auth gaps, injection, credential exposure, OWASP top 10): run `python -m gremlins.cli bail security "<one-line summary>"`
+- **Other blocker-severity findings** (correctness, design, or anything a human should weigh in on): run `python -m gremlins.cli bail reviewer_requested_changes "<one-line summary>"`
 
 If the review has no blocker-severity findings, do not run the helper — exit normally. The bail marker is the signal the pipeline checks after this stage.
 """
