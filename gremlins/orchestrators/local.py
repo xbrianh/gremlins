@@ -1,17 +1,4 @@
-"""Orchestrator entry points for the local pipeline.
-
-Three callables map onto three CLI subcommands:
-
-- ``local_main`` — full plan → implement → review-code → address-code chain
-  (``python -m gremlins.cli local``); the gremlin pipeline.
-- ``review_main`` — review-code stage only (``python -m gremlins.cli review``).
-  Standalone replacement for the old ``localreview.py``.
-- ``address_main`` — address-code stage only (``python -m gremlins.cli
-  address``). Standalone replacement for the old ``localaddress.py``.
-
-Each builds a real ``SubprocessClaudeClient`` by default; tests inject a
-``FakeClaudeClient`` via the ``client`` argument.
-"""
+"""Orchestrator entry points for the local pipeline."""
 
 from __future__ import annotations
 
@@ -23,17 +10,15 @@ import re
 import shutil
 import subprocess
 import sys
+from typing import NoReturn
 
 from ..clients.claude import ClaudeClient, SubprocessClaudeClient
 from ..git import in_git_repo
 from ..logging_setup import configure_logging
 from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
 from ..runner import install_signal_handlers, run_stages
-from ..stages.address_code import run_address_code_stage
-from ..stages.implement import run_implement_stage
-from ..stages.plan import run_plan_stage
-from ..stages.review_code import run_review_code_stage
-from ..stages.test import run_test_stage
+from ..stages import address_code, implement, plan, review_code, test
+from ..stages.context import StageContext
 from ..state import patch_state, resolve_session_dir, set_stage
 
 logger = logging.getLogger(__name__)
@@ -42,22 +27,13 @@ MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 VALID_RESUME_STAGES = ["plan", "implement", "review-code", "address-code", "test"]
 
 
-def die(msg: str) -> None:
+def die(msg: str) -> NoReturn:
     sys.stderr.write(f"error: {msg}\n")
     sys.stderr.flush()
     sys.exit(1)
 
 
-# ---------------------------------------------------------------------------
-# Full local pipeline (plan → implement → review-code → address-code)
-# ---------------------------------------------------------------------------
-
-
 def _parse_local_args(argv: list[str]) -> argparse.Namespace:
-    # Short-only model flags to preserve the bash `getopts "p:i:x:a:b:c:"`
-    # contract — no `--plan-model` etc. leak in via argparse's default
-    # long-form expansion. Long-form flags: `--resume-from` (rescue relaunch step)
-    # and `--plan` (skip the plan stage, read plan from a file instead).
     usage = (
         "usage: gremlins.cli local [-p <plan-model>] [-i <impl-model>] "
         "[-x <address-model>] [-b <detail-review-model>] "
@@ -82,11 +58,6 @@ def _parse_local_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("instructions", nargs="*")
     args = parser.parse_args(argv)
-    # launch.sh resume may pass an empty-string positional when a --plan
-    # gremlin is resumed; treat that as "no positional supplied" rather than
-    # a literal empty-string instruction. Narrowed to the resume path so the
-    # fresh-launch mutex (`--plan foo.md ""`) still fires on a literal empty
-    # string passed alongside --plan.
     if args.resume_from:
         args.instructions = [s for s in args.instructions if s]
     if args.plan_path:
@@ -131,13 +102,6 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
 
     logger.info("session: %s", session_dir)
 
-    # --plan staging happens up front (before the --resume-from precondition
-    # checks below) so `--plan <path> --resume-from implement` works: the
-    # `implement` precondition requires plan.md to exist, and if we staged
-    # --plan afterwards the precondition would fire first on fresh + resume
-    # combos. On resume we skip re-copying — session_dir/plan.md is the
-    # durable snapshot per the spec's rescue-determinism rule — and only
-    # require the source file on a fresh launch (no snapshot yet).
     plan_copied_from_source = False
     if args.plan_path and not plan_file.exists():
         src = pathlib.Path(args.plan_path)
@@ -148,11 +112,6 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         shutil.copyfile(src, plan_file)
         plan_copied_from_source = True
 
-    # --spec staging: snapshot into session_dir/spec.md on first launch.
-    # On resume, reuse the existing snapshot (same rescue-determinism rule as --plan).
-    # launcher.py normalizes spec_path before spawning the subprocess, so the
-    # is_file / size checks below are only reachable on a direct (non-launcher)
-    # invocation of the orchestrator — they guard that path.
     spec_file = session_dir / "spec.md"
     if args.spec_path and not spec_file.exists():
         spec_src = pathlib.Path(args.spec_path)
@@ -219,8 +178,12 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
                     f"--resume-from {args.resume_from} requires existing {review_code_file}"
                 )
 
-    # Stage callables. plan_text is read just-in-time so a mid-stage failure
-    # plus resume picks up whatever the plan stage produced.
+    ctx = StageContext(
+        client=client,
+        session_dir=session_dir,
+        gr_id=os.environ.get("GR_ID"),
+    )
+
     plan_text_holder: dict[str, str] = {}
 
     def stage_plan() -> None:
@@ -232,18 +195,17 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         else:
             set_stage("plan")
             logger.info("[1/5] planning (model: %s) -> %s", args.plan_model, plan_file)
-            run_plan_stage(
-                client=client,
-                plan_model=args.plan_model,
-                plan_file=plan_file,
-                instructions=instructions,
-                raw_path=session_dir / "stream-plan.jsonl",
-                code_style=code_style,
+            plan.run(
+                ctx,
+                plan.PlanOptions(
+                    plan_model=args.plan_model,
+                    plan_file=plan_file,
+                    instructions=instructions,
+                    code_style=code_style,
+                ),
             )
 
     def stage_implement() -> None:
-        # Plan text must exist by now. Read fresh so a resume reads the
-        # snapshot from disk rather than relying on in-memory state.
         plan_text = plan_file.read_text(encoding="utf-8")
         plan_text_holder["text"] = plan_text
         spec_text = ""
@@ -257,15 +219,15 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
                 )
         set_stage("implement")
         logger.info("[2/5] implementing (model: %s, from %s)", args.impl, plan_file)
-        run_implement_stage(
-            client=client,
-            impl_model=args.impl,
-            plan_file=plan_file,
-            plan_text=plan_text,
-            code_style=code_style,
-            session_dir=session_dir,
-            is_git=is_git,
-            spec_text=spec_text,
+        implement.run(
+            ctx,
+            implement.ImplementOptions(
+                impl_model=args.impl,
+                plan_text=plan_text,
+                code_style=code_style,
+                is_git=is_git,
+                spec_text=spec_text,
+            ),
         )
 
     def stage_review_code() -> None:
@@ -274,25 +236,27 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         )
         set_stage("review-code")
         logger.info("[3/5] reviewing code (model: %s)", args.detail)
-        review_file = run_review_code_stage(
-            client=client,
-            session_dir=session_dir,
-            plan_text=plan_text,
-            detail=args.detail,
-            is_git=is_git,
-            code_style=code_style,
+        review_file = review_code.run(
+            ctx,
+            review_code.ReviewCodeOptions(
+                plan_text=plan_text,
+                detail=args.detail,
+                is_git=is_git,
+                code_style=code_style,
+            ),
         )
         logger.info("detail code review (%s): %s", args.detail, review_file)
 
     def stage_address_code() -> None:
         set_stage("address-code")
         logger.info("[4/5] addressing code reviews (model: %s)", args.address)
-        run_address_code_stage(
-            client=client,
-            session_dir=session_dir,
-            address_model=args.address,
-            is_git=is_git,
-            code_style=code_style,
+        address_code.run(
+            ctx,
+            address_code.AddressCodeOptions(
+                address_model=args.address,
+                is_git=is_git,
+                code_style=code_style,
+            ),
         )
 
     def stage_test() -> None:
@@ -304,16 +268,16 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
                 args.test_max_attempts,
                 args.test_fix_model,
             )
-        cwd = pathlib.Path.cwd()
-        run_test_stage(
-            client=client,
-            session_dir=session_dir,
-            test_cmd=args.test_cmd,
-            max_attempts=args.test_max_attempts,
-            test_fix_model=args.test_fix_model,
-            is_git=is_git,
-            cwd=cwd,
-            code_style=code_style,
+        test.run(
+            ctx,
+            test.TestOptions(
+                test_cmd=args.test_cmd,
+                max_attempts=args.test_max_attempts,
+                test_fix_model=args.test_fix_model,
+                is_git=is_git,
+                cwd=pathlib.Path.cwd(),
+                code_style=code_style,
+            ),
         )
 
     stages = [
@@ -333,11 +297,6 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     if total_cost is not None and total_cost > 0:
         logger.info("total cost: $%.4f", total_cost)
     return 0
-
-
-# ---------------------------------------------------------------------------
-# Standalone review-code (was localreview.py)
-# ---------------------------------------------------------------------------
 
 
 def _parse_review_args(argv: list[str]) -> argparse.Namespace:
@@ -390,9 +349,6 @@ def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     except (FileNotFoundError, ValueError) as exc:
         die(f"error loading prompt: {exc}")
     if is_git:
-        # Refuse to spawn three reviewers on an empty diff. HEAD~1 may not
-        # exist (initial commit); in that case we require dirty tree to have
-        # something worth reviewing.
         head1_exists = (
             subprocess.run(
                 ["git", "rev-parse", "--verify", "HEAD~1"],
@@ -428,22 +384,21 @@ def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
                 "nothing to review: HEAD~1..HEAD has no changes and working tree is clean"
             )
 
+    ctx = StageContext(
+        client=client, session_dir=session_dir, gr_id=os.environ.get("GR_ID")
+    )
     logger.info("reviewing code (model: %s)", args.detail)
-    review_file = run_review_code_stage(
-        client=client,
-        session_dir=session_dir,
-        plan_text=plan_text,
-        detail=args.detail,
-        is_git=is_git,
-        code_style=code_style,
+    review_file = review_code.run(
+        ctx,
+        review_code.ReviewCodeOptions(
+            plan_text=plan_text,
+            detail=args.detail,
+            is_git=is_git,
+            code_style=code_style,
+        ),
     )
     logger.info("detail code review (%s): %s", args.detail, review_file)
     return 0
-
-
-# ---------------------------------------------------------------------------
-# Standalone address-code (was localaddress.py)
-# ---------------------------------------------------------------------------
 
 
 def _parse_address_args(argv: list[str]) -> argparse.Namespace:
@@ -477,12 +432,16 @@ def address_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     except (FileNotFoundError, ValueError) as exc:
         die(f"error loading prompt: {exc}")
 
+    ctx = StageContext(
+        client=client, session_dir=session_dir, gr_id=os.environ.get("GR_ID")
+    )
     logger.info("addressing code reviews (model: %s)", args.address)
-    run_address_code_stage(
-        client=client,
-        session_dir=session_dir,
-        address_model=args.address,
-        is_git=is_git,
-        code_style=code_style,
+    address_code.run(
+        ctx,
+        address_code.AddressCodeOptions(
+            address_model=args.address,
+            is_git=is_git,
+            code_style=code_style,
+        ),
     )
     return 0

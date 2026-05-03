@@ -1,31 +1,34 @@
-"""Local plan stage.
-
-Renders ``gremlins/prompts/plan.md`` with the user's instructions and the
-target plan-file path, runs ``claude -p``, and verifies the plan file was
-produced.
-"""
+"""Local plan stage."""
 
 from __future__ import annotations
 
+import dataclasses
 import pathlib
 
-from ..clients.claude import ClaudeClient
 from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
+from .context import StageContext
 
 
-def run_plan_stage(
-    *,
-    client: ClaudeClient,
-    plan_model: str,
-    plan_file: pathlib.Path,
-    instructions: str,
-    raw_path: pathlib.Path,
-    code_style: str,
-) -> None:
+@dataclasses.dataclass
+class PlanOptions:
+    plan_model: str
+    plan_file: pathlib.Path
+    instructions: str
+    code_style: str
+
+
+def run(ctx: StageContext, options: PlanOptions) -> None:
     template = load_prompts([BUNDLED_PROMPT_DIR / "plan.md"])
     prompt = template.format(
-        plan_file=plan_file, instructions=instructions, code_style=code_style
+        plan_file=options.plan_file,
+        instructions=options.instructions,
+        code_style=options.code_style,
     )
-    client.run(prompt, label="plan", model=plan_model, raw_path=raw_path)
-    if not plan_file.exists() or plan_file.stat().st_size == 0:
-        raise RuntimeError(f"plan stage did not produce {plan_file}")
+    ctx.client.run(
+        prompt,
+        label="plan",
+        model=options.plan_model,
+        raw_path=ctx.session_dir / "stream-plan.jsonl",
+    )
+    if not options.plan_file.exists() or options.plan_file.stat().st_size == 0:
+        raise RuntimeError(f"plan stage did not produce {options.plan_file}")

@@ -2,81 +2,73 @@
 
 import json
 import logging
+from typing import Any
 
 import pytest
 from conftest import MINIMAL_EVENTS
 
 import gremlins.orchestrators.boss as boss_mod
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.stages.test import run_test_stage
+from gremlins.stages.context import StageContext
+from gremlins.stages.test import TestOptions
+from gremlins.stages.test import run as run_test
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+
+def _make_ctx(client: Any, tmp_path: Any) -> StageContext:
+    return StageContext(client=client, session_dir=tmp_path, gr_id=None)
 
 
 def _run(
-    tmp_path,
+    tmp_path: Any,
     *,
-    test_cmd,
-    max_attempts=3,
-    client=None,
-    is_git=False,
-    code_style="Be good.",
-    test_fix_model="sonnet",
-):
+    test_cmd: Any,
+    max_attempts: int = 3,
+    client: Any = None,
+    is_git: bool = False,
+    code_style: str = "Be good.",
+    test_fix_model: str = "sonnet",
+) -> Any:
     if client is None:
         client = FakeClaudeClient(fixtures={})
-    run_test_stage(
-        client=client,
-        session_dir=tmp_path,
-        test_cmd=test_cmd,
-        max_attempts=max_attempts,
-        test_fix_model=test_fix_model,
-        is_git=is_git,
-        cwd=tmp_path,
-        code_style=code_style,
+    ctx = _make_ctx(client, tmp_path)
+    run_test(
+        ctx,
+        TestOptions(
+            test_cmd=test_cmd,
+            max_attempts=max_attempts,
+            test_fix_model=test_fix_model,
+            is_git=is_git,
+            cwd=tmp_path,
+            code_style=code_style,
+        ),
     )
     return client
 
 
-# ---------------------------------------------------------------------------
-# No-op when test_cmd is None
-# ---------------------------------------------------------------------------
-
-
 def test_noop_when_no_test_cmd(tmp_path, caplog):
     client = FakeClaudeClient(fixtures={})
+    ctx = _make_ctx(client, tmp_path)
     with caplog.at_level(logging.INFO):
-        run_test_stage(
-            client=client,
-            session_dir=tmp_path,
-            test_cmd=None,
-            max_attempts=3,
-            test_fix_model="sonnet",
-            is_git=False,
-            cwd=tmp_path,
-            code_style="Be good.",
+        run_test(
+            ctx,
+            TestOptions(
+                test_cmd=None,
+                max_attempts=3,
+                test_fix_model="sonnet",
+                is_git=False,
+                cwd=tmp_path,
+                code_style="Be good.",
+            ),
         )
     assert len(client.calls) == 0
     assert "skipped" in caplog.text
     assert "no --test" in caplog.text
 
 
-# ---------------------------------------------------------------------------
-# Green on first try
-# ---------------------------------------------------------------------------
-
-
 def test_green_on_first_try(tmp_path):
     client = _run(tmp_path, test_cmd="true")
     assert len(client.calls) == 0
     assert (tmp_path / "test-attempt-1.log").exists()
-
-
-# ---------------------------------------------------------------------------
-# Fix then green
-# ---------------------------------------------------------------------------
 
 
 def test_fix_then_green(tmp_path):
@@ -90,15 +82,17 @@ def test_fix_then_green(tmp_path):
             return super().run(prompt, label=label, **kwargs)
 
     client = _FixingClient(fixtures={"test-fix-1": MINIMAL_EVENTS})
-    run_test_stage(
-        client=client,
-        session_dir=tmp_path,
-        test_cmd=test_cmd,
-        max_attempts=3,
-        test_fix_model="haiku",
-        is_git=False,
-        cwd=tmp_path,
-        code_style="Be good.",
+    ctx = _make_ctx(client, tmp_path)
+    run_test(
+        ctx,
+        TestOptions(
+            test_cmd=test_cmd,
+            max_attempts=3,
+            test_fix_model="haiku",
+            is_git=False,
+            cwd=tmp_path,
+            code_style="Be good.",
+        ),
     )
 
     assert len(client.calls) == 1
@@ -107,11 +101,6 @@ def test_fix_then_green(tmp_path):
     assert (tmp_path / "test-attempt-1.log").exists()
     assert (tmp_path / "test-attempt-2.log").exists()
     assert (tmp_path / "stream-test-1.jsonl").exists()
-
-
-# ---------------------------------------------------------------------------
-# Attempts exhausted → RuntimeError + bail
-# ---------------------------------------------------------------------------
 
 
 def test_attempts_exhausted_bails(tmp_path, monkeypatch):
@@ -123,20 +112,21 @@ def test_attempts_exhausted_bails(tmp_path, monkeypatch):
             "test-fix-2": MINIMAL_EVENTS,
         }
     )
+    ctx = _make_ctx(client, tmp_path)
 
     with pytest.raises(RuntimeError, match="exhausted 3 attempts"):
-        run_test_stage(
-            client=client,
-            session_dir=tmp_path,
-            test_cmd="false",
-            max_attempts=3,
-            test_fix_model="sonnet",
-            is_git=False,
-            cwd=tmp_path,
-            code_style="Be good.",
+        run_test(
+            ctx,
+            TestOptions(
+                test_cmd="false",
+                max_attempts=3,
+                test_fix_model="sonnet",
+                is_git=False,
+                cwd=tmp_path,
+                code_style="Be good.",
+            ),
         )
 
-    # 3 attempts: fix after 1, fix after 2, bail after 3 (no fix on last attempt)
     assert len(client.calls) == 2
     assert (tmp_path / "test-attempt-1.log").exists()
     assert (tmp_path / "test-attempt-2.log").exists()
@@ -145,26 +135,23 @@ def test_attempts_exhausted_bails(tmp_path, monkeypatch):
 
 def test_attempts_exhausted_with_max_1(tmp_path):
     client = FakeClaudeClient(fixtures={})
+    ctx = _make_ctx(client, tmp_path)
 
     with pytest.raises(RuntimeError, match="exhausted 1 attempts"):
-        run_test_stage(
-            client=client,
-            session_dir=tmp_path,
-            test_cmd="false",
-            max_attempts=1,
-            test_fix_model="sonnet",
-            is_git=False,
-            cwd=tmp_path,
-            code_style="Be good.",
+        run_test(
+            ctx,
+            TestOptions(
+                test_cmd="false",
+                max_attempts=1,
+                test_fix_model="sonnet",
+                is_git=False,
+                cwd=tmp_path,
+                code_style="Be good.",
+            ),
         )
 
-    assert len(client.calls) == 0  # no fix on last (only) attempt
+    assert len(client.calls) == 0
     assert (tmp_path / "test-attempt-1.log").exists()
-
-
-# ---------------------------------------------------------------------------
-# code_style appears verbatim in fix prompt
-# ---------------------------------------------------------------------------
 
 
 def test_code_style_in_fix_prompt(tmp_path):
@@ -178,49 +165,42 @@ def test_code_style_in_fix_prompt(tmp_path):
             return super().run(prompt, label=label, **kwargs)
 
     client = _FixingClient(fixtures={"test-fix-1": MINIMAL_EVENTS})
-    run_test_stage(
-        client=client,
-        session_dir=tmp_path,
-        test_cmd=test_cmd,
-        max_attempts=3,
-        test_fix_model="sonnet",
-        is_git=False,
-        cwd=tmp_path,
-        code_style="My custom style rules.",
+    ctx = _make_ctx(client, tmp_path)
+    run_test(
+        ctx,
+        TestOptions(
+            test_cmd=test_cmd,
+            max_attempts=3,
+            test_fix_model="sonnet",
+            is_git=False,
+            cwd=tmp_path,
+            code_style="My custom style rules.",
+        ),
     )
 
     assert len(client.calls) == 1
     assert "My custom style rules." in client.calls[0].prompt
 
 
-# ---------------------------------------------------------------------------
-# Log file content
-# ---------------------------------------------------------------------------
-
-
 def test_log_file_captures_output(tmp_path):
     client = FakeClaudeClient(fixtures={})
+    ctx = _make_ctx(client, tmp_path)
 
-    # "true" produces no output; check that log is created and can be empty
-    run_test_stage(
-        client=client,
-        session_dir=tmp_path,
-        test_cmd="echo hello",
-        max_attempts=3,
-        test_fix_model="sonnet",
-        is_git=False,
-        cwd=tmp_path,
-        code_style="",
+    run_test(
+        ctx,
+        TestOptions(
+            test_cmd="echo hello",
+            max_attempts=3,
+            test_fix_model="sonnet",
+            is_git=False,
+            cwd=tmp_path,
+            code_style="",
+        ),
     )
 
     log = tmp_path / "test-attempt-1.log"
     assert log.exists()
     assert "hello" in log.read_text()
-
-
-# ---------------------------------------------------------------------------
-# boss: launch_child forwards --test flags via pipeline_args
-# ---------------------------------------------------------------------------
 
 
 def test_launch_child_forwards_test_flags(tmp_path, monkeypatch):
@@ -286,7 +266,6 @@ def test_launch_child_forwards_test_flags(tmp_path, monkeypatch):
 
 
 def test_launch_child_no_test_flags_when_absent(tmp_path, monkeypatch):
-    """When boss_state has no test_cmd, launch_child omits test flags."""
     gr_id = "test-boss-notest-cc3344"
     state_dir = tmp_path / gr_id
     state_dir.mkdir()

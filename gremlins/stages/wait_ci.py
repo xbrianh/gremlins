@@ -1,29 +1,36 @@
-"""CI gate stage for the gh pipeline.
-
-Polls the PR's CI checks after the review/address stages. On failure, invokes
-claude to fix the code and retries. Bounded by max_attempts (default 3) and a
-per-attempt poll_timeout (default 20 minutes).
-"""
+"""CI gate stage for the gh pipeline."""
 
 from __future__ import annotations
 
+import dataclasses
 import logging
-import os
-import pathlib
 import time
 from collections.abc import Callable
 from typing import Any
 
-from ..clients.claude import ClaudeClient
 from ..gh_utils import fetch_check_run_logs, get_pr_ci_status
 from ..git import git_head
 from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
 from ..state import check_bail, emit_bail
+from .context import StageContext
 
 logger = logging.getLogger(__name__)
 
 _FAILING_CONCLUSIONS = frozenset({"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED"})
 _PENDING_STATES = frozenset({"EXPECTED", "PENDING"})
+
+
+@dataclasses.dataclass
+class WaitCiOptions:
+    model: str | None
+    pr_url: str
+    code_style: str
+    max_attempts: int = 3
+    poll_timeout: int = 1200
+    poll_interval: int = 30
+    checks_getter: Callable[[], tuple[list[dict[str, Any]], str]] | None = None
+    head_sha_getter: Callable[[], str] | None = None
+    fix_sha_getter: Callable[[], str] | None = None
 
 
 class _ReviewRequiredError(RuntimeError):
@@ -56,18 +63,7 @@ def _poll_until_done(
     required_sha: str = "",
     head_sha_getter: Callable[[], str] | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
-    """Poll PR checks until all are complete or timeout. Returns (checks, review_decision).
-
-    When ``required_sha`` is set (non-empty), the poll will not accept a
-    "done" result until the PR's ``headRefOid`` matches ``required_sha``.
-    This prevents treating stale check results from the previous commit as
-    a passing signal in the window between a ci-fix push and GitHub queueing
-    new CI for the new HEAD SHA.
-
-    ``head_sha_getter`` is injectable for tests: a zero-argument callable that
-    returns the PR's current headRefOid. Defaults to the value from
-    ``get_pr_ci_status`` on the real code path.
-    """
+    """Poll PR checks until all are complete or timeout."""
     deadline = time.time() + timeout
     review_decision = ""
     while True:
@@ -84,9 +80,6 @@ def _poll_until_done(
 
         _bail_if_review_required(review_decision)
 
-        # If we pushed a fix, don't accept "done" until GitHub's PR headRefOid
-        # reflects the new commit — stale rollup results from the previous SHA
-        # would otherwise pass the checks-complete test before new CI even starts.
         if required_sha and head_sha and head_sha != required_sha:
             if time.time() >= deadline:
                 raise RuntimeError(
@@ -111,7 +104,6 @@ def _poll_until_done(
 
 
 def _collect_failure_output(failed: list[dict[str, Any]]) -> str:
-    """Concatenate log output from failing checks."""
     parts: list[str] = []
     for check in failed:
         name = check.get("name") or check.get("context") or "unknown"
@@ -128,42 +120,12 @@ def _escape_fmt(s: str) -> str:
     return s.replace("{", "{{").replace("}", "}}")
 
 
-def run_wait_ci_stage(
-    *,
-    client: ClaudeClient,
-    model: str | None,
-    pr_url: str,
-    artifacts_dir: pathlib.Path,
-    code_style: str,
-    max_attempts: int = 3,
-    poll_timeout: int = 1200,
-    poll_interval: int = 30,
-    checks_getter: Callable[[], tuple[list[dict[str, Any]], str]] | None = None,
-    head_sha_getter: Callable[[], str] | None = None,
-    fix_sha_getter: Callable[[], str] | None = None,
-) -> None:
-    """Wait for CI checks to pass, fixing failures up to max_attempts times.
-
-    ``checks_getter`` is injectable for tests: a zero-argument callable that
-    returns ``(checks_list, review_decision_string)``. Defaults to a real
-    ``gh pr view`` call.
-
-    ``head_sha_getter`` is injectable for tests: a zero-argument callable that
-    returns the PR's current headRefOid. Used to verify GitHub has propagated a
-    ci-fix push before accepting check results.
-
-    ``fix_sha_getter`` is injectable for tests: a zero-argument callable that
-    returns the local HEAD SHA after a ci-fix is committed and pushed. Defaults
-    to ``git_head``.
-
-    Skips entirely when the PR has no checks configured. Bails when the PR is
-    blocked by a required human review. Bails after max_attempts exhausted
-    without a green run.
-    """
-    if checks_getter is not None:
-        checks, review_decision = checks_getter()
+def run(ctx: StageContext, options: WaitCiOptions) -> None:
+    """Wait for CI checks to pass, fixing failures up to max_attempts times."""
+    if options.checks_getter is not None:
+        checks, review_decision = options.checks_getter()
     else:
-        status = get_pr_ci_status(pr_url)
+        status = get_pr_ci_status(options.pr_url)
         checks = status["checks"]
         review_decision = status["review_decision"]
 
@@ -175,7 +137,7 @@ def run_wait_ci_stage(
 
     template = load_prompts([BUNDLED_PROMPT_DIR / "ci_fix.md"])
     bail_section = ""
-    if os.environ.get("GR_ID"):
+    if ctx.gr_id:
         bail_section = (
             "\n\nIf you cannot fix the failure, run:\n"
             '  `python -m gremlins.cli bail other "<one-line reason>"`\n'
@@ -185,25 +147,23 @@ def run_wait_ci_stage(
     _exhausted = False
     _agent_bailed = False
     _review_bailed = False
-    # After a ci-fix push, track the expected new HEAD SHA so _poll_until_done
-    # can reject stale check results from the previous commit.
     fix_sha = ""
     try:
-        for attempt in range(1, max_attempts + 1):
+        for attempt in range(1, options.max_attempts + 1):
             logger.info(
                 "ci-gate: attempt %d/%d — polling (timeout %ds)",
                 attempt,
-                max_attempts,
-                poll_timeout,
+                options.max_attempts,
+                options.poll_timeout,
             )
             try:
                 final_checks, review_decision = _poll_until_done(
-                    pr_url,
-                    poll_timeout,
-                    poll_interval,
-                    checks_getter,
+                    options.pr_url,
+                    options.poll_timeout,
+                    options.poll_interval,
+                    options.checks_getter,
                     required_sha=fix_sha,
-                    head_sha_getter=head_sha_getter,
+                    head_sha_getter=options.head_sha_getter,
                 )
             except _ReviewRequiredError:
                 _review_bailed = True
@@ -218,36 +178,38 @@ def run_wait_ci_stage(
                 "ci-gate: %d check(s) failed on attempt %d", len(failed), attempt
             )
 
-            if attempt == max_attempts:
+            if attempt == options.max_attempts:
                 break
 
             failure_output = _collect_failure_output(failed)
-            log_file = artifacts_dir / f"ci-attempt-{attempt}.log"
+            log_file = ctx.session_dir / f"ci-attempt-{attempt}.log"
             log_file.write_text(failure_output, encoding="utf-8")
 
             fix_prompt = template.format(
-                code_style=_escape_fmt(code_style),
+                code_style=_escape_fmt(options.code_style),
                 failure_output=failure_output,
                 bail_section=bail_section,
             )
-            client.run(
+            ctx.client.run(
                 fix_prompt,
                 label=f"ci-fix-{attempt}",
-                model=model,
-                raw_path=artifacts_dir / f"stream-ci-fix-{attempt}.jsonl",
+                model=options.model,
+                raw_path=ctx.session_dir / f"stream-ci-fix-{attempt}.jsonl",
             )
             _agent_bailed = True
             check_bail(f"ci-fix-{attempt}")
             _agent_bailed = False
 
-            # Capture the new HEAD SHA so the next poll can verify GitHub has
-            # propagated the push before accepting check results.
-            _get_sha = fix_sha_getter if fix_sha_getter is not None else git_head
+            _get_sha = (
+                options.fix_sha_getter
+                if options.fix_sha_getter is not None
+                else git_head
+            )
             fix_sha = _get_sha()
 
         _exhausted = True
-        emit_bail("other", f"CI failed after {max_attempts} attempts")
-        raise RuntimeError(f"ci-gate exhausted {max_attempts} attempts")
+        emit_bail("other", f"CI failed after {options.max_attempts} attempts")
+        raise RuntimeError(f"ci-gate exhausted {options.max_attempts} attempts")
     except (SystemExit, Exception) as exc:
         if not _exhausted and not _agent_bailed and not _review_bailed:
             emit_bail("other", f"ci-gate failed: {exc}"[:200])
