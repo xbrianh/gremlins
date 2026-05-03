@@ -349,8 +349,11 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         if args.plan_source:
             return
         set_stage("plan")
-        logger.info("[1/8] running /ghplan")
-        plan_prompt = f"/ghplan {args.ref + ' ' if args.ref else ''}{instructions}"
+        logger.info("[1/8] running ghplan")
+        plan_prompt = load_prompts([BUNDLED_PROMPT_DIR / "ghplan.md"]).format(
+            ref=args.ref or "",
+            instructions=instructions,
+        )
         completed = ctx.client.run(
             plan_prompt,
             label="plan",

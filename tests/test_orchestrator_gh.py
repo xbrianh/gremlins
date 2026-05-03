@@ -514,6 +514,56 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
     assert "commit-pr" in labels
 
 
+def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch):
+    """Plan stage builds a real prompt from the bundled ghplan.md, not /ghplan."""
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+
+    # Restore the real load_prompts (patch_common replaces it with a stub).
+    from gremlins.prompts import load_prompts as _real_load_prompts
+
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.load_prompts",
+        _real_load_prompts,
+    )
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
+    )
+    monkeypatch.setattr("gremlins.stages.ghreview.run", lambda ctx, options: None)
+    monkeypatch.setattr(
+        "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.request_copilot.run",
+        lambda ctx, options: None,
+    )
+    monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.verify.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
+
+    client = _CommittingClient(
+        git_dir=tmp_path,
+        fixtures={
+            "plan": _issue_events(),
+            "implement": IMPL_EVENTS,
+            "commit-pr": _pr_events(),
+        },
+    )
+
+    result = gh_main(["add foo feature"], client=client)
+    assert result == 0
+
+    plan_call = next(c for c in client.calls if c.label == "plan")
+    assert "add foo feature" in plan_call.prompt
+    assert not plan_call.prompt.startswith("/ghplan")
+    assert "/ghplan" not in plan_call.prompt
+
+
 def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
     """--model is forwarded to every client.run call."""
     _init_git_repo(tmp_path)
