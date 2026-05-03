@@ -1081,3 +1081,167 @@ def test_resume_from_commit_pr_skips_implement(tmp_path, monkeypatch):
 
     # No resume_session: commit-pr must open a fresh session.
     assert commit_pr_call.resume_session is None
+
+
+# ---------------------------------------------------------------------------
+# ci-gate stage: argument wiring, ordering, and resume behavior
+# ---------------------------------------------------------------------------
+
+
+def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
+    """run_wait_ci_stage receives pr_url, model, code_style, and artifacts_dir."""
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_ghreview_stage", lambda **kw: None
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_wait_copilot_stage", lambda **kw: "APPROVED"
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_request_copilot_stage", lambda **kw: None
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_ghaddress_stage", lambda **kw: None
+    )
+
+    captured_ci = {}
+
+    def record_wait_ci(**kw):
+        captured_ci.update(kw)
+
+    monkeypatch.setattr("gremlins.orchestrators.gh.run_wait_ci_stage", record_wait_ci)
+
+    client = _CommittingClient(
+        git_dir=tmp_path,
+        fixtures={
+            "implement": IMPL_EVENTS,
+            "commit-pr": _pr_events("https://github.com/owner/repo/pull/77"),
+        },
+    )
+
+    result = gh_main(["--plan", "42", "--model", "claude-opus-4-7"], client=client)
+    assert result == 0
+
+    assert captured_ci["pr_url"] == "https://github.com/owner/repo/pull/77"
+    assert captured_ci["model"] == "claude-opus-4-7"
+    assert captured_ci["code_style"] == "Be good."
+    assert captured_ci["artifacts_dir"] == session_dir
+
+
+def test_wait_ci_stage_ordering(tmp_path, monkeypatch):
+    """ci-gate runs after ghaddress and exactly once."""
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
+    )
+
+    order: list[str] = []
+
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_ghreview_stage",
+        lambda **kw: order.append("ghreview"),
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_wait_copilot_stage",
+        lambda **kw: order.append("wait-copilot") or "APPROVED",
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_request_copilot_stage",
+        lambda **kw: order.append("request-copilot"),
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_ghaddress_stage",
+        lambda **kw: order.append("ghaddress"),
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_wait_ci_stage",
+        lambda **kw: order.append("ci-gate"),
+    )
+
+    client = _CommittingClient(
+        git_dir=tmp_path,
+        fixtures={
+            "implement": IMPL_EVENTS,
+            "commit-pr": _pr_events(),
+        },
+    )
+
+    result = gh_main(["--plan", "42"], client=client)
+    assert result == 0
+
+    assert order[-2:] == ["ghaddress", "ci-gate"]
+    assert order.count("ci-gate") == 1
+
+
+def test_resume_from_ci_gate(tmp_path, monkeypatch):
+    """--resume-from ci-gate skips all earlier stages and calls only run_wait_ci_stage."""
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+
+    def _fake_read(sf, field):
+        if field == "issue_url":
+            return "https://github.com/owner/repo/issues/5"
+        if field == "issue_num":
+            return "5"
+        if field == "pr_url":
+            return "https://github.com/owner/repo/pull/200"
+        if field == "model":
+            return ""
+        return ""
+
+    monkeypatch.setattr(_gh_mod, "_read_state_field", _fake_read)
+    monkeypatch.setattr(
+        _gh_mod, "_fetch_issue_body", lambda num, repo: "# Plan\nContent.\n"
+    )
+
+    earlier_called: list[str] = []
+    ci_calls: list[dict] = []
+
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_ghreview_stage",
+        lambda **kw: earlier_called.append("ghreview"),
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_wait_copilot_stage",
+        lambda **kw: earlier_called.append("wait-copilot") or "APPROVED",
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_request_copilot_stage",
+        lambda **kw: earlier_called.append("request-copilot"),
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_ghaddress_stage",
+        lambda **kw: earlier_called.append("ghaddress"),
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_wait_ci_stage",
+        lambda **kw: ci_calls.append(kw),
+    )
+    monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
+
+    client = FakeClaudeClient(fixtures={})
+
+    result = gh_main(["--plan", "5", "--resume-from", "ci-gate"], client=client)
+    assert result == 0
+
+    assert client.calls == [], "no client stages should run on ci-gate resume"
+    assert earlier_called == [], "earlier stages must be skipped"
+    assert len(ci_calls) == 1
+    assert ci_calls[0]["pr_url"] == "https://github.com/owner/repo/pull/200"
