@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -13,8 +14,8 @@ from gremlins.stages.verify import VerifyOptions
 from gremlins.stages.verify import run as run_verify
 
 
-def _make_ctx(client: Any, tmp_path: Any) -> StageContext:
-    return StageContext(client=client, session_dir=tmp_path, gr_id=None)
+def _make_ctx(client: Any, tmp_path: Any, *, gr_id: Any = None) -> StageContext:
+    return StageContext(client=client, session_dir=tmp_path, gr_id=gr_id)
 
 
 def _run(
@@ -239,3 +240,26 @@ def test_no_pr_opened_on_exhaustion(tmp_path, monkeypatch):
 
     # All fix attempts were consumed but still exhausted — no silent pass-through
     assert len(client.calls) == 2
+
+
+def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
+    gr_id = "test-gr-id"
+    state_dir = make_state_dir(gr_id)
+    client = FakeClaudeClient(
+        fixtures={"verify-fix-1": MINIMAL_EVENTS, "verify-fix-2": MINIMAL_EVENTS}
+    )
+    ctx = _make_ctx(client, tmp_path, gr_id=gr_id)
+    with pytest.raises(RuntimeError, match="exhausted"):
+        run_verify(
+            ctx,
+            VerifyOptions(
+                fix_model="sonnet",
+                cwd=tmp_path,
+                code_style="",
+                check_cmd="false",
+                test_cmd="true",
+                max_attempts=3,
+            ),
+        )
+    data = json.loads((state_dir / "state.json").read_text())
+    assert data.get("bail_class") == "other"

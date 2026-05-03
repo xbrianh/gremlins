@@ -1,3 +1,5 @@
+import json
+
 from conftest import (
     MINIMAL_EVENTS,
 )
@@ -96,3 +98,41 @@ def test_address_main_calls_client(tmp_path, monkeypatch):
     assert len(client.calls) == 1
     assert client.calls[0].label == "address-code"
     assert client.calls[0].model == "sonnet"
+
+
+def test_local_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir):
+    gr_id = "test-gr-id"
+    state_dir = make_state_dir(gr_id)
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("# Plan\nDo stuff.\n")
+
+    monkeypatch.chdir(tmp_path)
+    _common_patches(monkeypatch)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.local.resolve_session_dir",
+        lambda gr_id=None: session_dir,
+    )
+    monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.local.load_prompts", lambda paths: "Be good."
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.implement.changes_outside_git", lambda s, d: True
+    )
+
+    client = _ReviewCreatingClient(
+        fixtures={
+            "implement": MINIMAL_EVENTS,
+            **{lbl: MINIMAL_EVENTS for lbl in _REVIEW_LABELS},
+            "address-code": MINIMAL_EVENTS,
+        }
+    )
+
+    result = local_main(["--plan", str(plan_file)], client=client, gr_id=gr_id)
+    assert result == 0
+
+    data = json.loads((state_dir / "state.json").read_text())
+    assert data.get("stage") == "address-code"

@@ -14,8 +14,8 @@ from gremlins.stages.test import TestOptions
 from gremlins.stages.test import run as run_test
 
 
-def _make_ctx(client: Any, tmp_path: Any) -> StageContext:
-    return StageContext(client=client, session_dir=tmp_path, gr_id=None)
+def _make_ctx(client: Any, tmp_path: Any, *, gr_id: Any = None) -> StageContext:
+    return StageContext(client=client, session_dir=tmp_path, gr_id=gr_id)
 
 
 def _run(
@@ -321,3 +321,26 @@ def test_launch_child_no_test_flags_when_absent(tmp_path, monkeypatch):
     assert "--test" not in captured_pipeline_args
     assert "--test-max-attempts" not in captured_pipeline_args
     assert captured_pipeline_args == []
+
+
+def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
+    gr_id = "test-gr-id"
+    state_dir = make_state_dir(gr_id)
+    client = FakeClaudeClient(
+        fixtures={"test-fix-1": MINIMAL_EVENTS, "test-fix-2": MINIMAL_EVENTS}
+    )
+    ctx = _make_ctx(client, tmp_path, gr_id=gr_id)
+    with pytest.raises(RuntimeError, match="exhausted"):
+        run_test(
+            ctx,
+            TestOptions(
+                test_cmd="false",
+                max_attempts=3,
+                test_fix_model="sonnet",
+                is_git=False,
+                cwd=tmp_path,
+                code_style="",
+            ),
+        )
+    data = json.loads((state_dir / "state.json").read_text())
+    assert data.get("bail_class") == "other"
