@@ -111,7 +111,12 @@ def _validate_gh_args(args: argparse.Namespace, rest: list[str]) -> None:
         raise ValueError(f"invalid gh arguments (exit {exc.code})") from exc
 
     positional = [t for t in remainder if not t.startswith("-")]
-    if args.plan is None and args.instructions is None and parsed.resume_from is None and not positional:
+    if (
+        args.plan is None
+        and args.instructions is None
+        and parsed.resume_from is None
+        and not positional
+    ):
         raise ValueError("instructions, --plan, or --resume-from required")
     if parsed.resume_from is not None and parsed.resume_from not in VALID_STAGES:
         raise ValueError(
