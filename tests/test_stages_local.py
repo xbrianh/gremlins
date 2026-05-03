@@ -5,10 +5,15 @@ import pytest
 from conftest import MINIMAL_EVENTS, ReviewCreatingClient
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.stages.address_code import run_address_code_stage
-from gremlins.stages.implement import _render_spec_block, run_implement_stage
-from gremlins.stages.plan import run_plan_stage
+from gremlins.stages.address_code import AddressCodeOptions, run as run_address_code
+from gremlins.stages.context import StageContext
+from gremlins.stages.implement import ImplementOptions, _render_spec_block, run as run_implement
+from gremlins.stages.plan import PlanOptions, run as run_plan
 from gremlins.stages.review_code import run_review_code_stage
+
+
+def _make_ctx(client, session_dir):
+    return StageContext(client=client, session_dir=session_dir, gr_id=None)
 
 
 def _init_git_repo(path: pathlib.Path) -> None:
@@ -115,14 +120,16 @@ def test_implement_renders_spec_block_when_present(tmp_path, monkeypatch):
             return super().run(prompt, label=label, **kwargs)
 
     client = _CommittingClient(fixtures={"implement": MINIMAL_EVENTS})
-    run_implement_stage(
-        client=client,
-        impl_model="sonnet",
-        plan_text="task 1: do something",
-        code_style="Be good.",
-        session_dir=session_dir,
-        is_git=True,
-        spec_text="overall spec body",
+    ctx = _make_ctx(client, session_dir)
+    run_implement(
+        ctx,
+        ImplementOptions(
+            impl_model="sonnet",
+            plan_text="task 1: do something",
+            code_style="Be good.",
+            is_git=True,
+            spec_text="overall spec body",
+        ),
     )
     prompt = client.calls[0].prompt
     assert "Overarching goal (north star)" in prompt
@@ -157,14 +164,16 @@ def test_implement_omits_spec_block_when_absent(tmp_path, monkeypatch):
             return super().run(prompt, label=label, **kwargs)
 
     client = _CommittingClient(fixtures={"implement": MINIMAL_EVENTS})
-    run_implement_stage(
-        client=client,
-        impl_model="sonnet",
-        plan_text="task 1: do something",
-        code_style="Be good.",
-        session_dir=session_dir,
-        is_git=True,
-        spec_text="",
+    ctx = _make_ctx(client, session_dir)
+    run_implement(
+        ctx,
+        ImplementOptions(
+            impl_model="sonnet",
+            plan_text="task 1: do something",
+            code_style="Be good.",
+            is_git=True,
+            spec_text="",
+        ),
     )
     prompt = client.calls[0].prompt
     assert "Overarching goal" not in prompt
@@ -178,15 +187,19 @@ def test_implement_omits_spec_block_when_absent(tmp_path, monkeypatch):
 def test_plan_stage_raises_when_file_absent(tmp_path):
     client = FakeClaudeClient(fixtures={"plan": MINIMAL_EVENTS})
     plan_file = tmp_path / "plan.md"
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    ctx = _make_ctx(client, session_dir)
     # FakeClaudeClient won't create the plan file — stage must raise.
     with pytest.raises(RuntimeError, match="plan stage did not produce"):
-        run_plan_stage(
-            client=client,
-            plan_model="sonnet",
-            plan_file=plan_file,
-            instructions="do stuff",
-            raw_path=tmp_path / "stream-plan.jsonl",
-            code_style="Be good.",
+        run_plan(
+            ctx,
+            PlanOptions(
+                plan_model="sonnet",
+                plan_file=plan_file,
+                instructions="do stuff",
+                code_style="Be good.",
+            ),
         )
     assert len(client.calls) == 1
     assert client.calls[0].label == "plan"
@@ -195,6 +208,8 @@ def test_plan_stage_raises_when_file_absent(tmp_path):
 
 def test_plan_stage_succeeds_when_file_exists(tmp_path):
     plan_file = tmp_path / "plan.md"
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
 
     class _WritingClient(FakeClaudeClient):
         def run(self, prompt, *, label, **kwargs):
@@ -202,13 +217,15 @@ def test_plan_stage_succeeds_when_file_exists(tmp_path):
             return super().run(prompt, label=label, **kwargs)
 
     client = _WritingClient(fixtures={"plan": MINIMAL_EVENTS})
-    run_plan_stage(
-        client=client,
-        plan_model="haiku",
-        plan_file=plan_file,
-        instructions="do stuff",
-        raw_path=tmp_path / "stream-plan.jsonl",
-        code_style="Be good.",
+    ctx = _make_ctx(client, session_dir)
+    run_plan(
+        ctx,
+        PlanOptions(
+            plan_model="haiku",
+            plan_file=plan_file,
+            instructions="do stuff",
+            code_style="Be good.",
+        ),
     )
     assert plan_file.exists()
     assert client.calls[0].label == "plan"
@@ -230,15 +247,16 @@ def test_implement_stage_raises_on_empty_diff(tmp_path, monkeypatch):
     session_dir.mkdir()
 
     client = FakeClaudeClient(fixtures={"implement": MINIMAL_EVENTS})
+    ctx = _make_ctx(client, session_dir)
     with pytest.raises(RuntimeError, match="no changes"):
-        run_implement_stage(
-            client=client,
-            impl_model="sonnet",
-            plan_file=session_dir / "plan.md",
-            plan_text="# Plan\nDo stuff.\n",
-            code_style="Be good.",
-            session_dir=session_dir,
-            is_git=True,
+        run_implement(
+            ctx,
+            ImplementOptions(
+                impl_model="sonnet",
+                plan_text="# Plan\nDo stuff.\n",
+                code_style="Be good.",
+                is_git=True,
+            ),
         )
     assert len(client.calls) == 1
     assert client.calls[0].label == "implement"
@@ -255,12 +273,14 @@ def test_address_code_stage_calls_client_with_review_content(tmp_path):
     (session_dir / "review-code-detail-sonnet.md").write_text(review_text)
 
     client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
-    run_address_code_stage(
-        client=client,
-        session_dir=session_dir,
-        address_model="sonnet",
-        is_git=False,
-        code_style="",
+    ctx = _make_ctx(client, session_dir)
+    run_address_code(
+        ctx,
+        AddressCodeOptions(
+            address_model="sonnet",
+            is_git=False,
+            code_style="",
+        ),
     )
 
     assert len(client.calls) == 1
@@ -278,14 +298,18 @@ def test_address_code_stage_calls_client_with_review_content(tmp_path):
 def test_plan_stage_includes_code_style(tmp_path):
     client = FakeClaudeClient(fixtures={"plan": MINIMAL_EVENTS})
     plan_file = tmp_path / "plan.md"
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    ctx = _make_ctx(client, session_dir)
     with pytest.raises(RuntimeError, match="plan stage did not produce"):
-        run_plan_stage(
-            client=client,
-            plan_model="sonnet",
-            plan_file=plan_file,
-            instructions="do stuff",
-            raw_path=tmp_path / "stream.jsonl",
-            code_style="Be good.",
+        run_plan(
+            ctx,
+            PlanOptions(
+                plan_model="sonnet",
+                plan_file=plan_file,
+                instructions="do stuff",
+                code_style="Be good.",
+            ),
         )
     assert "Be good." in client.calls[0].prompt
 
@@ -310,11 +334,13 @@ def test_address_code_stage_includes_code_style(tmp_path):
         "# Detail Review\n\n## Findings\nNone.\n"
     )
     client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
-    run_address_code_stage(
-        client=client,
-        session_dir=tmp_path,
-        address_model="sonnet",
-        is_git=False,
-        code_style="Be good.",
+    ctx = _make_ctx(client, tmp_path)
+    run_address_code(
+        ctx,
+        AddressCodeOptions(
+            address_model="sonnet",
+            is_git=False,
+            code_style="Be good.",
+        ),
     )
     assert "Be good." in client.calls[0].prompt

@@ -2,23 +2,40 @@
 
 from __future__ import annotations
 
+import dataclasses
 import subprocess
 import time
 from collections.abc import Callable
 
 from ..gh_utils import check_copilot_review
+from .context import StageContext
 
 
-def run_request_copilot_stage(*, repo: str, pr_num: str) -> None:
+@dataclasses.dataclass
+class RequestCopilotOptions:
+    repo: str
+    pr_num: str
+
+
+@dataclasses.dataclass
+class WaitCopilotOptions:
+    repo: str
+    pr_num: str
+    timeout: int = 600
+    interval: int = 20
+    review_checker: Callable[[], str | None] | None = None
+
+
+def run_request_copilot_stage(_ctx: StageContext, options: RequestCopilotOptions) -> None:
     """Add copilot-pull-request-reviewer to the PR's reviewer list."""
     r = subprocess.run(
         [
             "gh",
             "pr",
             "edit",
-            pr_num,
+            options.pr_num,
             "--repo",
-            repo,
+            options.repo,
             "--add-reviewer",
             "copilot-pull-request-reviewer",
         ],
@@ -33,34 +50,21 @@ def run_request_copilot_stage(*, repo: str, pr_num: str) -> None:
         )
 
 
-def run_wait_copilot_stage(
-    *,
-    repo: str,
-    pr_num: str,
-    timeout: int = 600,
-    interval: int = 20,
-    review_checker: Callable[[], str | None] | None = None,
-) -> str:
-    """Poll until Copilot posts a non-PENDING review or timeout expires.
-
-    ``review_checker`` is injectable for tests: a zero-argument callable that
-    returns the review state string (e.g. ``'APPROVED'``) or ``None`` when the
-    review isn't ready yet.  Defaults to a real ``gh api`` call.
-
-    Returns the final review state string.
-    """
+def run(_ctx: StageContext, options: WaitCopilotOptions) -> str:
+    """Poll until Copilot posts a non-PENDING review or timeout expires."""
+    review_checker = options.review_checker
     if review_checker is None:
 
         def _default_checker() -> str | None:
-            return check_copilot_review(repo, pr_num)
+            return check_copilot_review(options.repo, options.pr_num)
 
         review_checker = _default_checker
 
-    deadline = time.time() + timeout
+    deadline = time.time() + options.timeout
     while True:
         state = review_checker()
         if state:
             return state
         if time.time() >= deadline:
-            raise RuntimeError(f"Copilot review timed out after {timeout}s")
-        time.sleep(interval)
+            raise RuntimeError(f"Copilot review timed out after {options.timeout}s")
+        time.sleep(options.interval)

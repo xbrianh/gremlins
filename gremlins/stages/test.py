@@ -1,22 +1,28 @@
-"""Test stage.
-
-Runs the user-supplied test command in a loop. On failure, invokes claude to
-fix the code and retries. Succeeds when the command exits 0 or bails after
-max_attempts.
-"""
+"""Test stage."""
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 import pathlib
 import subprocess
 
-from ..clients.claude import ClaudeClient
 from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
 from ..state import check_bail, emit_bail
+from .context import StageContext
 
 logger = logging.getLogger(__name__)
+
+
+@dataclasses.dataclass
+class TestOptions:
+    test_cmd: str | None
+    max_attempts: int
+    test_fix_model: str
+    is_git: bool
+    cwd: pathlib.Path
+    code_style: str
 
 
 def _diff_text(is_git: bool, cwd: pathlib.Path) -> str:
@@ -47,27 +53,14 @@ def _escape_fmt(s: str) -> str:
     return s.replace("{", "{{").replace("}", "}}")
 
 
-def run_test_stage(
-    *,
-    client: ClaudeClient,
-    session_dir: pathlib.Path,
-    test_cmd: str | None,
-    max_attempts: int,
-    test_fix_model: str,
-    is_git: bool,
-    cwd: pathlib.Path,
-    code_style: str,
-) -> None:
-    """Run the user-supplied test command, looping on failure until green or exhausted.
-
-    When test_cmd is None, logs a skip line and returns immediately (no-op stage).
-    """
-    if test_cmd is None:
+def run(ctx: StageContext, options: TestOptions) -> None:
+    """Run the user-supplied test command, looping on failure until green or exhausted."""
+    if options.test_cmd is None:
         logger.info("[5/5] test stage skipped (no --test)")
         return
 
     commit_instr = ""
-    if is_git:
+    if options.is_git:
         commit_instr = (
             "- After fixing, stage the changed files by name and create a single git "
             "commit titled 'Fix failing tests'. Do not push."
@@ -87,12 +80,12 @@ def run_test_stage(
     _exhausted = False
     _agent_bailed = False
     try:
-        for attempt in range(1, max_attempts + 1):
-            log_file = session_dir / f"test-attempt-{attempt}.log"
+        for attempt in range(1, options.max_attempts + 1):
+            log_file = ctx.session_dir / f"test-attempt-{attempt}.log"
             result = subprocess.run(
-                test_cmd,
+                options.test_cmd,
                 shell=True,
-                cwd=cwd,
+                cwd=options.cwd,
                 capture_output=True,
                 text=True,
             )
@@ -104,34 +97,32 @@ def run_test_stage(
 
             logger.info("test attempt %d: failed (exit %d)", attempt, result.returncode)
 
-            if attempt == max_attempts:
+            if attempt == options.max_attempts:
                 break
 
-            diff = _diff_text(is_git, cwd)
+            diff = _diff_text(options.is_git, options.cwd)
             test_output = log_file.read_text(encoding="utf-8")
             fix_prompt = template.format(
-                code_style=_escape_fmt(code_style),
-                test_cmd=test_cmd,
+                code_style=_escape_fmt(options.code_style),
+                test_cmd=options.test_cmd,
                 test_output=test_output,
                 diff_text=diff,
                 commit_instr=commit_instr,
                 bail_section=bail_section,
             )
-            client.run(
+            ctx.client.run(
                 fix_prompt,
                 label=f"test-fix-{attempt}",
-                model=test_fix_model,
-                raw_path=session_dir / f"stream-test-{attempt}.jsonl",
+                model=options.test_fix_model,
+                raw_path=ctx.session_dir / f"stream-test-{attempt}.jsonl",
             )
-            # Propagate immediately if the agent wrote a bail marker; don't
-            # overwrite it by running another test attempt or exhaustion bail.
             _agent_bailed = True
             check_bail(f"test-fix-{attempt}")
             _agent_bailed = False
 
         _exhausted = True
-        emit_bail("other", f"tests failed after {max_attempts} attempts")
-        raise RuntimeError(f"test stage exhausted {max_attempts} attempts")
+        emit_bail("other", f"tests failed after {options.max_attempts} attempts")
+        raise RuntimeError(f"test stage exhausted {options.max_attempts} attempts")
     except (SystemExit, Exception) as exc:
         if not _exhausted and not _agent_bailed:
             emit_bail("other", f"test stage failed: {exc}"[:200])

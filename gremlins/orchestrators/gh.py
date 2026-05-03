@@ -1,17 +1,4 @@
-"""Orchestrator entry point for the gh pipeline.
-
-Drives the gh pipeline: plan → implement → commit-pr → request-copilot → ghreview → wait-copilot → ghaddress → ci-gate.
-
-Stage sequence (names byte-stable for --resume-from):
-  plan → implement → commit-pr → request-copilot → ghreview → wait-copilot → ghaddress → ci-gate
-
-Arg contract preserved from ghgremlin.sh:
-  -r <ref>              git ref forwarded to /ghplan
-  --plan <path|ref>     plan source (mutually exclusive with instructions)
-  --model <model>       claude model
-  --resume-from <stage> resume at named stage
-  instructions          positional (mutually exclusive with --plan)
-"""
+"""Orchestrator entry point for the gh pipeline."""
 
 from __future__ import annotations
 
@@ -32,12 +19,9 @@ from ..git import DirtyOnly, HeadAdvanced
 from ..logging_setup import configure_logging
 from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
 from ..runner import install_signal_handlers, run_stages
-from ..stages.commit_pr import run_commit_pr_stage
-from ..stages.ghaddress import run_ghaddress_stage
-from ..stages.ghreview import run_ghreview_stage
-from ..stages.implement import ImplStageResult, run_implement_stage
-from ..stages.wait_ci import run_wait_ci_stage
-from ..stages.wait_copilot import run_request_copilot_stage, run_wait_copilot_stage
+from ..stages import commit_pr, ghaddress, ghreview, implement, wait_ci, wait_copilot
+from ..stages.context import StageContext
+from ..stages.implement import ImplStageResult
 from ..state import patch_state, resolve_session_dir, resolve_state_file, set_stage
 
 logger = logging.getLogger(__name__)
@@ -108,10 +92,6 @@ def _read_state_field(sf: pathlib.Path | None, field: str) -> str:
         return ""
 
 
-# Test compatibility shim — tests import _parse_issue_ref from this module
-# directly (and patch _fetch_issue_body below). The canonical implementation
-# lives in gremlins.gh_utils.parse_issue_ref so the boss orchestrator can
-# share it.
 _parse_issue_ref = parse_issue_ref
 
 
@@ -129,7 +109,6 @@ def _fetch_issue_body(issue_num: str, repo: str) -> str:
 def _update_description_from_plan(
     plan_md: pathlib.Path, state_file: pathlib.Path | None
 ) -> None:
-    """Update state.json .description from the plan's first H1, if not explicitly set."""
     if state_file is None or not state_file.exists():
         return
     try:
@@ -158,14 +137,8 @@ def _resolve_plan_source(
     client: ClaudeClient,
     state_file: pathlib.Path | None,
 ) -> tuple[str, str, str]:
-    """Resolve --plan <source> into (issue_url, issue_num, issue_body).
-
-    On resume (plan_md already exists): reload from snapshot + state.json.
-    Fresh launch: classify source shape, fetch/create issue, write plan.md.
-    Returns (issue_url, issue_num, issue_body).
-    """
+    """Resolve --plan <source> into (issue_url, issue_num, issue_body)."""
     if plan_md.exists() and plan_md.stat().st_size > 0:
-        # Resume path: reload from snapshot
         issue_url = _read_state_field(state_file, "issue_url")
         issue_num = _read_state_field(state_file, "issue_num")
         issue_body = plan_md.read_text(encoding="utf-8")
@@ -173,9 +146,7 @@ def _resolve_plan_source(
         logger.info("[1/7] plan resumed from snapshot: %s%s", plan_md, label)
         return issue_url, issue_num, issue_body
 
-    # Fresh launch: classify source shape
     if pathlib.Path(plan_source).is_file():
-        # Local file: post as GitHub issue
         src = pathlib.Path(plan_source)
         if src.stat().st_size == 0:
             die(f"--plan: file is empty: {plan_source}")
@@ -185,7 +156,6 @@ def _resolve_plan_source(
             plan_source,
         )
 
-        # Generate issue title via claude
         title_prompt = (
             "Produce a concise GitHub issue title (under 80 characters) "
             "summarizing the spec below. Output ONLY the title, nothing else."
@@ -232,7 +202,6 @@ def _resolve_plan_source(
         logger.info("issue: %s", issue_url)
         shutil.copyfile(src, plan_md)
     else:
-        # Issue reference
         target_repo, issue_ref = _parse_issue_ref(plan_source, repo)
         if target_repo is None or issue_ref is None:
             die(
@@ -250,8 +219,6 @@ def _resolve_plan_source(
         resolved_url = issue_data.get("url") or ""
         resolved_num = str(issue_data.get("number") or "")
 
-        # Only set issue_url/issue_num (which drive the `Closes #N` link) when
-        # the resolved issue's repo matches the PR's target repo.
         if target_repo == repo:
             issue_url = resolved_url
             issue_num = resolved_num
@@ -259,7 +226,6 @@ def _resolve_plan_source(
             issue_url = ""
             issue_num = ""
 
-        # Use issue_body + newline to match the `cp` semantics of the file path above.
         plan_md.write_text(issue_body + "\n", encoding="utf-8")
         logger.info(
             "[1/7] plan supplied via --plan (issue %s#%s)", target_repo, issue_ref
@@ -293,11 +259,6 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
 
     logger.info("session: %s", session_dir)
 
-    # --spec staging: snapshot into session_dir/spec.md on first launch.
-    # On resume, reuse the existing snapshot (rescue-determinism).
-    # launcher.py normalizes spec_path before spawning the subprocess, so the
-    # is_file / size checks below are only reachable on a direct (non-launcher)
-    # invocation of the orchestrator — they guard that path.
     if args.spec_path and not spec_file.exists():
         spec_src = pathlib.Path(args.spec_path)
         if not spec_src.is_file():
@@ -306,10 +267,6 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
             die(f"--spec: file is empty: {args.spec_path}")
         shutil.copyfile(spec_src, spec_file)
 
-    # Restore model from state.json when --model not supplied (resume path),
-    # then fall back to "sonnet" for fresh launches without an explicit --model.
-    # Argparse keeps default=None so the resume-restore step can detect "user
-    # didn't pass --model" and prefer the persisted value over the fresh default.
     model = args.model
     if model is None:
         model = _read_state_field(state_file, "model") or "sonnet"
@@ -318,7 +275,6 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
 
     instructions = " ".join(args.instructions) if args.instructions else ""
 
-    # Inter-stage state (populated before the loop or by stage callables).
     issue_url: str = ""
     issue_num: str = ""
     issue_body: str = ""
@@ -327,7 +283,6 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     resume_idx = VALID_STAGES.index(args.resume_from) if args.resume_from else 0
 
     if args.plan_source:
-        # Resolve plan source before the loop (handles both fresh and resume).
         issue_url, issue_num, issue_body = _resolve_plan_source(
             plan_source=args.plan_source,
             repo=repo,
@@ -337,7 +292,6 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
             state_file=state_file,
         )
     elif resume_idx > plan_stage_idx:
-        # Resuming past plan without --plan: reload issue from state.json.
         issue_url = _read_state_field(state_file, "issue_url")
         if not issue_url:
             die(
@@ -353,14 +307,20 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     except (FileNotFoundError, ValueError) as exc:
         die(f"error loading prompt: {exc}")
 
-    # pr_url populated by stage_commit_pr; later stages read it here.
-    pr_url_holder: dict[str, str] = {}
-    # impl_result populated by stage_implement; stage_commit_pr reads it.
-    impl_result_holder: dict[str, object] = {}
+    ctx = StageContext(
+        client=client,
+        session_dir=session_dir,
+        gr_id=os.environ.get("GR_ID"),
+    )
+
+    # Inter-stage state
+    impl_result: ImplStageResult | None = None
+    pr_url: str = ""
+    pr_num: str = ""
 
     def _ensure_pr_url() -> None:
-        """Populate pr_url_holder from state.json when resuming past commit-pr."""
-        if pr_url_holder.get("url"):
+        nonlocal pr_url, pr_num
+        if pr_url:
             return
         saved = _read_state_field(state_file, "pr_url")
         if not saved:
@@ -368,19 +328,18 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
                 f"--resume-from {args.resume_from}: no pr_url in state.json "
                 "(rewind to implement?)"
             )
-        pr_url_holder["url"] = saved
-        pr_url_holder["num"] = saved.split("/")[-1]
+        pr_url = saved
+        pr_num = saved.split("/")[-1]
         logger.info("resumed PR: %s", saved)
 
     def stage_plan() -> None:
         nonlocal issue_url, issue_num, issue_body
         if args.plan_source:
-            # Already resolved before the loop.
             return
         set_stage("plan")
         logger.info("[1/7] running /ghplan")
         plan_prompt = f"/ghplan {args.ref + ' ' if args.ref else ''}{instructions}"
-        completed = client.run(
+        completed = ctx.client.run(
             plan_prompt,
             label="plan",
             model=model,
@@ -400,6 +359,7 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         issue_body = _fetch_issue_body(issue_num, repo)
 
     def stage_implement() -> None:
+        nonlocal impl_result
         set_stage("implement")
         logger.info("[2a/7] implementing plan")
         spec_text = ""
@@ -411,38 +371,35 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
                     "could not read spec.md (%s); proceeding without north-star context",
                     exc,
                 )
-        result = run_implement_stage(
-            client=client,
-            impl_model=model,
-            plan_text=issue_body,
-            code_style=code_style,
-            session_dir=session_dir,
-            is_git=True,
-            kind="gh",
-            issue_num=issue_num,
-            spec_text=spec_text,
+        impl_result = implement.run(
+            ctx,
+            implement.ImplementOptions(
+                impl_model=model,
+                plan_text=issue_body,
+                code_style=code_style,
+                is_git=True,
+                kind="gh",
+                issue_num=issue_num,
+                spec_text=spec_text,
+            ),
         )
-        impl_result_holder["result"] = result
-        if result is None:
+        if impl_result is None:
             die("implement stage did not produce a result")
-        # Persist for commit-pr resume: base_ref and handoff branch are all
-        # that's needed to reconstruct the diff and outcome on a fresh process.
         patch_state(
-            impl_handoff_branch=result.handoff_branch,
-            impl_base_ref=result.pre_state.head,
+            impl_handoff_branch=impl_result.handoff_branch,
+            impl_base_ref=impl_result.pre_state.head,
         )
 
     def stage_commit_pr() -> None:
+        nonlocal pr_url, pr_num
         set_stage("commit-pr")
         logger.info("[2b/7] committing + opening PR")
 
-        if "result" in impl_result_holder:
-            result: ImplStageResult = impl_result_holder["result"]  # type: ignore[assignment]
-            impl_outcome = result.outcome
-            impl_handoff_branch = result.handoff_branch
-            base_ref = result.pre_state.head
+        if impl_result is not None:
+            impl_outcome = impl_result.outcome
+            impl_handoff_branch = impl_result.handoff_branch
+            base_ref = impl_result.pre_state.head
         else:
-            # Resuming at commit-pr: reconstruct from state.json
             impl_handoff_branch = _read_state_field(state_file, "impl_handoff_branch")
             base_ref = _read_state_field(state_file, "impl_base_ref")
             if not base_ref:
@@ -473,18 +430,18 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
             else:
                 impl_outcome = DirtyOnly()
 
-        pr_url = run_commit_pr_stage(
-            client=client,
-            model=model,
-            impl_outcome=impl_outcome,
-            impl_handoff_branch=impl_handoff_branch,
-            base_ref=base_ref,
-            issue_url=issue_url,
-            cwd=None,
-            session_dir=session_dir,
+        pr_url = commit_pr.run(
+            ctx,
+            commit_pr.CommitPrOptions(
+                model=model,
+                impl_outcome=impl_outcome,
+                impl_handoff_branch=impl_handoff_branch,
+                base_ref=base_ref,
+                issue_url=issue_url,
+                cwd=None,
+            ),
         )
-        pr_url_holder["url"] = pr_url
-        pr_url_holder["num"] = pr_url.split("/")[-1]
+        pr_num = pr_url.split("/")[-1]
         logger.info("PR: %s", pr_url)
         patch_state(pr_url=pr_url)
 
@@ -492,27 +449,31 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         _ensure_pr_url()
         set_stage("request-copilot")
         logger.info("[3/7] requesting Copilot review")
-        run_request_copilot_stage(repo=repo, pr_num=pr_url_holder["num"])
+        wait_copilot.run_request_copilot_stage(
+            ctx,
+            wait_copilot.RequestCopilotOptions(repo=repo, pr_num=pr_num),
+        )
 
     def stage_ghreview() -> None:
         _ensure_pr_url()
         set_stage("ghreview")
         logger.info("[4/7] running /ghreview")
-        run_ghreview_stage(
-            client=client,
-            model=model,
-            pr_url=pr_url_holder["url"],
-            artifacts_dir=session_dir,
-            code_style=code_style,
+        ghreview.run(
+            ctx,
+            ghreview.GhreviewOptions(
+                model=model,
+                pr_url=pr_url,
+                code_style=code_style,
+            ),
         )
 
     def stage_wait_copilot() -> None:
         _ensure_pr_url()
         set_stage("wait-copilot")
         logger.info("[5/7] waiting for Copilot review (20s interval, 10min timeout)")
-        state = run_wait_copilot_stage(
-            repo=repo,
-            pr_num=pr_url_holder["num"],
+        state = wait_copilot.run(
+            ctx,
+            wait_copilot.WaitCopilotOptions(repo=repo, pr_num=pr_num),
         )
         logger.info("Copilot review: %s", state)
 
@@ -520,24 +481,26 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         _ensure_pr_url()
         set_stage("ghaddress")
         logger.info("[6/7] running /ghaddress")
-        run_ghaddress_stage(
-            client=client,
-            model=model,
-            pr_url=pr_url_holder["url"],
-            artifacts_dir=session_dir,
-            code_style=code_style,
+        ghaddress.run(
+            ctx,
+            ghaddress.GhaddressOptions(
+                model=model,
+                pr_url=pr_url,
+                code_style=code_style,
+            ),
         )
 
     def stage_wait_ci() -> None:
         _ensure_pr_url()
         set_stage("ci-gate")
         logger.info("[7/7] waiting for CI checks (up to 3 attempts, 20min each)")
-        run_wait_ci_stage(
-            client=client,
-            model=model,
-            pr_url=pr_url_holder["url"],
-            artifacts_dir=session_dir,
-            code_style=code_style,
+        wait_ci.run(
+            ctx,
+            wait_ci.WaitCiOptions(
+                model=model,
+                pr_url=pr_url,
+                code_style=code_style,
+            ),
         )
 
     stages = [
@@ -556,7 +519,7 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     if total_cost is not None and total_cost > 0:
         patch_state(total_cost_usd=total_cost)
 
-    logger.info("done. PR: %s", pr_url_holder.get("url", "(unknown)"))
+    logger.info("done. PR: %s", pr_url or "(unknown)")
     if total_cost is not None and total_cost > 0:
         logger.info("total cost: $%.4f", total_cost)
     return 0

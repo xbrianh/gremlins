@@ -2,26 +2,26 @@
 
 from __future__ import annotations
 
-import pathlib
+import dataclasses
 
-from ..clients.claude import ClaudeClient
 from ..state import check_bail
+from .context import StageContext
 
 
-def run_ghreview_stage(
-    *,
-    client: ClaudeClient,
-    model: str | None,
-    pr_url: str,
-    artifacts_dir: pathlib.Path,
-    code_style: str,
-) -> None:
+@dataclasses.dataclass
+class GhreviewOptions:
+    model: str | None
+    pr_url: str
+    code_style: str
+
+
+def run(ctx: StageContext, options: GhreviewOptions) -> None:
     """Run /ghreview. Calls check_bail after completion."""
-    prompt = f"## Coding style\n\n{code_style}\n\n/ghreview {pr_url}"
-    client.run(
+    prompt = f"## Coding style\n\n{options.code_style}\n\n/ghreview {options.pr_url}"
+    ctx.client.run(
         prompt,
         label="ghreview",
-        model=model,
-        raw_path=artifacts_dir / "stream-ghreview.jsonl",
+        model=options.model,
+        raw_path=ctx.session_dir / "stream-ghreview.jsonl",
     )
     check_bail("/ghreview")

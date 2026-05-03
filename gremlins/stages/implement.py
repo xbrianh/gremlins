@@ -1,13 +1,4 @@
-"""Implement stage for both local and gh pipelines.
-
-For ``kind='local'``: renders ``implement_local.md``, runs claude, enforces the
-empty-implementation invariant (spec: an empty impl must never flow into review).
-
-For ``kind='gh'``: renders ``implement_gh.md``, runs claude, then runs the
-impl-handoff branch lifecycle from ``gremlins/git.py``.  Returns an
-``ImplStageResult`` with the pre-impl state snapshot and classified outcome.
-Raises on ``DivergentHead`` or ``EmptyImpl``.
-"""
+"""Implement stage for both local and gh pipelines."""
 
 from __future__ import annotations
 
@@ -17,7 +8,6 @@ import pathlib
 import subprocess
 import sys
 
-from ..clients.claude import ClaudeClient
 from ..git import (
     DivergentHead,
     EmptyImpl,
@@ -31,6 +21,7 @@ from ..git import (
     reset_pre_branch,
     sweep_stale_handoff_branches,
 )
+from .context import StageContext
 
 PROMPT_LOCAL_PATH = (
     pathlib.Path(__file__).resolve().parent.parent / "prompts" / "implement_local.md"
@@ -42,11 +33,23 @@ PROMPT_GH_PATH = (
 
 @dataclasses.dataclass
 class ImplStageResult:
-    """Returned by ``run_implement_stage`` when ``kind='gh'``."""
+    """Returned by ``run`` when ``options.kind='gh'``."""
 
     pre_state: PreImplState
     outcome: ImplOutcome
     handoff_branch: str  # empty string when outcome is DirtyOnly (no branch created)
+
+
+@dataclasses.dataclass
+class ImplementOptions:
+    impl_model: str | None
+    plan_text: str
+    code_style: str
+    is_git: bool
+    kind: str = "local"
+    spec_text: str = ""
+    issue_num: str = ""
+    cwd: str | None = None
 
 
 def changes_outside_git(sentinel: pathlib.Path, session_dir: pathlib.Path) -> bool:
@@ -103,50 +106,25 @@ def _render_spec_block(spec_text: str) -> str:
     )
 
 
-def run_implement_stage(
-    *,
-    client: ClaudeClient,
-    impl_model: str | None,
-    plan_text: str,
-    code_style: str,
-    session_dir: pathlib.Path,
-    is_git: bool,
-    kind: str = "local",
-    spec_text: str = "",
-    # local-only (kept for API compatibility, not used in function body)
-    plan_file: pathlib.Path | None = None,
-    # gh-only
-    issue_num: str = "",
-    cwd: str | None = None,
-) -> ImplStageResult | None:
+def run(ctx: StageContext, options: ImplementOptions) -> ImplStageResult | None:
     """Run the implement stage.
 
-    Returns ``None`` for ``kind='local'``.  Returns ``ImplStageResult`` for
-    ``kind='gh'`` so the orchestrator can thread the session_id into commit-pr.
+    Returns None for kind='local'. Returns ImplStageResult for kind='gh'.
     """
-    if kind == "gh":
-        return _run_implement_gh(
-            client=client,
-            impl_model=impl_model,
-            plan_text=plan_text,
-            code_style=code_style,
-            session_dir=session_dir,
-            issue_num=issue_num,
-            cwd=cwd,
-            spec_text=spec_text,
-        )
+    if options.kind == "gh":
+        return _run_implement_gh(ctx, options)
 
     # --- local path ---
     pre_head = ""
     pre_sentinel: pathlib.Path | None = None
-    if is_git:
+    if options.is_git:
         pre_head = git_head()
     else:
-        pre_sentinel = session_dir / ".pre-impl"
+        pre_sentinel = ctx.session_dir / ".pre-impl"
         pre_sentinel.touch()
 
     impl_commit_instr = "."
-    if is_git:
+    if options.is_git:
         impl_commit_instr = (
             ", stage the changed files by name and create a single git commit "
             "with a clear message that references the implementation plan "
@@ -158,19 +136,19 @@ def run_implement_stage(
 
     template = PROMPT_LOCAL_PATH.read_text(encoding="utf-8")
     prompt = template.format(
-        code_style=code_style,
-        spec_block=_render_spec_block(spec_text),
-        plan_text=plan_text,
+        code_style=options.code_style,
+        spec_block=_render_spec_block(options.spec_text),
+        plan_text=options.plan_text,
         impl_commit_instr=impl_commit_instr,
     )
-    client.run(
+    ctx.client.run(
         prompt,
         label="implement",
-        model=impl_model,
-        raw_path=session_dir / "stream-implement.jsonl",
+        model=options.impl_model,
+        raw_path=ctx.session_dir / "stream-implement.jsonl",
     )
 
-    if is_git:
+    if options.is_git:
         post_head = git_head()
         porcelain = subprocess.run(
             ["git", "status", "--porcelain"],
@@ -182,25 +160,15 @@ def run_implement_stage(
             raise RuntimeError("implementation stage produced no changes; aborting")
     else:
         assert pre_sentinel is not None
-        if not changes_outside_git(pre_sentinel, session_dir):
+        if not changes_outside_git(pre_sentinel, ctx.session_dir):
             raise RuntimeError("implementation stage produced no changes; aborting")
 
     return None
 
 
-def _run_implement_gh(
-    *,
-    client: ClaudeClient,
-    impl_model: str | None,
-    plan_text: str,
-    code_style: str,
-    session_dir: pathlib.Path,
-    issue_num: str,
-    cwd: str | None,
-    spec_text: str = "",
-) -> ImplStageResult:
+def _run_implement_gh(ctx: StageContext, options: ImplementOptions) -> ImplStageResult:
     """gh-specific implement: run claude, then orchestrate the handoff branch lifecycle."""
-    if issue_num:
+    if options.issue_num:
         plan_source_label = "from the GitHub issue"
         plan_location_note = (
             "The plan lives in the GitHub issue and reviews go to PR comments; "
@@ -215,24 +183,24 @@ def _run_implement_gh(
 
     template = PROMPT_GH_PATH.read_text(encoding="utf-8")
     prompt = template.format(
-        code_style=code_style,
-        spec_block=_render_spec_block(spec_text),
+        code_style=options.code_style,
+        spec_block=_render_spec_block(options.spec_text),
         plan_source_label=plan_source_label,
-        issue_body=plan_text,
+        issue_body=options.plan_text,
         plan_location_note=plan_location_note,
     )
 
-    pre_state = record_pre_impl_state(cwd=cwd)
+    pre_state = record_pre_impl_state(cwd=options.cwd)
 
-    client.run(
+    ctx.client.run(
         prompt,
         label="implement",
-        model=impl_model,
-        raw_path=session_dir / "stream-implement.jsonl",
+        model=options.impl_model,
+        raw_path=ctx.session_dir / "stream-implement.jsonl",
         capture_events=True,
     )
 
-    outcome = classify_impl_outcome(pre_state, cwd=cwd)
+    outcome = classify_impl_outcome(pre_state, cwd=options.cwd)
 
     if isinstance(outcome, EmptyImpl):
         raise RuntimeError(
@@ -247,9 +215,9 @@ def _run_implement_gh(
 
     handoff_branch = ""
     if isinstance(outcome, HeadAdvanced):
-        handoff_branch = create_handoff_branch(pre_state, cwd=cwd)
-        reset_pre_branch(pre_state, cwd=cwd)
-        sweep_stale_handoff_branches(handoff_branch, cwd=cwd)
+        handoff_branch = create_handoff_branch(pre_state, cwd=options.cwd)
+        reset_pre_branch(pre_state, cwd=options.cwd)
+        sweep_stale_handoff_branches(handoff_branch, cwd=options.cwd)
         commit_count = outcome.commit_count
         pre_branch_note = f" and reset {pre_state.branch}" if pre_state.branch else ""
         sys.stdout.write(
