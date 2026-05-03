@@ -1,4 +1,4 @@
-"""Tests for gremlins/cli.py bail subcommand."""
+"""Tests for gremlins/cli.py bail and _run-pipeline subcommands."""
 
 from __future__ import annotations
 
@@ -100,3 +100,38 @@ def test_bail_all_valid_classes_accepted(tmp_path, monkeypatch, bail_class):
     assert rc == 0
     data = json.loads(sf.read_text())
     assert data["bail_class"] == bail_class
+
+
+# ---------------------------------------------------------------------------
+# _run-pipeline subcommand — gr_id validation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    [
+        "",
+        "../escape",
+        "foo/bar",
+        "foo\\bar",
+        "foo..bar",
+        "id with spaces",
+        "id;injection",
+    ],
+)
+def test_run_pipeline_rejects_invalid_gr_id(tmp_path, monkeypatch, bad_id):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+
+    rc = main(["_run-pipeline", bad_id, "_local"])
+
+    assert rc != 0
+    assert not (tmp_path / "claude-gremlins").exists()
+
+
+def test_run_pipeline_valid_id_proceeds(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setattr("gremlins.cli.local_main", lambda *a, **kw: 0)
+
+    with pytest.raises(SystemExit):
+        main(["_run-pipeline", "valid-gremlin-abc123", "_local"])
+    # If we reach here, validate_gr_id passed; pipeline may exit for any reason.

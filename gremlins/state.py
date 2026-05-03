@@ -1,8 +1,9 @@
 """Stage and bail bookkeeping for gremlin state.json.
 
-Both helpers write state.json atomically in pure Python. Both are no-ops
-outside a gremlin context (no ``gr_id`` or missing state.json) and never
-raise — stage/bail bookkeeping must not break a running gremlin.
+``set_stage`` and ``emit_bail`` write state.json atomically in pure Python.
+Both are no-ops outside a gremlin context (no ``gr_id`` or missing
+state.json) and never raise — stage/bail bookkeeping must not break a
+running gremlin.
 """
 
 from __future__ import annotations
@@ -11,7 +12,17 @@ import datetime
 import json
 import os
 import pathlib
+import re
 import secrets
+
+_GR_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def validate_gr_id(gr_id: str) -> None:
+    """Raise ValueError if gr_id is not a safe, non-path-traversing identifier."""
+    if ".." in gr_id or not _GR_ID_RE.match(gr_id):
+        raise ValueError(f"gr_id contains illegal characters: {gr_id!r}")
+
 
 # The four bail-class strings written to state.json.bail_class. Byte-stable
 # across the migration — these strings appear in state.json files written by

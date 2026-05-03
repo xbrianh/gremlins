@@ -42,6 +42,7 @@ from .state import (
     BAIL_CLASS_SECRETS,
     BAIL_CLASS_SECURITY,
     emit_bail,
+    validate_gr_id,
 )
 
 
@@ -177,8 +178,10 @@ def _run_pipeline_main(argv: list[str]) -> int:
         return 1
 
     gr_id, kind_subcommand, *args = argv
-    if not gr_id:
-        sys.stderr.write("_run-pipeline: gr_id must be non-empty\n")
+    try:
+        validate_gr_id(gr_id)
+    except ValueError as exc:
+        sys.stderr.write(f"_run-pipeline: {exc}\n")
         return 1
     rc = 1
     try:
