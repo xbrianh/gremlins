@@ -1,24 +1,20 @@
-"""YAML pipeline loader and stage/client registries."""
+"""YAML pipeline loader."""
 
 from __future__ import annotations
 
 import dataclasses
+import importlib
 import pathlib
-from collections.abc import Callable
 from typing import Any, cast
 
 import yaml
 
-STAGE_REGISTRY: dict[str, Callable[..., Any]] = {}
-CLIENT_FACTORIES: dict[str, Callable[[str], Any]] = {}
+from gremlins.stages.registry import CLIENT_FACTORIES, STAGE_REGISTRY
 
 
-def register_stage(name: str, fn: Callable[..., Any]) -> None:
-    STAGE_REGISTRY[name] = fn
-
-
-def register_client_factory(provider: str, factory: Callable[[str], Any]) -> None:
-    CLIENT_FACTORIES[provider] = factory
+def _ensure_registered() -> None:
+    importlib.import_module("gremlins.stages.all")
+    importlib.import_module("gremlins.clients")
 
 
 @dataclasses.dataclass
@@ -136,6 +132,7 @@ def _parse_stage_entry(
 
 
 def load_pipeline(path: pathlib.Path) -> Pipeline:
+    _ensure_registered()
     path = path.resolve()
     if not path.exists():
         raise FileNotFoundError(f"pipeline file not found: {path}")
@@ -195,35 +192,3 @@ def resolve_pipeline_path(name_or_path: str, base_dir: pathlib.Path) -> pathlib.
         f"pipeline {name_or_path!r} not found in "
         f"{project_scoped.parent} or bundled pipelines"
     )
-
-
-def _bootstrap() -> None:
-    from gremlins.stages.address_code import run as _address_code
-    from gremlins.stages.commit_pr import run as _commit_pr
-    from gremlins.stages.ghaddress import run as _ghaddress
-    from gremlins.stages.ghreview import run as _ghreview
-    from gremlins.stages.implement import run as _implement
-    from gremlins.stages.plan import run as _plan
-    from gremlins.stages.request_copilot import run as _request_copilot
-    from gremlins.stages.review_code import run as _review_code
-    from gremlins.stages.test import run as _test
-    from gremlins.stages.wait_ci import run as _wait_ci
-    from gremlins.stages.wait_copilot import run as _wait_copilot
-
-    register_stage("plan", _plan)
-    register_stage("implement", _implement)
-    register_stage("review-code", _review_code)
-    register_stage("address-code", _address_code)
-    register_stage("test", _test)
-    register_stage("commit-pr", _commit_pr)
-    register_stage("request-copilot", _request_copilot)
-    register_stage("ghreview", _ghreview)
-    register_stage("wait-copilot", _wait_copilot)
-    register_stage("ghaddress", _ghaddress)
-    register_stage("wait-ci", _wait_ci)
-    from gremlins.clients.claude import SubprocessClaudeClient
-
-    register_client_factory("claude", lambda _: SubprocessClaudeClient())
-
-
-_bootstrap()

@@ -8,6 +8,7 @@ from collections.abc import Callable
 
 from ..gh_utils import check_copilot_review
 from .context import StageContext
+from .registry import register_stage
 
 
 @dataclasses.dataclass
@@ -19,7 +20,7 @@ class WaitCopilotOptions:
     review_checker: Callable[[], str | None] | None = None
 
 
-def run(_ctx: StageContext, options: WaitCopilotOptions) -> str:
+def run(_: StageContext, options: WaitCopilotOptions) -> str:
     """Poll until Copilot posts a non-PENDING review or timeout expires."""
     review_checker = options.review_checker
     if review_checker is None:
@@ -37,3 +38,6 @@ def run(_ctx: StageContext, options: WaitCopilotOptions) -> str:
         if time.time() >= deadline:
             raise RuntimeError(f"Copilot review timed out after {options.timeout}s")
         time.sleep(options.interval)
+
+
+register_stage("wait-copilot", run)

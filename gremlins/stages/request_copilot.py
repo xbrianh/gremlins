@@ -6,6 +6,7 @@ import dataclasses
 import subprocess
 
 from .context import StageContext
+from .registry import register_stage
 
 
 @dataclasses.dataclass
@@ -14,7 +15,7 @@ class RequestCopilotOptions:
     pr_num: str
 
 
-def run(_ctx: StageContext, options: RequestCopilotOptions) -> None:
+def run(_: StageContext, options: RequestCopilotOptions) -> None:
     r = subprocess.run(
         [
             "gh",
@@ -36,3 +37,6 @@ def run(_ctx: StageContext, options: RequestCopilotOptions) -> None:
             f"could not request Copilot review (is it enabled in repo settings?): "
             f"exit {r.returncode}: {detail}"
         )
+
+
+register_stage("request-copilot", run)

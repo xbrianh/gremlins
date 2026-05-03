@@ -13,6 +13,7 @@ from ..git import git_head
 from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
 from ..state import check_bail, emit_bail
 from .context import StageContext
+from .registry import register_stage
 
 logger = logging.getLogger(__name__)
 
@@ -214,3 +215,6 @@ def run(ctx: StageContext, options: WaitCiOptions) -> None:
         if not _exhausted and not _agent_bailed and not _review_bailed:
             emit_bail("other", f"ci-gate failed: {exc}"[:200])
         raise
+
+
+register_stage("wait-ci", run)

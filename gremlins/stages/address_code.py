@@ -10,6 +10,7 @@ import re
 from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
 from ..state import emit_bail
 from .context import StageContext
+from .registry import register_stage
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -84,3 +85,6 @@ Do not call this helper if you successfully addressed every actionable finding.
     except (SystemExit, Exception) as exc:
         emit_bail("other", f"address-code stage failed: {exc}"[:200])
         raise
+
+
+register_stage("address-code", run)

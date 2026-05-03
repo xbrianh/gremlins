@@ -22,6 +22,7 @@ from ..git import (
     sweep_stale_handoff_branches,
 )
 from .context import StageContext
+from .registry import register_stage
 
 PROMPT_LOCAL_PATH = (
     pathlib.Path(__file__).resolve().parent.parent / "prompts" / "implement_local.md"
@@ -231,3 +232,6 @@ def _run_implement_gh(ctx: StageContext, options: ImplementOptions) -> ImplStage
         outcome=outcome,
         handoff_branch=handoff_branch,
     )
+
+
+register_stage("implement", run)

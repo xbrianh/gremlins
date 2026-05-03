@@ -10,6 +10,7 @@ from ..clients.claude import CompletedRun
 from ..gh_utils import extract_gh_url
 from ..git import HeadAdvanced, ImplOutcome
 from .context import StageContext
+from .registry import register_stage
 
 PROMPTS_DIR = pathlib.Path(__file__).resolve().parent.parent / "prompts"
 
@@ -133,3 +134,6 @@ def run(ctx: StageContext, options: CommitPrOptions) -> str:
         label="PR",
     )
     return pr_url
+
+
+register_stage("commit-pr", run)
