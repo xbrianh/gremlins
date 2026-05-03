@@ -19,7 +19,15 @@ from ..git import DirtyOnly, HeadAdvanced
 from ..logging_setup import configure_logging
 from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
 from ..runner import install_signal_handlers, run_stages
-from ..stages import commit_pr, ghaddress, ghreview, implement, request_copilot, wait_ci, wait_copilot
+from ..stages import (
+    commit_pr,
+    ghaddress,
+    ghreview,
+    implement,
+    request_copilot,
+    wait_ci,
+    wait_copilot,
+)
 from ..stages.context import StageContext
 from ..stages.implement import ImplStageResult
 from ..state import patch_state, resolve_session_dir, resolve_state_file, set_stage
