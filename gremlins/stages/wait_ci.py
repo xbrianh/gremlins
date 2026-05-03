@@ -17,13 +17,10 @@ from typing import Any
 from ..clients.claude import ClaudeClient
 from ..gh_utils import fetch_check_run_logs, get_pr_ci_status
 from ..git import git_head
+from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
 from ..state import check_bail, emit_bail
 
 logger = logging.getLogger(__name__)
-
-PROMPT_TEMPLATE_PATH = (
-    pathlib.Path(__file__).resolve().parent.parent / "prompts" / "ci_fix.md"
-)
 
 _FAILING_CONCLUSIONS = frozenset({"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED"})
 _PENDING_STATES = frozenset({"EXPECTED", "PENDING"})
@@ -176,7 +173,7 @@ def run_wait_ci_stage(
         logger.info("ci-gate: no CI checks found, skipping")
         return
 
-    template = PROMPT_TEMPLATE_PATH.read_text(encoding="utf-8")
+    template = load_prompts([BUNDLED_PROMPT_DIR / "ci_fix.md"])
     bail_section = ""
     if os.environ.get("GR_ID"):
         bail_section = (

@@ -33,7 +33,7 @@ def test_local_main_plan_mode(tmp_path, monkeypatch):
     # tmp_path is not a git repo → is_git=False; monkeypatch for clarity.
     monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
     monkeypatch.setattr(
-        "gremlins.orchestrators.local.load_code_style", lambda: "Be good."
+        "gremlins.orchestrators.local.load_prompts", lambda paths: "Be good."
     )
     # Fake that implement produced changes (FakeClaudeClient won't create files).
     monkeypatch.setattr(

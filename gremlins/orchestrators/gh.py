@@ -30,7 +30,7 @@ from ..clients.claude import ClaudeClient, SubprocessClaudeClient
 from ..gh_utils import extract_gh_url, get_repo, parse_issue_ref, view_issue
 from ..git import DirtyOnly, HeadAdvanced
 from ..logging_setup import configure_logging
-from ..prompts import load_code_style
+from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
 from ..runner import install_signal_handlers, run_stages
 from ..stages.commit_pr import run_commit_pr_stage
 from ..stages.ghaddress import run_ghaddress_stage
@@ -348,7 +348,7 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         logger.info("resumed issue: %s", issue_url)
         issue_body = _fetch_issue_body(issue_num, repo)
 
-    code_style = load_code_style()
+    code_style = load_prompts([BUNDLED_PROMPT_DIR / "code_style.md"])
 
     # pr_url populated by stage_commit_pr; later stages read it here.
     pr_url_holder: dict[str, str] = {}

@@ -10,10 +10,7 @@ from __future__ import annotations
 import pathlib
 
 from ..clients.claude import ClaudeClient
-
-PROMPT_TEMPLATE_PATH = (
-    pathlib.Path(__file__).resolve().parent.parent / "prompts" / "plan.md"
-)
+from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
 
 
 def run_plan_stage(
@@ -25,7 +22,7 @@ def run_plan_stage(
     raw_path: pathlib.Path,
     code_style: str,
 ) -> None:
-    template = PROMPT_TEMPLATE_PATH.read_text(encoding="utf-8")
+    template = load_prompts([BUNDLED_PROMPT_DIR / "plan.md"])
     prompt = template.format(
         plan_file=plan_file, instructions=instructions, code_style=code_style
     )

@@ -115,7 +115,7 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         "gremlins.orchestrators.gh.install_signal_handlers", lambda c: None
     )
     monkeypatch.setattr("gremlins.orchestrators.gh.get_repo", lambda: "owner/repo")
-    monkeypatch.setattr("gremlins.orchestrators.gh.load_code_style", lambda: "Be good.")
+    monkeypatch.setattr("gremlins.orchestrators.gh.load_prompts", lambda paths: "Be good.")
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
