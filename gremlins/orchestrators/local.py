@@ -248,7 +248,10 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
             try:
                 spec_text = spec_file.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError) as exc:
-                logger.warning("could not read spec.md (%s); proceeding without north-star context", exc)
+                logger.warning(
+                    "could not read spec.md (%s); proceeding without north-star context",
+                    exc,
+                )
         set_stage("implement")
         logger.info("[2/5] implementing (model: %s, from %s)", args.impl, plan_file)
         run_implement_stage(

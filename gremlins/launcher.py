@@ -142,7 +142,9 @@ def _extract_impl_model(pipeline_args: list[str], kind: str) -> str:
         return "sonnet"
 
 
-def _delete_patch_state(state_dir: pathlib.Path, delete_keys: tuple[str, ...], **fields: Any) -> None:
+def _delete_patch_state(
+    state_dir: pathlib.Path, delete_keys: tuple[str, ...], **fields: Any
+) -> None:
     """Remove delete_keys and merge fields into state.json atomically. Best-effort."""
     sf = state_dir / "state.json"
     try:

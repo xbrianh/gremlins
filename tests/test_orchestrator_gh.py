@@ -491,7 +491,9 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
         "gremlins.orchestrators.gh.run_ghaddress_stage",
         lambda **kw: None,
     )
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_wait_ci_stage", lambda **kw: None)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_wait_ci_stage", lambda **kw: None
+    )
 
     client = _CommittingClient(
         git_dir=tmp_path,
@@ -535,7 +537,9 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.orchestrators.gh.run_ghaddress_stage", lambda **kw: None
     )
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_wait_ci_stage", lambda **kw: None)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_wait_ci_stage", lambda **kw: None
+    )
 
     client = _CommittingClient(
         git_dir=tmp_path,
@@ -581,7 +585,9 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.orchestrators.gh.run_ghaddress_stage", lambda **kw: None
     )
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_wait_ci_stage", lambda **kw: None)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_wait_ci_stage", lambda **kw: None
+    )
 
     client = _CommittingClient(
         git_dir=tmp_path,
@@ -644,7 +650,9 @@ def test_gh_main_resume_prefers_persisted_model_over_sonnet_default(
     monkeypatch.setattr(
         "gremlins.orchestrators.gh.run_ghaddress_stage", lambda **kw: None
     )
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_wait_ci_stage", lambda **kw: None)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_wait_ci_stage", lambda **kw: None
+    )
 
     client = _CommittingClient(
         git_dir=tmp_path,
@@ -711,7 +719,9 @@ def test_resume_from_implement(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.orchestrators.gh.run_ghaddress_stage", lambda **kw: None
     )
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_wait_ci_stage", lambda **kw: None)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_wait_ci_stage", lambda **kw: None
+    )
 
     client = _CommittingClient(
         git_dir=tmp_path,
@@ -780,7 +790,9 @@ def test_resume_from_ghreview(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.orchestrators.gh.run_ghaddress_stage", lambda **kw: None
     )
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_wait_ci_stage", lambda **kw: None)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_wait_ci_stage", lambda **kw: None
+    )
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
 
     client = FakeClaudeClient(fixtures={})
@@ -844,7 +856,9 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
     monkeypatch.setattr(
         "gremlins.orchestrators.gh.run_ghaddress_stage", lambda **kw: None
     )
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_wait_ci_stage", lambda **kw: None)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_wait_ci_stage", lambda **kw: None
+    )
 
     # Each fixture carries a distinct non-zero cost so a regression that drops
     # any one stage shows up as the total being short by exactly that amount.
@@ -959,7 +973,9 @@ def test_code_style_forwarded_to_ghreview_and_ghaddress(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.orchestrators.gh.run_ghaddress_stage", record_ghaddress
     )
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_wait_ci_stage", lambda **kw: None)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_wait_ci_stage", lambda **kw: None
+    )
 
     client = _CommittingClient(
         git_dir=tmp_path,
@@ -1044,7 +1060,9 @@ def test_resume_from_commit_pr_skips_implement(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.orchestrators.gh.run_ghaddress_stage", lambda **kw: None
     )
-    monkeypatch.setattr("gremlins.orchestrators.gh.run_wait_ci_stage", lambda **kw: None)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.run_wait_ci_stage", lambda **kw: None
+    )
 
     client = FakeClaudeClient(fixtures={"commit-pr": _pr_events()})
 

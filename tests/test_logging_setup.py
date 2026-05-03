@@ -39,6 +39,7 @@ def test_configure_logging_utc_format(capsys):
     out = capsys.readouterr().out
     # UTC timestamp format: YYYY-MM-DDTHH:MM:SSZ
     import re
+
     assert re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", out), (
         f"expected UTC timestamp in output, got: {out!r}"
     )

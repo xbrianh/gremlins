@@ -180,7 +180,10 @@ def _resolve_plan_source(
         if src.stat().st_size == 0:
             die(f"--plan: file is empty: {plan_source}")
         issue_body = src.read_text(encoding="utf-8")
-        logger.info("[1/7] plan supplied via --plan (file): %s — posting as GitHub issue", plan_source)
+        logger.info(
+            "[1/7] plan supplied via --plan (file): %s — posting as GitHub issue",
+            plan_source,
+        )
 
         # Generate issue title via claude
         title_prompt = (
@@ -258,7 +261,9 @@ def _resolve_plan_source(
 
         # Use issue_body + newline to match the `cp` semantics of the file path above.
         plan_md.write_text(issue_body + "\n", encoding="utf-8")
-        logger.info("[1/7] plan supplied via --plan (issue %s#%s)", target_repo, issue_ref)
+        logger.info(
+            "[1/7] plan supplied via --plan (issue %s#%s)", target_repo, issue_ref
+        )
 
     patch_state(issue_url=issue_url, issue_num=issue_num)
     _update_description_from_plan(plan_md, state_file)
@@ -399,7 +404,10 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
             try:
                 spec_text = spec_file.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError) as exc:
-                logger.warning("could not read spec.md (%s); proceeding without north-star context", exc)
+                logger.warning(
+                    "could not read spec.md (%s); proceeding without north-star context",
+                    exc,
+                )
         result = run_implement_stage(
             client=client,
             impl_model=model,
