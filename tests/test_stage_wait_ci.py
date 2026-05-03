@@ -169,6 +169,28 @@ def test_review_required_after_fix_bails(tmp_path: pathlib.Path) -> None:
     assert client.calls[0].label == "ci-fix-1"
 
 
+def test_review_required_while_pending_bails(tmp_path: pathlib.Path) -> None:
+    """REVIEW_REQUIRED flip while checks are still pending bails immediately."""
+    client = FakeClaudeClient(fixtures={})
+    getter = _make_getter(
+        [
+            ([_PENDING_CHECK], ""),               # startup: pending
+            ([_PENDING_CHECK], "REVIEW_REQUIRED"),  # poll: still pending, approval dismissed
+        ]
+    )
+    with pytest.raises(RuntimeError, match="PR blocked by required human review"):
+        run_wait_ci_stage(
+            client=client,
+            model="sonnet",
+            pr_url=PR_URL,
+            artifacts_dir=tmp_path,
+            code_style="Be good.",
+            poll_interval=0,
+            checks_getter=getter,
+        )
+    assert client.calls == []
+
+
 def test_fix_on_failure_then_pass(tmp_path: pathlib.Path) -> None:
     """First poll fails, claude is invoked to fix, second attempt passes."""
     client = FakeClaudeClient(fixtures={"ci-fix-1": MINIMAL_EVENTS})

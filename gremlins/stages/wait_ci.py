@@ -28,6 +28,10 @@ _FAILING_CONCLUSIONS = frozenset({"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED"})
 _PENDING_STATES = frozenset({"EXPECTED", "PENDING"})
 
 
+class _ReviewRequiredError(RuntimeError):
+    pass
+
+
 def _is_done(check: dict[str, Any]) -> bool:
     if check.get("__typename") == "StatusContext":
         return check.get("state") not in _PENDING_STATES
@@ -43,7 +47,7 @@ def _is_failing(check: dict[str, Any]) -> bool:
 def _bail_if_review_required(decision: str) -> None:
     if decision == "REVIEW_REQUIRED":
         emit_bail("other", "PR requires human review approval before merge")
-        raise RuntimeError("ci-gate: PR blocked by required human review")
+        raise _ReviewRequiredError("ci-gate: PR blocked by required human review")
 
 
 def _poll_until_done(
@@ -62,6 +66,7 @@ def _poll_until_done(
             status = get_pr_ci_status(pr_url)
             checks = status["checks"]
             review_decision = status["review_decision"]
+        _bail_if_review_required(review_decision)
         if not checks or all(_is_done(c) for c in checks):
             return checks, review_decision
         if time.time() >= deadline:
@@ -144,11 +149,13 @@ def run_wait_ci_stage(
                 max_attempts,
                 poll_timeout,
             )
-            final_checks, review_decision = _poll_until_done(
-                pr_url, poll_timeout, poll_interval, checks_getter
-            )
-            _review_bailed = review_decision == "REVIEW_REQUIRED"
-            _bail_if_review_required(review_decision)
+            try:
+                final_checks, review_decision = _poll_until_done(
+                    pr_url, poll_timeout, poll_interval, checks_getter
+                )
+            except _ReviewRequiredError:
+                _review_bailed = True
+                raise
             failed = [c for c in final_checks if _is_failing(c)]
 
             if not failed:
