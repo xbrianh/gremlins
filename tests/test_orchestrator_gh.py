@@ -1093,7 +1093,7 @@ def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+    session_dir, _state_file = _patch_common(monkeypatch, tmp_path)
 
     monkeypatch.setattr(
         subprocess,
@@ -1142,7 +1142,7 @@ def test_wait_ci_stage_ordering(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+    _session_dir, _state_file = _patch_common(monkeypatch, tmp_path)
 
     monkeypatch.setattr(
         subprocess,
@@ -1193,7 +1193,7 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+    _session_dir, _state_file = _patch_common(monkeypatch, tmp_path)
 
     def _fake_read(sf, field):
         if field == "issue_url":
