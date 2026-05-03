@@ -26,9 +26,9 @@ from . import git as _git_mod
 VALID_KINDS = {"ghgremlin", "localgremlin", "bossgremlin"}
 
 _KIND_SUBCOMMAND = {
-    "localgremlin": "local",
-    "ghgremlin": "gh",
-    "bossgremlin": "boss",
+    "localgremlin": "_local",
+    "ghgremlin": "_gh",
+    "bossgremlin": "_boss",
 }
 
 

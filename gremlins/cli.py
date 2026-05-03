@@ -2,20 +2,22 @@
 
 The first positional argument selects the subcommand:
 
-- ``local``           — full plan → implement → review-code → address-code chain
+- ``local``           — launch a background localgremlin (self-backgrounding)
 - ``review``          — review-code stage only (was ``localreview.py``)
 - ``address``         — address-code stage only (was ``localaddress.py``)
-- ``gh``              — full gh-issue-driven pipeline (Phase 3)
-- ``boss``            — chained serial workflow driven by a top-level spec (Phase 4)
+- ``gh``              — launch a background ghgremlin (self-backgrounding)
+- ``boss``            — launch a background bossgremlin (self-backgrounding)
 - ``fleet``           — fleet-manager subcommands (status / stop / rescue / land /
                         close / rm / log)
 - ``handoff``         — chain-step decision agent (next-plan / chain-done / bail)
-- ``launch``          — launch a new background gremlin (replaces launch.sh forward path)
 - ``resume``          — re-spawn an existing gremlin from its recorded stage (replaces
                         launch.sh --resume)
 - ``bail``            — mark the running gremlin as bailed (reads GR_ID from env)
 - ``session-summary`` — SessionStart / UserPromptSubmit hook (replaces session-summary.sh)
 - ``_run-pipeline``   — internal spawn boundary; not for direct human use
+- ``_gh``             — internal pipeline entry point for ghgremlin; not for direct use
+- ``_local``          — internal pipeline entry point for localgremlin; not for direct use
+- ``_boss``           — internal pipeline entry point for bossgremlin; not for direct use
 
 Remaining argv is forwarded to the chosen orchestrator entry point.
 """
@@ -31,7 +33,7 @@ import traceback
 from .fleet import main as fleet_main
 from .fleet.session_summary import main as _session_summary_main
 from .handoff import main as handoff_main
-from .launcher import VALID_KINDS, launch, resume, write_terminal_state
+from .launcher import launch, resume, write_terminal_state
 from .orchestrators.gh import gh_main
 from .orchestrators.local import address_main, local_main, review_main
 from .state import (
@@ -49,21 +51,27 @@ def main(argv: list[str] | None = None) -> int:
     if not argv:
         sys.stderr.write(
             "usage: python -m gremlins.cli "
-            "{local|review|address|gh|boss|fleet|handoff|launch|resume|bail|session-summary}"
+            "{local|review|address|gh|boss|fleet|handoff|resume|bail|session-summary}"
             " [args...]\n"
         )
         return 1
     sub = argv[0]
     rest = argv[1:]
     if sub == "local":
+        return _self_background_main("localgremlin", rest)
+    if sub == "_local":
         return local_main(rest)
     if sub == "review":
         return review_main(rest)
     if sub == "address":
         return address_main(rest)
     if sub == "gh":
+        return _self_background_main("ghgremlin", rest)
+    if sub == "_gh":
         return gh_main(rest)
     if sub == "boss":
+        return _self_background_main("bossgremlin", rest)
+    if sub == "_boss":
         from .orchestrators.boss import boss_main
 
         return boss_main(rest)
@@ -71,8 +79,6 @@ def main(argv: list[str] | None = None) -> int:
         return fleet_main(rest)
     if sub == "handoff":
         return handoff_main(rest)
-    if sub == "launch":
-        return _launch_main(rest)
     if sub == "resume":
         return _resume_main(rest)
     if sub == "bail":
@@ -85,13 +91,12 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
 
-def _launch_main(argv: list[str]) -> int:
-    """CLI front-end for launcher.launch()."""
+def _self_background_main(kind: str, argv: list[str]) -> int:
+    """Launch a background gremlin of the given kind and print its id/log/state."""
     p = argparse.ArgumentParser(
-        prog="python -m gremlins.cli launch",
-        description="Launch a background gremlin.",
+        prog=f"python -m gremlins.cli {kind.removesuffix('gremlin')}",
+        description=f"Launch a background {kind}.",
     )
-    p.add_argument("kind", choices=sorted(VALID_KINDS))
     p.add_argument("--plan", default=None)
     p.add_argument("--description", default=None)
     p.add_argument("--parent", dest="parent_id", default=None)
@@ -111,18 +116,15 @@ def _launch_main(argv: list[str]) -> int:
     )
     args, rest = p.parse_known_args(argv)
 
-    instructions = args.instructions
-    pipeline_flags = list(rest)
-
     try:
         gr_id = launch(
-            args.kind,
-            instructions=instructions,
+            kind,
+            instructions=args.instructions,
             plan=args.plan,
             description=args.description,
             parent_id=args.parent_id,
             base_ref=args.base_ref,
-            pipeline_args=tuple(pipeline_flags),
+            pipeline_args=tuple(rest),
         )
     except (ValueError, RuntimeError) as exc:
         sys.stderr.write(f"error: {exc}\n")
