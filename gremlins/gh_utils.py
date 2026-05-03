@@ -54,6 +54,7 @@ def parse_issue_ref(plan_source: str, repo: str) -> tuple[str | None, str | None
 
 
 VIEW_ISSUE_TIMEOUT = 30  # seconds; bounds `gh issue view` shell-out
+GET_PR_CI_STATUS_TIMEOUT = 30  # seconds; bounds `gh pr view` shell-out in poll loop
 
 
 def view_issue(issue_ref: str, repo: str) -> dict[str, Any]:
@@ -177,12 +178,19 @@ def get_pr_ci_status(pr_url: str) -> dict[str, Any]:
     - 'checks': list of check objects from statusCheckRollup (may be empty)
     - 'review_decision': reviewDecision string (e.g. 'REVIEW_REQUIRED', 'APPROVED', '')
     """
-    r = subprocess.run(
-        ["gh", "pr", "view", pr_url, "--json", "statusCheckRollup,reviewDecision"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        r = subprocess.run(
+            ["gh", "pr", "view", pr_url, "--json", "statusCheckRollup,reviewDecision"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=GET_PR_CI_STATUS_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"timed out after {GET_PR_CI_STATUS_TIMEOUT}s fetching CI status for "
+            f"{pr_url!r} via `gh pr view`; check GitHub CLI authentication and network"
+        ) from exc
     if r.returncode != 0:
         raise RuntimeError(f"could not fetch PR CI status: {r.stderr.strip()}")
     try:
