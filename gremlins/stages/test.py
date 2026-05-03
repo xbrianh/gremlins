@@ -13,13 +13,10 @@ import pathlib
 import subprocess
 
 from ..clients.claude import ClaudeClient
+from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
 from ..state import check_bail, emit_bail
 
 logger = logging.getLogger(__name__)
-
-PROMPT_TEMPLATE_PATH = (
-    pathlib.Path(__file__).resolve().parent.parent / "prompts" / "test_fix.md"
-)
 
 
 def _diff_text(is_git: bool, cwd: pathlib.Path) -> str:
@@ -85,7 +82,7 @@ def run_test_stage(
             "before finishing."
         )
 
-    template = PROMPT_TEMPLATE_PATH.read_text(encoding="utf-8")
+    template = load_prompts([BUNDLED_PROMPT_DIR / "test_fix.md"])
 
     _exhausted = False
     _agent_bailed = False

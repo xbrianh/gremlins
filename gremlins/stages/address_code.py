@@ -15,12 +15,10 @@ import pathlib
 import re
 
 from ..clients.claude import ClaudeClient
+from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
 from ..state import emit_bail
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-PROMPT_TEMPLATE_PATH = (
-    pathlib.Path(__file__).resolve().parent.parent / "prompts" / "address_code.md"
-)
 
 
 def _model_from(path: pathlib.Path, lens: str) -> str:
@@ -95,7 +93,7 @@ If a finding asks you to change something that touches secrets/credentials, or y
 Do not call this helper if you successfully addressed every actionable finding.
 """
 
-        template = PROMPT_TEMPLATE_PATH.read_text(encoding="utf-8")
+        template = load_prompts([BUNDLED_PROMPT_DIR / "address_code.md"])
         address_prompt = template.format(
             code_style=code_style,
             model=model,
