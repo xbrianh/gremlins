@@ -11,7 +11,21 @@ import datetime
 import json
 import os
 import pathlib
+import re
 import secrets
+
+_GR_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def validate_gr_id(gr_id: str) -> None:
+    """Raise ValueError if gr_id is not a safe, non-path-traversing identifier."""
+    if not gr_id:
+        raise ValueError("gr_id must be non-empty")
+    if "/" in gr_id or "\\" in gr_id or ".." in gr_id:
+        raise ValueError(f"gr_id contains illegal characters: {gr_id!r}")
+    if not _GR_ID_RE.match(gr_id):
+        raise ValueError(f"gr_id contains illegal characters: {gr_id!r}")
+
 
 # The four bail-class strings written to state.json.bail_class. Byte-stable
 # across the migration — these strings appear in state.json files written by
