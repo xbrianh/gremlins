@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 
+from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
 from ..state import check_bail
 from .context import StageContext
 from .registry import register_stage
@@ -17,8 +18,24 @@ class GhaddressOptions:
 
 
 def run(ctx: StageContext, options: GhaddressOptions) -> None:
-    """Run /ghaddress on the PR. Calls check_bail after completion."""
-    prompt = f"## Coding style\n\n{options.code_style}\n\n/ghaddress {options.pr_url}"
+    bail_section = ""
+    if ctx.gr_id:
+        bail_section = """
+
+## Bail markers (running under a gremlin pipeline)
+
+If you cannot safely address one or more comments, write a bail marker before finishing — do not make speculative changes when bailing:
+
+- Comment touches **secrets** (credential management, API keys, encryption material): `python -m gremlins.cli bail secrets "<one-line reason>"`
+- Any other reason you decline to proceed (ambiguous ask, conflicting comments, etc.): `python -m gremlins.cli bail other "<one-line reason>"`
+
+Out-of-scope comments and `gh issue create` failures are not bail reasons — handle them per the instructions above. If you successfully addressed every actionable comment, do not write a bail marker — just exit normally.
+"""
+    prompt = load_prompts([BUNDLED_PROMPT_DIR / "ghaddress.md"]).format(
+        pr_url=options.pr_url,
+        code_style=options.code_style,
+        bail_section=bail_section,
+    )
     ctx.client.run(
         prompt,
         label="ghaddress",

@@ -10,11 +10,11 @@ from gremlins.stages.ghreview import GhreviewOptions
 from gremlins.stages.ghreview import run as run_ghreview
 
 
-def _make_ctx(client, tmp_path):
-    return StageContext(client=client, session_dir=tmp_path, gr_id=None)
+def _make_ctx(client, tmp_path, *, gr_id=None):
+    return StageContext(client=client, session_dir=tmp_path, gr_id=gr_id)
 
 
-def test_ghreview_stage_includes_code_style(tmp_path):
+def test_ghreview_prompt_includes_pr_url_and_code_style(tmp_path):
     client = FakeClaudeClient(fixtures={"ghreview": MINIMAL_EVENTS})
     run_ghreview(
         _make_ctx(client, tmp_path),
@@ -24,10 +24,36 @@ def test_ghreview_stage_includes_code_style(tmp_path):
             code_style="Be good.",
         ),
     )
-    assert "Be good." in client.calls[0].prompt
+    prompt = client.calls[0].prompt
+    assert "https://github.com/owner/repo/pull/1" in prompt
+    assert "Be good." in prompt
+    assert not prompt.startswith("/ghreview")
+    assert "/ghreview" not in prompt
 
 
-def test_ghaddress_stage_includes_code_style(tmp_path):
+def test_ghreview_prompt_no_bail_section_without_gr_id(tmp_path):
+    client = FakeClaudeClient(fixtures={"ghreview": MINIMAL_EVENTS})
+    run_ghreview(
+        _make_ctx(client, tmp_path, gr_id=None),
+        GhreviewOptions(
+            model="sonnet", pr_url="https://github.com/owner/repo/pull/1", code_style=""
+        ),
+    )
+    assert "gremlins bail" not in client.calls[0].prompt
+
+
+def test_ghreview_prompt_includes_bail_section_with_gr_id(tmp_path):
+    client = FakeClaudeClient(fixtures={"ghreview": MINIMAL_EVENTS})
+    run_ghreview(
+        _make_ctx(client, tmp_path, gr_id="gr-test"),
+        GhreviewOptions(
+            model="sonnet", pr_url="https://github.com/owner/repo/pull/1", code_style=""
+        ),
+    )
+    assert "gremlins bail" in client.calls[0].prompt
+
+
+def test_ghaddress_prompt_includes_pr_url_and_code_style(tmp_path):
     client = FakeClaudeClient(fixtures={"ghaddress": MINIMAL_EVENTS})
     run_ghaddress(
         _make_ctx(client, tmp_path),
@@ -37,4 +63,35 @@ def test_ghaddress_stage_includes_code_style(tmp_path):
             code_style="Be good.",
         ),
     )
-    assert "Be good." in client.calls[0].prompt
+    prompt = client.calls[0].prompt
+    assert "https://github.com/owner/repo/pull/1" in prompt
+    assert "Be good." in prompt
+    assert not prompt.startswith("/ghaddress")
+    assert "/ghaddress" not in prompt
+
+
+def test_ghaddress_prompt_no_bail_section_without_gr_id(tmp_path):
+    client = FakeClaudeClient(fixtures={"ghaddress": MINIMAL_EVENTS})
+    run_ghaddress(
+        _make_ctx(client, tmp_path, gr_id=None),
+        GhaddressOptions(
+            model="sonnet", pr_url="https://github.com/owner/repo/pull/1", code_style=""
+        ),
+    )
+    assert (
+        "## Bail markers (running under a gremlin pipeline)"
+        not in client.calls[0].prompt
+    )
+
+
+def test_ghaddress_prompt_includes_bail_section_with_gr_id(tmp_path):
+    client = FakeClaudeClient(fixtures={"ghaddress": MINIMAL_EVENTS})
+    run_ghaddress(
+        _make_ctx(client, tmp_path, gr_id="gr-test"),
+        GhaddressOptions(
+            model="sonnet", pr_url="https://github.com/owner/repo/pull/1", code_style=""
+        ),
+    )
+    assert (
+        "## Bail markers (running under a gremlin pipeline)" in client.calls[0].prompt
+    )
