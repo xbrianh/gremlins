@@ -186,17 +186,23 @@ def test_boss_missing_chain_kind_exits_nonzero_no_state(tmp_path, monkeypatch):
 
 
 def test_local_with_positional_instructions_passes():
-    ns = argparse.Namespace(plan=None, instructions=None, positional_instructions="fix the bug")
+    ns = argparse.Namespace(
+        plan=None, instructions=None, positional_instructions="fix the bug"
+    )
     _validate_local_args(ns)  # must not raise
 
 
 def test_local_with_plan_passes():
-    ns = argparse.Namespace(plan="plan.md", instructions=None, positional_instructions=None)
+    ns = argparse.Namespace(
+        plan="plan.md", instructions=None, positional_instructions=None
+    )
     _validate_local_args(ns)  # must not raise
 
 
 def test_local_with_instructions_flag_passes():
-    ns = argparse.Namespace(plan=None, instructions="fix the bug", positional_instructions=None)
+    ns = argparse.Namespace(
+        plan=None, instructions="fix the bug", positional_instructions=None
+    )
     _validate_local_args(ns)  # must not raise
 
 
