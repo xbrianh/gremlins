@@ -493,6 +493,7 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
         "gremlins.stages.ghaddress.run",
         lambda ctx, options: None,
     )
+    monkeypatch.setattr("gremlins.stages.verify.run", lambda ctx, options: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
 
     client = _CommittingClient(
@@ -534,6 +535,7 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
         lambda ctx, options: None,
     )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.verify.run", lambda ctx, options: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
 
     client = _CommittingClient(
@@ -577,6 +579,7 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
         lambda ctx, options: None,
     )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.verify.run", lambda ctx, options: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
 
     client = _CommittingClient(
@@ -637,6 +640,7 @@ def test_gh_main_resume_prefers_persisted_model_over_sonnet_default(
         lambda ctx, options: None,
     )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.verify.run", lambda ctx, options: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
 
     client = _CommittingClient(
@@ -701,6 +705,7 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         lambda ctx, options: None,
     )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.verify.run", lambda ctx, options: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
 
     client = _CommittingClient(
@@ -830,6 +835,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
         lambda ctx, options: None,
     )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.verify.run", lambda ctx, options: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
 
     # Each fixture carries a distinct non-zero cost so a regression that drops
@@ -944,6 +950,7 @@ def test_code_style_forwarded_to_ghreview_and_ghaddress(tmp_path, monkeypatch):
         lambda ctx, options: None,
     )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", record_ghaddress)
+    monkeypatch.setattr("gremlins.stages.verify.run", lambda ctx, options: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
 
     client = _CommittingClient(
@@ -1073,6 +1080,7 @@ def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
         lambda ctx, options: None,
     )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.verify.run", lambda ctx, options: None)
 
     captured_ctx = {}
     captured_options = {}
@@ -1118,6 +1126,10 @@ def test_wait_ci_stage_ordering(tmp_path, monkeypatch):
     order: list[str] = []
 
     monkeypatch.setattr(
+        "gremlins.stages.verify.run",
+        lambda ctx, options: order.append("verify"),
+    )
+    monkeypatch.setattr(
         "gremlins.stages.ghreview.run",
         lambda ctx, options: order.append("ghreview"),
     )
@@ -1149,7 +1161,9 @@ def test_wait_ci_stage_ordering(tmp_path, monkeypatch):
     result = gh_main(["--plan", "42"], client=client)
     assert result == 0
 
+    assert order[0] == "verify", "verify must run before other tracked stages"
     assert order[-2:] == ["ghaddress", "ci-gate"]
+    assert order.count("verify") == 1
     assert order.count("ci-gate") == 1
 
 
@@ -1210,3 +1224,144 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
     assert earlier_called == [], "earlier stages must be skipped"
     assert len(ci_calls) == 1
     assert ci_calls[0].pr_url == "https://github.com/owner/repo/pull/200"
+
+
+# ---------------------------------------------------------------------------
+# verify stage: argument wiring and resume behavior
+# ---------------------------------------------------------------------------
+
+
+def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
+    """verify.run receives fix_model, cwd, code_style via options, session_dir via ctx."""
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    session_dir, _state_file = _patch_common(monkeypatch, tmp_path)
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
+    )
+    monkeypatch.setattr("gremlins.stages.ghreview.run", lambda ctx, options: None)
+    monkeypatch.setattr(
+        "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.request_copilot.run",
+        lambda ctx, options: None,
+    )
+    monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
+
+    captured_ctx = {}
+    captured_options = {}
+
+    def record_verify(ctx, options):
+        captured_ctx["ctx"] = ctx
+        captured_options["options"] = options
+
+    monkeypatch.setattr("gremlins.stages.verify.run", record_verify)
+
+    client = _CommittingClient(
+        git_dir=tmp_path,
+        fixtures={
+            "implement": IMPL_EVENTS,
+            "commit-pr": _pr_events("https://github.com/owner/repo/pull/77"),
+        },
+    )
+
+    result = gh_main(["--plan", "42", "--model", "claude-opus-4-7"], client=client)
+    assert result == 0
+
+    opts = captured_options["options"]
+    ctx = captured_ctx["ctx"]
+    assert opts.fix_model == "claude-opus-4-7"
+    assert opts.code_style == "Be good."
+    assert ctx.session_dir == session_dir
+
+
+def test_resume_from_verify(tmp_path, monkeypatch):
+    """--resume-from verify skips plan and implement, runs verify onward."""
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    # Simulate a completed implement stage: one commit above init.
+    (tmp_path / "impl.txt").write_text("impl content\n")
+    subprocess.run(
+        ["git", "add", "impl.txt"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "feat: add impl.txt"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    base_ref = subprocess.run(
+        ["git", "rev-parse", "HEAD~1"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    handoff_branch = "ghgremlin-impl-handoff-verify-test"
+    subprocess.run(
+        ["git", "branch", handoff_branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    _session_dir, _state_file = _patch_common(monkeypatch, tmp_path)
+
+    def _fake_read(sf, field):
+        if field == "issue_url":
+            return "https://github.com/owner/repo/issues/5"
+        if field == "issue_num":
+            return "5"
+        if field == "pr_url":
+            return ""
+        if field == "impl_handoff_branch":
+            return handoff_branch
+        if field == "impl_base_ref":
+            return base_ref
+        if field == "model":
+            return ""
+        return ""
+
+    monkeypatch.setattr(_gh_mod, "_read_state_field", _fake_read)
+    monkeypatch.setattr(
+        _gh_mod, "_fetch_issue_body", lambda num, repo: "# Plan\nContent.\n"
+    )
+
+    earlier_called: list[str] = []
+    verify_calls = []
+
+    monkeypatch.setattr(
+        "gremlins.stages.verify.run",
+        lambda ctx, options: verify_calls.append(options),
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.ghreview.run",
+        lambda ctx, options: earlier_called.append("ghreview"),
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.wait_copilot.run",
+        lambda ctx, options: "APPROVED",
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.request_copilot.run",
+        lambda ctx, options: None,
+    )
+    monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
+    monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
+
+    client = FakeClaudeClient(fixtures={"commit-pr": _pr_events()})
+
+    result = gh_main(["--plan", "5", "--resume-from", "verify"], client=client)
+    assert result == 0
+
+    labels = [c.label for c in client.calls]
+    assert "implement" not in labels, "implement must not run on verify resume"
+    assert len(verify_calls) == 1

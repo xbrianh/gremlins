@@ -61,7 +61,7 @@ validated in the orchestrators.
 
 - **Bail classes** (`state.json.bail_class`): `reviewer_requested_changes`, `security`, `secrets`, `other`.
 - **Local stage names**: `plan`, `implement`, `review-code`, `address-code`, `test`.
-- **Gh stage names**: `plan`, `implement`, `commit-pr`, `request-copilot`, `ghreview`, `wait-copilot`, `ghaddress`.
+- **Gh stage names**: `plan`, `implement`, `verify`, `commit-pr`, `request-copilot`, `ghreview`, `wait-copilot`, `ghaddress`, `ci-gate`.
 - **Marker-protocol bail reasons**: `diagnosis_no_marker`, `diagnosis_bad_marker`, `diagnosis_claude_error`, `diagnosis_timeout`, `excluded_class:<class>`, `attempts_exhausted`, `relaunch_launcher_missing`, `relaunch_failed`.
 
 ## Stage and bail bookkeeping
