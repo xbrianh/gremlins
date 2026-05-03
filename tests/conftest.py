@@ -1,3 +1,4 @@
+import logging
 import pathlib
 import re
 import shutil
@@ -49,6 +50,16 @@ def common_local_patches(monkeypatch):
     monkeypatch.setattr(
         "gremlins.orchestrators.local.install_signal_handlers", lambda c: None
     )
+
+
+@pytest.fixture(autouse=True)
+def _restore_root_logger():
+    root = logging.getLogger()
+    orig_level = root.level
+    orig_handlers = root.handlers[:]
+    yield
+    root.setLevel(orig_level)
+    root.handlers[:] = orig_handlers
 
 
 @pytest.fixture(autouse=True)

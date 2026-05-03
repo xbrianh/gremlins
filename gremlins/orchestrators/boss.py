@@ -87,9 +87,6 @@ def _sigterm_handler(signum: int, frame: types.FrameType | None) -> None:
             pass
 
 
-signal.signal(signal.SIGTERM, _sigterm_handler)
-
-
 def die(msg: str) -> NoReturn:
     logger.error("fatal: %s", msg)
     sys.exit(1)
@@ -695,6 +692,7 @@ def _maybe_set_description_from_spec(state_dir: str) -> None:
 
 def boss_main(argv: list[str]) -> int:
     configure_logging()
+    signal.signal(signal.SIGTERM, _sigterm_handler)
     args = _parse_boss_args(argv)
     if os.environ.get("GREMLINS_TEST_NOOP_PIPELINE"):
         return 0

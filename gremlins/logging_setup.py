@@ -24,4 +24,5 @@ def configure_logging(level: int = logging.INFO) -> None:
     root.setLevel(level)
     for h in root.handlers[:]:
         root.removeHandler(h)
+        h.close()
     root.addHandler(handler)
