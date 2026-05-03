@@ -109,7 +109,7 @@ def _validate_gh_args(rest: list[str]) -> None:
         raise ValueError(f"invalid model: {args.model!r}")
 
 
-def _validate_boss_args(rest: list[str]) -> None:
+def _validate_boss_args(rest: list[str], plan: str | None) -> None:
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--chain-kind", default=None)
     args, _ = p.parse_known_args(rest)
@@ -118,6 +118,8 @@ def _validate_boss_args(rest: list[str]) -> None:
         raise ValueError(
             f"--chain-kind is required and must be 'local' or 'gh' ({got})"
         )
+    if plan is None:
+        raise ValueError("--plan is required")
 
 
 def _self_background_main(kind: str, argv: list[str]) -> int:
@@ -157,7 +159,7 @@ def _self_background_main(kind: str, argv: list[str]) -> int:
         elif kind == "ghgremlin":
             _validate_gh_args(rest)
         elif kind == "bossgremlin":
-            _validate_boss_args(rest)
+            _validate_boss_args(rest, args.plan)
         instructions = args.instructions or args.positional_instructions
         gr_id = launch(
             kind,

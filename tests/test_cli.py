@@ -240,7 +240,21 @@ def test_gh_valid_model_passes():
 
 
 def test_boss_valid_chain_kind_passes():
-    _validate_boss_args(["--chain-kind", "local"])  # must not raise
+    _validate_boss_args(["--chain-kind", "local"], "plan.md")  # must not raise
+
+
+def test_boss_missing_plan_raises():
+    with pytest.raises(ValueError, match="--plan is required"):
+        _validate_boss_args(["--chain-kind", "local"], None)
+
+
+def test_boss_missing_plan_exits_nonzero_no_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+
+    rc = main(["boss", "--chain-kind", "local"])
+
+    assert rc != 0
+    assert _no_state_created(tmp_path)
 
 
 # ---------------------------------------------------------------------------
