@@ -58,7 +58,7 @@ class FakeClaudeClient:
 
     def _load_events(self, fixture: object) -> list[dict[str, Any]]:
         if isinstance(fixture, (list, tuple)):
-            return [cast(dict[str, Any], e) for e in cast(list[Any], fixture)]
+            return [dict(cast(dict[str, Any], e)) for e in cast(list[Any], fixture)]
         if isinstance(fixture, (str, pathlib.Path)):
             path = pathlib.Path(fixture)
             events: list[dict[str, Any]] = []

@@ -18,7 +18,7 @@ import re
 import shutil
 import subprocess
 import sys
-from typing import NoReturn, cast
+from typing import Any, NoReturn, cast
 
 from gremlins.prompts import load_code_style
 
@@ -499,7 +499,12 @@ def main(argv: list[str]) -> int:
         print(f"    updated plan: {out_path}", flush=True)
         print(f"    signal file:  {signal_path}", flush=True)
 
-    followups = cast(list[str], state.get("operator_followups") or [])
+    raw_followups = state.get("operator_followups")
+    followups = (
+        [str(item) for item in cast(list[Any], raw_followups) if str(item).strip()]
+        if isinstance(raw_followups, list)
+        else []
+    )
     if followups:
         print(f"    operator follow-ups ({len(followups)}):", flush=True)
         for item in followups:
