@@ -107,13 +107,13 @@ def run_wait_ci_stage(
         checks = status["checks"]
         review_decision = status["review_decision"]
 
-    if not checks:
-        logger.info("ci-gate: no CI checks found, skipping")
-        return
-
     if review_decision == "REVIEW_REQUIRED":
         emit_bail("other", "PR requires human review approval before merge")
         raise RuntimeError("ci-gate: PR blocked by required human review")
+
+    if not checks:
+        logger.info("ci-gate: no CI checks found, skipping")
+        return
 
     template = PROMPT_TEMPLATE_PATH.read_text(encoding="utf-8")
     bail_section = ""

@@ -63,6 +63,24 @@ def test_no_checks_skips(tmp_path: pathlib.Path) -> None:
     assert client.calls == []
 
 
+def test_review_required_no_checks_bails(tmp_path: pathlib.Path) -> None:
+    """REVIEW_REQUIRED is checked before the no-checks short-circuit."""
+    client = FakeClaudeClient(fixtures={})
+    getter = _make_getter([
+        ([], "REVIEW_REQUIRED"),
+    ])
+    with pytest.raises(RuntimeError, match="PR blocked by required human review"):
+        run_wait_ci_stage(
+            client=client,
+            model="sonnet",
+            pr_url=PR_URL,
+            artifacts_dir=tmp_path,
+            code_style="Be good.",
+            checks_getter=getter,
+        )
+    assert client.calls == []
+
+
 def test_all_checks_passing_returns(tmp_path: pathlib.Path) -> None:
     client = FakeClaudeClient(fixtures={})
     getter = _make_getter([
