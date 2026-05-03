@@ -241,3 +241,50 @@ def test_gh_valid_model_passes():
 
 def test_boss_valid_chain_kind_passes():
     _validate_boss_args(["--chain-kind", "local"])  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# resume subcommand — gr_id validation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    [
+        "../escape",
+        "foo/bar",
+        "foo\\bar",
+        "foo..bar",
+        "id with spaces",
+        "id;injection",
+    ],
+)
+def test_resume_rejects_invalid_gr_id(tmp_path, monkeypatch, bad_id):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+
+    rc = main(["resume", bad_id])
+
+    assert rc != 0
+
+
+# ---------------------------------------------------------------------------
+# bail subcommand — GR_ID validation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    [
+        "../escape",
+        "foo/bar",
+        "foo..bar",
+        "id with spaces",
+    ],
+)
+def test_bail_rejects_malformed_gr_id_env(tmp_path, monkeypatch, bad_id):
+    monkeypatch.setenv("GR_ID", bad_id)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+
+    rc = main(["bail", "other", "reason"])
+
+    assert rc != 0

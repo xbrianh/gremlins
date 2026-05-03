@@ -197,6 +197,7 @@ def _resume_main(argv: list[str]) -> int:
     args = p.parse_args(argv)
 
     try:
+        validate_gr_id(args.gr_id)
         resume(args.gr_id)
     except (ValueError, RuntimeError) as exc:
         sys.stderr.write(f"error: {exc}\n")
@@ -260,6 +261,12 @@ def _bail_main(argv: list[str]) -> int:
     args = p.parse_args(argv)
 
     gr_id = os.environ.get("GR_ID")
+    if gr_id is not None:
+        try:
+            validate_gr_id(gr_id)
+        except ValueError as exc:
+            sys.stderr.write(f"error: {exc}\n")
+            return 1
     emit_bail(gr_id, args.bail_class, args.bail_detail)
     return 0
 
