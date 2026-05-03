@@ -438,7 +438,10 @@ def main(argv: list[str]) -> int:
     except Exception as exc:
         die(f"git context collection failed: {exc}")
 
-    code_style = load_prompts([BUNDLED_PROMPT_DIR / "code_style.md"])
+    try:
+        code_style = load_prompts([BUNDLED_PROMPT_DIR / "code_style.md"])
+    except (FileNotFoundError, ValueError) as exc:
+        die(f"error loading prompt: {exc}")
     prompt = build_prompt(
         plan_text=plan_text,
         branch=branch,

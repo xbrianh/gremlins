@@ -348,7 +348,10 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         logger.info("resumed issue: %s", issue_url)
         issue_body = _fetch_issue_body(issue_num, repo)
 
-    code_style = load_prompts([BUNDLED_PROMPT_DIR / "code_style.md"])
+    try:
+        code_style = load_prompts([BUNDLED_PROMPT_DIR / "code_style.md"])
+    except (FileNotFoundError, ValueError) as exc:
+        die(f"error loading prompt: {exc}")
 
     # pr_url populated by stage_commit_pr; later stages read it here.
     pr_url_holder: dict[str, str] = {}

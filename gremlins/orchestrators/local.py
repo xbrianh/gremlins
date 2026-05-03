@@ -163,7 +163,10 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         shutil.copyfile(spec_src, spec_file)
 
     is_git = in_git_repo()
-    code_style = load_prompts([BUNDLED_PROMPT_DIR / "code_style.md"])
+    try:
+        code_style = load_prompts([BUNDLED_PROMPT_DIR / "code_style.md"])
+    except (FileNotFoundError, ValueError) as exc:
+        die(f"error loading prompt: {exc}")
 
     # Resume preconditions
     start_idx = 0
@@ -382,7 +385,10 @@ def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
             die(f"failed to read --plan {plan_path}: {exc}")
 
     is_git = in_git_repo()
-    code_style = load_prompts([BUNDLED_PROMPT_DIR / "code_style.md"])
+    try:
+        code_style = load_prompts([BUNDLED_PROMPT_DIR / "code_style.md"])
+    except (FileNotFoundError, ValueError) as exc:
+        die(f"error loading prompt: {exc}")
     if is_git:
         # Refuse to spawn three reviewers on an empty diff. HEAD~1 may not
         # exist (initial commit); in that case we require dirty tree to have
@@ -466,7 +472,10 @@ def address_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         die(f"--dir does not exist: {session_dir}")
 
     is_git = in_git_repo()
-    code_style = load_prompts([BUNDLED_PROMPT_DIR / "code_style.md"])
+    try:
+        code_style = load_prompts([BUNDLED_PROMPT_DIR / "code_style.md"])
+    except (FileNotFoundError, ValueError) as exc:
+        die(f"error loading prompt: {exc}")
 
     logger.info("addressing code reviews (model: %s)", args.address)
     run_address_code_stage(

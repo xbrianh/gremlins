@@ -8,7 +8,7 @@ def load_prompts(paths: list[pathlib.Path]) -> str:
     """
     parts: list[str] = []
     for path in paths:
-        if not path.exists():
+        if not path.is_file():
             raise FileNotFoundError(f"prompt file not found: {path}")
         text = path.read_text(encoding="utf-8")
         if not text.strip():
