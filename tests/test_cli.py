@@ -135,3 +135,40 @@ def test_run_pipeline_valid_id_proceeds(tmp_path, monkeypatch):
     with pytest.raises(SystemExit):
         main(["_run-pipeline", "valid-gremlin-abc123", "_local"])
     # If we reach here, validate_gr_id passed; pipeline may exit for any reason.
+
+
+# ---------------------------------------------------------------------------
+# Pre-launch validators — invalid invocations must exit non-zero without
+# touching XDG_STATE_HOME.
+# ---------------------------------------------------------------------------
+
+
+def _no_state_created(tmp_path: pathlib.Path) -> bool:
+    return not (tmp_path / "claude-gremlins").exists()
+
+
+def test_local_no_args_exits_nonzero_no_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+
+    rc = main(["local"])
+
+    assert rc != 0
+    assert _no_state_created(tmp_path)
+
+
+def test_gh_invalid_model_exits_nonzero_no_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+
+    rc = main(["gh", "--model", "!!!"])
+
+    assert rc != 0
+    assert _no_state_created(tmp_path)
+
+
+def test_boss_missing_chain_kind_exits_nonzero_no_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+
+    rc = main(["boss", "--plan", "x.md"])
+
+    assert rc != 0
+    assert _no_state_created(tmp_path)
