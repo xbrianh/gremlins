@@ -486,7 +486,7 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
         lambda ctx, options: "APPROVED",
     )
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run_request_copilot_stage",
+        "gremlins.stages.request_copilot.run",
         lambda ctx, options: None,
     )
     monkeypatch.setattr(
@@ -530,7 +530,7 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
         "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
     )
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run_request_copilot_stage",
+        "gremlins.stages.request_copilot.run",
         lambda ctx, options: None,
     )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
@@ -573,7 +573,7 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
         "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
     )
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run_request_copilot_stage",
+        "gremlins.stages.request_copilot.run",
         lambda ctx, options: None,
     )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
@@ -633,7 +633,7 @@ def test_gh_main_resume_prefers_persisted_model_over_sonnet_default(
         "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
     )
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run_request_copilot_stage",
+        "gremlins.stages.request_copilot.run",
         lambda ctx, options: None,
     )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
@@ -697,7 +697,7 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
     )
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run_request_copilot_stage",
+        "gremlins.stages.request_copilot.run",
         lambda ctx, options: None,
     )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
@@ -765,7 +765,7 @@ def test_resume_from_ghreview(tmp_path, monkeypatch):
         "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
     )
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run_request_copilot_stage",
+        "gremlins.stages.request_copilot.run",
         lambda ctx, options: None,
     )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
@@ -826,7 +826,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
         "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
     )
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run_request_copilot_stage",
+        "gremlins.stages.request_copilot.run",
         lambda ctx, options: None,
     )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
@@ -940,7 +940,7 @@ def test_code_style_forwarded_to_ghreview_and_ghaddress(tmp_path, monkeypatch):
         "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
     )
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run_request_copilot_stage",
+        "gremlins.stages.request_copilot.run",
         lambda ctx, options: None,
     )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", record_ghaddress)
@@ -1022,7 +1022,7 @@ def test_resume_from_commit_pr_skips_implement(tmp_path, monkeypatch):
         "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
     )
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run_request_copilot_stage",
+        "gremlins.stages.request_copilot.run",
         lambda ctx, options: None,
     )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
@@ -1069,7 +1069,7 @@ def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
         "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
     )
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run_request_copilot_stage",
+        "gremlins.stages.request_copilot.run",
         lambda ctx, options: None,
     )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
@@ -1126,7 +1126,7 @@ def test_wait_ci_stage_ordering(tmp_path, monkeypatch):
         lambda ctx, options: order.append("wait-copilot") or "APPROVED",
     )
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run_request_copilot_stage",
+        "gremlins.stages.request_copilot.run",
         lambda ctx, options: order.append("request-copilot"),
     )
     monkeypatch.setattr(
@@ -1188,7 +1188,7 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
         lambda ctx, options: earlier_called.append("wait-copilot") or "APPROVED",
     )
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run_request_copilot_stage",
+        "gremlins.stages.request_copilot.run",
         lambda ctx, options: earlier_called.append("request-copilot"),
     )
     monkeypatch.setattr(

@@ -19,7 +19,15 @@ from ..git import DirtyOnly, HeadAdvanced
 from ..logging_setup import configure_logging
 from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
 from ..runner import install_signal_handlers, run_stages
-from ..stages import commit_pr, ghaddress, ghreview, implement, wait_ci, wait_copilot
+from ..stages import (
+    commit_pr,
+    ghaddress,
+    ghreview,
+    implement,
+    request_copilot,
+    wait_ci,
+    wait_copilot,
+)
 from ..stages.context import StageContext
 from ..stages.implement import ImplStageResult
 from ..state import patch_state, resolve_session_dir, resolve_state_file, set_stage
@@ -449,9 +457,9 @@ def gh_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         _ensure_pr_url()
         set_stage("request-copilot")
         logger.info("[3/7] requesting Copilot review")
-        wait_copilot.run_request_copilot_stage(
+        request_copilot.run(
             ctx,
-            wait_copilot.RequestCopilotOptions(repo=repo, pr_num=pr_num),
+            request_copilot.RequestCopilotOptions(repo=repo, pr_num=pr_num),
         )
 
     def stage_ghreview() -> None:

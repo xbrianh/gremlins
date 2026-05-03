@@ -1,20 +1,13 @@
-"""Copilot review polling stage and request-copilot helper for the gh pipeline."""
+"""Copilot review polling stage for the gh pipeline."""
 
 from __future__ import annotations
 
 import dataclasses
-import subprocess
 import time
 from collections.abc import Callable
 
 from ..gh_utils import check_copilot_review
 from .context import StageContext
-
-
-@dataclasses.dataclass
-class RequestCopilotOptions:
-    repo: str
-    pr_num: str
 
 
 @dataclasses.dataclass
@@ -24,32 +17,6 @@ class WaitCopilotOptions:
     timeout: int = 600
     interval: int = 20
     review_checker: Callable[[], str | None] | None = None
-
-
-def run_request_copilot_stage(
-    _ctx: StageContext, options: RequestCopilotOptions
-) -> None:
-    """Add copilot-pull-request-reviewer to the PR's reviewer list."""
-    r = subprocess.run(
-        [
-            "gh",
-            "pr",
-            "edit",
-            options.pr_num,
-            "--repo",
-            options.repo,
-            "--add-reviewer",
-            "copilot-pull-request-reviewer",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if r.returncode != 0:
-        raise RuntimeError(
-            f"could not request Copilot review (is it enabled in repo settings?): "
-            f"{r.stderr.strip()}"
-        )
 
 
 def run(_ctx: StageContext, options: WaitCopilotOptions) -> str:
