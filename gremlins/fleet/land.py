@@ -865,7 +865,7 @@ def _land_gh(
 
     print(f"Merging: {pr_url}")
     r = subprocess.run(
-        ["gh", "pr", "merge", pr_url, "--squash", "--delete-branch"],
+        ["gh", "pr", "merge", pr_url, "--auto", "--squash", "--delete-branch"],
         capture_output=True,
         text=True,
         cwd=cwd,
