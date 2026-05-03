@@ -66,9 +66,10 @@ def _wait_for_checks(
     grace_secs: int,
 ) -> tuple[list[dict[str, Any]], str]:
     deadline = time.time() + grace_secs
+    review_decision = ""
     while True:
         checks, review_decision = _fetch_checks(options.pr_url, options.checks_getter)
-        if checks or review_decision or time.time() >= deadline:
+        if checks or review_decision == "REVIEW_REQUIRED" or time.time() >= deadline:
             return checks, review_decision
         time.sleep(options.poll_interval)
 

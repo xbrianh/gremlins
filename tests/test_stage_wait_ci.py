@@ -348,19 +348,27 @@ def test_grace_period_waits_for_checks_to_appear(tmp_path: pathlib.Path) -> None
 
 
 def test_no_checks_after_grace_skips(tmp_path: pathlib.Path) -> None:
+    """Grace period elapses with no checks appearing — should skip without invoking agent."""
     client = FakeClaudeClient(fixtures={})
-    getter = _make_getter([([], ""), ([], ""), ([], "")])
+    call_count = [0]
+
+    def getter() -> tuple[list[dict[str, Any]], str]:
+        call_count[0] += 1
+        return [], ""
+
     run_wait_ci(
         _make_ctx(client, tmp_path),
         WaitCiOptions(
             model="sonnet",
             pr_url=PR_URL,
             code_style="Be good.",
-            startup_grace_secs=0,
+            poll_interval=0,
+            startup_grace_secs=1,
             checks_getter=getter,
         ),
     )
     assert client.calls == []
+    assert call_count[0] >= 2
 
 
 def test_poll_empty_mid_run_continues_polling(tmp_path: pathlib.Path) -> None:
