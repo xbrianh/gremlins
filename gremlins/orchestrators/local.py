@@ -84,7 +84,9 @@ def _parse_local_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
-def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
+def local_main(
+    argv: list[str], *, client: ClaudeClient | None = None, gr_id: str | None = None
+) -> int:
     configure_logging()
     if client is None:
         client = SubprocessClaudeClient()
@@ -98,7 +100,7 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     if shutil.which("claude") is None:
         die("claude CLI not found")
 
-    session_dir = resolve_session_dir()
+    session_dir = resolve_session_dir(gr_id)
     plan_file = session_dir / "plan.md"
     review_code_file = session_dir / f"review-code-detail-{args.detail}.md"
 
@@ -183,7 +185,7 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     ctx = StageContext(
         client=client,
         session_dir=session_dir,
-        gr_id=os.environ.get("GR_ID"),
+        gr_id=gr_id,
     )
 
     plan_text_holder: dict[str, str] = {}
@@ -195,7 +197,7 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
             else:
                 logger.info("[1/5] plan reused from snapshot -> %s", plan_file)
         else:
-            set_stage("plan")
+            set_stage(gr_id, "plan")
             logger.info("[1/5] planning (model: %s) -> %s", args.plan_model, plan_file)
             plan.run(
                 ctx,
@@ -219,7 +221,7 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
                     "could not read spec.md (%s); proceeding without north-star context",
                     exc,
                 )
-        set_stage("implement")
+        set_stage(gr_id, "implement")
         logger.info("[2/5] implementing (model: %s, from %s)", args.impl, plan_file)
         implement.run(
             ctx,
@@ -236,7 +238,7 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         plan_text = plan_text_holder.get("text") or plan_file.read_text(
             encoding="utf-8"
         )
-        set_stage("review-code")
+        set_stage(gr_id, "review-code")
         logger.info("[3/5] reviewing code (model: %s)", args.detail)
         review_file = review_code.run(
             ctx,
@@ -250,7 +252,7 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         logger.info("detail code review (%s): %s", args.detail, review_file)
 
     def stage_address_code() -> None:
-        set_stage("address-code")
+        set_stage(gr_id, "address-code")
         logger.info("[4/5] addressing code reviews (model: %s)", args.address)
         address_code.run(
             ctx,
@@ -262,7 +264,7 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         )
 
     def stage_test() -> None:
-        set_stage("test")
+        set_stage(gr_id, "test")
         if args.test_cmd:
             logger.info(
                 "[5/5] running tests (cmd: %r, max-attempts: %s, model: %s)",
@@ -293,7 +295,7 @@ def local_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
 
     total_cost = getattr(client, "total_cost_usd", 0.0)
     if total_cost is not None and total_cost > 0:
-        patch_state(total_cost_usd=total_cost)
+        patch_state(gr_id, total_cost_usd=total_cost)
 
     logger.info("done. session artifacts in: %s", session_dir)
     if total_cost is not None and total_cost > 0:
@@ -386,9 +388,7 @@ def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
                 "nothing to review: HEAD~1..HEAD has no changes and working tree is clean"
             )
 
-    ctx = StageContext(
-        client=client, session_dir=session_dir, gr_id=os.environ.get("GR_ID")
-    )
+    ctx = StageContext(client=client, session_dir=session_dir, gr_id=None)
     logger.info("reviewing code (model: %s)", args.detail)
     review_file = review_code.run(
         ctx,
@@ -434,9 +434,7 @@ def address_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     except (FileNotFoundError, ValueError) as exc:
         die(f"error loading prompt: {exc}")
 
-    ctx = StageContext(
-        client=client, session_dir=session_dir, gr_id=os.environ.get("GR_ID")
-    )
+    ctx = StageContext(client=client, session_dir=session_dir, gr_id=None)
     logger.info("addressing code reviews (model: %s)", args.address)
     address_code.run(
         ctx,

@@ -287,7 +287,7 @@ def run_handoff(
     right cwd/rev so handoff sees the actually-landed work, not a stale ref
     in the user's repo that may never advance during the chain.
     """
-    set_stage("handoff")
+    set_stage(gr_id, "handoff")
 
     n = boss_state["handoff_count"] + 1
     out_path = os.path.join(state_dir, f"handoff-{n:03d}.md")
@@ -568,7 +568,9 @@ def _parse_boss_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
-def _resolve_plan_source(plan: str, state_dir: str) -> tuple[str, str, str]:
+def _resolve_plan_source(
+    plan: str, state_dir: str, *, gr_id: str | None = None
+) -> tuple[str, str, str]:
     """Resolve --plan into a snapshot under ``<state_dir>/spec.md``.
 
     Accepts the same forms as ghgremlin's --plan: a local file path, ``42`` /
@@ -659,7 +661,7 @@ def _resolve_plan_source(plan: str, state_dir: str) -> tuple[str, str, str]:
         f.write(body + "\n")
     # Persist the issue identifiers to state.json immediately so a crash
     # between this point and init_boss_state() doesn't strip them on rescue.
-    patch_state(issue_url=issue_url, issue_num=issue_num)
+    patch_state(gr_id, issue_url=issue_url, issue_num=issue_num)
     logger.info(
         "plan source (issue %s#%s): %s -> %s",
         target_repo,
@@ -670,7 +672,9 @@ def _resolve_plan_source(plan: str, state_dir: str) -> tuple[str, str, str]:
     return spec_dest, issue_url, issue_num
 
 
-def _maybe_set_description_from_spec(state_dir: str) -> None:
+def _maybe_set_description_from_spec(
+    state_dir: str, *, gr_id: str | None = None
+) -> None:
     """If state.json's description wasn't set explicitly, fill it from the
     spec snapshot's first heading. Mirrors gh's _update_description_from_plan.
 
@@ -702,20 +706,18 @@ def _maybe_set_description_from_spec(state_dir: str) -> None:
             h1 = m.group(1).strip()[:60]
             break
     if h1:
-        patch_state(description=h1)
+        patch_state(gr_id, description=h1)
 
 
-def boss_main(argv: list[str]) -> int:
+def boss_main(argv: list[str], *, gr_id: str | None = None) -> int:
     configure_logging()
     signal.signal(signal.SIGTERM, _sigterm_handler)
     args = _parse_boss_args(argv)
     if os.environ.get("GREMLINS_TEST_NOOP_PIPELINE"):
         return 0
 
-    gr_id = os.environ.get("GR_ID")
     if not gr_id:
-        die("GR_ID env var not set (should be set by launch.sh)")
-
+        die("gr_id is required (set by _run-pipeline)")
     state_dir = os.path.join(STATE_ROOT, gr_id)
     if not os.path.isdir(state_dir):
         die(f"state dir not found: {state_dir}")
@@ -744,7 +746,9 @@ def boss_main(argv: list[str]) -> int:
                 "--test is not supported for --chain-kind gh "
                 "(gh pipeline test integration is a separate plan)"
             )
-        spec_path, issue_url, issue_num = _resolve_plan_source(args.plan, state_dir)
+        spec_path, issue_url, issue_num = _resolve_plan_source(
+            args.plan, state_dir, gr_id=gr_id
+        )
         if issue_url:
             logger.info(
                 "chain start: kind=%s, spec=%s, issue=%s",
@@ -754,7 +758,7 @@ def boss_main(argv: list[str]) -> int:
             )
         else:
             logger.info("chain start: kind=%s, spec=%s", chain_kind, spec_path)
-        _maybe_set_description_from_spec(state_dir)
+        _maybe_set_description_from_spec(state_dir, gr_id=gr_id)
         if chain_kind == "gh":
             # gh children open PRs from the repo's default branch and land
             # there, regardless of where the user happens to be. Anchor the
@@ -792,7 +796,7 @@ def boss_main(argv: list[str]) -> int:
             initial_head = _git_mod.git_head_of_workdir(boss_workdir)
             if not initial_head:
                 die(f"failed to resolve HEAD for boss workdir: {boss_workdir!r}")
-            patch_state(current_head=initial_head)
+            patch_state(gr_id, current_head=initial_head)
     else:
         boss_state = load_boss_state(state_dir)
         logger.info(
@@ -831,7 +835,7 @@ def boss_main(argv: list[str]) -> int:
                         logger.info("  - %s", item)
                 else:
                     logger.info("operator follow-ups: (none)")
-                set_stage("done")
+                set_stage(gr_id, "done")
                 save_boss_state(state_dir, boss_state)
                 return 0
 
@@ -921,7 +925,7 @@ def boss_main(argv: list[str]) -> int:
             child_wdir = os.path.join(STATE_ROOT, current_child_id)
 
             if not os.path.isfile(os.path.join(child_wdir, "finished")):
-                set_stage("waiting")
+                set_stage(gr_id, "waiting")
                 success = wait_for_child(current_child_id, gr_id)
             else:
                 try:
@@ -933,7 +937,7 @@ def boss_main(argv: list[str]) -> int:
             check_stop()
 
             if success:
-                set_stage("landing")
+                set_stage(gr_id, "landing")
                 into_dir = ""
                 if chain_kind == "local":
                     if not boss_workdir or not os.path.isdir(boss_workdir):
@@ -952,7 +956,7 @@ def boss_main(argv: list[str]) -> int:
                                 f"HEAD for boss workdir {boss_workdir!r}; refusing to continue "
                                 f"with a stale current_head."
                             )
-                        patch_state(current_head=new_head)
+                        patch_state(gr_id, current_head=new_head)
                     outcome = "rescued-then-landed" if was_rescued else "landed"
                     logger.info("child %s %s", current_child_id, outcome)
                     boss_state["children"].append(
@@ -983,7 +987,7 @@ def boss_main(argv: list[str]) -> int:
                     )
 
             # Pipeline failure → rescue
-            set_stage("rescuing")
+            set_stage(gr_id, "rescuing")
             if not rescue_child(current_child_id):
                 bail_reason = get_child_bail_reason(current_child_id)
                 bail_detail = _summarize_for_log(

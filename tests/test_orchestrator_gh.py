@@ -122,7 +122,7 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     monkeypatch.setattr(
-        "gremlins.orchestrators.gh.resolve_session_dir", lambda: session_dir
+        "gremlins.orchestrators.gh.resolve_session_dir", lambda gr_id=None: session_dir
     )
 
     state_file = tmp_path / "state.json"
@@ -136,15 +136,15 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         initial.update(state_data)
     state_file.write_text(json.dumps(initial))
     monkeypatch.setattr(
-        "gremlins.orchestrators.gh.resolve_state_file", lambda: state_file
+        "gremlins.orchestrators.gh.resolve_state_file", lambda gr_id=None: state_file
     )
 
-    # patch_state reads/writes state_file — let it use the real implementation
-    # (no-op without GR_ID but the file is explicitly patched via resolve_state_file)
-    monkeypatch.setattr("gremlins.orchestrators.gh.patch_state", lambda **kw: None)
+    # Stub out patch_state so tests don't write to real state files.
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.patch_state", lambda gr_id=None, **kw: None
+    )
 
-    # set_stage is a no-op in tests (no GR_ID env var set)
-    # — the real implementation already no-ops without GR_ID.
+    # set_stage is a no-op in tests — gr_id is not passed to gh_main.
 
     return session_dir, state_file
 
@@ -854,7 +854,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
     session_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
     # Override patch_state so it actually writes fields to state_file instead of no-op.
-    def writing_patch_state(_delete=(), **kw):
+    def writing_patch_state(gr_id=None, _delete=(), **kw):
         data = json.loads(state_file.read_text())
         for key in _delete:
             data.pop(key, None)

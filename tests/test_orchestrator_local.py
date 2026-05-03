@@ -28,7 +28,8 @@ def test_local_main_plan_mode(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.orchestrators.local.resolve_session_dir", lambda: session_dir
+        "gremlins.orchestrators.local.resolve_session_dir",
+        lambda gr_id=None: session_dir,
     )
     # tmp_path is not a git repo → is_git=False; monkeypatch for clarity.
     monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
