@@ -22,7 +22,6 @@ def _ok(stdout: str) -> MagicMock:
     return m
 
 
-
 def test_get_pr_ci_status_timeout_raises_runtime_error():
     with patch(
         "subprocess.run",
@@ -56,7 +55,9 @@ def test_get_pr_ci_status_returns_full_rollup():
     ]
     with patch(
         "subprocess.run",
-        return_value=_ok(json.dumps({"statusCheckRollup": rollup, "reviewDecision": ""})),
+        return_value=_ok(
+            json.dumps({"statusCheckRollup": rollup, "reviewDecision": ""})
+        ),
     ):
         result = get_pr_ci_status(PR_URL)
 
@@ -77,7 +78,9 @@ def test_get_pr_ci_status_failing_non_required_check_included():
     ]
     with patch(
         "subprocess.run",
-        return_value=_ok(json.dumps({"statusCheckRollup": rollup, "reviewDecision": ""})),
+        return_value=_ok(
+            json.dumps({"statusCheckRollup": rollup, "reviewDecision": ""})
+        ),
     ):
         result = get_pr_ci_status(PR_URL)
 
@@ -97,7 +100,14 @@ def test_get_pr_ci_status_empty_rollup_returns_empty_checks():
 
 
 def test_get_pr_ci_status_returns_review_decision_and_head_sha():
-    rollup = [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}]
+    rollup = [
+        {
+            "__typename": "CheckRun",
+            "name": "ci",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+        }
+    ]
     payload = {
         "statusCheckRollup": rollup,
         "reviewDecision": "APPROVED",
