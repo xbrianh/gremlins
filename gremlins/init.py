@@ -110,7 +110,7 @@ def _validate_selection(selected: list[str], bundled: list[str]) -> int | None:
 
 def _format_yaml_error(name: str, exc: yaml.YAMLError) -> str:
     mark = getattr(exc, "problem_mark", None)
-    problem = getattr(exc, "problem", None) or str(exc).splitlines()[0]
+    problem = getattr(exc, "problem", None) or " ".join(str(exc).split())
     if mark is None:
         return f"parse failed in {name}: {problem}"
     return f"parse failed in {name}: {problem} (line {mark.line + 1}, column {mark.column + 1})"
@@ -120,7 +120,6 @@ class _YamlParseError(Exception):
     def __init__(self, name: str, original: yaml.YAMLError) -> None:
         super().__init__(_format_yaml_error(name, original))
         self.name = name
-        self.original = original
 
 
 def _tmp_path(dst: pathlib.Path) -> pathlib.Path:
