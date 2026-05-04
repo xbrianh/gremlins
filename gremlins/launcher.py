@@ -224,7 +224,7 @@ def _build_spawn_env(gr_id: str, project_root: str) -> dict[str, str]:
     env["PYTHONPATH"] = os.pathsep.join(parts)
     env["PYTHONSAFEPATH"] = "1"
     env["GR_ID"] = gr_id
-    env["GREMLINS_INVOCATION_DIR"] = project_root
+    env["GREMLINS_INVOCATION_DIR"] = str(pathlib.Path(project_root).resolve())
     return env
 
 

@@ -140,6 +140,7 @@ def lenv(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{old_path}")
     monkeypatch.delenv("PYTHONPATH", raising=False)
     monkeypatch.delenv("GR_ID", raising=False)
+    monkeypatch.delenv("GREMLINS_INVOCATION_DIR", raising=False)
     monkeypatch.chdir(repo)
 
     class _Env:
