@@ -24,7 +24,7 @@ class VerifyOptions:
     code_style: str
     is_git: bool
     commit_after_fix: bool
-    cmds: list[str] = dataclasses.field(default_factory=list)
+    cmds: list[str] = dataclasses.field(default_factory=lambda: [])
     max_attempts: int = 3
 
 
