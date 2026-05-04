@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import pathlib
 import sys
-from typing import Any
+from typing import Any, cast
 
 import yaml
 
@@ -28,19 +28,20 @@ def _collect_prompt_subpaths(stages: list[Any]) -> list[str]:
     def _walk(stage: Any) -> None:
         if not isinstance(stage, dict):
             return
-        if "parallel" in stage:
-            for child in stage["parallel"]:
+        s = cast(dict[str, Any], stage)
+        if "parallel" in s:
+            for child in cast(list[Any], s["parallel"]):
                 _walk(child)
             return
-        prompts = stage.get("prompt")
+        prompts = s.get("prompt")
         if not prompts:
             return
         if isinstance(prompts, str):
             prompts = [prompts]
-        for p in prompts:
+        for p in cast(list[str], prompts):
             if p.startswith("prompts/") and p not in seen:
                 seen.add(p)
-                result.append(p[len("prompts/"):])
+                result.append(p[len("prompts/") :])
 
     for stage in stages:
         _walk(stage)
@@ -51,21 +52,22 @@ def _rewrite_stage(stage: Any) -> Any:
     """Return stage with prompt paths rewritten from prompts/ to ../prompts/."""
     if not isinstance(stage, dict):
         return stage
-    stage = dict(stage)
-    if "parallel" in stage:
-        stage["parallel"] = [_rewrite_stage(c) for c in stage["parallel"]]
-        return stage
-    prompts = stage.get("prompt")
+    s: dict[str, Any] = dict(cast(dict[str, Any], stage))
+    if "parallel" in s:
+        s["parallel"] = [_rewrite_stage(c) for c in cast(list[Any], s["parallel"])]
+        return s
+    prompts = s.get("prompt")
     if prompts is None:
-        return stage
+        return s
     if isinstance(prompts, str):
         if prompts.startswith("prompts/"):
-            stage["prompt"] = "../" + prompts
+            s["prompt"] = "../" + prompts
     else:
-        stage["prompt"] = [
-            ("../" + p if p.startswith("prompts/") else p) for p in prompts
+        s["prompt"] = [
+            ("../" + p if p.startswith("prompts/") else p)
+            for p in cast(list[str], prompts)
         ]
-    return stage
+    return s
 
 
 def init_main(argv: list[str]) -> int:
@@ -120,8 +122,7 @@ def init_main(argv: list[str]) -> int:
                 prompt_subpaths.append(subpath)
 
     prompt_targets: list[tuple[pathlib.Path, pathlib.Path]] = [
-        (_PROMPTS_DIR / sub, dot_gremlins / "prompts" / sub)
-        for sub in prompt_subpaths
+        (_PROMPTS_DIR / sub, dot_gremlins / "prompts" / sub) for sub in prompt_subpaths
     ]
     pipeline_targets: list[tuple[str, pathlib.Path]] = [
         (name, dot_gremlins / "pipelines" / f"{name}.yaml") for name in selected

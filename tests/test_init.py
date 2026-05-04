@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import pathlib
 
-import pytest
 import yaml
 
 from gremlins.init import _bundled_pipeline_names, init_main
-
 
 # ---------------------------------------------------------------------------
 # Happy path: all pipelines
@@ -72,7 +70,7 @@ def test_init_single_pipeline(tmp_path, capsys):
 
     for ref in prompt_refs:
         assert ref.startswith("../prompts/")
-        subpath = ref[len("../prompts/"):]
+        subpath = ref[len("../prompts/") :]
         assert (dot / "prompts" / subpath).exists()
 
 
