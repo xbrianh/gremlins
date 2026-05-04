@@ -120,13 +120,10 @@ Run 'gremlins launch <kind> --help' for kind-specific flags.
 
 
 def _launch_main(argv: list[str]) -> int:
-    positionals = [a for a in argv if not a.startswith("-")]
-    kind_name = positionals[0] if positionals else None
+    kind_name = argv[0] if argv and not argv[0].startswith("-") else None
 
     if kind_name in _LAUNCH_KINDS:
-        rest = list(argv)
-        rest.remove(kind_name)
-        return _self_background_main(_LAUNCH_KINDS[kind_name], rest)
+        return _self_background_main(_LAUNCH_KINDS[kind_name], argv[1:])
 
     if kind_name is not None:
         sys.stderr.write(
@@ -255,7 +252,7 @@ def _self_background_main(kind: str, argv: list[str]) -> int:
 
 def _resume_main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(
-        prog="python -m gremlins.cli resume",
+        prog="gremlins resume",
         description="Re-spawn an existing gremlin from its recorded stage.",
     )
     p.add_argument("gr_id")

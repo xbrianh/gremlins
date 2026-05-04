@@ -261,6 +261,35 @@ def test_land_dispatches_to_land_main(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# launch subcommand dispatch
+# ---------------------------------------------------------------------------
+
+
+def test_launch_bare_prints_help_exits_nonzero(capsys):
+    rc = main(["launch"])
+    assert rc != 0
+    assert "gremlins launch <kind>" in capsys.readouterr().out
+
+
+def test_launch_help_flag_prints_help_exits_zero(capsys):
+    rc = main(["launch", "--help"])
+    assert rc == 0
+    assert "gremlins launch <kind>" in capsys.readouterr().out
+
+
+def test_launch_short_help_flag_prints_help_exits_zero(capsys):
+    rc = main(["launch", "-h"])
+    assert rc == 0
+    assert "gremlins launch <kind>" in capsys.readouterr().out
+
+
+def test_launch_unknown_kind_exits_nonzero_with_error(capsys):
+    rc = main(["launch", "bogus"])
+    assert rc != 0
+    assert "unknown launch kind" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
 # Pre-launch validators — invalid invocations exit non-zero without state
 # ---------------------------------------------------------------------------
 
