@@ -33,9 +33,9 @@ def test_pipeline_two_test_stages_both_names_present(tmp_path: pathlib.Path) -> 
 name: p
 clients: {}
 stages:
-  - {name: test-pre, type: test}
-  - {name: implement, type: test}
-  - {name: test-post, type: test}
+  - {name: test-pre, type: verify}
+  - {name: implement, type: verify}
+  - {name: test-post, type: verify}
 """,
     )
     pipeline = load_pipeline(tmp_path / "pipeline.yaml")
@@ -284,8 +284,8 @@ stages:
   - name: reviews
     max_concurrent: 2
     parallel:
-      - {name: r1, type: test}
-      - {name: r2, type: test}
+      - {name: r1, type: verify}
+      - {name: r2, type: verify}
 """,
     )
     pipeline = load_pipeline(tmp_path / "pipeline.yaml")
@@ -299,7 +299,7 @@ def test_pipeline_max_concurrent_on_leaf_stage_raises(tmp_path: pathlib.Path) ->
 name: p
 clients: {}
 stages:
-  - {name: s1, type: test, max_concurrent: 2}
+  - {name: s1, type: verify, max_concurrent: 2}
 """,
     )
     with pytest.raises(ValueError, match="max_concurrent"):

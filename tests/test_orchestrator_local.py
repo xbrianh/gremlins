@@ -104,7 +104,7 @@ def test_address_main_calls_client(tmp_path, monkeypatch):
 def test_local_pipeline_stage_names(tmp_path):
     pipeline = load_pipeline(resolve_pipeline_path("local", tmp_path))
     names = [s.name for s in pipeline.stages]
-    assert names == ["plan", "implement", "review-code", "address-code", "test"]
+    assert names == ["plan", "implement", "review-code", "address-code", "verify"]
 
 
 def test_local_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir):

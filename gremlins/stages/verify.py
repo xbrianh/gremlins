@@ -1,4 +1,4 @@
-"""Verify stage — runs make check && make test before opening a PR."""
+"""Verify stage — runs check_cmd && test_cmd; used by both gh and local pipelines."""
 
 from __future__ import annotations
 
@@ -22,12 +22,16 @@ class VerifyOptions:
     fix_model: str
     cwd: pathlib.Path
     code_style: str
+    is_git: bool
+    commit_after_fix: bool
     check_cmd: str = ""
     test_cmd: str = ""
     max_attempts: int = 3
 
 
-def _diff_text(cwd: pathlib.Path) -> str:
+def _diff_text(cwd: pathlib.Path, *, is_git: bool) -> str:
+    if not is_git:
+        return ""
     try:
         unstaged = subprocess.run(
             ["git", "diff"],
@@ -54,10 +58,16 @@ def _escape_fmt(s: str) -> str:
 
 
 def run(ctx: StageContext, options: VerifyOptions) -> None:
-    commit_instr = (
-        "- After fixing, leave changes uncommitted — do not stage or commit. "
-        "The next stage (commit-pr) will handle staging and committing."
-    )
+    if options.commit_after_fix and options.is_git:
+        commit_instr = (
+            "- After fixing, stage the changed files by name and create a single git "
+            "commit titled 'Fix failing checks'. Do not push."
+        )
+    else:
+        commit_instr = (
+            "- After fixing, leave changes uncommitted — do not stage or commit. "
+            "The next stage (commit-pr) will handle staging and committing."
+        )
 
     bail_section = ""
     if ctx.gr_id:
@@ -75,6 +85,13 @@ def run(ctx: StageContext, options: VerifyOptions) -> None:
         logger.info("verify: no check_cmd or test_cmd configured; skipping")
         return
     combined_cmd = " && ".join(cmds)
+
+    cmd_lines: list[str] = []
+    if options.check_cmd:
+        cmd_lines.append(f"- Check: `{options.check_cmd}`")
+    if options.test_cmd:
+        cmd_lines.append(f"- Test: `{options.test_cmd}`")
+    commands_section = "**Commands run:**\n" + "\n".join(cmd_lines)
 
     _exhausted = False
     _agent_bailed = False
@@ -101,12 +118,11 @@ def run(ctx: StageContext, options: VerifyOptions) -> None:
             if attempt == options.max_attempts:
                 break
 
-            diff = _diff_text(options.cwd)
+            diff = _diff_text(options.cwd, is_git=options.is_git)
             verify_output = log_file.read_text(encoding="utf-8")
             fix_prompt = template.format(
                 code_style=_escape_fmt(options.code_style),
-                check_cmd=options.check_cmd,
-                test_cmd=options.test_cmd,
+                commands_section=commands_section,
                 verify_output=verify_output,
                 diff_text=diff,
                 commit_instr=commit_instr,

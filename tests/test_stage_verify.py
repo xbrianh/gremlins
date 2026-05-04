@@ -27,6 +27,8 @@ def _run(
     client: Any = None,
     code_style: str = "Be good.",
     fix_model: str = "sonnet",
+    is_git: bool = True,
+    commit_after_fix: bool = False,
 ) -> Any:
     if client is None:
         client = FakeClaudeClient(fixtures={})
@@ -37,6 +39,8 @@ def _run(
             fix_model=fix_model,
             cwd=tmp_path,
             code_style=code_style,
+            is_git=is_git,
+            commit_after_fix=commit_after_fix,
             check_cmd=check_cmd,
             test_cmd=test_cmd,
             max_attempts=max_attempts,
@@ -90,6 +94,8 @@ def test_fix_then_green(tmp_path):
             fix_model="haiku",
             cwd=tmp_path,
             code_style="Be good.",
+            is_git=True,
+            commit_after_fix=False,
             check_cmd=check_cmd,
             test_cmd="true",
             max_attempts=3,
@@ -122,6 +128,8 @@ def test_attempts_exhausted_raises(tmp_path, monkeypatch):
                 fix_model="sonnet",
                 cwd=tmp_path,
                 code_style="Be good.",
+                is_git=True,
+                commit_after_fix=False,
                 check_cmd="false",
                 test_cmd="true",
                 max_attempts=3,
@@ -145,6 +153,8 @@ def test_exhaustion_with_max_1(tmp_path):
                 fix_model="sonnet",
                 cwd=tmp_path,
                 code_style="Be good.",
+                is_git=True,
+                commit_after_fix=False,
                 check_cmd="false",
                 test_cmd="true",
                 max_attempts=1,
@@ -173,6 +183,8 @@ def test_code_style_in_fix_prompt(tmp_path):
             fix_model="sonnet",
             cwd=tmp_path,
             code_style="My custom style rules.",
+            is_git=True,
+            commit_after_fix=False,
             check_cmd=check_cmd,
             test_cmd="true",
             max_attempts=3,
@@ -201,6 +213,8 @@ def test_both_cmds_in_fix_prompt(tmp_path, monkeypatch):
                 fix_model="sonnet",
                 cwd=tmp_path,
                 code_style="",
+                is_git=True,
+                commit_after_fix=False,
                 check_cmd="false",
                 test_cmd="make test",
                 max_attempts=3,
@@ -222,6 +236,8 @@ def test_log_file_captures_output(tmp_path):
             fix_model="sonnet",
             cwd=tmp_path,
             code_style="",
+            is_git=True,
+            commit_after_fix=False,
             check_cmd="echo hello_check",
             test_cmd="echo hello_test",
             max_attempts=3,
@@ -253,6 +269,8 @@ def test_no_pr_opened_on_exhaustion(tmp_path, monkeypatch):
                 fix_model="sonnet",
                 cwd=tmp_path,
                 code_style="",
+                is_git=True,
+                commit_after_fix=False,
                 check_cmd="false",
                 test_cmd="true",
                 max_attempts=3,
@@ -277,6 +295,8 @@ def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
                 fix_model="sonnet",
                 cwd=tmp_path,
                 code_style="",
+                is_git=True,
+                commit_after_fix=False,
                 check_cmd="false",
                 test_cmd="true",
                 max_attempts=3,
@@ -284,3 +304,66 @@ def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
         )
     data = json.loads((state_dir / "state.json").read_text())
     assert data.get("bail_class") == "other"
+
+
+def test_is_git_false_skips_diff(tmp_path):
+    flag = tmp_path / "flag.txt"
+    flag.write_text("fail\n")
+    check_cmd = f"grep -q '^pass$' {flag}"
+
+    captured_prompts = []
+
+    class _FixingClient(FakeClaudeClient):
+        def run(self, prompt, *, label, **kwargs):
+            captured_prompts.append(prompt)
+            flag.write_text("pass\n")
+            return super().run(prompt, label=label, **kwargs)
+
+    client = _FixingClient(fixtures={"verify-fix-1": MINIMAL_EVENTS})
+    ctx = _make_ctx(client, tmp_path)
+    run_verify(
+        ctx,
+        VerifyOptions(
+            fix_model="sonnet",
+            cwd=tmp_path,
+            code_style="",
+            is_git=False,
+            commit_after_fix=False,
+            check_cmd=check_cmd,
+            test_cmd="",
+            max_attempts=3,
+        ),
+    )
+    assert len(client.calls) == 1
+    # diff block renders as empty when is_git=False
+    assert "```\n\n```" in captured_prompts[0]
+
+
+def test_commit_after_fix_true_in_prompt(tmp_path):
+    flag = tmp_path / "flag.txt"
+    flag.write_text("fail\n")
+    check_cmd = f"grep -q '^pass$' {flag}"
+
+    class _FixingClient(FakeClaudeClient):
+        def run(self, prompt, *, label, **kwargs):
+            flag.write_text("pass\n")
+            return super().run(prompt, label=label, **kwargs)
+
+    client = _FixingClient(fixtures={"verify-fix-1": MINIMAL_EVENTS})
+    ctx = _make_ctx(client, tmp_path)
+    run_verify(
+        ctx,
+        VerifyOptions(
+            fix_model="sonnet",
+            cwd=tmp_path,
+            code_style="",
+            is_git=True,
+            commit_after_fix=True,
+            check_cmd=check_cmd,
+            test_cmd="",
+            max_attempts=3,
+        ),
+    )
+    assert len(client.calls) == 1
+    assert "Fix failing checks" in client.calls[0].prompt
+    assert "stage the changed files" in client.calls[0].prompt

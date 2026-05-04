@@ -89,7 +89,7 @@ def test_missing_prompt_file_raises(tmp_path: pathlib.Path) -> None:
 name: bad
 clients: {}
 stages:
-  - {name: s1, type: test, prompt: does_not_exist.md}
+  - {name: s1, type: verify, prompt: does_not_exist.md}
 """,
     )
     with pytest.raises(FileNotFoundError):
@@ -109,7 +109,7 @@ name: p
 clients: {{}}
 stages:
   - name: s1
-    type: test
+    type: verify
     prompt: [{a.name}, {b.name}]
 """,
     )
@@ -127,16 +127,16 @@ def test_repeated_type_distinct_names(tmp_path: pathlib.Path) -> None:
 name: p
 clients: {}
 stages:
-  - {name: test-pre, type: test}
-  - {name: test-post, type: test}
+  - {name: test-pre, type: verify}
+  - {name: test-post, type: verify}
 """,
     )
     pipeline = load_pipeline(tmp_path / "pipeline.yaml")
     assert len(pipeline.stages) == 2
     assert pipeline.stages[0].name == "test-pre"
     assert pipeline.stages[1].name == "test-post"
-    assert pipeline.stages[0].type == "test"
-    assert pipeline.stages[1].type == "test"
+    assert pipeline.stages[0].type == "verify"
+    assert pipeline.stages[1].type == "verify"
 
 
 # ---- parallel group validation --------------------------------------------
@@ -151,8 +151,8 @@ clients: {}
 stages:
   - name: reviews
     parallel:
-      - {name: r1, type: test}
-      - {name: r1, type: test}
+      - {name: r1, type: verify}
+      - {name: r1, type: verify}
 """,
     )
     with pytest.raises(ValueError, match="duplicate child name"):
@@ -170,7 +170,7 @@ stages:
     parallel:
       - name: inner
         parallel:
-          - {name: leaf, type: test}
+          - {name: leaf, type: verify}
 """,
     )
     with pytest.raises(ValueError, match="nested parallel"):

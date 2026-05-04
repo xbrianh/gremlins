@@ -27,8 +27,7 @@ sequencing logic of their own.
   <pr_url>`.
 - `request_copilot.py` — `run`. Requests Copilot review by adding
   `copilot-pull-request-reviewer` to the PR's reviewer list.
-- `verify.py` — `run(ctx, VerifyOptions)`. Gh pipeline. Runs `check_cmd && test_cmd`, re-invokes agent to fix failures up to `max_attempts`; bails on exhaustion. Registers as stage type `"verify"`.
-- `test.py` — `run(ctx, TestOptions)`. Local pipeline. Runs user-supplied `--test` command; no-ops when `test_cmd is None`; re-invokes agent to fix failures up to `max_attempts`; bails on exhaustion. Registers as stage type `"test"`.
+- `verify.py` — `run(ctx, VerifyOptions)`. Runs `check_cmd && test_cmd` (skipping empties), re-invokes agent to fix failures up to `max_attempts`; bails on exhaustion. Takes `is_git` (controls diff capture) and `commit_after_fix` (controls commit instruction in fix prompt). Used by both gh and local pipelines. Registers as stage type `"verify"`.
 - `wait_ci.py` — `run(ctx, WaitCiOptions)`. Gh pipeline (`ci-gate`). Polls PR CI checks via `gh_utils`; re-invokes agent to fix failures; bails on `REVIEW_REQUIRED` or attempt exhaustion. Registers as stage type `"wait-ci"`.
 - `wait_copilot.py` — `run`. Polls until Copilot posts a non-PENDING review.
 
@@ -45,7 +44,7 @@ sequencing logic of their own.
   this way and should not construct it themselves. Stage-local fallback
   constants (e.g. `PROMPT_LOCAL_PATH`, `_DEFAULT_PROMPT`) exist only for
   standalone entry points and backward-compatibility.
-- Fix-loop templates (`verify_fix.md`, `test_fix.md`, `ci_fix.md`) are
+- Fix-loop templates (`verify_fix.md`, `ci_fix.md`) are
   intrinsic to their stage module and are resolved via:
   ```python
   pathlib.Path(__file__).resolve().parent / "<name>.md"

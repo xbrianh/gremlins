@@ -379,6 +379,8 @@ def _build_stage_runner(
                     fix_model=model,
                     cwd=pathlib.Path.cwd(),
                     code_style=code_style,
+                    is_git=True,
+                    commit_after_fix=False,
                     check_cmd=check_cmd,
                     test_cmd=test_cmd,
                     max_attempts=max_attempts,
