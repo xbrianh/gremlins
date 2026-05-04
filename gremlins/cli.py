@@ -35,7 +35,8 @@ from .fleet.cli import (
     stop_main,
 )
 from .launcher import MODEL_RE, launch, resume
-from .orchestrators.gh import VALID_STAGES, gh_main
+from .orchestrators.gh import gh_main
+from .pipeline import load_pipeline, resolve_pipeline_path
 from .orchestrators.local import address_main, local_main, review_main
 from .state import validate_gr_id
 
@@ -149,6 +150,7 @@ def _validate_gh_args(args: argparse.Namespace, rest: list[str]) -> None:
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--model", default=None)
     p.add_argument("--resume-from", default=None)
+    p.add_argument("--pipeline", default=None)
     try:
         parsed, remainder = p.parse_known_args(rest)
     except SystemExit as exc:
@@ -162,11 +164,19 @@ def _validate_gh_args(args: argparse.Namespace, rest: list[str]) -> None:
         and not positional
     ):
         raise ValueError("instructions, --plan, or --resume-from required")
-    if parsed.resume_from is not None and parsed.resume_from not in VALID_STAGES:
-        raise ValueError(
-            f"invalid --resume-from: {parsed.resume_from} "
-            f"(allowed: {' '.join(VALID_STAGES)})"
-        )
+    if parsed.resume_from is not None:
+        try:
+            pipeline = load_pipeline(
+                resolve_pipeline_path(parsed.pipeline or "gh", pathlib.Path.cwd())
+            )
+            stage_names = [s.name for s in pipeline.stages]
+        except Exception:
+            stage_names = []
+        if stage_names and parsed.resume_from not in stage_names:
+            raise ValueError(
+                f"invalid --resume-from: {parsed.resume_from!r} "
+                f"(allowed: {' '.join(stage_names)})"
+            )
     if parsed.model is not None and not MODEL_RE.match(parsed.model):
         raise ValueError(f"invalid model: {parsed.model!r}")
 

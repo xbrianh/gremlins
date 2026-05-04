@@ -11,12 +11,16 @@ import re
 import shutil
 import subprocess
 import sys
-from typing import NoReturn
+from collections.abc import Callable
+from typing import Any, NoReturn
+
+import yaml
 
 from ..clients.claude import ClaudeClient, SubprocessClaudeClient
 from ..gh_utils import extract_gh_url, get_repo, parse_issue_ref, view_issue
 from ..git import DirtyOnly, HeadAdvanced
 from ..logging_setup import configure_logging
+from ..pipeline import StageEntry, load_pipeline, resolve_pipeline_path
 from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
 from ..runner import install_signal_handlers, run_stages
 from ..stages import (
@@ -37,18 +41,6 @@ logger = logging.getLogger(__name__)
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 REF_RE = re.compile(r"^[A-Za-z0-9._/#-]+$")
-
-VALID_STAGES = [
-    "plan",
-    "implement",
-    "verify",
-    "commit-pr",
-    "request-copilot",
-    "ghreview",
-    "wait-copilot",
-    "ghaddress",
-    "ci-gate",
-]
 
 
 def die(msg: str) -> NoReturn:
@@ -76,12 +68,6 @@ def _parse_gh_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--pipeline", dest="pipeline", default=None)
     parser.add_argument("instructions", nargs="*")
     args = parser.parse_args(argv)
-
-    if args.resume_from is not None and args.resume_from not in VALID_STAGES:
-        die(
-            f"invalid --resume-from: {args.resume_from} "
-            f"(allowed: {' '.join(VALID_STAGES)})"
-        )
 
     if args.plan_source:
         if args.instructions:
@@ -263,6 +249,272 @@ def _resolve_plan_source(
     return issue_url, issue_num, issue_body
 
 
+def _ensure_pr_url(
+    gh_state: dict[str, Any],
+    state_file: pathlib.Path | None,
+    resume_from: str | None,
+) -> None:
+    if gh_state["pr_url"]:
+        return
+    saved = _read_state_field(state_file, "pr_url")
+    if not saved:
+        die(
+            f"--resume-from {resume_from}: no pr_url in state.json "
+            "(rewind to implement?)"
+        )
+    gh_state["pr_url"] = saved
+    gh_state["pr_num"] = saved.split("/")[-1]
+    logger.info("resumed PR: %s", saved)
+
+
+def _build_stage_runner(
+    entry: StageEntry,
+    ctx: StageContext,
+    args: argparse.Namespace,
+    *,
+    model: str,
+    code_style: str,
+    repo: str,
+    session_dir: pathlib.Path,
+    state_file: pathlib.Path | None,
+    gr_id: str | None,
+    gh_state: dict[str, Any],
+) -> Callable[[], None]:
+    if entry.type == "plan":
+
+        def _plan() -> None:
+            if args.plan_source:
+                return
+            set_stage(gr_id, entry.name)
+            logger.info("[1/8] running ghplan")
+            plan_prompt = load_prompts([BUNDLED_PROMPT_DIR / "ghplan.md"]).format(
+                ref=_fmt_escape(args.ref or ""),
+                instructions=_fmt_escape(gh_state["instructions"]),
+            )
+            completed = ctx.client.run(
+                plan_prompt,
+                label="plan",
+                model=model,
+                raw_path=session_dir / "ghplan-out.jsonl",
+                capture_events=True,
+            )
+            events = completed.events or []
+            issue_url = extract_gh_url(
+                events,
+                url_pattern=r"https://github\.com/[^ )]+/issues/[0-9]+",
+                cmd_pattern=r"gh issue create",
+                label="issue",
+            )
+            issue_num = issue_url.split("/")[-1]
+            logger.info("issue: %s", issue_url)
+            patch_state(gr_id, issue_url=issue_url, issue_num=issue_num)
+            gh_state["issue_url"] = issue_url
+            gh_state["issue_num"] = issue_num
+            gh_state["issue_body"] = _fetch_issue_body(issue_num, repo)
+
+        return _plan
+
+    if entry.type == "implement":
+
+        def _implement() -> None:
+            set_stage(gr_id, entry.name)
+            logger.info("[2a/8] implementing plan")
+            spec_file = session_dir / "spec.md"
+            spec_text = ""
+            if spec_file.exists():
+                try:
+                    spec_text = spec_file.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError) as exc:
+                    logger.warning(
+                        "could not read spec.md (%s); proceeding without north-star context",
+                        exc,
+                    )
+            impl_result = implement.run(
+                ctx,
+                implement.ImplementOptions(
+                    impl_model=model,
+                    plan_text=gh_state["issue_body"],
+                    code_style=code_style,
+                    is_git=True,
+                    kind="gh",
+                    issue_num=gh_state["issue_num"],
+                    spec_text=spec_text,
+                ),
+            )
+            if impl_result is None:
+                die("implement stage did not produce a result")
+            gh_state["impl_result"] = impl_result
+            patch_state(
+                gr_id,
+                impl_handoff_branch=impl_result.handoff_branch,
+                impl_base_ref=impl_result.pre_state.head,
+            )
+
+        return _implement
+
+    if entry.type == "verify":
+        check_cmd = entry.options.get("check_cmd", "")
+        test_cmd = entry.options.get("test_cmd", "")
+
+        def _verify() -> None:
+            set_stage(gr_id, entry.name)
+            logger.info("[2b/8] verifying implementation")
+            verify.run(
+                ctx,
+                verify.VerifyOptions(
+                    fix_model=model,
+                    cwd=pathlib.Path.cwd(),
+                    code_style=code_style,
+                    check_cmd=check_cmd,
+                    test_cmd=test_cmd,
+                ),
+            )
+
+        return _verify
+
+    if entry.type == "commit-pr":
+
+        def _commit_pr() -> None:
+            set_stage(gr_id, entry.name)
+            logger.info("[2c/8] committing + opening PR")
+            impl_result: ImplStageResult | None = gh_state["impl_result"]
+            if impl_result is not None:
+                impl_outcome = impl_result.outcome
+                impl_handoff_branch = impl_result.handoff_branch
+                base_ref = impl_result.pre_state.head
+            else:
+                impl_handoff_branch = _read_state_field(state_file, "impl_handoff_branch")
+                base_ref = _read_state_field(state_file, "impl_base_ref")
+                if not base_ref:
+                    die(
+                        "--resume-from commit-pr: no impl_base_ref in state.json "
+                        "(rewind to implement?)"
+                    )
+                if impl_handoff_branch:
+                    count_r = subprocess.run(
+                        [
+                            "git",
+                            "rev-list",
+                            "--count",
+                            f"{base_ref}..{impl_handoff_branch}",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if count_r.returncode != 0:
+                        die(
+                            f"--resume-from commit-pr: impl_handoff_branch '{impl_handoff_branch}' "
+                            f"not found or base_ref invalid (rewind to implement?)\n"
+                            f"{count_r.stderr.strip()}"
+                        )
+                    commit_count = int(count_r.stdout.strip())
+                    impl_outcome = HeadAdvanced(commit_count=commit_count)
+                else:
+                    impl_outcome = DirtyOnly()
+
+            pr_url = commit_pr.run(
+                ctx,
+                commit_pr.CommitPrOptions(
+                    model=model,
+                    impl_outcome=impl_outcome,
+                    impl_handoff_branch=impl_handoff_branch,
+                    base_ref=base_ref,
+                    issue_url=gh_state["issue_url"],
+                    cwd=None,
+                ),
+            )
+            pr_num = pr_url.split("/")[-1]
+            logger.info("PR: %s", pr_url)
+            patch_state(gr_id, pr_url=pr_url)
+            gh_state["pr_url"] = pr_url
+            gh_state["pr_num"] = pr_num
+
+        return _commit_pr
+
+    if entry.type == "request-copilot":
+
+        def _request_copilot() -> None:
+            _ensure_pr_url(gh_state, state_file, args.resume_from)
+            set_stage(gr_id, entry.name)
+            logger.info("[3/8] requesting Copilot review")
+            request_copilot.run(
+                ctx,
+                request_copilot.RequestCopilotOptions(
+                    repo=repo, pr_num=gh_state["pr_num"]
+                ),
+            )
+
+        return _request_copilot
+
+    if entry.type == "ghreview":
+
+        def _ghreview() -> None:
+            _ensure_pr_url(gh_state, state_file, args.resume_from)
+            set_stage(gr_id, entry.name)
+            logger.info("[4/8] running /ghreview")
+            ghreview.run(
+                ctx,
+                ghreview.GhreviewOptions(
+                    model=model,
+                    pr_url=gh_state["pr_url"],
+                    code_style=code_style,
+                ),
+            )
+
+        return _ghreview
+
+    if entry.type == "wait-copilot":
+
+        def _wait_copilot() -> None:
+            _ensure_pr_url(gh_state, state_file, args.resume_from)
+            set_stage(gr_id, entry.name)
+            logger.info("[5/8] waiting for Copilot review (20s interval, 10min timeout)")
+            state = wait_copilot.run(
+                ctx,
+                wait_copilot.WaitCopilotOptions(repo=repo, pr_num=gh_state["pr_num"]),
+            )
+            logger.info("Copilot review: %s", state)
+
+        return _wait_copilot
+
+    if entry.type == "ghaddress":
+
+        def _ghaddress() -> None:
+            _ensure_pr_url(gh_state, state_file, args.resume_from)
+            set_stage(gr_id, entry.name)
+            logger.info("[6/8] running /ghaddress")
+            ghaddress.run(
+                ctx,
+                ghaddress.GhaddressOptions(
+                    model=model,
+                    pr_url=gh_state["pr_url"],
+                    code_style=code_style,
+                ),
+            )
+
+        return _ghaddress
+
+    if entry.type == "wait-ci":
+
+        def _wait_ci() -> None:
+            _ensure_pr_url(gh_state, state_file, args.resume_from)
+            set_stage(gr_id, entry.name)
+            logger.info("[7/8] waiting for CI checks (up to 3 attempts, 20min each)")
+            wait_ci.run(
+                ctx,
+                wait_ci.WaitCiOptions(
+                    model=model,
+                    pr_url=gh_state["pr_url"],
+                    code_style=code_style,
+                ),
+            )
+
+        return _wait_ci
+
+    raise ValueError(f"unsupported stage type {entry.type!r} in gh pipeline")
+
+
 def gh_main(
     argv: list[str], *, client: ClaudeClient | None = None, gr_id: str | None = None
 ) -> int:
@@ -279,6 +531,20 @@ def gh_main(
     if client is None:
         client = SubprocessClaudeClient()
     install_signal_handlers(client)
+
+    try:
+        pipeline = load_pipeline(
+            resolve_pipeline_path(args.pipeline or "gh", pathlib.Path.cwd())
+        )
+    except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
+        die(str(exc))
+
+    stage_names = [s.name for s in pipeline.stages]
+    if args.resume_from and args.resume_from not in stage_names:
+        die(
+            f"--resume-from {args.resume_from!r} is not a valid stage; "
+            f"valid: {stage_names}"
+        )
 
     repo = get_repo()
     session_dir = resolve_session_dir(gr_id)
@@ -308,8 +574,10 @@ def gh_main(
     issue_num: str = ""
     issue_body: str = ""
 
-    plan_stage_idx = VALID_STAGES.index("plan")
-    resume_idx = VALID_STAGES.index(args.resume_from) if args.resume_from else 0
+    plan_idx = next(
+        (i for i, s in enumerate(pipeline.stages) if s.type == "plan"), 0
+    )
+    resume_idx = stage_names.index(args.resume_from) if args.resume_from else 0
 
     if args.plan_source:
         issue_url, issue_num, issue_body = _resolve_plan_source(
@@ -321,7 +589,7 @@ def gh_main(
             state_file=state_file,
             gr_id=gr_id,
         )
-    elif resume_idx > plan_stage_idx:
+    elif resume_idx > plan_idx:
         issue_url = _read_state_field(state_file, "issue_url")
         if not issue_url:
             die(
@@ -343,222 +611,33 @@ def gh_main(
         gr_id=gr_id,
     )
 
-    # Inter-stage state
-    impl_result: ImplStageResult | None = None
-    pr_url: str = ""
-    pr_num: str = ""
-
-    def _ensure_pr_url() -> None:
-        nonlocal pr_url, pr_num
-        if pr_url:
-            return
-        saved = _read_state_field(state_file, "pr_url")
-        if not saved:
-            die(
-                f"--resume-from {args.resume_from}: no pr_url in state.json "
-                "(rewind to implement?)"
-            )
-        pr_url = saved
-        pr_num = saved.split("/")[-1]
-        logger.info("resumed PR: %s", saved)
-
-    def stage_plan() -> None:
-        nonlocal issue_url, issue_num, issue_body
-        if args.plan_source:
-            return
-        set_stage(gr_id, "plan")
-        logger.info("[1/8] running ghplan")
-        plan_prompt = load_prompts([BUNDLED_PROMPT_DIR / "ghplan.md"]).format(
-            ref=_fmt_escape(args.ref or ""),
-            instructions=_fmt_escape(instructions),
-        )
-        completed = ctx.client.run(
-            plan_prompt,
-            label="plan",
-            model=model,
-            raw_path=session_dir / "ghplan-out.jsonl",
-            capture_events=True,
-        )
-        events = completed.events or []
-        issue_url = extract_gh_url(
-            events,
-            url_pattern=r"https://github\.com/[^ )]+/issues/[0-9]+",
-            cmd_pattern=r"gh issue create",
-            label="issue",
-        )
-        issue_num = issue_url.split("/")[-1]
-        logger.info("issue: %s", issue_url)
-        patch_state(gr_id, issue_url=issue_url, issue_num=issue_num)
-        issue_body = _fetch_issue_body(issue_num, repo)
-
-    def stage_implement() -> None:
-        nonlocal impl_result
-        set_stage(gr_id, "implement")
-        logger.info("[2a/8] implementing plan")
-        spec_text = ""
-        if spec_file.exists():
-            try:
-                spec_text = spec_file.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError) as exc:
-                logger.warning(
-                    "could not read spec.md (%s); proceeding without north-star context",
-                    exc,
-                )
-        impl_result = implement.run(
-            ctx,
-            implement.ImplementOptions(
-                impl_model=model,
-                plan_text=issue_body,
-                code_style=code_style,
-                is_git=True,
-                kind="gh",
-                issue_num=issue_num,
-                spec_text=spec_text,
-            ),
-        )
-        if impl_result is None:
-            die("implement stage did not produce a result")
-        patch_state(
-            gr_id,
-            impl_handoff_branch=impl_result.handoff_branch,
-            impl_base_ref=impl_result.pre_state.head,
-        )
-
-    def stage_verify() -> None:
-        set_stage(gr_id, "verify")
-        logger.info("[2b/8] verifying implementation")
-        verify.run(
-            ctx,
-            verify.VerifyOptions(
-                fix_model=model,
-                cwd=pathlib.Path.cwd(),
-                code_style=code_style,
-            ),
-        )
-
-    def stage_commit_pr() -> None:
-        nonlocal pr_url, pr_num
-        set_stage(gr_id, "commit-pr")
-        logger.info("[2c/8] committing + opening PR")
-
-        if impl_result is not None:
-            impl_outcome = impl_result.outcome
-            impl_handoff_branch = impl_result.handoff_branch
-            base_ref = impl_result.pre_state.head
-        else:
-            impl_handoff_branch = _read_state_field(state_file, "impl_handoff_branch")
-            base_ref = _read_state_field(state_file, "impl_base_ref")
-            if not base_ref:
-                die(
-                    "--resume-from commit-pr: no impl_base_ref in state.json "
-                    "(rewind to implement?)"
-                )
-            if impl_handoff_branch:
-                count_r = subprocess.run(
-                    [
-                        "git",
-                        "rev-list",
-                        "--count",
-                        f"{base_ref}..{impl_handoff_branch}",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                if count_r.returncode != 0:
-                    die(
-                        f"--resume-from commit-pr: impl_handoff_branch '{impl_handoff_branch}' "
-                        f"not found or base_ref invalid (rewind to implement?)\n"
-                        f"{count_r.stderr.strip()}"
-                    )
-                commit_count = int(count_r.stdout.strip())
-                impl_outcome = HeadAdvanced(commit_count=commit_count)
-            else:
-                impl_outcome = DirtyOnly()
-
-        pr_url = commit_pr.run(
-            ctx,
-            commit_pr.CommitPrOptions(
-                model=model,
-                impl_outcome=impl_outcome,
-                impl_handoff_branch=impl_handoff_branch,
-                base_ref=base_ref,
-                issue_url=issue_url,
-                cwd=None,
-            ),
-        )
-        pr_num = pr_url.split("/")[-1]
-        logger.info("PR: %s", pr_url)
-        patch_state(gr_id, pr_url=pr_url)
-
-    def stage_request_copilot() -> None:
-        _ensure_pr_url()
-        set_stage(gr_id, "request-copilot")
-        logger.info("[3/8] requesting Copilot review")
-        request_copilot.run(
-            ctx,
-            request_copilot.RequestCopilotOptions(repo=repo, pr_num=pr_num),
-        )
-
-    def stage_ghreview() -> None:
-        _ensure_pr_url()
-        set_stage(gr_id, "ghreview")
-        logger.info("[4/8] running /ghreview")
-        ghreview.run(
-            ctx,
-            ghreview.GhreviewOptions(
-                model=model,
-                pr_url=pr_url,
-                code_style=code_style,
-            ),
-        )
-
-    def stage_wait_copilot() -> None:
-        _ensure_pr_url()
-        set_stage(gr_id, "wait-copilot")
-        logger.info("[5/8] waiting for Copilot review (20s interval, 10min timeout)")
-        state = wait_copilot.run(
-            ctx,
-            wait_copilot.WaitCopilotOptions(repo=repo, pr_num=pr_num),
-        )
-        logger.info("Copilot review: %s", state)
-
-    def stage_ghaddress() -> None:
-        _ensure_pr_url()
-        set_stage(gr_id, "ghaddress")
-        logger.info("[6/8] running /ghaddress")
-        ghaddress.run(
-            ctx,
-            ghaddress.GhaddressOptions(
-                model=model,
-                pr_url=pr_url,
-                code_style=code_style,
-            ),
-        )
-
-    def stage_wait_ci() -> None:
-        _ensure_pr_url()
-        set_stage(gr_id, "ci-gate")
-        logger.info("[7/8] waiting for CI checks (up to 3 attempts, 20min each)")
-        wait_ci.run(
-            ctx,
-            wait_ci.WaitCiOptions(
-                model=model,
-                pr_url=pr_url,
-                code_style=code_style,
-            ),
-        )
+    gh_state: dict[str, Any] = {
+        "issue_url": issue_url,
+        "issue_num": issue_num,
+        "issue_body": issue_body,
+        "impl_result": None,
+        "pr_url": "",
+        "pr_num": "",
+        "instructions": instructions,
+    }
 
     stages = [
-        ("plan", stage_plan),
-        ("implement", stage_implement),
-        ("verify", stage_verify),
-        ("commit-pr", stage_commit_pr),
-        ("request-copilot", stage_request_copilot),
-        ("ghreview", stage_ghreview),
-        ("wait-copilot", stage_wait_copilot),
-        ("ghaddress", stage_ghaddress),
-        ("ci-gate", stage_wait_ci),
+        (
+            e.name,
+            _build_stage_runner(
+                e,
+                ctx,
+                args,
+                model=model,
+                code_style=code_style,
+                repo=repo,
+                session_dir=session_dir,
+                state_file=state_file,
+                gr_id=gr_id,
+                gh_state=gh_state,
+            ),
+        )
+        for e in pipeline.stages
     ]
     run_stages(stages, resume_from=args.resume_from)
 
@@ -566,7 +645,7 @@ def gh_main(
     if total_cost is not None and total_cost > 0:
         patch_state(gr_id, total_cost_usd=total_cost)
 
-    logger.info("done. PR: %s", pr_url or "(unknown)")
+    logger.info("done. PR: %s", gh_state["pr_url"] or "(unknown)")
     if total_cost is not None and total_cost > 0:
         logger.info("total cost: $%.4f", total_cost)
     return 0

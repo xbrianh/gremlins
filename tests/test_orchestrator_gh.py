@@ -25,6 +25,7 @@ from gremlins.git import (
     sweep_stale_handoff_branches,
 )
 from gremlins.orchestrators.gh import _parse_gh_args, _parse_issue_ref, gh_main
+from gremlins.pipeline import load_pipeline, resolve_pipeline_path
 
 # ---------------------------------------------------------------------------
 # Helper: minimal stream-json event list containing a PR URL in a tool_result
@@ -431,6 +432,22 @@ def test_parse_issue_ref_invalid():
     repo, ref = _parse_issue_ref("not-a-ref", "owner/repo")
     assert repo is None
     assert ref is None
+
+
+def test_gh_pipeline_stage_names(tmp_path):
+    pipeline = load_pipeline(resolve_pipeline_path("gh", tmp_path))
+    names = [s.name for s in pipeline.stages]
+    assert names == [
+        "plan",
+        "implement",
+        "verify",
+        "commit-pr",
+        "request-copilot",
+        "ghreview",
+        "wait-copilot",
+        "ghaddress",
+        "ci-gate",
+    ]
 
 
 # ---------------------------------------------------------------------------

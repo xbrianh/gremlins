@@ -8,16 +8,6 @@ import yaml
 from gremlins.fleet.state import iter_state_files
 
 GREMLIN_STAGES = {
-    "localgremlin": ["plan", "implement", "review-code", "address-code"],
-    "ghgremlin": [
-        "plan",
-        "implement",
-        "commit-pr",
-        "request-copilot",
-        "ghreview",
-        "wait-copilot",
-        "ghaddress",
-    ],
     "bossgremlin": ["handoff", "waiting", "landing", "rescuing"],
 }
 

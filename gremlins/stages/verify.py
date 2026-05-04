@@ -20,8 +20,8 @@ class VerifyOptions:
     fix_model: str
     cwd: pathlib.Path
     code_style: str
-    check_cmd: str = "make check"
-    test_cmd: str = "make test"
+    check_cmd: str = ""
+    test_cmd: str = ""
     max_attempts: int = 3
 
 
