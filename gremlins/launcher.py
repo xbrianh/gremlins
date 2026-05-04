@@ -216,8 +216,7 @@ def _delete_patch_state(
         pass
 
 
-def _build_spawn_env(gr_id: str) -> dict[str, str]:
-    """Build the environment for the spawned pipeline process."""
+def _build_spawn_env(gr_id: str, project_root: str) -> dict[str, str]:
     env = os.environ.copy()
     pkg_root = str(pathlib.Path(__file__).resolve().parent.parent)
     existing_pp = env.get("PYTHONPATH", "")
@@ -225,6 +224,7 @@ def _build_spawn_env(gr_id: str) -> dict[str, str]:
     env["PYTHONPATH"] = os.pathsep.join(parts)
     env["PYTHONSAFEPATH"] = "1"
     env["GR_ID"] = gr_id
+    env["GREMLINS_INVOCATION_DIR"] = str(pathlib.Path(project_root).resolve())
     return env
 
 
@@ -234,6 +234,7 @@ def _spawn_pipeline(
     gr_id: str,
     kind_subcommand: str,
     pipeline_args: list[str],
+    project_root: str,
     log_mode: str = "w",
 ) -> subprocess.Popen[bytes]:
     """Spawn the pipeline detached. Returns the Popen object (already running).
@@ -248,7 +249,7 @@ def _spawn_pipeline(
         kind_subcommand,
         *pipeline_args,
     ]
-    env = _build_spawn_env(gr_id)
+    env = _build_spawn_env(gr_id, project_root)
     log_path = state_dir / "log"
     log_fh = open(log_path, log_mode)
     try:
@@ -407,7 +408,7 @@ def launch(
         spawn_args.append(instructions)
 
     proc = _spawn_pipeline(
-        state_dir, workdir, gr_id, _KIND_SUBCOMMAND[kind], spawn_args
+        state_dir, workdir, gr_id, _KIND_SUBCOMMAND[kind], spawn_args, project_root
     )
 
     (state_dir / "pid").write_text(str(proc.pid), encoding="utf-8")
@@ -516,9 +517,16 @@ def resume(gr_id: str) -> None:
         if instructions:
             spawn_args.append(instructions)
 
+    project_root = state.get("project_root") or workdir
     kind_subcommand = _KIND_SUBCOMMAND[kind]
     proc = _spawn_pipeline(
-        state_dir, workdir, gr_id, kind_subcommand, spawn_args, log_mode="a"
+        state_dir,
+        workdir,
+        gr_id,
+        kind_subcommand,
+        spawn_args,
+        project_root,
+        log_mode="a",
     )
 
     (state_dir / "pid").write_text(str(proc.pid), encoding="utf-8")

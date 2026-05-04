@@ -140,6 +140,7 @@ def lenv(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{old_path}")
     monkeypatch.delenv("PYTHONPATH", raising=False)
     monkeypatch.delenv("GR_ID", raising=False)
+    monkeypatch.delenv("GREMLINS_INVOCATION_DIR", raising=False)
     monkeypatch.chdir(repo)
 
     class _Env:
@@ -746,3 +747,17 @@ def test_launch_rejects_empty_spec_path(lenv):
     launcher = _launcher()
     with pytest.raises(ValueError, match="--spec"):
         launcher.launch("localgremlin", plan=str(plan_file), spec_path=str(spec_file))
+
+
+# ---------------------------------------------------------------------------
+# _build_spawn_env — GREMLINS_INVOCATION_DIR
+# ---------------------------------------------------------------------------
+
+
+def test_build_spawn_env_sets_invocation_dir(lenv, monkeypatch):
+    """_build_spawn_env includes GREMLINS_INVOCATION_DIR equal to project_root."""
+    monkeypatch.delenv("GREMLINS_INVOCATION_DIR", raising=False)
+    from gremlins import launcher
+
+    env = launcher._build_spawn_env("test-gr-id", str(lenv.repo))
+    assert env.get("GREMLINS_INVOCATION_DIR") == str(lenv.repo)
