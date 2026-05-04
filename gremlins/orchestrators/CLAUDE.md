@@ -6,10 +6,12 @@ Per-pipeline orchestrator entry points. Each module owns one CLI subcommand
 
 ## Modules
 
-- `local.py` — `local_main` (loads `local.yaml`, runs stages), `review_main`
-  (review-code only), `address_main` (address-code only). Subcommands:
-  `local`, `review`, `address`.
-- `gh.py` — `gh_main`. Subcommand: `gh`. Loads `gh.yaml` and runs stages.
+- `local.py` — `local_main` (loads the selected pipeline YAML, default
+  `local.yaml`, runs stages), `review_main` (review-code only),
+  `address_main` (address-code only). Subcommands: `local`, `review`,
+  `address`.
+- `gh.py` — `gh_main`. Subcommand: `gh`. Loads the selected pipeline YAML
+  (default `gh.yaml`) and runs stages.
 - `boss.py` — `boss_main`. Subcommand: `boss`. Not a stage sequencer —
   drives a chain of child gremlins, subprocessing out to
   `python -m gremlins.handoff` and `python -m gremlins.cli {stop,land,rescue}` between
@@ -28,14 +30,15 @@ Per-pipeline orchestrator entry points. Each module owns one CLI subcommand
   semantics, signal handlers, session-dir resolution) — keep stage logic
   out of these files.
 - Stage-name vocabulary is byte-stable (see parent CLAUDE.md §"Byte-stable
-  strings"). Resume-target validation loads the pipeline YAML and checks the
-  supplied name against `[s.name for s in pipeline.stages]`; child stage
-  names within a parallel group are also valid resume targets.
-- Both `local.py` and `gh.py` call `load_code_style()` from
-  `gremlins.prompts`, which reads `gremlins/prompts/code_style.md` via a
-  `pathlib.Path(__file__)` resolve in `prompts/__init__.py`. This is the
-  canonical coding-style doc for all gremlin pipeline stages; edit it there
-  rather than touching `agents/pragmatic-developer.md`.
+  strings"). Resume-target validation loads the pipeline YAML and builds
+  `all_valid_stages = stage_names + child_names`, where `stage_names` is the
+  top-level stage list and `child_names` are stages nested inside parallel
+  groups. Both are accepted as `--resume-from` targets.
+- Both `local.py` and `gh.py` read the coding-style doc via
+  `load_prompts([_CODE_STYLE_PATH])`, where `_CODE_STYLE_PATH` is resolved
+  with `pathlib.Path(__file__)` to `gremlins/pipelines/prompts/code_style.md`.
+  This is the canonical coding-style doc for all gremlin pipeline stages;
+  edit it there rather than touching `agents/pragmatic-developer.md`.
 
 ## Boss-specific notes
 
