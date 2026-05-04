@@ -111,7 +111,7 @@ stages:
 |---|---|
 | `name` | Unique stage identifier; used for `resume` targeting |
 | `type` | Registered stage type (see [Available stage types](#available-stage-types)) |
-| `client` | Key from `clients:`; omit for stages that need no model |
+| `client` | Key from `clients:`; parsed by the loader but not used by orchestrators to select the model |
 | `prompt` | Path or list of paths, relative to the YAML file |
 | `options` | Free-form dict passed to the stage |
 
@@ -142,8 +142,13 @@ clients:
   claude_sonnet: { provider: claude, model: sonnet }
 ```
 
-`provider` selects the client implementation; `model` is passed through.
-Today only `claude` is available as a provider.
+`provider` selects the client implementation. Today only `claude` is available.
+
+The `clients:` block and per-stage `client:` key are parsed by the pipeline
+loader but not currently used by the orchestrators to select the model at
+runtime. Model selection is controlled via CLI flags (`--model` for `gh`;
+`--plan-model`, `--impl`, `--address` etc. for `local`) or per-stage
+`options:` keys (e.g. `plan_model`, `impl_model`, `address_model`).
 
 ### `prompt:` field
 
@@ -153,7 +158,7 @@ prompt: [prompts/code_style.md, prompts/plan.md]         # list — concatenated
 ```
 
 Paths are relative to the YAML file. Lists are joined with `\n\n` before
-being passed to the stage. There is no runtime templating.
+being passed to the stage.
 
 To reuse bundled prompts from a project-local pipeline file, copy the files
 you need from `gremlins/pipelines/prompts/` into your
@@ -161,8 +166,8 @@ you need from `gremlins/pipelines/prompts/` into your
 
 ### `options:` field
 
-A free-form dict passed verbatim to the stage. Stages with documented
-options today:
+A free-form dict passed verbatim to the stage. Selected options by stage
+(see [`gremlins/stages/CLAUDE.md`](gremlins/stages/CLAUDE.md) for the full list):
 
 **`verify`** — runs `check_cmd` then `test_cmd`, with an agent fix-loop:
 
@@ -177,12 +182,12 @@ options:
 
 ```yaml
 options:
-  test_cmd: pytest        # required; stage no-ops if absent
+  test_cmd: pytest        # falls back to --test CLI flag; stage no-ops if unset in both
   max_attempts: 3         # fix-loop retries (default: 3)
 ```
 
-See [`gremlins/stages/CLAUDE.md`](gremlins/stages/CLAUDE.md) for the full
-per-stage option schemas.
+For `local` stages, model options (`plan_model`, `impl_model`, `address_model`,
+`test_fix_model`, `detail`) can also be set here to override the CLI defaults.
 
 ### Available stage types
 
@@ -206,6 +211,9 @@ per-stage option schemas.
 Wrap sibling stages in a `parallel:` list to run them concurrently:
 
 ```yaml
+clients:
+  claude_sonnet: { provider: claude, model: sonnet }
+
 stages:
   - name: plan
     type: plan
@@ -233,20 +241,18 @@ are not cancelled mid-run. `gremlins resume` accepts both the group name
 ### Worked example: project-local override
 
 Create `.gremlins/pipelines/local.yaml` to override the bundled `local`
-pipeline. This example swaps in Opus and runs `test` before `review-code`:
+pipeline. This example uses Opus for plan/implement/address stages and adds
+a `test` stage before `review-code`:
 
 ```yaml
 name: local
 
-clients:
-  claude_opus: { provider: claude, model: opus }
-
 stages:
-  - { name: plan,         type: plan,         client: claude_opus }
-  - { name: implement,    type: implement,    client: claude_opus }
+  - { name: plan,         type: plan,         options: { plan_model: opus } }
+  - { name: implement,    type: implement,    options: { impl_model: opus } }
   - { name: test,         type: test,         options: { test_cmd: pytest } }
-  - { name: review-code,  type: review-code,  client: claude_opus }
-  - { name: address-code, type: address-code, client: claude_opus }
+  - { name: review-code,  type: review-code }
+  - { name: address-code, type: address-code, options: { address_model: opus } }
 ```
 
 Add a `prompt:` key to any stage to supply a custom prompt; paths are
@@ -254,8 +260,7 @@ relative to the YAML file.
 
 ### Worked example: parallel reviewers
 
-Run two `review-code` passes in parallel — one for general detail, one for
-security — then address both:
+Run two `review-code` passes in parallel, then address both:
 
 ```yaml
 name: local
@@ -272,19 +277,16 @@ stages:
       - name: review-detail
         type: review-code
         client: claude_sonnet
-        prompt: prompts/detail.md
       - name: review-security
         type: review-code
         client: claude_sonnet
-        prompt: prompts/security.md
     max_concurrent: 2
 
   - { name: address-code, type: address-code, client: claude_sonnet }
 ```
 
-Prompt paths here are relative to `.gremlins/pipelines/`. Copy files from
-`gremlins/pipelines/prompts/lenses/` into `.gremlins/pipelines/prompts/`
-to reuse the bundled lenses.
+Note: `review-code` does not currently support per-stage prompt overrides
+via YAML — both passes use the built-in detail lens.
 
 ### Bundled pipelines
 
