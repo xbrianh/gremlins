@@ -5,7 +5,7 @@ from __future__ import annotations
 import dataclasses
 import pathlib
 
-from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
+from ..prompts import load_prompts
 from .context import StageContext
 from .registry import register_stage
 
@@ -16,10 +16,11 @@ class PlanOptions:
     plan_file: pathlib.Path
     instructions: str
     code_style: str
+    prompt_path: pathlib.Path
 
 
 def run(ctx: StageContext, options: PlanOptions) -> None:
-    template = load_prompts([BUNDLED_PROMPT_DIR / "plan.md"])
+    template = load_prompts([options.prompt_path])
     prompt = template.format(
         plan_file=options.plan_file,
         instructions=options.instructions,

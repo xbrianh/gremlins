@@ -7,12 +7,14 @@ import logging
 import pathlib
 import subprocess
 
-from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
+from ..prompts import load_prompts
 from ..state import check_bail, emit_bail
 from .context import StageContext
 from .registry import register_stage
 
 logger = logging.getLogger(__name__)
+
+_PROMPT = pathlib.Path(__file__).resolve().parent / "test_fix.md"
 
 
 @dataclasses.dataclass
@@ -75,7 +77,7 @@ def run(ctx: StageContext, options: TestOptions) -> None:
             "before finishing."
         )
 
-    template = load_prompts([BUNDLED_PROMPT_DIR / "test_fix.md"])
+    template = load_prompts([_PROMPT])
 
     _exhausted = False
     _agent_bailed = False

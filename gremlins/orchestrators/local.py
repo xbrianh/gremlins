@@ -19,7 +19,7 @@ from ..clients.claude import ClaudeClient, SubprocessClaudeClient
 from ..git import in_git_repo
 from ..logging_setup import configure_logging
 from ..pipeline import StageEntry, load_pipeline, resolve_pipeline_path
-from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
+from ..prompts import load_prompts
 from ..runner import install_signal_handlers, run_stages
 from ..stages import address_code, implement, plan, review_code, test
 from ..stages.context import StageContext
@@ -28,6 +28,13 @@ from ..state import patch_state, resolve_session_dir, set_stage
 logger = logging.getLogger(__name__)
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+_CODE_STYLE_PATH = (
+    pathlib.Path(__file__).resolve().parent.parent
+    / "pipelines"
+    / "prompts"
+    / "code_style.md"
+)
 
 
 def die(msg: str) -> NoReturn:
@@ -120,6 +127,7 @@ def _build_stage_runner(
                         plan_file=plan_file,
                         instructions=instructions,
                         code_style=code_style,
+                        prompt_path=entry.prompt_paths[-1],
                     ),
                 )
 
@@ -194,6 +202,7 @@ def _build_stage_runner(
                     address_model=entry.options.get("address_model", args.address),
                     is_git=is_git,
                     code_style=code_style,
+                    prompt_path=entry.prompt_paths[-1],
                 ),
             )
 
@@ -297,7 +306,7 @@ def local_main(
 
     is_git = in_git_repo()
     try:
-        code_style = load_prompts([BUNDLED_PROMPT_DIR / "code_style.md"])
+        code_style = load_prompts([_CODE_STYLE_PATH])
     except (FileNotFoundError, ValueError) as exc:
         die(f"error loading prompt: {exc}")
 
@@ -445,7 +454,7 @@ def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
 
     is_git = in_git_repo()
     try:
-        code_style = load_prompts([BUNDLED_PROMPT_DIR / "code_style.md"])
+        code_style = load_prompts([_CODE_STYLE_PATH])
     except (FileNotFoundError, ValueError) as exc:
         die(f"error loading prompt: {exc}")
     if is_git:
@@ -526,7 +535,7 @@ def address_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
 
     is_git = in_git_repo()
     try:
-        code_style = load_prompts([BUNDLED_PROMPT_DIR / "code_style.md"])
+        code_style = load_prompts([_CODE_STYLE_PATH])
     except (FileNotFoundError, ValueError) as exc:
         die(f"error loading prompt: {exc}")
 

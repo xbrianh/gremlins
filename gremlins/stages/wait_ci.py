@@ -4,18 +4,21 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import pathlib
 import time
 from collections.abc import Callable
 from typing import Any
 
 from ..gh_utils import fetch_check_run_logs, get_pr_ci_status
 from ..git import git_head
-from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
+from ..prompts import load_prompts
 from ..state import check_bail, emit_bail
 from .context import StageContext
 from .registry import register_stage
 
 logger = logging.getLogger(__name__)
+
+_PROMPT = pathlib.Path(__file__).resolve().parent / "ci_fix.md"
 
 _FAILING_CONCLUSIONS = frozenset({"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED"})
 _PENDING_STATES = frozenset({"EXPECTED", "PENDING"})
@@ -158,7 +161,7 @@ def run(ctx: StageContext, options: WaitCiOptions) -> None:
         )
         return
 
-    template = load_prompts([BUNDLED_PROMPT_DIR / "ci_fix.md"])
+    template = load_prompts([_PROMPT])
     bail_section = ""
     if ctx.gr_id:
         bail_section = (

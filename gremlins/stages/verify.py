@@ -7,12 +7,14 @@ import logging
 import pathlib
 import subprocess
 
-from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
+from ..prompts import load_prompts
 from ..state import check_bail, emit_bail
 from .context import StageContext
 from .registry import register_stage
 
 logger = logging.getLogger(__name__)
+
+_PROMPT = pathlib.Path(__file__).resolve().parent / "verify_fix.md"
 
 
 @dataclasses.dataclass
@@ -66,7 +68,7 @@ def run(ctx: StageContext, options: VerifyOptions) -> None:
             "before finishing."
         )
 
-    template = load_prompts([BUNDLED_PROMPT_DIR / "verify_fix.md"])
+    template = load_prompts([_PROMPT])
 
     cmds = [c for c in (options.check_cmd, options.test_cmd) if c]
     if not cmds:

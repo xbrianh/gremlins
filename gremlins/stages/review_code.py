@@ -14,7 +14,9 @@ from ..state import emit_bail, set_stage
 from .context import StageContext
 from .registry import register_stage
 
-LENSES_DIR = pathlib.Path(__file__).resolve().parent.parent / "prompts" / "lenses"
+LENSES_DIR = (
+    pathlib.Path(__file__).resolve().parent.parent / "pipelines" / "prompts" / "lenses"
+)
 
 
 def load_detail_lens() -> str:

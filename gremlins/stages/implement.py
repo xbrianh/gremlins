@@ -25,10 +25,16 @@ from .context import StageContext
 from .registry import register_stage
 
 PROMPT_LOCAL_PATH = (
-    pathlib.Path(__file__).resolve().parent.parent / "prompts" / "implement_local.md"
+    pathlib.Path(__file__).resolve().parent.parent
+    / "pipelines"
+    / "prompts"
+    / "implement_local.md"
 )
 PROMPT_GH_PATH = (
-    pathlib.Path(__file__).resolve().parent.parent / "prompts" / "implement_gh.md"
+    pathlib.Path(__file__).resolve().parent.parent
+    / "pipelines"
+    / "prompts"
+    / "implement_gh.md"
 )
 
 

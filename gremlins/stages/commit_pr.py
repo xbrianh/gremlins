@@ -12,7 +12,7 @@ from ..git import HeadAdvanced, ImplOutcome
 from .context import StageContext
 from .registry import register_stage
 
-PROMPTS_DIR = pathlib.Path(__file__).resolve().parent.parent / "prompts"
+PROMPTS_DIR = pathlib.Path(__file__).resolve().parent
 
 
 @dataclasses.dataclass
