@@ -38,7 +38,7 @@ sequencing logic of their own.
 - Stage modules expose `run(ctx: StageContext, options: XxxOptions)` as the orchestrator entry point. Orchestrators call `module.run(ctx, options)` directly.
 - Every stage that talks to `claude` takes `client: ClaudeClient` and
   calls `client.run(...)`. **Never spawn `claude -p` directly** — that
-  bypasses the test seam in `../clients/claude.py`.
+  bypasses the test seam in `../clients/protocol.py`.
 - Prompt templates live in `../prompts/` (and lens files under
   `../prompts/lenses/`). Resolve them via:
   ```python

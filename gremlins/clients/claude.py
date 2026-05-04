@@ -94,9 +94,13 @@ class SubprocessClaudeClient:
             env=env,
         )
         self._track(p)
-        assert p.stdin is not None
-        p.stdin.write(prompt.encode())
-        p.stdin.close()
+        try:
+            assert p.stdin is not None
+            p.stdin.write(prompt.encode())
+            p.stdin.close()
+        except Exception:
+            self._untrack(p)
+            raise
         return p
 
     def _consume(
@@ -105,8 +109,6 @@ class SubprocessClaudeClient:
         prefix: str,
         raw_path: pathlib.Path | None,
         capture_events: bool,
-        model: str | None,
-        label: str,
     ) -> CompletedRun:
         try:
             assert p.stdout is not None
@@ -123,9 +125,6 @@ class SubprocessClaudeClient:
             rc = p.wait()
         finally:
             self._untrack(p)
-
-        if rc != 0:
-            raise RuntimeError(f"claude -p (model={model}, label={label}) exited {rc}")
 
         return CompletedRun(
             exit_code=rc,
@@ -147,4 +146,9 @@ class SubprocessClaudeClient:
         argv = self._build_argv(model)
         p = self._spawn(argv, prompt)
         prefix = f"[{label}] " if label else ""
-        return self._consume(p, prefix, raw_path, capture_events, model, label)
+        result = self._consume(p, prefix, raw_path, capture_events)
+        if result.exit_code != 0:
+            raise RuntimeError(
+                f"claude -p (model={model}, label={label}) exited {result.exit_code}"
+            )
+        return result

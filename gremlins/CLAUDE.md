@@ -17,7 +17,9 @@ review / address pipelines (`local`, `gh`, `boss`), the fleet manager
 - `gh_utils.py` — `gh` CLI wrappers and stream-json URL extractors used by the gh orchestrator.
 - `fleet/` — fleet manager package: status listing + `stop` / `rescue` / `land` / `close` / `rm` / `log` ops. See [`fleet/CLAUDE.md`](fleet/CLAUDE.md) for the per-module breakdown.
 - `handoff.py` — chain-step decision agent (next-plan / chain-done / bail).
-- `clients/claude.py` — `ClaudeClient` Protocol + `SubprocessClaudeClient` (production).
+- `clients/protocol.py` — `ClaudeClient` Protocol + `CompletedRun` dataclass.
+- `clients/stream.py` — `stream_events` + `_emit_event` (stream-json parser and stderr renderer).
+- `clients/claude.py` — `SubprocessClaudeClient` (production subprocess runner).
 - `clients/fake.py` — `FakeClaudeClient` recording test double; replays canned stream-json from fixtures keyed by `label`.
 - `pipeline.py` — YAML pipeline loader: `load_pipeline`, `resolve_pipeline_path`, `Pipeline` / `StageEntry` dataclasses; supports parallel stage groups; resolves stage types against `STAGE_REGISTRY` (auto-populated via `stages/all.py`).
 - `pipelines/` — bundled YAML pipeline files (`local.yaml`, `gh.yaml`); lookup target for `resolve_pipeline_path`.
@@ -47,7 +49,7 @@ review / address pipelines (`local`, `gh`, `boss`), the fleet manager
 ## Testability seam: `ClaudeClient`
 
 Every stage that invokes `claude` takes an injected `client: ClaudeClient`
-(Protocol in `clients/claude.py`). Production code passes
+(Protocol in `clients/protocol.py`). Production code passes
 `SubprocessClaudeClient()` to those stages; tests pass
 `FakeClaudeClient(fixtures={label: <jsonl-or-list>})`. The fake records each
 `run(...)` call into `self.calls` for assertion. **Never have a stage

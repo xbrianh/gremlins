@@ -39,7 +39,7 @@ class FakeClaudeClient:
         self.total_cost_usd: float = 0.0
 
     def reap_all(self) -> None:
-        pass
+        pass  # Fake never spawns; nothing to reap.
 
     def _load_events(self, fixture: object) -> list[dict[str, Any]]:
         if isinstance(fixture, (list, tuple)):
