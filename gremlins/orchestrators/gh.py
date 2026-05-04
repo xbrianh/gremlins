@@ -293,7 +293,9 @@ def _build_stage_runner(
             if args.plan_source:
                 return
             if not entry.prompt_paths:
-                die(f"stage {entry.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML")
+                die(
+                    f"stage {entry.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML"
+                )
             set_stage(gr_id, entry.name)
             logger.info("[1/8] running ghplan")
             plan_prompt = load_prompts(entry.prompt_paths).format(
@@ -463,7 +465,9 @@ def _build_stage_runner(
 
         def _ghreview() -> None:
             if not entry.prompt_paths:
-                die(f"stage {entry.name!r}: type 'ghreview' requires a 'prompt' field in the pipeline YAML")
+                die(
+                    f"stage {entry.name!r}: type 'ghreview' requires a 'prompt' field in the pipeline YAML"
+                )
             _ensure_pr_url(gh_state, state_file, args.resume_from)
             set_stage(gr_id, entry.name)
             logger.info("[4/8] running /ghreview")
@@ -499,7 +503,9 @@ def _build_stage_runner(
 
         def _ghaddress() -> None:
             if not entry.prompt_paths:
-                die(f"stage {entry.name!r}: type 'ghaddress' requires a 'prompt' field in the pipeline YAML")
+                die(
+                    f"stage {entry.name!r}: type 'ghaddress' requires a 'prompt' field in the pipeline YAML"
+                )
             _ensure_pr_url(gh_state, state_file, args.resume_from)
             set_stage(gr_id, entry.name)
             logger.info("[6/8] running /ghaddress")
