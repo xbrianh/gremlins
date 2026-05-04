@@ -60,12 +60,13 @@ the module docstring at the top of [`gremlins/cli.py`](gremlins/cli.py).
 - `load_pipeline(path)` → `Pipeline` — parses a YAML file, resolves `clients`
   via `CLIENT_FACTORIES`, and validates every stage `type` against
   `STAGE_REGISTRY` (populated by importing `gremlins.stages.all`).
-- `resolve_pipeline_path(name_or_path, base_dir)` — resolves a bare name (e.g.
-  `"local"`) by checking `<base_dir>/.gremlins/pipelines/<name>.yaml` first,
-  then the bundled `gremlins/pipelines/` directory.
+- `resolve_pipeline_path(name_or_path, base_dir)` — resolves a pipeline name or
+  path. A value with a `.yaml` suffix or more than one path component is resolved
+  as a filesystem path directly. Otherwise, checks
+  `<base_dir>/.gremlins/pipelines/<name>.yaml` first, then the bundled
+  `gremlins/pipelines/` directory.
 
-Dataclasses: `Pipeline`, `StageEntry` (supports `type="parallel"` groups),
-`ClientDef`.
+Dataclasses: `Pipeline`, `StageEntry` (supports `type="parallel"` groups).
 
 Bundled YAML pipeline files live in `gremlins/pipelines/` (`local.yaml`,
 `gh.yaml`).
