@@ -63,6 +63,13 @@ def test_removed_subcommands_exit_nonzero(sub):
     assert rc != 0
 
 
+@pytest.mark.parametrize("sub", ["local", "gh", "boss"])
+def test_migrated_subcommands_exit_nonzero_with_hint(sub, capsys):
+    rc = main([sub])
+    assert rc != 0
+    assert f"gremlins launch {sub}" in capsys.readouterr().err
+
+
 # ---------------------------------------------------------------------------
 # bail_main — extracted to gremlins/bail.py
 # ---------------------------------------------------------------------------
@@ -264,35 +271,35 @@ def _no_state_created(tmp_path: pathlib.Path) -> bool:
 
 def test_local_no_args_exits_nonzero_no_state(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    rc = main(["local"])
+    rc = main(["launch", "local"])
     assert rc != 0
     assert _no_state_created(tmp_path)
 
 
 def test_gh_invalid_model_exits_nonzero_no_state(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    rc = main(["gh", "--model", "!!!", "-c", "fix bug"])
+    rc = main(["launch", "gh", "--model", "!!!", "-c", "fix bug"])
     assert rc != 0
     assert _no_state_created(tmp_path)
 
 
 def test_gh_bare_exits_nonzero_no_state(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    rc = main(["gh"])
+    rc = main(["launch", "gh"])
     assert rc != 0
     assert _no_state_created(tmp_path)
 
 
 def test_gh_invalid_resume_from_exits_nonzero_no_state(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    rc = main(["gh", "--resume-from", "bogus"])
+    rc = main(["launch", "gh", "--resume-from", "bogus"])
     assert rc != 0
     assert _no_state_created(tmp_path)
 
 
 def test_boss_missing_chain_kind_exits_nonzero_no_state(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    rc = main(["boss", "--plan", "x.md"])
+    rc = main(["launch", "boss", "--plan", "x.md"])
     assert rc != 0
     assert _no_state_created(tmp_path)
 
@@ -349,7 +356,7 @@ def test_boss_missing_plan_raises():
 
 def test_boss_missing_plan_exits_nonzero_no_state(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    rc = main(["boss", "--chain-kind", "local"])
+    rc = main(["launch", "boss", "--chain-kind", "local"])
     assert rc != 0
     assert _no_state_created(tmp_path)
 

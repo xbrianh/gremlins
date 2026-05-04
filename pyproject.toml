@@ -30,6 +30,6 @@ ignore = ["E501"]
 
 [tool.pyright]
 typeCheckingMode = "strict"
-exclude = [
-    "tests",
+include = [
+    "gremlins",
 ]

@@ -38,17 +38,18 @@ the module docstring at the top of [`gremlins/cli.py`](gremlins/cli.py).
 
 | Subcommand | Purpose |
 |---|---|
-| `local` | Full local pipeline: plan → implement → review-code → address-code |
+| `launch local` | Full local pipeline: plan → implement → review-code → address-code |
+| `launch gh` | GitHub issue-driven pipeline (plan → implement → PR → Copilot review → address) |
+| `launch boss` | Chained serial workflow driven by a top-level spec |
 | `review` | review-code stage only |
 | `address` | address-code stage only |
-| `gh` | GitHub issue-driven pipeline (plan → implement → PR → Copilot review → address) |
-| `boss` | Chained serial workflow driven by a top-level spec |
-| `fleet` | Fleet manager: status / stop / rescue / land / close / rm / log |
-| `handoff` | Chain-step decision agent (next-plan / chain-done / bail) |
-| `launch` | Launch a new background gremlin |
 | `resume` | Re-spawn an existing gremlin from its recorded stage |
-| `bail` | Mark the running gremlin as bailed |
-| `session-summary` | SessionStart / UserPromptSubmit hook handler |
+| `stop` | Send SIGTERM to a running gremlin |
+| `rescue` | Diagnose and resume a dead or stalled gremlin |
+| `land` | Land a finished gremlin onto the current branch |
+| `rm` | Delete a dead gremlin's state dir, worktree, and branch |
+| `close` | Mark a dead gremlin as closed |
+| `log` | Tail the gremlin's log file |
 
 `_run-pipeline` is an internal spawn boundary; not for direct use.
 
