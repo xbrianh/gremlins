@@ -571,6 +571,8 @@ def gh_main(
     for _e in pipeline.stages:
         if _e.type == "parallel":
             for _child in _e.children:
+                if _child.name in _child_to_group or _child.name in stage_names:
+                    die(f"duplicate child stage name {_child.name!r}")
                 _child_to_group[_child.name] = _e.name
 
     all_valid_stages = stage_names + list(_child_to_group)
@@ -678,6 +680,10 @@ def gh_main(
                     gr_id=ctx.gr_id,
                 )
                 try:
+                    # gh_state is shared across children without a lock; safe only
+                    # for read-only stages (ghreview, wait-copilot). Stages that
+                    # mutate gh_state (plan, implement, commit-pr) must not be placed
+                    # in a parallel group.
                     child_runner = _build_stage_runner(
                         child,
                         child_ctx,

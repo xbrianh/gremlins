@@ -277,6 +277,8 @@ def local_main(
     for _e in pipeline.stages:
         if _e.type == "parallel":
             for _child in _e.children:
+                if _child.name in _child_to_group or _child.name in stage_names:
+                    die(f"duplicate child stage name {_child.name!r}")
                 _child_to_group[_child.name] = _e.name
 
     all_valid_stages = stage_names + list(_child_to_group)

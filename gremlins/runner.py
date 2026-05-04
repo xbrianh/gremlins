@@ -14,12 +14,15 @@ followed by ``sys.exit(130)`` so a Ctrl-C'd run doesn't leave orphaned
 from __future__ import annotations
 
 import concurrent.futures
+import logging
 import signal
 import sys
 import types
 from collections.abc import Callable, Sequence
 
 from .clients.claude import ClaudeClient
+
+logger = logging.getLogger(__name__)
 
 Stage = tuple[str, Callable[[], None]]
 
@@ -65,6 +68,8 @@ def make_parallel_wrapper(
             futs = [pool.submit(fn) for _, fn in active]
         errors = [e for fut in futs if (e := fut.exception()) is not None]
         if errors:
+            for extra in errors[1:]:
+                logger.error("parallel child also failed: %s", extra)
             raise errors[0]
 
     return _wrapper
