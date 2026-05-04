@@ -84,9 +84,7 @@ def run(ctx: StageContext, options: VerifyOptions) -> None:
         logger.info("verify: no cmds configured; skipping")
         return
     combined_cmd = " && ".join(cmds)
-    commands_section = "**Commands run:**\n" + "\n".join(
-        f"- `{c}`" for c in cmds
-    )
+    commands_section = "**Commands run:**\n" + "\n".join(f"- `{c}`" for c in cmds)
 
     _exhausted = False
     _agent_bailed = False
