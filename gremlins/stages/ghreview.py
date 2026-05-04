@@ -29,7 +29,10 @@ def run(ctx: StageContext, options: GhreviewOptions) -> None:
 After posting the review, classify your findings and — if any are blocker-severity — emit a bail marker:
 
 - **Security-related blocker** (auth gaps, injection, credential exposure, OWASP top 10): run `python -m gremlins.bail security "<one-line summary>"`
-- **Other blocker-severity findings** (correctness, design, or anything a human should weigh in on): run `python -m gremlins.bail reviewer_requested_changes "<one-line summary>"`
+- **Design or judgment blocker** (ambiguous requirements, architectural choices, behavior the spec doesn't pin down, security tradeoffs): run `python -m gremlins.bail reviewer_requested_changes "<one-line summary>"`
+- **Do not bail** for mechanical, unambiguous fixes — missing import, wrong identifier, off-by-one, trivial wiring, dead code, single-line null check, simple rename. Flag them in the review and let the address stage handle them.
+
+**30-second rule**: if a competent developer could write the fix in under 30 seconds without asking any questions, do not bail.
 
 If the review has no blocker-severity findings, do not run the helper — exit normally. The bail marker is the signal the pipeline checks after this stage.
 """
