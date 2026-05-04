@@ -2,11 +2,9 @@ When writing code, follow these principles:
 
 {code_style}
 
-The pre-PR verify step failed. Read the captured output below, then fix the code so both commands exit 0.
+The verify step failed. Read the captured output below, then fix the code so the commands exit 0.
 
-**Commands run:**
-- Check: `{check_cmd}`
-- Test: `{test_cmd}`
+{commands_section}
 
 **Important constraints:**
 - Do not skip or disable linting rules, formatter directives, or type-check annotations to make the check pass — fix the actual violation.

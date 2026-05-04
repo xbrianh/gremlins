@@ -22,7 +22,7 @@ from ..logging_setup import configure_logging
 from ..pipeline import StageEntry, load_pipeline, resolve_pipeline_path
 from ..prompts import load_prompts
 from ..runner import install_signal_handlers, make_parallel_wrapper, run_stages
-from ..stages import address_code, implement, plan, review_code, test
+from ..stages import address_code, implement, plan, review_code, verify
 from ..stages.context import StageContext
 from ..state import patch_state, resolve_session_dir, set_stage
 
@@ -218,33 +218,41 @@ def _build_stage_runner(
 
         return _address_code
 
-    if entry.type == "test":
-        test_cmd = entry.options.get("test_cmd", args.test_cmd)
+    if entry.type == "verify":
+        check_cmd = entry.options.get("check_cmd", "")
+        test_cmd = (
+            args.test_cmd
+            if args.test_cmd is not None
+            else entry.options.get("test_cmd", "")
+        )
         max_attempts = entry.options.get("max_attempts", args.test_max_attempts)
-        test_fix_model = entry.options.get("test_fix_model", args.test_fix_model)
+        fix_model = entry.options.get("fix_model", args.test_fix_model)
 
-        def _test() -> None:
-            if test_cmd:
+        def _verify() -> None:
+            if check_cmd or test_cmd:
                 set_stage(ctx.gr_id, entry.name)
                 logger.info(
-                    "running tests (cmd: %r, max-attempts: %s, model: %s)",
+                    "running verify (check: %r, test: %r, max-attempts: %s, model: %s)",
+                    check_cmd,
                     test_cmd,
                     max_attempts,
-                    test_fix_model,
+                    fix_model,
                 )
-            test.run(
+            verify.run(
                 ctx,
-                test.TestOptions(
-                    test_cmd=test_cmd,
-                    max_attempts=max_attempts,
-                    test_fix_model=test_fix_model,
-                    is_git=is_git,
+                verify.VerifyOptions(
+                    fix_model=fix_model,
                     cwd=pathlib.Path.cwd(),
                     code_style=code_style,
+                    is_git=is_git,
+                    commit_after_fix=True,
+                    check_cmd=check_cmd,
+                    test_cmd=test_cmd,
+                    max_attempts=max_attempts,
                 ),
             )
 
-        return _test
+        return _verify
 
     raise ValueError(f"unsupported stage type {entry.type!r} in local pipeline")
 

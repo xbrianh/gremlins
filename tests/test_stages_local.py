@@ -29,7 +29,7 @@ def test_local_yaml_loads_and_validates(tmp_path):
     pipeline = load_pipeline(resolve_pipeline_path("local", tmp_path))
     assert len(pipeline.stages) == 5
     names = [s.name for s in pipeline.stages]
-    assert names == ["plan", "implement", "review-code", "address-code", "test"]
+    assert names == ["plan", "implement", "review-code", "address-code", "verify"]
 
 
 def _make_ctx(client, session_dir, *, gr_id=None):
