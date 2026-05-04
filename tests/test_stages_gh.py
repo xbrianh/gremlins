@@ -69,7 +69,7 @@ def test_ghreview_prompt_includes_bail_section_with_gr_id(tmp_path):
     assert "python -m gremlins.bail" in client.calls[0].prompt
 
 
-def test_ghreview_bail_rubric_pins_30_second_rule_and_mechanical_example(tmp_path):
+def test_ghreview_bail_rubric(tmp_path):
     client = FakeClaudeClient(fixtures={"ghreview": MINIMAL_EVENTS})
     run_ghreview(
         _make_ctx(client, tmp_path, gr_id="gr-test"),
@@ -83,20 +83,6 @@ def test_ghreview_bail_rubric_pins_30_second_rule_and_mechanical_example(tmp_pat
     prompt = client.calls[0].prompt
     assert "30 seconds" in prompt
     assert "missing import" in prompt
-
-
-def test_ghreview_bail_rubric_no_categorical_catchall(tmp_path):
-    client = FakeClaudeClient(fixtures={"ghreview": MINIMAL_EVENTS})
-    run_ghreview(
-        _make_ctx(client, tmp_path, gr_id="gr-test"),
-        GhreviewOptions(
-            model="sonnet",
-            pr_url="https://github.com/owner/repo/pull/1",
-            code_style="",
-            prompt_path=_BUNDLED_PROMPTS / "ghreview.md",
-        ),
-    )
-    prompt = client.calls[0].prompt
     assert "anything a human should weigh in on" not in prompt
 
 
