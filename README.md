@@ -297,6 +297,26 @@ The canonical reference pipelines:
 - [`gremlins/pipelines/local.yaml`](gremlins/pipelines/local.yaml) — default for `launch local`
 - [`gremlins/pipelines/gh.yaml`](gremlins/pipelines/gh.yaml) — default for `launch gh`
 
+### Local environment overrides
+
+If `.gremlins/env` exists in the project root, gremlins sources it through
+`bash` at startup and merges any new or changed variables into the process
+environment before any stage runs. All subprocesses (plan, implement, verify,
+review) inherit the result automatically.
+
+The file is sourced via `bash`, so it can use command substitution,
+conditionals, and anything bash supports:
+
+```sh
+export VIRTUAL_ENV=$(poetry env info --path)
+export PATH="$VIRTUAL_ENV/bin:$PATH"
+export TEST_DATABASE_URL=postgresql://localhost/mydb_test
+```
+
+`gremlins init` writes `.gremlins/.gitignore` with `env` so the file is
+gitignored by default. Add it to your `~/.gitignore_global` or project
+`.gitignore` if you don't use `gremlins init`.
+
 ### Loader API
 
 `gremlins/pipeline.py` exposes:
