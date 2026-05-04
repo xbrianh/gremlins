@@ -11,6 +11,12 @@ Exit 0 on the listing path even on unexpected errors: same "never break a
 session" principle as the session-summary hook.
 """
 
+from gremlins.fleet.ack import (
+    do_ack as do_ack,
+)
+from gremlins.fleet.ack import (
+    do_skip as do_skip,
+)
 from gremlins.fleet.cli import (
     main,
     parse_args,
@@ -83,6 +89,9 @@ __all__ = [
     # resolve
     "GREMLIN_STAGES",
     "resolve_gremlin",
+    # ack / skip
+    "do_ack",
+    "do_skip",
     # stop
     "do_stop",
     # rescue

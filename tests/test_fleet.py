@@ -452,6 +452,106 @@ def test_close_not_found(tmp_path, monkeypatch, capsys):
 
 
 # ---------------------------------------------------------------------------
+# do_ack / do_skip
+# ---------------------------------------------------------------------------
+
+
+def _setup_bailed_gremlin(
+    tmp_path, monkeypatch, gr_id="test-id-aabb12", **state_overrides
+):
+    state_root = tmp_path / "state-root"
+    state_root.mkdir()
+    gr_dir = state_root / gr_id
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    state = {
+        "id": gr_id,
+        "kind": "ghgremlin",
+        "stage": "ghreview",
+        "status": "bailed",
+        "bail_reason": "reviewer_requested_changes",
+        "exit_code": 2,
+        "workdir": str(workdir),
+    }
+    state.update(state_overrides)
+    _write_state(gr_dir, state, finished=True)
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+    return gr_dir, workdir
+
+
+def test_ack_on_bailed_child_sets_external_outcome_landed(
+    tmp_path, monkeypatch, capsys
+):
+    gr_dir, _ = _setup_bailed_gremlin(tmp_path, monkeypatch)
+    ok = gremlins.do_ack("test-id-aabb12")
+    assert ok is True
+    state = json.loads((gr_dir / "state.json").read_text())
+    assert state["external_outcome"] == "landed"
+    # other fields untouched
+    assert state["status"] == "bailed"
+    assert state["bail_reason"] == "reviewer_requested_changes"
+    assert state["exit_code"] == 2
+
+
+def test_ack_on_running_child_refuses(tmp_path, monkeypatch, capsys):
+    gr_dir, _ = _setup_bailed_gremlin(
+        tmp_path, monkeypatch, status="running", exit_code=None
+    )
+    ok = gremlins.do_ack("test-id-aabb12")
+    assert ok is False
+    assert "not bailed" in capsys.readouterr().err
+    state = json.loads((gr_dir / "state.json").read_text())
+    assert "external_outcome" not in state
+
+
+def test_ack_on_completed_child_refuses(tmp_path, monkeypatch, capsys):
+    gr_dir, _ = _setup_bailed_gremlin(
+        tmp_path, monkeypatch, status="completed", exit_code=0
+    )
+    ok = gremlins.do_ack("test-id-aabb12")
+    assert ok is False
+    assert "not bailed" in capsys.readouterr().err
+    state = json.loads((gr_dir / "state.json").read_text())
+    assert "external_outcome" not in state
+
+
+def test_skip_on_bailed_child_sets_external_outcome_abandoned(
+    tmp_path, monkeypatch, capsys
+):
+    gr_dir, _ = _setup_bailed_gremlin(tmp_path, monkeypatch)
+    ok = gremlins.do_skip("test-id-aabb12")
+    assert ok is True
+    state = json.loads((gr_dir / "state.json").read_text())
+    assert state["external_outcome"] == "abandoned"
+    # other fields untouched
+    assert state["status"] == "bailed"
+    assert state["bail_reason"] == "reviewer_requested_changes"
+    assert state["exit_code"] == 2
+
+
+def test_skip_on_running_child_refuses(tmp_path, monkeypatch, capsys):
+    gr_dir, _ = _setup_bailed_gremlin(
+        tmp_path, monkeypatch, status="running", exit_code=None
+    )
+    ok = gremlins.do_skip("test-id-aabb12")
+    assert ok is False
+    assert "not bailed" in capsys.readouterr().err
+    state = json.loads((gr_dir / "state.json").read_text())
+    assert "external_outcome" not in state
+
+
+def test_skip_on_completed_child_refuses(tmp_path, monkeypatch, capsys):
+    gr_dir, _ = _setup_bailed_gremlin(
+        tmp_path, monkeypatch, status="completed", exit_code=0
+    )
+    ok = gremlins.do_skip("test-id-aabb12")
+    assert ok is False
+    assert "not bailed" in capsys.readouterr().err
+    state = json.loads((gr_dir / "state.json").read_text())
+    assert "external_outcome" not in state
+
+
+# ---------------------------------------------------------------------------
 # do_land / _land_local — squash path
 # ---------------------------------------------------------------------------
 

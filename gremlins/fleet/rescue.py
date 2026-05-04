@@ -20,7 +20,7 @@ from gremlins.fleet.resolve import (
     resolve_gremlin,
     stage_names_for_gremlin,
 )
-from gremlins.fleet.state import liveness_of_state_file, load_state
+from gremlins.fleet.state import atomic_patch_state, liveness_of_state_file, load_state
 from gremlins.fleet.stop import do_stop
 from gremlins.launcher import resume as _resume
 
@@ -190,35 +190,7 @@ Constraints:
 """
 
 
-def _atomic_patch_state(sf: str, patch: dict[str, Any]) -> bool:
-    """Merge `patch` into state.json atomically. Returns True on success.
-
-    Used by headless rescue's bail paths so a partial write can't leave
-    state.json corrupt mid-bail. Stages that need to write a single field
-    (bail_class, stage) should still go through their dedicated jq-based
-    helper scripts for parity with the non-Python callers.
-    """
-    try:
-        with open(sf, encoding="utf-8") as fh:
-            state = json.load(fh)
-    except Exception:
-        return False
-    state.update(patch)
-    # Unique temp path (pid-scoped) so two concurrent bail-patchers can't
-    # clobber each other's in-flight write. Matches the `$$`-suffixed
-    # pattern used by set-stage.sh / set-bail.sh.
-    tmp = f"{sf}.bail.tmp.{os.getpid()}"
-    try:
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(state, fh, indent=2)
-        os.replace(tmp, sf)
-        return True
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        return False
+_atomic_patch_state = atomic_patch_state
 
 
 def _write_bail(sf: str, wdir: str, bail_reason: str, bail_detail: str = "") -> None:

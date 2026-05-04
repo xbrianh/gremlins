@@ -30,11 +30,13 @@ import yaml
 
 from .fleet import main as fleet_main
 from .fleet.cli import (
+    ack_main,
     close_main,
     land_main,
     log_main,
     rescue_main,
     rm_main,
+    skip_main,
     stop_main,
 )
 from .launcher import MODEL_RE, launch, resume
@@ -106,6 +108,10 @@ def main(argv: list[str] | None = None, *, gr_id: str | None = None) -> int:
         return close_main(rest)
     if sub == "log":
         return log_main(rest)
+    if sub == "ack":
+        return ack_main(rest)
+    if sub == "skip":
+        return skip_main(rest)
 
     # No subcommand or unknown first arg → fleet status (id-prefix drill-in works here)
     return fleet_main(argv)
