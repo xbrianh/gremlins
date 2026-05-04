@@ -422,7 +422,7 @@ def launch_child(gr_id: str, launch_kind: str, child_plan: str) -> str:
     test_model = boss_state.get("test_fix_model") or None
     extra: list[str] = []
     if test_cmd:
-        extra += ["--test", test_cmd]
+        extra += ["--cmd", test_cmd]
         if test_max is not None:
             extra += ["--test-max-attempts", str(test_max)]
         if test_model:

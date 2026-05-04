@@ -1,4 +1,4 @@
-"""Verify stage — runs check_cmd && test_cmd; used by both gh and local pipelines."""
+"""Verify stage — runs cmds joined with &&; used by both gh and local pipelines."""
 
 from __future__ import annotations
 
@@ -24,8 +24,7 @@ class VerifyOptions:
     code_style: str
     is_git: bool
     commit_after_fix: bool
-    check_cmd: str = ""
-    test_cmd: str = ""
+    cmds: list[str] = dataclasses.field(default_factory=lambda: [])
     max_attempts: int = 3
 
 
@@ -80,18 +79,12 @@ def run(ctx: StageContext, options: VerifyOptions) -> None:
 
     template = load_prompts([_PROMPT])
 
-    cmds = [c for c in (options.check_cmd, options.test_cmd) if c]
+    cmds = [c for c in options.cmds if c.strip()]
     if not cmds:
-        logger.info("verify: no check_cmd or test_cmd configured; skipping")
+        logger.info("verify: no cmds configured; skipping")
         return
     combined_cmd = " && ".join(cmds)
-
-    cmd_lines: list[str] = []
-    if options.check_cmd:
-        cmd_lines.append(f"- Check: `{options.check_cmd}`")
-    if options.test_cmd:
-        cmd_lines.append(f"- Test: `{options.test_cmd}`")
-    commands_section = "**Commands run:**\n" + "\n".join(cmd_lines)
+    commands_section = "**Commands run:**\n" + "\n".join(f"- `{c}`" for c in cmds)
 
     _exhausted = False
     _agent_bailed = False
