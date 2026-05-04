@@ -195,7 +195,17 @@ def land_main(argv: list[str]) -> int:
             "usage: gremlins land [--squash|--ff] [--force] [--into <dir>] <id-prefix>"
         )
         return 1
-    target = next((a for a in argv if not a.startswith("-")), None)
+    exclude: set[str] = set()
+    into_dir = ""
+    if "--into" in argv:
+        into_idx = list(argv).index("--into")
+        if into_idx + 1 < len(argv):
+            into_dir = argv[into_idx + 1]
+            exclude.add(into_dir)
+        else:
+            print("error: --into requires a directory argument")
+            return 1
+    target = next((a for a in argv if not a.startswith("-") and a not in exclude), None)
     if target is None:
         print(
             "usage: gremlins land [--squash|--ff] [--force] [--into <dir>] <id-prefix>"
@@ -211,14 +221,6 @@ def land_main(argv: list[str]) -> int:
         print("error: --squash and --ff are mutually exclusive")
         return 1
     mode = "squash" if squash_flag else ("ff" if ff_flag else None)
-    into_dir = ""
-    if "--into" in argv:
-        into_idx = list(argv).index("--into")
-        if into_idx + 1 < len(argv):
-            into_dir = argv[into_idx + 1]
-        else:
-            print("error: --into requires a directory argument")
-            return 1
     return 0 if do_land(target, force=force, mode=mode, into_dir=into_dir) else 1
 
 
@@ -276,8 +278,8 @@ def _main_impl(argv: list[str] | None = None) -> int:
 def main(argv: list[str] | None = None) -> int:
     """Entry point. Wraps ``_main_impl`` in a top-level try/except so the
     "exit 0 on the listing path even on unexpected errors" promise from the
-    module docstring holds regardless of how this is invoked — via
-    ``python -m gremlins.cli fleet`` dispatch or import + call from a test.
+    module docstring holds regardless of how this is invoked — bare ``gremlins``
+    invocation or import + call from a test.
 
     ``SystemExit`` is re-raised verbatim so deliberate ``sys.exit(N)`` calls
     inside ``_main_impl`` (including ``sys.exit(1)`` for handled failures)

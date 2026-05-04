@@ -15,7 +15,7 @@ Per-pipeline orchestrator entry points. Each module owns one CLI subcommand
   wait-copilot → ghaddress → ci-gate`.
 - `boss.py` — `boss_main`. Subcommand: `boss`. Not a stage sequencer —
   drives a chain of child gremlins, subprocessing out to
-  `python -m gremlins.handoff` and `gremlins {stop,land,rescue}` between
+  `python -m gremlins.handoff` and `python -m gremlins.cli {stop,land,rescue}` between
   each one. State lives in `boss_state.json` (schema preserved
   byte-for-byte from the legacy `bossgremlin.py`).
 
