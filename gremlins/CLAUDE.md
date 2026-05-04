@@ -68,12 +68,10 @@ writers (`session-summary.sh` hook, `liveness.sh` sourced from
 classifier in [`fleet/state.py`](fleet/state.py), the launcher, the rescue
 protocol). Renaming any of them silently breaks cross-process
 consumers. Source of truth: bail-class constants live in
-[`state.py`](state.py); local / gh stage-name vocab is defined and
-validated in the orchestrators.
+[`state.py`](state.py); stage-name vocab is defined in the pipeline YAML.
 
 - **Bail classes** (`state.json.bail_class`): `reviewer_requested_changes`, `security`, `secrets`, `other`.
-- **Local stage names**: `plan`, `implement`, `review-code`, `address-code`, `test`.
-- **Gh stage names**: `plan`, `implement`, `verify`, `commit-pr`, `request-copilot`, `ghreview`, `wait-copilot`, `ghaddress`, `ci-gate`.
+- **Stage names** (`state.json.stage`): stable within a pipeline definition. The authoritative list for any pipeline is its YAML file. `resolve_pipeline_path` checks `.gremlins/pipelines/<name>.yaml` (project-scoped) first, then bundled `gremlins/pipelines/<name>.yaml`; `--pipeline` accepts either a bare name (resolved this way) or a direct path.
 - **Marker-protocol bail reasons**: `diagnosis_no_marker`, `diagnosis_bad_marker`, `diagnosis_claude_error`, `diagnosis_timeout`, `excluded_class:<class>`, `attempts_exhausted`, `relaunch_launcher_missing`, `relaunch_failed`.
 
 ## Stage and bail bookkeeping

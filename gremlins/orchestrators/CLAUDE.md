@@ -6,13 +6,12 @@ Per-pipeline orchestrator entry points. Each module owns one CLI subcommand
 
 ## Modules
 
-- `local.py` — `local_main` (full local chain: `plan → implement → review-code →
-  address-code → test`), `review_main` (review-code only), `address_main`
-  (address-code only). Subcommands: `local`, `review`, `address`. The `test`
-  stage is a no-op when `--test` is omitted.
-- `gh.py` — `gh_main`. Subcommand: `gh`. Drives the gh pipeline:
-  `plan → implement → verify → commit-pr → request-copilot → ghreview →
-  wait-copilot → ghaddress → ci-gate`.
+- `local.py` — `local_main` (loads the selected pipeline YAML, default
+  `local.yaml`, runs stages), `review_main` (review-code only),
+  `address_main` (address-code only). Subcommands: `local`, `review`,
+  `address`.
+- `gh.py` — `gh_main`. Subcommand: `gh`. Loads the selected pipeline YAML
+  (default `gh.yaml`) and runs stages.
 - `boss.py` — `boss_main`. Subcommand: `boss`. Not a stage sequencer —
   drives a chain of child gremlins, subprocessing out to
   `python -m gremlins.handoff` and `python -m gremlins.cli {stop,land,rescue}` between
@@ -30,14 +29,16 @@ Per-pipeline orchestrator entry points. Each module owns one CLI subcommand
 - Stage bodies live in `../stages/`. Orchestrators wire them up (resume
   semantics, signal handlers, session-dir resolution) — keep stage logic
   out of these files.
-- Stage-name vocabulary per orchestrator is byte-stable (see parent
-  CLAUDE.md §"Byte-stable strings"). `VALID_RESUME_STAGES` /
-  `VALID_STAGES` constants are the source of truth.
-- Both `local.py` and `gh.py` call `load_code_style()` from
-  `gremlins.prompts`, which reads `gremlins/prompts/code_style.md` via a
-  `pathlib.Path(__file__)` resolve in `prompts/__init__.py`. This is the
-  canonical coding-style doc for all gremlin pipeline stages; edit it there
-  rather than touching `agents/pragmatic-developer.md`.
+- Stage-name vocabulary is byte-stable (see parent CLAUDE.md §"Byte-stable
+  strings"). Resume-target validation loads the pipeline YAML and builds
+  `all_valid_stages = stage_names + child_names`, where `stage_names` is the
+  top-level stage list and `child_names` are stages nested inside parallel
+  groups. Both are accepted as `--resume-from` targets.
+- Both `local.py` and `gh.py` read the coding-style doc via
+  `load_prompts([_CODE_STYLE_PATH])`, where `_CODE_STYLE_PATH` is resolved
+  with `pathlib.Path(__file__)` to `gremlins/pipelines/prompts/code_style.md`.
+  This is the canonical coding-style doc for all gremlin pipeline stages;
+  edit it there rather than touching `agents/pragmatic-developer.md`.
 
 ## Boss-specific notes
 
