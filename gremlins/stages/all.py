@@ -10,6 +10,7 @@ from . import (
     request_copilot,
     review_code,
     test,
+    verify,
     wait_ci,
     wait_copilot,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "request_copilot",
     "review_code",
     "test",
+    "verify",
     "wait_ci",
     "wait_copilot",
 ]

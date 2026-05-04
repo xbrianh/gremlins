@@ -19,7 +19,12 @@ review / address pipelines (`local`, `gh`, `boss`), the fleet manager
 - `handoff.py` — chain-step decision agent (next-plan / chain-done / bail).
 - `clients/claude.py` — `ClaudeClient` Protocol + `SubprocessClaudeClient` (production).
 - `clients/fake.py` — `FakeClaudeClient` recording test double; replays canned stream-json from fixtures keyed by `label`.
-- `stages/` — per-stage bodies: `plan`, `implement`, `review_code`, `address_code`, `test`, `commit_pr`, `ghreview`, `ghaddress`, `request_copilot`, `wait_copilot`.
+- `pipeline.py` — YAML pipeline loader: `load_pipeline`, `resolve_pipeline_path`, `Pipeline` / `StageEntry` dataclasses; supports parallel stage groups; resolves stage types against `STAGE_REGISTRY` (auto-populated via `stages/all.py`).
+- `pipelines/` — bundled YAML pipeline files (`local.yaml`, `gh.yaml`); lookup target for `resolve_pipeline_path`.
+- `stages/registry.py` — `STAGE_REGISTRY` and `CLIENT_FACTORIES` dicts + `register_stage` / `register_client_factory` functions.
+- `stages/all.py` — side-effect import; importing it causes every stage module to self-register into `STAGE_REGISTRY`. Called automatically by `load_pipeline` via `_ensure_registered()`; no manual import needed.
+- `stages/context.py` — `StageContext` dataclass: shared `client`, `session_dir`, `gr_id` threaded into every stage.
+- `stages/` — per-stage bodies: `plan`, `implement`, `review_code`, `address_code`, `verify`, `test`, `commit_pr`, `ghreview`, `ghaddress`, `request_copilot`, `wait_copilot`, `wait_ci`.
 - `orchestrators/local.py` — `local_main`, `review_main`, `address_main`.
 - `orchestrators/gh.py` — `gh_main`. Drives the gh pipeline.
 - `orchestrators/boss.py` — `boss_main`. Subprocesses out to `python -m gremlins.handoff` and `gremlins {stop,land,rescue}` between child gremlins.

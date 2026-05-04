@@ -6,30 +6,36 @@ sequencing logic of their own.
 
 ## Modules
 
-- `plan.py` — `run_plan_stage`. Local pipeline only.
-- `implement.py` — `run_implement_stage`. Dual-mode (`kind='local'` /
+- `registry.py` — `STAGE_REGISTRY` and `CLIENT_FACTORIES` dicts + `register_stage` / `register_client_factory`. All stage type lookups go through here.
+- `all.py` — importing triggers side-effect registration of all stage modules. `pipeline.py` imports it automatically via `_ensure_registered()`; no manual import needed.
+- `context.py` — `StageContext(client, session_dir, gr_id)` dataclass passed as the first arg to every registry-dispatched stage function.
+- `plan.py` — `run(ctx, PlanOptions)`. Local pipeline only.
+- `implement.py` — `run(ctx, ImplementOptions)`. Dual-mode (`kind='local'` /
   `kind='gh'`). For gh: enforces the empty-implementation invariant,
   classifies the outcome (`HeadAdvanced` / `DirtyOnly` / `EmptyImpl` /
   `DivergentHead`), creates the impl-handoff branch, and returns an
   `ImplStageResult` with the pre-impl state and classified outcome.
-- `review_code.py` — `run_review_code_stage`. Local pipeline only
+- `review_code.py` — `run(ctx, ReviewCodeOptions)`. Local pipeline only
   (single-detail-reviewer post-collapse).
-- `address_code.py` — `run_address_code_stage`. Local pipeline only.
-- `commit_pr.py` — `run_commit_pr_stage`. Gh pipeline. Opens a fresh
+- `address_code.py` — `run(ctx, AddressCodeOptions)`. Local pipeline only.
+- `commit_pr.py` — `run(ctx, CommitPrOptions)`. Gh pipeline. Opens a fresh
   claude session against the impl-handoff branch diff; no session_id
   dependency, so `--resume-from commit-pr` works cleanly.
-- `ghreview.py` — `run_ghreview_stage`. Thin wrapper around `/ghreview
+- `ghreview.py` — `run(ctx, GhreviewOptions)`. Thin wrapper around `/ghreview
   <pr_url>` plus a `check_bail` call.
-- `ghaddress.py` — `run_ghaddress_stage`. Thin wrapper around `/ghaddress
+- `ghaddress.py` — `run(ctx, GhaddressOptions)`. Thin wrapper around `/ghaddress
   <pr_url>`.
 - `request_copilot.py` — `run`. Requests Copilot review by adding
   `copilot-pull-request-reviewer` to the PR's reviewer list.
+- `verify.py` — `run(ctx, VerifyOptions)`. Gh pipeline. Runs `check_cmd && test_cmd`, re-invokes agent to fix failures up to `max_attempts`; bails on exhaustion. Registers as stage type `"verify"`.
+- `test.py` — `run(ctx, TestOptions)`. Local pipeline. Runs user-supplied `--test` command; no-ops when `test_cmd is None`; re-invokes agent to fix failures up to `max_attempts`; bails on exhaustion. Registers as stage type `"test"`.
+- `wait_ci.py` — `run(ctx, WaitCiOptions)`. Gh pipeline (`ci-gate`). Polls PR CI checks via `gh_utils`; re-invokes agent to fix failures; bails on `REVIEW_REQUIRED` or attempt exhaustion. Registers as stage type `"wait-ci"`.
 - `wait_copilot.py` — `run`. Polls until Copilot posts a non-PENDING review.
 
 ## Conventions
 
-- Public function name: `run_<stage>_stage`. Keyword-only args
-  (`def f(*, client, model, ...)`).
+- Stages registered via `register_stage` receive `(ctx: StageContext, options: XxxOptions)` as positional args.
+- Stage modules expose `run(ctx: StageContext, options: XxxOptions)` as the orchestrator entry point. Orchestrators call `module.run(ctx, options)` directly.
 - Every stage that talks to `claude` takes `client: ClaudeClient` and
   calls `client.run(...)`. **Never spawn `claude -p` directly** — that
   bypasses the test seam in `../clients/claude.py`.
