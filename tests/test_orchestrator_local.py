@@ -15,6 +15,7 @@ from conftest import (
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.orchestrators.local import address_main, local_main, review_main
+from gremlins.pipeline import load_pipeline, resolve_pipeline_path
 
 # ---------------------------------------------------------------------------
 # local_main smoke test (--plan mode: skips plan, runs implement→review→address)
@@ -98,6 +99,12 @@ def test_address_main_calls_client(tmp_path, monkeypatch):
     assert len(client.calls) == 1
     assert client.calls[0].label == "address-code"
     assert client.calls[0].model == "sonnet"
+
+
+def test_local_pipeline_stage_names(tmp_path):
+    pipeline = load_pipeline(resolve_pipeline_path("local", tmp_path))
+    names = [s.name for s in pipeline.stages]
+    assert names == ["plan", "implement", "review-code", "address-code", "test"]
 
 
 def test_local_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir):

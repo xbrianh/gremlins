@@ -6,6 +6,7 @@ import pytest
 from conftest import MINIMAL_EVENTS, ReviewCreatingClient
 
 from gremlins.clients.fake import FakeClaudeClient
+from gremlins.pipeline import load_pipeline, resolve_pipeline_path
 from gremlins.stages.address_code import AddressCodeOptions
 from gremlins.stages.address_code import run as run_address_code
 from gremlins.stages.context import StageContext
@@ -15,6 +16,13 @@ from gremlins.stages.plan import PlanOptions
 from gremlins.stages.plan import run as run_plan
 from gremlins.stages.review_code import ReviewCodeOptions
 from gremlins.stages.review_code import run as run_review_code
+
+
+def test_local_yaml_loads_and_validates(tmp_path):
+    pipeline = load_pipeline(resolve_pipeline_path("local", tmp_path))
+    assert len(pipeline.stages) == 5
+    names = [s.name for s in pipeline.stages]
+    assert names == [s.name for s in pipeline.stages]
 
 
 def _make_ctx(client, session_dir, *, gr_id=None):
