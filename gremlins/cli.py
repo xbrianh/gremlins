@@ -2,6 +2,7 @@
 
 User-facing subcommands:
   launch    — launch a background gremlin (local|gh|boss)
+  init      — scaffold .gremlins/ with editable copies of bundled pipelines
   review    — review-code stage only
   address   — address-code stage only
   resume    — re-spawn an existing gremlin from its recorded stage
@@ -75,6 +76,10 @@ def main(argv: list[str] | None = None, *, gr_id: str | None = None) -> int:
 
     if sub == "launch":
         return _launch_main(rest)
+    if sub == "init":
+        from .init import init_main
+
+        return init_main(rest)
     if sub == "_local":
         return local_main(rest, gr_id=gr_id)
     if sub == "review":
