@@ -269,7 +269,9 @@ def local_main(
     session_dir = resolve_session_dir(gr_id)
     plan_file = session_dir / "plan.md"
     _rc_entry = next((s for s in pipeline.stages if s.type == "review-code"), None)
-    _detail_model = _rc_entry.options.get("detail", args.detail) if _rc_entry else args.detail
+    _detail_model = (
+        _rc_entry.options.get("detail", args.detail) if _rc_entry else args.detail
+    )
     review_code_file = session_dir / f"review-code-detail-{_detail_model}.md"
 
     logger.info("session: %s", session_dir)
