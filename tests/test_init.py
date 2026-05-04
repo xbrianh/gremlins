@@ -51,6 +51,10 @@ def test_init_all_pipelines(tmp_path, capsys):
         for p in _iter_stage_prompts(data.get("stages", [])):
             assert p.startswith("../prompts/"), f"prompt not rewritten: {p}"
 
+    agents_md = tmp_path / "AGENTS.md"
+    assert agents_md.exists()
+    assert str(agents_md) in out
+
     assert (dot / "prompts").is_dir()
     for p in out.splitlines():
         assert pathlib.Path(p).exists(), f"listed but missing: {p}"
@@ -250,3 +254,31 @@ def test_commit_rename_failure(tmp_path, capsys, monkeypatch):
     assert err.startswith("error:")
     assert err.count("\n") == 1
     assert list(tmp_path.rglob("*.tmp.*")) == []
+
+
+# ---------------------------------------------------------------------------
+# AGENTS.md: conflict blocks without --force; --force overwrites
+# ---------------------------------------------------------------------------
+
+
+def test_agents_md_conflict_blocked(tmp_path, capsys):
+    agents_md = tmp_path / "AGENTS.md"
+    agents_md.write_text("old", encoding="utf-8")
+
+    rc = init_main(["--path", str(tmp_path), "--pipeline", "local"])
+    assert rc == 1
+
+    err = capsys.readouterr().err
+    assert "already exists" in err
+    assert agents_md.read_text(encoding="utf-8") == "old"
+
+
+def test_agents_md_force_overwrites(tmp_path, capsys):
+    agents_md = tmp_path / "AGENTS.md"
+    agents_md.write_text("old", encoding="utf-8")
+
+    rc = init_main(["--path", str(tmp_path), "--pipeline", "local", "--force"])
+    assert rc == 0
+    content = agents_md.read_text(encoding="utf-8")
+    assert content != "old"
+    assert "gremlins" in content
