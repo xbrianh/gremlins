@@ -1,11 +1,9 @@
 """Top-level dispatch for ``python -m gremlins.cli``.
 
 User-facing subcommands:
-  local     — launch a background localgremlin
+  launch    — launch a background gremlin (local|gh|boss)
   review    — review-code stage only
   address   — address-code stage only
-  gh        — launch a background ghgremlin
-  boss      — launch a background bossgremlin
   resume    — re-spawn an existing gremlin from its recorded stage
   stop      — send SIGTERM to a running gremlin
   rescue    — diagnose and resume a dead or stalled gremlin
@@ -41,7 +39,17 @@ from .orchestrators.gh import VALID_STAGES, gh_main
 from .orchestrators.local import address_main, local_main, review_main
 from .state import validate_gr_id
 
-_REMOVED = frozenset({"fleet", "handoff", "bail", "session-summary", "_run-pipeline"})
+# None → generic "no longer valid"; str → migration hint naming the new form
+_REMOVED: dict[str, str | None] = {
+    "fleet": None,
+    "handoff": None,
+    "bail": None,
+    "session-summary": None,
+    "_run-pipeline": None,
+    "local": "gremlins launch local",
+    "gh": "gremlins launch gh",
+    "boss": "gremlins launch boss",
+}
 
 
 def main(argv: list[str] | None = None, *, gr_id: str | None = None) -> int:
@@ -49,26 +57,29 @@ def main(argv: list[str] | None = None, *, gr_id: str | None = None) -> int:
         argv = sys.argv[1:]
 
     if argv and argv[0] in _REMOVED:
-        sys.stderr.write(f"error: '{argv[0]}' is no longer a valid subcommand\n")
+        redirect = _REMOVED[argv[0]]
+        if redirect:
+            sys.stderr.write(
+                f"error: '{argv[0]}' is no longer a top-level subcommand;"
+                f" use '{redirect}'\n"
+            )
+        else:
+            sys.stderr.write(f"error: '{argv[0]}' is no longer a valid subcommand\n")
         return 1
 
     sub = argv[0] if argv else ""
     rest = argv[1:]
 
-    if sub == "local":
-        return _self_background_main("localgremlin", rest)
+    if sub == "launch":
+        return _launch_main(rest)
     if sub == "_local":
         return local_main(rest, gr_id=gr_id)
     if sub == "review":
         return review_main(rest)
     if sub == "address":
         return address_main(rest)
-    if sub == "gh":
-        return _self_background_main("ghgremlin", rest)
     if sub == "_gh":
         return gh_main(rest, gr_id=gr_id)
-    if sub == "boss":
-        return _self_background_main("bossgremlin", rest)
     if sub == "_boss":
         from .orchestrators.boss import boss_main
 
@@ -90,6 +101,39 @@ def main(argv: list[str] | None = None, *, gr_id: str | None = None) -> int:
 
     # No subcommand or unknown first arg → fleet status (id-prefix drill-in works here)
     return fleet_main(argv)
+
+
+_LAUNCH_KINDS = {"local": "localgremlin", "gh": "ghgremlin", "boss": "bossgremlin"}
+
+_LAUNCH_HELP = """\
+usage: gremlins launch <kind> [opts]
+
+Launch a background gremlin.
+
+Kinds:
+  local  Full local pipeline: plan → implement → review-code → address-code
+  gh     GitHub issue-driven pipeline
+  boss   Chained serial workflow
+
+Run 'gremlins launch <kind> --help' for kind-specific flags.
+"""
+
+
+def _launch_main(argv: list[str]) -> int:
+    kind_name = argv[0] if argv and not argv[0].startswith("-") else None
+
+    if kind_name in _LAUNCH_KINDS:
+        return _self_background_main(_LAUNCH_KINDS[kind_name], argv[1:])
+
+    if kind_name is not None:
+        sys.stderr.write(
+            f"error: unknown launch kind: {kind_name!r} (choose: local, gh, boss)\n"
+        )
+        return 1
+
+    # No kind given: print help; exit 0 for --help, 1 for bare call
+    sys.stdout.write(_LAUNCH_HELP)
+    return 0 if ("--help" in argv or "-h" in argv) else 1
 
 
 def _validate_local_args(args: argparse.Namespace) -> None:
@@ -143,7 +187,7 @@ def _validate_boss_args(rest: list[str], plan: str | None) -> None:
 def _self_background_main(kind: str, argv: list[str]) -> int:
     """Launch a background gremlin of the given kind and print its id/log/state."""
     p = argparse.ArgumentParser(
-        prog=f"python -m gremlins.cli {kind.removesuffix('gremlin')}",
+        prog=f"gremlins launch {kind.removesuffix('gremlin')}",
         description=f"Launch a background {kind}.",
     )
     p.add_argument("--plan", default=None)
@@ -208,7 +252,7 @@ def _self_background_main(kind: str, argv: list[str]) -> int:
 
 def _resume_main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(
-        prog="python -m gremlins.cli resume",
+        prog="gremlins resume",
         description="Re-spawn an existing gremlin from its recorded stage.",
     )
     p.add_argument("gr_id")

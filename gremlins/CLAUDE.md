@@ -7,7 +7,7 @@ review / address pipelines (`local`, `gh`, `boss`), the fleet manager
 
 ## Module layout
 
-- `cli.py` — top-level dispatch: `gremlins {local,review,address,gh,boss,resume,stop,rescue,land,rm,close,log}`. Bare invocation prints fleet status.
+- `cli.py` — top-level dispatch: `gremlins {launch,review,address,resume,stop,rescue,land,rm,close,log}`. `launch` accepts `local|gh|boss` as its first positional. Bare invocation prints fleet status.
 - `bail.py` — `python -m gremlins.bail <class> [detail]`. Writes bail marker to `state.json`.
 - `run_pipeline.py` — `python -m gremlins.run_pipeline <gr_id> <kind>`. Spawned by the launcher; wraps `cli.main` and writes terminal state on exit.
 - `session_summary.py` — thin re-export of `fleet.session_summary.main` for `python -m gremlins.session_summary`.
@@ -29,11 +29,12 @@ review / address pipelines (`local`, `gh`, `boss`), the fleet manager
 
 | Subcommand | Module |
 |---|---|
-| `local` | `orchestrators.local.local_main` |
+| `launch local` | `orchestrators.local.local_main` |
+| `launch gh` | `orchestrators.gh.gh_main` |
+| `launch boss` | `orchestrators.boss.boss_main` |
 | `review` | `orchestrators.local.review_main` |
 | `address` | `orchestrators.local.address_main` |
-| `gh` | `orchestrators.gh.gh_main` |
-| `boss` | `orchestrators.boss.boss_main` |
+| `resume` | `cli._resume_main` |
 | `stop` / `rescue` / `land` / `rm` / `close` / `log` | `fleet.cli.*_main` |
 | (bare / id-prefix) | `fleet.main` |
 | `handoff` | `handoff.main` (via `python -m gremlins.handoff`) |

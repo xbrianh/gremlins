@@ -23,14 +23,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="On-demand status of background gremlins.",
         epilog=(
             "Subcommands (positional, before flags):\n"
+            "\n"
+            "  Launch:\n"
+            "  launch local  Full local pipeline: plan → implement → review-code → address-code\n"
+            "  launch gh     GitHub issue-driven pipeline\n"
+            "  launch boss   Chained serial workflow\n"
+            "  review        Review-code stage only (no launch)\n"
+            "  address       Address-code stage only (no launch)\n"
+            "  resume <id>   Re-spawn an existing gremlin from its recorded stage\n"
+            "\n"
+            "  Lifecycle:\n"
             "  stop <id>     Send SIGTERM to a running gremlin and wait for it to exit.\n"
             "  rescue <id>   Diagnose and resume a dead or stalled gremlin inline.\n"
             "                Pass --headless to run end-to-end with no TTY: refuses\n"
             "                excluded bail classes, caps at 3 attempts, writes a\n"
             "                bail_reason to state.json on bail.\n"
-            "  rm <id>       Delete a dead/finished gremlin's state directory, worktree, and branch.\n"
-            "  close <id>    Mark a dead/finished gremlin as closed (hides it from the default view).\n"
-            "  log <id>      Tail the gremlin's log file (`tail -F`). Ctrl-C exits.\n"
             "  land <id>     Land a finished gremlin onto the current branch, then clean up.\n"
             "                Default mode: localgremlin → --squash, bossgremlin → --ff.\n"
             "                gh → merges the PR (mode flags not applicable).\n"
@@ -39,6 +46,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "                --squash and --ff are mutually exclusive.\n"
             "                Preserves the state directory — use 'rm' for full cleanup.\n"
             "                Pass --force to skip merge and clean up a closed gh PR.\n"
+            "  rm <id>       Delete a dead/finished gremlin's state directory, worktree, and branch.\n"
+            "  close <id>    Mark a dead/finished gremlin as closed (hides it from the default view).\n"
+            "  log <id>      Tail the gremlin's log file (`tail -F`). Ctrl-C exits.\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         add_help=True,
@@ -255,7 +265,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
         interval = max(1, args.watch)
         stop = [False]
 
-        def _handle_sigint(signum: int, frame: types.FrameType | None) -> None:
+        def _handle_sigint(_signum: int, _frame: types.FrameType | None) -> None:
             stop[0] = True
 
         signal.signal(signal.SIGINT, _handle_sigint)
