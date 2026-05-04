@@ -108,6 +108,20 @@ def _validate_selection(selected: list[str], bundled: list[str]) -> int | None:
     return 1
 
 
+def _format_yaml_error(name: str, exc: yaml.YAMLError) -> str:
+    mark = getattr(exc, "problem_mark", None)
+    problem = getattr(exc, "problem", None) or " ".join(str(exc).split())
+    if mark is None:
+        return f"parse failed in {name}: {problem}"
+    return f"parse failed in {name}: {problem} (line {mark.line + 1}, column {mark.column + 1})"
+
+
+class _YamlParseError(Exception):
+    def __init__(self, name: str, original: yaml.YAMLError) -> None:
+        super().__init__(_format_yaml_error(name, original))
+        self.name = name
+
+
 def _tmp_path(dst: pathlib.Path) -> pathlib.Path:
     return dst.with_suffix(dst.suffix + f".tmp.{os.getpid()}")
 
@@ -120,9 +134,11 @@ def _build_plan(
 
     pipeline_data: dict[str, dict[str, Any]] = {}
     for name in selected:
-        raw = yaml.safe_load(
-            (_PIPELINES_DIR / f"{name}.yaml").read_text(encoding="utf-8")
-        )
+        text = (_PIPELINES_DIR / f"{name}.yaml").read_text(encoding="utf-8")
+        try:
+            raw = yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            raise _YamlParseError(f"{name}.yaml", exc) from exc
         if not isinstance(raw, dict):
             raise ValueError(f"malformed pipeline YAML: {name}.yaml")
         pipeline_data[name] = cast(dict[str, Any], raw)
@@ -201,6 +217,10 @@ def init_main(argv: list[str]) -> int:
         except OSError:
             _cleanup_tmp(staged)
             raise
+    except _YamlParseError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        _cleanup_tmp([_tmp_path(dst) for dst, _ in plan])
+        return 1
     except (OSError, yaml.YAMLError, ValueError) as exc:
         sys.stderr.write(f"error: {str(exc).splitlines()[0]}\n")
         _cleanup_tmp([_tmp_path(dst) for dst, _ in plan])
