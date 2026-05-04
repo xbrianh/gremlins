@@ -61,7 +61,7 @@ def test_subprocess_client_sets_gremlin_skip_summary(tmp_path, monkeypatch):
     monkeypatch.delenv("GREMLIN_SKIP_SUMMARY", raising=False)
 
     client = SubprocessClaudeClient()
-    client.run("hello", label="test", output_format="stream-json")
+    client.run("hello", label="test")
 
     assert env_out.exists(), "stub did not write env file"
     child_env = json.loads(env_out.read_text(encoding="utf-8"))
@@ -79,7 +79,7 @@ def test_subprocess_client_inherits_other_env_vars(tmp_path, monkeypatch):
     monkeypatch.setenv("MY_SENTINEL_VAR", sentinel)
 
     client = SubprocessClaudeClient()
-    client.run("hello", label="test", output_format="stream-json")
+    client.run("hello", label="test")
 
     child_env = json.loads(env_out.read_text(encoding="utf-8"))
     assert child_env.get("MY_SENTINEL_VAR") == sentinel
@@ -97,7 +97,7 @@ def test_subprocess_client_sends_prompt_via_stdin_not_argv(tmp_path, monkeypatch
 
     prompt = "the prompt text"
     client = SubprocessClaudeClient()
-    client.run(prompt, label="test", output_format="stream-json")
+    client.run(prompt, label="test")
 
     assert stdin_out.read_text(encoding="utf-8") == prompt
     child_argv = json.loads(argv_out.read_text(encoding="utf-8"))

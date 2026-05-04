@@ -15,7 +15,8 @@ from typing import NoReturn
 
 import yaml
 
-from ..clients.claude import ClaudeClient, SubprocessClaudeClient
+from ..clients.claude import SubprocessClaudeClient
+from ..clients.protocol import ClaudeClient
 from ..git import in_git_repo
 from ..logging_setup import configure_logging
 from ..pipeline import StageEntry, load_pipeline, resolve_pipeline_path

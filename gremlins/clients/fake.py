@@ -1,22 +1,13 @@
-"""Recording test double for the ClaudeClient Protocol.
-
-``FakeClaudeClient`` records every ``run(...)`` call as a ``RecordedCall``
-into ``self.calls`` and replays canned events from a fixture file selected
-by the call's ``label``. The lookup is one-shot per label — a missing
-fixture raises rather than silently replaying the previous one. Tests that
-re-enter the same stage twice within one process must use distinct labels
-per phase (e.g. ``"implement"`` and ``"implement_resume"``).
-"""
+"""Recording test double for the ClaudeClient Protocol."""
 
 from __future__ import annotations
 
 import json
 import pathlib
-from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
-from .claude import CompletedRun
+from .protocol import CompletedRun
 
 
 @dataclass
@@ -25,9 +16,6 @@ class RecordedCall:
     label: str
     model: str | None
     raw_path: pathlib.Path | None
-    output_format: str
-    resume_session: str | None
-    extra_flags: list[str]
     capture_events: bool
 
 
@@ -45,15 +33,12 @@ class FakeClaudeClient:
         self,
         *,
         fixtures: dict[str, object] | None = None,
-        text_results: dict[str, str] | None = None,
     ) -> None:
         self.calls: list[RecordedCall] = []
         self._fixtures: dict[str, object] = dict(fixtures or {})
-        self._text_results: dict[str, str] = dict(text_results or {})
         self.total_cost_usd: float = 0.0
 
     def reap_all(self) -> None:
-        # Fake never spawns; nothing to reap.
         pass
 
     def _load_events(self, fixture: object) -> list[dict[str, Any]]:
@@ -78,11 +63,7 @@ class FakeClaudeClient:
         label: str,
         model: str | None = None,
         raw_path: pathlib.Path | None = None,
-        output_format: str = "stream-json",
-        resume_session: str | None = None,
-        extra_flags: Sequence[str] = (),
         capture_events: bool = False,
-        on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> CompletedRun:
         self.calls.append(
             RecordedCall(
@@ -90,20 +71,9 @@ class FakeClaudeClient:
                 label=label,
                 model=model,
                 raw_path=pathlib.Path(raw_path) if raw_path is not None else None,
-                output_format=output_format,
-                resume_session=resume_session,
-                extra_flags=list(extra_flags),
                 capture_events=capture_events,
             )
         )
-
-        if output_format != "stream-json":
-            text = self._text_results.get(label)
-            if text is None:
-                raise KeyError(f"FakeClaudeClient: no text fixture for label {label!r}")
-            return CompletedRun(
-                exit_code=0, session_id=None, text_result=text, events=None
-            )
 
         if label not in self._fixtures:
             raise KeyError(f"FakeClaudeClient: no fixture for label {label!r}")
@@ -135,11 +105,6 @@ class FakeClaudeClient:
                 raw_result = evt.get("result")
                 if isinstance(raw_result, str):
                     result_text = raw_result
-            if on_event is not None:
-                try:
-                    on_event(evt)
-                except Exception:
-                    pass
 
         return CompletedRun(
             exit_code=0,

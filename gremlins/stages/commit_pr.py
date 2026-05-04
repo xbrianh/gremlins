@@ -6,7 +6,7 @@ import dataclasses
 import pathlib
 import subprocess
 
-from ..clients.claude import CompletedRun
+from ..clients.protocol import CompletedRun
 from ..gh_utils import extract_gh_url
 from ..git import HeadAdvanced, ImplOutcome
 from .context import StageContext
