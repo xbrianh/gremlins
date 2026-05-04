@@ -302,3 +302,8 @@ def _prune_old_state(state_root: str) -> None:
                     shutil.rmtree(d, ignore_errors=True)
             except OSError:
                 pass
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main(sys.argv[1:]))

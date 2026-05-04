@@ -39,7 +39,7 @@ def test_ghreview_prompt_no_bail_section_without_gr_id(tmp_path):
             model="sonnet", pr_url="https://github.com/owner/repo/pull/1", code_style=""
         ),
     )
-    assert "gremlins bail" not in client.calls[0].prompt
+    assert "python -m gremlins.bail" not in client.calls[0].prompt
 
 
 def test_ghreview_prompt_includes_bail_section_with_gr_id(tmp_path):
@@ -50,7 +50,7 @@ def test_ghreview_prompt_includes_bail_section_with_gr_id(tmp_path):
             model="sonnet", pr_url="https://github.com/owner/repo/pull/1", code_style=""
         ),
     )
-    assert "gremlins bail" in client.calls[0].prompt
+    assert "python -m gremlins.bail" in client.calls[0].prompt
 
 
 def test_ghaddress_prompt_includes_pr_url_and_code_style(tmp_path):

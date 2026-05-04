@@ -1,6 +1,6 @@
 # `gremlins/fleet/`
 
-Fleet manager package for background gremlins. Reads every `${XDG_STATE_HOME:-$HOME/.local/state}/claude-gremlins/<id>/state.json`, applies the shared liveness classifier inline, and prints one scannable line per gremlin. Subcommands (`stop`, `rescue`, `land`, `rm`, `close`, `log`) operate on a single gremlin by id-prefix. Exposed via `python -m gremlins.cli fleet`.
+Fleet manager package for background gremlins. Reads every `${XDG_STATE_HOME:-$HOME/.local/state}/claude-gremlins/<id>/state.json`, applies the shared liveness classifier inline, and prints one scannable line per gremlin. Fleet ops (`stop`, `rescue`, `land`, `rm`, `close`, `log`) are exposed as top-level `gremlins` subcommands via `fleet/cli.py`.
 
 ## Module map
 
@@ -17,7 +17,7 @@ Fleet manager package for background gremlins. Reads every `${XDG_STATE_HOME:-$H
 | `close.py` | `do_close` |
 | `land.py` | All land helpers + `do_rm`, `do_land`, `expected_branch`, `_print_cost`, `_persist_land_cost`, `_resolve_landing_cwd`, `_fast_forward_main`, `_cleanup_gremlin` |
 | `views.py` | `collect_rows`, `do_list`, `do_recent`, `do_drill_in` |
-| `cli.py` | `parse_args`, `render_view`, `_dispatch_subcommand`, `_main_impl`, `main` |
+| `cli.py` | `parse_args`, `render_view`, `_main_impl`, `main`, `stop_main`, `rescue_main`, `land_main`, `rm_main`, `close_main`, `log_main` |
 | `__init__.py` | Re-exports public surface + installs `_FleetModule` for monkeypatch support |
 
 ## Monkeypatch design

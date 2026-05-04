@@ -334,21 +334,15 @@ def run_handoff(
         handoff_cwd,
     )
     spec_args = ["--spec", spec_path] if forward_spec else []
-    cmd = _gremlins_cli_cmd(
-        "handoff",
-        "--plan",
-        current_plan,
+    cmd = [sys.executable, "-m", "gremlins.handoff",
+        "--plan", current_plan,
         *spec_args,
-        "--out",
-        out_path,
-        "--base",
-        base_ref,
-        "--model",
-        model,
-        "--timeout",
-        str(HANDOFF_TIMEOUT),
+        "--out", out_path,
+        "--base", base_ref,
+        "--model", model,
+        "--timeout", str(HANDOFF_TIMEOUT),
         *rev_args,
-    )
+    ]
     rc = run_proc(cmd, cwd=handoff_cwd, env=_gremlins_cli_env())
     check_stop()
 
@@ -461,7 +455,7 @@ def wait_for_child(child_id: str, gr_id: str) -> bool:
         if _stop_requested:
             logger.info("stop requested — stopping child %s", child_id)
             subprocess.run(
-                _gremlins_cli_cmd("fleet", "stop", child_id),
+                _gremlins_cli_cmd("stop", child_id),
                 capture_output=True,
                 env=_gremlins_cli_env(),
             )
@@ -538,7 +532,7 @@ def _summarize_for_log(text: str, limit: int = 240) -> str:
 
 def land_child(child_id: str, into_dir: str = "") -> bool:
     logger.info("landing child %s", child_id)
-    cmd = _gremlins_cli_cmd("fleet", "land", child_id)
+    cmd = _gremlins_cli_cmd("land", child_id)
     if into_dir:
         cmd += ["--into", into_dir]
     return run_proc(cmd, env=_gremlins_cli_env()) == 0
@@ -548,7 +542,7 @@ def rescue_child(child_id: str) -> bool:
     logger.info("rescuing child %s (headless)", child_id)
     return (
         run_proc(
-            _gremlins_cli_cmd("fleet", "rescue", "--headless", child_id),
+            _gremlins_cli_cmd("rescue", "--headless", child_id),
             env=_gremlins_cli_env(),
         )
         == 0
@@ -570,7 +564,7 @@ def _parse_boss_args(argv: list[str]) -> argparse.Namespace:
 
 def _resolve_plan_source(
     plan: str, state_dir: str, *, gr_id: str | None = None
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, str]:
     """Resolve --plan into a snapshot under ``<state_dir>/spec.md``.
 
     Accepts the same forms as ghgremlin's --plan: a local file path, ``42`` /
@@ -583,8 +577,8 @@ def _resolve_plan_source(
     rescue edge case where a previous run wrote the snapshot but crashed
     before persisting boss_state.json.
 
-    Returns ``(spec_path, issue_url, issue_num)``. ``issue_url`` /
-    ``issue_num`` are empty strings for local-file inputs.
+    Returns ``(spec_path, issue_url, issue_num, issue_title)``. ``issue_url``,
+    ``issue_num``, and ``issue_title`` are empty strings for local-file inputs.
     """
     spec_dest = os.path.join(state_dir, "spec.md")
 
@@ -602,7 +596,7 @@ def _resolve_plan_source(
             recovered_num = state_data.get("issue_num") or ""
         except Exception:
             pass
-        return spec_dest, recovered_url, recovered_num
+        return spec_dest, recovered_url, recovered_num, ""
 
     # Classify the input shape *before* shelling out to `gh repo view`. For a
     # typo like `--plan not-a-ref`, this lets us fail fast with a clear error
@@ -617,7 +611,7 @@ def _resolve_plan_source(
         except OSError as exc:
             die(f"--plan: failed to read/copy local plan file {plan!r}: {exc}")
         logger.info("plan source (file): %s -> %s", plan, spec_dest)
-        return spec_dest, "", ""
+        return spec_dest, "", "", ""
 
     if target_repo is None and issue_ref is None:
         # parse_issue_ref returned (None, None) for the bare-number form
@@ -656,6 +650,7 @@ def _resolve_plan_source(
 
     issue_url = issue_data.get("url") or ""
     issue_num = str(issue_data.get("number") or "")
+    issue_title = (issue_data.get("title") or "")[:60]
 
     with open(spec_dest, "w", encoding="utf-8") as f:
         f.write(body + "\n")
@@ -669,21 +664,17 @@ def _resolve_plan_source(
         issue_url,
         spec_dest,
     )
-    return spec_dest, issue_url, issue_num
+    return spec_dest, issue_url, issue_num, issue_title
 
 
 def _maybe_set_description_from_spec(
-    state_dir: str, *, gr_id: str | None = None
+    state_dir: str, *, gr_id: str | None = None, issue_title: str = ""
 ) -> None:
     """If state.json's description wasn't set explicitly, fill it from the
-    spec snapshot's first heading. Mirrors gh's _update_description_from_plan.
-
-    A no-op when state.json is missing or already has description_explicit=true,
-    or when the snapshot has no recognizable heading.
+    issue title (when sourced from an issue ref) or the spec snapshot's H1.
     """
     state_file = os.path.join(state_dir, "state.json")
-    spec_file = os.path.join(state_dir, "spec.md")
-    if not os.path.isfile(state_file) or not os.path.isfile(spec_file):
+    if not os.path.isfile(state_file):
         return
     try:
         data = load_json(state_file)
@@ -691,17 +682,20 @@ def _maybe_set_description_from_spec(
         return
     if data.get("description_explicit"):
         return
+    if issue_title:
+        patch_state(gr_id, description=issue_title[:60])
+        return
+    spec_file = os.path.join(state_dir, "spec.md")
+    if not os.path.isfile(spec_file):
+        return
     try:
-        # Read up to 50 lines; .splitlines() stops at EOF, so short specs
-        # still yield their leading lines (the prior list-comprehension
-        # form raised StopIteration on short files and dropped the H1).
         with open(spec_file, encoding="utf-8") as f:
             head_lines = f.read().splitlines()[:50]
     except Exception:
         return
     h1 = ""
     for line in head_lines:
-        m = re.match(r"^#+\s+(.+)", line)
+        m = re.match(r"^#\s+(.+)", line)
         if m:
             h1 = m.group(1).strip()[:60]
             break
@@ -746,7 +740,7 @@ def boss_main(argv: list[str], *, gr_id: str | None = None) -> int:
                 "--test is not supported for --chain-kind gh "
                 "(gh pipeline test integration is a separate plan)"
             )
-        spec_path, issue_url, issue_num = _resolve_plan_source(
+        spec_path, issue_url, issue_num, issue_title = _resolve_plan_source(
             args.plan, state_dir, gr_id=gr_id
         )
         if issue_url:
@@ -758,7 +752,7 @@ def boss_main(argv: list[str], *, gr_id: str | None = None) -> int:
             )
         else:
             logger.info("chain start: kind=%s, spec=%s", chain_kind, spec_path)
-        _maybe_set_description_from_spec(state_dir, gr_id=gr_id)
+        _maybe_set_description_from_spec(state_dir, gr_id=gr_id, issue_title=issue_title)
         if chain_kind == "gh":
             # gh children open PRs from the repo's default branch and land
             # there, regardless of where the user happens to be. Anchor the
@@ -864,7 +858,7 @@ def boss_main(argv: list[str], *, gr_id: str | None = None) -> int:
                     current_child_id,
                 )
                 subprocess.run(
-                    _gremlins_cli_cmd("fleet", "stop", current_child_id),
+                    _gremlins_cli_cmd("stop", current_child_id),
                     capture_output=True,
                     env=_gremlins_cli_env(),
                 )

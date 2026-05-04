@@ -75,7 +75,7 @@ def view_issue(issue_ref: str, repo: str) -> dict[str, Any]:
                 "--repo",
                 repo,
                 "--json",
-                "number,url,body",
+                "number,url,body,title",
             ],
             capture_output=True,
             text=True,

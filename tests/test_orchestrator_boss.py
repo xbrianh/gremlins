@@ -886,7 +886,7 @@ def test_resolve_plan_source_file(tmp_path):
     src = tmp_path / "in.md"
     src.write_text("# Spec\nContent.\n")
 
-    spec_path, issue_url, issue_num = _resolve_plan_source(str(src), str(state_dir))
+    spec_path, issue_url, issue_num, _ = _resolve_plan_source(str(src), str(state_dir))
 
     assert spec_path == str(state_dir / "spec.md")
     assert (state_dir / "spec.md").read_text() == "# Spec\nContent.\n"
@@ -922,7 +922,7 @@ def test_resolve_plan_source_issue_ref(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(shutil, "which", lambda n: "/fake/gh" if n == "gh" else None)
 
-    spec_path, issue_url, issue_num = _resolve_plan_source("42", str(state_dir))
+    spec_path, issue_url, issue_num, _ = _resolve_plan_source("42", str(state_dir))
 
     assert spec_path == str(state_dir / "spec.md")
     body = (state_dir / "spec.md").read_text()
@@ -952,7 +952,7 @@ def test_resolve_plan_source_cross_repo_issue_ref(tmp_path, monkeypatch):
     monkeypatch.setattr(boss_mod, "view_issue", fake_view_issue)
     monkeypatch.setattr(shutil, "which", lambda n: "/fake/gh" if n == "gh" else None)
 
-    spec_path, issue_url, issue_num = _resolve_plan_source(
+    spec_path, issue_url, issue_num, _ = _resolve_plan_source(
         "other/proj#7", str(state_dir)
     )
 
@@ -992,7 +992,7 @@ def test_resolve_plan_source_idempotent(tmp_path, monkeypatch):
         lambda: (_ for _ in ()).throw(AssertionError("get_repo should not be called")),
     )
 
-    spec_path, issue_url, issue_num = _resolve_plan_source("42", str(state_dir))
+    spec_path, issue_url, issue_num, _ = _resolve_plan_source("42", str(state_dir))
 
     assert spec_path == str(state_dir / "spec.md")
     assert (state_dir / "spec.md").read_text() == "# Already snapshotted\n"
@@ -1021,7 +1021,7 @@ def test_resolve_plan_source_idempotent_recovers_issue_metadata(tmp_path, monkey
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not refetch")),
     )
 
-    spec_path, issue_url, issue_num = _resolve_plan_source("77", str(state_dir))
+    spec_path, issue_url, issue_num, _ = _resolve_plan_source("77", str(state_dir))
 
     assert spec_path == str(state_dir / "spec.md")
     assert issue_url == "https://github.com/owner/repo/issues/77"
@@ -1055,7 +1055,7 @@ def test_resolve_plan_source_persists_issue_metadata_on_first_fetch(
     )
     monkeypatch.setattr(shutil, "which", lambda n: "/fake/gh" if n == "gh" else None)
 
-    spec_path, issue_url, issue_num = _resolve_plan_source(
+    spec_path, issue_url, issue_num, _ = _resolve_plan_source(
         "99", str(state_dir), gr_id="test-boss-persist-aa1122"
     )
 
