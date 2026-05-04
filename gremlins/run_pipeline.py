@@ -40,7 +40,7 @@ def main(argv: list[str] | None = None) -> int:
         traceback.print_exc()
     finally:
         write_terminal_state(gr_id, exit_code=rc)
-    return rc
+    sys.exit(rc)
 
 
 if __name__ == "__main__":
