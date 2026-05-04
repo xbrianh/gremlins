@@ -10,11 +10,15 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from typing import NoReturn
+
+import yaml
 
 from ..clients.claude import ClaudeClient, SubprocessClaudeClient
 from ..git import in_git_repo
 from ..logging_setup import configure_logging
+from ..pipeline import StageEntry, load_pipeline, resolve_pipeline_path
 from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
 from ..runner import install_signal_handlers, run_stages
 from ..stages import address_code, implement, plan, review_code, test
@@ -24,7 +28,6 @@ from ..state import patch_state, resolve_session_dir, set_stage
 logger = logging.getLogger(__name__)
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-VALID_RESUME_STAGES = ["plan", "implement", "review-code", "address-code", "test"]
 
 
 def die(msg: str) -> NoReturn:
@@ -48,9 +51,7 @@ def _parse_local_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("-x", dest="address", default="sonnet")
     parser.add_argument("-b", dest="detail", default="sonnet")
     parser.add_argument("-t", dest="test_fix_model", default="sonnet")
-    parser.add_argument(
-        "--resume-from", dest="resume_from", default=None, choices=VALID_RESUME_STAGES
-    )
+    parser.add_argument("--resume-from", dest="resume_from", default=None)
     parser.add_argument("--plan", dest="plan_path", default=None)
     parser.add_argument("--spec", dest="spec_path", default=None)
     parser.add_argument("--test", dest="test_cmd", default=None)
@@ -84,6 +85,151 @@ def _parse_local_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
+def _build_stage_runner(
+    entry: StageEntry,
+    ctx: StageContext,
+    args: argparse.Namespace,
+    *,
+    plan_file: pathlib.Path,
+    spec_file: pathlib.Path,
+    is_git: bool,
+    code_style: str,
+    instructions: str,
+    plan_copied_from_source: bool,
+    plan_text_holder: dict[str, str],
+) -> Callable[[], None]:
+    if entry.type == "plan":
+
+        def _plan() -> None:
+            if args.plan_path:
+                if plan_copied_from_source:
+                    logger.info("plan supplied via --plan (copied) -> %s", plan_file)
+                else:
+                    logger.info("plan reused from snapshot -> %s", plan_file)
+            else:
+                set_stage(ctx.gr_id, entry.name)
+                logger.info(
+                    "planning (model: %s) -> %s",
+                    entry.options.get("plan_model", args.plan_model),
+                    plan_file,
+                )
+                plan.run(
+                    ctx,
+                    plan.PlanOptions(
+                        plan_model=entry.options.get("plan_model", args.plan_model),
+                        plan_file=plan_file,
+                        instructions=instructions,
+                        code_style=code_style,
+                    ),
+                )
+
+        return _plan
+
+    if entry.type == "implement":
+
+        def _implement() -> None:
+            plan_text = plan_file.read_text(encoding="utf-8")
+            plan_text_holder["text"] = plan_text
+            spec_text = ""
+            if spec_file.exists():
+                try:
+                    spec_text = spec_file.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError) as exc:
+                    logger.warning(
+                        "could not read spec.md (%s); proceeding without north-star context",
+                        exc,
+                    )
+            set_stage(ctx.gr_id, entry.name)
+            logger.info(
+                "implementing (model: %s, from %s)",
+                entry.options.get("impl_model", args.impl),
+                plan_file,
+            )
+            implement.run(
+                ctx,
+                implement.ImplementOptions(
+                    impl_model=entry.options.get("impl_model", args.impl),
+                    plan_text=plan_text,
+                    code_style=code_style,
+                    is_git=is_git,
+                    spec_text=spec_text,
+                ),
+            )
+
+        return _implement
+
+    if entry.type == "review-code":
+        detail = entry.options.get("detail", args.detail)
+
+        def _review_code() -> None:
+            plan_text = plan_text_holder.get("text") or plan_file.read_text(
+                encoding="utf-8"
+            )
+            set_stage(ctx.gr_id, entry.name)
+            logger.info("reviewing code (model: %s)", detail)
+            review_file = review_code.run(
+                ctx,
+                review_code.ReviewCodeOptions(
+                    plan_text=plan_text,
+                    detail=detail,
+                    is_git=is_git,
+                    code_style=code_style,
+                ),
+            )
+            logger.info("detail code review (%s): %s", detail, review_file)
+
+        return _review_code
+
+    if entry.type == "address-code":
+
+        def _address_code() -> None:
+            set_stage(ctx.gr_id, entry.name)
+            logger.info(
+                "addressing code reviews (model: %s)",
+                entry.options.get("address_model", args.address),
+            )
+            address_code.run(
+                ctx,
+                address_code.AddressCodeOptions(
+                    address_model=entry.options.get("address_model", args.address),
+                    is_git=is_git,
+                    code_style=code_style,
+                ),
+            )
+
+        return _address_code
+
+    if entry.type == "test":
+        test_cmd = entry.options.get("test_cmd", args.test_cmd)
+        max_attempts = entry.options.get("max_attempts", args.test_max_attempts)
+        test_fix_model = entry.options.get("test_fix_model", args.test_fix_model)
+
+        def _test() -> None:
+            if test_cmd:
+                set_stage(ctx.gr_id, entry.name)
+                logger.info(
+                    "running tests (cmd: %r, max-attempts: %s, model: %s)",
+                    test_cmd,
+                    max_attempts,
+                    test_fix_model,
+                )
+            test.run(
+                ctx,
+                test.TestOptions(
+                    test_cmd=test_cmd,
+                    max_attempts=max_attempts,
+                    test_fix_model=test_fix_model,
+                    is_git=is_git,
+                    cwd=pathlib.Path.cwd(),
+                    code_style=code_style,
+                ),
+            )
+
+        return _test
+
+    raise ValueError(f"unsupported stage type {entry.type!r} in local pipeline")
+
+
 def local_main(
     argv: list[str], *, client: ClaudeClient | None = None, gr_id: str | None = None
 ) -> int:
@@ -100,9 +246,33 @@ def local_main(
     if shutil.which("claude") is None:
         die("claude CLI not found")
 
+    try:
+        pipeline = load_pipeline(
+            resolve_pipeline_path(args.pipeline or "local", pathlib.Path.cwd())
+        )
+    except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
+        die(str(exc))
+
+    stage_names = [s.name for s in pipeline.stages]
+    if args.resume_from and args.resume_from not in stage_names:
+        die(
+            f"--resume-from {args.resume_from!r} is not a valid stage; "
+            f"valid: {stage_names}"
+        )
+
+    seen: set[str] = set()
+    for _n in stage_names:
+        if _n in seen:
+            die(f"pipeline has duplicate stage name {_n!r}")
+        seen.add(_n)
+
     session_dir = resolve_session_dir(gr_id)
     plan_file = session_dir / "plan.md"
-    review_code_file = session_dir / f"review-code-detail-{args.detail}.md"
+    _rc_entry = next((s for s in pipeline.stages if s.type == "review-code"), None)
+    _detail_model = (
+        _rc_entry.options.get("detail", args.detail) if _rc_entry else args.detail
+    )
+    review_code_file = session_dir / f"review-code-detail-{_detail_model}.md"
 
     logger.info("session: %s", session_dir)
 
@@ -131,14 +301,19 @@ def local_main(
     except (FileNotFoundError, ValueError) as exc:
         die(f"error loading prompt: {exc}")
 
-    # Resume preconditions
+    def _type_idx(stage_type: str) -> int:
+        for i, s in enumerate(pipeline.stages):
+            if s.type == stage_type:
+                return i
+        return len(pipeline.stages)
+
     start_idx = 0
     if args.resume_from:
-        start_idx = VALID_RESUME_STAGES.index(args.resume_from)
-        if start_idx >= VALID_RESUME_STAGES.index("implement"):
+        start_idx = stage_names.index(args.resume_from)
+        if start_idx >= _type_idx("implement"):
             if not plan_file.exists() or plan_file.stat().st_size == 0:
                 die(f"--resume-from {args.resume_from} requires existing {plan_file}")
-        if start_idx >= VALID_RESUME_STAGES.index("review-code"):
+        if start_idx >= _type_idx("review-code"):
             if is_git:
                 porcelain = subprocess.run(
                     ["git", "status", "--porcelain"],
@@ -176,7 +351,7 @@ def local_main(
                     die(
                         f"--resume-from {args.resume_from} requires implementation changes in the worktree"
                     )
-        if start_idx >= VALID_RESUME_STAGES.index("address-code"):
+        if start_idx >= _type_idx("address-code"):
             if not review_code_file.exists() or review_code_file.stat().st_size == 0:
                 die(
                     f"--resume-from {args.resume_from} requires existing {review_code_file}"
@@ -190,106 +365,27 @@ def local_main(
 
     plan_text_holder: dict[str, str] = {}
 
-    def stage_plan() -> None:
-        if args.plan_path:
-            if plan_copied_from_source:
-                logger.info("[1/5] plan supplied via --plan (copied) -> %s", plan_file)
-            else:
-                logger.info("[1/5] plan reused from snapshot -> %s", plan_file)
-        else:
-            set_stage(gr_id, "plan")
-            logger.info("[1/5] planning (model: %s) -> %s", args.plan_model, plan_file)
-            plan.run(
-                ctx,
-                plan.PlanOptions(
-                    plan_model=args.plan_model,
-                    plan_file=plan_file,
-                    instructions=instructions,
-                    code_style=code_style,
-                ),
-            )
-
-    def stage_implement() -> None:
-        plan_text = plan_file.read_text(encoding="utf-8")
-        plan_text_holder["text"] = plan_text
-        spec_text = ""
-        if spec_file.exists():
-            try:
-                spec_text = spec_file.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError) as exc:
-                logger.warning(
-                    "could not read spec.md (%s); proceeding without north-star context",
-                    exc,
-                )
-        set_stage(gr_id, "implement")
-        logger.info("[2/5] implementing (model: %s, from %s)", args.impl, plan_file)
-        implement.run(
-            ctx,
-            implement.ImplementOptions(
-                impl_model=args.impl,
-                plan_text=plan_text,
-                code_style=code_style,
-                is_git=is_git,
-                spec_text=spec_text,
-            ),
-        )
-
-    def stage_review_code() -> None:
-        plan_text = plan_text_holder.get("text") or plan_file.read_text(
-            encoding="utf-8"
-        )
-        set_stage(gr_id, "review-code")
-        logger.info("[3/5] reviewing code (model: %s)", args.detail)
-        review_file = review_code.run(
-            ctx,
-            review_code.ReviewCodeOptions(
-                plan_text=plan_text,
-                detail=args.detail,
-                is_git=is_git,
-                code_style=code_style,
-            ),
-        )
-        logger.info("detail code review (%s): %s", args.detail, review_file)
-
-    def stage_address_code() -> None:
-        set_stage(gr_id, "address-code")
-        logger.info("[4/5] addressing code reviews (model: %s)", args.address)
-        address_code.run(
-            ctx,
-            address_code.AddressCodeOptions(
-                address_model=args.address,
-                is_git=is_git,
-                code_style=code_style,
-            ),
-        )
-
-    def stage_test() -> None:
-        if args.test_cmd:
-            set_stage(gr_id, "test")
-            logger.info(
-                "[5/5] running tests (cmd: %r, max-attempts: %s, model: %s)",
-                args.test_cmd,
-                args.test_max_attempts,
-                args.test_fix_model,
-            )
-        test.run(
-            ctx,
-            test.TestOptions(
-                test_cmd=args.test_cmd,
-                max_attempts=args.test_max_attempts,
-                test_fix_model=args.test_fix_model,
-                is_git=is_git,
-                cwd=pathlib.Path.cwd(),
-                code_style=code_style,
-            ),
-        )
+    for _e in pipeline.stages:
+        if _e.type == "parallel":
+            die(f"local pipeline does not support parallel stages (stage {_e.name!r})")
 
     stages = [
-        ("plan", stage_plan),
-        ("implement", stage_implement),
-        ("review-code", stage_review_code),
-        ("address-code", stage_address_code),
-        ("test", stage_test),
+        (
+            e.name,
+            _build_stage_runner(
+                e,
+                ctx,
+                args,
+                plan_file=plan_file,
+                spec_file=spec_file,
+                is_git=is_git,
+                code_style=code_style,
+                instructions=instructions,
+                plan_copied_from_source=plan_copied_from_source,
+                plan_text_holder=plan_text_holder,
+            ),
+        )
+        for e in pipeline.stages
     ]
     run_stages(stages, resume_from=args.resume_from)
 
