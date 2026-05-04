@@ -109,14 +109,20 @@ def init_main(argv: list[str]) -> int:
     base = pathlib.Path(args.path) if args.path else pathlib.Path.cwd()
     dot_gremlins = base / ".gremlins"
 
-    # Collect prompt subpaths across all selected pipelines
+    pipeline_data: dict[str, dict[str, Any]] = {}
+    for name in selected:
+        raw = yaml.safe_load(
+            (_PIPELINES_DIR / f"{name}.yaml").read_text(encoding="utf-8")
+        )
+        if not isinstance(raw, dict):
+            sys.stderr.write(f"error: malformed pipeline YAML: {name}.yaml\n")
+            return 1
+        pipeline_data[name] = cast(dict[str, Any], raw)
+
     prompt_subpaths: list[str] = []
     seen_subpaths: set[str] = set()
     for name in selected:
-        data = yaml.safe_load(
-            (_PIPELINES_DIR / f"{name}.yaml").read_text(encoding="utf-8")
-        )
-        for subpath in _collect_prompt_subpaths(data.get("stages", [])):
+        for subpath in _collect_prompt_subpaths(pipeline_data[name].get("stages", [])):
             if subpath not in seen_subpaths:
                 seen_subpaths.add(subpath)
                 prompt_subpaths.append(subpath)
@@ -143,12 +149,13 @@ def init_main(argv: list[str]) -> int:
         sys.stdout.write(f"{dst}\n")
 
     for name, dst in pipeline_targets:
-        data = yaml.safe_load(
-            (_PIPELINES_DIR / f"{name}.yaml").read_text(encoding="utf-8")
-        )
+        data = pipeline_data[name]
         data["stages"] = [_rewrite_stage(s) for s in data.get("stages", [])]
         dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_text(yaml.dump(data, default_flow_style=False), encoding="utf-8")
+        dst.write_text(
+            yaml.safe_dump(data, default_flow_style=False, sort_keys=False),
+            encoding="utf-8",
+        )
         sys.stdout.write(f"{dst}\n")
 
     return 0

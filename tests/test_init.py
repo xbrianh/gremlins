@@ -3,10 +3,28 @@
 from __future__ import annotations
 
 import pathlib
+from collections.abc import Iterator
+from typing import Any
 
 import yaml
 
 from gremlins.init import _bundled_pipeline_names, init_main
+
+
+def _iter_stage_prompts(stages: list[Any]) -> Iterator[str]:
+    for stage in stages:
+        if not isinstance(stage, dict):
+            continue
+        if "parallel" in stage:
+            yield from _iter_stage_prompts(stage["parallel"])
+        else:
+            prompts = stage.get("prompt")
+            if not prompts:
+                continue
+            if isinstance(prompts, str):
+                yield prompts
+            else:
+                yield from prompts
 
 # ---------------------------------------------------------------------------
 # Happy path: all pipelines
@@ -27,16 +45,8 @@ def test_init_all_pipelines(tmp_path, capsys):
         assert str(dst) in out
 
         data = yaml.safe_load(dst.read_text())
-        for stage in data.get("stages", []):
-            if not isinstance(stage, dict):
-                continue
-            prompts = stage.get("prompt")
-            if prompts is None:
-                continue
-            if isinstance(prompts, str):
-                prompts = [prompts]
-            for p in prompts:
-                assert p.startswith("../prompts/"), f"prompt not rewritten: {p}"
+        for p in _iter_stage_prompts(data.get("stages", [])):
+            assert p.startswith("../prompts/"), f"prompt not rewritten: {p}"
 
     assert (dot / "prompts").is_dir()
     for p in out.splitlines():
@@ -57,16 +67,7 @@ def test_init_single_pipeline(tmp_path, capsys):
     assert not (dot / "pipelines" / "gh.yaml").exists()
 
     data = yaml.safe_load((dot / "pipelines" / "local.yaml").read_text())
-    prompt_refs = set()
-    for stage in data["stages"]:
-        if not isinstance(stage, dict):
-            continue
-        prompts = stage.get("prompt")
-        if not prompts:
-            continue
-        if isinstance(prompts, str):
-            prompts = [prompts]
-        prompt_refs.update(prompts)
+    prompt_refs = set(_iter_stage_prompts(data["stages"]))
 
     for ref in prompt_refs:
         assert ref.startswith("../prompts/")
@@ -92,10 +93,7 @@ def test_init_conflict_exits_without_writing(tmp_path, capsys):
 
     # Nothing else written
     written = list((tmp_path / ".gremlins").rglob("*"))
-    assert written == [
-        conflict.parent,
-        conflict,
-    ] or all(p == conflict or p == conflict.parent for p in written)
+    assert set(written) == {conflict.parent, conflict}
     assert conflict.read_text(encoding="utf-8") == "existing"
 
 
