@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import dataclasses
+import pathlib
 
-from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
+from ..prompts import load_prompts
 from ..state import check_bail
 from .context import StageContext
 from .registry import register_stage
@@ -15,6 +16,7 @@ class GhreviewOptions:
     model: str | None
     pr_url: str
     code_style: str
+    prompt_path: pathlib.Path
 
 
 def run(ctx: StageContext, options: GhreviewOptions) -> None:
@@ -31,7 +33,7 @@ After posting the review, classify your findings and — if any are blocker-seve
 
 If the review has no blocker-severity findings, do not run the helper — exit normally. The bail marker is the signal the pipeline checks after this stage.
 """
-    prompt = load_prompts([BUNDLED_PROMPT_DIR / "ghreview.md"]).format(
+    prompt = load_prompts([options.prompt_path]).format(
         pr_url=options.pr_url,
         code_style=options.code_style,
         bail_section=bail_section,

@@ -22,9 +22,13 @@ import sys
 from typing import Any, NoReturn, cast
 
 from gremlins.logging_setup import configure_logging
-from gremlins.prompts import BUNDLED_PROMPT_DIR, load_prompts
+from gremlins.prompts import load_prompts
 
 logger = logging.getLogger(__name__)
+
+_CODE_STYLE_PATH = (
+    pathlib.Path(__file__).resolve().parent / "pipelines" / "prompts" / "code_style.md"
+)
 
 CLAUDE_FLAGS = [
     "--permission-mode",
@@ -439,7 +443,7 @@ def main(argv: list[str]) -> int:
         die(f"git context collection failed: {exc}")
 
     try:
-        code_style = load_prompts([BUNDLED_PROMPT_DIR / "code_style.md"])
+        code_style = load_prompts([_CODE_STYLE_PATH])
     except (FileNotFoundError, ValueError) as exc:
         die(f"error loading prompt: {exc}")
     prompt = build_prompt(

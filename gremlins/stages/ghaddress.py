@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import dataclasses
+import pathlib
 
-from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
+from ..prompts import load_prompts
 from ..state import check_bail
 from .context import StageContext
 from .registry import register_stage
@@ -15,6 +16,7 @@ class GhaddressOptions:
     model: str | None
     pr_url: str
     code_style: str
+    prompt_path: pathlib.Path
 
 
 def run(ctx: StageContext, options: GhaddressOptions) -> None:
@@ -31,7 +33,7 @@ If you cannot safely address one or more comments, write a bail marker before fi
 
 Out-of-scope comments and `gh issue create` failures are not bail reasons — handle them per the instructions above. If you successfully addressed every actionable comment, do not write a bail marker — just exit normally.
 """
-    prompt = load_prompts([BUNDLED_PROMPT_DIR / "ghaddress.md"]).format(
+    prompt = load_prompts([options.prompt_path]).format(
         pr_url=options.pr_url,
         code_style=options.code_style,
         bail_section=bail_section,

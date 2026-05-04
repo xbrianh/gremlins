@@ -4,8 +4,8 @@ clients:
   claude_sonnet: { provider: claude, model: sonnet }
 
 stages:
-  - { name: plan,         type: plan,         client: claude_sonnet, prompt: [../prompts/code_style.md, ../prompts/plan.md] }
-  - { name: implement,    type: implement,    client: claude_sonnet, prompt: [../prompts/code_style.md, ../prompts/implement_local.md] }
-  - { name: review-code,  type: review-code,  client: claude_sonnet, prompt: [../prompts/code_style.md, ../prompts/lenses/detail.md] }
-  - { name: address-code, type: address-code, client: claude_sonnet, prompt: [../prompts/code_style.md, ../prompts/address_code.md] }
+  - { name: plan,         type: plan,         client: claude_sonnet, prompt: [prompts/code_style.md, prompts/plan.md] }
+  - { name: implement,    type: implement,    client: claude_sonnet, prompt: [prompts/code_style.md, prompts/implement_local.md] }
+  - { name: review-code,  type: review-code,  client: claude_sonnet, prompt: [prompts/code_style.md, prompts/lenses/detail.md] }
+  - { name: address-code, type: address-code, client: claude_sonnet, prompt: [prompts/code_style.md, prompts/address_code.md] }
   - { name: test,         type: test }

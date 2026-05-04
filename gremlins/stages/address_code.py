@@ -7,12 +7,19 @@ import glob
 import pathlib
 import re
 
-from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
+from ..prompts import load_prompts
 from ..state import emit_bail
 from .context import StageContext
 from .registry import register_stage
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+_DEFAULT_PROMPT = (
+    pathlib.Path(__file__).resolve().parent.parent
+    / "pipelines"
+    / "prompts"
+    / "address_code.md"
+)
 
 
 @dataclasses.dataclass
@@ -20,6 +27,9 @@ class AddressCodeOptions:
     address_model: str
     is_git: bool
     code_style: str
+    prompt_path: pathlib.Path = dataclasses.field(
+        default_factory=lambda: _DEFAULT_PROMPT
+    )
 
 
 def _model_from(path: pathlib.Path, lens: str) -> str:
@@ -68,7 +78,7 @@ If a finding asks you to change something that touches secrets/credentials, or y
 Do not call this helper if you successfully addressed every actionable finding.
 """
 
-        template = load_prompts([BUNDLED_PROMPT_DIR / "address_code.md"])
+        template = load_prompts([options.prompt_path])
         address_prompt = template.format(
             code_style=options.code_style,
             model=model,

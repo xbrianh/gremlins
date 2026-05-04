@@ -21,7 +21,7 @@ from ..gh_utils import extract_gh_url, get_repo, parse_issue_ref, view_issue
 from ..git import DirtyOnly, HeadAdvanced
 from ..logging_setup import configure_logging
 from ..pipeline import StageEntry, load_pipeline, resolve_pipeline_path
-from ..prompts import BUNDLED_PROMPT_DIR, load_prompts
+from ..prompts import load_prompts
 from ..runner import install_signal_handlers, run_stages
 from ..stages import (
     commit_pr,
@@ -40,6 +40,13 @@ from ..state import patch_state, resolve_session_dir, resolve_state_file, set_st
 logger = logging.getLogger(__name__)
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+_CODE_STYLE_PATH = (
+    pathlib.Path(__file__).resolve().parent.parent
+    / "pipelines"
+    / "prompts"
+    / "code_style.md"
+)
 REF_RE = re.compile(r"^[A-Za-z0-9._/#-]+$")
 
 
@@ -285,9 +292,13 @@ def _build_stage_runner(
         def _plan() -> None:
             if args.plan_source:
                 return
+            if not entry.prompt_paths:
+                die(
+                    f"stage {entry.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML"
+                )
             set_stage(gr_id, entry.name)
             logger.info("[1/8] running ghplan")
-            plan_prompt = load_prompts([BUNDLED_PROMPT_DIR / "ghplan.md"]).format(
+            plan_prompt = load_prompts(entry.prompt_paths).format(
                 ref=_fmt_escape(args.ref or ""),
                 instructions=_fmt_escape(gh_state["instructions"]),
             )
@@ -339,6 +350,7 @@ def _build_stage_runner(
                     kind="gh",
                     issue_num=gh_state["issue_num"],
                     spec_text=spec_text,
+                    prompt_path=entry.prompt_paths[-1] if entry.prompt_paths else None,
                 ),
             )
             if impl_result is None:
@@ -452,6 +464,10 @@ def _build_stage_runner(
     if entry.type == "ghreview":
 
         def _ghreview() -> None:
+            if not entry.prompt_paths:
+                die(
+                    f"stage {entry.name!r}: type 'ghreview' requires a 'prompt' field in the pipeline YAML"
+                )
             _ensure_pr_url(gh_state, state_file, args.resume_from)
             set_stage(gr_id, entry.name)
             logger.info("[4/8] running /ghreview")
@@ -461,6 +477,7 @@ def _build_stage_runner(
                     model=model,
                     pr_url=gh_state["pr_url"],
                     code_style=code_style,
+                    prompt_path=entry.prompt_paths[-1],
                 ),
             )
 
@@ -485,6 +502,10 @@ def _build_stage_runner(
     if entry.type == "ghaddress":
 
         def _ghaddress() -> None:
+            if not entry.prompt_paths:
+                die(
+                    f"stage {entry.name!r}: type 'ghaddress' requires a 'prompt' field in the pipeline YAML"
+                )
             _ensure_pr_url(gh_state, state_file, args.resume_from)
             set_stage(gr_id, entry.name)
             logger.info("[6/8] running /ghaddress")
@@ -494,6 +515,7 @@ def _build_stage_runner(
                     model=model,
                     pr_url=gh_state["pr_url"],
                     code_style=code_style,
+                    prompt_path=entry.prompt_paths[-1],
                 ),
             )
 
@@ -613,7 +635,7 @@ def gh_main(
         issue_body = _fetch_issue_body(issue_num, repo)
 
     try:
-        code_style = load_prompts([BUNDLED_PROMPT_DIR / "code_style.md"])
+        code_style = load_prompts([_CODE_STYLE_PATH])
     except (FileNotFoundError, ValueError) as exc:
         die(f"error loading prompt: {exc}")
 

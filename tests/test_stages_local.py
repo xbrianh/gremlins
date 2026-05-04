@@ -17,6 +17,13 @@ from gremlins.stages.plan import run as run_plan
 from gremlins.stages.review_code import ReviewCodeOptions
 from gremlins.stages.review_code import run as run_review_code
 
+_BUNDLED_PROMPTS = (
+    pathlib.Path(__file__).resolve().parent.parent
+    / "gremlins"
+    / "pipelines"
+    / "prompts"
+)
+
 
 def test_local_yaml_loads_and_validates(tmp_path):
     pipeline = load_pipeline(resolve_pipeline_path("local", tmp_path))
@@ -212,6 +219,7 @@ def test_plan_stage_raises_when_file_absent(tmp_path):
                 plan_file=plan_file,
                 instructions="do stuff",
                 code_style="Be good.",
+                prompt_path=_BUNDLED_PROMPTS / "plan.md",
             ),
         )
     assert len(client.calls) == 1
@@ -238,6 +246,7 @@ def test_plan_stage_succeeds_when_file_exists(tmp_path):
             plan_file=plan_file,
             instructions="do stuff",
             code_style="Be good.",
+            prompt_path=_BUNDLED_PROMPTS / "plan.md",
         ),
     )
     assert plan_file.exists()
@@ -322,6 +331,7 @@ def test_plan_stage_includes_code_style(tmp_path):
                 plan_file=plan_file,
                 instructions="do stuff",
                 code_style="Be good.",
+                prompt_path=_BUNDLED_PROMPTS / "plan.md",
             ),
         )
     assert "Be good." in client.calls[0].prompt
