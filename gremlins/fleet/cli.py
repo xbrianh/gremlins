@@ -145,17 +145,18 @@ def stop_main(argv: list[str]) -> int:
 
 def rescue_main(argv: list[str]) -> int:
     if not argv:
-        print("usage: gremlins rescue [--headless] <id-prefix>")
+        print("usage: gremlins rescue [--headless] [--from-boss] <id-prefix>")
         return 1
     headless = "--headless" in argv
+    from_boss = "--from-boss" in argv
     target = next((a for a in argv if not a.startswith("-")), None)
     if target is None:
-        print("usage: gremlins rescue [--headless] <id-prefix>")
+        print("usage: gremlins rescue [--headless] [--from-boss] <id-prefix>")
         return 1
     if not os.path.isdir(_constants.STATE_ROOT):
         print("No gremlins have been launched on this machine.")
         return 0
-    return 0 if do_rescue(target, headless=headless) else 1
+    return 0 if do_rescue(target, headless=headless, from_boss=from_boss) else 1
 
 
 def rm_main(argv: list[str]) -> int:

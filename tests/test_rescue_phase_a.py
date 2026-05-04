@@ -297,6 +297,60 @@ def test_rescue_claude_not_found_records_diagnosis_claude_error(tmp_path, monkey
     assert state["bail_reason"] == "diagnosis_claude_error"
 
 
+def test_rescue_headless_excluded_class_short_circuits(tmp_path, monkeypatch):
+    """Plain headless rescue refuses on EXCLUDED_BAIL_CLASSES without --from-boss."""
+    sh = setup_shell_env(tmp_path)
+    state_dir = _make_failed_gremlin(sh.state_root, sh.repo)
+    # Set bail_class to an excluded class
+    state = json.loads((state_dir / "state.json").read_text())
+    state["bail_class"] = "reviewer_requested_changes"
+    (state_dir / "state.json").write_text(json.dumps(state))
+
+    _patch_state_root(sh.state_root, monkeypatch)
+
+    agent_calls = []
+
+    def fake_diagnosis(*a, **kw):
+        agent_calls.append(True)
+        return "fixed", ""
+
+    monkeypatch.setattr(rescue_mod, "_run_headless_diagnosis", fake_diagnosis)
+
+    ok = rescue_mod.do_rescue("victim-abcdef", headless=True, from_boss=False)
+    assert ok is False
+    assert agent_calls == [], (
+        "diagnosis agent should not run for excluded class without --from-boss"
+    )
+
+    updated = json.loads((state_dir / "state.json").read_text())
+    assert updated["bail_reason"].startswith("excluded_class:")
+
+
+def test_rescue_from_boss_bypasses_excluded_class(tmp_path, monkeypatch):
+    """--from-boss --headless rescue on an excluded-class bail invokes the diagnosis agent."""
+    sh = setup_shell_env(tmp_path)
+    state_dir = _make_failed_gremlin(sh.state_root, sh.repo)
+    # Set bail_class to an excluded class
+    state = json.loads((state_dir / "state.json").read_text())
+    state["bail_class"] = "reviewer_requested_changes"
+    (state_dir / "state.json").write_text(json.dumps(state))
+
+    _patch_state_root(sh.state_root, monkeypatch)
+
+    agent_calls = []
+
+    def fake_diagnosis(workdir, prompt, marker_path):
+        agent_calls.append({"workdir": workdir, "prompt": prompt})
+        # Return "structural" so do_rescue returns False without trying to relaunch
+        return "structural", "test sentinel"
+
+    monkeypatch.setattr(rescue_mod, "_run_headless_diagnosis", fake_diagnosis)
+
+    ok = rescue_mod.do_rescue("victim-abcdef", headless=True, from_boss=True)
+    assert ok is False  # structural → no relaunch
+    assert len(agent_calls) == 1, "diagnosis agent must run when --from-boss is set"
+
+
 def test_rescue_diagnosis_streams_events_to_stderr(tmp_path, monkeypatch, capsys):
     """Interactive rescue emits [rescue]-prefixed stream-json events to stderr."""
     sh = setup_shell_env(tmp_path)

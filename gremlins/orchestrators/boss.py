@@ -538,6 +538,69 @@ def _summarize_for_log(text: str, limit: int = 240) -> str:
     return one_line
 
 
+def _classify_from_child_state(child_id: str) -> str:
+    """Return verdict for a bailed child based on its state.json.
+
+    Verdicts: "running", "landed-externally", "abandoned", "no-decision".
+    """
+    state_path = os.path.join(STATE_ROOT, child_id, "state.json")
+    try:
+        s = load_json(state_path)
+    except Exception:
+        return "no-decision"
+    if s.get("status") == "running":
+        return "running"
+    ext = s.get("external_outcome")
+    if ext == "landed":
+        return "landed-externally"
+    if ext == "abandoned":
+        return "abandoned"
+    return "no-decision"
+
+
+def _last_bailed_child(boss_state: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the most recent bailed child entry, or None."""
+    for entry in reversed(boss_state.get("children", [])):
+        if str(entry.get("outcome", "")).startswith("bailed"):
+            return entry
+    return None
+
+
+def _is_fresh_rescue(state_dir: str) -> bool:
+    """True when the boss was just rescued (rescued_at newer than boss_state.json mtime).
+
+    The launcher writes rescued_at to state.json on resume. boss_state.json is
+    saved on every loop iteration, so after the first iteration post-rescue its
+    mtime overtakes rescued_at and this returns False.
+    """
+    state_path = os.path.join(state_dir, "state.json")
+    boss_state_path = os.path.join(state_dir, "boss_state.json")
+    try:
+        state = load_json(state_path)
+        rescued_at_str = state.get("rescued_at")
+        if not rescued_at_str:
+            return False
+        rescued_dt = datetime.datetime.fromisoformat(
+            rescued_at_str.replace("Z", "+00:00")
+        )
+        boss_mtime = os.path.getmtime(boss_state_path)
+        boss_dt = datetime.datetime.fromtimestamp(boss_mtime, tz=datetime.UTC)
+        return rescued_dt > boss_dt
+    except Exception:
+        return False
+
+
+def _format_no_decision_message(child_id: str) -> str:
+    return (
+        f"chain halted: child {child_id} bailed with no operator decision recorded.\n"
+        f"  Choose one of:\n"
+        f"    gremlins resume {child_id}   (re-run from bail point after fixing the issue)\n"
+        f"    gremlins ack {child_id}      (work is in main — proceed to next handoff)\n"
+        f"    gremlins skip {child_id}     (give up on this child — re-handoff plans something new)\n"
+        f"  Then rescue the boss: gremlins rescue <boss-id>"
+    )
+
+
 def land_child(child_id: str, into_dir: str = "") -> bool:
     logger.info("landing child %s", child_id)
     cmd = _gremlins_cli_cmd("land", child_id)
@@ -550,7 +613,7 @@ def rescue_child(child_id: str) -> bool:
     logger.info("rescuing child %s (headless)", child_id)
     return (
         run_proc(
-            _gremlins_cli_cmd("rescue", "--headless", child_id),
+            _gremlins_cli_cmd("rescue", "--headless", "--from-boss", child_id),
             env=_gremlins_cli_env(),
         )
         == 0
@@ -813,6 +876,33 @@ def boss_main(argv: list[str], *, gr_id: str | None = None) -> int:
     while True:
         check_stop()
         current_child_id = boss_state.get("current_child_id")
+
+        # On fresh rescue with a bailed child, classify before deciding next action.
+        # Verdict table: running → adopt child; landed-externally/abandoned → advance
+        # to next handoff; no-decision → die to prevent duplicate child spawning.
+        if current_child_id is None:
+            last_bailed = _last_bailed_child(boss_state)
+            if last_bailed is not None and _is_fresh_rescue(state_dir):
+                verdict = _classify_from_child_state(last_bailed["id"])
+                if verdict == "running":
+                    current_child_id = last_bailed["id"]
+                    boss_state["current_child_id"] = current_child_id
+                    boss_state["children"] = [
+                        c
+                        for c in boss_state["children"]
+                        if c["id"] != last_bailed["id"]
+                    ]
+                    save_boss_state(state_dir, boss_state)
+                elif verdict == "landed-externally":
+                    last_bailed["outcome"] = "landed-externally"
+                    save_boss_state(state_dir, boss_state)
+                    continue
+                elif verdict == "abandoned":
+                    last_bailed["outcome"] = "abandoned"
+                    save_boss_state(state_dir, boss_state)
+                    continue
+                else:
+                    die(_format_no_decision_message(last_bailed["id"]))
 
         if current_child_id is None:
             # Step 1: run handoff to decide what to do next
