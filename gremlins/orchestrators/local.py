@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import yaml
 from collections.abc import Callable
 from typing import NoReturn
 
@@ -105,7 +106,7 @@ def _build_stage_runner(
                 else:
                     logger.info("plan reused from snapshot -> %s", plan_file)
             else:
-                set_stage(ctx.gr_id, "plan")
+                set_stage(ctx.gr_id, entry.name)
                 logger.info(
                     "planning (model: %s) -> %s",
                     entry.options.get("plan_model", args.plan_model),
@@ -137,7 +138,7 @@ def _build_stage_runner(
                         "could not read spec.md (%s); proceeding without north-star context",
                         exc,
                     )
-            set_stage(ctx.gr_id, "implement")
+            set_stage(ctx.gr_id, entry.name)
             logger.info(
                 "implementing (model: %s, from %s)",
                 entry.options.get("impl_model", args.impl),
@@ -163,7 +164,7 @@ def _build_stage_runner(
             plan_text = plan_text_holder.get("text") or plan_file.read_text(
                 encoding="utf-8"
             )
-            set_stage(ctx.gr_id, "review-code")
+            set_stage(ctx.gr_id, entry.name)
             logger.info("reviewing code (model: %s)", detail)
             review_file = review_code.run(
                 ctx,
@@ -181,7 +182,7 @@ def _build_stage_runner(
     if entry.type == "address-code":
 
         def _address_code() -> None:
-            set_stage(ctx.gr_id, "address-code")
+            set_stage(ctx.gr_id, entry.name)
             logger.info(
                 "addressing code reviews (model: %s)",
                 entry.options.get("address_model", args.address),
@@ -204,7 +205,7 @@ def _build_stage_runner(
 
         def _test() -> None:
             if test_cmd:
-                set_stage(ctx.gr_id, "test")
+                set_stage(ctx.gr_id, entry.name)
                 logger.info(
                     "running tests (cmd: %r, max-attempts: %s, model: %s)",
                     test_cmd,
@@ -248,7 +249,7 @@ def local_main(
         pipeline = load_pipeline(
             resolve_pipeline_path(args.pipeline or "local", pathlib.Path.cwd())
         )
-    except (FileNotFoundError, ValueError) as exc:
+    except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
         die(str(exc))
 
     stage_names = [s.name for s in pipeline.stages]
@@ -258,9 +259,17 @@ def local_main(
             f"valid: {stage_names}"
         )
 
+    seen: set[str] = set()
+    for _n in stage_names:
+        if _n in seen:
+            die(f"pipeline has duplicate stage name {_n!r}")
+        seen.add(_n)
+
     session_dir = resolve_session_dir(gr_id)
     plan_file = session_dir / "plan.md"
-    review_code_file = session_dir / f"review-code-detail-{args.detail}.md"
+    _rc_entry = next((s for s in pipeline.stages if s.type == "review-code"), None)
+    _detail_model = _rc_entry.options.get("detail", args.detail) if _rc_entry else args.detail
+    review_code_file = session_dir / f"review-code-detail-{_detail_model}.md"
 
     logger.info("session: %s", session_dir)
 
@@ -289,16 +298,19 @@ def local_main(
     except (FileNotFoundError, ValueError) as exc:
         die(f"error loading prompt: {exc}")
 
-    def _stage_idx(name: str) -> int:
-        return stage_names.index(name) if name in stage_names else len(stage_names)
+    def _type_idx(stage_type: str) -> int:
+        for i, s in enumerate(pipeline.stages):
+            if s.type == stage_type:
+                return i
+        return len(pipeline.stages)
 
     start_idx = 0
     if args.resume_from:
         start_idx = stage_names.index(args.resume_from)
-        if start_idx >= _stage_idx("implement"):
+        if start_idx >= _type_idx("implement"):
             if not plan_file.exists() or plan_file.stat().st_size == 0:
                 die(f"--resume-from {args.resume_from} requires existing {plan_file}")
-        if start_idx >= _stage_idx("review-code"):
+        if start_idx >= _type_idx("review-code"):
             if is_git:
                 porcelain = subprocess.run(
                     ["git", "status", "--porcelain"],
@@ -336,7 +348,7 @@ def local_main(
                     die(
                         f"--resume-from {args.resume_from} requires implementation changes in the worktree"
                     )
-        if start_idx >= _stage_idx("address-code"):
+        if start_idx >= _type_idx("address-code"):
             if not review_code_file.exists() or review_code_file.stat().st_size == 0:
                 die(
                     f"--resume-from {args.resume_from} requires existing {review_code_file}"
@@ -349,6 +361,10 @@ def local_main(
     )
 
     plan_text_holder: dict[str, str] = {}
+
+    for _e in pipeline.stages:
+        if _e.type == "parallel":
+            die(f"local pipeline does not support parallel stages (stage {_e.name!r})")
 
     stages = [
         (
