@@ -24,7 +24,7 @@ class VerifyOptions:
     code_style: str
     is_git: bool
     commit_after_fix: bool
-    cmds: list[str] = dataclasses.field(default_factory=list[str])
+    cmds: list[str] = dataclasses.field(default_factory=list)
     max_attempts: int = 3
 
 
@@ -79,12 +79,13 @@ def run(ctx: StageContext, options: VerifyOptions) -> None:
 
     template = load_prompts([_PROMPT])
 
-    if not options.cmds:
+    cmds = [c for c in options.cmds if c.strip()]
+    if not cmds:
         logger.info("verify: no cmds configured; skipping")
         return
-    combined_cmd = " && ".join(options.cmds)
+    combined_cmd = " && ".join(cmds)
     commands_section = "**Commands run:**\n" + "\n".join(
-        f"- `{c}`" for c in options.cmds
+        f"- `{c}`" for c in cmds
     )
 
     _exhausted = False
