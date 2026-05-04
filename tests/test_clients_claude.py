@@ -23,6 +23,16 @@ if env_out:
     with open(env_out, "w", encoding="utf-8") as f:
         json.dump(dict(os.environ), f)
 
+stdin_out = os.environ.get("STUB_STDIN_OUT")
+if stdin_out:
+    with open(stdin_out, "w", encoding="utf-8") as f:
+        f.write(sys.stdin.read())
+
+argv_out = os.environ.get("STUB_ARGV_OUT")
+if argv_out:
+    with open(argv_out, "w", encoding="utf-8") as f:
+        json.dump(sys.argv[1:], f)
+
 sys.stdout.write(json.dumps({"type": "system", "subtype": "init", "session_id": "stub-sess"}) + "\\n")
 sys.stdout.write(json.dumps({"type": "result", "subtype": "success", "num_turns": 1, "total_cost_usd": 0.0}) + "\\n")
 sys.stdout.flush()
@@ -73,3 +83,22 @@ def test_subprocess_client_inherits_other_env_vars(tmp_path, monkeypatch):
 
     child_env = json.loads(env_out.read_text(encoding="utf-8"))
     assert child_env.get("MY_SENTINEL_VAR") == sentinel
+
+
+def test_subprocess_client_sends_prompt_via_stdin_not_argv(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    _install_stub_claude(bin_dir)
+    stdin_out = tmp_path / "child_stdin.txt"
+    argv_out = tmp_path / "child_argv.json"
+
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("STUB_STDIN_OUT", str(stdin_out))
+    monkeypatch.setenv("STUB_ARGV_OUT", str(argv_out))
+
+    prompt = "the prompt text"
+    client = SubprocessClaudeClient()
+    client.run(prompt, label="test", output_format="stream-json")
+
+    assert stdin_out.read_text(encoding="utf-8") == prompt
+    child_argv = json.loads(argv_out.read_text(encoding="utf-8"))
+    assert prompt not in child_argv

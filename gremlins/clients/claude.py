@@ -316,9 +316,6 @@ class SubprocessClaudeClient:
             env=env,
         )
         self._track(p)
-        assert p.stdin is not None
-        p.stdin.write(prompt.encode())
-        p.stdin.close()
 
         session_id: str | None = None
         text_chunks: list[str] = []
@@ -328,6 +325,9 @@ class SubprocessClaudeClient:
         stream_result_text: str | None = None
 
         try:
+            assert p.stdin is not None
+            p.stdin.write(prompt.encode())
+            p.stdin.close()
             assert p.stdout is not None
             if output_format == "stream-json":
                 session_id, cost_usd, stream_result_text, events = stream_events(
