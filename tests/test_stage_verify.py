@@ -21,8 +21,7 @@ def _make_ctx(client: Any, tmp_path: Any, *, gr_id: Any = None) -> StageContext:
 def _run(
     tmp_path: Any,
     *,
-    check_cmd: str = "true",
-    test_cmd: str = "true",
+    cmds: list[str] | None = None,
     max_attempts: int = 3,
     client: Any = None,
     code_style: str = "Be good.",
@@ -30,6 +29,8 @@ def _run(
     is_git: bool = True,
     commit_after_fix: bool = False,
 ) -> Any:
+    if cmds is None:
+        cmds = ["true"]
     if client is None:
         client = FakeClaudeClient(fixtures={})
     ctx = _make_ctx(client, tmp_path)
@@ -41,8 +42,7 @@ def _run(
             code_style=code_style,
             is_git=is_git,
             commit_after_fix=commit_after_fix,
-            check_cmd=check_cmd,
-            test_cmd=test_cmd,
+            cmds=cmds,
             max_attempts=max_attempts,
         ),
     )
@@ -50,28 +50,21 @@ def _run(
 
 
 def test_green_on_first_attempt(tmp_path):
-    client = _run(tmp_path, check_cmd="true", test_cmd="true")
+    client = _run(tmp_path, cmds=["true"])
     assert len(client.calls) == 0
     assert (tmp_path / "verify-attempt-1.log").exists()
 
 
-def test_no_op_when_both_cmds_empty(tmp_path):
-    """Both cmds empty -> stage skips without invoking the shell or agent."""
-    client = _run(tmp_path, check_cmd="", test_cmd="")
+def test_no_op_when_cmds_empty(tmp_path):
+    """Empty cmds list -> stage skips without invoking the shell or agent."""
+    client = _run(tmp_path, cmds=[])
     assert len(client.calls) == 0
     assert not (tmp_path / "verify-attempt-1.log").exists()
 
 
-def test_runs_only_check_when_test_cmd_empty(tmp_path):
-    """test_cmd empty -> only check_cmd runs (no shell-syntax error)."""
-    client = _run(tmp_path, check_cmd="true", test_cmd="")
-    assert len(client.calls) == 0
-    assert (tmp_path / "verify-attempt-1.log").exists()
-
-
-def test_runs_only_test_when_check_cmd_empty(tmp_path):
-    """check_cmd empty -> only test_cmd runs (no shell-syntax error)."""
-    client = _run(tmp_path, check_cmd="", test_cmd="true")
+def test_single_cmd(tmp_path):
+    """A single cmd in the list runs without shell-syntax error."""
+    client = _run(tmp_path, cmds=["true"])
     assert len(client.calls) == 0
     assert (tmp_path / "verify-attempt-1.log").exists()
 
@@ -96,8 +89,7 @@ def test_fix_then_green(tmp_path):
             code_style="Be good.",
             is_git=True,
             commit_after_fix=False,
-            check_cmd=check_cmd,
-            test_cmd="true",
+            cmds=[check_cmd, "true"],
             max_attempts=3,
         ),
     )
@@ -130,8 +122,7 @@ def test_attempts_exhausted_raises(tmp_path, monkeypatch):
                 code_style="Be good.",
                 is_git=True,
                 commit_after_fix=False,
-                check_cmd="false",
-                test_cmd="true",
+                cmds=["false", "true"],
                 max_attempts=3,
             ),
         )
@@ -155,8 +146,7 @@ def test_exhaustion_with_max_1(tmp_path):
                 code_style="Be good.",
                 is_git=True,
                 commit_after_fix=False,
-                check_cmd="false",
-                test_cmd="true",
+                cmds=["false"],
                 max_attempts=1,
             ),
         )
@@ -185,8 +175,7 @@ def test_code_style_in_fix_prompt(tmp_path):
             code_style="My custom style rules.",
             is_git=True,
             commit_after_fix=False,
-            check_cmd=check_cmd,
-            test_cmd="true",
+            cmds=[check_cmd, "true"],
             max_attempts=3,
         ),
     )
@@ -215,8 +204,7 @@ def test_both_cmds_in_fix_prompt(tmp_path, monkeypatch):
                 code_style="",
                 is_git=True,
                 commit_after_fix=False,
-                check_cmd="false",
-                test_cmd="make test",
+                cmds=["false", "make test"],
                 max_attempts=3,
             ),
         )
@@ -238,8 +226,7 @@ def test_log_file_captures_output(tmp_path):
             code_style="",
             is_git=True,
             commit_after_fix=False,
-            check_cmd="echo hello_check",
-            test_cmd="echo hello_test",
+            cmds=["echo hello_check", "echo hello_test"],
             max_attempts=3,
         ),
     )
@@ -271,8 +258,7 @@ def test_no_pr_opened_on_exhaustion(tmp_path, monkeypatch):
                 code_style="",
                 is_git=True,
                 commit_after_fix=False,
-                check_cmd="false",
-                test_cmd="true",
+                cmds=["false"],
                 max_attempts=3,
             ),
         )
@@ -297,8 +283,7 @@ def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
                 code_style="",
                 is_git=True,
                 commit_after_fix=False,
-                check_cmd="false",
-                test_cmd="true",
+                cmds=["false"],
                 max_attempts=3,
             ),
         )
@@ -329,8 +314,7 @@ def test_is_git_false_skips_diff(tmp_path):
             code_style="",
             is_git=False,
             commit_after_fix=False,
-            check_cmd=check_cmd,
-            test_cmd="",
+            cmds=[check_cmd],
             max_attempts=3,
         ),
     )
@@ -359,8 +343,7 @@ def test_commit_after_fix_true_in_prompt(tmp_path):
             code_style="",
             is_git=True,
             commit_after_fix=True,
-            check_cmd=check_cmd,
-            test_cmd="",
+            cmds=[check_cmd],
             max_attempts=3,
         ),
     )

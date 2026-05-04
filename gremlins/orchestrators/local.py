@@ -49,7 +49,7 @@ def _parse_local_args(argv: list[str]) -> argparse.Namespace:
         "usage: gremlins.cli local [-p <plan-model>] [-i <impl-model>] "
         "[-x <address-model>] [-b <detail-review-model>] "
         "[--resume-from <stage>] [--plan <path>] [--spec <path>] "
-        '[--test "<command>"] [--test-max-attempts <n>] [-t <test-fix-model>] '
+        '[--cmd "<command>"] [--test-max-attempts <n>] [-t <test-fix-model>] '
         "[--pipeline <name-or-path>] "
         '"<instructions>"'
     )
@@ -62,7 +62,7 @@ def _parse_local_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--resume-from", dest="resume_from", default=None)
     parser.add_argument("--plan", dest="plan_path", default=None)
     parser.add_argument("--spec", dest="spec_path", default=None)
-    parser.add_argument("--test", dest="test_cmd", default=None)
+    parser.add_argument("--cmd", dest="cmds", action="append", default=None)
     parser.add_argument(
         "--test-max-attempts", dest="test_max_attempts", type=int, default=3
     )
@@ -88,8 +88,10 @@ def _parse_local_args(argv: list[str]) -> argparse.Namespace:
             die(f"invalid model: {m}")
     if args.test_max_attempts <= 0:
         die("--test-max-attempts must be a positive integer")
-    if args.test_cmd is not None and not args.test_cmd.strip():
-        die("--test: command must be a non-empty string")
+    if args.cmds is not None:
+        for c in args.cmds:
+            if not c.strip():
+                die("--cmd: command must be a non-empty string")
     return args
 
 
@@ -219,22 +221,16 @@ def _build_stage_runner(
         return _address_code
 
     if entry.type == "verify":
-        check_cmd = entry.options.get("check_cmd", "")
-        test_cmd = (
-            args.test_cmd
-            if args.test_cmd is not None
-            else entry.options.get("test_cmd", "")
-        )
+        cmds = args.cmds if args.cmds is not None else entry.options.get("cmds", [])
         max_attempts = entry.options.get("max_attempts", args.test_max_attempts)
         fix_model = entry.options.get("fix_model", args.test_fix_model)
 
         def _verify() -> None:
-            if check_cmd or test_cmd:
+            if cmds:
                 set_stage(ctx.gr_id, entry.name)
                 logger.info(
-                    "running verify (check: %r, test: %r, max-attempts: %s, model: %s)",
-                    check_cmd,
-                    test_cmd,
+                    "running verify (cmds: %r, max-attempts: %s, model: %s)",
+                    cmds,
                     max_attempts,
                     fix_model,
                 )
@@ -246,8 +242,7 @@ def _build_stage_runner(
                     code_style=code_style,
                     is_git=is_git,
                     commit_after_fix=is_git,
-                    check_cmd=check_cmd,
-                    test_cmd=test_cmd,
+                    cmds=cmds,
                     max_attempts=max_attempts,
                 ),
             )

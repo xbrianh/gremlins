@@ -366,8 +366,7 @@ def _build_stage_runner(
         return _implement
 
     if entry.type == "verify":
-        check_cmd = entry.options.get("check_cmd", "")
-        test_cmd = entry.options.get("test_cmd", "")
+        cmds = entry.options.get("cmds", [])
         max_attempts = entry.options.get("max_attempts", 3)
 
         def _verify() -> None:
@@ -381,8 +380,7 @@ def _build_stage_runner(
                     code_style=code_style,
                     is_git=True,
                     commit_after_fix=False,
-                    check_cmd=check_cmd,
-                    test_cmd=test_cmd,
+                    cmds=cmds,
                     max_attempts=max_attempts,
                 ),
             )
