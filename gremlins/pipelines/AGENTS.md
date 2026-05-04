@@ -14,7 +14,7 @@ clients:
 
 stages:
   - name: <stage-name>
-    type: <stage-type>          # plan | implement | verify | review_code | address_code | commit-pr | ghreview | ghaddress | wait-ci | …
+    type: <stage-type>          # plan | implement | verify | review-code | address-code | commit-pr | ghreview | ghaddress | wait-ci | …
     client: <alias>             # omit for stages that don't call Claude
     prompt: [../prompts/foo.md] # list of prompt template paths (relative to pipelines/)
     options:                    # stage-specific knobs
@@ -24,7 +24,7 @@ stages:
 
 Stages run in order. A stage can be wrapped in a `parallel:` group to run concurrently.
 
-To change which model a stage uses, edit the `clients:` block and update the stage's `client:` field.
+To change which model a stage uses, set the appropriate stage option (`plan_model`, `impl_model`, `address_model`, `fix_model`) in the stage's `options:` block, or pass the corresponding CLI flag to `gremlins launch`. The `model` field in the `clients:` block is not used by the built-in `claude` provider.
 
 ## `.gremlins/prompts/*.md`
 

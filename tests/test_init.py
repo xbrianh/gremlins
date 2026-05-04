@@ -279,5 +279,6 @@ def test_agents_md_force_overwrites(tmp_path, capsys):
 
     rc = init_main(["--path", str(tmp_path), "--pipeline", "local", "--force"])
     assert rc == 0
-    assert agents_md.read_text(encoding="utf-8") != "old"
-    assert "gremlins" in agents_md.read_text(encoding="utf-8")
+    content = agents_md.read_text(encoding="utf-8")
+    assert content != "old"
+    assert "gremlins" in content
