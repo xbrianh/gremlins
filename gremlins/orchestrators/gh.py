@@ -126,6 +126,8 @@ def _update_description_from_plan(
     plan_md: pathlib.Path,
     state_file: pathlib.Path | None,
     gr_id: str | None = None,
+    *,
+    issue_title: str = "",
 ) -> None:
     if state_file is None or not state_file.exists():
         return
@@ -133,10 +135,13 @@ def _update_description_from_plan(
         data = json.loads(state_file.read_text(encoding="utf-8"))
         if data.get("description_explicit"):
             return
+        if issue_title:
+            patch_state(gr_id, description=issue_title[:60])
+            return
         lines = plan_md.read_text(encoding="utf-8").splitlines()[:50]
         h1 = ""
         for line in lines:
-            m = re.match(r"^#+\s+(.+)", line)
+            m = re.match(r"^#\s+(.+)", line)
             if m:
                 h1 = m.group(1)[:60]
                 break
@@ -237,6 +242,7 @@ def _resolve_plan_source(
 
         resolved_url = issue_data.get("url") or ""
         resolved_num = str(issue_data.get("number") or "")
+        issue_title = (issue_data.get("title") or "")[:60]
 
         if target_repo == repo:
             issue_url = resolved_url
@@ -251,7 +257,9 @@ def _resolve_plan_source(
         )
 
     patch_state(gr_id, issue_url=issue_url, issue_num=issue_num)
-    _update_description_from_plan(plan_md, state_file, gr_id=gr_id)
+    _update_description_from_plan(
+        plan_md, state_file, gr_id=gr_id, issue_title=issue_title
+    )
     return issue_url, issue_num, issue_body
 
 

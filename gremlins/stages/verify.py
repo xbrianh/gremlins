@@ -62,7 +62,7 @@ def run(ctx: StageContext, options: VerifyOptions) -> None:
         bail_section = (
             "\n\nIf you cannot fix the failure (e.g. the check reports a violation "
             "you legitimately cannot resolve), run:\n"
-            '  `python -m gremlins.cli bail other "<one-line reason>"`\n'
+            '  `python -m gremlins.bail other "<one-line reason>"`\n'
             "before finishing."
         )
 

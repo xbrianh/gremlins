@@ -163,7 +163,7 @@ def run(ctx: StageContext, options: WaitCiOptions) -> None:
     if ctx.gr_id:
         bail_section = (
             "\n\nIf you cannot fix the failure, run:\n"
-            '  `python -m gremlins.cli bail other "<one-line reason>"`\n'
+            '  `python -m gremlins.bail other "<one-line reason>"`\n'
             "before finishing."
         )
 

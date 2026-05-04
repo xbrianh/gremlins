@@ -57,16 +57,54 @@ def _slugify(text: str, max_len: int = 40) -> str:
 
 
 def _extract_h1(path: str) -> str:
-    """Extract the first # heading text from a file. Returns '' on failure."""
+    """Extract the first H1 heading text from a file. Returns '' on failure."""
     try:
         with open(path, encoding="utf-8") as f:
             for line in f:
-                m = re.match(r"^#+\s+(.+)", line)
+                m = re.match(r"^#\s+(.+)", line)
                 if m:
                     return m.group(1).strip()
     except OSError:
         pass
     return ""
+
+
+def _fetch_issue_title(plan: str) -> str:
+    """Try to fetch the GitHub issue title for an issue-ref --plan arg.
+
+    Returns '' on any error so callers can fall back gracefully.
+    """
+    try:
+        from .gh_utils import parse_issue_ref, view_issue
+
+        target_repo, issue_ref = parse_issue_ref(plan, "")
+        if issue_ref is None:
+            return ""
+        if not target_repo:
+            r = subprocess.run(
+                [
+                    "gh",
+                    "repo",
+                    "view",
+                    "--json",
+                    "nameWithOwner",
+                    "-q",
+                    ".nameWithOwner",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            if r.returncode != 0:
+                return ""
+            target_repo = r.stdout.strip()
+        if not target_repo:
+            return ""
+        data = view_issue(issue_ref, target_repo)
+        return data.get("title") or ""
+    except Exception:
+        return ""
 
 
 def _resolve_description_and_slug(
@@ -90,7 +128,12 @@ def _resolve_description_and_slug(
         return "", False, slug
 
     if plan:
-        # Non-file plan arg (issue ref); orchestrator fills description later.
+        # Non-file plan arg (issue ref); try to fetch the issue title for a
+        # meaningful slug. Best-effort: fall back to slug-from-ref on any error.
+        title = _fetch_issue_title(plan)
+        if title:
+            slug = _slugify(title) or "gremlin"
+            return title[:60], False, slug
         slug = _slugify(plan) or "gremlin"
         return "", False, slug
 
@@ -200,8 +243,7 @@ def _spawn_pipeline(
     cmd = [
         sys.executable,
         "-m",
-        "gremlins.cli",
-        "_run-pipeline",
+        "gremlins.run_pipeline",
         gr_id,
         kind_subcommand,
         *pipeline_args,

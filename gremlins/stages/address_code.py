@@ -63,8 +63,8 @@ def run(ctx: StageContext, options: AddressCodeOptions) -> None:
             bail_section = """
 
 If a finding asks you to change something that touches secrets/credentials, or you decline to address one or more findings for any other reason that should halt automated recovery, run the bail helper before finishing:
-  - `python -m gremlins.cli bail secrets "<one-line reason>"` if the blocked finding touches secrets.
-  - `python -m gremlins.cli bail other "<one-line reason>"` for any other reason you cannot proceed.
+  - `python -m gremlins.bail secrets "<one-line reason>"` if the blocked finding touches secrets.
+  - `python -m gremlins.bail other "<one-line reason>"` for any other reason you cannot proceed.
 Do not call this helper if you successfully addressed every actionable finding.
 """
 

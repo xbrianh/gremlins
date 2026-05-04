@@ -121,73 +121,112 @@ def render_view(args: argparse.Namespace, here_root: str | None) -> None:
         do_list(args, here_root=here_root)
 
 
-def _dispatch_subcommand(argv: list[str]):
-    """
-    Pre-process argv for stop/rescue subcommands before argparse runs.
-    Returns (handled: bool, ok: bool). handled=False means not a subcommand.
-    """
-    raw = list(argv)
-    non_flags = [a for a in raw if not a.startswith("-")]
-    if not non_flags or non_flags[0] not in (
-        "stop",
-        "rescue",
-        "rm",
-        "close",
-        "land",
-        "log",
-    ):
-        return False, False
-
-    subcommand = non_flags[0]
-    # Find the index of the subcommand in raw argv and take the next non-flag.
-    sc_idx = next(i for i, a in enumerate(raw) if a == subcommand)
-    trailing = [a for a in raw[sc_idx + 1 :] if not a.startswith("-")]
-    if not trailing:
-        print(f"usage: gremlins {subcommand} <id-prefix>")
-        sys.exit(1)
-
-    target = trailing[0]
+def stop_main(argv: list[str]) -> int:
+    if not argv:
+        print("usage: gremlins stop <id-prefix>")
+        return 1
+    target = argv[0]
     if not os.path.isdir(_constants.STATE_ROOT):
         print("No gremlins have been launched on this machine.")
-        sys.exit(0)
+        return 0
+    return 0 if do_stop(target) else 1
 
-    if subcommand == "stop":
-        ok = do_stop(target)
-    elif subcommand == "rm":
-        ok = do_rm(target)
-    elif subcommand == "close":
-        ok = do_close(target)
-    elif subcommand == "log":
-        ok = do_log(target)
-    elif subcommand == "land":
-        force = "--force" in raw
-        squash_flag = "--squash" in raw
-        ff_flag = "--ff" in raw
-        if squash_flag and ff_flag:
-            print("error: --squash and --ff are mutually exclusive")
-            sys.exit(1)
-        mode = "squash" if squash_flag else ("ff" if ff_flag else None)
-        into_dir = ""
-        if "--into" in raw:
-            into_idx = raw.index("--into")
-            if into_idx + 1 < len(raw):
-                into_dir = raw[into_idx + 1]
-            else:
-                print("error: --into requires a directory argument")
-                sys.exit(1)
-        ok = do_land(target, force=force, mode=mode, into_dir=into_dir)
-    else:
-        headless = "--headless" in raw
-        ok = do_rescue(target, headless=headless)
-    return True, ok
+
+def rescue_main(argv: list[str]) -> int:
+    if not argv:
+        print("usage: gremlins rescue [--headless] <id-prefix>")
+        return 1
+    headless = "--headless" in argv
+    target = next((a for a in argv if not a.startswith("-")), None)
+    if target is None:
+        print("usage: gremlins rescue [--headless] <id-prefix>")
+        return 1
+    if not os.path.isdir(_constants.STATE_ROOT):
+        print("No gremlins have been launched on this machine.")
+        return 0
+    return 0 if do_rescue(target, headless=headless) else 1
+
+
+def rm_main(argv: list[str]) -> int:
+    if not argv:
+        print("usage: gremlins rm <id-prefix>")
+        return 1
+    target = next((a for a in argv if not a.startswith("-")), None)
+    if target is None:
+        print("usage: gremlins rm <id-prefix>")
+        return 1
+    if not os.path.isdir(_constants.STATE_ROOT):
+        print("No gremlins have been launched on this machine.")
+        return 0
+    return 0 if do_rm(target) else 1
+
+
+def close_main(argv: list[str]) -> int:
+    if not argv:
+        print("usage: gremlins close <id-prefix>")
+        return 1
+    target = next((a for a in argv if not a.startswith("-")), None)
+    if target is None:
+        print("usage: gremlins close <id-prefix>")
+        return 1
+    if not os.path.isdir(_constants.STATE_ROOT):
+        print("No gremlins have been launched on this machine.")
+        return 0
+    return 0 if do_close(target) else 1
+
+
+def log_main(argv: list[str]) -> int:
+    if not argv:
+        print("usage: gremlins log <id-prefix>")
+        return 1
+    target = next((a for a in argv if not a.startswith("-")), None)
+    if target is None:
+        print("usage: gremlins log <id-prefix>")
+        return 1
+    if not os.path.isdir(_constants.STATE_ROOT):
+        print("No gremlins have been launched on this machine.")
+        return 0
+    return 0 if do_log(target) else 1
+
+
+def land_main(argv: list[str]) -> int:
+    if not argv:
+        print(
+            "usage: gremlins land [--squash|--ff] [--force] [--into <dir>] <id-prefix>"
+        )
+        return 1
+    exclude: set[str] = set()
+    into_dir = ""
+    if "--into" in argv:
+        into_idx = list(argv).index("--into")
+        if into_idx + 1 < len(argv):
+            into_dir = argv[into_idx + 1]
+            exclude.add(into_dir)
+        else:
+            print("error: --into requires a directory argument")
+            return 1
+    target = next((a for a in argv if not a.startswith("-") and a not in exclude), None)
+    if target is None:
+        print(
+            "usage: gremlins land [--squash|--ff] [--force] [--into <dir>] <id-prefix>"
+        )
+        return 1
+    if not os.path.isdir(_constants.STATE_ROOT):
+        print("No gremlins have been launched on this machine.")
+        return 0
+    force = "--force" in argv
+    squash_flag = "--squash" in argv
+    ff_flag = "--ff" in argv
+    if squash_flag and ff_flag:
+        print("error: --squash and --ff are mutually exclusive")
+        return 1
+    mode = "squash" if squash_flag else ("ff" if ff_flag else None)
+    return 0 if do_land(target, force=force, mode=mode, into_dir=into_dir) else 1
 
 
 def _main_impl(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
-    handled, ok = _dispatch_subcommand(argv)
-    if handled:
-        sys.exit(0 if ok else 1)
 
     args = parse_args(argv)
 
@@ -239,8 +278,8 @@ def _main_impl(argv: list[str] | None = None) -> int:
 def main(argv: list[str] | None = None) -> int:
     """Entry point. Wraps ``_main_impl`` in a top-level try/except so the
     "exit 0 on the listing path even on unexpected errors" promise from the
-    module docstring holds regardless of how this is invoked — via
-    ``python -m gremlins.cli fleet`` dispatch or import + call from a test.
+    module docstring holds regardless of how this is invoked — bare ``gremlins``
+    invocation or import + call from a test.
 
     ``SystemExit`` is re-raised verbatim so deliberate ``sys.exit(N)`` calls
     inside ``_main_impl`` (including ``sys.exit(1)`` for handled failures)
