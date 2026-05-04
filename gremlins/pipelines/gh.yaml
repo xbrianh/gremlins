@@ -6,6 +6,7 @@ clients:
 stages:
   - { name: plan,            type: plan,            client: claude_sonnet, prompt: [../prompts/code_style.md, ../prompts/plan.md] }
   - { name: implement,       type: implement,       client: claude_sonnet, prompt: [../prompts/code_style.md, ../prompts/implement_gh.md] }
+  - { name: verify,          type: verify,          options: { check_cmd: "make check", test_cmd: "make test" } }
   - { name: commit-pr,       type: commit-pr,       client: claude_sonnet }
   - { name: request-copilot, type: request-copilot }
   - { name: ghreview,        type: ghreview,        client: claude_sonnet }
