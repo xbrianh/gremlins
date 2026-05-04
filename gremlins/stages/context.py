@@ -5,7 +5,7 @@ from __future__ import annotations
 import dataclasses
 import pathlib
 
-from ..clients.claude import ClaudeClient
+from ..clients.protocol import ClaudeClient
 
 
 @dataclasses.dataclass

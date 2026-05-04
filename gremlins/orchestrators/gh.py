@@ -16,7 +16,8 @@ from typing import Any, NoReturn
 
 import yaml
 
-from ..clients.claude import ClaudeClient, SubprocessClaudeClient
+from ..clients.claude import SubprocessClaudeClient
+from ..clients.protocol import ClaudeClient
 from ..gh_utils import extract_gh_url, get_repo, parse_issue_ref, view_issue
 from ..git import DirtyOnly, HeadAdvanced
 from ..logging_setup import configure_logging

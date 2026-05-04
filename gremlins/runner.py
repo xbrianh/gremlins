@@ -18,7 +18,7 @@ import sys
 import types
 from collections.abc import Callable, Sequence
 
-from .clients.claude import ClaudeClient
+from .clients.protocol import ClaudeClient
 
 Stage = tuple[str, Callable[[], None]]
 

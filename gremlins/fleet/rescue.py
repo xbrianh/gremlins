@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 from typing import Any, cast
 
-from gremlins.clients.claude import stream_events
+from gremlins.clients.stream import stream_events
 from gremlins.fleet import constants as _constants
 from gremlins.fleet.constants import (
     EXCLUDED_BAIL_CLASSES,

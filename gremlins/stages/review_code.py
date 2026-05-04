@@ -9,7 +9,7 @@ from __future__ import annotations
 import dataclasses
 import pathlib
 
-from ..clients.claude import ClaudeClient
+from ..clients.protocol import ClaudeClient
 from ..state import emit_bail, set_stage
 from .context import StageContext
 from .registry import register_stage
