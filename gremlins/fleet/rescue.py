@@ -423,7 +423,6 @@ def _run_headless_diagnosis(workdir: str, prompt: str, marker_path: str):
         "bypassPermissions",
         "--output-format",
         "text",
-        prompt,
     ]
     try:
         # Discard stdout — the agent's reply can be large and we don't read
@@ -432,7 +431,7 @@ def _run_headless_diagnosis(workdir: str, prompt: str, marker_path: str):
         result = subprocess.run(
             cmd,
             cwd=workdir,
-            stdin=subprocess.DEVNULL,
+            input=prompt,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
@@ -797,10 +796,17 @@ def do_rescue(target: str, headless: bool = False) -> bool:
                     "--output-format",
                     "stream-json",
                     "--verbose",
-                    prompt,
                 ]
                 try:
-                    p = subprocess.Popen(cmd, cwd=scratch_dir, stdout=subprocess.PIPE)
+                    p = subprocess.Popen(
+                        cmd,
+                        cwd=scratch_dir,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                    )
+                    assert p.stdin is not None
+                    p.stdin.write(prompt.encode())
+                    p.stdin.close()
                 except FileNotFoundError:
                     print("error: 'claude' CLI not found in PATH")
                     _write_bail(

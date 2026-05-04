@@ -298,7 +298,6 @@ class SubprocessClaudeClient:
         if resume_session is not None:
             cmd += ["--resume", resume_session]
         cmd += list(extra_flags)
-        cmd.append(prompt)
 
         # Default bufsize (-1) gives a BufferedReader with 8 KiB reads, so
         # readline() scans for '\n' in-buffer instead of doing one os.read()
@@ -310,6 +309,7 @@ class SubprocessClaudeClient:
         env["GREMLIN_SKIP_SUMMARY"] = "1"
         p = subprocess.Popen(
             cmd,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=None,
             start_new_session=False,
@@ -325,6 +325,9 @@ class SubprocessClaudeClient:
         stream_result_text: str | None = None
 
         try:
+            assert p.stdin is not None
+            p.stdin.write(prompt.encode())
+            p.stdin.close()
             assert p.stdout is not None
             if output_format == "stream-json":
                 session_id, cost_usd, stream_result_text, events = stream_events(

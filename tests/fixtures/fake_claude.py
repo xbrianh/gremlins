@@ -344,8 +344,8 @@ def parse_argv(argv):
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--resume", default=None)
     args, rest = parser.parse_known_args(argv)
-    # Last positional is the prompt; anything else is extra/unknown.
-    prompt = rest[-1] if rest else ""
+    del rest  # prompt always comes from stdin; ignore leftover argv tokens
+    prompt = sys.stdin.read()
     return args, prompt
 
 
