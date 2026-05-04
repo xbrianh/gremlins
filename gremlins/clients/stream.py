@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import pathlib
 import sys
+from collections.abc import Callable
 from typing import IO, Any, cast
 
 
@@ -63,7 +64,7 @@ def _emit_assistant(prefix: str, evt: dict[str, Any]) -> None:
     msg = cast(dict[str, Any], evt.get("message") or {})
     content = cast(list[dict[str, Any]], msg.get("content") or [])
     for c in content:
-        fmt = _CONTENT_FMT.get(c.get("type", ""))
+        fmt = _CONTENT_FMT.get(str(c.get("type") or ""))
         if fmt:
             sys.stderr.write(f"{prefix}{fmt(c)}\n")
 
@@ -88,7 +89,7 @@ def _emit_result(prefix: str, evt: dict[str, Any]) -> None:
     )
 
 
-_HANDLERS: dict[str, Any] = {
+_HANDLERS: dict[str, Callable[[str, dict[str, Any]], None]] = {
     "system": _emit_init,
     "assistant": _emit_assistant,
     "user": _emit_user,
@@ -97,7 +98,7 @@ _HANDLERS: dict[str, Any] = {
 
 
 def _emit_event(prefix: str, evt: dict[str, Any]) -> None:
-    handler = _HANDLERS.get(evt.get("type", ""))
+    handler = _HANDLERS.get(str(evt.get("type") or ""))
     if handler:
         handler(prefix, evt)
     sys.stderr.flush()

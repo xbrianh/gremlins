@@ -187,5 +187,6 @@ def test_handler_exception_swallowed(monkeypatch):
     monkeypatch.setitem(_HANDLERS, "system", boom)
     evt1 = {"type": "system", "subtype": "init", "session_id": "s"}
     evt2 = {"type": "result", "subtype": "ok", "num_turns": 1}
-    _, _, _, events = stream_events(_bio(evt1, evt2), capture=True)
+    sid, _, _, events = stream_events(_bio(evt1, evt2), capture=True)
     assert len(events) == 2
+    assert sid == "s"
