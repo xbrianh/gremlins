@@ -335,8 +335,8 @@ def test_is_git_false_skips_diff(tmp_path):
         ),
     )
     assert len(client.calls) == 1
-    # No diff output when is_git=False
-    assert captured_prompts[0].count("```\n\n```") >= 0  # diff block is empty
+    # diff block renders as empty when is_git=False
+    assert "```\n\n```" in captured_prompts[0]
 
 
 def test_commit_after_fix_true_in_prompt(tmp_path):

@@ -58,7 +58,7 @@ def _escape_fmt(s: str) -> str:
 
 
 def run(ctx: StageContext, options: VerifyOptions) -> None:
-    if options.commit_after_fix:
+    if options.commit_after_fix and options.is_git:
         commit_instr = (
             "- After fixing, stage the changed files by name and create a single git "
             "commit titled 'Fix failing checks'. Do not push."

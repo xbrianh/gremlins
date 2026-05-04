@@ -245,7 +245,7 @@ def _build_stage_runner(
                     cwd=pathlib.Path.cwd(),
                     code_style=code_style,
                     is_git=is_git,
-                    commit_after_fix=True,
+                    commit_after_fix=is_git,
                     check_cmd=check_cmd,
                     test_cmd=test_cmd,
                     max_attempts=max_attempts,
