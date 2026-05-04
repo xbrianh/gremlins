@@ -10,9 +10,10 @@ import re
 import shutil
 import subprocess
 import sys
-import yaml
 from collections.abc import Callable
 from typing import NoReturn
+
+import yaml
 
 from ..clients.claude import ClaudeClient, SubprocessClaudeClient
 from ..git import in_git_repo
