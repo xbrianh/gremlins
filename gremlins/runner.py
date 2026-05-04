@@ -13,6 +13,7 @@ followed by ``sys.exit(130)`` so a Ctrl-C'd run doesn't leave orphaned
 
 from __future__ import annotations
 
+import concurrent.futures
 import signal
 import sys
 import types
@@ -36,6 +37,37 @@ def install_signal_handlers(client: ClaudeClient) -> None:
 
     signal.signal(signal.SIGINT, handler)
     signal.signal(signal.SIGTERM, handler)
+
+
+def make_parallel_wrapper(
+    children: list[tuple[str, Callable[[], None]]],
+    *,
+    max_concurrent: int | None,
+    resume_from: str | None,
+    set_stage_fn: Callable[[], None],
+) -> Callable[[], None]:
+    """Return a callable that runs children concurrently in a thread pool.
+
+    ``resume_from`` may be a child name; if so, children before it are skipped.
+    All children run to completion before any exception is re-raised.
+    """
+
+    def _wrapper() -> None:
+        set_stage_fn()
+        child_names = [n for n, _ in children]
+        active = children
+        if resume_from is not None and resume_from in child_names:
+            active = children[child_names.index(resume_from) :]
+        if not active:
+            return
+        workers = max_concurrent if max_concurrent is not None else len(active)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = [pool.submit(fn) for _, fn in active]
+        errors = [e for fut in futs if (e := fut.exception()) is not None]
+        if errors:
+            raise errors[0]
+
+    return _wrapper
 
 
 def run_stages(stages: Sequence[Stage], *, resume_from: str | None = None) -> None:

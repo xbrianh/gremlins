@@ -20,7 +20,7 @@ from ..git import in_git_repo
 from ..logging_setup import configure_logging
 from ..pipeline import StageEntry, load_pipeline, resolve_pipeline_path
 from ..prompts import load_prompts
-from ..runner import install_signal_handlers, run_stages
+from ..runner import install_signal_handlers, make_parallel_wrapper, run_stages
 from ..stages import address_code, implement, plan, review_code, test
 from ..stages.context import StageContext
 from ..state import patch_state, resolve_session_dir, set_stage
@@ -272,17 +272,29 @@ def local_main(
         die(str(exc))
 
     stage_names = [s.name for s in pipeline.stages]
-    if args.resume_from and args.resume_from not in stage_names:
-        die(
-            f"--resume-from {args.resume_from!r} is not a valid stage; "
-            f"valid: {stage_names}"
-        )
 
+    _child_to_group: dict[str, str] = {}
+    for _e in pipeline.stages:
+        if _e.type == "parallel":
+            for _child in _e.children:
+                _child_to_group[_child.name] = _e.name
+
+    all_valid_stages = stage_names + list(_child_to_group)
     seen: set[str] = set()
-    for _n in stage_names:
+    for _n in all_valid_stages:
         if _n in seen:
             die(f"pipeline has duplicate stage name {_n!r}")
         seen.add(_n)
+
+    if args.resume_from and args.resume_from not in all_valid_stages:
+        die(
+            f"--resume-from {args.resume_from!r} is not a valid stage; "
+            f"valid: {all_valid_stages}"
+        )
+
+    run_resume_from = args.resume_from
+    if args.resume_from in _child_to_group:
+        run_resume_from = _child_to_group[args.resume_from]
 
     session_dir = resolve_session_dir(gr_id)
     plan_file = session_dir / "plan.md"
@@ -326,8 +338,8 @@ def local_main(
         return len(pipeline.stages)
 
     start_idx = 0
-    if args.resume_from:
-        start_idx = stage_names.index(args.resume_from)
+    if run_resume_from:
+        start_idx = stage_names.index(run_resume_from)
         if start_idx >= _type_idx("implement"):
             if not plan_file.exists() or plan_file.stat().st_size == 0:
                 die(f"--resume-from {args.resume_from} requires existing {plan_file}")
@@ -383,29 +395,68 @@ def local_main(
 
     plan_text_holder: dict[str, str] = {}
 
-    for _e in pipeline.stages:
-        if _e.type == "parallel":
-            die(f"local pipeline does not support parallel stages (stage {_e.name!r})")
-
-    stages = [
-        (
-            e.name,
-            _build_stage_runner(
-                e,
-                ctx,
-                args,
-                plan_file=plan_file,
-                spec_file=spec_file,
-                is_git=is_git,
-                code_style=code_style,
-                instructions=instructions,
-                plan_copied_from_source=plan_copied_from_source,
-                plan_text_holder=plan_text_holder,
-            ),
-        )
-        for e in pipeline.stages
-    ]
-    run_stages(stages, resume_from=args.resume_from)
+    stages: list[tuple[str, Callable[[], None]]] = []
+    for e in pipeline.stages:
+        if e.type == "parallel":
+            group_dir = session_dir / e.name
+            group_dir.mkdir(parents=True, exist_ok=True)
+            child_runners: list[tuple[str, Callable[[], None]]] = []
+            for child in e.children:
+                child_dir = group_dir / child.name
+                child_dir.mkdir(parents=True, exist_ok=True)
+                child_ctx = StageContext(
+                    client=ctx.client,
+                    session_dir=child_dir,
+                    gr_id=ctx.gr_id,
+                )
+                child_runners.append(
+                    (
+                        child.name,
+                        _build_stage_runner(
+                            child,
+                            child_ctx,
+                            args,
+                            plan_file=plan_file,
+                            spec_file=spec_file,
+                            is_git=is_git,
+                            code_style=code_style,
+                            instructions=instructions,
+                            plan_copied_from_source=plan_copied_from_source,
+                            plan_text_holder=plan_text_holder,
+                        ),
+                    )
+                )
+            group_name = e.name
+            stages.append(
+                (
+                    e.name,
+                    make_parallel_wrapper(
+                        child_runners,
+                        max_concurrent=e.max_concurrent,
+                        resume_from=args.resume_from,
+                        set_stage_fn=lambda n=group_name: set_stage(ctx.gr_id, n),
+                    ),
+                )
+            )
+        else:
+            stages.append(
+                (
+                    e.name,
+                    _build_stage_runner(
+                        e,
+                        ctx,
+                        args,
+                        plan_file=plan_file,
+                        spec_file=spec_file,
+                        is_git=is_git,
+                        code_style=code_style,
+                        instructions=instructions,
+                        plan_copied_from_source=plan_copied_from_source,
+                        plan_text_holder=plan_text_holder,
+                    ),
+                )
+            )
+    run_stages(stages, resume_from=run_resume_from)
 
     total_cost = getattr(client, "total_cost_usd", 0.0)
     if total_cost is not None and total_cost > 0:

@@ -33,6 +33,7 @@ class StageEntry:
     children: list[StageEntry] = dataclasses.field(  # pyright: ignore[reportUnknownVariableType]
         default_factory=list
     )
+    max_concurrent: int | None = None
 
 
 @dataclasses.dataclass
@@ -94,6 +95,12 @@ def _parse_stage_entry(
                 )
             seen.add(child.name)
             children.append(child)
+        max_concurrent = entry.get("max_concurrent")
+        if max_concurrent is not None:
+            if not isinstance(max_concurrent, int) or max_concurrent <= 0:
+                raise ValueError(
+                    f"parallel group {name!r}: 'max_concurrent' must be a positive integer"
+                )
         return StageEntry(
             name=name,
             type="parallel",
@@ -101,11 +108,16 @@ def _parse_stage_entry(
             prompt_paths=[],
             options={},
             children=children,
+            max_concurrent=max_concurrent,
         )
 
     name = entry.get("name")
     if not isinstance(name, str) or not name:
         raise ValueError("stage entry must have a 'name' field")
+    if "max_concurrent" in entry:
+        raise ValueError(
+            f"stage {name!r}: 'max_concurrent' is only valid on parallel groups"
+        )
     stage_type = entry.get("type")
     if not isinstance(stage_type, str) or not stage_type:
         raise ValueError(f"stage {name!r}: must have a 'type' field")

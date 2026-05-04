@@ -22,7 +22,7 @@ from ..git import DirtyOnly, HeadAdvanced
 from ..logging_setup import configure_logging
 from ..pipeline import StageEntry, load_pipeline, resolve_pipeline_path
 from ..prompts import load_prompts
-from ..runner import install_signal_handlers, run_stages
+from ..runner import install_signal_handlers, make_parallel_wrapper, run_stages
 from ..stages import (
     commit_pr,
     ghaddress,
@@ -566,21 +566,29 @@ def gh_main(
         die(str(exc))
 
     stage_names = [s.name for s in pipeline.stages]
-    if args.resume_from and args.resume_from not in stage_names:
-        die(
-            f"--resume-from {args.resume_from!r} is not a valid stage; "
-            f"valid: {stage_names}"
-        )
 
+    _child_to_group: dict[str, str] = {}
+    for _e in pipeline.stages:
+        if _e.type == "parallel":
+            for _child in _e.children:
+                _child_to_group[_child.name] = _e.name
+
+    all_valid_stages = stage_names + list(_child_to_group)
     seen: set[str] = set()
-    for _n in stage_names:
+    for _n in all_valid_stages:
         if _n in seen:
             die(f"pipeline has duplicate stage name {_n!r}")
         seen.add(_n)
 
-    for _e in pipeline.stages:
-        if _e.type == "parallel":
-            die(f"gh pipeline does not support parallel stages (stage {_e.name!r})")
+    if args.resume_from and args.resume_from not in all_valid_stages:
+        die(
+            f"--resume-from {args.resume_from!r} is not a valid stage; "
+            f"valid: {all_valid_stages}"
+        )
+
+    run_resume_from = args.resume_from
+    if args.resume_from in _child_to_group:
+        run_resume_from = _child_to_group[args.resume_from]
 
     repo = get_repo()
     session_dir = resolve_session_dir(gr_id)
@@ -611,7 +619,7 @@ def gh_main(
     issue_body: str = ""
 
     plan_idx = next((i for i, s in enumerate(pipeline.stages) if s.type == "plan"), 0)
-    resume_idx = stage_names.index(args.resume_from) if args.resume_from else 0
+    resume_idx = stage_names.index(run_resume_from) if run_resume_from else 0
 
     if args.plan_source:
         issue_url, issue_num, issue_body = _resolve_plan_source(
@@ -657,23 +665,64 @@ def gh_main(
 
     stages: list[tuple[str, Callable[[], None]]] = []
     for e in pipeline.stages:
-        try:
-            runner = _build_stage_runner(
-                e,
-                ctx,
-                args,
-                model=model,
-                code_style=code_style,
-                repo=repo,
-                session_dir=session_dir,
-                state_file=state_file,
-                gr_id=gr_id,
-                gh_state=gh_state,
+        if e.type == "parallel":
+            group_dir = session_dir / e.name
+            group_dir.mkdir(parents=True, exist_ok=True)
+            child_runners: list[tuple[str, Callable[[], None]]] = []
+            for child in e.children:
+                child_dir = group_dir / child.name
+                child_dir.mkdir(parents=True, exist_ok=True)
+                child_ctx = StageContext(
+                    client=ctx.client,
+                    session_dir=child_dir,
+                    gr_id=ctx.gr_id,
+                )
+                try:
+                    child_runner = _build_stage_runner(
+                        child,
+                        child_ctx,
+                        args,
+                        model=model,
+                        code_style=code_style,
+                        repo=repo,
+                        session_dir=child_dir,
+                        state_file=state_file,
+                        gr_id=gr_id,
+                        gh_state=gh_state,
+                    )
+                except ValueError as exc:
+                    die(str(exc))
+                child_runners.append((child.name, child_runner))
+            group_name = e.name
+            stages.append(
+                (
+                    e.name,
+                    make_parallel_wrapper(
+                        child_runners,
+                        max_concurrent=e.max_concurrent,
+                        resume_from=args.resume_from,
+                        set_stage_fn=lambda n=group_name: set_stage(gr_id, n),
+                    ),
+                )
             )
-        except ValueError as exc:
-            die(str(exc))
-        stages.append((e.name, runner))
-    run_stages(stages, resume_from=args.resume_from)
+        else:
+            try:
+                runner = _build_stage_runner(
+                    e,
+                    ctx,
+                    args,
+                    model=model,
+                    code_style=code_style,
+                    repo=repo,
+                    session_dir=session_dir,
+                    state_file=state_file,
+                    gr_id=gr_id,
+                    gh_state=gh_state,
+                )
+            except ValueError as exc:
+                die(str(exc))
+            stages.append((e.name, runner))
+    run_stages(stages, resume_from=run_resume_from)
 
     total_cost = getattr(client, "total_cost_usd", 0.0)
     if total_cost is not None and total_cost > 0:
