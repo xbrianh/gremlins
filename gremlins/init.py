@@ -124,7 +124,7 @@ def _build_plan(
             (_PIPELINES_DIR / f"{name}.yaml").read_text(encoding="utf-8")
         )
         if not isinstance(raw, dict):
-            raise yaml.YAMLError(f"malformed pipeline YAML: {name}.yaml")
+            raise ValueError(f"malformed pipeline YAML: {name}.yaml")
         pipeline_data[name] = cast(dict[str, Any], raw)
 
     seen_subpaths: set[str] = set()
@@ -186,12 +186,12 @@ def _cleanup_tmp(paths: list[pathlib.Path]) -> None:
 def init_main(argv: list[str]) -> int:
     args = _parse_args(argv)
     bundled = _bundled_pipeline_names()
-    selected = args.pipelines or bundled
+    selected = list(dict.fromkeys(args.pipelines or bundled))
     if rc := _validate_selection(selected, bundled):
         return rc
-    base = pathlib.Path(args.path) if args.path else pathlib.Path.cwd()
     plan: list[tuple[pathlib.Path, bytes]] = []
     try:
+        base = pathlib.Path(args.path) if args.path else pathlib.Path.cwd()
         plan = _build_plan(selected, base)
         if rc := _check_conflicts(plan, args.force):
             return rc
@@ -201,7 +201,7 @@ def init_main(argv: list[str]) -> int:
         except OSError:
             _cleanup_tmp(staged)
             raise
-    except (OSError, yaml.YAMLError) as exc:
+    except (OSError, yaml.YAMLError, ValueError) as exc:
         sys.stderr.write(f"error: {str(exc).splitlines()[0]}\n")
         _cleanup_tmp([_tmp_path(dst) for dst, _ in plan])
         return 1

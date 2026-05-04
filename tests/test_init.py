@@ -245,3 +245,4 @@ def test_commit_rename_failure(tmp_path, capsys, monkeypatch):
     err = capsys.readouterr().err
     assert err.startswith("error:")
     assert err.count("\n") == 1
+    assert list(tmp_path.rglob("*.tmp.*")) == []
