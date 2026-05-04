@@ -154,6 +154,25 @@ def kind_short(kind: str) -> str:
     return kind or ""
 
 
+def atomic_patch_state(sf: str, patch: dict[str, object]) -> bool:
+    """Merge patch into state.json atomically. Returns True on success."""
+    tmp = f"{sf}.patch.tmp.{os.getpid()}"
+    try:
+        with open(sf, encoding="utf-8") as fh:
+            state = json.load(fh)
+        state.update(patch)
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, indent=2)
+        os.replace(tmp, sf)
+        return True
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
+
+
 def git_toplevel() -> str:
     """Return the git toplevel of cwd, or cwd itself if not in a repo."""
     try:

@@ -8,6 +8,7 @@ import time
 import types
 
 from gremlins.fleet import constants as _constants
+from gremlins.fleet.ack import do_ack, do_skip
 from gremlins.fleet.close import do_close
 from gremlins.fleet.land import do_land, do_rm
 from gremlins.fleet.log import do_log
@@ -232,6 +233,34 @@ def land_main(argv: list[str]) -> int:
         return 1
     mode = "squash" if squash_flag else ("ff" if ff_flag else None)
     return 0 if do_land(target, force=force, mode=mode, into_dir=into_dir) else 1
+
+
+def ack_main(argv: list[str]) -> int:
+    if not argv:
+        print("usage: gremlins ack <id-prefix>")
+        return 1
+    target = next((a for a in argv if not a.startswith("-")), None)
+    if target is None:
+        print("usage: gremlins ack <id-prefix>")
+        return 1
+    if not os.path.isdir(_constants.STATE_ROOT):
+        print("No gremlins have been launched on this machine.")
+        return 0
+    return 0 if do_ack(target) else 1
+
+
+def skip_main(argv: list[str]) -> int:
+    if not argv:
+        print("usage: gremlins skip <id-prefix>")
+        return 1
+    target = next((a for a in argv if not a.startswith("-")), None)
+    if target is None:
+        print("usage: gremlins skip <id-prefix>")
+        return 1
+    if not os.path.isdir(_constants.STATE_ROOT):
+        print("No gremlins have been launched on this machine.")
+        return 0
+    return 0 if do_skip(target) else 1
 
 
 def _main_impl(argv: list[str] | None = None) -> int:

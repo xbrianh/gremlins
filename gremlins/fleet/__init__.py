@@ -2,7 +2,7 @@
 
 Reads every ``${XDG_STATE_HOME:-$HOME/.local/state}/claude-gremlins/<id>/state.json``,
 applies the shared liveness classifier inline, and prints one scannable line per
-gremlin. Subcommands (``stop``, ``rescue``, ``land``, ``rm``, ``close``, ``log``)
+gremlin. Subcommands (``ack``, ``close``, ``land``, ``log``, ``rescue``, ``rm``, ``skip``, ``stop``)
 operate on a single gremlin by id-prefix.
 
 Exposed via ``python -m gremlins.cli fleet``.
@@ -11,6 +11,12 @@ Exit 0 on the listing path even on unexpected errors: same "never break a
 session" principle as the session-summary hook.
 """
 
+from gremlins.fleet.ack import (
+    do_ack as do_ack,
+)
+from gremlins.fleet.ack import (
+    do_skip as do_skip,
+)
 from gremlins.fleet.cli import (
     main,
     parse_args,
@@ -83,6 +89,9 @@ __all__ = [
     # resolve
     "GREMLIN_STAGES",
     "resolve_gremlin",
+    # ack / skip
+    "do_ack",
+    "do_skip",
     # stop
     "do_stop",
     # rescue
