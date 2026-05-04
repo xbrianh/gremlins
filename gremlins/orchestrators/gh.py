@@ -383,7 +383,9 @@ def _build_stage_runner(
                 impl_handoff_branch = impl_result.handoff_branch
                 base_ref = impl_result.pre_state.head
             else:
-                impl_handoff_branch = _read_state_field(state_file, "impl_handoff_branch")
+                impl_handoff_branch = _read_state_field(
+                    state_file, "impl_handoff_branch"
+                )
                 base_ref = _read_state_field(state_file, "impl_base_ref")
                 if not base_ref:
                     die(
@@ -469,7 +471,9 @@ def _build_stage_runner(
         def _wait_copilot() -> None:
             _ensure_pr_url(gh_state, state_file, args.resume_from)
             set_stage(gr_id, entry.name)
-            logger.info("[5/8] waiting for Copilot review (20s interval, 10min timeout)")
+            logger.info(
+                "[5/8] waiting for Copilot review (20s interval, 10min timeout)"
+            )
             state = wait_copilot.run(
                 ctx,
                 wait_copilot.WaitCopilotOptions(repo=repo, pr_num=gh_state["pr_num"]),
@@ -574,9 +578,7 @@ def gh_main(
     issue_num: str = ""
     issue_body: str = ""
 
-    plan_idx = next(
-        (i for i, s in enumerate(pipeline.stages) if s.type == "plan"), 0
-    )
+    plan_idx = next((i for i, s in enumerate(pipeline.stages) if s.type == "plan"), 0)
     resume_idx = stage_names.index(args.resume_from) if args.resume_from else 0
 
     if args.plan_source:

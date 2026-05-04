@@ -36,8 +36,8 @@ from .fleet.cli import (
 )
 from .launcher import MODEL_RE, launch, resume
 from .orchestrators.gh import gh_main
-from .pipeline import load_pipeline, resolve_pipeline_path
 from .orchestrators.local import address_main, local_main, review_main
+from .pipeline import load_pipeline, resolve_pipeline_path
 from .state import validate_gr_id
 
 # None → generic "no longer valid"; str → migration hint naming the new form
