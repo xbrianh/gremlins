@@ -18,6 +18,7 @@ Fleet manager package for background gremlins. Reads every `${XDG_STATE_HOME:-$H
 | `land.py` | All land helpers + `do_rm`, `do_land`, `expected_branch`, `_print_cost`, `_persist_land_cost`, `_resolve_landing_cwd`, `_fast_forward_main`, `_cleanup_gremlin` |
 | `views.py` | `collect_rows`, `do_list`, `do_recent`, `do_drill_in` |
 | `cli.py` | `parse_args`, `render_view`, `_main_impl`, `main`, `stop_main`, `rescue_main`, `land_main`, `rm_main`, `close_main`, `log_main` |
+| `session_summary.py` | SessionStart/UserPromptSubmit hook: filters gremlins by `project_root`, reports running + newly-finished, marks finished as `summarized`, prunes closed state dirs older than 14 days |
 | `__init__.py` | Re-exports public surface + installs `_FleetModule` for monkeypatch support |
 
 ## Monkeypatch design

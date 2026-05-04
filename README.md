@@ -53,6 +53,23 @@ the module docstring at the top of [`gremlins/cli.py`](gremlins/cli.py).
 
 `_run-pipeline` is an internal spawn boundary; not for direct use.
 
+## Pipeline loader
+
+`gremlins/pipeline.py` loads YAML pipeline definitions. Key API:
+
+- `load_pipeline(path)` → `Pipeline` — parses a YAML file, resolves `clients`
+  via `CLIENT_FACTORIES`, and validates every stage `type` against
+  `STAGE_REGISTRY` (populated by importing `gremlins.stages.all`).
+- `resolve_pipeline_path(name_or_path, base_dir)` — resolves a bare name (e.g.
+  `"local"`) by checking `<base_dir>/.gremlins/pipelines/<name>.yaml` first,
+  then the bundled `gremlins/pipelines/` directory.
+
+Dataclasses: `Pipeline`, `StageEntry` (supports `type="parallel"` groups),
+`ClientDef`.
+
+Bundled YAML pipeline files live in `gremlins/pipelines/` (`local.yaml`,
+`gh.yaml`).
+
 ## Internals docs
 
 - [`gremlins/CLAUDE.md`](gremlins/CLAUDE.md) — module layout, entry points,

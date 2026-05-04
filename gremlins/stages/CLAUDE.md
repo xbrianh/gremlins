@@ -6,6 +6,9 @@ sequencing logic of their own.
 
 ## Modules
 
+- `registry.py` — `STAGE_REGISTRY` and `CLIENT_FACTORIES` dicts + `register_stage` / `register_client_factory`. All stage type lookups go through here.
+- `all.py` — importing triggers side-effect registration of all stage modules. Used by `pipeline.py` to ensure all types are available before parsing. Must be imported before any YAML pipeline is loaded.
+- `context.py` — `StageContext(client, session_dir, gr_id)` dataclass passed as the first arg to every registry-dispatched stage function.
 - `plan.py` — `run_plan_stage`. Local pipeline only.
 - `implement.py` — `run_implement_stage`. Dual-mode (`kind='local'` /
   `kind='gh'`). For gh: enforces the empty-implementation invariant,
@@ -24,11 +27,15 @@ sequencing logic of their own.
   <pr_url>`.
 - `request_copilot.py` — `run`. Requests Copilot review by adding
   `copilot-pull-request-reviewer` to the PR's reviewer list.
+- `verify.py` — `run(ctx, VerifyOptions)`. Gh pipeline. Runs `check_cmd && test_cmd`, re-invokes agent to fix failures up to `max_attempts`; bails on exhaustion. Registers as stage type `"verify"`.
+- `test.py` — `run(ctx, TestOptions)`. Local pipeline. Runs user-supplied `--test` command; no-ops when `test_cmd is None`; re-invokes agent to fix failures up to `max_attempts`; bails on exhaustion. Registers as stage type `"test"`.
+- `wait_ci.py` — `run(ctx, WaitCiOptions)`. Gh pipeline (`ci-gate`). Polls PR CI checks via `gh_utils`; re-invokes agent to fix failures; bails on `REVIEW_REQUIRED` or attempt exhaustion. Registers as stage type `"wait-ci"`.
 - `wait_copilot.py` — `run`. Polls until Copilot posts a non-PENDING review.
 
 ## Conventions
 
-- Public function name: `run_<stage>_stage`. Keyword-only args
+- Stages registered via `register_stage` receive `(ctx: StageContext, options: XxxOptions)` as positional args. `all.py` must be imported before any pipeline parses stage types.
+- Public function name for orchestrator-called stages: `run_<stage>_stage`. Keyword-only args
   (`def f(*, client, model, ...)`).
 - Every stage that talks to `claude` takes `client: ClaudeClient` and
   calls `client.run(...)`. **Never spawn `claude -p` directly** — that

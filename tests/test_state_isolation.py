@@ -89,7 +89,7 @@ def test_autouse_isolate_gr_id_unsets_gr_id_under_inherited_env(tmp_path):
     """)
     )
     tests_dir = pathlib.Path(__file__).resolve().parent
-    repo_root = tests_dir.parent.parent
+    repo_root = tests_dir.parent
     env = dict(os.environ)
     env["GR_ID"] = "fake-parent-gremlin-deadbeef"
     env["GREMLINS_TESTS_DIR"] = str(tests_dir)
