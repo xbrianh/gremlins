@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import pathlib
 from collections.abc import Iterator
 from typing import Any
 
+import pytest
 import yaml
 
 from gremlins.init import _bundled_pipeline_names, init_main
@@ -141,3 +143,105 @@ def test_init_custom_path(tmp_path, capsys):
     assert rc == 0
 
     assert (target / ".gremlins" / "pipelines" / "local.yaml").exists()
+
+
+# ---------------------------------------------------------------------------
+# Error handling: write failure mid-stage
+# ---------------------------------------------------------------------------
+
+
+def test_write_failure_mid_stage(tmp_path, capsys, monkeypatch):
+    call_count = 0
+    original = pathlib.Path.write_bytes
+
+    def patched(self, data):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise OSError("disk full")
+        return original(self, data)
+
+    monkeypatch.setattr(pathlib.Path, "write_bytes", patched)
+    rc = init_main(["--path", str(tmp_path), "--pipeline", "local"])
+    assert rc == 1
+
+    err = capsys.readouterr().err
+    assert err.startswith("error:")
+    assert err.count("\n") == 1
+
+    assert list(tmp_path.rglob("*.tmp.*")) == []
+    dot = tmp_path / ".gremlins"
+    if dot.exists():
+        assert [f for f in dot.rglob("*") if f.is_file()] == []
+
+
+# ---------------------------------------------------------------------------
+# Error handling: corrupt bundled YAML
+# ---------------------------------------------------------------------------
+
+
+def test_corrupt_bundled_yaml(tmp_path, capsys, monkeypatch):
+    import gremlins.init as init_mod
+
+    fake_dir = tmp_path / "pipelines"
+    fake_dir.mkdir()
+    (fake_dir / "local.yaml").write_text("key: [unclosed", encoding="utf-8")
+    monkeypatch.setattr(init_mod, "_PIPELINES_DIR", fake_dir)
+
+    out_path = tmp_path / "out"
+    out_path.mkdir()
+    rc = init_main(["--path", str(out_path), "--pipeline", "local"])
+    assert rc == 1
+
+    err = capsys.readouterr().err
+    assert err.startswith("error:")
+    assert err.count("\n") == 1
+    assert not (out_path / ".gremlins").exists()
+
+
+# ---------------------------------------------------------------------------
+# Error handling: unwritable --path
+# ---------------------------------------------------------------------------
+
+
+def test_unwritable_path(tmp_path, capsys):
+    if os.getuid() == 0:
+        pytest.skip("running as root; chmod has no effect")
+
+    ro = tmp_path / "readonly"
+    ro.mkdir()
+    os.chmod(ro, 0o500)
+    try:
+        rc = init_main(["--path", str(ro), "--pipeline", "local"])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert err.startswith("error:")
+        assert err.count("\n") == 1
+        assert list(tmp_path.rglob("*.tmp.*")) == []
+    finally:
+        os.chmod(ro, 0o700)
+
+
+# ---------------------------------------------------------------------------
+# Error handling: commit-phase rename failure
+# ---------------------------------------------------------------------------
+
+
+def test_commit_rename_failure(tmp_path, capsys, monkeypatch):
+    call_count = 0
+    original = pathlib.Path.replace
+
+    def patched(self, target):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise OSError("rename failed")
+        return original(self, target)
+
+    monkeypatch.setattr(pathlib.Path, "replace", patched)
+    rc = init_main(["--path", str(tmp_path), "--pipeline", "local"])
+    assert rc == 1
+
+    err = capsys.readouterr().err
+    assert err.startswith("error:")
+    assert err.count("\n") == 1

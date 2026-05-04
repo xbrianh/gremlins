@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import sys
 from typing import Any, cast
@@ -70,7 +71,7 @@ def _rewrite_stage(stage: Any) -> Any:
     return s
 
 
-def init_main(argv: list[str]) -> int:
+def _parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="gremlins init",
         description="Scaffold .gremlins/ with editable copies of bundled pipelines.",
@@ -93,21 +94,29 @@ def init_main(argv: list[str]) -> int:
         metavar="DIR",
         help="Scaffold under DIR/.gremlins/ (default: cwd).",
     )
-    args = p.parse_args(argv)
+    return p.parse_args(argv)
 
-    bundled = _bundled_pipeline_names()
-    selected = args.pipelines or bundled
 
+def _validate_selection(selected: list[str], bundled: list[str]) -> int | None:
     unknown = [n for n in selected if n not in bundled]
-    if unknown:
-        sys.stderr.write(
-            f"error: unknown pipeline(s): {', '.join(unknown)}\n"
-            f"bundled pipelines: {', '.join(bundled)}\n"
-        )
-        return 1
+    if not unknown:
+        return None
+    sys.stderr.write(
+        f"error: unknown pipeline(s): {', '.join(unknown)}\n"
+        f"bundled pipelines: {', '.join(bundled)}\n"
+    )
+    return 1
 
-    base = pathlib.Path(args.path) if args.path else pathlib.Path.cwd()
+
+def _tmp_path(dst: pathlib.Path) -> pathlib.Path:
+    return dst.with_suffix(dst.suffix + f".tmp.{os.getpid()}")
+
+
+def _build_plan(
+    selected: list[str], base: pathlib.Path
+) -> list[tuple[pathlib.Path, bytes]]:
     dot_gremlins = base / ".gremlins"
+    plan: list[tuple[pathlib.Path, bytes]] = []
 
     pipeline_data: dict[str, dict[str, Any]] = {}
     for name in selected:
@@ -115,47 +124,85 @@ def init_main(argv: list[str]) -> int:
             (_PIPELINES_DIR / f"{name}.yaml").read_text(encoding="utf-8")
         )
         if not isinstance(raw, dict):
-            sys.stderr.write(f"error: malformed pipeline YAML: {name}.yaml\n")
-            return 1
+            raise yaml.YAMLError(f"malformed pipeline YAML: {name}.yaml")
         pipeline_data[name] = cast(dict[str, Any], raw)
 
-    prompt_subpaths: list[str] = []
     seen_subpaths: set[str] = set()
     for name in selected:
         for subpath in _collect_prompt_subpaths(pipeline_data[name].get("stages", [])):
             if subpath not in seen_subpaths:
                 seen_subpaths.add(subpath)
-                prompt_subpaths.append(subpath)
+                src = _PROMPTS_DIR / subpath
+                dst = dot_gremlins / "prompts" / subpath
+                plan.append((dst, src.read_bytes()))
 
-    prompt_targets: list[tuple[pathlib.Path, pathlib.Path]] = [
-        (_PROMPTS_DIR / sub, dot_gremlins / "prompts" / sub) for sub in prompt_subpaths
-    ]
-    pipeline_targets: list[tuple[str, pathlib.Path]] = [
-        (name, dot_gremlins / "pipelines" / f"{name}.yaml") for name in selected
-    ]
-
-    if not args.force:
-        conflicts = [dst for _, dst in prompt_targets if dst.exists()] + [
-            dst for _, dst in pipeline_targets if dst.exists()
-        ]
-        if conflicts:
-            for c in conflicts:
-                sys.stderr.write(f"error: already exists: {c}\n")
-            return 1
-
-    for src, dst in prompt_targets:
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_bytes(src.read_bytes())
-        sys.stdout.write(f"{dst}\n")
-
-    for name, dst in pipeline_targets:
-        data = pipeline_data[name]
+    for name in selected:
+        data = dict(pipeline_data[name])
         data["stages"] = [_rewrite_stage(s) for s in data.get("stages", [])]
+        dst = dot_gremlins / "pipelines" / f"{name}.yaml"
+        content = yaml.safe_dump(data, default_flow_style=False, sort_keys=False)
+        plan.append((dst, content.encode("utf-8")))
+
+    return plan
+
+
+def _check_conflicts(plan: list[tuple[pathlib.Path, bytes]], force: bool) -> int | None:
+    if force:
+        return None
+    conflicts = [dst for dst, _ in plan if dst.exists()]
+    if not conflicts:
+        return None
+    for c in conflicts:
+        sys.stderr.write(f"error: already exists: {c}\n")
+    return 1
+
+
+def _stage_writes(plan: list[tuple[pathlib.Path, bytes]]) -> list[pathlib.Path]:
+    staged: list[pathlib.Path] = []
+    for dst, data in plan:
         dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_text(
-            yaml.safe_dump(data, default_flow_style=False, sort_keys=False),
-            encoding="utf-8",
-        )
+        tmp = _tmp_path(dst)
+        tmp.write_bytes(data)
+        staged.append(tmp)
+    return staged
+
+
+def _commit_writes(
+    staged: list[pathlib.Path], plan: list[tuple[pathlib.Path, bytes]]
+) -> None:
+    for tmp, (dst, _) in zip(staged, plan):
+        tmp.replace(dst)
         sys.stdout.write(f"{dst}\n")
 
+
+def _cleanup_tmp(paths: list[pathlib.Path]) -> None:
+    for p in paths:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+
+def init_main(argv: list[str]) -> int:
+    args = _parse_args(argv)
+    bundled = _bundled_pipeline_names()
+    selected = args.pipelines or bundled
+    if rc := _validate_selection(selected, bundled):
+        return rc
+    base = pathlib.Path(args.path) if args.path else pathlib.Path.cwd()
+    plan: list[tuple[pathlib.Path, bytes]] = []
+    try:
+        plan = _build_plan(selected, base)
+        if rc := _check_conflicts(plan, args.force):
+            return rc
+        staged = _stage_writes(plan)
+        try:
+            _commit_writes(staged, plan)
+        except OSError:
+            _cleanup_tmp(staged)
+            raise
+    except (OSError, yaml.YAMLError) as exc:
+        sys.stderr.write(f"error: {str(exc).splitlines()[0]}\n")
+        _cleanup_tmp([_tmp_path(dst) for dst, _ in plan])
+        return 1
     return 0
