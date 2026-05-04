@@ -35,7 +35,9 @@ def test_bare_invocation_calls_fleet_status(tmp_path, monkeypatch):
     """gremlins (no args) delegates to fleet status, returns 0."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     called = []
-    monkeypatch.setattr("gremlins.cli.fleet_main", lambda argv: called.append(argv) or 0)
+    monkeypatch.setattr(
+        "gremlins.cli.fleet_main", lambda argv: called.append(argv) or 0
+    )
     rc = main([])
     assert rc == 0
     assert called == [[]]
@@ -45,13 +47,17 @@ def test_unknown_first_arg_falls_through_to_fleet(tmp_path, monkeypatch):
     """gremlins <id-prefix> passes argv to fleet_main for drill-in."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     received = []
-    monkeypatch.setattr("gremlins.cli.fleet_main", lambda argv: received.append(argv) or 0)
+    monkeypatch.setattr(
+        "gremlins.cli.fleet_main", lambda argv: received.append(argv) or 0
+    )
     rc = main(["abc123"])
     assert rc == 0
     assert received == [["abc123"]]
 
 
-@pytest.mark.parametrize("sub", ["fleet", "handoff", "bail", "session-summary", "_run-pipeline"])
+@pytest.mark.parametrize(
+    "sub", ["fleet", "handoff", "bail", "session-summary", "_run-pipeline"]
+)
 def test_removed_subcommands_exit_nonzero(sub):
     rc = main([sub])
     assert rc != 0
@@ -132,7 +138,15 @@ def test_bail_all_valid_classes_accepted(tmp_path, monkeypatch, bail_class):
 
 @pytest.mark.parametrize(
     "bad_id",
-    ["", "../escape", "foo/bar", "foo\\bar", "foo..bar", "id with spaces", "id;injection"],
+    [
+        "",
+        "../escape",
+        "foo/bar",
+        "foo\\bar",
+        "foo..bar",
+        "id with spaces",
+        "id;injection",
+    ],
 )
 def test_bail_rejects_malformed_gr_id_env(tmp_path, monkeypatch, bad_id):
     monkeypatch.setenv("GR_ID", bad_id)
@@ -150,7 +164,15 @@ def test_bail_rejects_malformed_gr_id_env(tmp_path, monkeypatch, bad_id):
 
 @pytest.mark.parametrize(
     "bad_id",
-    ["", "../escape", "foo/bar", "foo\\bar", "foo..bar", "id with spaces", "id;injection"],
+    [
+        "",
+        "../escape",
+        "foo/bar",
+        "foo\\bar",
+        "foo..bar",
+        "id with spaces",
+        "id;injection",
+    ],
 )
 def test_run_pipeline_rejects_invalid_gr_id(tmp_path, monkeypatch, bad_id):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
@@ -169,7 +191,9 @@ def test_run_pipeline_valid_id_proceeds(tmp_path, monkeypatch):
         run_pipeline_main(["valid-gremlin-abc123", "_local"])
 
 
-def test_run_pipeline_forwards_gr_id_to_orchestrator(tmp_path, monkeypatch, make_state_dir):
+def test_run_pipeline_forwards_gr_id_to_orchestrator(
+    tmp_path, monkeypatch, make_state_dir
+):
     gr_id = "test-pipeline-gr"
     state_dir = make_state_dir(gr_id)
 
@@ -212,7 +236,9 @@ def test_stop_dispatches_to_stop_main(tmp_path, monkeypatch):
 def test_rescue_dispatches_to_rescue_main(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     called = []
-    monkeypatch.setattr("gremlins.cli.rescue_main", lambda argv: called.append(argv) or 0)
+    monkeypatch.setattr(
+        "gremlins.cli.rescue_main", lambda argv: called.append(argv) or 0
+    )
     rc = main(["rescue", "--headless", "abc123"])
     assert rc == 0
     assert called == [["--headless", "abc123"]]
@@ -277,17 +303,23 @@ def test_boss_missing_chain_kind_exits_nonzero_no_state(tmp_path, monkeypatch):
 
 
 def test_local_with_positional_instructions_passes():
-    ns = argparse.Namespace(plan=None, instructions=None, positional_instructions="fix the bug")
+    ns = argparse.Namespace(
+        plan=None, instructions=None, positional_instructions="fix the bug"
+    )
     _validate_local_args(ns)
 
 
 def test_local_with_plan_passes():
-    ns = argparse.Namespace(plan="plan.md", instructions=None, positional_instructions=None)
+    ns = argparse.Namespace(
+        plan="plan.md", instructions=None, positional_instructions=None
+    )
     _validate_local_args(ns)
 
 
 def test_local_with_instructions_flag_passes():
-    ns = argparse.Namespace(plan=None, instructions="fix the bug", positional_instructions=None)
+    ns = argparse.Namespace(
+        plan=None, instructions="fix the bug", positional_instructions=None
+    )
     _validate_local_args(ns)
 
 
@@ -329,7 +361,15 @@ def test_boss_missing_plan_exits_nonzero_no_state(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(
     "bad_id",
-    ["", "../escape", "foo/bar", "foo\\bar", "foo..bar", "id with spaces", "id;injection"],
+    [
+        "",
+        "../escape",
+        "foo/bar",
+        "foo\\bar",
+        "foo..bar",
+        "id with spaces",
+        "id;injection",
+    ],
 )
 def test_resume_rejects_invalid_gr_id(tmp_path, monkeypatch, bad_id):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))

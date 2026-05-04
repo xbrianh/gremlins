@@ -191,11 +191,15 @@ def log_main(argv: list[str]) -> int:
 
 def land_main(argv: list[str]) -> int:
     if not argv:
-        print("usage: gremlins land [--squash|--ff] [--force] [--into <dir>] <id-prefix>")
+        print(
+            "usage: gremlins land [--squash|--ff] [--force] [--into <dir>] <id-prefix>"
+        )
         return 1
     target = next((a for a in argv if not a.startswith("-")), None)
     if target is None:
-        print("usage: gremlins land [--squash|--ff] [--force] [--into <dir>] <id-prefix>")
+        print(
+            "usage: gremlins land [--squash|--ff] [--force] [--into <dir>] <id-prefix>"
+        )
         return 1
     if not os.path.isdir(_constants.STATE_ROOT):
         print("No gremlins have been launched on this machine.")

@@ -82,7 +82,15 @@ def _fetch_issue_title(plan: str) -> str:
             return ""
         if not target_repo:
             r = subprocess.run(
-                ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+                [
+                    "gh",
+                    "repo",
+                    "view",
+                    "--json",
+                    "nameWithOwner",
+                    "-q",
+                    ".nameWithOwner",
+                ],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -94,7 +102,7 @@ def _fetch_issue_title(plan: str) -> str:
         if not target_repo:
             return ""
         data = view_issue(issue_ref, target_repo)
-        return (data.get("title") or "")
+        return data.get("title") or ""
     except Exception:
         return ""
 

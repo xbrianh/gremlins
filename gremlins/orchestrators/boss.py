@@ -334,13 +334,21 @@ def run_handoff(
         handoff_cwd,
     )
     spec_args = ["--spec", spec_path] if forward_spec else []
-    cmd = [sys.executable, "-m", "gremlins.handoff",
-        "--plan", current_plan,
+    cmd = [
+        sys.executable,
+        "-m",
+        "gremlins.handoff",
+        "--plan",
+        current_plan,
         *spec_args,
-        "--out", out_path,
-        "--base", base_ref,
-        "--model", model,
-        "--timeout", str(HANDOFF_TIMEOUT),
+        "--out",
+        out_path,
+        "--base",
+        base_ref,
+        "--model",
+        model,
+        "--timeout",
+        str(HANDOFF_TIMEOUT),
         *rev_args,
     ]
     rc = run_proc(cmd, cwd=handoff_cwd, env=_gremlins_cli_env())
@@ -752,7 +760,9 @@ def boss_main(argv: list[str], *, gr_id: str | None = None) -> int:
             )
         else:
             logger.info("chain start: kind=%s, spec=%s", chain_kind, spec_path)
-        _maybe_set_description_from_spec(state_dir, gr_id=gr_id, issue_title=issue_title)
+        _maybe_set_description_from_spec(
+            state_dir, gr_id=gr_id, issue_title=issue_title
+        )
         if chain_kind == "gh":
             # gh children open PRs from the repo's default branch and land
             # there, regardless of where the user happens to be. Anchor the

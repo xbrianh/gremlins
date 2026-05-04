@@ -2,6 +2,7 @@
 
 Reads GR_ID from env (set by the launcher). Returns 0 for valid invocations.
 """
+
 from __future__ import annotations
 
 import argparse

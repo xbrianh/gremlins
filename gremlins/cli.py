@@ -41,9 +41,7 @@ from .orchestrators.gh import VALID_STAGES, gh_main
 from .orchestrators.local import address_main, local_main, review_main
 from .state import validate_gr_id
 
-_REMOVED = frozenset(
-    {"fleet", "handoff", "bail", "session-summary", "_run-pipeline"}
-)
+_REMOVED = frozenset({"fleet", "handoff", "bail", "session-summary", "_run-pipeline"})
 
 
 def main(argv: list[str] | None = None, *, gr_id: str | None = None) -> int:
@@ -51,9 +49,7 @@ def main(argv: list[str] | None = None, *, gr_id: str | None = None) -> int:
         argv = sys.argv[1:]
 
     if argv and argv[0] in _REMOVED:
-        sys.stderr.write(
-            f"error: '{argv[0]}' is no longer a valid subcommand\n"
-        )
+        sys.stderr.write(f"error: '{argv[0]}' is no longer a valid subcommand\n")
         return 1
 
     sub = argv[0] if argv else ""
@@ -75,6 +71,7 @@ def main(argv: list[str] | None = None, *, gr_id: str | None = None) -> int:
         return _self_background_main("bossgremlin", rest)
     if sub == "_boss":
         from .orchestrators.boss import boss_main
+
         return boss_main(rest, gr_id=gr_id)
     if sub == "resume":
         return _resume_main(rest)

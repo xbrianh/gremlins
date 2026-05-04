@@ -306,4 +306,5 @@ def _prune_old_state(state_root: str) -> None:
 
 if __name__ == "__main__":
     import sys
+
     sys.exit(main(sys.argv[1:]))

@@ -257,7 +257,9 @@ def _resolve_plan_source(
         )
 
     patch_state(gr_id, issue_url=issue_url, issue_num=issue_num)
-    _update_description_from_plan(plan_md, state_file, gr_id=gr_id, issue_title=issue_title)
+    _update_description_from_plan(
+        plan_md, state_file, gr_id=gr_id, issue_title=issue_title
+    )
     return issue_url, issue_num, issue_body
 
 
