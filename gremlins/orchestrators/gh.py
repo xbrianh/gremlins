@@ -368,6 +368,7 @@ def _build_stage_runner(
     if entry.type == "verify":
         check_cmd = entry.options.get("check_cmd", "")
         test_cmd = entry.options.get("test_cmd", "")
+        max_attempts = entry.options.get("max_attempts", 3)
 
         def _verify() -> None:
             set_stage(gr_id, entry.name)
@@ -380,6 +381,7 @@ def _build_stage_runner(
                     code_style=code_style,
                     check_cmd=check_cmd,
                     test_cmd=test_cmd,
+                    max_attempts=max_attempts,
                 ),
             )
 

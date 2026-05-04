@@ -53,23 +53,262 @@ the module docstring at the top of [`gremlins/cli.py`](gremlins/cli.py).
 
 `_run-pipeline` is an internal spawn boundary; not for direct use.
 
-## Pipeline loader
+## Pipeline configuration
 
-`gremlins/pipeline.py` loads YAML pipeline definitions. Key API:
+Gremlins runs a sequence of stages defined in a YAML file. The bundled
+pipelines work out of the box; a project-local YAML can override any of them.
+
+### Discovery order
+
+`--pipeline <name|path>` resolves as follows:
+
+1. A value with a `.yaml` suffix or more than one path component is loaded
+   directly as a filesystem path.
+2. Otherwise `./.gremlins/pipelines/<name>.yaml` is checked first
+   (project-local override).
+3. Then `gremlins/pipelines/<name>.yaml` (bundled) is checked.
+
+Defaults: `launch local` → `local`, `launch gh` → `gh`.
+
+### Selecting a pipeline
+
+```sh
+gremlins launch local                                          # bundled local.yaml
+gremlins launch local --pipeline my-pipeline                   # .gremlins/pipelines/my-pipeline.yaml
+gremlins launch local --pipeline .gremlins/pipelines/foo.yaml  # direct path
+gremlins launch gh --pipeline gh                               # bundled gh.yaml
+```
+
+### Schema reference
+
+**Top-level keys:**
+
+```yaml
+name: my-pipeline         # optional; defaults to the file stem
+
+clients:
+  claude_sonnet:
+    provider: claude
+    model: sonnet
+
+stages:
+  - name: plan
+    type: plan
+    client: claude_sonnet
+    prompt: prompts/plan.md
+    options: {}
+```
+
+| Key | Description |
+|---|---|
+| `name` | Pipeline display name; defaults to the file stem |
+| `clients` | Named client definitions |
+| `stages` | Ordered list of stage entries or parallel groups |
+
+**Per-stage keys:**
+
+| Key | Description |
+|---|---|
+| `name` | Unique stage identifier; used for `resume` targeting |
+| `type` | Registered stage type (see [Available stage types](#available-stage-types)) |
+| `client` | Key from `clients:`; parsed by the loader but not used by orchestrators to select the model |
+| `prompt` | Path or list of paths, relative to the YAML file |
+| `options` | Free-form dict passed to the stage |
+
+**Parallel-group form:**
+
+```yaml
+- name: reviews
+  parallel:
+    - name: review-detail
+      type: review-code
+      client: claude_sonnet
+    - name: review-security
+      type: review-code
+      client: claude_sonnet
+  max_concurrent: 2         # optional; defaults to all children at once
+```
+
+| Key | Description |
+|---|---|
+| `name` | Group identifier |
+| `parallel` | List of child stage entries (no nesting allowed) |
+| `max_concurrent` | Max simultaneously running children (optional) |
+
+### `clients:` block
+
+```yaml
+clients:
+  claude_sonnet: { provider: claude, model: sonnet }
+```
+
+`provider` selects the client implementation. Today only `claude` is available.
+
+The `clients:` block and per-stage `client:` key are parsed by the pipeline
+loader but not currently used by the orchestrators to select the model at
+runtime. Model selection is controlled via CLI flags (`--model` for `gh`;
+`--plan-model`, `--impl`, `--address` etc. for `local`) or per-stage
+`options:` keys (e.g. `plan_model`, `impl_model`, `address_model`).
+
+### `prompt:` field
+
+```yaml
+prompt: prompts/plan.md                                  # single file
+prompt: [prompts/code_style.md, prompts/plan.md]         # list — concatenated with \n\n
+```
+
+Paths are relative to the YAML file. Lists are joined with `\n\n` before
+being passed to the stage.
+
+By convention, project-local prompts live in `./.gremlins/prompts/` (a peer
+of `./.gremlins/pipelines/`, not nested under it) and pipelines reference
+them as `../prompts/<file>.md`. There is no search fallback — paths are
+explicit. To reuse a bundled prompt, copy the file from
+`gremlins/pipelines/prompts/` into `./.gremlins/prompts/`.
+
+### `options:` field
+
+A free-form dict passed verbatim to the stage. Selected options by stage
+(see [`gremlins/stages/CLAUDE.md`](gremlins/stages/CLAUDE.md) for the full list):
+
+**`verify`** — runs `check_cmd` then `test_cmd`, with an agent fix-loop:
+
+```yaml
+options:
+  check_cmd: make check   # lint/typecheck command (optional)
+  test_cmd: make test     # test command (optional)
+  max_attempts: 3         # fix-loop retries (default: 3)
+```
+
+**`test`** — runs a single test command, with an agent fix-loop:
+
+```yaml
+options:
+  test_cmd: pytest        # falls back to --test CLI flag; stage no-ops if unset in both
+  max_attempts: 3         # fix-loop retries (default: 3)
+```
+
+For `local` stages, model options (`plan_model`, `impl_model`, `address_model`,
+`test_fix_model`, `detail`) can also be set here to override the CLI defaults.
+
+### Available stage types
+
+| Type | Description |
+|---|---|
+| `plan` | Produces an implementation plan |
+| `implement` | Applies the plan to the working tree |
+| `review-code` | Runs a code review and writes findings to disk |
+| `address-code` | Applies code-review findings |
+| `verify` | Runs check and test commands with an agent fix-loop |
+| `test` | Runs a single test command with an agent fix-loop |
+| `commit-pr` | Commits changes and opens a pull request |
+| `request-copilot` | Requests a Copilot review on the open PR |
+| `ghreview` | Runs the `/ghreview` skill against the open PR |
+| `wait-copilot` | Polls until Copilot posts its review |
+| `ghaddress` | Runs the `/ghaddress` skill to address PR review comments |
+| `wait-ci` | Polls PR CI checks until they pass or exhaust attempts |
+
+### Parallel groups
+
+Wrap sibling stages in a `parallel:` list to run them concurrently:
+
+```yaml
+clients:
+  claude_sonnet: { provider: claude, model: sonnet }
+
+stages:
+  - name: plan
+    type: plan
+    client: claude_sonnet
+
+  - name: reviews
+    parallel:
+      - name: review-detail
+        type: review-code
+        client: claude_sonnet
+      - name: review-security
+        type: review-code
+        client: claude_sonnet
+    max_concurrent: 2
+
+  - name: address-code
+    type: address-code
+    client: claude_sonnet
+```
+
+If any child fails, the pipeline halts after the group finishes — siblings
+are not cancelled mid-run. `gremlins resume` accepts both the group name
+(`reviews`) and individual child names (`review-detail`).
+
+### Worked example: project-local override
+
+Create `.gremlins/pipelines/local.yaml` to override the bundled `local`
+pipeline. This example uses Opus for plan/implement/address stages and adds
+a `test` stage before `review-code`:
+
+```yaml
+name: local
+
+stages:
+  - { name: plan,         type: plan,         options: { plan_model: opus } }
+  - { name: implement,    type: implement,    options: { impl_model: opus } }
+  - { name: test,         type: test,         options: { test_cmd: pytest } }
+  - { name: review-code,  type: review-code }
+  - { name: address-code, type: address-code, options: { address_model: opus } }
+```
+
+Add a `prompt:` key to any stage to supply a custom prompt; paths are
+relative to the YAML file.
+
+### Worked example: parallel reviewers
+
+Run two `review-code` passes in parallel, then address both:
+
+```yaml
+name: local
+
+clients:
+  claude_sonnet: { provider: claude, model: sonnet }
+
+stages:
+  - { name: plan,      type: plan,      client: claude_sonnet }
+  - { name: implement, type: implement, client: claude_sonnet }
+
+  - name: reviews
+    parallel:
+      - name: review-detail
+        type: review-code
+        client: claude_sonnet
+      - name: review-security
+        type: review-code
+        client: claude_sonnet
+    max_concurrent: 2
+
+  - { name: address-code, type: address-code, client: claude_sonnet }
+```
+
+Note: `review-code` does not currently support per-stage prompt overrides
+via YAML — both passes use the built-in detail lens.
+
+### Bundled pipelines
+
+The canonical reference pipelines:
+
+- [`gremlins/pipelines/local.yaml`](gremlins/pipelines/local.yaml) — default for `launch local`
+- [`gremlins/pipelines/gh.yaml`](gremlins/pipelines/gh.yaml) — default for `launch gh`
+
+### Loader API
+
+`gremlins/pipeline.py` exposes:
 
 - `load_pipeline(path)` → `Pipeline` — parses a YAML file, resolves `clients`
   via `CLIENT_FACTORIES`, and validates every stage `type` against
   `STAGE_REGISTRY` (populated by importing `gremlins.stages.all`).
-- `resolve_pipeline_path(name_or_path, base_dir)` — resolves a pipeline name or
-  path. A value with a `.yaml` suffix or more than one path component is resolved
-  as a filesystem path directly. Otherwise, checks
-  `<base_dir>/.gremlins/pipelines/<name>.yaml` first, then the bundled
-  `gremlins/pipelines/` directory.
+- `resolve_pipeline_path(name_or_path, base_dir)` — resolves a name or path
+  using the discovery order above.
 
-Dataclasses: `Pipeline`, `StageEntry` (supports `type="parallel"` groups).
-
-Bundled YAML pipeline files live in `gremlins/pipelines/` (`local.yaml`,
-`gh.yaml`).
+Dataclasses: `Pipeline`, `StageEntry` (parallel groups have `type="parallel"`
+internally and carry a `children` list and optional `max_concurrent`).
 
 ## Internals docs
 
