@@ -26,6 +26,7 @@ def _iter_stage_prompts(stages: list[Any]) -> Iterator[str]:
             else:
                 yield from prompts
 
+
 # ---------------------------------------------------------------------------
 # Happy path: all pipelines
 # ---------------------------------------------------------------------------
