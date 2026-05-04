@@ -57,6 +57,7 @@ class ImplementOptions:
     spec_text: str = ""
     issue_num: str = ""
     cwd: str | None = None
+    prompt_path: pathlib.Path | None = None
 
 
 def changes_outside_git(sentinel: pathlib.Path, session_dir: pathlib.Path) -> bool:
@@ -141,7 +142,7 @@ def run(ctx: StageContext, options: ImplementOptions) -> ImplStageResult | None:
             "notes-to-self. Do not push."
         )
 
-    template = PROMPT_LOCAL_PATH.read_text(encoding="utf-8")
+    template = (options.prompt_path or PROMPT_LOCAL_PATH).read_text(encoding="utf-8")
     prompt = template.format(
         code_style=options.code_style,
         spec_block=_render_spec_block(options.spec_text),
@@ -188,7 +189,7 @@ def _run_implement_gh(ctx: StageContext, options: ImplementOptions) -> ImplStage
             "should be product code."
         )
 
-    template = PROMPT_GH_PATH.read_text(encoding="utf-8")
+    template = (options.prompt_path or PROMPT_GH_PATH).read_text(encoding="utf-8")
     prompt = template.format(
         code_style=options.code_style,
         spec_block=_render_spec_block(options.spec_text),

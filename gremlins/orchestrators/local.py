@@ -120,6 +120,8 @@ def _build_stage_runner(
                     entry.options.get("plan_model", args.plan_model),
                     plan_file,
                 )
+                if not entry.prompt_paths:
+                    die(f"stage {entry.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML")
                 plan.run(
                     ctx,
                     plan.PlanOptions(
@@ -161,6 +163,7 @@ def _build_stage_runner(
                     code_style=code_style,
                     is_git=is_git,
                     spec_text=spec_text,
+                    prompt_path=entry.prompt_paths[-1] if entry.prompt_paths else None,
                 ),
             )
 
@@ -202,7 +205,7 @@ def _build_stage_runner(
                     address_model=entry.options.get("address_model", args.address),
                     is_git=is_git,
                     code_style=code_style,
-                    prompt_path=entry.prompt_paths[-1],
+                    **({"prompt_path": entry.prompt_paths[-1]} if entry.prompt_paths else {}),
                 ),
             )
 
