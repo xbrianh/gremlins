@@ -479,7 +479,7 @@ def _recreate_worktree(state: dict[str, Any]) -> tuple[bool, str]:
     return False, f"worktree add --detach {ref!r}: {fallback_err}"
 
 
-def do_rescue(target: str, headless: bool = False) -> bool:
+def do_rescue(target: str, headless: bool = False, from_boss: bool = False) -> bool:
     match = resolve_gremlin(target)
     if match is None:
         return False
@@ -573,8 +573,10 @@ def do_rescue(target: str, headless: bool = False) -> bool:
         # Headless: hard-refuse on excluded class or exhausted attempts. Both
         # paths write a fresh bail_reason (overwriting any prior one) so the
         # most recent decision is what /gremlins listings show.
+        # --from-boss bypasses the excluded-class short-circuit so the boss's
+        # own classification logic (not the rescue agent) decides next action.
         if headless:
-            if bail_class in EXCLUDED_BAIL_CLASSES:
+            if bail_class in EXCLUDED_BAIL_CLASSES and not from_boss:
                 reason = f"excluded_class:{bail_class}"
                 detail: str = str(
                     state.get("bail_detail")

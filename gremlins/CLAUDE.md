@@ -74,6 +74,50 @@ consumers. Source of truth: bail-class constants live in
 - **Stage names** (`state.json.stage`): stable within a pipeline definition. The authoritative list for any pipeline is its YAML file. `resolve_pipeline_path` checks `.gremlins/pipelines/<name>.yaml` (project-scoped) first, then bundled `gremlins/pipelines/<name>.yaml`; `--pipeline` accepts either a bare name (resolved this way) or a direct path.
 - **Marker-protocol bail reasons**: `diagnosis_no_marker`, `diagnosis_bad_marker`, `diagnosis_claude_error`, `diagnosis_timeout`, `excluded_class:<class>`, `attempts_exhausted`, `relaunch_launcher_missing`, `relaunch_failed`.
 
+## Recovering from a child bail
+
+When a child bails in a boss chain, the boss halts. The operator must put the
+child into a well-defined state, then rescue the boss. The boss reads only the
+child's `state.json` to decide what to do — no `gh` calls, no git inspection.
+
+### Child states the boss recognizes
+
+| Child state | Boss action on rescue |
+|---|---|
+| `status=running` | Adopt as current child, wait for it to finish |
+| `status=bailed`, `external_outcome=landed` | Mark `landed-externally`, next handoff |
+| `status=bailed`, `external_outcome=abandoned` | Mark `abandoned`, next handoff |
+| `status=bailed`, no `external_outcome` | Refuse to advance — print operator instructions |
+| `status=done`, `exit_code=0` | Mark `landed`, next handoff (normal flow) |
+
+### The three operator commands
+
+- `gremlins resume <child-id>` — re-spawn the bailed child at its bailed stage. Use after pushing a fix to the PR or editing the worktree.
+- `gremlins ack <child-id>` — assert the child's work is already in main. Writes `external_outcome=landed`. Use after manually merging the child's PR.
+- `gremlins skip <child-id>` — give up on the child's work. Writes `external_outcome=abandoned`. Use when the child's plan was wrong and you want the handoff agent to plan something different.
+
+### Operator recovery flows
+
+```sh
+# Keep this child going (fix the issue, re-run from bail point):
+/ghaddress <pr>
+gremlins resume <child-id>
+gremlins rescue <boss-id>
+
+# Manually merged the PR:
+gh pr merge <pr> --squash
+gremlins ack <child-id>
+gremlins rescue <boss-id>
+
+# Give up on this child's work, re-plan:
+gremlins skip <child-id>
+gremlins rescue <boss-id>
+```
+
+Two commands per recovery. If the boss was rescued with no operator decision
+recorded, it prints the three options above and exits non-zero — it never
+silently re-handoffs and spawns a near-duplicate child.
+
 ## Stage and bail bookkeeping
 
 `state.set_stage` and `state.emit_bail` write to `state.json` atomically
