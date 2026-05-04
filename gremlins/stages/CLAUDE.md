@@ -39,14 +39,15 @@ sequencing logic of their own.
 - Every stage that talks to `claude` takes `client: ClaudeClient` and
   calls `client.run(...)`. **Never spawn `claude -p` directly** — that
   bypasses the test seam in `../clients/protocol.py`.
-- Prompt templates live in `../prompts/` (and lens files under
-  `../prompts/lenses/`). Resolve them via:
+- Main stage prompts come from `StageEntry.prompt_paths`, resolved by the
+  pipeline loader and threaded through `options` (or passed directly by the
+  orchestrator). Stages should not construct prompt paths themselves for
+  their primary prompt.
+- Fix-loop templates (`verify_fix.md`, `test_fix.md`, `ci_fix.md`) are
+  intrinsic to their stage module and are resolved via:
   ```python
-  PROMPT_PATH = pathlib.Path(__file__).resolve().parent.parent / "prompts" / "<name>.md"
+  pathlib.Path(__file__).resolve().parent / "<name>.md"
   ```
-  Don't hard-code absolute paths or use `cwd`-relative paths — `__file__`
-  resolves into `~/.claude/gremlins/...` regardless of the orchestrator's
-  cwd.
 - Stages that should respect a bail marker (set by the agent via
   `python -m gremlins.bail`) call `check_bail(<phase-name>)` from
   `..state` after the claude run. The runner inspects the bail and

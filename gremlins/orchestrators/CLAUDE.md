@@ -6,13 +6,10 @@ Per-pipeline orchestrator entry points. Each module owns one CLI subcommand
 
 ## Modules
 
-- `local.py` — `local_main` (full local chain: `plan → implement → review-code →
-  address-code → test`), `review_main` (review-code only), `address_main`
-  (address-code only). Subcommands: `local`, `review`, `address`. The `test`
-  stage is a no-op when `--test` is omitted.
-- `gh.py` — `gh_main`. Subcommand: `gh`. Drives the gh pipeline:
-  `plan → implement → verify → commit-pr → request-copilot → ghreview →
-  wait-copilot → ghaddress → ci-gate`.
+- `local.py` — `local_main` (loads `local.yaml`, runs stages), `review_main`
+  (review-code only), `address_main` (address-code only). Subcommands:
+  `local`, `review`, `address`.
+- `gh.py` — `gh_main`. Subcommand: `gh`. Loads `gh.yaml` and runs stages.
 - `boss.py` — `boss_main`. Subcommand: `boss`. Not a stage sequencer —
   drives a chain of child gremlins, subprocessing out to
   `python -m gremlins.handoff` and `python -m gremlins.cli {stop,land,rescue}` between
@@ -30,9 +27,10 @@ Per-pipeline orchestrator entry points. Each module owns one CLI subcommand
 - Stage bodies live in `../stages/`. Orchestrators wire them up (resume
   semantics, signal handlers, session-dir resolution) — keep stage logic
   out of these files.
-- Stage-name vocabulary per orchestrator is byte-stable (see parent
-  CLAUDE.md §"Byte-stable strings"). `VALID_RESUME_STAGES` /
-  `VALID_STAGES` constants are the source of truth.
+- Stage-name vocabulary is byte-stable (see parent CLAUDE.md §"Byte-stable
+  strings"). Resume-target validation loads the pipeline YAML and checks the
+  supplied name against `[s.name for s in pipeline.stages]`; child stage
+  names within a parallel group are also valid resume targets.
 - Both `local.py` and `gh.py` call `load_code_style()` from
   `gremlins.prompts`, which reads `gremlins/prompts/code_style.md` via a
   `pathlib.Path(__file__)` resolve in `prompts/__init__.py`. This is the
