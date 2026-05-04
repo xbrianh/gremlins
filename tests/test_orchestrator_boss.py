@@ -1650,6 +1650,20 @@ def test_classify_missing_state(tmp_path):
         boss_mod.STATE_ROOT = orig
 
 
+def test_classify_done_exit_zero(tmp_path):
+    child_dir = tmp_path / "child-done-ee5"
+    child_dir.mkdir()
+    (child_dir / "state.json").write_text(
+        json.dumps({"status": "done", "exit_code": 0})
+    )
+    orig = boss_mod.STATE_ROOT
+    boss_mod.STATE_ROOT = str(tmp_path)
+    try:
+        assert boss_mod._classify_from_child_state("child-done-ee5") == "landed"
+    finally:
+        boss_mod.STATE_ROOT = orig
+
+
 def test_last_bailed_child_none_when_no_bailed():
     boss_state = {"children": [{"id": "c1", "outcome": "landed"}]}
     assert boss_mod._last_bailed_child(boss_state) is None
@@ -1685,9 +1699,6 @@ def test_is_fresh_rescue_true(tmp_path):
     # Write boss_state.json first (older mtime)
     boss_state_path = state_dir / "boss_state.json"
     boss_state_path.write_text("{}")
-    import time
-
-    time.sleep(0.01)
     # Write state.json with rescued_at newer than boss_state.json
     import datetime
 

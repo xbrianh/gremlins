@@ -541,7 +541,7 @@ def _summarize_for_log(text: str, limit: int = 240) -> str:
 def _classify_from_child_state(child_id: str) -> str:
     """Return verdict for a bailed child based on its state.json.
 
-    Verdicts: "running", "landed-externally", "abandoned", "no-decision".
+    Verdicts: "running", "landed", "landed-externally", "abandoned", "no-decision".
     """
     state_path = os.path.join(STATE_ROOT, child_id, "state.json")
     try:
@@ -550,6 +550,8 @@ def _classify_from_child_state(child_id: str) -> str:
         return "no-decision"
     if s.get("status") == "running":
         return "running"
+    if s.get("status") == "done" and s.get("exit_code") == 0:
+        return "landed"
     ext = s.get("external_outcome")
     if ext == "landed":
         return "landed-externally"
@@ -893,6 +895,10 @@ def boss_main(argv: list[str], *, gr_id: str | None = None) -> int:
                         if c["id"] != last_bailed["id"]
                     ]
                     save_boss_state(state_dir, boss_state)
+                elif verdict == "landed":
+                    last_bailed["outcome"] = "landed"
+                    save_boss_state(state_dir, boss_state)
+                    continue
                 elif verdict == "landed-externally":
                     last_bailed["outcome"] = "landed-externally"
                     save_boss_state(state_dir, boss_state)

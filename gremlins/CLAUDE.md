@@ -88,7 +88,7 @@ child's `state.json` to decide what to do — no `gh` calls, no git inspection.
 | `status=bailed`, `external_outcome=landed` | Mark `landed-externally`, next handoff |
 | `status=bailed`, `external_outcome=abandoned` | Mark `abandoned`, next handoff |
 | `status=bailed`, no `external_outcome` | Refuse to advance — print operator instructions |
-| `status=completed`, `exit_code=0` | Mark `landed`, next handoff (normal flow) |
+| `status=done`, `exit_code=0` | Mark `landed`, next handoff (normal flow) |
 
 ### The three operator commands
 
