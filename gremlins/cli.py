@@ -6,6 +6,8 @@ User-facing subcommands:
   review    — review-code stage only
   address   — address-code stage only
   resume    — re-spawn an existing gremlin from its recorded stage
+  ack       — record that a bailed child's work landed externally
+  skip      — abandon a bailed child's work
   stop      — send SIGTERM to a running gremlin
   rescue    — diagnose and resume a dead or stalled gremlin
   land      — land a finished gremlin onto the current branch

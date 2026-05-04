@@ -1,23 +1,24 @@
 # `gremlins/fleet/`
 
-Fleet manager package for background gremlins. Reads every `${XDG_STATE_HOME:-$HOME/.local/state}/claude-gremlins/<id>/state.json`, applies the shared liveness classifier inline, and prints one scannable line per gremlin. Fleet ops (`stop`, `rescue`, `land`, `rm`, `close`, `log`) are exposed as top-level `gremlins` subcommands via `fleet/cli.py`.
+Fleet manager package for background gremlins. Reads every `${XDG_STATE_HOME:-$HOME/.local/state}/claude-gremlins/<id>/state.json`, applies the shared liveness classifier inline, and prints one scannable line per gremlin. Fleet ops (`ack`, `skip`, `stop`, `rescue`, `land`, `rm`, `close`, `log`) are exposed as top-level `gremlins` subcommands via `fleet/cli.py`.
 
 ## Module map
 
 | File | Contents |
 |---|---|
 | `constants.py` | `BG_STALL_SECS`, `STATE_ROOT`, `FMT`, `RESCUE_CAP`, `HEADLESS_DIAGNOSIS_TIMEOUT_SECS`, `EXCLUDED_BAIL_CLASSES` |
-| `state.py` | `iso_to_epoch`, `humanize_age`, `display_id`, `render_sub_stage`, `liveness_of_state_file`, `iter_state_files`, `load_state`, `kind_short`, `git_toplevel` |
+| `state.py` | `iso_to_epoch`, `humanize_age`, `display_id`, `render_sub_stage`, `liveness_of_state_file`, `iter_state_files`, `load_state`, `kind_short`, `git_toplevel`, `atomic_patch_state` |
 | `duration.py` | `parse_duration` |
 | `render.py` | `build_row`, `print_table` |
 | `resolve.py` | `GREMLIN_STAGES`, `resolve_gremlin` |
+| `ack.py` | `do_ack`, `do_skip` |
 | `stop.py` | `do_stop` |
-| `rescue.py` | `build_rescue_prompt`, `_atomic_patch_state`, `_write_bail`, `write_rescue_report`, `_read_rescue_marker`, `_run_headless_diagnosis`, `do_rescue` |
+| `rescue.py` | `build_rescue_prompt`, `_write_bail`, `write_rescue_report`, `_read_rescue_marker`, `_run_headless_diagnosis`, `do_rescue` |
 | `log.py` | `do_log` |
 | `close.py` | `do_close` |
 | `land.py` | All land helpers + `do_rm`, `do_land`, `expected_branch`, `_print_cost`, `_persist_land_cost`, `_resolve_landing_cwd`, `_fast_forward_main`, `_cleanup_gremlin` |
 | `views.py` | `collect_rows`, `do_list`, `do_recent`, `do_drill_in` |
-| `cli.py` | `parse_args`, `render_view`, `_main_impl`, `main`, `stop_main`, `rescue_main`, `land_main`, `rm_main`, `close_main`, `log_main` |
+| `cli.py` | `parse_args`, `render_view`, `_main_impl`, `main`, `ack_main`, `skip_main`, `stop_main`, `rescue_main`, `land_main`, `rm_main`, `close_main`, `log_main` |
 | `session_summary.py` | SessionStart/UserPromptSubmit hook: filters gremlins by `project_root`, reports running + newly-finished, marks finished as `summarized`, prunes closed state dirs older than 14 days |
 | `__init__.py` | Re-exports public surface + installs `_FleetModule` for monkeypatch support |
 

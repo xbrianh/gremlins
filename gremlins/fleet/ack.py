@@ -3,8 +3,7 @@
 import sys
 
 from gremlins.fleet.resolve import resolve_gremlin
-from gremlins.fleet.state import atomic_patch_state as _atomic_patch_state
-from gremlins.fleet.state import load_state
+from gremlins.fleet.state import atomic_patch_state, load_state
 
 
 def do_ack(target: str) -> bool:
@@ -37,7 +36,7 @@ def _set_external_outcome(target: str, outcome: str) -> bool:
         )
         return False
 
-    if not _atomic_patch_state(sf, {"external_outcome": outcome}):
+    if not atomic_patch_state(sf, {"external_outcome": outcome}):
         print(f"error: could not write to {sf}", file=sys.stderr)
         return False
 

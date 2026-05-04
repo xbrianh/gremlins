@@ -156,14 +156,11 @@ def kind_short(kind: str) -> str:
 
 def atomic_patch_state(sf: str, patch: dict[str, object]) -> bool:
     """Merge patch into state.json atomically. Returns True on success."""
+    tmp = f"{sf}.patch.tmp.{os.getpid()}"
     try:
         with open(sf, encoding="utf-8") as fh:
             state = json.load(fh)
-    except Exception:
-        return False
-    state.update(patch)
-    tmp = f"{sf}.bail.tmp.{os.getpid()}"
-    try:
+        state.update(patch)
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(state, fh, indent=2)
         os.replace(tmp, sf)

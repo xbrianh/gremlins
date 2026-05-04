@@ -190,9 +190,6 @@ Constraints:
 """
 
 
-_atomic_patch_state = atomic_patch_state
-
-
 def _write_bail(sf: str, wdir: str, bail_reason: str, bail_detail: str = "") -> None:
     """Mark a gremlin as bailed by headless rescue.
 
@@ -203,7 +200,7 @@ def _write_bail(sf: str, wdir: str, bail_reason: str, bail_detail: str = "") -> 
     worse than before headless rescue ran.
     """
     now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    _atomic_patch_state(
+    atomic_patch_state(
         sf,
         {
             "bail_reason": bail_reason,
