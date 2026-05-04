@@ -550,6 +550,16 @@ def gh_main(
             f"valid: {stage_names}"
         )
 
+    seen: set[str] = set()
+    for _n in stage_names:
+        if _n in seen:
+            die(f"pipeline has duplicate stage name {_n!r}")
+        seen.add(_n)
+
+    for _e in pipeline.stages:
+        if _e.type == "parallel":
+            die(f"gh pipeline does not support parallel stages (stage {_e.name!r})")
+
     repo = get_repo()
     session_dir = resolve_session_dir(gr_id)
     state_file = resolve_state_file(gr_id)
@@ -623,10 +633,10 @@ def gh_main(
         "instructions": instructions,
     }
 
-    stages = [
-        (
-            e.name,
-            _build_stage_runner(
+    stages: list[tuple[str, Callable[[], None]]] = []
+    for e in pipeline.stages:
+        try:
+            runner = _build_stage_runner(
                 e,
                 ctx,
                 args,
@@ -637,10 +647,10 @@ def gh_main(
                 state_file=state_file,
                 gr_id=gr_id,
                 gh_state=gh_state,
-            ),
-        )
-        for e in pipeline.stages
-    ]
+            )
+        except ValueError as exc:
+            die(str(exc))
+        stages.append((e.name, runner))
     run_stages(stages, resume_from=args.resume_from)
 
     total_cost = getattr(client, "total_cost_usd", 0.0)

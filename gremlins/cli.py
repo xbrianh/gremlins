@@ -25,6 +25,8 @@ import os
 import pathlib
 import sys
 
+import yaml
+
 from .fleet import main as fleet_main
 from .fleet.cli import (
     close_main,
@@ -169,10 +171,10 @@ def _validate_gh_args(args: argparse.Namespace, rest: list[str]) -> None:
             pipeline = load_pipeline(
                 resolve_pipeline_path(parsed.pipeline or "gh", pathlib.Path.cwd())
             )
-            stage_names = [s.name for s in pipeline.stages]
-        except Exception:
-            stage_names = []
-        if stage_names and parsed.resume_from not in stage_names:
+        except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
+            raise ValueError(f"could not load pipeline for --resume-from check: {exc}")
+        stage_names = [s.name for s in pipeline.stages]
+        if parsed.resume_from not in stage_names:
             raise ValueError(
                 f"invalid --resume-from: {parsed.resume_from!r} "
                 f"(allowed: {' '.join(stage_names)})"

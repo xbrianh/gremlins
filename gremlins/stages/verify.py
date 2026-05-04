@@ -68,12 +68,17 @@ def run(ctx: StageContext, options: VerifyOptions) -> None:
 
     template = load_prompts([BUNDLED_PROMPT_DIR / "verify_fix.md"])
 
+    cmds = [c for c in (options.check_cmd, options.test_cmd) if c]
+    if not cmds:
+        logger.info("verify: no check_cmd or test_cmd configured; skipping")
+        return
+    combined_cmd = " && ".join(cmds)
+
     _exhausted = False
     _agent_bailed = False
     try:
         for attempt in range(1, options.max_attempts + 1):
             log_file = ctx.session_dir / f"verify-attempt-{attempt}.log"
-            combined_cmd = f"{options.check_cmd} && {options.test_cmd}"
             result = subprocess.run(
                 combined_cmd,
                 shell=True,

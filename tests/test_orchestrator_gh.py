@@ -1345,6 +1345,8 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
     ctx = captured_ctx["ctx"]
     assert opts.fix_model == "claude-opus-4-7"
     assert opts.code_style == "Be good."
+    assert opts.check_cmd == "make check"
+    assert opts.test_cmd == "make test"
     assert ctx.session_dir == session_dir
 
 

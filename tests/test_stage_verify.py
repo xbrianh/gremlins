@@ -51,6 +51,27 @@ def test_green_on_first_attempt(tmp_path):
     assert (tmp_path / "verify-attempt-1.log").exists()
 
 
+def test_no_op_when_both_cmds_empty(tmp_path):
+    """Both cmds empty -> stage skips without invoking the shell or agent."""
+    client = _run(tmp_path, check_cmd="", test_cmd="")
+    assert len(client.calls) == 0
+    assert not (tmp_path / "verify-attempt-1.log").exists()
+
+
+def test_runs_only_check_when_test_cmd_empty(tmp_path):
+    """test_cmd empty -> only check_cmd runs (no shell-syntax error)."""
+    client = _run(tmp_path, check_cmd="true", test_cmd="")
+    assert len(client.calls) == 0
+    assert (tmp_path / "verify-attempt-1.log").exists()
+
+
+def test_runs_only_test_when_check_cmd_empty(tmp_path):
+    """check_cmd empty -> only test_cmd runs (no shell-syntax error)."""
+    client = _run(tmp_path, check_cmd="", test_cmd="true")
+    assert len(client.calls) == 0
+    assert (tmp_path / "verify-attempt-1.log").exists()
+
+
 def test_fix_then_green(tmp_path):
     flag = tmp_path / "flag.txt"
     flag.write_text("fail\n")
