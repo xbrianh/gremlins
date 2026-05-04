@@ -11,7 +11,6 @@ import pytest
 from gremlins.pipeline import load_pipeline
 from gremlins.runner import make_parallel_wrapper, run_stages
 
-
 # ---------------------------------------------------------------------------
 # Fixtures helpers
 # ---------------------------------------------------------------------------
