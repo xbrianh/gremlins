@@ -29,7 +29,8 @@ Each stage is one of two kinds:
   receive a prompt assembled from pipeline-declared prompt files, run to
   completion, and produce an artifact on disk (a markdown file, a commit, a
   PR comment). Examples: `plan`, `implement`, `review-code`, `address-code`,
-  `ghreview`, `ghaddress`.
+  `ghreview`, `ghaddress`. Most agentic stages invoke the model exactly
+  once; the two self-healing stages described in §2.2 are the exception.
 
 The orchestrator (`runner.run_stages`) is responsible for sequencing,
 `--resume-from <stage>` semantics, and SIGINT/SIGTERM reaping of live `claude`
@@ -94,12 +95,46 @@ reasons:
    tools (`gremlins` status, `fleet/`, the session-summary hook) consume.
    An agent loop's progress is opaque without parsing its transcript.
 3. **Cost predictability.** Each stage has a bounded prompt and a bounded
-   workspace; the per-stage cost is roughly stable. An agent loop's cost is
-   a function of how long it stays interested, which is not a property we
-   want to discover in production.
+   workspace; per-stage cost is roughly stable for the one-shot stages
+   (and bounded by `--test-max-attempts` for the self-healing two). An
+   agent loop's cost is a function of how long it stays interested,
+   which is not a property we want to discover in production.
 
 The pipeline is the deterministic skeleton; agency is intentionally confined
 to one stage at a time.
+
+### 2.2 Self-healing stages
+
+Two stages — `verify` and `wait-ci` — embed an agent retry loop inside the
+stage body. They run a deterministic check (a test command, a CI status
+poll), and on failure invoke a fixer agent against the failure output, then
+re-run the check. Up to `--test-max-attempts` iterations per stage call.
+
+This is a deliberate exception to the "one agent invocation per stage"
+shape implied above. The justification is that the artifact these stages
+produce is *the green check itself*: the loop's exit condition is a
+deterministic re-run, the number of fix attempts isn't known up front, and
+from the outside the stage still either produces its artifact or bails.
+Splitting the loop across pipeline stages would require either loop
+semantics in the pipeline YAML (a much larger change) or unrolled stages
+that decide whether to skip — which §2 explicitly forbids.
+
+The cost of this exception:
+
+- §5's "per-stage cost is roughly stable" does not hold for these two.
+  Cost scales with the number of fix attempts and the size of the
+  accumulated check output. Per-attempt streams are written to the
+  session directory (`stream-verify-N.jsonl`, `verify-attempt-N.log`)
+  so post-hoc cost analysis can resolve a loopy stage from a one-shot
+  one; the per-stage `total_cost_usd` rollup cannot.
+- A self-healing stage is the one place where an agent invocation sees
+  content the *same stage* produced earlier — the failing check output
+  following its own fix. The isolation rules in §3 still hold across
+  stages; they bend within these two.
+
+We accept the exception because the alternatives are worse and the set
+is closed: exactly two stages, both deterministic-check-plus-fixer, and
+we don't expect a third.
 
 ## 3. Context management
 
@@ -288,7 +323,7 @@ The cost knobs we *do* use:
 
 The cost knobs we have *considered and rejected*:
 
-### 4.1 Why we reject session-resumption caching
+### 5.1 Why we reject session-resumption caching
 
 `CompletedRun.session_id` is captured from the `claude -p` stream-json
 output. At one point we thought about threading it back through
@@ -338,7 +373,7 @@ We are not going to do this, for reasons that follow directly from §3:
 and the overhead of carrying it through the protocol outweighed its
 occasional debugging utility.
 
-### 4.2 What we'd do instead, if cost became a problem
+### 5.2 What we'd do instead, if cost became a problem
 
 Before reaching for session caching we would:
 

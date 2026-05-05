@@ -1,10 +1,13 @@
 import dataclasses
 import json
 import logging
+import os
 import pathlib
 import re
 import shutil
 import sys
+
+os.environ.setdefault("GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME", "main")
 
 import pytest
 
