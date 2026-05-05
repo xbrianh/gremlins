@@ -729,42 +729,86 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
     )
 
 
-def test_gh_main_resume_prefers_persisted_model_over_sonnet_default(
+def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
     tmp_path, monkeypatch
 ):
-    """Regression: on resume, persisted stage_clients must win over
-    the package default. Locks in the invariant that resume uses state.json as
-    authoritative source for client/model selection.
-    """
+    """Resume must keep using persisted stage_clients after the pipeline changes."""
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
     gr_id = "resume-test-gr-id"
 
-    # Simulate state.json written by a previous launch with --client claude:claude-opus-4-7
-    _stage_clients = {
-        s: "claude:claude-opus-4-7"
-        for s in [
-            "plan",
-            "implement",
-            "verify",
-            "commit-pr",
-            "request-copilot",
-            "ghreview",
-            "wait-copilot",
-            "ghaddress",
-            "ci-gate",
-        ]
+    stage_defs = [
+        ("plan", "plan"),
+        ("implement", "implement"),
+        ("verify", "verify"),
+        ("commit-pr", "commit-pr"),
+        ("request-copilot", "request-copilot"),
+        ("ghreview", "ghreview"),
+        ("wait-copilot", "wait-copilot"),
+        ("ghaddress", "ghaddress"),
+        ("ci-gate", "wait-ci"),
+    ]
+    original_stage_clients = {
+        "plan": "claude:claude-sonnet-4-6",
+        "implement": "claude:claude-haiku-4-5-20251001",
+        "verify": "claude:claude-opus-4-1",
+        "commit-pr": "copilot:gpt-4o",
+        "request-copilot": "claude:claude-sonnet-4-6",
+        "ghreview": "claude:claude-haiku-4-5-20251001",
+        "wait-copilot": "copilot:gpt-5",
+        "ghaddress": "claude:claude-sonnet-4-6",
+        "ci-gate": "claude:claude-opus-4-1",
     }
-    session_dir, state_file = _patch_common(
+    mutated_stage_clients = {
+        stage_name: "claude:claude-opus-4-7" for stage_name, _ in stage_defs
+    }
+
+    pipeline_dir = tmp_path / ".gremlins" / "pipelines"
+    pipeline_dir.mkdir(parents=True)
+    pipeline_path = pipeline_dir / "gh.yaml"
+    prompt_dir = tmp_path / ".gremlins" / "prompts"
+    prompt_dir.mkdir(parents=True)
+    ghreview_prompt = prompt_dir / "ghreview.md"
+    ghreview_prompt.write_text("Review.\n", encoding="utf-8")
+    ghaddress_prompt = prompt_dir / "ghaddress.md"
+    ghaddress_prompt.write_text("Address.\n", encoding="utf-8")
+
+    def write_pipeline(stage_clients: dict[str, str]) -> None:
+        lines = ["name: gh", "", "stages:"]
+        for stage_name, stage_type in stage_defs:
+            fields = [
+                f"name: {stage_name}",
+                f"type: {stage_type}",
+                f"client: {json.dumps(stage_clients[stage_name])}",
+            ]
+            if stage_type == "ghreview":
+                fields.append(f"prompt: {json.dumps('../prompts/ghreview.md')}")
+            elif stage_type == "ghaddress":
+                fields.append(f"prompt: {json.dumps('../prompts/ghaddress.md')}")
+            lines.append("  - { " + ", ".join(fields) + " }")
+        pipeline_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    write_pipeline(original_stage_clients)
+
+    _, state_file = _patch_common(
         monkeypatch,
         tmp_path,
         state_data={
-            "issue_url": "https://github.com/owner/repo/issues/99",
-            "issue_num": "99",
-            "stage_clients": _stage_clients,
+            "issue_url": "https://github.com/owner/repo/issues/42",
+            "issue_num": "42",
         },
     )
+    monkeypatch.setattr("gremlins.orchestrators.gh.load_pipeline", load_pipeline)
+
+    def writing_patch_state(gr_id=None, _delete=(), **kw):
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+        for key in _delete:
+            data.pop(key, None)
+        data.update(kw)
+        state_file.write_text(json.dumps(data), encoding="utf-8")
+
+    monkeypatch.setattr("gremlins.orchestrators.gh.patch_state", writing_patch_state)
 
     monkeypatch.setattr(
         subprocess,
@@ -783,7 +827,7 @@ def test_gh_main_resume_prefers_persisted_model_over_sonnet_default(
     monkeypatch.setattr("gremlins.stages.verify.run", lambda ctx, options: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
 
-    client = _CommittingClient(
+    launch_client = _CommittingClient(
         git_dir=tmp_path,
         fixtures={
             "implement": IMPL_EVENTS,
@@ -791,33 +835,94 @@ def test_gh_main_resume_prefers_persisted_model_over_sonnet_default(
         },
     )
 
-    def _fake_read(sf, field):
-        if field == "issue_url":
-            return "https://github.com/owner/repo/issues/99"
-        if field == "issue_num":
-            return "99"
-        return ""
+    result = gh_main(["--plan", "42"], client=launch_client, gr_id=gr_id)
+    assert result == 0
 
-    monkeypatch.setattr(_gh_mod, "_read_state_field", _fake_read)
-    monkeypatch.setattr(
-        _gh_mod, "_fetch_issue_body", lambda num, repo: "# Resumed Plan\nDo stuff.\n"
+    launch_state = json.loads(state_file.read_text(encoding="utf-8"))
+    assert launch_state.get("stage_clients") == original_stage_clients
+
+    write_pipeline(mutated_stage_clients)
+    subprocess.run(
+        ["git", "switch", "main"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    branch_list = subprocess.run(
+        ["git", "branch", "--list", "ghgremlin-impl-handoff-*"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    for branch in branch_list.stdout.splitlines():
+        branch_name = branch.replace("*", "").strip()
+        if not branch_name:
+            continue
+        subprocess.run(
+            ["git", "branch", "-D", branch_name],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+        )
+    (tmp_path / "impl.txt").write_text("resume seed\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "impl.txt"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "prep resume"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
     )
 
-    # Invoke with no --client and a gr_id — resume path should restore
-    # "claude-opus-4-7" from state.json stage_clients.
+    resume_client = _CommittingClient(
+        git_dir=tmp_path,
+        fixtures={
+            "implement": IMPL_EVENTS,
+            "commit-pr": _pr_events(),
+        },
+    )
+
     result = gh_main(
-        ["--plan", "99", "--resume-from", "implement"],
-        client=client,
+        ["--plan", "42", "--resume-from", "implement"],
+        client=resume_client,
         gr_id=gr_id,
     )
     assert result == 0
 
-    assert client.calls, "expected at least one client call"
-    bad = [c for c in client.calls if c.model != "claude-opus-4-7"]
-    assert not bad, (
-        f"{len(bad)} stage(s) ignored persisted state.json model: "
-        f"{[(c.label, c.model) for c in bad]}"
+    called_models = {call.label: call.model for call in resume_client.calls}
+    assert called_models == {
+        "implement": "claude-haiku-4-5-20251001",
+        "commit-pr": "gpt-4o",
+    }
+
+
+def test_gh_main_resume_requires_persisted_stage_clients(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    _patch_common(
+        monkeypatch,
+        tmp_path,
+        state_data={
+            "issue_url": "https://github.com/owner/repo/issues/42",
+            "issue_num": "42",
+        },
     )
+    monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
+
+    with pytest.raises(SystemExit):
+        gh_main(
+            ["--plan", "42", "--resume-from", "implement"],
+            client=FakeClaudeClient(fixtures={}),
+            gr_id="resume-test-gr-id",
+        )
+
+    assert "stage_clients not found" in capsys.readouterr().err
 
 
 def test_resume_from_implement(tmp_path, monkeypatch):

@@ -1,18 +1,11 @@
 import dataclasses
 import json
 
-from conftest import (
-    MINIMAL_EVENTS,
-)
-from conftest import (
-    REVIEW_LABELS as _REVIEW_LABELS,
-)
-from conftest import (
-    ReviewCreatingClient as _ReviewCreatingClient,
-)
-from conftest import (
-    common_local_patches as _common_patches,
-)
+import pytest
+from conftest import MINIMAL_EVENTS
+from conftest import REVIEW_LABELS as _REVIEW_LABELS
+from conftest import ReviewCreatingClient as _ReviewCreatingClient
+from conftest import common_local_patches as _common_patches
 
 from gremlins.clients import ClientSpec
 from gremlins.clients.fake import FakeClaudeClient
@@ -285,3 +278,129 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
     assert client.calls[0].model == "gpt-5.4"  # implement
     assert client.calls[1].label == review_label
     assert client.calls[1].model == "gpt-5.4"  # review
+
+
+def test_local_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
+    tmp_path, monkeypatch, make_state_dir
+):
+    gr_id = "resume-test-gr-id"
+    make_state_dir(gr_id)
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("# Plan\nDo stuff.\n")
+
+    stage_defs = [
+        ("plan", "plan"),
+        ("implement", "implement"),
+        ("review-code", "review-code"),
+        ("address-code", "address-code"),
+        ("verify", "verify"),
+    ]
+    original_stage_clients = {
+        "plan": "claude:claude-sonnet-4-6",
+        "implement": "claude:claude-haiku-4-5-20251001",
+        "review-code": "copilot:gpt-4o",
+        "address-code": "claude:claude-sonnet-4-6",
+        "verify": "claude:claude-opus-4-1",
+    }
+    mutated_stage_clients = {
+        stage_name: "claude:claude-opus-4-7" for stage_name, _ in stage_defs
+    }
+
+    pipeline_dir = tmp_path / ".gremlins" / "pipelines"
+    pipeline_dir.mkdir(parents=True)
+    pipeline_path = pipeline_dir / "local.yaml"
+
+    def write_pipeline(stage_clients: dict[str, str]) -> None:
+        lines = ["name: local", "", "stages:"]
+        for stage_name, stage_type in stage_defs:
+            lines.append(
+                "  - { name: "
+                f"{stage_name}, type: {stage_type}, client: "
+                f"{json.dumps(stage_clients[stage_name])} }}"
+            )
+        pipeline_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    write_pipeline(original_stage_clients)
+
+    monkeypatch.chdir(tmp_path)
+    _common_patches(monkeypatch)
+    monkeypatch.setattr("gremlins.orchestrators.local.load_pipeline", load_pipeline)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.local.resolve_session_dir",
+        lambda gr_id=None: session_dir,
+    )
+    monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.local.load_prompts", lambda paths: "Be good."
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.implement.changes_outside_git", lambda s, d: True
+    )
+
+    original_review_label = "review-code:detail:gpt-4o"
+    mutated_review_label = "review-code:detail:claude-opus-4-7"
+
+    launch_client = _ReviewCreatingClient(
+        fixtures={
+            "implement": MINIMAL_EVENTS,
+            original_review_label: MINIMAL_EVENTS,
+            mutated_review_label: MINIMAL_EVENTS,
+            "address-code": MINIMAL_EVENTS,
+        }
+    )
+
+    result = local_main(["--plan", str(plan_file)], client=launch_client, gr_id=gr_id)
+    assert result == 0
+
+    state_dir = tmp_path / "xdg" / "claude-gremlins" / gr_id
+    launch_state = json.loads((state_dir / "state.json").read_text(encoding="utf-8"))
+    assert launch_state.get("stage_clients") == original_stage_clients
+
+    write_pipeline(mutated_stage_clients)
+    resume_client = _ReviewCreatingClient(
+        fixtures={
+            "implement": MINIMAL_EVENTS,
+            original_review_label: MINIMAL_EVENTS,
+            mutated_review_label: MINIMAL_EVENTS,
+            "address-code": MINIMAL_EVENTS,
+        }
+    )
+
+    result = local_main(
+        ["--plan", str(plan_file), "--resume-from", "implement"],
+        client=resume_client,
+        gr_id=gr_id,
+    )
+    assert result == 0
+
+    called_models = {call.label: call.model for call in resume_client.calls}
+    assert called_models == {
+        "implement": "claude-haiku-4-5-20251001",
+        "review-code:detail:gpt-4o": "gpt-4o",
+        "address-code": "claude-sonnet-4-6",
+    }
+
+
+def test_local_main_resume_requires_persisted_stage_clients(
+    tmp_path, monkeypatch, make_state_dir, capsys
+):
+    gr_id = "resume-test-gr-id"
+    make_state_dir(gr_id)
+
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("# Plan\nDo stuff.\n")
+
+    monkeypatch.chdir(tmp_path)
+    _common_patches(monkeypatch)
+
+    with pytest.raises(SystemExit):
+        local_main(
+            ["--plan", str(plan_file), "--resume-from", "implement"],
+            client=FakeClaudeClient(fixtures={}),
+            gr_id=gr_id,
+        )
+
+    assert "stage_clients not found" in capsys.readouterr().err
