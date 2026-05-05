@@ -66,29 +66,22 @@ class SubprocessCopilotClient:
     def total_cost_usd(self) -> float:
         return 0.0
 
-    def _build_argv(self, model: str | None) -> list[str]:
-        cmd = ["copilot", "-p", "--allow-all-tools"]
+    def _build_argv(self, model: str | None, prompt: str) -> list[str]:
+        cmd = ["copilot", "--allow-all-tools"]
         if model is not None:
             cmd += ["--model", model]
+        cmd += ["-p", prompt]
         return cmd
 
-    def _spawn(self, argv: list[str], prompt: str) -> subprocess.Popen[bytes]:
+    def _spawn(self, argv: list[str]) -> subprocess.Popen[bytes]:
         p = subprocess.Popen(
             argv,
-            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=None,
             start_new_session=False,
             env=os.environ.copy(),
         )
         self._track(p)
-        try:
-            assert p.stdin is not None
-            p.stdin.write(prompt.encode())
-            p.stdin.close()
-        except Exception:
-            self._untrack(p)
-            raise
         return p
 
     def run(
@@ -102,9 +95,8 @@ class SubprocessCopilotClient:
         on_timeout_prompt: str | None = None,
         max_retries: int = 2,
     ) -> CompletedRun:
-        argv = self._build_argv(model)
-        # max_retries is ignored; copilot -p blocks until completion with no streaming idle timeout
-        p = self._spawn(argv, prompt)
+        argv = self._build_argv(model, prompt)
+        p = self._spawn(argv)
         try:
             assert p.stdout is not None
             raw = p.stdout.read().decode(errors="replace")
