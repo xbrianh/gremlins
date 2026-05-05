@@ -206,8 +206,13 @@ def check_bail(
             shard: dict[str, Any] = parallel_bails.get(child_key) or {}
             bail_class = shard.get("bail_class", "")
         if bail_class:
+            detail_path = (
+                f"parallel_bails[{child_key!r}].bail_detail"
+                if child_key is not None
+                else "bail_detail"
+            )
             raise RuntimeError(
-                f"{label} bailed: bail_class={bail_class} (see state.json bail_detail)"
+                f"{label} bailed: bail_class={bail_class} (see state.json {detail_path})"
             )
     except RuntimeError:
         raise

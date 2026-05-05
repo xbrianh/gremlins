@@ -98,6 +98,7 @@ def _poll_until_done(
     checks_getter: Callable[[], tuple[list[dict[str, Any]], str]] | None = None,
     required_sha: str = "",
     head_sha_getter: Callable[[], str] | None = None,
+    child_key: str | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """Poll PR checks until all are complete or timeout."""
     deadline = time.time() + timeout
@@ -114,7 +115,7 @@ def _poll_until_done(
             review_decision = status["review_decision"]
             head_sha = status["head_sha"]
 
-        _bail_if_review_required(gr_id, review_decision)
+        _bail_if_review_required(gr_id, review_decision, child_key=child_key)
 
         if required_sha and head_sha and head_sha != required_sha:
             if time.time() >= deadline:
@@ -198,6 +199,7 @@ def run(ctx: StageContext, options: WaitCiOptions) -> None:
                     options.checks_getter,
                     required_sha=fix_sha,
                     head_sha_getter=options.head_sha_getter,
+                    child_key=ctx.child_key,
                 )
             except _ReviewRequiredError:
                 _review_bailed = True

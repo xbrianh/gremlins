@@ -95,7 +95,12 @@ def _parse_stage_entry(
                 raise ValueError(
                     f"parallel group {name!r}: 'max_concurrent' must be a positive integer"
                 )
-        cancel_on_bail = bool(entry.get("cancel_on_bail", False))
+        raw_cancel_on_bail = entry.get("cancel_on_bail", False)
+        if not isinstance(raw_cancel_on_bail, bool):
+            raise ValueError(
+                f"parallel group {name!r}: 'cancel_on_bail' must be a boolean"
+            )
+        cancel_on_bail = raw_cancel_on_bail
         bail_policy = str(entry.get("bail_policy") or "any")
         if bail_policy not in ("any", "all"):
             raise ValueError(

@@ -23,6 +23,7 @@ import concurrent.futures
 import json
 import logging
 import pathlib
+import secrets
 import signal
 import subprocess
 import sys
@@ -85,6 +86,7 @@ def build_parallel_stages(
     # Shared mutable state between the three stage closures.
     _worktree_paths: dict[str, pathlib.Path] = {}
     _base_head: list[str] = [""]  # list so nested functions can mutate
+    _child_errors: list[BaseException] = []
 
     def _in_git_repo() -> bool:
         try:
@@ -121,9 +123,10 @@ def build_parallel_stages(
         _base_head[0] = r.stdout.strip() if r.returncode == 0 else ""
 
         for child_key, ctx, _ in child_runners:
-            wt_dir = tempfile.mkdtemp(prefix=f"aibg-parallel-{group_name}-")
-            # mkdtemp creates the dir; git worktree add requires it to not exist.
-            pathlib.Path(wt_dir).rmdir()
+            wt_dir = str(
+                pathlib.Path(tempfile.gettempdir())
+                / f"aibg-parallel-{group_name}-{secrets.token_hex(8)}"
+            )
             r2 = subprocess.run(
                 ["git", "worktree", "add", "--detach", wt_dir, "HEAD"],
                 cwd=str(project_root),
@@ -174,7 +177,7 @@ def build_parallel_stages(
         if errors:
             for extra in errors[1:]:
                 logger.error("parallel child also failed: %s", extra)
-            raise errors[0]
+            _child_errors[:] = errors  # fan-in raises after cleanup
 
     def _fan_in() -> None:
         try:
@@ -214,41 +217,57 @@ def build_parallel_stages(
                         f"parallel child {child_key!r} mutated its worktree "
                         "(fan-in merge for mutating parallel is not yet implemented)"
                     )
+                status_r = subprocess.run(
+                    ["git", "status", "--porcelain"],
+                    cwd=str(wt),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if status_r.stdout.strip():
+                    raise NotImplementedError(
+                        f"parallel child {child_key!r} has uncommitted changes "
+                        "(fan-in merge for mutating parallel is not yet implemented)"
+                    )
 
         # Aggregate per-child bail shards and apply bail_policy.
         sf = resolve_state_file(gr_id)
-        if sf is None or not sf.exists():
-            return
-        try:
-            data = json.loads(sf.read_text(encoding="utf-8"))
-            shards: dict[str, dict[str, str]] = data.get("parallel_bails") or {}
-            bailed = [k for k, v in shards.items() if v.get("bail_class")]
+        bailed: list[str] = []
+        shards: dict[str, dict[str, str]] = {}
+        should_bail = False
+        if sf is not None and sf.exists():
+            try:
+                data = json.loads(sf.read_text(encoding="utf-8"))
+                shards = data.get("parallel_bails") or {}
+                bailed = [k for k, v in shards.items() if v.get("bail_class")]
 
-            should_bail = False
-            if bail_policy == "any":
-                should_bail = bool(bailed)
-            elif bail_policy == "all":
-                should_bail = bool(bailed) and len(bailed) == len(child_runners)
+                if bail_policy == "any":
+                    should_bail = bool(bailed)
+                elif bail_policy == "all":
+                    should_bail = bool(bailed) and len(bailed) == len(child_runners)
 
-            if should_bail:
-                first_shard = shards[bailed[0]]
-                emit_bail(
-                    gr_id,
-                    first_shard.get("bail_class", "other"),
-                    first_shard.get("bail_detail", ""),
-                )
+                if should_bail:
+                    first_shard = shards[bailed[0]]
+                    emit_bail(
+                        gr_id,
+                        first_shard.get("bail_class", "other"),
+                        first_shard.get("bail_detail", ""),
+                    )
 
-            patch_state(gr_id, _delete=("parallel_bails",))
+                patch_state(gr_id, _delete=("parallel_bails",))
+            except RuntimeError:
+                raise
+            except Exception as exc:
+                logger.warning("fan-in bail aggregation failed: %s", exc)
 
-            if should_bail:
-                raise RuntimeError(
-                    f"parallel group {group_name!r} bailed "
-                    f"({len(bailed)} child(ren), policy={bail_policy!r})"
-                )
-        except RuntimeError:
-            raise
-        except Exception:
-            pass
+        if should_bail:
+            raise RuntimeError(
+                f"parallel group {group_name!r} bailed "
+                f"({len(bailed)} child(ren), policy={bail_policy!r})"
+            )
+
+        if _child_errors:
+            raise _child_errors[0]
 
     def _teardown_worktrees() -> None:
         if not _in_git_repo():
