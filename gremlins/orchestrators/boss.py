@@ -29,6 +29,7 @@ import types
 from typing import Any, NoReturn, cast
 
 from .. import git as _git_mod
+from ..clients import PACKAGE_DEFAULT
 from ..gh_utils import get_repo, parse_issue_ref, view_issue
 from ..launcher import launch as _launch
 from ..logging_setup import configure_logging
@@ -229,7 +230,6 @@ def init_boss_state(
     issue_num: str = "",
     test_cmd: str = "",
     test_max_attempts: int = 3,
-    test_fix_model: str = "",
 ) -> dict[str, Any]:
     boss_state: dict[str, Any] = {
         "spec_path": spec_path,
@@ -255,7 +255,6 @@ def init_boss_state(
         # a rescued boss continues forwarding the same command after a crash.
         "test_cmd": test_cmd,
         "test_max_attempts": test_max_attempts,
-        "test_fix_model": test_fix_model,
     }
     save_json(os.path.join(state_dir, "boss_state.json"), boss_state)
     return boss_state
@@ -419,14 +418,11 @@ def launch_child(gr_id: str, launch_kind: str, child_plan: str) -> str:
 
     test_cmd = boss_state.get("test_cmd") or None
     test_max = boss_state.get("test_max_attempts")
-    test_model = boss_state.get("test_fix_model") or None
     extra: list[str] = []
     if test_cmd:
         extra += ["--cmd", test_cmd]
         if test_max is not None:
             extra += ["--test-max-attempts", str(test_max)]
-        if test_model:
-            extra += ["-t", test_model]
 
     logger.info(
         "launching child (%s): %s, base=%s", launch_kind, child_plan, base_ref[:12]
@@ -626,11 +622,10 @@ def _parse_boss_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--plan", required=True)
     p.add_argument("--chain-kind", required=True, choices=["local", "gh"])
-    p.add_argument("--model", default="sonnet")
+    p.add_argument("--model", default=PACKAGE_DEFAULT.model)
     p.add_argument("--resume-from", default=None)
     p.add_argument("--test", dest="test_cmd", default=None)
     p.add_argument("--test-max-attempts", dest="test_max_attempts", type=int, default=3)
-    p.add_argument("-t", dest="test_fix_model", default="sonnet")
     args, _ = p.parse_known_args(argv)
     return args
 
@@ -858,7 +853,6 @@ def boss_main(argv: list[str], *, gr_id: str | None = None) -> int:
             issue_num=issue_num,
             test_cmd=args.test_cmd or "",
             test_max_attempts=args.test_max_attempts,
-            test_fix_model=args.test_fix_model,
         )
         # Record initial boss HEAD so local children branch from the right commit.
         if chain_kind == "local" and boss_workdir and os.path.isdir(boss_workdir):

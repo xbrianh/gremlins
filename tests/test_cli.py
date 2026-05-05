@@ -305,9 +305,9 @@ def test_local_no_args_exits_nonzero_no_state(tmp_path, monkeypatch):
     assert _no_state_created(tmp_path)
 
 
-def test_gh_invalid_model_exits_nonzero_no_state(tmp_path, monkeypatch):
+def test_gh_invalid_client_exits_nonzero_no_state(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    rc = main(["launch", "gh", "--model", "!!!", "-c", "fix bug"])
+    rc = main(["launch", "gh", "--client", "notaspecifier", "-c", "fix bug"])
     assert rc != 0
     assert _no_state_created(tmp_path)
 

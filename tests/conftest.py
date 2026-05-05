@@ -61,7 +61,7 @@ def common_local_patches(monkeypatch):
         pipeline = _real_load_pipeline(path)
         stripped_stages = [dataclasses.replace(s, client=None) for s in pipeline.stages]
         return dataclasses.replace(
-            pipeline, clients=[], default_client=None, stages=stripped_stages
+            pipeline, default_client=None, stages=stripped_stages
         )
 
     monkeypatch.setattr(

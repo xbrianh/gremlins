@@ -27,7 +27,6 @@ from . import git as _git_mod
 from .pipeline import load_pipeline, resolve_pipeline_path
 
 VALID_KINDS = {"ghgremlin", "localgremlin", "bossgremlin"}
-MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 _KIND_SUBCOMMAND = {
     "localgremlin": "_local",
@@ -228,7 +227,7 @@ def _provider_from_client_spec(client_spec: str) -> str:
 
 def _model_from_client_spec(client_spec: str) -> str:
     _, sep, model = client_spec.partition(":")
-    if not sep or not model or not MODEL_RE.match(model):
+    if not sep or not model:
         return ""
     return model
 
@@ -240,7 +239,7 @@ def _pipeline_default_client_spec(pipeline_path: str) -> str:
         pipeline = load_pipeline(pathlib.Path(pipeline_path))
     except (FileNotFoundError, ValueError, yaml.YAMLError):
         return ""
-    return pipeline.default_client_spec or ""
+    return str(pipeline.default_client) if pipeline.default_client else ""
 
 
 def _resolve_client_label(
@@ -249,33 +248,38 @@ def _resolve_client_label(
     pipeline_path: str,
     state: dict[str, Any] | None = None,
 ) -> str:
-    client_spec = _extract_client_spec(pipeline_args)
-    pipeline_default = _pipeline_default_client_spec(pipeline_path)
+    from .clients import PACKAGE_DEFAULT
+
+    client_spec_str = _extract_client_spec(pipeline_args)
+    pipeline_default_str = _pipeline_default_client_spec(pipeline_path)
+
     provider = (
-        _provider_from_client_spec(client_spec)
-        or _provider_from_client_spec(pipeline_default)
-        or "claude"
+        _provider_from_client_spec(client_spec_str)
+        or _provider_from_client_spec(pipeline_default_str)
+        or PACKAGE_DEFAULT.provider
     )
 
     state_model = str((state or {}).get("model") or "")
     state_impl_model = str((state or {}).get("impl_model") or "")
     if kind == "ghgremlin":
         model = (
-            _extract_arg_value(pipeline_args, "--model")
-            or _model_from_client_spec(client_spec)
+            _model_from_client_spec(client_spec_str)
             or state_model
-            or _model_from_client_spec(pipeline_default)
-            or "sonnet"
+            or _model_from_client_spec(pipeline_default_str)
+            or PACKAGE_DEFAULT.model
         )
     elif kind == "bossgremlin":
-        model = _extract_arg_value(pipeline_args, "--model") or state_model or "sonnet"
-    else:
         model = (
-            _extract_arg_value(pipeline_args, "-i")
-            or _model_from_client_spec(client_spec)
+            _extract_arg_value(pipeline_args, "--model")
+            or state_model
+            or PACKAGE_DEFAULT.model
+        )
+    else:  # localgremlin
+        model = (
+            _model_from_client_spec(client_spec_str)
             or state_impl_model
-            or _model_from_client_spec(pipeline_default)
-            or "sonnet"
+            or _model_from_client_spec(pipeline_default_str)
+            or PACKAGE_DEFAULT.model
         )
 
     return f"{provider}:{model}"

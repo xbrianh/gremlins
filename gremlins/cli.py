@@ -42,7 +42,7 @@ from .fleet.cli import (
     skip_main,
     stop_main,
 )
-from .launcher import MODEL_RE, launch, resume
+from .launcher import launch, resume
 from .orchestrators.gh import gh_main
 from .orchestrators.local import address_main, local_main, review_main
 from .pipeline import load_pipeline, resolve_pipeline_path
@@ -173,7 +173,6 @@ def _validate_local_args(args: argparse.Namespace, rest: list[str]) -> None:
 
 def _validate_gh_args(args: argparse.Namespace, rest: list[str]) -> None:
     p = argparse.ArgumentParser(add_help=False)
-    p.add_argument("--model", default=None)
     p.add_argument("--resume-from", default=None)
     p.add_argument("--pipeline", default=None)
     p.add_argument("--client", default=None)
@@ -203,8 +202,6 @@ def _validate_gh_args(args: argparse.Namespace, rest: list[str]) -> None:
                 f"invalid --resume-from: {parsed.resume_from!r} "
                 f"(allowed: {' '.join(stage_names)})"
             )
-    if parsed.model is not None and not MODEL_RE.match(parsed.model):
-        raise ValueError(f"invalid model: {parsed.model!r}")
     if parsed.client is not None and not _CLIENT_SPEC_RE.match(parsed.client):
         raise ValueError(
             f"invalid --client: {parsed.client!r}: expected 'provider:model'"

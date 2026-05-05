@@ -21,6 +21,7 @@ import subprocess
 import sys
 from typing import Any, NoReturn, cast
 
+from gremlins.clients import PACKAGE_DEFAULT
 from gremlins.logging_setup import configure_logging
 from gremlins.prompts import load_prompts
 
@@ -352,7 +353,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--out", dest="out", default=None)
     parser.add_argument("--base", dest="base", default=None)
-    parser.add_argument("--model", dest="model", default="sonnet")
+    parser.add_argument("--model", dest="model", default=PACKAGE_DEFAULT.model)
     parser.add_argument(
         "--timeout",
         dest="timeout",

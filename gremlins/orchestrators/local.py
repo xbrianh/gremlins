@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import pathlib
-import re
 import shutil
 import subprocess
 import sys
@@ -15,7 +15,7 @@ from typing import NoReturn
 
 import yaml
 
-from ..clients.claude import SubprocessClaudeClient
+from ..clients import PACKAGE_DEFAULT, ClientSpec, resolve_stage_client, to_client
 from ..clients.protocol import ClaudeClient
 from ..env_file import load_env_file
 from ..git import in_git_repo
@@ -24,18 +24,15 @@ from ..pipeline import (
     Pipeline,
     StageEntry,
     load_pipeline,
-    parse_client_specifier,
     resolve_pipeline_path,
 )
 from ..prompts import load_prompts
 from ..runner import install_signal_handlers, make_parallel_wrapper, run_stages
 from ..stages import address_code, implement, plan, review_code, verify
 from ..stages.context import StageContext
-from ..state import patch_state, resolve_session_dir, set_stage
+from ..state import patch_state, resolve_session_dir, resolve_state_file, set_stage
 
 logger = logging.getLogger(__name__)
-
-MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 _CODE_STYLE_PATH = (
     pathlib.Path(__file__).resolve().parent.parent
@@ -51,81 +48,55 @@ def die(msg: str) -> NoReturn:
     sys.exit(1)
 
 
-def _resolve_stage_client(
-    entry: StageEntry,
+def _collect_stage_specs(
     pipeline: Pipeline,
-    cli_override: ClaudeClient | None,
-    fallback: ClaudeClient,
-) -> ClaudeClient:
-    if entry.client is not None:
-        return entry.client
-    if cli_override is not None:
-        return cli_override
-    if pipeline.default_client is not None:
-        return pipeline.default_client
-    return fallback
+    cli_spec: ClientSpec | None,
+) -> dict[str, ClientSpec]:
+    specs: dict[str, ClientSpec] = {}
+    for e in pipeline.stages:
+        if e.type == "parallel":
+            specs[e.name] = resolve_stage_client(
+                None, cli_spec, pipeline.default_client
+            )
+            for child in e.children:
+                specs[child.name] = resolve_stage_client(
+                    child.client, cli_spec, pipeline.default_client
+                )
+        else:
+            specs[e.name] = resolve_stage_client(
+                e.client, cli_spec, pipeline.default_client
+            )
+    return specs
 
 
-def _provider_from_client_spec(client_spec: str | None) -> str | None:
-    if client_spec is None:
-        return None
-    provider, sep, _ = client_spec.partition(":")
-    if not sep or not provider:
-        return None
-    return provider
-
-
-def _resolve_stage_model(entry: StageEntry, args: argparse.Namespace) -> str | None:
-    if entry.type == "plan":
-        return entry.options.get("plan_model", args.plan_model)
-    if entry.type == "implement":
-        return entry.options.get("impl_model", args.impl)
-    if entry.type == "review-code":
-        return entry.options.get("detail", args.detail)
-    if entry.type == "address-code":
-        return entry.options.get("address_model", args.address)
-    if entry.type == "verify":
-        return entry.options.get("fix_model", args.test_fix_model)
-    if entry.type == "parallel" and entry.children:
-        return _resolve_stage_model(entry.children[0], args)
-    return None
-
-
-def _resolve_stage_client_label(
-    entry: StageEntry,
-    pipeline: Pipeline,
-    cli_client_spec: str | None,
-    args: argparse.Namespace,
-) -> str | None:
-    model = _resolve_stage_model(entry, args)
-    if model is None:
-        return None
-    provider = (
-        _provider_from_client_spec(
-            entry.client_spec if entry.client is not None else None
-        )
-        or _provider_from_client_spec(cli_client_spec)
-        or _provider_from_client_spec(pipeline.default_client_spec)
-        or "claude"
-    )
-    return f"{provider}:{model}"
+def _load_stage_specs_from_state(gr_id: str | None) -> dict[str, ClientSpec]:
+    if not gr_id:
+        return {}
+    sf = resolve_state_file(gr_id)
+    if sf is None or not sf.exists():
+        return {}
+    try:
+        data = json.loads(sf.read_text(encoding="utf-8"))
+        stored = data.get("stage_clients", {})
+        result: dict[str, ClientSpec] = {}
+        for k, v in stored.items():
+            try:
+                result[str(k)] = ClientSpec.parse(str(v))
+            except ValueError:
+                pass
+        return result
+    except Exception:
+        return {}
 
 
 def _parse_local_args(argv: list[str]) -> argparse.Namespace:
     usage = (
-        "usage: gremlins.cli local [-p <plan-model>] [-i <impl-model>] "
-        "[-x <address-model>] [-b <detail-review-model>] "
-        "[--resume-from <stage>] [--plan <path>] [--spec <path>] "
-        '[--cmd "<command>"] [--test-max-attempts <n>] [-t <test-fix-model>] '
-        "[--pipeline <name-or-path>] "
+        "usage: gremlins.cli local [--resume-from <stage>] [--plan <path>] [--spec <path>] "
+        '[--cmd "<command>"] [--test-max-attempts <n>] '
+        "[--pipeline <name-or-path>] [--client <provider:model>] "
         '"<instructions>"'
     )
     parser = argparse.ArgumentParser(add_help=False, usage=usage)
-    parser.add_argument("-p", dest="plan_model", default=None)
-    parser.add_argument("-i", dest="impl", default=None)
-    parser.add_argument("-x", dest="address", default=None)
-    parser.add_argument("-b", dest="detail", default=None)
-    parser.add_argument("-t", dest="test_fix_model", default=None)
     parser.add_argument("--resume-from", dest="resume_from", default=None)
     parser.add_argument("--plan", dest="plan_path", default=None)
     parser.add_argument("--spec", dest="spec_path", default=None)
@@ -145,15 +116,6 @@ def _parse_local_args(argv: list[str]) -> argparse.Namespace:
     else:
         if not args.instructions:
             die(usage)
-    for m in (
-        args.plan_model,
-        args.impl,
-        args.address,
-        args.detail,
-        args.test_fix_model,
-    ):
-        if m is not None and not MODEL_RE.match(m):
-            die(f"invalid model: {m}")
     if args.test_max_attempts <= 0:
         die("--test-max-attempts must be a positive integer")
     if args.cmds is not None:
@@ -166,10 +128,9 @@ def _parse_local_args(argv: list[str]) -> argparse.Namespace:
 def _build_stage_runner(
     entry: StageEntry,
     ctx: StageContext,
-    pipeline: Pipeline,
-    args: argparse.Namespace,
+    model: str,
     *,
-    cli_client_spec: str | None,
+    args: argparse.Namespace,
     plan_file: pathlib.Path,
     spec_file: pathlib.Path,
     is_git: bool,
@@ -187,18 +148,8 @@ def _build_stage_runner(
                 else:
                     logger.info("plan reused from snapshot -> %s", plan_file)
             else:
-                set_stage(
-                    ctx.gr_id,
-                    entry.name,
-                    client_spec=_resolve_stage_client_label(
-                        entry, pipeline, cli_client_spec, args
-                    ),
-                )
-                logger.info(
-                    "planning (model: %s) -> %s",
-                    entry.options.get("plan_model", args.plan_model),
-                    plan_file,
-                )
+                set_stage(ctx.gr_id, entry.name)
+                logger.info("planning (model: %s) -> %s", model, plan_file)
                 if not entry.prompt_paths:
                     die(
                         f"stage {entry.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML"
@@ -206,7 +157,7 @@ def _build_stage_runner(
                 plan.run(
                     ctx,
                     plan.PlanOptions(
-                        plan_model=entry.options.get("plan_model", args.plan_model),
+                        plan_model=model,
                         plan_file=plan_file,
                         instructions=instructions,
                         code_style=code_style,
@@ -230,22 +181,12 @@ def _build_stage_runner(
                         "could not read spec.md (%s); proceeding without north-star context",
                         exc,
                     )
-            set_stage(
-                ctx.gr_id,
-                entry.name,
-                client_spec=_resolve_stage_client_label(
-                    entry, pipeline, cli_client_spec, args
-                ),
-            )
-            logger.info(
-                "implementing (model: %s, from %s)",
-                entry.options.get("impl_model", args.impl),
-                plan_file,
-            )
+            set_stage(ctx.gr_id, entry.name)
+            logger.info("implementing (model: %s, from %s)", model, plan_file)
             implement.run(
                 ctx,
                 implement.ImplementOptions(
-                    impl_model=entry.options.get("impl_model", args.impl),
+                    impl_model=model,
                     plan_text=plan_text,
                     code_style=code_style,
                     is_git=is_git,
@@ -257,51 +198,35 @@ def _build_stage_runner(
         return _implement
 
     if entry.type == "review-code":
-        detail = entry.options.get("detail", args.detail)
 
         def _review_code() -> None:
             plan_text = plan_text_holder.get("text") or plan_file.read_text(
                 encoding="utf-8"
             )
-            set_stage(
-                ctx.gr_id,
-                entry.name,
-                client_spec=_resolve_stage_client_label(
-                    entry, pipeline, cli_client_spec, args
-                ),
-            )
-            logger.info("reviewing code (model: %s)", detail)
+            set_stage(ctx.gr_id, entry.name)
+            logger.info("reviewing code (model: %s)", model)
             review_file = review_code.run(
                 ctx,
                 review_code.ReviewCodeOptions(
                     plan_text=plan_text,
-                    detail=detail,
+                    detail=model,
                     is_git=is_git,
                     code_style=code_style,
                 ),
             )
-            logger.info("detail code review (%s): %s", detail, review_file)
+            logger.info("detail code review (%s): %s", model, review_file)
 
         return _review_code
 
     if entry.type == "address-code":
 
         def _address_code() -> None:
-            set_stage(
-                ctx.gr_id,
-                entry.name,
-                client_spec=_resolve_stage_client_label(
-                    entry, pipeline, cli_client_spec, args
-                ),
-            )
-            logger.info(
-                "addressing code reviews (model: %s)",
-                entry.options.get("address_model", args.address),
-            )
+            set_stage(ctx.gr_id, entry.name)
+            logger.info("addressing code reviews (model: %s)", model)
             address_code.run(
                 ctx,
                 address_code.AddressCodeOptions(
-                    address_model=entry.options.get("address_model", args.address),
+                    address_model=model,
                     is_git=is_git,
                     code_style=code_style,
                     **(
@@ -317,27 +242,20 @@ def _build_stage_runner(
     if entry.type == "verify":
         cmds = args.cmds if args.cmds is not None else entry.options.get("cmds", [])
         max_attempts = entry.options.get("max_attempts", args.test_max_attempts)
-        fix_model = entry.options.get("fix_model", args.test_fix_model)
 
         def _verify() -> None:
             if cmds:
-                set_stage(
-                    ctx.gr_id,
-                    entry.name,
-                    client_spec=_resolve_stage_client_label(
-                        entry, pipeline, cli_client_spec, args
-                    ),
-                )
+                set_stage(ctx.gr_id, entry.name)
                 logger.info(
                     "running verify (cmds: %r, max-attempts: %s, model: %s)",
                     cmds,
                     max_attempts,
-                    fix_model,
+                    model,
                 )
             verify.run(
                 ctx,
                 verify.VerifyOptions(
-                    fix_model=fix_model,
+                    fix_model=model,
                     cwd=pathlib.Path.cwd(),
                     code_style=code_style,
                     is_git=is_git,
@@ -358,23 +276,12 @@ def local_main(
     configure_logging()
     args = _parse_local_args(argv)
 
-    base_client: ClaudeClient = client or SubprocessClaudeClient()
-    cli_client: ClaudeClient | None = None
+    cli_spec: ClientSpec | None = None
     if args.client:
         try:
-            cli_client = parse_client_specifier(args.client)
+            cli_spec = ClientSpec.parse(args.client)
         except ValueError as exc:
             die(str(exc))
-    effective_client = cli_client or base_client
-    install_signal_handlers(effective_client)
-
-    specifier_model: str | None = None
-    if args.client and ":" in args.client:
-        _, _, _m = args.client.partition(":")
-        if _m:
-            if not MODEL_RE.match(_m):
-                die(f"invalid model in --client specifier: {_m}")
-            specifier_model = _m
 
     if os.environ.get("GREMLINS_TEST_NOOP_PIPELINE"):
         return 0
@@ -398,22 +305,36 @@ def local_main(
     except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
         die(str(exc))
 
-    pipeline_model = (pipeline.default_client_spec or "").partition(":")[2] or None
-    if pipeline_model and not MODEL_RE.match(pipeline_model):
-        die(f"invalid model in pipeline default_client_spec: {pipeline_model}")
-    model_default = specifier_model or pipeline_model or "sonnet"
-    if args.plan_model is None:
-        args.plan_model = model_default
-    if args.impl is None:
-        args.impl = model_default
-    if args.address is None:
-        args.address = model_default
-    if args.detail is None:
-        args.detail = model_default
-    if args.test_fix_model is None:
-        args.test_fix_model = model_default
+    # Load or resolve stage specs; state.json is authoritative on resume
+    stage_specs: dict[str, ClientSpec] = {}
+    if args.resume_from and gr_id:
+        stage_specs = _load_stage_specs_from_state(gr_id)
+    if not stage_specs:
+        stage_specs = _collect_stage_specs(pipeline, cli_spec)
+        if gr_id:
+            patch_state(
+                gr_id, stage_clients={k: str(v) for k, v in stage_specs.items()}
+            )
 
-    install_signal_handlers(effective_client, *pipeline.clients)
+    # Create one client instance per unique spec (or reuse injected test client)
+    _spec_clients: dict[str, ClaudeClient] = {}
+
+    def _client_for_spec(spec: ClientSpec) -> ClaudeClient:
+        if client is not None:
+            return client
+        key = str(spec)
+        if key not in _spec_clients:
+            _spec_clients[key] = to_client(spec)
+        return _spec_clients[key]
+
+    for spec in stage_specs.values():
+        _client_for_spec(spec)
+
+    if client is not None:
+        install_signal_handlers(client)
+    elif _spec_clients:
+        all_clients = list(_spec_clients.values())
+        install_signal_handlers(all_clients[0], *all_clients[1:])
 
     stage_names = [s.name for s in pipeline.stages]
 
@@ -444,11 +365,14 @@ def local_main(
 
     session_dir = resolve_session_dir(gr_id)
     plan_file = session_dir / "plan.md"
+
+    # Determine the review-code model for the output file name
     _rc_entry = next((s for s in pipeline.stages if s.type == "review-code"), None)
-    _detail_model = (
-        _rc_entry.options.get("detail", args.detail) if _rc_entry else args.detail
-    )
-    review_code_file = session_dir / f"review-code-detail-{_detail_model}.md"
+    if _rc_entry:
+        _rc_model = stage_specs.get(_rc_entry.name, PACKAGE_DEFAULT).model
+    else:
+        _rc_model = PACKAGE_DEFAULT.model
+    review_code_file = session_dir / f"review-code-detail-{_rc_model}.md"
 
     logger.info("session: %s", session_dir)
 
@@ -542,12 +466,11 @@ def local_main(
             group_dir.mkdir(parents=True, exist_ok=True)
             child_runners: list[tuple[str, Callable[[], None]]] = []
             for child in e.children:
+                child_spec = stage_specs.get(child.name, PACKAGE_DEFAULT)
                 child_dir = group_dir / child.name
                 child_dir.mkdir(parents=True, exist_ok=True)
                 child_ctx = StageContext(
-                    client=_resolve_stage_client(
-                        child, pipeline, cli_client, base_client
-                    ),
+                    client=_client_for_spec(child_spec),
                     session_dir=child_dir,
                     gr_id=gr_id,
                 )
@@ -557,9 +480,8 @@ def local_main(
                         _build_stage_runner(
                             child,
                             child_ctx,
-                            pipeline,
-                            args,
-                            cli_client_spec=args.client,
+                            child_spec.model,
+                            args=args,
                             plan_file=plan_file,
                             spec_file=spec_file,
                             is_git=is_git,
@@ -571,7 +493,6 @@ def local_main(
                     )
                 )
             group_name = e.name
-            group_spec = _resolve_stage_client_label(e, pipeline, args.client, args)
             stages.append(
                 (
                     e.name,
@@ -579,15 +500,14 @@ def local_main(
                         child_runners,
                         max_concurrent=e.max_concurrent,
                         resume_from=args.resume_from,
-                        set_stage_fn=lambda n=group_name, s=group_spec: set_stage(
-                            gr_id, n, client_spec=s
-                        ),
+                        set_stage_fn=lambda n=group_name: set_stage(gr_id, n),
                     ),
                 )
             )
         else:
+            stage_spec = stage_specs.get(e.name, PACKAGE_DEFAULT)
             stage_ctx = StageContext(
-                client=_resolve_stage_client(e, pipeline, cli_client, base_client),
+                client=_client_for_spec(stage_spec),
                 session_dir=session_dir,
                 gr_id=gr_id,
             )
@@ -597,9 +517,8 @@ def local_main(
                     _build_stage_runner(
                         e,
                         stage_ctx,
-                        pipeline,
-                        args,
-                        cli_client_spec=args.client,
+                        stage_spec.model,
+                        args=args,
                         plan_file=plan_file,
                         spec_file=spec_file,
                         is_git=is_git,
@@ -612,12 +531,15 @@ def local_main(
             )
     run_stages(stages, resume_from=run_resume_from)
 
-    total_cost = getattr(effective_client, "total_cost_usd", 0.0)
-    if total_cost is not None and total_cost > 0:
+    # Accumulate cost from all client instances
+    total_cost = 0.0
+    for c in _spec_clients.values() if _spec_clients else [client] if client else []:
+        total_cost += getattr(c, "total_cost_usd", 0.0) or 0.0
+    if total_cost > 0:
         patch_state(gr_id, total_cost_usd=total_cost)
 
     logger.info("done. session artifacts in: %s", session_dir)
-    if total_cost is not None and total_cost > 0:
+    if total_cost > 0:
         logger.info("total cost: $%.4f", total_cost)
     return 0
 
@@ -629,15 +551,15 @@ def _parse_review_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=False, usage=usage)
     parser.add_argument("--dir", dest="dir", default=".")
     parser.add_argument("--plan", dest="plan", default=None)
-    parser.add_argument("-b", dest="detail", default="sonnet")
+    parser.add_argument("-b", dest="detail", default=PACKAGE_DEFAULT.model)
     args = parser.parse_args(argv)
-    if not MODEL_RE.match(args.detail):
-        die(f"invalid model: {args.detail}")
     return args
 
 
 def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     configure_logging()
+    from ..clients.claude import SubprocessClaudeClient
+
     if client is None:
         client = SubprocessClaudeClient()
     install_signal_handlers(client)
@@ -726,15 +648,15 @@ def _parse_address_args(argv: list[str]) -> argparse.Namespace:
     usage = "usage: gremlins.cli address [--dir <path>] [-x <address-model>]"
     parser = argparse.ArgumentParser(add_help=False, usage=usage)
     parser.add_argument("--dir", dest="dir", default=".")
-    parser.add_argument("-x", dest="address", default="sonnet")
+    parser.add_argument("-x", dest="address", default=PACKAGE_DEFAULT.model)
     args = parser.parse_args(argv)
-    if not MODEL_RE.match(args.address):
-        die(f"invalid model: {args.address}")
     return args
 
 
 def address_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     configure_logging()
+    from ..clients.claude import SubprocessClaudeClient
+
     if client is None:
         client = SubprocessClaudeClient()
     install_signal_handlers(client)

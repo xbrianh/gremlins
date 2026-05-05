@@ -40,7 +40,7 @@ stages:
     pipeline = load_pipeline(yaml_path)
     assert pipeline.name == "test-pipe"
     assert pipeline.default_client is not None
-    assert pipeline.default_client_spec == "claude:sonnet"
+    assert str(pipeline.default_client) == "claude:sonnet"
     assert len(pipeline.stages) == 1
     assert pipeline.stages[0].name == "plan"
     assert pipeline.stages[0].type == "plan"
@@ -68,9 +68,7 @@ stages:
     pipeline = load_pipeline(yaml_path)
     assert pipeline.stages[0].client is None
     assert pipeline.stages[1].client is not None
-    # Verify client_spec is populated
-    assert pipeline.stages[0].client_spec == "claude:sonnet"
-    assert pipeline.stages[1].client_spec == "copilot:gpt-5.4"
+    assert str(pipeline.stages[1].client) == "copilot:gpt-5.4"
 
 
 # ---- error cases -----------------------------------------------------------
@@ -129,41 +127,6 @@ stages:
     )
     with pytest.raises(FileNotFoundError):
         load_pipeline(tmp_path / "pipeline.yaml")
-
-
-# ---- pipeline.clients list -------------------------------------------------
-
-
-def test_pipeline_clients_list_same_spec(tmp_path: pathlib.Path) -> None:
-    _write_yaml(
-        tmp_path / "pipeline.yaml",
-        """\
-name: p
-default_client: claude:sonnet
-stages:
-  - name: s1
-    type: implement
-    client: claude:sonnet
-""",
-    )
-    pipeline = load_pipeline(tmp_path / "pipeline.yaml")
-    assert len(pipeline.clients) == 1
-
-
-def test_pipeline_clients_list_different_specs(tmp_path: pathlib.Path) -> None:
-    _write_yaml(
-        tmp_path / "pipeline.yaml",
-        """\
-name: p
-default_client: claude:sonnet
-stages:
-  - name: s1
-    type: implement
-    client: copilot:gpt-5.4
-""",
-    )
-    pipeline = load_pipeline(tmp_path / "pipeline.yaml")
-    assert len(pipeline.clients) == 2
 
 
 # ---- prompt list -----------------------------------------------------------
@@ -243,7 +206,7 @@ stages:
         load_pipeline(tmp_path / "pipeline.yaml")
 
 
-# ---- client_spec field population ---------------------------------------------
+# ---- client field population -----------------------------------------------
 
 
 def test_client_spec_inherits_from_default(tmp_path: pathlib.Path) -> None:
@@ -258,7 +221,8 @@ stages:
 """,
     )
     pipeline = load_pipeline(yaml_path)
-    assert pipeline.stages[0].client_spec == "claude:sonnet"
+    # client is None at load time; resolution happens at run time
+    assert pipeline.stages[0].client is None
 
 
 def test_client_spec_stage_override_wins(tmp_path: pathlib.Path) -> None:
@@ -274,7 +238,7 @@ stages:
 """,
     )
     pipeline = load_pipeline(yaml_path)
-    assert pipeline.stages[0].client_spec == "copilot:gpt-5.4"
+    assert str(pipeline.stages[0].client) == "copilot:gpt-5.4"
 
 
 def test_client_spec_none_when_no_default_no_stage(tmp_path: pathlib.Path) -> None:
@@ -288,7 +252,7 @@ stages:
 """,
     )
     pipeline = load_pipeline(yaml_path)
-    assert pipeline.stages[0].client_spec is None
+    assert pipeline.stages[0].client is None
 
 
 def test_client_spec_parallel_group_is_none(tmp_path: pathlib.Path) -> None:
@@ -305,5 +269,6 @@ stages:
 """,
     )
     pipeline = load_pipeline(yaml_path)
-    assert pipeline.stages[0].client_spec is None
-    assert pipeline.stages[0].children[0].client_spec == "claude:sonnet"
+    assert pipeline.stages[0].client is None
+    # child has no explicit client; resolution happens at run time
+    assert pipeline.stages[0].children[0].client is None

@@ -16,6 +16,7 @@ from typing import Any, NoReturn
 
 import yaml
 
+from ..clients import PACKAGE_DEFAULT, ClientSpec, resolve_stage_client, to_client
 from ..clients.claude import SubprocessClaudeClient
 from ..clients.protocol import ClaudeClient
 from ..env_file import load_env_file
@@ -26,7 +27,6 @@ from ..pipeline import (
     Pipeline,
     StageEntry,
     load_pipeline,
-    parse_client_specifier,
     resolve_pipeline_path,
 )
 from ..prompts import load_prompts
@@ -47,8 +47,6 @@ from ..state import patch_state, resolve_session_dir, resolve_state_file, set_st
 
 logger = logging.getLogger(__name__)
 
-MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-
 _CODE_STYLE_PATH = (
     pathlib.Path(__file__).resolve().parent.parent
     / "pipelines"
@@ -64,51 +62,45 @@ def die(msg: str) -> NoReturn:
     sys.exit(1)
 
 
-def _resolve_stage_client(
-    entry: StageEntry,
+def _collect_stage_specs(
     pipeline: Pipeline,
-    cli_override: ClaudeClient | None,
-    fallback: ClaudeClient,
-) -> ClaudeClient:
-    if entry.client is not None:
-        return entry.client
-    if cli_override is not None:
-        return cli_override
-    if pipeline.default_client is not None:
-        return pipeline.default_client
-    return fallback
+    cli_spec: ClientSpec | None,
+) -> dict[str, ClientSpec]:
+    specs: dict[str, ClientSpec] = {}
+    for e in pipeline.stages:
+        if e.type == "parallel":
+            specs[e.name] = resolve_stage_client(
+                None, cli_spec, pipeline.default_client
+            )
+            for child in e.children:
+                specs[child.name] = resolve_stage_client(
+                    child.client, cli_spec, pipeline.default_client
+                )
+        else:
+            specs[e.name] = resolve_stage_client(
+                e.client, cli_spec, pipeline.default_client
+            )
+    return specs
 
 
-def _provider_from_client_spec(client_spec: str | None) -> str | None:
-    if client_spec is None:
-        return None
-    provider, sep, _ = client_spec.partition(":")
-    if not sep or not provider:
-        return None
-    return provider
-
-
-def _effective_stage_model(entry: StageEntry, default_model: str) -> str:
-    if entry.client is not None and entry.client_spec:
-        m = entry.client_spec.partition(":")[2]
-        return m if m else default_model
-    return default_model
-
-
-def _resolve_stage_client_label(
-    entry: StageEntry,
-    pipeline: Pipeline,
-    cli_client_spec: str | None,
-    model: str,
-) -> str:
-    if entry.client is not None and entry.client_spec:
-        return entry.client_spec
-    provider = (
-        _provider_from_client_spec(cli_client_spec)
-        or _provider_from_client_spec(pipeline.default_client_spec)
-        or "claude"
-    )
-    return f"{provider}:{model}"
+def _load_stage_specs_from_state(gr_id: str | None) -> dict[str, ClientSpec]:
+    if not gr_id:
+        return {}
+    sf = resolve_state_file(gr_id)
+    if sf is None or not sf.exists():
+        return {}
+    try:
+        data = json.loads(sf.read_text(encoding="utf-8"))
+        stored = data.get("stage_clients", {})
+        result: dict[str, ClientSpec] = {}
+        for k, v in stored.items():
+            try:
+                result[str(k)] = ClientSpec.parse(str(v))
+            except ValueError:
+                pass
+        return result
+    except Exception:
+        return {}
 
 
 def _fmt_escape(s: str) -> str:
@@ -118,15 +110,14 @@ def _fmt_escape(s: str) -> str:
 def _parse_gh_args(argv: list[str]) -> argparse.Namespace:
     usage = (
         "usage: gremlins.cli gh [-r <ref>] [--resume-from <stage>] "
-        "[--plan <path|issue-ref>] [--spec <path>] [--model <model>] "
-        '[--pipeline <name-or-path>] "<instructions>"'
+        "[--plan <path|issue-ref>] [--spec <path>] "
+        '[--pipeline <name-or-path>] [--client <provider:model>] "<instructions>"'
     )
     parser = argparse.ArgumentParser(add_help=False, usage=usage)
     parser.add_argument("-r", dest="ref", default="")
     parser.add_argument("--resume-from", dest="resume_from", default=None)
     parser.add_argument("--plan", dest="plan_source", default=None)
     parser.add_argument("--spec", dest="spec_path", default=None)
-    parser.add_argument("--model", dest="model", default=None)
     parser.add_argument("--pipeline", dest="pipeline", default=None)
     parser.add_argument("--client", dest="client", default=None)
     parser.add_argument("instructions", nargs="*")
@@ -139,8 +130,6 @@ def _parse_gh_args(argv: list[str]) -> argparse.Namespace:
         if args.resume_from is None and not args.instructions:
             die(usage)
 
-    if args.model and not MODEL_RE.match(args.model):
-        die(f"invalid model: {args.model}")
     if args.ref and not REF_RE.match(args.ref):
         die(f"invalid -r ref: {args.ref} (allowed: A-Z a-z 0-9 . _ / # -)")
 
@@ -333,11 +322,9 @@ def _ensure_pr_url(
 def _build_stage_runner(
     entry: StageEntry,
     ctx: StageContext,
-    pipeline: Pipeline,
-    args: argparse.Namespace,
-    *,
-    cli_client_spec: str | None,
     model: str,
+    *,
+    args: argparse.Namespace,
     code_style: str,
     repo: str,
     session_dir: pathlib.Path,
@@ -345,8 +332,6 @@ def _build_stage_runner(
     gr_id: str | None,
     gh_state: dict[str, Any],
 ) -> Callable[[], None]:
-    stage_model = _effective_stage_model(entry, model)
-
     if entry.type == "plan":
 
         def _plan() -> None:
@@ -356,13 +341,7 @@ def _build_stage_runner(
                 die(
                     f"stage {entry.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML"
                 )
-            set_stage(
-                gr_id,
-                entry.name,
-                client_spec=_resolve_stage_client_label(
-                    entry, pipeline, cli_client_spec, model
-                ),
-            )
+            set_stage(gr_id, entry.name)
             logger.info("[1/8] running ghplan")
             plan_prompt = load_prompts(entry.prompt_paths).format(
                 ref=_fmt_escape(args.ref or ""),
@@ -371,7 +350,7 @@ def _build_stage_runner(
             completed = ctx.client.run(
                 plan_prompt,
                 label="plan",
-                model=stage_model,
+                model=model,
                 raw_path=session_dir / "ghplan-out.jsonl",
                 capture_events=True,
             )
@@ -394,13 +373,7 @@ def _build_stage_runner(
     if entry.type == "implement":
 
         def _implement() -> None:
-            set_stage(
-                gr_id,
-                entry.name,
-                client_spec=_resolve_stage_client_label(
-                    entry, pipeline, cli_client_spec, model
-                ),
-            )
+            set_stage(gr_id, entry.name)
             logger.info("[2a/8] implementing plan")
             spec_file = session_dir / "spec.md"
             spec_text = ""
@@ -415,7 +388,7 @@ def _build_stage_runner(
             impl_result = implement.run(
                 ctx,
                 implement.ImplementOptions(
-                    impl_model=stage_model,
+                    impl_model=model,
                     plan_text=gh_state["issue_body"],
                     code_style=code_style,
                     is_git=True,
@@ -441,18 +414,12 @@ def _build_stage_runner(
         max_attempts = entry.options.get("max_attempts", 3)
 
         def _verify() -> None:
-            set_stage(
-                gr_id,
-                entry.name,
-                client_spec=_resolve_stage_client_label(
-                    entry, pipeline, cli_client_spec, model
-                ),
-            )
+            set_stage(gr_id, entry.name)
             logger.info("[2b/8] verifying implementation")
             verify.run(
                 ctx,
                 verify.VerifyOptions(
-                    fix_model=stage_model,
+                    fix_model=model,
                     cwd=pathlib.Path.cwd(),
                     code_style=code_style,
                     is_git=True,
@@ -467,13 +434,7 @@ def _build_stage_runner(
     if entry.type == "commit-pr":
 
         def _commit_pr() -> None:
-            set_stage(
-                gr_id,
-                entry.name,
-                client_spec=_resolve_stage_client_label(
-                    entry, pipeline, cli_client_spec, model
-                ),
-            )
+            set_stage(gr_id, entry.name)
             logger.info("[2c/8] committing + opening PR")
             impl_result: ImplStageResult | None = gh_state["impl_result"]
             if impl_result is not None:
@@ -516,7 +477,7 @@ def _build_stage_runner(
             pr_url = commit_pr.run(
                 ctx,
                 commit_pr.CommitPrOptions(
-                    model=stage_model,
+                    model=model,
                     impl_outcome=impl_outcome,
                     impl_handoff_branch=impl_handoff_branch,
                     base_ref=base_ref,
@@ -536,13 +497,7 @@ def _build_stage_runner(
 
         def _request_copilot() -> None:
             _ensure_pr_url(gh_state, state_file, args.resume_from)
-            set_stage(
-                gr_id,
-                entry.name,
-                client_spec=_resolve_stage_client_label(
-                    entry, pipeline, cli_client_spec, model
-                ),
-            )
+            set_stage(gr_id, entry.name)
             logger.info("[3/8] requesting Copilot review")
             request_copilot.run(
                 ctx,
@@ -561,18 +516,12 @@ def _build_stage_runner(
                     f"stage {entry.name!r}: type 'ghreview' requires a 'prompt' field in the pipeline YAML"
                 )
             _ensure_pr_url(gh_state, state_file, args.resume_from)
-            set_stage(
-                gr_id,
-                entry.name,
-                client_spec=_resolve_stage_client_label(
-                    entry, pipeline, cli_client_spec, model
-                ),
-            )
+            set_stage(gr_id, entry.name)
             logger.info("[4/8] running /ghreview")
             ghreview.run(
                 ctx,
                 ghreview.GhreviewOptions(
-                    model=stage_model,
+                    model=model,
                     pr_url=gh_state["pr_url"],
                     code_style=code_style,
                     prompt_path=entry.prompt_paths[-1],
@@ -585,13 +534,7 @@ def _build_stage_runner(
 
         def _wait_copilot() -> None:
             _ensure_pr_url(gh_state, state_file, args.resume_from)
-            set_stage(
-                gr_id,
-                entry.name,
-                client_spec=_resolve_stage_client_label(
-                    entry, pipeline, cli_client_spec, model
-                ),
-            )
+            set_stage(gr_id, entry.name)
             logger.info(
                 "[5/8] waiting for Copilot review (20s interval, 10min timeout)"
             )
@@ -611,18 +554,12 @@ def _build_stage_runner(
                     f"stage {entry.name!r}: type 'ghaddress' requires a 'prompt' field in the pipeline YAML"
                 )
             _ensure_pr_url(gh_state, state_file, args.resume_from)
-            set_stage(
-                gr_id,
-                entry.name,
-                client_spec=_resolve_stage_client_label(
-                    entry, pipeline, cli_client_spec, model
-                ),
-            )
+            set_stage(gr_id, entry.name)
             logger.info("[6/8] running /ghaddress")
             ghaddress.run(
                 ctx,
                 ghaddress.GhaddressOptions(
-                    model=stage_model,
+                    model=model,
                     pr_url=gh_state["pr_url"],
                     code_style=code_style,
                     prompt_path=entry.prompt_paths[-1],
@@ -635,18 +572,12 @@ def _build_stage_runner(
 
         def _wait_ci() -> None:
             _ensure_pr_url(gh_state, state_file, args.resume_from)
-            set_stage(
-                gr_id,
-                entry.name,
-                client_spec=_resolve_stage_client_label(
-                    entry, pipeline, cli_client_spec, model
-                ),
-            )
+            set_stage(gr_id, entry.name)
             logger.info("[7/8] waiting for CI checks (up to 3 attempts, 20min each)")
             wait_ci.run(
                 ctx,
                 wait_ci.WaitCiOptions(
-                    model=stage_model,
+                    model=model,
                     pr_url=gh_state["pr_url"],
                     code_style=code_style,
                 ),
@@ -677,15 +608,12 @@ def gh_main(
     if shutil.which("gh") is None:
         die("gh CLI not found")
 
-    base_client: ClaudeClient = client or SubprocessClaudeClient()
-    cli_client: ClaudeClient | None = None
+    cli_spec: ClientSpec | None = None
     if args.client:
         try:
-            cli_client = parse_client_specifier(args.client)
+            cli_spec = ClientSpec.parse(args.client)
         except ValueError as exc:
             die(str(exc))
-    effective_client = cli_client or base_client
-    install_signal_handlers(effective_client)
 
     try:
         pipeline = load_pipeline(
@@ -694,7 +622,50 @@ def gh_main(
     except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
         die(str(exc))
 
-    install_signal_handlers(effective_client, *pipeline.clients)
+    # Load or resolve stage specs; state.json is authoritative on resume
+    stage_specs: dict[str, ClientSpec] = {}
+    state_file = resolve_state_file(gr_id)
+    if args.resume_from and gr_id:
+        stage_specs = _load_stage_specs_from_state(gr_id)
+    if not stage_specs:
+        stage_specs = _collect_stage_specs(pipeline, cli_spec)
+        if gr_id:
+            patch_state(
+                gr_id, stage_clients={k: str(v) for k, v in stage_specs.items()}
+            )
+
+    # Create one client instance per unique spec (or reuse injected test client)
+    _spec_clients: dict[str, ClaudeClient] = {}
+
+    def _client_for_spec(spec: ClientSpec) -> ClaudeClient:
+        if client is not None:
+            return client
+        key = str(spec)
+        if key not in _spec_clients:
+            _spec_clients[key] = to_client(spec)
+        return _spec_clients[key]
+
+    for spec in stage_specs.values():
+        _client_for_spec(spec)
+
+    # Determine the overall effective client for plan-title and signal handlers
+    default_spec = cli_spec or pipeline.default_client or PACKAGE_DEFAULT
+    effective_client = (
+        client or _spec_clients.get(str(default_spec)) or SubprocessClaudeClient()
+    )
+
+    if client is not None:
+        install_signal_handlers(client)
+    elif _spec_clients:
+        all_clients = list(_spec_clients.values())
+        install_signal_handlers(all_clients[0], *all_clients[1:])
+    else:
+        install_signal_handlers(effective_client)
+
+    # Record model in state for display and resume
+    default_model = default_spec.model
+    if gr_id:
+        patch_state(gr_id, model=default_model)
 
     stage_names = [s.name for s in pipeline.stages]
 
@@ -725,7 +696,6 @@ def gh_main(
 
     repo = get_repo()
     session_dir = resolve_session_dir(gr_id)
-    state_file = resolve_state_file(gr_id)
     plan_md = session_dir / "plan.md"
     spec_file = session_dir / "spec.md"
 
@@ -738,27 +708,6 @@ def gh_main(
         if spec_src.stat().st_size == 0:
             die(f"--spec: file is empty: {args.spec_path}")
         shutil.copyfile(spec_src, spec_file)
-
-    model = args.model
-    if model is None:
-        specifier_model: str | None = None
-        if args.client and ":" in args.client:
-            _, _, _m = args.client.partition(":")
-            if _m:
-                if not MODEL_RE.match(_m):
-                    die(f"invalid model in --client specifier: {_m}")
-                specifier_model = _m
-        pipeline_model = (pipeline.default_client_spec or "").partition(":")[2] or None
-        if pipeline_model and not MODEL_RE.match(pipeline_model):
-            die(f"invalid model in pipeline default_client_spec: {pipeline_model}")
-        model = (
-            specifier_model
-            or _read_state_field(state_file, "model")
-            or pipeline_model
-            or "sonnet"
-        )
-    if model:
-        patch_state(gr_id, model=model)
 
     instructions = " ".join(args.instructions) if args.instructions else ""
 
@@ -774,7 +723,7 @@ def gh_main(
             plan_source=args.plan_source,
             repo=repo,
             plan_md=plan_md,
-            model=model,
+            model=default_model,
             client=effective_client,
             state_file=state_file,
             gr_id=gr_id,
@@ -812,27 +761,20 @@ def gh_main(
             group_dir.mkdir(parents=True, exist_ok=True)
             child_runners: list[tuple[str, Callable[[], None]]] = []
             for child in e.children:
+                child_spec = stage_specs.get(child.name, PACKAGE_DEFAULT)
                 child_dir = group_dir / child.name
                 child_dir.mkdir(parents=True, exist_ok=True)
                 child_ctx = StageContext(
-                    client=_resolve_stage_client(
-                        child, pipeline, cli_client, base_client
-                    ),
+                    client=_client_for_spec(child_spec),
                     session_dir=child_dir,
                     gr_id=gr_id,
                 )
                 try:
-                    # gh_state is shared across children without a lock; safe only
-                    # for read-only stages (ghreview, wait-copilot). Stages that
-                    # mutate gh_state (plan, implement, commit-pr) must not be placed
-                    # in a parallel group.
                     child_runner = _build_stage_runner(
                         child,
                         child_ctx,
-                        pipeline,
-                        args,
-                        cli_client_spec=args.client,
-                        model=model,
+                        child_spec.model,
+                        args=args,
                         code_style=code_style,
                         repo=repo,
                         session_dir=child_dir,
@@ -844,7 +786,6 @@ def gh_main(
                     die(str(exc))
                 child_runners.append((child.name, child_runner))
             group_name = e.name
-            group_spec = _resolve_stage_client_label(e, pipeline, args.client, model)
             stages.append(
                 (
                     e.name,
@@ -852,15 +793,14 @@ def gh_main(
                         child_runners,
                         max_concurrent=e.max_concurrent,
                         resume_from=args.resume_from,
-                        set_stage_fn=lambda n=group_name, s=group_spec: set_stage(
-                            gr_id, n, client_spec=s
-                        ),
+                        set_stage_fn=lambda n=group_name: set_stage(gr_id, n),
                     ),
                 )
             )
         else:
+            stage_spec = stage_specs.get(e.name, PACKAGE_DEFAULT)
             stage_ctx = StageContext(
-                client=_resolve_stage_client(e, pipeline, cli_client, base_client),
+                client=_client_for_spec(stage_spec),
                 session_dir=session_dir,
                 gr_id=gr_id,
             )
@@ -868,10 +808,8 @@ def gh_main(
                 runner = _build_stage_runner(
                     e,
                     stage_ctx,
-                    pipeline,
-                    args,
-                    cli_client_spec=args.client,
-                    model=model,
+                    stage_spec.model,
+                    args=args,
                     code_style=code_style,
                     repo=repo,
                     session_dir=session_dir,
@@ -884,11 +822,13 @@ def gh_main(
             stages.append((e.name, runner))
     run_stages(stages, resume_from=run_resume_from)
 
-    total_cost = getattr(effective_client, "total_cost_usd", 0.0)
-    if total_cost is not None and total_cost > 0:
+    total_cost = 0.0
+    for c in _spec_clients.values() if _spec_clients else [client] if client else []:
+        total_cost += getattr(c, "total_cost_usd", 0.0) or 0.0
+    if total_cost > 0:
         patch_state(gr_id, total_cost_usd=total_cost)
 
     logger.info("done. PR: %s", gh_state["pr_url"] or "(unknown)")
-    if total_cost is not None and total_cost > 0:
+    if total_cost > 0:
         logger.info("total cost: $%.4f", total_cost)
     return 0
