@@ -549,6 +549,104 @@ stages:
     assert not (state_dir / "finished").exists()
 
 
+def test_resume_keeps_resume_flag_for_pipeline_gremlin(lenv, monkeypatch):
+    launcher = _launcher()
+    gr_id = "resume-local-spawn-args"
+    state_dir = _gremlins_state_root(lenv) / gr_id
+    state_dir.mkdir(parents=True)
+    (state_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "id": gr_id,
+                "kind": "localgremlin",
+                "workdir": str(lenv.repo),
+                "project_root": str(lenv.repo),
+                "stage": "implement",
+                "status": "stopped",
+                "exit_code": 1,
+                "pipeline_args": ["--pipeline", "local"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (state_dir / "instructions.txt").write_text("resume instructions", encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    class _Proc:
+        pid = 12345
+
+    def fake_spawn(state_dir, workdir, spawn_gr_id, subcommand, spawn_args, **kwargs):
+        captured["subcommand"] = subcommand
+        captured["spawn_args"] = list(spawn_args)
+        return _Proc()
+
+    monkeypatch.setattr(launcher, "_spawn_pipeline", fake_spawn)
+
+    launcher.resume(gr_id)
+
+    assert captured["subcommand"] == "_local"
+    expected_pipeline = str(launcher.resolve_pipeline_path("local", lenv.repo))
+    assert captured["spawn_args"] == [
+        "--pipeline",
+        expected_pipeline,
+        "--resume-from",
+        "implement",
+        "resume instructions",
+    ]
+
+
+def test_resume_omits_resume_flag_for_bossgremlin(lenv, monkeypatch):
+    launcher = _launcher()
+    gr_id = "resume-boss-spawn-args"
+    state_dir = _gremlins_state_root(lenv) / gr_id
+    state_dir.mkdir(parents=True)
+    plan_path = lenv.repo / "boss-spec.md"
+    plan_path.write_text("# Boss spec\n", encoding="utf-8")
+    (state_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "id": gr_id,
+                "kind": "bossgremlin",
+                "workdir": str(lenv.repo),
+                "project_root": str(lenv.repo),
+                "stage": "implement",
+                "status": "stopped",
+                "exit_code": 1,
+                "pipeline_args": [
+                    "--plan",
+                    str(plan_path),
+                    "--chain-kind",
+                    "local",
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    captured: dict[str, object] = {}
+
+    class _Proc:
+        pid = 12345
+
+    def fake_spawn(state_dir, workdir, spawn_gr_id, subcommand, spawn_args, **kwargs):
+        captured["subcommand"] = subcommand
+        captured["spawn_args"] = list(spawn_args)
+        return _Proc()
+
+    monkeypatch.setattr(launcher, "_spawn_pipeline", fake_spawn)
+
+    launcher.resume(gr_id)
+
+    assert captured["subcommand"] == "_boss"
+    assert captured["spawn_args"] == [
+        "--plan",
+        str(plan_path),
+        "--chain-kind",
+        "local",
+    ]
+
+
 def test_resume_refuses_running_gremlin(lenv):
     """resume() raises RuntimeError when the recorded pid is still alive."""
     launcher = _launcher()

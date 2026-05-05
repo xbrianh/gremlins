@@ -269,6 +269,12 @@ operator would, with their own worktrees, their own logs, their own
 lifecycles. From a child's perspective there is no boss; it just has a
 plan and runs the pipeline.
 
+Boss resumption is keyed off `boss_state.json`, not the pipeline stage
+vocabulary. The shared launcher resume path still tracks `state.json.stage`
+for fleet status, but it does not pass `--resume-from` when re-spawning a
+boss. If a caller does provide `--resume-from`, `boss_main` logs that the
+flag is being ignored and resumes from the chain cursor in `boss_state.json`.
+
 ### 4.1 Where the agency lives
 
 The boss reuses the §2 dividing line, applied at a different scale:

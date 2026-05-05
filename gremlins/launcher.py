@@ -584,8 +584,9 @@ def resume(gr_id: str) -> None:
 
     has_plan = any(a == "--plan" or str(a).startswith("--plan=") for a in pipeline_args)
 
-    # Build spawn args: pipeline_args + --resume-from + (instructions if no plan)
-    spawn_args: list[str] = list(pipeline_args) + ["--resume-from", str(stage)]
+    spawn_args: list[str] = list(pipeline_args)
+    if kind != "bossgremlin":
+        spawn_args.extend(["--resume-from", str(stage)])
     if not has_plan:
         instr_file = state_dir / "instructions.txt"
         if instr_file.is_file():
