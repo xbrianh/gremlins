@@ -70,7 +70,6 @@ def _gremlins_cli_env() -> dict[str, str]:
 
 
 POLL_INTERVAL = 5  # seconds between finished-marker polls
-HANDOFF_TIMEOUT = int(os.environ.get("BOSSGREMLIN_HANDOFF_TIMEOUT", "3600"))
 # Bounds every interaction with `origin` (chain-start fetch of the default
 # branch and per-handoff fetch of the target branch).
 HANDOFF_FETCH_TIMEOUT = int(os.environ.get("BOSSGREMLIN_HANDOFF_FETCH_TIMEOUT", "60"))
@@ -297,6 +296,7 @@ def run_handoff(
     project_root: str,
     boss_workdir: str,
     client: ClaudeClient,
+    client_spec: ClientSpec,
 ) -> tuple[str, dict[str, Any]]:
     """Run handoff agent. Returns (exit_state, signal dict).
 
@@ -352,14 +352,12 @@ def run_handoff(
         rev_label,
         handoff_cwd,
     )
-    client_spec = str(getattr(client, "_gremlins_client_spec", PACKAGE_DEFAULT))
     args = argparse.Namespace(
         plan=current_plan,
         spec=spec_path if forward_spec else None,
         out=out_path,
         base=base_ref,
-        client=client_spec,
-        timeout=HANDOFF_TIMEOUT,
+        client=str(client_spec),
         rev=rev_label if rev_label.startswith("origin/") else None,
     )
     old_cwd = os.getcwd()
@@ -797,7 +795,6 @@ def boss_main(argv: list[str], *, gr_id: str | None = None) -> int:
     except ValueError as exc:
         die(str(exc))
     client = to_client(client_spec)
-    setattr(client, "_gremlins_client_spec", str(client_spec))
     global _current_client
     _current_client = client
     signal.signal(signal.SIGTERM, _sigterm_handler)
@@ -941,6 +938,7 @@ def boss_main(argv: list[str], *, gr_id: str | None = None) -> int:
                 project_root,
                 boss_workdir,
                 client,
+                client_spec,
             )
             save_boss_state(state_dir, boss_state)
             check_stop()

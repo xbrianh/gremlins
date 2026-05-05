@@ -99,7 +99,6 @@ def test_parse_args_defaults():
     assert args.out is None
     assert args.base is None
     assert args.client == "claude:sonnet"
-    assert args.timeout is None
     assert args.rev is None
 
 
@@ -116,8 +115,6 @@ def test_parse_args_full():
             "develop",
             "--client",
             "claude:haiku",
-            "--timeout",
-            "300",
             "--rev",
             "feature-branch",
         ]
@@ -127,7 +124,6 @@ def test_parse_args_full():
     assert args.out == "/o.md"
     assert args.base == "develop"
     assert args.client == "claude:haiku"
-    assert args.timeout == 300
     assert args.rev == "feature-branch"
 
 
@@ -489,7 +485,9 @@ def test_run_client_error(monkeypatch, tmp_path, capsys):
     assert "handoff agent failed: boom" in err
 
 
-def test_run_uses_selected_model_and_timeout_caps(monkeypatch, tmp_path):
+def test_run_uses_selected_model_for_main_and_haiku_for_sanitize(
+    monkeypatch, tmp_path
+):
     args, client, _, _, _ = _stub_happy_run(
         monkeypatch,
         tmp_path,
@@ -502,51 +500,14 @@ def test_run_uses_selected_model_and_timeout_caps(monkeypatch, tmp_path):
         sanitize_text="# Sanitized rolling plan\n",
     )
     args.client = "copilot:gpt-5.4"
-    args.timeout = 300
-    calls: list[tuple[str, str | None, int | None]] = []
-
-    def fake_run_client_with_timeout(client_arg, prompt, *, label, model, timeout):
-        calls.append((label, model, timeout))
-        return client_arg.run(prompt, label=label, model=model)
-
-    monkeypatch.setattr(
-        handoff, "_run_client_with_timeout", fake_run_client_with_timeout
-    )
 
     rc = handoff.run(client, args)
 
     assert rc == 0
-    assert calls == [
-        ("handoff", "gpt-5.4", 300),
-        ("handoff:sanitize", "gpt-5.4", 60),
+    assert [(c.label, c.model) for c in client.calls] == [
+        ("handoff", "gpt-5.4"),
+        ("handoff:sanitize", handoff.SANITIZE_MODEL),
     ]
-
-
-def test_run_timeout_returns_error(monkeypatch, tmp_path, capsys):
-    args, client, _, _, _ = _stub_happy_run(
-        monkeypatch,
-        tmp_path,
-        {
-            "exit_state": "chain-done",
-            "child_plan": None,
-            "reason": None,
-            "operator_followups": [],
-        },
-    )
-    args.timeout = 123
-
-    def fake_run_client_with_timeout(client_arg, prompt, *, label, model, timeout):
-        raise handoff.ClientRunTimeoutError(timeout)
-
-    monkeypatch.setattr(
-        handoff, "_run_client_with_timeout", fake_run_client_with_timeout
-    )
-
-    rc = handoff.run(client, args)
-
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "handoff agent timed out after 123s" in err
 
 
 def test_run_operator_followups_preserved_in_signal(monkeypatch, tmp_path):
@@ -661,7 +622,7 @@ def test_sanitize_rolling_plan_rewrites_file(monkeypatch, tmp_path):
         signal_payload={},
         sanitize_text=cleaned,
     )
-    handoff.sanitize_rolling_plan(client, out_path, model="haiku", timeout=None)
+    handoff.sanitize_rolling_plan(client, out_path)
     assert out_path.read_text() == cleaned
 
 
@@ -675,7 +636,7 @@ def test_sanitize_rolling_plan_nonzero_is_nonfatal(monkeypatch, tmp_path, capsys
         signal_payload={},
         sanitize_error=RuntimeError("sanitize failed"),
     )
-    handoff.sanitize_rolling_plan(client, out_path, model="haiku", timeout=None)
+    handoff.sanitize_rolling_plan(client, out_path)
     err = capsys.readouterr().err
     assert "warning" in err.lower()
     assert out_path.read_text() == original

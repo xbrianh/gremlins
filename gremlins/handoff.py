@@ -17,13 +17,12 @@ import logging
 import pathlib
 import re
 import shutil
-import signal
 import subprocess
 import sys
 from typing import Any, NoReturn, cast
 
 from gremlins.clients import PACKAGE_DEFAULT, ClientSpec, to_client
-from gremlins.clients.protocol import ClaudeClient, CompletedRun
+from gremlins.clients.protocol import ClaudeClient
 from gremlins.logging_setup import configure_logging
 from gremlins.prompts import load_prompts
 
@@ -33,11 +32,7 @@ _CODE_STYLE_PATH = (
     pathlib.Path(__file__).resolve().parent / "pipelines" / "prompts" / "code_style.md"
 )
 
-
-class ClientRunTimeoutError(RuntimeError):
-    def __init__(self, timeout: int) -> None:
-        self.timeout = timeout
-        super().__init__(f"timed out after {timeout}s")
+SANITIZE_MODEL = "haiku"
 
 
 def die(msg: str) -> NoReturn:
@@ -288,7 +283,7 @@ Do not print the document to stdout. Do not explain what you changed.
 
 ## Rolling plan to rewrite
 
-    ~~~~
+~~~~
 {rolling_plan_text}
 ~~~~"""
 
@@ -321,81 +316,14 @@ def _read_rolling_plan_for_sanitize(out_path: pathlib.Path) -> str | None:
         return None
 
 
-def _run_client_with_timeout(
-    client: ClaudeClient,
-    prompt: str,
-    *,
-    label: str,
-    model: str | None,
-    timeout: int | None,
-) -> CompletedRun:
-    if timeout is None:
-        return client.run(prompt, label=label, model=model)
-
-    previous_handler = signal.getsignal(signal.SIGALRM)
-    previous_timer = signal.setitimer(signal.ITIMER_REAL, 0)
-
-    def _handle_timeout(signum: int, frame: object | None) -> None:
-        client.reap_all()
-        raise ClientRunTimeoutError(timeout)
-
-    try:
-        signal.signal(signal.SIGALRM, _handle_timeout)
-        signal.setitimer(signal.ITIMER_REAL, timeout)
-        return client.run(prompt, label=label, model=model)
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous_handler)
-        if previous_timer != (0.0, 0.0):
-            signal.setitimer(signal.ITIMER_REAL, *previous_timer)
-
-
-def _run_sanitize_pass(
-    client: ClaudeClient,
-    plan_text: str,
-    out_path: pathlib.Path,
-    *,
-    model: str | None,
-    timeout: int,
-) -> None:
-    prompt = build_sanitize_prompt(plan_text, out_path)
-    logger.info("sanitizing rolling plan")
-    _run_client_with_timeout(
-        client,
-        prompt,
-        label="handoff:sanitize",
-        model=model,
-        timeout=timeout,
-    )
-
-
-def sanitize_rolling_plan(
-    client: ClaudeClient,
-    out_path: pathlib.Path,
-    *,
-    model: str | None,
-    timeout: int | None,
-) -> None:
+def sanitize_rolling_plan(client: ClaudeClient, out_path: pathlib.Path) -> None:
     plan_text = _read_rolling_plan_for_sanitize(out_path)
     if plan_text is None:
         return
-    sanitize_timeout = min(timeout, 60) if timeout is not None else 60
-
+    prompt = build_sanitize_prompt(plan_text, out_path)
+    logger.info("sanitizing rolling plan")
     try:
-        _run_sanitize_pass(
-            client,
-            plan_text,
-            out_path,
-            model=model,
-            timeout=sanitize_timeout,
-        )
-    except ClientRunTimeoutError:
-        _restore_rolling_plan(
-            out_path,
-            plan_text,
-            f"sanitize pass timed out after {sanitize_timeout}s",
-        )
-        return
+        client.run(prompt, label="handoff:sanitize", model=SANITIZE_MODEL)
     except Exception as exc:
         _restore_rolling_plan(out_path, plan_text, f"sanitize pass failed: {exc}")
         return
@@ -456,7 +384,7 @@ def _parse_client_spec(client_arg: str) -> ClientSpec:
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    usage = "usage: handoff.sh --plan <path> [--spec <path>] [--out <path>] [--base <ref>] [--rev <ref>] [--client <provider:model>] [--timeout <secs>]"
+    usage = "usage: handoff.sh --plan <path> [--spec <path>] [--out <path>] [--base <ref>] [--rev <ref>] [--client <provider:model>]"
     parser = argparse.ArgumentParser(add_help=False, usage=usage)
     parser.add_argument("--plan", dest="plan", required=True)
     parser.add_argument(
@@ -468,13 +396,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--out", dest="out", default=None)
     parser.add_argument("--base", dest="base", default=None)
     parser.add_argument("--client", dest="client", default=str(PACKAGE_DEFAULT))
-    parser.add_argument(
-        "--timeout",
-        dest="timeout",
-        type=int,
-        default=None,
-        help="timeout in seconds for the main handoff agent (default: no timeout); the sanitize pass is capped at min(timeout, 60)s",
-    )
     parser.add_argument(
         "--rev",
         dest="rev",
@@ -539,16 +460,7 @@ def run(client: ClaudeClient, args: argparse.Namespace) -> int:
     client_spec = _parse_client_spec(args.client)
     logger.info("running handoff agent (client: %s)", client_spec)
     try:
-        _run_client_with_timeout(
-            client,
-            prompt,
-            label="handoff",
-            model=client_spec.model,
-            timeout=args.timeout,
-        )
-    except ClientRunTimeoutError:
-        sys.stderr.write(f"error: handoff agent timed out after {args.timeout}s\n")
-        return 1
+        client.run(prompt, label="handoff", model=client_spec.model)
     except Exception as exc:
         sys.stderr.write(f"error: handoff agent failed: {exc}\n")
         return 1
@@ -606,12 +518,7 @@ def run(client: ClaudeClient, args: argparse.Namespace) -> int:
         for item in followups:
             logger.info("  - %s", item)
 
-    sanitize_rolling_plan(
-        client,
-        out_path,
-        model=client_spec.model,
-        timeout=args.timeout,
-    )
+    sanitize_rolling_plan(client, out_path)
     return 0
 
 
