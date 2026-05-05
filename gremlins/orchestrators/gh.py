@@ -22,7 +22,7 @@ from ..env_file import load_env_file
 from ..gh_utils import extract_gh_url, get_repo, parse_issue_ref, view_issue
 from ..git import DirtyOnly, HeadAdvanced
 from ..logging_setup import configure_logging
-from ..pipeline import Pipeline, StageEntry, load_pipeline, resolve_pipeline_path
+from ..pipeline import Pipeline, StageEntry, load_pipeline, parse_client_specifier, resolve_pipeline_path
 from ..prompts import load_prompts
 from ..runner import install_signal_handlers, make_parallel_wrapper, run_stages
 from ..stages import (
@@ -61,8 +61,7 @@ def die(msg: str) -> NoReturn:
 def _resolve_stage_client(
     entry: StageEntry, pipeline: Pipeline, default_client: ClaudeClient
 ) -> ClaudeClient:
-    key = entry.client_key or pipeline.default_client
-    return pipeline.clients[key] if key else default_client
+    return entry.client or pipeline.default_client or default_client
 
 
 def _fmt_escape(s: str) -> str:
@@ -82,6 +81,7 @@ def _parse_gh_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--spec", dest="spec_path", default=None)
     parser.add_argument("--model", dest="model", default=None)
     parser.add_argument("--pipeline", dest="pipeline", default=None)
+    parser.add_argument("--client", dest="client", default=None)
     parser.add_argument("instructions", nargs="*")
     args = parser.parse_args(argv)
 
@@ -573,7 +573,13 @@ def gh_main(
         die("gh CLI not found")
 
     if client is None:
-        client = SubprocessClaudeClient()
+        if args.client:
+            try:
+                client = parse_client_specifier(args.client)
+            except ValueError as exc:
+                die(str(exc))
+        else:
+            client = SubprocessClaudeClient()
     install_signal_handlers(client)
 
     try:
@@ -583,7 +589,7 @@ def gh_main(
     except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
         die(str(exc))
 
-    install_signal_handlers(client, *pipeline.clients.values())
+    install_signal_handlers(client, *pipeline.clients)
 
     stage_names = [s.name for s in pipeline.stages]
 

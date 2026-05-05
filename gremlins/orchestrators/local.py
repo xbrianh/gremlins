@@ -20,7 +20,7 @@ from ..clients.protocol import ClaudeClient
 from ..env_file import load_env_file
 from ..git import in_git_repo
 from ..logging_setup import configure_logging
-from ..pipeline import Pipeline, StageEntry, load_pipeline, resolve_pipeline_path
+from ..pipeline import Pipeline, StageEntry, load_pipeline, parse_client_specifier, resolve_pipeline_path
 from ..prompts import load_prompts
 from ..runner import install_signal_handlers, make_parallel_wrapper, run_stages
 from ..stages import address_code, implement, plan, review_code, verify
@@ -48,8 +48,7 @@ def die(msg: str) -> NoReturn:
 def _resolve_stage_client(
     entry: StageEntry, pipeline: Pipeline, default_client: ClaudeClient
 ) -> ClaudeClient:
-    key = entry.client_key or pipeline.default_client
-    return pipeline.clients[key] if key else default_client
+    return entry.client or pipeline.default_client or default_client
 
 
 def _parse_local_args(argv: list[str]) -> argparse.Namespace:
@@ -75,6 +74,7 @@ def _parse_local_args(argv: list[str]) -> argparse.Namespace:
         "--test-max-attempts", dest="test_max_attempts", type=int, default=3
     )
     parser.add_argument("--pipeline", dest="pipeline", default=None)
+    parser.add_argument("--client", dest="client", default=None)
     parser.add_argument("instructions", nargs="*")
     args = parser.parse_args(argv)
     if args.resume_from:
@@ -264,11 +264,17 @@ def local_main(
     argv: list[str], *, client: ClaudeClient | None = None, gr_id: str | None = None
 ) -> int:
     configure_logging()
-    if client is None:
-        client = SubprocessClaudeClient()
-    install_signal_handlers(client)
-
     args = _parse_local_args(argv)
+
+    if client is None:
+        if args.client:
+            try:
+                client = parse_client_specifier(args.client)
+            except ValueError as exc:
+                die(str(exc))
+        else:
+            client = SubprocessClaudeClient()
+    install_signal_handlers(client)
     if os.environ.get("GREMLINS_TEST_NOOP_PIPELINE"):
         return 0
 
@@ -291,7 +297,7 @@ def local_main(
     except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
         die(str(exc))
 
-    install_signal_handlers(client, *pipeline.clients.values())
+    install_signal_handlers(client, *pipeline.clients)
 
     stage_names = [s.name for s in pipeline.stages]
 

@@ -30,24 +30,43 @@ def test_valid_pipeline_parses(tmp_path: pathlib.Path) -> None:
         tmp_path / "pipeline.yaml",
         f"""\
 name: test-pipe
-clients:
-  c1: {{provider: claude, model: sonnet}}
+default_client: claude:sonnet
 stages:
   - name: plan
     type: plan
-    client: c1
     prompt: {prompt.name}
 """,
     )
     pipeline = load_pipeline(yaml_path)
     assert pipeline.name == "test-pipe"
+    assert pipeline.default_client is not None
     assert len(pipeline.stages) == 1
     assert pipeline.stages[0].name == "plan"
     assert pipeline.stages[0].type == "plan"
-    assert pipeline.stages[0].client_key == "c1"
+    assert pipeline.stages[0].client is None
     assert pipeline.stages[0].prompt_paths == [prompt]
-    assert "c1" in pipeline.clients
-    assert pipeline.clients["c1"] is not None
+
+
+# ---- per-stage client override ---------------------------------------------
+
+
+def test_per_stage_client_override(tmp_path: pathlib.Path) -> None:
+    yaml_path = _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+default_client: claude:sonnet
+stages:
+  - name: implement
+    type: implement
+  - name: review
+    type: implement
+    client: copilot:gpt-5.4
+""",
+    )
+    pipeline = load_pipeline(yaml_path)
+    assert pipeline.stages[0].client is None
+    assert pipeline.stages[1].client is not None
 
 
 # ---- error cases -----------------------------------------------------------
@@ -58,7 +77,6 @@ def test_unknown_stage_type_raises(tmp_path: pathlib.Path) -> None:
         tmp_path / "pipeline.yaml",
         """\
 name: bad
-clients: {}
 stages:
   - {name: s1, type: no-such-type}
 """,
@@ -67,18 +85,32 @@ stages:
         load_pipeline(tmp_path / "pipeline.yaml")
 
 
-def test_unknown_client_key_raises(tmp_path: pathlib.Path) -> None:
+def test_unknown_provider_raises(tmp_path: pathlib.Path) -> None:
     _write_yaml(
         tmp_path / "pipeline.yaml",
         """\
 name: bad
-clients:
-  c1: {provider: claude, model: sonnet}
+default_client: unknown:model
 stages:
-  - {name: s1, type: plan, client: missing_key}
+  - {name: s1, type: implement}
 """,
     )
-    with pytest.raises(ValueError, match="unknown client key"):
+    with pytest.raises(ValueError, match="unknown provider"):
+        load_pipeline(tmp_path / "pipeline.yaml")
+
+
+def test_invalid_client_format_raises(tmp_path: pathlib.Path) -> None:
+    _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: bad
+stages:
+  - name: s1
+    type: implement
+    client: notaspecifier
+""",
+    )
+    with pytest.raises(ValueError):
         load_pipeline(tmp_path / "pipeline.yaml")
 
 
@@ -87,13 +119,47 @@ def test_missing_prompt_file_raises(tmp_path: pathlib.Path) -> None:
         tmp_path / "pipeline.yaml",
         """\
 name: bad
-clients: {}
 stages:
   - {name: s1, type: verify, prompt: does_not_exist.md}
 """,
     )
     with pytest.raises(FileNotFoundError):
         load_pipeline(tmp_path / "pipeline.yaml")
+
+
+# ---- pipeline.clients list -------------------------------------------------
+
+
+def test_pipeline_clients_list_same_spec(tmp_path: pathlib.Path) -> None:
+    _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+default_client: claude:sonnet
+stages:
+  - name: s1
+    type: implement
+    client: claude:sonnet
+""",
+    )
+    pipeline = load_pipeline(tmp_path / "pipeline.yaml")
+    assert len(pipeline.clients) == 1
+
+
+def test_pipeline_clients_list_different_specs(tmp_path: pathlib.Path) -> None:
+    _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+default_client: claude:sonnet
+stages:
+  - name: s1
+    type: implement
+    client: copilot:gpt-5.4
+""",
+    )
+    pipeline = load_pipeline(tmp_path / "pipeline.yaml")
+    assert len(pipeline.clients) == 2
 
 
 # ---- prompt list -----------------------------------------------------------
@@ -106,7 +172,6 @@ def test_prompt_list_resolves_both_paths(tmp_path: pathlib.Path) -> None:
         tmp_path / "pipeline.yaml",
         f"""\
 name: p
-clients: {{}}
 stages:
   - name: s1
     type: verify
@@ -125,7 +190,6 @@ def test_repeated_type_distinct_names(tmp_path: pathlib.Path) -> None:
         tmp_path / "pipeline.yaml",
         """\
 name: p
-clients: {}
 stages:
   - {name: test-pre, type: verify}
   - {name: test-post, type: verify}
@@ -147,7 +211,6 @@ def test_parallel_duplicate_child_name_raises(tmp_path: pathlib.Path) -> None:
         tmp_path / "pipeline.yaml",
         """\
 name: p
-clients: {}
 stages:
   - name: reviews
     parallel:
@@ -164,7 +227,6 @@ def test_nested_parallel_raises(tmp_path: pathlib.Path) -> None:
         tmp_path / "pipeline.yaml",
         """\
 name: p
-clients: {}
 stages:
   - name: outer
     parallel:
@@ -175,124 +237,3 @@ stages:
     )
     with pytest.raises(ValueError, match="nested parallel"):
         load_pipeline(tmp_path / "pipeline.yaml")
-
-
-# ---- copilot provider --------------------------------------------------------
-
-
-def test_copilot_provider_parses(tmp_path: pathlib.Path) -> None:
-    yaml_path = _write_yaml(
-        tmp_path / "pipeline.yaml",
-        """\
-name: copilot-pipe
-clients:
-  bot:
-    provider: copilot
-    model: gpt-5.4
-stages:
-  - name: implement
-    type: implement
-    client: bot
-""",
-    )
-    pipeline = load_pipeline(yaml_path)
-    assert "bot" in pipeline.clients
-    assert pipeline.clients["bot"] is not None
-    assert pipeline.stages[0].client_key == "bot"
-
-
-def test_copilot_provider_without_model(tmp_path: pathlib.Path) -> None:
-    yaml_path = _write_yaml(
-        tmp_path / "pipeline.yaml",
-        """\
-name: p
-clients:
-  bot: {provider: copilot}
-stages:
-  - {name: s1, type: implement, client: bot}
-""",
-    )
-    pipeline = load_pipeline(yaml_path)
-    assert "bot" in pipeline.clients
-
-
-# ---- clients.default ---------------------------------------------------------
-
-
-def test_pipeline_default_client(tmp_path: pathlib.Path) -> None:
-    yaml_path = _write_yaml(
-        tmp_path / "pipeline.yaml",
-        """\
-name: p
-clients:
-  default: bot
-  bot:
-    provider: copilot
-    model: gpt-5.4
-stages:
-  - {name: s1, type: implement}
-""",
-    )
-    pipeline = load_pipeline(yaml_path)
-    assert pipeline.default_client == "bot"
-    assert "bot" in pipeline.clients
-
-
-def test_pipeline_default_client_missing_key_raises(tmp_path: pathlib.Path) -> None:
-    _write_yaml(
-        tmp_path / "pipeline.yaml",
-        """\
-name: p
-clients:
-  default: no-such-key
-  bot: {provider: copilot}
-stages:
-  - {name: s1, type: implement}
-""",
-    )
-    with pytest.raises(ValueError, match="clients.default"):
-        load_pipeline(tmp_path / "pipeline.yaml")
-
-
-def test_pipeline_no_default_client_is_none(tmp_path: pathlib.Path) -> None:
-    yaml_path = _write_yaml(
-        tmp_path / "pipeline.yaml",
-        """\
-name: p
-clients: {}
-stages:
-  - {name: s1, type: implement}
-""",
-    )
-    pipeline = load_pipeline(yaml_path)
-    assert pipeline.default_client is None
-
-
-# ---- per-stage client override -----------------------------------------------
-
-
-def test_per_stage_client_override(tmp_path: pathlib.Path) -> None:
-    yaml_path = _write_yaml(
-        tmp_path / "pipeline.yaml",
-        """\
-name: p
-clients:
-  default: bot
-  bot:
-    provider: copilot
-    model: gpt-5.4
-  claude:
-    provider: claude
-    model: sonnet
-stages:
-  - name: implement
-    type: implement
-  - name: review
-    type: implement
-    client: claude
-""",
-    )
-    pipeline = load_pipeline(yaml_path)
-    assert pipeline.default_client == "bot"
-    assert pipeline.stages[0].client_key is None
-    assert pipeline.stages[1].client_key == "claude"

@@ -1,15 +1,14 @@
 name: gh
 
-clients:
-  claude_sonnet: { provider: claude, model: sonnet }
+default_client: claude:sonnet
 
 stages:
-  - { name: plan,            type: plan,            client: claude_sonnet, prompt: [prompts/code_style.md, prompts/ghplan.md] }
-  - { name: implement,       type: implement,       client: claude_sonnet, prompt: [prompts/code_style.md, prompts/implement_gh.md] }
+  - { name: plan,            type: plan,            prompt: [prompts/code_style.md, prompts/ghplan.md] }
+  - { name: implement,       type: implement,       prompt: [prompts/code_style.md, prompts/implement_gh.md] }
   - { name: verify,          type: verify,          options: { cmds: ["make check", "make test"] } }
-  - { name: commit-pr,       type: commit-pr,       client: claude_sonnet }
+  - { name: commit-pr,       type: commit-pr }
   - { name: request-copilot, type: request-copilot }
-  - { name: ghreview,        type: ghreview,        client: claude_sonnet, prompt: [prompts/ghreview.md] }
+  - { name: ghreview,        type: ghreview,        prompt: [prompts/ghreview.md] }
   - { name: wait-copilot,    type: wait-copilot }
-  - { name: ghaddress,       type: ghaddress,       client: claude_sonnet, prompt: [prompts/ghaddress.md] }
-  - { name: ci-gate,         type: wait-ci,         client: claude_sonnet }
+  - { name: ghaddress,       type: ghaddress,       prompt: [prompts/ghaddress.md] }
+  - { name: ci-gate,         type: wait-ci }
