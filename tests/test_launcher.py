@@ -259,53 +259,62 @@ def test_launch_persists_pipeline_args(lenv):
     assert args[2:] == ["-p", "opus", "-i", "sonnet"]
 
 
-def test_launch_persists_impl_model_explicit(lenv):
-    """impl_model is extracted from -i flag and stored in state.json."""
+def test_launch_persists_pipeline_default_client(lenv):
+    """The resolved pipeline default client is stored in state.json."""
     launcher = _launcher()
     gr_id = launcher.launch(
         "localgremlin",
-        pipeline_args=("-i", "opus"),
-        instructions="test impl model",
+        instructions="test default client",
     )
     state = _read_state(_gremlins_state_root(lenv) / gr_id)
-    assert state["impl_model"] == "opus"
+    assert state["client"] == "claude:sonnet"
 
 
-def test_launch_persists_impl_model_default(lenv):
-    """impl_model defaults to 'sonnet' when no -i flag is supplied."""
+def test_launch_persists_cli_client_space_form(lenv):
+    """A space-separated --client flag overrides the stored default client."""
     launcher = _launcher()
     gr_id = launcher.launch(
         "localgremlin",
-        instructions="test impl model default",
+        pipeline_args=("--client", "copilot:gpt-5.4"),
+        instructions="test cli client space",
     )
     state = _read_state(_gremlins_state_root(lenv) / gr_id)
-    assert state["impl_model"] == "sonnet"
+    assert state["client"] == "copilot:gpt-5.4"
 
 
-def test_launch_persists_impl_model_gh_space_form(lenv_with_gh):
-    """impl_model is extracted from space-separated --model flag for ghgremlin."""
-    lenv = lenv_with_gh
+def test_launch_persists_cli_client_equals_form(lenv):
+    """An equals-form --client flag overrides the stored default client."""
     launcher = _launcher()
     gr_id = launcher.launch(
-        "ghgremlin",
-        pipeline_args=("--model", "opus"),
-        instructions="test gh model space",
+        "localgremlin",
+        pipeline_args=("--client=copilot:gpt-5.4",),
+        instructions="test cli client equals",
     )
     state = _read_state(_gremlins_state_root(lenv) / gr_id)
-    assert state["impl_model"] == "opus"
+    assert state["client"] == "copilot:gpt-5.4"
 
 
-def test_launch_persists_impl_model_gh_equals_form(lenv_with_gh):
-    """impl_model is extracted from --model=<value> flag for ghgremlin."""
-    lenv = lenv_with_gh
+def test_launch_persists_custom_pipeline_default_client(lenv):
+    """A custom pipeline's default client is stored in state.json."""
+    pipeline = lenv.repo / "custom.yaml"
+    pipeline.write_text(
+        """\
+name: custom
+default_client: copilot:gpt-5.4
+stages:
+  - name: implement
+    type: implement
+""",
+        encoding="utf-8",
+    )
     launcher = _launcher()
     gr_id = launcher.launch(
-        "ghgremlin",
-        pipeline_args=("--model=haiku",),
-        instructions="test gh model equals",
+        "localgremlin",
+        pipeline_args=("--pipeline", str(pipeline)),
+        instructions="test custom pipeline client",
     )
     state = _read_state(_gremlins_state_root(lenv) / gr_id)
-    assert state["impl_model"] == "haiku"
+    assert state["client"] == "copilot:gpt-5.4"
 
 
 def test_launch_plan_normalized_to_absolute(lenv):

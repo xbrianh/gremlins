@@ -182,32 +182,21 @@ def test_build_row_no_rescue_suffix_when_zero():
     assert "(rescue" not in row["live"]
 
 
-def test_build_row_model_from_impl_model():
+def test_build_row_client_from_state():
     state = {
         "kind": "localgremlin",
         "stage": "implement",
         "started_at": "",
-        "impl_model": "opus",
+        "client": "copilot:gpt-5.4",
     }
     row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
-    assert row["model"] == "opus"
+    assert row["client"] == "copilot:gpt-5.4"
 
 
-def test_build_row_model_falls_back_to_model_field():
-    state = {
-        "kind": "ghgremlin",
-        "stage": "implement",
-        "started_at": "",
-        "model": "opus",
-    }
-    row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
-    assert row["model"] == "opus"
-
-
-def test_build_row_model_missing_field_shows_dash():
+def test_build_row_client_missing_field_shows_dash():
     state = {"kind": "localgremlin", "stage": "implement", "started_at": ""}
     row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
-    assert row["model"] == "—"
+    assert row["client"] == "—"
 
 
 # ---------------------------------------------------------------------------

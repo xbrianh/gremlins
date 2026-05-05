@@ -11,7 +11,7 @@ STATE_ROOT = os.path.join(
     "claude-gremlins",
 )
 
-FMT = "%-5s  %-47s  %-22s  %-28s  %-5s  %-20s  %-10s  %s"
+FMT = "%-5s  %-47s  %-22s  %-28s  %-5s  %-20s  %-20s  %s"
 
 # Headless rescue caps. The attempt cap is shared across interactive and
 # headless rescues — both check `rescue_count`, but interactive only warns

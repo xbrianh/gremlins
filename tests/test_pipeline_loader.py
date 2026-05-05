@@ -40,6 +40,7 @@ stages:
     pipeline = load_pipeline(yaml_path)
     assert pipeline.name == "test-pipe"
     assert pipeline.default_client is not None
+    assert pipeline.default_client_spec == "claude:sonnet"
     assert len(pipeline.stages) == 1
     assert pipeline.stages[0].name == "plan"
     assert pipeline.stages[0].type == "plan"

@@ -21,8 +21,10 @@ import subprocess
 import sys
 from typing import Any, cast
 
+import yaml
+
 from . import git as _git_mod
-from .pipeline import resolve_pipeline_path
+from .pipeline import load_pipeline, resolve_pipeline_path
 
 VALID_KINDS = {"ghgremlin", "localgremlin", "bossgremlin"}
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -194,25 +196,27 @@ def _resolve_pipeline(
     return ["--pipeline", resolved] + filtered, resolved
 
 
-def _extract_impl_model(pipeline_args: list[str], kind: str) -> str:
-    """Extract the implementation model alias from pipeline_args.
-
-    Returns the alias as passed (e.g. 'opus', 'sonnet') or 'sonnet' as the
-    default when no model flag is present — matching each orchestrator's default.
-    """
+def _extract_client_spec(pipeline_args: list[str]) -> str:
     args = list(pipeline_args)
-    if kind == "localgremlin":
-        for i, a in enumerate(args):
-            if a == "-i" and i + 1 < len(args):
-                return args[i + 1]
-        return "sonnet"
-    else:  # ghgremlin, bossgremlin use --model
-        for i, a in enumerate(args):
-            if a == "--model" and i + 1 < len(args):
-                return args[i + 1]
-            if a.startswith("--model="):
-                return a[len("--model=") :]
-        return "sonnet"
+    for i, arg in enumerate(args):
+        if arg == "--client" and i + 1 < len(args):
+            return args[i + 1]
+        if arg.startswith("--client="):
+            return arg[len("--client=") :]
+    return ""
+
+
+def _resolve_default_client_label(pipeline_args: list[str], pipeline_path: str) -> str:
+    client_spec = _extract_client_spec(pipeline_args)
+    if client_spec:
+        return client_spec
+    if not pipeline_path:
+        return ""
+    try:
+        pipeline = load_pipeline(pathlib.Path(pipeline_path))
+    except (FileNotFoundError, ValueError, yaml.YAMLError):
+        return ""
+    return pipeline.default_client_spec or ""
 
 
 def _delete_patch_state(
@@ -413,7 +417,7 @@ def launch(
         "description_explicit": desc_explicit,
         "parent_id": parent_id or "",
         "pipeline_args": stored_pipeline_args,
-        "impl_model": _extract_impl_model(stored_pipeline_args, kind),
+        "client": _resolve_default_client_label(stored_pipeline_args, pipeline_path),
         "pipeline_path": pipeline_path,
         "stage": "starting",
         "pid": None,
