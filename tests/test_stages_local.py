@@ -338,9 +338,7 @@ def test_plan_stage_includes_code_style(tmp_path):
 
 
 def test_review_code_stage_includes_code_style(tmp_path):
-    client = ReviewCreatingClient(
-        fixtures={"review-code:sonnet": MINIMAL_EVENTS}
-    )
+    client = ReviewCreatingClient(fixtures={"review-code:sonnet": MINIMAL_EVENTS})
     ctx = _make_ctx(client, tmp_path)
     run_review_code(
         ctx,
@@ -376,9 +374,7 @@ def test_address_code_stage_includes_code_style(tmp_path):
 def test_review_code_stage_writes_stage_to_state(tmp_path, make_state_dir):
     gr_id = "test-gr-id"
     state_dir = make_state_dir(gr_id)
-    client = ReviewCreatingClient(
-        fixtures={"review-code:sonnet": MINIMAL_EVENTS}
-    )
+    client = ReviewCreatingClient(fixtures={"review-code:sonnet": MINIMAL_EVENTS})
     ctx = _make_ctx(client, tmp_path, gr_id=gr_id)
     run_review_code(
         ctx,

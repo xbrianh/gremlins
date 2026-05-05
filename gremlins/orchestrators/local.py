@@ -185,7 +185,9 @@ def _build_stage_runner(
                     code_style=code_style,
                     model=model,
                     stage_name=entry.name,
-                    prompt_paths=entry.prompt_paths[1:] if entry.prompt_paths else [_DEFAULT_LENS],
+                    prompt_paths=entry.prompt_paths[1:]
+                    if entry.prompt_paths
+                    else [_DEFAULT_LENS],
                 ),
             )
             logger.info("code review (%s): %s", model, review_file)

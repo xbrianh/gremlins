@@ -95,12 +95,16 @@ def run(ctx: StageContext, options: ReviewCodeOptions) -> pathlib.Path:
             "available, otherwise inspect recently modified files)."
         )
     if options.plan_text:
-        code_context = f"The plan for this change is:\n\n{options.plan_text}\n\n{code_scope}"
+        code_context = (
+            f"The plan for this change is:\n\n{options.plan_text}\n\n{code_scope}"
+        )
     else:
         code_context = code_scope
 
     try:
-        set_stage(ctx.gr_id, options.stage_name, {"model": f"running ({options.model})"})
+        set_stage(
+            ctx.gr_id, options.stage_name, {"model": f"running ({options.model})"}
+        )
         _run_reviewer(
             client=ctx.client,
             model=options.model,
@@ -110,7 +114,8 @@ def run(ctx: StageContext, options: ReviewCodeOptions) -> pathlib.Path:
             code_style=options.code_style,
             where_field="**File:** `path/to/file.ext:<line>`",
             label=f"{options.stage_name}:{options.model}",
-            raw_path=ctx.session_dir / f"stream-{options.stage_name}-{options.model}.jsonl",
+            raw_path=ctx.session_dir
+            / f"stream-{options.stage_name}-{options.model}.jsonl",
         )
         set_stage(ctx.gr_id, options.stage_name, {"model": f"done ({options.model})"})
         if not out_file.exists() or out_file.stat().st_size == 0:
