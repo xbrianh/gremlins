@@ -136,6 +136,52 @@ We accept the exception because the alternatives are worse and the set
 is closed: exactly two stages, both deterministic-check-plus-fixer, and
 we don't expect a third.
 
+### 2.3 Bail as a control-flow channel
+
+A stage can halt the pipeline two ways. The first is to raise:
+`runner.run_stages` does not catch, so any unhandled exception ends the
+run. The second is to call `state.emit_bail`, which writes a
+`bail_class` (and optional `bail_detail`) to `state.json`.
+
+The two routes do different jobs:
+
+- **Raising** is for ordinary stage failure. The traceback goes to the
+  log; the operator reads it and decides what to do.
+- **`emit_bail`** records a *structured*, *persistent* halt reason.
+  `bail_class` is one of a small set of byte-stable strings
+  (`reviewer_requested_changes`, `security`, `secrets`, `other`);
+  `bail_detail` is a one-line human note. Both live in `state.json`
+  after the process exits.
+
+The persistence is the point. `bail_class` is read by the rescue
+protocol (§4.3), the fleet manager, the boss recovery table, and shell
+hooks — exactly the cross-process consumers §2 says we serve with
+byte-stable strings rather than prose. A stage that only raises tells a
+human; a stage that calls `emit_bail` first also tells a *script*.
+
+`emit_bail` does not itself halt the pipeline. It writes the marker and
+returns; the caller raises immediately afterward, or an in-stage agent
+invokes `python -m gremlins.bail` and the stage's normal exit-code
+handling raises on its behalf. The pairing — write the marker, then
+raise — is the pattern. The marker outlives the raise.
+
+`state.check_bail` is the read side. It raises `RuntimeError` if
+`state.json` already has a `bail_class` recorded. It is called at the
+*entry* of stages that follow a soft-failure point — `ghaddress` and
+`ghreview` call it before posting anything to GitHub, and the
+self-healing stages (§2.2) call it inside the retry loop after each
+fixer agent runs, so an agent that bails via `python -m gremlins.bail`
+halts the loop without the stage having to inspect agent output.
+`run_stages` itself does not call `check_bail`; it doesn't need to,
+because every emitter that wants the pipeline to stop also raises.
+
+Why not replace this with a typed exception the orchestrator catches?
+Because a typed exception is process-local, and by the time the rescue
+protocol runs, the original process is gone. The bail class has to
+survive the process boundary, and `state.json` is already the
+cross-process contract for everything else about a gremlin. A typed
+exception would duplicate that channel without replacing it.
+
 ## 3. Context management
 
 Context is the central design constraint. The cheapest, most reliable, and
