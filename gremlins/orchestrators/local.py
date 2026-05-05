@@ -52,13 +52,18 @@ def die(msg: str) -> NoReturn:
 
 
 def _resolve_stage_client(
-    entry: StageEntry, pipeline: Pipeline, default_client: ClaudeClient
+    entry: StageEntry,
+    pipeline: Pipeline,
+    cli_override: ClaudeClient | None,
+    fallback: ClaudeClient,
 ) -> ClaudeClient:
     if entry.client is not None:
         return entry.client
+    if cli_override is not None:
+        return cli_override
     if pipeline.default_client is not None:
         return pipeline.default_client
-    return default_client
+    return fallback
 
 
 def _parse_local_args(argv: list[str]) -> argparse.Namespace:
@@ -276,12 +281,14 @@ def local_main(
     configure_logging()
     args = _parse_local_args(argv)
 
-    effective_client: ClaudeClient = client or SubprocessClaudeClient()
+    base_client: ClaudeClient = client or SubprocessClaudeClient()
+    cli_client: ClaudeClient | None = None
     if args.client:
         try:
-            effective_client = parse_client_specifier(args.client)
+            cli_client = parse_client_specifier(args.client)
         except ValueError as exc:
             die(str(exc))
+    effective_client = cli_client or base_client
     install_signal_handlers(effective_client)
     if os.environ.get("GREMLINS_TEST_NOOP_PIPELINE"):
         return 0
@@ -437,7 +444,7 @@ def local_main(
                 child_dir = group_dir / child.name
                 child_dir.mkdir(parents=True, exist_ok=True)
                 child_ctx = StageContext(
-                    client=_resolve_stage_client(child, pipeline, effective_client),
+                    client=_resolve_stage_client(child, pipeline, cli_client, base_client),
                     session_dir=child_dir,
                     gr_id=gr_id,
                 )
@@ -472,7 +479,7 @@ def local_main(
             )
         else:
             stage_ctx = StageContext(
-                client=_resolve_stage_client(e, pipeline, effective_client),
+                client=_resolve_stage_client(e, pipeline, cli_client, base_client),
                 session_dir=session_dir,
                 gr_id=gr_id,
             )

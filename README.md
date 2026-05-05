@@ -81,7 +81,7 @@ the module docstring at the top of [`gremlins/cli.py`](gremlins/cli.py).
 | `--cmd <command>` | — | Verification command; may be repeated for multiple commands |
 | `--test-max-attempts <n>` | `3` | Maximum test-fix retry attempts (must be ≥ 1) |
 | `--pipeline <name-or-path>` | `local` | Pipeline to run (see Pipeline configuration) |
-| `--client <provider:model>` | — | Override the client for all stages (e.g. `claude:sonnet`, `copilot:gpt-5.4`) |
+| `--client <provider:model>` | — | Override the pipeline-level default client (per-stage `client:` in YAML still takes precedence; e.g. `claude:sonnet`, `copilot:gpt-5.4`) |
 
 #### `launch gh` flags
 
@@ -91,7 +91,7 @@ the module docstring at the top of [`gremlins/cli.py`](gremlins/cli.py).
 | `--model <model>` | — | Override the default model for all stages |
 | `--resume-from <stage>` | — | Resume from the named stage instead of starting over |
 | `--pipeline <name-or-path>` | `gh` | Pipeline to run (see Pipeline configuration) |
-| `--client <provider:model>` | — | Override the client for all stages (e.g. `claude:sonnet`, `copilot:gpt-5.4`) |
+| `--client <provider:model>` | — | Override the pipeline-level default client (per-stage `client:` in YAML still takes precedence; e.g. `claude:sonnet`, `copilot:gpt-5.4`) |
 
 #### `launch boss` flags
 
@@ -167,7 +167,7 @@ stages:
 
 **`provider:model` format:**
 
-Providers: `claude` (default), `copilot`. The model part is optional — `claude:` and `claude:sonnet` are both valid. Examples: `claude:sonnet`, `copilot:gpt-5.4`, `claude:`. Per-stage `client:` in YAML overrides the CLI `--client` flag.
+Providers: `claude` (default), `copilot`. The model part is optional — `claude:` and `claude:sonnet` are both valid. Examples: `claude:sonnet`, `copilot:gpt-5.4`, `claude:`. Per-stage `client:` in YAML takes precedence over the CLI `--client` flag; `default_client:` at the pipeline level does not.
 
 **Parallel-group form:**
 
@@ -176,10 +176,10 @@ Providers: `claude` (default), `copilot`. The model part is optional — `claude
   parallel:
     - name: review-detail
       type: review-code
-      client: claude_sonnet
+      client: claude:sonnet
     - name: review-security
       type: review-code
-      client: claude_sonnet
+      client: claude:sonnet
   max_concurrent: 2         # optional; defaults to all children at once
 ```
 
@@ -203,7 +203,7 @@ stages:
     client: copilot:gpt-5.4       # this stage uses copilot instead
 ```
 
-Providers: `claude`, `copilot`. The CLI `--client provider:model` flag sets a fallback used when neither the stage nor the pipeline YAML specifies a client.
+Providers: `claude`, `copilot`. The CLI `--client provider:model` flag overrides the pipeline-level `default_client:` but yields to per-stage `client:` settings.
 
 ### `prompt:` field
 
