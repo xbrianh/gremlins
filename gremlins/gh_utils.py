@@ -106,6 +106,7 @@ def extract_gh_url(
     url_pattern: str,
     cmd_pattern: str,
     label: str,
+    text_result: str | None = None,
 ) -> str:
     """Extract a GitHub URL from a claude stream-json event list.
 
@@ -167,6 +168,11 @@ def extract_gh_url(
             matches = re.findall(url_pattern, result_text)
             if matches:
                 return matches[-1]
+
+    if text_result:
+        matches = re.findall(url_pattern, text_result)
+        if matches:
+            return matches[-1]
 
     raise RuntimeError(f"failed to extract {label} URL from claude output events")
 

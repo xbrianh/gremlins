@@ -126,12 +126,12 @@ def run(ctx: StageContext, options: CommitPrOptions) -> str:
         capture_events=True,
     )
 
-    events = completed.events or []
     pr_url = extract_gh_url(
-        events,
+        completed.events or [],
         url_pattern=r"https://github\.com/[^ )]+/pull/[0-9]+",
         cmd_pattern=r"gh pr create",
         label="PR",
+        text_result=completed.text_result,
     )
     return pr_url
 

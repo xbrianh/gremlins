@@ -333,12 +333,12 @@ def _build_stage_runner(
                 raw_path=session_dir / "ghplan-out.jsonl",
                 capture_events=True,
             )
-            events = completed.events or []
             issue_url = extract_gh_url(
-                events,
+                completed.events or [],
                 url_pattern=r"https://github\.com/[^ )]+/issues/[0-9]+",
                 cmd_pattern=r"gh issue create",
                 label="issue",
+                text_result=completed.text_result,
             )
             issue_num = issue_url.split("/")[-1]
             logger.info("issue: %s", issue_url)
