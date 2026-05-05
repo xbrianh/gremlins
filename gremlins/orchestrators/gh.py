@@ -741,6 +741,8 @@ def gh_main(
                     die(f"invalid model in --client specifier: {_m}")
                 specifier_model = _m
         pipeline_model = (pipeline.default_client_spec or "").partition(":")[2] or None
+        if pipeline_model and not MODEL_RE.match(pipeline_model):
+            die(f"invalid model in pipeline default_client_spec: {pipeline_model}")
         model = (
             specifier_model
             or _read_state_field(state_file, "model")

@@ -399,6 +399,8 @@ def local_main(
         die(str(exc))
 
     pipeline_model = (pipeline.default_client_spec or "").partition(":")[2] or None
+    if pipeline_model and not MODEL_RE.match(pipeline_model):
+        die(f"invalid model in pipeline default_client_spec: {pipeline_model}")
     model_default = specifier_model or pipeline_model or "sonnet"
     if args.plan_model is None:
         args.plan_model = model_default
