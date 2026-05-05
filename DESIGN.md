@@ -321,57 +321,68 @@ The cost knobs we *do* use:
 - **Pipeline length.** Adding a stage is adding a fixed cost to every
   gremlin forever. We resist it.
 
-The cost knobs we have *considered and rejected*:
+The cost knobs we have *considered and are not using today*:
 
-### 5.1 Why we reject session-resumption caching
+### 5.1 Why session-resumption caching is out for now
 
-`CompletedRun.session_id` is captured from the `claude -p` stream-json
-output. At one point we thought about threading it back through
-`claude --resume <session_id>` on the next stage, on the theory that
-resuming a session would let Anthropic's prompt cache cover the prior
-context for free.
+We did try this.
 
-We are not going to do this, for reasons that follow directly from §3:
+`CompletedRun.session_id` used to be captured from the `claude -p`
+stream-json output so a later stage could call
+`claude --resume <session_id>`. The idea was straightforward: if two
+stages ran back-to-back, Anthropic's prompt cache might make the second
+stage cheaper because the first stage had already paid to build context.
 
-1. **Stages don't share enough context to amortize.** The strongest
-   candidate edge is `review-code → address-code`, where address would
-   inherit review's file reads and findings. The rest of the pipeline
-   either doesn't run back-to-back (verify, wait-copilot, wait-ci, CI
-   gates) or doesn't share enough with the previous stage to matter
-   (implement → review-code mutates the very files the previous stage
-   read).
+What we learned is not "session continuation is fundamentally wrong."
+What we learned is that this implementation sat in an awkward spot in
+this design.
 
-2. **The plan→implement edge is out-of-band in our workflow.** Plans are
-   typically authored interactively in a separate session and dropped onto
-   a gremlin via `--plan` or via an issue. The two stages are separated by
-   minutes to hours, not seconds, so the prompt cache is cold by the time
-   `implement` runs and the win evaporates.
+1. **Too few stage edges benefited.** The strongest candidate edge was
+   `review-code → address-code`, where address could plausibly reuse
+   review's reads and findings. Most other edges either do not run
+   back-to-back (`verify`, `wait-copilot`, `wait-ci`, CI gates) or do
+   not preserve enough useful context to matter (`implement → review-code`
+   rereads a tree that implement just changed).
 
-3. **One edge isn't worth the wiring.** Threading `session_id` through
-   `ClaudeClient.run`, the stage context, and resume semantics costs us
-   permanent complexity in a layer we want to keep simple. The win on a
-   single edge is small and only realized when the two stages run within
-   the cache TTL — which is exactly the case where exploration cost is
-   already small because the agent hasn't built up much state.
+2. **The best-looking edge in theory is weak in practice.** The
+   `plan → implement` handoff often happens minutes or hours later, with
+   the plan authored interactively and then handed to the gremlin via
+   `--plan` or an issue. That is usually outside the cache window, so the
+   main tempting edge often does not cash out.
 
-4. **It would couple stages we deliberately decoupled.** Resuming a
-   session means the next stage inherits the prior stage's full
-   message history. That is precisely the in-memory-context-sharing we
-   ruled out in §3.1, smuggled in through a different door. Stages that
-   communicate through resumed sessions are no longer independently
-   testable, no longer cleanly resumable, and no longer reasoning about
-   bounded prompts.
+3. **The plumbing cost was permanent.** Supporting continuation meant
+   carrying `session_id` through the client protocol, stage context, and
+   resume semantics while still keeping the cold-start path. That added
+   ongoing complexity to infrastructure we want to stay boring.
 
-5. **Sessions are linear; some of our stages aren't.** Where we do run
-   work in parallel (e.g. multiple review lenses, in pipelines that
-   support it), a single `session_id` cannot be forked into N concurrent
-   resumes. Any session-caching scheme would apply to a strict subset of
-   stage edges and would have to coexist with the cold-start path
-   anyway.
+4. **It weakened the stage boundary in exactly the way §3 tries to
+   avoid.** A resumed session imports the prior stage's full message
+   history. That is in-memory context sharing through a side door.
+   Once a stage depends on inherited history, `--resume-from` becomes
+   less clean, prompts stop being as bounded, and individual stages are
+   less independently testable.
 
-`CompletedRun.session_id` has since been removed. It was never load-bearing
-and the overhead of carrying it through the protocol outweighed its
-occasional debugging utility.
+5. **It did not compose with the whole pipeline.** Sessions are linear.
+   Some of our pipelines are not. Parallel review lenses and any future
+   fan-out stages still need a cold-start path, because one session
+   cannot be resumed into multiple concurrent children.
+
+So the current position is: we removed `CompletedRun.session_id` and are
+not pursuing session-resumption caching in the current implementation.
+That is a "not now" decision, not a permanent design taboo.
+
+If we ever reopen it, the bar should be concrete:
+
+1. Measured evidence that a specific stage edge is a real cost hot spot.
+2. A continuation model that preserves the clean cold-start and
+   `--resume-from` paths.
+3. A clear answer for which edges may share history and which must stay
+   isolated.
+4. A story for parallel stages, or an explicit decision that the feature
+   only applies to a narrow sequential subset.
+
+Until then, the simpler rule wins: stages communicate through explicit
+artifacts, not inherited session history.
 
 ### 5.2 What we'd do instead, if cost became a problem
 
