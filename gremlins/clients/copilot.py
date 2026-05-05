@@ -76,6 +76,7 @@ class SubprocessCopilotClient:
     def _spawn(self, argv: list[str]) -> subprocess.Popen[bytes]:
         p = subprocess.Popen(
             argv,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=None,
             start_new_session=False,

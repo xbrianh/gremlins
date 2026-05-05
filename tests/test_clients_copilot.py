@@ -88,18 +88,20 @@ def test_copilot_client_runs_and_returns_text(tmp_path, monkeypatch):
     assert result.cost_usd is None
 
 
-def test_copilot_client_sends_prompt_via_stdin(tmp_path, monkeypatch):
+def test_copilot_client_sends_prompt_via_argv(tmp_path, monkeypatch):
     bin_dir = tmp_path / "bin"
     _install_stub(bin_dir, _STUB_COPILOT_SRC)
-    stdin_out = tmp_path / "stdin.txt"
+    argv_out = tmp_path / "argv.json"
 
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
-    monkeypatch.setenv("STUB_STDIN_OUT", str(stdin_out))
+    monkeypatch.setenv("STUB_ARGV_OUT", str(argv_out))
 
     client = SubprocessCopilotClient()
     client.run("the prompt", label="test")
 
-    assert stdin_out.read_text(encoding="utf-8") == "the prompt"
+    argv = json.loads(argv_out.read_text(encoding="utf-8"))
+    p_idx = argv.index("-p")
+    assert argv[p_idx + 1] == "the prompt"
 
 
 def test_copilot_client_passes_allow_all_tools_flag(tmp_path, monkeypatch):
