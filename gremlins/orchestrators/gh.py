@@ -655,6 +655,8 @@ def gh_main(
         if args.client and ":" in args.client:
             _, _, _m = args.client.partition(":")
             if _m:
+                if not MODEL_RE.match(_m):
+                    die(f"invalid model in --client specifier: {_m}")
                 specifier_model = _m
         model = specifier_model or _read_state_field(state_file, "model") or "sonnet"
     if model:

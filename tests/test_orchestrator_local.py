@@ -130,10 +130,8 @@ def test_local_main_client_specifier_model(tmp_path, monkeypatch):
         }
     )
 
-    # parse_client_specifier would fail with "unknown provider" in tests because
-    # _ensure_registered() (which imports gremlins.clients) runs inside
-    # load_pipeline, which is called after parse_client_specifier in local_main.
-    # Stub it to return the injected client so all stages use it.
+    # Stub parse_client_specifier so it returns the injected test client rather
+    # than creating a real SubprocessCopilotClient that would replace it.
     monkeypatch.setattr(
         "gremlins.orchestrators.local.parse_client_specifier",
         lambda spec: client,
