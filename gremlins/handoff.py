@@ -21,6 +21,8 @@ import subprocess
 import sys
 from typing import Any, NoReturn, cast
 
+from gremlins.clients.claude import SubprocessClaudeClient
+from gremlins.clients.protocol import ClaudeClient
 from gremlins.logging_setup import configure_logging
 from gremlins.prompts import load_prompts
 
@@ -29,13 +31,6 @@ logger = logging.getLogger(__name__)
 _CODE_STYLE_PATH = (
     pathlib.Path(__file__).resolve().parent / "pipelines" / "prompts" / "code_style.md"
 )
-
-CLAUDE_FLAGS = [
-    "--permission-mode",
-    "bypassPermissions",
-    "--output-format",
-    "text",
-]
 
 
 def die(msg: str) -> NoReturn:
@@ -291,7 +286,9 @@ Do not print the document to stdout. Do not explain what you changed.
 ~~~~"""
 
 
-def sanitize_rolling_plan(out_path: pathlib.Path, timeout: int | None) -> None:
+def sanitize_rolling_plan(
+    client: ClaudeClient, out_path: pathlib.Path, timeout: int | None
+) -> None:
     if not out_path.exists():
         sys.stderr.write(
             f"warning: sanitize skipped — rolling plan not found: {out_path}\n"
@@ -315,21 +312,12 @@ def sanitize_rolling_plan(out_path: pathlib.Path, timeout: int | None) -> None:
             return
         sys.stderr.write(f"warning: {reason} — restored original rolling plan\n")
 
-    sanitize_timeout = min(timeout, 60) if timeout is not None else 60
     prompt = build_sanitize_prompt(plan_text, out_path)
-    cmd = ["claude", "-p", "--model", "haiku", *CLAUDE_FLAGS, prompt]
     logger.info("sanitizing rolling plan")
     try:
-        result = subprocess.run(
-            cmd, timeout=sanitize_timeout, capture_output=True, text=True
-        )
-    except subprocess.TimeoutExpired:
-        restore_original("sanitize pass timed out")
-        return
-    if result.stderr:
-        sys.stderr.write(f"warning: sanitize stderr:\n{result.stderr}")
-    if result.returncode != 0:
-        restore_original(f"sanitize pass exited {result.returncode}")
+        client.run(prompt, label="handoff:sanitize", model="haiku")
+    except RuntimeError as exc:
+        restore_original(f"sanitize pass failed: {exc}")
         return
     try:
         sanitized_text = out_path.read_text(encoding="utf-8")
@@ -369,13 +357,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: list[str]) -> int:
-    configure_logging()
-    args = parse_args(argv)
-
-    if shutil.which("claude") is None:
-        die("claude CLI not found")
-
+def run(client: ClaudeClient, args: argparse.Namespace) -> int:
+    """Run handoff agent with the given ClaudeClient. Returns exit code."""
     plan_path = pathlib.Path(args.plan).resolve()
     if not plan_path.exists():
         die(f"--plan does not exist: {plan_path}")
@@ -458,15 +441,11 @@ def main(argv: list[str]) -> int:
         code_style=code_style,
     )
 
-    cmd = ["claude", "-p", "--model", args.model, *CLAUDE_FLAGS, prompt]
     logger.info("running handoff agent (model: %s)", args.model)
     try:
-        result = subprocess.run(cmd, timeout=args.timeout)
-    except subprocess.TimeoutExpired:
-        sys.stderr.write(f"error: handoff agent timed out after {args.timeout}s\n")
-        return 1
-    if result.returncode != 0:
-        sys.stderr.write(f"error: claude -p exited {result.returncode}\n")
+        client.run(prompt, label="handoff:main", model=args.model)
+    except RuntimeError as exc:
+        sys.stderr.write(f"error: {exc}\n")
         return 1
 
     if not signal_path.exists():
@@ -522,8 +501,19 @@ def main(argv: list[str]) -> int:
         for item in followups:
             logger.info("  - %s", item)
 
-    sanitize_rolling_plan(out_path, args.timeout)
+    sanitize_rolling_plan(client, out_path, args.timeout)
     return 0
+
+
+def main(argv: list[str]) -> int:
+    configure_logging()
+    args = parse_args(argv)
+
+    if shutil.which("claude") is None:
+        die("claude CLI not found")
+
+    client = SubprocessClaudeClient()
+    return run(client, args)
 
 
 if __name__ == "__main__":

@@ -29,6 +29,9 @@ import types
 from typing import Any, NoReturn, cast
 
 from .. import git as _git_mod
+from .. import handoff as _handoff_mod
+from ..clients.claude import SubprocessClaudeClient
+from ..clients.protocol import ClaudeClient
 from ..gh_utils import get_repo, parse_issue_ref, view_issue
 from ..launcher import launch as _launch
 from ..logging_setup import configure_logging
@@ -270,6 +273,7 @@ def save_boss_state(state_dir: str, boss_state: dict[str, Any]) -> None:
 
 
 def run_handoff(
+    client: ClaudeClient,
     gr_id: str,
     state_dir: str,
     boss_state: dict[str, Any],
@@ -298,14 +302,13 @@ def run_handoff(
     chain_kind = boss_state.get("chain_kind")
     target_branch = boss_state.get("target_branch", "")
 
-    rev_args: list[str] = []
-    rev_label: str = ""
     handoff_cwd: str = ""
     if chain_kind == "local":
         if not boss_workdir or not os.path.isdir(boss_workdir):
             die(f"boss workdir not usable for local chain handoff: {boss_workdir!r}")
         handoff_cwd = boss_workdir
         rev_label = "HEAD"
+        rev_val = None
     elif chain_kind == "gh":
         if not target_branch:
             die("gh chain has no target branch — cannot resolve remote ref for handoff")
@@ -315,7 +318,7 @@ def run_handoff(
         fetch_origin_branch(project_root, target_branch, context="before handoff")
         handoff_cwd = project_root
         rev_label = f"origin/{target_branch}"
-        rev_args = ["--rev", rev_label]
+        rev_val = rev_label
     else:
         die(f"unknown chain_kind: {chain_kind!r}")
 
@@ -333,25 +336,25 @@ def run_handoff(
         rev_label,
         handoff_cwd,
     )
-    spec_args = ["--spec", spec_path] if forward_spec else []
-    cmd = [
-        sys.executable,
-        "-m",
-        "gremlins.handoff",
-        "--plan",
-        current_plan,
-        *spec_args,
-        "--out",
-        out_path,
-        "--base",
-        base_ref,
-        "--model",
-        model,
-        "--timeout",
-        str(HANDOFF_TIMEOUT),
-        *rev_args,
-    ]
-    rc = run_proc(cmd, cwd=handoff_cwd, env=_gremlins_cli_env())
+
+    # Switch to handoff_cwd before calling handoff.run() so git operations
+    # resolve refs correctly
+    saved_cwd = os.getcwd()
+    try:
+        os.chdir(handoff_cwd)
+        args = argparse.Namespace(
+            plan=current_plan,
+            spec=spec_path if forward_spec else None,
+            out=out_path,
+            base=base_ref,
+            model=model,
+            timeout=HANDOFF_TIMEOUT,
+            rev=rev_val,
+        )
+        rc = _handoff_mod.run(client, args)
+    finally:
+        os.chdir(saved_cwd)
+
     check_stop()
 
     if rc != 0:
@@ -776,7 +779,9 @@ def _maybe_set_description_from_spec(
         patch_state(gr_id, description=h1)
 
 
-def boss_main(argv: list[str], *, gr_id: str | None = None) -> int:
+def boss_main(
+    argv: list[str], *, gr_id: str | None = None, client: ClaudeClient | None = None
+) -> int:
     configure_logging()
     signal.signal(signal.SIGTERM, _sigterm_handler)
     args = _parse_boss_args(argv)
@@ -797,6 +802,9 @@ def boss_main(argv: list[str], *, gr_id: str | None = None) -> int:
     if not project_root or not os.path.isdir(project_root):
         die(f"project_root not usable: {project_root!r}")
     boss_workdir = gremlin_state.get("workdir", "")
+
+    if client is None:
+        client = SubprocessClaudeClient()
 
     chain_kind = args.chain_kind
     launch_kind = {"local": "localgremlin", "gh": "ghgremlin"}[chain_kind]
@@ -913,6 +921,7 @@ def boss_main(argv: list[str], *, gr_id: str | None = None) -> int:
         if current_child_id is None:
             # Step 1: run handoff to decide what to do next
             exit_state, sig = run_handoff(
+                client=client,
                 gr_id=gr_id,
                 state_dir=state_dir,
                 boss_state=boss_state,

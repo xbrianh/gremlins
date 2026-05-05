@@ -2,11 +2,11 @@
 
 import json
 import pathlib
-import subprocess
 
 import pytest
 
 from gremlins import handoff
+from gremlins.clients.fake import FakeClaudeClient
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 
@@ -258,12 +258,10 @@ def _stub_happy_main(
 ):
     """Set up a happy-path main() that writes the given signal payload.
 
-    If `child_plan_text` is given, the fake claude run also writes the
-    child plan file to whatever path the prompt says it should go to.
+    If `child_plan_text` is given, the fake client writes the child plan file.
     Returns the plan path so the caller can pass it to handoff.main.
 
-    The first subprocess.run call is the main agent (writes sig_path and
-    out_path); the second call is the sanitize pass (treated as a no-op).
+    Uses FakeClaudeClient with recorded events for main and sanitize passes.
     """
     plan_path = tmp_path / "plan.md"
     plan_path.write_text("# Plan\nTasks\n- [ ] thing\n")
@@ -279,24 +277,34 @@ def _stub_happy_main(
     sig_path = out_path.parent / (out_path.stem + ".state.json")
     child_path = out_path.parent / (out_path.stem + "-child" + out_path.suffix)
 
-    call_count = [0]
+    # Create fake events that write the expected files
+    def make_fake_client():
+        class FakeClientWithSideEffects(FakeClaudeClient):
+            def run(self, prompt, *, label, model=None, **kwargs):
+                # First call (main agent) writes signal and output files
+                if label == "handoff:main":
+                    if claude_timeout:
+                        raise RuntimeError("handoff agent timed out")
+                    if claude_returncode != 0:
+                        raise RuntimeError(f"claude -p exited {claude_returncode}")
+                    sig_path.write_text(json.dumps(signal_payload))
+                    out_path.write_text("# Rolling plan (stub)\n")
+                    if child_plan_text is not None:
+                        child_path.write_text(child_plan_text)
+                # Second call (sanitize) is a no-op
+                return super().run(prompt, label=label, model=model, **kwargs)
 
-    def fake_run(cmd, **kwargs):
-        if claude_timeout:
-            raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout") or 1)
-        call_count[0] += 1
-        if call_count[0] == 1:
-            # Main agent call
-            if claude_returncode == 0:
-                sig_path.write_text(json.dumps(signal_payload))
-                out_path.write_text("# Rolling plan (stub)\n")
-                if child_plan_text is not None:
-                    child_path.write_text(child_plan_text)
-            return subprocess.CompletedProcess(args=cmd, returncode=claude_returncode)
-        # Second call is the sanitize pass — no-op
-        return subprocess.CompletedProcess(args=cmd, returncode=0)
+        return FakeClientWithSideEffects(
+            fixtures={
+                "handoff:main": [{"type": "result", "result": "ok", "cost_usd": 0.0}],
+                "handoff:sanitize": [
+                    {"type": "result", "result": "ok", "cost_usd": 0.0}
+                ],
+            }
+        )
 
-    monkeypatch.setattr(handoff.subprocess, "run", fake_run)
+    fake_client = make_fake_client()
+    monkeypatch.setattr(handoff, "SubprocessClaudeClient", lambda: fake_client)
     return plan_path, sig_path, child_path
 
 
@@ -319,46 +327,25 @@ def test_main_chain_done_signal(monkeypatch, tmp_path, capsys):
 
 
 def test_main_next_plan_signal(monkeypatch, tmp_path, capsys):
+    child_plan_text = "# Next step\n"
     plan_path, sig_path, child_path = _stub_happy_main(
         monkeypatch,
         tmp_path,
         {
             "exit_state": "next-plan",
-            "child_plan": None,  # filled in by the fake_run write below
+            "child_plan": str(tmp_path / "plan-001-child.md"),
             "reason": None,
             "operator_followups": [],
         },
-        child_plan_text="# Next step\n",
+        child_plan_text=child_plan_text,
     )
-    # Patch the signal payload to point at the child plan path the wrapper expects.
-    payload = {
-        "exit_state": "next-plan",
-        "child_plan": str(child_path),
-        "reason": None,
-        "operator_followups": [],
-    }
-    out_path = handoff.auto_name_out(plan_path)
-    call_count2 = [0]
-
-    def fake_run2(cmd, **kw):
-        call_count2[0] += 1
-        if call_count2[0] == 1:
-            sig_path.write_text(json.dumps(payload))
-            child_path.write_text("# Child\n")
-            out_path.write_text("# Rolling plan\n")
-        return subprocess.CompletedProcess(args=cmd, returncode=0)
-
-    monkeypatch.setattr(
-        handoff, "collect_git_context", lambda base_ref, rev=None: ("b", "", "")
-    )
-    monkeypatch.setattr(handoff.subprocess, "run", fake_run2)
-
     rc = handoff.main(["--plan", str(plan_path)])
     assert rc == 0
     out = capsys.readouterr().out
     assert "handoff complete: next-plan" in out
     assert "child plan:" in out
     assert child_path.exists()
+    assert child_path.read_text() == child_plan_text
 
 
 def test_main_bail_signal(monkeypatch, tmp_path, capsys):
@@ -387,11 +374,12 @@ def test_main_signal_file_not_written(monkeypatch, tmp_path, capsys):
         handoff, "collect_git_context", lambda base_ref, rev=None: ("b", "", "")
     )
     # claude returns success but writes no signal file
-    monkeypatch.setattr(
-        handoff.subprocess,
-        "run",
-        lambda cmd, **kw: subprocess.CompletedProcess(args=cmd, returncode=0),
+    fake_client = FakeClaudeClient(
+        fixtures={
+            "handoff:main": [{"type": "result", "result": "ok", "cost_usd": 0.0}],
+        }
     )
+    monkeypatch.setattr(handoff, "SubprocessClaudeClient", lambda: fake_client)
     rc = handoff.main(["--plan", str(plan_path)])
     assert rc == 1
     err = capsys.readouterr().err
@@ -399,16 +387,28 @@ def test_main_signal_file_not_written(monkeypatch, tmp_path, capsys):
 
 
 def test_main_signal_file_invalid_json(monkeypatch, tmp_path, capsys):
-    plan_path, sig_path, _ = _stub_happy_main(monkeypatch, tmp_path, {})
-    # Overwrite with garbage
+    plan_path = tmp_path / "plan.md"
+    plan_path.write_text("# Plan\n")
+    monkeypatch.setattr(handoff.shutil, "which", lambda n: "/fake/claude")
     monkeypatch.setattr(
-        handoff.subprocess,
-        "run",
-        lambda cmd, **kw: (
-            sig_path.write_text("not json"),
-            subprocess.CompletedProcess(args=cmd, returncode=0),
-        )[-1],
+        handoff, "collect_git_context", lambda base_ref, rev=None: ("b", "", "")
     )
+
+    out_path = handoff.auto_name_out(plan_path)
+    sig_path = out_path.parent / (out_path.stem + ".state.json")
+
+    class FakeClientInvalidJSON(FakeClaudeClient):
+        def run(self, prompt, *, label, model=None, **kwargs):
+            if label == "handoff:main":
+                sig_path.write_text("not json")
+            return super().run(prompt, label=label, model=model, **kwargs)
+
+    fake_client = FakeClientInvalidJSON(
+        fixtures={
+            "handoff:main": [{"type": "result", "result": "ok", "cost_usd": 0.0}],
+        }
+    )
+    monkeypatch.setattr(handoff, "SubprocessClaudeClient", lambda: fake_client)
     rc = handoff.main(["--plan", str(plan_path)])
     assert rc == 1
     err = capsys.readouterr().err
@@ -558,12 +558,18 @@ def test_sanitize_rolling_plan_rewrites_file(monkeypatch, tmp_path):
     out_path.write_text("# Bad Plan\nPhases 0–3 have landed.\n- [ ] remaining task\n")
     cleaned = "# Remaining Work\n- [ ] remaining task\n"
 
-    def fake_run(cmd, **kwargs):
-        out_path.write_text(cleaned)
-        return subprocess.CompletedProcess(args=cmd, returncode=0)
+    class FakeClientSanitize(FakeClaudeClient):
+        def run(self, prompt, *, label, model=None, **kwargs):
+            if label == "handoff:sanitize":
+                out_path.write_text(cleaned)
+            return super().run(prompt, label=label, model=model, **kwargs)
 
-    monkeypatch.setattr(handoff.subprocess, "run", fake_run)
-    handoff.sanitize_rolling_plan(out_path, timeout=None)
+    fake_client = FakeClientSanitize(
+        fixtures={
+            "handoff:sanitize": [{"type": "result", "result": "ok", "cost_usd": 0.0}],
+        }
+    )
+    handoff.sanitize_rolling_plan(fake_client, out_path, timeout=None)
     assert out_path.read_text() == cleaned
 
 
@@ -584,18 +590,24 @@ def test_sanitize_rolling_plan_nonzero_is_nonfatal(monkeypatch, tmp_path, capsys
         "operator_followups": [],
     }
 
-    call_count = [0]
+    class FakeClientSanitizeFails(FakeClaudeClient):
+        def run(self, prompt, *, label, model=None, **kwargs):
+            if label == "handoff:main":
+                sig_path.write_text(json.dumps(payload))
+                out_path.write_text("# Rolling plan\n")
+            elif label == "handoff:sanitize":
+                raise RuntimeError(
+                    "claude -p (model=haiku, label=handoff:sanitize) exited 1"
+                )
+            return super().run(prompt, label=label, model=model, **kwargs)
 
-    def fake_run(cmd, **kwargs):
-        call_count[0] += 1
-        if call_count[0] == 1:
-            sig_path.write_text(json.dumps(payload))
-            out_path.write_text("# Rolling plan\n")
-            return subprocess.CompletedProcess(args=cmd, returncode=0)
-        # Sanitize pass — return non-zero
-        return subprocess.CompletedProcess(args=cmd, returncode=1)
-
-    monkeypatch.setattr(handoff.subprocess, "run", fake_run)
+    fake_client = FakeClientSanitizeFails(
+        fixtures={
+            "handoff:main": [{"type": "result", "result": "ok", "cost_usd": 0.0}],
+            "handoff:sanitize": [{"type": "result", "result": "ok", "cost_usd": 0.0}],
+        }
+    )
+    monkeypatch.setattr(handoff, "SubprocessClaudeClient", lambda: fake_client)
     rc = handoff.main(["--plan", str(plan_path)])
     assert rc == 0
     err = capsys.readouterr().err

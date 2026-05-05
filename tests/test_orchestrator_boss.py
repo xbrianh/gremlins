@@ -11,6 +11,7 @@ import pytest
 
 import gremlins.git as git_mod
 import gremlins.orchestrators.boss as boss_mod
+from gremlins.clients.fake import FakeClaudeClient
 from gremlins.orchestrators.boss import (
     _resolve_plan_source,
     _summarize_for_log,
@@ -68,6 +69,32 @@ def _common_boss_patches(monkeypatch, tmp_path, gr_id):
         git_mod,
         "git_head_of_workdir",
         lambda w: "aaaa1111bbbb2222cccc3333dddd4444eeee5555",
+    )
+
+
+def _make_handoff_client(
+    *,
+    signal_path: pathlib.Path,
+    out_path: pathlib.Path,
+    child_path: pathlib.Path,
+    signal_payload: dict[str, object],
+    rolling_plan_text: str = "# Rolling plan\n",
+    child_plan_text: str = "# Child plan\n",
+):
+    class HandoffClient(FakeClaudeClient):
+        def run(self, prompt, *, label, model=None, **kwargs):
+            if label == "handoff:main":
+                signal_path.write_text(json.dumps(signal_payload))
+                out_path.write_text(rolling_plan_text)
+                if signal_payload.get("child_plan"):
+                    child_path.write_text(child_plan_text)
+            return super().run(prompt, label=label, model=model, **kwargs)
+
+    return HandoffClient(
+        fixtures={
+            "handoff:main": [{"type": "result", "result": "ok", "cost_usd": 0.0}],
+            "handoff:sanitize": [{"type": "result", "result": "ok", "cost_usd": 0.0}],
+        }
     )
 
 
@@ -267,6 +294,142 @@ def test_resume_fixture_handoff_exit_states():
 # ---------------------------------------------------------------------------
 
 
+def test_run_handoff_local_uses_in_process_client(tmp_path, monkeypatch):
+    gr_id = "test-boss-handoff-local-aa1122"
+    state_dir, project_root, workdir = _make_gremlin_state(tmp_path, gr_id)
+
+    spec = tmp_path / "spec.md"
+    spec.write_text("# Spec\n")
+    boss_state = init_boss_state(
+        spec_path=str(spec),
+        chain_kind="local",
+        chain_base_ref="base1234567890",
+        target_branch="main",
+        state_dir=str(state_dir),
+    )
+
+    out_path = state_dir / "handoff-001.md"
+    signal_path = state_dir / "handoff-001.state.json"
+    child_path = state_dir / "handoff-001-child.md"
+    client = _make_handoff_client(
+        signal_path=signal_path,
+        out_path=out_path,
+        child_path=child_path,
+        signal_payload={
+            "exit_state": "next-plan",
+            "child_plan": str(child_path),
+            "operator_followups": ["verify docs"],
+        },
+    )
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(boss_mod, "set_stage", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        boss_mod._handoff_mod,
+        "collect_git_context",
+        lambda base_ref, rev=None: (
+            captured.update({"base_ref": base_ref, "rev": rev, "cwd": os.getcwd()})
+            or ("boss-branch", "log", "diff")
+        ),
+    )
+    monkeypatch.setattr(boss_mod._handoff_mod, "load_prompts", lambda paths: "")
+
+    starting_cwd = os.getcwd()
+    exit_state, sig = boss_mod.run_handoff(
+        client=client,
+        gr_id=gr_id,
+        state_dir=str(state_dir),
+        boss_state=boss_state,
+        project_root=str(project_root),
+        boss_workdir=str(workdir),
+        model="sonnet",
+    )
+
+    assert exit_state == "next-plan"
+    assert sig["child_plan"] == str(child_path)
+    assert captured == {
+        "base_ref": "base1234567890",
+        "rev": None,
+        "cwd": str(workdir),
+    }
+    assert os.getcwd() == starting_cwd
+    assert [call.label for call in client.calls] == ["handoff:main", "handoff:sanitize"]
+    assert [call.model for call in client.calls] == ["sonnet", "haiku"]
+    assert boss_state["handoff_count"] == 1
+    assert boss_state["current_plan"] == str(out_path)
+    assert boss_state["operator_followups"] == ["verify docs"]
+
+
+def test_run_handoff_gh_uses_origin_target_branch(tmp_path, monkeypatch):
+    gr_id = "test-boss-handoff-gh-bb3344"
+    state_dir, project_root, workdir = _make_gremlin_state(tmp_path, gr_id)
+
+    spec = tmp_path / "spec.md"
+    spec.write_text("# Spec\n")
+    boss_state = init_boss_state(
+        spec_path=str(spec),
+        chain_kind="gh",
+        chain_base_ref="base1234567890",
+        target_branch="feature-branch",
+        state_dir=str(state_dir),
+    )
+
+    out_path = state_dir / "handoff-001.md"
+    signal_path = state_dir / "handoff-001.state.json"
+    child_path = state_dir / "handoff-001-child.md"
+    client = _make_handoff_client(
+        signal_path=signal_path,
+        out_path=out_path,
+        child_path=child_path,
+        signal_payload={
+            "exit_state": "chain-done",
+            "child_plan": None,
+            "operator_followups": [],
+        },
+    )
+
+    fetch_calls: list[tuple[str, str, str]] = []
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(boss_mod, "set_stage", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        boss_mod,
+        "fetch_origin_branch",
+        lambda root, branch, *, context: fetch_calls.append((root, branch, context)),
+    )
+    monkeypatch.setattr(
+        boss_mod._handoff_mod,
+        "collect_git_context",
+        lambda base_ref, rev=None: (
+            captured.update({"base_ref": base_ref, "rev": rev, "cwd": os.getcwd()})
+            or ("origin/feature-branch", "log", "diff")
+        ),
+    )
+    monkeypatch.setattr(boss_mod._handoff_mod, "load_prompts", lambda paths: "")
+
+    exit_state, sig = boss_mod.run_handoff(
+        client=client,
+        gr_id=gr_id,
+        state_dir=str(state_dir),
+        boss_state=boss_state,
+        project_root=str(project_root),
+        boss_workdir=str(workdir),
+        model="haiku",
+    )
+
+    assert exit_state == "chain-done"
+    assert sig["exit_state"] == "chain-done"
+    assert fetch_calls == [
+        (str(project_root), "feature-branch", "before handoff"),
+    ]
+    assert captured == {
+        "base_ref": "base1234567890",
+        "rev": "origin/feature-branch",
+        "cwd": str(project_root),
+    }
+    assert [call.label for call in client.calls] == ["handoff:main", "handoff:sanitize"]
+    assert [call.model for call in client.calls] == ["haiku", "haiku"]
+
+
 def test_chain_done_after_one_child(tmp_path, monkeypatch):
     """Boss completes: handoff1→next-plan, child runs and lands, handoff2→chain-done."""
     gr_id = "test-boss-aabb12"
@@ -294,7 +457,7 @@ def test_chain_done_after_one_child(tmp_path, monkeypatch):
     )
 
     def fake_run_handoff(
-        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+        client, gr_id, state_dir, boss_state, project_root, boss_workdir, model
     ):
         exit_state, sig = next(handoff_results)
         n = boss_state["handoff_count"] + 1
@@ -382,7 +545,7 @@ def test_chain_uses_ghgremlin_for_gh_kind(tmp_path, monkeypatch):
     )
 
     def fake_run_handoff(
-        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+        client, gr_id, state_dir, boss_state, project_root, boss_workdir, model
     ):
         exit_state, sig = next(handoff_results)
         n = boss_state["handoff_count"] + 1
@@ -434,7 +597,7 @@ def test_chain_bail_on_handoff(tmp_path, monkeypatch):
     spec.write_text("# Spec\n")
 
     def fake_run_handoff(
-        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+        client, gr_id, state_dir, boss_state, project_root, boss_workdir, model
     ):
         n = boss_state["handoff_count"] + 1
         out_path = os.path.join(state_dir, f"handoff-{n:03d}.md")
@@ -505,7 +668,7 @@ def test_operator_followups_stored_in_boss_state(tmp_path, monkeypatch):
     )
 
     def fake_run_handoff(
-        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+        client, gr_id, state_dir, boss_state, project_root, boss_workdir, model
     ):
         exit_state, sig = next(handoff_results)
         n = boss_state["handoff_count"] + 1
@@ -593,7 +756,7 @@ def test_resume_picks_up_in_flight_child(tmp_path, monkeypatch):
     calls = []
 
     def fake_run_handoff(
-        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+        client, gr_id, state_dir, boss_state, project_root, boss_workdir, model
     ):
         n = boss_state["handoff_count"] + 1
         out_path = os.path.join(state_dir, f"handoff-{n:03d}.md")
@@ -660,7 +823,7 @@ def test_resume_fixture_in_boss_main(tmp_path, monkeypatch):
     calls = []
 
     def fake_run_handoff(
-        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+        client, gr_id, state_dir, boss_state, project_root, boss_workdir, model
     ):
         n = boss_state["handoff_count"] + 1
         out_path = os.path.join(state_dir, f"handoff-{n:03d}.md")
@@ -744,7 +907,7 @@ def test_rescue_then_land(tmp_path, monkeypatch):
     )
 
     def fake_run_handoff(
-        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+        client, gr_id, state_dir, boss_state, project_root, boss_workdir, model
     ):
         exit_state, sig = next(handoff_results)
         n = boss_state["handoff_count"] + 1
@@ -832,7 +995,7 @@ def test_bail_after_rescue_refused(tmp_path, monkeypatch):
     (child_dir / "finished").write_text("")
 
     def fake_run_handoff(
-        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+        client, gr_id, state_dir, boss_state, project_root, boss_workdir, model
     ):
         n = boss_state["handoff_count"] + 1
         out_path = os.path.join(state_dir, f"handoff-{n:03d}.md")
@@ -1100,7 +1263,7 @@ def test_boss_main_plan_issue_ref_snapshots_spec(tmp_path, monkeypatch):
     # Short-circuit handoff at the very first step so we don't have to mock
     # an entire chain — we just want to verify spec.md and boss_state.json.
     def fake_run_handoff(
-        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+        client, gr_id, state_dir, boss_state, project_root, boss_workdir, model
     ):
         n = boss_state["handoff_count"] + 1
         out_path = os.path.join(state_dir, f"handoff-{n:03d}.md")
@@ -1180,7 +1343,7 @@ def test_land_child_uses_boss_workdir_for_local_chain(tmp_path, monkeypatch):
     )
 
     def fake_run_handoff(
-        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+        client, gr_id, state_dir, boss_state, project_root, boss_workdir, model
     ):
         exit_state, sig = next(handoff_results)
         n = boss_state["handoff_count"] + 1
@@ -1263,7 +1426,7 @@ def test_land_child_no_into_dir_for_gh_chain(tmp_path, monkeypatch):
     )
 
     def fake_run_handoff(
-        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+        client, gr_id, state_dir, boss_state, project_root, boss_workdir, model
     ):
         exit_state, sig = next(handoff_results)
         n = boss_state["handoff_count"] + 1
@@ -1413,7 +1576,7 @@ def test_boss_records_current_head_after_land(tmp_path, monkeypatch):
     )
 
     def fake_run_handoff(
-        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+        client, gr_id, state_dir, boss_state, project_root, boss_workdir, model
     ):
         exit_state, sig = next(handoff_results)
         n = boss_state["handoff_count"] + 1
@@ -1795,7 +1958,7 @@ def _fake_handoff_chain_done(boss_state: dict, state_dir: str, n_offset: int = 0
     """Return a fake_run_handoff that always signals chain-done."""
 
     def fake_run_handoff(
-        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+        client, gr_id, state_dir, boss_state, project_root, boss_workdir, model
     ):
         n = boss_state["handoff_count"] + 1
         out_path = os.path.join(state_dir, f"handoff-{n:03d}.md")
@@ -1837,7 +2000,7 @@ def test_boss_rescue_external_outcome_landed(tmp_path, monkeypatch):
     handoff_calls = []
 
     def fake_run_handoff(
-        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+        client, gr_id, state_dir, boss_state, project_root, boss_workdir, model
     ):
         handoff_calls.append("handoff")
         n = boss_state["handoff_count"] + 1
@@ -1892,7 +2055,7 @@ def test_boss_rescue_external_outcome_abandoned(tmp_path, monkeypatch):
     handoff_calls = []
 
     def fake_run_handoff(
-        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+        client, gr_id, state_dir, boss_state, project_root, boss_workdir, model
     ):
         handoff_calls.append("handoff")
         n = boss_state["handoff_count"] + 1
@@ -1953,7 +2116,7 @@ def test_boss_rescue_child_running_adopts(tmp_path, monkeypatch):
     handoff_calls = []
 
     def fake_run_handoff(
-        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+        client, gr_id, state_dir, boss_state, project_root, boss_workdir, model
     ):
         handoff_calls.append("handoff")
         n = boss_state["handoff_count"] + 1
@@ -2079,7 +2242,7 @@ def test_boss_rescue_mid_wait_skips_classification(tmp_path, monkeypatch):
     handoff_calls = []
 
     def fake_run_handoff(
-        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+        client, gr_id, state_dir, boss_state, project_root, boss_workdir, model
     ):
         handoff_calls.append("handoff")
         n = boss_state["handoff_count"] + 1
@@ -2136,7 +2299,7 @@ def test_integration_ack_flow(tmp_path, monkeypatch):
     handoff_calls = []
 
     def fake_run_handoff(
-        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+        client, gr_id, state_dir, boss_state, project_root, boss_workdir, model
     ):
         handoff_calls.append("handoff")
         n = boss_state["handoff_count"] + 1
@@ -2190,7 +2353,7 @@ def test_integration_skip_flow(tmp_path, monkeypatch):
     handoff_calls = []
 
     def fake_run_handoff(
-        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+        client, gr_id, state_dir, boss_state, project_root, boss_workdir, model
     ):
         handoff_calls.append("handoff")
         n = boss_state["handoff_count"] + 1
@@ -2249,7 +2412,7 @@ def test_integration_resume_flow(tmp_path, monkeypatch):
     handoff_calls = []
 
     def fake_run_handoff(
-        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+        client, gr_id, state_dir, boss_state, project_root, boss_workdir, model
     ):
         handoff_calls.append("handoff")
         n = boss_state["handoff_count"] + 1
@@ -2331,7 +2494,7 @@ def test_integration_fresh_chain_no_bailed_children(tmp_path, monkeypatch):
     )
 
     def fake_run_handoff(
-        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+        client, gr_id, state_dir, boss_state, project_root, boss_workdir, model
     ):
         exit_state, sig = next(handoff_results)
         n = boss_state["handoff_count"] + 1
