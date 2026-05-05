@@ -140,6 +140,9 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
     monkeypatch.setattr(
         "gremlins.orchestrators.gh.resolve_state_file", lambda gr_id=None: state_file
     )
+    monkeypatch.setattr(
+        "gremlins.clients.resolve_state_file", lambda gr_id=None: state_file
+    )
 
     # Stub out patch_state so tests don't write to real state files.
     monkeypatch.setattr(
@@ -153,7 +156,7 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         pipeline = _real_load_pipeline(path)
         stripped_stages = [dataclasses.replace(s, client=None) for s in pipeline.stages]
         return dataclasses.replace(
-            pipeline, clients=[], default_client=None, stages=stripped_stages
+            pipeline, default_client=None, stages=stripped_stages
         )
 
     monkeypatch.setattr(
@@ -385,7 +388,6 @@ def test_parse_instructions():
     assert args.instructions == ["add a login page"]
     assert args.plan_source is None
     assert args.resume_from is None
-    assert args.model is None
     assert args.ref == ""
 
 
@@ -393,11 +395,6 @@ def test_parse_plan_source():
     args = _parse_gh_args(["--plan", "42"])
     assert args.plan_source == "42"
     assert args.instructions == []
-
-
-def test_parse_model():
-    args = _parse_gh_args(["--model", "claude-opus-4-7", "do stuff"])
-    assert args.model == "claude-opus-4-7"
 
 
 def test_parse_resume_from_commit_pr(capsys):
@@ -597,7 +594,7 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
 
 
 def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
-    """--model is forwarded to every client.run call."""
+    """--client provider:model is forwarded to every client.run call."""
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
@@ -628,7 +625,9 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
         },
     )
 
-    result = gh_main(["--plan", "42", "--model", "claude-opus-4-7"], client=client)
+    result = gh_main(
+        ["--plan", "42", "--client", "claude:claude-opus-4-7"], client=client
+    )
     assert result == 0
 
     for call in client.calls:
@@ -719,13 +718,6 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
         },
     )
 
-    # Stub parse_client_specifier so it returns the injected test client rather
-    # than creating a real SubprocessCopilotClient that would replace it.
-    monkeypatch.setattr(
-        "gremlins.orchestrators.gh.parse_client_specifier",
-        lambda spec: client,
-    )
-
     result = gh_main(["--plan", "42", "--client", "copilot:gpt-4o"], client=client)
     assert result == 0
 
@@ -740,22 +732,38 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
 def test_gh_main_resume_prefers_persisted_model_over_sonnet_default(
     tmp_path, monkeypatch
 ):
-    """Regression: on resume with no --model, a persisted state.json.model must
-    win over the fresh-launch "sonnet" fallback. Locks in the other half of the
-    invariant called out in gh.py — a future refactor that switched argparse to
-    default="sonnet" would silently break this precedence and only the
-    fresh-launch test would still pass.
+    """Regression: on resume, persisted stage_clients must win over
+    the package default. Locks in the invariant that resume uses state.json as
+    authoritative source for client/model selection.
     """
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    state_data = {
-        "issue_url": "https://github.com/owner/repo/issues/99",
-        "issue_num": "99",
-        "model": "claude-opus-4-7",
+    gr_id = "resume-test-gr-id"
+
+    # Simulate state.json written by a previous launch with --client claude:claude-opus-4-7
+    _stage_clients = {
+        s: "claude:claude-opus-4-7"
+        for s in [
+            "plan",
+            "implement",
+            "verify",
+            "commit-pr",
+            "request-copilot",
+            "ghreview",
+            "wait-copilot",
+            "ghaddress",
+            "ci-gate",
+        ]
     }
     session_dir, state_file = _patch_common(
-        monkeypatch, tmp_path, state_data=state_data
+        monkeypatch,
+        tmp_path,
+        state_data={
+            "issue_url": "https://github.com/owner/repo/issues/99",
+            "issue_num": "99",
+            "stage_clients": _stage_clients,
+        },
     )
 
     monkeypatch.setattr(
@@ -788,8 +796,6 @@ def test_gh_main_resume_prefers_persisted_model_over_sonnet_default(
             return "https://github.com/owner/repo/issues/99"
         if field == "issue_num":
             return "99"
-        if field == "model":
-            return "claude-opus-4-7"
         return ""
 
     monkeypatch.setattr(_gh_mod, "_read_state_field", _fake_read)
@@ -797,9 +803,13 @@ def test_gh_main_resume_prefers_persisted_model_over_sonnet_default(
         _gh_mod, "_fetch_issue_body", lambda num, repo: "# Resumed Plan\nDo stuff.\n"
     )
 
-    # Invoke with NO --model — resume path should restore "claude-opus-4-7"
-    # from state.json rather than falling through to the "sonnet" default.
-    result = gh_main(["--plan", "99", "--resume-from", "implement"], client=client)
+    # Invoke with no --client and a gr_id — resume path should restore
+    # "claude-opus-4-7" from state.json stage_clients.
+    result = gh_main(
+        ["--plan", "99", "--resume-from", "implement"],
+        client=client,
+        gr_id=gr_id,
+    )
     assert result == 0
 
     assert client.calls, "expected at least one client call"
@@ -1222,7 +1232,9 @@ def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
         },
     )
 
-    result = gh_main(["--plan", "42", "--model", "claude-opus-4-7"], client=client)
+    result = gh_main(
+        ["--plan", "42", "--client", "claude:claude-opus-4-7"], client=client
+    )
     assert result == 0
 
     opts = captured_options["options"]
@@ -1394,7 +1406,9 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
         },
     )
 
-    result = gh_main(["--plan", "42", "--model", "claude-opus-4-7"], client=client)
+    result = gh_main(
+        ["--plan", "42", "--client", "claude:claude-opus-4-7"], client=client
+    )
     assert result == 0
 
     opts = captured_options["options"]
@@ -1538,6 +1552,11 @@ def test_gh_main_state_client_tracks_effective_model(
 
     _patch_common(monkeypatch, tmp_path)
 
+    # Restore the real patch_state so stage_clients is actually written
+    import gremlins.state as _state_mod
+
+    monkeypatch.setattr("gremlins.orchestrators.gh.patch_state", _state_mod.patch_state)
+
     monkeypatch.setattr(
         subprocess, "run", _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n")
     )
@@ -1556,27 +1575,23 @@ def test_gh_main_state_client_tracks_effective_model(
         git_dir=tmp_path,
         fixtures={"implement": IMPL_EVENTS, "commit-pr": _pr_events()},
     )
-    monkeypatch.setattr(
-        "gremlins.orchestrators.gh.parse_client_specifier",
-        lambda spec: client,
-    )
 
     result = gh_main(
-        ["--plan", "42", "--client", "copilot:gpt-5.4", "--model", "opus"],
+        ["--plan", "42", "--client", "copilot:gpt-5.4"],
         gr_id=gr_id,
         client=client,
     )
     assert result == 0
 
     data = json.loads((state_dir / "state.json").read_text())
-    assert data.get("client") == "copilot:opus"
+    assert data.get("stage_clients", {}).get("implement") == "copilot:gpt-5.4"
 
 
 def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
-    """pipeline.default_client_spec model used when --model and --client are absent.
+    """pipeline.default_client model used when --client is absent.
 
     Regression: the model was extracted only from --model / --client, not from
-    the pipeline's default_client_spec. A pipeline with default_client: copilot:gpt-5.4
+    the pipeline's default_client. A pipeline with default_client: copilot:gpt-5.4
     produced model=sonnet, causing the Copilot client to fail immediately.
     """
     _init_git_repo(tmp_path)
@@ -1585,7 +1600,9 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
     session_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
     # Override load_pipeline (wins over _patch_common's version) to inject
-    # default_client_spec without a live client instance.
+    # default_client without a live client instance.
+    from gremlins.clients import ClientSpec as _ClientSpec
+
     _real_load_pipeline = _gh_mod.load_pipeline
 
     def _load_pipeline_copilot_default(path):
@@ -1593,9 +1610,7 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
         stripped_stages = [dataclasses.replace(s, client=None) for s in pipeline.stages]
         return dataclasses.replace(
             pipeline,
-            clients=[],
-            default_client=None,
-            default_client_spec="copilot:gpt-5.4",
+            default_client=_ClientSpec("copilot", "gpt-5.4"),
             stages=stripped_stages,
         )
 

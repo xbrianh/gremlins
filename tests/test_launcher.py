@@ -205,7 +205,6 @@ def test_launch_creates_state_layout(lenv):
     gr_id = launcher.launch(
         "localgremlin",
         instructions="test instructions",
-        pipeline_args=("-i", "sonnet"),
     )
     state_dir = _gremlins_state_root(lenv) / gr_id
     assert state_dir.is_dir()
@@ -223,7 +222,6 @@ def test_launch_creates_state_layout(lenv):
     assert state["branch"] == f"bg/localgremlin/{gr_id}"
     args = state["pipeline_args"]
     assert args[0] == "--pipeline" and args[1].endswith(".yaml")
-    assert args[2:] == ["-i", "sonnet"]
     assert "test instructions" in state["instructions"]
     assert "workdir" in state and state["workdir"]
 
@@ -250,13 +248,13 @@ def test_launch_persists_pipeline_args(lenv):
     launcher = _launcher()
     gr_id = launcher.launch(
         "localgremlin",
-        pipeline_args=("-p", "opus", "-i", "sonnet"),
+        pipeline_args=("--client", "claude:opus"),
         instructions="test",
     )
     state = _read_state(_gremlins_state_root(lenv) / gr_id)
     args = state["pipeline_args"]
     assert args[0] == "--pipeline" and args[1].endswith(".yaml")
-    assert args[2:] == ["-p", "opus", "-i", "sonnet"]
+    assert args[2:] == ["--client", "claude:opus"]
 
 
 def test_launch_persists_pipeline_default_client(lenv):
@@ -331,29 +329,6 @@ stages:
     )
     state = _read_state(_gremlins_state_root(lenv) / gr_id)
     assert state["client"] == "copilot:gpt-5.4"
-
-
-def test_launch_uses_impl_override_with_pipeline_default_provider(lenv):
-    """A local impl override keeps the pipeline default provider in the label."""
-    pipeline = lenv.repo / "custom.yaml"
-    pipeline.write_text(
-        """\
-name: custom
-default_client: copilot:gpt-5.4
-stages:
-  - name: implement
-    type: implement
-""",
-        encoding="utf-8",
-    )
-    launcher = _launcher()
-    gr_id = launcher.launch(
-        "localgremlin",
-        pipeline_args=("--pipeline", str(pipeline), "-i", "opus"),
-        instructions="test custom pipeline impl override",
-    )
-    state = _read_state(_gremlins_state_root(lenv) / gr_id)
-    assert state["client"] == "copilot:opus"
 
 
 def test_launch_ghgremlin_persists_pipeline_default_client(lenv_with_gh):
@@ -488,9 +463,7 @@ def test_resume_patches_state(lenv, monkeypatch):
     monkeypatch.delenv("GREMLINS_TEST_NOOP_PIPELINE")
     launcher = _launcher()
     monkeypatch.setenv("FAKE_CLAUDE_FAIL_AT", "plan")
-    gr_id = launcher.launch(
-        "localgremlin", pipeline_args=("-i", "sonnet"), instructions="test resume"
-    )
+    gr_id = launcher.launch("localgremlin", instructions="test resume")
     state_dir = _gremlins_state_root(lenv) / gr_id
     assert _wait_for_finished(state_dir, timeout=30), (
         "failed gremlin should terminate quickly"
@@ -508,7 +481,6 @@ def test_resume_patches_state(lenv, monkeypatch):
     assert post_state["resumed_from_stage"] == "plan"
     post_args = post_state["pipeline_args"]
     assert post_args[0] == "--pipeline" and post_args[1].endswith(".yaml")
-    assert post_args[2:] == ["-i", "sonnet"]
     assert not (state_dir / "finished").exists(), "finished marker must be cleared"
 
     _wait_for_finished(state_dir, timeout=60)

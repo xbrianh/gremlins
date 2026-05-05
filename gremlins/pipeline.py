@@ -9,8 +9,8 @@ from typing import Any, cast
 
 import yaml
 
-from gremlins.clients.protocol import ClaudeClient
-from gremlins.stages.registry import CLIENT_FACTORIES, STAGE_REGISTRY
+from gremlins.clients import ClientSpec
+from gremlins.stages.registry import STAGE_REGISTRY
 
 
 def _ensure_registered() -> None:
@@ -22,35 +22,21 @@ def _ensure_registered() -> None:
 class StageEntry:
     name: str
     type: str
-    client: ClaudeClient | None
+    client: ClientSpec | None
     prompt_paths: list[pathlib.Path]
     options: dict[str, Any]
     children: list[StageEntry] = dataclasses.field(  # pyright: ignore[reportUnknownVariableType]
         default_factory=list
     )
     max_concurrent: int | None = None
-    client_spec: str | None = None
 
 
 @dataclasses.dataclass
 class Pipeline:
     name: str
     path: pathlib.Path
-    clients: list[ClaudeClient]
     stages: list[StageEntry]
-    default_client: ClaudeClient | None = None
-    default_client_spec: str | None = None
-
-
-def parse_client_specifier(spec: str) -> ClaudeClient:
-    if ":" not in spec:
-        raise ValueError(
-            f"invalid client specifier {spec!r}: expected 'provider:model'"
-        )
-    provider, _, model = spec.partition(":")
-    if provider not in CLIENT_FACTORIES:
-        raise ValueError(f"unknown provider {provider!r} in client specifier {spec!r}")
-    return cast(ClaudeClient, CLIENT_FACTORIES[provider](model or None))
+    default_client: ClientSpec | None = None
 
 
 def _resolve_prompt_paths(
@@ -76,9 +62,7 @@ def _resolve_prompt_paths(
 def _parse_stage_entry(
     entry: dict[str, Any],
     yaml_dir: pathlib.Path,
-    client_cache: dict[str, Any],
     depth: int = 0,
-    default_client_spec: str | None = None,
 ) -> StageEntry:
     if "parallel" in entry:
         if depth > 0:
@@ -96,13 +80,7 @@ def _parse_stage_entry(
         seen: set[str] = set()
         children: list[StageEntry] = []
         for child_raw in children_raw:
-            child = _parse_stage_entry(
-                child_raw,
-                yaml_dir,
-                client_cache,
-                depth=depth + 1,
-                default_client_spec=default_client_spec,
-            )
+            child = _parse_stage_entry(child_raw, yaml_dir, depth=depth + 1)
             if child.name in seen:
                 raise ValueError(
                     f"parallel group {name!r}: duplicate child name {child.name!r}"
@@ -138,20 +116,14 @@ def _parse_stage_entry(
     if stage_type not in STAGE_REGISTRY:
         raise ValueError(f"stage {name!r}: unknown type {stage_type!r}")
 
-    client_spec = entry.get("client")
-    stage_client: Any | None = None
-    resolved_spec: str | None = None
-    if client_spec is not None:
-        if not isinstance(client_spec, str):
+    client_spec_raw = entry.get("client")
+    stage_client: ClientSpec | None = None
+    if client_spec_raw is not None:
+        if not isinstance(client_spec_raw, str):
             raise ValueError(
-                f"stage {name!r}: 'client' must be a string, got {type(client_spec)!r}"
+                f"stage {name!r}: 'client' must be a string, got {type(client_spec_raw)!r}"
             )
-        if client_spec not in client_cache:
-            client_cache[client_spec] = parse_client_specifier(client_spec)
-        stage_client = client_cache[client_spec]
-        resolved_spec = client_spec
-    elif default_client_spec is not None:
-        resolved_spec = default_client_spec
+        stage_client = ClientSpec.parse(client_spec_raw)
 
     prompt_paths = _resolve_prompt_paths(entry.get("prompt"), yaml_dir)
     options = dict(cast(dict[str, Any], entry.get("options") or {}))
@@ -161,7 +133,6 @@ def _parse_stage_entry(
         client=stage_client,
         prompt_paths=prompt_paths,
         options=options,
-        client_spec=resolved_spec,
     )
 
 
@@ -180,33 +151,24 @@ def load_pipeline(path: pathlib.Path) -> Pipeline:
 
     pipeline_name = str(raw.get("name") or path.stem)
 
-    client_cache: dict[str, Any] = {}
-
-    default_client: Any | None = None
-    default_client_spec = raw.get("default_client")
-    if default_client_spec is not None:
-        if not isinstance(default_client_spec, str):
+    default_client: ClientSpec | None = None
+    default_client_raw = raw.get("default_client")
+    if default_client_raw is not None:
+        if not isinstance(default_client_raw, str):
             raise ValueError(
-                f"default_client must be a string, got {type(default_client_spec)!r}"
+                f"default_client must be a string, got {type(default_client_raw)!r}"
             )
-        default_client = parse_client_specifier(default_client_spec)
-        client_cache[default_client_spec] = default_client
+        default_client = ClientSpec.parse(default_client_raw)
 
     stages: list[StageEntry] = []
     for entry in cast(list[dict[str, Any]], raw.get("stages") or []):
-        stages.append(
-            _parse_stage_entry(
-                entry, yaml_dir, client_cache, default_client_spec=default_client_spec
-            )
-        )
+        stages.append(_parse_stage_entry(entry, yaml_dir))
 
     return Pipeline(
         name=pipeline_name,
         path=path,
-        clients=list(client_cache.values()),
         stages=stages,
         default_client=default_client,
-        default_client_spec=default_client_spec,
     )
 
 

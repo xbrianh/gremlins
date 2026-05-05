@@ -37,9 +37,8 @@ def set_stage(
     gr_id: str | None,
     stage: str,
     sub_stage: object = None,
-    client_spec: str | None = None,
 ) -> None:
-    """Write stage metadata to state.json, including client when provided."""
+    """Write stage and optional sub-stage to state.json."""
     try:
         if not stage or not gr_id:
             return
@@ -48,31 +47,11 @@ def set_stage(
             return
         now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         if sub_stage is not None:
-            if client_spec is not None:
-                patch_state(
-                    gr_id,
-                    stage=stage,
-                    stage_updated_at=now,
-                    sub_stage=sub_stage,
-                    client=client_spec,
-                )
-            else:
-                patch_state(
-                    gr_id, stage=stage, stage_updated_at=now, sub_stage=sub_stage
-                )
+            patch_state(gr_id, stage=stage, stage_updated_at=now, sub_stage=sub_stage)
         else:
-            if client_spec is not None:
-                patch_state(
-                    gr_id,
-                    _delete=("sub_stage",),
-                    stage=stage,
-                    stage_updated_at=now,
-                    client=client_spec,
-                )
-            else:
-                patch_state(
-                    gr_id, _delete=("sub_stage",), stage=stage, stage_updated_at=now
-                )
+            patch_state(
+                gr_id, _delete=("sub_stage",), stage=stage, stage_updated_at=now
+            )
     except Exception:
         pass
 

@@ -14,6 +14,7 @@ from conftest import (
     common_local_patches as _common_patches,
 )
 
+from gremlins.clients import ClientSpec
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.orchestrators.local import address_main, local_main, review_main
 from gremlins.pipeline import load_pipeline, resolve_pipeline_path
@@ -131,13 +132,6 @@ def test_local_main_client_specifier_model(tmp_path, monkeypatch):
         }
     )
 
-    # Stub parse_client_specifier so it returns the injected test client rather
-    # than creating a real SubprocessCopilotClient that would replace it.
-    monkeypatch.setattr(
-        "gremlins.orchestrators.local.parse_client_specifier",
-        lambda spec: client,
-    )
-
     result = local_main(
         ["--plan", str(plan_file), "--client", "copilot:gpt-4o"],
         client=client,
@@ -189,68 +183,6 @@ def test_local_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir)
 
     data = json.loads((state_dir / "state.json").read_text())
     assert data.get("stage") == "address-code"
-
-
-def test_local_main_state_client_tracks_effective_model(
-    tmp_path, monkeypatch, make_state_dir
-):
-    gr_id = "test-gr-id"
-    state_dir = make_state_dir(gr_id)
-
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    plan_file = tmp_path / "plan.md"
-    plan_file.write_text("# Plan\nDo stuff.\n")
-
-    monkeypatch.chdir(tmp_path)
-    _common_patches(monkeypatch)
-    monkeypatch.setattr(
-        "gremlins.orchestrators.local.resolve_session_dir",
-        lambda gr_id=None: session_dir,
-    )
-    monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
-    monkeypatch.setattr(
-        "gremlins.orchestrators.local.load_prompts", lambda paths: "Be good."
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.implement.changes_outside_git", lambda s, d: True
-    )
-
-    client = _ReviewCreatingClient(
-        fixtures={
-            "implement": MINIMAL_EVENTS,
-            "review-code:detail:opus": MINIMAL_EVENTS,
-            "address-code": MINIMAL_EVENTS,
-        }
-    )
-    monkeypatch.setattr(
-        "gremlins.orchestrators.local.parse_client_specifier",
-        lambda spec: client,
-    )
-
-    result = local_main(
-        [
-            "--plan",
-            str(plan_file),
-            "--client",
-            "copilot:gpt-5.4",
-            "-i",
-            "opus",
-            "-x",
-            "opus",
-            "-b",
-            "opus",
-            "-t",
-            "opus",
-        ],
-        client=client,
-        gr_id=gr_id,
-    )
-    assert result == 0
-
-    data = json.loads((state_dir / "state.json").read_text())
-    assert data.get("stage") == "address-code"
-    assert data.get("client") == "copilot:opus"
 
 
 def test_local_main_env_file_vars_reach_verify(tmp_path, monkeypatch):
@@ -323,8 +255,7 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
         "gremlins.stages.implement.changes_outside_git", lambda s, d: True
     )
 
-    # Override load_pipeline (wins over _common_patches's version) to inject
-    # default_client_spec without a live client instance.
+    # Override load_pipeline to inject default_client without a live client instance.
     _real_load_pipeline = load_pipeline
 
     def _load_pipeline_copilot_default(path):
@@ -332,9 +263,7 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
         stripped_stages = [dataclasses.replace(s, client=None) for s in pipeline.stages]
         return dataclasses.replace(
             pipeline,
-            clients=[],
-            default_client=None,
-            default_client_spec="copilot:gpt-5.4",
+            default_client=ClientSpec("copilot", "gpt-5.4"),
             stages=stripped_stages,
         )
 
