@@ -15,7 +15,7 @@ review / address pipelines (`local`, `gh`, `boss`), the fleet manager
 - `state.py` — session-dir resolution, `set_stage` / `emit_bail` / `patch_state` / `check_bail`.
 - `git.py` — `in_git_repo`, `git_head`, branch / worktree helpers.
 - `gh_utils.py` — `gh` CLI wrappers and stream-json URL extractors used by the gh orchestrator.
-- `fleet/` — fleet manager package: status listing + `stop` / `rescue` / `land` / `close` / `rm` / `log` ops. See [`fleet/CLAUDE.md`](fleet/CLAUDE.md) for the per-module breakdown.
+- `fleet/` — fleet manager package: status listing + `stop` / `rescue` / `land` / `close` / `rm` / `log` ops. See [`fleet/AGENTS.md`](fleet/AGENTS.md) for the per-module breakdown.
 - `handoff.py` — chain-step decision agent (next-plan / chain-done / bail).
 - `clients/protocol.py` — `ClaudeClient` Protocol + `CompletedRun` dataclass.
 - `clients/stream.py` — `stream_events` + `_emit_event` (stream-json parser and stderr renderer).
