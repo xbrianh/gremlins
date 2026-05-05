@@ -38,6 +38,7 @@ class Pipeline:
     clients: list[ClaudeClient]
     stages: list[StageEntry]
     default_client: ClaudeClient | None = None
+    default_client_spec: str | None = None
 
 
 def parse_client_specifier(spec: str) -> ClaudeClient:
@@ -190,6 +191,7 @@ def load_pipeline(path: pathlib.Path) -> Pipeline:
         clients=list(client_cache.values()),
         stages=stages,
         default_client=default_client,
+        default_client_spec=default_client_spec,
     )
 
 

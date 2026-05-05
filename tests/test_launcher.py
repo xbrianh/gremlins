@@ -259,53 +259,121 @@ def test_launch_persists_pipeline_args(lenv):
     assert args[2:] == ["-p", "opus", "-i", "sonnet"]
 
 
-def test_launch_persists_impl_model_explicit(lenv):
-    """impl_model is extracted from -i flag and stored in state.json."""
+def test_launch_persists_pipeline_default_client(lenv):
+    """The resolved pipeline default client is stored in state.json."""
     launcher = _launcher()
     gr_id = launcher.launch(
         "localgremlin",
-        pipeline_args=("-i", "opus"),
-        instructions="test impl model",
+        instructions="test default client",
     )
     state = _read_state(_gremlins_state_root(lenv) / gr_id)
-    assert state["impl_model"] == "opus"
+    assert state["client"] == "claude:sonnet"
 
 
-def test_launch_persists_impl_model_default(lenv):
-    """impl_model defaults to 'sonnet' when no -i flag is supplied."""
+def test_launch_persists_cli_client_space_form(lenv):
+    """A space-separated --client flag overrides the stored default client."""
     launcher = _launcher()
     gr_id = launcher.launch(
         "localgremlin",
-        instructions="test impl model default",
+        pipeline_args=("--client", "copilot:gpt-5.4"),
+        instructions="test cli client space",
     )
     state = _read_state(_gremlins_state_root(lenv) / gr_id)
-    assert state["impl_model"] == "sonnet"
+    assert state["client"] == "copilot:gpt-5.4"
 
 
-def test_launch_persists_impl_model_gh_space_form(lenv_with_gh):
-    """impl_model is extracted from space-separated --model flag for ghgremlin."""
-    lenv = lenv_with_gh
+def test_launch_persists_cli_client_equals_form(lenv):
+    """An equals-form --client flag overrides the stored default client."""
+    launcher = _launcher()
+    gr_id = launcher.launch(
+        "localgremlin",
+        pipeline_args=("--client=copilot:gpt-5.4",),
+        instructions="test cli client equals",
+    )
+    state = _read_state(_gremlins_state_root(lenv) / gr_id)
+    assert state["client"] == "copilot:gpt-5.4"
+
+
+def test_launch_persists_last_repeated_cli_client(lenv):
+    """Repeated --client flags follow argparse's last-value-wins behavior."""
+    launcher = _launcher()
+    gr_id = launcher.launch(
+        "localgremlin",
+        pipeline_args=(
+            "--client",
+            "claude:sonnet",
+            "--client=copilot:gpt-5.4",
+        ),
+        instructions="test repeated cli client",
+    )
+    state = _read_state(_gremlins_state_root(lenv) / gr_id)
+    assert state["client"] == "copilot:gpt-5.4"
+
+
+def test_launch_persists_custom_pipeline_default_client(lenv):
+    """A custom pipeline stores the effective provider/default model label."""
+    pipeline = lenv.repo / "custom.yaml"
+    pipeline.write_text(
+        """\
+name: custom
+default_client: copilot:gpt-5.4
+stages:
+  - name: implement
+    type: implement
+""",
+        encoding="utf-8",
+    )
+    launcher = _launcher()
+    gr_id = launcher.launch(
+        "localgremlin",
+        pipeline_args=("--pipeline", str(pipeline)),
+        instructions="test custom pipeline client",
+    )
+    state = _read_state(_gremlins_state_root(lenv) / gr_id)
+    assert state["client"] == "copilot:sonnet"
+
+
+def test_launch_uses_impl_override_with_pipeline_default_provider(lenv):
+    """A local impl override keeps the pipeline default provider in the label."""
+    pipeline = lenv.repo / "custom.yaml"
+    pipeline.write_text(
+        """\
+name: custom
+default_client: copilot:gpt-5.4
+stages:
+  - name: implement
+    type: implement
+""",
+        encoding="utf-8",
+    )
+    launcher = _launcher()
+    gr_id = launcher.launch(
+        "localgremlin",
+        pipeline_args=("--pipeline", str(pipeline), "-i", "opus"),
+        instructions="test custom pipeline impl override",
+    )
+    state = _read_state(_gremlins_state_root(lenv) / gr_id)
+    assert state["client"] == "copilot:opus"
+
+
+def test_launch_ghgremlin_persists_pipeline_default_client(lenv_with_gh):
+    """ghgremlin stores the default provider/model label."""
+    launcher = _launcher()
+    gr_id = launcher.launch("ghgremlin", instructions="test gh default client")
+    state = _read_state(_gremlins_state_root(lenv_with_gh) / gr_id)
+    assert state["client"] == "claude:sonnet"
+
+
+def test_launch_ghgremlin_persists_cli_client_override(lenv_with_gh):
+    """ghgremlin stores an explicit --client override."""
     launcher = _launcher()
     gr_id = launcher.launch(
         "ghgremlin",
-        pipeline_args=("--model", "opus"),
-        instructions="test gh model space",
+        pipeline_args=("--client", "copilot:gpt-5.4"),
+        instructions="test gh cli client",
     )
-    state = _read_state(_gremlins_state_root(lenv) / gr_id)
-    assert state["impl_model"] == "opus"
-
-
-def test_launch_persists_impl_model_gh_equals_form(lenv_with_gh):
-    """impl_model is extracted from --model=<value> flag for ghgremlin."""
-    lenv = lenv_with_gh
-    launcher = _launcher()
-    gr_id = launcher.launch(
-        "ghgremlin",
-        pipeline_args=("--model=haiku",),
-        instructions="test gh model equals",
-    )
-    state = _read_state(_gremlins_state_root(lenv) / gr_id)
-    assert state["impl_model"] == "haiku"
+    state = _read_state(_gremlins_state_root(lenv_with_gh) / gr_id)
+    assert state["client"] == "copilot:gpt-5.4"
 
 
 def test_launch_plan_normalized_to_absolute(lenv):
@@ -443,6 +511,62 @@ def test_resume_patches_state(lenv, monkeypatch):
     assert post_args[2:] == ["-i", "sonnet"]
     assert not (state_dir / "finished").exists(), "finished marker must be cleared"
 
+    _wait_for_finished(state_dir, timeout=60)
+
+
+def test_resume_refreshes_client_and_pipeline_path(lenv, monkeypatch):
+    """resume() refreshes stored client metadata from edited pipeline args."""
+    monkeypatch.delenv("GREMLINS_TEST_NOOP_PIPELINE")
+    old_pipeline = lenv.repo / "old.yaml"
+    old_pipeline.write_text(
+        """\
+name: old
+default_client: copilot:gpt-5.4
+stages:
+  - name: implement
+    type: implement
+""",
+        encoding="utf-8",
+    )
+    new_pipeline = lenv.repo / "new.yaml"
+    new_pipeline.write_text(
+        """\
+name: new
+default_client: claude:haiku
+stages:
+  - name: implement
+    type: implement
+""",
+        encoding="utf-8",
+    )
+
+    launcher = _launcher()
+    monkeypatch.setenv("FAKE_CLAUDE_FAIL_AT", "implement")
+    gr_id = launcher.launch(
+        "localgremlin",
+        pipeline_args=("--pipeline", str(old_pipeline)),
+        instructions="test resume refresh",
+    )
+    state_dir = _gremlins_state_root(lenv) / gr_id
+    assert _wait_for_finished(state_dir, timeout=30), (
+        "failed gremlin should terminate quickly"
+    )
+
+    state = _read_state(state_dir)
+    assert state["client"] == "copilot:sonnet"
+    state["pipeline_args"] = ["--pipeline", str(new_pipeline)]
+    (state_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+    monkeypatch.setenv("FAKE_CLAUDE_FAIL_AT", "")
+    launcher.resume(gr_id)
+
+    post_state = _read_state(state_dir)
+    assert post_state["client"] == "claude:sonnet"
+    assert post_state["pipeline_path"] == str(new_pipeline.resolve())
+    assert post_state["pipeline_args"][:2] == [
+        "--pipeline",
+        str(new_pipeline.resolve()),
+    ]
     _wait_for_finished(state_dir, timeout=60)
 
 
