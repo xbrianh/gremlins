@@ -16,15 +16,13 @@ from typing import Any, NoReturn
 
 import yaml
 
-from ..clients import PACKAGE_DEFAULT, ClientSpec, resolve_stage_client, to_client
-from ..clients.claude import SubprocessClaudeClient
+from ..clients import PACKAGE_DEFAULT, ClientSpec, collect_stage_specs, load_stage_specs_from_state, to_client
 from ..clients.protocol import ClaudeClient
 from ..env_file import load_env_file
 from ..gh_utils import extract_gh_url, get_repo, parse_issue_ref, view_issue
 from ..git import DirtyOnly, HeadAdvanced
 from ..logging_setup import configure_logging
 from ..pipeline import (
-    Pipeline,
     StageEntry,
     load_pipeline,
     resolve_pipeline_path,
@@ -60,47 +58,6 @@ def die(msg: str) -> NoReturn:
     sys.stderr.write(f"error: {msg}\n")
     sys.stderr.flush()
     sys.exit(1)
-
-
-def _collect_stage_specs(
-    pipeline: Pipeline,
-    cli_spec: ClientSpec | None,
-) -> dict[str, ClientSpec]:
-    specs: dict[str, ClientSpec] = {}
-    for e in pipeline.stages:
-        if e.type == "parallel":
-            specs[e.name] = resolve_stage_client(
-                None, cli_spec, pipeline.default_client
-            )
-            for child in e.children:
-                specs[child.name] = resolve_stage_client(
-                    child.client, cli_spec, pipeline.default_client
-                )
-        else:
-            specs[e.name] = resolve_stage_client(
-                e.client, cli_spec, pipeline.default_client
-            )
-    return specs
-
-
-def _load_stage_specs_from_state(gr_id: str | None) -> dict[str, ClientSpec]:
-    if not gr_id:
-        return {}
-    sf = resolve_state_file(gr_id)
-    if sf is None or not sf.exists():
-        return {}
-    try:
-        data = json.loads(sf.read_text(encoding="utf-8"))
-        stored = data.get("stage_clients", {})
-        result: dict[str, ClientSpec] = {}
-        for k, v in stored.items():
-            try:
-                result[str(k)] = ClientSpec.parse(str(v))
-            except ValueError:
-                pass
-        return result
-    except Exception:
-        return {}
 
 
 def _fmt_escape(s: str) -> str:
@@ -626,9 +583,14 @@ def gh_main(
     stage_specs: dict[str, ClientSpec] = {}
     state_file = resolve_state_file(gr_id)
     if args.resume_from and gr_id:
-        stage_specs = _load_stage_specs_from_state(gr_id)
+        try:
+            stage_specs = load_stage_specs_from_state(gr_id)
+        except Exception as exc:
+            die(f"--resume-from: corrupt state.json stage_clients: {exc}")
+        if not stage_specs:
+            die("--resume-from: stage_clients not found in state.json (rerun from scratch?)")
     if not stage_specs:
-        stage_specs = _collect_stage_specs(pipeline, cli_spec)
+        stage_specs = collect_stage_specs(pipeline, cli_spec)
         if gr_id:
             patch_state(
                 gr_id, stage_clients={k: str(v) for k, v in stage_specs.items()}
@@ -650,9 +612,10 @@ def gh_main(
 
     # Determine the overall effective client for plan-title and signal handlers
     default_spec = cli_spec or pipeline.default_client or PACKAGE_DEFAULT
-    effective_client = (
-        client or _spec_clients.get(str(default_spec)) or SubprocessClaudeClient()
-    )
+    if client is not None:
+        effective_client = client
+    else:
+        effective_client = _client_for_spec(default_spec)
 
     if client is not None:
         install_signal_handlers(client)
@@ -662,9 +625,8 @@ def gh_main(
     else:
         install_signal_handlers(effective_client)
 
-    # Record model in state for display and resume
     default_model = default_spec.model
-    if gr_id:
+    if gr_id and not args.resume_from:
         patch_state(gr_id, model=default_model)
 
     stage_names = [s.name for s in pipeline.stages]

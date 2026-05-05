@@ -14,9 +14,8 @@ def test_parse_valid():
 
 
 def test_parse_empty_model():
-    spec = ClientSpec.parse("claude:")
-    assert spec.provider == "claude"
-    assert spec.model == ""
+    with pytest.raises(ValueError, match="model must not be empty"):
+        ClientSpec.parse("claude:")
 
 
 def test_parse_no_colon_raises():
@@ -30,7 +29,7 @@ def test_parse_unknown_provider_raises():
 
 
 def test_str_round_trip():
-    for s in ("claude:sonnet", "copilot:gpt-4o", "claude:"):
+    for s in ("claude:sonnet", "copilot:gpt-4o"):
         assert str(ClientSpec.parse(s)) == s
 
 

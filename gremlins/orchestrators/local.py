@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import pathlib
@@ -15,13 +14,12 @@ from typing import NoReturn
 
 import yaml
 
-from ..clients import PACKAGE_DEFAULT, ClientSpec, resolve_stage_client, to_client
+from ..clients import PACKAGE_DEFAULT, ClientSpec, collect_stage_specs, load_stage_specs_from_state, to_client
 from ..clients.protocol import ClaudeClient
 from ..env_file import load_env_file
 from ..git import in_git_repo
 from ..logging_setup import configure_logging
 from ..pipeline import (
-    Pipeline,
     StageEntry,
     load_pipeline,
     resolve_pipeline_path,
@@ -30,7 +28,7 @@ from ..prompts import load_prompts
 from ..runner import install_signal_handlers, make_parallel_wrapper, run_stages
 from ..stages import address_code, implement, plan, review_code, verify
 from ..stages.context import StageContext
-from ..state import patch_state, resolve_session_dir, resolve_state_file, set_stage
+from ..state import patch_state, resolve_session_dir, set_stage
 
 logger = logging.getLogger(__name__)
 
@@ -46,47 +44,6 @@ def die(msg: str) -> NoReturn:
     sys.stderr.write(f"error: {msg}\n")
     sys.stderr.flush()
     sys.exit(1)
-
-
-def _collect_stage_specs(
-    pipeline: Pipeline,
-    cli_spec: ClientSpec | None,
-) -> dict[str, ClientSpec]:
-    specs: dict[str, ClientSpec] = {}
-    for e in pipeline.stages:
-        if e.type == "parallel":
-            specs[e.name] = resolve_stage_client(
-                None, cli_spec, pipeline.default_client
-            )
-            for child in e.children:
-                specs[child.name] = resolve_stage_client(
-                    child.client, cli_spec, pipeline.default_client
-                )
-        else:
-            specs[e.name] = resolve_stage_client(
-                e.client, cli_spec, pipeline.default_client
-            )
-    return specs
-
-
-def _load_stage_specs_from_state(gr_id: str | None) -> dict[str, ClientSpec]:
-    if not gr_id:
-        return {}
-    sf = resolve_state_file(gr_id)
-    if sf is None or not sf.exists():
-        return {}
-    try:
-        data = json.loads(sf.read_text(encoding="utf-8"))
-        stored = data.get("stage_clients", {})
-        result: dict[str, ClientSpec] = {}
-        for k, v in stored.items():
-            try:
-                result[str(k)] = ClientSpec.parse(str(v))
-            except ValueError:
-                pass
-        return result
-    except Exception:
-        return {}
 
 
 def _parse_local_args(argv: list[str]) -> argparse.Namespace:
@@ -308,9 +265,14 @@ def local_main(
     # Load or resolve stage specs; state.json is authoritative on resume
     stage_specs: dict[str, ClientSpec] = {}
     if args.resume_from and gr_id:
-        stage_specs = _load_stage_specs_from_state(gr_id)
+        try:
+            stage_specs = load_stage_specs_from_state(gr_id)
+        except Exception as exc:
+            die(f"--resume-from: corrupt state.json stage_clients: {exc}")
+        if not stage_specs:
+            die("--resume-from: stage_clients not found in state.json (rerun from scratch?)")
     if not stage_specs:
-        stage_specs = _collect_stage_specs(pipeline, cli_spec)
+        stage_specs = collect_stage_specs(pipeline, cli_spec)
         if gr_id:
             patch_state(
                 gr_id, stage_clients={k: str(v) for k, v in stage_specs.items()}
@@ -330,11 +292,17 @@ def local_main(
     for spec in stage_specs.values():
         _client_for_spec(spec)
 
+    default_spec = cli_spec or pipeline.default_client or PACKAGE_DEFAULT
+    if client is None:
+        _client_for_spec(default_spec)
+
     if client is not None:
         install_signal_handlers(client)
     elif _spec_clients:
         all_clients = list(_spec_clients.values())
         install_signal_handlers(all_clients[0], *all_clients[1:])
+    else:
+        install_signal_handlers(to_client(default_spec))
 
     stage_names = [s.name for s in pipeline.stages]
 
