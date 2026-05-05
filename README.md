@@ -224,7 +224,7 @@ explicit. To reuse a bundled prompt, copy the file from
 ### `options:` field
 
 A free-form dict passed verbatim to the stage. Selected options by stage
-(see [`gremlins/stages/CLAUDE.md`](gremlins/stages/CLAUDE.md) for the full list):
+(see [`gremlins/stages/AGENTS.md`](gremlins/stages/AGENTS.md) for the full list):
 
 **`verify`** — runs `check_cmd` then `test_cmd`, with an agent fix-loop:
 
@@ -383,11 +383,11 @@ internally and carry a `children` list and optional `max_concurrent`).
 
 ## Internals docs
 
-- [`gremlins/CLAUDE.md`](gremlins/CLAUDE.md) — module layout, entry points,
+- [`gremlins/AGENTS.md`](gremlins/AGENTS.md) — module layout, entry points,
   testability seam, byte-stable strings
-- [`gremlins/fleet/CLAUDE.md`](gremlins/fleet/CLAUDE.md) — fleet manager internals
-- [`gremlins/orchestrators/CLAUDE.md`](gremlins/orchestrators/CLAUDE.md) — orchestrator internals
-- [`gremlins/stages/CLAUDE.md`](gremlins/stages/CLAUDE.md) — stage internals
+- [`gremlins/fleet/AGENTS.md`](gremlins/fleet/AGENTS.md) — fleet manager internals
+- [`gremlins/orchestrators/AGENTS.md`](gremlins/orchestrators/AGENTS.md) — orchestrator internals
+- [`gremlins/stages/AGENTS.md`](gremlins/stages/AGENTS.md) — stage internals
 
 ## Planned: `gremlins install`
 

@@ -5,7 +5,7 @@ we use deterministic code, where we delegate to a model, how context flows (and
 is deliberately *not* shared) between stages, and the cost model that follows
 from those choices.
 
-It is not a reference for individual modules — see the per-package `CLAUDE.md`
+It is not a reference for individual modules — see the per-package `AGENTS.md`
 files for that. It is the rationale you need to evaluate proposed changes
 without re-deriving the trade-offs each time.
 
