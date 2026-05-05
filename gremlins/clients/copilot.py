@@ -7,7 +7,7 @@ import subprocess
 import threading
 import time
 
-from .protocol import CompletedRun
+from gremlins.clients.protocol import CompletedRun
 
 # Copilot appends a stats footer like "⏺ Cost: $0.01 | Duration: 3.2s | ..."
 # after the response text. Strip it so text_result contains only the response.

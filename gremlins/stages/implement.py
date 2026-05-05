@@ -8,7 +8,7 @@ import pathlib
 import subprocess
 import sys
 
-from ..git import (
+from gremlins.git import (
     DivergentHead,
     EmptyImpl,
     HeadAdvanced,
@@ -21,8 +21,8 @@ from ..git import (
     reset_pre_branch,
     sweep_stale_handoff_branches,
 )
-from .context import StageContext
-from .registry import register_stage
+from gremlins.stages.context import StageContext
+from gremlins.stages.registry import register_stage
 
 PROMPT_LOCAL_PATH = (
     pathlib.Path(__file__).resolve().parent.parent

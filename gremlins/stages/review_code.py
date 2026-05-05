@@ -9,10 +9,10 @@ from __future__ import annotations
 import dataclasses
 import pathlib
 
-from ..clients.protocol import ClaudeClient
-from ..state import emit_bail, set_stage
-from .context import StageContext
-from .registry import register_stage
+from gremlins.clients.protocol import ClaudeClient
+from gremlins.stages.context import StageContext
+from gremlins.stages.registry import register_stage
+from gremlins.state import emit_bail, set_stage
 
 LENSES_DIR = (
     pathlib.Path(__file__).resolve().parent.parent / "pipelines" / "prompts" / "lenses"

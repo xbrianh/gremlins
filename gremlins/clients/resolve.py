@@ -5,11 +5,11 @@ import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from ..stages.registry import CLIENT_FACTORIES
-from ..state import resolve_state_file
+from gremlins.stages.registry import CLIENT_FACTORIES
+from gremlins.state import resolve_state_file
 
 if TYPE_CHECKING:
-    from ..pipeline import Pipeline
+    from gremlins.pipeline import Pipeline
 
 
 @dataclasses.dataclass(frozen=True)

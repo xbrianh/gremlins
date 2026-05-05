@@ -31,8 +31,8 @@ import sys
 
 import yaml
 
-from .fleet import main as fleet_main
-from .fleet.cli import (
+from gremlins.fleet import main as fleet_main
+from gremlins.fleet.cli import (
     ack_main,
     close_main,
     land_main,
@@ -42,11 +42,11 @@ from .fleet.cli import (
     skip_main,
     stop_main,
 )
-from .launcher import launch, resume
-from .orchestrators.gh import gh_main
-from .orchestrators.local import address_main, local_main, review_main
-from .pipeline import load_pipeline, resolve_pipeline_path
-from .state import validate_gr_id
+from gremlins.launcher import launch, resume
+from gremlins.orchestrators.gh import gh_main
+from gremlins.orchestrators.local import address_main, local_main, review_main
+from gremlins.pipeline import load_pipeline, resolve_pipeline_path
+from gremlins.state import validate_gr_id
 
 # None → generic "no longer valid"; str → migration hint naming the new form
 _REMOVED: dict[str, str | None] = {
@@ -82,7 +82,7 @@ def main(argv: list[str] | None = None, *, gr_id: str | None = None) -> int:
     if sub == "launch":
         return _launch_main(rest)
     if sub == "init":
-        from .init import init_main
+        from gremlins.init import init_main
 
         return init_main(rest)
     if sub == "_local":
@@ -94,7 +94,7 @@ def main(argv: list[str] | None = None, *, gr_id: str | None = None) -> int:
     if sub == "_gh":
         return gh_main(rest, gr_id=gr_id)
     if sub == "_boss":
-        from .orchestrators.boss import boss_main
+        from gremlins.orchestrators.boss import boss_main
 
         return boss_main(rest, gr_id=gr_id)
     if sub == "resume":

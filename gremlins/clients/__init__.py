@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
-from ..stages.registry import CLIENT_FACTORIES, register_client_factory
-from . import resolve as _resolve
-from .claude import SubprocessClaudeClient
-from .copilot import SubprocessCopilotClient
+from gremlins.clients import resolve as _resolve
+from gremlins.clients.claude import SubprocessClaudeClient
+from gremlins.clients.copilot import SubprocessCopilotClient
+from gremlins.stages.registry import CLIENT_FACTORIES, register_client_factory
 
 if TYPE_CHECKING:
-    from .protocol import ClaudeClient
+    from gremlins.clients.protocol import ClaudeClient
 
 register_client_factory("claude", lambda _: SubprocessClaudeClient())
 register_client_factory("copilot", lambda _: SubprocessCopilotClient())

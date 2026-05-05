@@ -7,8 +7,8 @@ import sys
 import threading
 import time
 
-from .protocol import CompletedRun
-from .stream import stream_events
+from gremlins.clients.protocol import CompletedRun
+from gremlins.clients.stream import stream_events
 
 
 class StreamTimeoutError(RuntimeError):

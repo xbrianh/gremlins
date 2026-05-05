@@ -14,28 +14,28 @@ from typing import NoReturn
 
 import yaml
 
-from ..clients import ClientSpec, to_client
-from ..clients.protocol import ClaudeClient
-from ..clients.resolve import (
+from gremlins.clients import ClientSpec, to_client
+from gremlins.clients.protocol import ClaudeClient
+from gremlins.clients.resolve import (
     PACKAGE_DEFAULT,
     collect_stage_specs,
     load_stage_specs_from_state,
     require_stage_spec,
     validate_stage_specs,
 )
-from ..env_file import load_env_file
-from ..git import in_git_repo
-from ..logging_setup import configure_logging
-from ..pipeline import (
+from gremlins.env_file import load_env_file
+from gremlins.git import in_git_repo
+from gremlins.logging_setup import configure_logging
+from gremlins.pipeline import (
     StageEntry,
     load_pipeline,
     resolve_pipeline_path,
 )
-from ..prompts import load_prompts
-from ..runner import install_signal_handlers, make_parallel_wrapper, run_stages
-from ..stages import address_code, implement, plan, review_code, verify
-from ..stages.context import StageContext
-from ..state import patch_state, resolve_session_dir, set_stage
+from gremlins.prompts import load_prompts
+from gremlins.runner import install_signal_handlers, make_parallel_wrapper, run_stages
+from gremlins.stages import address_code, implement, plan, review_code, verify
+from gremlins.stages.context import StageContext
+from gremlins.state import patch_state, resolve_session_dir, set_stage
 
 logger = logging.getLogger(__name__)
 
@@ -540,7 +540,7 @@ def _parse_review_args(argv: list[str]) -> argparse.Namespace:
 
 def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     configure_logging()
-    from ..clients.claude import SubprocessClaudeClient
+    from gremlins.clients.claude import SubprocessClaudeClient
 
     if client is None:
         client = SubprocessClaudeClient()
@@ -637,7 +637,7 @@ def _parse_address_args(argv: list[str]) -> argparse.Namespace:
 
 def address_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     configure_logging()
-    from ..clients.claude import SubprocessClaudeClient
+    from gremlins.clients.claude import SubprocessClaudeClient
 
     if client is None:
         client = SubprocessClaudeClient()

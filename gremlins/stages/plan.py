@@ -5,9 +5,9 @@ from __future__ import annotations
 import dataclasses
 import pathlib
 
-from ..prompts import load_prompts
-from .context import StageContext
-from .registry import register_stage
+from gremlins.prompts import load_prompts
+from gremlins.stages.context import StageContext
+from gremlins.stages.registry import register_stage
 
 
 @dataclasses.dataclass
