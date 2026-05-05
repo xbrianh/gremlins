@@ -24,6 +24,7 @@ from typing import Any, cast
 import yaml
 
 from . import git as _git_mod
+from .clients import PACKAGE_DEFAULT
 from .pipeline import load_pipeline, resolve_pipeline_path
 
 VALID_KINDS = {"ghgremlin", "localgremlin", "bossgremlin"}
@@ -218,20 +219,6 @@ def _extract_arg_value(args: list[str], flag: str) -> str:
     return value
 
 
-def _provider_from_client_spec(client_spec: str) -> str:
-    provider, sep, _ = client_spec.partition(":")
-    if not sep:
-        return ""
-    return provider
-
-
-def _model_from_client_spec(client_spec: str) -> str:
-    _, sep, model = client_spec.partition(":")
-    if not sep or not model:
-        return ""
-    return model
-
-
 def _pipeline_default_client_spec(pipeline_path: str) -> str:
     if not pipeline_path:
         return ""
@@ -242,47 +229,34 @@ def _pipeline_default_client_spec(pipeline_path: str) -> str:
     return str(pipeline.default_client) if pipeline.default_client else ""
 
 
-def _resolve_client_label(
-    kind: str,
-    pipeline_args: list[str],
-    pipeline_path: str,
-    state: dict[str, Any] | None = None,
+def _launch_client_label(
+    kind: str, pipeline_args: list[str], pipeline_path: str
 ) -> str:
-    from .clients import PACKAGE_DEFAULT
-
+    if kind == "bossgremlin":
+        model = _extract_arg_value(pipeline_args, "--model") or PACKAGE_DEFAULT.model
+        return f"{PACKAGE_DEFAULT.provider}:{model}"
     client_spec_str = _extract_client_spec(pipeline_args)
+    if client_spec_str:
+        return client_spec_str
     pipeline_default_str = _pipeline_default_client_spec(pipeline_path)
+    if pipeline_default_str:
+        return pipeline_default_str
+    return str(PACKAGE_DEFAULT)
 
-    provider = (
-        _provider_from_client_spec(client_spec_str)
-        or _provider_from_client_spec(pipeline_default_str)
-        or PACKAGE_DEFAULT.provider
-    )
 
-    state_model = str((state or {}).get("model") or "")
-    state_impl_model = str((state or {}).get("impl_model") or "")
-    if kind == "ghgremlin":
-        model = (
-            _model_from_client_spec(client_spec_str)
-            or state_model
-            or _model_from_client_spec(pipeline_default_str)
-            or PACKAGE_DEFAULT.model
-        )
-    elif kind == "bossgremlin":
-        model = (
-            _extract_arg_value(pipeline_args, "--model")
-            or state_model
-            or PACKAGE_DEFAULT.model
-        )
-    else:  # localgremlin
-        model = (
-            _model_from_client_spec(client_spec_str)
-            or state_impl_model
-            or _model_from_client_spec(pipeline_default_str)
-            or PACKAGE_DEFAULT.model
-        )
+def _persisted_client_label(state: dict[str, Any]) -> str:
+    client = str(state.get("client") or "")
+    if client:
+        return client
 
-    return f"{provider}:{model}"
+    stage_clients = state.get("stage_clients")
+    if isinstance(stage_clients, dict):
+        for client_spec in cast(dict[object, object], stage_clients).values():
+            label = str(client_spec or "")
+            if label:
+                return label
+
+    return str(PACKAGE_DEFAULT)
 
 
 def _delete_patch_state(
@@ -483,7 +457,7 @@ def launch(
         "description_explicit": desc_explicit,
         "parent_id": parent_id or "",
         "pipeline_args": stored_pipeline_args,
-        "client": _resolve_client_label(kind, stored_pipeline_args, pipeline_path),
+        "client": _launch_client_label(kind, stored_pipeline_args, pipeline_path),
         "pipeline_path": pipeline_path,
         "stage": "starting",
         "pid": None,
@@ -593,7 +567,7 @@ def resume(gr_id: str) -> None:
         pid=None,
         pipeline_args=pipeline_args,
         pipeline_path=pipeline_path,
-        client=_resolve_client_label(kind, pipeline_args, pipeline_path, state),
+        client=_persisted_client_label(state),
     )
 
     # Append resume header to log

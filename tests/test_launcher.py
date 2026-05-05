@@ -486,8 +486,8 @@ def test_resume_patches_state(lenv, monkeypatch):
     _wait_for_finished(state_dir, timeout=60)
 
 
-def test_resume_refreshes_client_and_pipeline_path(lenv, monkeypatch):
-    """resume() refreshes stored client metadata from edited pipeline args."""
+def test_resume_uses_persisted_stage_client_label(lenv, monkeypatch):
+    """resume() keeps the display label in sync with persisted stage_clients."""
     monkeypatch.delenv("GREMLINS_TEST_NOOP_PIPELINE")
     old_pipeline = lenv.repo / "old.yaml"
     old_pipeline.write_text(
@@ -526,6 +526,8 @@ stages:
 
     state = _read_state(state_dir)
     assert state["client"] == "copilot:gpt-5.4"
+    state.pop("client", None)
+    state.pop("model", None)
     state["pipeline_args"] = ["--pipeline", str(new_pipeline)]
     (state_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
 
@@ -533,7 +535,7 @@ stages:
     launcher.resume(gr_id)
 
     post_state = _read_state(state_dir)
-    assert post_state["client"] == "claude:haiku"
+    assert post_state["client"] == "copilot:gpt-5.4"
     assert post_state["pipeline_path"] == str(new_pipeline.resolve())
     assert post_state["pipeline_args"][:2] == [
         "--pipeline",
