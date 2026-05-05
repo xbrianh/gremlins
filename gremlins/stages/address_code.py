@@ -98,7 +98,12 @@ Do not call this helper if you successfully addressed every actionable finding.
             raw_path=ctx.session_dir / "stream-address.jsonl",
         )
     except (SystemExit, Exception) as exc:
-        emit_bail(ctx.gr_id, "other", f"address-code stage failed: {exc}"[:200], child_key=ctx.child_key)
+        emit_bail(
+            ctx.gr_id,
+            "other",
+            f"address-code stage failed: {exc}"[:200],
+            child_key=ctx.child_key,
+        )
         raise
 
 

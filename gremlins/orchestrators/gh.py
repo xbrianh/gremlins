@@ -701,9 +701,7 @@ def gh_main(
     issue_body: str = ""
 
     # plan_idx: index of the plan stage in the expanded stage list.
-    _plan_stage_name = next(
-        (s.name for s in pipeline.stages if s.type == "plan"), None
-    )
+    _plan_stage_name = next((s.name for s in pipeline.stages if s.type == "plan"), None)
     plan_idx = (
         _expanded_stage_names.index(_plan_stage_name)
         if _plan_stage_name and _plan_stage_name in _expanded_stage_names

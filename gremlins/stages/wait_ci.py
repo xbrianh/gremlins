@@ -81,7 +81,12 @@ def _bail_if_review_required(
     gr_id: str | None, decision: str, child_key: str | None = None
 ) -> None:
     if decision == "REVIEW_REQUIRED":
-        emit_bail(gr_id, "other", "PR requires human review approval before merge", child_key=child_key)
+        emit_bail(
+            gr_id,
+            "other",
+            "PR requires human review approval before merge",
+            child_key=child_key,
+        )
         raise _ReviewRequiredError("ci-gate: PR blocked by required human review")
 
 
@@ -238,13 +243,20 @@ def run(ctx: StageContext, options: WaitCiOptions) -> None:
 
         _exhausted = True
         emit_bail(
-            ctx.gr_id, "other", f"CI failed after {options.max_attempts} attempts",
+            ctx.gr_id,
+            "other",
+            f"CI failed after {options.max_attempts} attempts",
             child_key=ctx.child_key,
         )
         raise RuntimeError(f"ci-gate exhausted {options.max_attempts} attempts")
     except (SystemExit, Exception) as exc:
         if not _exhausted and not _agent_bailed and not _review_bailed:
-            emit_bail(ctx.gr_id, "other", f"ci-gate failed: {exc}"[:200], child_key=ctx.child_key)
+            emit_bail(
+                ctx.gr_id,
+                "other",
+                f"ci-gate failed: {exc}"[:200],
+                child_key=ctx.child_key,
+            )
         raise
 
 

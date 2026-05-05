@@ -133,13 +133,20 @@ def run(ctx: StageContext, options: VerifyOptions) -> None:
 
         _exhausted = True
         emit_bail(
-            ctx.gr_id, "other", f"verify failed after {options.max_attempts} attempts",
+            ctx.gr_id,
+            "other",
+            f"verify failed after {options.max_attempts} attempts",
             child_key=ctx.child_key,
         )
         raise RuntimeError(f"verify stage exhausted {options.max_attempts} attempts")
     except (SystemExit, Exception) as exc:
         if not _exhausted and not _agent_bailed:
-            emit_bail(ctx.gr_id, "other", f"verify stage failed: {exc}"[:200], child_key=ctx.child_key)
+            emit_bail(
+                ctx.gr_id,
+                "other",
+                f"verify stage failed: {exc}"[:200],
+                child_key=ctx.child_key,
+            )
         raise
 
 

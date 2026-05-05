@@ -21,10 +21,9 @@ import time
 import pytest
 
 import gremlins.state as state_mod
+from gremlins.clients.fake import FakeClaudeClient
 from gremlins.runner import build_parallel_stages, run_stages
 from gremlins.stages.context import StageContext
-from gremlins.clients.fake import FakeClaudeClient
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -78,7 +77,7 @@ def test_emit_bail_two_children_both_shards_present(tmp_path, monkeypatch):
 
 def test_check_bail_child_key_reads_only_own_shard(tmp_path, monkeypatch):
     gr_id = "gr-check-shard"
-    sf = _make_state(tmp_path, gr_id, monkeypatch)
+    _make_state(tmp_path, gr_id, monkeypatch)
 
     state_mod.emit_bail(gr_id, "other", "A failed", child_key="child-a")
 
@@ -92,7 +91,7 @@ def test_check_bail_child_key_reads_only_own_shard(tmp_path, monkeypatch):
 
 def test_check_bail_no_child_key_reads_top_level(tmp_path, monkeypatch):
     gr_id = "gr-check-toplevel"
-    sf = _make_state(tmp_path, gr_id, monkeypatch)
+    _make_state(tmp_path, gr_id, monkeypatch)
 
     # Only a child shard is set; top-level should be clear.
     state_mod.emit_bail(gr_id, "other", "child failed", child_key="child-a")
@@ -173,10 +172,7 @@ def _build_fanin_test(
     state_mod.patch_state(gr_id, parallel_bails=parallel_bails)
 
     child_keys = list(shards.keys())
-    children = [
-        (k, _make_simple_ctx(tmp_path, k), lambda: None)
-        for k in child_keys
-    ]
+    children = [(k, _make_simple_ctx(tmp_path, k), lambda: None) for k in child_keys]
 
     # We need a git-less project root so fan-in's worktree logic is skipped.
     project_root = tmp_path / "nongit"
@@ -257,9 +253,24 @@ def test_cancel_on_bail_skips_unstarted_children():
     def child_c() -> None:
         ran.append("c")
 
-    ctx_a = StageContext(client=FakeClaudeClient(), session_dir=pathlib.Path("/tmp"), gr_id=None, child_key="a")
-    ctx_b = StageContext(client=FakeClaudeClient(), session_dir=pathlib.Path("/tmp"), gr_id=None, child_key="b")
-    ctx_c = StageContext(client=FakeClaudeClient(), session_dir=pathlib.Path("/tmp"), gr_id=None, child_key="c")
+    ctx_a = StageContext(
+        client=FakeClaudeClient(),
+        session_dir=pathlib.Path("/tmp"),
+        gr_id=None,
+        child_key="a",
+    )
+    ctx_b = StageContext(
+        client=FakeClaudeClient(),
+        session_dir=pathlib.Path("/tmp"),
+        gr_id=None,
+        child_key="b",
+    )
+    ctx_c = StageContext(
+        client=FakeClaudeClient(),
+        session_dir=pathlib.Path("/tmp"),
+        gr_id=None,
+        child_key="c",
+    )
 
     children = [("a", ctx_a, child_a), ("b", ctx_b, child_b), ("c", ctx_c, child_c)]
 
@@ -346,12 +357,28 @@ def test_run_stages_resume_from_fanin_name(tmp_path, monkeypatch):
 
 
 def _init_git_repo(path: pathlib.Path) -> None:
-    subprocess.run(["git", "init", "-b", "main", str(path)], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(path), "config", "user.email", "t@t.com"], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(path), "config", "user.name", "T"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "init", "-b", "main", str(path)], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "-C", str(path), "config", "user.email", "t@t.com"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(path), "config", "user.name", "T"],
+        check=True,
+        capture_output=True,
+    )
     (path / "README.md").write_text("init")
-    subprocess.run(["git", "-C", str(path), "add", "."], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(path), "commit", "-m", "init"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(path), "add", "."], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "-C", str(path), "commit", "-m", "init"],
+        check=True,
+        capture_output=True,
+    )
 
 
 def test_worktree_lifecycle_fanout_creates_and_fanin_removes(tmp_path):
@@ -359,8 +386,12 @@ def test_worktree_lifecycle_fanout_creates_and_fanin_removes(tmp_path):
     repo.mkdir()
     _init_git_repo(repo)
 
-    ctx_a = StageContext(client=FakeClaudeClient(), session_dir=tmp_path / "a", gr_id=None, child_key="a")
-    ctx_b = StageContext(client=FakeClaudeClient(), session_dir=tmp_path / "b", gr_id=None, child_key="b")
+    ctx_a = StageContext(
+        client=FakeClaudeClient(), session_dir=tmp_path / "a", gr_id=None, child_key="a"
+    )
+    ctx_b = StageContext(
+        client=FakeClaudeClient(), session_dir=tmp_path / "b", gr_id=None, child_key="b"
+    )
 
     stages = build_parallel_stages(
         "reviews",
@@ -376,17 +407,23 @@ def test_worktree_lifecycle_fanout_creates_and_fanin_removes(tmp_path):
 
     # Fan-out: worktrees should be created.
     import os
+
     orig_cwd = os.getcwd()
     os.chdir(str(repo))
     try:
         stages[0][1]()  # fanout
         wt_list_after_fanout = subprocess.run(
             ["git", "worktree", "list", "--porcelain"],
-            cwd=str(repo), capture_output=True, text=True, check=True,
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout
         # Should have 2 extra worktrees (plus the main one).
         worktree_count = wt_list_after_fanout.count("worktree ")
-        assert worktree_count >= 3, f"expected >=3 worktrees, got:\n{wt_list_after_fanout}"
+        assert worktree_count >= 3, (
+            f"expected >=3 worktrees, got:\n{wt_list_after_fanout}"
+        )
 
         # ctx should have worktree paths set.
         assert ctx_a.worktree is not None and ctx_a.worktree.is_dir()
@@ -400,7 +437,10 @@ def test_worktree_lifecycle_fanout_creates_and_fanin_removes(tmp_path):
 
         wt_list_after_fanin = subprocess.run(
             ["git", "worktree", "list", "--porcelain"],
-            cwd=str(repo), capture_output=True, text=True, check=True,
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout
         assert wt_list_after_fanin.count("worktree ") == 1, (
             f"expected only main worktree after fanin, got:\n{wt_list_after_fanin}"
@@ -415,7 +455,12 @@ def test_worktree_lifecycle_fanout_creates_and_fanin_removes(tmp_path):
 
 
 def test_build_parallel_stages_returns_three_named_stages():
-    ctx = StageContext(client=FakeClaudeClient(), session_dir=pathlib.Path("/tmp"), gr_id=None, child_key="r1")
+    ctx = StageContext(
+        client=FakeClaudeClient(),
+        session_dir=pathlib.Path("/tmp"),
+        gr_id=None,
+        child_key="r1",
+    )
     stages = build_parallel_stages(
         "reviews",
         [("r1", ctx, lambda: None)],
@@ -433,8 +478,18 @@ def test_build_parallel_stages_returns_three_named_stages():
 
 def test_parallel_all_children_complete_with_defaults():
     ran: list[str] = []
-    ctx_a = StageContext(client=FakeClaudeClient(), session_dir=pathlib.Path("/tmp"), gr_id=None, child_key="a")
-    ctx_b = StageContext(client=FakeClaudeClient(), session_dir=pathlib.Path("/tmp"), gr_id=None, child_key="b")
+    ctx_a = StageContext(
+        client=FakeClaudeClient(),
+        session_dir=pathlib.Path("/tmp"),
+        gr_id=None,
+        child_key="a",
+    )
+    ctx_b = StageContext(
+        client=FakeClaudeClient(),
+        session_dir=pathlib.Path("/tmp"),
+        gr_id=None,
+        child_key="b",
+    )
 
     stages = build_parallel_stages(
         "reviews",

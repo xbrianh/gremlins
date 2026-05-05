@@ -13,7 +13,6 @@ from gremlins.pipeline import load_pipeline
 from gremlins.runner import build_parallel_stages, run_stages
 from gremlins.stages.context import StageContext
 
-
 # ---------------------------------------------------------------------------
 # Fixtures helpers
 # ---------------------------------------------------------------------------
@@ -42,7 +41,10 @@ def _parallel_wrapper(
 ) -> object:
     """Return the parallel-stage callable from build_parallel_stages."""
     if set_stage_fn is None:
-        set_stage_fn = lambda: None
+
+        def set_stage_fn() -> None:
+            pass
+
     triples = [(n, _make_ctx(n), fn) for n, fn in children]  # type: ignore[misc]
     stages = build_parallel_stages(
         "test-group",

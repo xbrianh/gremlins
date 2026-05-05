@@ -145,7 +145,7 @@ def build_parallel_stages(
         child_names = [n for n, _, _ in child_runners]
         active = child_runners
         if resume_from is not None and resume_from in child_names:
-            active = child_runners[child_names.index(resume_from):]
+            active = child_runners[child_names.index(resume_from) :]
         if not active:
             return
 

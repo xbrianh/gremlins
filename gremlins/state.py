@@ -15,6 +15,8 @@ import os
 import pathlib
 import re
 import secrets
+from collections.abc import Callable
+from typing import Any
 
 _GR_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -34,7 +36,7 @@ BAIL_CLASS_SECRETS = "secrets"
 BAIL_CLASS_OTHER = "other"
 
 
-def _locked_update(sf: pathlib.Path, fn: object) -> None:
+def _locked_update(sf: pathlib.Path, fn: Callable[[dict[str, Any]], None]) -> None:
     """Acquire an exclusive lock on sf.lock, read sf, apply fn(data), write sf atomically.
 
     Callers are responsible for the outer try/except — this may raise.
@@ -43,7 +45,7 @@ def _locked_update(sf: pathlib.Path, fn: object) -> None:
     with open(lock_path, "a") as lock_f:
         fcntl.flock(lock_f, fcntl.LOCK_EX)
         data = json.loads(sf.read_text(encoding="utf-8"))
-        fn(data)  # type: ignore[operator]
+        fn(data)
         tmp = sf.with_name(f"{sf.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
         tmp.write_text(json.dumps(data), encoding="utf-8")
         os.replace(tmp, sf)
@@ -130,8 +132,8 @@ def emit_bail(
             if bail_detail:
                 shard["bail_detail"] = bail_detail
 
-            def _merge(data: dict) -> None:  # type: ignore[type-arg]
-                shards = dict(data.get("parallel_bails") or {})
+            def _merge(data: dict[str, Any]) -> None:
+                shards: dict[str, Any] = dict(data.get("parallel_bails") or {})
                 shards[child_key] = shard
                 data["parallel_bails"] = shards
 
@@ -166,7 +168,8 @@ def patch_state(
     if sf is None or not sf.exists():
         return
     try:
-        def _apply(data: dict) -> None:  # type: ignore[type-arg]
+
+        def _apply(data: dict[str, Any]) -> None:
             for key in _delete:
                 data.pop(key, None)
             data.update(fields)
@@ -195,15 +198,13 @@ def check_bail(
     if sf is None or not sf.exists():
         return
     try:
-        data = json.loads(sf.read_text(encoding="utf-8"))
+        data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
         if child_key is None:
             bail_class = data.get("bail_class", "")
         else:
-            bail_class = (
-                (data.get("parallel_bails") or {})
-                .get(child_key, {})
-                .get("bail_class", "")
-            )
+            parallel_bails: dict[str, Any] = data.get("parallel_bails") or {}
+            shard: dict[str, Any] = parallel_bails.get(child_key) or {}
+            bail_class = shard.get("bail_class", "")
         if bail_class:
             raise RuntimeError(
                 f"{label} bailed: bail_class={bail_class} (see state.json bail_detail)"
