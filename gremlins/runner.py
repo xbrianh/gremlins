@@ -27,16 +27,18 @@ logger = logging.getLogger(__name__)
 Stage = tuple[str, Callable[[], None]]
 
 
-def install_signal_handlers(client: ClaudeClient) -> None:
+def install_signal_handlers(*clients: ClaudeClient) -> None:
     """Register SIGINT/SIGTERM handlers that reap claude children before
-    exit. Pass the live ClaudeClient (real or fake) — its ``reap_all`` is
+    exit. Pass the live ClaudeClient(s) (real or fake) — their ``reap_all`` is
     what gets called."""
 
     def handler(signum: int, frame: types.FrameType | None) -> None:
-        try:
-            client.reap_all()
-        finally:
-            sys.exit(130)
+        for c in clients:
+            try:
+                c.reap_all()
+            except Exception:
+                pass
+        sys.exit(130)
 
     signal.signal(signal.SIGINT, handler)
     signal.signal(signal.SIGTERM, handler)

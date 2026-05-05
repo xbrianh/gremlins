@@ -172,6 +172,11 @@ def test_copilot_client_strips_footer(tmp_path, monkeypatch):
     assert result.text_result == "response text"
 
 
+def test_strip_footer_preserves_bullet_in_body() -> None:
+    text = "Result:\n⏺ Read(file.py)\n\nSome output\n⏺ Cost: $0.01 | Duration: 1s"
+    assert _strip_footer(text) == "Result:\n⏺ Read(file.py)\n\nSome output"
+
+
 def test_copilot_total_cost_usd_is_zero() -> None:
     client = SubprocessCopilotClient()
     assert client.total_cost_usd == 0.0
