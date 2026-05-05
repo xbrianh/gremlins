@@ -199,7 +199,6 @@ def test_build_row_client_missing_field_shows_dash():
     assert row["client"] == "—"
 
 
-
 def test_build_row_preserves_long_client_label():
     client = "copilot:gpt-5.4-super-long-client-label"
     state = {
