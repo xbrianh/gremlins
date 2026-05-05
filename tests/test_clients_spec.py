@@ -1,10 +1,15 @@
-"""Tests for ClientSpec, PACKAGE_DEFAULT, resolve_stage_client."""
+"""Tests for stage client resolution."""
 
 from __future__ import annotations
 
 import pytest
 
-from gremlins.clients import PACKAGE_DEFAULT, ClientSpec, resolve_stage_client
+from gremlins.clients.resolve import (
+    PACKAGE_DEFAULT,
+    ClientSpec,
+    require_stage_spec,
+    resolve_stage_client,
+)
 
 
 def test_parse_valid():
@@ -58,3 +63,18 @@ def test_resolve_pipeline_default_wins_over_package():
 
 def test_resolve_falls_back_to_package_default():
     assert resolve_stage_client(None, None, None) is PACKAGE_DEFAULT
+
+
+def test_require_stage_spec_returns_present_stage():
+    spec = ClientSpec("claude", "opus")
+    assert require_stage_spec({"implement": spec}, "implement") is spec
+
+
+def test_require_stage_spec_missing_stage_exits(capsys):
+    with pytest.raises(SystemExit):
+        require_stage_spec({}, "implement")
+
+    assert (
+        "stage 'implement' missing from state.json stage_clients"
+        in capsys.readouterr().err
+    )

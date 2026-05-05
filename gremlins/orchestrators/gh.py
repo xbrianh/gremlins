@@ -16,14 +16,14 @@ from typing import Any, NoReturn
 
 import yaml
 
-from ..clients import (
+from ..clients import ClientSpec, to_client
+from ..clients.protocol import ClaudeClient
+from ..clients.resolve import (
     PACKAGE_DEFAULT,
-    ClientSpec,
     collect_stage_specs,
     load_stage_specs_from_state,
-    to_client,
+    require_stage_spec,
 )
-from ..clients.protocol import ClaudeClient
 from ..env_file import load_env_file
 from ..gh_utils import extract_gh_url, get_repo, parse_issue_ref, view_issue
 from ..git import DirtyOnly, HeadAdvanced
@@ -721,6 +721,16 @@ def gh_main(
         "instructions": instructions,
     }
 
+    expected_stage_names = {entry.name for entry in pipeline.stages}
+    for entry in pipeline.stages:
+        if entry.type == "parallel":
+            expected_stage_names.update(child.name for child in entry.children)
+    missing_stage_names = sorted(expected_stage_names.difference(stage_specs))
+    if missing_stage_names:
+        missing = ", ".join(repr(name) for name in missing_stage_names)
+        suffix = "" if len(missing_stage_names) == 1 else "s"
+        die(f"stage_clients missing stage{suffix}: {missing}")
+
     stages: list[tuple[str, Callable[[], None]]] = []
     for e in pipeline.stages:
         if e.type == "parallel":
@@ -728,7 +738,7 @@ def gh_main(
             group_dir.mkdir(parents=True, exist_ok=True)
             child_runners: list[tuple[str, Callable[[], None]]] = []
             for child in e.children:
-                child_spec = stage_specs.get(child.name, PACKAGE_DEFAULT)
+                child_spec = require_stage_spec(stage_specs, child.name)
                 child_dir = group_dir / child.name
                 child_dir.mkdir(parents=True, exist_ok=True)
                 child_ctx = StageContext(
@@ -765,7 +775,7 @@ def gh_main(
                 )
             )
         else:
-            stage_spec = stage_specs.get(e.name, PACKAGE_DEFAULT)
+            stage_spec = require_stage_spec(stage_specs, e.name)
             stage_ctx = StageContext(
                 client=_client_for_spec(stage_spec),
                 session_dir=session_dir,
