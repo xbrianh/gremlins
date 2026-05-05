@@ -624,6 +624,7 @@ def gh_main(
         effective_client = client
     else:
         effective_client = _client_for_spec(default_spec)
+    default_model = default_spec.model
 
     if client is not None:
         install_signal_handlers(client)
@@ -632,10 +633,6 @@ def gh_main(
         install_signal_handlers(all_clients[0], *all_clients[1:])
     else:
         install_signal_handlers(effective_client)
-
-    default_model = default_spec.model
-    if gr_id and not args.resume_from:
-        patch_state(gr_id, model=default_model)
 
     stage_names = [s.name for s in pipeline.stages]
 

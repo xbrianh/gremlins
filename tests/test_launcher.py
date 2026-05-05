@@ -486,60 +486,67 @@ def test_resume_patches_state(lenv, monkeypatch):
     _wait_for_finished(state_dir, timeout=60)
 
 
-def test_resume_refreshes_client_and_pipeline_path(lenv, monkeypatch):
-    """resume() refreshes stored client metadata from edited pipeline args."""
-    monkeypatch.delenv("GREMLINS_TEST_NOOP_PIPELINE")
+def test_resume_uses_persisted_stage_client_label(lenv, monkeypatch):
+    """resume() keeps the display label in sync with persisted stage_clients."""
     old_pipeline = lenv.repo / "old.yaml"
     old_pipeline.write_text(
         """\
 name: old
 default_client: copilot:gpt-5.4
 stages:
+  - name: plan
+    type: plan
   - name: implement
     type: implement
+    client: claude:opus
 """,
         encoding="utf-8",
     )
-    new_pipeline = lenv.repo / "new.yaml"
-    new_pipeline.write_text(
-        """\
-name: new
-default_client: claude:haiku
-stages:
-  - name: implement
-    type: implement
-""",
-        encoding="utf-8",
-    )
-
     launcher = _launcher()
-    monkeypatch.setenv("FAKE_CLAUDE_FAIL_AT", "implement")
-    gr_id = launcher.launch(
-        "localgremlin",
-        pipeline_args=("--pipeline", str(old_pipeline)),
-        instructions="test resume refresh",
-    )
+    gr_id = "resume-stage-client"
     state_dir = _gremlins_state_root(lenv) / gr_id
-    assert _wait_for_finished(state_dir, timeout=30), (
-        "failed gremlin should terminate quickly"
+    state_dir.mkdir(parents=True)
+    (state_dir / "log").write_text("", encoding="utf-8")
+    (state_dir / "finished").touch()
+    (state_dir / "instructions.txt").write_text("test resume refresh", encoding="utf-8")
+    (state_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "id": gr_id,
+                "kind": "localgremlin",
+                "workdir": str(lenv.repo),
+                "project_root": str(lenv.repo),
+                "stage": "implement",
+                "status": "stopped",
+                "exit_code": 1,
+                "pipeline_args": ["--pipeline", str(old_pipeline)],
+                "pipeline_path": str(old_pipeline),
+                "stage_clients": {
+                    "plan": "copilot:gpt-5.4",
+                    "implement": "claude:opus",
+                },
+            }
+        ),
+        encoding="utf-8",
     )
 
-    state = _read_state(state_dir)
-    assert state["client"] == "copilot:gpt-5.4"
-    state["pipeline_args"] = ["--pipeline", str(new_pipeline)]
-    (state_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    class _Proc:
+        pid = 12345
 
-    monkeypatch.setenv("FAKE_CLAUDE_FAIL_AT", "")
+    monkeypatch.setattr(launcher, "_spawn_pipeline", lambda *args, **kwargs: _Proc())
+
     launcher.resume(gr_id)
 
     post_state = _read_state(state_dir)
-    assert post_state["client"] == "claude:haiku"
-    assert post_state["pipeline_path"] == str(new_pipeline.resolve())
+    assert post_state["client"] == "claude:opus"
+    assert post_state["status"] == "running"
+    assert post_state["resumed_from_stage"] == "implement"
+    assert post_state["pipeline_path"] == str(old_pipeline.resolve())
     assert post_state["pipeline_args"][:2] == [
         "--pipeline",
-        str(new_pipeline.resolve()),
+        str(old_pipeline.resolve()),
     ]
-    _wait_for_finished(state_dir, timeout=60)
+    assert not (state_dir / "finished").exists()
 
 
 def test_resume_refuses_running_gremlin(lenv):

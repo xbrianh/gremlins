@@ -252,7 +252,19 @@ def write_rescue_report(wdir: str, report: dict[str, Any]) -> None:
         kind = state.get("kind") or ""
         description = state.get("description") or ""
         stage = state.get("stage") or ""
-        model = state.get("model")
+        client = state.get("client")
+        if not client:
+            stage_clients = state.get("stage_clients")
+            if isinstance(stage_clients, dict):
+                stored_stage_clients = cast(dict[object, object], stage_clients)
+                if stage:
+                    client = str(stored_stage_clients.get(stage) or "")
+                for client_spec in stored_stage_clients.values():
+                    if client:
+                        break
+                    client = str(client_spec or "")
+                    if client:
+                        break
         parent_id = state.get("parent_id") or ""
         attempt = int(report.get("attempt_number") or 0)
         # rescue_count is normalized to a non-negative int upstream (see
@@ -287,8 +299,8 @@ def write_rescue_report(wdir: str, report: dict[str, Any]) -> None:
             f"- Description: {description or '(none)'}",
             f"- Failed stage: {stage or '(unknown)'}",
         ]
-        if model:
-            lines.append(f"- Model: {model}")
+        if client:
+            lines.append(f"- Client: {client}")
         if parent_id:
             lines.append(f"- Parent (boss) id: {parent_id}")
         lines += [

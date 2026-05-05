@@ -1584,6 +1584,7 @@ def test_gh_main_state_client_tracks_effective_model(
     assert result == 0
 
     data = json.loads((state_dir / "state.json").read_text())
+    assert "model" not in data
     assert data.get("stage_clients", {}).get("implement") == "copilot:gpt-5.4"
 
 

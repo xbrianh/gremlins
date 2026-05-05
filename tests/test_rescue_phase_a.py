@@ -400,3 +400,35 @@ def test_rescue_diagnosis_streams_events_to_stderr(tmp_path, monkeypatch, capsys
     assert any("text:" in ln for ln in rescue_lines), (
         f"Expected text event line: {rescue_lines}"
     )
+
+
+def test_write_rescue_report_uses_client_label_without_model(tmp_path):
+    """Rescue reports use the failed stage's persisted client label."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    rescue_mod.write_rescue_report(
+        str(state_dir),
+        {
+            "state": {
+                "id": "victim-abcdef",
+                "kind": "localgremlin",
+                "stage": "implement",
+                "stage_clients": {
+                    "plan": "copilot:gpt-5.4",
+                    "implement": "claude:opus",
+                },
+            },
+            "attempt_number": 1,
+            "headless": False,
+            "verdict": "structural",
+            "summary": "test summary",
+            "relaunch_outcome": "skipped",
+        },
+    )
+
+    reports = list(state_dir.glob("rescue-*.md"))
+    assert len(reports) == 1
+    text = reports[0].read_text(encoding="utf-8")
+    assert "- Client: claude:opus" in text
+    assert "- Model:" not in text
