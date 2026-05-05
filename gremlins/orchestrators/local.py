@@ -110,6 +110,7 @@ def _build_stage_runner(
     instructions: str,
     plan_copied_from_source: bool,
     plan_text_holder: dict[str, str],
+    review_stage_names: list[str],
 ) -> Callable[[], None]:
     if entry.type == "plan":
 
@@ -185,9 +186,7 @@ def _build_stage_runner(
                     code_style=code_style,
                     model=model,
                     stage_name=entry.name,
-                    prompt_paths=entry.prompt_paths[1:]
-                    if entry.prompt_paths
-                    else [_DEFAULT_LENS],
+                    prompt_paths=entry.prompt_paths[1:] or [_DEFAULT_LENS],
                 ),
             )
             logger.info("code review (%s): %s", model, review_file)
@@ -203,6 +202,7 @@ def _build_stage_runner(
                 address_model=model,
                 is_git=is_git,
                 code_style=code_style,
+                review_stage_names=review_stage_names,
             )
             if entry.prompt_paths:
                 opts.prompt_path = entry.prompt_paths[-1]
@@ -448,6 +448,13 @@ def local_main(
 
     plan_text_holder: dict[str, str] = {}
 
+    _rc_names = [s.name for s in pipeline.stages if s.type == "review-code"]
+    for _s in pipeline.stages:
+        if _s.type == "parallel":
+            _rc_names += [c.name for c in _s.children if c.type == "review-code"]
+    if not _rc_names:
+        _rc_names = ["review-code"]
+
     stages: list[tuple[str, Callable[[], None]]] = []
     for e in pipeline.stages:
         if e.type == "parallel":
@@ -478,6 +485,7 @@ def local_main(
                             instructions=instructions,
                             plan_copied_from_source=plan_copied_from_source,
                             plan_text_holder=plan_text_holder,
+                            review_stage_names=_rc_names,
                         ),
                     )
                 )
@@ -515,6 +523,7 @@ def local_main(
                         instructions=instructions,
                         plan_copied_from_source=plan_copied_from_source,
                         plan_text_holder=plan_text_holder,
+                        review_stage_names=_rc_names,
                     ),
                 )
             )

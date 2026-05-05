@@ -58,7 +58,7 @@ Do NOT make any code changes — only write the review file.
 
 {focus}
 
-`{out_file}` is the canonical and required location for your review output in every case, including any short-circuit one-liner the lens tells you to emit. Do not emit the verdict only to chat; write it to `{out_file}` and then stop."""
+`{out_file}` is the canonical and required location for your review output in every case, including any short-circuit one-liner the prompt tells you to emit. Do not emit the verdict only to chat; write it to `{out_file}` and then stop."""
     client.run(prompt, label=label, model=model, raw_path=raw_path)
 
 
@@ -82,6 +82,11 @@ def run(ctx: StageContext, options: ReviewCodeOptions) -> pathlib.Path:
             pass
 
     focus = load_prompts(options.prompt_paths)
+    if not focus.strip():
+        raise ValueError(
+            f"stage '{options.stage_name}': prompt_paths produced empty focus; "
+            "check that prompt_paths is non-empty and all files have content"
+        )
 
     if options.is_git:
         code_scope = (
@@ -121,7 +126,7 @@ def run(ctx: StageContext, options: ReviewCodeOptions) -> pathlib.Path:
         if not out_file.exists() or out_file.stat().st_size == 0:
             raise RuntimeError(f"review {options.model} did not produce {out_file}")
     except (SystemExit, Exception) as exc:
-        emit_bail(ctx.gr_id, "other", f"review-code stage failed: {exc}"[:200])
+        emit_bail(ctx.gr_id, "other", f"{options.stage_name} stage failed: {exc}"[:200])
         raise
 
     return out_file
