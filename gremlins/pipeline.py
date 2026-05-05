@@ -43,6 +43,7 @@ class Pipeline:
     path: pathlib.Path
     clients: dict[str, Any]
     stages: list[StageEntry]
+    default_client: str | None = None
 
 
 def _resolve_prompt_paths(
@@ -159,20 +160,29 @@ def load_pipeline(path: pathlib.Path) -> Pipeline:
 
     pipeline_name = str(raw.get("name") or path.stem)
 
-    clients_raw = cast(dict[str, dict[str, Any]], raw.get("clients") or {})
+    clients_raw = cast(dict[str, Any], raw.get("clients") or {})
+    default_client_key = clients_raw.get("default")
+    if default_client_key is not None and not isinstance(default_client_key, str):
+        raise ValueError(
+            f"clients.default must be a string, got {type(default_client_key)!r}"
+        )
     resolved_clients: dict[str, Any] = {}
-    for key, cfg in clients_raw.items():
+    for key, cfg in cast(dict[str, dict[str, Any]], clients_raw).items():
+        if key == "default":
+            continue
         provider = str(cfg.get("provider") or "")
         if not provider:
             raise ValueError(f"client {key!r}: missing 'provider'")
         if provider not in CLIENT_FACTORIES:
             raise ValueError(f"client {key!r}: unknown provider {provider!r}")
-        model = str(cfg.get("model") or "")
-        if not model:
-            raise ValueError(f"client {key!r}: missing 'model'")
+        model = str(cfg.get("model") or "") or None
         resolved_clients[key] = CLIENT_FACTORIES[provider](model)
 
     client_keys = set(resolved_clients.keys())
+    if default_client_key is not None and default_client_key not in client_keys:
+        raise ValueError(
+            f"clients.default {default_client_key!r} is not a defined client key"
+        )
 
     stages: list[StageEntry] = []
     for entry in cast(list[dict[str, Any]], raw.get("stages") or []):
@@ -183,6 +193,7 @@ def load_pipeline(path: pathlib.Path) -> Pipeline:
         path=path,
         clients=resolved_clients,
         stages=stages,
+        default_client=default_client_key,
     )
 
 
