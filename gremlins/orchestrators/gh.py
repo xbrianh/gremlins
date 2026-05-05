@@ -710,7 +710,9 @@ def gh_main(
                 child_dir = group_dir / child.name
                 child_dir.mkdir(parents=True, exist_ok=True)
                 child_ctx = StageContext(
-                    client=_resolve_stage_client(child, pipeline, cli_client, base_client),
+                    client=_resolve_stage_client(
+                        child, pipeline, cli_client, base_client
+                    ),
                     session_dir=child_dir,
                     gr_id=gr_id,
                 )
