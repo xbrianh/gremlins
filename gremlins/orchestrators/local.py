@@ -9,7 +9,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import NoReturn
 
 import yaml
@@ -440,12 +440,15 @@ def local_main(
 
     plan_text_holder: dict[str, str] = {}
 
-    _rc_names = [s.name for s in pipeline.stages if s.type == "review-code"]
-    for _s in pipeline.stages:
-        if _s.type == "parallel":
-            _rc_names += [c.name for c in _s.children if c.type == "review-code"]
-    if not _rc_names:
-        _rc_names = ["review-code"]
+    def _all_stages() -> Iterator[StageEntry]:
+        for s in pipeline.stages:
+            yield s
+            if s.type == "parallel":
+                yield from s.children
+
+    review_stage_names = [
+        s.name for s in _all_stages() if s.type == "review-code"
+    ]
 
     stages: list[tuple[str, Callable[[], None]]] = []
     for e in pipeline.stages:
@@ -477,7 +480,7 @@ def local_main(
                             instructions=instructions,
                             plan_copied_from_source=plan_copied_from_source,
                             plan_text_holder=plan_text_holder,
-                            review_stage_names=_rc_names,
+                            review_stage_names=review_stage_names,
                         ),
                     )
                 )
@@ -515,7 +518,7 @@ def local_main(
                         instructions=instructions,
                         plan_copied_from_source=plan_copied_from_source,
                         plan_text_holder=plan_text_holder,
-                        review_stage_names=_rc_names,
+                        review_stage_names=review_stage_names,
                     ),
                 )
             )
