@@ -3,11 +3,17 @@ from __future__ import annotations
 import os
 import pathlib
 import subprocess
+import sys
 import threading
 import time
 
 from .protocol import CompletedRun
 from .stream import stream_events
+
+
+class StreamTimeoutError(RuntimeError):
+    pass
+
 
 CLAUDE_FLAGS_BASE = [
     "--permission-mode",
@@ -112,7 +118,7 @@ class SubprocessClaudeClient:
     ) -> CompletedRun:
         try:
             assert p.stdout is not None
-            session_id, cost_usd, result_text, events = stream_events(
+            session_id, cost_usd, result_text, events, timed_out = stream_events(
                 p.stdout,
                 prefix=prefix,
                 raw_path=raw_path,
@@ -125,6 +131,9 @@ class SubprocessClaudeClient:
             rc = p.wait()
         finally:
             self._untrack(p)
+
+        if rc != 0 and timed_out:
+            raise StreamTimeoutError("claude -p stream idle timeout")
 
         return CompletedRun(
             exit_code=rc,
@@ -142,13 +151,32 @@ class SubprocessClaudeClient:
         model: str | None = None,
         raw_path: pathlib.Path | None = None,
         capture_events: bool = False,
+        on_timeout_prompt: str | None = None,
+        max_retries: int = 2,
     ) -> CompletedRun:
+        if max_retries < 0:
+            raise ValueError(f"max_retries must be >= 0, got {max_retries}")
         argv = self._build_argv(model)
-        p = self._spawn(argv, prompt)
         prefix = f"[{label}] " if label else ""
-        result = self._consume(p, prefix, raw_path, capture_events)
-        if result.exit_code != 0:
-            raise RuntimeError(
-                f"claude -p (model={model}, label={label}) exited {result.exit_code}"
-            )
-        return result
+        active_prompt = prompt
+        for attempt in range(max_retries + 1):
+            p = self._spawn(argv, active_prompt)
+            try:
+                result = self._consume(p, prefix, raw_path, capture_events)
+            except StreamTimeoutError:
+                if attempt == max_retries:
+                    raise
+                sys.stderr.write(
+                    f"{prefix}stream idle timeout, retrying"
+                    f" ({attempt + 1}/{max_retries})...\n"
+                )
+                time.sleep(5)
+                if on_timeout_prompt is not None:
+                    active_prompt = on_timeout_prompt
+                continue
+            if result.exit_code != 0:
+                raise RuntimeError(
+                    f"claude -p (model={model}, label={label}) exited {result.exit_code}"
+                )
+            return result
+        raise RuntimeError("unreachable")

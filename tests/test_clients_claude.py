@@ -7,7 +7,9 @@ import os
 import pathlib
 import sys
 
-from gremlins.clients.claude import SubprocessClaudeClient
+import pytest
+
+from gremlins.clients.claude import StreamTimeoutError, SubprocessClaudeClient
 
 TESTS_DIR = pathlib.Path(__file__).resolve().parent
 
@@ -102,3 +104,109 @@ def test_subprocess_client_sends_prompt_via_stdin_not_argv(tmp_path, monkeypatch
     assert stdin_out.read_text(encoding="utf-8") == prompt
     child_argv = json.loads(argv_out.read_text(encoding="utf-8"))
     assert prompt not in child_argv
+
+
+# ---------------------------------------------------------------------------
+# Timeout / retry tests
+# ---------------------------------------------------------------------------
+
+_TIMEOUT_STUB_SRC = """\
+import json, os, sys
+
+count_file = os.environ.get("STUB_COUNT_FILE")
+fail_times = int(os.environ.get("STUB_FAIL_TIMES", "0"))
+
+count = 0
+if count_file:
+    try:
+        count = int(open(count_file).read().strip())
+    except Exception:
+        pass
+    with open(count_file, "w") as f:
+        f.write(str(count + 1))
+
+if count < fail_times:
+    sys.stdout.write("API Error: Stream idle timeout\\n")
+    sys.stdout.flush()
+    sys.exit(1)
+
+sys.stdout.write(json.dumps({"type": "system", "subtype": "init", "session_id": "s"}) + "\\n")
+sys.stdout.write(json.dumps({"type": "result", "subtype": "success", "num_turns": 1, "total_cost_usd": 0.0}) + "\\n")
+sys.stdout.flush()
+"""
+
+
+def _install_timeout_stub(bin_dir: pathlib.Path) -> None:
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    stub = bin_dir / "claude"
+    stub.write_text(f"#!{sys.executable}\n" + _TIMEOUT_STUB_SRC, encoding="utf-8")
+    stub.chmod(0o755)
+
+
+def test_retry_succeeds_on_second_attempt(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    _install_timeout_stub(bin_dir)
+    count_file = tmp_path / "count.txt"
+    count_file.write_text("0")
+
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("STUB_COUNT_FILE", str(count_file))
+    monkeypatch.setenv("STUB_FAIL_TIMES", "1")
+    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    client = SubprocessClaudeClient()
+    result = client.run("hello", label="test", max_retries=2)
+    assert result.exit_code == 0
+    assert int(count_file.read_text()) == 2  # called twice
+
+
+def test_retry_exhaustion_raises_stream_timeout_error(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    _install_timeout_stub(bin_dir)
+    count_file = tmp_path / "count.txt"
+    count_file.write_text("0")
+
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("STUB_COUNT_FILE", str(count_file))
+    monkeypatch.setenv("STUB_FAIL_TIMES", "99")
+    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    client = SubprocessClaudeClient()
+    with pytest.raises(StreamTimeoutError):
+        client.run("hello", label="test", max_retries=2)
+    assert int(count_file.read_text()) == 3  # initial + 2 retries
+
+
+def test_on_timeout_prompt_used_on_retry(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    _install_timeout_stub(bin_dir)
+    count_file = tmp_path / "count.txt"
+    count_file.write_text("0")
+    stdin_out = tmp_path / "last_stdin.txt"
+
+    stub = bin_dir / "claude"
+    extra = """
+stdin_out = os.environ.get("STUB_STDIN_OUT")
+if stdin_out:
+    with open(stdin_out, "w") as f:
+        f.write(sys.stdin.read())
+"""
+    # Prepend stdin capture before the timeout logic
+    src = _TIMEOUT_STUB_SRC.replace(
+        "import json, os, sys\n",
+        "import json, os, sys\n" + extra,
+    )
+    stub.write_text(f"#!{sys.executable}\n" + src, encoding="utf-8")
+    stub.chmod(0o755)
+
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("STUB_COUNT_FILE", str(count_file))
+    monkeypatch.setenv("STUB_FAIL_TIMES", "1")
+    monkeypatch.setenv("STUB_STDIN_OUT", str(stdin_out))
+    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    client = SubprocessClaudeClient()
+    client.run(
+        "original", label="test", on_timeout_prompt="retry-prompt", max_retries=2
+    )
+    assert stdin_out.read_text(encoding="utf-8") == "retry-prompt"
