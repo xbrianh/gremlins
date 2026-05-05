@@ -35,7 +35,7 @@ from gremlins.pipeline import (
     resolve_pipeline_path,
 )
 from gremlins.prompts import load_prompts
-from gremlins.runner import install_signal_handlers, make_parallel_wrapper, run_stages
+from gremlins.runner import build_parallel_stages, install_signal_handlers, run_stages
 from gremlins.stages import (
     commit_pr,
     ghaddress,
@@ -642,15 +642,22 @@ def gh_main(
 
     stage_names = [s.name for s in pipeline.stages]
 
+    # Expand parallel groups to their three runtime stages: fanout, parallel, fanin.
+    _expanded_stage_names: list[str] = []
     _child_to_group: dict[str, str] = {}
     for _e in pipeline.stages:
         if _e.type == "parallel":
+            _expanded_stage_names.extend(
+                [f"{_e.name}-fanout", _e.name, f"{_e.name}-fanin"]
+            )
             for _child in _e.children:
                 if _child.name in _child_to_group or _child.name in stage_names:
                     die(f"duplicate child stage name {_child.name!r}")
                 _child_to_group[_child.name] = _e.name
+        else:
+            _expanded_stage_names.append(_e.name)
 
-    all_valid_stages = stage_names + list(_child_to_group)
+    all_valid_stages = _expanded_stage_names + list(_child_to_group)
     seen: set[str] = set()
     for _n in all_valid_stages:
         if _n in seen:
@@ -693,8 +700,20 @@ def gh_main(
     issue_num: str = ""
     issue_body: str = ""
 
-    plan_idx = next((i for i, s in enumerate(pipeline.stages) if s.type == "plan"), 0)
-    resume_idx = stage_names.index(run_resume_from) if run_resume_from else 0
+    # plan_idx: index of the plan stage in the expanded stage list.
+    _plan_stage_name = next(
+        (s.name for s in pipeline.stages if s.type == "plan"), None
+    )
+    plan_idx = (
+        _expanded_stage_names.index(_plan_stage_name)
+        if _plan_stage_name and _plan_stage_name in _expanded_stage_names
+        else 0
+    )
+    resume_idx = (
+        _expanded_stage_names.index(run_resume_from)
+        if run_resume_from and run_resume_from in _expanded_stage_names
+        else 0
+    )
 
     if args.plan_source:
         issue_url, issue_num, issue_body = _resolve_plan_source(
@@ -737,7 +756,7 @@ def gh_main(
         if e.type == "parallel":
             group_dir = session_dir / e.name
             group_dir.mkdir(parents=True, exist_ok=True)
-            child_runners: list[tuple[str, Callable[[], None]]] = []
+            child_runners: list[tuple[str, StageContext, Callable[[], None]]] = []
             for child in e.children:
                 child_spec = require_stage_spec(stage_specs, child.name)
                 child_dir = group_dir / child.name
@@ -746,6 +765,7 @@ def gh_main(
                     client=_client_for_spec(child_spec),
                     session_dir=child_dir,
                     gr_id=gr_id,
+                    child_key=child.name,
                 )
                 try:
                     child_runner = _build_stage_runner(
@@ -762,17 +782,19 @@ def gh_main(
                     )
                 except ValueError as exc:
                     die(str(exc))
-                child_runners.append((child.name, child_runner))
+                child_runners.append((child.name, child_ctx, child_runner))
             group_name = e.name
-            stages.append(
-                (
-                    e.name,
-                    make_parallel_wrapper(
-                        child_runners,
-                        max_concurrent=e.max_concurrent,
-                        resume_from=args.resume_from,
-                        set_stage_fn=lambda n=group_name: set_stage(gr_id, n),
-                    ),
+            stages.extend(
+                build_parallel_stages(
+                    group_name,
+                    child_runners,
+                    max_concurrent=e.max_concurrent,
+                    resume_from=args.resume_from,
+                    set_stage_fn=lambda n=group_name: set_stage(gr_id, n),
+                    cancel_on_bail=e.cancel_on_bail,
+                    bail_policy=e.bail_policy,
+                    gr_id=gr_id,
+                    project_root=pathlib.Path.cwd(),
                 )
             )
         else:

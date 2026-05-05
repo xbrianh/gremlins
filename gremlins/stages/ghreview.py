@@ -49,7 +49,7 @@ If the review has no blocker-severity findings, do not run the helper — exit n
         model=options.model,
         raw_path=ctx.session_dir / "stream-ghreview.jsonl",
     )
-    check_bail(ctx.gr_id, "/ghreview")
+    check_bail(ctx.gr_id, "/ghreview", child_key=ctx.child_key)
 
 
 register_stage("ghreview", run)

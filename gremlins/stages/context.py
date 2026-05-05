@@ -13,3 +13,5 @@ class StageContext:
     client: ClaudeClient
     session_dir: pathlib.Path
     gr_id: str | None
+    child_key: str | None = None
+    worktree: pathlib.Path | None = None

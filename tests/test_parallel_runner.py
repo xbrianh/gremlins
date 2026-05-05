@@ -1,4 +1,4 @@
-"""Tests for make_parallel_wrapper and run_stages with parallel groups."""
+"""Tests for build_parallel_stages and run_stages with parallel groups."""
 
 from __future__ import annotations
 
@@ -8,8 +8,11 @@ import time
 
 import pytest
 
+from gremlins.clients.fake import FakeClaudeClient
 from gremlins.pipeline import load_pipeline
-from gremlins.runner import make_parallel_wrapper, run_stages
+from gremlins.runner import build_parallel_stages, run_stages
+from gremlins.stages.context import StageContext
+
 
 # ---------------------------------------------------------------------------
 # Fixtures helpers
@@ -19,6 +22,40 @@ from gremlins.runner import make_parallel_wrapper, run_stages
 def _write_yaml(path: pathlib.Path, content: str) -> pathlib.Path:
     path.write_text(content, encoding="utf-8")
     return path
+
+
+def _make_ctx(child_key: str) -> StageContext:
+    return StageContext(
+        client=FakeClaudeClient(),
+        session_dir=pathlib.Path("/tmp"),
+        gr_id=None,
+        child_key=child_key,
+    )
+
+
+def _parallel_wrapper(
+    children: list[tuple[str, object]],
+    *,
+    max_concurrent: int | None = None,
+    resume_from: str | None = None,
+    set_stage_fn: object = None,
+) -> object:
+    """Return the parallel-stage callable from build_parallel_stages."""
+    if set_stage_fn is None:
+        set_stage_fn = lambda: None
+    triples = [(n, _make_ctx(n), fn) for n, fn in children]  # type: ignore[misc]
+    stages = build_parallel_stages(
+        "test-group",
+        triples,
+        max_concurrent=max_concurrent,
+        resume_from=resume_from,
+        set_stage_fn=set_stage_fn,  # type: ignore[arg-type]
+        cancel_on_bail=False,
+        bail_policy="any",
+        gr_id=None,
+        project_root=pathlib.Path.cwd(),
+    )
+    return stages[1][1]  # index 1 is the parallel stage
 
 
 # ---------------------------------------------------------------------------
@@ -95,13 +132,8 @@ def test_parallel_wrapper_runs_all_children() -> None:
         return fn
 
     children = [("a", track("a")), ("b", track("b"))]
-    wrapper = make_parallel_wrapper(
-        children,
-        max_concurrent=None,
-        resume_from=None,
-        set_stage_fn=lambda: None,
-    )
-    wrapper()
+    wrapper = _parallel_wrapper(children)
+    wrapper()  # type: ignore[operator]
     assert sorted(log) == ["a", "b"]
 
 
@@ -125,13 +157,8 @@ def test_parallel_wrapper_children_overlap_in_time() -> None:
         return fn
 
     children = [("a", make_timed("a")), ("b", make_timed("b"))]
-    wrapper = make_parallel_wrapper(
-        children,
-        max_concurrent=None,
-        resume_from=None,
-        set_stage_fn=lambda: None,
-    )
-    wrapper()
+    wrapper = _parallel_wrapper(children)
+    wrapper()  # type: ignore[operator]
 
     # Both started before either finished → overlapping execution
     assert timings["a"]["start"] < timings["b"]["end"]
@@ -154,14 +181,9 @@ def test_parallel_wrapper_sibling_runs_when_one_child_fails() -> None:
         ran.append("sibling")
 
     children = [("fail", failing), ("sibling", sibling)]
-    wrapper = make_parallel_wrapper(
-        children,
-        max_concurrent=None,
-        resume_from=None,
-        set_stage_fn=lambda: None,
-    )
+    wrapper = _parallel_wrapper(children)
     with pytest.raises(RuntimeError, match="child failed"):
-        wrapper()
+        wrapper()  # type: ignore[operator]
     assert "sibling" in ran
 
 
@@ -174,13 +196,8 @@ def test_parallel_wrapper_resume_from_group_name_runs_all() -> None:
     log: list[str] = []
     children = [("a", lambda: log.append("a")), ("b", lambda: log.append("b"))]
     # "reviews" is the group name, not a child name → all children run
-    wrapper = make_parallel_wrapper(
-        children,
-        max_concurrent=None,
-        resume_from="reviews",
-        set_stage_fn=lambda: None,
-    )
-    wrapper()
+    wrapper = _parallel_wrapper(children, resume_from="reviews")
+    wrapper()  # type: ignore[operator]
     assert sorted(log) == ["a", "b"]
 
 
@@ -191,13 +208,8 @@ def test_parallel_wrapper_resume_from_child_name_skips_earlier() -> None:
         ("b", lambda: log.append("b")),
         ("c", lambda: log.append("c")),
     ]
-    wrapper = make_parallel_wrapper(
-        children,
-        max_concurrent=None,
-        resume_from="b",
-        set_stage_fn=lambda: None,
-    )
-    wrapper()
+    wrapper = _parallel_wrapper(children, resume_from="b")
+    wrapper()  # type: ignore[operator]
     assert "a" not in log
     assert "b" in log
     assert "c" in log
@@ -209,18 +221,13 @@ def test_parallel_wrapper_resume_from_last_child_runs_only_last() -> None:
         ("a", lambda: log.append("a")),
         ("b", lambda: log.append("b")),
     ]
-    wrapper = make_parallel_wrapper(
-        children,
-        max_concurrent=None,
-        resume_from="b",
-        set_stage_fn=lambda: None,
-    )
-    wrapper()
+    wrapper = _parallel_wrapper(children, resume_from="b")
+    wrapper()  # type: ignore[operator]
     assert log == ["b"]
 
 
 # ---------------------------------------------------------------------------
-# Task 4: run_stages with parallel group registered as single entry
+# Task 4: run_stages with parallel group registered as three entries
 # ---------------------------------------------------------------------------
 
 
@@ -228,16 +235,21 @@ def test_run_stages_drives_parallel_group() -> None:
     log: list[str] = []
 
     children = [("r1", lambda: log.append("r1")), ("r2", lambda: log.append("r2"))]
-    parallel = make_parallel_wrapper(
-        children,
+    parallel_stages = build_parallel_stages(
+        "reviews",
+        [(_n, _make_ctx(_n), _fn) for _n, _fn in children],
         max_concurrent=None,
         resume_from=None,
         set_stage_fn=lambda: None,
+        cancel_on_bail=False,
+        bail_policy="any",
+        gr_id=None,
+        project_root=pathlib.Path.cwd(),
     )
 
     stages = [
         ("plan", lambda: log.append("plan")),
-        ("reviews", parallel),
+        *parallel_stages,
         ("address", lambda: log.append("address")),
     ]
     run_stages(stages)
@@ -250,16 +262,21 @@ def test_run_stages_resume_from_group_skips_before_group() -> None:
     log: list[str] = []
 
     children = [("r1", lambda: log.append("r1")), ("r2", lambda: log.append("r2"))]
-    parallel = make_parallel_wrapper(
-        children,
+    parallel_stages = build_parallel_stages(
+        "reviews",
+        [(_n, _make_ctx(_n), _fn) for _n, _fn in children],
         max_concurrent=None,
         resume_from=None,
         set_stage_fn=lambda: None,
+        cancel_on_bail=False,
+        bail_policy="any",
+        gr_id=None,
+        project_root=pathlib.Path.cwd(),
     )
 
     stages = [
         ("plan", lambda: log.append("plan")),
-        ("reviews", parallel),
+        *parallel_stages,
         ("address", lambda: log.append("address")),
     ]
     run_stages(stages, resume_from="reviews")
@@ -304,3 +321,23 @@ stages:
     )
     with pytest.raises(ValueError, match="max_concurrent"):
         load_pipeline(tmp_path / "pipeline.yaml")
+
+
+# ---------------------------------------------------------------------------
+# build_parallel_stages stage naming
+# ---------------------------------------------------------------------------
+
+
+def test_build_parallel_stages_names() -> None:
+    stages = build_parallel_stages(
+        "reviews",
+        [("r1", _make_ctx("r1"), lambda: None)],
+        max_concurrent=None,
+        resume_from=None,
+        set_stage_fn=lambda: None,
+        cancel_on_bail=False,
+        bail_policy="any",
+        gr_id=None,
+        project_root=pathlib.Path.cwd(),
+    )
+    assert [n for n, _ in stages] == ["reviews-fanout", "reviews", "reviews-fanin"]

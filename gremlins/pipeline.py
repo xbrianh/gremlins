@@ -29,6 +29,8 @@ class StageEntry:
         default_factory=list
     )
     max_concurrent: int | None = None
+    cancel_on_bail: bool = False
+    bail_policy: str = "any"
 
 
 @dataclasses.dataclass
@@ -93,6 +95,12 @@ def _parse_stage_entry(
                 raise ValueError(
                     f"parallel group {name!r}: 'max_concurrent' must be a positive integer"
                 )
+        cancel_on_bail = bool(entry.get("cancel_on_bail", False))
+        bail_policy = str(entry.get("bail_policy") or "any")
+        if bail_policy not in ("any", "all"):
+            raise ValueError(
+                f"parallel group {name!r}: 'bail_policy' must be 'any' or 'all'"
+            )
         return StageEntry(
             name=name,
             type="parallel",
@@ -101,6 +109,8 @@ def _parse_stage_entry(
             options={},
             children=children,
             max_concurrent=max_concurrent,
+            cancel_on_bail=cancel_on_bail,
+            bail_policy=bail_policy,
         )
 
     name = entry.get("name")

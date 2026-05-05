@@ -246,6 +246,81 @@ chain coordinates child gremlins by reading their `state.json` files, not
 by sharing context with them. This is what lets a boss recover from a child
 bail without inheriting any of the child's confusion.
 
+### 3.5 Parallel stages
+
+A `type: parallel` block in a pipeline YAML runs N children concurrently.
+At runtime the block materialises as **three stages**, keeping §2's
+deterministic-vs-agentic line intact:
+
+- **`<group>-fanout`** (deterministic). Creates per-child artifact
+  subdirs and per-child git worktrees, each a detached checkout of the
+  current branch tip. Runs `git worktree prune` first to clear leftovers
+  from any previous interrupted run.
+- **`<group>`** (agentic, N concurrent). Runs N `claude -p` invocations in
+  a thread pool, each in its own `StageContext` with its `child_key` and
+  the worktree path from fan-out. Children write `bail_class` and
+  `bail_detail` into `state.json` under `parallel_bails[child_key]`, never
+  into the top-level bail slot, so children cannot see each other's bails.
+  `check_bail` called with a `child_key` reads only that child's shard.
+- **`<group>-fanin`** (deterministic). Reads `parallel_bails`, applies the
+  block's `bail_policy`, promotes a bail to the top-level `bail_class` if
+  warranted, clears `parallel_bails`, and tears down all per-child
+  worktrees with `git worktree remove --force` + `git worktree prune`.
+  Fan-in is also responsible for cleanup on crash — it runs teardown in a
+  `try/finally` so worktrees don't accumulate from aborted runs.
+
+This decomposition fixes two latent bugs in the prior single-stage
+parallel wrapper:
+
+- **Lost bail.** `patch_state` did a read-modify-write without a lock.
+  Concurrent `emit_bail` calls raced; last writer won. The fix is twofold:
+  `patch_state` now holds an exclusive `fcntl.flock` on a per-`state.json`
+  lock file for the duration of each read-modify-write, and child bails go
+  into `parallel_bails[child_key]` rather than the shared top-level slot.
+- **Bail cross-contamination.** `check_bail` read the global top-level
+  `bail_class`. A parallel child completing after a sibling bailed would
+  falsely report itself as bailed. `check_bail` is now parameterised by
+  `child_key` and reads only `parallel_bails[child_key]`.
+
+Both fixes are backward-compatible: `child_key=None` (the default, used by
+all sequential stages) preserves existing top-level bail semantics.
+
+**Per-block knobs** (declared on the parallel block in the pipeline YAML):
+
+- `cancel_on_bail: false` (default). All children run to completion even if
+  one bails. Right for review lenses where each lens is independent.
+  Set to `true` for parallel implementers where a structural bail by one
+  child makes the others irrelevant — on first bail a cancel flag is set
+  and children that have not yet started are skipped.
+- `bail_policy: any` (default). Any bailing child causes the group to bail
+  after fan-in. Set to `all` to require every child to bail before the
+  group bails. The top-level `bail_class` is populated from the first
+  bailing child's shard.
+
+**Worktrees are always-on.** Every parallel child gets its own worktree,
+regardless of whether it mutates. The cost — one full working-tree checkout
+per child, with object storage shared via `.git/worktrees/` — is small
+relative to gremlin runtime. Unconditional worktrees remove a flag and a
+code path: read-only and mutating parallel are architecturally identical;
+the only difference is what the children write and what fan-in does with it.
+
+**The merge problem is unsolved.** Fan-in for blocks whose children mutated
+their worktrees raises `NotImplementedError`. Deciding what to do when N
+agents each produced a different diff — pick the best, merge all,
+cherry-pick — requires a concrete use case before the right shape is clear.
+The current parallel use (review lenses) is read-only; it does not hit this
+path.
+
+**Resumability.** The three-stage decomposition makes resume targets
+explicit:
+
+- `--resume-from <group>-fanout`: re-create slots and run end-to-end.
+- `--resume-from <group>`: rerun all children from cold worktrees (fan-out
+  must have already run). Do not try to skip "already-completed" children —
+  partial state from a prior run is the in-memory-context-leak §3 forbids.
+- `--resume-from <group>-fanin`: re-aggregate whatever shards exist without
+  rerunning workers. The clean win when workers finished but fan-in crashed.
+
 ## 4. Boss gremlins and chained workflows
 
 A single gremlin produces one PR from one plan. Many real tasks don't fit

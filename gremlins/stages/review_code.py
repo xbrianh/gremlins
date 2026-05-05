@@ -126,7 +126,7 @@ def run(ctx: StageContext, options: ReviewCodeOptions) -> pathlib.Path:
         if not out_file.exists() or out_file.stat().st_size == 0:
             raise RuntimeError(f"review {options.model} did not produce {out_file}")
     except (SystemExit, Exception) as exc:
-        emit_bail(ctx.gr_id, "other", f"{options.stage_name} stage failed: {exc}"[:200])
+        emit_bail(ctx.gr_id, "other", f"{options.stage_name} stage failed: {exc}"[:200], child_key=ctx.child_key)
         raise
 
     return out_file
