@@ -69,7 +69,9 @@ def collect_stage_specs(
     specs: dict[str, ClientSpec] = {}
     for e in pipeline.stages:
         if e.type == "parallel":
-            specs[e.name] = resolve_stage_client(None, cli_spec, pipeline.default_client)
+            specs[e.name] = resolve_stage_client(
+                None, cli_spec, pipeline.default_client
+            )
             for child in e.children:
                 specs[child.name] = resolve_stage_client(
                     child.client, cli_spec, pipeline.default_client

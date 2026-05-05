@@ -276,7 +276,9 @@ def local_main(
         except Exception as exc:
             die(f"--resume-from: corrupt state.json stage_clients: {exc}")
         if not stage_specs:
-            die("--resume-from: stage_clients not found in state.json (rerun from scratch?)")
+            die(
+                "--resume-from: stage_clients not found in state.json (rerun from scratch?)"
+            )
     if not stage_specs:
         stage_specs = collect_stage_specs(pipeline, cli_spec)
         if gr_id:
