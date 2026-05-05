@@ -317,6 +317,10 @@ export TEST_DATABASE_URL=postgresql://localhost/mydb_test
 gitignored by default. Add it to your `~/.gitignore_global` or project
 `.gitignore` if you don't use `gremlins init`.
 
+> **Security warning:** because `.gremlins/env` is executed as a bash script,
+> it can run arbitrary code. Do not run gremlins in a repository unless you
+> have reviewed the contents of `.gremlins/env` and trust them.
+
 ### Loader API
 
 `gremlins/pipeline.py` exposes:
