@@ -45,7 +45,7 @@ def build_row(
     parent_id = state.get("parent_id") or ""
     boss_disp = display_id(parent_id)[:20] if parent_id else ""
 
-    client = state.get("client") or state.get("impl_model") or state.get("model") or "—"
+    client = state.get("client") or "—"
 
     return {
         "started_at": started_at,

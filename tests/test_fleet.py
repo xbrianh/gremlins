@@ -199,27 +199,6 @@ def test_build_row_client_missing_field_shows_dash():
     assert row["client"] == "—"
 
 
-def test_build_row_client_falls_back_to_legacy_impl_model():
-    state = {
-        "kind": "localgremlin",
-        "stage": "implement",
-        "started_at": "",
-        "impl_model": "opus",
-    }
-    row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
-    assert row["client"] == "opus"
-
-
-def test_build_row_client_falls_back_to_legacy_model():
-    state = {
-        "kind": "ghgremlin",
-        "stage": "implement",
-        "started_at": "",
-        "model": "gpt-5.4",
-    }
-    row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
-    assert row["client"] == "gpt-5.4"
-
 
 def test_build_row_preserves_long_client_label():
     client = "copilot:gpt-5.4-super-long-client-label"
