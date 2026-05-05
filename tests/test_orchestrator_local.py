@@ -442,7 +442,4 @@ def test_local_main_resume_requires_each_persisted_stage_client(
             gr_id=gr_id,
         )
 
-    assert (
-        "stage 'review-code' missing from state.json stage_clients"
-        in capsys.readouterr().err
-    )
+    assert "stage_clients missing stage: 'review-code'" in capsys.readouterr().err

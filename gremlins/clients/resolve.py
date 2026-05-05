@@ -2,19 +2,14 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import sys
-from typing import TYPE_CHECKING, NoReturn
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from ..stages.registry import CLIENT_FACTORIES
 from ..state import resolve_state_file
 
 if TYPE_CHECKING:
     from ..pipeline import Pipeline
-
-
-def _die(msg: str) -> NoReturn:
-    print(msg, file=sys.stderr)
-    raise SystemExit(1)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -95,11 +90,30 @@ def load_stage_specs_from_state(gr_id: str | None) -> dict[str, ClientSpec]:
     return {str(k): ClientSpec.parse(str(v)) for k, v in stored.items()}
 
 
+def _format_missing_stage_specs(names: Sequence[str]) -> str:
+    missing = ", ".join(repr(name) for name in sorted(names))
+    suffix = "" if len(names) == 1 else "s"
+    return f"stage_clients missing stage{suffix}: {missing}"
+
+
+def validate_stage_specs(
+    stage_specs: dict[str, ClientSpec], pipeline: Pipeline
+) -> None:
+    expected_stage_names = {entry.name for entry in pipeline.stages}
+    for entry in pipeline.stages:
+        if entry.type == "parallel":
+            expected_stage_names.update(child.name for child in entry.children)
+
+    missing_stage_names = sorted(expected_stage_names.difference(stage_specs))
+    if missing_stage_names:
+        raise ValueError(_format_missing_stage_specs(missing_stage_names))
+
+
 def require_stage_spec(
     stage_specs: dict[str, ClientSpec],
     name: str,
 ) -> ClientSpec:
     try:
         return stage_specs[name]
-    except KeyError:
-        _die(f"stage {name!r} missing from state.json stage_clients")
+    except KeyError as exc:
+        raise ValueError(_format_missing_stage_specs([name])) from exc

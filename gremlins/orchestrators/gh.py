@@ -23,6 +23,7 @@ from ..clients.resolve import (
     collect_stage_specs,
     load_stage_specs_from_state,
     require_stage_spec,
+    validate_stage_specs,
 )
 from ..env_file import load_env_file
 from ..gh_utils import extract_gh_url, get_repo, parse_issue_ref, view_issue
@@ -661,6 +662,11 @@ def gh_main(
     if args.resume_from in _child_to_group:
         run_resume_from = _child_to_group[args.resume_from]
 
+    try:
+        validate_stage_specs(stage_specs, pipeline)
+    except ValueError as exc:
+        die(str(exc))
+
     repo = get_repo()
     session_dir = resolve_session_dir(gr_id)
     plan_md = session_dir / "plan.md"
@@ -720,16 +726,6 @@ def gh_main(
         "pr_num": "",
         "instructions": instructions,
     }
-
-    expected_stage_names = {entry.name for entry in pipeline.stages}
-    for entry in pipeline.stages:
-        if entry.type == "parallel":
-            expected_stage_names.update(child.name for child in entry.children)
-    missing_stage_names = sorted(expected_stage_names.difference(stage_specs))
-    if missing_stage_names:
-        missing = ", ".join(repr(name) for name in missing_stage_names)
-        suffix = "" if len(missing_stage_names) == 1 else "s"
-        die(f"stage_clients missing stage{suffix}: {missing}")
 
     stages: list[tuple[str, Callable[[], None]]] = []
     for e in pipeline.stages:

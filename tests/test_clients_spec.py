@@ -9,7 +9,9 @@ from gremlins.clients.resolve import (
     ClientSpec,
     require_stage_spec,
     resolve_stage_client,
+    validate_stage_specs,
 )
+from gremlins.pipeline import load_pipeline, resolve_pipeline_path
 
 
 def test_parse_valid():
@@ -70,11 +72,13 @@ def test_require_stage_spec_returns_present_stage():
     assert require_stage_spec({"implement": spec}, "implement") is spec
 
 
-def test_require_stage_spec_missing_stage_exits(capsys):
-    with pytest.raises(SystemExit):
+def test_require_stage_spec_missing_stage_raises():
+    with pytest.raises(ValueError, match=r"stage_clients missing stage: 'implement'"):
         require_stage_spec({}, "implement")
 
-    assert (
-        "stage 'implement' missing from state.json stage_clients"
-        in capsys.readouterr().err
-    )
+
+def test_validate_stage_specs_reports_all_missing_stages(tmp_path):
+    pipeline = load_pipeline(resolve_pipeline_path("gh", tmp_path))
+
+    with pytest.raises(ValueError, match=r"stage_clients missing stages:"):
+        validate_stage_specs({"plan": ClientSpec("claude", "sonnet")}, pipeline)
