@@ -88,17 +88,23 @@ def _provider_from_client_spec(client_spec: str | None) -> str | None:
     return provider
 
 
+def _effective_stage_model(entry: StageEntry, default_model: str) -> str:
+    if entry.client is not None and entry.client_spec:
+        m = entry.client_spec.partition(":")[2]
+        return m if m else default_model
+    return default_model
+
+
 def _resolve_stage_client_label(
     entry: StageEntry,
     pipeline: Pipeline,
     cli_client_spec: str | None,
     model: str,
 ) -> str:
+    if entry.client is not None and entry.client_spec:
+        return entry.client_spec
     provider = (
-        _provider_from_client_spec(
-            entry.client_spec if entry.client is not None else None
-        )
-        or _provider_from_client_spec(cli_client_spec)
+        _provider_from_client_spec(cli_client_spec)
         or _provider_from_client_spec(pipeline.default_client_spec)
         or "claude"
     )
@@ -339,6 +345,8 @@ def _build_stage_runner(
     gr_id: str | None,
     gh_state: dict[str, Any],
 ) -> Callable[[], None]:
+    stage_model = _effective_stage_model(entry, model)
+
     if entry.type == "plan":
 
         def _plan() -> None:
@@ -363,7 +371,7 @@ def _build_stage_runner(
             completed = ctx.client.run(
                 plan_prompt,
                 label="plan",
-                model=model,
+                model=stage_model,
                 raw_path=session_dir / "ghplan-out.jsonl",
                 capture_events=True,
             )
@@ -407,7 +415,7 @@ def _build_stage_runner(
             impl_result = implement.run(
                 ctx,
                 implement.ImplementOptions(
-                    impl_model=model,
+                    impl_model=stage_model,
                     plan_text=gh_state["issue_body"],
                     code_style=code_style,
                     is_git=True,
@@ -444,7 +452,7 @@ def _build_stage_runner(
             verify.run(
                 ctx,
                 verify.VerifyOptions(
-                    fix_model=model,
+                    fix_model=stage_model,
                     cwd=pathlib.Path.cwd(),
                     code_style=code_style,
                     is_git=True,
@@ -508,7 +516,7 @@ def _build_stage_runner(
             pr_url = commit_pr.run(
                 ctx,
                 commit_pr.CommitPrOptions(
-                    model=model,
+                    model=stage_model,
                     impl_outcome=impl_outcome,
                     impl_handoff_branch=impl_handoff_branch,
                     base_ref=base_ref,
@@ -564,7 +572,7 @@ def _build_stage_runner(
             ghreview.run(
                 ctx,
                 ghreview.GhreviewOptions(
-                    model=model,
+                    model=stage_model,
                     pr_url=gh_state["pr_url"],
                     code_style=code_style,
                     prompt_path=entry.prompt_paths[-1],
@@ -614,7 +622,7 @@ def _build_stage_runner(
             ghaddress.run(
                 ctx,
                 ghaddress.GhaddressOptions(
-                    model=model,
+                    model=stage_model,
                     pr_url=gh_state["pr_url"],
                     code_style=code_style,
                     prompt_path=entry.prompt_paths[-1],
@@ -638,7 +646,7 @@ def _build_stage_runner(
             wait_ci.run(
                 ctx,
                 wait_ci.WaitCiOptions(
-                    model=model,
+                    model=stage_model,
                     pr_url=gh_state["pr_url"],
                     code_style=code_style,
                 ),
