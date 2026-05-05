@@ -815,7 +815,14 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
         "run",
         _make_gh_subprocess(issue_body="# Resumed Plan\nDo more stuff.\n"),
     )
-    monkeypatch.setattr("gremlins.stages.ghreview.run", lambda ctx, options: None)
+    verify_models: list[str] = []
+    ghreview_models: list[str] = []
+    ghaddress_models: list[str] = []
+    ci_models: list[str] = []
+    monkeypatch.setattr(
+        "gremlins.stages.ghreview.run",
+        lambda ctx, options: ghreview_models.append(options.model),
+    )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
     )
@@ -823,9 +830,18 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
         "gremlins.stages.request_copilot.run",
         lambda ctx, options: None,
     )
-    monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
-    monkeypatch.setattr("gremlins.stages.verify.run", lambda ctx, options: None)
-    monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
+    monkeypatch.setattr(
+        "gremlins.stages.ghaddress.run",
+        lambda ctx, options: ghaddress_models.append(options.model),
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.verify.run",
+        lambda ctx, options: verify_models.append(options.fix_model),
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.wait_ci.run",
+        lambda ctx, options: ci_models.append(options.model),
+    )
 
     launch_client = _CommittingClient(
         git_dir=tmp_path,
@@ -840,8 +856,16 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
 
     launch_state = json.loads(state_file.read_text(encoding="utf-8"))
     assert launch_state.get("stage_clients") == original_stage_clients
+    assert verify_models == ["claude-opus-4-1"]
+    assert ghreview_models == ["claude-haiku-4-5-20251001"]
+    assert ghaddress_models == ["claude-sonnet-4-6"]
+    assert ci_models == ["claude-opus-4-1"]
 
     write_pipeline(mutated_stage_clients)
+    verify_models.clear()
+    ghreview_models.clear()
+    ghaddress_models.clear()
+    ci_models.clear()
     subprocess.run(
         ["git", "switch", "main"],
         cwd=tmp_path,
@@ -899,6 +923,10 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
         "implement": "claude-haiku-4-5-20251001",
         "commit-pr": "gpt-4o",
     }
+    assert verify_models == ["claude-opus-4-1"]
+    assert ghreview_models == ["claude-haiku-4-5-20251001"]
+    assert ghaddress_models == ["claude-sonnet-4-6"]
+    assert ci_models == ["claude-opus-4-1"]
 
 
 def test_gh_main_resume_requires_persisted_stage_clients(tmp_path, monkeypatch, capsys):

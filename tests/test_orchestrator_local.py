@@ -38,7 +38,6 @@ def test_local_main_plan_mode(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.stages.implement.changes_outside_git", lambda s, d: True
     )
-
     client = _ReviewCreatingClient(
         fixtures={
             "implement": MINIMAL_EVENTS,
@@ -339,6 +338,11 @@ def test_local_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
     monkeypatch.setattr(
         "gremlins.stages.implement.changes_outside_git", lambda s, d: True
     )
+    verify_models: list[str] = []
+    monkeypatch.setattr(
+        "gremlins.stages.verify.run",
+        lambda ctx, options: verify_models.append(options.fix_model),
+    )
 
     original_review_label = "review-code:detail:gpt-4o"
     mutated_review_label = "review-code:detail:claude-opus-4-7"
@@ -358,8 +362,10 @@ def test_local_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
     state_dir = tmp_path / "xdg" / "claude-gremlins" / gr_id
     launch_state = json.loads((state_dir / "state.json").read_text(encoding="utf-8"))
     assert launch_state.get("stage_clients") == original_stage_clients
+    assert verify_models == ["claude-opus-4-1"]
 
     write_pipeline(mutated_stage_clients)
+    verify_models.clear()
     resume_client = _ReviewCreatingClient(
         fixtures={
             "implement": MINIMAL_EVENTS,
@@ -382,6 +388,7 @@ def test_local_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
         "review-code:detail:gpt-4o": "gpt-4o",
         "address-code": "claude-sonnet-4-6",
     }
+    assert verify_models == ["claude-opus-4-1"]
 
 
 def test_local_main_resume_requires_persisted_stage_clients(
