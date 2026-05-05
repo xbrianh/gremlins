@@ -66,6 +66,11 @@ def _resolve_stage_client(
     return fallback
 
 
+def _resolve_stage_client_spec(entry: StageEntry) -> str | None:
+    """Return the client spec string for this stage, if any."""
+    return entry.client_spec
+
+
 def _parse_local_args(argv: list[str]) -> argparse.Namespace:
     usage = (
         "usage: gremlins.cli local [-p <plan-model>] [-i <impl-model>] "
@@ -140,7 +145,9 @@ def _build_stage_runner(
                 else:
                     logger.info("plan reused from snapshot -> %s", plan_file)
             else:
-                set_stage(ctx.gr_id, entry.name)
+                set_stage(
+                    ctx.gr_id, entry.name, client_spec=_resolve_stage_client_spec(entry)
+                )
                 logger.info(
                     "planning (model: %s) -> %s",
                     entry.options.get("plan_model", args.plan_model),
@@ -177,7 +184,9 @@ def _build_stage_runner(
                         "could not read spec.md (%s); proceeding without north-star context",
                         exc,
                     )
-            set_stage(ctx.gr_id, entry.name)
+            set_stage(
+                ctx.gr_id, entry.name, client_spec=_resolve_stage_client_spec(entry)
+            )
             logger.info(
                 "implementing (model: %s, from %s)",
                 entry.options.get("impl_model", args.impl),
@@ -204,7 +213,9 @@ def _build_stage_runner(
             plan_text = plan_text_holder.get("text") or plan_file.read_text(
                 encoding="utf-8"
             )
-            set_stage(ctx.gr_id, entry.name)
+            set_stage(
+                ctx.gr_id, entry.name, client_spec=_resolve_stage_client_spec(entry)
+            )
             logger.info("reviewing code (model: %s)", detail)
             review_file = review_code.run(
                 ctx,
@@ -222,7 +233,9 @@ def _build_stage_runner(
     if entry.type == "address-code":
 
         def _address_code() -> None:
-            set_stage(ctx.gr_id, entry.name)
+            set_stage(
+                ctx.gr_id, entry.name, client_spec=_resolve_stage_client_spec(entry)
+            )
             logger.info(
                 "addressing code reviews (model: %s)",
                 entry.options.get("address_model", args.address),
@@ -250,7 +263,9 @@ def _build_stage_runner(
 
         def _verify() -> None:
             if cmds:
-                set_stage(ctx.gr_id, entry.name)
+                set_stage(
+                    ctx.gr_id, entry.name, client_spec=_resolve_stage_client_spec(entry)
+                )
                 logger.info(
                     "running verify (cmds: %r, max-attempts: %s, model: %s)",
                     cmds,
@@ -489,6 +504,7 @@ def local_main(
                     )
                 )
             group_name = e.name
+            group_spec = _resolve_stage_client_spec(e)
             stages.append(
                 (
                     e.name,
@@ -496,7 +512,9 @@ def local_main(
                         child_runners,
                         max_concurrent=e.max_concurrent,
                         resume_from=args.resume_from,
-                        set_stage_fn=lambda n=group_name: set_stage(gr_id, n),
+                        set_stage_fn=lambda n=group_name, s=group_spec: set_stage(
+                            gr_id, n, client_spec=s
+                        ),
                     ),
                 )
             )

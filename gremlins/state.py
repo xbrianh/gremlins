@@ -33,7 +33,12 @@ BAIL_CLASS_SECRETS = "secrets"
 BAIL_CLASS_OTHER = "other"
 
 
-def set_stage(gr_id: str | None, stage: str, sub_stage: object = None) -> None:
+def set_stage(
+    gr_id: str | None,
+    stage: str,
+    sub_stage: object = None,
+    client_spec: str | None = None,
+) -> None:
     """Write stage and stage_updated_at to state.json. No-op without gr_id, empty stage, or missing state.json."""
     try:
         if not stage or not gr_id:
@@ -43,11 +48,31 @@ def set_stage(gr_id: str | None, stage: str, sub_stage: object = None) -> None:
             return
         now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         if sub_stage is not None:
-            patch_state(gr_id, stage=stage, stage_updated_at=now, sub_stage=sub_stage)
+            if client_spec is not None:
+                patch_state(
+                    gr_id,
+                    stage=stage,
+                    stage_updated_at=now,
+                    sub_stage=sub_stage,
+                    client=client_spec,
+                )
+            else:
+                patch_state(
+                    gr_id, stage=stage, stage_updated_at=now, sub_stage=sub_stage
+                )
         else:
-            patch_state(
-                gr_id, _delete=("sub_stage",), stage=stage, stage_updated_at=now
-            )
+            if client_spec is not None:
+                patch_state(
+                    gr_id,
+                    _delete=("sub_stage",),
+                    stage=stage,
+                    stage_updated_at=now,
+                    client=client_spec,
+                )
+            else:
+                patch_state(
+                    gr_id, _delete=("sub_stage",), stage=stage, stage_updated_at=now
+                )
     except Exception:
         pass
 
