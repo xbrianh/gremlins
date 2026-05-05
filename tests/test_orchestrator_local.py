@@ -411,3 +411,35 @@ def test_local_main_resume_requires_persisted_stage_clients(
         )
 
     assert "stage_clients not found" in capsys.readouterr().err
+
+
+def test_local_main_resume_requires_each_persisted_stage_client(
+    tmp_path, monkeypatch, make_state_dir, capsys
+):
+    gr_id = "resume-test-gr-id"
+    state_dir = make_state_dir(gr_id)
+
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("# Plan\nDo stuff.\n")
+
+    state_file = state_dir / "state.json"
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    state["stage_clients"] = {
+        "plan": "claude:sonnet",
+        "implement": "claude:sonnet",
+        "address-code": "claude:sonnet",
+        "verify": "claude:sonnet",
+    }
+    state_file.write_text(json.dumps(state), encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+    _common_patches(monkeypatch)
+
+    with pytest.raises(SystemExit):
+        local_main(
+            ["--plan", str(plan_file), "--resume-from", "implement"],
+            client=FakeClaudeClient(fixtures={}),
+            gr_id=gr_id,
+        )
+
+    assert "stage_clients missing stage: 'review-code'" in capsys.readouterr().err

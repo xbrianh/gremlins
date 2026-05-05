@@ -16,14 +16,15 @@ from typing import Any, NoReturn
 
 import yaml
 
-from ..clients import (
+from ..clients import ClientSpec, to_client
+from ..clients.protocol import ClaudeClient
+from ..clients.resolve import (
     PACKAGE_DEFAULT,
-    ClientSpec,
     collect_stage_specs,
     load_stage_specs_from_state,
-    to_client,
+    require_stage_spec,
+    validate_stage_specs,
 )
-from ..clients.protocol import ClaudeClient
 from ..env_file import load_env_file
 from ..gh_utils import extract_gh_url, get_repo, parse_issue_ref, view_issue
 from ..git import DirtyOnly, HeadAdvanced
@@ -661,6 +662,11 @@ def gh_main(
     if args.resume_from in _child_to_group:
         run_resume_from = _child_to_group[args.resume_from]
 
+    try:
+        validate_stage_specs(stage_specs, pipeline)
+    except ValueError as exc:
+        die(str(exc))
+
     repo = get_repo()
     session_dir = resolve_session_dir(gr_id)
     plan_md = session_dir / "plan.md"
@@ -728,7 +734,7 @@ def gh_main(
             group_dir.mkdir(parents=True, exist_ok=True)
             child_runners: list[tuple[str, Callable[[], None]]] = []
             for child in e.children:
-                child_spec = stage_specs.get(child.name, PACKAGE_DEFAULT)
+                child_spec = require_stage_spec(stage_specs, child.name)
                 child_dir = group_dir / child.name
                 child_dir.mkdir(parents=True, exist_ok=True)
                 child_ctx = StageContext(
@@ -765,7 +771,7 @@ def gh_main(
                 )
             )
         else:
-            stage_spec = stage_specs.get(e.name, PACKAGE_DEFAULT)
+            stage_spec = require_stage_spec(stage_specs, e.name)
             stage_ctx = StageContext(
                 client=_client_for_spec(stage_spec),
                 session_dir=session_dir,

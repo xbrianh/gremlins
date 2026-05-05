@@ -14,14 +14,15 @@ from typing import NoReturn
 
 import yaml
 
-from ..clients import (
+from ..clients import ClientSpec, to_client
+from ..clients.protocol import ClaudeClient
+from ..clients.resolve import (
     PACKAGE_DEFAULT,
-    ClientSpec,
     collect_stage_specs,
     load_stage_specs_from_state,
-    to_client,
+    require_stage_spec,
+    validate_stage_specs,
 )
-from ..clients.protocol import ClaudeClient
 from ..env_file import load_env_file
 from ..git import in_git_repo
 from ..logging_setup import configure_logging
@@ -339,13 +340,18 @@ def local_main(
     if args.resume_from in _child_to_group:
         run_resume_from = _child_to_group[args.resume_from]
 
+    try:
+        validate_stage_specs(stage_specs, pipeline)
+    except ValueError as exc:
+        die(str(exc))
+
     session_dir = resolve_session_dir(gr_id)
     plan_file = session_dir / "plan.md"
 
     # Determine the review-code model for the output file name
     _rc_entry = next((s for s in pipeline.stages if s.type == "review-code"), None)
     if _rc_entry:
-        _rc_model = stage_specs.get(_rc_entry.name, PACKAGE_DEFAULT).model
+        _rc_model = require_stage_spec(stage_specs, _rc_entry.name).model
     else:
         _rc_model = PACKAGE_DEFAULT.model
     review_code_file = session_dir / f"review-code-detail-{_rc_model}.md"
@@ -442,7 +448,7 @@ def local_main(
             group_dir.mkdir(parents=True, exist_ok=True)
             child_runners: list[tuple[str, Callable[[], None]]] = []
             for child in e.children:
-                child_spec = stage_specs.get(child.name, PACKAGE_DEFAULT)
+                child_spec = require_stage_spec(stage_specs, child.name)
                 child_dir = group_dir / child.name
                 child_dir.mkdir(parents=True, exist_ok=True)
                 child_ctx = StageContext(
@@ -481,7 +487,7 @@ def local_main(
                 )
             )
         else:
-            stage_spec = stage_specs.get(e.name, PACKAGE_DEFAULT)
+            stage_spec = require_stage_spec(stage_specs, e.name)
             stage_ctx = StageContext(
                 client=_client_for_spec(stage_spec),
                 session_dir=session_dir,

@@ -141,7 +141,7 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         "gremlins.orchestrators.gh.resolve_state_file", lambda gr_id=None: state_file
     )
     monkeypatch.setattr(
-        "gremlins.clients.resolve_state_file", lambda gr_id=None: state_file
+        "gremlins.clients.resolve.resolve_state_file", lambda gr_id=None: state_file
     )
 
     # Stub out patch_state so tests don't write to real state files.
@@ -951,6 +951,42 @@ def test_gh_main_resume_requires_persisted_stage_clients(tmp_path, monkeypatch, 
         )
 
     assert "stage_clients not found" in capsys.readouterr().err
+
+
+def test_gh_main_resume_requires_each_persisted_stage_client(
+    tmp_path, monkeypatch, capsys
+):
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    _, state_file = _patch_common(
+        monkeypatch,
+        tmp_path,
+        state_data={
+            "issue_url": "https://github.com/owner/repo/issues/42",
+            "issue_num": "42",
+            "stage_clients": {
+                "plan": "claude:sonnet",
+                "implement": "claude:sonnet",
+                "verify": "claude:sonnet",
+                "commit-pr": "claude:sonnet",
+                "request-copilot": "claude:sonnet",
+                "wait-copilot": "claude:sonnet",
+                "ghaddress": "claude:sonnet",
+                "ci-gate": "claude:sonnet",
+            },
+        },
+    )
+    monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
+
+    with pytest.raises(SystemExit):
+        gh_main(
+            ["--plan", "42", "--resume-from", "implement"],
+            client=FakeClaudeClient(fixtures={}),
+            gr_id="resume-test-gr-id",
+        )
+
+    assert "stage_clients missing stage: 'ghreview'" in capsys.readouterr().err
 
 
 def test_resume_from_implement(tmp_path, monkeypatch):

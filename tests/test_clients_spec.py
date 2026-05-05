@@ -1,10 +1,17 @@
-"""Tests for ClientSpec, PACKAGE_DEFAULT, resolve_stage_client."""
+"""Tests for stage client resolution."""
 
 from __future__ import annotations
 
 import pytest
 
-from gremlins.clients import PACKAGE_DEFAULT, ClientSpec, resolve_stage_client
+from gremlins.clients.resolve import (
+    PACKAGE_DEFAULT,
+    ClientSpec,
+    require_stage_spec,
+    resolve_stage_client,
+    validate_stage_specs,
+)
+from gremlins.pipeline import load_pipeline, resolve_pipeline_path
 
 
 def test_parse_valid():
@@ -58,3 +65,20 @@ def test_resolve_pipeline_default_wins_over_package():
 
 def test_resolve_falls_back_to_package_default():
     assert resolve_stage_client(None, None, None) is PACKAGE_DEFAULT
+
+
+def test_require_stage_spec_returns_present_stage():
+    spec = ClientSpec("claude", "opus")
+    assert require_stage_spec({"implement": spec}, "implement") is spec
+
+
+def test_require_stage_spec_missing_stage_raises():
+    with pytest.raises(ValueError, match=r"stage_clients missing stage: 'implement'"):
+        require_stage_spec({}, "implement")
+
+
+def test_validate_stage_specs_reports_all_missing_stages(tmp_path):
+    pipeline = load_pipeline(resolve_pipeline_path("gh", tmp_path))
+
+    with pytest.raises(ValueError, match=r"stage_clients missing stages:"):
+        validate_stage_specs({"plan": ClientSpec("claude", "sonnet")}, pipeline)
