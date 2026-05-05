@@ -358,14 +358,14 @@ this design.
 4. **It weakened the stage boundary in exactly the way §3 tries to
    avoid.** A resumed session imports the prior stage's full message
    history. That is in-memory context sharing through a side door.
-   Once a stage depends on inherited history, `--resume-from` becomes
-   less clean, prompts stop being as bounded, and individual stages are
-   less independently testable.
+   Once a stage depends on inherited history, `--resume-from <stage>`
+   becomes less clean, prompts stop being as bounded, and individual
+   stages are less independently testable.
 
 5. **It did not compose with the whole pipeline.** Sessions are linear.
-   Some of our pipelines are not. Parallel review lenses and any future
-   fan-out stages still need a cold-start path, because one session
-   cannot be resumed into multiple concurrent children.
+   Some of our pipelines are not. Parallel `review-code` stages and any
+   future fan-out stages still need a cold-start path, because one
+   session cannot be resumed into multiple concurrent children.
 
 So the current position is: we removed `CompletedRun.session_id` and are
 not pursuing session-resumption caching in the current implementation.
