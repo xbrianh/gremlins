@@ -98,7 +98,7 @@ the module docstring at the top of [`gremlins/cli.py`](gremlins/cli.py).
 | Flag | Default | Description |
 |---|---|---|
 | `--chain-kind <kind>` | required | Kind of child gremlins to spawn: `local` or `gh` |
-| `--model <model>` | `sonnet` | Model for the handoff decision agent |
+| `--client <provider:model>` | `claude:sonnet` | Client for the handoff decision agent |
 | `--resume-from <stage>` | — | Ignored at the boss level (boss resumes from `boss_state.json`) |
 | `--test <command>` | — | Test command forwarded to each child gremlin; only valid with `--chain-kind local` (rejected for `gh`) |
 | `--test-max-attempts <n>` | `3` | Maximum test-fix retry attempts forwarded to each child |

@@ -233,8 +233,7 @@ def _launch_client_label(
     kind: str, pipeline_args: list[str], pipeline_path: str
 ) -> str:
     if kind == "bossgremlin":
-        model = _extract_arg_value(pipeline_args, "--model") or PACKAGE_DEFAULT.model
-        return f"{PACKAGE_DEFAULT.provider}:{model}"
+        return _extract_client_spec(pipeline_args) or str(PACKAGE_DEFAULT)
     client_spec_str = _extract_client_spec(pipeline_args)
     if client_spec_str:
         return client_spec_str

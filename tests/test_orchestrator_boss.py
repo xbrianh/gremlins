@@ -8,9 +8,11 @@ import pathlib
 import shutil
 
 import pytest
+from conftest import MINIMAL_EVENTS
 
 import gremlins.git as git_mod
 import gremlins.orchestrators.boss as boss_mod
+from gremlins.clients.fake import FakeClaudeClient
 from gremlins.orchestrators.boss import (
     _resolve_plan_source,
     _summarize_for_log,
@@ -62,6 +64,7 @@ def _common_boss_patches(monkeypatch, tmp_path, gr_id):
     monkeypatch.setattr(boss_mod, "set_stage", lambda *a, **kw: None)
     monkeypatch.setattr(boss_mod, "get_head_ref", lambda p: "abc123def456abc1")
     monkeypatch.setattr(boss_mod, "get_current_branch", lambda p: "main")
+    monkeypatch.setattr(boss_mod, "install_signal_handlers", lambda *c: None)
     # Stub git_head_of_workdir so tests don't need a real git worktree.
     # Individual tests that care about specific SHA values can override this.
     monkeypatch.setattr(
@@ -69,6 +72,41 @@ def _common_boss_patches(monkeypatch, tmp_path, gr_id):
         "git_head_of_workdir",
         lambda w: "aaaa1111bbbb2222cccc3333dddd4444eeee5555",
     )
+
+
+class BossHandoffClient(FakeClaudeClient):
+    def __init__(
+        self,
+        *,
+        out_path: pathlib.Path,
+        signal_path: pathlib.Path,
+        signal_payload: dict[str, object],
+        child_path: pathlib.Path | None = None,
+        child_plan_text: str | None = None,
+        sanitize_text: str | None = None,
+    ) -> None:
+        super().__init__(
+            fixtures={
+                "handoff": MINIMAL_EVENTS,
+                "handoff:sanitize": MINIMAL_EVENTS,
+            }
+        )
+        self.out_path = out_path
+        self.signal_path = signal_path
+        self.signal_payload = signal_payload
+        self.child_path = child_path
+        self.child_plan_text = child_plan_text
+        self.sanitize_text = sanitize_text
+
+    def run(self, prompt, *, label, **kwargs):
+        if label == "handoff":
+            self.out_path.write_text("# Rolling plan\n")
+            self.signal_path.write_text(json.dumps(self.signal_payload))
+            if self.child_path is not None and self.child_plan_text is not None:
+                self.child_path.write_text(self.child_plan_text)
+        elif label == "handoff:sanitize" and self.sanitize_text is not None:
+            self.out_path.write_text(self.sanitize_text)
+        return super().run(prompt, label=label, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +253,109 @@ def test_save_load_round_trip(tmp_path):
     save_boss_state(str(tmp_path), state)
     loaded = load_boss_state(str(tmp_path))
     assert loaded == state
+
+
+# ---------------------------------------------------------------------------
+# run_handoff
+# ---------------------------------------------------------------------------
+
+
+def test_run_handoff_uses_client_in_process(tmp_path, monkeypatch):
+    gr_id = "test-boss-handoff-client-aa11"
+    state_dir, project_root, workdir = _make_gremlin_state(tmp_path, gr_id)
+    _common_boss_patches(monkeypatch, tmp_path, gr_id)
+
+    spec = tmp_path / "spec.md"
+    spec.write_text("# Spec\n")
+    child_plan = state_dir / "handoff-001-child.md"
+    signal_path = state_dir / "handoff-001.state.json"
+    out_path = state_dir / "handoff-001.md"
+    boss_state = init_boss_state(
+        spec_path=str(spec),
+        chain_kind="local",
+        chain_base_ref="abc123def456abc1",
+        target_branch="main",
+        state_dir=str(state_dir),
+    )
+    client = BossHandoffClient(
+        out_path=out_path,
+        signal_path=signal_path,
+        signal_payload={
+            "exit_state": "next-plan",
+            "child_plan": str(child_plan),
+            "reason": None,
+            "operator_followups": ["Run follow-up manually"],
+        },
+        child_path=child_plan,
+        child_plan_text="# Child plan\n",
+        sanitize_text="# Sanitized rolling plan\n",
+    )
+    setattr(client, "_gremlins_client_spec", "claude:haiku")
+
+    monkeypatch.setattr(
+        boss_mod.handoff,
+        "collect_git_context",
+        lambda base_ref, rev=None: ("test-branch", "log line", "diff body"),
+    )
+    monkeypatch.setattr(
+        boss_mod.handoff, "load_prompts", lambda paths: "Keep it simple."
+    )
+
+    exit_state, sig = boss_mod.run_handoff(
+        gr_id=gr_id,
+        state_dir=str(state_dir),
+        boss_state=boss_state,
+        project_root=str(project_root),
+        boss_workdir=str(workdir),
+        client=client,
+    )
+
+    assert exit_state == "next-plan"
+    assert sig["child_plan"] == str(child_plan)
+    assert json.loads(signal_path.read_text())["operator_followups"] == [
+        "Run follow-up manually"
+    ]
+    assert out_path.read_text() == "# Sanitized rolling plan\n"
+    assert [call.label for call in client.calls] == ["handoff", "handoff:sanitize"]
+    assert client.calls[0].model == "haiku"
+    assert boss_state["handoff_count"] == 1
+    assert boss_state["current_plan"] == str(out_path)
+    assert boss_state["operator_followups"] == ["Run follow-up manually"]
+
+
+def test_boss_main_passes_resolved_client_to_handoff(tmp_path, monkeypatch):
+    gr_id = "test-boss-client-wire-bb22"
+    state_dir, project_root, workdir = _make_gremlin_state(tmp_path, gr_id)
+    _common_boss_patches(monkeypatch, tmp_path, gr_id)
+
+    spec = tmp_path / "spec.md"
+    spec.write_text("# Spec\n")
+    fake_client = FakeClaudeClient(fixtures={})
+    captured: list[str] = []
+
+    monkeypatch.setattr(
+        boss_mod,
+        "to_client",
+        lambda spec: (
+            setattr(fake_client, "_gremlins_client_spec", str(spec)) or fake_client
+        ),
+    )
+
+    def fake_run_handoff(
+        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+    ):
+        captured.append(str(getattr(model, "_gremlins_client_spec", "")))
+        return "chain-done", {"exit_state": "chain-done", "operator_followups": []}
+
+    monkeypatch.setattr(boss_mod, "run_handoff", fake_run_handoff)
+
+    result = boss_main(
+        ["--plan", str(spec), "--chain-kind", "local", "--client", "copilot:gpt-5.4"],
+        gr_id=gr_id,
+    )
+
+    assert result == 0
+    assert captured == ["copilot:gpt-5.4"]
 
 
 # ---------------------------------------------------------------------------

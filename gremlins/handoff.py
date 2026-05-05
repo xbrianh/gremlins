@@ -21,7 +21,8 @@ import subprocess
 import sys
 from typing import Any, NoReturn, cast
 
-from gremlins.clients import PACKAGE_DEFAULT
+from gremlins.clients import PACKAGE_DEFAULT, ClientSpec, to_client
+from gremlins.clients.protocol import ClaudeClient
 from gremlins.logging_setup import configure_logging
 from gremlins.prompts import load_prompts
 
@@ -30,13 +31,6 @@ logger = logging.getLogger(__name__)
 _CODE_STYLE_PATH = (
     pathlib.Path(__file__).resolve().parent / "pipelines" / "prompts" / "code_style.md"
 )
-
-CLAUDE_FLAGS = [
-    "--permission-mode",
-    "bypassPermissions",
-    "--output-format",
-    "text",
-]
 
 
 def die(msg: str) -> NoReturn:
@@ -287,62 +281,115 @@ Do not print the document to stdout. Do not explain what you changed.
 
 ## Rolling plan to rewrite
 
-~~~~
+    ~~~~
 {rolling_plan_text}
 ~~~~"""
 
 
-def sanitize_rolling_plan(out_path: pathlib.Path, timeout: int | None) -> None:
+def _restore_rolling_plan(
+    out_path: pathlib.Path, original_text: str, reason: str
+) -> None:
+    try:
+        out_path.write_text(original_text, encoding="utf-8")
+    except OSError as exc:
+        sys.stderr.write(
+            f"warning: {reason} — failed to restore original rolling plan: {exc}\n"
+        )
+        return
+    sys.stderr.write(f"warning: {reason} — restored original rolling plan\n")
+
+
+def _read_rolling_plan_for_sanitize(out_path: pathlib.Path) -> str | None:
     if not out_path.exists():
         sys.stderr.write(
             f"warning: sanitize skipped — rolling plan not found: {out_path}\n"
         )
-        return
+        return None
     try:
-        plan_text = out_path.read_text(encoding="utf-8")
+        return out_path.read_text(encoding="utf-8")
     except OSError as exc:
         sys.stderr.write(
             f"warning: sanitize skipped — could not read rolling plan: {exc}\n"
         )
-        return
+        return None
 
-    def restore_original(reason: str) -> None:
-        try:
-            out_path.write_text(plan_text, encoding="utf-8")
-        except OSError as exc:
-            sys.stderr.write(
-                f"warning: {reason} — failed to restore original rolling plan: {exc}\n"
-            )
-            return
-        sys.stderr.write(f"warning: {reason} — restored original rolling plan\n")
 
-    sanitize_timeout = min(timeout, 60) if timeout is not None else 60
+def _run_sanitize_pass(
+    client: ClaudeClient, plan_text: str, out_path: pathlib.Path
+) -> None:
     prompt = build_sanitize_prompt(plan_text, out_path)
-    cmd = ["claude", "-p", "--model", "haiku", *CLAUDE_FLAGS, prompt]
     logger.info("sanitizing rolling plan")
-    try:
-        result = subprocess.run(
-            cmd, timeout=sanitize_timeout, capture_output=True, text=True
-        )
-    except subprocess.TimeoutExpired:
-        restore_original("sanitize pass timed out")
+    client.run(prompt, label="handoff:sanitize", model="haiku")
+
+
+def sanitize_rolling_plan(client: ClaudeClient, out_path: pathlib.Path) -> None:
+    plan_text = _read_rolling_plan_for_sanitize(out_path)
+    if plan_text is None:
         return
-    if result.stderr:
-        sys.stderr.write(f"warning: sanitize stderr:\n{result.stderr}")
-    if result.returncode != 0:
-        restore_original(f"sanitize pass exited {result.returncode}")
+
+    try:
+        _run_sanitize_pass(client, plan_text, out_path)
+    except Exception as exc:
+        _restore_rolling_plan(out_path, plan_text, f"sanitize pass failed: {exc}")
         return
     try:
         sanitized_text = out_path.read_text(encoding="utf-8")
     except OSError as exc:
-        restore_original(f"sanitize pass completed but output could not be read: {exc}")
+        _restore_rolling_plan(
+            out_path,
+            plan_text,
+            f"sanitize pass completed but output could not be read: {exc}",
+        )
         return
     if not sanitized_text.strip():
-        restore_original("sanitize pass completed but output was empty")
+        _restore_rolling_plan(
+            out_path, plan_text, "sanitize pass completed but output was empty"
+        )
+
+
+def _read_optional_spec(spec_arg: str | None) -> str | None:
+    if spec_arg is None:
+        return None
+
+    spec_path = pathlib.Path(spec_arg).resolve()
+    if not spec_path.exists():
+        sys.stderr.write(
+            f"warning: --spec does not exist, continuing without north-star context: {spec_path}\n"
+        )
+        return None
+    if not spec_path.is_file():
+        sys.stderr.write(
+            f"warning: --spec is not a file, continuing without north-star context: {spec_path}\n"
+        )
+        return None
+    if spec_path.stat().st_size == 0:
+        sys.stderr.write(
+            f"warning: --spec is empty, continuing without north-star context: {spec_path}\n"
+        )
+        return None
+
+    try:
+        return spec_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        sys.stderr.write(
+            f"warning: --spec is not valid UTF-8, continuing without north-star context: {spec_path}\n"
+        )
+    except OSError as exc:
+        sys.stderr.write(
+            f"warning: failed to read --spec, continuing without north-star context: {spec_path}: {exc}\n"
+        )
+    return None
+
+
+def _parse_client_spec(client_arg: str) -> ClientSpec:
+    try:
+        return ClientSpec.parse(client_arg)
+    except ValueError as exc:
+        die(str(exc))
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    usage = "usage: handoff.sh --plan <path> [--spec <path>] [--out <path>] [--base <ref>] [--rev <ref>] [--model <model>] [--timeout <secs>]"
+    usage = "usage: handoff.sh --plan <path> [--spec <path>] [--out <path>] [--base <ref>] [--rev <ref>] [--client <provider:model>] [--timeout <secs>]"
     parser = argparse.ArgumentParser(add_help=False, usage=usage)
     parser.add_argument("--plan", dest="plan", required=True)
     parser.add_argument(
@@ -353,13 +400,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--out", dest="out", default=None)
     parser.add_argument("--base", dest="base", default=None)
-    parser.add_argument("--model", dest="model", default=PACKAGE_DEFAULT.model)
+    parser.add_argument("--client", dest="client", default=str(PACKAGE_DEFAULT))
     parser.add_argument(
         "--timeout",
         dest="timeout",
         type=int,
         default=None,
-        help="timeout in seconds for the main handoff agent (default: no timeout); the sanitize pass is capped at min(timeout, 60)s",
+        help="legacy no-op for client-based execution",
     )
     parser.add_argument(
         "--rev",
@@ -370,13 +417,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: list[str]) -> int:
-    configure_logging()
-    args = parse_args(argv)
-
-    if shutil.which("claude") is None:
-        die("claude CLI not found")
-
+def run(client: ClaudeClient, args: argparse.Namespace) -> int:
     plan_path = pathlib.Path(args.plan).resolve()
     if not plan_path.exists():
         die(f"--plan does not exist: {plan_path}")
@@ -391,38 +432,7 @@ def main(argv: list[str]) -> int:
     except OSError as exc:
         die(f"failed to read --plan {plan_path}: {exc}")
 
-    # Spec is best-effort context, not a hard chain anchor: if it's missing,
-    # moved, or unreadable, fall back to rendering without the north-star
-    # section rather than halting the whole boss chain. The rolling plan and
-    # landed diff alone are still enough for a coherent next-step decision
-    # (which is exactly what the standalone /handoff invocation does without
-    # --spec). Warn so the operator can notice and fix the path if intended.
-    spec_text: str | None = None
-    if args.spec is not None:
-        spec_path = pathlib.Path(args.spec).resolve()
-        if not spec_path.exists():
-            sys.stderr.write(
-                f"warning: --spec does not exist, continuing without north-star context: {spec_path}\n"
-            )
-        elif not spec_path.is_file():
-            sys.stderr.write(
-                f"warning: --spec is not a file, continuing without north-star context: {spec_path}\n"
-            )
-        elif spec_path.stat().st_size == 0:
-            sys.stderr.write(
-                f"warning: --spec is empty, continuing without north-star context: {spec_path}\n"
-            )
-        else:
-            try:
-                spec_text = spec_path.read_text(encoding="utf-8")
-            except UnicodeDecodeError:
-                sys.stderr.write(
-                    f"warning: --spec is not valid UTF-8, continuing without north-star context: {spec_path}\n"
-                )
-            except OSError as exc:
-                sys.stderr.write(
-                    f"warning: failed to read --spec, continuing without north-star context: {spec_path}: {exc}\n"
-                )
+    spec_text = _read_optional_spec(args.spec)
 
     if args.out:
         out_path = pathlib.Path(args.out).resolve()
@@ -459,15 +469,12 @@ def main(argv: list[str]) -> int:
         code_style=code_style,
     )
 
-    cmd = ["claude", "-p", "--model", args.model, *CLAUDE_FLAGS, prompt]
-    logger.info("running handoff agent (model: %s)", args.model)
+    client_spec = _parse_client_spec(args.client)
+    logger.info("running handoff agent (client: %s)", client_spec)
     try:
-        result = subprocess.run(cmd, timeout=args.timeout)
-    except subprocess.TimeoutExpired:
-        sys.stderr.write(f"error: handoff agent timed out after {args.timeout}s\n")
-        return 1
-    if result.returncode != 0:
-        sys.stderr.write(f"error: claude -p exited {result.returncode}\n")
+        client.run(prompt, label="handoff", model=client_spec.model)
+    except Exception as exc:
+        sys.stderr.write(f"error: handoff agent failed: {exc}\n")
         return 1
 
     if not signal_path.exists():
@@ -523,8 +530,17 @@ def main(argv: list[str]) -> int:
         for item in followups:
             logger.info("  - %s", item)
 
-    sanitize_rolling_plan(out_path, args.timeout)
+    sanitize_rolling_plan(client, out_path)
     return 0
+
+
+def main(argv: list[str]) -> int:
+    configure_logging()
+    args = parse_args(argv)
+    client_spec = _parse_client_spec(args.client)
+    if client_spec.provider == "claude" and shutil.which("claude") is None:
+        die("claude CLI not found")
+    return run(to_client(client_spec), args)
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ Drives a chain of child gremlins serially, invoking handoff between each step.
 Chain state lives in boss_state.json.
 
 Receives pipeline args forwarded by the launcher:
-  boss_main --plan <spec-path> --chain-kind local|gh [--model <model>]
+  boss_main --plan <spec-path> --chain-kind local|gh [--client <provider:model>]
   [--resume-from <stage>]    ← added by the launcher resume path; ignored
                                 (we use boss_state.json for resumption)
 
@@ -29,10 +29,13 @@ import types
 from typing import Any, NoReturn, cast
 
 from .. import git as _git_mod
-from ..clients import PACKAGE_DEFAULT
+from .. import handoff
+from ..clients import PACKAGE_DEFAULT, ClientSpec, to_client
+from ..clients.protocol import ClaudeClient
 from ..gh_utils import get_repo, parse_issue_ref, view_issue
 from ..launcher import launch as _launch
 from ..logging_setup import configure_logging
+from ..runner import install_signal_handlers
 from ..state import patch_state, set_stage
 
 logger = logging.getLogger(__name__)
@@ -274,7 +277,7 @@ def run_handoff(
     boss_state: dict[str, Any],
     project_root: str,
     boss_workdir: str,
-    model: str,
+    client: ClaudeClient,
 ) -> tuple[str, dict[str, Any]]:
     """Run handoff agent. Returns (exit_state, signal dict).
 
@@ -297,7 +300,6 @@ def run_handoff(
     chain_kind = boss_state.get("chain_kind")
     target_branch = boss_state.get("target_branch", "")
 
-    rev_args: list[str] = []
     rev_label: str = ""
     handoff_cwd: str = ""
     if chain_kind == "local":
@@ -314,7 +316,6 @@ def run_handoff(
         fetch_origin_branch(project_root, target_branch, context="before handoff")
         handoff_cwd = project_root
         rev_label = f"origin/{target_branch}"
-        rev_args = ["--rev", rev_label]
     else:
         die(f"unknown chain_kind: {chain_kind!r}")
 
@@ -332,25 +333,23 @@ def run_handoff(
         rev_label,
         handoff_cwd,
     )
-    spec_args = ["--spec", spec_path] if forward_spec else []
-    cmd = [
-        sys.executable,
-        "-m",
-        "gremlins.handoff",
-        "--plan",
-        current_plan,
-        *spec_args,
-        "--out",
-        out_path,
-        "--base",
-        base_ref,
-        "--model",
-        model,
-        "--timeout",
-        str(HANDOFF_TIMEOUT),
-        *rev_args,
-    ]
-    rc = run_proc(cmd, cwd=handoff_cwd, env=_gremlins_cli_env())
+    client_spec = str(getattr(client, "_gremlins_client_spec", PACKAGE_DEFAULT))
+    args = argparse.Namespace(
+        plan=current_plan,
+        spec=spec_path if forward_spec else None,
+        out=out_path,
+        base=base_ref,
+        client=client_spec,
+        timeout=HANDOFF_TIMEOUT,
+        rev=rev_label if rev_label.startswith("origin/") else None,
+    )
+    old_cwd = os.getcwd()
+    os.chdir(handoff_cwd)
+    check_stop()
+    try:
+        rc = handoff.run(client, args)
+    finally:
+        os.chdir(old_cwd)
     check_stop()
 
     if rc != 0:
@@ -622,7 +621,7 @@ def _parse_boss_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--plan", required=True)
     p.add_argument("--chain-kind", required=True, choices=["local", "gh"])
-    p.add_argument("--model", default=PACKAGE_DEFAULT.model)
+    p.add_argument("--client", default=str(PACKAGE_DEFAULT))
     p.add_argument("--resume-from", default=None)
     p.add_argument("--test", dest="test_cmd", default=None)
     p.add_argument("--test-max-attempts", dest="test_max_attempts", type=int, default=3)
@@ -775,6 +774,13 @@ def boss_main(argv: list[str], *, gr_id: str | None = None) -> int:
     configure_logging()
     signal.signal(signal.SIGTERM, _sigterm_handler)
     args = _parse_boss_args(argv)
+    try:
+        client_spec = ClientSpec.parse(args.client)
+    except ValueError as exc:
+        die(str(exc))
+    client = to_client(client_spec)
+    setattr(client, "_gremlins_client_spec", str(client_spec))
+    install_signal_handlers(client)
     if os.environ.get("GREMLINS_TEST_NOOP_PIPELINE"):
         return 0
 
@@ -907,12 +913,12 @@ def boss_main(argv: list[str], *, gr_id: str | None = None) -> int:
         if current_child_id is None:
             # Step 1: run handoff to decide what to do next
             exit_state, sig = run_handoff(
-                gr_id=gr_id,
-                state_dir=state_dir,
-                boss_state=boss_state,
-                project_root=project_root,
-                boss_workdir=boss_workdir,
-                model=args.model,
+                gr_id,
+                state_dir,
+                boss_state,
+                project_root,
+                boss_workdir,
+                client,
             )
             save_boss_state(state_dir, boss_state)
             check_stop()
