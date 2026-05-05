@@ -304,6 +304,10 @@ If `.gremlins/env` exists in the project root, gremlins sources it through
 environment before any stage runs. All subprocesses (plan, implement, verify,
 review) inherit the result automatically.
 
+> **Security warning:** because `.gremlins/env` is executed as a bash script,
+> it can run arbitrary code. Do not run gremlins in a repository unless you
+> have reviewed the contents of `.gremlins/env` and trust them.
+
 The file is sourced via `bash`, so it can use command substitution,
 conditionals, and anything bash supports:
 
