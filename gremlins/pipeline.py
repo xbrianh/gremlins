@@ -9,6 +9,7 @@ from typing import Any, cast
 
 import yaml
 
+from gremlins.clients.protocol import ClaudeClient
 from gremlins.stages.registry import CLIENT_FACTORIES, STAGE_REGISTRY
 
 
@@ -18,16 +19,10 @@ def _ensure_registered() -> None:
 
 
 @dataclasses.dataclass
-class ClientDef:
-    provider: str
-    model: str
-
-
-@dataclasses.dataclass
 class StageEntry:
     name: str
     type: str
-    client_key: str | None
+    client: ClaudeClient | None
     prompt_paths: list[pathlib.Path]
     options: dict[str, Any]
     children: list[StageEntry] = dataclasses.field(  # pyright: ignore[reportUnknownVariableType]
@@ -40,9 +35,20 @@ class StageEntry:
 class Pipeline:
     name: str
     path: pathlib.Path
-    clients: dict[str, Any]
+    clients: list[ClaudeClient]
     stages: list[StageEntry]
-    default_client: str | None = None
+    default_client: ClaudeClient | None = None
+
+
+def parse_client_specifier(spec: str) -> ClaudeClient:
+    if ":" not in spec:
+        raise ValueError(
+            f"invalid client specifier {spec!r}: expected 'provider:model'"
+        )
+    provider, _, model = spec.partition(":")
+    if provider not in CLIENT_FACTORIES:
+        raise ValueError(f"unknown provider {provider!r} in client specifier {spec!r}")
+    return cast(ClaudeClient, CLIENT_FACTORIES[provider](model or None))
 
 
 def _resolve_prompt_paths(
@@ -68,7 +74,7 @@ def _resolve_prompt_paths(
 def _parse_stage_entry(
     entry: dict[str, Any],
     yaml_dir: pathlib.Path,
-    client_keys: set[str],
+    client_cache: dict[str, Any],
     depth: int = 0,
 ) -> StageEntry:
     if "parallel" in entry:
@@ -88,7 +94,7 @@ def _parse_stage_entry(
         children: list[StageEntry] = []
         for child_raw in children_raw:
             child = _parse_stage_entry(
-                child_raw, yaml_dir, client_keys, depth=depth + 1
+                child_raw, yaml_dir, client_cache, depth=depth + 1
             )
             if child.name in seen:
                 raise ValueError(
@@ -105,7 +111,7 @@ def _parse_stage_entry(
         return StageEntry(
             name=name,
             type="parallel",
-            client_key=None,
+            client=None,
             prompt_paths=[],
             options={},
             children=children,
@@ -125,20 +131,23 @@ def _parse_stage_entry(
     if stage_type not in STAGE_REGISTRY:
         raise ValueError(f"stage {name!r}: unknown type {stage_type!r}")
 
-    client_key = entry.get("client")
-    if client_key is not None and not isinstance(client_key, str):
-        raise ValueError(
-            f"stage {name!r}: 'client' must be a string, got {type(client_key)!r}"
-        )
-    if client_key is not None and client_key not in client_keys:
-        raise ValueError(f"stage {name!r}: unknown client key {client_key!r}")
+    client_spec = entry.get("client")
+    stage_client: Any | None = None
+    if client_spec is not None:
+        if not isinstance(client_spec, str):
+            raise ValueError(
+                f"stage {name!r}: 'client' must be a string, got {type(client_spec)!r}"
+            )
+        if client_spec not in client_cache:
+            client_cache[client_spec] = parse_client_specifier(client_spec)
+        stage_client = client_cache[client_spec]
 
     prompt_paths = _resolve_prompt_paths(entry.get("prompt"), yaml_dir)
     options = dict(cast(dict[str, Any], entry.get("options") or {}))
     return StageEntry(
         name=name,
         type=stage_type,
-        client_key=client_key,
+        client=stage_client,
         prompt_paths=prompt_paths,
         options=options,
     )
@@ -159,40 +168,28 @@ def load_pipeline(path: pathlib.Path) -> Pipeline:
 
     pipeline_name = str(raw.get("name") or path.stem)
 
-    clients_raw = cast(dict[str, Any], raw.get("clients") or {})
-    default_client_key = clients_raw.get("default")
-    if default_client_key is not None and not isinstance(default_client_key, str):
-        raise ValueError(
-            f"clients.default must be a string, got {type(default_client_key)!r}"
-        )
-    resolved_clients: dict[str, Any] = {}
-    for key, cfg in cast(dict[str, dict[str, Any]], clients_raw).items():
-        if key == "default":
-            continue
-        provider = str(cfg.get("provider") or "")
-        if not provider:
-            raise ValueError(f"client {key!r}: missing 'provider'")
-        if provider not in CLIENT_FACTORIES:
-            raise ValueError(f"client {key!r}: unknown provider {provider!r}")
-        model = str(cfg.get("model") or "") or None
-        resolved_clients[key] = CLIENT_FACTORIES[provider](model)
+    client_cache: dict[str, Any] = {}
 
-    client_keys = set(resolved_clients.keys())
-    if default_client_key is not None and default_client_key not in client_keys:
-        raise ValueError(
-            f"clients.default {default_client_key!r} is not a defined client key"
-        )
+    default_client: Any | None = None
+    default_client_spec = raw.get("default_client")
+    if default_client_spec is not None:
+        if not isinstance(default_client_spec, str):
+            raise ValueError(
+                f"default_client must be a string, got {type(default_client_spec)!r}"
+            )
+        default_client = parse_client_specifier(default_client_spec)
+        client_cache[default_client_spec] = default_client
 
     stages: list[StageEntry] = []
     for entry in cast(list[dict[str, Any]], raw.get("stages") or []):
-        stages.append(_parse_stage_entry(entry, yaml_dir, client_keys))
+        stages.append(_parse_stage_entry(entry, yaml_dir, client_cache))
 
     return Pipeline(
         name=pipeline_name,
         path=path,
-        clients=resolved_clients,
+        clients=list(client_cache.values()),
         stages=stages,
-        default_client=default_client_key,
+        default_client=default_client,
     )
 
 

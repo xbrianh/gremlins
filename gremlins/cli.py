@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import os
 import pathlib
+import re
 import sys
 
 import yaml
@@ -152,13 +153,22 @@ def _launch_main(argv: list[str]) -> int:
     return 0 if ("--help" in argv or "-h" in argv) else 1
 
 
-def _validate_local_args(args: argparse.Namespace) -> None:
-    if args.plan or args.instructions or args.positional_instructions:
-        return
-    raise ValueError(
-        "localgremlin requires instructions: pass them as a positional argument, "
-        "--plan <path>, or -c/--instructions <text>"
-    )
+_CLIENT_SPEC_RE = re.compile(r"^[A-Za-z0-9_-]+:[A-Za-z0-9._-]*$")
+
+
+def _validate_local_args(args: argparse.Namespace, rest: list[str]) -> None:
+    if not args.plan and not args.instructions and not args.positional_instructions:
+        raise ValueError(
+            "localgremlin requires instructions: pass them as a positional argument, "
+            "--plan <path>, or -c/--instructions <text>"
+        )
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument("--client", default=None)
+    parsed, _ = p.parse_known_args(rest)
+    if parsed.client is not None and not _CLIENT_SPEC_RE.match(parsed.client):
+        raise ValueError(
+            f"invalid --client: {parsed.client!r}: expected 'provider:model'"
+        )
 
 
 def _validate_gh_args(args: argparse.Namespace, rest: list[str]) -> None:
@@ -166,6 +176,7 @@ def _validate_gh_args(args: argparse.Namespace, rest: list[str]) -> None:
     p.add_argument("--model", default=None)
     p.add_argument("--resume-from", default=None)
     p.add_argument("--pipeline", default=None)
+    p.add_argument("--client", default=None)
     try:
         parsed, remainder = p.parse_known_args(rest)
     except SystemExit as exc:
@@ -194,6 +205,10 @@ def _validate_gh_args(args: argparse.Namespace, rest: list[str]) -> None:
             )
     if parsed.model is not None and not MODEL_RE.match(parsed.model):
         raise ValueError(f"invalid model: {parsed.model!r}")
+    if parsed.client is not None and not _CLIENT_SPEC_RE.match(parsed.client):
+        raise ValueError(
+            f"invalid --client: {parsed.client!r}: expected 'provider:model'"
+        )
 
 
 def _validate_boss_args(rest: list[str], plan: str | None) -> None:
@@ -241,7 +256,7 @@ def _self_background_main(kind: str, argv: list[str]) -> int:
 
     try:
         if kind == "localgremlin":
-            _validate_local_args(args)
+            _validate_local_args(args, rest)
         elif kind == "ghgremlin":
             _validate_gh_args(args, rest)
         elif kind == "bossgremlin":

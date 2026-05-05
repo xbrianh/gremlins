@@ -81,6 +81,7 @@ the module docstring at the top of [`gremlins/cli.py`](gremlins/cli.py).
 | `--cmd <command>` | — | Verification command; may be repeated for multiple commands |
 | `--test-max-attempts <n>` | `3` | Maximum test-fix retry attempts (must be ≥ 1) |
 | `--pipeline <name-or-path>` | `local` | Pipeline to run (see Pipeline configuration) |
+| `--client <provider:model>` | — | Override the pipeline-level default client (per-stage `client:` in YAML still takes precedence; e.g. `claude:sonnet`, `copilot:gpt-5.4`) |
 
 #### `launch gh` flags
 
@@ -90,6 +91,7 @@ the module docstring at the top of [`gremlins/cli.py`](gremlins/cli.py).
 | `--model <model>` | — | Override the default model for all stages |
 | `--resume-from <stage>` | — | Resume from the named stage instead of starting over |
 | `--pipeline <name-or-path>` | `gh` | Pipeline to run (see Pipeline configuration) |
+| `--client <provider:model>` | — | Override the pipeline-level default client (per-stage `client:` in YAML still takes precedence; e.g. `claude:sonnet`, `copilot:gpt-5.4`) |
 
 #### `launch boss` flags
 
@@ -137,15 +139,12 @@ gremlins launch gh --pipeline gh                               # bundled gh.yaml
 ```yaml
 name: my-pipeline         # optional; defaults to the file stem
 
-clients:
-  claude_sonnet:
-    provider: claude
-    model: sonnet
+default_client: claude:sonnet   # optional; provider:model string
 
 stages:
   - name: plan
     type: plan
-    client: claude_sonnet
+    client: copilot:gpt-5.4     # optional; overrides default_client for this stage
     prompt: prompts/plan.md
     options: {}
 ```
@@ -153,7 +152,7 @@ stages:
 | Key | Description |
 |---|---|
 | `name` | Pipeline display name; defaults to the file stem |
-| `clients` | Named client definitions |
+| `default_client` | `provider:model` string used for stages without an explicit `client:` |
 | `stages` | Ordered list of stage entries or parallel groups |
 
 **Per-stage keys:**
@@ -162,9 +161,13 @@ stages:
 |---|---|
 | `name` | Unique stage identifier; used for `resume` targeting |
 | `type` | Registered stage type (see [Available stage types](#available-stage-types)) |
-| `client` | Key from `clients:`; parsed by the loader but not used by orchestrators to select the model |
+| `client` | `provider:model` string; overrides `default_client` for this stage |
 | `prompt` | Path or list of paths, relative to the YAML file |
 | `options` | Free-form dict passed to the stage |
+
+**`provider:model` format:**
+
+Providers: `claude` (default), `copilot`. The model part is optional — `claude:` and `claude:sonnet` are both valid. Examples: `claude:sonnet`, `copilot:gpt-5.4`, `claude:`. Per-stage `client:` in YAML takes precedence over the CLI `--client` flag; `default_client:` at the pipeline level does not.
 
 **Parallel-group form:**
 
@@ -173,10 +176,10 @@ stages:
   parallel:
     - name: review-detail
       type: review-code
-      client: claude_sonnet
+      client: claude:sonnet
     - name: review-security
       type: review-code
-      client: claude_sonnet
+      client: claude:sonnet
   max_concurrent: 2         # optional; defaults to all children at once
 ```
 
@@ -186,20 +189,21 @@ stages:
 | `parallel` | List of child stage entries (no nesting allowed) |
 | `max_concurrent` | Max simultaneously running children (optional) |
 
-### `clients:` block
+### Client specifiers
+
+Clients are specified as `provider:model` inline strings, either at the pipeline level (`default_client:`) or per stage (`client:`). The model part is optional.
 
 ```yaml
-clients:
-  claude_sonnet: { provider: claude, model: sonnet }
+default_client: claude:sonnet     # all stages default to this
+stages:
+  - name: plan
+    type: plan
+  - name: implement
+    type: implement
+    client: copilot:gpt-5.4       # this stage uses copilot instead
 ```
 
-`provider` selects the client implementation. Today only `claude` is available.
-
-The `clients:` block and per-stage `client:` key are parsed by the pipeline
-loader but not currently used by the orchestrators to select the model at
-runtime. Model selection is controlled via CLI flags (`--model` for `gh`;
-`--plan-model`, `--impl`, `--address` etc. for `local`) or per-stage
-`options:` keys (e.g. `plan_model`, `impl_model`, `address_model`).
+Providers: `claude`, `copilot`. The CLI `--client provider:model` flag overrides the pipeline-level `default_client:` but yields to per-stage `client:` settings.
 
 ### `prompt:` field
 
@@ -264,27 +268,22 @@ For `local` stages, model options (`plan_model`, `impl_model`, `address_model`,
 Wrap sibling stages in a `parallel:` list to run them concurrently:
 
 ```yaml
-clients:
-  claude_sonnet: { provider: claude, model: sonnet }
+default_client: claude:sonnet
 
 stages:
   - name: plan
     type: plan
-    client: claude_sonnet
 
   - name: reviews
     parallel:
       - name: review-detail
         type: review-code
-        client: claude_sonnet
       - name: review-security
         type: review-code
-        client: claude_sonnet
     max_concurrent: 2
 
   - name: address-code
     type: address-code
-    client: claude_sonnet
 ```
 
 If any child fails, the pipeline halts after the group finishes — siblings
@@ -318,24 +317,21 @@ Run two `review-code` passes in parallel, then address both:
 ```yaml
 name: local
 
-clients:
-  claude_sonnet: { provider: claude, model: sonnet }
+default_client: claude:sonnet
 
 stages:
-  - { name: plan,      type: plan,      client: claude_sonnet }
-  - { name: implement, type: implement, client: claude_sonnet }
+  - { name: plan,      type: plan }
+  - { name: implement, type: implement }
 
   - name: reviews
     parallel:
       - name: review-detail
         type: review-code
-        client: claude_sonnet
       - name: review-security
         type: review-code
-        client: claude_sonnet
     max_concurrent: 2
 
-  - { name: address-code, type: address-code, client: claude_sonnet }
+  - { name: address-code, type: address-code }
 ```
 
 Note: `review-code` does not currently support per-stage prompt overrides

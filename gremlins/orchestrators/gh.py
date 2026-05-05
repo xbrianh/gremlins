@@ -22,7 +22,13 @@ from ..env_file import load_env_file
 from ..gh_utils import extract_gh_url, get_repo, parse_issue_ref, view_issue
 from ..git import DirtyOnly, HeadAdvanced
 from ..logging_setup import configure_logging
-from ..pipeline import Pipeline, StageEntry, load_pipeline, resolve_pipeline_path
+from ..pipeline import (
+    Pipeline,
+    StageEntry,
+    load_pipeline,
+    parse_client_specifier,
+    resolve_pipeline_path,
+)
 from ..prompts import load_prompts
 from ..runner import install_signal_handlers, make_parallel_wrapper, run_stages
 from ..stages import (
@@ -59,10 +65,18 @@ def die(msg: str) -> NoReturn:
 
 
 def _resolve_stage_client(
-    entry: StageEntry, pipeline: Pipeline, default_client: ClaudeClient
+    entry: StageEntry,
+    pipeline: Pipeline,
+    cli_override: ClaudeClient | None,
+    fallback: ClaudeClient,
 ) -> ClaudeClient:
-    key = entry.client_key or pipeline.default_client
-    return pipeline.clients[key] if key else default_client
+    if entry.client is not None:
+        return entry.client
+    if cli_override is not None:
+        return cli_override
+    if pipeline.default_client is not None:
+        return pipeline.default_client
+    return fallback
 
 
 def _fmt_escape(s: str) -> str:
@@ -82,6 +96,7 @@ def _parse_gh_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--spec", dest="spec_path", default=None)
     parser.add_argument("--model", dest="model", default=None)
     parser.add_argument("--pipeline", dest="pipeline", default=None)
+    parser.add_argument("--client", dest="client", default=None)
     parser.add_argument("instructions", nargs="*")
     args = parser.parse_args(argv)
 
@@ -572,9 +587,15 @@ def gh_main(
     if shutil.which("gh") is None:
         die("gh CLI not found")
 
-    if client is None:
-        client = SubprocessClaudeClient()
-    install_signal_handlers(client)
+    base_client: ClaudeClient = client or SubprocessClaudeClient()
+    cli_client: ClaudeClient | None = None
+    if args.client:
+        try:
+            cli_client = parse_client_specifier(args.client)
+        except ValueError as exc:
+            die(str(exc))
+    effective_client = cli_client or base_client
+    install_signal_handlers(effective_client)
 
     try:
         pipeline = load_pipeline(
@@ -583,7 +604,7 @@ def gh_main(
     except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
         die(str(exc))
 
-    install_signal_handlers(client, *pipeline.clients.values())
+    install_signal_handlers(effective_client, *pipeline.clients)
 
     stage_names = [s.name for s in pipeline.stages]
 
@@ -649,7 +670,7 @@ def gh_main(
             repo=repo,
             plan_md=plan_md,
             model=model,
-            client=client,
+            client=effective_client,
             state_file=state_file,
             gr_id=gr_id,
         )
@@ -689,7 +710,9 @@ def gh_main(
                 child_dir = group_dir / child.name
                 child_dir.mkdir(parents=True, exist_ok=True)
                 child_ctx = StageContext(
-                    client=_resolve_stage_client(child, pipeline, client),
+                    client=_resolve_stage_client(
+                        child, pipeline, cli_client, base_client
+                    ),
                     session_dir=child_dir,
                     gr_id=gr_id,
                 )
@@ -727,7 +750,7 @@ def gh_main(
             )
         else:
             stage_ctx = StageContext(
-                client=_resolve_stage_client(e, pipeline, client),
+                client=_resolve_stage_client(e, pipeline, cli_client, base_client),
                 session_dir=session_dir,
                 gr_id=gr_id,
             )
@@ -749,7 +772,7 @@ def gh_main(
             stages.append((e.name, runner))
     run_stages(stages, resume_from=run_resume_from)
 
-    total_cost = getattr(client, "total_cost_usd", 0.0)
+    total_cost = getattr(effective_client, "total_cost_usd", 0.0)
     if total_cost is not None and total_cost > 0:
         patch_state(gr_id, total_cost_usd=total_cost)
 

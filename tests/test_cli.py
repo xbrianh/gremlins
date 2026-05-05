@@ -342,21 +342,21 @@ def test_local_with_positional_instructions_passes():
     ns = argparse.Namespace(
         plan=None, instructions=None, positional_instructions="fix the bug"
     )
-    _validate_local_args(ns)
+    _validate_local_args(ns, [])
 
 
 def test_local_with_plan_passes():
     ns = argparse.Namespace(
         plan="plan.md", instructions=None, positional_instructions=None
     )
-    _validate_local_args(ns)
+    _validate_local_args(ns, [])
 
 
 def test_local_with_instructions_flag_passes():
     ns = argparse.Namespace(
         plan=None, instructions="fix the bug", positional_instructions=None
     )
-    _validate_local_args(ns)
+    _validate_local_args(ns, [])
 
 
 def test_gh_valid_model_passes():
