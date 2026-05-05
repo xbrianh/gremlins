@@ -59,18 +59,19 @@ the module docstring at the top of [`gremlins/cli.py`](gremlins/cli.py).
 
 | Flag | Default | Description |
 |---|---|---|
-| `--plan <path>` | — | Path to a plan/spec file (mutually exclusive with positional instructions) |
+| `--plan <path-or-ref>` | — | Path to a plan/spec file, or (for `gh`/`boss`) a GitHub issue ref (`42`, `#42`, `owner/repo#42`, or issue URL) |
 | `--description <text>` | — | Human-readable description stored in state |
 | `--parent <id>` | — | Parent gremlin ID (used by boss to track child ownership) |
 | `--print-id` | false | Print the gremlin ID to stdout after launch |
-| `-c`/`--instructions <text>` | — | Instructions string (mutually exclusive with `--plan`) |
+| `-c`/`--instructions <text>` | — | Instructions string (mutually exclusive with `--plan`); not applicable to `launch boss` |
 | `--base-ref <ref>` | `HEAD` | Git ref to branch the worktree from; ignored for `gh` (always anchors to origin default branch) |
-| `--spec <path>` | — | Path to a coding-style spec file passed into stages |
+| `--spec <path>` | — | Path to a coding-style spec file passed into stages; not applicable to `launch boss` |
 
 #### `launch local` flags
 
 | Flag | Default | Description |
 |---|---|---|
+| `<instructions>` | — | Positional instructions string (mutually exclusive with `--plan` and `-c`) |
 | `-p <model>` | `sonnet` | Model for the plan stage |
 | `-i <model>` | `sonnet` | Model for the implement stage |
 | `-x <model>` | `sonnet` | Model for the address stage |
@@ -97,7 +98,7 @@ the module docstring at the top of [`gremlins/cli.py`](gremlins/cli.py).
 | `--chain-kind <kind>` | required | Kind of child gremlins to spawn: `local` or `gh` |
 | `--model <model>` | `sonnet` | Model for the handoff decision agent |
 | `--resume-from <stage>` | — | Ignored at the boss level (boss resumes from `boss_state.json`) |
-| `--test <command>` | — | Test command forwarded to each child gremlin |
+| `--test <command>` | — | Test command forwarded to each child gremlin; only valid with `--chain-kind local` (rejected for `gh`) |
 | `--test-max-attempts <n>` | `3` | Maximum test-fix retry attempts forwarded to each child |
 | `-t <model>` | `sonnet` | Test-fix model forwarded to each child |
 

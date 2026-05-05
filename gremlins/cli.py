@@ -131,7 +131,7 @@ Kinds:
   gh     GitHub issue-driven pipeline
   boss   Chained serial workflow
 
-Flag reference: README.md § "Launch flags"
+Flag reference: https://github.com/amorphous-industries/gremlins#launch-flags
 """
 
 
