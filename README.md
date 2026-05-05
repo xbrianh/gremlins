@@ -53,6 +53,57 @@ the module docstring at the top of [`gremlins/cli.py`](gremlins/cli.py).
 
 `_run-pipeline` is an internal spawn boundary; not for direct use.
 
+### Launch flags
+
+#### Common flags (all kinds)
+
+| Flag | Default | Description |
+|---|---|---|
+| `--plan <path-or-ref>` | — | Path to a plan/spec file, or (for `gh`/`boss`) a GitHub issue ref (`42`, `#42`, `owner/repo#42`, or issue URL) |
+| `--description <text>` | — | Human-readable description stored in state |
+| `--parent <id>` | — | Parent gremlin ID (used by boss to track child ownership) |
+| `--print-id` | false | Print the gremlin ID to stdout after launch |
+| `-c`/`--instructions <text>` | — | Instructions string (mutually exclusive with `--plan`); not applicable to `launch boss` |
+| `--base-ref <ref>` | `HEAD` | Git ref to branch the worktree from; ignored for `gh` (always anchors to origin default branch) |
+| `--spec <path>` | — | Path to a coding-style spec file passed into stages; not applicable to `launch boss` |
+
+#### `launch local` flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `<instructions>` | — | Positional instructions string (mutually exclusive with `--plan` and `-c`) |
+| `-p <model>` | `sonnet` | Model for the plan stage |
+| `-i <model>` | `sonnet` | Model for the implement stage |
+| `-x <model>` | `sonnet` | Model for the address stage |
+| `-b <model>` | `sonnet` | Model for the detail-review stage |
+| `-t <model>` | `sonnet` | Model for the test-fix stage |
+| `--resume-from <stage>` | — | Resume from the named stage instead of starting over |
+| `--cmd <command>` | — | Verification command; may be repeated for multiple commands |
+| `--test-max-attempts <n>` | `3` | Maximum test-fix retry attempts (must be ≥ 1) |
+| `--pipeline <name-or-path>` | `local` | Pipeline to run (see Pipeline configuration) |
+
+#### `launch gh` flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `-r <ref>` | — | GitHub issue or PR reference (e.g. `42`, `#42`, `owner/repo#42`) |
+| `--model <model>` | — | Override the default model for all stages |
+| `--resume-from <stage>` | — | Resume from the named stage instead of starting over |
+| `--pipeline <name-or-path>` | `gh` | Pipeline to run (see Pipeline configuration) |
+
+#### `launch boss` flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--chain-kind <kind>` | required | Kind of child gremlins to spawn: `local` or `gh` |
+| `--model <model>` | `sonnet` | Model for the handoff decision agent |
+| `--resume-from <stage>` | — | Ignored at the boss level (boss resumes from `boss_state.json`) |
+| `--test <command>` | — | Test command forwarded to each child gremlin; only valid with `--chain-kind local` (rejected for `gh`) |
+| `--test-max-attempts <n>` | `3` | Maximum test-fix retry attempts forwarded to each child |
+| `-t <model>` | `sonnet` | Test-fix model forwarded to each child |
+
+`boss` does not accept `--pipeline`; child pipeline args are built internally from `--test`/`--test-max-attempts`/`-t`.
+
 ## Pipeline configuration
 
 Gremlins runs a sequence of stages defined in a YAML file. The bundled

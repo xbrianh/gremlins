@@ -131,7 +131,7 @@ Kinds:
   gh     GitHub issue-driven pipeline
   boss   Chained serial workflow
 
-Run 'gremlins launch <kind> --help' for kind-specific flags.
+Flag reference: https://github.com/amorphous-industries/gremlins#launch-flags
 """
 
 
