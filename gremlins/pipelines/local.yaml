@@ -5,6 +5,6 @@ default_client: claude:sonnet
 stages:
   - { name: plan,         type: plan,         prompt: [prompts/code_style.md, prompts/plan.md] }
   - { name: implement,    type: implement,    prompt: [prompts/code_style.md, prompts/implement_local.md] }
-  - { name: review-code,  type: review-code,  prompt: [prompts/code_style.md, prompts/lenses/detail.md] }
+  - { name: review-code,  type: review-code,  prompt: [prompts/code_style.md, prompts/review/detail.md] }
   - { name: address-code, type: address-code, prompt: [prompts/code_style.md, prompts/address_code.md] }
   - { name: verify,       type: verify }

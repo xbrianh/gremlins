@@ -292,7 +292,7 @@ def test_implement_stage_raises_on_empty_diff(tmp_path, monkeypatch):
 def test_address_code_stage_calls_client_with_review_content(tmp_path):
     session_dir = tmp_path
     review_text = "# Detail Review\n\n## Findings\nLooks good.\n"
-    (session_dir / "review-code-detail-sonnet.md").write_text(review_text)
+    (session_dir / "review-code-sonnet.md").write_text(review_text)
 
     client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
     ctx = _make_ctx(client, session_dir)
@@ -338,24 +338,24 @@ def test_plan_stage_includes_code_style(tmp_path):
 
 
 def test_review_code_stage_includes_code_style(tmp_path):
-    client = ReviewCreatingClient(
-        fixtures={"review-code:detail:sonnet": MINIMAL_EVENTS}
-    )
+    client = ReviewCreatingClient(fixtures={"review-code:sonnet": MINIMAL_EVENTS})
     ctx = _make_ctx(client, tmp_path)
     run_review_code(
         ctx,
         ReviewCodeOptions(
             plan_text="",
-            detail="sonnet",
             is_git=False,
             code_style="Be good.",
+            model="sonnet",
+            stage_name="review-code",
+            prompt_paths=[_BUNDLED_PROMPTS / "review" / "detail.md"],
         ),
     )
     assert "Be good." in client.calls[0].prompt
 
 
 def test_address_code_stage_includes_code_style(tmp_path):
-    (tmp_path / "review-code-detail-sonnet.md").write_text(
+    (tmp_path / "review-code-sonnet.md").write_text(
         "# Detail Review\n\n## Findings\nNone.\n"
     )
     client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
@@ -374,13 +374,18 @@ def test_address_code_stage_includes_code_style(tmp_path):
 def test_review_code_stage_writes_stage_to_state(tmp_path, make_state_dir):
     gr_id = "test-gr-id"
     state_dir = make_state_dir(gr_id)
-    client = ReviewCreatingClient(
-        fixtures={"review-code:detail:sonnet": MINIMAL_EVENTS}
-    )
+    client = ReviewCreatingClient(fixtures={"review-code:sonnet": MINIMAL_EVENTS})
     ctx = _make_ctx(client, tmp_path, gr_id=gr_id)
     run_review_code(
         ctx,
-        ReviewCodeOptions(plan_text="", detail="sonnet", is_git=False, code_style=""),
+        ReviewCodeOptions(
+            plan_text="",
+            is_git=False,
+            code_style="",
+            model="sonnet",
+            stage_name="review-code",
+            prompt_paths=[_BUNDLED_PROMPTS / "review" / "detail.md"],
+        ),
     )
     data = json.loads((state_dir / "state.json").read_text())
     assert data.get("stage") == "review-code"

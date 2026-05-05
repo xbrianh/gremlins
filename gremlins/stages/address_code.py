@@ -30,11 +30,14 @@ class AddressCodeOptions:
     prompt_path: pathlib.Path = dataclasses.field(
         default_factory=lambda: _DEFAULT_PROMPT
     )
+    review_stage_names: list[str] = dataclasses.field(
+        default_factory=lambda: ["review-code"]
+    )
 
 
-def _model_from(path: pathlib.Path, lens: str) -> str:
+def _model_from(path: pathlib.Path, stage_name: str) -> str:
     stem = path.stem
-    prefix = f"review-code-{lens}-"
+    prefix = f"{stage_name}-"
     model = stem[len(prefix) :] if stem.startswith(prefix) else ""
     if not model or not MODEL_RE.match(model):
         raise ValueError(
@@ -45,20 +48,22 @@ def _model_from(path: pathlib.Path, lens: str) -> str:
 
 def run(ctx: StageContext, options: AddressCodeOptions) -> None:
     try:
-        matches = sorted(glob.glob(str(ctx.session_dir / "review-code-detail-*.md")))
-        if not matches:
-            raise FileNotFoundError(
-                f"no review-code-detail-*.md file found in {ctx.session_dir}"
-            )
-        if len(matches) > 1:
-            raise RuntimeError(
-                f"multiple review-code-detail-*.md files in {ctx.session_dir}: "
-                f"{', '.join(matches)}"
-            )
-        review_file = pathlib.Path(matches[0])
+        review_files: list[tuple[str, pathlib.Path]] = []
+        for stage_name in options.review_stage_names:
+            for m in sorted(glob.glob(str(ctx.session_dir / f"{stage_name}-*.md"))):
+                review_files.append((stage_name, pathlib.Path(m)))
 
-        model = _model_from(review_file, "detail")
-        text = review_file.read_text(encoding="utf-8")
+        if not review_files:
+            stages_str = ", ".join(options.review_stage_names)
+            raise FileNotFoundError(
+                f"no review files found in {ctx.session_dir} (stages: {stages_str})"
+            )
+
+        first_stage_name, first_path = review_files[0]
+        model = _model_from(first_path, first_stage_name)
+        text = "\n\n---\n\n".join(
+            p.read_text(encoding="utf-8") for _, p in review_files
+        )
 
         address_commit_instr = ""
         if options.is_git:

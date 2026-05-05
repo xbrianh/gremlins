@@ -28,7 +28,7 @@ MINIMAL_EVENTS = [
 # orchestrator smoke tests and the GR_ID-isolation regression tests stay
 # in sync if the label scheme changes.
 REVIEW_LABELS = {
-    "review-code:detail:sonnet",
+    "review-code:sonnet",
 }
 
 

@@ -28,7 +28,7 @@ To change which model a stage uses, set the appropriate stage option (`plan_mode
 
 ## `.gremlins/prompts/*.md`
 
-Markdown prompt templates injected into Claude's system prompt for the stage that references them. Edit in place — no re-scaffolding needed. Templates may use subdirectories (e.g. `lenses/detail.md`).
+Markdown prompt templates injected into Claude's system prompt for the stage that references them. Edit in place — no re-scaffolding needed. Templates may use subdirectories (e.g. `review/detail.md`).
 
 ## Re-scaffolding
 

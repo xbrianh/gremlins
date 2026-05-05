@@ -1,8 +1,4 @@
-"""Single-lens code review stage.
-
-One reviewer spawns a ``claude -p`` via the injected client. ``set_stage``
-updates the gremlin's sub_stage before and after the reviewer runs.
-"""
+"""Code review stage."""
 
 from __future__ import annotations
 
@@ -10,27 +6,13 @@ import dataclasses
 import pathlib
 
 from gremlins.clients.protocol import ClaudeClient
+from gremlins.prompts import load_prompts
 from gremlins.stages.context import StageContext
 from gremlins.stages.registry import register_stage
 from gremlins.state import emit_bail, set_stage
 
-LENSES_DIR = (
-    pathlib.Path(__file__).resolve().parent.parent / "pipelines" / "prompts" / "lenses"
-)
 
-
-def load_detail_lens() -> str:
-    """Return detail lens prose. Raises if missing or empty."""
-    path = LENSES_DIR / "detail.md"
-    if not path.exists() or path.stat().st_size == 0:
-        raise FileNotFoundError(f"missing or empty lens file: {path}")
-    # Explicit utf-8 — lens files contain em-dashes and other non-ASCII, so
-    # relying on the process default encoding would crash under a non-UTF-8
-    # locale (e.g. a minimal container with LANG=C).
-    return path.read_text(encoding="utf-8")
-
-
-def run_review(
+def _run_reviewer(
     *,
     client: ClaudeClient,
     model: str,
@@ -42,9 +24,6 @@ def run_review(
     label: str,
     raw_path: pathlib.Path,
 ) -> None:
-    """Invoke the reviewer. CONTEXT describes what is being reviewed;
-    FOCUS is the lens prose; WHERE_FIELD is the field label used to cite
-    findings (e.g. `**File:** path:line` for code reviews)."""
     style_preamble = ""
     if code_style:
         style_preamble = (
@@ -79,66 +58,37 @@ Do NOT make any code changes — only write the review file.
 
 {focus}
 
-`{out_file}` is the canonical and required location for your review output in every case, including any short-circuit one-liner the lens tells you to emit. Do not emit the verdict only to chat; write it to `{out_file}` and then stop."""
+`{out_file}` is the canonical and required location for your review output in every case, including any short-circuit one-liner the prompt tells you to emit. Do not emit the verdict only to chat; write it to `{out_file}` and then stop."""
     client.run(prompt, label=label, model=model, raw_path=raw_path)
 
 
 @dataclasses.dataclass
 class ReviewCodeOptions:
     plan_text: str
-    detail: str
     is_git: bool
     code_style: str
+    model: str
+    stage_name: str
+    prompt_paths: list[pathlib.Path]
 
 
 def run(ctx: StageContext, options: ReviewCodeOptions) -> pathlib.Path:
-    """Unified entry point: run the review-code stage and return the output path."""
-    return run_review_code_stage(
-        client=ctx.client,
-        session_dir=ctx.session_dir,
-        plan_text=options.plan_text,
-        detail=options.detail,
-        is_git=options.is_git,
-        code_style=options.code_style,
-        gr_id=ctx.gr_id,
-    )
+    out_file = ctx.session_dir / f"{options.stage_name}-{options.model}.md"
 
-
-def run_review_code_stage(
-    *,
-    client: ClaudeClient,
-    session_dir: pathlib.Path,
-    plan_text: str,
-    detail: str,
-    is_git: bool,
-    code_style: str,
-    gr_id: str | None = None,
-) -> pathlib.Path:
-    """Execute the review-code stage: load the detail lens, run one reviewer,
-    and return the output path. Emits bail_class=other on failure when
-    running under a gremlin (no-op otherwise). Shared by the orchestrator
-    and /localreview.
-
-    Passing ``plan_text=""`` (empty string, not None) intentionally omits
-    the plan block from the review prompt entirely — this is the contract
-    that lets standalone ``/localreview`` callers run without ``--plan``.
-
-    Stale ``review-code-detail-*.md`` files are unlinked before spawning
-    the reviewer so a ``--resume-from review-code`` with a different ``-b``
-    model cannot leave two files for the same lens (which would later
-    confuse ``run_address_code_stage``'s glob-based discovery).
-    """
-    review_code = session_dir / f"review-code-detail-{detail}.md"
-
-    for stale in session_dir.glob("review-code-detail-*.md"):
+    for stale in ctx.session_dir.glob(f"{options.stage_name}-*.md"):
         try:
             stale.unlink()
         except OSError:
             pass
 
-    focus = load_detail_lens()
+    focus = load_prompts(options.prompt_paths)
+    if not focus.strip():
+        raise ValueError(
+            f"stage '{options.stage_name}': prompt_paths produced empty focus; "
+            "check that prompt_paths is non-empty and all files have content"
+        )
 
-    if is_git:
+    if options.is_git:
         code_scope = (
             "Review the changes introduced by the most recent commit "
             "(HEAD vs HEAD~1) plus any uncommitted working-tree changes. "
@@ -149,39 +99,37 @@ def run_review_code_stage(
             "Review the uncommitted changes in this directory (`git diff` if "
             "available, otherwise inspect recently modified files)."
         )
-    # Omit the plan block entirely when no plan was supplied (standalone
-    # /localreview without --plan); sending a bare "The plan for this change
-    # is:" header with empty body would confuse the reviewer.
-    if plan_text:
-        code_review_context = (
-            f"The plan for this change is:\n\n{plan_text}\n\n{code_scope}"
+    if options.plan_text:
+        code_context = (
+            f"The plan for this change is:\n\n{options.plan_text}\n\n{code_scope}"
         )
     else:
-        code_review_context = code_scope
+        code_context = code_scope
 
-    # Wrap so any infrastructure failure (claude -p crash, missing output
-    # file, etc.) records bail_class=other before the exception propagates.
     try:
-        set_stage(gr_id, "review-code", {"detail": f"running ({detail})"})
-        run_review(
-            client=client,
-            model=detail,
-            out_file=review_code,
-            focus=focus,
-            context=code_review_context,
-            code_style=code_style,
-            where_field="**File:** `path/to/file.ext:<line>`",
-            label=f"review-code:detail:{detail}",
-            raw_path=session_dir / f"stream-review-code-detail-{detail}.jsonl",
+        set_stage(
+            ctx.gr_id, options.stage_name, {"model": f"running ({options.model})"}
         )
-        set_stage(gr_id, "review-code", {"detail": f"done ({detail})"})
-        if not review_code.exists() or review_code.stat().st_size == 0:
-            raise RuntimeError(f"review {detail} did not produce {review_code}")
+        _run_reviewer(
+            client=ctx.client,
+            model=options.model,
+            out_file=out_file,
+            focus=focus,
+            context=code_context,
+            code_style=options.code_style,
+            where_field="**File:** `path/to/file.ext:<line>`",
+            label=f"{options.stage_name}:{options.model}",
+            raw_path=ctx.session_dir
+            / f"stream-{options.stage_name}-{options.model}.jsonl",
+        )
+        set_stage(ctx.gr_id, options.stage_name, {"model": f"done ({options.model})"})
+        if not out_file.exists() or out_file.stat().st_size == 0:
+            raise RuntimeError(f"review {options.model} did not produce {out_file}")
     except (SystemExit, Exception) as exc:
-        emit_bail(gr_id, "other", f"review-code stage failed: {exc}"[:200])
+        emit_bail(ctx.gr_id, "other", f"{options.stage_name} stage failed: {exc}"[:200])
         raise
 
-    return review_code
+    return out_file
 
 
 register_stage("review-code", run)

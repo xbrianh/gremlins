@@ -9,7 +9,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import NoReturn
 
 import yaml
@@ -102,6 +102,7 @@ def _build_stage_runner(
     instructions: str,
     plan_copied_from_source: bool,
     plan_text_holder: dict[str, str],
+    review_stage_names: list[str],
 ) -> Callable[[], None]:
     if entry.type == "plan":
 
@@ -173,12 +174,14 @@ def _build_stage_runner(
                 ctx,
                 review_code.ReviewCodeOptions(
                     plan_text=plan_text,
-                    detail=model,
                     is_git=is_git,
                     code_style=code_style,
+                    model=model,
+                    stage_name=entry.name,
+                    prompt_paths=entry.prompt_paths[1:],
                 ),
             )
-            logger.info("detail code review (%s): %s", model, review_file)
+            logger.info("code review (%s): %s", model, review_file)
 
         return _review_code
 
@@ -187,19 +190,15 @@ def _build_stage_runner(
         def _address_code() -> None:
             set_stage(ctx.gr_id, entry.name)
             logger.info("addressing code reviews (model: %s)", model)
-            address_code.run(
-                ctx,
-                address_code.AddressCodeOptions(
-                    address_model=model,
-                    is_git=is_git,
-                    code_style=code_style,
-                    **(
-                        {"prompt_path": entry.prompt_paths[-1]}
-                        if entry.prompt_paths
-                        else {}
-                    ),
-                ),
+            opts = address_code.AddressCodeOptions(
+                address_model=model,
+                is_git=is_git,
+                code_style=code_style,
+                review_stage_names=review_stage_names,
             )
+            if entry.prompt_paths:
+                opts.prompt_path = entry.prompt_paths[-1]
+            address_code.run(ctx, opts)
 
         return _address_code
 
@@ -348,13 +347,13 @@ def local_main(
     session_dir = resolve_session_dir(gr_id)
     plan_file = session_dir / "plan.md"
 
-    # Determine the review-code model for the output file name
+    # Determine the review-code output file path for the resume guard
     _rc_entry = next((s for s in pipeline.stages if s.type == "review-code"), None)
     if _rc_entry:
         _rc_model = require_stage_spec(stage_specs, _rc_entry.name).model
+        review_code_file = session_dir / f"{_rc_entry.name}-{_rc_model}.md"
     else:
-        _rc_model = PACKAGE_DEFAULT.model
-    review_code_file = session_dir / f"review-code-detail-{_rc_model}.md"
+        review_code_file = session_dir / f"review-code-{PACKAGE_DEFAULT.model}.md"
 
     logger.info("session: %s", session_dir)
 
@@ -441,6 +440,14 @@ def local_main(
 
     plan_text_holder: dict[str, str] = {}
 
+    def _all_stages() -> Iterator[StageEntry]:
+        for s in pipeline.stages:
+            yield s
+            if s.type == "parallel":
+                yield from s.children
+
+    review_stage_names = [s.name for s in _all_stages() if s.type == "review-code"]
+
     stages: list[tuple[str, Callable[[], None]]] = []
     for e in pipeline.stages:
         if e.type == "parallel":
@@ -471,6 +478,7 @@ def local_main(
                             instructions=instructions,
                             plan_copied_from_source=plan_copied_from_source,
                             plan_text_holder=plan_text_holder,
+                            review_stage_names=review_stage_names,
                         ),
                     )
                 )
@@ -508,6 +516,7 @@ def local_main(
                         instructions=instructions,
                         plan_copied_from_source=plan_copied_from_source,
                         plan_text_holder=plan_text_holder,
+                        review_stage_names=review_stage_names,
                     ),
                 )
             )
@@ -611,18 +620,24 @@ def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
                 "nothing to review: HEAD~1..HEAD has no changes and working tree is clean"
             )
 
+    pipeline = load_pipeline(resolve_pipeline_path("local", pathlib.Path.cwd()))
+    rc_entry = next((s for s in pipeline.stages if s.type == "review-code"), None)
+    if rc_entry is None or not rc_entry.prompt_paths[1:]:
+        die("local pipeline has no review-code stage with a prompt")
     ctx = StageContext(client=client, session_dir=session_dir, gr_id=None)
     logger.info("reviewing code (model: %s)", args.detail)
     review_file = review_code.run(
         ctx,
         review_code.ReviewCodeOptions(
             plan_text=plan_text,
-            detail=args.detail,
             is_git=is_git,
             code_style=code_style,
+            model=args.detail,
+            stage_name=rc_entry.name,
+            prompt_paths=rc_entry.prompt_paths[1:],
         ),
     )
-    logger.info("detail code review (%s): %s", args.detail, review_file)
+    logger.info("code review (%s): %s", args.detail, review_file)
     return 0
 
 

@@ -21,7 +21,7 @@ def _bundled_pipeline_names() -> list[str]:
 def _collect_prompt_subpaths(stages: list[Any]) -> list[str]:
     """Walk stage list (including parallel groups) and return unique prompt subpaths.
 
-    Subpaths are the part after 'prompts/' — e.g. 'plan.md', 'lenses/detail.md'.
+    Subpaths are the part after 'prompts/' — e.g. 'plan.md', 'review/detail.md'.
     """
     seen: set[str] = set()
     result: list[str] = []
