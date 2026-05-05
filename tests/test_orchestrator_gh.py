@@ -687,6 +687,56 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
     )
 
 
+def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
+    """Model from --client provider:model flows into all stage run() calls."""
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
+    )
+    monkeypatch.setattr("gremlins.stages.ghreview.run", lambda ctx, options: None)
+    monkeypatch.setattr(
+        "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.request_copilot.run",
+        lambda ctx, options: None,
+    )
+    monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.verify.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
+
+    client = _CommittingClient(
+        git_dir=tmp_path,
+        fixtures={
+            "implement": IMPL_EVENTS,
+            "commit-pr": _pr_events(),
+        },
+    )
+
+    # Stub parse_client_specifier so it returns the injected test client rather
+    # than creating a real SubprocessCopilotClient that would replace it.
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.parse_client_specifier",
+        lambda spec: client,
+    )
+
+    result = gh_main(["--plan", "42", "--client", "copilot:gpt-4o"], client=client)
+    assert result == 0
+
+    assert client.calls, "expected at least one client call"
+    bad = [c for c in client.calls if c.model != "gpt-4o"]
+    assert not bad, (
+        f"{len(bad)} stage(s) ran on a non-gpt-4o model: "
+        f"{[(c.label, c.model) for c in bad]}"
+    )
+
+
 def test_gh_main_resume_prefers_persisted_model_over_sonnet_default(
     tmp_path, monkeypatch
 ):

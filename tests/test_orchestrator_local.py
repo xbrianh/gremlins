@@ -101,6 +101,51 @@ def test_address_main_calls_client(tmp_path, monkeypatch):
     assert client.calls[0].model == "sonnet"
 
 
+def test_local_main_client_specifier_model(tmp_path, monkeypatch):
+    """Model from --client provider:model flows into stage run() calls."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("# Plan\nDo stuff.\n")
+
+    monkeypatch.chdir(tmp_path)
+    _common_patches(monkeypatch)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.local.resolve_session_dir",
+        lambda gr_id=None: session_dir,
+    )
+    monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.local.load_prompts", lambda paths: "Be good."
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.implement.changes_outside_git", lambda s, d: True
+    )
+    review_label = "review-code:detail:gpt-4o"
+    client = _ReviewCreatingClient(
+        fixtures={
+            "implement": MINIMAL_EVENTS,
+            review_label: MINIMAL_EVENTS,
+            "address-code": MINIMAL_EVENTS,
+        }
+    )
+
+    # Stub parse_client_specifier so it returns the injected test client rather
+    # than creating a real SubprocessCopilotClient that would replace it.
+    monkeypatch.setattr(
+        "gremlins.orchestrators.local.parse_client_specifier",
+        lambda spec: client,
+    )
+
+    result = local_main(
+        ["--plan", str(plan_file), "--client", "copilot:gpt-4o"],
+        client=client,
+    )
+    assert result == 0
+    assert client.calls[0].model == "gpt-4o"  # implement stage
+    assert client.calls[1].label == review_label
+
+
 def test_local_pipeline_stage_names(tmp_path):
     pipeline = load_pipeline(resolve_pipeline_path("local", tmp_path))
     names = [s.name for s in pipeline.stages]

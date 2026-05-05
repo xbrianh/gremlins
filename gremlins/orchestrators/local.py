@@ -76,11 +76,11 @@ def _parse_local_args(argv: list[str]) -> argparse.Namespace:
         '"<instructions>"'
     )
     parser = argparse.ArgumentParser(add_help=False, usage=usage)
-    parser.add_argument("-p", dest="plan_model", default="sonnet")
-    parser.add_argument("-i", dest="impl", default="sonnet")
-    parser.add_argument("-x", dest="address", default="sonnet")
-    parser.add_argument("-b", dest="detail", default="sonnet")
-    parser.add_argument("-t", dest="test_fix_model", default="sonnet")
+    parser.add_argument("-p", dest="plan_model", default=None)
+    parser.add_argument("-i", dest="impl", default=None)
+    parser.add_argument("-x", dest="address", default=None)
+    parser.add_argument("-b", dest="detail", default=None)
+    parser.add_argument("-t", dest="test_fix_model", default=None)
     parser.add_argument("--resume-from", dest="resume_from", default=None)
     parser.add_argument("--plan", dest="plan_path", default=None)
     parser.add_argument("--spec", dest="spec_path", default=None)
@@ -107,7 +107,7 @@ def _parse_local_args(argv: list[str]) -> argparse.Namespace:
         args.detail,
         args.test_fix_model,
     ):
-        if not MODEL_RE.match(m):
+        if m is not None and not MODEL_RE.match(m):
             die(f"invalid model: {m}")
     if args.test_max_attempts <= 0:
         die("--test-max-attempts must be a positive integer")
@@ -290,6 +290,27 @@ def local_main(
             die(str(exc))
     effective_client = cli_client or base_client
     install_signal_handlers(effective_client)
+
+    specifier_model: str | None = None
+    if args.client and ":" in args.client:
+        _, _, _m = args.client.partition(":")
+        if _m:
+            if not MODEL_RE.match(_m):
+                die(f"invalid model in --client specifier: {_m}")
+            specifier_model = _m
+
+    model_default = specifier_model or "sonnet"
+    if args.plan_model is None:
+        args.plan_model = model_default
+    if args.impl is None:
+        args.impl = model_default
+    if args.address is None:
+        args.address = model_default
+    if args.detail is None:
+        args.detail = model_default
+    if args.test_fix_model is None:
+        args.test_fix_model = model_default
+
     if os.environ.get("GREMLINS_TEST_NOOP_PIPELINE"):
         return 0
 
