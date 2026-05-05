@@ -22,6 +22,7 @@ import sys
 from typing import Any, cast
 
 from . import git as _git_mod
+from .pipeline import resolve_pipeline_path
 
 VALID_KINDS = {"ghgremlin", "localgremlin", "bossgremlin"}
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -165,17 +166,32 @@ def _patch_state(state_dir: pathlib.Path, **fields: Any) -> None:
         pass
 
 
-def _default_pipeline_path(kind: str) -> str:
-    # bossgremlin has no per-pipeline YAML; exclude it explicitly
-    name = _KIND_SUBCOMMAND.get(kind)
-    if name is None or kind == "bossgremlin":
-        return ""
-    p = (
-        pathlib.Path(__file__).resolve().parent
-        / "pipelines"
-        / f"{name.removeprefix('_')}.yaml"
-    )
-    return str(p)
+def _resolve_pipeline(
+    kind: str, pipeline_args: tuple[str, ...], project_root: str
+) -> tuple[list[str], str]:
+    # Returns (args_with_pipeline_injected, resolved_path); bossgremlin gets ([], "").
+    if kind == "bossgremlin":
+        return list(pipeline_args), ""
+    args = list(pipeline_args)
+    pipeline_val: str | None = None
+    filtered: list[str] = []
+    i = 0
+    while i < len(args):
+        if args[i] == "--pipeline":
+            if i + 1 < len(args):
+                pipeline_val = args[i + 1]
+                i += 2
+            else:
+                i += 1  # drop dangling flag
+        elif args[i].startswith("--pipeline="):
+            pipeline_val = args[i][len("--pipeline=") :]
+            i += 1
+        else:
+            filtered.append(args[i])
+            i += 1
+    name = pipeline_val or _KIND_SUBCOMMAND[kind].removeprefix("_")
+    resolved = str(resolve_pipeline_path(name, pathlib.Path(project_root)))
+    return ["--pipeline", resolved] + filtered, resolved
 
 
 def _extract_impl_model(pipeline_args: list[str], kind: str) -> str:
@@ -216,7 +232,7 @@ def _delete_patch_state(
         pass
 
 
-def _build_spawn_env(gr_id: str, project_root: str) -> dict[str, str]:
+def _build_spawn_env(gr_id: str) -> dict[str, str]:
     env = os.environ.copy()
     pkg_root = str(pathlib.Path(__file__).resolve().parent.parent)
     existing_pp = env.get("PYTHONPATH", "")
@@ -224,7 +240,6 @@ def _build_spawn_env(gr_id: str, project_root: str) -> dict[str, str]:
     env["PYTHONPATH"] = os.pathsep.join(parts)
     env["PYTHONSAFEPATH"] = "1"
     env["GR_ID"] = gr_id
-    env["GREMLINS_INVOCATION_DIR"] = str(pathlib.Path(project_root).resolve())
     return env
 
 
@@ -234,7 +249,6 @@ def _spawn_pipeline(
     gr_id: str,
     kind_subcommand: str,
     pipeline_args: list[str],
-    project_root: str,
     log_mode: str = "w",
 ) -> subprocess.Popen[bytes]:
     """Spawn the pipeline detached. Returns the Popen object (already running).
@@ -249,7 +263,7 @@ def _spawn_pipeline(
         kind_subcommand,
         *pipeline_args,
     ]
-    env = _build_spawn_env(gr_id, project_root)
+    env = _build_spawn_env(gr_id)
     log_path = state_dir / "log"
     log_fh = open(log_path, log_mode)
     try:
@@ -332,11 +346,15 @@ def launch(
         else:
             project_root = os.getcwd()
 
+    resolved_pipeline_args, pipeline_path = _resolve_pipeline(
+        kind, pipeline_args, project_root
+    )
+
     state_dir = _state_root() / gr_id
     state_dir.mkdir(parents=True, exist_ok=True)
 
     # pipeline_args for state.json: includes --plan and --spec when set
-    stored_pipeline_args = list(pipeline_args)
+    stored_pipeline_args = list(resolved_pipeline_args)
     if spec_path and "--spec" not in stored_pipeline_args:
         stored_pipeline_args = ["--spec", spec_path] + stored_pipeline_args
     if plan and "--plan" not in stored_pipeline_args:
@@ -396,7 +414,7 @@ def launch(
         "parent_id": parent_id or "",
         "pipeline_args": stored_pipeline_args,
         "impl_model": _extract_impl_model(stored_pipeline_args, kind),
-        "pipeline_path": _default_pipeline_path(kind),
+        "pipeline_path": pipeline_path,
         "stage": "starting",
         "pid": None,
     }
@@ -408,7 +426,7 @@ def launch(
         spawn_args.append(instructions)
 
     proc = _spawn_pipeline(
-        state_dir, workdir, gr_id, _KIND_SUBCOMMAND[kind], spawn_args, project_root
+        state_dir, workdir, gr_id, _KIND_SUBCOMMAND[kind], spawn_args
     )
 
     (state_dir / "pid").write_text(str(proc.pid), encoding="utf-8")
@@ -517,7 +535,6 @@ def resume(gr_id: str) -> None:
         if instructions:
             spawn_args.append(instructions)
 
-    project_root = state.get("project_root") or workdir
     kind_subcommand = _KIND_SUBCOMMAND[kind]
     proc = _spawn_pipeline(
         state_dir,
@@ -525,7 +542,6 @@ def resume(gr_id: str) -> None:
         gr_id,
         kind_subcommand,
         spawn_args,
-        project_root,
         log_mode="a",
     )
 

@@ -35,6 +35,8 @@ The only question that matters: **can the address stage fix this without asking 
 - **Everything else**: do not bail. Incomplete wiring, missing imports, dead code, wrong identifiers, off-by-ones, missing tests, simple renames — flag them and let the address stage handle them. Err strongly on the side of not bailing.
 
 If the review has no blocker-severity findings, do not run the helper — exit normally. The bail marker is the signal the pipeline checks after this stage.
+
+**30-second rule**: if a competent developer could fix it in under 30 seconds without asking questions — missing import, wrong identifier, off-by-one, trivial rename — do not bail; flag it in the review.
 """
     prompt = load_prompts([options.prompt_path]).format(
         pr_url=options.pr_url,

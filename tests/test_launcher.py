@@ -140,7 +140,6 @@ def lenv(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{old_path}")
     monkeypatch.delenv("PYTHONPATH", raising=False)
     monkeypatch.delenv("GR_ID", raising=False)
-    monkeypatch.delenv("GREMLINS_INVOCATION_DIR", raising=False)
     monkeypatch.chdir(repo)
 
     class _Env:
@@ -222,7 +221,9 @@ def test_launch_creates_state_layout(lenv):
     assert state["kind"] == "localgremlin"
     assert state["setup_kind"] == "worktree-branch"
     assert state["branch"] == f"bg/localgremlin/{gr_id}"
-    assert state["pipeline_args"] == ["-i", "sonnet"]
+    args = state["pipeline_args"]
+    assert args[0] == "--pipeline" and args[1].endswith(".yaml")
+    assert args[2:] == ["-i", "sonnet"]
     assert "test instructions" in state["instructions"]
     assert "workdir" in state and state["workdir"]
 
@@ -245,7 +246,7 @@ def test_launch_writes_worktree(lenv):
 
 
 def test_launch_persists_pipeline_args(lenv):
-    """Pipeline-level flags are stored verbatim in state.json pipeline_args."""
+    """Pipeline-level flags are stored in state.json pipeline_args with resolved --pipeline."""
     launcher = _launcher()
     gr_id = launcher.launch(
         "localgremlin",
@@ -253,7 +254,9 @@ def test_launch_persists_pipeline_args(lenv):
         instructions="test",
     )
     state = _read_state(_gremlins_state_root(lenv) / gr_id)
-    assert state["pipeline_args"] == ["-p", "opus", "-i", "sonnet"]
+    args = state["pipeline_args"]
+    assert args[0] == "--pipeline" and args[1].endswith(".yaml")
+    assert args[2:] == ["-p", "opus", "-i", "sonnet"]
 
 
 def test_launch_persists_impl_model_explicit(lenv):
@@ -435,7 +438,9 @@ def test_resume_patches_state(lenv, monkeypatch):
     assert post_state["rescue_count"] == pre_rescue_count + 1
     assert post_state["status"] == "running"
     assert post_state["resumed_from_stage"] == "plan"
-    assert post_state["pipeline_args"] == ["-i", "sonnet"]
+    post_args = post_state["pipeline_args"]
+    assert post_args[0] == "--pipeline" and post_args[1].endswith(".yaml")
+    assert post_args[2:] == ["-i", "sonnet"]
     assert not (state_dir / "finished").exists(), "finished marker must be cleared"
 
     _wait_for_finished(state_dir, timeout=60)
@@ -747,17 +752,3 @@ def test_launch_rejects_empty_spec_path(lenv):
     launcher = _launcher()
     with pytest.raises(ValueError, match="--spec"):
         launcher.launch("localgremlin", plan=str(plan_file), spec_path=str(spec_file))
-
-
-# ---------------------------------------------------------------------------
-# _build_spawn_env — GREMLINS_INVOCATION_DIR
-# ---------------------------------------------------------------------------
-
-
-def test_build_spawn_env_sets_invocation_dir(lenv, monkeypatch):
-    """_build_spawn_env includes GREMLINS_INVOCATION_DIR equal to project_root."""
-    monkeypatch.delenv("GREMLINS_INVOCATION_DIR", raising=False)
-    from gremlins import launcher
-
-    env = launcher._build_spawn_env("test-gr-id", str(lenv.repo))
-    assert env.get("GREMLINS_INVOCATION_DIR") == str(lenv.repo)
