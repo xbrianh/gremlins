@@ -200,6 +200,22 @@ def _extract_client_spec(pipeline_args: list[str]) -> str:
     return _extract_arg_value(pipeline_args, "--client")
 
 
+def _drop_arg(args: list[str], flag: str) -> list[str]:
+    filtered: list[str] = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == flag:
+            i += 2 if i + 1 < len(args) else 1
+            continue
+        if arg.startswith(f"{flag}="):
+            i += 1
+            continue
+        filtered.append(arg)
+        i += 1
+    return filtered
+
+
 def _extract_arg_value(args: list[str], flag: str) -> str:
     value = ""
     i = 0
@@ -585,7 +601,9 @@ def resume(gr_id: str) -> None:
     has_plan = any(a == "--plan" or str(a).startswith("--plan=") for a in pipeline_args)
 
     spawn_args: list[str] = list(pipeline_args)
-    if kind != "bossgremlin":
+    if kind == "bossgremlin":
+        spawn_args = _drop_arg(spawn_args, "--resume-from")
+    else:
         spawn_args.extend(["--resume-from", str(stage)])
     if not has_plan:
         instr_file = state_dir / "instructions.txt"

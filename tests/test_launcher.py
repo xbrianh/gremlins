@@ -618,6 +618,8 @@ def test_resume_omits_resume_flag_for_bossgremlin(lenv, monkeypatch):
                     str(plan_path),
                     "--chain-kind",
                     "local",
+                    "--resume-from",
+                    "implement",
                 ],
             }
         ),
