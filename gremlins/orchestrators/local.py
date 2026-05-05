@@ -446,9 +446,7 @@ def local_main(
             if s.type == "parallel":
                 yield from s.children
 
-    review_stage_names = [
-        s.name for s in _all_stages() if s.type == "review-code"
-    ]
+    review_stage_names = [s.name for s in _all_stages() if s.type == "review-code"]
 
     stages: list[tuple[str, Callable[[], None]]] = []
     for e in pipeline.stages:
