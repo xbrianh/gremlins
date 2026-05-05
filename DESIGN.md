@@ -334,10 +334,9 @@ We are not going to do this, for reasons that follow directly from §3:
    stage edges and would have to coexist with the cold-start path
    anyway.
 
-The `session_id` field remains in `CompletedRun` because it is cheap to
-capture and useful for debugging (it's emitted in the stderr stream prefix
-and lets an operator correlate a stage with its claude.ai session if
-needed). It is not load-bearing and we would not be sad to remove it.
+`CompletedRun.session_id` has since been removed. It was never load-bearing
+and the overhead of carrying it through the protocol outweighed its
+occasional debugging utility.
 
 ### 4.2 What we'd do instead, if cost became a problem
 
