@@ -63,7 +63,7 @@ def build_parallel_stages(
     *,
     max_concurrent: int | None,
     resume_from: str | None,
-    set_stage_fn: Callable[[], None],
+    set_stage_fn: Callable[[str], None],
     cancel_on_bail: bool,
     bail_policy: str,
     gr_id: str | None,
@@ -101,6 +101,7 @@ def build_parallel_stages(
             return False
 
     def _fan_out() -> None:
+        set_stage_fn(fanout_name)
         if not _in_git_repo():
             return
 
@@ -143,7 +144,7 @@ def build_parallel_stages(
             ctx.worktree = wt_path
 
     def _parallel() -> None:
-        set_stage_fn()
+        set_stage_fn(group_name)
         child_names = [n for n, _, _ in child_runners]
         active = child_runners
         if resume_from is not None and resume_from in child_names:
@@ -179,6 +180,7 @@ def build_parallel_stages(
             raise errors[0]
 
     def _fan_in() -> None:
+        set_stage_fn(fanin_name)
         try:
             _do_fan_in()
         finally:

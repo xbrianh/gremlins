@@ -788,7 +788,7 @@ def gh_main(
                     child_runners,
                     max_concurrent=e.max_concurrent,
                     resume_from=args.resume_from,
-                    set_stage_fn=lambda n=group_name: set_stage(gr_id, n),
+                    set_stage_fn=lambda n: set_stage(gr_id, n),
                     cancel_on_bail=e.cancel_on_bail,
                     bail_policy=e.bail_policy,
                     gr_id=gr_id,

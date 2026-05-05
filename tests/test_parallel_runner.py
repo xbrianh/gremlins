@@ -42,7 +42,7 @@ def _parallel_wrapper(
     """Return the parallel-stage callable from build_parallel_stages."""
     if set_stage_fn is None:
 
-        def set_stage_fn() -> None:
+        def set_stage_fn(_name: str) -> None:
             pass
 
     triples = [(n, _make_ctx(n), fn) for n, fn in children]  # type: ignore[misc]
@@ -242,7 +242,7 @@ def test_run_stages_drives_parallel_group() -> None:
         [(_n, _make_ctx(_n), _fn) for _n, _fn in children],
         max_concurrent=None,
         resume_from=None,
-        set_stage_fn=lambda: None,
+        set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",
         gr_id=None,
@@ -269,7 +269,7 @@ def test_run_stages_resume_from_group_skips_before_group() -> None:
         [(_n, _make_ctx(_n), _fn) for _n, _fn in children],
         max_concurrent=None,
         resume_from=None,
-        set_stage_fn=lambda: None,
+        set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",
         gr_id=None,
@@ -336,7 +336,7 @@ def test_build_parallel_stages_names() -> None:
         [("r1", _make_ctx("r1"), lambda: None)],
         max_concurrent=None,
         resume_from=None,
-        set_stage_fn=lambda: None,
+        set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",
         gr_id=None,
