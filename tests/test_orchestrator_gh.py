@@ -1525,3 +1525,48 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir):
 
     data = json.loads((state_dir / "state.json").read_text())
     assert data.get("stage") == "ci-gate"
+
+
+def test_gh_main_state_client_tracks_effective_model(
+    tmp_path, monkeypatch, make_state_dir
+):
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    gr_id = "test-gr-id"
+    state_dir = make_state_dir(gr_id)
+
+    _patch_common(monkeypatch, tmp_path)
+
+    monkeypatch.setattr(
+        subprocess, "run", _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n")
+    )
+    monkeypatch.setattr("gremlins.stages.ghreview.run", lambda ctx, options: None)
+    monkeypatch.setattr(
+        "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.request_copilot.run", lambda ctx, options: None
+    )
+    monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.verify.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
+
+    client = _CommittingClient(
+        git_dir=tmp_path,
+        fixtures={"implement": IMPL_EVENTS, "commit-pr": _pr_events()},
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.parse_client_specifier",
+        lambda spec: client,
+    )
+
+    result = gh_main(
+        ["--plan", "42", "--client", "copilot:gpt-5.4", "--model", "opus"],
+        gr_id=gr_id,
+        client=client,
+    )
+    assert result == 0
+
+    data = json.loads((state_dir / "state.json").read_text())
+    assert data.get("client") == "copilot:opus"

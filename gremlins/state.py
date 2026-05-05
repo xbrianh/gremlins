@@ -39,7 +39,7 @@ def set_stage(
     sub_stage: object = None,
     client_spec: str | None = None,
 ) -> None:
-    """Write stage and stage_updated_at to state.json. No-op without gr_id, empty stage, or missing state.json."""
+    """Write stage metadata to state.json, including client when provided."""
     try:
         if not stage or not gr_id:
             return

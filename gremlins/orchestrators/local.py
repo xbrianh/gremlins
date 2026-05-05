@@ -66,9 +66,49 @@ def _resolve_stage_client(
     return fallback
 
 
-def _resolve_stage_client_spec(entry: StageEntry) -> str | None:
-    """Return the client spec string for this stage, if any."""
-    return entry.client_spec
+def _provider_from_client_spec(client_spec: str | None) -> str | None:
+    if client_spec is None:
+        return None
+    provider, sep, _ = client_spec.partition(":")
+    if not sep or not provider:
+        return None
+    return provider
+
+
+def _resolve_stage_model(entry: StageEntry, args: argparse.Namespace) -> str | None:
+    if entry.type == "plan":
+        return entry.options.get("plan_model", args.plan_model)
+    if entry.type == "implement":
+        return entry.options.get("impl_model", args.impl)
+    if entry.type == "review-code":
+        return entry.options.get("detail", args.detail)
+    if entry.type == "address-code":
+        return entry.options.get("address_model", args.address)
+    if entry.type == "verify":
+        return entry.options.get("fix_model", args.test_fix_model)
+    if entry.type == "parallel" and entry.children:
+        return _resolve_stage_model(entry.children[0], args)
+    return None
+
+
+def _resolve_stage_client_label(
+    entry: StageEntry,
+    pipeline: Pipeline,
+    cli_client_spec: str | None,
+    args: argparse.Namespace,
+) -> str | None:
+    model = _resolve_stage_model(entry, args)
+    if model is None:
+        return None
+    provider = (
+        _provider_from_client_spec(
+            entry.client_spec if entry.client is not None else None
+        )
+        or _provider_from_client_spec(cli_client_spec)
+        or _provider_from_client_spec(pipeline.default_client_spec)
+        or "claude"
+    )
+    return f"{provider}:{model}"
 
 
 def _parse_local_args(argv: list[str]) -> argparse.Namespace:
@@ -126,8 +166,10 @@ def _parse_local_args(argv: list[str]) -> argparse.Namespace:
 def _build_stage_runner(
     entry: StageEntry,
     ctx: StageContext,
+    pipeline: Pipeline,
     args: argparse.Namespace,
     *,
+    cli_client_spec: str | None,
     plan_file: pathlib.Path,
     spec_file: pathlib.Path,
     is_git: bool,
@@ -146,7 +188,11 @@ def _build_stage_runner(
                     logger.info("plan reused from snapshot -> %s", plan_file)
             else:
                 set_stage(
-                    ctx.gr_id, entry.name, client_spec=_resolve_stage_client_spec(entry)
+                    ctx.gr_id,
+                    entry.name,
+                    client_spec=_resolve_stage_client_label(
+                        entry, pipeline, cli_client_spec, args
+                    ),
                 )
                 logger.info(
                     "planning (model: %s) -> %s",
@@ -185,7 +231,11 @@ def _build_stage_runner(
                         exc,
                     )
             set_stage(
-                ctx.gr_id, entry.name, client_spec=_resolve_stage_client_spec(entry)
+                ctx.gr_id,
+                entry.name,
+                client_spec=_resolve_stage_client_label(
+                    entry, pipeline, cli_client_spec, args
+                ),
             )
             logger.info(
                 "implementing (model: %s, from %s)",
@@ -214,7 +264,11 @@ def _build_stage_runner(
                 encoding="utf-8"
             )
             set_stage(
-                ctx.gr_id, entry.name, client_spec=_resolve_stage_client_spec(entry)
+                ctx.gr_id,
+                entry.name,
+                client_spec=_resolve_stage_client_label(
+                    entry, pipeline, cli_client_spec, args
+                ),
             )
             logger.info("reviewing code (model: %s)", detail)
             review_file = review_code.run(
@@ -234,7 +288,11 @@ def _build_stage_runner(
 
         def _address_code() -> None:
             set_stage(
-                ctx.gr_id, entry.name, client_spec=_resolve_stage_client_spec(entry)
+                ctx.gr_id,
+                entry.name,
+                client_spec=_resolve_stage_client_label(
+                    entry, pipeline, cli_client_spec, args
+                ),
             )
             logger.info(
                 "addressing code reviews (model: %s)",
@@ -264,7 +322,11 @@ def _build_stage_runner(
         def _verify() -> None:
             if cmds:
                 set_stage(
-                    ctx.gr_id, entry.name, client_spec=_resolve_stage_client_spec(entry)
+                    ctx.gr_id,
+                    entry.name,
+                    client_spec=_resolve_stage_client_label(
+                        entry, pipeline, cli_client_spec, args
+                    ),
                 )
                 logger.info(
                     "running verify (cmds: %r, max-attempts: %s, model: %s)",
@@ -492,7 +554,9 @@ def local_main(
                         _build_stage_runner(
                             child,
                             child_ctx,
+                            pipeline,
                             args,
+                            cli_client_spec=args.client,
                             plan_file=plan_file,
                             spec_file=spec_file,
                             is_git=is_git,
@@ -504,7 +568,7 @@ def local_main(
                     )
                 )
             group_name = e.name
-            group_spec = _resolve_stage_client_spec(e)
+            group_spec = _resolve_stage_client_label(e, pipeline, args.client, args)
             stages.append(
                 (
                     e.name,
@@ -530,7 +594,9 @@ def local_main(
                     _build_stage_runner(
                         e,
                         stage_ctx,
+                        pipeline,
                         args,
+                        cli_client_spec=args.client,
                         plan_file=plan_file,
                         spec_file=spec_file,
                         is_git=is_git,

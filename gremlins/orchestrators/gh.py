@@ -79,9 +79,30 @@ def _resolve_stage_client(
     return fallback
 
 
-def _resolve_stage_client_spec(entry: StageEntry) -> str | None:
-    """Return the client spec string for this stage, if any."""
-    return entry.client_spec
+def _provider_from_client_spec(client_spec: str | None) -> str | None:
+    if client_spec is None:
+        return None
+    provider, sep, _ = client_spec.partition(":")
+    if not sep or not provider:
+        return None
+    return provider
+
+
+def _resolve_stage_client_label(
+    entry: StageEntry,
+    pipeline: Pipeline,
+    cli_client_spec: str | None,
+    model: str,
+) -> str:
+    provider = (
+        _provider_from_client_spec(
+            entry.client_spec if entry.client is not None else None
+        )
+        or _provider_from_client_spec(cli_client_spec)
+        or _provider_from_client_spec(pipeline.default_client_spec)
+        or "claude"
+    )
+    return f"{provider}:{model}"
 
 
 def _fmt_escape(s: str) -> str:
@@ -306,8 +327,10 @@ def _ensure_pr_url(
 def _build_stage_runner(
     entry: StageEntry,
     ctx: StageContext,
+    pipeline: Pipeline,
     args: argparse.Namespace,
     *,
+    cli_client_spec: str | None,
     model: str,
     code_style: str,
     repo: str,
@@ -325,7 +348,13 @@ def _build_stage_runner(
                 die(
                     f"stage {entry.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML"
                 )
-            set_stage(gr_id, entry.name, client_spec=_resolve_stage_client_spec(entry))
+            set_stage(
+                gr_id,
+                entry.name,
+                client_spec=_resolve_stage_client_label(
+                    entry, pipeline, cli_client_spec, model
+                ),
+            )
             logger.info("[1/8] running ghplan")
             plan_prompt = load_prompts(entry.prompt_paths).format(
                 ref=_fmt_escape(args.ref or ""),
@@ -357,7 +386,13 @@ def _build_stage_runner(
     if entry.type == "implement":
 
         def _implement() -> None:
-            set_stage(gr_id, entry.name, client_spec=_resolve_stage_client_spec(entry))
+            set_stage(
+                gr_id,
+                entry.name,
+                client_spec=_resolve_stage_client_label(
+                    entry, pipeline, cli_client_spec, model
+                ),
+            )
             logger.info("[2a/8] implementing plan")
             spec_file = session_dir / "spec.md"
             spec_text = ""
@@ -398,7 +433,13 @@ def _build_stage_runner(
         max_attempts = entry.options.get("max_attempts", 3)
 
         def _verify() -> None:
-            set_stage(gr_id, entry.name, client_spec=_resolve_stage_client_spec(entry))
+            set_stage(
+                gr_id,
+                entry.name,
+                client_spec=_resolve_stage_client_label(
+                    entry, pipeline, cli_client_spec, model
+                ),
+            )
             logger.info("[2b/8] verifying implementation")
             verify.run(
                 ctx,
@@ -418,7 +459,13 @@ def _build_stage_runner(
     if entry.type == "commit-pr":
 
         def _commit_pr() -> None:
-            set_stage(gr_id, entry.name, client_spec=_resolve_stage_client_spec(entry))
+            set_stage(
+                gr_id,
+                entry.name,
+                client_spec=_resolve_stage_client_label(
+                    entry, pipeline, cli_client_spec, model
+                ),
+            )
             logger.info("[2c/8] committing + opening PR")
             impl_result: ImplStageResult | None = gh_state["impl_result"]
             if impl_result is not None:
@@ -481,7 +528,13 @@ def _build_stage_runner(
 
         def _request_copilot() -> None:
             _ensure_pr_url(gh_state, state_file, args.resume_from)
-            set_stage(gr_id, entry.name, client_spec=_resolve_stage_client_spec(entry))
+            set_stage(
+                gr_id,
+                entry.name,
+                client_spec=_resolve_stage_client_label(
+                    entry, pipeline, cli_client_spec, model
+                ),
+            )
             logger.info("[3/8] requesting Copilot review")
             request_copilot.run(
                 ctx,
@@ -500,7 +553,13 @@ def _build_stage_runner(
                     f"stage {entry.name!r}: type 'ghreview' requires a 'prompt' field in the pipeline YAML"
                 )
             _ensure_pr_url(gh_state, state_file, args.resume_from)
-            set_stage(gr_id, entry.name, client_spec=_resolve_stage_client_spec(entry))
+            set_stage(
+                gr_id,
+                entry.name,
+                client_spec=_resolve_stage_client_label(
+                    entry, pipeline, cli_client_spec, model
+                ),
+            )
             logger.info("[4/8] running /ghreview")
             ghreview.run(
                 ctx,
@@ -518,7 +577,13 @@ def _build_stage_runner(
 
         def _wait_copilot() -> None:
             _ensure_pr_url(gh_state, state_file, args.resume_from)
-            set_stage(gr_id, entry.name, client_spec=_resolve_stage_client_spec(entry))
+            set_stage(
+                gr_id,
+                entry.name,
+                client_spec=_resolve_stage_client_label(
+                    entry, pipeline, cli_client_spec, model
+                ),
+            )
             logger.info(
                 "[5/8] waiting for Copilot review (20s interval, 10min timeout)"
             )
@@ -538,7 +603,13 @@ def _build_stage_runner(
                     f"stage {entry.name!r}: type 'ghaddress' requires a 'prompt' field in the pipeline YAML"
                 )
             _ensure_pr_url(gh_state, state_file, args.resume_from)
-            set_stage(gr_id, entry.name, client_spec=_resolve_stage_client_spec(entry))
+            set_stage(
+                gr_id,
+                entry.name,
+                client_spec=_resolve_stage_client_label(
+                    entry, pipeline, cli_client_spec, model
+                ),
+            )
             logger.info("[6/8] running /ghaddress")
             ghaddress.run(
                 ctx,
@@ -556,7 +627,13 @@ def _build_stage_runner(
 
         def _wait_ci() -> None:
             _ensure_pr_url(gh_state, state_file, args.resume_from)
-            set_stage(gr_id, entry.name, client_spec=_resolve_stage_client_spec(entry))
+            set_stage(
+                gr_id,
+                entry.name,
+                client_spec=_resolve_stage_client_label(
+                    entry, pipeline, cli_client_spec, model
+                ),
+            )
             logger.info("[7/8] waiting for CI checks (up to 3 attempts, 20min each)")
             wait_ci.run(
                 ctx,
@@ -736,7 +813,9 @@ def gh_main(
                     child_runner = _build_stage_runner(
                         child,
                         child_ctx,
+                        pipeline,
                         args,
+                        cli_client_spec=args.client,
                         model=model,
                         code_style=code_style,
                         repo=repo,
@@ -749,7 +828,7 @@ def gh_main(
                     die(str(exc))
                 child_runners.append((child.name, child_runner))
             group_name = e.name
-            group_spec = _resolve_stage_client_spec(e)
+            group_spec = _resolve_stage_client_label(e, pipeline, args.client, model)
             stages.append(
                 (
                     e.name,
@@ -773,7 +852,9 @@ def gh_main(
                 runner = _build_stage_runner(
                     e,
                     stage_ctx,
+                    pipeline,
                     args,
+                    cli_client_spec=args.client,
                     model=model,
                     code_style=code_style,
                     repo=repo,
