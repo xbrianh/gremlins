@@ -35,6 +35,8 @@ After posting the review, classify your findings and — if any are blocker-seve
 **30-second rule**: if a competent developer could write the fix in under 30 seconds without asking any questions, do not bail.
 
 If the review has no blocker-severity findings, do not run the helper — exit normally. The bail marker is the signal the pipeline checks after this stage.
+
+**30-second rule**: if a competent developer could fix it in under 30 seconds without asking questions — missing import, wrong identifier, off-by-one, trivial rename — do not bail; flag it in the review.
 """
     prompt = load_prompts([options.prompt_path]).format(
         pr_url=options.pr_url,
