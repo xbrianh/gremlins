@@ -651,7 +651,12 @@ def gh_main(
 
     model = args.model
     if model is None:
-        model = _read_state_field(state_file, "model") or "sonnet"
+        specifier_model: str | None = None
+        if args.client and ":" in args.client:
+            _, _, _m = args.client.partition(":")
+            if _m:
+                specifier_model = _m
+        model = specifier_model or _read_state_field(state_file, "model") or "sonnet"
     if model:
         patch_state(gr_id, model=model)
 
