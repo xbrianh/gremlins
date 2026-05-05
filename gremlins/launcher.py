@@ -263,8 +263,8 @@ def _resolve_client_label(
         model = (
             _extract_arg_value(pipeline_args, "--model")
             or _model_from_client_spec(client_spec)
-            or _model_from_client_spec(pipeline_default)
             or state_model
+            or _model_from_client_spec(pipeline_default)
             or "sonnet"
         )
     elif kind == "bossgremlin":
@@ -273,8 +273,8 @@ def _resolve_client_label(
         model = (
             _extract_arg_value(pipeline_args, "-i")
             or _model_from_client_spec(client_spec)
-            or _model_from_client_spec(pipeline_default)
             or state_impl_model
+            or _model_from_client_spec(pipeline_default)
             or "sonnet"
         )
 

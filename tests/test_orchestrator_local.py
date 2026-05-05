@@ -355,3 +355,4 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
     assert result == 0
     assert client.calls[0].model == "gpt-5.4"  # implement
     assert client.calls[1].label == review_label
+    assert client.calls[1].model == "gpt-5.4"  # review
