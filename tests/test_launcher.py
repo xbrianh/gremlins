@@ -330,7 +330,7 @@ stages:
         instructions="test custom pipeline client",
     )
     state = _read_state(_gremlins_state_root(lenv) / gr_id)
-    assert state["client"] == "copilot:sonnet"
+    assert state["client"] == "copilot:gpt-5.4"
 
 
 def test_launch_uses_impl_override_with_pipeline_default_provider(lenv):
@@ -553,7 +553,7 @@ stages:
     )
 
     state = _read_state(state_dir)
-    assert state["client"] == "copilot:sonnet"
+    assert state["client"] == "copilot:gpt-5.4"
     state["pipeline_args"] = ["--pipeline", str(new_pipeline)]
     (state_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
 
@@ -561,7 +561,7 @@ stages:
     launcher.resume(gr_id)
 
     post_state = _read_state(state_dir)
-    assert post_state["client"] == "claude:sonnet"
+    assert post_state["client"] == "claude:haiku"
     assert post_state["pipeline_path"] == str(new_pipeline.resolve())
     assert post_state["pipeline_args"][:2] == [
         "--pipeline",

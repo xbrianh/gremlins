@@ -250,13 +250,12 @@ def _resolve_client_label(
     state: dict[str, Any] | None = None,
 ) -> str:
     client_spec = _extract_client_spec(pipeline_args)
-    provider = _provider_from_client_spec(client_spec)
-    if not provider:
-        provider = _provider_from_client_spec(
-            _pipeline_default_client_spec(pipeline_path)
-        )
-    if not provider:
-        provider = "claude"
+    pipeline_default = _pipeline_default_client_spec(pipeline_path)
+    provider = (
+        _provider_from_client_spec(client_spec)
+        or _provider_from_client_spec(pipeline_default)
+        or "claude"
+    )
 
     state_model = str((state or {}).get("model") or "")
     state_impl_model = str((state or {}).get("impl_model") or "")
@@ -265,6 +264,7 @@ def _resolve_client_label(
             _extract_arg_value(pipeline_args, "--model")
             or _model_from_client_spec(client_spec)
             or state_model
+            or _model_from_client_spec(pipeline_default)
             or "sonnet"
         )
     elif kind == "bossgremlin":
@@ -274,6 +274,7 @@ def _resolve_client_label(
             _extract_arg_value(pipeline_args, "-i")
             or _model_from_client_spec(client_spec)
             or state_impl_model
+            or _model_from_client_spec(pipeline_default)
             or "sonnet"
         )
 

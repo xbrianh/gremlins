@@ -1570,3 +1570,63 @@ def test_gh_main_state_client_tracks_effective_model(
 
     data = json.loads((state_dir / "state.json").read_text())
     assert data.get("client") == "copilot:opus"
+
+
+def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
+    """pipeline.default_client_spec model used when --model and --client are absent.
+
+    Regression: the model was extracted only from --model / --client, not from
+    the pipeline's default_client_spec. A pipeline with default_client: copilot:gpt-5.4
+    produced model=sonnet, causing the Copilot client to fail immediately.
+    """
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+
+    # Override load_pipeline (wins over _patch_common's version) to inject
+    # default_client_spec without a live client instance.
+    _real_load_pipeline = _gh_mod.load_pipeline
+
+    def _load_pipeline_copilot_default(path):
+        pipeline = _real_load_pipeline(path)
+        stripped_stages = [dataclasses.replace(s, client=None) for s in pipeline.stages]
+        return dataclasses.replace(
+            pipeline,
+            clients=[],
+            default_client=None,
+            default_client_spec="copilot:gpt-5.4",
+            stages=stripped_stages,
+        )
+
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.load_pipeline", _load_pipeline_copilot_default
+    )
+
+    monkeypatch.setattr(
+        subprocess, "run", _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n")
+    )
+    monkeypatch.setattr("gremlins.stages.ghreview.run", lambda ctx, options: None)
+    monkeypatch.setattr(
+        "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.request_copilot.run", lambda ctx, options: None
+    )
+    monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.verify.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
+
+    client = _CommittingClient(
+        git_dir=tmp_path,
+        fixtures={"implement": IMPL_EVENTS, "commit-pr": _pr_events()},
+    )
+
+    result = gh_main(["--plan", "42"], client=client)
+    assert result == 0
+
+    assert client.calls, "expected at least one client call"
+    bad = [c for c in client.calls if c.model != "gpt-5.4"]
+    assert not bad, (
+        f"{len(bad)} stage(s) used wrong model: {[(c.label, c.model) for c in bad]}"
+    )

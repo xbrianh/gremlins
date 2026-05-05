@@ -1,3 +1,4 @@
+import dataclasses
 import json
 
 from conftest import (
@@ -294,3 +295,64 @@ def test_local_main_env_file_vars_reach_verify(tmp_path, monkeypatch):
         client=client,
     )
     assert result == 0
+
+
+def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
+    """pipeline.default_client_spec model used when --model and --client are absent.
+
+    Regression: the model was computed before pipeline loading, so the pipeline's
+    default_client_spec model was never consulted. A pipeline with
+    default_client: copilot:gpt-5.4 produced model=sonnet.
+    """
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("# Plan\nDo stuff.\n")
+
+    monkeypatch.chdir(tmp_path)
+    _common_patches(monkeypatch)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.local.resolve_session_dir",
+        lambda gr_id=None: session_dir,
+    )
+    monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.local.load_prompts", lambda paths: "Be good."
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.implement.changes_outside_git", lambda s, d: True
+    )
+
+    # Override load_pipeline (wins over _common_patches's version) to inject
+    # default_client_spec without a live client instance.
+    _real_load_pipeline = load_pipeline
+
+    def _load_pipeline_copilot_default(path):
+        pipeline = _real_load_pipeline(path)
+        stripped_stages = [dataclasses.replace(s, client=None) for s in pipeline.stages]
+        return dataclasses.replace(
+            pipeline,
+            clients=[],
+            default_client=None,
+            default_client_spec="copilot:gpt-5.4",
+            stages=stripped_stages,
+        )
+
+    monkeypatch.setattr(
+        "gremlins.orchestrators.local.load_pipeline", _load_pipeline_copilot_default
+    )
+
+    review_label = "review-code:detail:gpt-5.4"
+    client = _ReviewCreatingClient(
+        fixtures={
+            "implement": MINIMAL_EVENTS,
+            review_label: MINIMAL_EVENTS,
+            "address-code": MINIMAL_EVENTS,
+        }
+    )
+
+    result = local_main(["--plan", str(plan_file)], client=client)
+    assert result == 0
+    assert client.calls[0].model == "gpt-5.4"  # implement
+    assert client.calls[1].label == review_label
+    assert client.calls[1].model == "gpt-5.4"  # review
