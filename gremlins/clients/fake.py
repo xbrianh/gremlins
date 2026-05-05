@@ -64,6 +64,8 @@ class FakeClaudeClient:
         model: str | None = None,
         raw_path: pathlib.Path | None = None,
         capture_events: bool = False,
+        on_timeout_prompt: str | None = None,
+        max_retries: int = 2,
     ) -> CompletedRun:
         self.calls.append(
             RecordedCall(

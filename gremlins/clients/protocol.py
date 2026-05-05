@@ -23,6 +23,8 @@ class ClaudeClient(Protocol):
         model: str | None = None,
         raw_path: pathlib.Path | None = None,
         capture_events: bool = False,
+        on_timeout_prompt: str | None = None,
+        max_retries: int = 2,
     ) -> CompletedRun: ...
 
     def reap_all(self) -> None: ...

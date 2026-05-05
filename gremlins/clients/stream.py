@@ -136,15 +136,18 @@ def stream_events(
     prefix: str = "",
     raw_path: pathlib.Path | None = None,
     capture: bool = False,
-) -> tuple[str | None, float | None, str | None, list[dict[str, Any]] | None]:
+) -> tuple[str | None, float | None, str | None, list[dict[str, Any]] | None, bool]:
     state: dict[str, Any] = {"session_id": None, "cost_usd": None, "result_text": None}
     events: list[dict[str, Any]] | None = [] if capture else None
+    timed_out = False
     raw = open(raw_path, "ab") if raw_path is not None else None
     try:
         for line in stdout:
             if raw is not None:
                 raw.write(line)
                 raw.flush()
+            if b"Stream idle timeout" in line:
+                timed_out = True
             evt = _decode_line(line)
             if evt is None:
                 continue
@@ -158,4 +161,10 @@ def stream_events(
     finally:
         if raw is not None:
             raw.close()
-    return state["session_id"], state["cost_usd"], state["result_text"], events
+    return (
+        state["session_id"],
+        state["cost_usd"],
+        state["result_text"],
+        events,
+        timed_out,
+    )
