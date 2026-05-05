@@ -6,6 +6,7 @@ import json
 import os
 import pathlib
 import shutil
+import signal
 
 import pytest
 from conftest import MINIMAL_EVENTS
@@ -64,7 +65,6 @@ def _common_boss_patches(monkeypatch, tmp_path, gr_id):
     monkeypatch.setattr(boss_mod, "set_stage", lambda *a, **kw: None)
     monkeypatch.setattr(boss_mod, "get_head_ref", lambda p: "abc123def456abc1")
     monkeypatch.setattr(boss_mod, "get_current_branch", lambda p: "main")
-    monkeypatch.setattr(boss_mod, "install_signal_handlers", lambda *c: None)
     # Stub git_head_of_workdir so tests don't need a real git worktree.
     # Individual tests that care about specific SHA values can override this.
     monkeypatch.setattr(
@@ -107,6 +107,15 @@ class BossHandoffClient(FakeClaudeClient):
         elif label == "handoff:sanitize" and self.sanitize_text is not None:
             self.out_path.write_text(self.sanitize_text)
         return super().run(prompt, label=label, **kwargs)
+
+
+class TrackingBossClient(FakeClaudeClient):
+    def __init__(self) -> None:
+        super().__init__(fixtures={})
+        self.reap_calls = 0
+
+    def reap_all(self) -> None:
+        self.reap_calls += 1
 
 
 # ---------------------------------------------------------------------------
@@ -356,6 +365,66 @@ def test_boss_main_passes_resolved_client_to_handoff(tmp_path, monkeypatch):
 
     assert result == 0
     assert captured == ["copilot:gpt-5.4"]
+
+
+def test_sigterm_handler_reaps_current_client(monkeypatch):
+    client = TrackingBossClient()
+    monkeypatch.setattr(boss_mod, "_current_client", client)
+    monkeypatch.setattr(boss_mod, "_current_proc", None)
+    monkeypatch.setattr(boss_mod, "_stop_requested", False)
+
+    boss_mod._sigterm_handler(signal.SIGTERM, None)
+
+    assert boss_mod._stop_requested is True
+    assert client.reap_calls == 1
+
+
+def test_boss_main_preserves_sigterm_handler(tmp_path, monkeypatch):
+    gr_id = "test-boss-sigterm-ee33"
+    state_dir, project_root, workdir = _make_gremlin_state(tmp_path, gr_id)
+    _common_boss_patches(monkeypatch, tmp_path, gr_id)
+
+    spec = tmp_path / "spec.md"
+    spec.write_text("# Spec\n")
+    client = TrackingBossClient()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        boss_mod,
+        "to_client",
+        lambda spec: setattr(client, "_gremlins_client_spec", str(spec)) or client,
+    )
+
+    def fake_run_handoff(
+        gr_id, state_dir, boss_state, project_root, boss_workdir, model
+    ):
+        captured["sigterm"] = signal.getsignal(signal.SIGTERM)
+        captured["sigint"] = signal.getsignal(signal.SIGINT)
+        return "chain-done", {"exit_state": "chain-done", "operator_followups": []}
+
+    old_sigint = signal.getsignal(signal.SIGINT)
+    old_sigterm = signal.getsignal(signal.SIGTERM)
+    monkeypatch.setattr(boss_mod, "run_handoff", fake_run_handoff)
+
+    try:
+        result = boss_main(
+            [
+                "--plan",
+                str(spec),
+                "--chain-kind",
+                "local",
+                "--client",
+                "copilot:gpt-5.4",
+            ],
+            gr_id=gr_id,
+        )
+    finally:
+        signal.signal(signal.SIGINT, old_sigint)
+        signal.signal(signal.SIGTERM, old_sigterm)
+
+    assert result == 0
+    assert captured["sigterm"] is boss_mod._sigterm_handler
+    assert captured["sigint"] != boss_mod._sigterm_handler
 
 
 # ---------------------------------------------------------------------------

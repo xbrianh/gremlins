@@ -26,6 +26,7 @@ import subprocess
 import sys
 import time
 import types
+from collections.abc import Callable
 from typing import Any, NoReturn, cast
 
 from .. import git as _git_mod
@@ -35,7 +36,6 @@ from ..clients.protocol import ClaudeClient
 from ..gh_utils import get_repo, parse_issue_ref, view_issue
 from ..launcher import launch as _launch
 from ..logging_setup import configure_logging
-from ..runner import install_signal_handlers
 from ..state import patch_state, set_stage
 
 logger = logging.getLogger(__name__)
@@ -77,6 +77,7 @@ HANDOFF_FETCH_TIMEOUT = int(os.environ.get("BOSSGREMLIN_HANDOFF_FETCH_TIMEOUT", 
 GH_VIEW_TIMEOUT = 30  # seconds; bounds `gh repo view` at chain start
 
 _current_proc = None
+_current_client: ClaudeClient | None = None
 _stop_requested = False
 
 
@@ -84,11 +85,29 @@ def _sigterm_handler(signum: int, frame: types.FrameType | None) -> None:
     global _stop_requested
     _stop_requested = True
     logger.info("received SIGTERM — stopping after current operation")
+    if _current_client is not None:
+        try:
+            _current_client.reap_all()
+        except Exception:
+            pass
     if _current_proc is not None:
         try:
             _current_proc.send_signal(signal.SIGTERM)
         except Exception:
             pass
+
+
+def _sigint_handler(
+    client: ClaudeClient,
+) -> Callable[[int, types.FrameType | None], None]:
+    def handler(signum: int, frame: types.FrameType | None) -> None:
+        try:
+            client.reap_all()
+        except Exception:
+            pass
+        sys.exit(130)
+
+    return handler
 
 
 def die(msg: str) -> NoReturn:
@@ -772,7 +791,6 @@ def _maybe_set_description_from_spec(
 
 def boss_main(argv: list[str], *, gr_id: str | None = None) -> int:
     configure_logging()
-    signal.signal(signal.SIGTERM, _sigterm_handler)
     args = _parse_boss_args(argv)
     try:
         client_spec = ClientSpec.parse(args.client)
@@ -780,8 +798,12 @@ def boss_main(argv: list[str], *, gr_id: str | None = None) -> int:
         die(str(exc))
     client = to_client(client_spec)
     setattr(client, "_gremlins_client_spec", str(client_spec))
-    install_signal_handlers(client)
+    global _current_client
+    _current_client = client
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+    signal.signal(signal.SIGINT, _sigint_handler(client))
     if os.environ.get("GREMLINS_TEST_NOOP_PIPELINE"):
+        _current_client = None
         return 0
 
     if not gr_id:
@@ -937,6 +959,7 @@ def boss_main(argv: list[str], *, gr_id: str | None = None) -> int:
                     logger.info("operator follow-ups: (none)")
                 set_stage(gr_id, "done")
                 save_boss_state(state_dir, boss_state)
+                _current_client = None
                 return 0
 
             if exit_state == "bail":
