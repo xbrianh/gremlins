@@ -29,12 +29,11 @@ def emit_event(evt: dict) -> None:
     sys.stdout.flush()
 
 
-def emit_minimal_stream(session_id: str, *, extra: list = None) -> None:
+def emit_minimal_stream(*, extra: list = None) -> None:
     emit_event(
         {
             "type": "system",
             "subtype": "init",
-            "session_id": session_id,
             "model": "fake",
             "cwd": os.getcwd(),
         }
@@ -51,10 +50,9 @@ def emit_minimal_stream(session_id: str, *, extra: list = None) -> None:
     )
 
 
-def emit_pr_create_stream(session_id: str, pr_url: str) -> None:
+def emit_pr_create_stream(pr_url: str) -> None:
     tu_id = "tu-" + uuid.uuid4().hex[:8]
     emit_minimal_stream(
-        session_id,
         extra=[
             {
                 "type": "assistant",
@@ -85,10 +83,9 @@ def emit_pr_create_stream(session_id: str, pr_url: str) -> None:
     )
 
 
-def emit_issue_create_stream(session_id: str, issue_url: str) -> None:
+def emit_issue_create_stream(issue_url: str) -> None:
     tu_id = "tu-" + uuid.uuid4().hex[:8]
     emit_minimal_stream(
-        session_id,
         extra=[
             {
                 "type": "assistant",
@@ -173,7 +170,7 @@ def git_commit_changes(message: str) -> bool:
         return False
 
 
-def handle_plan(prompt: str, session_id: str) -> int:
+def handle_plan(prompt: str) -> int:
     plan_file = find_path_in_prompt(prompt, r"write it to the file `([^`]+)`")
     if plan_file:
         pathlib.Path(plan_file).parent.mkdir(parents=True, exist_ok=True)
@@ -182,11 +179,11 @@ def handle_plan(prompt: str, session_id: str) -> int:
             "## Tasks\n- [ ] Touch a file\n",
             encoding="utf-8",
         )
-    emit_minimal_stream(session_id)
+    emit_minimal_stream()
     return 0
 
 
-def handle_implement(prompt: str, session_id: str) -> int:
+def handle_implement(prompt: str) -> int:
     # Create a new file so review-code's diff is non-empty.
     target = pathlib.Path("fake_impl.txt")
     target.write_text("fake implementation\n", encoding="utf-8")
@@ -205,11 +202,11 @@ def handle_implement(prompt: str, session_id: str) -> int:
     if in_git:
         # Commit so HEAD advances (post-impl invariant for both local and gh).
         git_commit_changes("impl: fake implementation")
-    emit_minimal_stream(session_id)
+    emit_minimal_stream()
     return 0
 
 
-def handle_review(prompt: str, session_id: str) -> int:
+def handle_review(prompt: str) -> int:
     out_file = find_path_in_prompt(prompt, r"`([^`]+\.md)`\s+is the canonical")
     if out_file:
         out_path = pathlib.Path(out_file)
@@ -218,11 +215,11 @@ def handle_review(prompt: str, session_id: str) -> int:
             "# Review (fake)\n\n## Summary\nFake review.\n\n## Findings\nNo issues.\n",
             encoding="utf-8",
         )
-    emit_minimal_stream(session_id)
+    emit_minimal_stream()
     return 0
 
 
-def handle_address(prompt: str, session_id: str) -> int:
+def handle_address(prompt: str) -> int:
     in_git = (
         subprocess.run(
             ["git", "rev-parse", "--git-dir"],
@@ -237,33 +234,32 @@ def handle_address(prompt: str, session_id: str) -> int:
         if target.exists():
             target.write_text("fake implementation (addressed)\n", encoding="utf-8")
             git_commit_changes("Address review feedback")
-    emit_minimal_stream(session_id)
+    emit_minimal_stream()
     return 0
 
 
-def handle_commit_pr(prompt: str, session_id: str) -> int:
+def handle_commit_pr(prompt: str) -> int:
     pr_url = os.environ.get(
         "FAKE_CLAUDE_PR_URL", "https://github.com/owner/repo/pull/101"
     )
-    emit_pr_create_stream(session_id, pr_url)
+    emit_pr_create_stream(pr_url)
     return 0
 
 
-def handle_ghplan(prompt: str, session_id: str) -> int:
+def handle_ghplan(prompt: str) -> int:
     issue_url = os.environ.get(
         "FAKE_CLAUDE_ISSUE_URL", "https://github.com/owner/repo/issues/42"
     )
-    emit_issue_create_stream(session_id, issue_url)
+    emit_issue_create_stream(issue_url)
     return 0
 
 
-def handle_plan_title(prompt: str, session_id: str) -> int:
+def handle_plan_title(prompt: str) -> int:
     # `--plan <file>` flow asks for a one-line GitHub issue title.
     emit_event(
         {
             "type": "system",
             "subtype": "init",
-            "session_id": session_id,
             "model": "fake",
             "cwd": os.getcwd(),
         }
@@ -352,7 +348,6 @@ def parse_argv(argv):
 def main(argv):
     args, prompt = parse_argv(argv)
     stage = classify_stage(prompt)
-    session_id = f"sess-{stage}-{uuid.uuid4().hex[:6]}"
 
     log_invocation(
         {
@@ -380,9 +375,9 @@ def main(argv):
         "address": handle_address,
         "commit-pr": handle_commit_pr,
         "ghplan": handle_ghplan,
-        "ghreview": lambda p, s: (emit_minimal_stream(s), 0)[1],
-        "ghaddress": lambda p, s: (emit_minimal_stream(s), 0)[1],
-        "rescue-diagnosis": lambda p, s: handle_rescue_diagnosis(p),
+        "ghreview": lambda p: (emit_minimal_stream(), 0)[1],
+        "ghaddress": lambda p: (emit_minimal_stream(), 0)[1],
+        "rescue-diagnosis": handle_rescue_diagnosis,
     }
     h = handlers.get(stage)
     if h is None:
@@ -390,10 +385,10 @@ def main(argv):
             f"fake claude: unrecognized stage for prompt head: {prompt[:120]!r}\n"
         )
         if os.environ.get("FAKE_CLAUDE_ALLOW_UNKNOWN_STAGE") == "1":
-            emit_minimal_stream(session_id)
+            emit_minimal_stream()
             return 0
         return 1
-    return h(prompt, session_id)
+    return h(prompt)
 
 
 if __name__ == "__main__":

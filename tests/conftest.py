@@ -15,7 +15,7 @@ if str(TESTS_DIR) not in sys.path:
 
 # Shared minimal event stream used across test modules.
 MINIMAL_EVENTS = [
-    {"type": "system", "subtype": "init", "session_id": "test-session-1"},
+    {"type": "system", "subtype": "init"},
     {"type": "result", "subtype": "success"},
 ]
 
