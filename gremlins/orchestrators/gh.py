@@ -16,7 +16,13 @@ from typing import Any, NoReturn
 
 import yaml
 
-from ..clients import PACKAGE_DEFAULT, ClientSpec, collect_stage_specs, load_stage_specs_from_state, to_client
+from ..clients import (
+    PACKAGE_DEFAULT,
+    ClientSpec,
+    collect_stage_specs,
+    load_stage_specs_from_state,
+    to_client,
+)
 from ..clients.protocol import ClaudeClient
 from ..env_file import load_env_file
 from ..gh_utils import extract_gh_url, get_repo, parse_issue_ref, view_issue

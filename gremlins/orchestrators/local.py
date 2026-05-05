@@ -14,7 +14,13 @@ from typing import NoReturn
 
 import yaml
 
-from ..clients import PACKAGE_DEFAULT, ClientSpec, collect_stage_specs, load_stage_specs_from_state, to_client
+from ..clients import (
+    PACKAGE_DEFAULT,
+    ClientSpec,
+    collect_stage_specs,
+    load_stage_specs_from_state,
+    to_client,
+)
 from ..clients.protocol import ClaudeClient
 from ..env_file import load_env_file
 from ..git import in_git_repo

@@ -5,14 +5,13 @@ import json
 from typing import TYPE_CHECKING, cast
 
 from ..stages.registry import CLIENT_FACTORIES, register_client_factory
+from ..state import resolve_state_file
 from .claude import SubprocessClaudeClient
 from .copilot import SubprocessCopilotClient
 
-from ..state import resolve_state_file
-
 if TYPE_CHECKING:
-    from .protocol import ClaudeClient
     from ..pipeline import Pipeline
+    from .protocol import ClaudeClient
 
 register_client_factory("claude", lambda _: SubprocessClaudeClient())
 register_client_factory("copilot", lambda _: SubprocessCopilotClient())
