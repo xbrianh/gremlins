@@ -9,6 +9,7 @@ from typing import Any, cast
 
 import yaml
 
+from gremlins.clients.protocol import ClaudeClient
 from gremlins.stages.registry import CLIENT_FACTORIES, STAGE_REGISTRY
 
 
@@ -21,7 +22,7 @@ def _ensure_registered() -> None:
 class StageEntry:
     name: str
     type: str
-    client: Any | None
+    client: ClaudeClient | None
     prompt_paths: list[pathlib.Path]
     options: dict[str, Any]
     children: list[StageEntry] = dataclasses.field(  # pyright: ignore[reportUnknownVariableType]
@@ -34,18 +35,20 @@ class StageEntry:
 class Pipeline:
     name: str
     path: pathlib.Path
-    clients: list[Any]
+    clients: list[ClaudeClient]
     stages: list[StageEntry]
-    default_client: Any | None = None
+    default_client: ClaudeClient | None = None
 
 
-def parse_client_specifier(spec: str) -> Any:
+def parse_client_specifier(spec: str) -> ClaudeClient:
     if ":" not in spec:
-        raise ValueError(f"invalid client specifier {spec!r}: expected 'provider:model'")
+        raise ValueError(
+            f"invalid client specifier {spec!r}: expected 'provider:model'"
+        )
     provider, _, model = spec.partition(":")
     if provider not in CLIENT_FACTORIES:
         raise ValueError(f"unknown provider {provider!r} in client specifier {spec!r}")
-    return CLIENT_FACTORIES[provider](model or None)
+    return cast(ClaudeClient, CLIENT_FACTORIES[provider](model or None))
 
 
 def _resolve_prompt_paths(

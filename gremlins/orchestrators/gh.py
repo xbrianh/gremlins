@@ -22,7 +22,13 @@ from ..env_file import load_env_file
 from ..gh_utils import extract_gh_url, get_repo, parse_issue_ref, view_issue
 from ..git import DirtyOnly, HeadAdvanced
 from ..logging_setup import configure_logging
-from ..pipeline import Pipeline, StageEntry, load_pipeline, parse_client_specifier, resolve_pipeline_path
+from ..pipeline import (
+    Pipeline,
+    StageEntry,
+    load_pipeline,
+    parse_client_specifier,
+    resolve_pipeline_path,
+)
 from ..prompts import load_prompts
 from ..runner import install_signal_handlers, make_parallel_wrapper, run_stages
 from ..stages import (
@@ -61,7 +67,11 @@ def die(msg: str) -> NoReturn:
 def _resolve_stage_client(
     entry: StageEntry, pipeline: Pipeline, default_client: ClaudeClient
 ) -> ClaudeClient:
-    return entry.client or pipeline.default_client or default_client
+    if entry.client is not None:
+        return entry.client
+    if pipeline.default_client is not None:
+        return pipeline.default_client
+    return default_client
 
 
 def _fmt_escape(s: str) -> str:
@@ -572,15 +582,13 @@ def gh_main(
     if shutil.which("gh") is None:
         die("gh CLI not found")
 
-    if client is None:
-        if args.client:
-            try:
-                client = parse_client_specifier(args.client)
-            except ValueError as exc:
-                die(str(exc))
-        else:
-            client = SubprocessClaudeClient()
-    install_signal_handlers(client)
+    effective_client: ClaudeClient = client or SubprocessClaudeClient()
+    if args.client:
+        try:
+            effective_client = parse_client_specifier(args.client)
+        except ValueError as exc:
+            die(str(exc))
+    install_signal_handlers(effective_client)
 
     try:
         pipeline = load_pipeline(
@@ -589,7 +597,7 @@ def gh_main(
     except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
         die(str(exc))
 
-    install_signal_handlers(client, *pipeline.clients)
+    install_signal_handlers(effective_client, *pipeline.clients)
 
     stage_names = [s.name for s in pipeline.stages]
 
@@ -655,7 +663,7 @@ def gh_main(
             repo=repo,
             plan_md=plan_md,
             model=model,
-            client=client,
+            client=effective_client,
             state_file=state_file,
             gr_id=gr_id,
         )
@@ -695,7 +703,7 @@ def gh_main(
                 child_dir = group_dir / child.name
                 child_dir.mkdir(parents=True, exist_ok=True)
                 child_ctx = StageContext(
-                    client=_resolve_stage_client(child, pipeline, client),
+                    client=_resolve_stage_client(child, pipeline, effective_client),
                     session_dir=child_dir,
                     gr_id=gr_id,
                 )
@@ -733,7 +741,7 @@ def gh_main(
             )
         else:
             stage_ctx = StageContext(
-                client=_resolve_stage_client(e, pipeline, client),
+                client=_resolve_stage_client(e, pipeline, effective_client),
                 session_dir=session_dir,
                 gr_id=gr_id,
             )
@@ -755,7 +763,7 @@ def gh_main(
             stages.append((e.name, runner))
     run_stages(stages, resume_from=run_resume_from)
 
-    total_cost = getattr(client, "total_cost_usd", 0.0)
+    total_cost = getattr(effective_client, "total_cost_usd", 0.0)
     if total_cost is not None and total_cost > 0:
         patch_state(gr_id, total_cost_usd=total_cost)
 
