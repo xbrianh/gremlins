@@ -304,6 +304,10 @@ If `.gremlins/env` exists in the project root, gremlins sources it through
 environment before any stage runs. All subprocesses (plan, implement, verify,
 review) inherit the result automatically.
 
+> **Security warning:** because `.gremlins/env` is executed as a bash script,
+> it can run arbitrary code. Do not run gremlins in a repository unless you
+> have reviewed the contents of `.gremlins/env` and trust them.
+
 The file is sourced via `bash`, so it can use command substitution,
 conditionals, and anything bash supports:
 
@@ -316,10 +320,6 @@ export TEST_DATABASE_URL=postgresql://localhost/mydb_test
 `gremlins init` writes `.gremlins/.gitignore` with `env` so the file is
 gitignored by default. Add it to your `~/.gitignore_global` or project
 `.gitignore` if you don't use `gremlins init`.
-
-> **Security warning:** because `.gremlins/env` is executed as a bash script,
-> it can run arbitrary code. Do not run gremlins in a repository unless you
-> have reviewed the contents of `.gremlins/env` and trust them.
 
 ### Loader API
 
