@@ -7,7 +7,7 @@ import pathlib
 from dataclasses import dataclass
 from typing import Any, cast
 
-from .protocol import CompletedRun
+from gremlins.clients.protocol import CompletedRun
 
 
 @dataclass

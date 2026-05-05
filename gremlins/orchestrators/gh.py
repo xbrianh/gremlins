@@ -16,27 +16,27 @@ from typing import Any, NoReturn
 
 import yaml
 
-from ..clients import ClientSpec, to_client
-from ..clients.protocol import ClaudeClient
-from ..clients.resolve import (
+from gremlins.clients import ClientSpec, to_client
+from gremlins.clients.protocol import ClaudeClient
+from gremlins.clients.resolve import (
     PACKAGE_DEFAULT,
     collect_stage_specs,
     load_stage_specs_from_state,
     require_stage_spec,
     validate_stage_specs,
 )
-from ..env_file import load_env_file
-from ..gh_utils import extract_gh_url, get_repo, parse_issue_ref, view_issue
-from ..git import DirtyOnly, HeadAdvanced
-from ..logging_setup import configure_logging
-from ..pipeline import (
+from gremlins.env_file import load_env_file
+from gremlins.gh_utils import extract_gh_url, get_repo, parse_issue_ref, view_issue
+from gremlins.git import DirtyOnly, HeadAdvanced
+from gremlins.logging_setup import configure_logging
+from gremlins.pipeline import (
     StageEntry,
     load_pipeline,
     resolve_pipeline_path,
 )
-from ..prompts import load_prompts
-from ..runner import install_signal_handlers, make_parallel_wrapper, run_stages
-from ..stages import (
+from gremlins.prompts import load_prompts
+from gremlins.runner import install_signal_handlers, make_parallel_wrapper, run_stages
+from gremlins.stages import (
     commit_pr,
     ghaddress,
     ghreview,
@@ -46,9 +46,14 @@ from ..stages import (
     wait_ci,
     wait_copilot,
 )
-from ..stages.context import StageContext
-from ..stages.implement import ImplStageResult
-from ..state import patch_state, resolve_session_dir, resolve_state_file, set_stage
+from gremlins.stages.context import StageContext
+from gremlins.stages.implement import ImplStageResult
+from gremlins.state import (
+    patch_state,
+    resolve_session_dir,
+    resolve_state_file,
+    set_stage,
+)
 
 logger = logging.getLogger(__name__)
 

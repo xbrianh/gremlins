@@ -25,8 +25,11 @@ testpaths = ["tests"]
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP"]
+select = ["E", "F", "I", "UP", "TID"]
 ignore = ["E501"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
 
 [tool.pyright]
 typeCheckingMode = "strict"

@@ -9,7 +9,7 @@ import argparse
 import os
 import sys
 
-from .state import (
+from gremlins.state import (
     BAIL_CLASS_OTHER,
     BAIL_CLASS_REVIEWER_REQUESTED_CHANGES,
     BAIL_CLASS_SECRETS,

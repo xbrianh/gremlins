@@ -7,10 +7,10 @@ import logging
 import pathlib
 import subprocess
 
-from ..prompts import load_prompts
-from ..state import check_bail, emit_bail
-from .context import StageContext
-from .registry import register_stage
+from gremlins.prompts import load_prompts
+from gremlins.stages.context import StageContext
+from gremlins.stages.registry import register_stage
+from gremlins.state import check_bail, emit_bail
 
 logger = logging.getLogger(__name__)
 

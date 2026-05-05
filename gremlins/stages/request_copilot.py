@@ -5,8 +5,8 @@ from __future__ import annotations
 import dataclasses
 import subprocess
 
-from .context import StageContext
-from .registry import register_stage
+from gremlins.stages.context import StageContext
+from gremlins.stages.registry import register_stage
 
 
 @dataclasses.dataclass

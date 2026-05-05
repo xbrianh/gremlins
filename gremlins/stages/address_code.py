@@ -7,10 +7,10 @@ import glob
 import pathlib
 import re
 
-from ..prompts import load_prompts
-from ..state import emit_bail
-from .context import StageContext
-from .registry import register_stage
+from gremlins.prompts import load_prompts
+from gremlins.stages.context import StageContext
+from gremlins.stages.registry import register_stage
+from gremlins.state import emit_bail
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 

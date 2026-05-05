@@ -28,14 +28,14 @@ import time
 import types
 from typing import Any, NoReturn, cast
 
-from .. import git as _git_mod
-from .. import handoff
-from ..clients import PACKAGE_DEFAULT, ClientSpec, to_client
-from ..clients.protocol import ClaudeClient
-from ..gh_utils import get_repo, parse_issue_ref, view_issue
-from ..launcher import launch as _launch
-from ..logging_setup import configure_logging
-from ..state import patch_state, set_stage
+from gremlins import git as _git_mod
+from gremlins import handoff
+from gremlins.clients import PACKAGE_DEFAULT, ClientSpec, to_client
+from gremlins.clients.protocol import ClaudeClient
+from gremlins.gh_utils import get_repo, parse_issue_ref, view_issue
+from gremlins.launcher import launch as _launch
+from gremlins.logging_setup import configure_logging
+from gremlins.state import patch_state, set_stage
 
 logger = logging.getLogger(__name__)
 

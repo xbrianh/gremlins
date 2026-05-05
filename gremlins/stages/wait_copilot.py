@@ -6,9 +6,9 @@ import dataclasses
 import time
 from collections.abc import Callable
 
-from ..gh_utils import check_copilot_review
-from .context import StageContext
-from .registry import register_stage
+from gremlins.gh_utils import check_copilot_review
+from gremlins.stages.context import StageContext
+from gremlins.stages.registry import register_stage
 
 
 @dataclasses.dataclass

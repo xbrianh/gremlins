@@ -23,9 +23,9 @@ from typing import Any, cast
 
 import yaml
 
-from . import git as _git_mod
-from .clients import PACKAGE_DEFAULT
-from .pipeline import load_pipeline, resolve_pipeline_path
+from gremlins import git as _git_mod
+from gremlins.clients import PACKAGE_DEFAULT
+from gremlins.pipeline import load_pipeline, resolve_pipeline_path
 
 VALID_KINDS = {"ghgremlin", "localgremlin", "bossgremlin"}
 
@@ -78,7 +78,7 @@ def _fetch_issue_title(plan: str) -> str:
     Returns '' on any error so callers can fall back gracefully.
     """
     try:
-        from .gh_utils import parse_issue_ref, view_issue
+        from gremlins.gh_utils import parse_issue_ref, view_issue
 
         target_repo, issue_ref = parse_issue_ref(plan, "")
         if issue_ref is None:

@@ -10,8 +10,8 @@ from __future__ import annotations
 import sys
 import traceback
 
-from .launcher import write_terminal_state
-from .state import validate_gr_id
+from gremlins.launcher import write_terminal_state
+from gremlins.state import validate_gr_id
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -28,7 +28,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(f"run_pipeline: {exc}\n")
         return 1
 
-    from .cli import main as cli_main
+    from gremlins.cli import main as cli_main
 
     rc = 1
     try:

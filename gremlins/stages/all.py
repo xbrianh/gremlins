@@ -1,6 +1,6 @@
 """Import all stage modules so each self-registers into the stage registry."""
 
-from . import (
+from gremlins.stages import (
     address_code,
     commit_pr,
     ghaddress,

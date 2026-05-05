@@ -9,12 +9,12 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from ..gh_utils import fetch_check_run_logs, get_pr_ci_status
-from ..git import git_head
-from ..prompts import load_prompts
-from ..state import check_bail, emit_bail
-from .context import StageContext
-from .registry import register_stage
+from gremlins.gh_utils import fetch_check_run_logs, get_pr_ci_status
+from gremlins.git import git_head
+from gremlins.prompts import load_prompts
+from gremlins.stages.context import StageContext
+from gremlins.stages.registry import register_stage
+from gremlins.state import check_bail, emit_bail
 
 logger = logging.getLogger(__name__)
 

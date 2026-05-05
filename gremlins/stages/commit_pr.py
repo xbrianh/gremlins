@@ -6,11 +6,11 @@ import dataclasses
 import pathlib
 import subprocess
 
-from ..clients.protocol import CompletedRun
-from ..gh_utils import extract_gh_url
-from ..git import HeadAdvanced, ImplOutcome
-from .context import StageContext
-from .registry import register_stage
+from gremlins.clients.protocol import CompletedRun
+from gremlins.gh_utils import extract_gh_url
+from gremlins.git import HeadAdvanced, ImplOutcome
+from gremlins.stages.context import StageContext
+from gremlins.stages.registry import register_stage
 
 PROMPTS_DIR = pathlib.Path(__file__).resolve().parent
 
