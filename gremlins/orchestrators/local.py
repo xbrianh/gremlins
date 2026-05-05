@@ -46,6 +46,14 @@ _CODE_STYLE_PATH = (
     / "code_style.md"
 )
 
+_DEFAULT_LENS = (
+    pathlib.Path(__file__).resolve().parent.parent
+    / "pipelines"
+    / "prompts"
+    / "review"
+    / "detail.md"
+)
+
 
 def die(msg: str) -> NoReturn:
     sys.stderr.write(f"error: {msg}\n")
@@ -173,12 +181,14 @@ def _build_stage_runner(
                 ctx,
                 review_code.ReviewCodeOptions(
                     plan_text=plan_text,
-                    detail=model,
                     is_git=is_git,
                     code_style=code_style,
+                    model=model,
+                    stage_name=entry.name,
+                    prompt_paths=entry.prompt_paths[1:] if entry.prompt_paths else [_DEFAULT_LENS],
                 ),
             )
-            logger.info("detail code review (%s): %s", model, review_file)
+            logger.info("code review (%s): %s", model, review_file)
 
         return _review_code
 
@@ -187,19 +197,14 @@ def _build_stage_runner(
         def _address_code() -> None:
             set_stage(ctx.gr_id, entry.name)
             logger.info("addressing code reviews (model: %s)", model)
-            address_code.run(
-                ctx,
-                address_code.AddressCodeOptions(
-                    address_model=model,
-                    is_git=is_git,
-                    code_style=code_style,
-                    **(
-                        {"prompt_path": entry.prompt_paths[-1]}
-                        if entry.prompt_paths
-                        else {}
-                    ),
-                ),
+            opts = address_code.AddressCodeOptions(
+                address_model=model,
+                is_git=is_git,
+                code_style=code_style,
             )
+            if entry.prompt_paths:
+                opts.prompt_path = entry.prompt_paths[-1]
+            address_code.run(ctx, opts)
 
         return _address_code
 
@@ -348,13 +353,13 @@ def local_main(
     session_dir = resolve_session_dir(gr_id)
     plan_file = session_dir / "plan.md"
 
-    # Determine the review-code model for the output file name
+    # Determine the review-code output file path for the resume guard
     _rc_entry = next((s for s in pipeline.stages if s.type == "review-code"), None)
     if _rc_entry:
         _rc_model = require_stage_spec(stage_specs, _rc_entry.name).model
+        review_code_file = session_dir / f"{_rc_entry.name}-{_rc_model}.md"
     else:
-        _rc_model = PACKAGE_DEFAULT.model
-    review_code_file = session_dir / f"review-code-detail-{_rc_model}.md"
+        review_code_file = session_dir / f"review-code-{PACKAGE_DEFAULT.model}.md"
 
     logger.info("session: %s", session_dir)
 
@@ -617,12 +622,14 @@ def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         ctx,
         review_code.ReviewCodeOptions(
             plan_text=plan_text,
-            detail=args.detail,
             is_git=is_git,
             code_style=code_style,
+            model=args.detail,
+            stage_name="review-code",
+            prompt_paths=[_DEFAULT_LENS],
         ),
     )
-    logger.info("detail code review (%s): %s", args.detail, review_file)
+    logger.info("code review (%s): %s", args.detail, review_file)
     return 0
 
 

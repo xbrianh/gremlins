@@ -51,7 +51,7 @@ def test_local_main_plan_mode(tmp_path, monkeypatch):
 
     labels = [c.label for c in client.calls]
     assert labels[0] == "implement"
-    assert labels[1] == "review-code:detail:sonnet"
+    assert labels[1] == "review-code:sonnet"
     assert labels[2] == "address-code"
 
 
@@ -79,7 +79,7 @@ def test_review_main_calls_client(tmp_path, monkeypatch):
 
 
 def test_address_main_calls_client(tmp_path, monkeypatch):
-    (tmp_path / "review-code-detail-sonnet.md").write_text(
+    (tmp_path / "review-code-sonnet.md").write_text(
         "# Detail Review\n\n## Findings\nNone.\n"
     )
 
@@ -115,7 +115,7 @@ def test_local_main_client_specifier_model(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.stages.implement.changes_outside_git", lambda s, d: True
     )
-    review_label = "review-code:detail:gpt-4o"
+    review_label = "review-code:gpt-4o"
     client = _ReviewCreatingClient(
         fixtures={
             "implement": MINIMAL_EVENTS,
@@ -263,7 +263,7 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
         "gremlins.orchestrators.local.load_pipeline", _load_pipeline_copilot_default
     )
 
-    review_label = "review-code:detail:gpt-5.4"
+    review_label = "review-code:gpt-5.4"
     client = _ReviewCreatingClient(
         fixtures={
             "implement": MINIMAL_EVENTS,
@@ -344,8 +344,8 @@ def test_local_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
         lambda ctx, options: verify_models.append(options.fix_model),
     )
 
-    original_review_label = "review-code:detail:gpt-4o"
-    mutated_review_label = "review-code:detail:claude-opus-4-7"
+    original_review_label = "review-code:gpt-4o"
+    mutated_review_label = "review-code:claude-opus-4-7"
 
     launch_client = _ReviewCreatingClient(
         fixtures={
@@ -385,7 +385,7 @@ def test_local_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
     called_models = {call.label: call.model for call in resume_client.calls}
     assert called_models == {
         "implement": "claude-haiku-4-5-20251001",
-        "review-code:detail:gpt-4o": "gpt-4o",
+        "review-code:gpt-4o": "gpt-4o",
         "address-code": "claude-sonnet-4-6",
     }
     assert verify_models == ["claude-opus-4-1"]

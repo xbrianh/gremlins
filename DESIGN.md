@@ -158,7 +158,7 @@ This is a deliberate constraint, not an oversight:
   of its prompt and the worktree, not of a hidden history.
 - It forces communication between stages to go through **artifacts** —
   files that are also useful to the operator: `plan.md`,
-  `review-code-detail-*.md`, the commit itself, the PR description.
+  `review-code-*.md`, the commit itself, the PR description.
 - It makes `--resume-from <stage>` semantically clean. Resuming from
   `address-code` means re-running `address-code` with whatever artifacts
   exist on disk; there is no "but the previous run's reviewer was thinking
