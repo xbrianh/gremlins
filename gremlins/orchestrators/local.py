@@ -46,14 +46,6 @@ _CODE_STYLE_PATH = (
     / "code_style.md"
 )
 
-_DEFAULT_LENS = (
-    pathlib.Path(__file__).resolve().parent.parent
-    / "pipelines"
-    / "prompts"
-    / "review"
-    / "detail.md"
-)
-
 
 def die(msg: str) -> NoReturn:
     sys.stderr.write(f"error: {msg}\n")
@@ -186,7 +178,7 @@ def _build_stage_runner(
                     code_style=code_style,
                     model=model,
                     stage_name=entry.name,
-                    prompt_paths=entry.prompt_paths[1:] or [_DEFAULT_LENS],
+                    prompt_paths=entry.prompt_paths[1:],
                 ),
             )
             logger.info("code review (%s): %s", model, review_file)
@@ -627,6 +619,10 @@ def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
                 "nothing to review: HEAD~1..HEAD has no changes and working tree is clean"
             )
 
+    pipeline = load_pipeline(resolve_pipeline_path("local", pathlib.Path.cwd()))
+    rc_entry = next((s for s in pipeline.stages if s.type == "review-code"), None)
+    if rc_entry is None or not rc_entry.prompt_paths[1:]:
+        die("local pipeline has no review-code stage with a prompt")
     ctx = StageContext(client=client, session_dir=session_dir, gr_id=None)
     logger.info("reviewing code (model: %s)", args.detail)
     review_file = review_code.run(
@@ -636,8 +632,8 @@ def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
             is_git=is_git,
             code_style=code_style,
             model=args.detail,
-            stage_name="review-code",
-            prompt_paths=[_DEFAULT_LENS],
+            stage_name=rc_entry.name,
+            prompt_paths=rc_entry.prompt_paths[1:],
         ),
     )
     logger.info("code review (%s): %s", args.detail, review_file)

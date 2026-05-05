@@ -311,14 +311,21 @@ def test_local_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
     pipeline_dir = tmp_path / ".gremlins" / "pipelines"
     pipeline_dir.mkdir(parents=True)
     pipeline_path = pipeline_dir / "local.yaml"
+    style_path = pipeline_dir / "style.md"
+    style_path.write_text("Style content.\n", encoding="utf-8")
+    review_prompt_path = pipeline_dir / "review.md"
+    review_prompt_path.write_text("Review prompt content.\n", encoding="utf-8")
 
     def write_pipeline(stage_clients: dict[str, str]) -> None:
         lines = ["name: local", "", "stages:"]
         for stage_name, stage_type in stage_defs:
+            extras = ""
+            if stage_type == "review-code":
+                extras = ", prompt: [style.md, review.md]"
             lines.append(
                 "  - { name: "
                 f"{stage_name}, type: {stage_type}, client: "
-                f"{json.dumps(stage_clients[stage_name])} }}"
+                f"{json.dumps(stage_clients[stage_name])}{extras} }}"
             )
         pipeline_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
