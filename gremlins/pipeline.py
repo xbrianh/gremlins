@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import dataclasses
 import importlib
-import os
 import pathlib
 from typing import Any, cast
 
@@ -197,11 +196,6 @@ def load_pipeline(path: pathlib.Path) -> Pipeline:
     )
 
 
-def _invocation_dir(fallback: pathlib.Path) -> pathlib.Path:
-    env = os.environ.get("GREMLINS_INVOCATION_DIR")
-    return pathlib.Path(env) if env else fallback
-
-
 def resolve_pipeline_path(name_or_path: str, base_dir: pathlib.Path) -> pathlib.Path:
     candidate = pathlib.Path(name_or_path)
     if candidate.suffix == ".yaml" or len(candidate.parts) > 1:
@@ -210,7 +204,7 @@ def resolve_pipeline_path(name_or_path: str, base_dir: pathlib.Path) -> pathlib.
             raise FileNotFoundError(f"pipeline file not found: {resolved}")
         return resolved
     project_scoped = (
-        _invocation_dir(base_dir) / ".gremlins" / "pipelines" / f"{name_or_path}.yaml"
+        base_dir / ".gremlins" / "pipelines" / f"{name_or_path}.yaml"
     )
     if project_scoped.exists():
         return project_scoped.resolve()
