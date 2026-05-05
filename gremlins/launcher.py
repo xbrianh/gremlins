@@ -169,29 +169,28 @@ def _patch_state(state_dir: pathlib.Path, **fields: Any) -> None:
 def _resolve_pipeline(
     kind: str, pipeline_args: tuple[str, ...], project_root: str
 ) -> tuple[list[str], str]:
-    """Resolve and inject --pipeline /abs/path into args. Returns (args, path).
-
-    bossgremlin has no pipeline; returns (list(pipeline_args), "").
-    """
+    # Returns (args_with_pipeline_injected, resolved_path); bossgremlin gets ([], "").
     if kind == "bossgremlin":
         return list(pipeline_args), ""
     args = list(pipeline_args)
     pipeline_val: str | None = None
-    keep: list[int] = []
+    filtered: list[str] = []
     i = 0
     while i < len(args):
-        if args[i] == "--pipeline" and i + 1 < len(args):
-            pipeline_val = args[i + 1]
-            i += 2
+        if args[i] == "--pipeline":
+            if i + 1 < len(args):
+                pipeline_val = args[i + 1]
+                i += 2
+            else:
+                i += 1  # drop dangling flag
         elif args[i].startswith("--pipeline="):
             pipeline_val = args[i][len("--pipeline=") :]
             i += 1
         else:
-            keep.append(i)
+            filtered.append(args[i])
             i += 1
     name = pipeline_val or _KIND_SUBCOMMAND[kind].removeprefix("_")
     resolved = str(resolve_pipeline_path(name, pathlib.Path(project_root)))
-    filtered = [args[j] for j in keep]
     return ["--pipeline", resolved] + filtered, resolved
 
 
@@ -347,13 +346,12 @@ def launch(
         else:
             project_root = os.getcwd()
 
-    state_dir = _state_root() / gr_id
-    state_dir.mkdir(parents=True, exist_ok=True)
-
-    # Resolve pipeline path before spawning
     resolved_pipeline_args, pipeline_path = _resolve_pipeline(
         kind, pipeline_args, project_root
     )
+
+    state_dir = _state_root() / gr_id
+    state_dir.mkdir(parents=True, exist_ok=True)
 
     # pipeline_args for state.json: includes --plan and --spec when set
     stored_pipeline_args = list(resolved_pipeline_args)
