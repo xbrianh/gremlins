@@ -181,6 +181,7 @@ def test_local_main_env_file_vars_reach_verify(tmp_path, monkeypatch):
         }
     )
 
+    monkeypatch.delenv("GREMLIN_ENV_TEST_SENTINEL", raising=False)
     result = local_main(
         ["--plan", str(plan_file), "--cmd", verify_cmd],
         client=client,

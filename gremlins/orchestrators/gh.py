@@ -554,7 +554,7 @@ def gh_main(
         return 0
 
     env_file = pathlib.Path(".gremlins/env")
-    if env_file.exists():
+    if env_file.is_file():
         try:
             os.environ.update(load_env_file(env_file))
         except RuntimeError as exc:
