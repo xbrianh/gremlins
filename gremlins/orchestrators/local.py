@@ -376,18 +376,6 @@ def local_main(
                 die(f"invalid model in --client specifier: {_m}")
             specifier_model = _m
 
-    model_default = specifier_model or "sonnet"
-    if args.plan_model is None:
-        args.plan_model = model_default
-    if args.impl is None:
-        args.impl = model_default
-    if args.address is None:
-        args.address = model_default
-    if args.detail is None:
-        args.detail = model_default
-    if args.test_fix_model is None:
-        args.test_fix_model = model_default
-
     if os.environ.get("GREMLINS_TEST_NOOP_PIPELINE"):
         return 0
 
@@ -409,6 +397,19 @@ def local_main(
         )
     except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
         die(str(exc))
+
+    pipeline_model = (pipeline.default_client_spec or "").partition(":")[2] or None
+    model_default = specifier_model or pipeline_model or "sonnet"
+    if args.plan_model is None:
+        args.plan_model = model_default
+    if args.impl is None:
+        args.impl = model_default
+    if args.address is None:
+        args.address = model_default
+    if args.detail is None:
+        args.detail = model_default
+    if args.test_fix_model is None:
+        args.test_fix_model = model_default
 
     install_signal_handlers(effective_client, *pipeline.clients)
 
