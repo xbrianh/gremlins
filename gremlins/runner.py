@@ -86,7 +86,6 @@ def build_parallel_stages(
     # Shared mutable state between the three stage closures.
     _worktree_paths: dict[str, pathlib.Path] = {}
     _base_head: list[str] = [""]  # list so nested functions can mutate
-    _child_errors: list[BaseException] = []
 
     def _in_git_repo() -> bool:
         try:
@@ -177,7 +176,7 @@ def build_parallel_stages(
         if errors:
             for extra in errors[1:]:
                 logger.error("parallel child also failed: %s", extra)
-            _child_errors[:] = errors  # fan-in raises after cleanup
+            raise errors[0]
 
     def _fan_in() -> None:
         try:
@@ -265,9 +264,6 @@ def build_parallel_stages(
                 f"parallel group {group_name!r} bailed "
                 f"({len(bailed)} child(ren), policy={bail_policy!r})"
             )
-
-        if _child_errors:
-            raise _child_errors[0]
 
     def _teardown_worktrees() -> None:
         if not _in_git_repo():
