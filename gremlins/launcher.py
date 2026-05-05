@@ -197,19 +197,43 @@ def _resolve_pipeline(
 
 
 def _extract_client_spec(pipeline_args: list[str]) -> str:
-    args = list(pipeline_args)
-    for i, arg in enumerate(args):
-        if arg == "--client" and i + 1 < len(args):
-            return args[i + 1]
-        if arg.startswith("--client="):
-            return arg[len("--client=") :]
-    return ""
+    return _extract_arg_value(pipeline_args, "--client")
 
 
-def _resolve_default_client_label(pipeline_args: list[str], pipeline_path: str) -> str:
-    client_spec = _extract_client_spec(pipeline_args)
-    if client_spec:
-        return client_spec
+def _extract_arg_value(args: list[str], flag: str) -> str:
+    value = ""
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == flag:
+            if i + 1 < len(args):
+                value = args[i + 1]
+                i += 2
+                continue
+            i += 1
+            continue
+        prefix = f"{flag}="
+        if arg.startswith(prefix):
+            value = arg[len(prefix) :]
+        i += 1
+    return value
+
+
+def _provider_from_client_spec(client_spec: str) -> str:
+    provider, sep, _ = client_spec.partition(":")
+    if not sep:
+        return ""
+    return provider
+
+
+def _model_from_client_spec(client_spec: str) -> str:
+    _, sep, model = client_spec.partition(":")
+    if not sep or not model or not MODEL_RE.match(model):
+        return ""
+    return model
+
+
+def _pipeline_default_client_spec(pipeline_path: str) -> str:
     if not pipeline_path:
         return ""
     try:
@@ -217,6 +241,43 @@ def _resolve_default_client_label(pipeline_args: list[str], pipeline_path: str) 
     except (FileNotFoundError, ValueError, yaml.YAMLError):
         return ""
     return pipeline.default_client_spec or ""
+
+
+def _resolve_client_label(
+    kind: str,
+    pipeline_args: list[str],
+    pipeline_path: str,
+    state: dict[str, Any] | None = None,
+) -> str:
+    client_spec = _extract_client_spec(pipeline_args)
+    provider = _provider_from_client_spec(client_spec)
+    if not provider:
+        provider = _provider_from_client_spec(
+            _pipeline_default_client_spec(pipeline_path)
+        )
+    if not provider:
+        provider = "claude"
+
+    state_model = str((state or {}).get("model") or "")
+    state_impl_model = str((state or {}).get("impl_model") or "")
+    if kind == "ghgremlin":
+        model = (
+            _extract_arg_value(pipeline_args, "--model")
+            or _model_from_client_spec(client_spec)
+            or state_model
+            or "sonnet"
+        )
+    elif kind == "bossgremlin":
+        model = _extract_arg_value(pipeline_args, "--model") or state_model or "sonnet"
+    else:
+        model = (
+            _extract_arg_value(pipeline_args, "-i")
+            or _model_from_client_spec(client_spec)
+            or state_impl_model
+            or "sonnet"
+        )
+
+    return f"{provider}:{model}"
 
 
 def _delete_patch_state(
@@ -417,7 +478,7 @@ def launch(
         "description_explicit": desc_explicit,
         "parent_id": parent_id or "",
         "pipeline_args": stored_pipeline_args,
-        "client": _resolve_default_client_label(stored_pipeline_args, pipeline_path),
+        "client": _resolve_client_label(kind, stored_pipeline_args, pipeline_path),
         "pipeline_path": pipeline_path,
         "stage": "starting",
         "pid": None,
@@ -498,6 +559,16 @@ def resume(gr_id: str) -> None:
     except (ValueError, TypeError):
         pass
 
+    pipeline_args = cast(list[str], state.get("pipeline_args") or [])
+    pipeline_path = str(state.get("pipeline_path") or "")
+    project_root = str(state.get("project_root") or os.getcwd())
+    try:
+        pipeline_args, pipeline_path = _resolve_pipeline(
+            kind, tuple(pipeline_args), project_root
+        )
+    except FileNotFoundError:
+        pass
+
     _delete_patch_state(
         state_dir,
         (
@@ -515,6 +586,9 @@ def resume(gr_id: str) -> None:
         resumed_from_stage=stage,
         rescue_count=rescue_count + 1,
         pid=None,
+        pipeline_args=pipeline_args,
+        pipeline_path=pipeline_path,
+        client=_resolve_client_label(kind, pipeline_args, pipeline_path, state),
     )
 
     # Append resume header to log
@@ -524,8 +598,6 @@ def resume(gr_id: str) -> None:
     except OSError:
         pass
 
-    # Rehydrate pipeline args from state.json
-    pipeline_args = cast(list[str], state.get("pipeline_args") or [])
     has_plan = any(a == "--plan" or str(a).startswith("--plan=") for a in pipeline_args)
 
     # Build spawn args: pipeline_args + --resume-from + (instructions if no plan)

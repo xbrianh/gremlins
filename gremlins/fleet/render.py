@@ -45,8 +45,7 @@ def build_row(
     parent_id = state.get("parent_id") or ""
     boss_disp = display_id(parent_id)[:20] if parent_id else ""
 
-    client = state.get("client") or "—"
-    client_trim = client[:20]
+    client = state.get("client") or state.get("impl_model") or state.get("model") or "—"
 
     return {
         "started_at": started_at,
@@ -57,7 +56,7 @@ def build_row(
         "live": live_trim,
         "live_full": live,
         "age": age,
-        "client": client_trim,
+        "client": client,
         "desc": desc_trim,
         "project_root": pr,
         "gr_id": gr_id,
