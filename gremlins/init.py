@@ -162,6 +162,8 @@ def _build_plan(
     agents_md = _PIPELINES_DIR / "AGENTS.md"
     plan.append((base / "AGENTS.md", agents_md.read_bytes()))
 
+    plan.append((dot_gremlins / ".gitignore", b"env\n"))
+
     return plan
 
 

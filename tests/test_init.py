@@ -230,6 +230,14 @@ def test_unwritable_path(tmp_path, capsys):
         os.chmod(ro, 0o700)
 
 
+def test_init_writes_gremlins_gitignore(tmp_path, capsys):
+    rc = init_main(["--path", str(tmp_path), "--pipeline", "local"])
+    assert rc == 0
+    gitignore = tmp_path / ".gremlins" / ".gitignore"
+    assert gitignore.exists()
+    assert "env" in gitignore.read_text(encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # Error handling: commit-phase rename failure
 # ---------------------------------------------------------------------------

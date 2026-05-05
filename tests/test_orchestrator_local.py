@@ -143,3 +143,47 @@ def test_local_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir)
 
     data = json.loads((state_dir / "state.json").read_text())
     assert data.get("stage") == "address-code"
+
+
+def test_local_main_env_file_vars_reach_verify(tmp_path, monkeypatch):
+    """Vars from .gremlins/env are visible to verify subprocesses."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("# Plan\nDo stuff.\n")
+
+    dot_gremlins = tmp_path / ".gremlins"
+    dot_gremlins.mkdir()
+    env_file = dot_gremlins / "env"
+    env_file.write_text("export GREMLIN_ENV_TEST_SENTINEL=from_env_file\n")
+
+    verify_cmd = 'test "$GREMLIN_ENV_TEST_SENTINEL" = from_env_file'
+
+    monkeypatch.chdir(tmp_path)
+    _common_patches(monkeypatch)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.local.resolve_session_dir",
+        lambda gr_id=None: session_dir,
+    )
+    monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.local.load_prompts", lambda paths: "Be good."
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.implement.changes_outside_git", lambda s, d: True
+    )
+
+    client = _ReviewCreatingClient(
+        fixtures={
+            "implement": MINIMAL_EVENTS,
+            **{lbl: MINIMAL_EVENTS for lbl in _REVIEW_LABELS},
+            "address-code": MINIMAL_EVENTS,
+        }
+    )
+
+    monkeypatch.delenv("GREMLIN_ENV_TEST_SENTINEL", raising=False)
+    result = local_main(
+        ["--plan", str(plan_file), "--cmd", verify_cmd],
+        client=client,
+    )
+    assert result == 0

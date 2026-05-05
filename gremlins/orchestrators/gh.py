@@ -18,6 +18,7 @@ import yaml
 
 from ..clients.claude import SubprocessClaudeClient
 from ..clients.protocol import ClaudeClient
+from ..env_file import load_env_file
 from ..gh_utils import extract_gh_url, get_repo, parse_issue_ref, view_issue
 from ..git import DirtyOnly, HeadAdvanced
 from ..logging_setup import configure_logging
@@ -551,6 +552,13 @@ def gh_main(
     args = _parse_gh_args(argv)
     if os.environ.get("GREMLINS_TEST_NOOP_PIPELINE"):
         return 0
+
+    env_file = pathlib.Path(".gremlins/env")
+    if env_file.is_file():
+        try:
+            os.environ.update(load_env_file(env_file))
+        except RuntimeError as exc:
+            die(str(exc))
 
     if shutil.which("claude") is None:
         die("claude CLI not found")
