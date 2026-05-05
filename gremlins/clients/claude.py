@@ -154,6 +154,8 @@ class SubprocessClaudeClient:
         on_timeout_prompt: str | None = None,
         max_retries: int = 2,
     ) -> CompletedRun:
+        if max_retries < 0:
+            raise ValueError(f"max_retries must be >= 0, got {max_retries}")
         argv = self._build_argv(model)
         prefix = f"[{label}] " if label else ""
         active_prompt = prompt

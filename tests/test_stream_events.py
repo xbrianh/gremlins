@@ -205,10 +205,10 @@ def test_stream_events_timed_out_true_on_timeout_line():
     assert timed_out is True
 
 
-def test_stream_events_timed_out_true_in_json_line():
-    # timeout message embedded in a JSON line (unlikely but covers the check)
+def test_stream_events_timed_out_false_in_json_line():
+    # timeout text embedded in a valid JSON event must not set timed_out
     line = (
         json.dumps({"type": "result", "result": "Stream idle timeout"}).encode() + b"\n"
     )
     _, _, _, _, timed_out = stream_events(io.BytesIO(line))
-    assert timed_out is True
+    assert timed_out is False

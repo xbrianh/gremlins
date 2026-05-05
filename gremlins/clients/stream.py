@@ -146,7 +146,7 @@ def stream_events(
             if raw is not None:
                 raw.write(line)
                 raw.flush()
-            if b"Stream idle timeout" in line:
+            if b"Stream idle timeout" in line and _decode_line(line) is None:
                 timed_out = True
             evt = _decode_line(line)
             if evt is None:
