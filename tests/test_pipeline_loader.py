@@ -175,3 +175,124 @@ stages:
     )
     with pytest.raises(ValueError, match="nested parallel"):
         load_pipeline(tmp_path / "pipeline.yaml")
+
+
+# ---- copilot provider --------------------------------------------------------
+
+
+def test_copilot_provider_parses(tmp_path: pathlib.Path) -> None:
+    yaml_path = _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: copilot-pipe
+clients:
+  bot:
+    provider: copilot
+    model: gpt-5.4
+stages:
+  - name: implement
+    type: implement
+    client: bot
+""",
+    )
+    pipeline = load_pipeline(yaml_path)
+    assert "bot" in pipeline.clients
+    assert pipeline.clients["bot"] is not None
+    assert pipeline.stages[0].client_key == "bot"
+
+
+def test_copilot_provider_without_model(tmp_path: pathlib.Path) -> None:
+    yaml_path = _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+clients:
+  bot: {provider: copilot}
+stages:
+  - {name: s1, type: implement, client: bot}
+""",
+    )
+    pipeline = load_pipeline(yaml_path)
+    assert "bot" in pipeline.clients
+
+
+# ---- clients.default ---------------------------------------------------------
+
+
+def test_pipeline_default_client(tmp_path: pathlib.Path) -> None:
+    yaml_path = _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+clients:
+  default: bot
+  bot:
+    provider: copilot
+    model: gpt-5.4
+stages:
+  - {name: s1, type: implement}
+""",
+    )
+    pipeline = load_pipeline(yaml_path)
+    assert pipeline.default_client == "bot"
+    assert "bot" in pipeline.clients
+
+
+def test_pipeline_default_client_missing_key_raises(tmp_path: pathlib.Path) -> None:
+    _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+clients:
+  default: no-such-key
+  bot: {provider: copilot}
+stages:
+  - {name: s1, type: implement}
+""",
+    )
+    with pytest.raises(ValueError, match="clients.default"):
+        load_pipeline(tmp_path / "pipeline.yaml")
+
+
+def test_pipeline_no_default_client_is_none(tmp_path: pathlib.Path) -> None:
+    yaml_path = _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+clients: {}
+stages:
+  - {name: s1, type: implement}
+""",
+    )
+    pipeline = load_pipeline(yaml_path)
+    assert pipeline.default_client is None
+
+
+# ---- per-stage client override -----------------------------------------------
+
+
+def test_per_stage_client_override(tmp_path: pathlib.Path) -> None:
+    yaml_path = _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+clients:
+  default: bot
+  bot:
+    provider: copilot
+    model: gpt-5.4
+  claude:
+    provider: claude
+    model: sonnet
+stages:
+  - name: implement
+    type: implement
+  - name: review
+    type: implement
+    client: claude
+""",
+    )
+    pipeline = load_pipeline(yaml_path)
+    assert pipeline.default_client == "bot"
+    assert pipeline.stages[0].client_key is None
+    assert pipeline.stages[1].client_key == "claude"

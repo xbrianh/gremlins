@@ -4,6 +4,7 @@ Uses FakeClaudeClient throughout — no real claude subprocess or gh CLI calls
 (gh calls are monkeypatched at the subprocess.run level).
 """
 
+import dataclasses
 import json
 import pathlib
 import shutil
@@ -113,7 +114,7 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         shutil, "which", lambda n: f"/fake/{n}" if n in ("claude", "gh") else None
     )
     monkeypatch.setattr(
-        "gremlins.orchestrators.gh.install_signal_handlers", lambda c: None
+        "gremlins.orchestrators.gh.install_signal_handlers", lambda *c: None
     )
     monkeypatch.setattr("gremlins.orchestrators.gh.get_repo", lambda: "owner/repo")
     monkeypatch.setattr(
@@ -143,6 +144,22 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
     # Stub out patch_state so tests don't write to real state files.
     monkeypatch.setattr(
         "gremlins.orchestrators.gh.patch_state", lambda gr_id=None, **kw: None
+    )
+
+    # Strip pipeline client keys so the injected client is used for every stage.
+    _real_load_pipeline = _gh_mod.load_pipeline
+
+    def _load_pipeline_no_clients(path):
+        pipeline = _real_load_pipeline(path)
+        stripped_stages = [
+            dataclasses.replace(s, client_key=None) for s in pipeline.stages
+        ]
+        return dataclasses.replace(
+            pipeline, clients={}, default_client=None, stages=stripped_stages
+        )
+
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.load_pipeline", _load_pipeline_no_clients
     )
 
     # set_stage is a no-op in tests — gr_id is not passed to gh_main.

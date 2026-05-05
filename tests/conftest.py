@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import logging
 import pathlib
@@ -7,6 +8,7 @@ import sys
 
 import pytest
 
+import gremlins.orchestrators.local as _local_mod
 from gremlins.clients.fake import FakeClaudeClient
 
 TESTS_DIR = pathlib.Path(__file__).resolve().parent
@@ -49,7 +51,23 @@ def common_local_patches(monkeypatch):
         shutil, "which", lambda n: "/fake/claude" if n == "claude" else None
     )
     monkeypatch.setattr(
-        "gremlins.orchestrators.local.install_signal_handlers", lambda c: None
+        "gremlins.orchestrators.local.install_signal_handlers", lambda *c: None
+    )
+
+    # Strip pipeline client keys so the injected client is used for every stage.
+    _real_load_pipeline = _local_mod.load_pipeline
+
+    def _load_pipeline_no_clients(path):
+        pipeline = _real_load_pipeline(path)
+        stripped_stages = [
+            dataclasses.replace(s, client_key=None) for s in pipeline.stages
+        ]
+        return dataclasses.replace(
+            pipeline, clients={}, default_client=None, stages=stripped_stages
+        )
+
+    monkeypatch.setattr(
+        "gremlins.orchestrators.local.load_pipeline", _load_pipeline_no_clients
     )
 
 
