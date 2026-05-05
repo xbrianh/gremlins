@@ -2,13 +2,59 @@
 
 import json
 import pathlib
-import subprocess
 
 import pytest
+from conftest import MINIMAL_EVENTS
 
 from gremlins import handoff
+from gremlins.clients import ClientSpec
+from gremlins.clients.fake import FakeClaudeClient
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
+
+
+class WritingHandoffClient(FakeClaudeClient):
+    def __init__(
+        self,
+        *,
+        out_path: pathlib.Path,
+        signal_path: pathlib.Path,
+        signal_payload: dict[str, object],
+        child_path: pathlib.Path | None = None,
+        child_plan_text: str | None = None,
+        sanitize_text: str | None = None,
+        handoff_error: Exception | None = None,
+        sanitize_error: Exception | None = None,
+    ) -> None:
+        super().__init__(
+            fixtures={
+                "handoff": MINIMAL_EVENTS,
+                "handoff:sanitize": MINIMAL_EVENTS,
+            }
+        )
+        self.out_path = out_path
+        self.signal_path = signal_path
+        self.signal_payload = signal_payload
+        self.child_path = child_path
+        self.child_plan_text = child_plan_text
+        self.sanitize_text = sanitize_text
+        self.handoff_error = handoff_error
+        self.sanitize_error = sanitize_error
+
+    def run(self, prompt, *, label, **kwargs):
+        if label == "handoff":
+            if self.handoff_error is not None:
+                raise self.handoff_error
+            self.signal_path.write_text(json.dumps(self.signal_payload))
+            self.out_path.write_text("# Rolling plan (stub)\n")
+            if self.child_path is not None and self.child_plan_text is not None:
+                self.child_path.write_text(self.child_plan_text)
+        elif label == "handoff:sanitize":
+            if self.sanitize_error is not None:
+                raise self.sanitize_error
+            if self.sanitize_text is not None:
+                self.out_path.write_text(self.sanitize_text)
+        return super().run(prompt, label=label, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -53,8 +99,7 @@ def test_parse_args_defaults():
     assert args.spec is None
     assert args.out is None
     assert args.base is None
-    assert args.model == "sonnet"
-    assert args.timeout is None
+    assert args.client == "claude:sonnet"
     assert args.rev is None
 
 
@@ -69,10 +114,8 @@ def test_parse_args_full():
             "/o.md",
             "--base",
             "develop",
-            "--model",
-            "haiku",
-            "--timeout",
-            "300",
+            "--client",
+            "claude:haiku",
             "--rev",
             "feature-branch",
         ]
@@ -81,8 +124,7 @@ def test_parse_args_full():
     assert args.spec == "/s.md"
     assert args.out == "/o.md"
     assert args.base == "develop"
-    assert args.model == "haiku"
-    assert args.timeout == 300
+    assert args.client == "claude:haiku"
     assert args.rev == "feature-branch"
 
 
@@ -243,65 +285,50 @@ def test_main_out_parent_does_not_exist(monkeypatch, tmp_path, capsys):
 
 
 # ---------------------------------------------------------------------------
-# main — signal parsing (next-plan / chain-done / bail)
+# run — signal parsing (next-plan / chain-done / bail)
 # ---------------------------------------------------------------------------
 
 
-def _stub_happy_main(
+def _stub_happy_run(
     monkeypatch,
     tmp_path,
     signal_payload,
     *,
     child_plan_text=None,
-    claude_returncode=0,
-    claude_timeout=False,
+    handoff_error=None,
+    sanitize_error=None,
+    sanitize_text=None,
 ):
-    """Set up a happy-path main() that writes the given signal payload.
-
-    If `child_plan_text` is given, the fake claude run also writes the
-    child plan file to whatever path the prompt says it should go to.
-    Returns the plan path so the caller can pass it to handoff.main.
-
-    The first subprocess.run call is the main agent (writes sig_path and
-    out_path); the second call is the sanitize pass (treated as a no-op).
-    """
+    """Set up a happy-path handoff.run() call with a fake client."""
     plan_path = tmp_path / "plan.md"
     plan_path.write_text("# Plan\nTasks\n- [ ] thing\n")
 
-    monkeypatch.setattr(handoff.shutil, "which", lambda n: "/fake/claude")
     monkeypatch.setattr(
         handoff,
         "collect_git_context",
         lambda base_ref, rev=None: ("test-branch", "log line", "diff body"),
     )
+    monkeypatch.setattr(handoff, "load_prompts", lambda paths: "Keep it simple.")
 
     out_path = handoff.auto_name_out(plan_path)
     sig_path = out_path.parent / (out_path.stem + ".state.json")
     child_path = out_path.parent / (out_path.stem + "-child" + out_path.suffix)
-
-    call_count = [0]
-
-    def fake_run(cmd, **kwargs):
-        if claude_timeout:
-            raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout") or 1)
-        call_count[0] += 1
-        if call_count[0] == 1:
-            # Main agent call
-            if claude_returncode == 0:
-                sig_path.write_text(json.dumps(signal_payload))
-                out_path.write_text("# Rolling plan (stub)\n")
-                if child_plan_text is not None:
-                    child_path.write_text(child_plan_text)
-            return subprocess.CompletedProcess(args=cmd, returncode=claude_returncode)
-        # Second call is the sanitize pass — no-op
-        return subprocess.CompletedProcess(args=cmd, returncode=0)
-
-    monkeypatch.setattr(handoff.subprocess, "run", fake_run)
-    return plan_path, sig_path, child_path
+    client = WritingHandoffClient(
+        out_path=out_path,
+        signal_path=sig_path,
+        signal_payload=signal_payload,
+        child_path=child_path,
+        child_plan_text=child_plan_text,
+        sanitize_text=sanitize_text,
+        handoff_error=handoff_error,
+        sanitize_error=sanitize_error,
+    )
+    args = handoff.parse_args(["--plan", str(plan_path)])
+    return args, client, sig_path, child_path, out_path
 
 
-def test_main_chain_done_signal(monkeypatch, tmp_path, capsys):
-    plan_path, sig_path, _ = _stub_happy_main(
+def test_run_chain_done_signal(monkeypatch, tmp_path):
+    args, client, sig_path, _, _ = _stub_happy_run(
         monkeypatch,
         tmp_path,
         {
@@ -311,58 +338,40 @@ def test_main_chain_done_signal(monkeypatch, tmp_path, capsys):
             "operator_followups": [],
         },
     )
-    rc = handoff.main(["--plan", str(plan_path)])
+    rc = handoff.run(client, args)
     assert rc == 0
-    out = capsys.readouterr().out
-    assert "handoff complete: chain-done" in out
     assert sig_path.exists()
+    assert json.loads(sig_path.read_text())["exit_state"] == "chain-done"
+    assert [call.label for call in client.calls] == ["handoff", "handoff:sanitize"]
 
 
-def test_main_next_plan_signal(monkeypatch, tmp_path, capsys):
-    plan_path, sig_path, child_path = _stub_happy_main(
+def test_run_next_plan_signal(monkeypatch, tmp_path):
+    args, client, sig_path, child_path, _ = _stub_happy_run(
         monkeypatch,
         tmp_path,
         {
             "exit_state": "next-plan",
-            "child_plan": None,  # filled in by the fake_run write below
+            "child_plan": None,
             "reason": None,
             "operator_followups": [],
         },
         child_plan_text="# Next step\n",
     )
-    # Patch the signal payload to point at the child plan path the wrapper expects.
-    payload = {
+    client.signal_payload = {
         "exit_state": "next-plan",
         "child_plan": str(child_path),
         "reason": None,
         "operator_followups": [],
     }
-    out_path = handoff.auto_name_out(plan_path)
-    call_count2 = [0]
-
-    def fake_run2(cmd, **kw):
-        call_count2[0] += 1
-        if call_count2[0] == 1:
-            sig_path.write_text(json.dumps(payload))
-            child_path.write_text("# Child\n")
-            out_path.write_text("# Rolling plan\n")
-        return subprocess.CompletedProcess(args=cmd, returncode=0)
-
-    monkeypatch.setattr(
-        handoff, "collect_git_context", lambda base_ref, rev=None: ("b", "", "")
-    )
-    monkeypatch.setattr(handoff.subprocess, "run", fake_run2)
-
-    rc = handoff.main(["--plan", str(plan_path)])
+    rc = handoff.run(client, args)
     assert rc == 0
-    out = capsys.readouterr().out
-    assert "handoff complete: next-plan" in out
-    assert "child plan:" in out
     assert child_path.exists()
+    assert json.loads(sig_path.read_text())["child_plan"] == str(child_path)
+    assert [call.label for call in client.calls] == ["handoff", "handoff:sanitize"]
 
 
-def test_main_bail_signal(monkeypatch, tmp_path, capsys):
-    plan_path, _, _ = _stub_happy_main(
+def test_run_bail_signal(monkeypatch, tmp_path):
+    args, client, _, _, _ = _stub_happy_run(
         monkeypatch,
         tmp_path,
         {
@@ -372,65 +381,66 @@ def test_main_bail_signal(monkeypatch, tmp_path, capsys):
             "operator_followups": [],
         },
     )
-    rc = handoff.main(["--plan", str(plan_path)])
+    rc = handoff.run(client, args)
     assert rc == 0
-    out = capsys.readouterr().out
-    assert "handoff complete: bail" in out
-    assert "incoherent state" in out
+    assert (
+        json.loads(client.signal_path.read_text())["reason"]
+        == "incoherent state — see plan"
+    )
 
 
-def test_main_signal_file_not_written(monkeypatch, tmp_path, capsys):
+def test_run_signal_file_not_written(monkeypatch, tmp_path, capsys):
     plan_path = tmp_path / "plan.md"
     plan_path.write_text("# Plan\n")
-    monkeypatch.setattr(handoff.shutil, "which", lambda n: "/fake/claude")
     monkeypatch.setattr(
         handoff, "collect_git_context", lambda base_ref, rev=None: ("b", "", "")
     )
-    # claude returns success but writes no signal file
-    monkeypatch.setattr(
-        handoff.subprocess,
-        "run",
-        lambda cmd, **kw: subprocess.CompletedProcess(args=cmd, returncode=0),
-    )
-    rc = handoff.main(["--plan", str(plan_path)])
+    monkeypatch.setattr(handoff, "load_prompts", lambda paths: "Keep it simple.")
+    args = handoff.parse_args(["--plan", str(plan_path)])
+    client = FakeClaudeClient(fixtures={"handoff": MINIMAL_EVENTS})
+    rc = handoff.run(client, args)
     assert rc == 1
     err = capsys.readouterr().err
     assert "signal file not written" in err
 
 
-def test_main_signal_file_invalid_json(monkeypatch, tmp_path, capsys):
-    plan_path, sig_path, _ = _stub_happy_main(monkeypatch, tmp_path, {})
-    # Overwrite with garbage
+def test_run_signal_file_invalid_json(monkeypatch, tmp_path, capsys):
+    args, client, sig_path, _, _ = _stub_happy_run(monkeypatch, tmp_path, {})
+    client.signal_payload = {}
+
+    def write_bad_json(prompt, *, label, **kwargs):
+        if label == "handoff":
+            sig_path.write_text("not json")
+            client.out_path.write_text("# Rolling plan\n")
+        return FakeClaudeClient.run(client, prompt, label=label, **kwargs)
+
     monkeypatch.setattr(
-        handoff.subprocess,
+        client,
         "run",
-        lambda cmd, **kw: (
-            sig_path.write_text("not json"),
-            subprocess.CompletedProcess(args=cmd, returncode=0),
-        )[-1],
+        write_bad_json,
     )
-    rc = handoff.main(["--plan", str(plan_path)])
+    rc = handoff.run(client, args)
     assert rc == 1
     err = capsys.readouterr().err
     assert "could not parse signal file" in err
 
 
-def test_main_signal_unknown_exit_state(monkeypatch, tmp_path, capsys):
-    plan_path, _, _ = _stub_happy_main(
+def test_run_signal_unknown_exit_state(monkeypatch, tmp_path, capsys):
+    args, client, _, _, _ = _stub_happy_run(
         monkeypatch,
         tmp_path,
         {
             "exit_state": "bogus",
         },
     )
-    rc = handoff.main(["--plan", str(plan_path)])
+    rc = handoff.run(client, args)
     assert rc == 1
     err = capsys.readouterr().err
     assert "unrecognized exit_state" in err
 
 
-def test_main_next_plan_missing_child_plan(monkeypatch, tmp_path, capsys):
-    plan_path, _, _ = _stub_happy_main(
+def test_run_next_plan_missing_child_plan(monkeypatch, tmp_path, capsys):
+    args, client, _, _, _ = _stub_happy_run(
         monkeypatch,
         tmp_path,
         {
@@ -440,14 +450,14 @@ def test_main_next_plan_missing_child_plan(monkeypatch, tmp_path, capsys):
             "operator_followups": [],
         },
     )
-    rc = handoff.main(["--plan", str(plan_path)])
+    rc = handoff.run(client, args)
     assert rc == 1
     err = capsys.readouterr().err
     assert "child_plan is null" in err
 
 
-def test_main_next_plan_child_plan_path_does_not_exist(monkeypatch, tmp_path, capsys):
-    plan_path, _, child_path = _stub_happy_main(
+def test_run_next_plan_child_plan_path_does_not_exist(monkeypatch, tmp_path, capsys):
+    args, client, _, child_path, _ = _stub_happy_run(
         monkeypatch,
         tmp_path,
         {
@@ -457,30 +467,73 @@ def test_main_next_plan_child_plan_path_does_not_exist(monkeypatch, tmp_path, ca
             "operator_followups": [],
         },
     )
-    rc = handoff.main(["--plan", str(plan_path)])
+    rc = handoff.run(client, args)
     assert rc == 1
     err = capsys.readouterr().err
     assert "child plan path in signal file does not exist" in err
 
 
-def test_main_claude_nonzero_exit(monkeypatch, tmp_path, capsys):
-    plan_path, _, _ = _stub_happy_main(monkeypatch, tmp_path, {}, claude_returncode=2)
-    rc = handoff.main(["--plan", str(plan_path)])
+def test_run_client_error(monkeypatch, tmp_path, capsys):
+    args, client, _, _, _ = _stub_happy_run(
+        monkeypatch,
+        tmp_path,
+        {},
+        handoff_error=RuntimeError("boom"),
+    )
+    rc = handoff.run(client, args)
     assert rc == 1
     err = capsys.readouterr().err
-    assert "claude -p exited 2" in err
+    assert "handoff agent failed: boom" in err
 
 
-def test_main_claude_timeout(monkeypatch, tmp_path, capsys):
-    plan_path, _, _ = _stub_happy_main(monkeypatch, tmp_path, {}, claude_timeout=True)
-    rc = handoff.main(["--plan", str(plan_path), "--timeout", "5"])
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "timed out" in err
+def test_run_claude_sanitizes_with_haiku(monkeypatch, tmp_path):
+    args, client, _, _, _ = _stub_happy_run(
+        monkeypatch,
+        tmp_path,
+        {
+            "exit_state": "chain-done",
+            "child_plan": None,
+            "reason": None,
+            "operator_followups": [],
+        },
+        sanitize_text="# Sanitized rolling plan\n",
+    )
+    args.client = "claude:opus"
+
+    rc = handoff.run(client, args)
+
+    assert rc == 0
+    assert [(c.label, c.model) for c in client.calls] == [
+        ("handoff", "opus"),
+        ("handoff:sanitize", handoff.CLAUDE_SANITIZE_MODEL),
+    ]
 
 
-def test_main_operator_followups_printed(monkeypatch, tmp_path, capsys):
-    plan_path, _, _ = _stub_happy_main(
+def test_run_non_claude_sanitizes_with_main_model(monkeypatch, tmp_path):
+    args, client, _, _, _ = _stub_happy_run(
+        monkeypatch,
+        tmp_path,
+        {
+            "exit_state": "chain-done",
+            "child_plan": None,
+            "reason": None,
+            "operator_followups": [],
+        },
+        sanitize_text="# Sanitized rolling plan\n",
+    )
+    args.client = "copilot:gpt-5.4"
+
+    rc = handoff.run(client, args)
+
+    assert rc == 0
+    assert [(c.label, c.model) for c in client.calls] == [
+        ("handoff", "gpt-5.4"),
+        ("handoff:sanitize", "gpt-5.4"),
+    ]
+
+
+def test_run_operator_followups_preserved_in_signal(monkeypatch, tmp_path):
+    args, client, sig_path, _, _ = _stub_happy_run(
         monkeypatch,
         tmp_path,
         {
@@ -490,12 +543,12 @@ def test_main_operator_followups_printed(monkeypatch, tmp_path, capsys):
             "operator_followups": ["Sync ~/.claude/", "Run smoke test manually"],
         },
     )
-    rc = handoff.main(["--plan", str(plan_path)])
+    rc = handoff.run(client, args)
     assert rc == 0
-    out = capsys.readouterr().out
-    assert "operator follow-ups (2):" in out
-    assert "Sync ~/.claude/" in out
-    assert "Run smoke test manually" in out
+    assert json.loads(sig_path.read_text())["operator_followups"] == [
+        "Sync ~/.claude/",
+        "Run smoke test manually",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -504,7 +557,7 @@ def test_main_operator_followups_printed(monkeypatch, tmp_path, capsys):
 
 
 def test_main_missing_spec_warns_and_continues(monkeypatch, tmp_path, capsys):
-    plan_path, _, _ = _stub_happy_main(
+    args, client, _, _, _ = _stub_happy_run(
         monkeypatch,
         tmp_path,
         {
@@ -514,18 +567,46 @@ def test_main_missing_spec_warns_and_continues(monkeypatch, tmp_path, capsys):
             "operator_followups": [],
         },
     )
-    rc = handoff.main(
-        [
-            "--plan",
-            str(plan_path),
-            "--spec",
-            str(tmp_path / "no-such-spec.md"),
-        ]
-    )
+    args.spec = str(tmp_path / "no-such-spec.md")
+    rc = handoff.run(client, args)
     assert rc == 0
     err = capsys.readouterr().err
     assert "warning" in err.lower()
     assert "spec" in err.lower()
+
+
+def test_main_builds_client_and_runs(monkeypatch, tmp_path):
+    plan_path = tmp_path / "plan.md"
+    plan_path.write_text("# Plan\n- [ ] thing\n")
+    out_path = handoff.auto_name_out(plan_path)
+    sig_path = out_path.parent / (out_path.stem + ".state.json")
+    client = WritingHandoffClient(
+        out_path=out_path,
+        signal_path=sig_path,
+        signal_payload={
+            "exit_state": "chain-done",
+            "child_plan": None,
+            "reason": None,
+            "operator_followups": [],
+        },
+    )
+    monkeypatch.setattr(handoff.shutil, "which", lambda n: "/fake/claude")
+    monkeypatch.setattr(
+        handoff,
+        "to_client",
+        lambda spec: setattr(client, "_gremlins_client_spec", str(spec)) or client,
+    )
+    monkeypatch.setattr(
+        handoff,
+        "collect_git_context",
+        lambda base_ref, rev=None: ("test-branch", "log line", "diff body"),
+    )
+    monkeypatch.setattr(handoff, "load_prompts", lambda paths: "Keep it simple.")
+
+    rc = handoff.main(["--plan", str(plan_path), "--client", "claude:haiku"])
+    assert rc == 0
+    assert [call.label for call in client.calls] == ["handoff", "handoff:sanitize"]
+    assert client.calls[0].model == "haiku"
 
 
 # ---------------------------------------------------------------------------
@@ -557,49 +638,30 @@ def test_sanitize_rolling_plan_rewrites_file(monkeypatch, tmp_path):
     out_path = tmp_path / "rolling.md"
     out_path.write_text("# Bad Plan\nPhases 0–3 have landed.\n- [ ] remaining task\n")
     cleaned = "# Remaining Work\n- [ ] remaining task\n"
-
-    def fake_run(cmd, **kwargs):
-        out_path.write_text(cleaned)
-        return subprocess.CompletedProcess(args=cmd, returncode=0)
-
-    monkeypatch.setattr(handoff.subprocess, "run", fake_run)
-    handoff.sanitize_rolling_plan(out_path, timeout=None)
+    client = WritingHandoffClient(
+        out_path=out_path,
+        signal_path=tmp_path / "unused.state.json",
+        signal_payload={},
+        sanitize_text=cleaned,
+    )
+    handoff.sanitize_rolling_plan(client, out_path, ClientSpec.parse("claude:sonnet"))
     assert out_path.read_text() == cleaned
 
 
 def test_sanitize_rolling_plan_nonzero_is_nonfatal(monkeypatch, tmp_path, capsys):
-    plan_path = tmp_path / "plan.md"
-    plan_path.write_text("# Plan\n- [ ] task\n")
-    monkeypatch.setattr(handoff.shutil, "which", lambda n: "/fake/claude")
-    monkeypatch.setattr(
-        handoff, "collect_git_context", lambda base_ref, rev=None: ("b", "", "")
+    out_path = tmp_path / "rolling.md"
+    original = "# Rolling plan\n- [ ] task\n"
+    out_path.write_text(original)
+    client = WritingHandoffClient(
+        out_path=out_path,
+        signal_path=tmp_path / "unused.state.json",
+        signal_payload={},
+        sanitize_error=RuntimeError("sanitize failed"),
     )
-
-    out_path = handoff.auto_name_out(plan_path)
-    sig_path = out_path.parent / (out_path.stem + ".state.json")
-    payload = {
-        "exit_state": "chain-done",
-        "child_plan": None,
-        "reason": None,
-        "operator_followups": [],
-    }
-
-    call_count = [0]
-
-    def fake_run(cmd, **kwargs):
-        call_count[0] += 1
-        if call_count[0] == 1:
-            sig_path.write_text(json.dumps(payload))
-            out_path.write_text("# Rolling plan\n")
-            return subprocess.CompletedProcess(args=cmd, returncode=0)
-        # Sanitize pass — return non-zero
-        return subprocess.CompletedProcess(args=cmd, returncode=1)
-
-    monkeypatch.setattr(handoff.subprocess, "run", fake_run)
-    rc = handoff.main(["--plan", str(plan_path)])
-    assert rc == 0
+    handoff.sanitize_rolling_plan(client, out_path, ClientSpec.parse("claude:sonnet"))
     err = capsys.readouterr().err
     assert "warning" in err.lower()
+    assert out_path.read_text() == original
 
 
 # ---------------------------------------------------------------------------
