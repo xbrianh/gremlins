@@ -26,7 +26,6 @@ import subprocess
 import sys
 import time
 import types
-from collections.abc import Callable
 from typing import Any, NoReturn, cast
 
 from .. import git as _git_mod
@@ -70,6 +69,7 @@ def _gremlins_cli_env() -> dict[str, str]:
 
 
 POLL_INTERVAL = 5  # seconds between finished-marker polls
+HANDOFF_TIMEOUT = int(os.environ.get("BOSSGREMLIN_HANDOFF_TIMEOUT", "3600"))
 # Bounds every interaction with `origin` (chain-start fetch of the default
 # branch and per-handoff fetch of the target branch).
 HANDOFF_FETCH_TIMEOUT = int(os.environ.get("BOSSGREMLIN_HANDOFF_FETCH_TIMEOUT", "60"))
@@ -80,10 +80,10 @@ _current_client: ClaudeClient | None = None
 _stop_requested = False
 
 
-def _sigterm_handler(signum: int, frame: types.FrameType | None) -> None:
+def _stop_signal_handler(signum: int, frame: types.FrameType | None) -> None:
     global _stop_requested
     _stop_requested = True
-    logger.info("received SIGTERM — stopping after current operation")
+    logger.info("received signal %d — stopping after current operation", signum)
     if _current_client is not None:
         try:
             _current_client.reap_all()
@@ -94,19 +94,6 @@ def _sigterm_handler(signum: int, frame: types.FrameType | None) -> None:
             _current_proc.send_signal(signal.SIGTERM)
         except Exception:
             pass
-
-
-def _sigint_handler(
-    client: ClaudeClient,
-) -> Callable[[int, types.FrameType | None], None]:
-    def handler(signum: int, frame: types.FrameType | None) -> None:
-        try:
-            client.reap_all()
-        except Exception:
-            pass
-        sys.exit(130)
-
-    return handler
 
 
 def die(msg: str) -> NoReturn:
@@ -358,6 +345,7 @@ def run_handoff(
         out=out_path,
         base=base_ref,
         client=str(client_spec),
+        timeout=HANDOFF_TIMEOUT,
         rev=rev_label if rev_label.startswith("origin/") else None,
     )
     old_cwd = os.getcwd()
@@ -797,8 +785,8 @@ def boss_main(argv: list[str], *, gr_id: str | None = None) -> int:
     client = to_client(client_spec)
     global _current_client
     _current_client = client
-    signal.signal(signal.SIGTERM, _sigterm_handler)
-    signal.signal(signal.SIGINT, _sigint_handler(client))
+    signal.signal(signal.SIGTERM, _stop_signal_handler)
+    signal.signal(signal.SIGINT, _stop_signal_handler)
     if os.environ.get("GREMLINS_TEST_NOOP_PIPELINE"):
         _current_client = None
         return 0

@@ -361,21 +361,38 @@ def test_boss_main_passes_resolved_client_to_handoff(tmp_path, monkeypatch):
     assert captured == [(fake_client, "copilot:gpt-5.4")]
 
 
-def test_sigterm_handler_reaps_current_client(monkeypatch):
+def test_stop_signal_handler_reaps_current_client(monkeypatch):
     client = TrackingBossClient()
     monkeypatch.setattr(boss_mod, "_current_client", client)
     monkeypatch.setattr(boss_mod, "_current_proc", None)
     monkeypatch.setattr(boss_mod, "_stop_requested", False)
 
-    boss_mod._sigterm_handler(signal.SIGTERM, None)
+    boss_mod._stop_signal_handler(signal.SIGTERM, None)
 
     assert boss_mod._stop_requested is True
     assert client.reap_calls == 1
 
 
-def test_boss_main_preserves_sigterm_handler(tmp_path, monkeypatch):
+def test_stop_signal_handler_forwards_to_current_proc(monkeypatch):
+    sent_signals: list[int] = []
+
+    class FakeProc:
+        def send_signal(self, sig: int) -> None:
+            sent_signals.append(sig)
+
+    monkeypatch.setattr(boss_mod, "_current_client", None)
+    monkeypatch.setattr(boss_mod, "_current_proc", FakeProc())
+    monkeypatch.setattr(boss_mod, "_stop_requested", False)
+
+    boss_mod._stop_signal_handler(signal.SIGINT, None)
+
+    assert boss_mod._stop_requested is True
+    assert sent_signals == [signal.SIGTERM]
+
+
+def test_boss_main_installs_stop_handler_on_sigterm_and_sigint(tmp_path, monkeypatch):
     gr_id = "test-boss-sigterm-ee33"
-    state_dir, project_root, workdir = _make_gremlin_state(tmp_path, gr_id)
+    _state_dir, _project_root, _workdir = _make_gremlin_state(tmp_path, gr_id)
     _common_boss_patches(monkeypatch, tmp_path, gr_id)
 
     spec = tmp_path / "spec.md"
@@ -383,11 +400,7 @@ def test_boss_main_preserves_sigterm_handler(tmp_path, monkeypatch):
     client = TrackingBossClient()
     captured: dict[str, object] = {}
 
-    monkeypatch.setattr(
-        boss_mod,
-        "to_client",
-        lambda spec: setattr(client, "_gremlins_client_spec", str(spec)) or client,
-    )
+    monkeypatch.setattr(boss_mod, "to_client", lambda spec: client)
 
     def fake_run_handoff(
         gr_id, state_dir, boss_state, project_root, boss_workdir, client, client_spec
@@ -417,8 +430,8 @@ def test_boss_main_preserves_sigterm_handler(tmp_path, monkeypatch):
         signal.signal(signal.SIGTERM, old_sigterm)
 
     assert result == 0
-    assert captured["sigterm"] is boss_mod._sigterm_handler
-    assert captured["sigint"] != boss_mod._sigterm_handler
+    assert captured["sigterm"] is boss_mod._stop_signal_handler
+    assert captured["sigint"] is boss_mod._stop_signal_handler
 
 
 # ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@ import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins import handoff
+from gremlins.clients import ClientSpec
 from gremlins.clients.fake import FakeClaudeClient
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
@@ -485,9 +486,30 @@ def test_run_client_error(monkeypatch, tmp_path, capsys):
     assert "handoff agent failed: boom" in err
 
 
-def test_run_uses_selected_model_for_main_and_haiku_for_sanitize(
-    monkeypatch, tmp_path
-):
+def test_run_claude_sanitizes_with_haiku(monkeypatch, tmp_path):
+    args, client, _, _, _ = _stub_happy_run(
+        monkeypatch,
+        tmp_path,
+        {
+            "exit_state": "chain-done",
+            "child_plan": None,
+            "reason": None,
+            "operator_followups": [],
+        },
+        sanitize_text="# Sanitized rolling plan\n",
+    )
+    args.client = "claude:opus"
+
+    rc = handoff.run(client, args)
+
+    assert rc == 0
+    assert [(c.label, c.model) for c in client.calls] == [
+        ("handoff", "opus"),
+        ("handoff:sanitize", handoff.CLAUDE_SANITIZE_MODEL),
+    ]
+
+
+def test_run_non_claude_sanitizes_with_main_model(monkeypatch, tmp_path):
     args, client, _, _, _ = _stub_happy_run(
         monkeypatch,
         tmp_path,
@@ -506,7 +528,7 @@ def test_run_uses_selected_model_for_main_and_haiku_for_sanitize(
     assert rc == 0
     assert [(c.label, c.model) for c in client.calls] == [
         ("handoff", "gpt-5.4"),
-        ("handoff:sanitize", handoff.SANITIZE_MODEL),
+        ("handoff:sanitize", "gpt-5.4"),
     ]
 
 
@@ -622,7 +644,7 @@ def test_sanitize_rolling_plan_rewrites_file(monkeypatch, tmp_path):
         signal_payload={},
         sanitize_text=cleaned,
     )
-    handoff.sanitize_rolling_plan(client, out_path)
+    handoff.sanitize_rolling_plan(client, out_path, ClientSpec.parse("claude:sonnet"))
     assert out_path.read_text() == cleaned
 
 
@@ -636,7 +658,7 @@ def test_sanitize_rolling_plan_nonzero_is_nonfatal(monkeypatch, tmp_path, capsys
         signal_payload={},
         sanitize_error=RuntimeError("sanitize failed"),
     )
-    handoff.sanitize_rolling_plan(client, out_path)
+    handoff.sanitize_rolling_plan(client, out_path, ClientSpec.parse("claude:sonnet"))
     err = capsys.readouterr().err
     assert "warning" in err.lower()
     assert out_path.read_text() == original

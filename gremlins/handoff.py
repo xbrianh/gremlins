@@ -19,7 +19,9 @@ import re
 import shutil
 import subprocess
 import sys
-from typing import Any, NoReturn, cast
+import threading
+from collections.abc import Callable
+from typing import Any, NoReturn, TypeVar, cast
 
 from gremlins.clients import PACKAGE_DEFAULT, ClientSpec, to_client
 from gremlins.clients.protocol import ClaudeClient
@@ -32,7 +34,34 @@ _CODE_STYLE_PATH = (
     pathlib.Path(__file__).resolve().parent / "pipelines" / "prompts" / "code_style.md"
 )
 
-SANITIZE_MODEL = "haiku"
+CLAUDE_SANITIZE_MODEL = "haiku"
+
+T = TypeVar("T")
+
+
+def sanitize_model_for(client_spec: ClientSpec) -> str:
+    return (
+        CLAUDE_SANITIZE_MODEL if client_spec.provider == "claude" else client_spec.model
+    )
+
+
+def with_reap_after(
+    client: ClaudeClient, timeout: int | None, fn: Callable[[], T]
+) -> T:
+    """Run fn, reaping the client's subprocesses if it doesn't return in time.
+
+    A reap unblocks a stalled client.run by terminating the underlying process,
+    which then surfaces as a RuntimeError to the caller.
+    """
+    if timeout is None:
+        return fn()
+    timer = threading.Timer(timeout, client.reap_all)
+    timer.daemon = True
+    timer.start()
+    try:
+        return fn()
+    finally:
+        timer.cancel()
 
 
 def die(msg: str) -> NoReturn:
@@ -316,14 +345,25 @@ def _read_rolling_plan_for_sanitize(out_path: pathlib.Path) -> str | None:
         return None
 
 
-def sanitize_rolling_plan(client: ClaudeClient, out_path: pathlib.Path) -> None:
+def sanitize_rolling_plan(
+    client: ClaudeClient,
+    out_path: pathlib.Path,
+    client_spec: ClientSpec,
+    *,
+    timeout: int | None = None,
+) -> None:
     plan_text = _read_rolling_plan_for_sanitize(out_path)
     if plan_text is None:
         return
     prompt = build_sanitize_prompt(plan_text, out_path)
-    logger.info("sanitizing rolling plan")
+    model = sanitize_model_for(client_spec)
+    logger.info("sanitizing rolling plan (model: %s)", model)
     try:
-        client.run(prompt, label="handoff:sanitize", model=SANITIZE_MODEL)
+        with_reap_after(
+            client,
+            timeout,
+            lambda: client.run(prompt, label="handoff:sanitize", model=model),
+        )
     except Exception as exc:
         _restore_rolling_plan(out_path, plan_text, f"sanitize pass failed: {exc}")
         return
@@ -384,7 +424,7 @@ def _parse_client_spec(client_arg: str) -> ClientSpec:
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    usage = "usage: handoff.sh --plan <path> [--spec <path>] [--out <path>] [--base <ref>] [--rev <ref>] [--client <provider:model>]"
+    usage = "usage: handoff.sh --plan <path> [--spec <path>] [--out <path>] [--base <ref>] [--rev <ref>] [--client <provider:model>] [--timeout <secs>]"
     parser = argparse.ArgumentParser(add_help=False, usage=usage)
     parser.add_argument("--plan", dest="plan", required=True)
     parser.add_argument(
@@ -396,6 +436,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--out", dest="out", default=None)
     parser.add_argument("--base", dest="base", default=None)
     parser.add_argument("--client", dest="client", default=str(PACKAGE_DEFAULT))
+    parser.add_argument(
+        "--timeout",
+        dest="timeout",
+        type=int,
+        default=None,
+        help="wall-clock timeout (seconds) for the main agent and the sanitize pass; on expiry the active client subprocess is reaped",
+    )
     parser.add_argument(
         "--rev",
         dest="rev",
@@ -460,7 +507,11 @@ def run(client: ClaudeClient, args: argparse.Namespace) -> int:
     client_spec = _parse_client_spec(args.client)
     logger.info("running handoff agent (client: %s)", client_spec)
     try:
-        client.run(prompt, label="handoff", model=client_spec.model)
+        with_reap_after(
+            client,
+            args.timeout,
+            lambda: client.run(prompt, label="handoff", model=client_spec.model),
+        )
     except Exception as exc:
         sys.stderr.write(f"error: handoff agent failed: {exc}\n")
         return 1
@@ -518,7 +569,12 @@ def run(client: ClaudeClient, args: argparse.Namespace) -> int:
         for item in followups:
             logger.info("  - %s", item)
 
-    sanitize_rolling_plan(client, out_path)
+    sanitize_rolling_plan(
+        client,
+        out_path,
+        client_spec,
+        timeout=min(args.timeout, 60) if args.timeout is not None else None,
+    )
     return 0
 
 
