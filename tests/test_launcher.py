@@ -752,5 +752,3 @@ def test_launch_rejects_empty_spec_path(lenv):
     launcher = _launcher()
     with pytest.raises(ValueError, match="--spec"):
         launcher.launch("localgremlin", plan=str(plan_file), spec_path=str(spec_file))
-
-

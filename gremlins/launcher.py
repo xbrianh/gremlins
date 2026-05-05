@@ -184,7 +184,7 @@ def _resolve_pipeline(
             pipeline_val = args[i + 1]
             i += 2
         elif args[i].startswith("--pipeline="):
-            pipeline_val = args[i][len("--pipeline="):]
+            pipeline_val = args[i][len("--pipeline=") :]
             i += 1
         else:
             keep.append(i)
@@ -351,7 +351,9 @@ def launch(
     state_dir.mkdir(parents=True, exist_ok=True)
 
     # Resolve pipeline path before spawning
-    resolved_pipeline_args, pipeline_path = _resolve_pipeline(kind, pipeline_args, project_root)
+    resolved_pipeline_args, pipeline_path = _resolve_pipeline(
+        kind, pipeline_args, project_root
+    )
 
     # pipeline_args for state.json: includes --plan and --spec when set
     stored_pipeline_args = list(resolved_pipeline_args)

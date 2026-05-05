@@ -203,9 +203,7 @@ def resolve_pipeline_path(name_or_path: str, base_dir: pathlib.Path) -> pathlib.
         if not resolved.exists():
             raise FileNotFoundError(f"pipeline file not found: {resolved}")
         return resolved
-    project_scoped = (
-        base_dir / ".gremlins" / "pipelines" / f"{name_or_path}.yaml"
-    )
+    project_scoped = base_dir / ".gremlins" / "pipelines" / f"{name_or_path}.yaml"
     if project_scoped.exists():
         return project_scoped.resolve()
     bundled = (
