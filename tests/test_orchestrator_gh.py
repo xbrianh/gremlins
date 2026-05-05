@@ -1610,7 +1610,9 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
     )
-    monkeypatch.setattr("gremlins.stages.request_copilot.run", lambda ctx, options: None)
+    monkeypatch.setattr(
+        "gremlins.stages.request_copilot.run", lambda ctx, options: None
+    )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
     monkeypatch.setattr("gremlins.stages.verify.run", lambda ctx, options: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
