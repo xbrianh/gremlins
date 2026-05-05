@@ -159,7 +159,7 @@ def _build_plan(
         content = yaml.safe_dump(data, default_flow_style=False, sort_keys=False)
         plan.append((dst, content.encode("utf-8")))
 
-    plan.append((dot_gremlins / "AGENTS.md", (_PIPELINES_DIR / "AGENTS.md").read_bytes()))
+    plan.append((base / "AGENTS.md", (_PIPELINES_DIR / "AGENTS.md").read_bytes()))
 
     plan.append((dot_gremlins / ".gitignore", b"env\n"))
 
