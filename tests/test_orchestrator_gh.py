@@ -158,7 +158,9 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
             pipeline, clients={}, default_client=None, stages=stripped_stages
         )
 
-    monkeypatch.setattr("gremlins.orchestrators.gh.load_pipeline", _load_pipeline_no_clients)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.load_pipeline", _load_pipeline_no_clients
+    )
 
     # set_stage is a no-op in tests — gr_id is not passed to gh_main.
 

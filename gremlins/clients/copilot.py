@@ -104,9 +104,13 @@ class SubprocessCopilotClient:
     ) -> CompletedRun:
         argv = self._build_argv(model)
         if on_timeout_prompt is not None:
-            raise NotImplementedError("SubprocessCopilotClient does not support on_timeout_prompt")
+            raise NotImplementedError(
+                "SubprocessCopilotClient does not support on_timeout_prompt"
+            )
         if capture_events:
-            raise NotImplementedError("SubprocessCopilotClient does not support capture_events")
+            raise NotImplementedError(
+                "SubprocessCopilotClient does not support capture_events"
+            )
         # max_retries is ignored; copilot -p blocks until completion with no streaming idle timeout
         p = self._spawn(argv, prompt)
         try:
