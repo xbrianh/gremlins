@@ -403,7 +403,7 @@ def test_rescue_diagnosis_streams_events_to_stderr(tmp_path, monkeypatch, capsys
 
 
 def test_write_rescue_report_uses_client_label_without_model(tmp_path):
-    """Rescue reports fall back to stage_clients when top-level model is absent."""
+    """Rescue reports use the failed stage's persisted client label."""
     state_dir = tmp_path / "state"
     state_dir.mkdir()
 
@@ -414,7 +414,10 @@ def test_write_rescue_report_uses_client_label_without_model(tmp_path):
                 "id": "victim-abcdef",
                 "kind": "localgremlin",
                 "stage": "implement",
-                "stage_clients": {"plan": "copilot:gpt-5.4"},
+                "stage_clients": {
+                    "plan": "copilot:gpt-5.4",
+                    "implement": "claude:opus",
+                },
             },
             "attempt_number": 1,
             "headless": False,
@@ -427,5 +430,5 @@ def test_write_rescue_report_uses_client_label_without_model(tmp_path):
     reports = list(state_dir.glob("rescue-*.md"))
     assert len(reports) == 1
     text = reports[0].read_text(encoding="utf-8")
-    assert "- Client: copilot:gpt-5.4" in text
+    assert "- Client: claude:opus" in text
     assert "- Model:" not in text

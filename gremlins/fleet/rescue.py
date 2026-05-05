@@ -256,7 +256,12 @@ def write_rescue_report(wdir: str, report: dict[str, Any]) -> None:
         if not client:
             stage_clients = state.get("stage_clients")
             if isinstance(stage_clients, dict):
-                for client_spec in cast(dict[object, object], stage_clients).values():
+                stored_stage_clients = cast(dict[object, object], stage_clients)
+                if stage:
+                    client = str(stored_stage_clients.get(stage) or "")
+                for client_spec in stored_stage_clients.values():
+                    if client:
+                        break
                     client = str(client_spec or "")
                     if client:
                         break
