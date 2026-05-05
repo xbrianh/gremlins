@@ -24,12 +24,12 @@ Per-pipeline orchestrator entry points. Each module owns one CLI subcommand
   `../cli.py` calls them with `sys.argv[2:]`.
 - `local.py` and `gh.py` build a real `SubprocessClaudeClient()` by default
   and pass it into stages via the `client: ClaudeClient` seam (see parent
-  CLAUDE.md). Tests inject a `FakeClaudeClient`. Never have an orchestrator
+  AGENTS.md). Tests inject a `FakeClaudeClient`. Never have an orchestrator
   spawn `claude -p` directly.
 - Stage bodies live in `../stages/`. Orchestrators wire them up (resume
   semantics, signal handlers, session-dir resolution) — keep stage logic
   out of these files.
-- Stage-name vocabulary is byte-stable (see parent CLAUDE.md §"Byte-stable
+- Stage-name vocabulary is byte-stable (see parent AGENTS.md §"Byte-stable
   strings"). Resume-target validation loads the pipeline YAML and builds
   `all_valid_stages = stage_names + child_names`, where `stage_names` is the
   top-level stage list and `child_names` are stages nested inside parallel
