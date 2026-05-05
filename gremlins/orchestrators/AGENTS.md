@@ -46,7 +46,9 @@ Per-pipeline orchestrator entry points. Each module owns one CLI subcommand
   The env helper sets `PYTHONSAFEPATH=1` and prepends the package's parent
   to `PYTHONPATH` so `python -m gremlins.*` resolves to
   `~/.claude/gremlins/` regardless of cwd (worktree-shadow protection).
-- The `--resume-from` flag forwarded by `launch.sh --resume` is *ignored*:
-  boss resumes from `boss_state.json`, not the runner's stage vocabulary.
+- Boss resume is driven by `boss_state.json`, not the runner's stage
+  vocabulary. `launcher.resume()` omits `--resume-from` for boss gremlins;
+  if a caller still passes the flag directly, `boss_main` logs that it is
+  ignoring it.
 - `SIGTERM` is trapped to set `_stop_requested` and forward to the current
   child process; the chain checks `check_stop()` between operations.

@@ -778,6 +778,11 @@ def _maybe_set_description_from_spec(
 def boss_main(argv: list[str], *, gr_id: str | None = None) -> int:
     configure_logging()
     args = _parse_boss_args(argv)
+    if args.resume_from is not None:
+        logger.info(
+            "ignoring --resume-from=%s; boss resume position comes from boss_state.json",
+            args.resume_from,
+        )
     try:
         client_spec = ClientSpec.parse(args.client)
     except ValueError as exc:

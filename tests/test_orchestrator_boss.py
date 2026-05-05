@@ -361,6 +361,22 @@ def test_boss_main_passes_resolved_client_to_handoff(tmp_path, monkeypatch):
     assert captured == [(fake_client, "copilot:gpt-5.4")]
 
 
+def test_boss_main_logs_ignored_resume_from(capsys, monkeypatch):
+    monkeypatch.setenv("GREMLINS_TEST_NOOP_PIPELINE", "1")
+
+    result = boss_main(
+        ["--plan", "spec.md", "--chain-kind", "local", "--resume-from", "implement"],
+        gr_id="test-boss-log-resume",
+    )
+
+    assert result == 0
+    captured = capsys.readouterr()
+    assert (
+        "ignoring --resume-from=implement; boss resume position comes from "
+        "boss_state.json" in captured.out
+    )
+
+
 def test_stop_signal_handler_reaps_current_client(monkeypatch):
     client = TrackingBossClient()
     monkeypatch.setattr(boss_mod, "_current_client", client)
