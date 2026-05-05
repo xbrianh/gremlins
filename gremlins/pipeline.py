@@ -29,6 +29,7 @@ class StageEntry:
         default_factory=list
     )
     max_concurrent: int | None = None
+    client_spec: str | None = None
 
 
 @dataclasses.dataclass
@@ -77,6 +78,7 @@ def _parse_stage_entry(
     yaml_dir: pathlib.Path,
     client_cache: dict[str, Any],
     depth: int = 0,
+    default_client_spec: str | None = None,
 ) -> StageEntry:
     if "parallel" in entry:
         if depth > 0:
@@ -95,7 +97,11 @@ def _parse_stage_entry(
         children: list[StageEntry] = []
         for child_raw in children_raw:
             child = _parse_stage_entry(
-                child_raw, yaml_dir, client_cache, depth=depth + 1
+                child_raw,
+                yaml_dir,
+                client_cache,
+                depth=depth + 1,
+                default_client_spec=default_client_spec,
             )
             if child.name in seen:
                 raise ValueError(
@@ -134,6 +140,7 @@ def _parse_stage_entry(
 
     client_spec = entry.get("client")
     stage_client: Any | None = None
+    resolved_spec: str | None = None
     if client_spec is not None:
         if not isinstance(client_spec, str):
             raise ValueError(
@@ -142,6 +149,9 @@ def _parse_stage_entry(
         if client_spec not in client_cache:
             client_cache[client_spec] = parse_client_specifier(client_spec)
         stage_client = client_cache[client_spec]
+        resolved_spec = client_spec
+    elif default_client_spec is not None:
+        resolved_spec = default_client_spec
 
     prompt_paths = _resolve_prompt_paths(entry.get("prompt"), yaml_dir)
     options = dict(cast(dict[str, Any], entry.get("options") or {}))
@@ -151,6 +161,7 @@ def _parse_stage_entry(
         client=stage_client,
         prompt_paths=prompt_paths,
         options=options,
+        client_spec=resolved_spec,
     )
 
 
@@ -183,7 +194,11 @@ def load_pipeline(path: pathlib.Path) -> Pipeline:
 
     stages: list[StageEntry] = []
     for entry in cast(list[dict[str, Any]], raw.get("stages") or []):
-        stages.append(_parse_stage_entry(entry, yaml_dir, client_cache))
+        stages.append(
+            _parse_stage_entry(
+                entry, yaml_dir, client_cache, default_client_spec=default_client_spec
+            )
+        )
 
     return Pipeline(
         name=pipeline_name,

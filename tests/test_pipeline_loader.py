@@ -68,6 +68,9 @@ stages:
     pipeline = load_pipeline(yaml_path)
     assert pipeline.stages[0].client is None
     assert pipeline.stages[1].client is not None
+    # Verify client_spec is populated
+    assert pipeline.stages[0].client_spec == "claude:sonnet"
+    assert pipeline.stages[1].client_spec == "copilot:gpt-5.4"
 
 
 # ---- error cases -----------------------------------------------------------
@@ -238,3 +241,69 @@ stages:
     )
     with pytest.raises(ValueError, match="nested parallel"):
         load_pipeline(tmp_path / "pipeline.yaml")
+
+
+# ---- client_spec field population ---------------------------------------------
+
+
+def test_client_spec_inherits_from_default(tmp_path: pathlib.Path) -> None:
+    yaml_path = _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+default_client: claude:sonnet
+stages:
+  - name: s1
+    type: implement
+""",
+    )
+    pipeline = load_pipeline(yaml_path)
+    assert pipeline.stages[0].client_spec == "claude:sonnet"
+
+
+def test_client_spec_stage_override_wins(tmp_path: pathlib.Path) -> None:
+    yaml_path = _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+default_client: claude:sonnet
+stages:
+  - name: s1
+    type: implement
+    client: copilot:gpt-5.4
+""",
+    )
+    pipeline = load_pipeline(yaml_path)
+    assert pipeline.stages[0].client_spec == "copilot:gpt-5.4"
+
+
+def test_client_spec_none_when_no_default_no_stage(tmp_path: pathlib.Path) -> None:
+    yaml_path = _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+stages:
+  - name: s1
+    type: implement
+""",
+    )
+    pipeline = load_pipeline(yaml_path)
+    assert pipeline.stages[0].client_spec is None
+
+
+def test_client_spec_parallel_group_is_none(tmp_path: pathlib.Path) -> None:
+    yaml_path = _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+default_client: claude:sonnet
+stages:
+  - name: reviews
+    parallel:
+      - name: r1
+        type: verify
+""",
+    )
+    pipeline = load_pipeline(yaml_path)
+    assert pipeline.stages[0].client_spec is None
+    assert pipeline.stages[0].children[0].client_spec == "claude:sonnet"

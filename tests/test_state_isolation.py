@@ -279,6 +279,37 @@ def test_set_stage_removes_sub_stage_when_none(tmp_path, monkeypatch):
     assert "sub_stage" not in data
 
 
+def test_set_stage_with_client_spec(tmp_path, monkeypatch):
+    """set_stage with client_spec writes the client key atomically with stage."""
+    gr_id = "gr-client-test"
+    xdg, sf = _make_state_dir(tmp_path, gr_id)
+    monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
+
+    state_mod.set_stage(gr_id, "implement", client_spec="claude:sonnet")
+
+    data = json.loads(sf.read_text())
+    assert data["stage"] == "implement"
+    assert data["client"] == "claude:sonnet"
+    assert "stage_updated_at" in data
+
+
+def test_set_stage_with_client_spec_and_sub_stage(tmp_path, monkeypatch):
+    """set_stage with both client_spec and sub_stage writes all atomically."""
+    gr_id = "gr-client-substage-test"
+    xdg, sf = _make_state_dir(tmp_path, gr_id)
+    monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
+
+    state_mod.set_stage(
+        gr_id, "verify", sub_stage={"attempt": 1}, client_spec="copilot:gpt-5.4"
+    )
+
+    data = json.loads(sf.read_text())
+    assert data["stage"] == "verify"
+    assert data["sub_stage"] == {"attempt": 1}
+    assert data["client"] == "copilot:gpt-5.4"
+    assert "stage_updated_at" in data
+
+
 def test_set_stage_noop_when_state_json_missing(tmp_path, monkeypatch):
     """set_stage is a no-op when state.json doesn't exist (no crash)."""
     gr_id = "gr-missing-state-test"
