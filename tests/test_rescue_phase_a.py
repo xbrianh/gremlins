@@ -363,7 +363,7 @@ def test_rescue_diagnosis_streams_events_to_stderr(tmp_path, monkeypatch, capsys
         "import json, os, pathlib, sys\n"
         "prompt = sys.argv[-1]\n"
         "for evt in [\n"
-        '    {"type": "system", "subtype": "init", "session_id": "rescue-s1",\n'
+        '    {"type": "system", "subtype": "init",\n'
         '     "model": "fake", "cwd": os.getcwd()},\n'
         '    {"type": "assistant", "message": {"content": [\n'
         '        {"type": "text", "text": "Diagnosing..."}]}},\n'

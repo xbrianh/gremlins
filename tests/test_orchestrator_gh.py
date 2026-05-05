@@ -34,7 +34,7 @@ from gremlins.pipeline import load_pipeline, resolve_pipeline_path
 
 def _issue_events(issue_url: str = "https://github.com/owner/repo/issues/42") -> list:
     return [
-        {"type": "system", "subtype": "init", "session_id": "session-plan-1"},
+        {"type": "system", "subtype": "init"},
         {
             "type": "assistant",
             "message": {
@@ -66,7 +66,7 @@ def _issue_events(issue_url: str = "https://github.com/owner/repo/issues/42") ->
 
 def _pr_events(pr_url: str = "https://github.com/owner/repo/pull/101") -> list:
     return [
-        {"type": "system", "subtype": "init", "session_id": "session-commit-1"},
+        {"type": "system", "subtype": "init"},
         {
             "type": "assistant",
             "message": {
@@ -97,7 +97,7 @@ def _pr_events(pr_url: str = "https://github.com/owner/repo/pull/101") -> list:
 
 
 IMPL_EVENTS = [
-    {"type": "system", "subtype": "init", "session_id": "session-impl-1"},
+    {"type": "system", "subtype": "init"},
     {"type": "result", "subtype": "success"},
 ]
 
@@ -909,7 +909,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
     # any one stage shows up as the total being short by exactly that amount.
     fixtures = {
         "plan-title": [
-            {"type": "system", "subtype": "init", "session_id": "session-title-1"},
+            {"type": "system", "subtype": "init"},
             {
                 "type": "result",
                 "subtype": "success",
@@ -918,11 +918,11 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
             },
         ],
         "implement": [
-            {"type": "system", "subtype": "init", "session_id": "session-impl-1"},
+            {"type": "system", "subtype": "init"},
             {"type": "result", "subtype": "success", "total_cost_usd": 0.07},
         ],
         "commit-pr": [
-            {"type": "system", "subtype": "init", "session_id": "session-commit-1"},
+            {"type": "system", "subtype": "init"},
             {
                 "type": "assistant",
                 "message": {

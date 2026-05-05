@@ -8,7 +8,6 @@ from typing import Any, Protocol
 @dataclass
 class CompletedRun:
     exit_code: int
-    session_id: str | None = None
     text_result: str | None = None
     events: list[dict[str, Any]] | None = None
     cost_usd: float | None = None

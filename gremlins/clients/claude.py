@@ -118,7 +118,7 @@ class SubprocessClaudeClient:
     ) -> CompletedRun:
         try:
             assert p.stdout is not None
-            session_id, cost_usd, result_text, events, timed_out = stream_events(
+            cost_usd, result_text, events, timed_out = stream_events(
                 p.stdout,
                 prefix=prefix,
                 raw_path=raw_path,
@@ -137,7 +137,6 @@ class SubprocessClaudeClient:
 
         return CompletedRun(
             exit_code=rc,
-            session_id=session_id,
             text_result=result_text,
             events=events,
             cost_usd=cost_usd,

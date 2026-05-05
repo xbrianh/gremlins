@@ -35,7 +35,7 @@ if argv_out:
     with open(argv_out, "w", encoding="utf-8") as f:
         json.dump(sys.argv[1:], f)
 
-sys.stdout.write(json.dumps({"type": "system", "subtype": "init", "session_id": "stub-sess"}) + "\\n")
+sys.stdout.write(json.dumps({"type": "system", "subtype": "init"}) + "\\n")
 sys.stdout.write(json.dumps({"type": "result", "subtype": "success", "num_turns": 1, "total_cost_usd": 0.0}) + "\\n")
 sys.stdout.flush()
 """
@@ -130,7 +130,7 @@ if count < fail_times:
     sys.stdout.flush()
     sys.exit(1)
 
-sys.stdout.write(json.dumps({"type": "system", "subtype": "init", "session_id": "s"}) + "\\n")
+sys.stdout.write(json.dumps({"type": "system", "subtype": "init"}) + "\\n")
 sys.stdout.write(json.dumps({"type": "result", "subtype": "success", "num_turns": 1, "total_cost_usd": 0.0}) + "\\n")
 sys.stdout.flush()
 """

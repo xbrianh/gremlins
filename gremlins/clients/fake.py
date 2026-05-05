@@ -88,17 +88,9 @@ class FakeClaudeClient:
                 for evt in events:
                     f.write((json.dumps(evt) + "\n").encode("utf-8"))
 
-        session_id: str | None = None
         cost_usd: float | None = None
         result_text: str | None = None
         for evt in events:
-            if (
-                session_id is None
-                and evt.get("type") == "system"
-                and evt.get("subtype") == "init"
-                and isinstance(evt.get("session_id"), str)
-            ):
-                session_id = evt["session_id"]
             if evt.get("type") == "result":
                 raw_cost = evt.get("total_cost_usd", evt.get("cost_usd"))
                 if isinstance(raw_cost, (int, float)):
@@ -110,7 +102,6 @@ class FakeClaudeClient:
 
         return CompletedRun(
             exit_code=0,
-            session_id=session_id,
             text_result=result_text,
             events=events if capture_events else None,
             cost_usd=cost_usd,

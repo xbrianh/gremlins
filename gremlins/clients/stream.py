@@ -55,8 +55,7 @@ def _emit_init(prefix: str, evt: dict[str, Any]) -> None:
     if evt.get("subtype") != "init":
         return
     sys.stderr.write(
-        f"{prefix}init session={evt.get('session_id', '?')} "
-        f"model={evt.get('model', '?')} cwd={evt.get('cwd', '?')}\n"
+        f"{prefix}init model={evt.get('model', '?')} cwd={evt.get('cwd', '?')}\n"
     )
 
 
@@ -113,14 +112,6 @@ def _decode_line(line: bytes) -> dict[str, Any] | None:
 
 
 def _extract_state(evt: dict[str, Any], state: dict[str, Any]) -> None:
-    if (
-        state["session_id"] is None
-        and evt.get("type") == "system"
-        and evt.get("subtype") == "init"
-    ):
-        sid = evt.get("session_id")
-        if isinstance(sid, str):
-            state["session_id"] = sid
     if evt.get("type") == "result":
         raw_cost = evt.get("total_cost_usd", evt.get("cost_usd"))
         if isinstance(raw_cost, (int, float)):
@@ -136,8 +127,8 @@ def stream_events(
     prefix: str = "",
     raw_path: pathlib.Path | None = None,
     capture: bool = False,
-) -> tuple[str | None, float | None, str | None, list[dict[str, Any]] | None, bool]:
-    state: dict[str, Any] = {"session_id": None, "cost_usd": None, "result_text": None}
+) -> tuple[float | None, str | None, list[dict[str, Any]] | None, bool]:
+    state: dict[str, Any] = {"cost_usd": None, "result_text": None}
     events: list[dict[str, Any]] | None = [] if capture else None
     timed_out = False
     raw = open(raw_path, "ab") if raw_path is not None else None
@@ -162,7 +153,6 @@ def stream_events(
         if raw is not None:
             raw.close()
     return (
-        state["session_id"],
         state["cost_usd"],
         state["result_text"],
         events,
