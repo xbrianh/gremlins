@@ -595,31 +595,7 @@ def gh_main(
     except ValueError as exc:
         die(str(exc))
 
-    stage_names = [s.name for s in pipeline.stages]
-
-    # Expand parallel groups to their three runtime stages: fanout, parallel, fanin.
-    # Child names are not valid resume targets — resuming a parallel block always
-    # restarts at one of the three group-level stages so prior shards/worktrees
-    # don't bleed across runs.
-    _expanded_stage_names: list[str] = []
-    _child_names: set[str] = set()
-    for _e in pipeline.stages:
-        if _e.type == "parallel":
-            _expanded_stage_names.extend(
-                [f"{_e.name}-fanout", _e.name, f"{_e.name}-fanin"]
-            )
-            for _child in _e.children:
-                if _child.name in _child_names or _child.name in stage_names:
-                    die(f"duplicate child stage name {_child.name!r}")
-                _child_names.add(_child.name)
-        else:
-            _expanded_stage_names.append(_e.name)
-
-    seen: set[str] = set()
-    for _n in _expanded_stage_names:
-        if _n in seen:
-            die(f"pipeline has duplicate stage name {_n!r}")
-        seen.add(_n)
+    _expanded_stage_names = [s.name for s in pipe.stages]
 
     run_resume_from = args.resume_from
 
@@ -649,7 +625,7 @@ def gh_main(
     issue_body: str = ""
 
     # plan_idx: index of the plan stage in the expanded stage list.
-    _plan_stage_name = next((s.name for s in pipeline.stages if s.type == "plan"), None)
+    _plan_stage_name = next((s.name for s in pipe.stages if s.type == "plan"), None)
     plan_idx = (
         _expanded_stage_names.index(_plan_stage_name)
         if _plan_stage_name and _plan_stage_name in _expanded_stage_names

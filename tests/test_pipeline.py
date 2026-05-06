@@ -135,3 +135,37 @@ def test_validate_resume_target_child_name_rejected(tmp_path):
     pipe = LocalPipeline(stages, args=_args(resume_from="review-a"), session_dir=tmp_path, gr_id=None)
     with pytest.raises(ValueError, match="review-a"):
         pipe.validate_resume_target()
+
+
+def test_parallel_expansion_in_from_yaml(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "gremlins.orchestrators.pipeline.resolve_session_dir",
+        lambda gr_id=None: tmp_path,
+    )
+    yaml_content = """\
+name: test-parallel
+stages:
+  - name: plan
+    type: plan
+  - name: reviews
+    parallel:
+      - name: review-a
+        type: review-code
+      - name: review-b
+        type: review-code
+"""
+    yaml_file = tmp_path / "pipeline.yaml"
+    yaml_file.write_text(yaml_content)
+
+    pipe = LocalPipeline.from_yaml(yaml_file, args=_args(), gr_id=None)
+
+    stage_names = [s.name for s in pipe.stages]
+    assert all(s.type != "parallel" for s in pipe.stages)
+    assert "reviews-fanout" in stage_names
+    assert "reviews" in stage_names
+    assert "reviews-fanin" in stage_names
+    assert "review-a" not in stage_names
+    by_name = {s.name: s for s in pipe.stages}
+    assert by_name["reviews-fanout"].type == "parallel-fanout"
+    assert by_name["reviews"].type == "parallel-group"
+    assert by_name["reviews-fanin"].type == "parallel-fanin"

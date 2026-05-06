@@ -308,31 +308,7 @@ def local_main(
     except ValueError as exc:
         die(str(exc))
 
-    stage_names = [s.name for s in pipeline.stages]
-
-    # Expand parallel groups to their three runtime stages: fanout, parallel, fanin.
-    # Child names are not valid resume targets — resuming a parallel block always
-    # restarts at one of the three group-level stages so prior shards/worktrees
-    # don't bleed across runs.
-    _expanded_stage_names: list[str] = []
-    _child_names: set[str] = set()
-    for _e in pipeline.stages:
-        if _e.type == "parallel":
-            _expanded_stage_names.extend(
-                [f"{_e.name}-fanout", _e.name, f"{_e.name}-fanin"]
-            )
-            for _child in _e.children:
-                if _child.name in _child_names or _child.name in stage_names:
-                    die(f"duplicate child stage name {_child.name!r}")
-                _child_names.add(_child.name)
-        else:
-            _expanded_stage_names.append(_e.name)
-
-    seen: set[str] = set()
-    for _n in _expanded_stage_names:
-        if _n in seen:
-            die(f"pipeline has duplicate stage name {_n!r}")
-        seen.add(_n)
+    _expanded_stage_names = [s.name for s in pipe.stages]
 
     run_resume_from = args.resume_from
 
@@ -375,12 +351,11 @@ def local_main(
     is_git = in_git_repo()
 
     def _type_idx(stage_type: str) -> int:
-        idx = 0
-        for s in pipeline.stages:
+        # returns an index into pipe.stages, the same index space as _expanded_stage_names
+        for i, s in enumerate(pipe.stages):
             if s.type == stage_type:
-                return idx
-            idx += 3 if s.type == "parallel" else 1
-        return len(_expanded_stage_names)
+                return i
+        return len(pipe.stages)
 
     start_idx = 0
     if run_resume_from:
