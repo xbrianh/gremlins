@@ -230,11 +230,12 @@ def try_fetch_all(
     *,
     cwd: str | os.PathLike[str] | None = None,
     timeout: float | None = None,
-) -> None:
+) -> bool:
     try:
-        _run_git(["fetch", remote], cwd=cwd, check=False, timeout=timeout)
+        r = _run_git(["fetch", remote], cwd=cwd, check=False, timeout=timeout)
+        return r.returncode == 0
     except Exception:
-        pass
+        return False
 
 
 def force_update_branch(

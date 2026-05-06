@@ -99,16 +99,19 @@ def _resolve_landing_cwd(state: dict[str, Any]) -> str:
 
 def _fast_forward_main(cwd: str | None):
     """Attempt to fast-forward local main to origin/main after a gh PR merge."""
-    _git.try_fetch_all(cwd=cwd)
+    if not _git.try_fetch_all(cwd=cwd):
+        print("warning: git fetch origin failed")
+        return
     current = _git.current_branch(cwd=cwd)
     if current == "main":
         try:
             _git.ff_merge("origin/main", cwd=cwd)
             print("Fast-forwarded local main.")
-        except _git.GitError:
-            print(
-                "warning: local main has diverged from origin/main — fast-forward not possible; update manually"
-            )
+        except _git.GitError as e:
+            msg = "warning: local main has diverged from origin/main — fast-forward not possible; update manually"
+            if e.stderr:
+                msg += f"\n  git: {e.stderr}"
+            print(msg)
     else:
         if _git.is_ancestor("main", "origin/main", cwd=cwd):
             try:
@@ -154,8 +157,7 @@ def _cleanup_gremlin(
         pass
 
     if workdir and os.path.exists(workdir):
-        if cwd:
-            _git.remove_worktree(cwd, workdir)
+        _git.remove_worktree(cwd or os.getcwd(), workdir)
         if os.path.exists(workdir):
             try:
                 shutil.rmtree(workdir)
@@ -488,7 +490,12 @@ def _squash_land(
         print(f"error: could not compute merge-base between HEAD and {source_label}")
         return False
 
-    if _git.rev_list_count(f"{base}..{source_ref}", cwd=cwd) < 1:
+    try:
+        commit_count = _git.rev_list_count(f"{base}..{source_ref}", cwd=cwd)
+    except _git.GitError:
+        print(f"error: could not count commits between merge-base and {source_label}")
+        return False
+    if commit_count < 1:
         print(f"{current} is already up to date with {source_label}.")
         _cleanup_gremlin(
             gr_id,
@@ -506,7 +513,7 @@ def _squash_land(
     print(f"Squash-merging {source_label} onto {current}...")
     try:
         _git.squash_merge(source_ref, cwd=cwd)
-    except _git.GitError:
+    except _git.GitError as e:
         reset_ok = True
         try:
             _git.reset_hard("HEAD", cwd=cwd)
@@ -515,7 +522,8 @@ def _squash_land(
         if not pre_merge_untracked:
             _git.clean_fd(cwd=cwd)
         suffix = "working tree restored" if reset_ok else "manual cleanup may be needed"
-        print(f"error: git merge --squash failed — {suffix}")
+        detail = f"\n  git: {e.stderr}" if e.stderr else ""
+        print(f"error: git merge --squash failed — {suffix}{detail}")
         return False
 
     subject, body, land_cost = _build_commit_message(wdir, state, source_ref, base, cwd)
@@ -523,8 +531,9 @@ def _squash_land(
 
     try:
         _git.commit(commit_msg, cwd=cwd)
-    except _git.GitError:
-        print("error: git commit failed")
+    except _git.GitError as e:
+        detail = f"\n  git: {e.stderr}" if e.stderr else ""
+        print(f"error: git commit failed{detail}")
         return False
 
     print(f"Landed {source_label} onto {current}.")
@@ -555,7 +564,12 @@ def _ff_land(
         )
         return False
 
-    if _git.rev_list_count(f"HEAD..{source_ref}", cwd=cwd) < 1:
+    try:
+        commit_count = _git.rev_list_count(f"HEAD..{source_ref}", cwd=cwd)
+    except _git.GitError:
+        print(f"error: could not count commits between HEAD and {source_label}")
+        return False
+    if commit_count < 1:
         print(f"{current} is already up to date with {source_label}.")
         _cleanup_gremlin(
             gr_id,
@@ -571,8 +585,9 @@ def _ff_land(
     print(f"Fast-forwarding {current} to {source_label}...")
     try:
         _git.ff_merge(source_ref, cwd=cwd)
-    except _git.GitError:
-        print("error: git merge --ff-only failed")
+    except _git.GitError as e:
+        detail = f"\n  git: {e.stderr}" if e.stderr else ""
+        print(f"error: git merge --ff-only failed{detail}")
         return False
 
     print(f"Landed {source_label} onto {current}.")
