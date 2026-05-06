@@ -55,6 +55,83 @@ def test_local_main_plan_mode(tmp_path, monkeypatch):
     assert labels[2] == "address-code"
 
 
+def test_local_main_resume_from_review_code_requires_git_changes(
+    tmp_path, monkeypatch, capsys
+):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("# Plan\nDo stuff.\n")
+
+    monkeypatch.chdir(tmp_path)
+    _common_patches(monkeypatch)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.local.resolve_session_dir",
+        lambda gr_id=None: session_dir,
+    )
+    monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: True)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.local.has_dirty_worktree", lambda: False
+    )
+    monkeypatch.setattr("gremlins.orchestrators.local.has_commits", lambda: False)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.local.load_prompts", lambda paths: "Be good."
+    )
+
+    with pytest.raises(SystemExit):
+        local_main(
+            ["--plan", str(plan_file), "--resume-from", "review-code"],
+            client=FakeClaudeClient(fixtures={}),
+        )
+
+    assert (
+        "--resume-from review-code requires implementation changes in the worktree"
+        in capsys.readouterr().err
+    )
+
+
+def test_local_main_resume_from_review_code_allows_existing_git_changes(
+    tmp_path, monkeypatch
+):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("# Plan\nDo stuff.\n")
+
+    monkeypatch.chdir(tmp_path)
+    _common_patches(monkeypatch)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.local.resolve_session_dir",
+        lambda gr_id=None: session_dir,
+    )
+    monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: True)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.local.has_dirty_worktree", lambda: False
+    )
+    monkeypatch.setattr("gremlins.orchestrators.local.has_commits", lambda: True)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.local.load_prompts", lambda paths: "Be good."
+    )
+
+    client = _ReviewCreatingClient(
+        fixtures={
+            "review-code:sonnet": MINIMAL_EVENTS,
+            "address-code": MINIMAL_EVENTS,
+        }
+    )
+
+    result = local_main(
+        ["--plan", str(plan_file), "--resume-from", "review-code"],
+        client=client,
+    )
+
+    assert result == 0
+    assert [call.label for call in client.calls] == [
+        "review-code:sonnet",
+        "address-code",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # review_main smoke test
 # ---------------------------------------------------------------------------
@@ -71,6 +148,47 @@ def test_review_main_calls_client(tmp_path, monkeypatch):
     result = review_main(["--dir", str(tmp_path)], client=client)
     assert result == 0
     assert {c.label for c in client.calls} == _REVIEW_LABELS
+
+
+def test_review_main_requires_commit_diff_or_dirty_worktree(
+    tmp_path, monkeypatch, capsys
+):
+    _common_patches(monkeypatch)
+    monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: True)
+    monkeypatch.setattr("gremlins.orchestrators.local.rev_exists", lambda rev: True)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.local.has_diff", lambda base, head: False
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.local.has_dirty_worktree", lambda: False
+    )
+
+    with pytest.raises(SystemExit):
+        review_main(["--dir", str(tmp_path)], client=FakeClaudeClient(fixtures={}))
+
+    assert (
+        "nothing to review: HEAD~1..HEAD has no changes and working tree is clean"
+        in capsys.readouterr().err
+    )
+
+
+def test_review_main_allows_dirty_worktree_without_commit_diff(tmp_path, monkeypatch):
+    _common_patches(monkeypatch)
+    monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: True)
+    monkeypatch.setattr("gremlins.orchestrators.local.rev_exists", lambda rev: True)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.local.has_diff", lambda base, head: False
+    )
+    monkeypatch.setattr("gremlins.orchestrators.local.has_dirty_worktree", lambda: True)
+
+    client = _ReviewCreatingClient(
+        fixtures={lbl: MINIMAL_EVENTS for lbl in _REVIEW_LABELS}
+    )
+
+    result = review_main(["--dir", str(tmp_path)], client=client)
+
+    assert result == 0
+    assert {call.label for call in client.calls} == _REVIEW_LABELS
 
 
 # ---------------------------------------------------------------------------
