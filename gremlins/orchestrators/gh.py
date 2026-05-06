@@ -533,14 +533,11 @@ def _build_stage_runner(
             _ensure_pr_url(gh_state, state_file, args.resume_from)
             set_stage(gr_id, entry.name)
             logger.info("[7/8] waiting for CI checks (up to 3 attempts, 20min each)")
-            wait_ci.run(
-                ctx,
-                wait_ci.WaitCiOptions(
-                    model=model,
-                    pr_url=gh_state["pr_url"],
-                    code_style=code_style,
-                ),
+            stage = wait_ci.WaitCI(
+                entry, model, pr_url=gh_state["pr_url"], code_style=code_style
             )
+            stage.bind(ctx)
+            stage.run(None)
 
         return _wait_ci
 
