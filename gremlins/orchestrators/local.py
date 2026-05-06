@@ -175,17 +175,15 @@ def _build_stage_runner(
             )
             set_stage(ctx.gr_id, entry.name)
             logger.info("reviewing code (model: %s)", model)
-            review_file = review_code.run(
-                ctx,
-                review_code.ReviewCodeOptions(
-                    plan_text=plan_text,
-                    is_git=is_git,
-                    code_style=code_style,
-                    model=model,
-                    stage_name=entry.name,
-                    prompt_paths=entry.prompt_paths[1:],
-                ),
+            stage = review_code.ReviewCode(
+                entry,
+                model,
+                plan_text=plan_text,
+                is_git=is_git,
+                code_style=code_style,
             )
+            stage.bind(ctx)
+            review_file = stage.run(None)
             logger.info("code review (%s): %s", model, review_file)
 
         return _review_code
@@ -609,17 +607,15 @@ def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         die("local pipeline has no review-code stage with a prompt")
     ctx = StageContext(client=client, session_dir=session_dir, gr_id=None)
     logger.info("reviewing code (model: %s)", args.detail)
-    review_file = review_code.run(
-        ctx,
-        review_code.ReviewCodeOptions(
-            plan_text=plan_text,
-            is_git=is_git,
-            code_style=code_style,
-            model=args.detail,
-            stage_name=rc_entry.name,
-            prompt_paths=rc_entry.prompt_paths[1:],
-        ),
+    stage = review_code.ReviewCode(
+        rc_entry,
+        args.detail,
+        plan_text=plan_text,
+        is_git=is_git,
+        code_style=code_style,
     )
+    stage.bind(ctx)
+    review_file = stage.run(None)
     logger.info("code review (%s): %s", args.detail, review_file)
     return 0
 

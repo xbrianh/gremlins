@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import dataclasses
 import pathlib
+from typing import Any
 
 from gremlins.clients.protocol import ClaudeClient
+from gremlins.pipeline import StageEntry
 from gremlins.prompts import load_prompts
-from gremlins.stages.context import StageContext
+from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import emit_bail, set_stage
 
@@ -63,80 +64,85 @@ Do NOT make any code changes — only write the review file.
     client.run(prompt, label=label, model=model, raw_path=raw_path, cwd=cwd)
 
 
-@dataclasses.dataclass
-class ReviewCodeOptions:
-    plan_text: str
-    is_git: bool
-    code_style: str
-    model: str
-    stage_name: str
-    prompt_paths: list[pathlib.Path]
+class ReviewCode(Stage):
+    def __init__(
+        self,
+        entry: StageEntry,
+        model: str | None,
+        *,
+        plan_text: str,
+        is_git: bool,
+        code_style: str,
+    ) -> None:
+        super().__init__(entry, model)
+        self.plan_text = plan_text
+        self.is_git = is_git
+        self.code_style = code_style
 
+    def run(self, pipe: Any) -> pathlib.Path:
+        if self.model is None:
+            raise ValueError(f"stage {self.name!r}: model must be set")
+        out_file = self.state.session_dir / f"{self.name}-{self.model}.md"
 
-def run(ctx: StageContext, options: ReviewCodeOptions) -> pathlib.Path:
-    out_file = ctx.session_dir / f"{options.stage_name}-{options.model}.md"
+        for stale in self.state.session_dir.glob(f"{self.name}-*.md"):
+            try:
+                stale.unlink()
+            except OSError:
+                pass
 
-    for stale in ctx.session_dir.glob(f"{options.stage_name}-*.md"):
+        focus = load_prompts(self.prompt_paths[1:])
+        if not focus.strip():
+            raise ValueError(
+                f"stage '{self.name}': prompt_paths produced empty focus; "
+                "check that prompt_paths has at least 2 entries and all files after index 0 have content"
+            )
+
+        if self.is_git:
+            code_scope = (
+                "Review the changes introduced by the most recent commit "
+                "(HEAD vs HEAD~1) plus any uncommitted working-tree changes. "
+                "Use `git diff HEAD~1 HEAD` and `git diff` to see the scope."
+            )
+        else:
+            code_scope = (
+                "Review the uncommitted changes in this directory (`git diff` if "
+                "available, otherwise inspect recently modified files)."
+            )
+        if self.plan_text:
+            code_context = (
+                f"The plan for this change is:\n\n{self.plan_text}\n\n{code_scope}"
+            )
+        else:
+            code_context = code_scope
+
         try:
-            stale.unlink()
-        except OSError:
-            pass
+            set_stage(self.state.gr_id, self.name, {"model": f"running ({self.model})"})
+            _run_reviewer(
+                client=self.state.client,
+                model=self.model,
+                out_file=out_file,
+                focus=focus,
+                context=code_context,
+                code_style=self.code_style,
+                where_field="**File:** `path/to/file.ext:<line>`",
+                label=f"{self.name}:{self.model}",
+                raw_path=self.state.session_dir
+                / f"stream-{self.name}-{self.model}.jsonl",
+                cwd=self.state.worktree,
+            )
+            set_stage(self.state.gr_id, self.name, {"model": f"done ({self.model})"})
+            if not out_file.exists() or out_file.stat().st_size == 0:
+                raise RuntimeError(f"review {self.model} did not produce {out_file}")
+        except (SystemExit, Exception) as exc:
+            emit_bail(
+                self.state.gr_id,
+                "other",
+                f"{self.name} stage failed: {exc}"[:200],
+                child_key=self.state.child_key,
+            )
+            raise
 
-    focus = load_prompts(options.prompt_paths)
-    if not focus.strip():
-        raise ValueError(
-            f"stage '{options.stage_name}': prompt_paths produced empty focus; "
-            "check that prompt_paths is non-empty and all files have content"
-        )
-
-    if options.is_git:
-        code_scope = (
-            "Review the changes introduced by the most recent commit "
-            "(HEAD vs HEAD~1) plus any uncommitted working-tree changes. "
-            "Use `git diff HEAD~1 HEAD` and `git diff` to see the scope."
-        )
-    else:
-        code_scope = (
-            "Review the uncommitted changes in this directory (`git diff` if "
-            "available, otherwise inspect recently modified files)."
-        )
-    if options.plan_text:
-        code_context = (
-            f"The plan for this change is:\n\n{options.plan_text}\n\n{code_scope}"
-        )
-    else:
-        code_context = code_scope
-
-    try:
-        set_stage(
-            ctx.gr_id, options.stage_name, {"model": f"running ({options.model})"}
-        )
-        _run_reviewer(
-            client=ctx.client,
-            model=options.model,
-            out_file=out_file,
-            focus=focus,
-            context=code_context,
-            code_style=options.code_style,
-            where_field="**File:** `path/to/file.ext:<line>`",
-            label=f"{options.stage_name}:{options.model}",
-            raw_path=ctx.session_dir
-            / f"stream-{options.stage_name}-{options.model}.jsonl",
-            cwd=ctx.worktree,
-        )
-        set_stage(ctx.gr_id, options.stage_name, {"model": f"done ({options.model})"})
-        if not out_file.exists() or out_file.stat().st_size == 0:
-            raise RuntimeError(f"review {options.model} did not produce {out_file}")
-    except (SystemExit, Exception) as exc:
-        emit_bail(
-            ctx.gr_id,
-            "other",
-            f"{options.stage_name} stage failed: {exc}"[:200],
-            child_key=ctx.child_key,
-        )
-        raise
-
-    return out_file
+        return out_file
 
 
-register_stage("review-code", run)
+register_stage("review-code", ReviewCode)
