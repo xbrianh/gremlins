@@ -5,10 +5,10 @@ default_client: claude:sonnet
 stages:
   - { name: plan,            type: plan,            prompt: [prompts/code_style.md, prompts/ghplan.md] }
   - { name: implement,       type: implement,       prompt: [prompts/code_style.md, prompts/implement_gh.md] }
-  - { name: verify,          type: verify,          options: { cmds: ["make check", "make test"] }, prompt: [prompts/bail_section.md] }
+  - { name: verify,          type: verify,          options: { cmds: ["make check", "make test"] }, prompt: [prompts/bail_section_fix.md] }
   - { name: commit-pr,       type: commit-pr }
   - { name: request-copilot, type: request-copilot }
   - { name: ghreview,        type: ghreview,        prompt: [prompts/code_style.md, prompts/ghreview.md] }
   - { name: wait-copilot,    type: wait-copilot }
   - { name: ghaddress,       type: ghaddress,       prompt: [prompts/code_style.md, prompts/ghaddress.md, prompts/bail_section.md] }
-  - { name: ci-gate,         type: wait-ci,         prompt: [prompts/bail_section.md] }
+  - { name: ci-gate,         type: wait-ci,         prompt: [prompts/bail_section_fix.md] }

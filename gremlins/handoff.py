@@ -173,7 +173,10 @@ This is the original chain spec. It does not change between handoffs and is read
         / "prompts"
         / "code_style.md"
     )
-    code_style = load_prompts([_style_path])
+    try:
+        code_style = load_prompts([_style_path])
+    except (FileNotFoundError, ValueError) as exc:
+        die(f"error loading prompt: {exc}")
     style_section = f"""## Coding style
 
 Respect these principles when writing child plans. Avoid proposing architectures that violate them — e.g. multi-level class hierarchies, factories where a function suffices, speculative abstractions:
