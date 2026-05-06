@@ -7,7 +7,6 @@ import logging
 import os
 import pathlib
 import shutil
-import subprocess
 import sys
 from collections.abc import Callable, Iterator
 from typing import NoReturn
@@ -24,7 +23,13 @@ from gremlins.clients.resolve import (
     validate_stage_specs,
 )
 from gremlins.env_file import load_env_file
-from gremlins.git import in_git_repo
+from gremlins.git import (
+    diff_quiet,
+    has_commits,
+    has_dirty_worktree,
+    in_git_repo,
+    rev_exists,
+)
 from gremlins.logging_setup import configure_logging
 from gremlins.pipeline import (
     StageEntry,
@@ -411,21 +416,7 @@ def local_main(
                 die(f"--resume-from {args.resume_from} requires existing {plan_file}")
         if start_idx >= _type_idx("review-code"):
             if is_git:
-                porcelain = subprocess.run(
-                    ["git", "status", "--porcelain"],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                has_dirty = bool(porcelain.stdout.strip())
-                r = subprocess.run(
-                    ["git", "rev-list", "--count", "HEAD"],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                has_commits = r.returncode == 0 and int(r.stdout.strip() or "0") > 0
-                if not has_dirty and not has_commits:
+                if not has_dirty_worktree() and not has_commits():
                     die(
                         f"--resume-from {args.resume_from} requires implementation changes in the worktree"
                     )
@@ -603,33 +594,9 @@ def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     except (FileNotFoundError, ValueError) as exc:
         die(f"error loading prompt: {exc}")
     if is_git:
-        head1_exists = (
-            subprocess.run(
-                ["git", "rev-parse", "--verify", "HEAD~1"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            ).returncode
-            == 0
-        )
-        has_commit_diff = False
-        if head1_exists:
-            has_commit_diff = (
-                subprocess.run(
-                    ["git", "diff", "--quiet", "HEAD~1", "HEAD"],
-                    check=False,
-                ).returncode
-                != 0
-            )
-        has_dirty = bool(
-            subprocess.run(
-                ["git", "status", "--porcelain"],
-                capture_output=True,
-                text=True,
-                check=False,
-            ).stdout.strip()
-        )
-        if not has_commit_diff and not has_dirty:
+        head1_exists = rev_exists("HEAD~1")
+        has_commit_diff = head1_exists and not diff_quiet("HEAD~1", "HEAD")
+        if not has_commit_diff and not has_dirty_worktree():
             if not head1_exists:
                 die(
                     "nothing to review: no commit history beyond HEAD and working tree is clean"
