@@ -9,7 +9,6 @@ import os
 import pathlib
 import shutil
 import sys
-from collections.abc import Callable, Iterator
 from typing import NoReturn
 
 import yaml
@@ -34,14 +33,13 @@ from gremlins.git import (
 from gremlins.logging_setup import configure_logging
 from gremlins.orchestrators.pipeline import LocalPipeline
 from gremlins.pipeline import (
-    StageEntry,
     load_pipeline,
     resolve_pipeline_path,
 )
-from gremlins.runner import build_parallel_stages, install_signal_handlers, run_stages
-from gremlins.stages import address_code, implement, plan, review_code, verify
+from gremlins.runner import install_signal_handlers
+from gremlins.stages import address_code, review_code
 from gremlins.stages.context import StageContext
-from gremlins.state import patch_state, resolve_session_dir, set_stage
+from gremlins.state import patch_state, resolve_session_dir
 
 logger = logging.getLogger(__name__)
 
@@ -88,139 +86,6 @@ def _parse_local_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
-def _build_stage_runner(
-    entry: StageEntry,
-    ctx: StageContext,
-    model: str,
-    *,
-    args: argparse.Namespace,
-    plan_file: pathlib.Path,
-    spec_file: pathlib.Path,
-    is_git: bool,
-    instructions: str,
-    plan_copied_from_source: bool,
-    plan_text_holder: dict[str, str],
-    review_stage_names: list[str],
-) -> Callable[[], None]:
-    if entry.type == "plan":
-
-        def _plan() -> None:
-            if args.plan_path:
-                if plan_copied_from_source:
-                    logger.info("plan supplied via --plan (copied) -> %s", plan_file)
-                else:
-                    logger.info("plan reused from snapshot -> %s", plan_file)
-            else:
-                set_stage(ctx.gr_id, entry.name)
-                logger.info("planning (model: %s) -> %s", model, plan_file)
-                if not entry.prompt_paths:
-                    die(
-                        f"stage {entry.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML"
-                    )
-                stage = plan.Plan(
-                    entry,
-                    model,
-                    plan_file=plan_file,
-                    instructions=instructions,
-                )
-                stage.bind(ctx)
-                stage.run(None)
-
-        return _plan
-
-    if entry.type == "implement":
-
-        def _implement() -> None:
-            plan_text = plan_file.read_text(encoding="utf-8")
-            plan_text_holder["text"] = plan_text
-            spec_text = ""
-            if spec_file.exists():
-                try:
-                    spec_text = spec_file.read_text(encoding="utf-8")
-                except (OSError, UnicodeDecodeError) as exc:
-                    logger.warning(
-                        "could not read spec.md (%s); proceeding without north-star context",
-                        exc,
-                    )
-            set_stage(ctx.gr_id, entry.name)
-            logger.info("implementing (model: %s, from %s)", model, plan_file)
-            stage = implement.Implement(
-                entry,
-                model,
-                plan_text=plan_text,
-                is_git=is_git,
-                spec_text=spec_text,
-            )
-            stage.bind(ctx)
-            stage.run(None)
-
-        return _implement
-
-    if entry.type == "review-code":
-
-        def _review_code() -> None:
-            plan_text = plan_text_holder.get("text") or plan_file.read_text(
-                encoding="utf-8"
-            )
-            set_stage(ctx.gr_id, entry.name)
-            logger.info("reviewing code (model: %s)", model)
-            stage = review_code.ReviewCode(
-                entry,
-                model,
-                plan_text=plan_text,
-                is_git=is_git,
-            )
-            stage.bind(ctx)
-            review_file = stage.run(None)
-            logger.info("code review (%s): %s", model, review_file)
-
-        return _review_code
-
-    if entry.type == "address-code":
-
-        def _address_code() -> None:
-            set_stage(ctx.gr_id, entry.name)
-            logger.info("addressing code reviews (model: %s)", model)
-            stage = address_code.AddressCode(
-                entry,
-                model,
-                is_git=is_git,
-                review_stage_names=review_stage_names,
-            )
-            stage.bind(ctx)
-            stage.run(None)
-
-        return _address_code
-
-    if entry.type == "verify":
-        # Resolve CLI --cmd override; --test-max-attempts fills in if YAML omits it
-        if args.cmds is not None:
-            entry.options["cmds"] = args.cmds
-        entry.options.setdefault("max_attempts", args.test_max_attempts)
-
-        def _verify() -> None:
-            resolved_cmds = entry.options.get("cmds", [])
-            if resolved_cmds:
-                set_stage(ctx.gr_id, entry.name)
-                logger.info(
-                    "running verify (cmds: %r, max-attempts: %s, model: %s)",
-                    resolved_cmds,
-                    entry.options.get("max_attempts"),
-                    model,
-                )
-            stage = verify.Verify(
-                entry,
-                model,
-                is_git=is_git,
-                commit_after_fix=is_git,
-            )
-            stage.bind(ctx)
-            stage.run(None)
-
-        return _verify
-
-    raise ValueError(f"unsupported stage type {entry.type!r} in local pipeline")
-
 
 def local_main(
     argv: list[str], *, client: ClaudeClient | None = None, gr_id: str | None = None
@@ -244,8 +109,6 @@ def local_main(
             os.environ.update(load_env_file(env_file))
         except RuntimeError as exc:
             die(str(exc))
-
-    instructions = " ".join(args.instructions)
 
     if shutil.which("claude") is None:
         die("claude CLI not found")
@@ -302,9 +165,17 @@ def local_main(
     else:
         _signal_clients = [to_client(default_spec)]
     try:
-        pipe = LocalPipeline(pipeline.stages, args=args, session_dir=session_dir, gr_id=gr_id)
+        pipe = LocalPipeline(
+            pipeline.stages,
+            args=args,
+            session_dir=session_dir,
+            gr_id=gr_id,
+            _test_client=client,
+            _spec_clients=_spec_clients,
+            _stage_specs=stage_specs,
+            _pipeline_data=pipeline,
+        )
         pipe.validate_resume_target()
-        pipe.run(*_signal_clients)
     except ValueError as exc:
         die(str(exc))
 
@@ -328,25 +199,6 @@ def local_main(
         review_code_file = session_dir / f"review-code-{PACKAGE_DEFAULT.model}.md"
 
     logger.info("session: %s", session_dir)
-
-    plan_copied_from_source = False
-    if args.plan_path and not plan_file.exists():
-        src = pathlib.Path(args.plan_path)
-        if not src.is_file():
-            die(f"--plan: file not found: {args.plan_path}")
-        if src.stat().st_size == 0:
-            die(f"--plan: file is empty: {args.plan_path}")
-        shutil.copyfile(src, plan_file)
-        plan_copied_from_source = True
-
-    spec_file = session_dir / "spec.md"
-    if args.spec_path and not spec_file.exists():
-        spec_src = pathlib.Path(args.spec_path)
-        if not spec_src.is_file():
-            die(f"--spec: file not found: {args.spec_path}")
-        if spec_src.stat().st_size == 0:
-            die(f"--spec: file is empty: {args.spec_path}")
-        shutil.copyfile(spec_src, spec_file)
 
     is_git = in_git_repo()
 
@@ -397,90 +249,7 @@ def local_main(
                     f"--resume-from {args.resume_from} requires existing {review_code_file}"
                 )
 
-    plan_text_holder: dict[str, str] = {}
-
-    def _all_stages() -> Iterator[StageEntry]:
-        for s in pipeline.stages:
-            yield s
-            if s.type == "parallel":
-                yield from s.children
-
-    review_stage_names = [s.name for s in _all_stages() if s.type == "review-code"]
-
-    stages: list[tuple[str, Callable[[], None]]] = []
-    for e in pipeline.stages:
-        if e.type == "parallel":
-            group_dir = session_dir / e.name
-            group_dir.mkdir(parents=True, exist_ok=True)
-            child_runners: list[tuple[str, StageContext, Callable[[], None]]] = []
-            for child in e.children:
-                child_spec = require_stage_spec(stage_specs, child.name)
-                child_dir = group_dir / child.name
-                child_dir.mkdir(parents=True, exist_ok=True)
-                child_ctx = StageContext(
-                    client=_client_for_spec(child_spec),
-                    session_dir=child_dir,
-                    gr_id=gr_id,
-                    child_key=child.name,
-                )
-                child_runners.append(
-                    (
-                        child.name,
-                        child_ctx,
-                        _build_stage_runner(
-                            child,
-                            child_ctx,
-                            child_spec.model,
-                            args=args,
-                            plan_file=plan_file,
-                            spec_file=spec_file,
-                            is_git=is_git,
-                            instructions=instructions,
-                            plan_copied_from_source=plan_copied_from_source,
-                            plan_text_holder=plan_text_holder,
-                            review_stage_names=review_stage_names,
-                        ),
-                    )
-                )
-            group_name = e.name
-            stages.extend(
-                build_parallel_stages(
-                    group_name,
-                    child_runners,
-                    max_concurrent=e.max_concurrent,
-                    set_stage_fn=lambda n: set_stage(gr_id, n),
-                    cancel_on_bail=e.cancel_on_bail,
-                    bail_policy=e.bail_policy,
-                    gr_id=gr_id,
-                    project_root=pathlib.Path.cwd(),
-                )
-            )
-        else:
-            stage_spec = require_stage_spec(stage_specs, e.name)
-            stage_ctx = StageContext(
-                client=_client_for_spec(stage_spec),
-                session_dir=session_dir,
-                gr_id=gr_id,
-            )
-            stages.append(
-                (
-                    e.name,
-                    _build_stage_runner(
-                        e,
-                        stage_ctx,
-                        stage_spec.model,
-                        args=args,
-                        plan_file=plan_file,
-                        spec_file=spec_file,
-                        is_git=is_git,
-                        instructions=instructions,
-                        plan_copied_from_source=plan_copied_from_source,
-                        plan_text_holder=plan_text_holder,
-                        review_stage_names=review_stage_names,
-                    ),
-                )
-            )
-    run_stages(stages, resume_from=run_resume_from)
+    pipe.run(*_signal_clients)
 
     # Accumulate cost from all client instances
     total_cost = 0.0

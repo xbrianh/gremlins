@@ -4,6 +4,7 @@ import pathlib
 import pytest
 
 from gremlins.orchestrators.pipeline import GHPipeline, LocalPipeline
+from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline import StageEntry, resolve_pipeline_path
 from gremlins.stages import (
     address_code,
@@ -23,6 +24,10 @@ from gremlins.stages import (
 
 def _args(**kwargs):
     return argparse.Namespace(**kwargs)
+
+
+def _pipeline_data(stages: list[StageEntry] | None = None) -> _PipelineData:
+    return _PipelineData(name="test", path=pathlib.Path("."), stages=stages or [])
 
 
 def test_local_pipeline_from_yaml(tmp_path, monkeypatch):
@@ -79,7 +84,7 @@ def test_gh_pipeline_from_yaml(tmp_path, monkeypatch):
 def test_local_pipeline_rejects_gh_stages(tmp_path):
     gh_stages = [StageEntry(name="commit-pr", type="commit-pr", client=None, prompt_paths=[], options={})]
     with pytest.raises(ValueError, match="commit-pr"):
-        LocalPipeline(gh_stages, args=_args(), session_dir=tmp_path, gr_id=None)
+        LocalPipeline(gh_stages, args=_args(), session_dir=tmp_path, gr_id=None, _pipeline_data=_pipeline_data(gh_stages))
 
 
 # ---------------------------------------------------------------------------
@@ -97,42 +102,45 @@ def _make_parallel_stage(name: str, children: list[str]) -> StageEntry:
 
 
 def test_validate_resume_target_no_resume_from(tmp_path):
-    pipe = LocalPipeline(_make_stages("plan", "implement"), args=_args(resume_from=None), session_dir=tmp_path, gr_id=None)
+    stages = _make_stages("plan", "implement")
+    pipe = LocalPipeline(stages, args=_args(resume_from=None), session_dir=tmp_path, gr_id=None, _pipeline_data=_pipeline_data(stages))
     pipe.validate_resume_target()  # should not raise
 
 
 def test_validate_resume_target_valid_name(tmp_path):
-    pipe = LocalPipeline(_make_stages("plan", "implement"), args=_args(resume_from="implement"), session_dir=tmp_path, gr_id=None)
+    stages = _make_stages("plan", "implement")
+    pipe = LocalPipeline(stages, args=_args(resume_from="implement"), session_dir=tmp_path, gr_id=None, _pipeline_data=_pipeline_data(stages))
     pipe.validate_resume_target()  # should not raise
 
 
 def test_validate_resume_target_invalid_name(tmp_path):
-    pipe = LocalPipeline(_make_stages("plan", "implement"), args=_args(resume_from="bogus"), session_dir=tmp_path, gr_id=None)
+    stages = _make_stages("plan", "implement")
+    pipe = LocalPipeline(stages, args=_args(resume_from="bogus"), session_dir=tmp_path, gr_id=None, _pipeline_data=_pipeline_data(stages))
     with pytest.raises(ValueError, match="bogus"):
         pipe.validate_resume_target()
 
 
 def test_validate_resume_target_parallel_group_name(tmp_path):
     stages = [_make_parallel_stage("reviews", ["review-a", "review-b"])]
-    pipe = LocalPipeline(stages, args=_args(resume_from="reviews"), session_dir=tmp_path, gr_id=None)
+    pipe = LocalPipeline(stages, args=_args(resume_from="reviews"), session_dir=tmp_path, gr_id=None, _pipeline_data=_pipeline_data(stages))
     pipe.validate_resume_target()  # "reviews" is a valid expanded name
 
 
 def test_validate_resume_target_parallel_fanout(tmp_path):
     stages = [_make_parallel_stage("reviews", ["review-a", "review-b"])]
-    pipe = LocalPipeline(stages, args=_args(resume_from="reviews-fanout"), session_dir=tmp_path, gr_id=None)
+    pipe = LocalPipeline(stages, args=_args(resume_from="reviews-fanout"), session_dir=tmp_path, gr_id=None, _pipeline_data=_pipeline_data(stages))
     pipe.validate_resume_target()  # fanout is valid
 
 
 def test_validate_resume_target_parallel_fanin(tmp_path):
     stages = [_make_parallel_stage("reviews", ["review-a", "review-b"])]
-    pipe = LocalPipeline(stages, args=_args(resume_from="reviews-fanin"), session_dir=tmp_path, gr_id=None)
+    pipe = LocalPipeline(stages, args=_args(resume_from="reviews-fanin"), session_dir=tmp_path, gr_id=None, _pipeline_data=_pipeline_data(stages))
     pipe.validate_resume_target()  # fanin is valid
 
 
 def test_validate_resume_target_child_name_rejected(tmp_path):
     stages = [_make_parallel_stage("reviews", ["review-a", "review-b"])]
-    pipe = LocalPipeline(stages, args=_args(resume_from="review-a"), session_dir=tmp_path, gr_id=None)
+    pipe = LocalPipeline(stages, args=_args(resume_from="review-a"), session_dir=tmp_path, gr_id=None, _pipeline_data=_pipeline_data(stages))
     with pytest.raises(ValueError, match="review-a"):
         pipe.validate_resume_target()
 
