@@ -24,7 +24,7 @@ def _make_entry() -> StageEntry:
 
 def _make_stage(
     tmp_path, *, repo: str, pr_num: str
-) -> tuple[RequestCopilot, StageContext]:
+) -> RequestCopilot:
     entry = _make_entry()
     stage = RequestCopilot(entry, None, repo=repo, pr_num=pr_num)
     ctx = StageContext(
@@ -33,7 +33,7 @@ def _make_stage(
         gr_id=None,
     )
     stage.bind(ctx)
-    return stage, ctx
+    return stage
 
 
 def test_run_calls_gh_pr_edit(tmp_path, monkeypatch):
@@ -45,7 +45,7 @@ def test_run_calls_gh_pr_edit(tmp_path, monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    stage, _ = _make_stage(tmp_path, repo="owner/repo", pr_num="42")
+    stage = _make_stage(tmp_path, repo="owner/repo", pr_num="42")
     stage.run(None)
 
     assert len(calls) == 1
@@ -66,6 +66,6 @@ def test_run_raises_on_nonzero_returncode(tmp_path, monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    stage, _ = _make_stage(tmp_path, repo="owner/repo", pr_num="7")
+    stage = _make_stage(tmp_path, repo="owner/repo", pr_num="7")
     with pytest.raises(RuntimeError, match="could not request Copilot review"):
         stage.run(None)
