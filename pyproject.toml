@@ -3,11 +3,17 @@ requires = ["hatchling>=1.18.0"]
 build-backend = "hatchling.build"
 
 [project]
-name = "gremlins"
+name = "wf-gremlins"
 version = "0.1.0"
 description = "Background plan/implement/review/address pipelines for Claude Code"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["pyyaml"]
+
+[project.urls]
+Homepage = "https://github.com/amorphous-industries/gremlins"
+Repository = "https://github.com/amorphous-industries/gremlins"
+Issues = "https://github.com/amorphous-industries/gremlins/issues"
 
 [project.optional-dependencies]
 dev = ["pytest", "ruff", "pyright"]
