@@ -11,6 +11,7 @@ from gremlins.gh_utils import extract_gh_url, view_issue
 from gremlins.pipeline import StageEntry
 from gremlins.prompts import load_prompts
 from gremlins.stages.base import Stage
+from gremlins.stages.registry import register_stage
 from gremlins.state import patch_state
 
 logger = logging.getLogger(__name__)
@@ -83,3 +84,6 @@ class GHPlan(Stage):
         return GHPlanResult(
             issue_url=issue_url, issue_num=issue_num, issue_body=issue_body
         )
+
+
+register_stage("ghplan", GHPlan)
