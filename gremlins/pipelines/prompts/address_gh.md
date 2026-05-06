@@ -1,3 +1,4 @@
+<!-- placeholders: pr_url -->
 You are addressing review comments on a GitHub pull request. Your job is to fix the issues raised by reviewers and reply to each comment thread.
 
 ## Pull Request

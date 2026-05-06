@@ -1,3 +1,4 @@
+<!-- placeholders: spec_block, plan_source_label, issue_body, plan_location_note -->
 {spec_block}The following is the implementation plan {plan_source_label}:
 
 {issue_body}
