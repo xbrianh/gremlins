@@ -1,7 +1,3 @@
-When writing code, follow these principles:
-
-{code_style}
-
 CI checks on this PR have failed. Read the failure output below and fix the code so the checks pass.
 
 **Important constraints:**

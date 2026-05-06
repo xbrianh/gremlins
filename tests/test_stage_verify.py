@@ -33,7 +33,6 @@ def _make_stage(
     cmds: list[str] | None = None,
     max_attempts: int = 3,
     client: Any = None,
-    code_style: str = "Be good.",
     fix_model: str = "sonnet",
     is_git: bool = True,
     commit_after_fix: bool = False,
@@ -46,7 +45,6 @@ def _make_stage(
     stage = Verify(
         entry,
         fix_model,
-        code_style=code_style,
         is_git=is_git,
         commit_after_fix=commit_after_fix,
     )
@@ -140,29 +138,6 @@ def test_exhaustion_with_max_1(tmp_path):
     assert (tmp_path / "verify-attempt-1.log").exists()
 
 
-def test_code_style_in_fix_prompt(tmp_path):
-    flag = tmp_path / "flag.txt"
-    flag.write_text("fail\n")
-    check_cmd = f"grep -q '^pass$' {flag}"
-
-    class _FixingClient(FakeClaudeClient):
-        def run(self, prompt, *, label, **kwargs):
-            flag.write_text("pass\n")
-            return super().run(prompt, label=label, **kwargs)
-
-    client = _FixingClient(fixtures={"verify-fix-1": MINIMAL_EVENTS})
-    stage, _ = _make_stage(
-        tmp_path,
-        cmds=[check_cmd, "true"],
-        client=client,
-        code_style="My custom style rules.",
-    )
-    stage.run(None)
-
-    assert len(client.calls) == 1
-    assert "My custom style rules." in client.calls[0].prompt
-
-
 def test_both_cmds_in_fix_prompt(tmp_path, monkeypatch):
     monkeypatch.delenv("GR_ID", raising=False)
 
@@ -177,7 +152,6 @@ def test_both_cmds_in_fix_prompt(tmp_path, monkeypatch):
         cmds=["false", "make test"],
         max_attempts=3,
         client=client,
-        code_style="",
     )
 
     with pytest.raises(RuntimeError):
@@ -188,9 +162,7 @@ def test_both_cmds_in_fix_prompt(tmp_path, monkeypatch):
 
 
 def test_log_file_captures_output(tmp_path):
-    stage, client = _make_stage(
-        tmp_path, cmds=["echo hello_check", "echo hello_test"], code_style=""
-    )
+    stage, client = _make_stage(tmp_path, cmds=["echo hello_check", "echo hello_test"])
     stage.run(None)
 
     log = tmp_path / "verify-attempt-1.log"
@@ -224,7 +196,7 @@ def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
         fixtures={"verify-fix-1": MINIMAL_EVENTS, "verify-fix-2": MINIMAL_EVENTS}
     )
     entry = _make_entry(cmds=["false"], max_attempts=3)
-    stage = Verify(entry, "sonnet", code_style="", is_git=True, commit_after_fix=False)
+    stage = Verify(entry, "sonnet", is_git=True, commit_after_fix=False)
     ctx = StageContext(
         client=client, session_dir=tmp_path, gr_id=gr_id, worktree=tmp_path
     )
@@ -251,9 +223,7 @@ def test_is_git_false_skips_diff(tmp_path):
             return super().run(prompt, label=label, **kwargs)
 
     client = _FixingClient(fixtures={"verify-fix-1": MINIMAL_EVENTS})
-    stage, _ = _make_stage(
-        tmp_path, cmds=[check_cmd], client=client, is_git=False, code_style=""
-    )
+    stage, _ = _make_stage(tmp_path, cmds=[check_cmd], client=client, is_git=False)
     stage.run(None)
 
     assert len(client.calls) == 1
@@ -272,7 +242,7 @@ def test_commit_after_fix_true_in_prompt(tmp_path):
 
     client = _FixingClient(fixtures={"verify-fix-1": MINIMAL_EVENTS})
     stage, _ = _make_stage(
-        tmp_path, cmds=[check_cmd], client=client, commit_after_fix=True, code_style=""
+        tmp_path, cmds=[check_cmd], client=client, commit_after_fix=True
     )
     stage.run(None)
 

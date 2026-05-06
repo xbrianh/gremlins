@@ -20,22 +20,12 @@ def _run_reviewer(
     out_file: pathlib.Path,
     focus: str,
     context: str,
-    code_style: str,
     where_field: str,
     label: str,
     raw_path: pathlib.Path,
     cwd: pathlib.Path | None = None,
 ) -> None:
-    style_preamble = ""
-    if code_style:
-        style_preamble = (
-            "Follow these coding-style rules and flag violations — long functions, "
-            "inheritance where functions suffice, dead comments, speculative "
-            "abstractions — alongside the correctness, security, and performance "
-            "findings in the focus section below:\n\n"
-            f"{code_style}\n\n"
-        )
-    prompt = f"""{style_preamble}Read surrounding code as needed — don't review in isolation.
+    prompt = f"""Read surrounding code as needed — don't review in isolation.
 
 {context}
 
@@ -72,12 +62,10 @@ class ReviewCode(Stage):
         *,
         plan_text: str,
         is_git: bool,
-        code_style: str,
     ) -> None:
         super().__init__(entry, model)
         self.plan_text = plan_text
         self.is_git = is_git
-        self.code_style = code_style
 
     def run(self, pipe: Any) -> pathlib.Path:
         if self.model is None:
@@ -90,11 +78,11 @@ class ReviewCode(Stage):
             except OSError:
                 pass
 
-        focus = load_prompts(self.prompt_paths[1:])
+        focus = load_prompts(self.prompt_paths)
         if not focus.strip():
             raise ValueError(
                 f"stage '{self.name}': prompt_paths produced empty focus; "
-                "check that prompt_paths has at least 2 entries and all files after index 0 have content"
+                "check that prompt_paths is non-empty and all files have content"
             )
 
         if self.is_git:
@@ -123,7 +111,6 @@ class ReviewCode(Stage):
                 out_file=out_file,
                 focus=focus,
                 context=code_context,
-                code_style=self.code_style,
                 where_field="**File:** `path/to/file.ext:<line>`",
                 label=f"{self.name}:{self.model}",
                 raw_path=self.state.session_dir

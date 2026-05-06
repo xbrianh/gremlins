@@ -141,10 +141,6 @@ def _collect_failure_output(failed: list[dict[str, Any]]) -> str:
     return "\n\n".join(parts)
 
 
-def _escape_fmt(s: str) -> str:
-    return s.replace("{", "{{").replace("}", "}}")
-
-
 class WaitCI(Stage):
     def __init__(
         self,
@@ -152,7 +148,6 @@ class WaitCI(Stage):
         model: str | None,
         *,
         pr_url: str,
-        code_style: str,
         max_attempts: int = 3,
         poll_timeout: int = 1200,
         poll_interval: int = 30,
@@ -163,7 +158,6 @@ class WaitCI(Stage):
     ) -> None:
         super().__init__(entry, model)
         self.pr_url = pr_url
-        self.code_style = code_style
         self.max_attempts = max_attempts
         self.poll_timeout = poll_timeout
         self.poll_interval = poll_interval
@@ -240,7 +234,6 @@ class WaitCI(Stage):
                 log_file.write_text(failure_output, encoding="utf-8")
 
                 fix_prompt = template.format(
-                    code_style=_escape_fmt(self.code_style),
                     failure_output=failure_output,
                     bail_section=bail_section,
                 )

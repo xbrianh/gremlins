@@ -18,11 +18,9 @@ class GHAddress(Stage):
         model: str | None,
         *,
         pr_url: str,
-        code_style: str,
     ) -> None:
         super().__init__(entry, model)
         self.pr_url = pr_url
-        self.code_style = code_style
 
     def run(self, pipe: Any) -> None:
         bail_section = ""
@@ -38,10 +36,8 @@ If you cannot safely address one or more comments, write a bail marker before fi
 
 Out-of-scope comments and `gh issue create` failures are not bail reasons — handle them per the instructions above. If you successfully addressed every actionable comment, do not write a bail marker — just exit normally.
 """
-        prompt_path = self.prompt_paths[-1]
-        prompt = load_prompts([prompt_path]).format(
+        prompt = load_prompts(self.prompt_paths).format(
             pr_url=self.pr_url,
-            code_style=self.code_style,
             bail_section=bail_section,
         )
         self.run_claude(

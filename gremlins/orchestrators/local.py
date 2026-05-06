@@ -36,20 +36,12 @@ from gremlins.pipeline import (
     load_pipeline,
     resolve_pipeline_path,
 )
-from gremlins.prompts import load_prompts
 from gremlins.runner import build_parallel_stages, install_signal_handlers, run_stages
 from gremlins.stages import address_code, implement, plan, review_code, verify
 from gremlins.stages.context import StageContext
 from gremlins.state import patch_state, resolve_session_dir, set_stage
 
 logger = logging.getLogger(__name__)
-
-_CODE_STYLE_PATH = (
-    pathlib.Path(__file__).resolve().parent.parent
-    / "pipelines"
-    / "prompts"
-    / "code_style.md"
-)
 
 
 def die(msg: str) -> NoReturn:
@@ -103,7 +95,6 @@ def _build_stage_runner(
     plan_file: pathlib.Path,
     spec_file: pathlib.Path,
     is_git: bool,
-    code_style: str,
     instructions: str,
     plan_copied_from_source: bool,
     plan_text_holder: dict[str, str],
@@ -129,7 +120,6 @@ def _build_stage_runner(
                     model,
                     plan_file=plan_file,
                     instructions=instructions,
-                    code_style=code_style,
                 )
                 stage.bind(ctx)
                 stage.run(None)
@@ -156,7 +146,6 @@ def _build_stage_runner(
                 entry,
                 model,
                 plan_text=plan_text,
-                code_style=code_style,
                 is_git=is_git,
                 spec_text=spec_text,
             )
@@ -178,7 +167,6 @@ def _build_stage_runner(
                 model,
                 plan_text=plan_text,
                 is_git=is_git,
-                code_style=code_style,
             )
             stage.bind(ctx)
             review_file = stage.run(None)
@@ -195,7 +183,6 @@ def _build_stage_runner(
                 entry,
                 model,
                 is_git=is_git,
-                code_style=code_style,
                 review_stage_names=review_stage_names,
             )
             stage.bind(ctx)
@@ -222,7 +209,6 @@ def _build_stage_runner(
             stage = verify.Verify(
                 entry,
                 model,
-                code_style=code_style,
                 is_git=is_git,
                 commit_after_fix=is_git,
             )
@@ -385,10 +371,6 @@ def local_main(
         shutil.copyfile(spec_src, spec_file)
 
     is_git = in_git_repo()
-    try:
-        code_style = load_prompts([_CODE_STYLE_PATH])
-    except (FileNotFoundError, ValueError) as exc:
-        die(f"error loading prompt: {exc}")
 
     def _type_idx(stage_type: str) -> int:
         idx = 0
@@ -476,7 +458,6 @@ def local_main(
                             plan_file=plan_file,
                             spec_file=spec_file,
                             is_git=is_git,
-                            code_style=code_style,
                             instructions=instructions,
                             plan_copied_from_source=plan_copied_from_source,
                             plan_text_holder=plan_text_holder,
@@ -515,7 +496,6 @@ def local_main(
                         plan_file=plan_file,
                         spec_file=spec_file,
                         is_git=is_git,
-                        code_style=code_style,
                         instructions=instructions,
                         plan_copied_from_source=plan_copied_from_source,
                         plan_text_holder=plan_text_holder,
@@ -583,10 +563,6 @@ def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
             die(f"failed to read --plan {plan_path}: {exc}")
 
     is_git = in_git_repo()
-    try:
-        code_style = load_prompts([_CODE_STYLE_PATH])
-    except (FileNotFoundError, ValueError) as exc:
-        die(f"error loading prompt: {exc}")
     if is_git:
         head1_exists = rev_exists("HEAD~1")
         has_commit_diff = head1_exists and has_diff("HEAD~1", "HEAD")
@@ -610,7 +586,6 @@ def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         args.detail,
         plan_text=plan_text,
         is_git=is_git,
-        code_style=code_style,
     )
     stage.bind(ctx)
     review_file = stage.run(None)
@@ -644,10 +619,6 @@ def address_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         die(f"--dir does not exist: {session_dir}")
 
     is_git = in_git_repo()
-    try:
-        code_style = load_prompts([_CODE_STYLE_PATH])
-    except (FileNotFoundError, ValueError) as exc:
-        die(f"error loading prompt: {exc}")
 
     ctx = StageContext(client=client, session_dir=session_dir, gr_id=None)
     logger.info("addressing code reviews (model: %s)", args.address)
@@ -662,7 +633,6 @@ def address_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         entry,
         args.address,
         is_git=is_git,
-        code_style=code_style,
     )
     stage.bind(ctx)
     stage.run(None)

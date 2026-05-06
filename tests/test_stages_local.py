@@ -147,7 +147,6 @@ def test_implement_renders_spec_block_when_present(tmp_path, monkeypatch):
         entry,
         "sonnet",
         plan_text="task 1: do something",
-        code_style="Be good.",
         is_git=True,
         spec_text="overall spec body",
     )
@@ -197,7 +196,6 @@ def test_implement_omits_spec_block_when_absent(tmp_path, monkeypatch):
         entry,
         "sonnet",
         plan_text="task 1: do something",
-        code_style="Be good.",
         is_git=True,
         spec_text="",
     )
@@ -229,7 +227,6 @@ def test_plan_stage_raises_when_file_absent(tmp_path):
         "sonnet",
         plan_file=plan_file,
         instructions="do stuff",
-        code_style="Be good.",
     )
     stage.bind(_make_ctx(client, session_dir))
     with pytest.raises(RuntimeError, match="plan stage did not produce"):
@@ -262,7 +259,6 @@ def test_plan_stage_succeeds_when_file_exists(tmp_path):
         "haiku",
         plan_file=plan_file,
         instructions="do stuff",
-        code_style="Be good.",
     )
     stage.bind(_make_ctx(client, session_dir))
     stage.run(None)
@@ -297,7 +293,6 @@ def test_implement_stage_raises_on_empty_diff(tmp_path, monkeypatch):
         entry,
         "sonnet",
         plan_text="# Plan\nDo stuff.\n",
-        code_style="Be good.",
         is_git=True,
     )
     stage.bind(_make_ctx(client, session_dir))
@@ -319,7 +314,6 @@ def _make_review_code_stage(
     model: str = "sonnet",
     plan_text: str = "",
     is_git: bool = False,
-    code_style: str = "",
     gr_id=None,
 ) -> ReviewCode:
     entry = StageEntry(
@@ -337,7 +331,6 @@ def _make_review_code_stage(
         model,
         plan_text=plan_text,
         is_git=is_git,
-        code_style=code_style,
     )
     stage.bind(_make_ctx(client, session_dir, gr_id=gr_id))
     return stage
@@ -353,7 +346,6 @@ def _make_address_code_stage(
     *,
     model: str = "sonnet",
     is_git: bool = False,
-    code_style: str = "",
     gr_id=None,
 ) -> AddressCode:
     entry = StageEntry(
@@ -363,7 +355,7 @@ def _make_address_code_stage(
         prompt_paths=[],
         options={},
     )
-    stage = AddressCode(entry, model, is_git=is_git, code_style=code_style)
+    stage = AddressCode(entry, model, is_git=is_git)
     stage.bind(_make_ctx(client, session_dir, gr_id=gr_id))
     return stage
 
@@ -388,16 +380,18 @@ def test_address_code_stage_calls_client_with_review_content(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_plan_stage_includes_code_style(tmp_path):
+def test_plan_stage_includes_style_from_prompt_paths(tmp_path):
     client = FakeClaudeClient(fixtures={"plan": MINIMAL_EVENTS})
     plan_file = tmp_path / "plan.md"
     session_dir = tmp_path / "session"
     session_dir.mkdir()
+    style_file = tmp_path / "style.md"
+    style_file.write_text("Be good.")
     entry = StageEntry(
         name="plan",
         type="plan",
         client=None,
-        prompt_paths=[_BUNDLED_PROMPTS / "plan.md"],
+        prompt_paths=[style_file, _BUNDLED_PROMPTS / "plan.md"],
         options={},
     )
     stage = plan.Plan(
@@ -405,7 +399,6 @@ def test_plan_stage_includes_code_style(tmp_path):
         "sonnet",
         plan_file=plan_file,
         instructions="do stuff",
-        code_style="Be good.",
     )
     stage.bind(_make_ctx(client, session_dir))
     with pytest.raises(RuntimeError, match="plan stage did not produce"):
@@ -432,19 +425,39 @@ def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
     assert client.calls[0].cwd == worktree
 
 
-def test_review_code_stage_includes_code_style(tmp_path):
+def test_review_code_stage_includes_style_from_prompt_paths(tmp_path):
+    style_file = tmp_path / "style.md"
+    style_file.write_text("Be good.")
     client = ReviewCreatingClient(fixtures={"review-code:sonnet": MINIMAL_EVENTS})
-    stage = _make_review_code_stage(client, tmp_path, code_style="Be good.")
+    entry = StageEntry(
+        name="review-code",
+        type="review-code",
+        client=None,
+        prompt_paths=[style_file, _BUNDLED_PROMPTS / "review" / "detail.md"],
+        options={},
+    )
+    stage = ReviewCode(entry, "sonnet", plan_text="", is_git=False)
+    stage.bind(_make_ctx(client, tmp_path))
     stage.run(None)
     assert "Be good." in client.calls[0].prompt
 
 
-def test_address_code_stage_includes_code_style(tmp_path):
+def test_address_code_stage_includes_style_from_prompt_paths(tmp_path):
     (tmp_path / "review-code-sonnet.md").write_text(
         "# Detail Review\n\n## Findings\nNone.\n"
     )
+    style_file = tmp_path / "style.md"
+    style_file.write_text("Be good.")
     client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
-    stage = _make_address_code_stage(client, tmp_path, code_style="Be good.")
+    entry = StageEntry(
+        name="address-code",
+        type="address-code",
+        client=None,
+        prompt_paths=[style_file, _BUNDLED_PROMPTS / "address_code.md"],
+        options={},
+    )
+    stage = AddressCode(entry, "sonnet", is_git=False)
+    stage.bind(_make_ctx(client, tmp_path))
     stage.run(None)
     assert "Be good." in client.calls[0].prompt
 

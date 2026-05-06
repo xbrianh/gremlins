@@ -41,12 +41,10 @@ class AddressCode(Stage):
         model: str | None,
         *,
         is_git: bool,
-        code_style: str,
         review_stage_names: list[str] | None = None,
     ) -> None:
         super().__init__(entry, model)
         self.is_git = is_git
-        self.code_style = code_style
         self.review_stage_names = (
             review_stage_names if review_stage_names is not None else ["review-code"]
         )
@@ -90,12 +88,10 @@ If a finding asks you to change something that touches secrets/credentials, or y
 Do not call this helper if you successfully addressed every actionable finding.
 """
 
-            prompt_path = (
-                self.prompt_paths[-1] if self.prompt_paths else _DEFAULT_PROMPT
+            template = load_prompts(
+                self.prompt_paths if self.prompt_paths else [_DEFAULT_PROMPT]
             )
-            template = load_prompts([prompt_path])
             address_prompt = template.format(
-                code_style=self.code_style,
                 model=review_model,
                 text=text,
                 address_commit_instr=address_commit_instr,

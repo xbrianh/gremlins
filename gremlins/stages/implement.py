@@ -23,6 +23,7 @@ from gremlins.git import (
     sweep_stale_handoff_branches,
 )
 from gremlins.pipeline import StageEntry
+from gremlins.prompts import load_prompts
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 
@@ -110,7 +111,6 @@ class Implement(Stage):
         model: str | None,
         *,
         plan_text: str,
-        code_style: str,
         is_git: bool,
         kind: str = "local",
         spec_text: str = "",
@@ -119,7 +119,6 @@ class Implement(Stage):
     ) -> None:
         super().__init__(entry, model)
         self.plan_text = plan_text
-        self.code_style = code_style
         self.is_git = is_git
         self.kind = kind
         self.spec_text = spec_text
@@ -158,10 +157,10 @@ class Implement(Stage):
                 "notes-to-self. Do not push."
             )
 
-        prompt_path = self.prompt_paths[-1] if self.prompt_paths else PROMPT_LOCAL_PATH
-        template = prompt_path.read_text(encoding="utf-8")
+        template = load_prompts(
+            self.prompt_paths if self.prompt_paths else [PROMPT_LOCAL_PATH]
+        )
         prompt = template.format(
-            code_style=self.code_style,
             spec_block=_render_spec_block(self.spec_text),
             plan_text=self.plan_text,
             impl_commit_instr=impl_commit_instr,
@@ -195,10 +194,10 @@ class Implement(Stage):
                 "should be product code."
             )
 
-        prompt_path = self.prompt_paths[-1] if self.prompt_paths else PROMPT_GH_PATH
-        template = prompt_path.read_text(encoding="utf-8")
+        template = load_prompts(
+            self.prompt_paths if self.prompt_paths else [PROMPT_GH_PATH]
+        )
         prompt = template.format(
-            code_style=self.code_style,
             spec_block=_render_spec_block(self.spec_text),
             plan_source_label=plan_source_label,
             issue_body=self.plan_text,

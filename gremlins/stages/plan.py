@@ -19,19 +19,16 @@ class Plan(Stage):
         *,
         plan_file: pathlib.Path,
         instructions: str,
-        code_style: str,
     ) -> None:
         super().__init__(entry, model)
         self.plan_file = plan_file
         self.instructions = instructions
-        self.code_style = code_style
 
     def run(self, pipe: Any) -> None:
-        template = load_prompts([self.prompt_paths[-1]])
+        template = load_prompts(self.prompt_paths)
         prompt = template.format(
             plan_file=self.plan_file,
             instructions=self.instructions,
-            code_style=self.code_style,
         )
         self.run_claude(
             prompt,

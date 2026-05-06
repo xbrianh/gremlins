@@ -156,9 +156,6 @@ def test_local_main_does_not_clobber_external_state(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
     monkeypatch.setattr(
-        "gremlins.orchestrators.local.load_prompts", lambda paths: "Be good."
-    )
-    monkeypatch.setattr(
         "gremlins.stages.implement.changes_outside_git", lambda s, d: True
     )
 

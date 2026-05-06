@@ -18,11 +18,9 @@ class GHReview(Stage):
         model: str | None,
         *,
         pr_url: str,
-        code_style: str,
     ) -> None:
         super().__init__(entry, model)
         self.pr_url = pr_url
-        self.code_style = code_style
 
     def run(self, pipe: Any) -> None:
         bail_section = ""
@@ -43,10 +41,8 @@ If the review has no blocker-severity findings, do not run the helper — exit n
 
 **30-second rule**: if a competent developer could fix it in under 30 seconds without asking questions — missing import, wrong identifier, off-by-one, trivial rename — do not bail; flag it in the review.
 """
-        prompt_path = self.prompt_paths[-1]
-        prompt = load_prompts([prompt_path]).format(
+        prompt = load_prompts(self.prompt_paths).format(
             pr_url=self.pr_url,
-            code_style=self.code_style,
             bail_section=bail_section,
         )
         self.run_claude(
