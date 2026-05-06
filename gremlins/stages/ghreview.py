@@ -2,27 +2,32 @@
 
 from __future__ import annotations
 
-import dataclasses
-import pathlib
+from typing import Any
 
+from gremlins.pipeline import StageEntry
 from gremlins.prompts import load_prompts
-from gremlins.stages.context import StageContext
+from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import check_bail
 
 
-@dataclasses.dataclass
-class GhreviewOptions:
-    model: str | None
-    pr_url: str
-    code_style: str
-    prompt_path: pathlib.Path
+class GHReview(Stage):
+    def __init__(
+        self,
+        entry: StageEntry,
+        model: str | None,
+        *,
+        pr_url: str,
+        code_style: str,
+    ) -> None:
+        super().__init__(entry, model)
+        self.pr_url = pr_url
+        self.code_style = code_style
 
-
-def run(ctx: StageContext, options: GhreviewOptions) -> None:
-    bail_section = ""
-    if ctx.gr_id:
-        bail_section = """
+    def run(self, pipe: Any) -> None:
+        bail_section = ""
+        if self.state.gr_id:
+            bail_section = """
 
 ## Emit a bail marker (running under a gremlin pipeline)
 
@@ -38,19 +43,18 @@ If the review has no blocker-severity findings, do not run the helper — exit n
 
 **30-second rule**: if a competent developer could fix it in under 30 seconds without asking questions — missing import, wrong identifier, off-by-one, trivial rename — do not bail; flag it in the review.
 """
-    prompt = load_prompts([options.prompt_path]).format(
-        pr_url=options.pr_url,
-        code_style=options.code_style,
-        bail_section=bail_section,
-    )
-    ctx.client.run(
-        prompt,
-        label="ghreview",
-        model=options.model,
-        raw_path=ctx.session_dir / "stream-ghreview.jsonl",
-        cwd=ctx.worktree,
-    )
-    check_bail(ctx.gr_id, "/ghreview", child_key=ctx.child_key)
+        prompt_path = self.prompt_paths[-1]
+        prompt = load_prompts([prompt_path]).format(
+            pr_url=self.pr_url,
+            code_style=self.code_style,
+            bail_section=bail_section,
+        )
+        self.run_claude(
+            prompt,
+            label="ghreview",
+            raw_path=self.state.session_dir / "stream-ghreview.jsonl",
+        )
+        check_bail(self.state.gr_id, "/ghreview", child_key=self.state.child_key)
 
 
-register_stage("ghreview", run)
+register_stage("ghreview", GHReview)
