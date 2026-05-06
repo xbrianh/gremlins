@@ -43,6 +43,7 @@ Out-of-scope comments and `gh issue create` failures are not bail reasons — ha
         label="ghaddress",
         model=options.model,
         raw_path=ctx.session_dir / "stream-ghaddress.jsonl",
+        cwd=ctx.worktree,
     )
     check_bail(ctx.gr_id, "/ghaddress", child_key=ctx.child_key)
 

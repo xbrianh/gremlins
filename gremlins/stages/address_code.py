@@ -96,6 +96,7 @@ Do not call this helper if you successfully addressed every actionable finding.
             label="address-code",
             model=options.address_model,
             raw_path=ctx.session_dir / "stream-address.jsonl",
+            cwd=ctx.worktree,
         )
     except (SystemExit, Exception) as exc:
         emit_bail(

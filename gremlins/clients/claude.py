@@ -84,7 +84,12 @@ class SubprocessClaudeClient:
         cmd += ["--output-format", "stream-json"]
         return cmd
 
-    def _spawn(self, argv: list[str], prompt: str) -> subprocess.Popen[bytes]:
+    def _spawn(
+        self,
+        argv: list[str],
+        prompt: str,
+        cwd: pathlib.Path | None = None,
+    ) -> subprocess.Popen[bytes]:
         env = os.environ.copy()
         env["GREMLIN_SKIP_SUMMARY"] = "1"
         # Default bufsize (-1) gives a BufferedReader with 8 KiB reads, so
@@ -98,6 +103,7 @@ class SubprocessClaudeClient:
             stderr=None,
             start_new_session=False,
             env=env,
+            cwd=str(cwd) if cwd is not None else None,
         )
         self._track(p)
         try:
@@ -152,6 +158,7 @@ class SubprocessClaudeClient:
         capture_events: bool = False,
         on_timeout_prompt: str | None = None,
         max_retries: int = 2,
+        cwd: pathlib.Path | None = None,
     ) -> CompletedRun:
         if max_retries < 0:
             raise ValueError(f"max_retries must be >= 0, got {max_retries}")
@@ -159,7 +166,7 @@ class SubprocessClaudeClient:
         prefix = f"[{label}] " if label else ""
         active_prompt = prompt
         for attempt in range(max_retries + 1):
-            p = self._spawn(argv, active_prompt)
+            p = self._spawn(argv, active_prompt, cwd=cwd)
             try:
                 result = self._consume(p, prefix, raw_path, capture_events)
             except StreamTimeoutError:

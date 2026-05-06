@@ -73,7 +73,9 @@ class SubprocessCopilotClient:
         cmd += ["-p", prompt]
         return cmd
 
-    def _spawn(self, argv: list[str]) -> subprocess.Popen[bytes]:
+    def _spawn(
+        self, argv: list[str], cwd: pathlib.Path | None = None
+    ) -> subprocess.Popen[bytes]:
         p = subprocess.Popen(
             argv,
             stdin=subprocess.DEVNULL,
@@ -81,6 +83,7 @@ class SubprocessCopilotClient:
             stderr=None,
             start_new_session=False,
             env=os.environ.copy(),
+            cwd=str(cwd) if cwd is not None else None,
         )
         self._track(p)
         return p
@@ -95,9 +98,10 @@ class SubprocessCopilotClient:
         capture_events: bool = False,
         on_timeout_prompt: str | None = None,
         max_retries: int = 2,
+        cwd: pathlib.Path | None = None,
     ) -> CompletedRun:
         argv = self._build_argv(model, prompt)
-        p = self._spawn(argv)
+        p = self._spawn(argv, cwd=cwd)
         try:
             assert p.stdout is not None
             raw = p.stdout.read().decode(errors="replace")

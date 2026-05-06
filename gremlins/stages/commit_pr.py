@@ -69,8 +69,10 @@ def run(ctx: StageContext, options: CommitPrOptions) -> str:
     """Build the commit-pr prompt, run a fresh claude session, return the PR URL."""
     issue_num = options.issue_url.split("/")[-1] if options.issue_url else ""
 
+    cwd_arg = options.cwd or (str(ctx.worktree) if ctx.worktree is not None else None)
+
     diff = _get_diff(
-        options.impl_outcome, options.impl_handoff_branch, options.base_ref, options.cwd
+        options.impl_outcome, options.impl_handoff_branch, options.base_ref, cwd_arg
     )
 
     if isinstance(options.impl_outcome, HeadAdvanced):
@@ -79,7 +81,7 @@ def run(ctx: StageContext, options: CommitPrOptions) -> str:
             capture_output=True,
             text=True,
             check=False,
-            cwd=options.cwd,
+            cwd=cwd_arg,
         )
         worktree_dirty = bool(status_r.stdout.strip())
         if worktree_dirty:
@@ -124,6 +126,7 @@ def run(ctx: StageContext, options: CommitPrOptions) -> str:
         model=options.model,
         raw_path=ctx.session_dir / "stream-commit-pr.jsonl",
         capture_events=True,
+        cwd=ctx.worktree,
     )
 
     pr_url = extract_gh_url(

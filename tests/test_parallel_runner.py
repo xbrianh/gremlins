@@ -36,7 +36,6 @@ def _parallel_wrapper(
     children: list[tuple[str, object]],
     *,
     max_concurrent: int | None = None,
-    resume_from: str | None = None,
     set_stage_fn: object = None,
 ) -> object:
     """Return the parallel-stage callable from build_parallel_stages."""
@@ -50,7 +49,6 @@ def _parallel_wrapper(
         "test-group",
         triples,
         max_concurrent=max_concurrent,
-        resume_from=resume_from,
         set_stage_fn=set_stage_fn,  # type: ignore[arg-type]
         cancel_on_bail=False,
         bail_policy="any",
@@ -194,38 +192,18 @@ def test_parallel_wrapper_sibling_runs_when_one_child_fails() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_parallel_wrapper_resume_from_group_name_runs_all() -> None:
-    log: list[str] = []
-    children = [("a", lambda: log.append("a")), ("b", lambda: log.append("b"))]
-    # "reviews" is the group name, not a child name → all children run
-    wrapper = _parallel_wrapper(children, resume_from="reviews")
-    wrapper()  # type: ignore[operator]
-    assert sorted(log) == ["a", "b"]
-
-
-def test_parallel_wrapper_resume_from_child_name_skips_earlier() -> None:
+def test_parallel_wrapper_runs_all_children_unconditionally() -> None:
+    # Resuming a parallel group always reruns the whole group; child names
+    # are not valid resume targets (enforced at the orchestrator layer).
     log: list[str] = []
     children = [
         ("a", lambda: log.append("a")),
         ("b", lambda: log.append("b")),
         ("c", lambda: log.append("c")),
     ]
-    wrapper = _parallel_wrapper(children, resume_from="b")
+    wrapper = _parallel_wrapper(children)
     wrapper()  # type: ignore[operator]
-    assert "a" not in log
-    assert "b" in log
-    assert "c" in log
-
-
-def test_parallel_wrapper_resume_from_last_child_runs_only_last() -> None:
-    log: list[str] = []
-    children = [
-        ("a", lambda: log.append("a")),
-        ("b", lambda: log.append("b")),
-    ]
-    wrapper = _parallel_wrapper(children, resume_from="b")
-    wrapper()  # type: ignore[operator]
-    assert log == ["b"]
+    assert sorted(log) == ["a", "b", "c"]
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +219,6 @@ def test_run_stages_drives_parallel_group() -> None:
         "reviews",
         [(_n, _make_ctx(_n), _fn) for _n, _fn in children],
         max_concurrent=None,
-        resume_from=None,
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",
@@ -268,7 +245,6 @@ def test_run_stages_resume_from_group_skips_before_group() -> None:
         "reviews",
         [(_n, _make_ctx(_n), _fn) for _n, _fn in children],
         max_concurrent=None,
-        resume_from=None,
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",
@@ -335,7 +311,6 @@ def test_build_parallel_stages_names() -> None:
         "reviews",
         [("r1", _make_ctx("r1"), lambda: None)],
         max_concurrent=None,
-        resume_from=None,
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",

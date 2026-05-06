@@ -179,6 +179,44 @@ def patch_state(
         pass
 
 
+def patch_parallel_worktrees(
+    gr_id: str | None,
+    group_name: str,
+    *,
+    base_head: str | None,
+    paths: dict[str, str] | None,
+) -> None:
+    """Set or clear ``parallel_worktrees[group_name]`` in state.json.
+
+    Pass ``None`` for both ``base_head`` and ``paths`` to remove the entry
+    for ``group_name``. No-op without ``gr_id`` or when state.json is missing.
+    """
+    if not gr_id or not group_name:
+        return
+    sf = resolve_state_file(gr_id)
+    if sf is None or not sf.exists():
+        return
+    try:
+
+        def _apply(data: dict[str, Any]) -> None:
+            groups: dict[str, Any] = dict(data.get("parallel_worktrees") or {})
+            if base_head is None and paths is None:
+                groups.pop(group_name, None)
+            else:
+                groups[group_name] = {
+                    "base_head": base_head or "",
+                    "paths": dict(paths or {}),
+                }
+            if groups:
+                data["parallel_worktrees"] = groups
+            else:
+                data.pop("parallel_worktrees", None)
+
+        _locked_update(sf, _apply)
+    except Exception:
+        pass
+
+
 def check_bail(
     gr_id: str | None,
     label: str = "stage",

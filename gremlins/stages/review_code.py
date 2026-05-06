@@ -23,6 +23,7 @@ def _run_reviewer(
     where_field: str,
     label: str,
     raw_path: pathlib.Path,
+    cwd: pathlib.Path | None = None,
 ) -> None:
     style_preamble = ""
     if code_style:
@@ -59,7 +60,7 @@ Do NOT make any code changes — only write the review file.
 {focus}
 
 `{out_file}` is the canonical and required location for your review output in every case, including any short-circuit one-liner the prompt tells you to emit. Do not emit the verdict only to chat; write it to `{out_file}` and then stop."""
-    client.run(prompt, label=label, model=model, raw_path=raw_path)
+    client.run(prompt, label=label, model=model, raw_path=raw_path, cwd=cwd)
 
 
 @dataclasses.dataclass
@@ -121,6 +122,7 @@ def run(ctx: StageContext, options: ReviewCodeOptions) -> pathlib.Path:
             label=f"{options.stage_name}:{options.model}",
             raw_path=ctx.session_dir
             / f"stream-{options.stage_name}-{options.model}.jsonl",
+            cwd=ctx.worktree,
         )
         set_stage(ctx.gr_id, options.stage_name, {"model": f"done ({options.model})"})
         if not out_file.exists() or out_file.stat().st_size == 0:

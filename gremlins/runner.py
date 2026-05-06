@@ -31,6 +31,7 @@ import tempfile
 import threading
 import types
 from collections.abc import Callable, Sequence
+from typing import Any
 
 from gremlins.clients.protocol import ClaudeClient
 from gremlins.stages.context import StageContext
@@ -62,7 +63,6 @@ def build_parallel_stages(
     child_runners: list[tuple[str, StageContext, Callable[[], None]]],
     *,
     max_concurrent: int | None,
-    resume_from: str | None,
     set_stage_fn: Callable[[str], None],
     cancel_on_bail: bool,
     bail_policy: str,
@@ -78,12 +78,15 @@ def build_parallel_stages(
     ``<group>`` re-runs only the parallel and fan-in stages (worktrees must
     already exist from a prior fan-out or will be skipped if not present);
     ``<group>-fanin`` re-aggregates whatever shards exist without rerunning
-    workers.
+    workers. Child names are not valid resume targets — resuming a parallel
+    block always restarts at one of the three group-level stages.
     """
     fanout_name = f"{group_name}-fanout"
     fanin_name = f"{group_name}-fanin"
 
-    # Shared mutable state between the three stage closures.
+    # In-process mirror of the worktree paths and base HEAD persisted to
+    # state.json under parallel_worktrees[group_name]. Hydrated from
+    # state.json when stages run in a fresh process (resume).
     _worktree_paths: dict[str, pathlib.Path] = {}
     _base_head: list[str] = [""]  # list so nested functions can mutate
 
@@ -100,8 +103,81 @@ def build_parallel_stages(
         except Exception:
             return False
 
+    def _hydrate_from_state() -> None:
+        """Populate _worktree_paths/_base_head from state.json, if present."""
+        from gremlins.state import resolve_state_file
+
+        if _worktree_paths:
+            return
+        sf = resolve_state_file(gr_id)
+        if sf is None or not sf.exists():
+            return
+        try:
+            data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
+            groups: dict[str, Any] = data.get("parallel_worktrees") or {}
+            entry: dict[str, Any] = groups.get(group_name) or {}
+            paths: dict[str, str] = entry.get("paths") or {}
+            for k, v in paths.items():
+                _worktree_paths[k] = pathlib.Path(v)
+            _base_head[0] = entry.get("base_head", "") or _base_head[0]
+        except Exception as exc:
+            logger.warning(
+                "parallel group %r: could not hydrate worktree paths: %s",
+                group_name,
+                exc,
+            )
+
+    def _persist_state() -> None:
+        from gremlins.state import patch_parallel_worktrees
+
+        patch_parallel_worktrees(
+            gr_id,
+            group_name,
+            base_head=_base_head[0],
+            paths={k: str(v) for k, v in _worktree_paths.items()},
+        )
+
+    def _clear_persisted_state() -> None:
+        from gremlins.state import patch_parallel_worktrees
+
+        patch_parallel_worktrees(gr_id, group_name, base_head=None, paths=None)
+
+    def _remove_worktrees(paths: list[pathlib.Path]) -> None:
+        if not _in_git_repo():
+            return
+        for wt in paths:
+            try:
+                subprocess.run(
+                    ["git", "worktree", "remove", "--force", str(wt)],
+                    cwd=str(project_root),
+                    capture_output=True,
+                    check=False,
+                )
+            except Exception:
+                pass
+        try:
+            subprocess.run(
+                ["git", "worktree", "prune"],
+                cwd=str(project_root),
+                capture_output=True,
+                check=False,
+            )
+        except Exception:
+            pass
+
     def _fan_out() -> None:
         set_stage_fn(fanout_name)
+
+        # Tear down any worktrees the previous run recorded for this group
+        # before creating fresh ones, so resumed runs don't leak temp dirs.
+        _hydrate_from_state()
+        prior = list(_worktree_paths.values())
+        if prior:
+            _remove_worktrees(prior)
+        _worktree_paths.clear()
+        _base_head[0] = ""
+        _clear_persisted_state()
+
         if not _in_git_repo():
             return
 
@@ -142,15 +218,17 @@ def build_parallel_stages(
             wt_path = pathlib.Path(wt_dir)
             _worktree_paths[child_key] = wt_path
             ctx.worktree = wt_path
+            _persist_state()
 
     def _parallel() -> None:
         set_stage_fn(group_name)
-        child_names = [n for n, _, _ in child_runners]
         active = child_runners
-        if resume_from is not None and resume_from in child_names:
-            active = child_runners[child_names.index(resume_from) :]
         if not active:
             return
+
+        # Hydrate worktree paths from state.json if this is a fresh-process
+        # resume directly into the parallel stage (fan-out skipped).
+        _hydrate_from_state()
 
         # Set worktree on ctx for any children that fan-out already populated.
         for child_key, ctx, _ in active:
@@ -181,6 +259,9 @@ def build_parallel_stages(
 
     def _fan_in() -> None:
         set_stage_fn(fanin_name)
+        # Hydrate worktree paths from state.json if this is a fresh-process
+        # resume directly into fan-in (fan-out and parallel skipped).
+        _hydrate_from_state()
         try:
             _do_fan_in()
         finally:
@@ -268,27 +349,10 @@ def build_parallel_stages(
             )
 
     def _teardown_worktrees() -> None:
-        if not _in_git_repo():
-            return
-        for wt in _worktree_paths.values():
-            try:
-                subprocess.run(
-                    ["git", "worktree", "remove", "--force", str(wt)],
-                    cwd=str(project_root),
-                    capture_output=True,
-                    check=False,
-                )
-            except Exception:
-                pass
-        try:
-            subprocess.run(
-                ["git", "worktree", "prune"],
-                cwd=str(project_root),
-                capture_output=True,
-                check=False,
-            )
-        except Exception:
-            pass
+        _remove_worktrees(list(_worktree_paths.values()))
+        _worktree_paths.clear()
+        _base_head[0] = ""
+        _clear_persisted_state()
 
     return [
         (fanout_name, _fan_out),

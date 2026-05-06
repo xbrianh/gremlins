@@ -126,6 +126,7 @@ def run(ctx: StageContext, options: VerifyOptions) -> None:
                 label=f"verify-fix-{attempt}",
                 model=options.fix_model,
                 raw_path=ctx.session_dir / f"stream-verify-{attempt}.jsonl",
+                cwd=ctx.worktree,
             )
             _agent_bailed = True
             check_bail(ctx.gr_id, f"verify-fix-{attempt}", child_key=ctx.child_key)

@@ -337,6 +337,32 @@ def test_plan_stage_includes_code_style(tmp_path):
     assert "Be good." in client.calls[0].prompt
 
 
+def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
+    """When ctx.worktree is set (parallel child), client.run gets cwd=worktree
+    so claude -p reads/writes the isolated worktree, not the parent process cwd."""
+    client = ReviewCreatingClient(fixtures={"review-code:sonnet": MINIMAL_EVENTS})
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    ctx = StageContext(
+        client=client,
+        session_dir=tmp_path,
+        gr_id=None,
+        worktree=worktree,
+    )
+    run_review_code(
+        ctx,
+        ReviewCodeOptions(
+            plan_text="",
+            is_git=False,
+            code_style="",
+            model="sonnet",
+            stage_name="review-code",
+            prompt_paths=[_BUNDLED_PROMPTS / "review" / "detail.md"],
+        ),
+    )
+    assert client.calls[0].cwd == worktree
+
+
 def test_review_code_stage_includes_code_style(tmp_path):
     client = ReviewCreatingClient(fixtures={"review-code:sonnet": MINIMAL_EVENTS})
     ctx = _make_ctx(client, tmp_path)

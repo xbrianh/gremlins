@@ -17,6 +17,7 @@ from gremlins.git import (
     classify_impl_outcome,
     create_handoff_branch,
     git_head,
+    git_head_of_workdir,
     record_pre_impl_state,
     reset_pre_branch,
     sweep_stale_handoff_branches,
@@ -125,8 +126,9 @@ def run(ctx: StageContext, options: ImplementOptions) -> ImplStageResult | None:
     # --- local path ---
     pre_head = ""
     pre_sentinel: pathlib.Path | None = None
+    cwd_arg = str(ctx.worktree) if ctx.worktree is not None else None
     if options.is_git:
-        pre_head = git_head()
+        pre_head = git_head_of_workdir(cwd_arg) if cwd_arg is not None else git_head()
     else:
         pre_sentinel = ctx.session_dir / ".pre-impl"
         pre_sentinel.touch()
@@ -154,15 +156,17 @@ def run(ctx: StageContext, options: ImplementOptions) -> ImplStageResult | None:
         label="implement",
         model=options.impl_model,
         raw_path=ctx.session_dir / "stream-implement.jsonl",
+        cwd=ctx.worktree,
     )
 
     if options.is_git:
-        post_head = git_head()
+        post_head = git_head_of_workdir(cwd_arg) if cwd_arg is not None else git_head()
         porcelain = subprocess.run(
             ["git", "status", "--porcelain"],
             capture_output=True,
             text=True,
             check=False,
+            cwd=cwd_arg,
         )
         if post_head == pre_head and not porcelain.stdout.strip():
             raise RuntimeError("implementation stage produced no changes; aborting")
@@ -198,7 +202,8 @@ def _run_implement_gh(ctx: StageContext, options: ImplementOptions) -> ImplStage
         plan_location_note=plan_location_note,
     )
 
-    pre_state = record_pre_impl_state(cwd=options.cwd)
+    impl_cwd = options.cwd or (str(ctx.worktree) if ctx.worktree is not None else None)
+    pre_state = record_pre_impl_state(cwd=impl_cwd)
 
     ctx.client.run(
         prompt,
@@ -206,9 +211,10 @@ def _run_implement_gh(ctx: StageContext, options: ImplementOptions) -> ImplStage
         model=options.impl_model,
         raw_path=ctx.session_dir / "stream-implement.jsonl",
         capture_events=True,
+        cwd=ctx.worktree,
     )
 
-    outcome = classify_impl_outcome(pre_state, cwd=options.cwd)
+    outcome = classify_impl_outcome(pre_state, cwd=impl_cwd)
 
     if isinstance(outcome, EmptyImpl):
         raise RuntimeError(
@@ -223,9 +229,9 @@ def _run_implement_gh(ctx: StageContext, options: ImplementOptions) -> ImplStage
 
     handoff_branch = ""
     if isinstance(outcome, HeadAdvanced):
-        handoff_branch = create_handoff_branch(pre_state, cwd=options.cwd)
-        reset_pre_branch(pre_state, cwd=options.cwd)
-        sweep_stale_handoff_branches(handoff_branch, cwd=options.cwd)
+        handoff_branch = create_handoff_branch(pre_state, cwd=impl_cwd)
+        reset_pre_branch(pre_state, cwd=impl_cwd)
+        sweep_stale_handoff_branches(handoff_branch, cwd=impl_cwd)
         commit_count = outcome.commit_count
         pre_branch_note = f" and reset {pre_state.branch}" if pre_state.branch else ""
         sys.stdout.write(

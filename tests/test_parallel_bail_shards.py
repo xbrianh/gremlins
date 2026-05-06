@@ -182,7 +182,6 @@ def _build_fanin_test(
         "reviews",
         children,
         max_concurrent=None,
-        resume_from=None,
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy=bail_policy,
@@ -278,7 +277,6 @@ def test_cancel_on_bail_skips_unstarted_children():
         "workers",
         children,
         max_concurrent=2,  # only 2 concurrent; c starts only after a or b finishes
-        resume_from=None,
         set_stage_fn=lambda _n: None,
         cancel_on_bail=True,
         bail_policy="any",
@@ -330,7 +328,6 @@ def test_run_stages_resume_from_fanin_name(tmp_path, monkeypatch):
         "reviews",
         [("c", ctx, lambda: None)],
         max_concurrent=None,
-        resume_from="reviews-fanin",
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",
@@ -397,7 +394,6 @@ def test_worktree_lifecycle_fanout_creates_and_fanin_removes(tmp_path):
         "reviews",
         [("a", ctx_a, lambda: None), ("b", ctx_b, lambda: None)],
         max_concurrent=None,
-        resume_from=None,
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",
@@ -449,6 +445,125 @@ def test_worktree_lifecycle_fanout_creates_and_fanin_removes(tmp_path):
         os.chdir(orig_cwd)
 
 
+def test_fanout_persists_worktrees_and_fresh_fanin_can_clean_up(tmp_path, monkeypatch):
+    """Fan-out writes worktree paths to state.json; a fresh build_parallel_stages
+    instance (simulating a resume in a new process) reads them back and cleans
+    them up during fan-in."""
+    gr_id = "gr-resume-wt"
+    _make_state(tmp_path, gr_id, monkeypatch)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+
+    def _make_ctx(name: str) -> StageContext:
+        return StageContext(
+            client=FakeClaudeClient(),
+            session_dir=tmp_path / name,
+            gr_id=gr_id,
+            child_key=name,
+        )
+
+    # First instance: only run fan-out, then drop the closure (simulating
+    # process exit between fan-out and parallel/fan-in).
+    stages_run1 = build_parallel_stages(
+        "reviews",
+        [("a", _make_ctx("a"), lambda: None), ("b", _make_ctx("b"), lambda: None)],
+        max_concurrent=None,
+        set_stage_fn=lambda _n: None,
+        cancel_on_bail=False,
+        bail_policy="any",
+        gr_id=gr_id,
+        project_root=repo,
+    )
+    stages_run1[0][1]()  # fan-out only
+
+    # state.json should now record both worktree paths.
+    sf = state_mod.resolve_state_file(gr_id)
+    assert sf is not None
+    persisted = (_read_state(sf).get("parallel_worktrees") or {}).get("reviews") or {}
+    assert set(persisted.get("paths", {}).keys()) == {"a", "b"}
+    prior_paths = [pathlib.Path(p) for p in persisted["paths"].values()]
+    for p in prior_paths:
+        assert p.is_dir()
+
+    # Second instance: simulate fresh process. New closures, empty in-process
+    # state. Run fan-in directly — it should hydrate from state.json and tear
+    # down the worktrees fan-out created in run 1.
+    stages_run2 = build_parallel_stages(
+        "reviews",
+        [("a", _make_ctx("a"), lambda: None), ("b", _make_ctx("b"), lambda: None)],
+        max_concurrent=None,
+        set_stage_fn=lambda _n: None,
+        cancel_on_bail=False,
+        bail_policy="any",
+        gr_id=gr_id,
+        project_root=repo,
+    )
+    stages_run2[2][1]()  # fan-in
+
+    # Worktrees gone from disk and from state.json.
+    for p in prior_paths:
+        assert not p.is_dir()
+    assert "reviews" not in (_read_state(sf).get("parallel_worktrees") or {})
+
+
+def test_fanout_resume_tears_down_prior_worktrees(tmp_path, monkeypatch):
+    """A second fan-out (e.g. after `--resume-from <group>-fanout`) cleans up
+    the previous run's worktrees before creating fresh ones."""
+    gr_id = "gr-resume-fanout"
+    _make_state(tmp_path, gr_id, monkeypatch)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+
+    def _make_ctx(name: str) -> StageContext:
+        return StageContext(
+            client=FakeClaudeClient(),
+            session_dir=tmp_path / name,
+            gr_id=gr_id,
+            child_key=name,
+        )
+
+    stages_run1 = build_parallel_stages(
+        "reviews",
+        [("a", _make_ctx("a"), lambda: None)],
+        max_concurrent=None,
+        set_stage_fn=lambda _n: None,
+        cancel_on_bail=False,
+        bail_policy="any",
+        gr_id=gr_id,
+        project_root=repo,
+    )
+    stages_run1[0][1]()  # fan-out
+
+    sf = state_mod.resolve_state_file(gr_id)
+    assert sf is not None
+    prior_path_str = (_read_state(sf)["parallel_worktrees"]["reviews"]["paths"])["a"]
+    prior_path = pathlib.Path(prior_path_str)
+    assert prior_path.is_dir()
+
+    # Re-run fan-out from a fresh closure → prior worktree should be torn down,
+    # new one created at a fresh path.
+    stages_run2 = build_parallel_stages(
+        "reviews",
+        [("a", _make_ctx("a"), lambda: None)],
+        max_concurrent=None,
+        set_stage_fn=lambda _n: None,
+        cancel_on_bail=False,
+        bail_policy="any",
+        gr_id=gr_id,
+        project_root=repo,
+    )
+    stages_run2[0][1]()  # fan-out again
+
+    new_path_str = (_read_state(sf)["parallel_worktrees"]["reviews"]["paths"])["a"]
+    assert new_path_str != prior_path_str
+    assert not prior_path.is_dir()
+    assert pathlib.Path(new_path_str).is_dir()
+
+
 # ---------------------------------------------------------------------------
 # Existing review-lens pipeline behaviour unchanged
 # ---------------------------------------------------------------------------
@@ -465,7 +580,6 @@ def test_build_parallel_stages_returns_three_named_stages():
         "reviews",
         [("r1", ctx, lambda: None)],
         max_concurrent=None,
-        resume_from=None,
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",
@@ -498,7 +612,6 @@ def test_parallel_all_children_complete_with_defaults():
             ("b", ctx_b, lambda: ran.append("b")),
         ],
         max_concurrent=None,
-        resume_from=None,
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",

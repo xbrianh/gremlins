@@ -231,6 +231,7 @@ def run(ctx: StageContext, options: WaitCiOptions) -> None:
                 label=f"ci-fix-{attempt}",
                 model=options.model,
                 raw_path=ctx.session_dir / f"stream-ci-fix-{attempt}.jsonl",
+                cwd=ctx.worktree,
             )
             _agent_bailed = True
             check_bail(ctx.gr_id, f"ci-fix-{attempt}", child_key=ctx.child_key)

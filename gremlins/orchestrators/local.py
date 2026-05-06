@@ -219,7 +219,9 @@ def _build_stage_runner(
                 ctx,
                 verify.VerifyOptions(
                     fix_model=model,
-                    cwd=pathlib.Path.cwd(),
+                    cwd=ctx.worktree
+                    if ctx.worktree is not None
+                    else pathlib.Path.cwd(),
                     code_style=code_style,
                     is_git=is_git,
                     commit_after_fix=is_git,
@@ -315,36 +317,36 @@ def local_main(
     stage_names = [s.name for s in pipeline.stages]
 
     # Expand parallel groups to their three runtime stages: fanout, parallel, fanin.
+    # Child names are not valid resume targets — resuming a parallel block always
+    # restarts at one of the three group-level stages so prior shards/worktrees
+    # don't bleed across runs.
     _expanded_stage_names: list[str] = []
-    _child_to_group: dict[str, str] = {}
+    _child_names: set[str] = set()
     for _e in pipeline.stages:
         if _e.type == "parallel":
             _expanded_stage_names.extend(
                 [f"{_e.name}-fanout", _e.name, f"{_e.name}-fanin"]
             )
             for _child in _e.children:
-                if _child.name in _child_to_group or _child.name in stage_names:
+                if _child.name in _child_names or _child.name in stage_names:
                     die(f"duplicate child stage name {_child.name!r}")
-                _child_to_group[_child.name] = _e.name
+                _child_names.add(_child.name)
         else:
             _expanded_stage_names.append(_e.name)
 
-    all_valid_stages = _expanded_stage_names + list(_child_to_group)
     seen: set[str] = set()
-    for _n in all_valid_stages:
+    for _n in _expanded_stage_names:
         if _n in seen:
             die(f"pipeline has duplicate stage name {_n!r}")
         seen.add(_n)
 
-    if args.resume_from and args.resume_from not in all_valid_stages:
+    if args.resume_from and args.resume_from not in _expanded_stage_names:
         die(
             f"--resume-from {args.resume_from!r} is not a valid stage; "
-            f"valid: {all_valid_stages}"
+            f"valid: {_expanded_stage_names}"
         )
 
     run_resume_from = args.resume_from
-    if args.resume_from in _child_to_group:
-        run_resume_from = _child_to_group[args.resume_from]
 
     try:
         validate_stage_specs(stage_specs, pipeline)
@@ -503,7 +505,6 @@ def local_main(
                     group_name,
                     child_runners,
                     max_concurrent=e.max_concurrent,
-                    resume_from=args.resume_from,
                     set_stage_fn=lambda n: set_stage(gr_id, n),
                     cancel_on_bail=e.cancel_on_bail,
                     bail_policy=e.bail_policy,
