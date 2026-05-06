@@ -5,10 +5,10 @@ import pathlib
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
+from gremlins.pipeline import StageEntry
 from gremlins.stages.context import StageContext
 from gremlins.stages.ghaddress import GHAddress
-from gremlins.stages.ghreview import GhreviewOptions
-from gremlins.stages.ghreview import run as run_ghreview
+from gremlins.stages.ghreview import GHReview
 
 _BUNDLED_PROMPTS = (
     pathlib.Path(__file__).resolve().parent.parent
@@ -22,17 +22,28 @@ def _make_ctx(client, tmp_path, *, gr_id=None):
     return StageContext(client=client, session_dir=tmp_path, gr_id=gr_id)
 
 
+def _make_ghreview(client, tmp_path, *, gr_id=None, pr_url, code_style):
+    entry = StageEntry(
+        name="ghreview",
+        type="ghreview",
+        client=None,
+        prompt_paths=[_BUNDLED_PROMPTS / "ghreview.md"],
+        options={},
+    )
+    stage = GHReview(entry, "sonnet", pr_url=pr_url, code_style=code_style)
+    stage.bind(_make_ctx(client, tmp_path, gr_id=gr_id))
+    return stage
+
+
 def test_ghreview_prompt_includes_pr_url_and_code_style(tmp_path):
     client = FakeClaudeClient(fixtures={"ghreview": MINIMAL_EVENTS})
-    run_ghreview(
-        _make_ctx(client, tmp_path),
-        GhreviewOptions(
-            model="sonnet",
-            pr_url="https://github.com/owner/repo/pull/1",
-            code_style="Be good.",
-            prompt_path=_BUNDLED_PROMPTS / "ghreview.md",
-        ),
+    stage = _make_ghreview(
+        client,
+        tmp_path,
+        pr_url="https://github.com/owner/repo/pull/1",
+        code_style="Be good.",
     )
+    stage.run(None)
     prompt = client.calls[0].prompt
     assert "https://github.com/owner/repo/pull/1" in prompt
     assert "Be good." in prompt
@@ -42,43 +53,40 @@ def test_ghreview_prompt_includes_pr_url_and_code_style(tmp_path):
 
 def test_ghreview_prompt_no_bail_section_without_gr_id(tmp_path):
     client = FakeClaudeClient(fixtures={"ghreview": MINIMAL_EVENTS})
-    run_ghreview(
-        _make_ctx(client, tmp_path, gr_id=None),
-        GhreviewOptions(
-            model="sonnet",
-            pr_url="https://github.com/owner/repo/pull/1",
-            code_style="",
-            prompt_path=_BUNDLED_PROMPTS / "ghreview.md",
-        ),
+    stage = _make_ghreview(
+        client,
+        tmp_path,
+        gr_id=None,
+        pr_url="https://github.com/owner/repo/pull/1",
+        code_style="",
     )
+    stage.run(None)
     assert "python -m gremlins.bail" not in client.calls[0].prompt
 
 
 def test_ghreview_prompt_includes_bail_section_with_gr_id(tmp_path):
     client = FakeClaudeClient(fixtures={"ghreview": MINIMAL_EVENTS})
-    run_ghreview(
-        _make_ctx(client, tmp_path, gr_id="gr-test"),
-        GhreviewOptions(
-            model="sonnet",
-            pr_url="https://github.com/owner/repo/pull/1",
-            code_style="",
-            prompt_path=_BUNDLED_PROMPTS / "ghreview.md",
-        ),
+    stage = _make_ghreview(
+        client,
+        tmp_path,
+        gr_id="gr-test",
+        pr_url="https://github.com/owner/repo/pull/1",
+        code_style="",
     )
+    stage.run(None)
     assert "python -m gremlins.bail" in client.calls[0].prompt
 
 
 def test_ghreview_bail_rubric(tmp_path):
     client = FakeClaudeClient(fixtures={"ghreview": MINIMAL_EVENTS})
-    run_ghreview(
-        _make_ctx(client, tmp_path, gr_id="gr-test"),
-        GhreviewOptions(
-            model="sonnet",
-            pr_url="https://github.com/owner/repo/pull/1",
-            code_style="",
-            prompt_path=_BUNDLED_PROMPTS / "ghreview.md",
-        ),
+    stage = _make_ghreview(
+        client,
+        tmp_path,
+        gr_id="gr-test",
+        pr_url="https://github.com/owner/repo/pull/1",
+        code_style="",
     )
+    stage.run(None)
     prompt = client.calls[0].prompt
     assert "30 seconds" in prompt
     assert "missing import" in prompt
@@ -86,8 +94,6 @@ def test_ghreview_bail_rubric(tmp_path):
 
 
 def _make_ghaddress(client, tmp_path, *, gr_id=None, pr_url, code_style):
-    from gremlins.pipeline import StageEntry
-
     entry = StageEntry(
         name="ghaddress",
         type="ghaddress",

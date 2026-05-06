@@ -477,15 +477,11 @@ def _build_stage_runner(
             _ensure_pr_url(gh_state, state_file, args.resume_from)
             set_stage(gr_id, entry.name)
             logger.info("[4/8] running /ghreview")
-            ghreview.run(
-                ctx,
-                ghreview.GhreviewOptions(
-                    model=model,
-                    pr_url=gh_state["pr_url"],
-                    code_style=code_style,
-                    prompt_path=entry.prompt_paths[-1],
-                ),
+            stage = ghreview.GHReview(
+                entry, model, pr_url=gh_state["pr_url"], code_style=code_style
             )
+            stage.bind(ctx)
+            stage.run(None)
 
         return _ghreview
 
