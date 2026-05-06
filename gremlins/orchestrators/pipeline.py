@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import pathlib
 
+from gremlins.clients.protocol import ClaudeClient
 from gremlins.git import in_git_repo
 from gremlins.pipeline import StageEntry
 from gremlins.pipeline import load_pipeline as _load_pipeline
+from gremlins.runner import install_signal_handlers
 from gremlins.stages import (
     address_code,
     commit_pr,
@@ -70,6 +72,10 @@ class PipelineRunner:
             session_dir=session_dir,
             gr_id=gr_id,
         )
+
+    def run(self, *clients: ClaudeClient) -> None:
+        # stub — stage-running loop lands in a later plan step
+        install_signal_handlers(*clients)
 
 
 # Keep old name as alias for backwards compatibility during migration

@@ -32,6 +32,7 @@ from gremlins.git import (
     rev_exists,
 )
 from gremlins.logging_setup import configure_logging
+from gremlins.orchestrators.pipeline import LocalPipeline
 from gremlins.pipeline import (
     StageEntry,
     load_pipeline,
@@ -292,13 +293,18 @@ def local_main(
     if client is None:
         _client_for_spec(default_spec)
 
+    session_dir = resolve_session_dir(gr_id)
+
     if client is not None:
-        install_signal_handlers(client)
+        _signal_clients = [client]
     elif _spec_clients:
-        all_clients = list(_spec_clients.values())
-        install_signal_handlers(all_clients[0], *all_clients[1:])
+        _signal_clients = list(_spec_clients.values())
     else:
-        install_signal_handlers(to_client(default_spec))
+        _signal_clients = [to_client(default_spec)]
+    try:
+        LocalPipeline(pipeline.stages, args=args, session_dir=session_dir, gr_id=gr_id).run(*_signal_clients)
+    except ValueError as exc:
+        die(str(exc))
 
     stage_names = [s.name for s in pipeline.stages]
 
@@ -339,7 +345,6 @@ def local_main(
     except ValueError as exc:
         die(str(exc))
 
-    session_dir = resolve_session_dir(gr_id)
     plan_file = session_dir / "plan.md"
 
     # Determine the review-code output file path for the resume guard

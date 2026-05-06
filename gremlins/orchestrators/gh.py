@@ -29,12 +29,13 @@ from gremlins.env_file import load_env_file
 from gremlins.gh_utils import get_repo, parse_issue_ref, view_issue
 from gremlins.git import DirtyOnly, HeadAdvanced
 from gremlins.logging_setup import configure_logging
+from gremlins.orchestrators.pipeline import GHPipeline
 from gremlins.pipeline import (
     StageEntry,
     load_pipeline,
     resolve_pipeline_path,
 )
-from gremlins.runner import build_parallel_stages, install_signal_handlers, run_stages
+from gremlins.runner import build_parallel_stages, run_stages
 from gremlins.stages import (
     commit_pr,
     ghaddress,
@@ -579,13 +580,18 @@ def gh_main(
         effective_client = _client_for_spec(default_spec)
     default_model = default_spec.model
 
+    session_dir = resolve_session_dir(gr_id)
+
     if client is not None:
-        install_signal_handlers(client)
+        _signal_clients = [client]
     elif _spec_clients:
-        all_clients = list(_spec_clients.values())
-        install_signal_handlers(all_clients[0], *all_clients[1:])
+        _signal_clients = list(_spec_clients.values())
     else:
-        install_signal_handlers(effective_client)
+        _signal_clients = [effective_client]
+    try:
+        GHPipeline(pipeline.stages, args=args, session_dir=session_dir, gr_id=gr_id).run(*_signal_clients)
+    except ValueError as exc:
+        die(str(exc))
 
     stage_names = [s.name for s in pipeline.stages]
 
@@ -627,7 +633,6 @@ def gh_main(
         die(str(exc))
 
     repo = get_repo()
-    session_dir = resolve_session_dir(gr_id)
     plan_md = session_dir / "plan.md"
     spec_file = session_dir / "spec.md"
 
