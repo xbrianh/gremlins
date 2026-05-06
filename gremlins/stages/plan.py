@@ -2,39 +2,44 @@
 
 from __future__ import annotations
 
-import dataclasses
 import pathlib
+from typing import Any
 
+from gremlins.pipeline import StageEntry
 from gremlins.prompts import load_prompts
-from gremlins.stages.context import StageContext
+from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 
 
-@dataclasses.dataclass
-class PlanOptions:
-    plan_model: str
-    plan_file: pathlib.Path
-    instructions: str
-    code_style: str
-    prompt_path: pathlib.Path
+class Plan(Stage):
+    def __init__(
+        self,
+        entry: StageEntry,
+        model: str | None,
+        *,
+        plan_file: pathlib.Path,
+        instructions: str,
+        code_style: str,
+    ) -> None:
+        super().__init__(entry, model)
+        self.plan_file = plan_file
+        self.instructions = instructions
+        self.code_style = code_style
+
+    def run(self, pipe: Any) -> None:
+        template = load_prompts([self.prompt_paths[-1]])
+        prompt = template.format(
+            plan_file=self.plan_file,
+            instructions=self.instructions,
+            code_style=self.code_style,
+        )
+        self.run_claude(
+            prompt,
+            label="plan",
+            raw_path=self.state.session_dir / "stream-plan.jsonl",
+        )
+        if not self.plan_file.exists() or self.plan_file.stat().st_size == 0:
+            raise RuntimeError(f"plan stage did not produce {self.plan_file}")
 
 
-def run(ctx: StageContext, options: PlanOptions) -> None:
-    template = load_prompts([options.prompt_path])
-    prompt = template.format(
-        plan_file=options.plan_file,
-        instructions=options.instructions,
-        code_style=options.code_style,
-    )
-    ctx.client.run(
-        prompt,
-        label="plan",
-        model=options.plan_model,
-        raw_path=ctx.session_dir / "stream-plan.jsonl",
-        cwd=ctx.worktree,
-    )
-    if not options.plan_file.exists() or options.plan_file.stat().st_size == 0:
-        raise RuntimeError(f"plan stage did not produce {options.plan_file}")
-
-
-register_stage("plan", run)
+register_stage("plan", Plan)
