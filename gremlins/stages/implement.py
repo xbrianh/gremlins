@@ -28,7 +28,7 @@ from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 
 _IMPL_COMMIT_GIT_PATH = (
-    pathlib.Path(__file__).parent.parent
+    pathlib.Path(__file__).resolve().parent.parent
     / "pipelines"
     / "prompts"
     / "impl_commit_git.md"
