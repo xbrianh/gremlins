@@ -2,7 +2,9 @@
 
 Conventions:
 - Predicates return bool and never raise.
-- Value-returning helpers raise GitError on failure.
+- Value-returning helpers raise GitError on failure. _git-based helpers
+  (record_pre_impl_state, create_handoff_branch, etc.) still raise RuntimeError
+  pending migration to _run_git.
 - Best-effort helpers swallow errors and use a try_ prefix.
 - Every helper accepts cwd: str | os.PathLike | None = None.
 - _run_git defaults to check=True and raises GitError on non-zero exit.
@@ -41,31 +43,33 @@ def _run_git(
             raise GitError(r.returncode, r.stderr.strip())
         return r
     else:
-        rr: subprocess.CompletedProcess[bytes] = subprocess.run(
+        rr = subprocess.run(
             ["git"] + args,
             cwd=cwd,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
         )
         if check and rr.returncode != 0:
-            raise GitError(rr.returncode, "")
-        return subprocess.CompletedProcess(rr.args, rr.returncode, "", "")
+            raise GitError(rr.returncode, rr.stderr.strip())
+        return subprocess.CompletedProcess(rr.args, rr.returncode, "", rr.stderr)
 
 
-def in_git_repo() -> bool:
+def in_git_repo(cwd: str | os.PathLike[str] | None = None) -> bool:
     try:
-        r = _run_git(["rev-parse", "--git-dir"], check=False, capture=False)
+        r = _run_git(["rev-parse", "--git-dir"], cwd=cwd, check=False, capture=False)
         return r.returncode == 0
-    except Exception:
+    except OSError:
         return False
 
 
-def git_head() -> str:
+def git_head(cwd: str | os.PathLike[str] | None = None) -> str:
     r = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         capture_output=True,
         text=True,
         check=False,
+        cwd=cwd,
     )
     return r.stdout.strip() if r.returncode == 0 else ""
 
@@ -122,6 +126,7 @@ class DivergentHead:
 ImplOutcome = EmptyImpl | DirtyOnly | HeadAdvanced | DivergentHead
 
 
+# being phased out in favour of _run_git
 def _git(
     args: list[str], *, cwd: str | None = None, **kwargs: Any
 ) -> subprocess.CompletedProcess[Any]:
@@ -290,7 +295,7 @@ def is_git_repo(path: str) -> bool:
     try:
         r = _run_git(["-C", path, "rev-parse", "--git-dir"], check=False, capture=False)
         return r.returncode == 0
-    except Exception:
+    except OSError:
         return False
 
 
