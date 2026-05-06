@@ -89,9 +89,7 @@ def _resolve_project_root(cwd_from_input: str) -> str:
     root = os.environ.get("CLAUDE_PROJECT_DIR") or cwd_from_input or os.getcwd()
     if root:
         try:
-            top = _git_mod.toplevel(root)
-            if top:
-                return top
+            return _git_mod.toplevel(root)
         except Exception:
             pass
     return root
