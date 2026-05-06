@@ -73,6 +73,22 @@ class PipelineRunner:
             gr_id=gr_id,
         )
 
+    def validate_resume_target(self) -> None:
+        resume_from = getattr(self.args, "resume_from", None)
+        if not resume_from:
+            return
+        expanded: list[str] = []
+        for entry in self.stages:
+            if entry.type == "parallel":
+                expanded.extend([f"{entry.name}-fanout", entry.name, f"{entry.name}-fanin"])
+            else:
+                expanded.append(entry.name)
+        if resume_from not in expanded:
+            raise ValueError(
+                f"--resume-from {resume_from!r} is not a valid stage; "
+                f"valid: {expanded}"
+            )
+
     def run(self, *clients: ClaudeClient) -> None:
         # stub — stage-running loop lands in a later plan step
         install_signal_handlers(*clients)

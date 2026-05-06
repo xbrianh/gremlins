@@ -302,7 +302,9 @@ def local_main(
     else:
         _signal_clients = [to_client(default_spec)]
     try:
-        LocalPipeline(pipeline.stages, args=args, session_dir=session_dir, gr_id=gr_id).run(*_signal_clients)
+        pipe = LocalPipeline(pipeline.stages, args=args, session_dir=session_dir, gr_id=gr_id)
+        pipe.validate_resume_target()
+        pipe.run(*_signal_clients)
     except ValueError as exc:
         die(str(exc))
 
@@ -331,12 +333,6 @@ def local_main(
         if _n in seen:
             die(f"pipeline has duplicate stage name {_n!r}")
         seen.add(_n)
-
-    if args.resume_from and args.resume_from not in _expanded_stage_names:
-        die(
-            f"--resume-from {args.resume_from!r} is not a valid stage; "
-            f"valid: {_expanded_stage_names}"
-        )
 
     run_resume_from = args.resume_from
 
