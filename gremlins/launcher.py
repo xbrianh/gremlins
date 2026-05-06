@@ -25,6 +25,7 @@ import yaml
 
 from gremlins import git as _git_mod
 from gremlins.clients import PACKAGE_DEFAULT
+from gremlins.gh_utils import parse_issue_ref, resolve_default_branch, view_issue
 from gremlins.pipeline import load_pipeline, resolve_pipeline_path
 
 VALID_KINDS = {"ghgremlin", "localgremlin", "bossgremlin"}
@@ -78,8 +79,6 @@ def _fetch_issue_title(plan: str) -> str:
     Returns '' on any error so callers can fall back gracefully.
     """
     try:
-        from gremlins.gh_utils import parse_issue_ref, view_issue
-
         target_repo, issue_ref = parse_issue_ref(plan, "")
         if issue_ref is None:
             return ""
@@ -439,7 +438,7 @@ def launch(
                 project_root, gr_id, base_ref=base_ref
             )
         elif kind == "ghgremlin":
-            default_branch = _git_mod.resolve_default_branch(project_root)
+            default_branch = resolve_default_branch(project_root)
             refspec = (
                 f"refs/heads/{default_branch}:refs/remotes/origin/{default_branch}"
             )
