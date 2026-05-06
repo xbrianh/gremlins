@@ -195,15 +195,15 @@ def _build_stage_runner(
         def _address_code() -> None:
             set_stage(ctx.gr_id, entry.name)
             logger.info("addressing code reviews (model: %s)", model)
-            opts = address_code.AddressCodeOptions(
-                address_model=model,
+            stage = address_code.AddressCode(
+                entry,
+                model,
                 is_git=is_git,
                 code_style=code_style,
                 review_stage_names=review_stage_names,
             )
-            if entry.prompt_paths:
-                opts.prompt_path = entry.prompt_paths[-1]
-            address_code.run(ctx, opts)
+            stage.bind(ctx)
+            stage.run(None)
 
         return _address_code
 
@@ -657,12 +657,19 @@ def address_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
 
     ctx = StageContext(client=client, session_dir=session_dir, gr_id=None)
     logger.info("addressing code reviews (model: %s)", args.address)
-    address_code.run(
-        ctx,
-        address_code.AddressCodeOptions(
-            address_model=args.address,
-            is_git=is_git,
-            code_style=code_style,
-        ),
+    entry = StageEntry(
+        name="address-code",
+        type="address-code",
+        client=None,
+        prompt_paths=[],
+        options={},
     )
+    stage = address_code.AddressCode(
+        entry,
+        args.address,
+        is_git=is_git,
+        code_style=code_style,
+    )
+    stage.bind(ctx)
+    stage.run(None)
     return 0
