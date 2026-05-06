@@ -16,8 +16,7 @@ from gremlins.git import (
     PreImplState,
     classify_impl_outcome,
     create_handoff_branch,
-    git_head,
-    git_head_of_workdir,
+    head_sha,
     record_pre_impl_state,
     reset_pre_branch,
     sweep_stale_handoff_branches,
@@ -128,7 +127,7 @@ def run(ctx: StageContext, options: ImplementOptions) -> ImplStageResult | None:
     pre_sentinel: pathlib.Path | None = None
     cwd_arg = str(ctx.worktree) if ctx.worktree is not None else None
     if options.is_git:
-        pre_head = git_head_of_workdir(cwd_arg) if cwd_arg is not None else git_head()
+        pre_head = head_sha(cwd=cwd_arg)
     else:
         pre_sentinel = ctx.session_dir / ".pre-impl"
         pre_sentinel.touch()
@@ -160,7 +159,7 @@ def run(ctx: StageContext, options: ImplementOptions) -> ImplStageResult | None:
     )
 
     if options.is_git:
-        post_head = git_head_of_workdir(cwd_arg) if cwd_arg is not None else git_head()
+        post_head = head_sha(cwd=cwd_arg)
         porcelain = subprocess.run(
             ["git", "status", "--porcelain"],
             capture_output=True,

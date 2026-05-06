@@ -63,25 +63,8 @@ def in_git_repo(cwd: str | os.PathLike[str] | None = None) -> bool:
         return False
 
 
-def git_head(cwd: str | os.PathLike[str] | None = None) -> str:
-    r = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        capture_output=True,
-        text=True,
-        check=False,
-        cwd=cwd,
-    )
-    return r.stdout.strip() if r.returncode == 0 else ""
-
-
-def git_head_of_workdir(workdir: str) -> str:
-    r = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        capture_output=True,
-        text=True,
-        check=False,
-        cwd=workdir,
-    )
+def head_sha(cwd: str | os.PathLike[str] | None = None) -> str:
+    r = _run_git(["rev-parse", "HEAD"], cwd=cwd, check=False)
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
@@ -288,15 +271,6 @@ def sweep_stale_handoff_branches(handoff_branch: str, cwd: str | None = None) ->
                 "(unique commits would be lost)\n"
             )
             sys.stderr.flush()
-
-
-def is_git_repo(path: str) -> bool:
-    """Return True if `path` is inside a git repository."""
-    try:
-        r = _run_git(["-C", path, "rev-parse", "--git-dir"], check=False, capture=False)
-        return r.returncode == 0
-    except OSError:
-        return False
 
 
 def resolve_default_branch(project_root: str) -> str:

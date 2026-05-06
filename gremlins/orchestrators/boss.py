@@ -874,7 +874,7 @@ def boss_main(argv: list[str], *, gr_id: str | None = None) -> int:
         )
         # Record initial boss HEAD so local children branch from the right commit.
         if chain_kind == "local" and boss_workdir and os.path.isdir(boss_workdir):
-            initial_head = _git_mod.git_head_of_workdir(boss_workdir)
+            initial_head = _git_mod.head_sha(cwd=boss_workdir)
             if not initial_head:
                 die(f"failed to resolve HEAD for boss workdir: {boss_workdir!r}")
             patch_state(gr_id, current_head=initial_head)
@@ -1063,7 +1063,7 @@ def boss_main(argv: list[str], *, gr_id: str | None = None) -> int:
                         and boss_workdir
                         and os.path.isdir(boss_workdir)
                     ):
-                        new_head = _git_mod.git_head_of_workdir(boss_workdir)
+                        new_head = _git_mod.head_sha(cwd=boss_workdir)
                         if not new_head:
                             die(
                                 f"child {current_child_id} landed locally, but could not resolve "

@@ -432,7 +432,7 @@ def launch(
     # Worktree setup
     branch = ""
     worktree_base = ""
-    if _git_mod.is_git_repo(project_root):
+    if _git_mod.in_git_repo(cwd=project_root):
         if kind == "localgremlin":
             setup_kind = "worktree-branch"
             workdir, branch = _git_mod.setup_worktree_branch(
