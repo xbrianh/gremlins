@@ -168,7 +168,11 @@ class Pipeline:
                         child_key=child.name,
                     )
                     child_runners.append(
-                        (child.name, child_ctx, self._make_runner(child, child_ctx, child_spec.model))
+                        (
+                            child.name,
+                            child_ctx,
+                            self._make_runner(child, child_ctx, child_spec.model),
+                        )
                     )
                 stages.extend(
                     build_parallel_stages(
@@ -189,7 +193,9 @@ class Pipeline:
                     session_dir=self.session_dir,
                     gr_id=gr_id,
                 )
-                stages.append((e.name, self._make_runner(e, stage_ctx, stage_spec.model)))
+                stages.append(
+                    (e.name, self._make_runner(e, stage_ctx, stage_spec.model))
+                )
 
         run_stages(stages, resume_from=self.args.resume_from)
 
@@ -267,7 +273,9 @@ class LocalPipeline(Pipeline):
             def _plan() -> None:
                 if plan_path:
                     if plan_copied_from_source:
-                        logger.info("plan supplied via --plan (copied) -> %s", plan_file)
+                        logger.info(
+                            "plan supplied via --plan (copied) -> %s", plan_file
+                        )
                     else:
                         logger.info("plan reused from snapshot -> %s", plan_file)
                 else:
@@ -363,7 +371,9 @@ class LocalPipeline(Pipeline):
             cmds = getattr(args, "cmds", None)
             if cmds is not None:
                 entry.options["cmds"] = cmds
-            entry.options.setdefault("max_attempts", getattr(args, "test_max_attempts", 3))
+            entry.options.setdefault(
+                "max_attempts", getattr(args, "test_max_attempts", 3)
+            )
 
             def _verify() -> None:
                 resolved_cmds = entry.options.get("cmds", [])
@@ -656,7 +666,9 @@ class GHPipeline(Pipeline):
             def _wait_ci() -> None:
                 self._ensure_pr_url()
                 set_stage(self.gr_id, entry.name)
-                logger.info("[7/8] waiting for CI checks (up to 3 attempts, 20min each)")
+                logger.info(
+                    "[7/8] waiting for CI checks (up to 3 attempts, 20min each)"
+                )
                 stage = wait_ci.WaitCI(entry, model, pr_url=self.pr_url)
                 stage.bind(ctx)
                 stage.run(None)

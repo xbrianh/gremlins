@@ -92,7 +92,11 @@ def test_gh_pipeline_constructs_from_bundled_yaml(tmp_path):
 
 
 def test_local_pipeline_rejects_gh_stages(tmp_path):
-    gh_stages = [StageEntry(name="commit-pr", type="commit-pr", client=None, prompt_paths=[], options={})]
+    gh_stages = [
+        StageEntry(
+            name="commit-pr", type="commit-pr", client=None, prompt_paths=[], options={}
+        )
+    ]
     with pytest.raises(ValueError, match="commit-pr"):
         _local(gh_stages, args=_args(), tmp_path=tmp_path)
 
@@ -103,54 +107,97 @@ def test_local_pipeline_rejects_gh_stages(tmp_path):
 
 
 def _make_stages(*names: str) -> list[StageEntry]:
-    return [StageEntry(name=n, type="plan", client=None, prompt_paths=[], options={}) for n in names]
+    return [
+        StageEntry(name=n, type="plan", client=None, prompt_paths=[], options={})
+        for n in names
+    ]
 
 
 def _make_parallel_stage(name: str, children: list[str]) -> StageEntry:
-    child_entries = [StageEntry(name=c, type="plan", client=None, prompt_paths=[], options={}) for c in children]
-    return StageEntry(name=name, type="parallel", client=None, prompt_paths=[], options={}, children=child_entries)
+    child_entries = [
+        StageEntry(name=c, type="plan", client=None, prompt_paths=[], options={})
+        for c in children
+    ]
+    return StageEntry(
+        name=name,
+        type="parallel",
+        client=None,
+        prompt_paths=[],
+        options={},
+        children=child_entries,
+    )
 
 
 def test_validate_resume_target_no_resume_from(tmp_path):
-    pipe = _local(_make_stages("plan", "implement"), args=_args(resume_from=None), tmp_path=tmp_path)
+    pipe = _local(
+        _make_stages("plan", "implement"),
+        args=_args(resume_from=None),
+        tmp_path=tmp_path,
+    )
     pipe.validate_resume_target()  # should not raise
 
 
 def test_validate_resume_target_valid_name(tmp_path):
-    pipe = _local(_make_stages("plan", "implement"), args=_args(resume_from="implement"), tmp_path=tmp_path)
+    pipe = _local(
+        _make_stages("plan", "implement"),
+        args=_args(resume_from="implement"),
+        tmp_path=tmp_path,
+    )
     pipe.validate_resume_target()  # should not raise
 
 
 def test_validate_resume_target_invalid_name(tmp_path):
-    pipe = _local(_make_stages("plan", "implement"), args=_args(resume_from="bogus"), tmp_path=tmp_path)
+    pipe = _local(
+        _make_stages("plan", "implement"),
+        args=_args(resume_from="bogus"),
+        tmp_path=tmp_path,
+    )
     with pytest.raises(ValueError, match="bogus"):
         pipe.validate_resume_target()
 
 
 def test_validate_resume_target_parallel_group_name(tmp_path):
-    pipe = _local([_make_parallel_stage("reviews", ["review-a", "review-b"])], args=_args(resume_from="reviews"), tmp_path=tmp_path)
+    pipe = _local(
+        [_make_parallel_stage("reviews", ["review-a", "review-b"])],
+        args=_args(resume_from="reviews"),
+        tmp_path=tmp_path,
+    )
     pipe.validate_resume_target()  # "reviews" is a valid expanded name
 
 
 def test_validate_resume_target_parallel_fanout(tmp_path):
-    pipe = _local([_make_parallel_stage("reviews", ["review-a", "review-b"])], args=_args(resume_from="reviews-fanout"), tmp_path=tmp_path)
+    pipe = _local(
+        [_make_parallel_stage("reviews", ["review-a", "review-b"])],
+        args=_args(resume_from="reviews-fanout"),
+        tmp_path=tmp_path,
+    )
     pipe.validate_resume_target()  # fanout is valid
 
 
 def test_validate_resume_target_parallel_fanin(tmp_path):
-    pipe = _local([_make_parallel_stage("reviews", ["review-a", "review-b"])], args=_args(resume_from="reviews-fanin"), tmp_path=tmp_path)
+    pipe = _local(
+        [_make_parallel_stage("reviews", ["review-a", "review-b"])],
+        args=_args(resume_from="reviews-fanin"),
+        tmp_path=tmp_path,
+    )
     pipe.validate_resume_target()  # fanin is valid
 
 
 def test_validate_resume_target_child_name_rejected(tmp_path):
-    pipe = _local([_make_parallel_stage("reviews", ["review-a", "review-b"])], args=_args(resume_from="review-a"), tmp_path=tmp_path)
+    pipe = _local(
+        [_make_parallel_stage("reviews", ["review-a", "review-b"])],
+        args=_args(resume_from="review-a"),
+        tmp_path=tmp_path,
+    )
     with pytest.raises(ValueError, match="review-a"):
         pipe.validate_resume_target()
 
 
 def test_parallel_expansion_in_constructor(tmp_path):
     parallel = _make_parallel_stage("reviews", ["review-a", "review-b"])
-    plan_entry = StageEntry(name="plan", type="plan", client=None, prompt_paths=[], options={})
+    plan_entry = StageEntry(
+        name="plan", type="plan", client=None, prompt_paths=[], options={}
+    )
     pipe = _local([plan_entry, parallel], args=_args(), tmp_path=tmp_path)
 
     stage_names = [s.name for s in pipe.stages]

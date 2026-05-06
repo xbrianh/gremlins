@@ -27,11 +27,11 @@ from gremlins.env_file import load_env_file
 from gremlins.gh_utils import get_repo, parse_issue_ref, view_issue
 from gremlins.logging_setup import configure_logging
 from gremlins.orchestrators.pipeline import GHPipeline, read_state_field
-from gremlins.runner import install_signal_handlers
 from gremlins.pipeline import (
     load_pipeline,
     resolve_pipeline_path,
 )
+from gremlins.runner import install_signal_handlers
 from gremlins.state import (
     patch_state,
     resolve_session_dir,

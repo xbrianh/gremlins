@@ -86,7 +86,6 @@ def _parse_local_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
-
 def local_main(
     argv: list[str], *, client: ClaudeClient | None = None, gr_id: str | None = None
 ) -> int:
