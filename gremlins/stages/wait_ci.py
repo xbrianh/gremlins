@@ -148,7 +148,6 @@ class WaitCI(Stage):
         model: str | None,
         *,
         pr_url: str,
-        code_style: str,
         max_attempts: int = 3,
         poll_timeout: int = 1200,
         poll_interval: int = 30,
@@ -159,7 +158,6 @@ class WaitCI(Stage):
     ) -> None:
         super().__init__(entry, model)
         self.pr_url = pr_url
-        self.code_style = code_style
         self.max_attempts = max_attempts
         self.poll_timeout = poll_timeout
         self.poll_interval = poll_interval

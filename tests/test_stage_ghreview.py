@@ -13,7 +13,6 @@ from gremlins.stages.context import StageContext
 from gremlins.stages.ghreview import GHReview
 
 PR_URL = "https://github.com/owner/repo/pull/42"
-CODE_STYLE = "Be good."
 
 
 def _make_entry(prompt_path: pathlib.Path) -> StageEntry:
@@ -31,7 +30,6 @@ def _make_stage(
     *,
     gr_id: str | None = None,
     pr_url: str = PR_URL,
-    code_style: str = CODE_STYLE,
     style_content: str | None = None,
 ) -> tuple[GHReview, StageContext]:
     prompt_path = tmp_path / "ghreview.md"
@@ -48,7 +46,7 @@ def _make_stage(
         )
     else:
         entry = _make_entry(prompt_path)
-    stage = GHReview(entry, "sonnet", pr_url=pr_url, code_style=code_style)
+    stage = GHReview(entry, "sonnet", pr_url=pr_url)
     client = FakeClaudeClient(fixtures={"ghreview": MINIMAL_EVENTS})
     ctx = StageContext(client=client, session_dir=tmp_path, gr_id=gr_id)
     stage.bind(ctx)
@@ -91,7 +89,7 @@ def test_run_raises_if_unbound() -> None:
         prompt_paths=[prompt_path],
         options={},
     )
-    stage = GHReview(entry, None, pr_url=PR_URL, code_style=CODE_STYLE)
+    stage = GHReview(entry, None, pr_url=PR_URL)
     with pytest.raises(RuntimeError, match="not bound"):
         stage.run(None)
 

@@ -34,7 +34,6 @@ from gremlins.pipeline import (
     load_pipeline,
     resolve_pipeline_path,
 )
-from gremlins.prompts import load_prompts
 from gremlins.runner import build_parallel_stages, install_signal_handlers, run_stages
 from gremlins.stages import (
     commit_pr,
@@ -58,12 +57,6 @@ from gremlins.state import (
 
 logger = logging.getLogger(__name__)
 
-_CODE_STYLE_PATH = (
-    pathlib.Path(__file__).resolve().parent.parent
-    / "pipelines"
-    / "prompts"
-    / "code_style.md"
-)
 REF_RE = re.compile(r"^[A-Za-z0-9._/#-]+$")
 
 
@@ -291,7 +284,6 @@ def _build_stage_runner(
     model: str,
     *,
     args: argparse.Namespace,
-    code_style: str,
     repo: str,
     session_dir: pathlib.Path,
     state_file: pathlib.Path | None,
@@ -343,7 +335,6 @@ def _build_stage_runner(
                 entry,
                 model,
                 plan_text=gh_state["issue_body"],
-                code_style=code_style,
                 is_git=True,
                 kind="gh",
                 issue_num=gh_state["issue_num"],
@@ -368,7 +359,7 @@ def _build_stage_runner(
             set_stage(gr_id, entry.name)
             logger.info("[2b/8] verifying implementation")
             stage = verify.Verify(
-                entry, model, code_style=code_style, is_git=True, commit_after_fix=False
+                entry, model, is_git=True, commit_after_fix=False
             )
             stage.bind(ctx)
             stage.run(None)
@@ -462,7 +453,7 @@ def _build_stage_runner(
             set_stage(gr_id, entry.name)
             logger.info("[4/8] running /ghreview")
             stage = ghreview.GHReview(
-                entry, model, pr_url=gh_state["pr_url"], code_style=code_style
+                entry, model, pr_url=gh_state["pr_url"]
             )
             stage.bind(ctx)
             stage.run(None)
@@ -497,7 +488,7 @@ def _build_stage_runner(
             set_stage(gr_id, entry.name)
             logger.info("[6/8] running /ghaddress")
             stage = ghaddress.GHAddress(
-                entry, model, pr_url=gh_state["pr_url"], code_style=code_style
+                entry, model, pr_url=gh_state["pr_url"]
             )
             stage.bind(ctx)
             stage.run(None)
@@ -511,7 +502,7 @@ def _build_stage_runner(
             set_stage(gr_id, entry.name)
             logger.info("[7/8] waiting for CI checks (up to 3 attempts, 20min each)")
             stage = wait_ci.WaitCI(
-                entry, model, pr_url=gh_state["pr_url"], code_style=code_style
+                entry, model, pr_url=gh_state["pr_url"]
             )
             stage.bind(ctx)
             stage.run(None)
@@ -698,11 +689,6 @@ def gh_main(
         logger.info("resumed issue: %s", issue_url)
         issue_body = _fetch_issue_body(issue_num, repo)
 
-    try:
-        code_style = load_prompts([_CODE_STYLE_PATH])
-    except (FileNotFoundError, ValueError) as exc:
-        die(f"error loading prompt: {exc}")
-
     gh_state: dict[str, Any] = {
         "issue_url": issue_url,
         "issue_num": issue_num,
@@ -735,7 +721,6 @@ def gh_main(
                         child_ctx,
                         child_spec.model,
                         args=args,
-                        code_style=code_style,
                         repo=repo,
                         session_dir=child_dir,
                         state_file=state_file,
@@ -771,7 +756,6 @@ def gh_main(
                     stage_ctx,
                     stage_spec.model,
                     args=args,
-                    code_style=code_style,
                     repo=repo,
                     session_dir=session_dir,
                     state_file=state_file,

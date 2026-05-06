@@ -18,11 +18,9 @@ class GHAddress(Stage):
         model: str | None,
         *,
         pr_url: str,
-        code_style: str,
     ) -> None:
         super().__init__(entry, model)
         self.pr_url = pr_url
-        self.code_style = code_style
 
     def run(self, pipe: Any) -> None:
         bail_section = ""

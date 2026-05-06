@@ -111,7 +111,6 @@ class Implement(Stage):
         model: str | None,
         *,
         plan_text: str,
-        code_style: str,
         is_git: bool,
         kind: str = "local",
         spec_text: str = "",
@@ -120,7 +119,6 @@ class Implement(Stage):
     ) -> None:
         super().__init__(entry, model)
         self.plan_text = plan_text
-        self.code_style = code_style
         self.is_git = is_git
         self.kind = kind
         self.spec_text = spec_text

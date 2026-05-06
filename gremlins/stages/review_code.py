@@ -62,12 +62,10 @@ class ReviewCode(Stage):
         *,
         plan_text: str,
         is_git: bool,
-        code_style: str,
     ) -> None:
         super().__init__(entry, model)
         self.plan_text = plan_text
         self.is_git = is_git
-        self.code_style = code_style
 
     def run(self, pipe: Any) -> pathlib.Path:
         if self.model is None:

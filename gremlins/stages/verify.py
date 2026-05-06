@@ -36,12 +36,10 @@ class Verify(Stage):
         entry: StageEntry,
         model: str | None,
         *,
-        code_style: str,
         is_git: bool,
         commit_after_fix: bool,
     ) -> None:
         super().__init__(entry, model)
-        self._code_style = code_style
         self._is_git = is_git
         self._commit_after_fix = commit_after_fix
 

@@ -31,9 +31,7 @@ def test_local_main_plan_mode(tmp_path, monkeypatch):
     )
     # tmp_path is not a git repo → is_git=False; monkeypatch for clarity.
     monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
-    monkeypatch.setattr(
-        "gremlins.orchestrators.local.load_prompts", lambda paths: "Be good."
-    )
+
     # Fake that implement produced changes (FakeClaudeClient won't create files).
     monkeypatch.setattr(
         "gremlins.stages.implement.changes_outside_git", lambda s, d: True
@@ -74,9 +72,7 @@ def test_local_main_resume_from_review_code_requires_git_changes(
         "gremlins.orchestrators.local.has_dirty_worktree", lambda: False
     )
     monkeypatch.setattr("gremlins.orchestrators.local.has_commits", lambda: False)
-    monkeypatch.setattr(
-        "gremlins.orchestrators.local.load_prompts", lambda paths: "Be good."
-    )
+
 
     with pytest.raises(SystemExit):
         local_main(
@@ -109,9 +105,7 @@ def test_local_main_resume_from_review_code_allows_existing_git_changes(
         "gremlins.orchestrators.local.has_dirty_worktree", lambda: False
     )
     monkeypatch.setattr("gremlins.orchestrators.local.has_commits", lambda: True)
-    monkeypatch.setattr(
-        "gremlins.orchestrators.local.load_prompts", lambda paths: "Be good."
-    )
+
 
     client = _ReviewCreatingClient(
         fixtures={
@@ -227,9 +221,7 @@ def test_local_main_client_specifier_model(tmp_path, monkeypatch):
         lambda gr_id=None: session_dir,
     )
     monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
-    monkeypatch.setattr(
-        "gremlins.orchestrators.local.load_prompts", lambda paths: "Be good."
-    )
+
     monkeypatch.setattr(
         "gremlins.stages.implement.changes_outside_git", lambda s, d: True
     )
@@ -273,9 +265,7 @@ def test_local_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir)
         lambda gr_id=None: session_dir,
     )
     monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
-    monkeypatch.setattr(
-        "gremlins.orchestrators.local.load_prompts", lambda paths: "Be good."
-    )
+
     monkeypatch.setattr(
         "gremlins.stages.implement.changes_outside_git", lambda s, d: True
     )
@@ -316,9 +306,7 @@ def test_local_main_env_file_vars_reach_verify(tmp_path, monkeypatch):
         lambda gr_id=None: session_dir,
     )
     monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
-    monkeypatch.setattr(
-        "gremlins.orchestrators.local.load_prompts", lambda paths: "Be good."
-    )
+
     monkeypatch.setattr(
         "gremlins.stages.implement.changes_outside_git", lambda s, d: True
     )
@@ -358,9 +346,7 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
         lambda gr_id=None: session_dir,
     )
     monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
-    monkeypatch.setattr(
-        "gremlins.orchestrators.local.load_prompts", lambda paths: "Be good."
-    )
+
     monkeypatch.setattr(
         "gremlins.stages.implement.changes_outside_git", lambda s, d: True
     )
@@ -457,9 +443,7 @@ def test_local_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
         lambda gr_id=None: session_dir,
     )
     monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
-    monkeypatch.setattr(
-        "gremlins.orchestrators.local.load_prompts", lambda paths: "Be good."
-    )
+
     monkeypatch.setattr(
         "gremlins.stages.implement.changes_outside_git", lambda s, d: True
     )

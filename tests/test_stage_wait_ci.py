@@ -51,11 +51,10 @@ def _make_stage(
     *,
     gr_id: Any = None,
     model: str = "sonnet",
-    code_style: str = "Be good.",
     **kwargs: Any,
 ) -> tuple[WaitCI, StageContext]:
     entry = _make_entry()
-    stage = WaitCI(entry, model, pr_url=PR_URL, code_style=code_style, **kwargs)
+    stage = WaitCI(entry, model, pr_url=PR_URL, **kwargs)
     ctx = StageContext(client=client, session_dir=tmp_path, gr_id=gr_id)
     stage.bind(ctx)
     return stage, ctx

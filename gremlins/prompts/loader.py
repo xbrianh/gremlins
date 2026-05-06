@@ -6,6 +6,8 @@ def load_prompts(paths: list[pathlib.Path]) -> str:
 
     Raises FileNotFoundError on a missing file, ValueError on an empty one.
     """
+    if not paths:
+        raise ValueError("load_prompts requires at least one path")
     parts: list[str] = []
     for path in paths:
         if not path.is_file():

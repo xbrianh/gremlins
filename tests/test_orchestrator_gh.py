@@ -117,9 +117,6 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         "gremlins.orchestrators.gh.install_signal_handlers", lambda *c: None
     )
     monkeypatch.setattr("gremlins.orchestrators.gh.get_repo", lambda: "owner/repo")
-    monkeypatch.setattr(
-        "gremlins.orchestrators.gh.load_prompts", lambda paths: "Be good."
-    )
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -549,14 +546,6 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
     monkeypatch.chdir(tmp_path)
 
     session_dir, state_file = _patch_common(monkeypatch, tmp_path)
-
-    # Restore the real load_prompts (patch_common replaces it with a stub).
-    from gremlins.prompts import load_prompts as _real_load_prompts
-
-    monkeypatch.setattr(
-        "gremlins.orchestrators.gh.load_prompts",
-        _real_load_prompts,
-    )
 
     monkeypatch.setattr(
         subprocess,
@@ -1251,54 +1240,6 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
 # ---------------------------------------------------------------------------
 
 
-def test_code_style_forwarded_to_ghreview_and_ghaddress(tmp_path, monkeypatch):
-    """code_style is threaded into ghreview and ghaddress options."""
-    _init_git_repo(tmp_path)
-    monkeypatch.chdir(tmp_path)
-
-    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
-
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
-    )
-
-    captured = {}
-
-    def record_ghreview(self, pipe):
-        captured["ghreview"] = self
-
-    def record_ghaddress(self, pipe):
-        captured["ghaddress"] = self
-
-    monkeypatch.setattr("gremlins.stages.ghreview.GHReview.run", record_ghreview)
-    monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.request_copilot.RequestCopilot.run",
-        lambda self, pipe: None,
-    )
-    monkeypatch.setattr("gremlins.stages.ghaddress.GHAddress.run", record_ghaddress)
-    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
-    monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
-
-    client = _CommittingClient(
-        git_dir=tmp_path,
-        fixtures={
-            "implement": IMPL_EVENTS,
-            "commit-pr": _pr_events(),
-        },
-    )
-
-    result = gh_main(["--plan", "42"], client=client)
-    assert result == 0
-
-    assert captured["ghreview"].code_style == "Be good."
-    assert captured["ghaddress"].code_style == "Be good."
-
-
 def test_resume_from_commit_pr_skips_implement(tmp_path, monkeypatch):
     """--resume-from commit-pr picks up at commit-pr without re-running implement.
 
@@ -1451,7 +1392,7 @@ def test_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
 
 
 def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
-    """WaitCI receives pr_url, model, code_style as instance attrs, session_dir via state."""
+    """WaitCI receives pr_url, model as instance attrs, session_dir via state."""
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
@@ -1500,7 +1441,6 @@ def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
     stage = captured_stage["stage"]
     assert stage.pr_url == "https://github.com/owner/repo/pull/77"
     assert stage.model == "claude-opus-4-7"
-    assert stage.code_style == "Be good."
     assert stage.state.session_dir == session_dir
 
 
@@ -1626,7 +1566,7 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
 
 
 def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
-    """verify.run receives fix_model, cwd, code_style via options, session_dir via ctx."""
+    """verify.run receives fix_model, cwd via options, session_dir via ctx."""
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
@@ -1674,7 +1614,6 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
 
     stage = captured_stage["stage"]
     assert stage.model == "claude-opus-4-7"
-    assert stage._code_style == "Be good."
     assert stage.options.get("cmds") == ["make check", "make test"]
     assert stage.state.session_dir == session_dir
 
