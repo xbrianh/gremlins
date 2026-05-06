@@ -23,22 +23,8 @@ class GHAddress(Stage):
         self.pr_url = pr_url
 
     def run(self, pipe: Any) -> None:
-        bail_section = ""
-        if self.state.gr_id:
-            bail_section = """
-
-## Bail markers (running under a gremlin pipeline)
-
-If you cannot safely address one or more comments, write a bail marker before finishing — do not make speculative changes when bailing:
-
-- Comment touches **secrets** (credential management, API keys, encryption material): `python -m gremlins.bail secrets "<one-line reason>"`
-- Any other reason you decline to proceed (ambiguous ask, conflicting comments, etc.): `python -m gremlins.bail other "<one-line reason>"`
-
-Out-of-scope comments and `gh issue create` failures are not bail reasons — handle them per the instructions above. If you successfully addressed every actionable comment, do not write a bail marker — just exit normally.
-"""
         prompt = load_prompts(self.prompt_paths).format(
             pr_url=self.pr_url,
-            bail_section=bail_section,
         )
         self.run_claude(
             prompt,

@@ -62,16 +62,7 @@ class Verify(Stage):
                 "The next stage (commit-pr) will handle staging and committing."
             )
 
-        bail_section = ""
-        if self.state.gr_id:
-            bail_section = (
-                "\n\nIf you cannot fix the failure (e.g. the check reports a violation "
-                "you legitimately cannot resolve), run:\n"
-                '  `python -m gremlins.bail other "<one-line reason>"`\n'
-                "before finishing."
-            )
-
-        template = load_prompts([_PROMPT])
+        template = load_prompts([_PROMPT] + list(self.prompt_paths))
         combined_cmd = " && ".join(cmds)
         commands_section = "**Commands run:**\n" + "\n".join(f"- `{c}`" for c in cmds)
 
@@ -107,7 +98,6 @@ class Verify(Stage):
                     verify_output=verify_output,
                     diff_text=diff,
                     commit_instr=commit_instr,
-                    bail_section=bail_section,
                 )
                 self.run_claude(
                     fix_prompt,

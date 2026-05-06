@@ -78,16 +78,6 @@ class AddressCode(Stage):
                     "body references the review file. Do not push."
                 )
 
-            bail_section = ""
-            if self.state.gr_id:
-                bail_section = """
-
-If a finding asks you to change something that touches secrets/credentials, or you decline to address one or more findings for any other reason that should halt automated recovery, run the bail helper before finishing:
-  - `python -m gremlins.bail secrets "<one-line reason>"` if the blocked finding touches secrets.
-  - `python -m gremlins.bail other "<one-line reason>"` for any other reason you cannot proceed.
-Do not call this helper if you successfully addressed every actionable finding.
-"""
-
             template = load_prompts(
                 self.prompt_paths if self.prompt_paths else [_DEFAULT_PROMPT]
             )
@@ -95,7 +85,6 @@ Do not call this helper if you successfully addressed every actionable finding.
                 model=review_model,
                 text=text,
                 address_commit_instr=address_commit_instr,
-                bail_section=bail_section,
             )
             self.run_claude(
                 address_prompt,

@@ -98,4 +98,3 @@ Issue-creation failure is not a reason to stop addressing the rest of the PR. Do
 - Log the failure prominently in the run output (a clear `ERROR: failed to file issue for comment <id>: <error>` line, and include it in the final summary).
 - Fall back to a reply on the PR thread that **clearly marks itself as a failed filing attempt**. Open with `Tried to file as "<intended title>" but \`gh issue create\` failed: <error>. Please file manually if this is a real defect.` followed by the one-line summary. Do not phrase it as a generic dismissal.
 - Continue with the remaining comments.
-{bail_section}

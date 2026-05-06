@@ -22,4 +22,3 @@ The verify step failed. Read the captured output below, then fix the code so the
 ```
 {diff_text}
 ```
-{bail_section}
