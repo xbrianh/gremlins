@@ -5,7 +5,7 @@ import pytest
 
 from gremlins.orchestrators.pipeline import GHPipeline, LocalPipeline
 from gremlins.pipeline import Pipeline as _PipelineData
-from gremlins.pipeline import StageEntry, resolve_pipeline_path
+from gremlins.pipeline import StageEntry, load_pipeline, resolve_pipeline_path
 from gremlins.stages import (
     address_code,
     commit_pr,
@@ -30,15 +30,24 @@ def _pipeline_data(stages: list[StageEntry] | None = None) -> _PipelineData:
     return _PipelineData(name="test", path=pathlib.Path("."), stages=stages or [])
 
 
-def test_local_pipeline_from_yaml(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        "gremlins.orchestrators.pipeline.resolve_session_dir",
-        lambda gr_id=None: tmp_path,
-    )
-    pipe = LocalPipeline.from_yaml(
-        resolve_pipeline_path("local", pathlib.Path.cwd()),
-        args=_args(),
+def _local(stages, *, args, tmp_path):
+    return LocalPipeline(
+        stages,
+        args=args,
+        session_dir=tmp_path,
         gr_id=None,
+        pipeline_data=_pipeline_data(stages),
+    )
+
+
+def test_local_pipeline_constructs_from_bundled_yaml(tmp_path):
+    pipeline_data = load_pipeline(resolve_pipeline_path("local", pathlib.Path.cwd()))
+    pipe = LocalPipeline(
+        pipeline_data.stages,
+        args=_args(),
+        session_dir=tmp_path,
+        gr_id=None,
+        pipeline_data=pipeline_data,
     )
 
     assert len(pipe.stages) > 0
@@ -54,15 +63,16 @@ def test_local_pipeline_from_yaml(tmp_path, monkeypatch):
     assert LocalPipeline.STAGE_TYPES["verify"] is verify.Verify
 
 
-def test_gh_pipeline_from_yaml(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        "gremlins.orchestrators.pipeline.resolve_session_dir",
-        lambda gr_id=None: tmp_path,
-    )
-    pipe = GHPipeline.from_yaml(
-        resolve_pipeline_path("gh", pathlib.Path.cwd()),
+def test_gh_pipeline_constructs_from_bundled_yaml(tmp_path):
+    pipeline_data = load_pipeline(resolve_pipeline_path("gh", pathlib.Path.cwd()))
+    pipe = GHPipeline(
+        pipeline_data.stages,
         args=_args(),
+        session_dir=tmp_path,
         gr_id=None,
+        pipeline_data=pipeline_data,
+        repo="",
+        state_file=None,
     )
 
     assert len(pipe.stages) > 0
@@ -84,7 +94,7 @@ def test_gh_pipeline_from_yaml(tmp_path, monkeypatch):
 def test_local_pipeline_rejects_gh_stages(tmp_path):
     gh_stages = [StageEntry(name="commit-pr", type="commit-pr", client=None, prompt_paths=[], options={})]
     with pytest.raises(ValueError, match="commit-pr"):
-        LocalPipeline(gh_stages, args=_args(), session_dir=tmp_path, gr_id=None, _pipeline_data=_pipeline_data(gh_stages))
+        _local(gh_stages, args=_args(), tmp_path=tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -102,70 +112,46 @@ def _make_parallel_stage(name: str, children: list[str]) -> StageEntry:
 
 
 def test_validate_resume_target_no_resume_from(tmp_path):
-    stages = _make_stages("plan", "implement")
-    pipe = LocalPipeline(stages, args=_args(resume_from=None), session_dir=tmp_path, gr_id=None, _pipeline_data=_pipeline_data(stages))
+    pipe = _local(_make_stages("plan", "implement"), args=_args(resume_from=None), tmp_path=tmp_path)
     pipe.validate_resume_target()  # should not raise
 
 
 def test_validate_resume_target_valid_name(tmp_path):
-    stages = _make_stages("plan", "implement")
-    pipe = LocalPipeline(stages, args=_args(resume_from="implement"), session_dir=tmp_path, gr_id=None, _pipeline_data=_pipeline_data(stages))
+    pipe = _local(_make_stages("plan", "implement"), args=_args(resume_from="implement"), tmp_path=tmp_path)
     pipe.validate_resume_target()  # should not raise
 
 
 def test_validate_resume_target_invalid_name(tmp_path):
-    stages = _make_stages("plan", "implement")
-    pipe = LocalPipeline(stages, args=_args(resume_from="bogus"), session_dir=tmp_path, gr_id=None, _pipeline_data=_pipeline_data(stages))
+    pipe = _local(_make_stages("plan", "implement"), args=_args(resume_from="bogus"), tmp_path=tmp_path)
     with pytest.raises(ValueError, match="bogus"):
         pipe.validate_resume_target()
 
 
 def test_validate_resume_target_parallel_group_name(tmp_path):
-    stages = [_make_parallel_stage("reviews", ["review-a", "review-b"])]
-    pipe = LocalPipeline(stages, args=_args(resume_from="reviews"), session_dir=tmp_path, gr_id=None, _pipeline_data=_pipeline_data(stages))
+    pipe = _local([_make_parallel_stage("reviews", ["review-a", "review-b"])], args=_args(resume_from="reviews"), tmp_path=tmp_path)
     pipe.validate_resume_target()  # "reviews" is a valid expanded name
 
 
 def test_validate_resume_target_parallel_fanout(tmp_path):
-    stages = [_make_parallel_stage("reviews", ["review-a", "review-b"])]
-    pipe = LocalPipeline(stages, args=_args(resume_from="reviews-fanout"), session_dir=tmp_path, gr_id=None, _pipeline_data=_pipeline_data(stages))
+    pipe = _local([_make_parallel_stage("reviews", ["review-a", "review-b"])], args=_args(resume_from="reviews-fanout"), tmp_path=tmp_path)
     pipe.validate_resume_target()  # fanout is valid
 
 
 def test_validate_resume_target_parallel_fanin(tmp_path):
-    stages = [_make_parallel_stage("reviews", ["review-a", "review-b"])]
-    pipe = LocalPipeline(stages, args=_args(resume_from="reviews-fanin"), session_dir=tmp_path, gr_id=None, _pipeline_data=_pipeline_data(stages))
+    pipe = _local([_make_parallel_stage("reviews", ["review-a", "review-b"])], args=_args(resume_from="reviews-fanin"), tmp_path=tmp_path)
     pipe.validate_resume_target()  # fanin is valid
 
 
 def test_validate_resume_target_child_name_rejected(tmp_path):
-    stages = [_make_parallel_stage("reviews", ["review-a", "review-b"])]
-    pipe = LocalPipeline(stages, args=_args(resume_from="review-a"), session_dir=tmp_path, gr_id=None, _pipeline_data=_pipeline_data(stages))
+    pipe = _local([_make_parallel_stage("reviews", ["review-a", "review-b"])], args=_args(resume_from="review-a"), tmp_path=tmp_path)
     with pytest.raises(ValueError, match="review-a"):
         pipe.validate_resume_target()
 
 
-def test_parallel_expansion_in_from_yaml(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        "gremlins.orchestrators.pipeline.resolve_session_dir",
-        lambda gr_id=None: tmp_path,
-    )
-    yaml_content = """\
-name: test-parallel
-stages:
-  - name: plan
-    type: plan
-  - name: reviews
-    parallel:
-      - name: review-a
-        type: review-code
-      - name: review-b
-        type: review-code
-"""
-    yaml_file = tmp_path / "pipeline.yaml"
-    yaml_file.write_text(yaml_content)
-
-    pipe = LocalPipeline.from_yaml(yaml_file, args=_args(), gr_id=None)
+def test_parallel_expansion_in_constructor(tmp_path):
+    parallel = _make_parallel_stage("reviews", ["review-a", "review-b"])
+    plan_entry = StageEntry(name="plan", type="plan", client=None, prompt_paths=[], options={})
+    pipe = _local([plan_entry, parallel], args=_args(), tmp_path=tmp_path)
 
     stage_names = [s.name for s in pipe.stages]
     assert all(s.type != "parallel" for s in pipe.stages)

@@ -338,12 +338,12 @@ def gh_main(
             args=args,
             session_dir=session_dir,
             gr_id=gr_id,
-            _pipeline_data=pipeline,
+            pipeline_data=pipeline,
             repo=repo,
             state_file=state_file,
-            _spec_clients=_spec_clients,
-            _stage_specs=stage_specs,
-            _test_client=client,
+            spec_clients=_spec_clients,
+            stage_specs=stage_specs,
+            test_client=client,
         )
         pipe.validate_resume_target()
     except ValueError as exc:

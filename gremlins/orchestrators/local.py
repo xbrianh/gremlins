@@ -170,10 +170,10 @@ def local_main(
             args=args,
             session_dir=session_dir,
             gr_id=gr_id,
-            _test_client=client,
-            _spec_clients=_spec_clients,
-            _stage_specs=stage_specs,
-            _pipeline_data=pipeline,
+            test_client=client,
+            spec_clients=_spec_clients,
+            stage_specs=stage_specs,
+            pipeline_data=pipeline,
         )
         pipe.validate_resume_target()
     except ValueError as exc:

@@ -19,7 +19,6 @@ from gremlins.clients.resolve import require_stage_spec
 from gremlins.git import DirtyOnly, HeadAdvanced, in_git_repo
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline import StageEntry
-from gremlins.pipeline import load_pipeline as _load_pipeline
 from gremlins.runner import build_parallel_stages, install_signal_handlers, run_stages
 from gremlins.stages import (
     address_code,
@@ -37,7 +36,7 @@ from gremlins.stages import (
 )
 from gremlins.stages.base import Stage, StageContext
 from gremlins.stages.implement import ImplStageResult
-from gremlins.state import patch_state, resolve_session_dir, set_stage
+from gremlins.state import patch_state, set_stage
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +69,6 @@ def _expand_stage_entries(raw_stages: list[StageEntry]) -> list[StageEntry]:
                 if child.name in child_names or child.name in top_level_names:
                     raise ValueError(f"duplicate child stage name {child.name!r}")
                 child_names.add(child.name)
-            # children are not resume targets; only the three group-level stages are
             for name, typ in [
                 (f"{entry.name}-fanout", "parallel-fanout"),
                 (entry.name, "parallel-group"),
@@ -89,7 +87,7 @@ def _expand_stage_entries(raw_stages: list[StageEntry]) -> list[StageEntry]:
     return result
 
 
-class PipelineRunner:
+class Pipeline:
     STAGE_TYPES: dict[str, type[Stage]] = {}
     target: str = ""
 
@@ -100,6 +98,10 @@ class PipelineRunner:
         args: argparse.Namespace,
         session_dir: pathlib.Path,
         gr_id: str | None,
+        pipeline_data: _PipelineData,
+        stage_specs: dict[str, ClientSpec] | None = None,
+        spec_clients: dict[str, ClaudeClient] | None = None,
+        test_client: ClaudeClient | None = None,
     ) -> None:
         if self.STAGE_TYPES:
             unknown = [
@@ -116,30 +118,15 @@ class PipelineRunner:
         self.session_dir = session_dir
         self.gr_id = gr_id
         self.is_git = in_git_repo()
-        self._test_client: ClaudeClient | None = None
-        self._spec_clients: dict[str, ClaudeClient] = {}
+        self.pipeline_data = pipeline_data
+        self.stage_specs: dict[str, ClientSpec] = stage_specs or {}
+        self.spec_clients: dict[str, ClaudeClient] = spec_clients or {}
+        self.test_client = test_client
 
     def _get_client(self, spec: ClientSpec) -> ClaudeClient:
-        if self._test_client is not None:
-            return self._test_client
-        return self._spec_clients[str(spec)]
-
-    @classmethod
-    def from_yaml(
-        cls,
-        path: pathlib.Path,
-        *,
-        args: argparse.Namespace,
-        gr_id: str | None,
-    ) -> "PipelineRunner":
-        pipeline_data = _load_pipeline(path)
-        session_dir = resolve_session_dir(gr_id)
-        return cls(
-            pipeline_data.stages,
-            args=args,
-            session_dir=session_dir,
-            gr_id=gr_id,
-        )
+        if self.test_client is not None:
+            return self.test_client
+        return self.spec_clients[str(spec)]
 
     def validate_resume_target(self) -> None:
         resume_from = getattr(self.args, "resume_from", None)
@@ -152,16 +139,59 @@ class PipelineRunner:
                 f"valid: {valid_names}"
             )
 
+    def _make_runner(
+        self, entry: StageEntry, ctx: StageContext, model: str
+    ) -> Callable[[], None]:
+        raise NotImplementedError
+
     def run(self, *clients: ClaudeClient) -> None:
-        # stub — stage-running loop lands in a later plan step
         install_signal_handlers(*clients)
 
+        gr_id = self.gr_id
+        stages: list[tuple[str, Callable[[], None]]] = []
+        for e in self.pipeline_data.stages:
+            if e.type == "parallel":
+                group_dir = self.session_dir / e.name
+                group_dir.mkdir(parents=True, exist_ok=True)
+                child_runners: list[tuple[str, StageContext, Callable[[], None]]] = []
+                for child in e.children:
+                    child_spec = require_stage_spec(self.stage_specs, child.name)
+                    child_dir = group_dir / child.name
+                    child_dir.mkdir(parents=True, exist_ok=True)
+                    child_ctx = StageContext(
+                        client=self._get_client(child_spec),
+                        session_dir=child_dir,
+                        gr_id=gr_id,
+                        child_key=child.name,
+                    )
+                    child_runners.append(
+                        (child.name, child_ctx, self._make_runner(child, child_ctx, child_spec.model))
+                    )
+                stages.extend(
+                    build_parallel_stages(
+                        e.name,
+                        child_runners,
+                        max_concurrent=e.max_concurrent,
+                        set_stage_fn=lambda n: set_stage(gr_id, n),
+                        cancel_on_bail=e.cancel_on_bail,
+                        bail_policy=e.bail_policy,
+                        gr_id=gr_id,
+                        project_root=pathlib.Path.cwd(),
+                    )
+                )
+            else:
+                stage_spec = require_stage_spec(self.stage_specs, e.name)
+                stage_ctx = StageContext(
+                    client=self._get_client(stage_spec),
+                    session_dir=self.session_dir,
+                    gr_id=gr_id,
+                )
+                stages.append((e.name, self._make_runner(e, stage_ctx, stage_spec.model)))
 
-# Keep old name as alias for backwards compatibility during migration
-Pipeline = PipelineRunner
+        run_stages(stages, resume_from=self.args.resume_from)
 
 
-class LocalPipeline(PipelineRunner):
+class LocalPipeline(Pipeline):
     target = "local"
     STAGE_TYPES: dict[str, type[Stage]] = {
         "plan": plan.Plan,
@@ -171,24 +201,6 @@ class LocalPipeline(PipelineRunner):
         "address-code": address_code.AddressCode,
     }
 
-    @classmethod
-    def from_yaml(
-        cls,
-        path: pathlib.Path,
-        *,
-        args: argparse.Namespace,
-        gr_id: str | None,
-    ) -> "LocalPipeline":
-        pipeline_data = _load_pipeline(path)
-        session_dir = resolve_session_dir(gr_id)
-        return cls(
-            pipeline_data.stages,
-            args=args,
-            session_dir=session_dir,
-            gr_id=gr_id,
-            _pipeline_data=pipeline_data,
-        )
-
     def __init__(
         self,
         stages: list[StageEntry],
@@ -196,16 +208,21 @@ class LocalPipeline(PipelineRunner):
         args: argparse.Namespace,
         session_dir: pathlib.Path,
         gr_id: str | None,
-        _pipeline_data: _PipelineData,
-        _test_client: ClaudeClient | None = None,
-        _spec_clients: dict[str, ClaudeClient] | None = None,
-        _stage_specs: dict[str, ClientSpec] | None = None,
+        pipeline_data: _PipelineData,
+        stage_specs: dict[str, ClientSpec] | None = None,
+        spec_clients: dict[str, ClaudeClient] | None = None,
+        test_client: ClaudeClient | None = None,
     ) -> None:
-        super().__init__(stages, args=args, session_dir=session_dir, gr_id=gr_id)
-        self._pipeline_data = _pipeline_data
-        self._test_client = _test_client
-        self._spec_clients = _spec_clients or {}
-        self._stage_specs: dict[str, ClientSpec] = _stage_specs or {}
+        super().__init__(
+            stages,
+            args=args,
+            session_dir=session_dir,
+            gr_id=gr_id,
+            pipeline_data=pipeline_data,
+            stage_specs=stage_specs,
+            spec_clients=spec_clients,
+            test_client=test_client,
+        )
         self.plan_copied_from_source = False
 
         plan_path = getattr(args, "plan_path", None)
@@ -316,7 +333,7 @@ class LocalPipeline(PipelineRunner):
         if entry.type == "address-code":
 
             def _all_stages() -> Iterator[StageEntry]:
-                for s in self._pipeline_data.stages:
+                for s in self.pipeline_data.stages:
                     yield s
                     if s.type == "parallel":
                         yield from s.children
@@ -368,56 +385,8 @@ class LocalPipeline(PipelineRunner):
 
         raise ValueError(f"unsupported stage type {entry.type!r} in local pipeline")
 
-    def run(self, *clients: ClaudeClient) -> None:
-        install_signal_handlers(*clients)
 
-        stage_specs = self._stage_specs
-        gr_id = self.gr_id
-
-        stages: list[tuple[str, Callable[[], None]]] = []
-        for e in self._pipeline_data.stages:
-            if e.type == "parallel":
-                group_dir = self.session_dir / e.name
-                group_dir.mkdir(parents=True, exist_ok=True)
-                child_runners: list[tuple[str, StageContext, Callable[[], None]]] = []
-                for child in e.children:
-                    child_spec = require_stage_spec(stage_specs, child.name)
-                    child_dir = group_dir / child.name
-                    child_dir.mkdir(parents=True, exist_ok=True)
-                    child_ctx = StageContext(
-                        client=self._get_client(child_spec),
-                        session_dir=child_dir,
-                        gr_id=gr_id,
-                        child_key=child.name,
-                    )
-                    child_runners.append(
-                        (child.name, child_ctx, self._make_runner(child, child_ctx, child_spec.model))
-                    )
-                stages.extend(
-                    build_parallel_stages(
-                        e.name,
-                        child_runners,
-                        max_concurrent=e.max_concurrent,
-                        set_stage_fn=lambda n: set_stage(gr_id, n),
-                        cancel_on_bail=e.cancel_on_bail,
-                        bail_policy=e.bail_policy,
-                        gr_id=gr_id,
-                        project_root=pathlib.Path.cwd(),
-                    )
-                )
-            else:
-                stage_spec = require_stage_spec(stage_specs, e.name)
-                stage_ctx = StageContext(
-                    client=self._get_client(stage_spec),
-                    session_dir=self.session_dir,
-                    gr_id=gr_id,
-                )
-                stages.append((e.name, self._make_runner(e, stage_ctx, stage_spec.model)))
-
-        run_stages(stages, resume_from=self.args.resume_from)
-
-
-class GHPipeline(PipelineRunner):
+class GHPipeline(Pipeline):
     target = "github"
     STAGE_TYPES: dict[str, type[Stage]] = {
         "plan": ghplan.GHPlan,
@@ -431,27 +400,6 @@ class GHPipeline(PipelineRunner):
         "wait-copilot": wait_copilot.WaitCopilot,
     }
 
-    @classmethod
-    def from_yaml(
-        cls,
-        path: pathlib.Path,
-        *,
-        args: argparse.Namespace,
-        gr_id: str | None,
-    ) -> "GHPipeline":
-        # For structural inspection only; _stage_specs is empty so run() will fail.
-        pipeline_data = _load_pipeline(path)
-        session_dir = resolve_session_dir(gr_id)
-        return cls(
-            pipeline_data.stages,
-            args=args,
-            session_dir=session_dir,
-            gr_id=gr_id,
-            _pipeline_data=pipeline_data,
-            repo="",
-            state_file=None,
-        )
-
     def __init__(
         self,
         stages: list[StageEntry],
@@ -459,18 +407,23 @@ class GHPipeline(PipelineRunner):
         args: argparse.Namespace,
         session_dir: pathlib.Path,
         gr_id: str | None,
-        _pipeline_data: _PipelineData,
+        pipeline_data: _PipelineData,
         repo: str,
         state_file: pathlib.Path | None,
-        _test_client: ClaudeClient | None = None,
-        _spec_clients: dict[str, ClaudeClient] | None = None,
-        _stage_specs: dict[str, ClientSpec] | None = None,
+        stage_specs: dict[str, ClientSpec] | None = None,
+        spec_clients: dict[str, ClaudeClient] | None = None,
+        test_client: ClaudeClient | None = None,
     ) -> None:
-        super().__init__(stages, args=args, session_dir=session_dir, gr_id=gr_id)
-        self._pipeline_data = _pipeline_data
-        self._test_client = _test_client
-        self._spec_clients = _spec_clients or {}
-        self._stage_specs: dict[str, ClientSpec] = _stage_specs or {}
+        super().__init__(
+            stages,
+            args=args,
+            session_dir=session_dir,
+            gr_id=gr_id,
+            pipeline_data=pipeline_data,
+            stage_specs=stage_specs,
+            spec_clients=spec_clients,
+            test_client=test_client,
+        )
         self.repo = repo
         self.state_file = state_file
         self.instructions: str = " ".join(getattr(args, "instructions", None) or [])
@@ -708,51 +661,3 @@ class GHPipeline(PipelineRunner):
             return _wait_ci
 
         raise ValueError(f"unsupported stage type {entry.type!r} in gh pipeline")
-
-    def run(self, *clients: ClaudeClient) -> None:
-        install_signal_handlers(*clients)
-
-        stage_specs = self._stage_specs
-        gr_id = self.gr_id
-
-        stages: list[tuple[str, Callable[[], None]]] = []
-        for e in self._pipeline_data.stages:
-            if e.type == "parallel":
-                group_dir = self.session_dir / e.name
-                group_dir.mkdir(parents=True, exist_ok=True)
-                child_runners: list[tuple[str, StageContext, Callable[[], None]]] = []
-                for child in e.children:
-                    child_spec = require_stage_spec(stage_specs, child.name)
-                    child_dir = group_dir / child.name
-                    child_dir.mkdir(parents=True, exist_ok=True)
-                    child_ctx = StageContext(
-                        client=self._get_client(child_spec),
-                        session_dir=child_dir,
-                        gr_id=gr_id,
-                        child_key=child.name,
-                    )
-                    child_runners.append(
-                        (child.name, child_ctx, self._make_runner(child, child_ctx, child_spec.model))
-                    )
-                stages.extend(
-                    build_parallel_stages(
-                        e.name,
-                        child_runners,
-                        max_concurrent=e.max_concurrent,
-                        set_stage_fn=lambda n: set_stage(gr_id, n),
-                        cancel_on_bail=e.cancel_on_bail,
-                        bail_policy=e.bail_policy,
-                        gr_id=gr_id,
-                        project_root=pathlib.Path.cwd(),
-                    )
-                )
-            else:
-                stage_spec = require_stage_spec(stage_specs, e.name)
-                stage_ctx = StageContext(
-                    client=self._get_client(stage_spec),
-                    session_dir=self.session_dir,
-                    gr_id=gr_id,
-                )
-                stages.append((e.name, self._make_runner(e, stage_ctx, stage_spec.model)))
-
-        run_stages(stages, resume_from=self.args.resume_from)
