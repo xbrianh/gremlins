@@ -22,9 +22,7 @@ def _make_entry() -> StageEntry:
     )
 
 
-def _make_stage(
-    tmp_path, *, repo: str, pr_num: str
-) -> RequestCopilot:
+def _make_stage(tmp_path, *, repo: str, pr_num: str) -> RequestCopilot:
     entry = _make_entry()
     stage = RequestCopilot(entry, None, repo=repo, pr_num=pr_num)
     ctx = StageContext(
