@@ -13,8 +13,7 @@ from gremlins.stages.implement import ImplementOptions, _render_spec_block
 from gremlins.stages.implement import run as run_implement
 from gremlins.stages.plan import PlanOptions
 from gremlins.stages.plan import run as run_plan
-from gremlins.stages.review_code import ReviewCodeOptions
-from gremlins.stages.review_code import run as run_review_code
+from gremlins.stages.review_code import ReviewCode
 
 _BUNDLED_PROMPTS = (
     pathlib.Path(__file__).resolve().parent.parent
@@ -284,6 +283,42 @@ def test_implement_stage_raises_on_empty_diff(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# review-code stage
+# ---------------------------------------------------------------------------
+
+
+def _make_review_code_stage(
+    client: ReviewCreatingClient,
+    session_dir,
+    *,
+    model: str = "sonnet",
+    plan_text: str = "",
+    is_git: bool = False,
+    code_style: str = "",
+    gr_id=None,
+) -> ReviewCode:
+    entry = StageEntry(
+        name="review-code",
+        type="review-code",
+        client=None,
+        prompt_paths=[
+            _BUNDLED_PROMPTS / "code_style.md",
+            _BUNDLED_PROMPTS / "review" / "detail.md",
+        ],
+        options={},
+    )
+    stage = ReviewCode(
+        entry,
+        model,
+        plan_text=plan_text,
+        is_git=is_git,
+        code_style=code_style,
+        stage_name="review-code",
+    )
+    stage.bind(_make_ctx(client, session_dir, gr_id=gr_id))
+    return stage
+
+
 # address-code stage
 # ---------------------------------------------------------------------------
 
@@ -355,40 +390,21 @@ def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
     client = ReviewCreatingClient(fixtures={"review-code:sonnet": MINIMAL_EVENTS})
     worktree = tmp_path / "wt"
     worktree.mkdir()
-    ctx = StageContext(
+    stage = _make_review_code_stage(client, tmp_path)
+    stage._mutable_state = StageContext(
         client=client,
         session_dir=tmp_path,
         gr_id=None,
         worktree=worktree,
     )
-    run_review_code(
-        ctx,
-        ReviewCodeOptions(
-            plan_text="",
-            is_git=False,
-            code_style="",
-            model="sonnet",
-            stage_name="review-code",
-            prompt_paths=[_BUNDLED_PROMPTS / "review" / "detail.md"],
-        ),
-    )
+    stage.run(None)
     assert client.calls[0].cwd == worktree
 
 
 def test_review_code_stage_includes_code_style(tmp_path):
     client = ReviewCreatingClient(fixtures={"review-code:sonnet": MINIMAL_EVENTS})
-    ctx = _make_ctx(client, tmp_path)
-    run_review_code(
-        ctx,
-        ReviewCodeOptions(
-            plan_text="",
-            is_git=False,
-            code_style="Be good.",
-            model="sonnet",
-            stage_name="review-code",
-            prompt_paths=[_BUNDLED_PROMPTS / "review" / "detail.md"],
-        ),
-    )
+    stage = _make_review_code_stage(client, tmp_path, code_style="Be good.")
+    stage.run(None)
     assert "Be good." in client.calls[0].prompt
 
 
@@ -406,18 +422,8 @@ def test_review_code_stage_writes_stage_to_state(tmp_path, make_state_dir):
     gr_id = "test-gr-id"
     state_dir = make_state_dir(gr_id)
     client = ReviewCreatingClient(fixtures={"review-code:sonnet": MINIMAL_EVENTS})
-    ctx = _make_ctx(client, tmp_path, gr_id=gr_id)
-    run_review_code(
-        ctx,
-        ReviewCodeOptions(
-            plan_text="",
-            is_git=False,
-            code_style="",
-            model="sonnet",
-            stage_name="review-code",
-            prompt_paths=[_BUNDLED_PROMPTS / "review" / "detail.md"],
-        ),
-    )
+    stage = _make_review_code_stage(client, tmp_path, gr_id=gr_id)
+    stage.run(None)
     data = json.loads((state_dir / "state.json").read_text())
     assert data.get("stage") == "review-code"
 
