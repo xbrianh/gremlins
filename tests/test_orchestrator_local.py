@@ -423,7 +423,7 @@ def test_local_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
     address_prompt_path.write_text("Address.\n", encoding="utf-8")
 
     def write_pipeline(stage_clients: dict[str, str]) -> None:
-        lines = ["name: local", "", "stages:"]
+        lines = ["name: local", "prompt_dir: .", "", "stages:"]
         for stage_name, stage_type in stage_defs:
             extras = ""
             if stage_type == "review-code":

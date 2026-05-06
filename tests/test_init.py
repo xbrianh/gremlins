@@ -48,8 +48,13 @@ def test_init_all_pipelines(tmp_path, capsys):
         assert str(dst) in out
 
         data = yaml.safe_load(dst.read_text())
+        assert data.get("prompt_dir") == "../prompts", (
+            f"prompt_dir not injected in {dst}"
+        )
         for p in _iter_stage_prompts(data.get("stages", [])):
-            assert p.startswith("../prompts/"), f"prompt not rewritten: {p}"
+            assert "/" not in p or p.startswith("review/"), (
+                f"prompt should be a bare name (or review/<lens>): {p}"
+            )
 
     agents_md = tmp_path / "AGENTS.md"
     assert agents_md.exists()
@@ -74,12 +79,11 @@ def test_init_single_pipeline(tmp_path, capsys):
     assert not (dot / "pipelines" / "gh.yaml").exists()
 
     data = yaml.safe_load((dot / "pipelines" / "local.yaml").read_text())
+    assert data["prompt_dir"] == "../prompts"
     prompt_refs = set(_iter_stage_prompts(data["stages"]))
 
     for ref in prompt_refs:
-        assert ref.startswith("../prompts/")
-        subpath = ref[len("../prompts/") :]
-        assert (dot / "prompts" / subpath).exists()
+        assert (dot / "prompts" / ref).exists()
 
 
 # ---------------------------------------------------------------------------

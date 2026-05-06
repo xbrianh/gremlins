@@ -41,8 +41,20 @@ class Pipeline:
     default_client: ClientSpec | None = None
 
 
+_BUNDLED_PROMPT_DIR = pathlib.Path(__file__).resolve().parent / "prompts"
+
+
+def _resolve_prompt_dir(value: object, yaml_dir: pathlib.Path) -> pathlib.Path:
+    """Pipeline-level `prompt_dir:` (relative to YAML); default = bundled prompts."""
+    if value is None:
+        return _BUNDLED_PROMPT_DIR
+    if not isinstance(value, str):
+        raise ValueError(f"prompt_dir must be a string, got {type(value)!r}")
+    return (yaml_dir / value).resolve()
+
+
 def _resolve_prompt_paths(
-    prompt_field: object, yaml_dir: pathlib.Path
+    prompt_field: object, prompt_dir: pathlib.Path
 ) -> list[pathlib.Path]:
     if prompt_field is None:
         return []
@@ -54,7 +66,7 @@ def _resolve_prompt_paths(
         raise ValueError(f"prompt must be a string or list, got {type(prompt_field)!r}")
     resolved: list[pathlib.Path] = []
     for p in raw:
-        path = (yaml_dir / p).resolve()
+        path = (prompt_dir / p).resolve()
         if not path.exists():
             raise FileNotFoundError(f"prompt file not found: {path}")
         resolved.append(path)
@@ -63,7 +75,7 @@ def _resolve_prompt_paths(
 
 def _parse_stage_entry(
     entry: dict[str, Any],
-    yaml_dir: pathlib.Path,
+    prompt_dir: pathlib.Path,
     depth: int = 0,
 ) -> StageEntry:
     if "parallel" in entry:
@@ -82,7 +94,7 @@ def _parse_stage_entry(
         seen: set[str] = set()
         children: list[StageEntry] = []
         for child_raw in children_raw:
-            child = _parse_stage_entry(child_raw, yaml_dir, depth=depth + 1)
+            child = _parse_stage_entry(child_raw, prompt_dir, depth=depth + 1)
             if child.name in seen:
                 raise ValueError(
                     f"parallel group {name!r}: duplicate child name {child.name!r}"
@@ -140,7 +152,7 @@ def _parse_stage_entry(
             )
         stage_client = ClientSpec.parse(client_spec_raw)
 
-    prompt_paths = _resolve_prompt_paths(entry.get("prompt"), yaml_dir)
+    prompt_paths = _resolve_prompt_paths(entry.get("prompt"), prompt_dir)
     options = dict(cast(dict[str, Any], entry.get("options") or {}))
     return StageEntry(
         name=name,
@@ -163,6 +175,7 @@ def load_pipeline(path: pathlib.Path) -> Pipeline:
         )
     raw = cast(dict[str, Any], parsed)
     yaml_dir = path.parent
+    prompt_dir = _resolve_prompt_dir(raw.get("prompt_dir"), yaml_dir)
 
     pipeline_name = str(raw.get("name") or path.stem)
 
@@ -177,7 +190,7 @@ def load_pipeline(path: pathlib.Path) -> Pipeline:
 
     stages: list[StageEntry] = []
     for entry in cast(list[dict[str, Any]], raw.get("stages") or []):
-        stages.append(_parse_stage_entry(entry, yaml_dir))
+        stages.append(_parse_stage_entry(entry, prompt_dir))
 
     return Pipeline(
         name=pipeline_name,

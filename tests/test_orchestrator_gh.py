@@ -782,7 +782,7 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
     implement_prompt.write_text("Implement.\n", encoding="utf-8")
 
     def write_pipeline(stage_clients: dict[str, str]) -> None:
-        lines = ["name: gh", "", "stages:"]
+        lines = ["name: gh", "prompt_dir: ../prompts", "", "stages:"]
         for stage_name, stage_type in stage_defs:
             fields = [
                 f"name: {stage_name}",
@@ -790,11 +790,11 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
                 f"client: {json.dumps(stage_clients[stage_name])}",
             ]
             if stage_type == "ghreview":
-                fields.append(f"prompt: {json.dumps('../prompts/ghreview.md')}")
+                fields.append(f"prompt: {json.dumps('ghreview.md')}")
             elif stage_type == "ghaddress":
-                fields.append(f"prompt: {json.dumps('../prompts/ghaddress.md')}")
+                fields.append(f"prompt: {json.dumps('ghaddress.md')}")
             elif stage_type == "implement":
-                fields.append(f"prompt: {json.dumps('../prompts/implement.md')}")
+                fields.append(f"prompt: {json.dumps('implement.md')}")
             lines.append("  - { " + ", ".join(fields) + " }")
         pipeline_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 

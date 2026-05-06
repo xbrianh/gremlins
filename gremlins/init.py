@@ -21,7 +21,9 @@ def _bundled_pipeline_names() -> list[str]:
 def _collect_prompt_subpaths(stages: list[Any]) -> list[str]:
     """Walk stage list (including parallel groups) and return unique prompt subpaths.
 
-    Subpaths are the part after '../prompts/' — e.g. 'plan.md', 'review/detail.md'.
+    Bundled pipelines reference prompts by bare name (e.g. 'plan.md',
+    'review/detail.md'); they're resolved against the bundled prompts dir
+    via the implicit default `prompt_dir`.
     """
     seen: set[str] = set()
     result: list[str] = []
@@ -40,40 +42,13 @@ def _collect_prompt_subpaths(stages: list[Any]) -> list[str]:
         if isinstance(prompts, str):
             prompts = [prompts]
         for p in cast(list[str], prompts):
-            if p.startswith("../prompts/") and p not in seen:
+            if p not in seen:
                 seen.add(p)
-                result.append(p[len("../prompts/") :])
-            elif p.startswith("prompts/") and p not in seen:
-                seen.add(p)
-                result.append(p[len("prompts/") :])
+                result.append(p)
 
     for stage in stages:
         _walk(stage)
     return result
-
-
-def _rewrite_stage(stage: Any) -> Any:
-    """Return stage with prompt paths normalized to ../prompts/."""
-    if not isinstance(stage, dict):
-        return stage
-    s: dict[str, Any] = dict(cast(dict[str, Any], stage))
-    if "parallel" in s:
-        s["parallel"] = [_rewrite_stage(c) for c in cast(list[Any], s["parallel"])]
-        return s
-    prompts = s.get("prompt")
-    if prompts is None:
-        return s
-    if isinstance(prompts, str):
-        if prompts.startswith("prompts/"):
-            s["prompt"] = "../" + prompts
-        elif prompts.startswith("../prompts/"):
-            s["prompt"] = prompts
-    else:
-        s["prompt"] = [
-            ("../" + p if p.startswith("prompts/") else p)
-            for p in cast(list[str], prompts)
-        ]
-    return s
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -159,7 +134,7 @@ def _build_plan(
 
     for name in selected:
         data = dict(pipeline_data[name])
-        data["stages"] = [_rewrite_stage(s) for s in data.get("stages", [])]
+        data.setdefault("prompt_dir", "../prompts")
         dst = dot_gremlins / "pipelines" / f"{name}.yaml"
         content = yaml.safe_dump(data, default_flow_style=False, sort_keys=False)
         plan.append((dst, content.encode("utf-8")))
