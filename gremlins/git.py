@@ -68,6 +68,42 @@ def head_sha(cwd: str | os.PathLike[str] | None = None) -> str:
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
+def has_dirty_worktree(cwd: str | os.PathLike[str] | None = None) -> bool:
+    try:
+        r = _run_git(["status", "--porcelain"], cwd=cwd, check=False)
+        return bool(r.stdout.strip())
+    except OSError:
+        return False
+
+
+def has_commits(cwd: str | os.PathLike[str] | None = None) -> bool:
+    try:
+        r = _run_git(["rev-list", "--count", "HEAD"], cwd=cwd, check=False)
+        return r.returncode == 0 and int(r.stdout.strip() or "0") > 0
+    except OSError:
+        return False
+
+
+def rev_exists(rev: str, cwd: str | os.PathLike[str] | None = None) -> bool:
+    try:
+        r = _run_git(
+            ["rev-parse", "--verify", rev], cwd=cwd, check=False, capture=False
+        )
+        return r.returncode == 0
+    except OSError:
+        return False
+
+
+def has_diff(ref_a: str, ref_b: str, cwd: str | os.PathLike[str] | None = None) -> bool:
+    try:
+        r = _run_git(
+            ["diff", "--quiet", ref_a, ref_b], cwd=cwd, check=False, capture=False
+        )
+        return r.returncode != 0
+    except OSError:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # ghgremlin impl-handoff branch lifecycle (Phase 3)
 # ---------------------------------------------------------------------------
