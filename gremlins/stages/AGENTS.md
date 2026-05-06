@@ -39,8 +39,8 @@ sequencing logic of their own.
   calls `client.run(...)`. **Never spawn `claude -p` directly** — that
   bypasses the test seam in `../clients/protocol.py`.
 - Prompt-based claude stages compose `load_prompts(self.prompt_paths)` from the YAML `prompt:`
-  list; all prompt files live under `gremlins/pipelines/prompts/`. See
-  `gremlins/pipelines/prompts/README.md` for the runtime placeholder inventory.
+  list; bundled prompt files live under `gremlins/prompts/`. See
+  `gremlins/prompts/README.md` for the runtime placeholder inventory.
 - Stages that should respect a bail marker (set by the agent via
   `python -m gremlins.bail`) call `check_bail(<phase-name>)` from
   `..state` after the claude run. The runner inspects the bail and

@@ -31,7 +31,7 @@ from gremlins.prompts import load_prompts
 logger = logging.getLogger(__name__)
 
 CLAUDE_SANITIZE_MODEL = "haiku"
-_PROMPTS_DIR = pathlib.Path(__file__).resolve().parent / "pipelines" / "prompts"
+_PROMPTS_DIR = pathlib.Path(__file__).resolve().parent / "prompts"
 _HANDOFF_STYLE_PATH = _PROMPTS_DIR / "code_style.md"
 
 T = TypeVar("T")

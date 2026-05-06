@@ -12,11 +12,13 @@ name: <pipeline-name>
 clients:
   <alias>: { provider: claude, model: sonnet }   # model: sonnet | opus | haiku
 
+prompt_dir: ../prompts            # directory prompt: paths resolve against (relative to this YAML)
+
 stages:
   - name: <stage-name>
     type: <stage-type>          # plan | implement | verify | review-code | address-code | commit-pr | ghreview | ghaddress | wait-ci | …
     client: <alias>             # omit for stages that don't call Claude
-    prompt: [../prompts/foo.md] # list of prompt template paths (relative to pipelines/)
+    prompt: [foo.md]            # list of prompt template paths (resolved against prompt_dir)
     options:                    # stage-specific knobs
       check_cmd: "make check"   # verify: command run as lint/type-check gate
       test_cmd:  "make test"    # verify: command run as test gate
@@ -29,6 +31,8 @@ To change which model a stage uses, set the appropriate stage option (`plan_mode
 ## `.gremlins/prompts/*.md`
 
 Markdown prompt templates injected into Claude's system prompt for the stage that references them. Edit in place — no re-scaffolding needed. Templates may use subdirectories (e.g. `review/detail.md`).
+Bundled defaults for these files live under `gremlins/prompts/` in the package and
+are copied into `.gremlins/prompts/` by `gremlins init`.
 
 ## Re-scaffolding
 

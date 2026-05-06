@@ -31,6 +31,7 @@ def test_valid_pipeline_parses(tmp_path: pathlib.Path) -> None:
         f"""\
 name: test-pipe
 default_client: claude:sonnet
+prompt_dir: .
 stages:
   - name: plan
     type: plan
@@ -139,6 +140,7 @@ def test_prompt_list_resolves_both_paths(tmp_path: pathlib.Path) -> None:
         tmp_path / "pipeline.yaml",
         f"""\
 name: p
+prompt_dir: .
 stages:
   - name: s1
     type: verify

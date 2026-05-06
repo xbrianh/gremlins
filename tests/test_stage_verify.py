@@ -17,7 +17,6 @@ from gremlins.stages.verify import Verify
 _VERIFY_PROMPT = (
     pathlib.Path(__file__).resolve().parent.parent
     / "gremlins"
-    / "pipelines"
     / "prompts"
     / "verify_fix.md"
 )
@@ -270,7 +269,6 @@ def test_parallel_child_fix_prompt_uses_child_key_bail_command(tmp_path):
             _VERIFY_PROMPT,
             pathlib.Path(__file__).resolve().parent.parent
             / "gremlins"
-            / "pipelines"
             / "prompts"
             / "bail_section_fix.md",
         ],
