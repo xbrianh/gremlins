@@ -10,6 +10,7 @@ import subprocess
 import time
 from typing import Any, cast
 
+import gremlins.git as _git
 from gremlins.fleet import constants as _constants
 from gremlins.fleet.resolve import resolve_gremlin
 from gremlins.fleet.state import liveness_of_state_file, load_state
@@ -98,49 +99,26 @@ def _resolve_landing_cwd(state: dict[str, Any]) -> str:
 
 def _fast_forward_main(cwd: str | None):
     """Attempt to fast-forward local main to origin/main after a gh PR merge."""
-    r = subprocess.run(
-        ["git", "fetch", "origin"], capture_output=True, text=True, cwd=cwd
-    )
-    if r.returncode != 0:
-        print(f"warning: git fetch origin failed: {r.stderr.strip()}")
+    if not _git.try_fetch_all(cwd=cwd):
+        print("warning: git fetch origin failed")
         return
-    r = subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-        capture_output=True,
-        text=True,
-        cwd=cwd,
-    )
-    current = r.stdout.strip()
+    current = _git.current_branch(cwd=cwd)
     if current == "main":
-        r = subprocess.run(
-            ["git", "merge", "--ff-only", "origin/main"],
-            capture_output=True,
-            text=True,
-            cwd=cwd,
-        )
-        if r.returncode != 0:
-            print(
-                "warning: local main has diverged from origin/main — fast-forward not possible; update manually"
-            )
-        else:
+        try:
+            _git.ff_merge("origin/main", cwd=cwd)
             print("Fast-forwarded local main.")
+        except _git.GitError as e:
+            msg = "warning: local main has diverged from origin/main — fast-forward not possible; update manually"
+            if e.stderr:
+                msg += f"\n  git: {e.stderr}"
+            print(msg)
     else:
-        r = subprocess.run(
-            ["git", "merge-base", "--is-ancestor", "main", "origin/main"],
-            capture_output=True,
-            cwd=cwd,
-        )
-        if r.returncode == 0:
-            r = subprocess.run(
-                ["git", "branch", "-f", "main", "origin/main"],
-                capture_output=True,
-                text=True,
-                cwd=cwd,
-            )
-            if r.returncode == 0:
+        if _git.is_ancestor("main", "origin/main", cwd=cwd):
+            try:
+                _git.force_update_branch("main", "origin/main", cwd=cwd)
                 print("Fast-forwarded local main.")
-            else:
-                print(f"warning: could not fast-forward main: {r.stderr.strip()}")
+            except _git.GitError as e:
+                print(f"warning: could not fast-forward main: {e.stderr}")
         else:
             print("warning: local main has diverged from origin/main — update manually")
 
@@ -179,33 +157,24 @@ def _cleanup_gremlin(
         pass
 
     if workdir and os.path.exists(workdir):
-        r = subprocess.run(
-            ["git", "worktree", "remove", "--force", workdir],
-            capture_output=True,
-            cwd=cwd,
-        )
-        if r.returncode == 0:
-            print(f"removed worktree {workdir}")
-        else:
+        _git.remove_worktree(cwd or os.getcwd(), workdir)
+        if os.path.exists(workdir):
             try:
                 shutil.rmtree(workdir)
-                print(f"removed worktree {workdir}")
             except OSError as e:
                 print(f"warning: could not remove worktree {workdir}: {e}")
+        if not os.path.exists(workdir):
+            print(f"removed worktree {workdir}")
 
     if delete_branch:
         branch = state.get("branch") or expected_branch(state, gr_id)
         if branch:
-            r = subprocess.run(
-                ["git", "branch", "-D", branch],
-                capture_output=True,
-                text=True,
-                cwd=cwd,
-            )
-            if r.returncode == 0:
+            try:
+                _git.delete_branch(branch, force=True, cwd=cwd)
                 print(f"deleted branch {branch}")
-            elif "not found" not in r.stderr:
-                print(f"warning: could not delete branch {branch}: {r.stderr.strip()}")
+            except _git.GitError as e:
+                if "not found" not in e.stderr:
+                    print(f"warning: could not delete branch {branch}: {e.stderr}")
 
     if remove_state_dir:
         try:
@@ -328,24 +297,12 @@ def _gather_commit_inputs(
     except OSError:
         inputs["spec"] = ""
 
-    # best-effort; empty string on failure is fine — model will use other inputs
-    r = subprocess.run(
-        ["git", "log", "--oneline", f"{merge_base}..{branch}"],
-        capture_output=True,
-        text=True,
-        cwd=cwd,
+    inputs["git_log"] = "\n".join(
+        _git.log_oneline(f"{merge_base}..{branch}", cwd=cwd).splitlines()[:100]
     )
-    log_lines = r.stdout.strip().splitlines()[:100]
-    inputs["git_log"] = "\n".join(log_lines)
-
-    r = subprocess.run(
-        ["git", "diff", "--stat", f"{merge_base}..{branch}"],
-        capture_output=True,
-        text=True,
-        cwd=cwd,
+    inputs["git_stat"] = "\n".join(
+        _git.diff_stat(f"{merge_base}..{branch}", cwd=cwd).splitlines()[:100]
     )
-    stat_lines = r.stdout.strip().splitlines()[:100]
-    inputs["git_stat"] = "\n".join(stat_lines)
 
     return inputs
 
@@ -492,22 +449,19 @@ def _preflight_land(state: dict[str, Any], cwd: str | None) -> tuple[str, bool]:
         print("you are inside this gremlin's worktree — cd elsewhere before landing")
         return "", False
 
-    r = subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-        capture_output=True,
-        text=True,
-        cwd=cwd,
-    )
-    if r.returncode != 0:
-        print("error: could not determine current branch")
-        return "", False
-    current = r.stdout.strip()
+    current = _git.current_branch(cwd=cwd)
+    if not current:
+        # Detached HEAD: head_sha succeeds but no branch name exists.
+        if _git.head_sha(cwd=cwd):
+            current = "HEAD"
+        else:
+            print("error: could not determine current branch")
+            return "", False
 
-    r = subprocess.run(
-        ["git", "status", "--porcelain"], capture_output=True, text=True, cwd=cwd
-    )
     tracked_changes = [
-        ln for ln in r.stdout.splitlines() if not ln.startswith(("??", "!!"))
+        ln
+        for ln in _git.status_porcelain(cwd=cwd).splitlines()
+        if not ln.startswith(("??", "!!"))
     ]
     if tracked_changes:
         print(
@@ -530,24 +484,18 @@ def _squash_land(
     delete_branch: bool,
 ) -> bool:
     """Squash all commits above the merge-base of `source_ref` and HEAD, then commit."""
-    r = subprocess.run(
-        ["git", "merge-base", "HEAD", source_ref],
-        capture_output=True,
-        text=True,
-        cwd=cwd,
-    )
-    if r.returncode != 0:
+    try:
+        base = _git.merge_base("HEAD", source_ref, cwd=cwd)
+    except _git.GitError:
         print(f"error: could not compute merge-base between HEAD and {source_label}")
         return False
-    merge_base = r.stdout.strip()
 
-    r = subprocess.run(
-        ["git", "rev-list", "--count", f"{merge_base}..{source_ref}"],
-        capture_output=True,
-        text=True,
-        cwd=cwd,
-    )
-    if int(r.stdout.strip() or "0") < 1:
+    try:
+        commit_count = _git.rev_list_count(f"{base}..{source_ref}", cwd=cwd)
+    except _git.GitError:
+        print(f"error: could not count commits between merge-base and {source_label}")
+        return False
+    if commit_count < 1:
         print(f"{current} is already up to date with {source_label}.")
         _cleanup_gremlin(
             gr_id,
@@ -560,43 +508,32 @@ def _squash_land(
         )
         return True
 
-    # Snapshot untracked files before the merge so the failure-cleanup path
-    # doesn't delete files that were already present before we started.
-    pre_merge_untracked = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard"],
-        capture_output=True,
-        text=True,
-        cwd=cwd,
-    ).stdout.strip()
+    pre_merge_untracked = _git.ls_others(cwd=cwd)
 
     print(f"Squash-merging {source_label} onto {current}...")
-    r = subprocess.run(["git", "merge", "--squash", source_ref], cwd=cwd)
-    if r.returncode != 0:
-        reset_ok = (
-            subprocess.run(
-                ["git", "reset", "--hard", "HEAD"],
-                capture_output=True,
-                cwd=cwd,
-            ).returncode
-            == 0
-        )
-        # Only run git clean if the tree was clean of untracked files before
-        # the merge attempt — otherwise we'd delete pre-existing files that
-        # were explicitly allowed through preflight.
+    try:
+        _git.squash_merge(source_ref, cwd=cwd)
+    except _git.GitError as e:
+        reset_ok = True
+        try:
+            _git.reset_hard("HEAD", cwd=cwd)
+        except _git.GitError:
+            reset_ok = False
         if not pre_merge_untracked:
-            subprocess.run(["git", "clean", "-fd"], capture_output=True, cwd=cwd)
+            _git.clean_fd(cwd=cwd)
         suffix = "working tree restored" if reset_ok else "manual cleanup may be needed"
-        print(f"error: git merge --squash failed — {suffix}")
+        detail = f"\n  git: {e.stderr}" if e.stderr else ""
+        print(f"error: git merge --squash failed — {suffix}{detail}")
         return False
 
-    subject, body, land_cost = _build_commit_message(
-        wdir, state, source_ref, merge_base, cwd
-    )
+    subject, body, land_cost = _build_commit_message(wdir, state, source_ref, base, cwd)
     commit_msg = f"{subject}\n\n{body}" if body else subject
 
-    r = subprocess.run(["git", "commit", "-m", commit_msg], cwd=cwd)
-    if r.returncode != 0:
-        print("error: git commit failed")
+    try:
+        _git.commit(commit_msg, cwd=cwd)
+    except _git.GitError as e:
+        detail = f"\n  git: {e.stderr}" if e.stderr else ""
+        print(f"error: git commit failed{detail}")
         return False
 
     print(f"Landed {source_label} onto {current}.")
@@ -620,25 +557,19 @@ def _ff_land(
     delete_branch: bool,
 ) -> bool:
     """Fast-forward the caller's branch to `source_ref`. Hard fail if ff is not possible."""
-    r = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", "HEAD", source_ref],
-        capture_output=True,
-        cwd=cwd,
-    )
-    if r.returncode != 0:
+    if not _git.is_ancestor("HEAD", source_ref, cwd=cwd):
         print(
             f"error: cannot fast-forward — {current} has diverged from {source_label}. "
             f"Re-run with --squash to condense the chain into one commit, or rebase manually."
         )
         return False
 
-    r = subprocess.run(
-        ["git", "rev-list", "--count", f"HEAD..{source_ref}"],
-        capture_output=True,
-        text=True,
-        cwd=cwd,
-    )
-    if int(r.stdout.strip() or "0") < 1:
+    try:
+        commit_count = _git.rev_list_count(f"HEAD..{source_ref}", cwd=cwd)
+    except _git.GitError:
+        print(f"error: could not count commits between HEAD and {source_label}")
+        return False
+    if commit_count < 1:
         print(f"{current} is already up to date with {source_label}.")
         _cleanup_gremlin(
             gr_id,
@@ -652,9 +583,11 @@ def _ff_land(
         return True
 
     print(f"Fast-forwarding {current} to {source_label}...")
-    r = subprocess.run(["git", "merge", "--ff-only", source_ref], cwd=cwd)
-    if r.returncode != 0:
-        print("error: git merge --ff-only failed")
+    try:
+        _git.ff_merge(source_ref, cwd=cwd)
+    except _git.GitError as e:
+        detail = f"\n  git: {e.stderr}" if e.stderr else ""
+        print(f"error: git merge --ff-only failed{detail}")
         return False
 
     print(f"Landed {source_label} onto {current}.")
@@ -690,12 +623,7 @@ def _land_local(
     else:
         cwd = project_root if project_root and os.path.isdir(project_root) else None
 
-    r = subprocess.run(
-        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
-        capture_output=True,
-        cwd=cwd,
-    )
-    if r.returncode != 0:
+    if not _git.branch_exists(branch, cwd=cwd):
         print(
             f"error: gremlin branch {branch!r} does not exist — may already have been cleaned up"
         )
@@ -731,16 +659,10 @@ def _land_boss(
         )
         return False
 
-    r = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        capture_output=True,
-        text=True,
-        cwd=workdir,
-    )
-    if r.returncode != 0 or not r.stdout.strip():
+    boss_head = _git.head_sha(cwd=workdir)
+    if not boss_head:
         print(f"error: could not resolve HEAD in boss worktree {workdir}")
         return False
-    boss_head = r.stdout.strip()
 
     project_root = state.get("project_root") or ""
     cwd = project_root if project_root and os.path.isdir(project_root) else None
