@@ -1,5 +1,5 @@
 <!-- placeholders: model, text, address_commit_instr -->
-A code review of the most recent implementation follows. For every actionable finding you agree with, make the fix in the code. For findings you disagree with or choose to skip, note them briefly in your final summary with a reason.
+A code review of the most recent implementation follows. **Default: fix every actionable finding.** Severity language ("nit", "minor", "non-blocking", "fyi") is metadata, not a routing signal — fix it anyway. The only reason to skip is if the reviewer is factually wrong (verify by re-reading the code first) or the comment is a question that needs no code change. Note any skipped findings briefly in your final summary with the reason.
 
 ---
 **Reviewer** (model: {model}):
