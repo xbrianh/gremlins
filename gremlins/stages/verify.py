@@ -32,7 +32,7 @@ class VerifyOptions:
 def _diff_text(cwd: pathlib.Path, *, is_git: bool) -> str:
     if not is_git:
         return ""
-    try:
+    try:  # GitError (from check=True in diff_output) and OSError both fall through here
         unstaged = _git_mod.diff_output(cwd=cwd)
         staged = _git_mod.diff_output(["--cached"], cwd=cwd)
         return (unstaged + staged).strip()

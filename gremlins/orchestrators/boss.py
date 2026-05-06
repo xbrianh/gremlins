@@ -135,10 +135,10 @@ def run_proc(cmd: list[str], **kwargs: Any) -> int:
 
 
 def get_head_ref(project_root: str) -> str:
-    sha = _git_mod.head_sha(cwd=project_root)
-    if not sha:
-        die(f"git rev-parse HEAD failed in {project_root}")
-    return sha
+    try:
+        return _git_mod.remote_ref_sha("HEAD", cwd=project_root)
+    except _git_mod.GitError as e:
+        die(f"git rev-parse HEAD failed in {project_root}: {e.stderr}")
 
 
 def get_current_branch(project_root: str) -> str:
@@ -202,7 +202,7 @@ def get_remote_branch_sha(project_root: str, branch: str) -> str:
             f"refs/remotes/origin/{branch}", cwd=project_root
         )
     except _git_mod.GitError as e:
-        die(f"git rev-parse refs/remotes/origin/{branch} failed: {e.stderr}")
+        return die(f"git rev-parse refs/remotes/origin/{branch} failed: {e.stderr}")
 
 
 def init_boss_state(

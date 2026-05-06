@@ -108,7 +108,10 @@ def has_diff(ref_a: str, ref_b: str, cwd: str | os.PathLike[str] | None = None) 
 
 def current_branch(cwd: str | os.PathLike[str] | None = None) -> str:
     """Return current branch name, or '' for detached HEAD or on error."""
-    r = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd, check=False)
+    try:
+        r = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd, check=False)
+    except OSError:
+        return ""
     if r.returncode != 0:
         return ""
     branch = r.stdout.strip()
