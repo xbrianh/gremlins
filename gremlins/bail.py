@@ -1,7 +1,4 @@
-"""CLI entry point for emitting a bail marker from inside a running pipeline stage.
-
-Reads GR_ID from env (set by the launcher). Returns 0 for valid invocations.
-"""
+"""CLI entry point for emitting a bail marker from inside a running pipeline stage."""
 
 from __future__ import annotations
 
@@ -26,6 +23,13 @@ _VALID = {
 }
 
 
+def _resolve_child_key(arg_child_key: str | None) -> str | None:
+    if arg_child_key:
+        return arg_child_key
+    env_child_key = os.environ.get("GREMLIN_CHILD_KEY")
+    return env_child_key or None
+
+
 def bail_main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
@@ -33,6 +37,7 @@ def bail_main(argv: list[str] | None = None) -> int:
         prog="python -m gremlins.bail",
         description="Mark the running gremlin as bailed.",
     )
+    p.add_argument("--child-key")
     p.add_argument("bail_class", choices=sorted(_VALID))
     p.add_argument("bail_detail", nargs="?", default="")
     args = p.parse_args(argv)
@@ -44,7 +49,12 @@ def bail_main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             sys.stderr.write(f"error: {exc}\n")
             return 1
-    emit_bail(gr_id, args.bail_class, args.bail_detail)
+    emit_bail(
+        gr_id,
+        args.bail_class,
+        args.bail_detail,
+        child_key=_resolve_child_key(args.child_key),
+    )
     return 0
 
 

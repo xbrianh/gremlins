@@ -74,6 +74,27 @@ def test_ghreview_bail_rubric(tmp_path):
     assert "anything a human should weigh in on" not in prompt
 
 
+def test_ghreview_parallel_child_uses_child_key_bail_command(tmp_path):
+    client = FakeClaudeClient(fixtures={"ghreview": MINIMAL_EVENTS})
+    stage = _make_ghreview(
+        client,
+        tmp_path,
+        pr_url="https://github.com/owner/repo/pull/1",
+    )
+    stage.bind(
+        StageContext(
+            client=client,
+            session_dir=tmp_path,
+            gr_id="gr-123",
+            child_key="review-child",
+        )
+    )
+
+    stage.run(None)
+
+    assert "python -m gremlins.bail --child-key review-child" in client.calls[0].prompt
+
+
 def _make_ghaddress(client, tmp_path, *, gr_id=None, pr_url):
     entry = StageEntry(
         name="ghaddress",
@@ -115,3 +136,24 @@ def test_ghaddress_prompt_includes_bail_content(tmp_path):
     assert (
         "## Bail markers (running under a gremlin pipeline)" in client.calls[0].prompt
     )
+
+
+def test_ghaddress_parallel_child_uses_child_key_bail_command(tmp_path):
+    client = FakeClaudeClient(fixtures={"ghaddress": MINIMAL_EVENTS})
+    stage = _make_ghaddress(
+        client,
+        tmp_path,
+        pr_url="https://github.com/owner/repo/pull/1",
+    )
+    stage.bind(
+        StageContext(
+            client=client,
+            session_dir=tmp_path,
+            gr_id="gr-123",
+            child_key="address-child",
+        )
+    )
+
+    stage.run(None)
+
+    assert "python -m gremlins.bail --child-key address-child" in client.calls[0].prompt

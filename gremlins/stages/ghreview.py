@@ -24,6 +24,7 @@ class GHReview(Stage):
 
     def run(self, pipe: Any) -> None:
         prompt = load_prompts(self.prompt_paths).format(
+            bail_command=self.bail_command(),
             pr_url=self.pr_url,
         )
         self.run_claude(

@@ -31,6 +31,8 @@ from gremlins.prompts import load_prompts
 logger = logging.getLogger(__name__)
 
 CLAUDE_SANITIZE_MODEL = "haiku"
+_PROMPTS_DIR = pathlib.Path(__file__).resolve().parent / "pipelines" / "prompts"
+_HANDOFF_STYLE_PATH = _PROMPTS_DIR / "code_style.md"
 
 T = TypeVar("T")
 
@@ -64,6 +66,13 @@ def die(msg: str) -> NoReturn:
     sys.stderr.write(f"error: {msg}\n")
     sys.stderr.flush()
     sys.exit(1)
+
+
+def _load_handoff_style() -> str:
+    try:
+        return load_prompts([_HANDOFF_STYLE_PATH])
+    except (FileNotFoundError, ValueError) as exc:
+        die(f"error loading prompt: {exc}")
 
 
 def run_git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -167,16 +176,7 @@ This is the original chain spec. It does not change between handoffs and is read
 
 """
 
-    _style_path = (
-        pathlib.Path(__file__).resolve().parent
-        / "pipelines"
-        / "prompts"
-        / "code_style.md"
-    )
-    try:
-        code_style = load_prompts([_style_path])
-    except (FileNotFoundError, ValueError) as exc:
-        die(f"error loading prompt: {exc}")
+    code_style = _load_handoff_style()
     style_section = f"""## Coding style
 
 Respect these principles when writing child plans. Avoid proposing architectures that violate them — e.g. multi-level class hierarchies, factories where a function suffices, speculative abstractions:
