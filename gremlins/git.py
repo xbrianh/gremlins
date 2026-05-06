@@ -1,4 +1,14 @@
-"""Git helpers used across pipeline stages."""
+"""Git helpers used across pipeline stages.
+
+Conventions:
+- Predicates return bool and never raise.
+- Value-returning helpers raise GitError on failure. _git-based helpers
+  (record_pre_impl_state, create_handoff_branch, etc.) still raise RuntimeError
+  pending migration to _run_git.
+- Best-effort helpers swallow errors and use a try_ prefix.
+- Every helper accepts cwd: str | os.PathLike | None = None.
+- _run_git defaults to check=True and raises GitError on non-zero exit.
+"""
 
 from __future__ import annotations
 
@@ -11,25 +21,55 @@ import tempfile
 from typing import Any, cast
 
 
-def in_git_repo() -> bool:
-    try:
-        r = subprocess.run(
-            ["git", "rev-parse", "--git-dir"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
+class GitError(Exception):
+    def __init__(self, returncode: int, stderr: str) -> None:
+        super().__init__(f"git exited {returncode}: {stderr}")
+        self.returncode = returncode
+        self.stderr = stderr
+
+
+def _run_git(
+    args: list[str],
+    *,
+    cwd: str | os.PathLike[str] | None = None,
+    check: bool = True,
+    capture: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    if capture:
+        r: subprocess.CompletedProcess[str] = subprocess.run(
+            ["git"] + args, cwd=cwd, capture_output=True, text=True
         )
+        if check and r.returncode != 0:
+            raise GitError(r.returncode, r.stderr.strip())
+        return r
+    else:
+        rr = subprocess.run(
+            ["git"] + args,
+            cwd=cwd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if check and rr.returncode != 0:
+            raise GitError(rr.returncode, rr.stderr.strip())
+        return subprocess.CompletedProcess(rr.args, rr.returncode, "", rr.stderr)
+
+
+def in_git_repo(cwd: str | os.PathLike[str] | None = None) -> bool:
+    try:
+        r = _run_git(["rev-parse", "--git-dir"], cwd=cwd, check=False, capture=False)
         return r.returncode == 0
-    except Exception:
+    except OSError:
         return False
 
 
-def git_head() -> str:
+def git_head(cwd: str | os.PathLike[str] | None = None) -> str:
     r = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         capture_output=True,
         text=True,
         check=False,
+        cwd=cwd,
     )
     return r.stdout.strip() if r.returncode == 0 else ""
 
@@ -86,6 +126,7 @@ class DivergentHead:
 ImplOutcome = EmptyImpl | DirtyOnly | HeadAdvanced | DivergentHead
 
 
+# being phased out in favour of _run_git
 def _git(
     args: list[str], *, cwd: str | None = None, **kwargs: Any
 ) -> subprocess.CompletedProcess[Any]:
@@ -251,13 +292,11 @@ def sweep_stale_handoff_branches(handoff_branch: str, cwd: str | None = None) ->
 
 def is_git_repo(path: str) -> bool:
     """Return True if `path` is inside a git repository."""
-    r = subprocess.run(
-        ["git", "-C", path, "rev-parse", "--git-dir"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    return r.returncode == 0
+    try:
+        r = _run_git(["-C", path, "rev-parse", "--git-dir"], check=False, capture=False)
+        return r.returncode == 0
+    except OSError:
+        return False
 
 
 def resolve_default_branch(project_root: str) -> str:
