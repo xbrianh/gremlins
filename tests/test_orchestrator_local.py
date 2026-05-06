@@ -417,6 +417,10 @@ def test_local_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
     style_path.write_text("Style content.\n", encoding="utf-8")
     review_prompt_path = pipeline_dir / "review.md"
     review_prompt_path.write_text("Review prompt content.\n", encoding="utf-8")
+    implement_prompt_path = pipeline_dir / "implement.md"
+    implement_prompt_path.write_text("Implement.\n", encoding="utf-8")
+    address_prompt_path = pipeline_dir / "address.md"
+    address_prompt_path.write_text("Address.\n", encoding="utf-8")
 
     def write_pipeline(stage_clients: dict[str, str]) -> None:
         lines = ["name: local", "", "stages:"]
@@ -424,6 +428,10 @@ def test_local_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
             extras = ""
             if stage_type == "review-code":
                 extras = ", prompt: [style.md, review.md]"
+            elif stage_type == "implement":
+                extras = ", prompt: [implement.md]"
+            elif stage_type == "address-code":
+                extras = ", prompt: [address.md]"
             lines.append(
                 "  - { name: "
                 f"{stage_name}, type: {stage_type}, client: "

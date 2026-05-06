@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import logging
 import os
 import pathlib
@@ -620,15 +621,14 @@ def address_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
 
     is_git = in_git_repo()
 
+    pipeline = load_pipeline(resolve_pipeline_path("local", pathlib.Path.cwd()))
+    ac_entry = next((s for s in pipeline.stages if s.type == "address-code"), None)
+    if ac_entry is None or not ac_entry.prompt_paths:
+        die("local pipeline has no address-code stage with a prompt")
+
     ctx = StageContext(client=client, session_dir=session_dir, gr_id=None)
     logger.info("addressing code reviews (model: %s)", args.address)
-    entry = StageEntry(
-        name="address-code",
-        type="address-code",
-        client=None,
-        prompt_paths=[],
-        options={},
-    )
+    entry = dataclasses.replace(ac_entry, client=None)
     stage = address_code.AddressCode(
         entry,
         args.address,

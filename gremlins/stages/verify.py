@@ -16,8 +16,6 @@ from gremlins.state import check_bail, emit_bail
 
 logger = logging.getLogger(__name__)
 
-_PROMPT = pathlib.Path(__file__).resolve().parent / "verify_fix.md"
-
 
 def _diff_text(cwd: pathlib.Path, *, is_git: bool) -> str:
     if not is_git:
@@ -62,7 +60,7 @@ class Verify(Stage):
                 "The next stage (commit-pr) will handle staging and committing."
             )
 
-        template = load_prompts([_PROMPT] + list(self.prompt_paths))
+        template = load_prompts(self.prompt_paths)
         combined_cmd = " && ".join(cmds)
         commands_section = "**Commands run:**\n" + "\n".join(f"- `{c}`" for c in cmds)
 

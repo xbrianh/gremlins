@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import pathlib
 from typing import Any
 
 import pytest
@@ -13,13 +14,21 @@ from gremlins.pipeline import StageEntry
 from gremlins.stages.context import StageContext
 from gremlins.stages.verify import Verify
 
+_VERIFY_PROMPT = (
+    pathlib.Path(__file__).resolve().parent.parent
+    / "gremlins"
+    / "pipelines"
+    / "prompts"
+    / "verify_fix.md"
+)
+
 
 def _make_entry(cmds: list[str] | None = None, max_attempts: int = 3) -> StageEntry:
     return StageEntry(
         name="verify",
         type="verify",
         client=None,
-        prompt_paths=[],
+        prompt_paths=[_VERIFY_PROMPT],
         options={
             "cmds": cmds if cmds is not None else [],
             "max_attempts": max_attempts,

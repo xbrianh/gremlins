@@ -15,13 +15,6 @@ from gremlins.state import emit_bail
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
-_DEFAULT_PROMPT = (
-    pathlib.Path(__file__).resolve().parent.parent
-    / "pipelines"
-    / "prompts"
-    / "address_code.md"
-)
-
 
 def _model_from(path: pathlib.Path, stage_name: str) -> str:
     stem = path.stem
@@ -78,9 +71,7 @@ class AddressCode(Stage):
                     "body references the review file. Do not push."
                 )
 
-            template = load_prompts(
-                self.prompt_paths if self.prompt_paths else [_DEFAULT_PROMPT]
-            )
+            template = load_prompts(self.prompt_paths)
             address_prompt = template.format(
                 model=review_model,
                 text=text,

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import pathlib
 import time
 from collections.abc import Callable
 from typing import Any
@@ -17,8 +16,6 @@ from gremlins.stages.registry import register_stage
 from gremlins.state import check_bail, emit_bail
 
 logger = logging.getLogger(__name__)
-
-_PROMPT = pathlib.Path(__file__).resolve().parent / "ci_fix.md"
 
 _FAILING_CONCLUSIONS = frozenset({"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED"})
 _PENDING_STATES = frozenset({"EXPECTED", "PENDING"})
@@ -181,7 +178,7 @@ class WaitCI(Stage):
             )
             return
 
-        template = load_prompts([_PROMPT] + list(self.prompt_paths))
+        template = load_prompts(self.prompt_paths)
 
         _exhausted = False
         _agent_bailed = False

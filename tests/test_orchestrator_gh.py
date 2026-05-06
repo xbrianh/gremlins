@@ -778,6 +778,8 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
     ghreview_prompt.write_text("Review.\n", encoding="utf-8")
     ghaddress_prompt = prompt_dir / "ghaddress.md"
     ghaddress_prompt.write_text("Address.\n", encoding="utf-8")
+    implement_prompt = prompt_dir / "implement.md"
+    implement_prompt.write_text("Implement.\n", encoding="utf-8")
 
     def write_pipeline(stage_clients: dict[str, str]) -> None:
         lines = ["name: gh", "", "stages:"]
@@ -791,6 +793,8 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
                 fields.append(f"prompt: {json.dumps('../prompts/ghreview.md')}")
             elif stage_type == "ghaddress":
                 fields.append(f"prompt: {json.dumps('../prompts/ghaddress.md')}")
+            elif stage_type == "implement":
+                fields.append(f"prompt: {json.dumps('../prompts/implement.md')}")
             lines.append("  - { " + ", ".join(fields) + " }")
         pipeline_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 

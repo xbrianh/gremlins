@@ -140,7 +140,7 @@ def test_implement_renders_spec_block_when_present(tmp_path, monkeypatch):
         name="implement",
         type="implement",
         client=None,
-        prompt_paths=[],
+        prompt_paths=[_BUNDLED_PROMPTS / "implement_local.md"],
         options={},
     )
     stage = implement.Implement(
@@ -189,7 +189,7 @@ def test_implement_omits_spec_block_when_absent(tmp_path, monkeypatch):
         name="implement",
         type="implement",
         client=None,
-        prompt_paths=[],
+        prompt_paths=[_BUNDLED_PROMPTS / "implement_local.md"],
         options={},
     )
     stage = implement.Implement(
@@ -285,7 +285,7 @@ def test_implement_stage_raises_on_empty_diff(tmp_path, monkeypatch):
         name="implement",
         type="implement",
         client=None,
-        prompt_paths=[],
+        prompt_paths=[_BUNDLED_PROMPTS / "implement_local.md"],
         options={},
     )
     client = FakeClaudeClient(fixtures={"implement": MINIMAL_EVENTS})
@@ -352,7 +352,7 @@ def _make_address_code_stage(
         name="address-code",
         type="address-code",
         client=None,
-        prompt_paths=[],
+        prompt_paths=[_BUNDLED_PROMPTS / "address_code.md"],
         options={},
     )
     stage = AddressCode(entry, model, is_git=is_git)
