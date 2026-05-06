@@ -27,7 +27,7 @@ def _make_ghreview(client, tmp_path, *, gr_id=None, pr_url):
         name="ghreview",
         type="ghreview",
         client=None,
-        prompt_paths=[_BUNDLED_PROMPTS / "ghreview.md"],
+        prompt_paths=[_BUNDLED_PROMPTS / "review_gh.md"],
         options={},
     )
     stage = GHReview(entry, "sonnet", pr_url=pr_url)
@@ -80,7 +80,7 @@ def _make_ghaddress(client, tmp_path, *, gr_id=None, pr_url):
         type="ghaddress",
         client=None,
         prompt_paths=[
-            _BUNDLED_PROMPTS / "ghaddress.md",
+            _BUNDLED_PROMPTS / "address_gh.md",
             _BUNDLED_PROMPTS / "bail_section.md",
         ],
         options={},
