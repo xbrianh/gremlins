@@ -104,28 +104,28 @@ def _poll_until_done(
     deadline = time.time() + timeout
     review_decision = ""
     while True:
-        head_sha = ""
+        current_sha = ""
         if checks_getter is not None:
             checks, review_decision = checks_getter()
             if head_sha_getter is not None:
-                head_sha = head_sha_getter()
+                current_sha = head_sha_getter()
         else:
             status = get_pr_ci_status(pr_url)
             checks = status["checks"]
             review_decision = status["review_decision"]
-            head_sha = status["head_sha"]
+            current_sha = status["head_sha"]
 
         _bail_if_review_required(gr_id, review_decision, child_key=child_key)
 
-        if required_sha and head_sha and head_sha != required_sha:
+        if required_sha and current_sha and current_sha != required_sha:
             if time.time() >= deadline:
                 raise RuntimeError(
                     f"ci-gate: timed out waiting for GitHub to reflect pushed SHA "
-                    f"{required_sha[:8]} (still showing {head_sha[:8]}) after {timeout}s"
+                    f"{required_sha[:8]} (still showing {current_sha[:8]}) after {timeout}s"
                 )
             logger.debug(
                 "ci-gate: PR head %s != expected %s, waiting for push to propagate",
-                head_sha[:8],
+                current_sha[:8],
                 required_sha[:8],
             )
             time.sleep(interval)
