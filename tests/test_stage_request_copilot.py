@@ -1,21 +1,37 @@
 """Unit tests for gremlins.stages.request_copilot."""
 
+from __future__ import annotations
+
 import subprocess
 
 import pytest
 
+from gremlins.clients.fake import FakeClaudeClient
+from gremlins.pipeline import StageEntry
 from gremlins.stages.context import StageContext
-from gremlins.stages.request_copilot import RequestCopilotOptions, run
+from gremlins.stages.request_copilot import RequestCopilot
 
 
-def _make_ctx(tmp_path):
-    from gremlins.clients.fake import FakeClaudeClient
+def _make_entry() -> StageEntry:
+    return StageEntry(
+        name="request-copilot",
+        type="request-copilot",
+        client=None,
+        prompt_paths=[],
+        options={},
+    )
 
-    return StageContext(
+
+def _make_stage(tmp_path, *, repo: str, pr_num: str) -> RequestCopilot:
+    entry = _make_entry()
+    stage = RequestCopilot(entry, None, repo=repo, pr_num=pr_num)
+    ctx = StageContext(
         client=FakeClaudeClient(fixtures={}),
         session_dir=tmp_path,
         gr_id=None,
     )
+    stage.bind(ctx)
+    return stage
 
 
 def test_run_calls_gh_pr_edit(tmp_path, monkeypatch):
@@ -27,7 +43,8 @@ def test_run_calls_gh_pr_edit(tmp_path, monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    run(_make_ctx(tmp_path), RequestCopilotOptions(repo="owner/repo", pr_num="42"))
+    stage = _make_stage(tmp_path, repo="owner/repo", pr_num="42")
+    stage.run(None)
 
     assert len(calls) == 1
     cmd = calls[0]
@@ -47,5 +64,6 @@ def test_run_raises_on_nonzero_returncode(tmp_path, monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
+    stage = _make_stage(tmp_path, repo="owner/repo", pr_num="7")
     with pytest.raises(RuntimeError, match="could not request Copilot review"):
-        run(_make_ctx(tmp_path), RequestCopilotOptions(repo="owner/repo", pr_num="7"))
+        stage.run(None)

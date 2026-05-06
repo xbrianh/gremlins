@@ -459,12 +459,11 @@ def _build_stage_runner(
             _ensure_pr_url(gh_state, state_file, args.resume_from)
             set_stage(gr_id, entry.name)
             logger.info("[3/8] requesting Copilot review")
-            request_copilot.run(
-                ctx,
-                request_copilot.RequestCopilotOptions(
-                    repo=repo, pr_num=gh_state["pr_num"]
-                ),
+            stage = request_copilot.RequestCopilot(
+                entry, model, repo=repo, pr_num=gh_state["pr_num"]
             )
+            stage.bind(ctx)
+            stage.run(None)
 
         return _request_copilot
 
