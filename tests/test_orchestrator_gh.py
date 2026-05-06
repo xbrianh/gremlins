@@ -1357,6 +1357,61 @@ def test_resume_from_commit_pr_skips_implement(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# wait-copilot stage: argument wiring
+# ---------------------------------------------------------------------------
+
+
+def test_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
+    """WaitCopilot receives repo and pr_num as instance attrs, session_dir via state."""
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    session_dir, _state_file = _patch_common(monkeypatch, tmp_path)
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
+    )
+    monkeypatch.setattr("gremlins.stages.ghreview.run", lambda ctx, options: None)
+    monkeypatch.setattr(
+        "gremlins.stages.request_copilot.RequestCopilot.run",
+        lambda self, pipe: None,
+    )
+    monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
+    monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
+
+    captured_stage = {}
+
+    def record_wait_copilot(self, pipe):
+        captured_stage["stage"] = self
+        return "APPROVED"
+
+    monkeypatch.setattr(
+        "gremlins.stages.wait_copilot.WaitCopilot.run", record_wait_copilot
+    )
+
+    client = _CommittingClient(
+        git_dir=tmp_path,
+        fixtures={
+            "implement": IMPL_EVENTS,
+            "commit-pr": _pr_events("https://github.com/owner/repo/pull/77"),
+        },
+    )
+
+    result = gh_main(
+        ["--plan", "42", "--client", "claude:claude-opus-4-7"], client=client
+    )
+    assert result == 0
+
+    stage = captured_stage["stage"]
+    assert stage.repo == "owner/repo"
+    assert stage.pr_num == "77"
+    assert stage.state.session_dir == session_dir
+
+
+# ---------------------------------------------------------------------------
 # ci-gate stage: argument wiring, ordering, and resume behavior
 # ---------------------------------------------------------------------------
 
