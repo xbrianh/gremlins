@@ -257,10 +257,11 @@ class WaitCI(Stage):
                 )
                 _agent_bailed = False
 
-                _get_sha = (
-                    self.fix_sha_getter if self.fix_sha_getter is not None else head_sha
+                fix_sha = (
+                    self.fix_sha_getter()
+                    if self.fix_sha_getter is not None
+                    else head_sha(cwd=self.state.cwd)
                 )
-                fix_sha = _get_sha()
 
             _exhausted = True
             emit_bail(
