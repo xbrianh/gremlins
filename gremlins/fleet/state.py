@@ -4,11 +4,11 @@ import datetime
 import json
 import os
 import re
-import subprocess
 import time
 from collections.abc import Iterator
 from typing import cast
 
+from gremlins import git as _git_mod
 from gremlins.fleet import constants as _constants
 
 
@@ -176,12 +176,6 @@ def atomic_patch_state(sf: str, patch: dict[str, object]) -> bool:
 def git_toplevel() -> str:
     """Return the git toplevel of cwd, or cwd itself if not in a repo."""
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return result.stdout.strip()
+        return _git_mod.toplevel()
     except Exception:
         return os.getcwd()

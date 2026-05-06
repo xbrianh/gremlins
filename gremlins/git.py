@@ -407,6 +407,12 @@ def setup_copy(project_root: str) -> str:
     return workdir
 
 
+def toplevel(cwd: str | os.PathLike[str] | None = None) -> str:
+    """Return the absolute path of the git toplevel. Raises GitError on failure."""
+    r = _run_git(["rev-parse", "--show-toplevel"], cwd=cwd)
+    return r.stdout.strip()
+
+
 def remove_worktree(project_root: str, workdir: str) -> None:
     """Remove a git worktree and prune stale entries. Best-effort; never raises."""
     try:
