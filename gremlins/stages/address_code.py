@@ -67,7 +67,7 @@ class AddressCode(Stage):
                 )
 
             first_stage_name, first_path = review_files[0]
-            model = _model_from(first_path, first_stage_name)
+            review_model = _model_from(first_path, first_stage_name)
             text = "\n\n---\n\n".join(
                 p.read_text(encoding="utf-8") for _, p in review_files
             )
@@ -96,7 +96,7 @@ Do not call this helper if you successfully addressed every actionable finding.
             template = load_prompts([prompt_path])
             address_prompt = template.format(
                 code_style=self.code_style,
-                model=model,
+                model=review_model,
                 text=text,
                 address_commit_instr=address_commit_instr,
                 bail_section=bail_section,
