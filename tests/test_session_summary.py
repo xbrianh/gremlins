@@ -10,7 +10,6 @@ import subprocess
 import time
 
 import gremlins.fleet.constants as _const
-import gremlins.fleet.session_summary as ss
 from gremlins.fleet.session_summary import (
     _collect_gremlins,
     _prune_old_state,
@@ -77,7 +76,7 @@ def _invoke(
     """Call main() with a faked stdin, returning (rc, stdout, stderr)."""
     hook_input = json.dumps({"hook_event_name": hook_event, "cwd": project_root})
 
-    monkeypatch.setenv("XDG_STATE_HOME", str(state_root.parent))
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     if skip_summary:
         monkeypatch.setenv("GREMLIN_SKIP_SUMMARY", "1")
@@ -415,7 +414,7 @@ def test_always_exits_zero_on_exception(monkeypatch, capsys):
     def boom(*a, **kw):
         raise RuntimeError("simulated failure")
 
-    monkeypatch.setattr(ss, "_get_state_root", boom)
+    monkeypatch.setattr("gremlins.paths.state_root", boom)
     rc = main([])
     assert rc == 0
 

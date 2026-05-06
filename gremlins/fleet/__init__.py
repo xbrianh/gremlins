@@ -1,9 +1,10 @@
 """Fleet manager package for background gremlins.
 
-Reads every ``${XDG_STATE_HOME:-$HOME/.local/state}/claude-gremlins/<id>/state.json``,
-applies the shared liveness classifier inline, and prints one scannable line per
-gremlin. Subcommands (``ack``, ``close``, ``land``, ``log``, ``rescue``, ``rm``, ``skip``, ``stop``)
-operate on a single gremlin by id-prefix.
+Reads every gremlin state file under the per-user state directory from
+``gremlins.paths.state_root()``, applies the shared liveness classifier inline,
+and prints one scannable line per gremlin. Subcommands (``ack``, ``close``,
+``land``, ``log``, ``rescue``, ``rm``, ``skip``, ``stop``) operate on a single
+gremlin by id-prefix.
 
 Exposed via ``python -m gremlins.cli fleet``.
 

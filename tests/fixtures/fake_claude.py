@@ -283,7 +283,9 @@ def handle_rescue_diagnosis(prompt: str) -> int:
     object. Default verdict is "fixed" — tests override via env to exercise
     other branches.
     """
-    m = re.search(r"(/[^\s`]+\.done)\b", prompt)
+    m = re.search(r"`([^`]+\.done)`", prompt) or re.search(
+        r"(/[^\s`]+\.done)\b", prompt
+    )
     marker_path = m.group(1) if m else ""
     status = os.environ.get("FAKE_CLAUDE_RESCUE_VERDICT", "fixed")
     summary = os.environ.get("FAKE_CLAUDE_RESCUE_SUMMARY", "fake diagnosis")

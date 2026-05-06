@@ -30,6 +30,7 @@ from typing import Any, NoReturn, cast
 
 from gremlins import git as _git_mod
 from gremlins import handoff
+from gremlins import paths as _paths
 from gremlins.clients import PACKAGE_DEFAULT, ClientSpec, to_client
 from gremlins.clients.protocol import ClaudeClient
 from gremlins.gh_utils import get_repo, parse_issue_ref, view_issue
@@ -39,12 +40,7 @@ from gremlins.state import patch_state, set_stage
 
 logger = logging.getLogger(__name__)
 
-STATE_ROOT = os.path.join(
-    os.environ.get(
-        "XDG_STATE_HOME", os.path.join(os.path.expanduser("~"), ".local", "state")
-    ),
-    "claude-gremlins",
-)
+STATE_ROOT = str(_paths.state_root())
 
 # Parent of the gremlins package — where ``python -m gremlins.cli`` needs to
 # find ``gremlins/`` on PYTHONPATH when boss subprocesses out to handoff /

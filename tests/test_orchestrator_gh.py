@@ -1711,7 +1711,7 @@ def test_resume_from_verify(tmp_path, monkeypatch):
 
 
 def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir):
-    """gr_id threads into set_stage and writes to state.json under XDG_STATE_HOME."""
+    """gr_id threads into set_stage and writes to the isolated state root."""
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 

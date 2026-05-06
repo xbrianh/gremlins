@@ -94,16 +94,22 @@ def _isolate_gr_id(monkeypatch):
 
 
 @pytest.fixture
-def make_state_dir(tmp_path, monkeypatch):
-    """Fixture factory: set XDG_STATE_HOME and create a minimal state.json for gr_id.
+def test_state_root(tmp_path, monkeypatch):
+    """Create and patch an isolated gremlins state root."""
+    root = tmp_path / "state"
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: root)
+    return root
+
+
+@pytest.fixture
+def make_state_dir(test_state_root):
+    """Fixture factory: create a minimal state.json for gr_id under the state root.
 
     Returns a callable: make_state_dir(gr_id) -> state_dir_path
     """
-    xdg = tmp_path / "xdg"
-    monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
 
     def _factory(gr_id: str) -> pathlib.Path:
-        state_dir = xdg / "claude-gremlins" / gr_id
+        state_dir = test_state_root / gr_id
         state_dir.mkdir(parents=True, exist_ok=True)
         (state_dir / "state.json").write_text(
             json.dumps({"id": gr_id, "stage": "", "bail_class": ""})

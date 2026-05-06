@@ -116,18 +116,18 @@ def test_autouse_isolate_gr_id_unsets_gr_id_under_inherited_env(tmp_path):
 
 
 def _stage_parent_state(tmp_path, monkeypatch):
-    """Pre-create a parent gremlin's state.json under XDG_STATE_HOME.
+    """Pre-create a parent gremlin's state.json under an isolated state root.
     Returns (parent_state_file, original_content, parent_mtime).
     """
-    xdg = tmp_path / "xdg"
+    state_root = tmp_path / "state"
     parent_id = "parent-gremlin-deadbeef"
-    parent_state_dir = xdg / "claude-gremlins" / parent_id
+    parent_state_dir = state_root / parent_id
     parent_state_dir.mkdir(parents=True)
     parent_state_file = parent_state_dir / "state.json"
     original_content = json.dumps({"id": parent_id, "stage": "implement"})
     parent_state_file.write_text(original_content)
     parent_mtime = parent_state_file.stat().st_mtime_ns
-    monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
     # GR_ID intentionally NOT set — the autouse _isolate_gr_id fixture in
     # conftest.py has removed it. set_stage no-ops because GR_ID is empty.
     return parent_state_file, original_content, parent_mtime
@@ -213,18 +213,18 @@ def test_address_main_does_not_clobber_external_state(tmp_path, monkeypatch):
 
 def _make_state_dir(tmp_path, gr_id):
     """Create state dir with a minimal state.json and return the file path."""
-    xdg = tmp_path / "xdg"
-    state_dir = xdg / "claude-gremlins" / gr_id
+    state_root = tmp_path / "state"
+    state_dir = state_root / gr_id
     state_dir.mkdir(parents=True)
     sf = state_dir / "state.json"
     sf.write_text(json.dumps({"id": gr_id, "stage": "implement"}))
-    return xdg, sf
+    return state_root, sf
 
 
 def test_set_stage_noop_when_gr_id_unset(tmp_path, monkeypatch):
     """set_stage is a no-op when GR_ID is absent (autouse already clears it)."""
-    xdg, sf = _make_state_dir(tmp_path, "gr-noop-test")
-    monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
+    state_root, sf = _make_state_dir(tmp_path, "gr-noop-test")
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
     # GR_ID is already unset via autouse fixture
     mtime_before = sf.stat().st_mtime_ns
     state_mod.set_stage(None, "running")
@@ -234,8 +234,8 @@ def test_set_stage_noop_when_gr_id_unset(tmp_path, monkeypatch):
 def test_set_stage_writes_stage_and_timestamp(tmp_path, monkeypatch):
     """set_stage writes stage and stage_updated_at to state.json."""
     gr_id = "gr-stage-write-test"
-    xdg, sf = _make_state_dir(tmp_path, gr_id)
-    monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
+    state_root, sf = _make_state_dir(tmp_path, gr_id)
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
 
     state_mod.set_stage(gr_id, "review-code")
 
@@ -251,8 +251,8 @@ def test_set_stage_writes_stage_and_timestamp(tmp_path, monkeypatch):
 def test_set_stage_with_sub_stage(tmp_path, monkeypatch):
     """set_stage with sub_stage writes the sub_stage key."""
     gr_id = "gr-substage-test"
-    xdg, sf = _make_state_dir(tmp_path, gr_id)
-    monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
+    state_root, sf = _make_state_dir(tmp_path, gr_id)
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
 
     state_mod.set_stage(gr_id, "implement", sub_stage={"attempt": 2})
 
@@ -264,8 +264,8 @@ def test_set_stage_with_sub_stage(tmp_path, monkeypatch):
 def test_set_stage_removes_sub_stage_when_none(tmp_path, monkeypatch):
     """Calling set_stage without sub_stage removes a previously written sub_stage key."""
     gr_id = "gr-substage-del-test"
-    xdg, sf = _make_state_dir(tmp_path, gr_id)
-    monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
+    state_root, sf = _make_state_dir(tmp_path, gr_id)
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
 
     state_mod.set_stage(gr_id, "implement", sub_stage={"k": 1})
     assert "sub_stage" in json.loads(sf.read_text())
@@ -279,11 +279,11 @@ def test_set_stage_removes_sub_stage_when_none(tmp_path, monkeypatch):
 def test_set_stage_noop_when_state_json_missing(tmp_path, monkeypatch):
     """set_stage is a no-op when state.json doesn't exist (no crash)."""
     gr_id = "gr-missing-state-test"
-    xdg = tmp_path / "xdg"
-    state_dir = xdg / "claude-gremlins" / gr_id
+    state_root = tmp_path / "state"
+    state_dir = state_root / gr_id
     state_dir.mkdir(parents=True)
     # No state.json written
-    monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
     state_mod.set_stage(gr_id, "running")  # must not raise
 
 
@@ -295,8 +295,8 @@ def test_set_stage_noop_when_state_json_missing(tmp_path, monkeypatch):
 def test_emit_bail_writes_bail_class(tmp_path, monkeypatch):
     """emit_bail writes bail_class to state.json."""
     gr_id = "gr-bail-write-test"
-    xdg, sf = _make_state_dir(tmp_path, gr_id)
-    monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
+    state_root, sf = _make_state_dir(tmp_path, gr_id)
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
 
     state_mod.emit_bail(gr_id, "other", "something went wrong")
 
@@ -308,8 +308,8 @@ def test_emit_bail_writes_bail_class(tmp_path, monkeypatch):
 def test_emit_bail_removes_bail_detail_when_empty(tmp_path, monkeypatch):
     """Calling emit_bail without detail removes a previously written bail_detail key."""
     gr_id = "gr-bail-del-test"
-    xdg, sf = _make_state_dir(tmp_path, gr_id)
-    monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
+    state_root, sf = _make_state_dir(tmp_path, gr_id)
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
 
     state_mod.emit_bail(gr_id, "other", "detail")
     assert "bail_detail" in json.loads(sf.read_text())
@@ -323,8 +323,8 @@ def test_emit_bail_removes_bail_detail_when_empty(tmp_path, monkeypatch):
 def test_emit_bail_noop_when_gr_id_unset(tmp_path, monkeypatch):
     """emit_bail is a no-op when GR_ID is absent."""
     gr_id = "gr-bail-noop-test"
-    xdg, sf = _make_state_dir(tmp_path, gr_id)
-    monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
+    state_root, sf = _make_state_dir(tmp_path, gr_id)
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
     mtime_before = sf.stat().st_mtime_ns
     state_mod.emit_bail(None, "other")
     assert sf.stat().st_mtime_ns == mtime_before
@@ -333,8 +333,8 @@ def test_emit_bail_noop_when_gr_id_unset(tmp_path, monkeypatch):
 def test_emit_bail_noop_when_bail_class_empty(tmp_path, monkeypatch):
     """emit_bail is a no-op when bail_class is empty."""
     gr_id = "gr-bail-empty-test"
-    xdg, sf = _make_state_dir(tmp_path, gr_id)
-    monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
+    state_root, sf = _make_state_dir(tmp_path, gr_id)
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
     mtime_before = sf.stat().st_mtime_ns
     state_mod.emit_bail(gr_id, "")
     assert sf.stat().st_mtime_ns == mtime_before

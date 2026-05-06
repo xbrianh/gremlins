@@ -1,6 +1,6 @@
 # `gremlins/fleet/`
 
-Fleet manager package for background gremlins. Reads every `${XDG_STATE_HOME:-$HOME/.local/state}/claude-gremlins/<id>/state.json`, applies the shared liveness classifier inline, and prints one scannable line per gremlin. Fleet ops (`ack`, `skip`, `stop`, `rescue`, `land`, `rm`, `close`, `log`) are exposed as top-level `gremlins` subcommands via `fleet/cli.py`.
+Fleet manager package for background gremlins. Reads every gremlin state file under `gremlins.paths.state_root()`, applies the shared liveness classifier inline, and prints one scannable line per gremlin. Fleet ops (`ack`, `skip`, `stop`, `rescue`, `land`, `rm`, `close`, `log`) are exposed as top-level `gremlins` subcommands via `fleet/cli.py`.
 
 ## Module map
 
