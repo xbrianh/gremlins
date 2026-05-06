@@ -14,11 +14,11 @@ import json
 import os
 import pathlib
 import shutil
-import subprocess
 import sys
 import time
 from typing import Any, cast
 
+from gremlins import git as _git_mod
 from gremlins.fleet.state import liveness_of_state_file
 
 
@@ -89,13 +89,7 @@ def _resolve_project_root(cwd_from_input: str) -> str:
     root = os.environ.get("CLAUDE_PROJECT_DIR") or cwd_from_input or os.getcwd()
     if root:
         try:
-            result = subprocess.run(
-                ["git", "-C", root, "rev-parse", "--show-toplevel"],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            top = result.stdout.strip()
+            top = _git_mod.toplevel(root)
             if top:
                 return top
         except Exception:
