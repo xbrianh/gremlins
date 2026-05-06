@@ -23,6 +23,7 @@ from typing import Any, cast
 
 import yaml
 
+from gremlins import gh as _gh_mod
 from gremlins import git as _git_mod
 from gremlins.clients import PACKAGE_DEFAULT
 from gremlins.pipeline import load_pipeline, resolve_pipeline_path
@@ -439,7 +440,7 @@ def launch(
                 project_root, gr_id, base_ref=base_ref
             )
         elif kind == "ghgremlin":
-            default_branch = _git_mod.resolve_default_branch(project_root)
+            default_branch = _gh_mod.resolve_default_branch(project_root)
             refspec = (
                 f"refs/heads/{default_branch}:refs/remotes/origin/{default_branch}"
             )
