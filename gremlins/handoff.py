@@ -26,13 +26,11 @@ from typing import Any, NoReturn, TypeVar, cast
 from gremlins.clients import PACKAGE_DEFAULT, ClientSpec, to_client
 from gremlins.clients.protocol import ClaudeClient
 from gremlins.logging_setup import configure_logging
-from gremlins.prompts import load_prompts
+from gremlins.prompts import BUNDLED_PROMPT_DIR, load_prompts
 
 logger = logging.getLogger(__name__)
 
 CLAUDE_SANITIZE_MODEL = "haiku"
-_PROMPTS_DIR = pathlib.Path(__file__).resolve().parent / "prompts"
-_HANDOFF_STYLE_PATH = _PROMPTS_DIR / "code_style.md"
 
 T = TypeVar("T")
 
@@ -70,7 +68,7 @@ def die(msg: str) -> NoReturn:
 
 def _load_handoff_style() -> str:
     try:
-        return load_prompts([_HANDOFF_STYLE_PATH])
+        return load_prompts([BUNDLED_PROMPT_DIR / "code_style.md"])
     except (FileNotFoundError, ValueError) as exc:
         die(f"error loading prompt: {exc}")
 

@@ -10,6 +10,7 @@ from typing import Any, cast
 import yaml
 
 from gremlins.clients import ClientSpec
+from gremlins.prompts import BUNDLED_PROMPT_DIR
 from gremlins.stages.registry import STAGE_REGISTRY
 
 
@@ -41,13 +42,10 @@ class Pipeline:
     default_client: ClientSpec | None = None
 
 
-_BUNDLED_PROMPT_DIR = pathlib.Path(__file__).resolve().parent / "prompts"
-
-
 def _resolve_prompt_dir(value: object, yaml_dir: pathlib.Path) -> pathlib.Path:
     """Pipeline-level `prompt_dir:` (relative to YAML); default = bundled prompts."""
     if value is None:
-        return _BUNDLED_PROMPT_DIR
+        return BUNDLED_PROMPT_DIR
     if not isinstance(value, str):
         raise ValueError(f"prompt_dir must be a string, got {type(value)!r}")
     return (yaml_dir / value).resolve()

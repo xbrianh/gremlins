@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pathlib
 from typing import Any
 
 from gremlins.clients.protocol import CompletedRun
@@ -15,14 +14,13 @@ from gremlins.git import (
     log_patch,
 )
 from gremlins.pipeline import StageEntry
+from gremlins.prompts import BUNDLED_PROMPT_DIR
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 
-PROMPTS_DIR = pathlib.Path(__file__).resolve().parent.parent / "prompts"
-
 
 def _load(name: str) -> str:
-    return (PROMPTS_DIR / name).read_text(encoding="utf-8")
+    return (BUNDLED_PROMPT_DIR / name).read_text(encoding="utf-8")
 
 
 def _get_diff(

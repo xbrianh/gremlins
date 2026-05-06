@@ -1,3 +1,7 @@
+import pathlib
+
 from gremlins.prompts.loader import load_prompts
 
-__all__ = ["load_prompts"]
+BUNDLED_PROMPT_DIR = pathlib.Path(__file__).resolve().parent
+
+__all__ = ["BUNDLED_PROMPT_DIR", "load_prompts"]
