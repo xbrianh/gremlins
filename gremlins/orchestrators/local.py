@@ -24,8 +24,8 @@ from gremlins.clients.resolve import (
 )
 from gremlins.env_file import load_env_file
 from gremlins.git import (
-    diff_quiet,
     has_commits,
+    has_diff,
     has_dirty_worktree,
     in_git_repo,
     rev_exists,
@@ -595,7 +595,7 @@ def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         die(f"error loading prompt: {exc}")
     if is_git:
         head1_exists = rev_exists("HEAD~1")
-        has_commit_diff = head1_exists and not diff_quiet("HEAD~1", "HEAD")
+        has_commit_diff = head1_exists and has_diff("HEAD~1", "HEAD")
         if not has_commit_diff and not has_dirty_worktree():
             if not head1_exists:
                 die(

@@ -68,48 +68,40 @@ def head_sha(cwd: str | os.PathLike[str] | None = None) -> str:
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
-def current_branch(cwd: str | os.PathLike[str] | None = None) -> str:
-    r = _run_git(["symbolic-ref", "--short", "HEAD"], cwd=cwd, check=False)
-    return r.stdout.strip() if r.returncode == 0 else ""
-
-
 def has_dirty_worktree(cwd: str | os.PathLike[str] | None = None) -> bool:
-    r = _run_git(["status", "--porcelain"], cwd=cwd, check=False)
-    return bool(r.stdout.strip())
+    try:
+        r = _run_git(["status", "--porcelain"], cwd=cwd, check=False)
+        return bool(r.stdout.strip())
+    except OSError:
+        return False
 
 
 def has_commits(cwd: str | os.PathLike[str] | None = None) -> bool:
-    r = _run_git(["rev-list", "--count", "HEAD"], cwd=cwd, check=False)
-    return r.returncode == 0 and int(r.stdout.strip() or "0") > 0
-
-
-def commit_count(ref_range: str, cwd: str | os.PathLike[str] | None = None) -> int:
-    r = _run_git(["rev-list", "--count", ref_range], cwd=cwd)
-    return int(r.stdout.strip())
+    try:
+        r = _run_git(["rev-list", "--count", "HEAD"], cwd=cwd, check=False)
+        return r.returncode == 0 and int(r.stdout.strip() or "0") > 0
+    except OSError:
+        return False
 
 
 def rev_exists(rev: str, cwd: str | os.PathLike[str] | None = None) -> bool:
-    r = _run_git(["rev-parse", "--verify", rev], cwd=cwd, check=False, capture=False)
-    return r.returncode == 0
+    try:
+        r = _run_git(["rev-parse", "--verify", rev], cwd=cwd, check=False, capture=False)
+        return r.returncode == 0
+    except OSError:
+        return False
 
 
-def is_ancestor(
-    older: str, newer: str, cwd: str | os.PathLike[str] | None = None
-) -> bool:
-    r = _run_git(
-        ["merge-base", "--is-ancestor", older, newer],
-        cwd=cwd,
-        check=False,
-        capture=False,
-    )
-    return r.returncode == 0
-
-
-def diff_quiet(
+def has_diff(
     ref_a: str, ref_b: str, cwd: str | os.PathLike[str] | None = None
 ) -> bool:
-    r = _run_git(["diff", "--quiet", ref_a, ref_b], cwd=cwd, check=False, capture=False)
-    return r.returncode == 0
+    try:
+        r = _run_git(
+            ["diff", "--quiet", ref_a, ref_b], cwd=cwd, check=False, capture=False
+        )
+        return r.returncode != 0
+    except OSError:
+        return False
 
 
 # ---------------------------------------------------------------------------
