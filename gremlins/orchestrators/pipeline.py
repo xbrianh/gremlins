@@ -104,11 +104,14 @@ class Pipeline:
         test_client: ClaudeClient | None = None,
     ) -> None:
         if self.STAGE_TYPES:
-            unknown = [
-                s.type
-                for s in stages
-                if s.type != "parallel" and s.type not in self.STAGE_TYPES
-            ]
+            unknown: list[str] = []
+            for s in stages:
+                if s.type == "parallel":
+                    unknown.extend(
+                        c.type for c in s.children if c.type not in self.STAGE_TYPES
+                    )
+                elif s.type not in self.STAGE_TYPES:
+                    unknown.append(s.type)
             if unknown:
                 raise ValueError(
                     f"{type(self).__name__} does not support stage type(s): {unknown}"
