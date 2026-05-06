@@ -10,7 +10,7 @@ from collections.abc import Callable
 from typing import Any
 
 from gremlins.gh_utils import fetch_check_run_logs, get_pr_ci_status
-from gremlins.git import git_head
+from gremlins.git import head_sha
 from gremlins.prompts import load_prompts
 from gremlins.stages.context import StageContext
 from gremlins.stages.registry import register_stage
@@ -240,7 +240,7 @@ def run(ctx: StageContext, options: WaitCiOptions) -> None:
             _get_sha = (
                 options.fix_sha_getter
                 if options.fix_sha_getter is not None
-                else git_head
+                else head_sha
             )
             fix_sha = _get_sha()
 

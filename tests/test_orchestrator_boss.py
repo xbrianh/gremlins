@@ -66,12 +66,12 @@ def _common_boss_patches(monkeypatch, tmp_path, gr_id):
     monkeypatch.setattr(boss_mod, "set_stage", lambda *a, **kw: None)
     monkeypatch.setattr(boss_mod, "get_head_ref", lambda p: "abc123def456abc1")
     monkeypatch.setattr(boss_mod, "get_current_branch", lambda p: "main")
-    # Stub git_head_of_workdir so tests don't need a real git worktree.
+    # Stub head_sha so tests don't need a real git worktree.
     # Individual tests that care about specific SHA values can override this.
     monkeypatch.setattr(
         git_mod,
-        "git_head_of_workdir",
-        lambda w: "aaaa1111bbbb2222cccc3333dddd4444eeee5555",
+        "head_sha",
+        lambda cwd=None: "aaaa1111bbbb2222cccc3333dddd4444eeee5555",
     )
 
 
@@ -1624,7 +1624,7 @@ def test_boss_records_current_head_after_land(tmp_path, monkeypatch):
     initial_head = "inithead1234567890123456789012345678ab"
     expected_new_head = "newhead12345678901234567890abcdef123456"
     head_sequence = iter([initial_head, expected_new_head])
-    monkeypatch.setattr(git_mod, "git_head_of_workdir", lambda w: next(head_sequence))
+    monkeypatch.setattr(git_mod, "head_sha", lambda cwd=None: next(head_sequence))
 
     patch_calls = []
     monkeypatch.setattr(
