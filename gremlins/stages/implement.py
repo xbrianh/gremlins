@@ -159,7 +159,9 @@ class Implement(Stage):
                 "notes-to-self. Do not push."
             )
 
-        template = load_prompts(self.prompt_paths if self.prompt_paths else [PROMPT_LOCAL_PATH])
+        template = load_prompts(
+            self.prompt_paths if self.prompt_paths else [PROMPT_LOCAL_PATH]
+        )
         prompt = template.format(
             spec_block=_render_spec_block(self.spec_text),
             plan_text=self.plan_text,
@@ -194,7 +196,9 @@ class Implement(Stage):
                 "should be product code."
             )
 
-        template = load_prompts(self.prompt_paths if self.prompt_paths else [PROMPT_GH_PATH])
+        template = load_prompts(
+            self.prompt_paths if self.prompt_paths else [PROMPT_GH_PATH]
+        )
         prompt = template.format(
             spec_block=_render_spec_block(self.spec_text),
             plan_source_label=plan_source_label,

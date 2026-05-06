@@ -90,7 +90,9 @@ If a finding asks you to change something that touches secrets/credentials, or y
 Do not call this helper if you successfully addressed every actionable finding.
 """
 
-            template = load_prompts(self.prompt_paths if self.prompt_paths else [_DEFAULT_PROMPT])
+            template = load_prompts(
+                self.prompt_paths if self.prompt_paths else [_DEFAULT_PROMPT]
+            )
             address_prompt = template.format(
                 model=review_model,
                 text=text,
