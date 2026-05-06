@@ -511,8 +511,8 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
         lambda ctx, options: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run",
-        lambda ctx, options: "APPROVED",
+        "gremlins.stages.wait_copilot.WaitCopilot.run",
+        lambda self, pipe: "APPROVED",
     )
     monkeypatch.setattr(
         "gremlins.stages.request_copilot.RequestCopilot.run",
@@ -565,7 +565,7 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
     )
     monkeypatch.setattr("gremlins.stages.ghreview.run", lambda ctx, options: None)
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
+        "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
         "gremlins.stages.request_copilot.RequestCopilot.run",
@@ -607,7 +607,7 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("gremlins.stages.ghreview.run", lambda ctx, options: None)
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
+        "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
         "gremlins.stages.request_copilot.RequestCopilot.run",
@@ -653,7 +653,7 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("gremlins.stages.ghreview.run", lambda ctx, options: None)
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
+        "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
         "gremlins.stages.request_copilot.RequestCopilot.run",
@@ -700,7 +700,7 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("gremlins.stages.ghreview.run", lambda ctx, options: None)
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
+        "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
         "gremlins.stages.request_copilot.RequestCopilot.run",
@@ -824,7 +824,7 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
         lambda ctx, options: ghreview_models.append(options.model),
     )
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
+        "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
         "gremlins.stages.request_copilot.RequestCopilot.run",
@@ -1009,7 +1009,7 @@ def test_resume_from_implement(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("gremlins.stages.ghreview.run", lambda ctx, options: None)
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
+        "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
         "gremlins.stages.request_copilot.RequestCopilot.run",
@@ -1078,7 +1078,7 @@ def test_resume_from_ghreview(tmp_path, monkeypatch):
         lambda ctx, options: ghreview_called.append(options.pr_url),
     )
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
+        "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
         "gremlins.stages.request_copilot.RequestCopilot.run",
@@ -1139,7 +1139,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
 
     monkeypatch.setattr("gremlins.stages.ghreview.run", lambda ctx, options: None)
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
+        "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
         "gremlins.stages.request_copilot.RequestCopilot.run",
@@ -1248,7 +1248,7 @@ def test_code_style_forwarded_to_ghreview_and_ghaddress(tmp_path, monkeypatch):
 
     monkeypatch.setattr("gremlins.stages.ghreview.run", record_ghreview)
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
+        "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
         "gremlins.stages.request_copilot.RequestCopilot.run",
@@ -1331,7 +1331,7 @@ def test_resume_from_commit_pr_skips_implement(tmp_path, monkeypatch):
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
     monkeypatch.setattr("gremlins.stages.ghreview.run", lambda ctx, options: None)
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
+        "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
         "gremlins.stages.request_copilot.RequestCopilot.run",
@@ -1375,7 +1375,7 @@ def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("gremlins.stages.ghreview.run", lambda ctx, options: None)
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
+        "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
         "gremlins.stages.request_copilot.RequestCopilot.run",
@@ -1435,8 +1435,8 @@ def test_wait_ci_stage_ordering(tmp_path, monkeypatch):
         lambda ctx, options: order.append("ghreview"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run",
-        lambda ctx, options: order.append("wait-copilot") or "APPROVED",
+        "gremlins.stages.wait_copilot.WaitCopilot.run",
+        lambda self, pipe: order.append("wait-copilot") or "APPROVED",
     )
     monkeypatch.setattr(
         "gremlins.stages.request_copilot.RequestCopilot.run",
@@ -1499,8 +1499,8 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
         lambda ctx, options: earlier_called.append("ghreview"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run",
-        lambda ctx, options: earlier_called.append("wait-copilot") or "APPROVED",
+        "gremlins.stages.wait_copilot.WaitCopilot.run",
+        lambda self, pipe: earlier_called.append("wait-copilot") or "APPROVED",
     )
     monkeypatch.setattr(
         "gremlins.stages.request_copilot.RequestCopilot.run",
@@ -1546,7 +1546,7 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("gremlins.stages.ghreview.run", lambda ctx, options: None)
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
+        "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
         "gremlins.stages.request_copilot.RequestCopilot.run",
@@ -1647,8 +1647,8 @@ def test_resume_from_verify(tmp_path, monkeypatch):
         lambda ctx, options: earlier_called.append("ghreview"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run",
-        lambda ctx, options: "APPROVED",
+        "gremlins.stages.wait_copilot.WaitCopilot.run",
+        lambda self, pipe: "APPROVED",
     )
     monkeypatch.setattr(
         "gremlins.stages.request_copilot.RequestCopilot.run",
@@ -1683,7 +1683,7 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir):
     )
     monkeypatch.setattr("gremlins.stages.ghreview.run", lambda ctx, options: None)
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
+        "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
         "gremlins.stages.request_copilot.RequestCopilot.run", lambda self, pipe: None
@@ -1725,7 +1725,7 @@ def test_gh_main_state_client_tracks_effective_model(
     )
     monkeypatch.setattr("gremlins.stages.ghreview.run", lambda ctx, options: None)
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
+        "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
         "gremlins.stages.request_copilot.RequestCopilot.run", lambda self, pipe: None
@@ -1787,7 +1787,7 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("gremlins.stages.ghreview.run", lambda ctx, options: None)
     monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.run", lambda ctx, options: "APPROVED"
+        "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
         "gremlins.stages.request_copilot.RequestCopilot.run", lambda self, pipe: None

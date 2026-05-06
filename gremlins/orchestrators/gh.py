@@ -497,10 +497,11 @@ def _build_stage_runner(
             logger.info(
                 "[5/8] waiting for Copilot review (20s interval, 10min timeout)"
             )
-            state = wait_copilot.run(
-                ctx,
-                wait_copilot.WaitCopilotOptions(repo=repo, pr_num=gh_state["pr_num"]),
+            stage = wait_copilot.WaitCopilot(
+                entry, model, repo=repo, pr_num=gh_state["pr_num"]
             )
+            stage.bind(ctx)
+            state = stage.run(None)
             logger.info("Copilot review: %s", state)
 
         return _wait_copilot
