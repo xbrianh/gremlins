@@ -9,11 +9,14 @@ running gremlin.
 from __future__ import annotations
 
 import datetime
+import fcntl
 import json
 import os
 import pathlib
 import re
 import secrets
+from collections.abc import Callable
+from typing import Any
 
 _GR_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -31,6 +34,21 @@ BAIL_CLASS_REVIEWER_REQUESTED_CHANGES = "reviewer_requested_changes"
 BAIL_CLASS_SECURITY = "security"
 BAIL_CLASS_SECRETS = "secrets"
 BAIL_CLASS_OTHER = "other"
+
+
+def _locked_update(sf: pathlib.Path, fn: Callable[[dict[str, Any]], None]) -> None:
+    """Acquire an exclusive lock on sf.lock, read sf, apply fn(data), write sf atomically.
+
+    Callers are responsible for the outer try/except — this may raise.
+    """
+    lock_path = sf.with_name(sf.name + ".lock")
+    with open(lock_path, "a") as lock_f:
+        fcntl.flock(lock_f, fcntl.LOCK_EX)
+        data = json.loads(sf.read_text(encoding="utf-8"))
+        fn(data)
+        tmp = sf.with_name(f"{sf.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(tmp, sf)
 
 
 def set_stage(
@@ -83,18 +101,43 @@ def resolve_session_dir(gr_id: str | None = None) -> pathlib.Path:
     return session_dir
 
 
-def emit_bail(gr_id: str | None, bail_class: str, bail_detail: str = "") -> None:
-    """Write bail_class (and optional bail_detail) to state.json. No-op without gr_id, empty bail_class, or missing state.json."""
+def emit_bail(
+    gr_id: str | None,
+    bail_class: str,
+    bail_detail: str = "",
+    *,
+    child_key: str | None = None,
+) -> None:
+    """Write bail_class (and optional bail_detail) to state.json.
+
+    When ``child_key`` is set, writes into ``parallel_bails[child_key]``
+    instead of the top-level fields, isolating child bails from each other
+    and from the top-level bail slot.
+
+    No-op without gr_id, empty bail_class, or missing state.json.
+    """
     try:
         if not gr_id or not bail_class:
             return
         sf = resolve_state_file(gr_id)
         if sf is None or not sf.exists():
             return
-        if bail_detail:
-            patch_state(gr_id, bail_class=bail_class, bail_detail=bail_detail)
+        if child_key is None:
+            if bail_detail:
+                patch_state(gr_id, bail_class=bail_class, bail_detail=bail_detail)
+            else:
+                patch_state(gr_id, _delete=("bail_detail",), bail_class=bail_class)
         else:
-            patch_state(gr_id, _delete=("bail_detail",), bail_class=bail_class)
+            shard: dict[str, str] = {"bail_class": bail_class}
+            if bail_detail:
+                shard["bail_detail"] = bail_detail
+
+            def _merge(data: dict[str, Any]) -> None:
+                shards: dict[str, Any] = dict(data.get("parallel_bails") or {})
+                shards[child_key] = shard
+                data["parallel_bails"] = shards
+
+            _locked_update(sf, _merge)
     except Exception:
         pass
 
@@ -116,7 +159,7 @@ def resolve_state_file(gr_id: str | None) -> pathlib.Path | None:
 def patch_state(
     gr_id: str | None, _delete: tuple[str, ...] = (), **fields: object
 ) -> None:
-    """Merge keyword fields into state.json atomically, deleting any keys in _delete.
+    """Merge keyword fields into state.json atomically under an exclusive file lock.
 
     No-op when gr_id is unset, when state.json doesn't exist, or when the
     write fails — stage bookkeeping must not crash a running gremlin.
@@ -125,29 +168,89 @@ def patch_state(
     if sf is None or not sf.exists():
         return
     try:
-        data = json.loads(sf.read_text(encoding="utf-8"))
-        for key in _delete:
-            data.pop(key, None)
-        data.update(fields)
-        tmp = sf.with_name(f"{sf.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
-        tmp.write_text(json.dumps(data), encoding="utf-8")
-        os.replace(tmp, sf)
+
+        def _apply(data: dict[str, Any]) -> None:
+            for key in _delete:
+                data.pop(key, None)
+            data.update(fields)
+
+        _locked_update(sf, _apply)
     except Exception:
         pass
 
 
-def check_bail(gr_id: str | None, label: str = "stage") -> None:
-    """Raise RuntimeError if a bail_class was written to state.json by the
-    just-completed stage.  No-op without gr_id or when state.json is absent."""
+def patch_parallel_worktrees(
+    gr_id: str | None,
+    group_name: str,
+    *,
+    base_head: str | None,
+    paths: dict[str, str] | None,
+) -> None:
+    """Set or clear ``parallel_worktrees[group_name]`` in state.json.
+
+    Pass ``None`` for both ``base_head`` and ``paths`` to remove the entry
+    for ``group_name``. No-op without ``gr_id`` or when state.json is missing.
+    """
+    if not gr_id or not group_name:
+        return
     sf = resolve_state_file(gr_id)
     if sf is None or not sf.exists():
         return
     try:
-        data = json.loads(sf.read_text(encoding="utf-8"))
-        bail_class = data.get("bail_class", "")
+
+        def _apply(data: dict[str, Any]) -> None:
+            groups: dict[str, Any] = dict(data.get("parallel_worktrees") or {})
+            if base_head is None and paths is None:
+                groups.pop(group_name, None)
+            else:
+                groups[group_name] = {
+                    "base_head": base_head or "",
+                    "paths": dict(paths or {}),
+                }
+            if groups:
+                data["parallel_worktrees"] = groups
+            else:
+                data.pop("parallel_worktrees", None)
+
+        _locked_update(sf, _apply)
+    except Exception:
+        pass
+
+
+def check_bail(
+    gr_id: str | None,
+    label: str = "stage",
+    *,
+    child_key: str | None = None,
+) -> None:
+    """Raise RuntimeError if a bail_class was written to state.json by the
+    just-completed stage.
+
+    When ``child_key`` is set, checks ``parallel_bails[child_key]`` instead
+    of the top-level ``bail_class`` field, so parallel children don't see
+    each other's bails.
+
+    No-op without gr_id or when state.json is absent.
+    """
+    sf = resolve_state_file(gr_id)
+    if sf is None or not sf.exists():
+        return
+    try:
+        data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
+        if child_key is None:
+            bail_class = data.get("bail_class", "")
+        else:
+            parallel_bails: dict[str, Any] = data.get("parallel_bails") or {}
+            shard: dict[str, Any] = parallel_bails.get(child_key) or {}
+            bail_class = shard.get("bail_class", "")
         if bail_class:
+            detail_path = (
+                f"parallel_bails[{child_key!r}].bail_detail"
+                if child_key is not None
+                else "bail_detail"
+            )
             raise RuntimeError(
-                f"{label} bailed: bail_class={bail_class} (see state.json bail_detail)"
+                f"{label} bailed: bail_class={bail_class} (see state.json {detail_path})"
             )
     except RuntimeError:
         raise

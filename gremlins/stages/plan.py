@@ -31,6 +31,7 @@ def run(ctx: StageContext, options: PlanOptions) -> None:
         label="plan",
         model=options.plan_model,
         raw_path=ctx.session_dir / "stream-plan.jsonl",
+        cwd=ctx.worktree,
     )
     if not options.plan_file.exists() or options.plan_file.stat().st_size == 0:
         raise RuntimeError(f"plan stage did not produce {options.plan_file}")

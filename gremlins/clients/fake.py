@@ -17,6 +17,7 @@ class RecordedCall:
     model: str | None
     raw_path: pathlib.Path | None
     capture_events: bool
+    cwd: pathlib.Path | None = None
 
 
 class FakeClaudeClient:
@@ -66,6 +67,7 @@ class FakeClaudeClient:
         capture_events: bool = False,
         on_timeout_prompt: str | None = None,
         max_retries: int = 2,
+        cwd: pathlib.Path | None = None,
     ) -> CompletedRun:
         self.calls.append(
             RecordedCall(
@@ -74,6 +76,7 @@ class FakeClaudeClient:
                 model=model,
                 raw_path=pathlib.Path(raw_path) if raw_path is not None else None,
                 capture_events=capture_events,
+                cwd=pathlib.Path(cwd) if cwd is not None else None,
             )
         )
 

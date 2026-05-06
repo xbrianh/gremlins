@@ -77,9 +77,16 @@ def _wait_for_checks(
         time.sleep(options.poll_interval)
 
 
-def _bail_if_review_required(gr_id: str | None, decision: str) -> None:
+def _bail_if_review_required(
+    gr_id: str | None, decision: str, child_key: str | None = None
+) -> None:
     if decision == "REVIEW_REQUIRED":
-        emit_bail(gr_id, "other", "PR requires human review approval before merge")
+        emit_bail(
+            gr_id,
+            "other",
+            "PR requires human review approval before merge",
+            child_key=child_key,
+        )
         raise _ReviewRequiredError("ci-gate: PR blocked by required human review")
 
 
@@ -91,6 +98,7 @@ def _poll_until_done(
     checks_getter: Callable[[], tuple[list[dict[str, Any]], str]] | None = None,
     required_sha: str = "",
     head_sha_getter: Callable[[], str] | None = None,
+    child_key: str | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """Poll PR checks until all are complete or timeout."""
     deadline = time.time() + timeout
@@ -107,7 +115,7 @@ def _poll_until_done(
             review_decision = status["review_decision"]
             head_sha = status["head_sha"]
 
-        _bail_if_review_required(gr_id, review_decision)
+        _bail_if_review_required(gr_id, review_decision, child_key=child_key)
 
         if required_sha and head_sha and head_sha != required_sha:
             if time.time() >= deadline:
@@ -152,7 +160,7 @@ def _escape_fmt(s: str) -> str:
 def run(ctx: StageContext, options: WaitCiOptions) -> None:
     """Wait for CI checks to pass, fixing failures up to max_attempts times."""
     checks, review_decision = _wait_for_checks(options, options.startup_grace_secs)
-    _bail_if_review_required(ctx.gr_id, review_decision)
+    _bail_if_review_required(ctx.gr_id, review_decision, child_key=ctx.child_key)
 
     if not checks:
         logger.info(
@@ -191,6 +199,7 @@ def run(ctx: StageContext, options: WaitCiOptions) -> None:
                     options.checks_getter,
                     required_sha=fix_sha,
                     head_sha_getter=options.head_sha_getter,
+                    child_key=ctx.child_key,
                 )
             except _ReviewRequiredError:
                 _review_bailed = True
@@ -222,9 +231,10 @@ def run(ctx: StageContext, options: WaitCiOptions) -> None:
                 label=f"ci-fix-{attempt}",
                 model=options.model,
                 raw_path=ctx.session_dir / f"stream-ci-fix-{attempt}.jsonl",
+                cwd=ctx.worktree,
             )
             _agent_bailed = True
-            check_bail(ctx.gr_id, f"ci-fix-{attempt}")
+            check_bail(ctx.gr_id, f"ci-fix-{attempt}", child_key=ctx.child_key)
             _agent_bailed = False
 
             _get_sha = (
@@ -236,12 +246,20 @@ def run(ctx: StageContext, options: WaitCiOptions) -> None:
 
         _exhausted = True
         emit_bail(
-            ctx.gr_id, "other", f"CI failed after {options.max_attempts} attempts"
+            ctx.gr_id,
+            "other",
+            f"CI failed after {options.max_attempts} attempts",
+            child_key=ctx.child_key,
         )
         raise RuntimeError(f"ci-gate exhausted {options.max_attempts} attempts")
     except (SystemExit, Exception) as exc:
         if not _exhausted and not _agent_bailed and not _review_bailed:
-            emit_bail(ctx.gr_id, "other", f"ci-gate failed: {exc}"[:200])
+            emit_bail(
+                ctx.gr_id,
+                "other",
+                f"ci-gate failed: {exc}"[:200],
+                child_key=ctx.child_key,
+            )
         raise
 
 
