@@ -36,7 +36,7 @@ Per-pipeline orchestrator entry points. Each module owns one CLI subcommand
   groups. Both are accepted as `--resume-from` targets.
 - `code_style.md` is the canonical coding-style doc for all gremlin pipeline
   stages; edit it there rather than touching `agents/pragmatic-developer.md`.
-  It is listed as the first entry in each stage's `prompt:` list in
+  It is listed as the first entry in each coding stage's `prompt:` list in
   `local.yaml` / `gh.yaml` and concatenated by `load_prompts(self.prompt_paths)`.
   No special-casing in the orchestrator.
 

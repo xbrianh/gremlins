@@ -1,9 +1,10 @@
 # Prompt interpolation reference
 
 Every placeholder in the templates below is a runtime value supplied by the
-calling stage module via Python's `.format(...)`. Static text no longer uses
-placeholders — it lives in separate `.md` fragments composed via the YAML
-`prompt:` list.
+calling stage module via Python's `.format(...)`. Static text lives in separate
+`.md` fragments composed via the YAML `prompt:` list. Literal braces that must
+survive `.format(...)` unchanged (e.g. `{owner}` in command examples) are
+escaped as `{{owner}}` in the template source.
 
 ## Placeholder table
 
