@@ -1,0 +1,1 @@
+Push the current branch with 'git push -u origin <branch-name>' and open a PR against the default branch with 'gh pr create --base <default-branch>'. Print ONLY the PR URL on the final line of your response.

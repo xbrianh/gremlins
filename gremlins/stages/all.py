@@ -2,11 +2,12 @@
 
 from gremlins.stages import (
     address_code,
-    commit_pr,
+    commit,
     ghaddress,
     ghplan,
     ghreview,
     implement,
+    open_github_pr,
     plan,
     request_copilot,
     review_code,
@@ -17,11 +18,12 @@ from gremlins.stages import (
 
 __all__ = [
     "address_code",
-    "commit_pr",
+    "commit",
     "ghaddress",
     "ghplan",
     "ghreview",
     "implement",
+    "open_github_pr",
     "plan",
     "request_copilot",
     "review_code",

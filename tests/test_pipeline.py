@@ -8,11 +8,12 @@ from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline import StageEntry, load_pipeline, resolve_pipeline_path
 from gremlins.stages import (
     address_code,
-    commit_pr,
+    commit,
     ghaddress,
     ghplan,
     ghreview,
     implement,
+    open_github_pr,
     plan,
     request_copilot,
     review_code,
@@ -83,7 +84,8 @@ def test_gh_pipeline_constructs_from_bundled_yaml(tmp_path):
     assert pipe.target == "github"
     assert GHPipeline.STAGE_TYPES["plan"] is ghplan.GHPlan
     assert GHPipeline.STAGE_TYPES["implement"] is implement.Implement
-    assert GHPipeline.STAGE_TYPES["commit-pr"] is commit_pr.CommitPR
+    assert GHPipeline.STAGE_TYPES["commit"] is commit.Commit
+    assert GHPipeline.STAGE_TYPES["open-github-pr"] is open_github_pr.OpenGitHubPR
     assert GHPipeline.STAGE_TYPES["request-copilot"] is request_copilot.RequestCopilot
     assert GHPipeline.STAGE_TYPES["ghreview"] is ghreview.GHReview
     assert GHPipeline.STAGE_TYPES["ghaddress"] is ghaddress.GHAddress
@@ -94,10 +96,10 @@ def test_gh_pipeline_constructs_from_bundled_yaml(tmp_path):
 def test_local_pipeline_rejects_gh_stages(tmp_path):
     gh_stages = [
         StageEntry(
-            name="commit-pr", type="commit-pr", client=None, prompt_paths=[], options={}
+            name="commit", type="commit", client=None, prompt_paths=[], options={}
         )
     ]
-    with pytest.raises(ValueError, match="commit-pr"):
+    with pytest.raises(ValueError, match="commit"):
         _local(gh_stages, args=_args(), tmp_path=tmp_path)
 
 

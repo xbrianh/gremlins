@@ -57,7 +57,7 @@ class Verify(Stage):
         else:
             commit_instr = (
                 "- After fixing, leave changes uncommitted — do not stage or commit. "
-                "The next stage (commit-pr) will handle staging and committing."
+                "The next stage (commit) will handle staging and committing."
             )
 
         template = load_prompts(self.prompt_paths)

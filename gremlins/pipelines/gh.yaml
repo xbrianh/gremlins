@@ -6,7 +6,8 @@ stages:
   - { name: plan,            type: plan,            prompt: [code_style.md, plan_gh.md] }
   - { name: implement,       type: implement,       prompt: [code_style.md, implement_gh.md] }
   - { name: verify,          type: verify,          options: { cmds: ["make check", "make test"] }, prompt: [verify_fix.md, bail_section_fix.md] }
-  - { name: commit-pr,       type: commit-pr }
+  - { name: commit,          type: commit }
+  - { name: open-pr,         type: open-github-pr }
   - { name: request-copilot, type: request-copilot }
   - { name: ghreview,        type: ghreview,        prompt: [code_style.md, review_gh.md] }
   - { name: wait-copilot,    type: wait-copilot }

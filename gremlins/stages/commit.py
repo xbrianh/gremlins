@@ -1,11 +1,9 @@
-"""Commit-and-open-PR stage for the gh pipeline."""
+"""Commit stage for the gh pipeline."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from gremlins.clients.protocol import CompletedRun
-from gremlins.gh_utils import extract_gh_url
 from gremlins.git import (
     HeadAdvanced,
     ImplOutcome,
@@ -36,7 +34,7 @@ def _get_diff(
     return diff or "(no diff available)"
 
 
-class CommitPR(Stage):
+class Commit(Stage):
     def __init__(
         self,
         entry: StageEntry,
@@ -55,7 +53,7 @@ class CommitPR(Stage):
         self.issue_url = issue_url
         self._cwd = cwd
 
-    def run(self, pipe: Any) -> str:
+    def run(self, pipe: Any) -> None:
         issue_num = self.issue_url.split("/")[-1] if self.issue_url else ""
         cwd_arg = self._cwd or (
             str(self.state.worktree) if self.state.worktree is not None else None
@@ -68,54 +66,38 @@ class CommitPR(Stage):
         if isinstance(self.impl_outcome, HeadAdvanced):
             worktree_dirty = has_dirty_worktree(cwd=cwd_arg)
             if worktree_dirty:
-                action_clause = _load("commit_pr_handoff_dirty.md").format(
+                action_clause = _load("commit_handoff_dirty.md").format(
                     handoff_branch=self.impl_handoff_branch,
                     commit_count=self.impl_outcome.commit_count,
                     pre_head=self.base_ref,
                 )
             else:
-                action_clause = _load("commit_pr_handoff_clean.md").format(
+                action_clause = _load("commit_handoff_clean.md").format(
                     handoff_branch=self.impl_handoff_branch,
                     commit_count=self.impl_outcome.commit_count,
                     pre_head=self.base_ref,
                 )
         else:
-            action_clause = _load("commit_pr_fresh.md")
+            action_clause = _load("commit_fresh.md")
 
         if issue_num:
             branch_clause = f"Name the branch 'issue-{issue_num}-<short-slug>'."
-            closes_clause = (
-                f"End the commit message with 'Closes #{issue_num}' and include "
-                f"'Closes #{issue_num}' in the PR body."
-            )
+            closes_clause = f"End the commit message with 'Closes #{issue_num}'."
         else:
             branch_clause = "Name the branch with a short descriptive slug derived from the plan title."
-            closes_clause = (
-                "Do NOT include any 'Closes #N' or 'Fixes #N' link in the commit "
-                "message or PR body."
-            )
+            closes_clause = "Do NOT include any 'Closes #N' or 'Fixes #N' link in the commit message."
 
         prompt = (
             f"Here is the implementation diff:\n\n```diff\n{diff}\n```\n\n"
-            f"{action_clause} {branch_clause} {closes_clause} "
-            "Print ONLY the PR URL on the final line of your response."
+            f"{action_clause} {branch_clause} {closes_clause}"
         )
 
-        completed: CompletedRun = self.run_claude(
+        self.run_claude(
             prompt,
-            label="commit-pr",
-            raw_path=self.state.session_dir / "stream-commit-pr.jsonl",
+            label="commit",
+            raw_path=self.state.session_dir / "stream-commit.jsonl",
             capture_events=True,
         )
 
-        pr_url = extract_gh_url(
-            completed.events or [],
-            url_pattern=r"https://github\.com/[^ )]+/pull/[0-9]+",
-            cmd_pattern=r"gh pr create",
-            label="PR",
-            text_result=completed.text_result,
-        )
-        return pr_url
 
-
-register_stage("commit-pr", CommitPR)
+register_stage("commit", Commit)

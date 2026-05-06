@@ -238,7 +238,7 @@ def handle_address(prompt: str) -> int:
     return 0
 
 
-def handle_commit_pr(prompt: str) -> int:
+def handle_open_github_pr(prompt: str) -> int:
     pr_url = os.environ.get(
         "FAKE_CLAUDE_PR_URL", "https://github.com/owner/repo/pull/101"
     )
@@ -309,7 +309,12 @@ def classify_stage(prompt: str) -> str:
     if "Produce a concise GitHub issue title" in prompt:
         return "plan-title"
     if "Print ONLY the PR URL on the final line" in prompt:
-        return "commit-pr"
+        return "open-github-pr"
+    if (
+        "stage all changes, and commit" in prompt
+        or "Rename the current branch" in prompt
+    ):
+        return "commit"
     if "/ghreview " in prompt:
         return "ghreview"
     if "/ghaddress " in prompt:
@@ -375,7 +380,8 @@ def main(argv):
         "implement-gh": handle_implement,
         "review": handle_review,
         "address": handle_address,
-        "commit-pr": handle_commit_pr,
+        "commit": lambda p: (emit_minimal_stream(), 0)[1],
+        "open-github-pr": handle_open_github_pr,
         "ghplan": handle_ghplan,
         "ghreview": lambda p: (emit_minimal_stream(), 0)[1],
         "ghaddress": lambda p: (emit_minimal_stream(), 0)[1],
