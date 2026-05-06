@@ -26,7 +26,7 @@ from gremlins.clients.resolve import (
     validate_stage_specs,
 )
 from gremlins.env_file import load_env_file
-from gremlins.gh_utils import extract_gh_url, get_repo, parse_issue_ref, view_issue
+from gremlins.gh_utils import get_repo, parse_issue_ref, view_issue
 from gremlins.git import DirtyOnly, HeadAdvanced
 from gremlins.logging_setup import configure_logging
 from gremlins.pipeline import (
@@ -39,6 +39,7 @@ from gremlins.runner import build_parallel_stages, install_signal_handlers, run_
 from gremlins.stages import (
     commit_pr,
     ghaddress,
+    ghplan,
     ghreview,
     implement,
     request_copilot,
@@ -70,10 +71,6 @@ def die(msg: str) -> NoReturn:
     sys.stderr.write(f"error: {msg}\n")
     sys.stderr.flush()
     sys.exit(1)
-
-
-def _fmt_escape(s: str) -> str:
-    return s.replace("{", "{{").replace("}", "}}")
 
 
 def _parse_gh_args(argv: list[str]) -> argparse.Namespace:
@@ -312,30 +309,18 @@ def _build_stage_runner(
                 )
             set_stage(gr_id, entry.name)
             logger.info("[1/8] running ghplan")
-            plan_prompt = load_prompts(entry.prompt_paths).format(
-                ref=_fmt_escape(args.ref or ""),
-                instructions=_fmt_escape(gh_state["instructions"]),
+            stage = ghplan.GHPlan(
+                entry,
+                model,
+                ref=args.ref or "",
+                instructions=gh_state["instructions"],
+                repo=repo,
             )
-            completed = ctx.client.run(
-                plan_prompt,
-                label="plan",
-                model=model,
-                raw_path=session_dir / "ghplan-out.jsonl",
-                capture_events=True,
-            )
-            issue_url = extract_gh_url(
-                completed.events or [],
-                url_pattern=r"https://github\.com/[^ )]+/issues/[0-9]+",
-                cmd_pattern=r"gh issue create",
-                label="issue",
-                text_result=completed.text_result,
-            )
-            issue_num = issue_url.split("/")[-1]
-            logger.info("issue: %s", issue_url)
-            patch_state(gr_id, issue_url=issue_url, issue_num=issue_num)
-            gh_state["issue_url"] = issue_url
-            gh_state["issue_num"] = issue_num
-            gh_state["issue_body"] = _fetch_issue_body(issue_num, repo)
+            stage.bind(ctx)
+            result = stage.run(None)
+            gh_state["issue_url"] = result.issue_url
+            gh_state["issue_num"] = result.issue_num
+            gh_state["issue_body"] = result.issue_body
 
         return _plan
 
@@ -354,19 +339,18 @@ def _build_stage_runner(
                         "could not read spec.md (%s); proceeding without north-star context",
                         exc,
                     )
-            impl_result = implement.run(
-                ctx,
-                implement.ImplementOptions(
-                    impl_model=model,
-                    plan_text=gh_state["issue_body"],
-                    code_style=code_style,
-                    is_git=True,
-                    kind="gh",
-                    issue_num=gh_state["issue_num"],
-                    spec_text=spec_text,
-                    prompt_path=entry.prompt_paths[-1] if entry.prompt_paths else None,
-                ),
+            stage = implement.Implement(
+                entry,
+                model,
+                plan_text=gh_state["issue_body"],
+                code_style=code_style,
+                is_git=True,
+                kind="gh",
+                issue_num=gh_state["issue_num"],
+                spec_text=spec_text,
             )
+            stage.bind(ctx)
+            impl_result = stage.run(None)
             if impl_result is None:
                 die("implement stage did not produce a result")
             gh_state["impl_result"] = impl_result
@@ -434,17 +418,17 @@ def _build_stage_runner(
                 else:
                     impl_outcome = DirtyOnly()
 
-            pr_url = commit_pr.run(
-                ctx,
-                commit_pr.CommitPrOptions(
-                    model=model,
-                    impl_outcome=impl_outcome,
-                    impl_handoff_branch=impl_handoff_branch,
-                    base_ref=base_ref,
-                    issue_url=gh_state["issue_url"],
-                    cwd=None,
-                ),
+            stage = commit_pr.CommitPR(
+                entry,
+                model,
+                impl_outcome=impl_outcome,
+                impl_handoff_branch=impl_handoff_branch,
+                base_ref=base_ref,
+                issue_url=gh_state["issue_url"],
+                cwd=None,
             )
+            stage.bind(ctx)
+            pr_url = stage.run(None)
             pr_num = pr_url.split("/")[-1]
             logger.info("PR: %s", pr_url)
             patch_state(gr_id, pr_url=pr_url)

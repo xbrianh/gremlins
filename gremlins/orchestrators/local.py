@@ -124,16 +124,15 @@ def _build_stage_runner(
                     die(
                         f"stage {entry.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML"
                     )
-                plan.run(
-                    ctx,
-                    plan.PlanOptions(
-                        plan_model=model,
-                        plan_file=plan_file,
-                        instructions=instructions,
-                        code_style=code_style,
-                        prompt_path=entry.prompt_paths[-1],
-                    ),
+                stage = plan.Plan(
+                    entry,
+                    model,
+                    plan_file=plan_file,
+                    instructions=instructions,
+                    code_style=code_style,
                 )
+                stage.bind(ctx)
+                stage.run(None)
 
         return _plan
 
@@ -153,17 +152,16 @@ def _build_stage_runner(
                     )
             set_stage(ctx.gr_id, entry.name)
             logger.info("implementing (model: %s, from %s)", model, plan_file)
-            implement.run(
-                ctx,
-                implement.ImplementOptions(
-                    impl_model=model,
-                    plan_text=plan_text,
-                    code_style=code_style,
-                    is_git=is_git,
-                    spec_text=spec_text,
-                    prompt_path=entry.prompt_paths[-1] if entry.prompt_paths else None,
-                ),
+            stage = implement.Implement(
+                entry,
+                model,
+                plan_text=plan_text,
+                code_style=code_style,
+                is_git=is_git,
+                spec_text=spec_text,
             )
+            stage.bind(ctx)
+            stage.run(None)
 
         return _implement
 

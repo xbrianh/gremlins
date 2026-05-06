@@ -7,12 +7,10 @@ from conftest import MINIMAL_EVENTS, ReviewCreatingClient
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.pipeline import StageEntry, load_pipeline, resolve_pipeline_path
+from gremlins.stages import implement, plan
 from gremlins.stages.address_code import AddressCode
 from gremlins.stages.context import StageContext
-from gremlins.stages.implement import ImplementOptions, _render_spec_block
-from gremlins.stages.implement import run as run_implement
-from gremlins.stages.plan import PlanOptions
-from gremlins.stages.plan import run as run_plan
+from gremlins.stages.implement import _render_spec_block
 from gremlins.stages.review_code import ReviewCode
 
 _BUNDLED_PROMPTS = (
@@ -138,17 +136,23 @@ def test_implement_renders_spec_block_when_present(tmp_path, monkeypatch):
             return super().run(prompt, label=label, **kwargs)
 
     client = _CommittingClient(fixtures={"implement": MINIMAL_EVENTS})
-    ctx = _make_ctx(client, session_dir)
-    run_implement(
-        ctx,
-        ImplementOptions(
-            impl_model="sonnet",
-            plan_text="task 1: do something",
-            code_style="Be good.",
-            is_git=True,
-            spec_text="overall spec body",
-        ),
+    entry = StageEntry(
+        name="implement",
+        type="implement",
+        client=None,
+        prompt_paths=[],
+        options={},
     )
+    stage = implement.Implement(
+        entry,
+        "sonnet",
+        plan_text="task 1: do something",
+        code_style="Be good.",
+        is_git=True,
+        spec_text="overall spec body",
+    )
+    stage.bind(_make_ctx(client, session_dir))
+    stage.run(None)
     prompt = client.calls[0].prompt
     assert "Overarching goal (north star)" in prompt
     assert "overall spec body" in prompt
@@ -182,17 +186,23 @@ def test_implement_omits_spec_block_when_absent(tmp_path, monkeypatch):
             return super().run(prompt, label=label, **kwargs)
 
     client = _CommittingClient(fixtures={"implement": MINIMAL_EVENTS})
-    ctx = _make_ctx(client, session_dir)
-    run_implement(
-        ctx,
-        ImplementOptions(
-            impl_model="sonnet",
-            plan_text="task 1: do something",
-            code_style="Be good.",
-            is_git=True,
-            spec_text="",
-        ),
+    entry = StageEntry(
+        name="implement",
+        type="implement",
+        client=None,
+        prompt_paths=[],
+        options={},
     )
+    stage = implement.Implement(
+        entry,
+        "sonnet",
+        plan_text="task 1: do something",
+        code_style="Be good.",
+        is_git=True,
+        spec_text="",
+    )
+    stage.bind(_make_ctx(client, session_dir))
+    stage.run(None)
     prompt = client.calls[0].prompt
     assert "Overarching goal" not in prompt
 
@@ -207,19 +217,23 @@ def test_plan_stage_raises_when_file_absent(tmp_path):
     plan_file = tmp_path / "plan.md"
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    ctx = _make_ctx(client, session_dir)
-    # FakeClaudeClient won't create the plan file — stage must raise.
+    entry = StageEntry(
+        name="plan",
+        type="plan",
+        client=None,
+        prompt_paths=[_BUNDLED_PROMPTS / "plan.md"],
+        options={},
+    )
+    stage = plan.Plan(
+        entry,
+        "sonnet",
+        plan_file=plan_file,
+        instructions="do stuff",
+        code_style="Be good.",
+    )
+    stage.bind(_make_ctx(client, session_dir))
     with pytest.raises(RuntimeError, match="plan stage did not produce"):
-        run_plan(
-            ctx,
-            PlanOptions(
-                plan_model="sonnet",
-                plan_file=plan_file,
-                instructions="do stuff",
-                code_style="Be good.",
-                prompt_path=_BUNDLED_PROMPTS / "plan.md",
-            ),
-        )
+        stage.run(None)
     assert len(client.calls) == 1
     assert client.calls[0].label == "plan"
     assert client.calls[0].model == "sonnet"
@@ -236,17 +250,22 @@ def test_plan_stage_succeeds_when_file_exists(tmp_path):
             return super().run(prompt, label=label, **kwargs)
 
     client = _WritingClient(fixtures={"plan": MINIMAL_EVENTS})
-    ctx = _make_ctx(client, session_dir)
-    run_plan(
-        ctx,
-        PlanOptions(
-            plan_model="haiku",
-            plan_file=plan_file,
-            instructions="do stuff",
-            code_style="Be good.",
-            prompt_path=_BUNDLED_PROMPTS / "plan.md",
-        ),
+    entry = StageEntry(
+        name="plan",
+        type="plan",
+        client=None,
+        prompt_paths=[_BUNDLED_PROMPTS / "plan.md"],
+        options={},
     )
+    stage = plan.Plan(
+        entry,
+        "haiku",
+        plan_file=plan_file,
+        instructions="do stuff",
+        code_style="Be good.",
+    )
+    stage.bind(_make_ctx(client, session_dir))
+    stage.run(None)
     assert plan_file.exists()
     assert client.calls[0].label == "plan"
     assert client.calls[0].model == "haiku"
@@ -266,18 +285,24 @@ def test_implement_stage_raises_on_empty_diff(tmp_path, monkeypatch):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
+    entry = StageEntry(
+        name="implement",
+        type="implement",
+        client=None,
+        prompt_paths=[],
+        options={},
+    )
     client = FakeClaudeClient(fixtures={"implement": MINIMAL_EVENTS})
-    ctx = _make_ctx(client, session_dir)
+    stage = implement.Implement(
+        entry,
+        "sonnet",
+        plan_text="# Plan\nDo stuff.\n",
+        code_style="Be good.",
+        is_git=True,
+    )
+    stage.bind(_make_ctx(client, session_dir))
     with pytest.raises(RuntimeError, match="no changes"):
-        run_implement(
-            ctx,
-            ImplementOptions(
-                impl_model="sonnet",
-                plan_text="# Plan\nDo stuff.\n",
-                code_style="Be good.",
-                is_git=True,
-            ),
-        )
+        stage.run(None)
     assert len(client.calls) == 1
     assert client.calls[0].label == "implement"
 
@@ -368,18 +393,23 @@ def test_plan_stage_includes_code_style(tmp_path):
     plan_file = tmp_path / "plan.md"
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    ctx = _make_ctx(client, session_dir)
+    entry = StageEntry(
+        name="plan",
+        type="plan",
+        client=None,
+        prompt_paths=[_BUNDLED_PROMPTS / "plan.md"],
+        options={},
+    )
+    stage = plan.Plan(
+        entry,
+        "sonnet",
+        plan_file=plan_file,
+        instructions="do stuff",
+        code_style="Be good.",
+    )
+    stage.bind(_make_ctx(client, session_dir))
     with pytest.raises(RuntimeError, match="plan stage did not produce"):
-        run_plan(
-            ctx,
-            PlanOptions(
-                plan_model="sonnet",
-                plan_file=plan_file,
-                instructions="do stuff",
-                code_style="Be good.",
-                prompt_path=_BUNDLED_PROMPTS / "plan.md",
-            ),
-        )
+        stage.run(None)
     assert "Be good." in client.calls[0].prompt
 
 
