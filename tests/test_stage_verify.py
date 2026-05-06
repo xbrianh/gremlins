@@ -1,4 +1,4 @@
-"""Tests for gremlins.stages.verify."""
+"""Tests for gremlins.stages.verify.Verify."""
 
 from __future__ import annotations
 
@@ -9,16 +9,25 @@ import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
+from gremlins.pipeline import StageEntry
 from gremlins.stages.context import StageContext
-from gremlins.stages.verify import VerifyOptions
-from gremlins.stages.verify import run as run_verify
+from gremlins.stages.verify import Verify
 
 
-def _make_ctx(client: Any, tmp_path: Any, *, gr_id: Any = None) -> StageContext:
-    return StageContext(client=client, session_dir=tmp_path, gr_id=gr_id)
+def _make_entry(cmds: list[str] | None = None, max_attempts: int = 3) -> StageEntry:
+    return StageEntry(
+        name="verify",
+        type="verify",
+        client=None,
+        prompt_paths=[],
+        options={
+            "cmds": cmds if cmds is not None else [],
+            "max_attempts": max_attempts,
+        },
+    )
 
 
-def _run(
+def _make_stage(
     tmp_path: Any,
     *,
     cmds: list[str] | None = None,
@@ -28,43 +37,45 @@ def _run(
     fix_model: str = "sonnet",
     is_git: bool = True,
     commit_after_fix: bool = False,
-) -> Any:
+) -> tuple[Verify, Any]:
     if cmds is None:
         cmds = ["true"]
     if client is None:
         client = FakeClaudeClient(fixtures={})
-    ctx = _make_ctx(client, tmp_path)
-    run_verify(
-        ctx,
-        VerifyOptions(
-            fix_model=fix_model,
-            cwd=tmp_path,
-            code_style=code_style,
-            is_git=is_git,
-            commit_after_fix=commit_after_fix,
-            cmds=cmds,
-            max_attempts=max_attempts,
-        ),
+    entry = _make_entry(cmds=cmds, max_attempts=max_attempts)
+    stage = Verify(
+        entry,
+        fix_model,
+        code_style=code_style,
+        is_git=is_git,
+        commit_after_fix=commit_after_fix,
     )
-    return client
+    ctx = StageContext(
+        client=client, session_dir=tmp_path, gr_id=None, worktree=tmp_path
+    )
+    stage.bind(ctx)
+    return stage, client
 
 
 def test_green_on_first_attempt(tmp_path):
-    client = _run(tmp_path, cmds=["true"])
+    stage, client = _make_stage(tmp_path, cmds=["true"])
+    stage.run(None)
     assert len(client.calls) == 0
     assert (tmp_path / "verify-attempt-1.log").exists()
 
 
 def test_no_op_when_cmds_empty(tmp_path):
     """Empty cmds list -> stage skips without invoking the shell or agent."""
-    client = _run(tmp_path, cmds=[])
+    stage, client = _make_stage(tmp_path, cmds=[])
+    stage.run(None)
     assert len(client.calls) == 0
     assert not (tmp_path / "verify-attempt-1.log").exists()
 
 
 def test_single_cmd(tmp_path):
     """A single cmd in the list runs without shell-syntax error."""
-    client = _run(tmp_path, cmds=["true"])
+    stage, client = _make_stage(tmp_path, cmds=["true"])
+    stage.run(None)
     assert len(client.calls) == 0
     assert (tmp_path / "verify-attempt-1.log").exists()
 
@@ -80,19 +91,14 @@ def test_fix_then_green(tmp_path):
             return super().run(prompt, label=label, **kwargs)
 
     client = _FixingClient(fixtures={"verify-fix-1": MINIMAL_EVENTS})
-    ctx = _make_ctx(client, tmp_path)
-    run_verify(
-        ctx,
-        VerifyOptions(
-            fix_model="haiku",
-            cwd=tmp_path,
-            code_style="Be good.",
-            is_git=True,
-            commit_after_fix=False,
-            cmds=[check_cmd, "true"],
-            max_attempts=3,
-        ),
+    stage, _ = _make_stage(
+        tmp_path,
+        cmds=[check_cmd, "true"],
+        max_attempts=3,
+        client=client,
+        fix_model="haiku",
     )
+    stage.run(None)
 
     assert len(client.calls) == 1
     assert client.calls[0].label == "verify-fix-1"
@@ -111,21 +117,12 @@ def test_attempts_exhausted_raises(tmp_path, monkeypatch):
             "verify-fix-2": MINIMAL_EVENTS,
         }
     )
-    ctx = _make_ctx(client, tmp_path)
+    stage, _ = _make_stage(
+        tmp_path, cmds=["false", "true"], max_attempts=3, client=client
+    )
 
     with pytest.raises(RuntimeError, match="exhausted 3 attempts"):
-        run_verify(
-            ctx,
-            VerifyOptions(
-                fix_model="sonnet",
-                cwd=tmp_path,
-                code_style="Be good.",
-                is_git=True,
-                commit_after_fix=False,
-                cmds=["false", "true"],
-                max_attempts=3,
-            ),
-        )
+        stage.run(None)
 
     assert len(client.calls) == 2
     assert (tmp_path / "verify-attempt-1.log").exists()
@@ -134,22 +131,10 @@ def test_attempts_exhausted_raises(tmp_path, monkeypatch):
 
 
 def test_exhaustion_with_max_1(tmp_path):
-    client = FakeClaudeClient(fixtures={})
-    ctx = _make_ctx(client, tmp_path)
+    stage, client = _make_stage(tmp_path, cmds=["false"], max_attempts=1)
 
     with pytest.raises(RuntimeError, match="exhausted 1 attempts"):
-        run_verify(
-            ctx,
-            VerifyOptions(
-                fix_model="sonnet",
-                cwd=tmp_path,
-                code_style="Be good.",
-                is_git=True,
-                commit_after_fix=False,
-                cmds=["false"],
-                max_attempts=1,
-            ),
-        )
+        stage.run(None)
 
     assert len(client.calls) == 0
     assert (tmp_path / "verify-attempt-1.log").exists()
@@ -166,19 +151,13 @@ def test_code_style_in_fix_prompt(tmp_path):
             return super().run(prompt, label=label, **kwargs)
 
     client = _FixingClient(fixtures={"verify-fix-1": MINIMAL_EVENTS})
-    ctx = _make_ctx(client, tmp_path)
-    run_verify(
-        ctx,
-        VerifyOptions(
-            fix_model="sonnet",
-            cwd=tmp_path,
-            code_style="My custom style rules.",
-            is_git=True,
-            commit_after_fix=False,
-            cmds=[check_cmd, "true"],
-            max_attempts=3,
-        ),
+    stage, _ = _make_stage(
+        tmp_path,
+        cmds=[check_cmd, "true"],
+        client=client,
+        code_style="My custom style rules.",
     )
+    stage.run(None)
 
     assert len(client.calls) == 1
     assert "My custom style rules." in client.calls[0].prompt
@@ -193,43 +172,26 @@ def test_both_cmds_in_fix_prompt(tmp_path, monkeypatch):
             "verify-fix-2": MINIMAL_EVENTS,
         }
     )
-    ctx = _make_ctx(client, tmp_path)
+    stage, _ = _make_stage(
+        tmp_path,
+        cmds=["false", "make test"],
+        max_attempts=3,
+        client=client,
+        code_style="",
+    )
 
     with pytest.raises(RuntimeError):
-        run_verify(
-            ctx,
-            VerifyOptions(
-                fix_model="sonnet",
-                cwd=tmp_path,
-                code_style="",
-                is_git=True,
-                commit_after_fix=False,
-                cmds=["false", "make test"],
-                max_attempts=3,
-            ),
-        )
+        stage.run(None)
 
-    # Both command strings must appear in the fix prompt
     assert "false" in client.calls[0].prompt
     assert "make test" in client.calls[0].prompt
 
 
 def test_log_file_captures_output(tmp_path):
-    client = FakeClaudeClient(fixtures={})
-    ctx = _make_ctx(client, tmp_path)
-
-    run_verify(
-        ctx,
-        VerifyOptions(
-            fix_model="sonnet",
-            cwd=tmp_path,
-            code_style="",
-            is_git=True,
-            commit_after_fix=False,
-            cmds=["echo hello_check", "echo hello_test"],
-            max_attempts=3,
-        ),
+    stage, client = _make_stage(
+        tmp_path, cmds=["echo hello_check", "echo hello_test"], code_style=""
     )
+    stage.run(None)
 
     log = tmp_path / "verify-attempt-1.log"
     assert log.exists()
@@ -247,23 +209,11 @@ def test_no_pr_opened_on_exhaustion(tmp_path, monkeypatch):
             "verify-fix-2": MINIMAL_EVENTS,
         }
     )
-    ctx = _make_ctx(client, tmp_path)
+    stage, _ = _make_stage(tmp_path, cmds=["false"], max_attempts=3, client=client)
 
     with pytest.raises(RuntimeError):
-        run_verify(
-            ctx,
-            VerifyOptions(
-                fix_model="sonnet",
-                cwd=tmp_path,
-                code_style="",
-                is_git=True,
-                commit_after_fix=False,
-                cmds=["false"],
-                max_attempts=3,
-            ),
-        )
+        stage.run(None)
 
-    # All fix attempts were consumed but still exhausted — no silent pass-through
     assert len(client.calls) == 2
 
 
@@ -273,20 +223,16 @@ def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
     client = FakeClaudeClient(
         fixtures={"verify-fix-1": MINIMAL_EVENTS, "verify-fix-2": MINIMAL_EVENTS}
     )
-    ctx = _make_ctx(client, tmp_path, gr_id=gr_id)
+    entry = _make_entry(cmds=["false"], max_attempts=3)
+    stage = Verify(entry, "sonnet", code_style="", is_git=True, commit_after_fix=False)
+    ctx = StageContext(
+        client=client, session_dir=tmp_path, gr_id=gr_id, worktree=tmp_path
+    )
+    stage.bind(ctx)
+
     with pytest.raises(RuntimeError, match="exhausted"):
-        run_verify(
-            ctx,
-            VerifyOptions(
-                fix_model="sonnet",
-                cwd=tmp_path,
-                code_style="",
-                is_git=True,
-                commit_after_fix=False,
-                cmds=["false"],
-                max_attempts=3,
-            ),
-        )
+        stage.run(None)
+
     data = json.loads((state_dir / "state.json").read_text())
     assert data.get("bail_class") == "other"
 
@@ -305,21 +251,12 @@ def test_is_git_false_skips_diff(tmp_path):
             return super().run(prompt, label=label, **kwargs)
 
     client = _FixingClient(fixtures={"verify-fix-1": MINIMAL_EVENTS})
-    ctx = _make_ctx(client, tmp_path)
-    run_verify(
-        ctx,
-        VerifyOptions(
-            fix_model="sonnet",
-            cwd=tmp_path,
-            code_style="",
-            is_git=False,
-            commit_after_fix=False,
-            cmds=[check_cmd],
-            max_attempts=3,
-        ),
+    stage, _ = _make_stage(
+        tmp_path, cmds=[check_cmd], client=client, is_git=False, code_style=""
     )
+    stage.run(None)
+
     assert len(client.calls) == 1
-    # diff block renders as empty when is_git=False
     assert "```\n\n```" in captured_prompts[0]
 
 
@@ -334,19 +271,11 @@ def test_commit_after_fix_true_in_prompt(tmp_path):
             return super().run(prompt, label=label, **kwargs)
 
     client = _FixingClient(fixtures={"verify-fix-1": MINIMAL_EVENTS})
-    ctx = _make_ctx(client, tmp_path)
-    run_verify(
-        ctx,
-        VerifyOptions(
-            fix_model="sonnet",
-            cwd=tmp_path,
-            code_style="",
-            is_git=True,
-            commit_after_fix=True,
-            cmds=[check_cmd],
-            max_attempts=3,
-        ),
+    stage, _ = _make_stage(
+        tmp_path, cmds=[check_cmd], client=client, commit_after_fix=True, code_style=""
     )
+    stage.run(None)
+
     assert len(client.calls) == 1
     assert "Fix failing checks" in client.calls[0].prompt
     assert "stage the changed files" in client.calls[0].prompt

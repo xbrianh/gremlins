@@ -208,32 +208,30 @@ def _build_stage_runner(
         return _address_code
 
     if entry.type == "verify":
-        cmds = args.cmds if args.cmds is not None else entry.options.get("cmds", [])
-        max_attempts = entry.options.get("max_attempts", args.test_max_attempts)
+        # Resolve CLI --cmd override; --test-max-attempts fills in if YAML omits it
+        if args.cmds is not None:
+            entry.options["cmds"] = args.cmds
+        entry.options.setdefault("max_attempts", args.test_max_attempts)
 
         def _verify() -> None:
-            if cmds:
+            resolved_cmds = entry.options.get("cmds", [])
+            if resolved_cmds:
                 set_stage(ctx.gr_id, entry.name)
                 logger.info(
                     "running verify (cmds: %r, max-attempts: %s, model: %s)",
-                    cmds,
-                    max_attempts,
+                    resolved_cmds,
+                    entry.options.get("max_attempts"),
                     model,
                 )
-            verify.run(
-                ctx,
-                verify.VerifyOptions(
-                    fix_model=model,
-                    cwd=ctx.worktree
-                    if ctx.worktree is not None
-                    else pathlib.Path.cwd(),
-                    code_style=code_style,
-                    is_git=is_git,
-                    commit_after_fix=is_git,
-                    cmds=cmds,
-                    max_attempts=max_attempts,
-                ),
+            stage = verify.Verify(
+                entry,
+                model,
+                code_style=code_style,
+                is_git=is_git,
+                commit_after_fix=is_git,
             )
+            stage.bind(ctx)
+            stage.run(None)
 
         return _verify
 
