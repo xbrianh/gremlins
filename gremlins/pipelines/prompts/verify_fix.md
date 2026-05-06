@@ -1,3 +1,4 @@
+<!-- placeholders: commands_section, commit_instr, verify_output, diff_text -->
 The verify step failed. Read the captured output below, then fix the code so the commands exit 0.
 
 {commands_section}

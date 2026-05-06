@@ -1,3 +1,4 @@
+<!-- placeholders: ref, instructions -->
 You are creating an implementation plan and posting it as a new GitHub issue.
 
 ## Reference (optional)

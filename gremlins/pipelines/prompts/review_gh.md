@@ -1,3 +1,4 @@
+<!-- placeholders: pr_url -->
 # Review a GitHub PR and post inline comments
 
 Review the pull request at `{pr_url}` and post the review directly to GitHub as a PR review with inline line comments.

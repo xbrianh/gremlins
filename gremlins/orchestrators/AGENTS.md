@@ -34,11 +34,11 @@ Per-pipeline orchestrator entry points. Each module owns one CLI subcommand
   `all_valid_stages = stage_names + child_names`, where `stage_names` is the
   top-level stage list and `child_names` are stages nested inside parallel
   groups. Both are accepted as `--resume-from` targets.
-- Both `local.py` and `gh.py` read the coding-style doc via
-  `load_prompts([_CODE_STYLE_PATH])`, where `_CODE_STYLE_PATH` is resolved
-  with `pathlib.Path(__file__)` to `gremlins/pipelines/prompts/code_style.md`.
-  This is the canonical coding-style doc for all gremlin pipeline stages;
-  edit it there rather than touching `agents/pragmatic-developer.md`.
+- `code_style.md` is the canonical coding-style doc for all gremlin pipeline
+  stages; edit it there rather than touching `agents/pragmatic-developer.md`.
+  It is listed as the first entry in each coding stage's `prompt:` list in
+  `local.yaml` / `gh.yaml` and concatenated by `load_prompts(self.prompt_paths)`.
+  No special-casing in the orchestrator.
 
 ## Boss-specific notes
 

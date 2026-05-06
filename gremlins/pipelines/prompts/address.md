@@ -1,3 +1,4 @@
+<!-- placeholders: model, text, address_commit_instr -->
 A code review of the most recent implementation follows. For every actionable finding you agree with, make the fix in the code. For findings you disagree with or choose to skip, note them briefly in your final summary with a reason.
 
 ---
