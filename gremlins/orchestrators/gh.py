@@ -358,9 +358,7 @@ def _build_stage_runner(
         def _verify() -> None:
             set_stage(gr_id, entry.name)
             logger.info("[2b/8] verifying implementation")
-            stage = verify.Verify(
-                entry, model, is_git=True, commit_after_fix=False
-            )
+            stage = verify.Verify(entry, model, is_git=True, commit_after_fix=False)
             stage.bind(ctx)
             stage.run(None)
 
@@ -452,9 +450,7 @@ def _build_stage_runner(
             _ensure_pr_url(gh_state, state_file, args.resume_from)
             set_stage(gr_id, entry.name)
             logger.info("[4/8] running /ghreview")
-            stage = ghreview.GHReview(
-                entry, model, pr_url=gh_state["pr_url"]
-            )
+            stage = ghreview.GHReview(entry, model, pr_url=gh_state["pr_url"])
             stage.bind(ctx)
             stage.run(None)
 
@@ -487,9 +483,7 @@ def _build_stage_runner(
             _ensure_pr_url(gh_state, state_file, args.resume_from)
             set_stage(gr_id, entry.name)
             logger.info("[6/8] running /ghaddress")
-            stage = ghaddress.GHAddress(
-                entry, model, pr_url=gh_state["pr_url"]
-            )
+            stage = ghaddress.GHAddress(entry, model, pr_url=gh_state["pr_url"])
             stage.bind(ctx)
             stage.run(None)
 
@@ -501,9 +495,7 @@ def _build_stage_runner(
             _ensure_pr_url(gh_state, state_file, args.resume_from)
             set_stage(gr_id, entry.name)
             logger.info("[7/8] waiting for CI checks (up to 3 attempts, 20min each)")
-            stage = wait_ci.WaitCI(
-                entry, model, pr_url=gh_state["pr_url"]
-            )
+            stage = wait_ci.WaitCI(entry, model, pr_url=gh_state["pr_url"])
             stage.bind(ctx)
             stage.run(None)
 

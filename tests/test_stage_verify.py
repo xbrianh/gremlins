@@ -162,9 +162,7 @@ def test_both_cmds_in_fix_prompt(tmp_path, monkeypatch):
 
 
 def test_log_file_captures_output(tmp_path):
-    stage, client = _make_stage(
-        tmp_path, cmds=["echo hello_check", "echo hello_test"]
-    )
+    stage, client = _make_stage(tmp_path, cmds=["echo hello_check", "echo hello_test"])
     stage.run(None)
 
     log = tmp_path / "verify-attempt-1.log"
@@ -225,9 +223,7 @@ def test_is_git_false_skips_diff(tmp_path):
             return super().run(prompt, label=label, **kwargs)
 
     client = _FixingClient(fixtures={"verify-fix-1": MINIMAL_EVENTS})
-    stage, _ = _make_stage(
-        tmp_path, cmds=[check_cmd], client=client, is_git=False
-    )
+    stage, _ = _make_stage(tmp_path, cmds=[check_cmd], client=client, is_git=False)
     stage.run(None)
 
     assert len(client.calls) == 1

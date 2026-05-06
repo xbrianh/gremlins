@@ -73,7 +73,6 @@ def test_local_main_resume_from_review_code_requires_git_changes(
     )
     monkeypatch.setattr("gremlins.orchestrators.local.has_commits", lambda: False)
 
-
     with pytest.raises(SystemExit):
         local_main(
             ["--plan", str(plan_file), "--resume-from", "review-code"],
@@ -105,7 +104,6 @@ def test_local_main_resume_from_review_code_allows_existing_git_changes(
         "gremlins.orchestrators.local.has_dirty_worktree", lambda: False
     )
     monkeypatch.setattr("gremlins.orchestrators.local.has_commits", lambda: True)
-
 
     client = _ReviewCreatingClient(
         fixtures={
