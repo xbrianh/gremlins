@@ -1,6 +1,6 @@
 """Helpers for shell integration tests.
 
-Each test gets its own isolated HOME, XDG_STATE_HOME, PATH, and a real git
+Each test gets its own isolated HOME, PATH, and a real git
 repo. ``setup_shell_env`` returns a populated ``ShellEnv`` dataclass with
 paths the test needs to assert against.
 """
@@ -14,6 +14,8 @@ import pathlib
 import subprocess
 import sys
 import time
+
+import platformdirs
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent.parent
 FIXTURES_DIR = pathlib.Path(__file__).resolve().parent
@@ -124,7 +126,15 @@ def setup_shell_env(
     if with_gh:
         install_fake_bin(bin_dir, "gh", FAKE_GH)
 
-    state_root = tmp_path / "state"
+    old_home = os.environ.get("HOME")
+    os.environ["HOME"] = str(home)
+    try:
+        state_root = pathlib.Path(platformdirs.user_state_dir("claude-gremlins"))
+    finally:
+        if old_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = old_home
     state_root.mkdir(parents=True, exist_ok=True)
 
     repo = tmp_path / "repo"
@@ -137,7 +147,6 @@ def setup_shell_env(
     env = {
         **os.environ,
         "HOME": str(home),
-        "XDG_STATE_HOME": str(state_root),
         "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
         "FAKE_CLAUDE_LOG": str(fake_claude_log),
         "FAKE_GH_LOG": str(fake_gh_log),

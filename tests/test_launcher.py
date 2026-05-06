@@ -1,7 +1,7 @@
 """Tests for gremlins/launcher.py.
 
 Drives launcher.launch() and launcher.resume() directly with:
-- Monkeypatched HOME, XDG_STATE_HOME, PATH (so the spawned pipeline
+- Monkeypatched HOME and PATH (so the spawned pipeline
   finds the fake `claude` binary and the gremlins package).
 - Real throwaway git repos for worktree tests.
 
@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import time
 
+import platformdirs
 import pytest
 from fixtures.shell_env import install_fake_bin
 
@@ -121,18 +122,18 @@ def lenv(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir(parents=True, exist_ok=True)
     _setup_claude_home(home)
+    monkeypatch.setenv("HOME", str(home))
 
     bin_dir = tmp_path / "bin"
     install_fake_bin(bin_dir, "claude", FAKE_CLAUDE)
 
-    state_root = tmp_path / "state"
+    state_root = pathlib.Path(platformdirs.user_state_dir("claude-gremlins"))
     state_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
 
     repo = tmp_path / "repo"
     _init_git_repo(repo)
 
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
     monkeypatch.setenv("FAKE_CLAUDE_LOG", str(tmp_path / "fake_claude.log"))
     monkeypatch.setenv("GIT_OPTIONAL_LOCKS", "0")
     monkeypatch.setenv("GREMLINS_TEST_NOOP_PIPELINE", "1")
@@ -177,7 +178,7 @@ def _launcher():
 
 
 def _gremlins_state_root(lenv) -> pathlib.Path:
-    return lenv.state_root / "claude-gremlins"
+    return lenv.state_root
 
 
 # ---------------------------------------------------------------------------

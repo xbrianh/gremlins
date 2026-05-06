@@ -19,6 +19,7 @@ import time
 from typing import Any, cast
 
 from gremlins import git as _git_mod
+from gremlins import paths as _paths
 from gremlins.fleet.state import liveness_of_state_file
 
 
@@ -34,7 +35,7 @@ def _run() -> int:
     if os.environ.get("GREMLIN_SKIP_SUMMARY") == "1":
         return 0
 
-    state_root = _get_state_root()
+    state_root = str(_paths.state_root())
     if not os.path.isdir(state_root):
         return 0
 
@@ -63,13 +64,6 @@ def _run() -> int:
 
     _prune_old_state(state_root)
     return 0
-
-
-def _get_state_root() -> str:
-    xdg = os.environ.get("XDG_STATE_HOME") or os.path.join(
-        os.path.expanduser("~"), ".local", "state"
-    )
-    return os.path.join(xdg, "claude-gremlins")
 
 
 def _read_stdin() -> dict[str, Any]:

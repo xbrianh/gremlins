@@ -18,6 +18,8 @@ import secrets
 from collections.abc import Callable
 from typing import Any
 
+from gremlins import paths as _paths
+
 _GR_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
@@ -84,13 +86,7 @@ def resolve_session_dir(gr_id: str | None = None) -> pathlib.Path:
     separated from real gremlins and can be pruned on a simpler age-based
     heuristic.
     """
-    state_root = (
-        pathlib.Path(
-            os.environ.get("XDG_STATE_HOME")
-            or os.path.join(os.path.expanduser("~"), ".local", "state")
-        )
-        / "claude-gremlins"
-    )
+    state_root = _paths.state_root()
     if gr_id:
         session_dir = state_root / gr_id / "artifacts"
     else:
@@ -146,13 +142,7 @@ def resolve_state_file(gr_id: str | None) -> pathlib.Path | None:
     """Return path to state.json for gr_id, or None when gr_id is absent."""
     if not gr_id:
         return None
-    state_root = (
-        pathlib.Path(
-            os.environ.get("XDG_STATE_HOME")
-            or os.path.join(os.path.expanduser("~"), ".local", "state")
-        )
-        / "claude-gremlins"
-    )
+    state_root = _paths.state_root()
     return state_root / gr_id / "state.json"
 
 

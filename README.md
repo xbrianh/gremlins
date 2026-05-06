@@ -2,7 +2,8 @@
 
 Background orchestration pipelines for Claude Code. Given a goal or GitHub issue,
 a gremlin runs the full plan → implement → review-code → address-code cycle
-unattended, writing artifacts to `~/.local/state/claude-gremlins/` and optionally
+unattended, writing artifacts to the per-user state directory resolved by
+`platformdirs.user_state_dir("claude-gremlins")` and optionally
 opening a pull request. A fleet manager tracks running, stalled, and finished
 gremlins and provides stop / rescue / land / close operations.
 

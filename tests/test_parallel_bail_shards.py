@@ -30,13 +30,18 @@ from gremlins.stages.context import StageContext
 # ---------------------------------------------------------------------------
 
 
-def _make_state(tmp_path: pathlib.Path, gr_id: str, monkeypatch) -> pathlib.Path:
-    xdg = tmp_path / "xdg"
-    state_dir = xdg / "claude-gremlins" / gr_id
+@pytest.fixture
+def state_root(tmp_path: pathlib.Path, monkeypatch):
+    root = tmp_path / "state"
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: root)
+    return root
+
+
+def _make_state(state_root: pathlib.Path, gr_id: str) -> pathlib.Path:
+    state_dir = state_root / gr_id
     state_dir.mkdir(parents=True)
     sf = state_dir / "state.json"
     sf.write_text(json.dumps({"id": gr_id, "stage": ""}), encoding="utf-8")
-    monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
     return sf
 
 
@@ -49,9 +54,9 @@ def _read_state(sf: pathlib.Path) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_emit_bail_with_child_key_writes_shard(tmp_path, monkeypatch):
+def test_emit_bail_with_child_key_writes_shard(state_root):
     gr_id = "gr-shard-a"
-    sf = _make_state(tmp_path, gr_id, monkeypatch)
+    sf = _make_state(state_root, gr_id)
 
     state_mod.emit_bail(gr_id, "other", "child A bailed", child_key="child-a")
 
@@ -61,9 +66,9 @@ def test_emit_bail_with_child_key_writes_shard(tmp_path, monkeypatch):
     assert data["parallel_bails"]["child-a"]["bail_detail"] == "child A bailed"
 
 
-def test_emit_bail_two_children_both_shards_present(tmp_path, monkeypatch):
+def test_emit_bail_two_children_both_shards_present(state_root):
     gr_id = "gr-shard-two"
-    sf = _make_state(tmp_path, gr_id, monkeypatch)
+    sf = _make_state(state_root, gr_id)
 
     state_mod.emit_bail(gr_id, "other", "A", child_key="child-a")
     state_mod.emit_bail(gr_id, "security", "B", child_key="child-b")
@@ -75,9 +80,9 @@ def test_emit_bail_two_children_both_shards_present(tmp_path, monkeypatch):
     assert not data.get("bail_class")
 
 
-def test_check_bail_child_key_reads_only_own_shard(tmp_path, monkeypatch):
+def test_check_bail_child_key_reads_only_own_shard(state_root):
     gr_id = "gr-check-shard"
-    _make_state(tmp_path, gr_id, monkeypatch)
+    _make_state(state_root, gr_id)
 
     state_mod.emit_bail(gr_id, "other", "A failed", child_key="child-a")
 
@@ -89,9 +94,9 @@ def test_check_bail_child_key_reads_only_own_shard(tmp_path, monkeypatch):
     state_mod.check_bail(gr_id, "test", child_key="child-b")
 
 
-def test_check_bail_no_child_key_reads_top_level(tmp_path, monkeypatch):
+def test_check_bail_no_child_key_reads_top_level(state_root):
     gr_id = "gr-check-toplevel"
-    _make_state(tmp_path, gr_id, monkeypatch)
+    _make_state(state_root, gr_id)
 
     # Only a child shard is set; top-level should be clear.
     state_mod.emit_bail(gr_id, "other", "child failed", child_key="child-a")
@@ -108,9 +113,9 @@ def test_check_bail_no_child_key_reads_top_level(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_patch_state_concurrent_no_lost_updates(tmp_path, monkeypatch):
+def test_patch_state_concurrent_no_lost_updates(state_root):
     gr_id = "gr-flock-race"
-    _make_state(tmp_path, gr_id, monkeypatch)
+    _make_state(state_root, gr_id)
 
     errors: list[Exception] = []
     n_threads = 20
@@ -158,12 +163,12 @@ def _make_simple_ctx(tmp_path: pathlib.Path, child_key: str) -> StageContext:
 
 def _build_fanin_test(
     tmp_path: pathlib.Path,
-    monkeypatch,
+    state_root: pathlib.Path,
     gr_id: str,
     shards: dict[str, str],  # child_key -> bail_class (empty = no bail)
     bail_policy: str,
 ) -> tuple[pathlib.Path, list]:
-    sf = _make_state(tmp_path, gr_id, monkeypatch)
+    sf = _make_state(state_root, gr_id)
     # Pre-populate parallel_bails as fan-out+parallel would have done.
     parallel_bails = {}
     for key, bc in shards.items():
@@ -191,10 +196,10 @@ def _build_fanin_test(
     return sf, stages
 
 
-def test_bail_policy_any_one_bailed_sets_top_level(tmp_path, monkeypatch):
+def test_bail_policy_any_one_bailed_sets_top_level(tmp_path, state_root):
     gr_id = "gr-policy-any"
     shards = {"child-a": "other", "child-b": ""}
-    sf, stages = _build_fanin_test(tmp_path, monkeypatch, gr_id, shards, "any")
+    sf, stages = _build_fanin_test(tmp_path, state_root, gr_id, shards, "any")
 
     # Run just the fanin stage.
     with pytest.raises(RuntimeError, match="bailed"):
@@ -205,10 +210,10 @@ def test_bail_policy_any_one_bailed_sets_top_level(tmp_path, monkeypatch):
     assert "parallel_bails" not in data
 
 
-def test_bail_policy_all_one_bailed_no_top_level(tmp_path, monkeypatch):
+def test_bail_policy_all_one_bailed_no_top_level(tmp_path, state_root):
     gr_id = "gr-policy-all-partial"
     shards = {"child-a": "other", "child-b": ""}
-    sf, stages = _build_fanin_test(tmp_path, monkeypatch, gr_id, shards, "all")
+    sf, stages = _build_fanin_test(tmp_path, state_root, gr_id, shards, "all")
 
     # Only one bailed; policy=all requires all → no top-level bail.
     stages[2][1]()  # fanin should not raise
@@ -218,10 +223,10 @@ def test_bail_policy_all_one_bailed_no_top_level(tmp_path, monkeypatch):
     assert "parallel_bails" not in data
 
 
-def test_bail_policy_all_both_bailed_sets_top_level(tmp_path, monkeypatch):
+def test_bail_policy_all_both_bailed_sets_top_level(tmp_path, state_root):
     gr_id = "gr-policy-all-both"
     shards = {"child-a": "other", "child-b": "reviewer_requested_changes"}
-    sf, stages = _build_fanin_test(tmp_path, monkeypatch, gr_id, shards, "all")
+    sf, stages = _build_fanin_test(tmp_path, state_root, gr_id, shards, "all")
 
     with pytest.raises(RuntimeError, match="bailed"):
         stages[2][1]()
@@ -297,10 +302,10 @@ def test_cancel_on_bail_skips_unstarted_children():
 # ---------------------------------------------------------------------------
 
 
-def test_fanin_resume_aggregates_existing_shards(tmp_path, monkeypatch):
+def test_fanin_resume_aggregates_existing_shards(tmp_path, state_root):
     gr_id = "gr-fanin-resume"
     shards = {"child-a": "other", "child-b": ""}
-    sf, stages = _build_fanin_test(tmp_path, monkeypatch, gr_id, shards, "any")
+    sf, stages = _build_fanin_test(tmp_path, state_root, gr_id, shards, "any")
 
     # Simulate resuming from fanin: only run the fanin stage.
     # Fanin raises because one child bailed; state must still be written.
@@ -312,9 +317,9 @@ def test_fanin_resume_aggregates_existing_shards(tmp_path, monkeypatch):
     assert "parallel_bails" not in data
 
 
-def test_run_stages_resume_from_fanin_name(tmp_path, monkeypatch):
+def test_run_stages_resume_from_fanin_name(tmp_path, state_root):
     gr_id = "gr-resume-fanin-name"
-    sf = _make_state(tmp_path, gr_id, monkeypatch)
+    sf = _make_state(state_root, gr_id)
     state_mod.patch_state(
         gr_id,
         parallel_bails={"c": {"bail_class": "other"}},
@@ -445,12 +450,12 @@ def test_worktree_lifecycle_fanout_creates_and_fanin_removes(tmp_path):
         os.chdir(orig_cwd)
 
 
-def test_fanout_persists_worktrees_and_fresh_fanin_can_clean_up(tmp_path, monkeypatch):
+def test_fanout_persists_worktrees_and_fresh_fanin_can_clean_up(tmp_path, state_root):
     """Fan-out writes worktree paths to state.json; a fresh build_parallel_stages
     instance (simulating a resume in a new process) reads them back and cleans
     them up during fan-in."""
     gr_id = "gr-resume-wt"
-    _make_state(tmp_path, gr_id, monkeypatch)
+    _make_state(state_root, gr_id)
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -508,11 +513,11 @@ def test_fanout_persists_worktrees_and_fresh_fanin_can_clean_up(tmp_path, monkey
     assert "reviews" not in (_read_state(sf).get("parallel_worktrees") or {})
 
 
-def test_fanout_resume_tears_down_prior_worktrees(tmp_path, monkeypatch):
+def test_fanout_resume_tears_down_prior_worktrees(tmp_path, state_root):
     """A second fan-out (e.g. after `--resume-from <group>-fanout`) cleans up
     the previous run's worktrees before creating fresh ones."""
     gr_id = "gr-resume-fanout"
-    _make_state(tmp_path, gr_id, monkeypatch)
+    _make_state(state_root, gr_id)
 
     repo = tmp_path / "repo"
     repo.mkdir()

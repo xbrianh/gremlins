@@ -59,7 +59,7 @@ def _make_failed_gremlin(
 
     Returns the state dir path.
     """
-    state_dir = state_root / "claude-gremlins" / gr_id
+    state_dir = state_root / gr_id
     state_dir.mkdir(parents=True)
     state = {
         "id": gr_id,
@@ -82,12 +82,13 @@ def _make_failed_gremlin(
 
 
 def _patch_state_root(state_root: pathlib.Path, monkeypatch):
-    """Patch constants.STATE_ROOT to point at the test state root."""
+    """Patch rescue state-path lookups to point at the test state root."""
     monkeypatch.setattr(
         _constants,
         "STATE_ROOT",
-        str(state_root / "claude-gremlins"),
+        str(state_root),
     )
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
 
 
 def test_rescue_diagnosis_runs_in_scratch_dir_not_worktree(tmp_path, monkeypatch):

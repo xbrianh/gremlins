@@ -24,13 +24,13 @@ Bare invocation prints fleet status.
 from __future__ import annotations
 
 import argparse
-import os
 import pathlib
 import re
 import sys
 
 import yaml
 
+from gremlins import paths as _paths
 from gremlins.fleet import main as fleet_main
 from gremlins.fleet.cli import (
     ack_main,
@@ -273,7 +273,7 @@ def _self_background_main(kind: str, argv: list[str]) -> int:
         sys.stderr.write(f"error: {exc}\n")
         return 1
 
-    state_root = _get_state_root()
+    state_root = _paths.state_root()
     state_dir = state_root / gr_id
     log_path = state_dir / "log"
     sf = state_dir / "state.json"
@@ -304,16 +304,6 @@ def _resume_main(argv: list[str]) -> int:
 
     sys.stdout.write(f"resumed gremlin: {args.gr_id}\n")
     return 0
-
-
-def _get_state_root():
-    return (
-        pathlib.Path(
-            os.environ.get("XDG_STATE_HOME")
-            or os.path.join(os.path.expanduser("~"), ".local", "state")
-        )
-        / "claude-gremlins"
-    )
 
 
 if __name__ == "__main__":

@@ -385,7 +385,7 @@ def test_local_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
     tmp_path, monkeypatch, make_state_dir
 ):
     gr_id = "resume-test-gr-id"
-    make_state_dir(gr_id)
+    state_dir = make_state_dir(gr_id)
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -474,7 +474,6 @@ def test_local_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
     result = local_main(["--plan", str(plan_file)], client=launch_client, gr_id=gr_id)
     assert result == 0
 
-    state_dir = tmp_path / "xdg" / "claude-gremlins" / gr_id
     launch_state = json.loads((state_dir / "state.json").read_text(encoding="utf-8"))
     assert launch_state.get("stage_clients") == original_stage_clients
     assert verify_models == ["claude-opus-4-1"]

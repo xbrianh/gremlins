@@ -18,8 +18,15 @@ from gremlins.cli import (
 from gremlins.run_pipeline import main as run_pipeline_main
 
 
-def _make_state(tmp_path: pathlib.Path, gr_id: str) -> pathlib.Path:
-    state_dir = tmp_path / "claude-gremlins" / gr_id
+@pytest.fixture
+def state_root(tmp_path: pathlib.Path, monkeypatch):
+    root = tmp_path / "state"
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: root)
+    return root
+
+
+def _make_state(state_root: pathlib.Path, gr_id: str) -> pathlib.Path:
+    state_dir = state_root / gr_id
     state_dir.mkdir(parents=True)
     sf = state_dir / "state.json"
     sf.write_text(json.dumps({"status": "running"}), encoding="utf-8")
@@ -33,7 +40,6 @@ def _make_state(tmp_path: pathlib.Path, gr_id: str) -> pathlib.Path:
 
 def test_bare_invocation_calls_fleet_status(tmp_path, monkeypatch):
     """gremlins (no args) delegates to fleet status, returns 0."""
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     called = []
     monkeypatch.setattr(
         "gremlins.cli.fleet_main", lambda argv: called.append(argv) or 0
@@ -45,7 +51,6 @@ def test_bare_invocation_calls_fleet_status(tmp_path, monkeypatch):
 
 def test_unknown_first_arg_falls_through_to_fleet(tmp_path, monkeypatch):
     """gremlins <id-prefix> passes argv to fleet_main for drill-in."""
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     received = []
     monkeypatch.setattr(
         "gremlins.cli.fleet_main", lambda argv: received.append(argv) or 0
@@ -75,11 +80,10 @@ def test_migrated_subcommands_exit_nonzero_with_hint(sub, capsys):
 # ---------------------------------------------------------------------------
 
 
-def test_bail_writes_bail_class_and_detail(tmp_path, monkeypatch):
+def test_bail_writes_bail_class_and_detail(state_root, monkeypatch):
     gr_id = "test-gremlin-001"
-    sf = _make_state(tmp_path, gr_id)
+    sf = _make_state(state_root, gr_id)
     monkeypatch.setenv("GR_ID", gr_id)
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
 
     rc = bail_main(["other", "test reason"])
 
@@ -89,15 +93,14 @@ def test_bail_writes_bail_class_and_detail(tmp_path, monkeypatch):
     assert data["bail_detail"] == "test reason"
 
 
-def test_bail_without_detail_omits_bail_detail_key(tmp_path, monkeypatch):
+def test_bail_without_detail_omits_bail_detail_key(state_root, monkeypatch):
     gr_id = "test-gremlin-002"
-    sf = _make_state(tmp_path, gr_id)
+    sf = _make_state(state_root, gr_id)
     data = json.loads(sf.read_text())
     data["bail_detail"] = "stale"
     sf.write_text(json.dumps(data))
 
     monkeypatch.setenv("GR_ID", gr_id)
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
 
     rc = bail_main(["secrets"])
 
@@ -107,11 +110,10 @@ def test_bail_without_detail_omits_bail_detail_key(tmp_path, monkeypatch):
     assert "bail_detail" not in result
 
 
-def test_bail_with_child_key_flag_writes_parallel_shard(tmp_path, monkeypatch):
+def test_bail_with_child_key_flag_writes_parallel_shard(state_root, monkeypatch):
     gr_id = "test-gremlin-child-001"
-    sf = _make_state(tmp_path, gr_id)
+    sf = _make_state(state_root, gr_id)
     monkeypatch.setenv("GR_ID", gr_id)
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
 
     rc = bail_main(["--child-key", "verify-fix", "other", "test reason"])
 
@@ -122,12 +124,11 @@ def test_bail_with_child_key_flag_writes_parallel_shard(tmp_path, monkeypatch):
     assert data["parallel_bails"]["verify-fix"]["bail_detail"] == "test reason"
 
 
-def test_bail_with_child_key_env_writes_parallel_shard(tmp_path, monkeypatch):
+def test_bail_with_child_key_env_writes_parallel_shard(state_root, monkeypatch):
     gr_id = "test-gremlin-child-002"
-    sf = _make_state(tmp_path, gr_id)
+    sf = _make_state(state_root, gr_id)
     monkeypatch.setenv("GR_ID", gr_id)
     monkeypatch.setenv("GREMLIN_CHILD_KEY", "ghreview")
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
 
     rc = bail_main(["security", "needs manual review"])
 
@@ -138,12 +139,11 @@ def test_bail_with_child_key_env_writes_parallel_shard(tmp_path, monkeypatch):
     assert data["parallel_bails"]["ghreview"]["bail_detail"] == "needs manual review"
 
 
-def test_bail_child_key_flag_overrides_env(tmp_path, monkeypatch):
+def test_bail_child_key_flag_overrides_env(state_root, monkeypatch):
     gr_id = "test-gremlin-child-003"
-    sf = _make_state(tmp_path, gr_id)
+    sf = _make_state(state_root, gr_id)
     monkeypatch.setenv("GR_ID", gr_id)
     monkeypatch.setenv("GREMLIN_CHILD_KEY", "from-env")
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
 
     rc = bail_main(["--child-key", "from-flag", "other", "reason"])
 
@@ -155,17 +155,15 @@ def test_bail_child_key_flag_overrides_env(tmp_path, monkeypatch):
 
 def test_bail_without_gr_id_exits_zero_no_write(tmp_path, monkeypatch):
     monkeypatch.delenv("GR_ID", raising=False)
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
 
     rc = bail_main(["other", "no gremlin context"])
 
     assert rc == 0
-    assert not (tmp_path / "claude-gremlins").exists()
+    assert _no_state_created(tmp_path)
 
 
 def test_bail_invalid_class_exits_nonzero(tmp_path, monkeypatch):
     monkeypatch.setenv("GR_ID", "test-gremlin-003")
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
 
     with pytest.raises(SystemExit) as exc_info:
         bail_main(["bogus_class"])
@@ -176,11 +174,10 @@ def test_bail_invalid_class_exits_nonzero(tmp_path, monkeypatch):
     "bail_class",
     ["reviewer_requested_changes", "security", "secrets", "other"],
 )
-def test_bail_all_valid_classes_accepted(tmp_path, monkeypatch, bail_class):
+def test_bail_all_valid_classes_accepted(state_root, monkeypatch, bail_class):
     gr_id = f"test-gremlin-{bail_class}"
-    sf = _make_state(tmp_path, gr_id)
+    sf = _make_state(state_root, gr_id)
     monkeypatch.setenv("GR_ID", gr_id)
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
 
     rc = bail_main([bail_class, "reason"])
 
@@ -203,7 +200,6 @@ def test_bail_all_valid_classes_accepted(tmp_path, monkeypatch, bail_class):
 )
 def test_bail_rejects_malformed_gr_id_env(tmp_path, monkeypatch, bad_id):
     monkeypatch.setenv("GR_ID", bad_id)
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
 
     rc = bail_main(["other", "reason"])
 
@@ -228,16 +224,13 @@ def test_bail_rejects_malformed_gr_id_env(tmp_path, monkeypatch, bad_id):
     ],
 )
 def test_run_pipeline_rejects_invalid_gr_id(tmp_path, monkeypatch, bad_id):
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-
     rc = run_pipeline_main([bad_id, "_local"])
 
     assert rc != 0
-    assert not (tmp_path / "claude-gremlins").exists()
+    assert _no_state_created(tmp_path)
 
 
 def test_run_pipeline_valid_id_proceeds(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("gremlins.cli.local_main", lambda *a, **kw: 0)
 
     with pytest.raises(SystemExit):
@@ -278,7 +271,6 @@ def test_run_pipeline_forwards_gr_id_to_orchestrator(
 
 
 def test_stop_dispatches_to_stop_main(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     called = []
     monkeypatch.setattr("gremlins.cli.stop_main", lambda argv: called.append(argv) or 0)
     rc = main(["stop", "abc123"])
@@ -287,7 +279,6 @@ def test_stop_dispatches_to_stop_main(tmp_path, monkeypatch):
 
 
 def test_rescue_dispatches_to_rescue_main(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     called = []
     monkeypatch.setattr(
         "gremlins.cli.rescue_main", lambda argv: called.append(argv) or 0
@@ -298,7 +289,6 @@ def test_rescue_dispatches_to_rescue_main(tmp_path, monkeypatch):
 
 
 def test_land_dispatches_to_land_main(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     called = []
     monkeypatch.setattr("gremlins.cli.land_main", lambda argv: called.append(argv) or 0)
     rc = main(["land", "abc123"])
@@ -341,39 +331,34 @@ def test_launch_unknown_kind_exits_nonzero_with_error(capsys):
 
 
 def _no_state_created(tmp_path: pathlib.Path) -> bool:
-    return not (tmp_path / "claude-gremlins").exists()
+    return not (tmp_path / "state").exists()
 
 
 def test_local_no_args_exits_nonzero_no_state(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     rc = main(["launch", "local"])
     assert rc != 0
     assert _no_state_created(tmp_path)
 
 
 def test_gh_invalid_client_exits_nonzero_no_state(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     rc = main(["launch", "gh", "--client", "notaspecifier", "-c", "fix bug"])
     assert rc != 0
     assert _no_state_created(tmp_path)
 
 
 def test_gh_bare_exits_nonzero_no_state(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     rc = main(["launch", "gh"])
     assert rc != 0
     assert _no_state_created(tmp_path)
 
 
 def test_gh_invalid_resume_from_exits_nonzero_no_state(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     rc = main(["launch", "gh", "--resume-from", "bogus"])
     assert rc != 0
     assert _no_state_created(tmp_path)
 
 
 def test_boss_missing_chain_kind_exits_nonzero_no_state(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     rc = main(["launch", "boss", "--plan", "x.md"])
     assert rc != 0
     assert _no_state_created(tmp_path)
@@ -430,7 +415,6 @@ def test_boss_missing_plan_raises():
 
 
 def test_boss_missing_plan_exits_nonzero_no_state(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     rc = main(["launch", "boss", "--chain-kind", "local"])
     assert rc != 0
     assert _no_state_created(tmp_path)
@@ -454,6 +438,5 @@ def test_boss_missing_plan_exits_nonzero_no_state(tmp_path, monkeypatch):
     ],
 )
 def test_resume_rejects_invalid_gr_id(tmp_path, monkeypatch, bad_id):
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     rc = main(["resume", bad_id])
     assert rc != 0

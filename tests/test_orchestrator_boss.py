@@ -60,9 +60,7 @@ def _common_boss_patches(monkeypatch, tmp_path, gr_id):
     """Shared monkeypatches for boss_main integration tests."""
     monkeypatch.setattr(boss_mod, "STATE_ROOT", str(tmp_path))
     monkeypatch.setattr(boss_mod, "_stop_requested", False)
-    # Stub out set_stage so tests don't touch the developer's real ~/.local/state.
-    # (state.set_stage resolves XDG_STATE_HOME at call time; patching the name
-    # imported into boss_mod keeps all boss call-sites covered.)
+    # Stub out set_stage so tests don't touch any real state directory.
     monkeypatch.setattr(boss_mod, "set_stage", lambda *a, **kw: None)
     monkeypatch.setattr(boss_mod, "get_head_ref", lambda p: "abc123def456abc1")
     monkeypatch.setattr(boss_mod, "get_current_branch", lambda p: "main")
@@ -1267,14 +1265,13 @@ def test_resolve_plan_source_persists_issue_metadata_on_first_fetch(
     """First-run issue-ref path persists issue_url / issue_num to state.json
     so a crash before init_boss_state still leaves the rescue path able to
     recover the link."""
-    xdg_home = tmp_path / "xdg"
-    state_root = xdg_home / "claude-gremlins"
+    state_root = tmp_path / "state"
     state_dir = state_root / "test-boss-persist-aa1122"
     state_dir.mkdir(parents=True)
     (state_dir / "state.json").write_text(
         json.dumps({"id": "test-boss-persist-aa1122"})
     )
-    monkeypatch.setenv("XDG_STATE_HOME", str(xdg_home))
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
 
     monkeypatch.setattr(boss_mod, "get_repo", lambda: "owner/repo")
     monkeypatch.setattr(
@@ -1307,13 +1304,9 @@ def test_resolve_plan_source_persists_issue_metadata_on_first_fetch(
 def test_boss_main_plan_issue_ref_snapshots_spec(tmp_path, monkeypatch):
     """boss_main with --plan <issue-ref> fetches the issue and snapshots spec.md."""
     gr_id = "test-boss-issue-aabb12"
-    # Arrange XDG_STATE_HOME so boss_mod.STATE_ROOT and patch_state's
-    # XDG-derived state file path agree, otherwise the description fill
-    # would silently no-op and the assertion below would always pass.
-    xdg_home = tmp_path / "xdg"
-    state_root = xdg_home / "claude-gremlins"
+    state_root = tmp_path / "state"
     state_root.mkdir(parents=True)
-    monkeypatch.setenv("XDG_STATE_HOME", str(xdg_home))
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
 
     state_dir, project_root, workdir = _make_gremlin_state(state_root, gr_id)
     _common_boss_patches(monkeypatch, state_root, gr_id)

@@ -24,6 +24,7 @@ from typing import Any, cast
 import yaml
 
 from gremlins import git as _git_mod
+from gremlins import paths as _paths
 from gremlins.clients import PACKAGE_DEFAULT
 from gremlins.gh_utils import parse_issue_ref, resolve_default_branch, view_issue
 from gremlins.pipeline import load_pipeline, resolve_pipeline_path
@@ -38,13 +39,7 @@ _KIND_SUBCOMMAND = {
 
 
 def _state_root() -> pathlib.Path:
-    return (
-        pathlib.Path(
-            os.environ.get("XDG_STATE_HOME")
-            or os.path.join(os.path.expanduser("~"), ".local", "state")
-        )
-        / "claude-gremlins"
-    )
+    return _paths.state_root()
 
 
 def _slugify(text: str, max_len: int = 40) -> str:
