@@ -2,27 +2,32 @@
 
 from __future__ import annotations
 
-import dataclasses
-import pathlib
+from typing import Any
 
+from gremlins.pipeline import StageEntry
 from gremlins.prompts import load_prompts
-from gremlins.stages.context import StageContext
+from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import check_bail
 
 
-@dataclasses.dataclass
-class GhaddressOptions:
-    model: str | None
-    pr_url: str
-    code_style: str
-    prompt_path: pathlib.Path
+class GHAddress(Stage):
+    def __init__(
+        self,
+        entry: StageEntry,
+        model: str | None,
+        *,
+        pr_url: str,
+        code_style: str,
+    ) -> None:
+        super().__init__(entry, model)
+        self.pr_url = pr_url
+        self.code_style = code_style
 
-
-def run(ctx: StageContext, options: GhaddressOptions) -> None:
-    bail_section = ""
-    if ctx.gr_id:
-        bail_section = """
+    def run(self, pipe: Any) -> None:
+        bail_section = ""
+        if self.state.gr_id:
+            bail_section = """
 
 ## Bail markers (running under a gremlin pipeline)
 
@@ -33,19 +38,18 @@ If you cannot safely address one or more comments, write a bail marker before fi
 
 Out-of-scope comments and `gh issue create` failures are not bail reasons — handle them per the instructions above. If you successfully addressed every actionable comment, do not write a bail marker — just exit normally.
 """
-    prompt = load_prompts([options.prompt_path]).format(
-        pr_url=options.pr_url,
-        code_style=options.code_style,
-        bail_section=bail_section,
-    )
-    ctx.client.run(
-        prompt,
-        label="ghaddress",
-        model=options.model,
-        raw_path=ctx.session_dir / "stream-ghaddress.jsonl",
-        cwd=ctx.worktree,
-    )
-    check_bail(ctx.gr_id, "/ghaddress", child_key=ctx.child_key)
+        prompt_path = self.prompt_paths[-1]
+        prompt = load_prompts([prompt_path]).format(
+            pr_url=self.pr_url,
+            code_style=self.code_style,
+            bail_section=bail_section,
+        )
+        self.run_claude(
+            prompt,
+            label="ghaddress",
+            raw_path=self.state.session_dir / "stream-ghaddress.jsonl",
+        )
+        check_bail(self.state.gr_id, "/ghaddress", child_key=self.state.child_key)
 
 
-register_stage("ghaddress", run)
+register_stage("ghaddress", GHAddress)
