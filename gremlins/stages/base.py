@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pathlib
+import shlex
 import subprocess
 from typing import TYPE_CHECKING, Any, cast
 
@@ -44,6 +45,12 @@ class Stage:
             cwd=self.state.worktree,
             **kw,
         )
+
+    def bail_command(self) -> str:
+        command = ["python", "-m", "gremlins.bail"]
+        if self.state.child_key:
+            command.extend(["--child-key", self.state.child_key])
+        return shlex.join(command)
 
     def run_subprocess(
         self, argv: list[str], **kw: Any

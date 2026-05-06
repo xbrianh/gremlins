@@ -92,6 +92,7 @@ class Verify(Stage):
                 diff = _diff_text(self.state.cwd, is_git=self._is_git)
                 verify_output = log_file.read_text(encoding="utf-8")
                 fix_prompt = template.format(
+                    bail_command=self.bail_command(),
                     commands_section=commands_section,
                     verify_output=verify_output,
                     diff_text=diff,

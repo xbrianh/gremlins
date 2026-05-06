@@ -107,6 +107,52 @@ def test_bail_without_detail_omits_bail_detail_key(tmp_path, monkeypatch):
     assert "bail_detail" not in result
 
 
+def test_bail_with_child_key_flag_writes_parallel_shard(tmp_path, monkeypatch):
+    gr_id = "test-gremlin-child-001"
+    sf = _make_state(tmp_path, gr_id)
+    monkeypatch.setenv("GR_ID", gr_id)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+
+    rc = bail_main(["--child-key", "verify-fix", "other", "test reason"])
+
+    assert rc == 0
+    data = json.loads(sf.read_text())
+    assert "bail_class" not in data
+    assert data["parallel_bails"]["verify-fix"]["bail_class"] == "other"
+    assert data["parallel_bails"]["verify-fix"]["bail_detail"] == "test reason"
+
+
+def test_bail_with_child_key_env_writes_parallel_shard(tmp_path, monkeypatch):
+    gr_id = "test-gremlin-child-002"
+    sf = _make_state(tmp_path, gr_id)
+    monkeypatch.setenv("GR_ID", gr_id)
+    monkeypatch.setenv("GREMLIN_CHILD_KEY", "ghreview")
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+
+    rc = bail_main(["security", "needs manual review"])
+
+    assert rc == 0
+    data = json.loads(sf.read_text())
+    assert "bail_class" not in data
+    assert data["parallel_bails"]["ghreview"]["bail_class"] == "security"
+    assert data["parallel_bails"]["ghreview"]["bail_detail"] == "needs manual review"
+
+
+def test_bail_child_key_flag_overrides_env(tmp_path, monkeypatch):
+    gr_id = "test-gremlin-child-003"
+    sf = _make_state(tmp_path, gr_id)
+    monkeypatch.setenv("GR_ID", gr_id)
+    monkeypatch.setenv("GREMLIN_CHILD_KEY", "from-env")
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+
+    rc = bail_main(["--child-key", "from-flag", "other", "reason"])
+
+    assert rc == 0
+    data = json.loads(sf.read_text())
+    assert "from-env" not in data.get("parallel_bails", {})
+    assert data["parallel_bails"]["from-flag"]["bail_class"] == "other"
+
+
 def test_bail_without_gr_id_exits_zero_no_write(tmp_path, monkeypatch):
     monkeypatch.delenv("GR_ID", raising=False)
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))

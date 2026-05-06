@@ -224,6 +224,7 @@ class WaitCI(Stage):
                 log_file.write_text(failure_output, encoding="utf-8")
 
                 fix_prompt = template.format(
+                    bail_command=self.bail_command(),
                     failure_output=failure_output,
                 )
                 self.run_claude(

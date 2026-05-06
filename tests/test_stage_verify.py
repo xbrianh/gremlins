@@ -258,3 +258,36 @@ def test_commit_after_fix_true_in_prompt(tmp_path):
     assert len(client.calls) == 1
     assert "Fix failing checks" in client.calls[0].prompt
     assert "stage the changed files" in client.calls[0].prompt
+
+
+def test_parallel_child_fix_prompt_uses_child_key_bail_command(tmp_path):
+    client = FakeClaudeClient(fixtures={"verify-fix-1": MINIMAL_EVENTS})
+    entry = StageEntry(
+        name="verify",
+        type="verify",
+        client=None,
+        prompt_paths=[
+            _VERIFY_PROMPT,
+            pathlib.Path(__file__).resolve().parent.parent
+            / "gremlins"
+            / "pipelines"
+            / "prompts"
+            / "bail_section_fix.md",
+        ],
+        options={"cmds": ["false"], "max_attempts": 2},
+    )
+    stage = Verify(entry, "sonnet", is_git=True, commit_after_fix=False)
+    stage.bind(
+        StageContext(
+            client=client,
+            session_dir=tmp_path,
+            gr_id="gr-verify",
+            child_key="verify-child",
+            worktree=tmp_path,
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="exhausted 2 attempts"):
+        stage.run(None)
+
+    assert "python -m gremlins.bail --child-key verify-child" in client.calls[0].prompt

@@ -73,6 +73,7 @@ class AddressCode(Stage):
 
             template = load_prompts(self.prompt_paths)
             address_prompt = template.format(
+                bail_command=self.bail_command(),
                 model=review_model,
                 text=text,
                 address_commit_instr=address_commit_instr,
