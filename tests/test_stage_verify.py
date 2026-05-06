@@ -50,7 +50,7 @@ def _make_stage(
         is_git=is_git,
         commit_after_fix=commit_after_fix,
     )
-    ctx = StageContext(client=client, session_dir=tmp_path, gr_id=None)
+    ctx = StageContext(client=client, session_dir=tmp_path, gr_id=None, worktree=tmp_path)
     stage.bind(ctx)
     return stage, client
 
@@ -223,7 +223,7 @@ def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
     )
     entry = _make_entry(cmds=["false"], max_attempts=3)
     stage = Verify(entry, "sonnet", code_style="", is_git=True, commit_after_fix=False)
-    ctx = StageContext(client=client, session_dir=tmp_path, gr_id=gr_id)
+    ctx = StageContext(client=client, session_dir=tmp_path, gr_id=gr_id, worktree=tmp_path)
     stage.bind(ctx)
 
     with pytest.raises(RuntimeError, match="exhausted"):

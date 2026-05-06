@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import logging
 import pathlib
-import subprocess  # shell=True string invocation; not a list, so can't use run_subprocess
+import subprocess
 from typing import Any
 
 from gremlins import git as _git_mod
+from gremlins.pipeline import StageEntry
 from gremlins.prompts import load_prompts
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
@@ -37,7 +38,7 @@ def _escape_fmt(s: str) -> str:
 class Verify(Stage):
     def __init__(
         self,
-        entry: Any,
+        entry: StageEntry,
         model: str | None,
         *,
         code_style: str,
