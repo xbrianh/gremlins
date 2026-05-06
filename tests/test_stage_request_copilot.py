@@ -8,7 +8,7 @@ import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.pipeline import StageEntry
-from gremlins.stages.context import StageContext
+from gremlins.stages.base import StageContext
 from gremlins.stages.request_copilot import RequestCopilot
 
 

@@ -8,7 +8,6 @@ sequencing logic of their own.
 
 - `registry.py` — `STAGE_REGISTRY` and `CLIENT_FACTORIES` dicts + `register_stage` / `register_client_factory`. All stage type lookups go through here.
 - `all.py` — importing triggers side-effect registration of all stage modules. `pipeline.py` imports it automatically via `_ensure_registered()`; no manual import needed.
-- `context.py` — `StageContext(client, session_dir, gr_id)` dataclass passed as the first arg to every registry-dispatched stage function.
 - `plan.py` — `run(ctx, PlanOptions)`. Local pipeline only.
 - `implement.py` — `run(ctx, ImplementOptions)`. Dual-mode (`kind='local'` /
   `kind='gh'`). For gh: enforces the empty-implementation invariant,

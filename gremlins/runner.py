@@ -34,7 +34,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from gremlins.clients.protocol import ClaudeClient
-from gremlins.stages.context import StageContext
+from gremlins.stages.base import StageContext
 
 logger = logging.getLogger(__name__)
 

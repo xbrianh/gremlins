@@ -11,8 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Callable
-from typing import Any, NoReturn
+from typing import NoReturn
 
 import yaml
 
@@ -22,37 +21,21 @@ from gremlins.clients.resolve import (
     PACKAGE_DEFAULT,
     collect_stage_specs,
     load_stage_specs_from_state,
-    require_stage_spec,
     validate_stage_specs,
 )
 from gremlins.env_file import load_env_file
 from gremlins.gh_utils import get_repo, parse_issue_ref, view_issue
-from gremlins.git import DirtyOnly, HeadAdvanced
 from gremlins.logging_setup import configure_logging
+from gremlins.orchestrators.pipeline import GHPipeline, read_state_field
 from gremlins.pipeline import (
-    StageEntry,
     load_pipeline,
     resolve_pipeline_path,
 )
-from gremlins.runner import build_parallel_stages, install_signal_handlers, run_stages
-from gremlins.stages import (
-    commit_pr,
-    ghaddress,
-    ghplan,
-    ghreview,
-    implement,
-    request_copilot,
-    verify,
-    wait_ci,
-    wait_copilot,
-)
-from gremlins.stages.context import StageContext
-from gremlins.stages.implement import ImplStageResult
+from gremlins.runner import install_signal_handlers
 from gremlins.state import (
     patch_state,
     resolve_session_dir,
     resolve_state_file,
-    set_stage,
 )
 
 logger = logging.getLogger(__name__)
@@ -93,16 +76,6 @@ def _parse_gh_args(argv: list[str]) -> argparse.Namespace:
         die(f"invalid -r ref: {args.ref} (allowed: A-Z a-z 0-9 . _ / # -)")
 
     return args
-
-
-def _read_state_field(sf: pathlib.Path | None, field: str) -> str:
-    if sf is None or not sf.exists():
-        return ""
-    try:
-        data = json.loads(sf.read_text(encoding="utf-8"))
-        return data.get(field) or ""
-    except Exception:
-        return ""
 
 
 _parse_issue_ref = parse_issue_ref
@@ -160,8 +133,8 @@ def _resolve_plan_source(
 ) -> tuple[str, str, str]:
     """Resolve --plan <source> into (issue_url, issue_num, issue_body)."""
     if plan_md.exists() and plan_md.stat().st_size > 0:
-        issue_url = _read_state_field(state_file, "issue_url")
-        issue_num = _read_state_field(state_file, "issue_num")
+        issue_url = read_state_field(state_file, "issue_url")
+        issue_num = read_state_field(state_file, "issue_num")
         issue_body = plan_md.read_text(encoding="utf-8")
         label = f" (issue #{issue_num})" if issue_num else ""
         logger.info("[1/8] plan resumed from snapshot: %s%s", plan_md, label)
@@ -260,250 +233,6 @@ def _resolve_plan_source(
     return issue_url, issue_num, issue_body
 
 
-def _ensure_pr_url(
-    gh_state: dict[str, Any],
-    state_file: pathlib.Path | None,
-    resume_from: str | None,
-) -> None:
-    if gh_state["pr_url"]:
-        return
-    saved = _read_state_field(state_file, "pr_url")
-    if not saved:
-        die(
-            f"--resume-from {resume_from}: no pr_url in state.json "
-            "(rewind to implement?)"
-        )
-    gh_state["pr_url"] = saved
-    gh_state["pr_num"] = saved.split("/")[-1]
-    logger.info("resumed PR: %s", saved)
-
-
-def _build_stage_runner(
-    entry: StageEntry,
-    ctx: StageContext,
-    model: str,
-    *,
-    args: argparse.Namespace,
-    repo: str,
-    session_dir: pathlib.Path,
-    state_file: pathlib.Path | None,
-    gr_id: str | None,
-    gh_state: dict[str, Any],
-) -> Callable[[], None]:
-    if entry.type == "plan":
-
-        def _plan() -> None:
-            if args.plan_source:
-                return
-            if not entry.prompt_paths:
-                die(
-                    f"stage {entry.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML"
-                )
-            set_stage(gr_id, entry.name)
-            logger.info("[1/8] running ghplan")
-            stage = ghplan.GHPlan(
-                entry,
-                model,
-                ref=args.ref or "",
-                instructions=gh_state["instructions"],
-                repo=repo,
-            )
-            stage.bind(ctx)
-            result = stage.run(None)
-            gh_state["issue_url"] = result.issue_url
-            gh_state["issue_num"] = result.issue_num
-            gh_state["issue_body"] = result.issue_body
-
-        return _plan
-
-    if entry.type == "implement":
-
-        def _implement() -> None:
-            set_stage(gr_id, entry.name)
-            logger.info("[2a/8] implementing plan")
-            spec_file = session_dir / "spec.md"
-            spec_text = ""
-            if spec_file.exists():
-                try:
-                    spec_text = spec_file.read_text(encoding="utf-8")
-                except (OSError, UnicodeDecodeError) as exc:
-                    logger.warning(
-                        "could not read spec.md (%s); proceeding without north-star context",
-                        exc,
-                    )
-            stage = implement.Implement(
-                entry,
-                model,
-                plan_text=gh_state["issue_body"],
-                is_git=True,
-                kind="gh",
-                issue_num=gh_state["issue_num"],
-                spec_text=spec_text,
-            )
-            stage.bind(ctx)
-            impl_result = stage.run(None)
-            if impl_result is None:
-                die("implement stage did not produce a result")
-            gh_state["impl_result"] = impl_result
-            patch_state(
-                gr_id,
-                impl_handoff_branch=impl_result.handoff_branch,
-                impl_base_ref=impl_result.pre_state.head,
-            )
-
-        return _implement
-
-    if entry.type == "verify":
-
-        def _verify() -> None:
-            set_stage(gr_id, entry.name)
-            logger.info("[2b/8] verifying implementation")
-            stage = verify.Verify(entry, model, is_git=True, commit_after_fix=False)
-            stage.bind(ctx)
-            stage.run(None)
-
-        return _verify
-
-    if entry.type == "commit-pr":
-
-        def _commit_pr() -> None:
-            set_stage(gr_id, entry.name)
-            logger.info("[2c/8] committing + opening PR")
-            impl_result: ImplStageResult | None = gh_state["impl_result"]
-            if impl_result is not None:
-                impl_outcome = impl_result.outcome
-                impl_handoff_branch = impl_result.handoff_branch
-                base_ref = impl_result.pre_state.head
-            else:
-                impl_handoff_branch = _read_state_field(
-                    state_file, "impl_handoff_branch"
-                )
-                base_ref = _read_state_field(state_file, "impl_base_ref")
-                if not base_ref:
-                    die(
-                        "--resume-from commit-pr: no impl_base_ref in state.json "
-                        "(rewind to implement?)"
-                    )
-                if impl_handoff_branch:
-                    count_r = subprocess.run(
-                        [
-                            "git",
-                            "rev-list",
-                            "--count",
-                            f"{base_ref}..{impl_handoff_branch}",
-                        ],
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
-                    if count_r.returncode != 0:
-                        die(
-                            f"--resume-from commit-pr: impl_handoff_branch '{impl_handoff_branch}' "
-                            f"not found or base_ref invalid (rewind to implement?)\n"
-                            f"{count_r.stderr.strip()}"
-                        )
-                    commit_count = int(count_r.stdout.strip())
-                    impl_outcome = HeadAdvanced(commit_count=commit_count)
-                else:
-                    impl_outcome = DirtyOnly()
-
-            stage = commit_pr.CommitPR(
-                entry,
-                model,
-                impl_outcome=impl_outcome,
-                impl_handoff_branch=impl_handoff_branch,
-                base_ref=base_ref,
-                issue_url=gh_state["issue_url"],
-                cwd=None,
-            )
-            stage.bind(ctx)
-            pr_url = stage.run(None)
-            pr_num = pr_url.split("/")[-1]
-            logger.info("PR: %s", pr_url)
-            patch_state(gr_id, pr_url=pr_url)
-            gh_state["pr_url"] = pr_url
-            gh_state["pr_num"] = pr_num
-
-        return _commit_pr
-
-    if entry.type == "request-copilot":
-
-        def _request_copilot() -> None:
-            _ensure_pr_url(gh_state, state_file, args.resume_from)
-            set_stage(gr_id, entry.name)
-            logger.info("[3/8] requesting Copilot review")
-            stage = request_copilot.RequestCopilot(
-                entry, model, repo=repo, pr_num=gh_state["pr_num"]
-            )
-            stage.bind(ctx)
-            stage.run(None)
-
-        return _request_copilot
-
-    if entry.type == "ghreview":
-
-        def _ghreview() -> None:
-            if not entry.prompt_paths:
-                die(
-                    f"stage {entry.name!r}: type 'ghreview' requires a 'prompt' field in the pipeline YAML"
-                )
-            _ensure_pr_url(gh_state, state_file, args.resume_from)
-            set_stage(gr_id, entry.name)
-            logger.info("[4/8] running /ghreview")
-            stage = ghreview.GHReview(entry, model, pr_url=gh_state["pr_url"])
-            stage.bind(ctx)
-            stage.run(None)
-
-        return _ghreview
-
-    if entry.type == "wait-copilot":
-
-        def _wait_copilot() -> None:
-            _ensure_pr_url(gh_state, state_file, args.resume_from)
-            set_stage(gr_id, entry.name)
-            logger.info(
-                "[5/8] waiting for Copilot review (20s interval, 10min timeout)"
-            )
-            stage = wait_copilot.WaitCopilot(
-                entry, model, repo=repo, pr_num=gh_state["pr_num"]
-            )
-            stage.bind(ctx)
-            state = stage.run(None)
-            logger.info("Copilot review: %s", state)
-
-        return _wait_copilot
-
-    if entry.type == "ghaddress":
-
-        def _ghaddress() -> None:
-            if not entry.prompt_paths:
-                die(
-                    f"stage {entry.name!r}: type 'ghaddress' requires a 'prompt' field in the pipeline YAML"
-                )
-            _ensure_pr_url(gh_state, state_file, args.resume_from)
-            set_stage(gr_id, entry.name)
-            logger.info("[6/8] running /ghaddress")
-            stage = ghaddress.GHAddress(entry, model, pr_url=gh_state["pr_url"])
-            stage.bind(ctx)
-            stage.run(None)
-
-        return _ghaddress
-
-    if entry.type == "wait-ci":
-
-        def _wait_ci() -> None:
-            _ensure_pr_url(gh_state, state_file, args.resume_from)
-            set_stage(gr_id, entry.name)
-            logger.info("[7/8] waiting for CI checks (up to 3 attempts, 20min each)")
-            stage = wait_ci.WaitCI(entry, model, pr_url=gh_state["pr_url"])
-            stage.bind(ctx)
-            stage.run(None)
-
-        return _wait_ci
-
-    raise ValueError(f"unsupported stage type {entry.type!r} in gh pipeline")
-
-
 def gh_main(
     argv: list[str], *, client: ClaudeClient | None = None, gr_id: str | None = None
 ) -> int:
@@ -573,53 +302,17 @@ def gh_main(
 
     # Determine the overall effective client for plan-title and signal handlers
     default_spec = cli_spec or pipeline.default_client or PACKAGE_DEFAULT
-    if client is not None:
-        effective_client = client
-    else:
-        effective_client = _client_for_spec(default_spec)
+    effective_client = client if client is not None else _client_for_spec(default_spec)
     default_model = default_spec.model
 
+    session_dir = resolve_session_dir(gr_id)
+
     if client is not None:
-        install_signal_handlers(client)
+        _signal_clients = [client]
     elif _spec_clients:
-        all_clients = list(_spec_clients.values())
-        install_signal_handlers(all_clients[0], *all_clients[1:])
+        _signal_clients = list(_spec_clients.values())
     else:
-        install_signal_handlers(effective_client)
-
-    stage_names = [s.name for s in pipeline.stages]
-
-    # Expand parallel groups to their three runtime stages: fanout, parallel, fanin.
-    # Child names are not valid resume targets — resuming a parallel block always
-    # restarts at one of the three group-level stages so prior shards/worktrees
-    # don't bleed across runs.
-    _expanded_stage_names: list[str] = []
-    _child_names: set[str] = set()
-    for _e in pipeline.stages:
-        if _e.type == "parallel":
-            _expanded_stage_names.extend(
-                [f"{_e.name}-fanout", _e.name, f"{_e.name}-fanin"]
-            )
-            for _child in _e.children:
-                if _child.name in _child_names or _child.name in stage_names:
-                    die(f"duplicate child stage name {_child.name!r}")
-                _child_names.add(_child.name)
-        else:
-            _expanded_stage_names.append(_e.name)
-
-    seen: set[str] = set()
-    for _n in _expanded_stage_names:
-        if _n in seen:
-            die(f"pipeline has duplicate stage name {_n!r}")
-        seen.add(_n)
-
-    if args.resume_from and args.resume_from not in _expanded_stage_names:
-        die(
-            f"--resume-from {args.resume_from!r} is not a valid stage; "
-            f"valid: {_expanded_stage_names}"
-        )
-
-    run_resume_from = args.resume_from
+        _signal_clients = [effective_client]
 
     try:
         validate_stage_specs(stage_specs, pipeline)
@@ -627,7 +320,6 @@ def gh_main(
         die(str(exc))
 
     repo = get_repo()
-    session_dir = resolve_session_dir(gr_id)
     plan_md = session_dir / "plan.md"
     spec_file = session_dir / "spec.md"
 
@@ -641,27 +333,43 @@ def gh_main(
             die(f"--spec: file is empty: {args.spec_path}")
         shutil.copyfile(spec_src, spec_file)
 
-    instructions = " ".join(args.instructions) if args.instructions else ""
+    try:
+        pipe = GHPipeline(
+            pipeline.stages,
+            args=args,
+            session_dir=session_dir,
+            gr_id=gr_id,
+            pipeline_data=pipeline,
+            repo=repo,
+            state_file=state_file,
+            spec_clients=_spec_clients,
+            stage_specs=stage_specs,
+            test_client=client,
+        )
+        pipe.validate_resume_target()
+    except ValueError as exc:
+        die(str(exc))
 
-    issue_url: str = ""
-    issue_num: str = ""
-    issue_body: str = ""
-
-    # plan_idx: index of the plan stage in the expanded stage list.
-    _plan_stage_name = next((s.name for s in pipeline.stages if s.type == "plan"), None)
+    _expanded_stage_names = [s.name for s in pipe.stages]
+    _plan_stage_name = next((s.name for s in pipe.stages if s.type == "plan"), None)
     plan_idx = (
         _expanded_stage_names.index(_plan_stage_name)
         if _plan_stage_name and _plan_stage_name in _expanded_stage_names
         else 0
     )
     resume_idx = (
-        _expanded_stage_names.index(run_resume_from)
-        if run_resume_from and run_resume_from in _expanded_stage_names
+        _expanded_stage_names.index(args.resume_from)
+        if args.resume_from and args.resume_from in _expanded_stage_names
         else 0
     )
 
+    # Install signal handlers before any pre-pipeline Claude calls (e.g.
+    # `_resolve_plan_source` invokes the model to generate an issue title);
+    # otherwise Ctrl-C during that call leaks the child process.
+    install_signal_handlers(*_signal_clients)
+
     if args.plan_source:
-        issue_url, issue_num, issue_body = _resolve_plan_source(
+        pipe.issue_url, pipe.issue_num, pipe.issue_body = _resolve_plan_source(
             plan_source=args.plan_source,
             repo=repo,
             plan_md=plan_md,
@@ -671,93 +379,20 @@ def gh_main(
             gr_id=gr_id,
         )
     elif resume_idx > plan_idx:
-        issue_url = _read_state_field(state_file, "issue_url")
-        if not issue_url:
+        pipe.issue_url = read_state_field(state_file, "issue_url")
+        if not pipe.issue_url:
             die(
                 f"--resume-from {args.resume_from}: no issue_url in state.json "
                 "(rewind to plan?)"
             )
-        issue_num = issue_url.split("/")[-1]
-        logger.info("resumed issue: %s", issue_url)
-        issue_body = _fetch_issue_body(issue_num, repo)
+        pipe.issue_num = pipe.issue_url.split("/")[-1]
+        logger.info("resumed issue: %s", pipe.issue_url)
+        pipe.issue_body = _fetch_issue_body(pipe.issue_num, repo)
 
-    gh_state: dict[str, Any] = {
-        "issue_url": issue_url,
-        "issue_num": issue_num,
-        "issue_body": issue_body,
-        "impl_result": None,
-        "pr_url": "",
-        "pr_num": "",
-        "instructions": instructions,
-    }
-
-    stages: list[tuple[str, Callable[[], None]]] = []
-    for e in pipeline.stages:
-        if e.type == "parallel":
-            group_dir = session_dir / e.name
-            group_dir.mkdir(parents=True, exist_ok=True)
-            child_runners: list[tuple[str, StageContext, Callable[[], None]]] = []
-            for child in e.children:
-                child_spec = require_stage_spec(stage_specs, child.name)
-                child_dir = group_dir / child.name
-                child_dir.mkdir(parents=True, exist_ok=True)
-                child_ctx = StageContext(
-                    client=_client_for_spec(child_spec),
-                    session_dir=child_dir,
-                    gr_id=gr_id,
-                    child_key=child.name,
-                )
-                try:
-                    child_runner = _build_stage_runner(
-                        child,
-                        child_ctx,
-                        child_spec.model,
-                        args=args,
-                        repo=repo,
-                        session_dir=child_dir,
-                        state_file=state_file,
-                        gr_id=gr_id,
-                        gh_state=gh_state,
-                    )
-                except ValueError as exc:
-                    die(str(exc))
-                child_runners.append((child.name, child_ctx, child_runner))
-            group_name = e.name
-            stages.extend(
-                build_parallel_stages(
-                    group_name,
-                    child_runners,
-                    max_concurrent=e.max_concurrent,
-                    set_stage_fn=lambda n: set_stage(gr_id, n),
-                    cancel_on_bail=e.cancel_on_bail,
-                    bail_policy=e.bail_policy,
-                    gr_id=gr_id,
-                    project_root=pathlib.Path.cwd(),
-                )
-            )
-        else:
-            stage_spec = require_stage_spec(stage_specs, e.name)
-            stage_ctx = StageContext(
-                client=_client_for_spec(stage_spec),
-                session_dir=session_dir,
-                gr_id=gr_id,
-            )
-            try:
-                runner = _build_stage_runner(
-                    e,
-                    stage_ctx,
-                    stage_spec.model,
-                    args=args,
-                    repo=repo,
-                    session_dir=session_dir,
-                    state_file=state_file,
-                    gr_id=gr_id,
-                    gh_state=gh_state,
-                )
-            except ValueError as exc:
-                die(str(exc))
-            stages.append((e.name, runner))
-    run_stages(stages, resume_from=run_resume_from)
+    try:
+        pipe.run(*_signal_clients)
+    except ValueError as exc:
+        die(str(exc))
 
     total_cost = 0.0
     for c in _spec_clients.values() if _spec_clients else [client] if client else []:
@@ -765,7 +400,7 @@ def gh_main(
     if total_cost > 0:
         patch_state(gr_id, total_cost_usd=total_cost)
 
-    logger.info("done. PR: %s", gh_state["pr_url"] or "(unknown)")
+    logger.info("done. PR: %s", pipe.pr_url or "(unknown)")
     if total_cost > 0:
         logger.info("total cost: $%.4f", total_cost)
     return 0

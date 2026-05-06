@@ -9,7 +9,7 @@ from gremlins.clients.fake import FakeClaudeClient
 from gremlins.pipeline import StageEntry, load_pipeline, resolve_pipeline_path
 from gremlins.stages import implement, plan
 from gremlins.stages.address_code import AddressCode
-from gremlins.stages.context import StageContext
+from gremlins.stages.base import StageContext
 from gremlins.stages.implement import _render_spec_block
 from gremlins.stages.review_code import ReviewCode
 
