@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import logging
 import pathlib
 import time
@@ -11,8 +10,9 @@ from typing import Any
 
 from gremlins.gh_utils import fetch_check_run_logs, get_pr_ci_status
 from gremlins.git import head_sha
+from gremlins.pipeline import StageEntry
 from gremlins.prompts import load_prompts
-from gremlins.stages.context import StageContext
+from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import check_bail, emit_bail
 
@@ -22,20 +22,6 @@ _PROMPT = pathlib.Path(__file__).resolve().parent / "ci_fix.md"
 
 _FAILING_CONCLUSIONS = frozenset({"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED"})
 _PENDING_STATES = frozenset({"EXPECTED", "PENDING"})
-
-
-@dataclasses.dataclass
-class WaitCiOptions:
-    model: str | None
-    pr_url: str
-    code_style: str
-    max_attempts: int = 3
-    poll_timeout: int = 1200
-    poll_interval: int = 30
-    startup_grace_secs: int = 60
-    checks_getter: Callable[[], tuple[list[dict[str, Any]], str]] | None = None
-    head_sha_getter: Callable[[], str] | None = None
-    fix_sha_getter: Callable[[], str] | None = None
 
 
 class _ReviewRequiredError(RuntimeError):
@@ -65,16 +51,18 @@ def _fetch_checks(
 
 
 def _wait_for_checks(
-    options: WaitCiOptions,
+    pr_url: str,
+    checks_getter: Callable[[], tuple[list[dict[str, Any]], str]] | None,
+    poll_interval: int,
     grace_secs: int,
 ) -> tuple[list[dict[str, Any]], str]:
     deadline = time.time() + grace_secs
     review_decision = ""
     while True:
-        checks, review_decision = _fetch_checks(options.pr_url, options.checks_getter)
+        checks, review_decision = _fetch_checks(pr_url, checks_getter)
         if checks or review_decision == "REVIEW_REQUIRED" or time.time() >= deadline:
             return checks, review_decision
-        time.sleep(options.poll_interval)
+        time.sleep(poll_interval)
 
 
 def _bail_if_review_required(
@@ -157,110 +145,140 @@ def _escape_fmt(s: str) -> str:
     return s.replace("{", "{{").replace("}", "}}")
 
 
-def run(ctx: StageContext, options: WaitCiOptions) -> None:
-    """Wait for CI checks to pass, fixing failures up to max_attempts times."""
-    checks, review_decision = _wait_for_checks(options, options.startup_grace_secs)
-    _bail_if_review_required(ctx.gr_id, review_decision, child_key=ctx.child_key)
+class WaitCI(Stage):
+    def __init__(
+        self,
+        entry: StageEntry,
+        model: str | None,
+        *,
+        pr_url: str,
+        code_style: str,
+        max_attempts: int = 3,
+        poll_timeout: int = 1200,
+        poll_interval: int = 30,
+        startup_grace_secs: int = 60,
+        checks_getter: Callable[[], tuple[list[dict[str, Any]], str]] | None = None,
+        head_sha_getter: Callable[[], str] | None = None,
+        fix_sha_getter: Callable[[], str] | None = None,
+    ) -> None:
+        super().__init__(entry, model)
+        self.pr_url = pr_url
+        self.code_style = code_style
+        self.max_attempts = max_attempts
+        self.poll_timeout = poll_timeout
+        self.poll_interval = poll_interval
+        self.startup_grace_secs = startup_grace_secs
+        self.checks_getter = checks_getter
+        self.head_sha_getter = head_sha_getter
+        self.fix_sha_getter = fix_sha_getter
 
-    if not checks:
-        logger.info(
-            "ci-gate: PR has no check-runs after %ds, skipping",
-            options.startup_grace_secs,
+    def run(self, pipe: Any) -> None:
+        checks, review_decision = _wait_for_checks(
+            self.pr_url, self.checks_getter, self.poll_interval, self.startup_grace_secs
         )
-        return
-
-    template = load_prompts([_PROMPT])
-    bail_section = ""
-    if ctx.gr_id:
-        bail_section = (
-            "\n\nIf you cannot fix the failure, run:\n"
-            '  `python -m gremlins.bail other "<one-line reason>"`\n'
-            "before finishing."
+        _bail_if_review_required(
+            self.state.gr_id, review_decision, child_key=self.state.child_key
         )
 
-    _exhausted = False
-    _agent_bailed = False
-    _review_bailed = False
-    fix_sha = ""
-    try:
-        for attempt in range(1, options.max_attempts + 1):
+        if not checks:
             logger.info(
-                "ci-gate: attempt %d/%d — polling (timeout %ds)",
-                attempt,
-                options.max_attempts,
-                options.poll_timeout,
+                "ci-gate: PR has no check-runs after %ds, skipping",
+                self.startup_grace_secs,
             )
-            try:
-                final_checks, review_decision = _poll_until_done(
-                    ctx.gr_id,
-                    options.pr_url,
-                    options.poll_timeout,
-                    options.poll_interval,
-                    options.checks_getter,
-                    required_sha=fix_sha,
-                    head_sha_getter=options.head_sha_getter,
-                    child_key=ctx.child_key,
+            return
+
+        template = load_prompts([_PROMPT])
+        bail_section = ""
+        if self.state.gr_id:
+            bail_section = (
+                "\n\nIf you cannot fix the failure, run:\n"
+                '  `python -m gremlins.bail other "<one-line reason>"`\n'
+                "before finishing."
+            )
+
+        _exhausted = False
+        _agent_bailed = False
+        _review_bailed = False
+        fix_sha = ""
+        try:
+            for attempt in range(1, self.max_attempts + 1):
+                logger.info(
+                    "ci-gate: attempt %d/%d — polling (timeout %ds)",
+                    attempt,
+                    self.max_attempts,
+                    self.poll_timeout,
                 )
-            except _ReviewRequiredError:
-                _review_bailed = True
-                raise
-            failed = [c for c in final_checks if _is_failing(c)]
+                try:
+                    final_checks, review_decision = _poll_until_done(
+                        self.state.gr_id,
+                        self.pr_url,
+                        self.poll_timeout,
+                        self.poll_interval,
+                        self.checks_getter,
+                        required_sha=fix_sha,
+                        head_sha_getter=self.head_sha_getter,
+                        child_key=self.state.child_key,
+                    )
+                except _ReviewRequiredError:
+                    _review_bailed = True
+                    raise
+                failed = [c for c in final_checks if _is_failing(c)]
 
-            if not failed:
-                logger.info("ci-gate: all checks passed on attempt %d", attempt)
-                return
+                if not failed:
+                    logger.info("ci-gate: all checks passed on attempt %d", attempt)
+                    return
 
-            logger.info(
-                "ci-gate: %d check(s) failed on attempt %d", len(failed), attempt
-            )
+                logger.info(
+                    "ci-gate: %d check(s) failed on attempt %d", len(failed), attempt
+                )
 
-            if attempt == options.max_attempts:
-                break
+                if attempt == self.max_attempts:
+                    break
 
-            failure_output = _collect_failure_output(failed)
-            log_file = ctx.session_dir / f"ci-attempt-{attempt}.log"
-            log_file.write_text(failure_output, encoding="utf-8")
+                failure_output = _collect_failure_output(failed)
+                log_file = self.state.session_dir / f"ci-attempt-{attempt}.log"
+                log_file.write_text(failure_output, encoding="utf-8")
 
-            fix_prompt = template.format(
-                code_style=_escape_fmt(options.code_style),
-                failure_output=failure_output,
-                bail_section=bail_section,
-            )
-            ctx.client.run(
-                fix_prompt,
-                label=f"ci-fix-{attempt}",
-                model=options.model,
-                raw_path=ctx.session_dir / f"stream-ci-fix-{attempt}.jsonl",
-                cwd=ctx.worktree,
-            )
-            _agent_bailed = True
-            check_bail(ctx.gr_id, f"ci-fix-{attempt}", child_key=ctx.child_key)
-            _agent_bailed = False
+                fix_prompt = template.format(
+                    code_style=_escape_fmt(self.code_style),
+                    failure_output=failure_output,
+                    bail_section=bail_section,
+                )
+                self.run_claude(
+                    fix_prompt,
+                    label=f"ci-fix-{attempt}",
+                    raw_path=self.state.session_dir / f"stream-ci-fix-{attempt}.jsonl",
+                )
+                _agent_bailed = True
+                check_bail(
+                    self.state.gr_id,
+                    f"ci-fix-{attempt}",
+                    child_key=self.state.child_key,
+                )
+                _agent_bailed = False
 
-            _get_sha = (
-                options.fix_sha_getter
-                if options.fix_sha_getter is not None
-                else head_sha
-            )
-            fix_sha = _get_sha()
+                _get_sha = (
+                    self.fix_sha_getter if self.fix_sha_getter is not None else head_sha
+                )
+                fix_sha = _get_sha()
 
-        _exhausted = True
-        emit_bail(
-            ctx.gr_id,
-            "other",
-            f"CI failed after {options.max_attempts} attempts",
-            child_key=ctx.child_key,
-        )
-        raise RuntimeError(f"ci-gate exhausted {options.max_attempts} attempts")
-    except (SystemExit, Exception) as exc:
-        if not _exhausted and not _agent_bailed and not _review_bailed:
+            _exhausted = True
             emit_bail(
-                ctx.gr_id,
+                self.state.gr_id,
                 "other",
-                f"ci-gate failed: {exc}"[:200],
-                child_key=ctx.child_key,
+                f"CI failed after {self.max_attempts} attempts",
+                child_key=self.state.child_key,
             )
-        raise
+            raise RuntimeError(f"ci-gate exhausted {self.max_attempts} attempts")
+        except (SystemExit, Exception) as exc:
+            if not _exhausted and not _agent_bailed and not _review_bailed:
+                emit_bail(
+                    self.state.gr_id,
+                    "other",
+                    f"ci-gate failed: {exc}"[:200],
+                    child_key=self.state.child_key,
+                )
+            raise
 
 
-register_stage("wait-ci", run)
+register_stage("wait-ci", WaitCI)
