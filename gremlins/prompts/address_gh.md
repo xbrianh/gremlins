@@ -17,29 +17,38 @@ Fetch issue comments using `gh pr view <number-or-ref> --comments`.
 
 ## Process
 
-1. Read all review comments above carefully.
-2. For each comment, decide whether it is in-scope to address in this PR or out-of-scope (OOS). For each in-scope comment:
-   a. Understand what the reviewer is asking for.
-   b. Read the relevant code to understand the current state.
-   c. Make the fix or change requested.
+**Default: address every comment.** Severity language ("nit", "minor", "non-blocking", "fyi", "tracking issue acknowledged") is metadata, not a routing signal. Reviewers use those words to communicate priority to a human; you should still fix the thing. The work to fix a typo or rename a variable is trivial; refusing to do it because the reviewer was polite about flagging it is the wrong outcome.
 
-   OOS comments are deferred to step 4 and the *Out-of-scope triage* section below — do not act on them in this step.
-3. After making all in-scope code changes, stage, commit, and push:
+1. Read all review comments carefully.
+2. For each comment, fix the code. Walk through:
+   a. Understand what the reviewer is asking for.
+   b. Read the relevant code for context.
+   c. Make the fix.
+
+   **Skip a comment only if it is genuinely out-of-scope (OOS).** OOS is narrow:
+   - The fix requires substantial work tracked in a separately-filed issue (the comment cites an issue number, or the work is large enough that a separate PR is the right unit).
+   - The reviewer is wrong (misread the code, missed context). Verify before deciding this — re-read the code first.
+   - The comment is a question or acknowledgement that needs no code change.
+
+   "Reviewer called it a nit" is **not** a reason to skip. "Reviewer said it's tracked elsewhere" is only a reason to skip if there's a real issue cited and the work is genuinely substantial.
+
+3. After making all changes, stage, commit, and push:
    a. `git add` the changed files (by name, not `-A`).
    b. `git commit` with a message summarizing what was addressed.
    c. `git push` to the PR branch.
 
-   If there were no in-scope changes (every comment was OOS or already-resolved), skip 3a–3c and proceed directly to step 4 — `git commit` would fail with "nothing to commit" and gate out the OOS triage, which is the case where the new behavior matters most.
+   If you genuinely had nothing to fix (every comment was a question, the reviewer was wrong everywhere, or the only flagged items were tracked-elsewhere with cited issue numbers), skip 3a–3c and proceed directly to step 4 — `git commit` would fail with "nothing to commit". This case should be rare; defaulting to it is a smell.
+
 4. Reply to each comment thread (after the push succeeds, if step 3 ran). Skip comments that have already been resolved.
-   - For in-scope comments you addressed: reply briefly acknowledging the fix.
-   - For questions or acknowledgements that need no code change: reply briefly.
+   - For comments you addressed: reply briefly acknowledging the fix.
+   - For questions or acknowledgements: reply briefly.
    - For OOS comments: run the OOS triage in the next section before replying.
    - Post replies to review comments with `gh api repos/{{owner}}/{{repo}}/pulls/<number>/comments/{{comment_id}}/replies -f body="<reply>"`.
 5. Summarize what was done, including any issues filed for OOS comments and any `gh issue create` failures.
 
 ## Out-of-scope triage (file issues for real defects)
 
-For each comment you marked OOS, decide whether it looks like a real defect or noise. The goal is that real defects survive the OOS decision as filed issues, while pure noise doesn't pollute the issue tracker.
+For the rare comment that's genuinely OOS, decide whether it looks like a real defect or noise. Real defects survive as filed issues; pure noise doesn't pollute the issue tracker.
 
 **File a new issue when the OOS comment flags any of:**
 
@@ -52,11 +61,10 @@ For each comment you marked OOS, decide whether it looks like a real defect or n
 **Don't file an issue when:**
 
 - The reviewer's claim is wrong — they misread the code, missed context, or are factually incorrect.
-- The comment is a subjective style nit, naming bikeshed, or "consider extracting…" preference with no defect claim.
-- The reviewer themselves marked the comment as non-blocking, nit, or fyi.
+- The reviewer cited an existing issue (use that one; don't dupe).
 - The comment is already addressed elsewhere (e.g., another comment in the same review covers the same point).
 
-**Tie-breaker:** If you're genuinely unsure whether the comment is a real defect or the reviewer is wrong, **file the issue**. Over-filing is cheap; losing a real bug is not. A human triaging the issue can close it as invalid.
+**Tie-breaker:** if you're genuinely unsure whether the comment is a real defect or the reviewer is wrong, **file the issue**. Over-filing is cheap; losing a real bug is not. A human triaging the issue can close it as invalid.
 
 ### Filing the issue
 
