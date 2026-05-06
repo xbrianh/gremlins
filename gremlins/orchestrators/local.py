@@ -628,7 +628,7 @@ def address_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
 
     ctx = StageContext(client=client, session_dir=session_dir, gr_id=None)
     logger.info("addressing code reviews (model: %s)", args.address)
-    entry = dataclasses.replace(ac_entry, name="address-code", client=None)
+    entry = dataclasses.replace(ac_entry, client=None)
     stage = address_code.AddressCode(
         entry,
         args.address,
