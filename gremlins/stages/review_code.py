@@ -116,9 +116,7 @@ class ReviewCode(Stage):
             code_context = code_scope
 
         try:
-            set_stage(
-                self.state.gr_id, self.name, {"model": f"running ({self.model})"}
-            )
+            set_stage(self.state.gr_id, self.name, {"model": f"running ({self.model})"})
             _run_reviewer(
                 client=self.state.client,
                 model=self.model,
@@ -132,9 +130,7 @@ class ReviewCode(Stage):
                 / f"stream-{self.name}-{self.model}.jsonl",
                 cwd=self.state.worktree,
             )
-            set_stage(
-                self.state.gr_id, self.name, {"model": f"done ({self.model})"}
-            )
+            set_stage(self.state.gr_id, self.name, {"model": f"done ({self.model})"})
             if not out_file.exists() or out_file.stat().st_size == 0:
                 raise RuntimeError(f"review {self.model} did not produce {out_file}")
         except (SystemExit, Exception) as exc:

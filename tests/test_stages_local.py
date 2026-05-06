@@ -390,12 +390,14 @@ def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
     worktree = tmp_path / "wt"
     worktree.mkdir()
     stage = _make_review_code_stage(client, tmp_path)
-    stage.bind(StageContext(
-        client=client,
-        session_dir=tmp_path,
-        gr_id=None,
-        worktree=worktree,
-    ))
+    stage.bind(
+        StageContext(
+            client=client,
+            session_dir=tmp_path,
+            gr_id=None,
+            worktree=worktree,
+        )
+    )
     stage.run(None)
     assert client.calls[0].cwd == worktree
 
