@@ -388,16 +388,18 @@ def test_address_code_stage_calls_client_with_review_content(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_plan_stage_includes_code_style(tmp_path):
+def test_plan_stage_includes_style_from_prompt_paths(tmp_path):
     client = FakeClaudeClient(fixtures={"plan": MINIMAL_EVENTS})
     plan_file = tmp_path / "plan.md"
     session_dir = tmp_path / "session"
     session_dir.mkdir()
+    style_file = tmp_path / "style.md"
+    style_file.write_text("Be good.")
     entry = StageEntry(
         name="plan",
         type="plan",
         client=None,
-        prompt_paths=[_BUNDLED_PROMPTS / "plan.md"],
+        prompt_paths=[style_file, _BUNDLED_PROMPTS / "plan.md"],
         options={},
     )
     stage = plan.Plan(
@@ -432,19 +434,39 @@ def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
     assert client.calls[0].cwd == worktree
 
 
-def test_review_code_stage_includes_code_style(tmp_path):
+def test_review_code_stage_includes_style_from_prompt_paths(tmp_path):
+    style_file = tmp_path / "style.md"
+    style_file.write_text("Be good.")
     client = ReviewCreatingClient(fixtures={"review-code:sonnet": MINIMAL_EVENTS})
-    stage = _make_review_code_stage(client, tmp_path, code_style="Be good.")
+    entry = StageEntry(
+        name="review-code",
+        type="review-code",
+        client=None,
+        prompt_paths=[style_file, _BUNDLED_PROMPTS / "review" / "detail.md"],
+        options={},
+    )
+    stage = ReviewCode(entry, "sonnet", plan_text="", is_git=False, code_style="")
+    stage.bind(_make_ctx(client, tmp_path))
     stage.run(None)
     assert "Be good." in client.calls[0].prompt
 
 
-def test_address_code_stage_includes_code_style(tmp_path):
+def test_address_code_stage_includes_style_from_prompt_paths(tmp_path):
     (tmp_path / "review-code-sonnet.md").write_text(
         "# Detail Review\n\n## Findings\nNone.\n"
     )
+    style_file = tmp_path / "style.md"
+    style_file.write_text("Be good.")
     client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
-    stage = _make_address_code_stage(client, tmp_path, code_style="Be good.")
+    entry = StageEntry(
+        name="address-code",
+        type="address-code",
+        client=None,
+        prompt_paths=[style_file, _BUNDLED_PROMPTS / "address_code.md"],
+        options={},
+    )
+    stage = AddressCode(entry, "sonnet", is_git=False, code_style="")
+    stage.bind(_make_ctx(client, tmp_path))
     stage.run(None)
     assert "Be good." in client.calls[0].prompt
 

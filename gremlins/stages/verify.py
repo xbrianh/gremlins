@@ -30,11 +30,6 @@ def _diff_text(cwd: pathlib.Path, *, is_git: bool) -> str:
         return ""
 
 
-def _escape_fmt(s: str) -> str:
-    """Escape curly braces so str.format() treats content as literal text."""
-    return s.replace("{", "{{").replace("}", "}}")
-
-
 class Verify(Stage):
     def __init__(
         self,
@@ -110,7 +105,6 @@ class Verify(Stage):
                 diff = _diff_text(self.state.cwd, is_git=self._is_git)
                 verify_output = log_file.read_text(encoding="utf-8")
                 fix_prompt = template.format(
-                    code_style=_escape_fmt(self._code_style),
                     commands_section=commands_section,
                     verify_output=verify_output,
                     diff_text=diff,

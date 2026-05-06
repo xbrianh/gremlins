@@ -141,10 +141,6 @@ def _collect_failure_output(failed: list[dict[str, Any]]) -> str:
     return "\n\n".join(parts)
 
 
-def _escape_fmt(s: str) -> str:
-    return s.replace("{", "{{").replace("}", "}}")
-
-
 class WaitCI(Stage):
     def __init__(
         self,
@@ -240,7 +236,6 @@ class WaitCI(Stage):
                 log_file.write_text(failure_output, encoding="utf-8")
 
                 fix_prompt = template.format(
-                    code_style=_escape_fmt(self.code_style),
                     failure_output=failure_output,
                     bail_section=bail_section,
                 )

@@ -140,29 +140,6 @@ def test_exhaustion_with_max_1(tmp_path):
     assert (tmp_path / "verify-attempt-1.log").exists()
 
 
-def test_code_style_in_fix_prompt(tmp_path):
-    flag = tmp_path / "flag.txt"
-    flag.write_text("fail\n")
-    check_cmd = f"grep -q '^pass$' {flag}"
-
-    class _FixingClient(FakeClaudeClient):
-        def run(self, prompt, *, label, **kwargs):
-            flag.write_text("pass\n")
-            return super().run(prompt, label=label, **kwargs)
-
-    client = _FixingClient(fixtures={"verify-fix-1": MINIMAL_EVENTS})
-    stage, _ = _make_stage(
-        tmp_path,
-        cmds=[check_cmd, "true"],
-        client=client,
-        code_style="My custom style rules.",
-    )
-    stage.run(None)
-
-    assert len(client.calls) == 1
-    assert "My custom style rules." in client.calls[0].prompt
-
-
 def test_both_cmds_in_fix_prompt(tmp_path, monkeypatch):
     monkeypatch.delenv("GR_ID", raising=False)
 

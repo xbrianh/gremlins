@@ -27,11 +27,10 @@ class Plan(Stage):
         self.code_style = code_style
 
     def run(self, pipe: Any) -> None:
-        template = load_prompts([self.prompt_paths[-1]])
+        template = load_prompts(self.prompt_paths)
         prompt = template.format(
             plan_file=self.plan_file,
             instructions=self.instructions,
-            code_style=self.code_style,
         )
         self.run_claude(
             prompt,

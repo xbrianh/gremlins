@@ -32,12 +32,22 @@ def _make_stage(
     gr_id: str | None = None,
     pr_url: str = PR_URL,
     code_style: str = CODE_STYLE,
+    style_content: str | None = None,
 ) -> tuple[GHReview, StageContext]:
     prompt_path = tmp_path / "ghreview.md"
-    prompt_path.write_text(
-        "Review PR {pr_url} with style {code_style}.{bail_section}", encoding="utf-8"
-    )
-    entry = _make_entry(prompt_path)
+    prompt_path.write_text("Review PR {pr_url}.{bail_section}", encoding="utf-8")
+    if style_content is not None:
+        style_path = tmp_path / "style.md"
+        style_path.write_text(style_content, encoding="utf-8")
+        entry = StageEntry(
+            name="ghreview",
+            type="ghreview",
+            client=None,
+            prompt_paths=[style_path, prompt_path],
+            options={},
+        )
+    else:
+        entry = _make_entry(prompt_path)
     stage = GHReview(entry, "sonnet", pr_url=pr_url, code_style=code_style)
     client = FakeClaudeClient(fixtures={"ghreview": MINIMAL_EVENTS})
     ctx = StageContext(client=client, session_dir=tmp_path, gr_id=gr_id)
@@ -54,8 +64,8 @@ def test_run_calls_claude_with_pr_url(tmp_path: pathlib.Path) -> None:
     assert call.label == "ghreview"
 
 
-def test_run_includes_code_style(tmp_path: pathlib.Path) -> None:
-    stage, ctx = _make_stage(tmp_path, code_style="Use type hints.")
+def test_run_includes_style_from_prompt_paths(tmp_path: pathlib.Path) -> None:
+    stage, ctx = _make_stage(tmp_path, style_content="Use type hints.")
     stage.run(None)
     assert "Use type hints." in ctx.client.calls[0].prompt
 

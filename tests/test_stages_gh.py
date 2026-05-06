@@ -35,18 +35,17 @@ def _make_ghreview(client, tmp_path, *, gr_id=None, pr_url, code_style):
     return stage
 
 
-def test_ghreview_prompt_includes_pr_url_and_code_style(tmp_path):
+def test_ghreview_prompt_includes_pr_url(tmp_path):
     client = FakeClaudeClient(fixtures={"ghreview": MINIMAL_EVENTS})
     stage = _make_ghreview(
         client,
         tmp_path,
         pr_url="https://github.com/owner/repo/pull/1",
-        code_style="Be good.",
+        code_style="",
     )
     stage.run(None)
     prompt = client.calls[0].prompt
     assert "https://github.com/owner/repo/pull/1" in prompt
-    assert "Be good." in prompt
     assert not prompt.startswith("/ghreview")
     assert "/ghreview" not in prompt
 
@@ -106,18 +105,17 @@ def _make_ghaddress(client, tmp_path, *, gr_id=None, pr_url, code_style):
     return stage
 
 
-def test_ghaddress_prompt_includes_pr_url_and_code_style(tmp_path):
+def test_ghaddress_prompt_includes_pr_url(tmp_path):
     client = FakeClaudeClient(fixtures={"ghaddress": MINIMAL_EVENTS})
     stage = _make_ghaddress(
         client,
         tmp_path,
         pr_url="https://github.com/owner/repo/pull/1",
-        code_style="Be good.",
+        code_style="",
     )
     stage.run(None)
     prompt = client.calls[0].prompt
     assert "https://github.com/owner/repo/pull/1" in prompt
-    assert "Be good." in prompt
     assert not prompt.startswith("/ghaddress")
     assert "/ghaddress" not in prompt
 

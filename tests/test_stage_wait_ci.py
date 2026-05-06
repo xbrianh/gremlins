@@ -317,30 +317,6 @@ def test_poll_empty_mid_run_continues_polling(tmp_path: pathlib.Path) -> None:
     assert call_count[0] >= 3
 
 
-def test_code_style_in_fix_prompt(tmp_path: pathlib.Path) -> None:
-    client = FakeClaudeClient(
-        fixtures={"ci-fix-1": MINIMAL_EVENTS, "ci-fix-2": MINIMAL_EVENTS}
-    )
-    call_count = [0]
-
-    def getter() -> tuple[list[dict[str, Any]], str]:
-        call_count[0] += 1
-        if call_count[0] <= 2:
-            return [_FAILING_CHECK], ""
-        return [_PASSING_CHECK], ""
-
-    stage, _ = _make_stage(
-        client,
-        tmp_path,
-        code_style="Always write docstrings.",
-        poll_interval=0,
-        checks_getter=getter,
-    )
-    stage.run(None)
-    assert client.calls
-    assert "Always write docstrings." in client.calls[0].prompt
-
-
 def test_review_required_emits_bail_to_state(
     tmp_path: pathlib.Path, make_state_dir
 ) -> None:

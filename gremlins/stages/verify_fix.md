@@ -1,7 +1,3 @@
-When writing code, follow these principles:
-
-{code_style}
-
 The verify step failed. Read the captured output below, then fix the code so the commands exit 0.
 
 {commands_section}

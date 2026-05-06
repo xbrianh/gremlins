@@ -1,7 +1,3 @@
-When writing code, follow these principles:
-
-{code_style}
-
 {spec_block}The following is the implementation plan {plan_source_label}:
 
 {issue_body}

@@ -8,7 +8,7 @@ stages:
   - { name: verify,          type: verify,          options: { cmds: ["make check", "make test"] } }
   - { name: commit-pr,       type: commit-pr }
   - { name: request-copilot, type: request-copilot }
-  - { name: ghreview,        type: ghreview,        prompt: [prompts/ghreview.md] }
+  - { name: ghreview,        type: ghreview,        prompt: [prompts/code_style.md, prompts/ghreview.md] }
   - { name: wait-copilot,    type: wait-copilot }
-  - { name: ghaddress,       type: ghaddress,       prompt: [prompts/ghaddress.md] }
+  - { name: ghaddress,       type: ghaddress,       prompt: [prompts/code_style.md, prompts/ghaddress.md] }
   - { name: ci-gate,         type: wait-ci }
