@@ -74,7 +74,7 @@ def test_run_raises_if_unbound() -> None:
         / "gremlins"
         / "pipelines"
         / "prompts"
-        / "ghreview.md"
+        / "review_gh.md"
     )
     entry = StageEntry(
         name="ghreview",

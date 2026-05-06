@@ -18,7 +18,7 @@ from gremlins.pipeline import StageEntry
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 
-PROMPTS_DIR = pathlib.Path(__file__).resolve().parent
+PROMPTS_DIR = pathlib.Path(__file__).resolve().parent.parent / "pipelines" / "prompts"
 
 
 def _load(name: str) -> str:

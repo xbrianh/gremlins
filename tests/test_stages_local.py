@@ -352,7 +352,7 @@ def _make_address_code_stage(
         name="address-code",
         type="address-code",
         client=None,
-        prompt_paths=[_BUNDLED_PROMPTS / "address_code.md"],
+        prompt_paths=[_BUNDLED_PROMPTS / "address.md"],
         options={},
     )
     stage = AddressCode(entry, model, is_git=is_git)
@@ -453,7 +453,7 @@ def test_address_code_stage_includes_style_from_prompt_paths(tmp_path):
         name="address-code",
         type="address-code",
         client=None,
-        prompt_paths=[style_file, _BUNDLED_PROMPTS / "address_code.md"],
+        prompt_paths=[style_file, _BUNDLED_PROMPTS / "address.md"],
         options={},
     )
     stage = AddressCode(entry, "sonnet", is_git=False)
