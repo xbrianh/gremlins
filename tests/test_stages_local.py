@@ -6,9 +6,8 @@ import pytest
 from conftest import MINIMAL_EVENTS, ReviewCreatingClient
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.pipeline import load_pipeline, resolve_pipeline_path
-from gremlins.stages.address_code import AddressCodeOptions
-from gremlins.stages.address_code import run as run_address_code
+from gremlins.pipeline import StageEntry, load_pipeline, resolve_pipeline_path
+from gremlins.stages.address_code import AddressCode
 from gremlins.stages.context import StageContext
 from gremlins.stages.implement import ImplementOptions, _render_spec_block
 from gremlins.stages.implement import run as run_implement
@@ -289,21 +288,34 @@ def test_implement_stage_raises_on_empty_diff(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def _make_address_code_stage(
+    client: FakeClaudeClient,
+    session_dir,
+    *,
+    model: str = "sonnet",
+    is_git: bool = False,
+    code_style: str = "",
+    gr_id=None,
+) -> AddressCode:
+    entry = StageEntry(
+        name="address-code",
+        type="address-code",
+        client=None,
+        prompt_paths=[],
+        options={},
+    )
+    stage = AddressCode(entry, model, is_git=is_git, code_style=code_style)
+    stage.bind(_make_ctx(client, session_dir, gr_id=gr_id))
+    return stage
+
+
 def test_address_code_stage_calls_client_with_review_content(tmp_path):
-    session_dir = tmp_path
     review_text = "# Detail Review\n\n## Findings\nLooks good.\n"
-    (session_dir / "review-code-sonnet.md").write_text(review_text)
+    (tmp_path / "review-code-sonnet.md").write_text(review_text)
 
     client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
-    ctx = _make_ctx(client, session_dir)
-    run_address_code(
-        ctx,
-        AddressCodeOptions(
-            address_model="sonnet",
-            is_git=False,
-            code_style="",
-        ),
-    )
+    stage = _make_address_code_stage(client, tmp_path)
+    stage.run(None)
 
     assert len(client.calls) == 1
     call = client.calls[0]
@@ -385,15 +397,8 @@ def test_address_code_stage_includes_code_style(tmp_path):
         "# Detail Review\n\n## Findings\nNone.\n"
     )
     client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
-    ctx = _make_ctx(client, tmp_path)
-    run_address_code(
-        ctx,
-        AddressCodeOptions(
-            address_model="sonnet",
-            is_git=False,
-            code_style="Be good.",
-        ),
-    )
+    stage = _make_address_code_stage(client, tmp_path, code_style="Be good.")
+    stage.run(None)
     assert "Be good." in client.calls[0].prompt
 
 
@@ -421,10 +426,8 @@ def test_address_code_stage_emits_bail_on_failure(tmp_path, make_state_dir):
     gr_id = "test-gr-id"
     state_dir = make_state_dir(gr_id)
     client = FakeClaudeClient(fixtures={})
-    ctx = _make_ctx(client, tmp_path, gr_id=gr_id)
+    stage = _make_address_code_stage(client, tmp_path, gr_id=gr_id)
     with pytest.raises(FileNotFoundError):
-        run_address_code(
-            ctx, AddressCodeOptions(address_model="sonnet", is_git=False, code_style="")
-        )
+        stage.run(None)
     data = json.loads((state_dir / "state.json").read_text())
     assert data.get("bail_class") == "other"
