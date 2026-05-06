@@ -70,12 +70,17 @@ def head_sha(cwd: str | os.PathLike[str] | None = None) -> str:
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
-def has_dirty_worktree(cwd: str | os.PathLike[str] | None = None) -> bool:
+def status_porcelain(cwd: str | os.PathLike[str] | None = None) -> str:
+    """Return raw output of `git status --porcelain`, or '' on error."""
     try:
         r = _run_git(["status", "--porcelain"], cwd=cwd, check=False)
-        return bool(r.stdout.strip())
+        return r.stdout
     except OSError:
-        return False
+        return ""
+
+
+def has_dirty_worktree(cwd: str | os.PathLike[str] | None = None) -> bool:
+    return bool(status_porcelain(cwd).strip())
 
 
 def has_commits(cwd: str | os.PathLike[str] | None = None) -> bool:
@@ -149,6 +154,119 @@ def log_patch(rev_range: str, *, cwd: str | os.PathLike[str] | None = None) -> s
     """Return stdout of `git log --patch <rev_range>`. Raises GitError on failure."""
     r = _run_git(["log", "--patch", rev_range], cwd=cwd)
     return r.stdout
+
+
+def is_ancestor(
+    ref_a: str, ref_b: str, *, cwd: str | os.PathLike[str] | None = None
+) -> bool:
+    try:
+        r = _run_git(
+            ["merge-base", "--is-ancestor", ref_a, ref_b],
+            cwd=cwd,
+            check=False,
+            capture=False,
+        )
+        return r.returncode == 0
+    except OSError:
+        return False
+
+
+def merge_base(
+    ref_a: str, ref_b: str, *, cwd: str | os.PathLike[str] | None = None
+) -> str:
+    r = _run_git(["merge-base", ref_a, ref_b], cwd=cwd)
+    return r.stdout.strip()
+
+
+def rev_list_count(rev_range: str, *, cwd: str | os.PathLike[str] | None = None) -> int:
+    r = _run_git(["rev-list", "--count", rev_range], cwd=cwd)
+    return int(r.stdout.strip())
+
+
+def squash_merge(ref: str, *, cwd: str | os.PathLike[str] | None = None) -> None:
+    _run_git(["merge", "--squash", ref], cwd=cwd)
+
+
+def reset_hard(ref: str = "HEAD", *, cwd: str | os.PathLike[str] | None = None) -> None:
+    _run_git(["reset", "--hard", ref], cwd=cwd)
+
+
+def clean_fd(*, cwd: str | os.PathLike[str] | None = None) -> None:
+    try:
+        _run_git(["clean", "-fd"], cwd=cwd, check=False)
+    except Exception:
+        pass
+
+
+def commit(message: str, *, cwd: str | os.PathLike[str] | None = None) -> None:
+    _run_git(["commit", "-m", message], cwd=cwd)
+
+
+def ff_merge(ref: str, *, cwd: str | os.PathLike[str] | None = None) -> None:
+    _run_git(["merge", "--ff-only", ref], cwd=cwd)
+
+
+def branch_exists(branch: str, *, cwd: str | os.PathLike[str] | None = None) -> bool:
+    try:
+        r = _run_git(
+            ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+            cwd=cwd,
+            check=False,
+            capture=False,
+        )
+        return r.returncode == 0
+    except OSError:
+        return False
+
+
+def delete_branch(
+    branch: str, *, force: bool = False, cwd: str | os.PathLike[str] | None = None
+) -> None:
+    _run_git(["branch", "-D" if force else "-d", branch], cwd=cwd)
+
+
+def try_fetch_all(
+    remote: str = "origin",
+    *,
+    cwd: str | os.PathLike[str] | None = None,
+    timeout: float | None = None,
+) -> None:
+    try:
+        _run_git(["fetch", remote], cwd=cwd, check=False, timeout=timeout)
+    except Exception:
+        pass
+
+
+def force_update_branch(
+    branch: str, target: str, *, cwd: str | os.PathLike[str] | None = None
+) -> None:
+    _run_git(["branch", "-f", branch, target], cwd=cwd)
+
+
+def log_oneline(rev_range: str, *, cwd: str | os.PathLike[str] | None = None) -> str:
+    try:
+        r = _run_git(["log", "--oneline", rev_range], cwd=cwd, check=False)
+        return r.stdout.strip()
+    except Exception:
+        return ""
+
+
+def diff_stat(rev_range: str, *, cwd: str | os.PathLike[str] | None = None) -> str:
+    try:
+        r = _run_git(["diff", "--stat", rev_range], cwd=cwd, check=False)
+        return r.stdout.strip()
+    except Exception:
+        return ""
+
+
+def ls_others(*, cwd: str | os.PathLike[str] | None = None) -> str:
+    try:
+        r = _run_git(
+            ["ls-files", "--others", "--exclude-standard"], cwd=cwd, check=False
+        )
+        return r.stdout.strip()
+    except Exception:
+        return ""
 
 
 # ---------------------------------------------------------------------------
