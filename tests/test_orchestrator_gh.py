@@ -13,6 +13,7 @@ import subprocess
 import pytest
 
 import gremlins.orchestrators.gh as _gh_mod
+import gremlins.orchestrators.pipeline as _pipeline_mod
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.git import (
     DirtyOnly,
@@ -1040,7 +1041,7 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         },
     )
 
-    # Simulate that the state.json has issue_url so _read_state_field can return it.
+    # Simulate that the state.json has issue_url so read_state_field can return it.
     # We need to reach into the patched resolve_state_file to make the pre-loop read work.
     def _fake_read(sf, field):
         if field == "issue_url":
@@ -1049,7 +1050,7 @@ def test_resume_from_implement(tmp_path, monkeypatch):
             return "99"
         return ""
 
-    monkeypatch.setattr(_gh_mod, "_read_state_field", _fake_read)
+    monkeypatch.setattr(_gh_mod, "read_state_field", _fake_read)
     monkeypatch.setattr(
         _gh_mod, "_fetch_issue_body", lambda num, repo: "# Resumed Plan\nDo stuff.\n"
     )
@@ -1080,7 +1081,8 @@ def test_resume_from_ghreview(tmp_path, monkeypatch):
             return ""
         return ""
 
-    monkeypatch.setattr(_gh_mod, "_read_state_field", _fake_read)
+    monkeypatch.setattr(_gh_mod, "read_state_field", _fake_read)
+    monkeypatch.setattr(_pipeline_mod, "read_state_field", _fake_read)
     monkeypatch.setattr(
         _gh_mod, "_fetch_issue_body", lambda num, repo: "# Plan\nContent.\n"
     )
@@ -1295,7 +1297,8 @@ def test_resume_from_commit_pr_skips_implement(tmp_path, monkeypatch):
             return base_ref
         return ""
 
-    monkeypatch.setattr(_gh_mod, "_read_state_field", _fake_read)
+    monkeypatch.setattr(_gh_mod, "read_state_field", _fake_read)
+    monkeypatch.setattr(_pipeline_mod, "read_state_field", _fake_read)
     monkeypatch.setattr(
         _gh_mod, "_fetch_issue_body", lambda num, repo: "# Plan\nDo stuff.\n"
     )
@@ -1523,7 +1526,8 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
             return ""
         return ""
 
-    monkeypatch.setattr(_gh_mod, "_read_state_field", _fake_read)
+    monkeypatch.setattr(_gh_mod, "read_state_field", _fake_read)
+    monkeypatch.setattr(_pipeline_mod, "read_state_field", _fake_read)
     monkeypatch.setattr(
         _gh_mod, "_fetch_issue_body", lambda num, repo: "# Plan\nContent.\n"
     )
@@ -1670,7 +1674,8 @@ def test_resume_from_verify(tmp_path, monkeypatch):
             return ""
         return ""
 
-    monkeypatch.setattr(_gh_mod, "_read_state_field", _fake_read)
+    monkeypatch.setattr(_gh_mod, "read_state_field", _fake_read)
+    monkeypatch.setattr(_pipeline_mod, "read_state_field", _fake_read)
     monkeypatch.setattr(
         _gh_mod, "_fetch_issue_body", lambda num, repo: "# Plan\nContent.\n"
     )
