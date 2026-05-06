@@ -7,6 +7,6 @@ A code review of the most recent implementation follows. For every actionable fi
 
 ---
 
-{address_commit_instr}{bail_section}
+{address_commit_instr}
 
 End with a short summary (to stdout) of: what you addressed, what you skipped and why.

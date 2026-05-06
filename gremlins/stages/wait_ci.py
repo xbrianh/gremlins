@@ -181,14 +181,7 @@ class WaitCI(Stage):
             )
             return
 
-        template = load_prompts([_PROMPT])
-        bail_section = ""
-        if self.state.gr_id:
-            bail_section = (
-                "\n\nIf you cannot fix the failure, run:\n"
-                '  `python -m gremlins.bail other "<one-line reason>"`\n'
-                "before finishing."
-            )
+        template = load_prompts([_PROMPT] + list(self.prompt_paths))
 
         _exhausted = False
         _agent_bailed = False
@@ -235,7 +228,6 @@ class WaitCI(Stage):
 
                 fix_prompt = template.format(
                     failure_output=failure_output,
-                    bail_section=bail_section,
                 )
                 self.run_claude(
                     fix_prompt,

@@ -30,10 +30,6 @@ from gremlins.prompts import load_prompts
 
 logger = logging.getLogger(__name__)
 
-_CODE_STYLE_PATH = (
-    pathlib.Path(__file__).resolve().parent / "pipelines" / "prompts" / "code_style.md"
-)
-
 CLAUDE_SANITIZE_MODEL = "haiku"
 
 T = TypeVar("T")
@@ -144,7 +140,6 @@ def build_prompt(
     child_plan_path: pathlib.Path,
     signal_path: pathlib.Path,
     spec_text: str | None = None,
-    code_style: str = "",
 ) -> str:
     diff_body = git_diff[:50000] if git_diff else "(empty — no changes yet)"
     diff_trunc = (
@@ -172,9 +167,14 @@ This is the original chain spec. It does not change between handoffs and is read
 
 """
 
-    style_section = ""
-    if code_style:
-        style_section = f"""## Coding style
+    _style_path = (
+        pathlib.Path(__file__).resolve().parent
+        / "pipelines"
+        / "prompts"
+        / "code_style.md"
+    )
+    code_style = load_prompts([_style_path])
+    style_section = f"""## Coding style
 
 Respect these principles when writing child plans. Avoid proposing architectures that violate them — e.g. multi-level class hierarchies, factories where a function suffices, speculative abstractions:
 
@@ -488,10 +488,6 @@ def run(client: ClaudeClient, args: argparse.Namespace) -> int:
     except Exception as exc:
         die(f"git context collection failed: {exc}")
 
-    try:
-        code_style = load_prompts([_CODE_STYLE_PATH])
-    except (FileNotFoundError, ValueError) as exc:
-        die(f"error loading prompt: {exc}")
     prompt = build_prompt(
         plan_text=plan_text,
         branch=branch,
@@ -501,7 +497,6 @@ def run(client: ClaudeClient, args: argparse.Namespace) -> int:
         child_plan_path=child_plan_path,
         signal_path=signal_path,
         spec_text=spec_text,
-        code_style=code_style,
     )
 
     client_spec = _parse_client_spec(args.client)
