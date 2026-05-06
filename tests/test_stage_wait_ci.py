@@ -14,6 +14,14 @@ from gremlins.stages.wait_ci import WaitCI
 
 PR_URL = "https://github.com/owner/repo/pull/42"
 
+_CI_PROMPT = (
+    pathlib.Path(__file__).resolve().parent.parent
+    / "gremlins"
+    / "pipelines"
+    / "prompts"
+    / "ci_fix.md"
+)
+
 _PASSING_CHECK = {
     "__typename": "CheckRun",
     "name": "tests",
@@ -41,7 +49,7 @@ _FAILING_CHECK = {
 
 def _make_entry() -> StageEntry:
     return StageEntry(
-        name="wait-ci", type="wait-ci", client=None, prompt_paths=[], options={}
+        name="wait-ci", type="wait-ci", client=None, prompt_paths=[_CI_PROMPT], options={}
     )
 
 

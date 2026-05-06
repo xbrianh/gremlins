@@ -27,20 +27,6 @@ from gremlins.prompts import load_prompts
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 
-PROMPT_LOCAL_PATH = (
-    pathlib.Path(__file__).resolve().parent.parent
-    / "pipelines"
-    / "prompts"
-    / "implement_local.md"
-)
-PROMPT_GH_PATH = (
-    pathlib.Path(__file__).resolve().parent.parent
-    / "pipelines"
-    / "prompts"
-    / "implement_gh.md"
-)
-
-
 @dataclasses.dataclass
 class ImplStageResult:
     """Returned by ``Implement.run`` when ``kind='gh'``."""
@@ -157,9 +143,7 @@ class Implement(Stage):
                 "notes-to-self. Do not push."
             )
 
-        template = load_prompts(
-            self.prompt_paths if self.prompt_paths else [PROMPT_LOCAL_PATH]
-        )
+        template = load_prompts(self.prompt_paths)
         prompt = template.format(
             spec_block=_render_spec_block(self.spec_text),
             plan_text=self.plan_text,
@@ -194,9 +178,7 @@ class Implement(Stage):
                 "should be product code."
             )
 
-        template = load_prompts(
-            self.prompt_paths if self.prompt_paths else [PROMPT_GH_PATH]
-        )
+        template = load_prompts(self.prompt_paths)
         prompt = template.format(
             spec_block=_render_spec_block(self.spec_text),
             plan_source_label=plan_source_label,
