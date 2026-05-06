@@ -5,7 +5,6 @@ from __future__ import annotations
 import dataclasses
 import os
 import pathlib
-import subprocess
 import sys
 
 from gremlins.git import (
@@ -16,6 +15,7 @@ from gremlins.git import (
     PreImplState,
     classify_impl_outcome,
     create_handoff_branch,
+    has_dirty_worktree,
     head_sha,
     record_pre_impl_state,
     reset_pre_branch,
@@ -160,14 +160,7 @@ def run(ctx: StageContext, options: ImplementOptions) -> ImplStageResult | None:
 
     if options.is_git:
         post_head = head_sha(cwd=cwd_arg)
-        porcelain = subprocess.run(
-            ["git", "status", "--porcelain"],
-            capture_output=True,
-            text=True,
-            check=False,
-            cwd=cwd_arg,
-        )
-        if post_head == pre_head and not porcelain.stdout.strip():
+        if post_head == pre_head and not has_dirty_worktree(cwd=cwd_arg):
             raise RuntimeError("implementation stage produced no changes; aborting")
     else:
         assert pre_sentinel is not None

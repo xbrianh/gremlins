@@ -34,10 +34,11 @@ def _run_git(
     cwd: str | os.PathLike[str] | None = None,
     check: bool = True,
     capture: bool = True,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if capture:
         r: subprocess.CompletedProcess[str] = subprocess.run(
-            ["git"] + args, cwd=cwd, capture_output=True, text=True
+            ["git"] + args, cwd=cwd, capture_output=True, text=True, timeout=timeout
         )
         if check and r.returncode != 0:
             raise GitError(r.returncode, r.stderr.strip())
@@ -49,6 +50,7 @@ def _run_git(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
+            timeout=timeout,
         )
         if check and rr.returncode != 0:
             raise GitError(rr.returncode, rr.stderr.strip())
@@ -102,6 +104,48 @@ def has_diff(ref_a: str, ref_b: str, cwd: str | os.PathLike[str] | None = None) 
         return r.returncode != 0
     except OSError:
         return False
+
+
+def current_branch(cwd: str | os.PathLike[str] | None = None) -> str:
+    """Return current branch name, or '' for detached HEAD or on error."""
+    r = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd, check=False)
+    if r.returncode != 0:
+        return ""
+    branch = r.stdout.strip()
+    return "" if branch == "HEAD" else branch
+
+
+def fetch_origin(
+    branch: str,
+    *,
+    cwd: str | os.PathLike[str] | None = None,
+    timeout: float | None = None,
+) -> None:
+    """Fetch refs/heads/<branch> from origin into refs/remotes/origin/<branch>. Raises GitError."""
+    refspec = f"refs/heads/{branch}:refs/remotes/origin/{branch}"
+    _run_git(["fetch", "origin", refspec], cwd=cwd, timeout=timeout)
+
+
+def remote_ref_sha(ref: str, cwd: str | os.PathLike[str] | None = None) -> str:
+    """Return the SHA of <ref> (e.g. refs/remotes/origin/main). Raises GitError."""
+    r = _run_git(["rev-parse", ref], cwd=cwd)
+    return r.stdout.strip()
+
+
+def diff_output(
+    args: list[str] | None = None,
+    *,
+    cwd: str | os.PathLike[str] | None = None,
+) -> str:
+    """Return stdout of `git diff [args]`. Raises GitError on failure."""
+    r = _run_git(["diff"] + (args or []), cwd=cwd)
+    return r.stdout
+
+
+def log_patch(rev_range: str, *, cwd: str | os.PathLike[str] | None = None) -> str:
+    """Return stdout of `git log --patch <rev_range>`. Raises GitError on failure."""
+    r = _run_git(["log", "--patch", rev_range], cwd=cwd)
+    return r.stdout
 
 
 # ---------------------------------------------------------------------------
