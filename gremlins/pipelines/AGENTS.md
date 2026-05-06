@@ -12,11 +12,13 @@ name: <pipeline-name>
 clients:
   <alias>: { provider: claude, model: sonnet }   # model: sonnet | opus | haiku
 
+prompt_dir: ../prompts            # directory prompt: paths resolve against (relative to this YAML)
+
 stages:
   - name: <stage-name>
     type: <stage-type>          # plan | implement | verify | review-code | address-code | commit-pr | ghreview | ghaddress | wait-ci | …
     client: <alias>             # omit for stages that don't call Claude
-    prompt: [../prompts/foo.md] # list of prompt template paths (relative to pipelines/)
+    prompt: [foo.md]            # list of prompt template paths (resolved against prompt_dir)
     options:                    # stage-specific knobs
       check_cmd: "make check"   # verify: command run as lint/type-check gate
       test_cmd:  "make test"    # verify: command run as test gate

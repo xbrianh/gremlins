@@ -141,11 +141,13 @@ name: my-pipeline         # optional; defaults to the file stem
 
 default_client: claude:sonnet   # optional; provider:model string
 
+prompt_dir: ../prompts          # optional; relative to YAML, defaults to bundled gremlins/prompts/
+
 stages:
   - name: plan
     type: plan
     client: copilot:gpt-5.4     # optional; overrides default_client for this stage
-    prompt: ../prompts/plan.md
+    prompt: plan.md             # resolved against prompt_dir
     options: {}
 ```
 
@@ -153,6 +155,7 @@ stages:
 |---|---|
 | `name` | Pipeline display name; defaults to the file stem |
 | `default_client` | `provider:model` string used for stages without an explicit `client:` |
+| `prompt_dir` | Directory that `prompt:` paths resolve against, relative to the YAML file. Defaults to the bundled `gremlins/prompts/`. `gremlins init` injects `prompt_dir: ../prompts` into copied pipelines. |
 | `stages` | Ordered list of stage entries or parallel groups |
 
 **Per-stage keys:**
@@ -162,7 +165,7 @@ stages:
 | `name` | Unique stage identifier; used for `resume` targeting |
 | `type` | Registered stage type (see [Available stage types](#available-stage-types)) |
 | `client` | `provider:model` string; overrides `default_client` for this stage |
-| `prompt` | Path or list of paths, relative to the YAML file |
+| `prompt` | Path or list of paths, resolved against the pipeline's `prompt_dir` |
 | `options` | Free-form dict passed to the stage |
 
 **`provider:model` format:**
@@ -208,17 +211,20 @@ Providers: `claude`, `copilot`. The CLI `--client provider:model` flag overrides
 ### `prompt:` field
 
 ```yaml
-prompt: ../prompts/plan.md                               # single file
-prompt: [../prompts/code_style.md, ../prompts/plan.md]  # list — concatenated with \n\n
+prompt: plan.md                          # single file
+prompt: [code_style.md, plan.md]         # list — concatenated with \n\n
 ```
 
-Paths are relative to the YAML file. Lists are joined with `\n\n` before
-being passed to the stage.
+Paths are resolved against the pipeline's top-level `prompt_dir:` (relative
+to the YAML file). If `prompt_dir:` is omitted, paths resolve against the
+bundled `gremlins/prompts/` directory shipped with the package. Lists are
+joined with `\n\n` before being passed to the stage.
 
 By convention, project-local prompts live in `./.gremlins/prompts/` (a peer
-of `./.gremlins/pipelines/`, not nested under it) and pipelines reference
-them as `../prompts/<file>.md`. There is no search fallback — paths are
-explicit. To reuse a bundled prompt, copy the file from
+of `./.gremlins/pipelines/`, not nested under it) and pipelines set
+`prompt_dir: ../prompts`. `gremlins init` injects that line automatically
+when scaffolding pipelines into a project. There is no search fallback —
+paths are explicit. To reuse a bundled prompt, copy the file from
 `gremlins/prompts/` into `./.gremlins/prompts/`.
 
 ### `options:` field
