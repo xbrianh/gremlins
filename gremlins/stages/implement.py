@@ -23,13 +23,9 @@ from gremlins.git import (
     sweep_stale_handoff_branches,
 )
 from gremlins.pipeline import StageEntry
-from gremlins.prompts import load_prompts
+from gremlins.prompts import BUNDLED_PROMPT_DIR, load_prompts
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
-
-_IMPL_COMMIT_GIT_PATH = (
-    pathlib.Path(__file__).resolve().parent.parent / "prompts" / "impl_commit_git.md"
-)
 
 
 @dataclasses.dataclass
@@ -139,7 +135,9 @@ class Implement(Stage):
 
         impl_commit_instr = "."
         if self.is_git:
-            impl_commit_instr = load_prompts([_IMPL_COMMIT_GIT_PATH])
+            impl_commit_instr = load_prompts(
+                [BUNDLED_PROMPT_DIR / "impl_commit_git.md"]
+            )
 
         template = load_prompts(self.prompt_paths)
         prompt = template.format(
