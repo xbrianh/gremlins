@@ -27,6 +27,7 @@ from gremlins.prompts import load_prompts
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 
+
 @dataclasses.dataclass
 class ImplStageResult:
     """Returned by ``Implement.run`` when ``kind='gh'``."""

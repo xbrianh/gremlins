@@ -49,7 +49,11 @@ _FAILING_CHECK = {
 
 def _make_entry() -> StageEntry:
     return StageEntry(
-        name="wait-ci", type="wait-ci", client=None, prompt_paths=[_CI_PROMPT], options={}
+        name="wait-ci",
+        type="wait-ci",
+        client=None,
+        prompt_paths=[_CI_PROMPT],
+        options={},
     )
 
 

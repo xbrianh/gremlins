@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any
-
 import pathlib
+from typing import Any
 
 import pytest
 from conftest import MINIMAL_EVENTS
