@@ -86,15 +86,15 @@ def has_commits(cwd: str | os.PathLike[str] | None = None) -> bool:
 
 def rev_exists(rev: str, cwd: str | os.PathLike[str] | None = None) -> bool:
     try:
-        r = _run_git(["rev-parse", "--verify", rev], cwd=cwd, check=False, capture=False)
+        r = _run_git(
+            ["rev-parse", "--verify", rev], cwd=cwd, check=False, capture=False
+        )
         return r.returncode == 0
     except OSError:
         return False
 
 
-def has_diff(
-    ref_a: str, ref_b: str, cwd: str | os.PathLike[str] | None = None
-) -> bool:
+def has_diff(ref_a: str, ref_b: str, cwd: str | os.PathLike[str] | None = None) -> bool:
     try:
         r = _run_git(
             ["diff", "--quiet", ref_a, ref_b], cwd=cwd, check=False, capture=False
