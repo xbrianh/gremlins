@@ -465,8 +465,8 @@ def test_local_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
     )
     verify_models: list[str] = []
     monkeypatch.setattr(
-        "gremlins.stages.verify.run",
-        lambda ctx, options: verify_models.append(options.fix_model),
+        "gremlins.stages.verify.Verify.run",
+        lambda self, pipe: verify_models.append(self.model),
     )
 
     original_review_label = "review-code:gpt-4o"

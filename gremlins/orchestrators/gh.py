@@ -379,26 +379,15 @@ def _build_stage_runner(
         return _implement
 
     if entry.type == "verify":
-        cmds = entry.options.get("cmds", [])
-        max_attempts = entry.options.get("max_attempts", 3)
 
         def _verify() -> None:
             set_stage(gr_id, entry.name)
             logger.info("[2b/8] verifying implementation")
-            verify.run(
-                ctx,
-                verify.VerifyOptions(
-                    fix_model=model,
-                    cwd=ctx.worktree
-                    if ctx.worktree is not None
-                    else pathlib.Path.cwd(),
-                    code_style=code_style,
-                    is_git=True,
-                    commit_after_fix=False,
-                    cmds=cmds,
-                    max_attempts=max_attempts,
-                ),
+            stage = verify.Verify(
+                entry, model, code_style=code_style, is_git=True, commit_after_fix=False
             )
+            stage.bind(ctx)
+            stage.run(None)
 
         return _verify
 

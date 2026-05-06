@@ -522,7 +522,7 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
         "gremlins.stages.ghaddress.run",
         lambda ctx, options: None,
     )
-    monkeypatch.setattr("gremlins.stages.verify.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
 
     client = _CommittingClient(
@@ -572,7 +572,7 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
         lambda ctx, options: None,
     )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
-    monkeypatch.setattr("gremlins.stages.verify.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
 
     client = _CommittingClient(
@@ -614,7 +614,7 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
         lambda ctx, options: None,
     )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
-    monkeypatch.setattr("gremlins.stages.verify.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
 
     client = _CommittingClient(
@@ -660,7 +660,7 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
         lambda ctx, options: None,
     )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
-    monkeypatch.setattr("gremlins.stages.verify.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
 
     client = _CommittingClient(
@@ -707,7 +707,7 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
         lambda ctx, options: None,
     )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
-    monkeypatch.setattr("gremlins.stages.verify.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
 
     client = _CommittingClient(
@@ -835,8 +835,8 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
         lambda ctx, options: ghaddress_models.append(options.model),
     )
     monkeypatch.setattr(
-        "gremlins.stages.verify.run",
-        lambda ctx, options: verify_models.append(options.fix_model),
+        "gremlins.stages.verify.Verify.run",
+        lambda self, pipe: verify_models.append(self.model),
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_ci.run",
@@ -1016,7 +1016,7 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         lambda ctx, options: None,
     )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
-    monkeypatch.setattr("gremlins.stages.verify.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
 
     client = _CommittingClient(
@@ -1146,7 +1146,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
         lambda ctx, options: None,
     )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
-    monkeypatch.setattr("gremlins.stages.verify.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
 
     # Each fixture carries a distinct non-zero cost so a regression that drops
@@ -1255,7 +1255,7 @@ def test_code_style_forwarded_to_ghreview_and_ghaddress(tmp_path, monkeypatch):
         lambda ctx, options: None,
     )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", record_ghaddress)
-    monkeypatch.setattr("gremlins.stages.verify.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
 
     client = _CommittingClient(
@@ -1382,7 +1382,7 @@ def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
         lambda ctx, options: None,
     )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
-    monkeypatch.setattr("gremlins.stages.verify.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
 
     captured_ctx = {}
     captured_options = {}
@@ -1430,8 +1430,8 @@ def test_wait_ci_stage_ordering(tmp_path, monkeypatch):
     order: list[str] = []
 
     monkeypatch.setattr(
-        "gremlins.stages.verify.run",
-        lambda ctx, options: order.append("verify"),
+        "gremlins.stages.verify.Verify.run",
+        lambda self, pipe: order.append("verify"),
     )
     monkeypatch.setattr(
         "gremlins.stages.ghreview.run",
@@ -1558,14 +1558,12 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
     monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
 
-    captured_ctx = {}
-    captured_options = {}
+    captured_stage = {}
 
-    def record_verify(ctx, options):
-        captured_ctx["ctx"] = ctx
-        captured_options["options"] = options
+    def record_verify(self, pipe):
+        captured_stage["stage"] = self
 
-    monkeypatch.setattr("gremlins.stages.verify.run", record_verify)
+    monkeypatch.setattr("gremlins.stages.verify.Verify.run", record_verify)
 
     client = _CommittingClient(
         git_dir=tmp_path,
@@ -1580,12 +1578,11 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
     )
     assert result == 0
 
-    opts = captured_options["options"]
-    ctx = captured_ctx["ctx"]
-    assert opts.fix_model == "claude-opus-4-7"
-    assert opts.code_style == "Be good."
-    assert opts.cmds == ["make check", "make test"]
-    assert ctx.session_dir == session_dir
+    stage = captured_stage["stage"]
+    assert stage.model == "claude-opus-4-7"
+    assert stage._code_style == "Be good."
+    assert stage.options.get("cmds") == ["make check", "make test"]
+    assert stage.state.session_dir == session_dir
 
 
 def test_resume_from_verify(tmp_path, monkeypatch):
@@ -1645,8 +1642,8 @@ def test_resume_from_verify(tmp_path, monkeypatch):
     verify_calls = []
 
     monkeypatch.setattr(
-        "gremlins.stages.verify.run",
-        lambda ctx, options: verify_calls.append(options),
+        "gremlins.stages.verify.Verify.run",
+        lambda self, pipe: verify_calls.append(self),
     )
     monkeypatch.setattr(
         "gremlins.stages.ghreview.run",
@@ -1695,7 +1692,7 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir):
         "gremlins.stages.request_copilot.run", lambda ctx, options: None
     )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
-    monkeypatch.setattr("gremlins.stages.verify.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
 
     client = _CommittingClient(
@@ -1737,7 +1734,7 @@ def test_gh_main_state_client_tracks_effective_model(
         "gremlins.stages.request_copilot.run", lambda ctx, options: None
     )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
-    monkeypatch.setattr("gremlins.stages.verify.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
 
     client = _CommittingClient(
@@ -1799,7 +1796,7 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
         "gremlins.stages.request_copilot.run", lambda ctx, options: None
     )
     monkeypatch.setattr("gremlins.stages.ghaddress.run", lambda ctx, options: None)
-    monkeypatch.setattr("gremlins.stages.verify.run", lambda ctx, options: None)
+    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.run", lambda ctx, options: None)
 
     client = _CommittingClient(
