@@ -11,7 +11,7 @@ import pytest
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.pipeline import load_pipeline
 from gremlins.runner import build_parallel_stages, run_stages
-from gremlins.stages.context import StageContext
+from gremlins.stages.base import StageContext
 
 # ---------------------------------------------------------------------------
 # Fixtures helpers

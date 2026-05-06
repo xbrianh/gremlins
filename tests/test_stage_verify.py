@@ -11,7 +11,7 @@ from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.pipeline import StageEntry
-from gremlins.stages.context import StageContext
+from gremlins.stages.base import StageContext
 from gremlins.stages.verify import Verify
 
 _VERIFY_PROMPT = (

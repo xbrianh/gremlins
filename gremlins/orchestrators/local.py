@@ -38,7 +38,7 @@ from gremlins.pipeline import (
 )
 from gremlins.runner import install_signal_handlers
 from gremlins.stages import address_code, review_code
-from gremlins.stages.context import StageContext
+from gremlins.stages.base import StageContext
 from gremlins.state import patch_state, resolve_session_dir
 
 logger = logging.getLogger(__name__)

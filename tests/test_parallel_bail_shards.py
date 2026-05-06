@@ -23,7 +23,7 @@ import pytest
 import gremlins.state as state_mod
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.runner import build_parallel_stages, run_stages
-from gremlins.stages.context import StageContext
+from gremlins.stages.base import StageContext
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -35,8 +35,7 @@ from gremlins.stages import (
     wait_ci,
     wait_copilot,
 )
-from gremlins.stages.base import Stage
-from gremlins.stages.context import StageContext
+from gremlins.stages.base import Stage, StageContext
 from gremlins.stages.implement import ImplStageResult
 from gremlins.state import patch_state, resolve_session_dir, set_stage
 
