@@ -11,7 +11,7 @@ from typing import Any, cast
 import yaml
 
 _PIPELINES_DIR = pathlib.Path(__file__).resolve().parent / "pipelines"
-_PROMPTS_DIR = _PIPELINES_DIR / "prompts"
+_PROMPTS_DIR = pathlib.Path(__file__).resolve().parent / "prompts"
 
 
 def _bundled_pipeline_names() -> list[str]:
@@ -21,7 +21,7 @@ def _bundled_pipeline_names() -> list[str]:
 def _collect_prompt_subpaths(stages: list[Any]) -> list[str]:
     """Walk stage list (including parallel groups) and return unique prompt subpaths.
 
-    Subpaths are the part after 'prompts/' — e.g. 'plan.md', 'review/detail.md'.
+    Subpaths are the part after '../prompts/' — e.g. 'plan.md', 'review/detail.md'.
     """
     seen: set[str] = set()
     result: list[str] = []
@@ -40,7 +40,10 @@ def _collect_prompt_subpaths(stages: list[Any]) -> list[str]:
         if isinstance(prompts, str):
             prompts = [prompts]
         for p in cast(list[str], prompts):
-            if p.startswith("prompts/") and p not in seen:
+            if p.startswith("../prompts/") and p not in seen:
+                seen.add(p)
+                result.append(p[len("../prompts/") :])
+            elif p.startswith("prompts/") and p not in seen:
                 seen.add(p)
                 result.append(p[len("prompts/") :])
 
@@ -50,7 +53,7 @@ def _collect_prompt_subpaths(stages: list[Any]) -> list[str]:
 
 
 def _rewrite_stage(stage: Any) -> Any:
-    """Return stage with prompt paths rewritten from prompts/ to ../prompts/."""
+    """Return stage with prompt paths normalized to ../prompts/."""
     if not isinstance(stage, dict):
         return stage
     s: dict[str, Any] = dict(cast(dict[str, Any], stage))
@@ -63,6 +66,8 @@ def _rewrite_stage(stage: Any) -> Any:
     if isinstance(prompts, str):
         if prompts.startswith("prompts/"):
             s["prompt"] = "../" + prompts
+        elif prompts.startswith("../prompts/"):
+            s["prompt"] = prompts
     else:
         s["prompt"] = [
             ("../" + p if p.startswith("prompts/") else p)

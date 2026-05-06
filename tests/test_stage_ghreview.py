@@ -72,7 +72,6 @@ def test_run_raises_if_unbound() -> None:
     prompt_path = (
         pathlib.Path(__file__).resolve().parent.parent
         / "gremlins"
-        / "pipelines"
         / "prompts"
         / "review_gh.md"
     )

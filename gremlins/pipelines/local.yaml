@@ -3,8 +3,8 @@ name: local
 default_client: claude:sonnet
 
 stages:
-  - { name: plan,         type: plan,         prompt: [prompts/code_style.md, prompts/plan.md] }
-  - { name: implement,    type: implement,    prompt: [prompts/code_style.md, prompts/implement_local.md] }
-  - { name: review-code,  type: review-code,  prompt: [prompts/code_style.md, prompts/review/detail.md] }
-  - { name: address-code, type: address-code, prompt: [prompts/code_style.md, prompts/address.md, prompts/bail_section.md] }
-  - { name: verify,       type: verify,       prompt: [prompts/verify_fix.md, prompts/bail_section_fix.md] }
+  - { name: plan,         type: plan,         prompt: [../prompts/code_style.md, ../prompts/plan.md] }
+  - { name: implement,    type: implement,    prompt: [../prompts/code_style.md, ../prompts/implement_local.md] }
+  - { name: review-code,  type: review-code,  prompt: [../prompts/code_style.md, ../prompts/review/detail.md] }
+  - { name: address-code, type: address-code, prompt: [../prompts/code_style.md, ../prompts/address.md, ../prompts/bail_section.md] }
+  - { name: verify,       type: verify,       prompt: [../prompts/verify_fix.md, ../prompts/bail_section_fix.md] }

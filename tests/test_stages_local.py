@@ -14,10 +14,7 @@ from gremlins.stages.implement import _render_spec_block
 from gremlins.stages.review_code import ReviewCode
 
 _BUNDLED_PROMPTS = (
-    pathlib.Path(__file__).resolve().parent.parent
-    / "gremlins"
-    / "pipelines"
-    / "prompts"
+    pathlib.Path(__file__).resolve().parent.parent / "gremlins" / "prompts"
 )
 
 

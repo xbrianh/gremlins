@@ -145,7 +145,7 @@ stages:
   - name: plan
     type: plan
     client: copilot:gpt-5.4     # optional; overrides default_client for this stage
-    prompt: prompts/plan.md
+    prompt: ../prompts/plan.md
     options: {}
 ```
 
@@ -208,8 +208,8 @@ Providers: `claude`, `copilot`. The CLI `--client provider:model` flag overrides
 ### `prompt:` field
 
 ```yaml
-prompt: prompts/plan.md                                  # single file
-prompt: [prompts/code_style.md, prompts/plan.md]         # list — concatenated with \n\n
+prompt: ../prompts/plan.md                               # single file
+prompt: [../prompts/code_style.md, ../prompts/plan.md]  # list — concatenated with \n\n
 ```
 
 Paths are relative to the YAML file. Lists are joined with `\n\n` before
@@ -219,7 +219,7 @@ By convention, project-local prompts live in `./.gremlins/prompts/` (a peer
 of `./.gremlins/pipelines/`, not nested under it) and pipelines reference
 them as `../prompts/<file>.md`. There is no search fallback — paths are
 explicit. To reuse a bundled prompt, copy the file from
-`gremlins/pipelines/prompts/` into `./.gremlins/prompts/`.
+`gremlins/prompts/` into `./.gremlins/prompts/`.
 
 ### `options:` field
 

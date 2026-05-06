@@ -11,10 +11,7 @@ from gremlins.stages.ghaddress import GHAddress
 from gremlins.stages.ghreview import GHReview
 
 _BUNDLED_PROMPTS = (
-    pathlib.Path(__file__).resolve().parent.parent
-    / "gremlins"
-    / "pipelines"
-    / "prompts"
+    pathlib.Path(__file__).resolve().parent.parent / "gremlins" / "prompts"
 )
 
 

@@ -17,7 +17,6 @@ PR_URL = "https://github.com/owner/repo/pull/42"
 _CI_PROMPT = (
     pathlib.Path(__file__).resolve().parent.parent
     / "gremlins"
-    / "pipelines"
     / "prompts"
     / "ci_fix.md"
 )
