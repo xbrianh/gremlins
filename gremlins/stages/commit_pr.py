@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import dataclasses
 import pathlib
-import subprocess
 
 from gremlins.clients.protocol import CompletedRun
 from gremlins.gh_utils import extract_gh_url
-from gremlins.git import HeadAdvanced, ImplOutcome
+from gremlins.git import (
+    HeadAdvanced,
+    ImplOutcome,
+    diff_output,
+    has_dirty_worktree,
+    log_patch,
+)
 from gremlins.stages.context import StageContext
 from gremlins.stages.registry import register_stage
 
@@ -36,32 +41,9 @@ def _get_diff(
     cwd: str | None,
 ) -> str:
     if isinstance(outcome, HeadAdvanced):
-        r = subprocess.run(
-            ["git", "log", "--patch", f"{base_ref}..{impl_handoff_branch}"],
-            capture_output=True,
-            text=True,
-            check=False,
-            cwd=cwd,
-        )
-        if r.returncode != 0:
-            raise RuntimeError(
-                f"git log --patch {base_ref}..{impl_handoff_branch} failed "
-                f"(rc={r.returncode}): {r.stderr.strip()}"
-            )
-        diff = r.stdout.strip()
+        diff = log_patch(f"{base_ref}..{impl_handoff_branch}", cwd=cwd).strip()
     else:
-        r = subprocess.run(
-            ["git", "diff", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=False,
-            cwd=cwd,
-        )
-        if r.returncode != 0:
-            raise RuntimeError(
-                f"git diff HEAD failed (rc={r.returncode}): {r.stderr.strip()}"
-            )
-        diff = r.stdout.strip()
+        diff = diff_output(["HEAD"], cwd=cwd).strip()
     return diff or "(no diff available)"
 
 
@@ -76,14 +58,7 @@ def run(ctx: StageContext, options: CommitPrOptions) -> str:
     )
 
     if isinstance(options.impl_outcome, HeadAdvanced):
-        status_r = subprocess.run(
-            ["git", "status", "--porcelain"],
-            capture_output=True,
-            text=True,
-            check=False,
-            cwd=cwd_arg,
-        )
-        worktree_dirty = bool(status_r.stdout.strip())
+        worktree_dirty = has_dirty_worktree(cwd=cwd_arg)
         if worktree_dirty:
             action_clause = _load("commit_pr_handoff_dirty.md").format(
                 handoff_branch=options.impl_handoff_branch,

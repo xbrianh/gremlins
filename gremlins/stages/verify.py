@@ -7,6 +7,7 @@ import logging
 import pathlib
 import subprocess
 
+from gremlins import git as _git_mod
 from gremlins.prompts import load_prompts
 from gremlins.stages.context import StageContext
 from gremlins.stages.registry import register_stage
@@ -31,22 +32,10 @@ class VerifyOptions:
 def _diff_text(cwd: pathlib.Path, *, is_git: bool) -> str:
     if not is_git:
         return ""
-    try:
-        unstaged = subprocess.run(
-            ["git", "diff"],
-            capture_output=True,
-            text=True,
-            cwd=cwd,
-            check=False,
-        )
-        staged = subprocess.run(
-            ["git", "diff", "--cached"],
-            capture_output=True,
-            text=True,
-            cwd=cwd,
-            check=False,
-        )
-        return (unstaged.stdout + staged.stdout).strip()
+    try:  # GitError (from check=True in diff_output) and OSError both fall through here
+        unstaged = _git_mod.diff_output(cwd=cwd)
+        staged = _git_mod.diff_output(["--cached"], cwd=cwd)
+        return (unstaged + staged).strip()
     except Exception:
         return ""
 

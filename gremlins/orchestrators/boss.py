@@ -135,28 +135,14 @@ def run_proc(cmd: list[str], **kwargs: Any) -> int:
 
 
 def get_head_ref(project_root: str) -> str:
-    r = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        capture_output=True,
-        text=True,
-        cwd=project_root,
-    )
-    if r.returncode != 0:
-        die(f"git rev-parse HEAD failed in {project_root}: {r.stderr.strip()}")
-    return r.stdout.strip()
+    try:
+        return _git_mod.remote_ref_sha("HEAD", cwd=project_root)
+    except _git_mod.GitError as e:
+        die(f"git rev-parse HEAD failed in {project_root}: {e.stderr}")
 
 
 def get_current_branch(project_root: str) -> str:
-    r = subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-        capture_output=True,
-        text=True,
-        cwd=project_root,
-    )
-    if r.returncode != 0:
-        return ""
-    branch = r.stdout.strip()
-    return "" if branch == "HEAD" else branch
+    return _git_mod.current_branch(cwd=project_root)
 
 
 def get_default_branch(project_root: str) -> str:
@@ -199,33 +185,24 @@ def fetch_origin_branch(project_root: str, branch: str, *, context: str) -> None
     """
     refspec = f"refs/heads/{branch}:refs/remotes/origin/{branch}"
     try:
-        fetch = subprocess.run(
-            ["git", "fetch", "origin", refspec],
-            capture_output=True,
-            text=True,
-            cwd=project_root,
-            timeout=HANDOFF_FETCH_TIMEOUT,
-        )
+        _git_mod.fetch_origin(branch, cwd=project_root, timeout=HANDOFF_FETCH_TIMEOUT)
     except subprocess.TimeoutExpired:
         die(
             f"git fetch origin {refspec} timed out after {HANDOFF_FETCH_TIMEOUT}s {context}"
         )
-    if fetch.returncode != 0:
-        die(f"git fetch origin {refspec} failed {context}: {fetch.stderr.strip()}")
+    except _git_mod.GitError as e:
+        die(f"git fetch origin {refspec} failed {context}: {e.stderr}")
 
 
 def get_remote_branch_sha(project_root: str, branch: str) -> str:
     """Fetch origin/<branch> and return its SHA. Calls die() on failure."""
     fetch_origin_branch(project_root, branch, context="at chain start")
-    r = subprocess.run(
-        ["git", "rev-parse", f"refs/remotes/origin/{branch}"],
-        capture_output=True,
-        text=True,
-        cwd=project_root,
-    )
-    if r.returncode != 0:
-        die(f"git rev-parse refs/remotes/origin/{branch} failed: {r.stderr.strip()}")
-    return r.stdout.strip()
+    try:
+        return _git_mod.remote_ref_sha(
+            f"refs/remotes/origin/{branch}", cwd=project_root
+        )
+    except _git_mod.GitError as e:
+        return die(f"git rev-parse refs/remotes/origin/{branch} failed: {e.stderr}")
 
 
 def init_boss_state(
