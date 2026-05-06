@@ -73,20 +73,18 @@ class ReviewCode(Stage):
         plan_text: str,
         is_git: bool,
         code_style: str,
-        stage_name: str,
     ) -> None:
         super().__init__(entry, model)
         self.plan_text = plan_text
         self.is_git = is_git
         self.code_style = code_style
-        self.stage_name = stage_name
 
     def run(self, pipe: Any) -> pathlib.Path:
         if self.model is None:
-            raise ValueError(f"stage {self.stage_name!r}: model must be set")
-        out_file = self.state.session_dir / f"{self.stage_name}-{self.model}.md"
+            raise ValueError(f"stage {self.name!r}: model must be set")
+        out_file = self.state.session_dir / f"{self.name}-{self.model}.md"
 
-        for stale in self.state.session_dir.glob(f"{self.stage_name}-*.md"):
+        for stale in self.state.session_dir.glob(f"{self.name}-*.md"):
             try:
                 stale.unlink()
             except OSError:
@@ -95,8 +93,8 @@ class ReviewCode(Stage):
         focus = load_prompts(self.prompt_paths[1:])
         if not focus.strip():
             raise ValueError(
-                f"stage '{self.stage_name}': prompt_paths produced empty focus; "
-                "check that prompt_paths is non-empty and all files have content"
+                f"stage '{self.name}': prompt_paths produced empty focus; "
+                "check that prompt_paths has at least 2 entries and all files after index 0 have content"
             )
 
         if self.is_git:
@@ -119,7 +117,7 @@ class ReviewCode(Stage):
 
         try:
             set_stage(
-                self.state.gr_id, self.stage_name, {"model": f"running ({self.model})"}
+                self.state.gr_id, self.name, {"model": f"running ({self.model})"}
             )
             _run_reviewer(
                 client=self.state.client,
@@ -129,13 +127,13 @@ class ReviewCode(Stage):
                 context=code_context,
                 code_style=self.code_style,
                 where_field="**File:** `path/to/file.ext:<line>`",
-                label=f"{self.stage_name}:{self.model}",
+                label=f"{self.name}:{self.model}",
                 raw_path=self.state.session_dir
-                / f"stream-{self.stage_name}-{self.model}.jsonl",
+                / f"stream-{self.name}-{self.model}.jsonl",
                 cwd=self.state.worktree,
             )
             set_stage(
-                self.state.gr_id, self.stage_name, {"model": f"done ({self.model})"}
+                self.state.gr_id, self.name, {"model": f"done ({self.model})"}
             )
             if not out_file.exists() or out_file.stat().st_size == 0:
                 raise RuntimeError(f"review {self.model} did not produce {out_file}")
@@ -143,7 +141,7 @@ class ReviewCode(Stage):
             emit_bail(
                 self.state.gr_id,
                 "other",
-                f"{self.stage_name} stage failed: {exc}"[:200],
+                f"{self.name} stage failed: {exc}"[:200],
                 child_key=self.state.child_key,
             )
             raise

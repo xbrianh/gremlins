@@ -181,7 +181,6 @@ def _build_stage_runner(
                 plan_text=plan_text,
                 is_git=is_git,
                 code_style=code_style,
-                stage_name=entry.name,
             )
             stage.bind(ctx)
             review_file = stage.run(None)
@@ -614,7 +613,6 @@ def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
         plan_text=plan_text,
         is_git=is_git,
         code_style=code_style,
-        stage_name=rc_entry.name,
     )
     stage.bind(ctx)
     review_file = stage.run(None)

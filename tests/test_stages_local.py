@@ -313,7 +313,6 @@ def _make_review_code_stage(
         plan_text=plan_text,
         is_git=is_git,
         code_style=code_style,
-        stage_name="review-code",
     )
     stage.bind(_make_ctx(client, session_dir, gr_id=gr_id))
     return stage
@@ -391,12 +390,12 @@ def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
     worktree = tmp_path / "wt"
     worktree.mkdir()
     stage = _make_review_code_stage(client, tmp_path)
-    stage._mutable_state = StageContext(
+    stage.bind(StageContext(
         client=client,
         session_dir=tmp_path,
         gr_id=None,
         worktree=worktree,
-    )
+    ))
     stage.run(None)
     assert client.calls[0].cwd == worktree
 
