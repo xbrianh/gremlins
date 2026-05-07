@@ -153,6 +153,8 @@ class GHPipeline(Pipeline):
         issue_num = ""
         if pathlib.Path(plan_src).is_file():
             src = pathlib.Path(plan_src)
+            if src.stat().st_size == 0:
+                die(f"--plan: file is empty: {plan_src}")
             issue_body = src.read_text(encoding="utf-8")
             logger.info(
                 "[1/8] plan supplied via --plan (file): %s — posting as GitHub issue",
@@ -194,7 +196,6 @@ class GHPipeline(Pipeline):
                 )
             issue_url = m.group(0)
             issue_num = issue_url.split("/")[-1]
-            patch_state(self.gr_id, issue_url=issue_url, issue_num=issue_num)
             logger.info("issue: %s", issue_url)
             shutil.copyfile(src, plan_md)
         else:
