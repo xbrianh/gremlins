@@ -121,7 +121,6 @@ class GHPipeline(Pipeline):
                         f"stage {entry.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML"
                     )
                 set_stage(self.gr_id, entry.name)
-                logger.info("[1/8] running plan")
                 stage = plan.Plan(
                     entry,
                     model,
@@ -139,7 +138,6 @@ class GHPipeline(Pipeline):
 
             def _implement() -> None:
                 set_stage(self.gr_id, entry.name)
-                logger.info("[2a/8] implementing plan")
                 spec_file = self.session_dir / "spec.md"
                 spec_text = ""
                 if spec_file.exists():
@@ -172,7 +170,6 @@ class GHPipeline(Pipeline):
 
             def _handoff_branch() -> None:
                 set_stage(self.gr_id, entry.name)
-                logger.info("[2b/8] creating handoff branch")
                 if self.impl_pre_state is None:
                     saved_head = read_state_field(self.state_file, "impl_pre_head")
                     if saved_head:
@@ -198,7 +195,6 @@ class GHPipeline(Pipeline):
 
             def _verify() -> None:
                 set_stage(self.gr_id, entry.name)
-                logger.info("[2c/8] verifying implementation")
                 stage = verify.Verify(entry, model, is_git=True, commit_after_fix=False)
                 stage.bind(ctx)
                 stage.run(None)
@@ -209,7 +205,6 @@ class GHPipeline(Pipeline):
 
             def _commit() -> None:
                 set_stage(self.gr_id, entry.name)
-                logger.info("[2d/8] committing changes")
                 hb_result = self.impl_handoff_result
                 if hb_result is not None:
                     impl_outcome = hb_result.outcome
@@ -265,7 +260,6 @@ class GHPipeline(Pipeline):
 
             def _open_github_pr() -> None:
                 set_stage(self.gr_id, entry.name)
-                logger.info("[2e/8] opening GitHub PR")
                 stage = open_github_pr.OpenGitHubPR(
                     entry,
                     model,
@@ -354,7 +348,6 @@ class GHPipeline(Pipeline):
             def _request_copilot() -> None:
                 self._ensure_pr_url()
                 set_stage(self.gr_id, entry.name)
-                logger.info("[3/8] requesting Copilot review")
                 stage = request_copilot.RequestCopilot(
                     entry, model, repo=self.repo, pr_num=self.pr_num
                 )
@@ -372,7 +365,6 @@ class GHPipeline(Pipeline):
                     )
                 self._ensure_pr_url()
                 set_stage(self.gr_id, entry.name)
-                logger.info("[4/8] running /ghreview")
                 stage = review_code.ReviewCode(
                     entry,
                     model,
@@ -390,9 +382,6 @@ class GHPipeline(Pipeline):
             def _wait_copilot() -> None:
                 self._ensure_pr_url()
                 set_stage(self.gr_id, entry.name)
-                logger.info(
-                    "[5/8] waiting for Copilot review (20s interval, 10min timeout)"
-                )
                 stage = wait_copilot.WaitCopilot(
                     entry, model, repo=self.repo, pr_num=self.pr_num
                 )
@@ -411,7 +400,6 @@ class GHPipeline(Pipeline):
                     )
                 self._ensure_pr_url()
                 set_stage(self.gr_id, entry.name)
-                logger.info("[6/8] running /ghaddress")
                 stage = address_code.AddressCode(
                     entry,
                     model,
@@ -428,9 +416,6 @@ class GHPipeline(Pipeline):
             def _wait_ci() -> None:
                 self._ensure_pr_url()
                 set_stage(self.gr_id, entry.name)
-                logger.info(
-                    "[7/8] waiting for CI checks (up to 3 attempts, 20min each)"
-                )
                 stage = wait_ci.WaitCI(entry, model, pr_url=self.pr_url)
                 stage.bind(ctx)
                 stage.run(None)
