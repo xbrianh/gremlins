@@ -515,7 +515,7 @@ def launch(
 
     workdir = None
     try:
-        if plan and not os.path.isfile(plan):
+        if plan and not os.path.isfile(plan) and pipeline_mode != "gh":
             plan = _resolve_boss_plan(plan, issue_data, state_dir)
 
         # pipeline_args for state.json: includes --plan and --spec when set

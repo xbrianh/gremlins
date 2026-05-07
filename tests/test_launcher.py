@@ -821,6 +821,20 @@ def test_launch_ghgremlin_state_layout(lenv_with_gh):
     assert workdir.is_dir(), f"worktree directory should exist: {workdir}"
 
 
+def test_launch_gh_plan_issue_ref_not_snapshotted(lenv_with_gh):
+    """gh pipeline with --plan <issue-ref> keeps the raw ref without snapshotting."""
+    lenv = lenv_with_gh
+    launcher = _launcher()
+    gr_id = launcher.launch("gh", plan="42")
+    state_dir = _gremlins_state_root(lenv) / gr_id
+    state = _read_state(state_dir)
+
+    idx = state["pipeline_args"].index("--plan")
+    persisted = state["pipeline_args"][idx + 1]
+    assert persisted == "42", f"expected raw issue ref '42', got: {persisted!r}"
+    assert not (state_dir / "plan-from-issue.md").exists()
+
+
 # ---------------------------------------------------------------------------
 # PYTHONSAFEPATH worktree-rename regression
 # ---------------------------------------------------------------------------
