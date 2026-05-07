@@ -63,7 +63,7 @@ class Plan(Stage):
             plan_file=self.plan_file,
             instructions=self.instructions,
         )
-        self.run_claude(
+        completed = self.run_claude(
             prompt,
             label="plan",
             raw_path=self.state.session_dir / "stream-plan.jsonl",
@@ -73,7 +73,9 @@ class Plan(Stage):
             or not self.plan_file.exists()
             or self.plan_file.stat().st_size == 0
         ):
-            raise RuntimeError(f"plan stage did not produce {self.plan_file}")
+            snippet = (completed.text_result or "")[:200].strip()
+            detail = f"; model said: {snippet}" if snippet else ""
+            raise RuntimeError(f"plan stage did not produce {self.plan_file}{detail}")
 
     def results_to_github(self, pipe: Any) -> None:
         plan_prompt = load_prompts(self.prompt_paths).format(
