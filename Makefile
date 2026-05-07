@@ -1,4 +1,6 @@
-.PHONY: lint format typecheck test check
+TEST_FILES := $(wildcard tests/test_*.py)
+
+.PHONY: lint format typecheck test check $(TEST_FILES)
 
 lint:
 	ruff check .
@@ -9,7 +11,9 @@ format:
 typecheck:
 	pyright
 
-test:
-	pytest
+test: $(TEST_FILES)
+
+$(TEST_FILES):
+	pytest $@
 
 check: lint format typecheck

@@ -321,6 +321,13 @@ def _delete_patch_state(
         pass
 
 
+def _copy_gremlins_overlay(project_root: str, workdir: str) -> None:
+    # `.gremlins/` is conventionally untracked, so worktrees miss it; copy it across.
+    src = pathlib.Path(project_root) / ".gremlins"
+    if src.is_dir():
+        shutil.copytree(src, pathlib.Path(workdir) / ".gremlins", dirs_exist_ok=True)
+
+
 def _setup_workdir(
     mode: str, project_root: str, base_ref: str, gr_id: str
 ) -> tuple[str, str, str, str]:
@@ -332,6 +339,7 @@ def _setup_workdir(
         workdir, branch = _git_mod.setup_worktree_branch(
             project_root, gr_id, base_ref=base_ref
         )
+        _copy_gremlins_overlay(project_root, workdir)
         return workdir, branch, "", "worktree-branch"
 
     if mode == "gh":
@@ -347,15 +355,14 @@ def _setup_workdir(
                 f"git fetch origin {default_branch} failed: {fr.stderr.strip()}"
             )
         worktree_base = f"origin/{default_branch}"
-        return (
-            _git_mod.setup_detached_worktree(project_root, worktree_base),
-            "",
-            worktree_base,
-            "worktree",
-        )
+        workdir = _git_mod.setup_detached_worktree(project_root, worktree_base)
+        _copy_gremlins_overlay(project_root, workdir)
+        return workdir, "", worktree_base, "worktree"
 
     # boss mode: detached worktree off base_ref
-    return _git_mod.setup_detached_worktree(project_root, base_ref), "", "", "worktree"
+    workdir = _git_mod.setup_detached_worktree(project_root, base_ref)
+    _copy_gremlins_overlay(project_root, workdir)
+    return workdir, "", "", "worktree"
 
 
 def _build_spawn_env(gr_id: str) -> dict[str, str]:
