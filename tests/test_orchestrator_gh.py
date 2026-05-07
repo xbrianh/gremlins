@@ -13,7 +13,7 @@ import subprocess
 import pytest
 
 import gremlins.orchestrators.gh as _gh_mod
-import gremlins.orchestrators.pipeline as _pipeline_mod
+import gremlins.orchestrators.gh_pipeline as _pipeline_mod
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.git import (
     DirtyOnly,
@@ -115,7 +115,7 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         shutil, "which", lambda n: f"/fake/{n}" if n in ("claude", "gh") else None
     )
     monkeypatch.setattr(
-        "gremlins.orchestrators.pipeline.install_signal_handlers", lambda *c: None
+        "gremlins.orchestrators.base.install_signal_handlers", lambda *c: None
     )
     monkeypatch.setattr(
         "gremlins.orchestrators.gh.install_signal_handlers", lambda *c: None

@@ -1,4 +1,4 @@
-"""Orchestrator entry points for the local pipeline."""
+"""Orchestrator entry point for the local pipeline."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ from gremlins.git import (
     rev_exists,
 )
 from gremlins.logging_setup import configure_logging
-from gremlins.orchestrators.pipeline import LocalPipeline
+from gremlins.orchestrators.local_pipeline import LocalPipeline
 from gremlins.pipeline import (
     load_pipeline,
     resolve_pipeline_path,
