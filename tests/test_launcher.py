@@ -821,6 +821,26 @@ def test_launch_ghgremlin_state_layout(lenv_with_gh):
     assert workdir.is_dir(), f"worktree directory should exist: {workdir}"
 
 
+def test_launch_gh_plan_issue_ref_not_snapshotted(tmp_path, monkeypatch, lenv_with_gh):
+    """gh pipeline with --plan <issue-ref> keeps the raw ref; no new issue is created."""
+    lenv = lenv_with_gh
+    gh_log = tmp_path / "gh.log"
+    monkeypatch.setenv("FAKE_GH_LOG", str(gh_log))
+
+    launcher = _launcher()
+    gr_id = launcher.launch("gh", plan="42")
+    state = _read_state(_gremlins_state_root(lenv) / gr_id)
+
+    idx = state["pipeline_args"].index("--plan")
+    persisted = state["pipeline_args"][idx + 1]
+    assert persisted == "42", f"expected raw issue ref '42', got: {persisted!r}"
+
+    if gh_log.exists():
+        calls = [json.loads(line)["argv"] for line in gh_log.read_text().splitlines()]
+        created = [c for c in calls if c[:2] == ["issue", "create"]]
+        assert not created, f"gh issue create should not be called, got: {created}"
+
+
 # ---------------------------------------------------------------------------
 # PYTHONSAFEPATH worktree-rename regression
 # ---------------------------------------------------------------------------
