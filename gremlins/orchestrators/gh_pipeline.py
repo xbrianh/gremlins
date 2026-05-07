@@ -27,7 +27,7 @@ from gremlins.stages import (
     wait_copilot,
 )
 from gremlins.stages import handoff_branch as handoff_branch_mod
-from gremlins.stages.base import StageContext
+from gremlins.stages.base import Stage, StageContext
 from gremlins.stages.handoff_branch import HandoffBranchResult
 from gremlins.state import patch_state, set_stage
 
@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 class GHPipeline(Pipeline):
     target = "github"
-    STAGE_TYPES: dict[str, type] = {
+    STAGE_TYPES: dict[str, type[Stage]] = {
         "plan": plan.Plan,
         "implement": implement.Implement,
         "handoff-branch": handoff_branch_mod.HandoffBranch,

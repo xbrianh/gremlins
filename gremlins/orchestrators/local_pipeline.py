@@ -15,7 +15,7 @@ from gremlins.orchestrators.base import Pipeline, die
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline import StageEntry
 from gremlins.stages import address_code, implement, plan, review_code, verify
-from gremlins.stages.base import StageContext
+from gremlins.stages.base import Stage, StageContext
 from gremlins.stages.chain import Chain
 from gremlins.state import set_stage
 
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 class LocalPipeline(Pipeline):
     target = "local"
-    STAGE_TYPES: dict[str, type] = {
+    STAGE_TYPES: dict[str, type[Stage]] = {
         "plan": plan.Plan,
         "implement": implement.Implement,
         "verify": verify.Verify,
