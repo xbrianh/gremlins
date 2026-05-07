@@ -2,6 +2,7 @@
 
 from gremlins.stages import (
     address_code,
+    chain,
     commit,
     implement,
     open_github_pr,
@@ -15,6 +16,7 @@ from gremlins.stages import (
 
 __all__ = [
     "address_code",
+    "chain",
     "commit",
     "implement",
     "open_github_pr",

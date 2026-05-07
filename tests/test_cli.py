@@ -358,8 +358,9 @@ def test_gh_invalid_resume_from_exits_nonzero_no_state(tmp_path, monkeypatch):
     assert _no_state_created(tmp_path)
 
 
-def test_boss_missing_chain_kind_exits_nonzero_no_state(tmp_path, monkeypatch):
-    rc = main(["launch", "boss", "--plan", "x.md"])
+def test_boss_missing_plan_exits_nonzero_no_state(tmp_path, monkeypatch):
+    # --plan is required for bossgremlin
+    rc = main(["launch", "boss"])
     assert rc != 0
     assert _no_state_created(tmp_path)
 
@@ -405,16 +406,18 @@ def test_gh_positional_instructions_passes():
     _validate_gh_args(ns, ["fix the bug"])
 
 
-def test_boss_valid_chain_kind_passes():
-    _validate_boss_args(["--chain-kind", "local"], "plan.md")
+def test_boss_with_plan_passes():
+    _validate_boss_args("plan.md")
 
 
 def test_boss_missing_plan_raises():
     with pytest.raises(ValueError, match="--plan is required"):
-        _validate_boss_args(["--chain-kind", "local"], None)
+        _validate_boss_args(None)
 
 
-def test_boss_missing_plan_exits_nonzero_no_state(tmp_path, monkeypatch):
+def test_boss_missing_plan_with_chain_kind_exits_nonzero_no_state(
+    tmp_path, monkeypatch
+):
     rc = main(["launch", "boss", "--chain-kind", "local"])
     assert rc != 0
     assert _no_state_created(tmp_path)

@@ -1,0 +1,17 @@
+name: boss
+
+default_client: claude:sonnet
+
+stages:
+  - name: chain
+    type: chain
+    options:
+      child: local
+
+  - name: review-chain
+    type: review-code
+    prompt: [code_style.md, review/chain.md]
+
+  - name: address-chain
+    type: address-code
+    prompt: [code_style.md, address.md, bail_section.md]
