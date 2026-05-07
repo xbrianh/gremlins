@@ -481,7 +481,7 @@ def test_address_code_stage_emits_bail_on_failure(tmp_path, make_state_dir):
 
 
 def test_address_code_finds_review_files_in_parallel_subdirs(tmp_path):
-    # Simulate parallel group: reviews/<group>/<child>/<stage>-<model>.md
+    # Simulate parallel group: reviews_dir/<child>/<stage>-<model>.md
     reviews_dir = tmp_path / "reviews"
     child1_dir = reviews_dir / "review-code"
     child2_dir = reviews_dir / "review-code-fidelity"

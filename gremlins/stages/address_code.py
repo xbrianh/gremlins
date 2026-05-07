@@ -71,8 +71,12 @@ class AddressCode(Stage):
                 review_files.append((stage_name, pathlib.Path(m)))
         if not review_files:
             stages_str = ", ".join(self.review_stage_names)
+            searched = ", ".join(
+                str(self.review_stage_dirs.get(s, self.state.session_dir))
+                for s in self.review_stage_names
+            )
             raise FileNotFoundError(
-                f"no review files found in {self.state.session_dir} (stages: {stages_str})"
+                f"no review files found in [{searched}] (stages: {stages_str})"
             )
         first_stage_name, first_path = review_files[0]
         review_model = _model_from(first_path, first_stage_name)
