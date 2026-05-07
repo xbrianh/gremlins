@@ -10,6 +10,7 @@ from collections.abc import Callable
 
 from gremlins.clients import ClientSpec
 from gremlins.clients.protocol import ClaudeClient
+from gremlins.gh_utils import get_repo, parse_issue_ref, view_issue
 from gremlins.orchestrators.base import Pipeline, die, read_stage_inputs
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline import StageEntry
@@ -65,12 +66,31 @@ class LocalPipeline(Pipeline):
         plan_file = session_dir / "plan.md"
         if plan_path and not plan_file.exists():
             src = pathlib.Path(plan_path)
-            if not src.is_file():
-                raise ValueError(f"--plan: file not found: {plan_path}")
-            if src.stat().st_size == 0:
-                raise ValueError(f"--plan: file is empty: {plan_path}")
-            shutil.copyfile(src, plan_file)
-            self.plan_copied_from_source = True
+            if src.is_file():
+                if src.stat().st_size == 0:
+                    raise ValueError(f"--plan: file is empty: {plan_path}")
+                shutil.copyfile(src, plan_file)
+                self.plan_copied_from_source = True
+            else:
+                target_repo, issue_ref = parse_issue_ref(plan_path, "")
+                if issue_ref is None:
+                    raise ValueError(f"--plan: file not found: {plan_path}")
+                if not target_repo:
+                    try:
+                        target_repo = get_repo()
+                    except RuntimeError as exc:
+                        raise ValueError(
+                            f"--plan: could not resolve repo: {exc}"
+                        ) from exc
+                try:
+                    issue_data = view_issue(issue_ref, target_repo)
+                except RuntimeError as exc:
+                    raise ValueError(f"--plan: {exc}") from exc
+                body = (issue_data.get("body") or "").strip()
+                if not body:
+                    raise ValueError(f"--plan: issue {plan_path} has empty body")
+                plan_file.write_text(body, encoding="utf-8")
+                self.plan_copied_from_source = True
 
         spec_file = session_dir / "spec.md"
         if spec_path and not spec_file.exists():

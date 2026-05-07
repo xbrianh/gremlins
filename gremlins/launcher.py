@@ -194,29 +194,6 @@ def _resolve_description_and_slug(
     return "", False, "gremlin"
 
 
-def _resolve_boss_plan(
-    plan: str, issue_data: dict[str, Any] | None, state_dir: pathlib.Path
-) -> str:
-    """Resolve a boss pipeline --plan arg to an absolute path.
-
-    Accepts a file path (passed through, normalized to absolute) or an issue
-    ref whose body has already been fetched via :func:`_fetch_issue`. Snapshots
-    the issue body to ``state_dir/plan-from-issue.md``.
-    """
-    if os.path.isfile(plan):
-        return str(pathlib.Path(plan).resolve())
-    if issue_data is None:
-        raise ValueError(
-            f"--plan: not a file and could not resolve as issue ref: {plan}"
-        )
-    body = (issue_data.get("body") or "").strip()
-    if not body:
-        raise ValueError(f"--plan: issue {plan} has empty body")
-    snap = state_dir / "plan-from-issue.md"
-    snap.write_text(body, encoding="utf-8")
-    return str(snap)
-
-
 def _write_state(state_dir: pathlib.Path, data: dict[str, Any]) -> None:
     """Atomically write state.json."""
     sf = state_dir / "state.json"
@@ -469,8 +446,14 @@ def launch(
     if plan and os.path.isfile(plan):
         plan = str(pathlib.Path(plan).resolve())
 
-    if plan and not os.path.isfile(plan) and (os.sep in plan or plan.endswith(".md")):
-        raise ValueError(f"--plan: file not found: {plan}")
+    if plan and not os.path.isfile(plan):
+        if os.sep in plan or plan.endswith(".md"):
+            raise ValueError(f"--plan: file not found: {plan}")
+        _, _issue_ref = parse_issue_ref(plan, "")
+        if _issue_ref is None:
+            raise ValueError(
+                f"--plan: not a file or recognized issue ref (use #N or owner/repo#N): {plan}"
+            )
 
     issue_data: dict[str, Any] | None = None
     if plan and not os.path.isfile(plan):
@@ -515,9 +498,6 @@ def launch(
 
     workdir = None
     try:
-        if plan and not os.path.isfile(plan) and pipeline_mode != "gh":
-            plan = _resolve_boss_plan(plan, issue_data, state_dir)
-
         # pipeline_args for state.json: includes --plan and --spec when set
         stored_pipeline_args = list(resolved_pipeline_args)
         if spec_path and "--spec" not in stored_pipeline_args:

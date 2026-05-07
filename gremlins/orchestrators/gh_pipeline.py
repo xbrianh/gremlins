@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import pathlib
+import re
+import shutil
 import subprocess
 from collections.abc import Callable
 
 from gremlins.clients import ClientSpec
 from gremlins.clients.protocol import ClaudeClient
+from gremlins.gh_utils import parse_issue_ref, view_issue
 from gremlins.git import DirtyOnly, HeadAdvanced, PreImplState, record_pre_impl_state
 from gremlins.orchestrators.base import (
     Pipeline,
@@ -37,6 +41,35 @@ from gremlins.stages.handoff_branch import HandoffBranchResult
 from gremlins.state import patch_state, set_stage
 
 logger = logging.getLogger(__name__)
+
+
+def _update_description_from_plan(
+    plan_md: pathlib.Path,
+    state_file: pathlib.Path | None,
+    gr_id: str | None = None,
+    *,
+    issue_title: str = "",
+) -> None:
+    if state_file is None or not state_file.exists():
+        return
+    try:
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+        if data.get("description_explicit"):
+            return
+        if issue_title:
+            patch_state(gr_id, description=issue_title[:60])
+            return
+        lines = plan_md.read_text(encoding="utf-8").splitlines()[:50]
+        h1 = ""
+        for line in lines:
+            m = re.match(r"^#\s+(.+)", line)
+            if m:
+                h1 = m.group(1)[:60]
+                break
+        if h1:
+            patch_state(gr_id, description=h1)
+    except Exception:
+        pass
 
 
 class GHPipeline(Pipeline):
@@ -107,6 +140,98 @@ class GHPipeline(Pipeline):
         self.pr_num = saved.split("/")[-1]
         logger.info("resumed PR: %s", saved)
 
+    def _do_plan_source(
+        self,
+        plan_src: str,
+        plan_md: pathlib.Path,
+        client: ClaudeClient,
+        model: str | None,
+    ) -> None:
+        """Resolve --plan (file or issue ref) and populate self.issue_url/num/body."""
+        issue_title = ""
+        issue_url = ""
+        issue_num = ""
+        if pathlib.Path(plan_src).is_file():
+            src = pathlib.Path(plan_src)
+            if src.stat().st_size == 0:
+                die(f"--plan: file is empty: {plan_src}")
+            issue_body = src.read_text(encoding="utf-8")
+            logger.info(
+                "[1/8] plan supplied via --plan (file): %s — posting as GitHub issue",
+                plan_src,
+            )
+            title_prompt = (
+                "Produce a concise GitHub issue title (under 80 characters) "
+                "summarizing the spec below. Output ONLY the title, nothing else."
+                f"\n\n{issue_body}"
+            )
+            completed = client.run(title_prompt, label="plan-title", model=model)
+            parts = (completed.text_result or "").strip().splitlines()
+            issue_title = parts[0][:80] if parts else ""
+            if not issue_title:
+                die("--plan: title agent returned empty output")
+            r = subprocess.run(
+                [
+                    "gh",
+                    "issue",
+                    "create",
+                    "--repo",
+                    self.repo,
+                    "--title",
+                    issue_title,
+                    "--body-file",
+                    plan_src,
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if r.returncode != 0:
+                die(f"--plan: failed to create GitHub issue: {r.stderr.strip()}")
+            create_out = r.stdout + r.stderr
+            m = re.search(r"https://github\.com/[^ )]+/issues/[0-9]+", create_out)
+            if not m:
+                die(
+                    f"--plan: could not extract issue URL from gh output: {create_out.strip()}"
+                )
+            issue_url = m.group(0)
+            issue_num = issue_url.split("/")[-1]
+            logger.info("issue: %s", issue_url)
+            shutil.copyfile(src, plan_md)
+        else:
+            target_repo, issue_ref = parse_issue_ref(plan_src, self.repo)
+            if target_repo is None or issue_ref is None:
+                die(
+                    f"--plan: not a readable file or recognized issue reference: {plan_src}"
+                )
+            try:
+                issue_data = view_issue(issue_ref, target_repo)
+            except RuntimeError as exc:
+                die(f"--plan: {exc}")
+            issue_body = issue_data.get("body") or ""
+            if not issue_body:
+                die(f"--plan: issue {plan_src} has an empty body")
+            resolved_url = issue_data.get("url") or ""
+            resolved_num = str(issue_data.get("number") or "")
+            issue_title = (issue_data.get("title") or "")[:60]
+            if target_repo == self.repo:
+                issue_url = resolved_url
+                issue_num = resolved_num
+            else:
+                issue_url = ""
+                issue_num = ""
+            plan_md.write_text(issue_body + "\n", encoding="utf-8")
+            logger.info(
+                "[1/8] plan supplied via --plan (issue %s#%s)", target_repo, issue_ref
+            )
+        self.issue_url = issue_url
+        self.issue_num = issue_num
+        self.issue_body = issue_body
+        patch_state(self.gr_id, issue_url=issue_url, issue_num=issue_num)
+        _update_description_from_plan(
+            plan_md, self.state_file, gr_id=self.gr_id, issue_title=issue_title
+        )
+
     def _make_runner(
         self, entry: StageEntry, ctx: StageContext, spec: ClientSpec
     ) -> Callable[[], None]:
@@ -114,8 +239,28 @@ class GHPipeline(Pipeline):
         if entry.type == "plan":
 
             def _plan() -> None:
-                if self.args.plan_source:
+                plan_md = self.session_dir / "plan.md"
+
+                if plan_md.exists() and plan_md.stat().st_size > 0:
+                    self.issue_url = read_state_field(self.state_file, "issue_url")
+                    self.issue_num = read_state_field(self.state_file, "issue_num")
+                    self.issue_body = plan_md.read_text(encoding="utf-8")
+                    label = f" (issue #{self.issue_num})" if self.issue_num else ""
+                    logger.info(
+                        "[1/8] plan resumed from snapshot: %s%s", plan_md, label
+                    )
                     return
+
+                if self.args.plan_source:
+                    set_stage(self.gr_id, entry.name)
+                    self._do_plan_source(
+                        self.args.plan_source,
+                        plan_md,
+                        self._get_client(spec),
+                        model,
+                    )
+                    return
+
                 if not entry.prompt_paths:
                     die(
                         f"stage {entry.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML"
