@@ -16,7 +16,7 @@ from typing import NoReturn
 from gremlins.clients import ClientSpec
 from gremlins.clients.protocol import ClaudeClient
 from gremlins.clients.resolve import require_stage_spec
-from gremlins.git import DirtyOnly, HeadAdvanced, in_git_repo
+from gremlins.git import DirtyOnly, HeadAdvanced, PreImplState, in_git_repo, record_pre_impl_state
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline import StageEntry
 from gremlins.runner import build_parallel_stages, install_signal_handlers, run_stages
@@ -26,6 +26,7 @@ from gremlins.stages import (
     ghaddress,
     ghplan,
     ghreview,
+    handoff_branch as handoff_branch_mod,
     implement,
     open_github_pr,
     plan,
@@ -36,7 +37,7 @@ from gremlins.stages import (
     wait_copilot,
 )
 from gremlins.stages.base import Stage, StageContext
-from gremlins.stages.implement import ImplStageResult
+from gremlins.stages.handoff_branch import HandoffBranchResult
 from gremlins.state import patch_state, set_stage
 
 logger = logging.getLogger(__name__)
@@ -405,6 +406,7 @@ class GHPipeline(Pipeline):
     STAGE_TYPES: dict[str, type[Stage]] = {
         "plan": ghplan.GHPlan,
         "implement": implement.Implement,
+        "handoff-branch": handoff_branch_mod.HandoffBranch,
         "verify": verify.Verify,
         "commit": commit.Commit,
         "open-github-pr": open_github_pr.OpenGitHubPR,
@@ -445,7 +447,10 @@ class GHPipeline(Pipeline):
         self.issue_url: str = ""
         self.issue_num: str = ""
         self.issue_body: str = ""
-        self.impl_result: ImplStageResult | None = None
+        self.impl_pre_state: PreImplState | None = None
+        self.impl_handoff_result: HandoffBranchResult | None = None
+        self.impl_handoff_branch: str = ""
+        self.impl_base_ref: str = ""
         self.pr_url: str = ""
         self.pr_num: str = ""
 
@@ -506,33 +511,43 @@ class GHPipeline(Pipeline):
                             "could not read spec.md (%s); proceeding without north-star context",
                             exc,
                         )
+                self.impl_pre_state = record_pre_impl_state()
                 stage = implement.Implement(
                     entry,
                     model,
                     plan_text=self.issue_body,
                     is_git=True,
-                    kind="gh",
-                    issue_num=self.issue_num,
                     spec_text=spec_text,
                 )
                 stage.bind(ctx)
-                impl_result = stage.run(None)
-                if impl_result is None:
-                    _die("implement stage did not produce a result")
-                self.impl_result = impl_result
-                patch_state(
-                    self.gr_id,
-                    impl_handoff_branch=impl_result.handoff_branch,
-                    impl_base_ref=impl_result.pre_state.head,
-                )
+                stage.run(self)
 
             return _implement
+
+        if entry.type == "handoff-branch":
+
+            def _handoff_branch() -> None:
+                set_stage(self.gr_id, entry.name)
+                logger.info("[2b/8] creating handoff branch")
+                stage = handoff_branch_mod.HandoffBranch(entry, model)
+                stage.bind(ctx)
+                result = stage.run(self)
+                self.impl_handoff_result = result
+                self.impl_handoff_branch = result.handoff_branch
+                self.impl_base_ref = result.base_ref
+                patch_state(
+                    self.gr_id,
+                    impl_handoff_branch=result.handoff_branch,
+                    impl_base_ref=result.base_ref,
+                )
+
+            return _handoff_branch
 
         if entry.type == "verify":
 
             def _verify() -> None:
                 set_stage(self.gr_id, entry.name)
-                logger.info("[2b/8] verifying implementation")
+                logger.info("[2c/8] verifying implementation")
                 stage = verify.Verify(entry, model, is_git=True, commit_after_fix=False)
                 stage.bind(ctx)
                 stage.run(None)
@@ -543,12 +558,12 @@ class GHPipeline(Pipeline):
 
             def _commit() -> None:
                 set_stage(self.gr_id, entry.name)
-                logger.info("[2c/8] committing changes")
-                impl_result = self.impl_result
-                if impl_result is not None:
-                    impl_outcome = impl_result.outcome
-                    impl_handoff_branch = impl_result.handoff_branch
-                    base_ref = impl_result.pre_state.head
+                logger.info("[2d/8] committing changes")
+                hb_result = self.impl_handoff_result
+                if hb_result is not None:
+                    impl_outcome = hb_result.outcome
+                    impl_handoff_branch = hb_result.handoff_branch
+                    base_ref = hb_result.base_ref
                 else:
                     impl_handoff_branch = read_state_field(
                         self.state_file, "impl_handoff_branch"
@@ -599,7 +614,7 @@ class GHPipeline(Pipeline):
 
             def _open_github_pr() -> None:
                 set_stage(self.gr_id, entry.name)
-                logger.info("[2d/8] opening GitHub PR")
+                logger.info("[2e/8] opening GitHub PR")
                 stage = open_github_pr.OpenGitHubPR(
                     entry,
                     model,

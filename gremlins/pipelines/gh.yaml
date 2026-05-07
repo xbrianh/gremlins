@@ -5,6 +5,7 @@ default_client: claude:sonnet
 stages:
   - { name: plan,            type: plan,            prompt: [code_style.md, plan_gh.md] }
   - { name: implement,       type: implement,       prompt: [code_style.md, implement_gh.md] }
+  - { name: handoff-branch,  type: handoff-branch }
   - { name: verify,          type: verify,          options: { cmds: ["make check", "make test"] }, prompt: [verify_fix.md, bail_section_fix.md] }
   - { name: commit,          type: commit }
   - { name: open-pr,         type: open-github-pr }

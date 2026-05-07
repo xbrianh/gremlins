@@ -453,6 +453,7 @@ def test_gh_pipeline_stage_names(tmp_path):
     assert names == [
         "plan",
         "implement",
+        "handoff-branch",
         "verify",
         "commit",
         "open-pr",
@@ -756,6 +757,7 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
     stage_defs = [
         ("plan", "plan"),
         ("implement", "implement"),
+        ("handoff-branch", "handoff-branch"),
         ("verify", "verify"),
         ("commit", "commit"),
         ("open-pr", "open-github-pr"),
@@ -768,6 +770,7 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
     original_stage_clients = {
         "plan": "claude:claude-sonnet-4-6",
         "implement": "claude:claude-haiku-4-5-20251001",
+        "handoff-branch": "claude:claude-sonnet-4-6",
         "verify": "claude:claude-opus-4-1",
         "commit": "copilot:gpt-4o",
         "open-pr": "copilot:gpt-4o",
@@ -992,6 +995,7 @@ def test_gh_main_resume_requires_each_persisted_stage_client(
             "stage_clients": {
                 "plan": "claude:sonnet",
                 "implement": "claude:sonnet",
+                "handoff-branch": "claude:sonnet",
                 "verify": "claude:sonnet",
                 "commit": "claude:sonnet",
                 "open-pr": "claude:sonnet",
