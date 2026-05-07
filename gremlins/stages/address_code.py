@@ -35,6 +35,7 @@ class AddressCode(Stage):
         *,
         is_git: bool,
         review_stage_names: list[str] | None = None,
+        review_stage_dirs: dict[str, pathlib.Path] | None = None,
         pr_url: str = "",
     ) -> None:
         super().__init__(entry, model)
@@ -42,6 +43,7 @@ class AddressCode(Stage):
         self.review_stage_names = (
             review_stage_names if review_stage_names is not None else ["review-code"]
         )
+        self.review_stage_dirs = review_stage_dirs or {}
         self.pr_url = pr_url
 
     def run(self, pipe: Any) -> None:
@@ -64,9 +66,8 @@ class AddressCode(Stage):
     def _inputs_from_local(self, pipe: Any) -> dict[str, str]:
         review_files: list[tuple[str, pathlib.Path]] = []
         for stage_name in self.review_stage_names:
-            for m in sorted(
-                glob.glob(str(self.state.session_dir / f"{stage_name}-*.md"))
-            ):
+            search_dir = self.review_stage_dirs.get(stage_name, self.state.session_dir)
+            for m in sorted(glob.glob(str(search_dir / f"{stage_name}-*.md"))):
                 review_files.append((stage_name, pathlib.Path(m)))
         if not review_files:
             stages_str = ", ".join(self.review_stage_names)

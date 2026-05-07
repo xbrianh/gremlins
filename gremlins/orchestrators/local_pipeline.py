@@ -6,7 +6,7 @@ import argparse
 import logging
 import pathlib
 import shutil
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 
 from gremlins.clients import ClientSpec
 from gremlins.clients.protocol import ClaudeClient
@@ -168,16 +168,19 @@ class LocalPipeline(Pipeline):
             return _review_code
 
         if entry.type == "address-code":
-
-            def _all_stages() -> Iterator[StageEntry]:
-                for s in self.pipeline_data.stages:
-                    yield s
-                    if s.type == "parallel":
-                        yield from s.children
-
-            review_stage_names = [
-                s.name for s in _all_stages() if s.type == "review-code"
-            ]
+            review_stage_names: list[str] = []
+            review_stage_dirs: dict[str, pathlib.Path] = {}
+            for s in self.pipeline_data.stages:
+                if s.type == "parallel":
+                    for child in s.children:
+                        if child.type == "review-code":
+                            review_stage_names.append(child.name)
+                            review_stage_dirs[child.name] = (
+                                self.session_dir / s.name / child.name
+                            )
+                elif s.type == "review-code":
+                    review_stage_names.append(s.name)
+                    review_stage_dirs[s.name] = self.session_dir
 
             def _address_code() -> None:
                 set_stage(gr_id, entry.name)
@@ -187,6 +190,7 @@ class LocalPipeline(Pipeline):
                     model,
                     is_git=is_git,
                     review_stage_names=review_stage_names,
+                    review_stage_dirs=review_stage_dirs,
                 )
                 stage.bind(ctx)
                 stage.run(None)
