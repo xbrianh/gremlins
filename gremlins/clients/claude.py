@@ -147,17 +147,16 @@ class SubprocessClaudeClient:
                         p.kill()
                     except OSError:
                         pass
-                    p.wait()
+                    try:
+                        p.wait(timeout=5.0)
+                    except subprocess.TimeoutExpired:
+                        pass
                 p.stdout.close()
-                rc = p.returncode
-            else:
-                p.stdout.close()
-                rc = p.wait()
+                raise StreamTimeoutError("claude -p stream idle timeout")
+            p.stdout.close()
+            rc = p.wait()
         finally:
             self._untrack(p)
-
-        if timed_out:
-            raise StreamTimeoutError("claude -p stream idle timeout")
 
         return CompletedRun(
             exit_code=rc,

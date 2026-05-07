@@ -156,6 +156,10 @@ def stream_events(
                 line = q.get(timeout=idle_timeout)
             except queue.Empty:
                 timed_out = True
+                try:
+                    stdout.close()
+                except OSError:
+                    pass
                 break
             if line is None:
                 break
@@ -175,6 +179,7 @@ def stream_events(
             except Exception:
                 pass
     finally:
+        t.join(timeout=5.0)
         if raw is not None:
             raw.close()
     return (
