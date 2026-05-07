@@ -148,6 +148,57 @@ def test_liveness_stalled_when_log_is_old(tmp_path, monkeypatch):
     assert gremlins.liveness_of_state_file(sf).startswith("stalled:")
 
 
+def test_boss_waiting_with_old_log_shows_waiting_duration(tmp_path):
+    sf = _write_state(
+        tmp_path / "g",
+        {
+            "status": "running",
+            "pid": os.getpid(),
+            "kind": "bossgremlin",
+            "stage": "waiting",
+        },
+        log_text="old",
+    )
+    log_path = tmp_path / "g" / "log"
+    old = os.path.getmtime(log_path) - 200
+    os.utime(log_path, (old, old))
+    live = gremlins.liveness_of_state_file(sf)
+    assert live.startswith("waiting (")
+    assert "stalled" not in live
+
+
+def test_boss_waiting_no_log_shows_waiting(tmp_path):
+    sf = _write_state(
+        tmp_path / "g",
+        {
+            "status": "running",
+            "pid": os.getpid(),
+            "kind": "bossgremlin",
+            "stage": "waiting",
+        },
+    )
+    live = gremlins.liveness_of_state_file(sf)
+    assert live == "waiting"
+
+
+def test_boss_non_waiting_stage_shows_running(tmp_path, monkeypatch):
+    sf = _write_state(
+        tmp_path / "g",
+        {
+            "status": "running",
+            "pid": os.getpid(),
+            "kind": "bossgremlin",
+            "stage": "handoff",
+        },
+        log_text="old",
+    )
+    log_path = tmp_path / "g" / "log"
+    old = os.path.getmtime(log_path) - 10000
+    os.utime(log_path, (old, old))
+    monkeypatch.setattr(_constants, "BG_STALL_SECS", 100)
+    assert gremlins.liveness_of_state_file(sf) == "running"
+
+
 # ---------------------------------------------------------------------------
 # build_row — rescue marker (state transition: dead → rescued → running)
 # ---------------------------------------------------------------------------
@@ -161,7 +212,7 @@ def test_build_row_rescue_suffix_singular():
         "started_at": "",
     }
     row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
-    assert "(rescue)" in row["live"]
+    assert "(rescue)" in row.liveness
 
 
 def test_build_row_rescue_suffix_multiple():
@@ -172,7 +223,7 @@ def test_build_row_rescue_suffix_multiple():
         "started_at": "",
     }
     row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
-    assert "(rescue x3)" in row["live"]
+    assert "(rescue x3)" in row.liveness
 
 
 def test_build_row_no_rescue_suffix_when_zero():
@@ -183,7 +234,19 @@ def test_build_row_no_rescue_suffix_when_zero():
         "started_at": "",
     }
     row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
-    assert "(rescue" not in row["live"]
+    assert "(rescue" not in row.liveness
+
+
+def test_build_row_boss_waiting_with_child_stage():
+    state = {
+        "kind": "boss",
+        "pipeline_kind": "boss",
+        "stage": "waiting",
+        "chain_current_child_stage": "implement",
+        "started_at": "",
+    }
+    row = gremlins.build_row("g1", "/sf", "/wdir", state, "waiting (3m12s)")
+    assert row.stage == "waiting:implement"
 
 
 def test_build_row_client_from_state():
@@ -194,13 +257,13 @@ def test_build_row_client_from_state():
         "client": "copilot:gpt-5.4",
     }
     row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
-    assert row["client"] == "copilot:gpt-5.4"
+    assert row.client == "copilot:gpt-5.4"
 
 
 def test_build_row_client_missing_field_shows_dash():
     state = {"kind": "localgremlin", "stage": "implement", "started_at": ""}
     row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
-    assert row["client"] == "—"
+    assert row.client == "—"
 
 
 def test_build_row_preserves_long_client_label():
@@ -212,7 +275,7 @@ def test_build_row_preserves_long_client_label():
         "client": client,
     }
     row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
-    assert row["client"] == client
+    assert row.client == client
 
 
 # ---------------------------------------------------------------------------

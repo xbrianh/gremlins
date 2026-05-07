@@ -5,10 +5,9 @@ import datetime
 import json
 import os
 import time
-from typing import Any
 
 from gremlins.fleet.duration import parse_duration
-from gremlins.fleet.render import build_row, print_table
+from gremlins.fleet.render import FleetRow, build_row, print_table
 from gremlins.fleet.state import (
     effective_pipeline_kind,
     humanize_age,
@@ -25,9 +24,9 @@ def collect_rows(
     since_secs: float | None = None,
     liveness_filter: set[str] | None = None,
     include_closed: bool = False,
-) -> list[dict[str, Any]]:
+) -> list[FleetRow]:
     """
-    Collect and return a list of row dicts, sorted by started_at ascending.
+    Collect and return a list of FleetRows, sorted by started_at ascending.
 
     here_root         — if set, restrict to gremlins with this project_root.
     kind_filter       — if set ('local', 'gh', or 'boss'), restrict to that kind.
@@ -36,7 +35,7 @@ def collect_rows(
     include_closed    — if True, include closed gremlins (for drill-in / --recent).
     """
     now = time.time()
-    rows: list[dict[str, Any]] = []
+    rows: list[FleetRow] = []
     for gr_id, sf, wdir in iter_state_files():
         if not include_closed and os.path.isfile(os.path.join(wdir, "closed")):
             continue
@@ -76,7 +75,7 @@ def collect_rows(
         row = build_row(gr_id_from_state, sf, wdir, state, live)
         rows.append(row)
 
-    rows.sort(key=lambda r: r["started_at"])
+    rows.sort(key=lambda r: r.started_at)
     return rows
 
 
@@ -87,6 +86,7 @@ def do_list(args: argparse.Namespace, here_root: str | None = None) -> None:
         liveness_filter = set()
         if args.running:
             liveness_filter.add("running")
+            liveness_filter.add("waiting")
         if args.dead:
             liveness_filter.add("dead:")
         if args.stalled:
@@ -110,7 +110,12 @@ def do_list(args: argparse.Namespace, here_root: str | None = None) -> None:
 
     # Running gremlins float to the top; within each group, older gremlins
     # appear first by started_at.
-    rows.sort(key=lambda r: (r["live_full"] != "running", r["started_at"]))
+    rows.sort(
+        key=lambda r: (
+            r.live_full != "running" and not r.live_full.startswith("waiting"),
+            r.started_at,
+        )
+    )
 
     if not rows:
         if here_root is not None:
@@ -134,10 +139,6 @@ def do_recent(args: argparse.Namespace, here_root: str | None = None) -> None:
         liveness_filter={"dead:"},
         include_closed=True,
     )
-
-    for row in rows:
-        if row["closed"]:
-            row["desc"] = row["desc"][:51] + " [closed]"
 
     if not rows:
         if here_root is not None:

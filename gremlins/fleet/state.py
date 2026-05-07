@@ -57,10 +57,21 @@ def render_sub_stage(sub: str | dict[str, object] | None) -> str:
     return str(sub)
 
 
+def _fmt_duration(secs: int) -> str:
+    # Intentionally more precise than humanize_age (shows seconds within the hour).
+    if secs < 60:
+        return f"{secs}s"
+    m, s = divmod(secs, 60)
+    if m < 60:
+        return f"{m}m{s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h{m:02d}m"
+
+
 def liveness_of_state_file(sf: str, state: dict[str, object] | None = None) -> str:
     """
     Classify a gremlin's liveness from its state.json path.
-    Returns one of: running, dead:<reason>, stalled:<reason>.
+    Returns one of: running, waiting (<duration>), dead:<reason>, stalled:<reason>.
     Replicates liveness.sh inline — no shell-out.
     Pass an already-loaded state dict to avoid a second JSON parse.
     """
@@ -78,6 +89,7 @@ def liveness_of_state_file(sf: str, state: dict[str, object] | None = None) -> s
     gr_pid = state.get("pid")
     gr_exit_code = state.get("exit_code")
     gr_bail_reason = state.get("bail_reason")
+    is_boss = str(state.get("kind") or "") == "bossgremlin"
 
     # Terminal: finish.sh (or headless rescue's bail path) wrote the
     # `finished` marker. A bail_reason takes precedence over the generic
@@ -100,6 +112,24 @@ def liveness_of_state_file(sf: str, state: dict[str, object] | None = None) -> s
                 if workdir and not os.path.isdir(workdir):
                     return "dead:host-terminated"
                 return f"dead:crashed (pid {gr_pid} gone)"
+
+        # Boss gremlins are idle by design while waiting for a child; skip
+        # the stall heuristic entirely and show time since last log write.
+        if is_boss:
+            stage = str(state.get("stage") or "")
+            if stage == "waiting":
+                log_path = os.path.join(wdir, "log")
+                if os.path.isfile(log_path):
+                    try:
+                        age_secs = max(0, int(time.time() - os.path.getmtime(log_path)))
+                        return f"waiting ({_fmt_duration(age_secs)})"
+                    except OSError:
+                        pass
+                return "waiting"
+            # Non-waiting boss stages (handoff, landing) show running unconditionally;
+            # a hung boss during handoff won't surface as stalled. Acceptable trade-off:
+            # these stages are brief and boss PIDs are always live while running.
+            return "running"
 
         # Stall heuristic: log file hasn't moved in BG_STALL_SECS.
         log_path = os.path.join(wdir, "log")

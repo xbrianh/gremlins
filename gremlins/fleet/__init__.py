@@ -39,7 +39,7 @@ from gremlins.fleet.land import (
     expected_branch,
 )
 from gremlins.fleet.log import do_log
-from gremlins.fleet.render import build_row, print_table
+from gremlins.fleet.render import FleetRow, build_row, print_table
 from gremlins.fleet.rescue import (
     build_rescue_prompt,
     do_rescue,
@@ -85,6 +85,7 @@ __all__ = [
     # duration
     "parse_duration",
     # render
+    "FleetRow",
     "build_row",
     "print_table",
     # resolve
