@@ -105,12 +105,8 @@ class SubprocessCopilotClient:
         argv = self._build_argv(model, prompt)
         p = self._spawn(argv, cwd=cwd)
         try:
-            assert p.stdout is not None
-            assert p.stderr is not None
-            raw_out, raw_err = p.stdout.read(), p.stderr.read()
-            p.stdout.close()
-            p.stderr.close()
-            rc = p.wait()
+            raw_out, raw_err = p.communicate()
+            rc = p.returncode
         finally:
             self._untrack(p)
 
