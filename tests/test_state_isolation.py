@@ -48,7 +48,8 @@ from conftest import (
 
 import gremlins.state as state_mod
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.orchestrators.local import address_main, local_main, review_main
+from gremlins.orchestrators.local import local_main
+from gremlins.orchestrators.review_address import address_main, review_main
 
 
 def test_autouse_isolate_gr_id_unsets_gr_id_under_inherited_env(tmp_path):
@@ -179,7 +180,9 @@ def test_review_main_does_not_clobber_external_state(tmp_path, monkeypatch):
     review_dir.mkdir()
     monkeypatch.chdir(review_dir)
     _common_patches(monkeypatch)
-    monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.review_address.in_git_repo", lambda: False
+    )
     client = _ReviewCreatingClient(
         fixtures={lbl: MINIMAL_EVENTS for lbl in _REVIEW_LABELS}
     )
@@ -200,7 +203,9 @@ def test_address_main_does_not_clobber_external_state(tmp_path, monkeypatch):
         )
     monkeypatch.chdir(address_dir)
     _common_patches(monkeypatch)
-    monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.review_address.in_git_repo", lambda: False
+    )
     client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
     assert address_main(["--dir", str(address_dir)], client=client) == 0
     _assert_no_state_clobber(parent_state_file, original_content, parent_mtime)

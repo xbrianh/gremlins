@@ -53,6 +53,10 @@ sequencing logic of their own.
   same logical step within one process (e.g. resumed implement) must use
   distinct labels per phase so the fake's lookup doesn't collide.
 
+## Import constraint for new stages
+
+Any new `gremlins/stages/introspect.py` (planned for #258) must import only `inspect` and `gremlins.stages.base.Stage` — never any orchestrator module. This keeps the stages package free of upward dependencies so orchestrators can import stages without cycles.
+
 ## Load-bearing invariants
 
 - `implement.py` enforces the empty-implementation invariant: an empty

@@ -3,7 +3,8 @@ import pathlib
 
 import pytest
 
-from gremlins.orchestrators.pipeline import GHPipeline, LocalPipeline
+from gremlins.orchestrators.gh_pipeline import GHPipeline
+from gremlins.orchestrators.local_pipeline import LocalPipeline
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline import StageEntry, load_pipeline, resolve_pipeline_path
 from gremlins.stages import (

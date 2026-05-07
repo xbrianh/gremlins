@@ -9,7 +9,8 @@ from conftest import common_local_patches as _common_patches
 
 from gremlins.clients import ClientSpec
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.orchestrators.local import address_main, local_main, review_main
+from gremlins.orchestrators.local import local_main
+from gremlins.orchestrators.review_address import address_main, review_main
 from gremlins.pipeline import load_pipeline, resolve_pipeline_path
 
 # ---------------------------------------------------------------------------
@@ -131,7 +132,9 @@ def test_local_main_resume_from_review_code_allows_existing_git_changes(
 
 def test_review_main_calls_client(tmp_path, monkeypatch):
     _common_patches(monkeypatch)
-    monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.review_address.in_git_repo", lambda: False
+    )
 
     client = _ReviewCreatingClient(
         fixtures={lbl: MINIMAL_EVENTS for lbl in _REVIEW_LABELS}
@@ -146,13 +149,17 @@ def test_review_main_requires_commit_diff_or_dirty_worktree(
     tmp_path, monkeypatch, capsys
 ):
     _common_patches(monkeypatch)
-    monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: True)
-    monkeypatch.setattr("gremlins.orchestrators.local.rev_exists", lambda rev: True)
     monkeypatch.setattr(
-        "gremlins.orchestrators.local.has_diff", lambda base, head: False
+        "gremlins.orchestrators.review_address.in_git_repo", lambda: True
     )
     monkeypatch.setattr(
-        "gremlins.orchestrators.local.has_dirty_worktree", lambda: False
+        "gremlins.orchestrators.review_address.rev_exists", lambda rev: True
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.review_address.has_diff", lambda base, head: False
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.review_address.has_dirty_worktree", lambda: False
     )
 
     with pytest.raises(SystemExit):
@@ -166,12 +173,18 @@ def test_review_main_requires_commit_diff_or_dirty_worktree(
 
 def test_review_main_allows_dirty_worktree_without_commit_diff(tmp_path, monkeypatch):
     _common_patches(monkeypatch)
-    monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: True)
-    monkeypatch.setattr("gremlins.orchestrators.local.rev_exists", lambda rev: True)
     monkeypatch.setattr(
-        "gremlins.orchestrators.local.has_diff", lambda base, head: False
+        "gremlins.orchestrators.review_address.in_git_repo", lambda: True
     )
-    monkeypatch.setattr("gremlins.orchestrators.local.has_dirty_worktree", lambda: True)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.review_address.rev_exists", lambda rev: True
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.review_address.has_diff", lambda base, head: False
+    )
+    monkeypatch.setattr(
+        "gremlins.orchestrators.review_address.has_dirty_worktree", lambda: True
+    )
 
     client = _ReviewCreatingClient(
         fixtures={lbl: MINIMAL_EVENTS for lbl in _REVIEW_LABELS}
@@ -194,7 +207,9 @@ def test_address_main_calls_client(tmp_path, monkeypatch):
     )
 
     _common_patches(monkeypatch)
-    monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.review_address.in_git_repo", lambda: False
+    )
 
     client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
 

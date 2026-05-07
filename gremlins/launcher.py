@@ -27,20 +27,16 @@ from gremlins import git as _git_mod
 from gremlins import paths as _paths
 from gremlins.clients import PACKAGE_DEFAULT
 from gremlins.gh_utils import parse_issue_ref, resolve_default_branch, view_issue
-from gremlins.pipeline import load_pipeline, resolve_pipeline_path
-
-VALID_KINDS = {"ghgremlin", "localgremlin", "bossgremlin"}
+from gremlins.pipeline import (
+    KIND_SUBCOMMAND,
+    VALID_KINDS,
+    load_pipeline,
+    resolve_pipeline_path,
+)
 
 
 class GremlinAlreadyRunning(RuntimeError):
     pass
-
-
-_KIND_SUBCOMMAND = {
-    "localgremlin": "_local",
-    "ghgremlin": "_gh",
-    "bossgremlin": "_boss",
-}
 
 
 def _state_root() -> pathlib.Path:
@@ -227,7 +223,7 @@ def _resolve_pipeline(
         else:
             filtered.append(args[i])
             i += 1
-    name = pipeline_val or _KIND_SUBCOMMAND[kind].removeprefix("_")
+    name = pipeline_val or KIND_SUBCOMMAND[kind].removeprefix("_")
     resolved = str(resolve_pipeline_path(name, pathlib.Path(project_root)))
     return ["--pipeline", resolved] + filtered, resolved
 
@@ -311,6 +307,43 @@ def _delete_patch_state(
         os.replace(tmp, sf)
     except Exception:
         pass
+
+
+def _setup_workdir(
+    kind: str, project_root: str, base_ref: str, gr_id: str
+) -> tuple[str, str, str, str]:
+    """Return (workdir, branch, worktree_base, setup_kind)."""
+    if not _git_mod.in_git_repo(cwd=project_root):
+        return _git_mod.setup_copy(project_root), "", "", "copy"
+
+    if kind == "localgremlin":
+        workdir, branch = _git_mod.setup_worktree_branch(
+            project_root, gr_id, base_ref=base_ref
+        )
+        return workdir, branch, "", "worktree-branch"
+
+    if kind == "ghgremlin":
+        default_branch = resolve_default_branch(project_root)
+        refspec = f"refs/heads/{default_branch}:refs/remotes/origin/{default_branch}"
+        fr = subprocess.run(
+            ["git", "-C", project_root, "fetch", "origin", "--quiet", refspec],
+            capture_output=True,
+            text=True,
+        )
+        if fr.returncode != 0:
+            raise RuntimeError(
+                f"git fetch origin {default_branch} failed: {fr.stderr.strip()}"
+            )
+        worktree_base = f"origin/{default_branch}"
+        return (
+            _git_mod.setup_detached_worktree(project_root, worktree_base),
+            "",
+            worktree_base,
+            "worktree",
+        )
+
+    # bossgremlin
+    return _git_mod.setup_detached_worktree(project_root, base_ref), "", "", "worktree"
 
 
 def _build_spawn_env(gr_id: str) -> dict[str, str]:
@@ -457,38 +490,9 @@ def launch(
     instr_raw = instructions or ""
     (state_dir / "instructions.txt").write_text(instr_raw, encoding="utf-8")
 
-    # Worktree setup
-    branch = ""
-    worktree_base = ""
-    if _git_mod.in_git_repo(cwd=project_root):
-        if kind == "localgremlin":
-            setup_kind = "worktree-branch"
-            workdir, branch = _git_mod.setup_worktree_branch(
-                project_root, gr_id, base_ref=base_ref
-            )
-        elif kind == "ghgremlin":
-            default_branch = resolve_default_branch(project_root)
-            refspec = (
-                f"refs/heads/{default_branch}:refs/remotes/origin/{default_branch}"
-            )
-            fr = subprocess.run(
-                ["git", "-C", project_root, "fetch", "origin", "--quiet", refspec],
-                capture_output=True,
-                text=True,
-            )
-            if fr.returncode != 0:
-                raise RuntimeError(
-                    f"git fetch origin {default_branch} failed: {fr.stderr.strip()}"
-                )
-            worktree_base = f"origin/{default_branch}"
-            setup_kind = "worktree"
-            workdir = _git_mod.setup_detached_worktree(project_root, worktree_base)
-        else:  # bossgremlin
-            setup_kind = "worktree"
-            workdir = _git_mod.setup_detached_worktree(project_root, base_ref)
-    else:
-        setup_kind = "copy"
-        workdir = _git_mod.setup_copy(project_root)
+    workdir, branch, worktree_base, setup_kind = _setup_workdir(
+        kind, project_root, base_ref, gr_id
+    )
 
     now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     state = {
@@ -518,9 +522,7 @@ def launch(
     if instructions:
         spawn_args.append(instructions)
 
-    proc = _spawn_pipeline(
-        state_dir, workdir, gr_id, _KIND_SUBCOMMAND[kind], spawn_args
-    )
+    proc = _spawn_pipeline(state_dir, workdir, gr_id, KIND_SUBCOMMAND[kind], spawn_args)
 
     (state_dir / "pid").write_text(str(proc.pid), encoding="utf-8")
     _patch_state(state_dir, pid=proc.pid)
@@ -643,7 +645,7 @@ def resume(gr_id: str) -> None:
         if instructions:
             spawn_args.append(instructions)
 
-    kind_subcommand = _KIND_SUBCOMMAND[kind]
+    kind_subcommand = KIND_SUBCOMMAND[kind]
     proc = _spawn_pipeline(
         state_dir,
         workdir,

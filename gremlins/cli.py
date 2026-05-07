@@ -44,7 +44,8 @@ from gremlins.fleet.cli import (
 )
 from gremlins.launcher import launch, resume
 from gremlins.orchestrators.gh import gh_main
-from gremlins.orchestrators.local import address_main, local_main, review_main
+from gremlins.orchestrators.local import local_main
+from gremlins.orchestrators.review_address import address_main, review_main
 from gremlins.pipeline import load_pipeline, resolve_pipeline_path
 from gremlins.state import validate_gr_id
 
