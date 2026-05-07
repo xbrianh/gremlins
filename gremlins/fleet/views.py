@@ -86,6 +86,7 @@ def do_list(args: argparse.Namespace, here_root: str | None = None) -> None:
         liveness_filter = set()
         if args.running:
             liveness_filter.add("running")
+            liveness_filter.add("waiting")
         if args.dead:
             liveness_filter.add("dead:")
         if args.stalled:
@@ -109,7 +110,12 @@ def do_list(args: argparse.Namespace, here_root: str | None = None) -> None:
 
     # Running gremlins float to the top; within each group, older gremlins
     # appear first by started_at.
-    rows.sort(key=lambda r: (r.live_full != "running", r.started_at))
+    rows.sort(
+        key=lambda r: (
+            r.live_full != "running" and not r.live_full.startswith("waiting"),
+            r.started_at,
+        )
+    )
 
     if not rows:
         if here_root is not None:
@@ -133,10 +139,6 @@ def do_recent(args: argparse.Namespace, here_root: str | None = None) -> None:
         liveness_filter={"dead:"},
         include_closed=True,
     )
-
-    for row in rows:
-        if row.closed:
-            row.desc = row.desc[:51] + " [closed]"
 
     if not rows:
         if here_root is not None:

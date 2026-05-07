@@ -29,7 +29,6 @@ class FleetRow:
     gr_id: str
     wdir: str
     closed: bool
-    state: dict[str, Any]
 
 
 def build_row(
@@ -69,7 +68,11 @@ def build_row(
         live_trim = f"{live_trim} (rescue)"
     elif rescue_count > 1:
         live_trim = f"{live_trim} (rescue x{rescue_count})"
-    desc_trim = desc[:60]
+    closed = os.path.isfile(os.path.join(wdir, "closed"))
+    if closed:
+        desc_trim = desc[:51] + " [closed]"
+    else:
+        desc_trim = desc[:60]
     age = humanize_age(started_at)
     sid = display_id(gr_id)
     parent_id = state.get("parent_id") or ""
@@ -91,8 +94,7 @@ def build_row(
         project_root=str(pr),
         gr_id=gr_id,
         wdir=wdir,
-        closed=os.path.isfile(os.path.join(wdir, "closed")),
-        state=state,
+        closed=closed,
     )
 
 

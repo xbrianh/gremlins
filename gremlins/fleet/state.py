@@ -58,7 +58,7 @@ def render_sub_stage(sub: str | dict[str, object] | None) -> str:
 
 
 def _fmt_duration(secs: int) -> str:
-    """Format a duration as e.g. '5s', '3m12s', '1h05m'."""
+    # Intentionally more precise than humanize_age (shows seconds within the hour).
     if secs < 60:
         return f"{secs}s"
     m, s = divmod(secs, 60)
@@ -121,11 +121,14 @@ def liveness_of_state_file(sf: str, state: dict[str, object] | None = None) -> s
                 log_path = os.path.join(wdir, "log")
                 if os.path.isfile(log_path):
                     try:
-                        age_secs = int(time.time() - os.path.getmtime(log_path))
+                        age_secs = max(0, int(time.time() - os.path.getmtime(log_path)))
                         return f"waiting ({_fmt_duration(age_secs)})"
                     except OSError:
                         pass
                 return "waiting"
+            # Non-waiting boss stages (handoff, landing) show running unconditionally;
+            # a hung boss during handoff won't surface as stalled. Acceptable trade-off:
+            # these stages are brief and boss PIDs are always live while running.
             return "running"
 
         # Stall heuristic: log file hasn't moved in BG_STALL_SECS.
