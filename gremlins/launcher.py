@@ -412,8 +412,8 @@ def launch(
     Synchronous through spawn; does not wait for the pipeline to finish.
     Raises ValueError on bad arguments, RuntimeError on infrastructure failure.
     """
-    stage_inputs = dict(stage_inputs) if stage_inputs else {}
-    instructions: str | None = stage_inputs.get("instructions")  # type: ignore[assignment]
+    stage_inputs = {} if stage_inputs is None else dict(stage_inputs)
+    instructions: str | None = stage_inputs.get("instructions")
     if kind not in VALID_KINDS:
         raise ValueError(
             f"invalid kind: {kind!r} (allowed: {', '.join(sorted(VALID_KINDS))})"
