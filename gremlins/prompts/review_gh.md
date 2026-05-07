@@ -26,7 +26,7 @@ gh pr diff {pr_url}
 **If the diff is > 80 000 bytes**, fetch per-file instead using the GitHub API, which returns each file's patch directly:
 
 ```
-gh api repos/{owner}/{repo}/pulls/{number}/files
+gh api repos/{{owner}}/{{repo}}/pulls/{{number}}/files
 ```
 
 This returns a JSON array. Each entry has `filename`, `patch` (unified diff for that file), `additions`, `deletions`, and `status`. Parse with `jq` to process files individually.
