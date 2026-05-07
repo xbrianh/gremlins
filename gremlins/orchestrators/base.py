@@ -9,7 +9,7 @@ import logging
 import pathlib
 import sys
 from collections.abc import Callable
-from typing import NoReturn
+from typing import Any, NoReturn
 
 from gremlins.clients import ClientSpec
 from gremlins.clients.protocol import ClaudeClient
@@ -38,6 +38,16 @@ def read_state_field(sf: pathlib.Path | None, field: str) -> str:
         return data.get(field) or ""
     except Exception:
         return ""
+
+
+def read_stage_inputs(sf: pathlib.Path | None) -> dict[str, Any]:
+    if sf is None or not sf.exists():
+        return {}
+    try:
+        data = json.loads(sf.read_text(encoding="utf-8"))
+        return data.get("stage_inputs") or {}
+    except Exception:
+        return {}
 
 
 def _expand_stage_entries(raw_stages: list[StageEntry]) -> list[StageEntry]:

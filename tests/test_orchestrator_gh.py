@@ -1998,3 +1998,54 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
     assert not bad, (
         f"{len(bad)} stage(s) used wrong model: {[(c.label, c.model) for c in bad]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# stage_inputs wiring: gh pipeline reads instructions from state.json
+# ---------------------------------------------------------------------------
+
+
+def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
+    """stage_inputs["instructions"] from state.json is passed to plan.Plan, and
+    takes precedence over the CLI positional argument."""
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    session_dir, state_file = _patch_common(
+        monkeypatch,
+        tmp_path,
+        state_data={"stage_inputs": {"instructions": "instr from state"}},
+    )
+
+    monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
+    monkeypatch.setattr(
+        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.request_copilot.RequestCopilot.run", lambda self, pipe: None
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
+    )
+    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
+    monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
+
+    client = _CommittingClient(
+        git_dir=tmp_path,
+        fixtures={
+            "plan": _issue_events(),
+            "implement": IMPL_EVENTS,
+            "commit": IMPL_EVENTS,
+            "open-github-pr": _pr_events(),
+        },
+    )
+
+    result = gh_main(["instr from cli"], client=client)
+    assert result == 0
+
+    plan_call = next(c for c in client.calls if c.label == "plan")
+    assert "instr from state" in plan_call.prompt
+    assert "instr from cli" not in plan_call.prompt

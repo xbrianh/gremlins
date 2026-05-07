@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import argparse
+import json
+
 from gremlins.orchestrators.boss import _strip_arg, boss_main
 
 # ---------------------------------------------------------------------------
@@ -92,3 +95,60 @@ def test_boss_main_passes_gr_id(monkeypatch):
     rc = boss_main([], gr_id="my-gr-id")
     assert rc == 42
     assert received_gr_id == ["my-gr-id"]
+
+
+# ---------------------------------------------------------------------------
+# stage_inputs wiring: boss pipeline reads stage_inputs from state.json
+# ---------------------------------------------------------------------------
+
+
+def test_boss_stage_inputs_loaded_from_state(tmp_path, make_state_dir):
+    """LocalPipeline in boss mode reads stage_inputs from state.json.
+
+    The boss pipeline's first stage is 'chain' (not 'plan'), so instructions in
+    stage_inputs are not forwarded to a Plan constructor. This test directly
+    constructs a LocalPipeline with the boss pipeline YAML and verifies that
+    stage_inputs is populated from state.json.
+    """
+    from gremlins.clients import ClientSpec
+    from gremlins.clients.fake import FakeClaudeClient
+    from gremlins.orchestrators.local_pipeline import LocalPipeline
+    from gremlins.pipeline import load_pipeline, resolve_pipeline_path
+
+    gr_id = "test-si-boss"
+    state_dir = make_state_dir(gr_id)
+
+    sf = state_dir / "state.json"
+    state = json.loads(sf.read_text())
+    state["stage_inputs"] = {"instructions": "some instructions"}
+    sf.write_text(json.dumps(state))
+
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("# Plan\nDo stuff.\n")
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    (session_dir / "plan.md").write_text("# Plan\nDo stuff.\n")
+
+    boss_pipeline = load_pipeline(resolve_pipeline_path("boss", tmp_path))
+    default_spec = ClientSpec.parse("claude:sonnet")
+    fake_client = FakeClaudeClient(fixtures={})
+
+    pipe = LocalPipeline(
+        boss_pipeline.stages,
+        args=argparse.Namespace(
+            plan_path=str(plan_file),
+            spec_path=None,
+            cmds=None,
+            test_max_attempts=3,
+            instructions=None,
+            resume_from=None,
+        ),
+        session_dir=session_dir,
+        gr_id=gr_id,
+        pipeline_data=boss_pipeline,
+        stage_specs={"chain": default_spec},
+        spec_clients={str(default_spec): fake_client},
+    )
+
+    assert pipe.stage_inputs == {"instructions": "some instructions"}
