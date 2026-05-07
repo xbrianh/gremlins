@@ -209,16 +209,17 @@ def _validate_gh_args(args: argparse.Namespace, rest: list[str]) -> None:
 
 
 def _validate_boss_args(rest: list[str], plan: str | None) -> None:
+    if plan is None:
+        raise ValueError("--plan is required")
+    # --chain-kind is no longer required; child kind is configured in boss.yaml.
+    # Accept it silently for backward compatibility with saved pipeline_args.
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--chain-kind", default=None)
     args, _ = p.parse_known_args(rest)
-    if args.chain_kind not in ("local", "gh"):
-        got = repr(args.chain_kind) if args.chain_kind is not None else "missing"
+    if args.chain_kind is not None and args.chain_kind not in ("local", "gh"):
         raise ValueError(
-            f"--chain-kind is required and must be 'local' or 'gh' ({got})"
+            f"--chain-kind must be 'local' or 'gh' (got {args.chain_kind!r})"
         )
-    if plan is None:
-        raise ValueError("--plan is required")
 
 
 def _self_background_main(kind: str, argv: list[str]) -> int:

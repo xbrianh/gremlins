@@ -358,8 +358,9 @@ def test_gh_invalid_resume_from_exits_nonzero_no_state(tmp_path, monkeypatch):
     assert _no_state_created(tmp_path)
 
 
-def test_boss_missing_chain_kind_exits_nonzero_no_state(tmp_path, monkeypatch):
-    rc = main(["launch", "boss", "--plan", "x.md"])
+def test_boss_missing_plan_exits_nonzero_no_state(tmp_path, monkeypatch):
+    # --plan is required for bossgremlin
+    rc = main(["launch", "boss"])
     assert rc != 0
     assert _no_state_created(tmp_path)
 
@@ -414,7 +415,9 @@ def test_boss_missing_plan_raises():
         _validate_boss_args(["--chain-kind", "local"], None)
 
 
-def test_boss_missing_plan_exits_nonzero_no_state(tmp_path, monkeypatch):
+def test_boss_missing_plan_with_chain_kind_exits_nonzero_no_state(
+    tmp_path, monkeypatch
+):
     rc = main(["launch", "boss", "--chain-kind", "local"])
     assert rc != 0
     assert _no_state_created(tmp_path)

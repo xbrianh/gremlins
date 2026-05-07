@@ -597,7 +597,8 @@ def test_resume_keeps_resume_flag_for_pipeline_gremlin(lenv, monkeypatch):
     ]
 
 
-def test_resume_omits_resume_flag_for_bossgremlin(lenv, monkeypatch):
+def test_resume_bossgremlin_resumes_at_chain_stage(lenv, monkeypatch):
+    """bossgremlin resume always uses --resume-from chain (unless post-chain stage)."""
     launcher = _launcher()
     gr_id = "resume-boss-spawn-args"
     state_dir = _gremlins_state_root(lenv) / gr_id
@@ -615,12 +616,10 @@ def test_resume_omits_resume_flag_for_bossgremlin(lenv, monkeypatch):
                 "status": "stopped",
                 "exit_code": 1,
                 "pipeline_args": [
+                    "--pipeline",
+                    "boss",
                     "--plan",
                     str(plan_path),
-                    "--chain-kind",
-                    "local",
-                    "--resume-from",
-                    "implement",
                 ],
             }
         ),
@@ -642,12 +641,11 @@ def test_resume_omits_resume_flag_for_bossgremlin(lenv, monkeypatch):
     launcher.resume(gr_id)
 
     assert captured["subcommand"] == "_boss"
-    assert captured["spawn_args"] == [
-        "--plan",
-        str(plan_path),
-        "--chain-kind",
-        "local",
-    ]
+    spawn_args = captured["spawn_args"]
+    # --resume-from chain must be present (boss maps mid-chain stages back to "chain")
+    assert "--resume-from" in spawn_args
+    idx = spawn_args.index("--resume-from")
+    assert spawn_args[idx + 1] == "chain"
 
 
 def test_resume_refuses_running_gremlin(lenv):

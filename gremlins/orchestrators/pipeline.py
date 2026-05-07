@@ -154,9 +154,8 @@ class Pipeline:
     ) -> Callable[[], None]:
         raise NotImplementedError
 
-    def run(self, *clients: ClaudeClient) -> None:
-        install_signal_handlers(*clients)
-
+    def _collect_stages(self) -> list[tuple[str, Callable[[], None]]]:
+        """Build the stage list without installing signal handlers."""
         gr_id = self.gr_id
         stages: list[tuple[str, Callable[[], None]]] = []
         for e in self.pipeline_data.stages:
@@ -203,7 +202,11 @@ class Pipeline:
                 stages.append(
                     (e.name, self._make_runner(e, stage_ctx, stage_spec.model))
                 )
+        return stages
 
+    def run(self, *clients: ClaudeClient) -> None:
+        install_signal_handlers(*clients)
+        stages = self._collect_stages()
         run_stages(stages, resume_from=self.args.resume_from)
 
 
@@ -215,6 +218,7 @@ class LocalPipeline(Pipeline):
         "verify": verify.Verify,
         "review-code": review_code.ReviewCode,
         "address-code": address_code.AddressCode,
+        "chain": Stage,  # placeholder; real class imported at runtime in _make_runner
     }
 
     def __init__(
@@ -403,7 +407,69 @@ class LocalPipeline(Pipeline):
 
             return _verify
 
+        if entry.type == "chain":
+
+            def _chain() -> None:
+                from gremlins.stages.chain import (
+                    Chain as _Chain,  # type: ignore[import]
+                )
+
+                set_stage(gr_id, entry.name)
+                logger.info(
+                    "running chain stage (child: %s)",
+                    entry.options.get("child", "local"),
+                )
+                stage: Stage = _Chain(  # type: ignore[assignment]
+                    entry,
+                    model,
+                    pipeline_builder=self._build_child_stages,
+                )
+                stage.bind(ctx)  # type: ignore[union-attr]
+                stage.run(None)  # type: ignore[union-attr]
+
+            return _chain
+
         raise ValueError(f"unsupported stage type {entry.type!r} in local pipeline")
+
+    def _build_child_stages(
+        self,
+        pipeline_name: str,
+        plan_path: pathlib.Path,
+        session_dir: pathlib.Path,
+        resume_from: str | None,
+    ) -> list[tuple[str, Callable[[], None]]]:
+        """Build stages for an in-process child pipeline run."""
+        import argparse as _argparse
+
+        from gremlins.clients.resolve import collect_stage_specs
+        from gremlins.pipeline import load_pipeline, resolve_pipeline_path
+
+        pipeline = load_pipeline(
+            resolve_pipeline_path(pipeline_name, pathlib.Path.cwd())
+        )
+        child_args = _argparse.Namespace(
+            plan_path=str(plan_path),
+            spec_path=None,
+            cmds=None,
+            test_max_attempts=3,
+            instructions=None,
+            resume_from=resume_from,
+        )
+        stage_specs = collect_stage_specs(pipeline, None)
+        spec_clients: dict[str, ClaudeClient] = {
+            str(spec): self._get_client(spec) for spec in stage_specs.values()
+        }
+        child_pipeline = LocalPipeline(
+            pipeline.stages,
+            args=child_args,
+            session_dir=session_dir,
+            gr_id=self.gr_id,
+            pipeline_data=pipeline,
+            stage_specs=stage_specs,
+            spec_clients=spec_clients,
+            test_client=self.test_client,
+        )
+        return child_pipeline._collect_stages()
 
 
 class GHPipeline(Pipeline):

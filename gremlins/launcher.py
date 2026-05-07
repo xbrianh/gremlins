@@ -110,7 +110,6 @@ def _fetch_issue_title(plan: str) -> str:
 
 
 def _resolve_description_and_slug(
-    kind: str,
     instructions: str | None,
     plan: str | None,
     description: str | None,
@@ -170,9 +169,6 @@ def _patch_state(state_dir: pathlib.Path, **fields: Any) -> None:
 def _resolve_pipeline(
     kind: str, pipeline_args: tuple[str, ...], project_root: str
 ) -> tuple[list[str], str]:
-    # Returns (args_with_pipeline_injected, resolved_path); bossgremlin gets ([], "").
-    if kind == "bossgremlin":
-        return list(pipeline_args), ""
     args = list(pipeline_args)
     pipeline_val: str | None = None
     filtered: list[str] = []
@@ -197,22 +193,6 @@ def _resolve_pipeline(
 
 def _extract_client_spec(pipeline_args: list[str]) -> str:
     return _extract_arg_value(pipeline_args, "--client")
-
-
-def _drop_arg(args: list[str], flag: str) -> list[str]:
-    filtered: list[str] = []
-    i = 0
-    while i < len(args):
-        arg = args[i]
-        if arg == flag:
-            i += 2 if i + 1 < len(args) else 1
-            continue
-        if arg.startswith(f"{flag}="):
-            i += 1
-            continue
-        filtered.append(arg)
-        i += 1
-    return filtered
 
 
 def _extract_arg_value(args: list[str], flag: str) -> str:
@@ -244,11 +224,7 @@ def _pipeline_default_client_spec(pipeline_path: str) -> str:
     return str(pipeline.default_client) if pipeline.default_client else ""
 
 
-def _launch_client_label(
-    kind: str, pipeline_args: list[str], pipeline_path: str
-) -> str:
-    if kind == "bossgremlin":
-        return _extract_client_spec(pipeline_args) or str(PACKAGE_DEFAULT)
+def _launch_client_label(pipeline_args: list[str], pipeline_path: str) -> str:
     client_spec_str = _extract_client_spec(pipeline_args)
     if client_spec_str:
         return client_spec_str
@@ -393,7 +369,7 @@ def launch(
         plan = str(pathlib.Path(plan).resolve())
 
     desc, desc_explicit, slug = _resolve_description_and_slug(
-        kind, instructions, plan, description
+        instructions, plan, description
     )
     rand_hex = secrets.token_hex(3)
     gr_id = f"{slug}-{rand_hex}"
@@ -477,7 +453,7 @@ def launch(
         "description_explicit": desc_explicit,
         "parent_id": parent_id or "",
         "pipeline_args": stored_pipeline_args,
-        "client": _launch_client_label(kind, stored_pipeline_args, pipeline_path),
+        "client": _launch_client_label(stored_pipeline_args, pipeline_path),
         "pipeline_path": pipeline_path,
         "stage": "starting",
         "pid": None,
@@ -544,6 +520,10 @@ def resume(gr_id: str) -> None:
     if not stage or stage == "starting":
         stage = "plan"
 
+    # Boss always resumes at "chain" unless already past it
+    if kind == "bossgremlin" and stage not in ("review-chain", "address-chain"):
+        stage = "chain"
+
     # Clear terminal markers and patch state for the resumed run
     for marker in ("finished", "summarized"):
         try:
@@ -600,10 +580,7 @@ def resume(gr_id: str) -> None:
     has_plan = any(a == "--plan" or str(a).startswith("--plan=") for a in pipeline_args)
 
     spawn_args: list[str] = list(pipeline_args)
-    if kind == "bossgremlin":
-        spawn_args = _drop_arg(spawn_args, "--resume-from")
-    else:
-        spawn_args.extend(["--resume-from", str(stage)])
+    spawn_args.extend(["--resume-from", str(stage)])
     if not has_plan:
         instr_file = state_dir / "instructions.txt"
         if instr_file.is_file():
