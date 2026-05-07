@@ -76,8 +76,7 @@ class GHPipeline(Pipeline):
         )
         self.repo = repo
         self.state_file = state_file
-        self.stage_inputs = read_stage_inputs(state_file)
-        self.instructions: str = self.stage_inputs.get("instructions") or " ".join(
+        self.instructions: str = read_stage_inputs(state_file).get("instructions") or " ".join(
             getattr(args, "instructions", None) or []
         )
         self.issue_url: str = ""

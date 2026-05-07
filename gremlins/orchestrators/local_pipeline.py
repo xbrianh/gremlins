@@ -55,7 +55,9 @@ class LocalPipeline(Pipeline):
             test_client=test_client,
         )
         self.plan_copied_from_source = False
-        self.stage_inputs = read_stage_inputs(resolve_state_file(gr_id))
+        self.instructions: str = read_stage_inputs(resolve_state_file(gr_id)).get(
+            "instructions"
+        ) or " ".join(getattr(args, "instructions", None) or [])
 
         plan_path = getattr(args, "plan_path", None)
         spec_path = getattr(args, "spec_path", None)
@@ -89,9 +91,7 @@ class LocalPipeline(Pipeline):
         is_git = self.is_git
         gr_id = self.gr_id
         plan_copied_from_source = self.plan_copied_from_source
-        instructions = self.stage_inputs.get("instructions") or " ".join(
-            getattr(args, "instructions", None) or []
-        )
+        instructions = self.instructions
         plan_path = getattr(args, "plan_path", None)
 
         if entry.type == "plan":
