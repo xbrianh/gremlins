@@ -906,6 +906,13 @@ def do_rescue(target: str, headless: bool = False, from_boss: bool = False) -> b
             _resume(gr_id)
         except Exception as exc:
             detail = str(exc)
+            if "is still running" in detail:
+                # Another rescue or manual resume already relaunched this child.
+                # The existing process is doing the work — this is a benign race.
+                print(f"note: relaunch skipped — gremlin is already running: {detail}")
+                report["relaunch_outcome"] = "already_running"
+                report["relaunch_reason"] = detail
+                return True
             if headless:
                 _write_bail(sf, wdir, "relaunch_failed", detail)
             print(f"error: background resume failed: {detail}")
