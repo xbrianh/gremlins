@@ -23,17 +23,13 @@ gh pr diff {pr_url} | wc -c
 gh pr diff {pr_url}
 ```
 
-**If the diff is > 80 000 bytes**, fetch per-file instead — the whole diff won't fit in a single Read. Get the changed-file list and diff each file individually:
+**If the diff is > 80 000 bytes**, fetch per-file instead using the GitHub API, which returns each file's patch directly:
 
 ```
-gh pr view {pr_url} --json files -q '.files[].path'
+gh api repos/{owner}/{repo}/pulls/{number}/files
 ```
 
-Then for each path:
-
-```
-gh pr diff {pr_url} -- <path>
-```
+This returns a JSON array. Each entry has `filename`, `patch` (unified diff for that file), `additions`, `deletions`, and `status`. Parse with `jq` to process files individually.
 
 Review every file. A file whose diff is itself > 80 000 bytes is rare but possible; if it happens, read it in chunks using `offset` and `limit` on the Read tool (e.g. `limit: 500` lines at a time).
 
