@@ -478,3 +478,42 @@ def test_address_code_stage_emits_bail_on_failure(tmp_path, make_state_dir):
         stage.run(None)
     data = json.loads((state_dir / "state.json").read_text())
     assert data.get("bail_class") == "other"
+
+
+def test_address_code_finds_review_files_in_parallel_subdirs(tmp_path):
+    # Simulate parallel group: reviews_dir/<child>/<stage>-<model>.md
+    reviews_dir = tmp_path / "reviews"
+    child1_dir = reviews_dir / "review-code"
+    child2_dir = reviews_dir / "review-code-fidelity"
+    child1_dir.mkdir(parents=True)
+    child2_dir.mkdir(parents=True)
+    (child1_dir / "review-code-sonnet.md").write_text("# Review 1\nFindings A.\n")
+    (child2_dir / "review-code-fidelity-sonnet.md").write_text(
+        "# Review 2\nFindings B.\n"
+    )
+
+    client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
+    entry = StageEntry(
+        name="address-code",
+        type="address-code",
+        client=None,
+        prompt_paths=[_BUNDLED_PROMPTS / "address.md"],
+        options={},
+    )
+    stage = AddressCode(
+        entry,
+        "sonnet",
+        is_git=False,
+        review_stage_names=["review-code", "review-code-fidelity"],
+        review_stage_dirs={
+            "review-code": child1_dir,
+            "review-code-fidelity": child2_dir,
+        },
+    )
+    stage.bind(_make_ctx(client, tmp_path))
+    stage.run(None)
+
+    assert len(client.calls) == 1
+    prompt = client.calls[0].prompt
+    assert "Findings A." in prompt
+    assert "Findings B." in prompt
