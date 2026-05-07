@@ -18,7 +18,6 @@ from gremlins.clients.resolve import (
     PACKAGE_DEFAULT,
     collect_stage_specs,
     load_stage_specs_from_state,
-    require_stage_spec,
     validate_stage_specs,
 )
 from gremlins.env_file import load_env_file
@@ -183,14 +182,6 @@ def local_main(
 
     plan_file = session_dir / "plan.md"
 
-    # Determine the review-code output file path for the resume guard
-    _rc_entry = next((s for s in pipeline.stages if s.type == "review-code"), None)
-    if _rc_entry:
-        _rc_model = require_stage_spec(stage_specs, _rc_entry.name).model
-        review_code_file = session_dir / f"{_rc_entry.name}-{_rc_model}.md"
-    else:
-        review_code_file = session_dir / f"review-code-{PACKAGE_DEFAULT.model}.md"
-
     logger.info("session: %s", session_dir)
 
     is_git = in_git_repo()
@@ -236,11 +227,6 @@ def local_main(
                     die(
                         f"--resume-from {args.resume_from} requires implementation changes in the worktree"
                     )
-        if start_idx >= _type_idx("address-code"):
-            if not review_code_file.exists() or review_code_file.stat().st_size == 0:
-                die(
-                    f"--resume-from {args.resume_from} requires existing {review_code_file}"
-                )
 
     pipe.run(*_signal_clients)
 
