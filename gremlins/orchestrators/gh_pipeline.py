@@ -11,7 +11,12 @@ from collections.abc import Callable
 from gremlins.clients import ClientSpec
 from gremlins.clients.protocol import ClaudeClient
 from gremlins.git import DirtyOnly, HeadAdvanced, PreImplState, record_pre_impl_state
-from gremlins.orchestrators.base import Pipeline, die, read_state_field
+from gremlins.orchestrators.base import (
+    Pipeline,
+    die,
+    read_stage_inputs,
+    read_state_field,
+)
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline import StageEntry
 from gremlins.stages import (
@@ -76,7 +81,9 @@ class GHPipeline(Pipeline):
         )
         self.repo = repo
         self.state_file = state_file
-        self.instructions: str = " ".join(getattr(args, "instructions", None) or [])
+        self.instructions: str = read_stage_inputs(state_file).get(
+            "instructions"
+        ) or " ".join(getattr(args, "instructions", None) or [])
         self.issue_url: str = ""
         self.issue_num: str = ""
         self.issue_body: str = ""

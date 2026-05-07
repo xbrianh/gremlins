@@ -25,10 +25,8 @@ from __future__ import annotations
 
 import argparse
 import pathlib
-import re
 import sys
-
-import yaml
+from typing import Any, cast
 
 from gremlins import paths as _paths
 from gremlins.fleet import main as fleet_main
@@ -46,7 +44,9 @@ from gremlins.launcher import launch, resume
 from gremlins.orchestrators.gh import gh_main
 from gremlins.orchestrators.local import local_main
 from gremlins.orchestrators.review_address import address_main, review_main
-from gremlins.pipeline import load_pipeline, resolve_pipeline_path
+from gremlins.pipeline import list_pipelines, load_pipeline, resolve_pipeline_name
+from gremlins.stages.introspect import build_launch_parser
+from gremlins.stages.registry import STAGE_REGISTRY
 from gremlins.state import validate_gr_id
 
 # None → generic "no longer valid"; str → migration hint naming the new form
@@ -121,146 +121,74 @@ def main(argv: list[str] | None = None, *, gr_id: str | None = None) -> int:
     return fleet_main(argv)
 
 
-_LAUNCH_KINDS = {"local": "localgremlin", "gh": "ghgremlin", "boss": "bossgremlin"}
+class _EmptyStage:
+    def __init__(self) -> None:
+        pass
 
-_LAUNCH_HELP = """\
-usage: gremlins launch <kind> [opts]
 
-Launch a background gremlin.
+_INFRA_ARGS = frozenset(
+    {"description", "parent_id", "print_id", "base_ref", "client", "spec_path", "plan"}
+)
 
-Kinds:
-  local  Full local pipeline: plan → implement → review-code → address-code
-  gh     GitHub issue-driven pipeline
-  boss   Chained serial workflow
-
-Flag reference: https://github.com/amorphous-industries/gremlins#launch-flags
-"""
+_LAUNCH_BRIEF = "usage: gremlins launch <name> [opts]\nLaunch a background gremlin by pipeline name. Run 'gremlins launch --list' to see available pipelines.\n"
 
 
 def _launch_main(argv: list[str]) -> int:
-    kind_name = argv[0] if argv and not argv[0].startswith("-") else None
+    if "--list" in argv:
+        for name, path in list_pipelines(pathlib.Path.cwd()):
+            try:
+                pipeline = load_pipeline(path)
+                label = pipeline.name
+            except Exception:
+                label = "unloadable"
+            sys.stdout.write(f"{name}  {path.parent}  ({label})\n")
+        return 0
 
-    if kind_name in _LAUNCH_KINDS:
-        return _self_background_main(_LAUNCH_KINDS[kind_name], argv[1:])
+    if not argv or argv[0].startswith("-"):
+        sys.stdout.write(_LAUNCH_BRIEF)
+        return 0 if ("--help" in argv or "-h" in argv) else 1
 
-    if kind_name is not None:
-        sys.stderr.write(
-            f"error: unknown launch kind: {kind_name!r} (choose: local, gh, boss)\n"
-        )
+    name = argv[0]
+
+    try:
+        pipeline_path = resolve_pipeline_name(name, pathlib.Path.cwd())
+        pipeline = load_pipeline(pipeline_path)
+    except FileNotFoundError as exc:
+        sys.stderr.write(f"error: {exc}\n")
         return 1
 
-    # No kind given: print help; exit 0 for --help, 1 for bare call
-    sys.stdout.write(_LAUNCH_HELP)
-    return 0 if ("--help" in argv or "-h" in argv) else 1
-
-
-_CLIENT_SPEC_RE = re.compile(r"^[A-Za-z0-9_-]+:[A-Za-z0-9._-]*$")
-
-
-def _validate_local_args(args: argparse.Namespace, rest: list[str]) -> None:
-    if not args.plan and not args.instructions and not args.positional_instructions:
-        raise ValueError(
-            "localgremlin requires instructions: pass them as a positional argument, "
-            "--plan <path>, or -c/--instructions <text>"
-        )
-    p = argparse.ArgumentParser(add_help=False)
-    p.add_argument("--client", default=None)
-    parsed, _ = p.parse_known_args(rest)
-    if parsed.client is not None and not _CLIENT_SPEC_RE.match(parsed.client):
-        raise ValueError(
-            f"invalid --client: {parsed.client!r}: expected 'provider:model'"
-        )
-
-
-def _validate_gh_args(args: argparse.Namespace, rest: list[str]) -> None:
-    p = argparse.ArgumentParser(add_help=False)
-    p.add_argument("--resume-from", default=None)
-    p.add_argument("--pipeline", default=None)
-    p.add_argument("--client", default=None)
+    first = next((s for s in pipeline.stages if s.type != "parallel"), None)
     try:
-        parsed, remainder = p.parse_known_args(rest)
+        stage_cls = (
+            cast(type, STAGE_REGISTRY[first.type]) if first is not None else _EmptyStage
+        )
+        parser = build_launch_parser(name, stage_cls)
+    except (KeyError, TypeError):
+        parser = build_launch_parser(name, _EmptyStage)
+
+    try:
+        args = parser.parse_args(argv[1:])
     except SystemExit as exc:
-        raise ValueError(f"invalid gh arguments (exit {exc.code})") from exc
+        return exc.code if isinstance(exc.code, int) else 1
 
-    positional = [t for t in remainder if not t.startswith("-")]
-    if (
-        args.plan is None
-        and args.instructions is None
-        and parsed.resume_from is None
-        and not positional
-    ):
-        raise ValueError("instructions, --plan, or --resume-from required")
-    if parsed.resume_from is not None:
-        try:
-            pipeline = load_pipeline(
-                resolve_pipeline_path(parsed.pipeline or "gh", pathlib.Path.cwd())
-            )
-        except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
-            raise ValueError(f"could not load pipeline for --resume-from check: {exc}")
-        stage_names = [s.name for s in pipeline.stages]
-        if parsed.resume_from not in stage_names:
-            raise ValueError(
-                f"invalid --resume-from: {parsed.resume_from!r} "
-                f"(allowed: {' '.join(stage_names)})"
-            )
-    if parsed.client is not None and not _CLIENT_SPEC_RE.match(parsed.client):
-        raise ValueError(
-            f"invalid --client: {parsed.client!r}: expected 'provider:model'"
-        )
+    stage_inputs = {k: v for k, v in vars(args).items() if k not in _INFRA_ARGS}
+    return _self_background_main(name, args, stage_inputs)
 
 
-def _validate_boss_args(plan: str | None) -> None:
-    if plan is None:
-        raise ValueError("--plan is required")
-
-
-def _self_background_main(kind: str, argv: list[str]) -> int:
-    """Launch a background gremlin of the given kind and print its id/log/state."""
-    p = argparse.ArgumentParser(
-        prog=f"gremlins launch {kind.removesuffix('gremlin')}",
-        description=f"Launch a background {kind}.",
-    )
-    p.add_argument("--plan", default=None)
-    p.add_argument("--description", default=None)
-    p.add_argument("--parent", dest="parent_id", default=None)
-    p.add_argument("--print-id", action="store_true")
-    p.add_argument(
-        "--instructions",
-        "-c",
-        default=None,
-        help="Instructions string (mutually exclusive with --plan).",
-    )
-    p.add_argument(
-        "--base-ref",
-        default="HEAD",
-        help="Git ref to branch the worktree from (default: HEAD). "
-        "Applies to local gremlins only; ignored for gh gremlins, "
-        "which always anchor to origin/<default-branch>.",
-    )
-    p.add_argument("--spec", dest="spec_path", default=None)
-    if kind == "localgremlin":
-        p.add_argument("positional_instructions", nargs="?", default=None)
-    else:
-        p.set_defaults(positional_instructions=None)
-    args, rest = p.parse_known_args(argv)
-
+def _self_background_main(
+    pipeline_name: str, args: argparse.Namespace, stage_inputs: dict[str, Any]
+) -> int:
+    pipeline_args = ("--client", args.client) if args.client else ()
     try:
-        if kind == "localgremlin":
-            _validate_local_args(args, rest)
-        elif kind == "ghgremlin":
-            _validate_gh_args(args, rest)
-        elif kind == "bossgremlin":
-            _validate_boss_args(args.plan)
-        instructions = args.instructions or args.positional_instructions
         gr_id = launch(
-            kind,
-            instructions=instructions,
+            pipeline_name,
+            stage_inputs=stage_inputs,
             plan=args.plan,
             description=args.description,
             parent_id=args.parent_id,
             base_ref=args.base_ref,
             spec_path=args.spec_path,
-            pipeline_args=tuple(rest),
+            pipeline_args=pipeline_args,
         )
     except (ValueError, RuntimeError) as exc:
         sys.stderr.write(f"error: {exc}\n")

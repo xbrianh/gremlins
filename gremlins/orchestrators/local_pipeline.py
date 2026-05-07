@@ -10,13 +10,13 @@ from collections.abc import Callable, Iterator
 
 from gremlins.clients import ClientSpec
 from gremlins.clients.protocol import ClaudeClient
-from gremlins.orchestrators.base import Pipeline, die
+from gremlins.orchestrators.base import Pipeline, die, read_stage_inputs
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline import StageEntry
 from gremlins.stages import address_code, implement, plan, review_code, verify
 from gremlins.stages.base import Stage, StageContext
 from gremlins.stages.chain import Chain
-from gremlins.state import set_stage
+from gremlins.state import resolve_state_file, set_stage
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +55,9 @@ class LocalPipeline(Pipeline):
             test_client=test_client,
         )
         self.plan_copied_from_source = False
+        self.instructions: str = read_stage_inputs(resolve_state_file(gr_id)).get(
+            "instructions"
+        ) or " ".join(getattr(args, "instructions", None) or [])
 
         plan_path = getattr(args, "plan_path", None)
         spec_path = getattr(args, "spec_path", None)
@@ -88,7 +91,7 @@ class LocalPipeline(Pipeline):
         is_git = self.is_git
         gr_id = self.gr_id
         plan_copied_from_source = self.plan_copied_from_source
-        instructions = " ".join(getattr(args, "instructions", None) or [])
+        instructions = self.instructions
         plan_path = getattr(args, "plan_path", None)
 
         if entry.type == "plan":

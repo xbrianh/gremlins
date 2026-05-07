@@ -42,7 +42,7 @@ class Plan(Stage):
         entry: StageEntry,
         model: str | None,
         *,
-        instructions: str,
+        instructions: str = "",
         plan_file: pathlib.Path | None = None,
         ref: str = "",
         repo: str = "",

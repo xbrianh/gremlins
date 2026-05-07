@@ -39,9 +39,7 @@ the module docstring at the top of [`gremlins/cli.py`](gremlins/cli.py).
 
 | Subcommand | Purpose |
 |---|---|
-| `launch local` | Full local pipeline: plan → implement → review-code → address-code |
-| `launch gh` | GitHub issue-driven pipeline (plan → implement → PR → Copilot review → address) |
-| `launch boss` | Chained serial workflow driven by a top-level spec |
+| `launch <name>` | Launch a background gremlin by pipeline name (`gremlins launch --list` to see available) |
 | `review` | review-code stage only |
 | `address` | address-code stage only |
 | `resume` | Re-spawn an existing gremlin from its recorded stage |
@@ -56,56 +54,21 @@ the module docstring at the top of [`gremlins/cli.py`](gremlins/cli.py).
 
 ### Launch flags
 
-#### Common flags (all kinds)
+#### Per-pipeline flags
+
+Flags vary by pipeline. The first stage's `__init__` signature defines the accepted flags; `gremlins launch <name> --help` prints the full list.
+
+Common infrastructure flags (accepted by all pipelines):
 
 | Flag | Default | Description |
 |---|---|---|
-| `--plan <path-or-ref>` | — | Path to a plan/spec file, or (for `gh`/`boss`) a GitHub issue ref (`42`, `#42`, `owner/repo#42`, or issue URL) |
+| `--plan <path-or-ref>` | — | Path to a plan/spec file, or a GitHub issue ref (`42`, `#42`, `owner/repo#42`, or issue URL) |
 | `--description <text>` | — | Human-readable description stored in state |
 | `--parent <id>` | — | Parent gremlin ID (used by boss to track child ownership) |
 | `--print-id` | false | Print the gremlin ID to stdout after launch |
-| `-c`/`--instructions <text>` | — | Instructions string (mutually exclusive with `--plan`); not applicable to `launch boss` |
-| `--base-ref <ref>` | `HEAD` | Git ref to branch the worktree from; ignored for `gh` (always anchors to origin default branch) |
-| `--spec <path>` | — | Path to a coding-style spec file passed into stages; not applicable to `launch boss` |
-
-#### `launch local` flags
-
-| Flag | Default | Description |
-|---|---|---|
-| `<instructions>` | — | Positional instructions string (mutually exclusive with `--plan` and `-c`) |
-| `-p <model>` | `sonnet` | Model for the plan stage |
-| `-i <model>` | `sonnet` | Model for the implement stage |
-| `-x <model>` | `sonnet` | Model for the address stage |
-| `-b <model>` | `sonnet` | Model for the detail-review stage |
-| `-t <model>` | `sonnet` | Model for the test-fix stage |
-| `--resume-from <stage>` | — | Resume from the named stage instead of starting over |
-| `--cmd <command>` | — | Verification command; may be repeated for multiple commands |
-| `--test-max-attempts <n>` | `3` | Maximum test-fix retry attempts (must be ≥ 1) |
-| `--pipeline <name-or-path>` | `local` | Pipeline to run (see Pipeline configuration) |
-| `--client <provider:model>` | — | Override the pipeline-level default client (per-stage `client:` in YAML still takes precedence; e.g. `claude:sonnet`, `copilot:gpt-5.4`) |
-
-#### `launch gh` flags
-
-| Flag | Default | Description |
-|---|---|---|
-| `-r <ref>` | — | GitHub issue or PR reference (e.g. `42`, `#42`, `owner/repo#42`) |
-| `--model <model>` | — | Override the default model for all stages |
-| `--resume-from <stage>` | — | Resume from the named stage instead of starting over |
-| `--pipeline <name-or-path>` | `gh` | Pipeline to run (see Pipeline configuration) |
-| `--client <provider:model>` | — | Override the pipeline-level default client (per-stage `client:` in YAML still takes precedence; e.g. `claude:sonnet`, `copilot:gpt-5.4`) |
-
-#### `launch boss` flags
-
-| Flag | Default | Description |
-|---|---|---|
-| `--chain-kind <kind>` | required | Kind of child gremlins to spawn: `local` or `gh` |
-| `--client <provider:model>` | `claude:sonnet` | Client for the handoff decision agent |
-| `--resume-from <stage>` | — | Ignored at the boss level (boss resumes from `boss_state.json`) |
-| `--test <command>` | — | Test command forwarded to each child gremlin; only valid with `--chain-kind local` (rejected for `gh`) |
-| `--test-max-attempts <n>` | `3` | Maximum test-fix retry attempts forwarded to each child |
-| `-t <model>` | `sonnet` | Test-fix model forwarded to each child |
-
-`boss` does not accept `--pipeline`; child pipeline args are built internally from `--test`/`--test-max-attempts`/`-t`.
+| `-c`/`--instructions <text>` | — | Instructions string (mutually exclusive with `--plan`) |
+| `--base-ref <ref>` | `HEAD` | Git ref to branch the worktree from; ignored for gh pipelines (always anchors to origin default branch) |
+| `--spec <path>` | — | Path to a coding-style spec file passed into stages |
 
 ## Pipeline configuration
 
@@ -122,15 +85,13 @@ pipelines work out of the box; a project-local YAML can override any of them.
    (project-local override).
 3. Then `gremlins/pipelines/<name>.yaml` (bundled) is checked.
 
-Defaults: `launch local` → `local`, `launch gh` → `gh`.
+The pipeline name is the first non-flag argument to `gremlins launch`. Run `gremlins launch --list` to see all available pipeline names.
 
 ### Selecting a pipeline
 
 ```sh
-gremlins launch local                                          # bundled local.yaml
-gremlins launch local --pipeline my-pipeline                   # .gremlins/pipelines/my-pipeline.yaml
-gremlins launch local --pipeline .gremlins/pipelines/foo.yaml  # direct path
-gremlins launch gh --pipeline gh                               # bundled gh.yaml
+gremlins launch local   # bundled local.yaml
+gremlins launch gh      # bundled gh.yaml
 ```
 
 ### Schema reference
@@ -355,8 +316,9 @@ via YAML — both passes use the built-in detail lens.
 
 The canonical reference pipelines:
 
-- [`gremlins/pipelines/local.yaml`](gremlins/pipelines/local.yaml) — default for `launch local`
-- [`gremlins/pipelines/gh.yaml`](gremlins/pipelines/gh.yaml) — default for `launch gh`
+- [`gremlins/pipelines/local.yaml`](gremlins/pipelines/local.yaml) — `gremlins launch local`
+- [`gremlins/pipelines/gh.yaml`](gremlins/pipelines/gh.yaml) — `gremlins launch gh`
+- [`gremlins/pipelines/boss.yaml`](gremlins/pipelines/boss.yaml) — `gremlins launch boss`
 
 ### Local environment overrides
 

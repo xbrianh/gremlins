@@ -212,13 +212,42 @@ def load_pipeline(path: pathlib.Path) -> Pipeline:
     )
 
 
-VALID_KINDS = {"ghgremlin", "localgremlin", "bossgremlin"}
+BUNDLED_PIPELINE_DIR = pathlib.Path(__file__).resolve().parent / "pipelines"
 
-KIND_SUBCOMMAND = {
-    "localgremlin": "_local",
-    "ghgremlin": "_gh",
-    "bossgremlin": "_boss",
-}
+
+def list_pipelines(project_root: pathlib.Path) -> list[tuple[str, pathlib.Path]]:
+    """Return (name, path) pairs for all resolvable pipelines, project-local first."""
+    results: list[tuple[str, pathlib.Path]] = []
+    seen: set[str] = set()
+
+    local_dir = project_root / ".gremlins" / "pipelines"
+    if local_dir.exists():
+        for p in sorted(local_dir.glob("*.yaml")):
+            results.append((p.stem, p.resolve()))
+            seen.add(p.stem)
+
+    for p in sorted(BUNDLED_PIPELINE_DIR.glob("*.yaml")):
+        if p.stem not in seen:
+            results.append((p.stem, p.resolve()))
+
+    return results
+
+
+def resolve_pipeline_name(name: str, project_root: pathlib.Path) -> pathlib.Path:
+    project_local = project_root / ".gremlins" / "pipelines" / f"{name}.yaml"
+    if project_local.exists():
+        return project_local.resolve()
+    bundled = BUNDLED_PIPELINE_DIR / f"{name}.yaml"
+    if bundled.exists():
+        return bundled.resolve()
+    names: list[str] = []
+    if project_local.parent.exists():
+        names += sorted(p.stem for p in project_local.parent.glob("*.yaml"))
+    names += sorted(p.stem for p in BUNDLED_PIPELINE_DIR.glob("*.yaml"))
+    available = list(dict.fromkeys(names))
+    raise FileNotFoundError(
+        f"pipeline {name!r} not found; available: {', '.join(available) or '(none)'}"
+    )
 
 
 def resolve_pipeline_path(name_or_path: str, base_dir: pathlib.Path) -> pathlib.Path:

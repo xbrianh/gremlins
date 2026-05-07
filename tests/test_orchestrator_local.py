@@ -572,3 +572,67 @@ def test_local_main_resume_requires_each_persisted_stage_client(
         )
 
     assert "stage_clients missing stage: 'review-code'" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# stage_inputs wiring: local pipeline reads instructions from state.json
+# ---------------------------------------------------------------------------
+
+
+def test_local_stage_inputs_instructions_reach_plan(
+    tmp_path, monkeypatch, make_state_dir
+):
+    """stage_inputs["instructions"] from state.json is passed to plan.Plan, and
+    takes precedence over the CLI positional argument."""
+    gr_id = "test-si-local"
+    state_dir = make_state_dir(gr_id)
+
+    sf = state_dir / "state.json"
+    state = json.loads(sf.read_text())
+    state["stage_inputs"] = {"instructions": "instr from state"}
+    sf.write_text(json.dumps(state))
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    # Pre-create plan.md so the implement stage can read it after the (no-op) plan stage.
+    (session_dir / "plan.md").write_text("# Plan\nDo stuff.\n")
+
+    monkeypatch.chdir(tmp_path)
+    _common_patches(monkeypatch)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.local.resolve_session_dir",
+        lambda gr_id=None: session_dir,
+    )
+    monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
+
+    received: list[str] = []
+
+    from gremlins.stages import plan as _plan_mod
+
+    _real_plan_init = _plan_mod.Plan.__init__
+
+    def _capturing_plan_init(self, entry, model, *, instructions, **kw):
+        received.append(instructions)
+        _real_plan_init(self, entry, model, instructions=instructions, **kw)
+
+    monkeypatch.setattr(_plan_mod.Plan, "__init__", _capturing_plan_init)
+    monkeypatch.setattr(_plan_mod.Plan, "run", lambda self, pipe: None)
+
+    from gremlins.stages import address_code as _ac_mod
+    from gremlins.stages import implement as _impl_mod
+    from gremlins.stages import review_code as _rc_mod
+    from gremlins.stages import verify as _v_mod
+
+    monkeypatch.setattr(_impl_mod.Implement, "run", lambda self, pipe: None)
+    monkeypatch.setattr(_rc_mod.ReviewCode, "run", lambda self, pipe: None)
+    monkeypatch.setattr(_ac_mod.AddressCode, "run", lambda self, pipe: None)
+    monkeypatch.setattr(_v_mod.Verify, "run", lambda self, pipe: None)
+
+    result = local_main(
+        ["instr from cli"],
+        client=FakeClaudeClient(fixtures={}),
+        gr_id=gr_id,
+    )
+
+    assert result == 0
+    assert received == ["instr from state"]
