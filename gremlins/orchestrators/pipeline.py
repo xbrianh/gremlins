@@ -16,17 +16,21 @@ from typing import NoReturn
 from gremlins.clients import ClientSpec
 from gremlins.clients.protocol import ClaudeClient
 from gremlins.clients.resolve import require_stage_spec
-from gremlins.git import DirtyOnly, HeadAdvanced, in_git_repo
+from gremlins.git import (
+    DirtyOnly,
+    HeadAdvanced,
+    PreImplState,
+    in_git_repo,
+    record_pre_impl_state,
+)
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline import StageEntry
 from gremlins.runner import build_parallel_stages, install_signal_handlers, run_stages
 from gremlins.stages import (
     address_code,
-    commit_pr,
-    ghaddress,
-    ghplan,
-    ghreview,
+    commit,
     implement,
+    open_github_pr,
     plan,
     request_copilot,
     review_code,
@@ -34,8 +38,11 @@ from gremlins.stages import (
     wait_ci,
     wait_copilot,
 )
+from gremlins.stages import (
+    handoff_branch as handoff_branch_mod,
+)
 from gremlins.stages.base import Stage, StageContext
-from gremlins.stages.implement import ImplStageResult
+from gremlins.stages.handoff_branch import HandoffBranchResult
 from gremlins.state import patch_state, set_stage
 
 logger = logging.getLogger(__name__)
@@ -402,13 +409,15 @@ class LocalPipeline(Pipeline):
 class GHPipeline(Pipeline):
     target = "github"
     STAGE_TYPES: dict[str, type[Stage]] = {
-        "plan": ghplan.GHPlan,
+        "plan": plan.Plan,
         "implement": implement.Implement,
+        "handoff-branch": handoff_branch_mod.HandoffBranch,
         "verify": verify.Verify,
-        "commit-pr": commit_pr.CommitPR,
+        "commit": commit.Commit,
+        "open-github-pr": open_github_pr.OpenGitHubPR,
         "request-copilot": request_copilot.RequestCopilot,
-        "ghreview": ghreview.GHReview,
-        "ghaddress": ghaddress.GHAddress,
+        "ghreview": review_code.ReviewCode,
+        "ghaddress": address_code.AddressCode,
         "wait-ci": wait_ci.WaitCI,
         "wait-copilot": wait_copilot.WaitCopilot,
     }
@@ -443,7 +452,10 @@ class GHPipeline(Pipeline):
         self.issue_url: str = ""
         self.issue_num: str = ""
         self.issue_body: str = ""
-        self.impl_result: ImplStageResult | None = None
+        self.impl_pre_state: PreImplState | None = None
+        self.impl_handoff_result: HandoffBranchResult | None = None
+        self.impl_handoff_branch: str = ""
+        self.impl_base_ref: str = ""
         self.pr_url: str = ""
         self.pr_num: str = ""
 
@@ -473,8 +485,8 @@ class GHPipeline(Pipeline):
                         f"stage {entry.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML"
                     )
                 set_stage(self.gr_id, entry.name)
-                logger.info("[1/8] running ghplan")
-                stage = ghplan.GHPlan(
+                logger.info("[1/8] running plan")
+                stage = plan.Plan(
                     entry,
                     model,
                     ref=self.args.ref or "",
@@ -482,10 +494,7 @@ class GHPipeline(Pipeline):
                     repo=self.repo,
                 )
                 stage.bind(ctx)
-                result = stage.run(None)
-                self.issue_url = result.issue_url
-                self.issue_num = result.issue_num
-                self.issue_body = result.issue_body
+                stage.run(self)
 
             return _plan
 
@@ -504,49 +513,71 @@ class GHPipeline(Pipeline):
                             "could not read spec.md (%s); proceeding without north-star context",
                             exc,
                         )
+                self.impl_pre_state = record_pre_impl_state()
+                patch_state(
+                    self.gr_id,
+                    impl_pre_head=self.impl_pre_state.head,
+                    impl_pre_branch=self.impl_pre_state.branch,
+                )
                 stage = implement.Implement(
                     entry,
                     model,
                     plan_text=self.issue_body,
                     is_git=True,
-                    kind="gh",
-                    issue_num=self.issue_num,
                     spec_text=spec_text,
                 )
                 stage.bind(ctx)
-                impl_result = stage.run(None)
-                if impl_result is None:
-                    _die("implement stage did not produce a result")
-                self.impl_result = impl_result
-                patch_state(
-                    self.gr_id,
-                    impl_handoff_branch=impl_result.handoff_branch,
-                    impl_base_ref=impl_result.pre_state.head,
-                )
+                stage.run(self)
 
             return _implement
+
+        if entry.type == "handoff-branch":
+
+            def _handoff_branch() -> None:
+                set_stage(self.gr_id, entry.name)
+                logger.info("[2b/8] creating handoff branch")
+                if self.impl_pre_state is None:
+                    saved_head = read_state_field(self.state_file, "impl_pre_head")
+                    if saved_head:
+                        self.impl_pre_state = PreImplState(
+                            head=saved_head,
+                            branch=read_state_field(self.state_file, "impl_pre_branch"),
+                        )
+                stage = handoff_branch_mod.HandoffBranch(entry, model)
+                stage.bind(ctx)
+                result = stage.run(self)
+                self.impl_handoff_result = result
+                self.impl_handoff_branch = result.handoff_branch
+                self.impl_base_ref = result.base_ref
+                patch_state(
+                    self.gr_id,
+                    impl_handoff_branch=result.handoff_branch,
+                    impl_base_ref=result.base_ref,
+                )
+
+            return _handoff_branch
 
         if entry.type == "verify":
 
             def _verify() -> None:
                 set_stage(self.gr_id, entry.name)
-                logger.info("[2b/8] verifying implementation")
+                logger.info("[2c/8] verifying implementation")
                 stage = verify.Verify(entry, model, is_git=True, commit_after_fix=False)
                 stage.bind(ctx)
                 stage.run(None)
 
             return _verify
 
-        if entry.type == "commit-pr":
+        if entry.type == "commit":
 
-            def _commit_pr() -> None:
+            def _commit() -> None:
                 set_stage(self.gr_id, entry.name)
-                logger.info("[2c/8] committing + opening PR")
-                impl_result = self.impl_result
-                if impl_result is not None:
-                    impl_outcome = impl_result.outcome
-                    impl_handoff_branch = impl_result.handoff_branch
-                    base_ref = impl_result.pre_state.head
+                logger.info("[2d/8] committing changes")
+                hb_result = self.impl_handoff_result
+                if hb_result is not None:
+                    impl_outcome = hb_result.outcome
+                    impl_handoff_branch = hb_result.handoff_branch
+                    base_ref = hb_result.base_ref
                 else:
                     impl_handoff_branch = read_state_field(
                         self.state_file, "impl_handoff_branch"
@@ -554,7 +585,7 @@ class GHPipeline(Pipeline):
                     base_ref = read_state_field(self.state_file, "impl_base_ref")
                     if not base_ref:
                         _die(
-                            "--resume-from commit-pr: no impl_base_ref in state.json "
+                            "--resume-from commit: no impl_base_ref in state.json "
                             "(rewind to implement?)"
                         )
                     if impl_handoff_branch:
@@ -571,7 +602,7 @@ class GHPipeline(Pipeline):
                         )
                         if count_r.returncode != 0:
                             _die(
-                                f"--resume-from commit-pr: impl_handoff_branch '{impl_handoff_branch}' "
+                                f"--resume-from commit: impl_handoff_branch '{impl_handoff_branch}' "
                                 f"not found or base_ref invalid (rewind to implement?)\n"
                                 f"{count_r.stderr.strip()}"
                             )
@@ -579,7 +610,7 @@ class GHPipeline(Pipeline):
                         impl_outcome = HeadAdvanced(commit_count=commit_count)
                     else:
                         impl_outcome = DirtyOnly()
-                stage = commit_pr.CommitPR(
+                stage = commit.Commit(
                     entry,
                     model,
                     impl_outcome=impl_outcome,
@@ -589,6 +620,21 @@ class GHPipeline(Pipeline):
                     cwd=None,
                 )
                 stage.bind(ctx)
+                stage.run(None)
+
+            return _commit
+
+        if entry.type == "open-github-pr":
+
+            def _open_github_pr() -> None:
+                set_stage(self.gr_id, entry.name)
+                logger.info("[2e/8] opening GitHub PR")
+                stage = open_github_pr.OpenGitHubPR(
+                    entry,
+                    model,
+                    issue_url=self.issue_url,
+                )
+                stage.bind(ctx)
                 pr_url = stage.run(None)
                 pr_num = pr_url.split("/")[-1]
                 logger.info("PR: %s", pr_url)
@@ -596,7 +642,7 @@ class GHPipeline(Pipeline):
                 self.pr_url = pr_url
                 self.pr_num = pr_num
 
-            return _commit_pr
+            return _open_github_pr
 
         if entry.type == "request-copilot":
 
@@ -622,9 +668,15 @@ class GHPipeline(Pipeline):
                 self._ensure_pr_url()
                 set_stage(self.gr_id, entry.name)
                 logger.info("[4/8] running /ghreview")
-                stage = ghreview.GHReview(entry, model, pr_url=self.pr_url)
+                stage = review_code.ReviewCode(
+                    entry,
+                    model,
+                    plan_text="",
+                    is_git=True,
+                    pr_url=self.pr_url,
+                )
                 stage.bind(ctx)
-                stage.run(None)
+                stage.run(self)
 
             return _ghreview
 
@@ -655,9 +707,14 @@ class GHPipeline(Pipeline):
                 self._ensure_pr_url()
                 set_stage(self.gr_id, entry.name)
                 logger.info("[6/8] running /ghaddress")
-                stage = ghaddress.GHAddress(entry, model, pr_url=self.pr_url)
+                stage = address_code.AddressCode(
+                    entry,
+                    model,
+                    is_git=True,
+                    pr_url=self.pr_url,
+                )
                 stage.bind(ctx)
-                stage.run(None)
+                stage.run(self)
 
             return _ghaddress
 

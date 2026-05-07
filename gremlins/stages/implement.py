@@ -2,39 +2,18 @@
 
 from __future__ import annotations
 
-import dataclasses
 import os
 import pathlib
-import sys
 from typing import Any
 
 from gremlins.git import (
-    DivergentHead,
-    EmptyImpl,
-    HeadAdvanced,
-    ImplOutcome,
-    PreImplState,
-    classify_impl_outcome,
-    create_handoff_branch,
     has_dirty_worktree,
     head_sha,
-    record_pre_impl_state,
-    reset_pre_branch,
-    sweep_stale_handoff_branches,
 )
 from gremlins.pipeline import StageEntry
 from gremlins.prompts import BUNDLED_PROMPT_DIR, load_prompts
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
-
-
-@dataclasses.dataclass
-class ImplStageResult:
-    """Returned by ``Implement.run`` when ``kind='gh'``."""
-
-    pre_state: PreImplState
-    outcome: ImplOutcome
-    handoff_branch: str  # empty string when outcome is DirtyOnly (no branch created)
 
 
 def changes_outside_git(sentinel: pathlib.Path, session_dir: pathlib.Path) -> bool:
@@ -99,17 +78,13 @@ class Implement(Stage):
         *,
         plan_text: str,
         is_git: bool,
-        kind: str = "local",
         spec_text: str = "",
-        issue_num: str = "",
         cwd: str | None = None,
     ) -> None:
         super().__init__(entry, model)
         self.plan_text = plan_text
         self.is_git = is_git
-        self.kind = kind
         self.spec_text = spec_text
-        self.issue_num = issue_num
         self._cwd = cwd
 
     @property
@@ -118,10 +93,11 @@ class Implement(Stage):
             str(self.state.worktree) if self.state.worktree is not None else None
         )
 
-    def run(self, pipe: Any) -> ImplStageResult | None:
-        if self.kind == "gh":
-            return self._run_gh()
-        return self._run_local()
+    def run(self, pipe: Any) -> None:
+        if getattr(pipe, "target", "local") == "github":
+            self._run_gh(pipe)
+        else:
+            self._run_local()
 
     def _run_local(self) -> None:
         cwd_arg = str(self.state.worktree) if self.state.worktree is not None else None
@@ -160,8 +136,9 @@ class Implement(Stage):
             if not changes_outside_git(pre_sentinel, self.state.session_dir):
                 raise RuntimeError("implementation stage produced no changes; aborting")
 
-    def _run_gh(self) -> ImplStageResult:
-        if self.issue_num:
+    def _run_gh(self, pipe: Any) -> None:
+        issue_num = getattr(pipe, "issue_num", "")
+        if issue_num:
             plan_source_label = "from the GitHub issue"
             plan_location_note = (
                 "The plan lives in the GitHub issue and reviews go to PR comments; "
@@ -182,48 +159,11 @@ class Implement(Stage):
             plan_location_note=plan_location_note,
         )
 
-        impl_cwd = self._impl_cwd
-        pre_state = record_pre_impl_state(cwd=impl_cwd)
-
         self.run_claude(
             prompt,
             label="implement",
             raw_path=self.state.session_dir / "stream-implement.jsonl",
             capture_events=True,
-        )
-
-        outcome = classify_impl_outcome(pre_state, cwd=impl_cwd)
-
-        if isinstance(outcome, EmptyImpl):
-            raise RuntimeError(
-                "implementation step produced no changes; refusing to open empty PR"
-            )
-        if isinstance(outcome, DivergentHead):
-            raise RuntimeError(
-                f"implementation changed HEAD from {outcome.pre_head} to {outcome.post_head} "
-                "without advancing from the starting commit; refusing to treat this as "
-                "committed work to hand off"
-            )
-
-        handoff_branch = ""
-        if isinstance(outcome, HeadAdvanced):
-            handoff_branch = create_handoff_branch(pre_state, cwd=impl_cwd)
-            reset_pre_branch(pre_state, cwd=impl_cwd)
-            sweep_stale_handoff_branches(handoff_branch, cwd=impl_cwd)
-            commit_count = outcome.commit_count
-            pre_branch_note = (
-                f" and reset {pre_state.branch}" if pre_state.branch else ""
-            )
-            sys.stdout.write(
-                f"    implement committed during run; moved {commit_count} commit(s) "
-                f"onto {handoff_branch}{pre_branch_note}\n"
-            )
-            sys.stdout.flush()
-
-        return ImplStageResult(
-            pre_state=pre_state,
-            outcome=outcome,
-            handoff_branch=handoff_branch,
         )
 
 

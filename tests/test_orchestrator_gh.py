@@ -398,9 +398,9 @@ def test_parse_plan_source():
     assert args.instructions == []
 
 
-def test_parse_resume_from_commit_pr(capsys):
-    args = _parse_gh_args(["--plan", "42", "--resume-from", "commit-pr"])
-    assert args.resume_from == "commit-pr"
+def test_parse_resume_from_commit(capsys):
+    args = _parse_gh_args(["--plan", "42", "--resume-from", "commit"])
+    assert args.resume_from == "commit"
     captured = capsys.readouterr()
     assert "rewinding" not in captured.err
 
@@ -453,8 +453,10 @@ def test_gh_pipeline_stage_names(tmp_path):
     assert names == [
         "plan",
         "implement",
+        "handoff-branch",
         "verify",
-        "commit-pr",
+        "commit",
+        "open-pr",
         "request-copilot",
         "ghreview",
         "wait-copilot",
@@ -508,7 +510,7 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
     )
 
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run",
+        "gremlins.stages.review_code.ReviewCode.run",
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
@@ -520,7 +522,7 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run",
+        "gremlins.stages.address_code.AddressCode.run",
         lambda self, pipe: None,
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
@@ -530,7 +532,8 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
         git_dir=tmp_path,
         fixtures={
             "implement": IMPL_EVENTS,
-            "commit-pr": _pr_events(),
+            "commit": IMPL_EVENTS,
+            "open-github-pr": _pr_events(),
         },
     )
 
@@ -541,7 +544,7 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
     # plan stage must NOT have been called
     assert "plan" not in labels
     assert "implement" in labels
-    assert "commit-pr" in labels
+    assert "commit" in labels
 
 
 def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch):
@@ -557,7 +560,7 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run", lambda self, pipe: None
+        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -567,7 +570,7 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
@@ -577,7 +580,8 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
         fixtures={
             "plan": _issue_events(),
             "implement": IMPL_EVENTS,
-            "commit-pr": _pr_events(),
+            "commit": IMPL_EVENTS,
+            "open-github-pr": _pr_events(),
         },
     )
 
@@ -603,7 +607,7 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run", lambda self, pipe: None
+        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -613,7 +617,7 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
@@ -622,7 +626,8 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
         git_dir=tmp_path,
         fixtures={
             "implement": IMPL_EVENTS,
-            "commit-pr": _pr_events(),
+            "commit": IMPL_EVENTS,
+            "open-github-pr": _pr_events(),
         },
     )
 
@@ -653,7 +658,7 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run", lambda self, pipe: None
+        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -663,7 +668,7 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
@@ -672,7 +677,8 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
         git_dir=tmp_path,
         fixtures={
             "implement": IMPL_EVENTS,
-            "commit-pr": _pr_events(),
+            "commit": IMPL_EVENTS,
+            "open-github-pr": _pr_events(),
         },
     )
 
@@ -704,7 +710,7 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run", lambda self, pipe: None
+        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -714,7 +720,7 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
@@ -723,7 +729,8 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
         git_dir=tmp_path,
         fixtures={
             "implement": IMPL_EVENTS,
-            "commit-pr": _pr_events(),
+            "commit": IMPL_EVENTS,
+            "open-github-pr": _pr_events(),
         },
     )
 
@@ -750,8 +757,10 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
     stage_defs = [
         ("plan", "plan"),
         ("implement", "implement"),
+        ("handoff-branch", "handoff-branch"),
         ("verify", "verify"),
-        ("commit-pr", "commit-pr"),
+        ("commit", "commit"),
+        ("open-pr", "open-github-pr"),
         ("request-copilot", "request-copilot"),
         ("ghreview", "ghreview"),
         ("wait-copilot", "wait-copilot"),
@@ -761,8 +770,10 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
     original_stage_clients = {
         "plan": "claude:claude-sonnet-4-6",
         "implement": "claude:claude-haiku-4-5-20251001",
+        "handoff-branch": "claude:claude-sonnet-4-6",
         "verify": "claude:claude-opus-4-1",
-        "commit-pr": "copilot:gpt-4o",
+        "commit": "copilot:gpt-4o",
+        "open-pr": "copilot:gpt-4o",
         "request-copilot": "claude:claude-sonnet-4-6",
         "ghreview": "claude:claude-haiku-4-5-20251001",
         "wait-copilot": "copilot:gpt-5",
@@ -833,7 +844,7 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
     ghaddress_models: list[str] = []
     ci_models: list[str] = []
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run",
+        "gremlins.stages.review_code.ReviewCode.run",
         lambda self, pipe: ghreview_models.append(self.model),
     )
     monkeypatch.setattr(
@@ -844,7 +855,7 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run",
+        "gremlins.stages.address_code.AddressCode.run",
         lambda self, pipe: ghaddress_models.append(self.model),
     )
     monkeypatch.setattr(
@@ -860,7 +871,8 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
         git_dir=tmp_path,
         fixtures={
             "implement": IMPL_EVENTS,
-            "commit-pr": _pr_events(),
+            "commit": IMPL_EVENTS,
+            "open-github-pr": _pr_events(),
         },
     )
 
@@ -920,7 +932,8 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
         git_dir=tmp_path,
         fixtures={
             "implement": IMPL_EVENTS,
-            "commit-pr": _pr_events(),
+            "commit": IMPL_EVENTS,
+            "open-github-pr": _pr_events(),
         },
     )
 
@@ -934,7 +947,8 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
     called_models = {call.label: call.model for call in resume_client.calls}
     assert called_models == {
         "implement": "claude-haiku-4-5-20251001",
-        "commit-pr": "gpt-4o",
+        "commit": "gpt-4o",
+        "open-github-pr": "gpt-4o",
     }
     assert verify_models == ["claude-opus-4-1"]
     assert ghreview_models == ["claude-haiku-4-5-20251001"]
@@ -981,8 +995,10 @@ def test_gh_main_resume_requires_each_persisted_stage_client(
             "stage_clients": {
                 "plan": "claude:sonnet",
                 "implement": "claude:sonnet",
+                "handoff-branch": "claude:sonnet",
                 "verify": "claude:sonnet",
-                "commit-pr": "claude:sonnet",
+                "commit": "claude:sonnet",
+                "open-pr": "claude:sonnet",
                 "request-copilot": "claude:sonnet",
                 "wait-copilot": "claude:sonnet",
                 "ghaddress": "claude:sonnet",
@@ -1021,7 +1037,7 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Resumed Plan\nDo more stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run", lambda self, pipe: None
+        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -1031,7 +1047,7 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
@@ -1040,7 +1056,8 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         git_dir=tmp_path,
         fixtures={
             "implement": IMPL_EVENTS,
-            "commit-pr": _pr_events(),
+            "commit": IMPL_EVENTS,
+            "open-github-pr": _pr_events(),
         },
     )
 
@@ -1092,7 +1109,7 @@ def test_resume_from_ghreview(tmp_path, monkeypatch):
 
     ghreview_called = []
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run",
+        "gremlins.stages.review_code.ReviewCode.run",
         lambda self, pipe: ghreview_called.append(self.pr_url),
     )
     monkeypatch.setattr(
@@ -1103,7 +1120,7 @@ def test_resume_from_ghreview(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
@@ -1113,7 +1130,7 @@ def test_resume_from_ghreview(tmp_path, monkeypatch):
     result = gh_main(["--plan", "5", "--resume-from", "ghreview"], client=client)
     assert result == 0
 
-    # No client.run calls (plan/implement/commit-pr all skipped)
+    # No client.run calls (plan/implement/commit/open-pr all skipped)
     assert client.calls == []
     # ghreview was called with the correct PR URL
     assert ghreview_called == ["https://github.com/owner/repo/pull/200"]
@@ -1158,7 +1175,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
     monkeypatch.setattr(subprocess, "run", fake_gh_run)
 
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run", lambda self, pipe: None
+        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -1168,7 +1185,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
@@ -1189,7 +1206,11 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
             {"type": "system", "subtype": "init"},
             {"type": "result", "subtype": "success", "total_cost_usd": 0.07},
         ],
-        "commit-pr": [
+        "commit": [
+            {"type": "system", "subtype": "init"},
+            {"type": "result", "subtype": "success", "total_cost_usd": 0.03},
+        ],
+        "open-github-pr": [
             {"type": "system", "subtype": "init"},
             {
                 "type": "assistant",
@@ -1216,7 +1237,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
                     ]
                 },
             },
-            {"type": "result", "subtype": "success", "total_cost_usd": 0.05},
+            {"type": "result", "subtype": "success", "total_cost_usd": 0.02},
         ],
     }
 
@@ -1230,14 +1251,15 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
     labels = [c.label for c in client.calls]
     assert "plan-title" in labels
     assert "implement" in labels
-    assert "commit-pr" in labels
+    assert "commit" in labels
+    assert "open-github-pr" in labels
 
     # Read on-disk state.json — verifies both the accumulation and the persistence step.
     state = json.loads(state_file.read_text())
     assert "total_cost_usd" in state, "total_cost_usd was not persisted to state.json"
 
     total = state["total_cost_usd"]
-    expected = 0.13 + 0.07 + 0.05
+    expected = 0.13 + 0.07 + 0.03 + 0.02
     assert total == pytest.approx(expected), (
         f"expected total {expected:.2f}, got {total:.4f}; "
         f"a regression dropping plan-title cost (0.13) would show total ≈ {expected - 0.13:.2f}"
@@ -1245,15 +1267,15 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
 
 
 # ---------------------------------------------------------------------------
-# Regression: --resume-from commit-pr must not re-run implement
+# Regression: --resume-from commit must not re-run implement
 # ---------------------------------------------------------------------------
 
 
-def test_resume_from_commit_pr_skips_implement(tmp_path, monkeypatch):
-    """--resume-from commit-pr picks up at commit-pr without re-running implement.
+def test_resume_from_commit_skips_implement(tmp_path, monkeypatch):
+    """--resume-from commit picks up at commit without re-running implement.
 
     Regression guard for the bug where the orchestrator silently rewound
-    commit-pr → implement, which caused an EmptyImpl loop when the
+    commit → implement, which caused an EmptyImpl loop when the
     impl-handoff branch was already present.
     """
     _init_git_repo(tmp_path)
@@ -1307,7 +1329,7 @@ def test_resume_from_commit_pr_skips_implement(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run", lambda self, pipe: None
+        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -1317,24 +1339,111 @@ def test_resume_from_commit_pr_skips_implement(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
 
-    client = FakeClaudeClient(fixtures={"commit-pr": _pr_events()})
+    client = FakeClaudeClient(
+        fixtures={"commit": IMPL_EVENTS, "open-github-pr": _pr_events()}
+    )
 
-    result = gh_main(["--plan", "42", "--resume-from", "commit-pr"], client=client)
+    result = gh_main(["--plan", "42", "--resume-from", "commit"], client=client)
     assert result == 0
 
     labels = [c.label for c in client.calls]
-    assert "implement" not in labels, "implement must not run on commit-pr resume"
-    assert "commit-pr" in labels
+    assert "implement" not in labels, "implement must not run on commit resume"
+    assert "commit" in labels
 
-    # The commit-pr prompt must contain content from the impl diff.
-    commit_pr_call = next(c for c in client.calls if c.label == "commit-pr")
-    assert (
-        "impl content" in commit_pr_call.prompt or "impl.txt" in commit_pr_call.prompt
+    # The commit prompt must contain content from the impl diff.
+    commit_call = next(c for c in client.calls if c.label == "commit")
+    assert "impl content" in commit_call.prompt or "impl.txt" in commit_call.prompt
+
+
+def test_parse_resume_from_open_pr(capsys):
+    args = _parse_gh_args(["--plan", "42", "--resume-from", "open-pr"])
+    assert args.resume_from == "open-pr"
+
+
+def test_resume_from_open_pr(tmp_path, monkeypatch):
+    """--resume-from open-pr skips plan/implement/commit and runs open-github-pr onward."""
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    # Simulate a completed implement + commit: one commit above init.
+    (tmp_path / "impl.txt").write_text("impl content\n")
+    subprocess.run(
+        ["git", "add", "impl.txt"], cwd=tmp_path, check=True, capture_output=True
     )
+    subprocess.run(
+        ["git", "commit", "-m", "feat: add impl.txt"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    base_ref = subprocess.run(
+        ["git", "rev-parse", "HEAD~1"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    handoff_branch = "ghgremlin-impl-handoff-open-pr-test"
+    subprocess.run(
+        ["git", "branch", handoff_branch], cwd=tmp_path, check=True, capture_output=True
+    )
+
+    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+
+    def _fake_read(sf, field):
+        if field == "issue_url":
+            return "https://github.com/owner/repo/issues/42"
+        if field == "issue_num":
+            return "42"
+        if field == "pr_url":
+            return ""
+        if field == "impl_handoff_branch":
+            return handoff_branch
+        if field == "impl_base_ref":
+            return base_ref
+        return ""
+
+    monkeypatch.setattr(_gh_mod, "read_state_field", _fake_read)
+    monkeypatch.setattr(_pipeline_mod, "read_state_field", _fake_read)
+    monkeypatch.setattr(
+        _gh_mod, "_fetch_issue_body", lambda num, repo: "# Plan\nDo stuff.\n"
+    )
+    monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
+    ghreview_called = []
+    monkeypatch.setattr(
+        "gremlins.stages.review_code.ReviewCode.run",
+        lambda self, pipe: ghreview_called.append(self.pr_url),
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.request_copilot.RequestCopilot.run",
+        lambda self, pipe: None,
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
+    )
+    monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
+
+    client = FakeClaudeClient(fixtures={"open-github-pr": _pr_events()})
+
+    result = gh_main(["--plan", "42", "--resume-from", "open-pr"], client=client)
+    assert result == 0
+
+    labels = [c.label for c in client.calls]
+    assert "implement" not in labels, "implement must not run on open-pr resume"
+    assert "commit" not in labels, "commit must not run on open-pr resume"
+    assert "open-github-pr" in labels
+
+    # pr_url was extracted and threaded into downstream stages
+    assert ghreview_called == ["https://github.com/owner/repo/pull/101"]
 
 
 # ---------------------------------------------------------------------------
@@ -1355,14 +1464,14 @@ def test_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run", lambda self, pipe: None
+        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.request_copilot.RequestCopilot.run",
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
@@ -1381,7 +1490,8 @@ def test_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
         git_dir=tmp_path,
         fixtures={
             "implement": IMPL_EVENTS,
-            "commit-pr": _pr_events("https://github.com/owner/repo/pull/77"),
+            "commit": IMPL_EVENTS,
+            "open-github-pr": _pr_events("https://github.com/owner/repo/pull/77"),
         },
     )
 
@@ -1414,7 +1524,7 @@ def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run", lambda self, pipe: None
+        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -1424,7 +1534,7 @@ def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
 
@@ -1439,7 +1549,8 @@ def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
         git_dir=tmp_path,
         fixtures={
             "implement": IMPL_EVENTS,
-            "commit-pr": _pr_events("https://github.com/owner/repo/pull/77"),
+            "commit": IMPL_EVENTS,
+            "open-github-pr": _pr_events("https://github.com/owner/repo/pull/77"),
         },
     )
 
@@ -1474,7 +1585,7 @@ def test_wait_ci_stage_ordering(tmp_path, monkeypatch):
         lambda self, pipe: order.append("verify"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run",
+        "gremlins.stages.review_code.ReviewCode.run",
         lambda self, pipe: order.append("ghreview"),
     )
     monkeypatch.setattr(
@@ -1486,7 +1597,7 @@ def test_wait_ci_stage_ordering(tmp_path, monkeypatch):
         lambda self, pipe: order.append("request-copilot"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run",
+        "gremlins.stages.address_code.AddressCode.run",
         lambda self, pipe: order.append("ghaddress"),
     )
     monkeypatch.setattr(
@@ -1498,7 +1609,8 @@ def test_wait_ci_stage_ordering(tmp_path, monkeypatch):
         git_dir=tmp_path,
         fixtures={
             "implement": IMPL_EVENTS,
-            "commit-pr": _pr_events(),
+            "commit": IMPL_EVENTS,
+            "open-github-pr": _pr_events(),
         },
     )
 
@@ -1539,7 +1651,7 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
     ci_stages = []
 
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run",
+        "gremlins.stages.review_code.ReviewCode.run",
         lambda self, pipe: earlier_called.append("ghreview"),
     )
     monkeypatch.setattr(
@@ -1551,7 +1663,7 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
         lambda self, pipe: earlier_called.append("request-copilot"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run",
+        "gremlins.stages.address_code.AddressCode.run",
         lambda self, pipe: earlier_called.append("ghaddress"),
     )
     monkeypatch.setattr(
@@ -1589,7 +1701,7 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run", lambda self, pipe: None
+        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -1599,7 +1711,7 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
 
@@ -1614,7 +1726,8 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
         git_dir=tmp_path,
         fixtures={
             "implement": IMPL_EVENTS,
-            "commit-pr": _pr_events("https://github.com/owner/repo/pull/77"),
+            "commit": IMPL_EVENTS,
+            "open-github-pr": _pr_events("https://github.com/owner/repo/pull/77"),
         },
     )
 
@@ -1691,7 +1804,7 @@ def test_resume_from_verify(tmp_path, monkeypatch):
         lambda self, pipe: verify_calls.append(self),
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run",
+        "gremlins.stages.review_code.ReviewCode.run",
         lambda self, pipe: earlier_called.append("ghreview"),
     )
     monkeypatch.setattr(
@@ -1703,12 +1816,14 @@ def test_resume_from_verify(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
 
-    client = FakeClaudeClient(fixtures={"commit-pr": _pr_events()})
+    client = FakeClaudeClient(
+        fixtures={"commit": IMPL_EVENTS, "open-github-pr": _pr_events()}
+    )
 
     result = gh_main(["--plan", "5", "--resume-from", "verify"], client=client)
     assert result == 0
@@ -1732,7 +1847,7 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir):
         subprocess, "run", _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n")
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run", lambda self, pipe: None
+        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -1741,14 +1856,18 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir):
         "gremlins.stages.request_copilot.RequestCopilot.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
 
     client = _CommittingClient(
         git_dir=tmp_path,
-        fixtures={"implement": IMPL_EVENTS, "commit-pr": _pr_events()},
+        fixtures={
+            "implement": IMPL_EVENTS,
+            "commit": IMPL_EVENTS,
+            "open-github-pr": _pr_events(),
+        },
     )
 
     result = gh_main(["--plan", "42"], gr_id=gr_id, client=client)
@@ -1778,7 +1897,7 @@ def test_gh_main_state_client_tracks_effective_model(
         subprocess, "run", _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n")
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run", lambda self, pipe: None
+        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -1787,14 +1906,18 @@ def test_gh_main_state_client_tracks_effective_model(
         "gremlins.stages.request_copilot.RequestCopilot.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
 
     client = _CommittingClient(
         git_dir=tmp_path,
-        fixtures={"implement": IMPL_EVENTS, "commit-pr": _pr_events()},
+        fixtures={
+            "implement": IMPL_EVENTS,
+            "commit": IMPL_EVENTS,
+            "open-github-pr": _pr_events(),
+        },
     )
 
     result = gh_main(
@@ -1844,7 +1967,7 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
         subprocess, "run", _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n")
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run", lambda self, pipe: None
+        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -1853,14 +1976,18 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
         "gremlins.stages.request_copilot.RequestCopilot.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
 
     client = _CommittingClient(
         git_dir=tmp_path,
-        fixtures={"implement": IMPL_EVENTS, "commit-pr": _pr_events()},
+        fixtures={
+            "implement": IMPL_EVENTS,
+            "commit": IMPL_EVENTS,
+            "open-github-pr": _pr_events(),
+        },
     )
 
     result = gh_main(["--plan", "42"], client=client)

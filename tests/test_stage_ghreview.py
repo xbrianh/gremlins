@@ -1,8 +1,9 @@
-"""Tests for gremlins.stages.ghreview."""
+"""Tests for ReviewCode.results_to_github (formerly gremlins.stages.ghreview)."""
 
 from __future__ import annotations
 
 import pathlib
+import types
 
 import pytest
 from conftest import MINIMAL_EVENTS
@@ -10,9 +11,10 @@ from conftest import MINIMAL_EVENTS
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.pipeline import StageEntry
 from gremlins.stages.base import StageContext
-from gremlins.stages.ghreview import GHReview
+from gremlins.stages.review_code import ReviewCode
 
 PR_URL = "https://github.com/owner/repo/pull/42"
+_GH_PIPE = types.SimpleNamespace(target="github")
 
 
 def _make_entry(prompt_path: pathlib.Path) -> StageEntry:
@@ -31,7 +33,7 @@ def _make_stage(
     gr_id: str | None = None,
     pr_url: str = PR_URL,
     style_content: str | None = None,
-) -> tuple[GHReview, StageContext]:
+) -> tuple[ReviewCode, FakeClaudeClient]:
     prompt_path = tmp_path / "ghreview.md"
     prompt_path.write_text("Review PR {pr_url}.", encoding="utf-8")
     if style_content is not None:
@@ -46,26 +48,25 @@ def _make_stage(
         )
     else:
         entry = _make_entry(prompt_path)
-    stage = GHReview(entry, "sonnet", pr_url=pr_url)
+    stage = ReviewCode(entry, "sonnet", plan_text="", is_git=True, pr_url=pr_url)
     client = FakeClaudeClient(fixtures={"ghreview": MINIMAL_EVENTS})
-    ctx = StageContext(client=client, session_dir=tmp_path, gr_id=gr_id)
-    stage.bind(ctx)
-    return stage, ctx
+    stage.bind(StageContext(client=client, session_dir=tmp_path, gr_id=gr_id))
+    return stage, client
 
 
 def test_run_calls_claude_with_pr_url(tmp_path: pathlib.Path) -> None:
-    stage, ctx = _make_stage(tmp_path)
-    stage.run(None)
-    assert len(ctx.client.calls) == 1
-    call = ctx.client.calls[0]
+    stage, client = _make_stage(tmp_path)
+    stage.run(_GH_PIPE)
+    assert len(client.calls) == 1
+    call = client.calls[0]
     assert PR_URL in call.prompt
     assert call.label == "ghreview"
 
 
 def test_run_includes_style_from_prompt_paths(tmp_path: pathlib.Path) -> None:
-    stage, ctx = _make_stage(tmp_path, style_content="Use type hints.")
-    stage.run(None)
-    assert "Use type hints." in ctx.client.calls[0].prompt
+    stage, client = _make_stage(tmp_path, style_content="Use type hints.")
+    stage.run(_GH_PIPE)
+    assert "Use type hints." in client.calls[0].prompt
 
 
 def test_run_raises_if_unbound() -> None:
@@ -82,13 +83,13 @@ def test_run_raises_if_unbound() -> None:
         prompt_paths=[prompt_path],
         options={},
     )
-    stage = GHReview(entry, None, pr_url=PR_URL)
+    stage = ReviewCode(entry, None, plan_text="", is_git=True, pr_url=PR_URL)
     with pytest.raises(RuntimeError, match="not bound"):
-        stage.run(None)
+        stage.run(_GH_PIPE)
 
 
 def test_run_writes_raw_path(tmp_path: pathlib.Path) -> None:
-    stage, ctx = _make_stage(tmp_path)
-    stage.run(None)
-    call = ctx.client.calls[0]
+    stage, client = _make_stage(tmp_path)
+    stage.run(_GH_PIPE)
+    call = client.calls[0]
     assert call.raw_path == tmp_path / "stream-ghreview.jsonl"

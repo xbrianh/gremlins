@@ -8,11 +8,9 @@ from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline import StageEntry, load_pipeline, resolve_pipeline_path
 from gremlins.stages import (
     address_code,
-    commit_pr,
-    ghaddress,
-    ghplan,
-    ghreview,
+    commit,
     implement,
+    open_github_pr,
     plan,
     request_copilot,
     review_code,
@@ -22,7 +20,7 @@ from gremlins.stages import (
 )
 
 
-def _args(**kwargs):
+def _args(**kwargs: object) -> argparse.Namespace:
     return argparse.Namespace(**kwargs)
 
 
@@ -30,7 +28,12 @@ def _pipeline_data(stages: list[StageEntry] | None = None) -> _PipelineData:
     return _PipelineData(name="test", path=pathlib.Path("."), stages=stages or [])
 
 
-def _local(stages, *, args, tmp_path):
+def _local(
+    stages: list[StageEntry],
+    *,
+    args: argparse.Namespace,
+    tmp_path: pathlib.Path,
+) -> LocalPipeline:
     return LocalPipeline(
         stages,
         args=args,
@@ -40,7 +43,7 @@ def _local(stages, *, args, tmp_path):
     )
 
 
-def test_local_pipeline_constructs_from_bundled_yaml(tmp_path):
+def test_local_pipeline_constructs_from_bundled_yaml(tmp_path: pathlib.Path) -> None:
     pipeline_data = load_pipeline(resolve_pipeline_path("local", pathlib.Path.cwd()))
     pipe = LocalPipeline(
         pipeline_data.stages,
@@ -63,7 +66,7 @@ def test_local_pipeline_constructs_from_bundled_yaml(tmp_path):
     assert LocalPipeline.STAGE_TYPES["verify"] is verify.Verify
 
 
-def test_gh_pipeline_constructs_from_bundled_yaml(tmp_path):
+def test_gh_pipeline_constructs_from_bundled_yaml(tmp_path: pathlib.Path) -> None:
     pipeline_data = load_pipeline(resolve_pipeline_path("gh", pathlib.Path.cwd()))
     pipe = GHPipeline(
         pipeline_data.stages,
@@ -81,23 +84,24 @@ def test_gh_pipeline_constructs_from_bundled_yaml(tmp_path):
     assert "plan" in stage_types
     assert "implement" in stage_types
     assert pipe.target == "github"
-    assert GHPipeline.STAGE_TYPES["plan"] is ghplan.GHPlan
+    assert GHPipeline.STAGE_TYPES["plan"] is plan.Plan
     assert GHPipeline.STAGE_TYPES["implement"] is implement.Implement
-    assert GHPipeline.STAGE_TYPES["commit-pr"] is commit_pr.CommitPR
+    assert GHPipeline.STAGE_TYPES["commit"] is commit.Commit
+    assert GHPipeline.STAGE_TYPES["open-github-pr"] is open_github_pr.OpenGitHubPR
     assert GHPipeline.STAGE_TYPES["request-copilot"] is request_copilot.RequestCopilot
-    assert GHPipeline.STAGE_TYPES["ghreview"] is ghreview.GHReview
-    assert GHPipeline.STAGE_TYPES["ghaddress"] is ghaddress.GHAddress
+    assert GHPipeline.STAGE_TYPES["ghreview"] is review_code.ReviewCode
+    assert GHPipeline.STAGE_TYPES["ghaddress"] is address_code.AddressCode
     assert GHPipeline.STAGE_TYPES["wait-ci"] is wait_ci.WaitCI
     assert GHPipeline.STAGE_TYPES["wait-copilot"] is wait_copilot.WaitCopilot
 
 
-def test_local_pipeline_rejects_gh_stages(tmp_path):
+def test_local_pipeline_rejects_gh_stages(tmp_path: pathlib.Path) -> None:
     gh_stages = [
         StageEntry(
-            name="commit-pr", type="commit-pr", client=None, prompt_paths=[], options={}
+            name="commit", type="commit", client=None, prompt_paths=[], options={}
         )
     ]
-    with pytest.raises(ValueError, match="commit-pr"):
+    with pytest.raises(ValueError, match="commit"):
         _local(gh_stages, args=_args(), tmp_path=tmp_path)
 
 
@@ -128,7 +132,7 @@ def _make_parallel_stage(name: str, children: list[str]) -> StageEntry:
     )
 
 
-def test_validate_resume_target_no_resume_from(tmp_path):
+def test_validate_resume_target_no_resume_from(tmp_path: pathlib.Path) -> None:
     pipe = _local(
         _make_stages("plan", "implement"),
         args=_args(resume_from=None),
@@ -137,7 +141,7 @@ def test_validate_resume_target_no_resume_from(tmp_path):
     pipe.validate_resume_target()  # should not raise
 
 
-def test_validate_resume_target_valid_name(tmp_path):
+def test_validate_resume_target_valid_name(tmp_path: pathlib.Path) -> None:
     pipe = _local(
         _make_stages("plan", "implement"),
         args=_args(resume_from="implement"),
@@ -146,7 +150,7 @@ def test_validate_resume_target_valid_name(tmp_path):
     pipe.validate_resume_target()  # should not raise
 
 
-def test_validate_resume_target_invalid_name(tmp_path):
+def test_validate_resume_target_invalid_name(tmp_path: pathlib.Path) -> None:
     pipe = _local(
         _make_stages("plan", "implement"),
         args=_args(resume_from="bogus"),
@@ -156,7 +160,7 @@ def test_validate_resume_target_invalid_name(tmp_path):
         pipe.validate_resume_target()
 
 
-def test_validate_resume_target_parallel_group_name(tmp_path):
+def test_validate_resume_target_parallel_group_name(tmp_path: pathlib.Path) -> None:
     pipe = _local(
         [_make_parallel_stage("reviews", ["review-a", "review-b"])],
         args=_args(resume_from="reviews"),
@@ -165,7 +169,7 @@ def test_validate_resume_target_parallel_group_name(tmp_path):
     pipe.validate_resume_target()  # "reviews" is a valid expanded name
 
 
-def test_validate_resume_target_parallel_fanout(tmp_path):
+def test_validate_resume_target_parallel_fanout(tmp_path: pathlib.Path) -> None:
     pipe = _local(
         [_make_parallel_stage("reviews", ["review-a", "review-b"])],
         args=_args(resume_from="reviews-fanout"),
@@ -174,7 +178,7 @@ def test_validate_resume_target_parallel_fanout(tmp_path):
     pipe.validate_resume_target()  # fanout is valid
 
 
-def test_validate_resume_target_parallel_fanin(tmp_path):
+def test_validate_resume_target_parallel_fanin(tmp_path: pathlib.Path) -> None:
     pipe = _local(
         [_make_parallel_stage("reviews", ["review-a", "review-b"])],
         args=_args(resume_from="reviews-fanin"),
@@ -183,7 +187,7 @@ def test_validate_resume_target_parallel_fanin(tmp_path):
     pipe.validate_resume_target()  # fanin is valid
 
 
-def test_validate_resume_target_child_name_rejected(tmp_path):
+def test_validate_resume_target_child_name_rejected(tmp_path: pathlib.Path) -> None:
     pipe = _local(
         [_make_parallel_stage("reviews", ["review-a", "review-b"])],
         args=_args(resume_from="review-a"),
@@ -193,7 +197,7 @@ def test_validate_resume_target_child_name_rejected(tmp_path):
         pipe.validate_resume_target()
 
 
-def test_parallel_expansion_in_constructor(tmp_path):
+def test_parallel_expansion_in_constructor(tmp_path: pathlib.Path) -> None:
     parallel = _make_parallel_stage("reviews", ["review-a", "review-b"])
     plan_entry = StageEntry(
         name="plan", type="plan", client=None, prompt_paths=[], options={}
