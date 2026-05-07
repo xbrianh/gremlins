@@ -26,7 +26,7 @@ from __future__ import annotations
 import argparse
 import pathlib
 import sys
-from typing import Any
+from typing import Any, cast
 
 from gremlins import paths as _paths
 from gremlins.fleet import main as fleet_main
@@ -151,9 +151,8 @@ def _launch_main(argv: list[str]) -> int:
 
     first = next((s for s in pipeline.stages if s.type != "parallel"), None)
     try:
-        parser = build_launch_parser(
-            name, STAGE_REGISTRY[first.type] if first is not None else _EmptyStage
-        )
+        stage_cls = cast(type, STAGE_REGISTRY[first.type]) if first is not None else _EmptyStage
+        parser = build_launch_parser(name, stage_cls)
     except (KeyError, TypeError):
         parser = build_launch_parser(name, _EmptyStage)
 
