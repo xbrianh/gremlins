@@ -250,15 +250,6 @@ def resolve_pipeline_name(name: str, project_root: pathlib.Path) -> pathlib.Path
     )
 
 
-VALID_KINDS = {"ghgremlin", "localgremlin", "bossgremlin"}
-
-KIND_SUBCOMMAND = {
-    "localgremlin": "_local",
-    "ghgremlin": "_gh",
-    "bossgremlin": "_boss",
-}
-
-
 def resolve_pipeline_path(name_or_path: str, base_dir: pathlib.Path) -> pathlib.Path:
     candidate = pathlib.Path(name_or_path)
     if candidate.suffix == ".yaml" or len(candidate.parts) > 1:

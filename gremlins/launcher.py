@@ -145,7 +145,7 @@ def _resolve_description_and_slug(
     """Return (description, description_explicit, slug) from available inputs.
 
     ``issue_title`` is an optional pre-fetched title for an issue-ref ``plan``
-    so callers that already resolved the issue (e.g. bossgremlin) don't trigger
+    so callers that already resolved the issue (e.g. boss pipeline) don't trigger
     a second ``gh`` round-trip here.
     """
     if description:
@@ -185,7 +185,7 @@ def _resolve_description_and_slug(
 def _resolve_boss_plan(
     plan: str, issue_data: dict[str, Any] | None, state_dir: pathlib.Path
 ) -> str:
-    """Resolve a bossgremlin --plan arg to an absolute path.
+    """Resolve a boss pipeline --plan arg to an absolute path.
 
     Accepts a file path (passed through, normalized to absolute) or an issue
     ref whose body has already been fetched via :func:`_fetch_issue`. Snapshots
@@ -708,7 +708,7 @@ def write_terminal_state(gr_id: str, exit_code: int) -> None:
 
     Called by the _run-pipeline subcommand's finally block. Mirrors finish.sh:
     touches the finished marker, patches state.json, and on success removes
-    the worktree (except bossgremlin). Best-effort throughout.
+    the worktree (except boss pipeline). Best-effort throughout.
     """
     state_dir = _state_root() / gr_id
     sf = state_dir / "state.json"

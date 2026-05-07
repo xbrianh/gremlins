@@ -90,10 +90,8 @@ The pipeline name is the first non-flag argument to `gremlins launch`. Run `grem
 ### Selecting a pipeline
 
 ```sh
-gremlins launch local                                          # bundled local.yaml
-gremlins launch local --pipeline my-pipeline                   # .gremlins/pipelines/my-pipeline.yaml
-gremlins launch local --pipeline .gremlins/pipelines/foo.yaml  # direct path
-gremlins launch gh                                             # bundled gh.yaml
+gremlins launch local   # bundled local.yaml
+gremlins launch gh      # bundled gh.yaml
 ```
 
 ### Schema reference

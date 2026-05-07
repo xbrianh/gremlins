@@ -144,13 +144,11 @@ def _launch_main(argv: list[str]) -> int:
             sys.stdout.write(f"{name}  {path.parent}  ({label})\n")
         return 0
 
-    name_idx = next((i for i, a in enumerate(argv) if not a.startswith("-")), None)
-
-    if name_idx is None:
+    if not argv or argv[0].startswith("-"):
         sys.stdout.write(_LAUNCH_BRIEF)
         return 0 if ("--help" in argv or "-h" in argv) else 1
 
-    name = argv[name_idx]
+    name = argv[0]
 
     try:
         pipeline_path = resolve_pipeline_name(name, pathlib.Path.cwd())
@@ -166,9 +164,8 @@ def _launch_main(argv: list[str]) -> int:
     except (KeyError, TypeError):
         parser = build_launch_parser(name, _EmptyStage)
 
-    argv_for_parser = [a for i, a in enumerate(argv) if i != name_idx]
     try:
-        args = parser.parse_args(argv_for_parser)
+        args = parser.parse_args(argv[1:])
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else 1
 
@@ -179,6 +176,7 @@ def _launch_main(argv: list[str]) -> int:
 def _self_background_main(
     pipeline_name: str, args: argparse.Namespace, stage_inputs: dict[str, Any]
 ) -> int:
+    pipeline_args = ("--client", args.client) if args.client else ()
     try:
         gr_id = launch(
             pipeline_name,
@@ -188,6 +186,7 @@ def _self_background_main(
             parent_id=args.parent_id,
             base_ref=args.base_ref,
             spec_path=args.spec_path,
+            pipeline_args=pipeline_args,
         )
     except (ValueError, RuntimeError) as exc:
         sys.stderr.write(f"error: {exc}\n")
