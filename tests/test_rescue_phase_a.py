@@ -45,6 +45,7 @@ from fixtures.shell_env import (
 import gremlins.fleet.constants as _constants
 import gremlins.fleet.rescue as rescue_mod
 from gremlins import fleet
+from gremlins.launcher import GremlinAlreadyRunning
 
 
 def _load_gremlins_module():
@@ -216,6 +217,33 @@ def test_rescue_fixed_verdict_invokes_launcher_resume(tmp_path, monkeypatch):
 
     assert len(resume_calls) == 1, resume_calls
     assert resume_calls[0] == "victim-abcdef"
+
+
+def test_rescue_already_running_returns_true_no_bail(tmp_path, monkeypatch):
+    """When _resume raises GremlinAlreadyRunning, do_rescue returns True without bailing."""
+    sh = setup_shell_env(tmp_path)
+    state_dir = _make_failed_gremlin(sh.state_root, sh.repo)
+
+    monkeypatch.setattr(
+        rescue_mod,
+        "_run_headless_diagnosis",
+        lambda *a, **kw: ("fixed", "state looks good"),
+    )
+
+    def _raise_already_running(gr_id: str) -> None:
+        raise GremlinAlreadyRunning(
+            f"gremlin {gr_id} is still running (pid 99999) — stop it first"
+        )
+
+    monkeypatch.setattr(rescue_mod, "_resume", _raise_already_running)
+    _patch_state_root(sh.state_root, monkeypatch)
+
+    ok = rescue_mod.do_rescue("victim-abcdef", headless=True)
+    assert ok is True
+
+    state = json.loads((state_dir / "state.json").read_text())
+    assert state.get("bail_reason") != "relaunch_failed"
+    assert "finished" not in state.get("status", "")
 
 
 def test_rescue_headless_excluded_class_refused(tmp_path, monkeypatch):

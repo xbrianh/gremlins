@@ -22,6 +22,7 @@ from gremlins.fleet.resolve import (
 )
 from gremlins.fleet.state import atomic_patch_state, liveness_of_state_file, load_state
 from gremlins.fleet.stop import do_stop
+from gremlins.launcher import GremlinAlreadyRunning
 from gremlins.launcher import resume as _resume
 
 _atomic_patch_state = atomic_patch_state
@@ -904,6 +905,13 @@ def do_rescue(target: str, headless: bool = False, from_boss: bool = False) -> b
         report["relaunch_attempted"] = True
         try:
             _resume(gr_id)
+        except GremlinAlreadyRunning as exc:
+            detail = str(exc)
+            # The gremlin is already running — skip relaunch regardless of how it got there.
+            print(f"note: relaunch skipped — gremlin is already running: {detail}")
+            report["relaunch_outcome"] = "already_running"
+            report["relaunch_reason"] = detail
+            return True
         except Exception as exc:
             detail = str(exc)
             if headless:

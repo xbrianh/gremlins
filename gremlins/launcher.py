@@ -31,6 +31,11 @@ from gremlins.pipeline import load_pipeline, resolve_pipeline_path
 
 VALID_KINDS = {"ghgremlin", "localgremlin", "bossgremlin"}
 
+
+class GremlinAlreadyRunning(RuntimeError):
+    pass
+
+
 _KIND_SUBCOMMAND = {
     "localgremlin": "_local",
     "ghgremlin": "_gh",
@@ -526,7 +531,7 @@ def resume(gr_id: str) -> None:
     if status == "running" and old_pid is not None:
         try:
             os.kill(int(old_pid), 0)
-            raise RuntimeError(
+            raise GremlinAlreadyRunning(
                 f"gremlin {gr_id} is still running (pid {old_pid}) — stop it first"
             )
         except (OSError, ValueError):
