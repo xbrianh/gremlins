@@ -220,7 +220,7 @@ def test_launch_creates_state_layout(lenv):
     assert state["id"] == gr_id
     assert state["kind"] == "local"
     assert state["setup_kind"] == "worktree-branch"
-    assert state["branch"] == f"bg/localgremlin/{gr_id}"
+    assert state["branch"] == f"bg/local/{gr_id}"
     args = state["pipeline_args"]
     assert args[0] == "--pipeline" and args[1].endswith(".yaml")
     assert "test instructions" in state["instructions"]

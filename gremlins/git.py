@@ -479,7 +479,7 @@ def setup_worktree_branch(
     project_root: str,
     gr_id: str,
     base_ref: str = "HEAD",
-    branch_prefix: str = "bg/localgremlin",
+    branch_prefix: str = "bg/local",
 ) -> tuple[str, str]:
     """Add a named-branch worktree at base_ref. Returns (workdir_path, branch_name).
 

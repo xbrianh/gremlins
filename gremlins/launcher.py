@@ -457,6 +457,9 @@ def launch(
     if plan and os.path.isfile(plan):
         plan = str(pathlib.Path(plan).resolve())
 
+    if plan and not os.path.isfile(plan) and (os.sep in plan or plan.endswith(".md")):
+        raise ValueError(f"--plan: file not found: {plan}")
+
     issue_data: dict[str, Any] | None = None
     if plan and not os.path.isfile(plan):
         issue_data = _fetch_issue(plan)
@@ -489,7 +492,7 @@ def launch(
     try:
         _loaded_pipeline = load_pipeline(pathlib.Path(pipeline_path))
         pipeline_mode = _pipeline_mode(_loaded_pipeline)
-    except Exception:
+    except (FileNotFoundError, OSError):
         pipeline_mode = _infer_mode_from_kind(kind)
 
     if pipeline_mode == "gh" and shutil.which("gh") is None:
@@ -617,7 +620,7 @@ def resume(gr_id: str) -> None:
         try:
             _loaded = load_pipeline(pathlib.Path(pipeline_path))
             pipeline_mode = _pipeline_mode(_loaded)
-        except Exception:
+        except (FileNotFoundError, OSError):
             pass
 
     if pipeline_mode == "gh" and shutil.which("gh") is None:
