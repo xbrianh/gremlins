@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import time
 
 from gremlins.clients.stream import (
     _HANDLERS,
@@ -196,3 +198,18 @@ def test_stream_events_timed_out_false_in_json_line():
     )
     _, _, _, timed_out = stream_events(io.BytesIO(line))
     assert timed_out is False
+
+
+def test_stream_events_queue_idle_timeout():
+    r_fd, w_fd = os.pipe()
+    read_end = os.fdopen(r_fd, "rb")
+    write_end = os.fdopen(w_fd, "wb")
+    try:
+        start = time.monotonic()
+        _, _, _, timed_out = stream_events(read_end, idle_timeout=0.05)
+        elapsed = time.monotonic() - start
+        assert timed_out is True
+        assert elapsed < 2.0
+    finally:
+        write_end.close()
+        read_end.close()

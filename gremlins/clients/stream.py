@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import json
 import pathlib
+import queue
 import sys
+import threading
 from collections.abc import Callable
 from typing import IO, Any, cast
+
+STREAM_IDLE_TIMEOUT = 120
 
 
 def _trunc(s: object, n: int = 200) -> str:
@@ -127,13 +131,34 @@ def stream_events(
     prefix: str = "",
     raw_path: pathlib.Path | None = None,
     capture: bool = False,
+    idle_timeout: float = STREAM_IDLE_TIMEOUT,
 ) -> tuple[float | None, str | None, list[dict[str, Any]] | None, bool]:
     state: dict[str, Any] = {"cost_usd": None, "result_text": None}
     events: list[dict[str, Any]] | None = [] if capture else None
     timed_out = False
     raw = open(raw_path, "ab") if raw_path is not None else None
+
+    q: queue.Queue[bytes | None] = queue.Queue()
+
+    def _reader() -> None:
+        try:
+            for line in stdout:
+                q.put(line)
+        finally:
+            q.put(None)
+
+    t = threading.Thread(target=_reader, daemon=True)
+    t.start()
+
     try:
-        for line in stdout:
+        while True:
+            try:
+                line = q.get(timeout=idle_timeout)
+            except queue.Empty:
+                timed_out = True
+                break
+            if line is None:
+                break
             if raw is not None:
                 raw.write(line)
                 raw.flush()
