@@ -25,6 +25,7 @@ class ClaudeClient(Protocol):
         on_timeout_prompt: str | None = None,
         max_retries: int = 2,
         cwd: pathlib.Path | None = None,
+        idle_timeout: float | None = None,
     ) -> CompletedRun: ...
 
     def reap_all(self) -> None: ...

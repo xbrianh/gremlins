@@ -15,6 +15,8 @@ from gremlins.prompts import BUNDLED_PROMPT_DIR, load_prompts
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 
+IMPLEMENT_IDLE_TIMEOUT = 600.0
+
 
 def changes_outside_git(sentinel: pathlib.Path, session_dir: pathlib.Path) -> bool:
     try:
@@ -125,6 +127,7 @@ class Implement(Stage):
             prompt,
             label="implement",
             raw_path=self.state.session_dir / "stream-implement.jsonl",
+            idle_timeout=IMPLEMENT_IDLE_TIMEOUT,
         )
 
         if self.is_git:
@@ -164,6 +167,7 @@ class Implement(Stage):
             label="implement",
             raw_path=self.state.session_dir / "stream-implement.jsonl",
             capture_events=True,
+            idle_timeout=IMPLEMENT_IDLE_TIMEOUT,
         )
 
 
