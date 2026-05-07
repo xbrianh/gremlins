@@ -10,7 +10,6 @@ from collections.abc import Callable
 
 from gremlins.clients import ClientSpec
 from gremlins.clients.protocol import ClaudeClient
-from gremlins.gh_utils import get_repo, parse_issue_ref, view_issue
 from gremlins.orchestrators.base import Pipeline, die, read_stage_inputs
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline import StageEntry
@@ -55,42 +54,11 @@ class LocalPipeline(Pipeline):
             spec_clients=spec_clients,
             test_client=test_client,
         )
-        self.plan_copied_from_source = False
         self.instructions: str = read_stage_inputs(resolve_state_file(gr_id)).get(
             "instructions"
         ) or " ".join(getattr(args, "instructions", None) or [])
 
-        plan_path = getattr(args, "plan_path", None)
         spec_path = getattr(args, "spec_path", None)
-
-        plan_file = session_dir / "plan.md"
-        if plan_path and not plan_file.exists():
-            src = pathlib.Path(plan_path)
-            if src.is_file():
-                if src.stat().st_size == 0:
-                    raise ValueError(f"--plan: file is empty: {plan_path}")
-                shutil.copyfile(src, plan_file)
-                self.plan_copied_from_source = True
-            else:
-                target_repo, issue_ref = parse_issue_ref(plan_path, "")
-                if issue_ref is None:
-                    raise ValueError(f"--plan: file not found: {plan_path}")
-                if not target_repo:
-                    try:
-                        target_repo = get_repo()
-                    except RuntimeError as exc:
-                        raise ValueError(
-                            f"--plan: could not resolve repo: {exc}"
-                        ) from exc
-                try:
-                    issue_data = view_issue(issue_ref, target_repo)
-                except RuntimeError as exc:
-                    raise ValueError(f"--plan: {exc}") from exc
-                body = (issue_data.get("body") or "").strip()
-                if not body:
-                    raise ValueError(f"--plan: issue {plan_path} has empty body")
-                plan_file.write_text(body, encoding="utf-8")
-                self.plan_copied_from_source = True
 
         spec_file = session_dir / "spec.md"
         if spec_path and not spec_file.exists():
@@ -110,35 +78,27 @@ class LocalPipeline(Pipeline):
         spec_file = self.session_dir / "spec.md"
         is_git = self.is_git
         gr_id = self.gr_id
-        plan_copied_from_source = self.plan_copied_from_source
         instructions = self.instructions
         plan_path = getattr(args, "plan_path", None)
 
         if entry.type == "plan":
 
             def _plan() -> None:
-                if plan_path:
-                    if plan_copied_from_source:
-                        logger.info(
-                            "plan supplied via --plan (copied) -> %s", plan_file
-                        )
-                    else:
-                        logger.info("plan reused from snapshot -> %s", plan_file)
-                else:
-                    set_stage(gr_id, entry.name)
-                    logger.info("planning (model: %s) -> %s", model, plan_file)
-                    if not entry.prompt_paths:
-                        die(
-                            f"stage {entry.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML"
-                        )
-                    stage = plan.Plan(
-                        entry,
-                        model,
-                        plan_file=plan_file,
-                        instructions=instructions,
+                if not entry.prompt_paths and not plan_path:
+                    die(
+                        f"stage {entry.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML"
                     )
-                    stage.bind(ctx)
-                    stage.run(None)
+                set_stage(gr_id, entry.name)
+                logger.info("planning (model: %s) -> %s", model, plan_file)
+                stage = plan.Plan(
+                    entry,
+                    model,
+                    plan_source=plan_path,
+                    plan_file=plan_file,
+                    instructions=instructions,
+                )
+                stage.bind(ctx)
+                stage.run(None)
 
             return _plan
 

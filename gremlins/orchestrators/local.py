@@ -182,6 +182,14 @@ def local_main(
 
     plan_file = session_dir / "plan.md"
 
+    # When --plan points to a file and we're resuming past the plan stage,
+    # the plan stage won't run, so pre-populate plan.md now.
+    plan_path_arg = getattr(args, "plan_path", None)
+    if plan_path_arg and not plan_file.exists():
+        src = pathlib.Path(plan_path_arg)
+        if src.is_file():
+            shutil.copyfile(src, plan_file)
+
     logger.info("session: %s", session_dir)
 
     is_git = in_git_repo()
