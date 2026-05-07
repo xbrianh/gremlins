@@ -22,7 +22,8 @@ from gremlins.fleet.resolve import (
 )
 from gremlins.fleet.state import atomic_patch_state, liveness_of_state_file, load_state
 from gremlins.fleet.stop import do_stop
-from gremlins.launcher import GremlinAlreadyRunning, resume as _resume
+from gremlins.launcher import GremlinAlreadyRunning
+from gremlins.launcher import resume as _resume
 
 _atomic_patch_state = atomic_patch_state
 
