@@ -420,9 +420,10 @@ def test_launch_invalid_pipeline_exits_nonzero_with_message(
         "gremlins.cli.resolve_pipeline_name",
         lambda name, root: pathlib.Path(f"/fake/{name}.yaml"),
     )
-    monkeypatch.setattr(
-        "gremlins.cli.load_pipeline", lambda path: (_ for _ in ()).throw(exc)
-    )
+    def _raise(_path):
+        raise exc
+
+    monkeypatch.setattr("gremlins.cli.load_pipeline", _raise)
     launched = []
     monkeypatch.setattr(
         "gremlins.cli.launch", lambda *a, **kw: launched.append(1) or "gr-x"
