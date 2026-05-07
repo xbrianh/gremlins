@@ -161,7 +161,7 @@ def test_build_row_rescue_suffix_singular():
         "started_at": "",
     }
     row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
-    assert "(rescue)" in row["live"]
+    assert "(rescue)" in row.liveness
 
 
 def test_build_row_rescue_suffix_multiple():
@@ -172,7 +172,7 @@ def test_build_row_rescue_suffix_multiple():
         "started_at": "",
     }
     row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
-    assert "(rescue x3)" in row["live"]
+    assert "(rescue x3)" in row.liveness
 
 
 def test_build_row_no_rescue_suffix_when_zero():
@@ -183,7 +183,7 @@ def test_build_row_no_rescue_suffix_when_zero():
         "started_at": "",
     }
     row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
-    assert "(rescue" not in row["live"]
+    assert "(rescue" not in row.liveness
 
 
 def test_build_row_client_from_state():
@@ -194,13 +194,13 @@ def test_build_row_client_from_state():
         "client": "copilot:gpt-5.4",
     }
     row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
-    assert row["client"] == "copilot:gpt-5.4"
+    assert row.client == "copilot:gpt-5.4"
 
 
 def test_build_row_client_missing_field_shows_dash():
     state = {"kind": "localgremlin", "stage": "implement", "started_at": ""}
     row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
-    assert row["client"] == "—"
+    assert row.client == "—"
 
 
 def test_build_row_preserves_long_client_label():
@@ -212,7 +212,7 @@ def test_build_row_preserves_long_client_label():
         "client": client,
     }
     row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
-    assert row["client"] == client
+    assert row.client == client
 
 
 # ---------------------------------------------------------------------------
