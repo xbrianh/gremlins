@@ -177,6 +177,33 @@ def test_retry_exhaustion_raises_stream_timeout_error(tmp_path, monkeypatch):
     assert int(count_file.read_text()) == 3  # initial + 2 retries
 
 
+_SLEEP_FOREVER_STUB_SRC = """\
+import json, sys, time
+
+sys.stdout.write(json.dumps({"type": "assistant", "message": {"content": [], "stop_reason": None}}) + "\\n")
+sys.stdout.flush()
+time.sleep(9999)
+"""
+
+
+def _install_sleep_forever_stub(bin_dir: pathlib.Path) -> None:
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    stub = bin_dir / "claude"
+    stub.write_text(f"#!{sys.executable}\n" + _SLEEP_FOREVER_STUB_SRC, encoding="utf-8")
+    stub.chmod(0o755)
+
+
+def test_idle_timeout_raises_stream_timeout_error(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    _install_sleep_forever_stub(bin_dir)
+
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    client = SubprocessClaudeClient()
+    with pytest.raises(StreamTimeoutError):
+        client.run("hello", label="test", idle_timeout=0.1, max_retries=0)
+
+
 def test_on_timeout_prompt_used_on_retry(tmp_path, monkeypatch):
     bin_dir = tmp_path / "bin"
     _install_timeout_stub(bin_dir)

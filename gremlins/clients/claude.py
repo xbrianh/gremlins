@@ -8,7 +8,7 @@ import threading
 import time
 
 from gremlins.clients.protocol import CompletedRun
-from gremlins.clients.stream import stream_events
+from gremlins.clients.stream import STREAM_IDLE_TIMEOUT, stream_events
 
 
 class StreamTimeoutError(RuntimeError):
@@ -121,6 +121,7 @@ class SubprocessClaudeClient:
         prefix: str,
         raw_path: pathlib.Path | None,
         capture_events: bool,
+        idle_timeout: float = STREAM_IDLE_TIMEOUT,
     ) -> CompletedRun:
         try:
             assert p.stdout is not None
@@ -129,17 +130,33 @@ class SubprocessClaudeClient:
                 prefix=prefix,
                 raw_path=raw_path,
                 capture=capture_events,
+                idle_timeout=idle_timeout,
             )
             if cost_usd is not None:
                 with self._lock:
                     self._total_cost_usd += cost_usd
+            if timed_out:
+                try:
+                    p.terminate()
+                except OSError:
+                    pass
+                try:
+                    p.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    try:
+                        p.kill()
+                    except OSError:
+                        pass
+                    try:
+                        p.wait(timeout=5.0)
+                    except subprocess.TimeoutExpired:
+                        pass
+                p.stdout.close()
+                raise StreamTimeoutError("claude -p stream idle timeout")
             p.stdout.close()
             rc = p.wait()
         finally:
             self._untrack(p)
-
-        if rc != 0 and timed_out:
-            raise StreamTimeoutError("claude -p stream idle timeout")
 
         return CompletedRun(
             exit_code=rc,
@@ -159,6 +176,7 @@ class SubprocessClaudeClient:
         on_timeout_prompt: str | None = None,
         max_retries: int = 2,
         cwd: pathlib.Path | None = None,
+        idle_timeout: float = STREAM_IDLE_TIMEOUT,
     ) -> CompletedRun:
         if max_retries < 0:
             raise ValueError(f"max_retries must be >= 0, got {max_retries}")
@@ -168,7 +186,9 @@ class SubprocessClaudeClient:
         for attempt in range(max_retries + 1):
             p = self._spawn(argv, active_prompt, cwd=cwd)
             try:
-                result = self._consume(p, prefix, raw_path, capture_events)
+                result = self._consume(
+                    p, prefix, raw_path, capture_events, idle_timeout
+                )
             except StreamTimeoutError:
                 if attempt == max_retries:
                     raise
