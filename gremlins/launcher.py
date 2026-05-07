@@ -39,6 +39,9 @@ class GremlinAlreadyRunning(RuntimeError):
     pass
 
 
+_KIND_ALIASES = {"local": "localgremlin", "gh": "ghgremlin", "boss": "bossgremlin"}
+
+
 def _state_root() -> pathlib.Path:
     return _paths.state_root()
 
@@ -412,6 +415,7 @@ def launch(
     Synchronous through spawn; does not wait for the pipeline to finish.
     Raises ValueError on bad arguments, RuntimeError on infrastructure failure.
     """
+    kind = _KIND_ALIASES.get(kind, kind)
     stage_inputs = {} if stage_inputs is None else dict(stage_inputs)
     instructions: str | None = stage_inputs.get("instructions")
     if kind not in VALID_KINDS:

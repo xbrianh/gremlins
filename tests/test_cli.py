@@ -2,19 +2,13 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import pathlib
 
 import pytest
 
 from gremlins.bail import bail_main
-from gremlins.cli import (
-    _validate_boss_args,
-    _validate_gh_args,
-    _validate_local_args,
-    main,
-)
+from gremlins.cli import main
 from gremlins.run_pipeline import main as run_pipeline_main
 
 
@@ -301,126 +295,126 @@ def test_land_dispatches_to_land_main(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def _no_state_created(tmp_path: pathlib.Path) -> bool:
+    return not (tmp_path / "state").exists()
+
+
 def test_launch_bare_prints_help_exits_nonzero(capsys):
     rc = main(["launch"])
     assert rc != 0
-    assert "gremlins launch <kind>" in capsys.readouterr().out
+    assert "gremlins launch" in capsys.readouterr().out
 
 
 def test_launch_help_flag_prints_help_exits_zero(capsys):
     rc = main(["launch", "--help"])
     assert rc == 0
-    assert "gremlins launch <kind>" in capsys.readouterr().out
+    assert "gremlins launch" in capsys.readouterr().out
 
 
 def test_launch_short_help_flag_prints_help_exits_zero(capsys):
     rc = main(["launch", "-h"])
     assert rc == 0
-    assert "gremlins launch <kind>" in capsys.readouterr().out
+    assert "gremlins launch" in capsys.readouterr().out
 
 
-def test_launch_unknown_kind_exits_nonzero_with_error(capsys):
+def test_launch_unknown_kind_exits_nonzero_with_error(monkeypatch, capsys):
+    def _raise(name, root):
+        raise FileNotFoundError(f"pipeline {name!r} not found")
+    monkeypatch.setattr("gremlins.cli.resolve_pipeline_name", _raise)
     rc = main(["launch", "bogus"])
     assert rc != 0
-    assert "unknown launch kind" in capsys.readouterr().err
+    assert "bogus" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
-# Pre-launch validators — invalid invocations exit non-zero without state
+# Unified dynamic dispatch
 # ---------------------------------------------------------------------------
 
 
-def _no_state_created(tmp_path: pathlib.Path) -> bool:
-    return not (tmp_path / "state").exists()
+class _FakePlanStage:
+    def __init__(self, entry, model, *, instructions: str) -> None:
+        pass
 
 
-def test_local_no_args_exits_nonzero_no_state(tmp_path, monkeypatch):
-    rc = main(["launch", "local"])
-    assert rc != 0
-    assert _no_state_created(tmp_path)
-
-
-def test_gh_invalid_client_exits_nonzero_no_state(tmp_path, monkeypatch):
-    rc = main(["launch", "gh", "--client", "notaspecifier", "-c", "fix bug"])
-    assert rc != 0
-    assert _no_state_created(tmp_path)
-
-
-def test_gh_bare_exits_nonzero_no_state(tmp_path, monkeypatch):
-    rc = main(["launch", "gh"])
-    assert rc != 0
-    assert _no_state_created(tmp_path)
-
-
-def test_gh_invalid_resume_from_exits_nonzero_no_state(tmp_path, monkeypatch):
-    rc = main(["launch", "gh", "--resume-from", "bogus"])
-    assert rc != 0
-    assert _no_state_created(tmp_path)
-
-
-def test_boss_missing_plan_exits_nonzero_no_state(tmp_path, monkeypatch):
-    # --plan is required for bossgremlin
-    rc = main(["launch", "boss"])
-    assert rc != 0
-    assert _no_state_created(tmp_path)
-
-
-# ---------------------------------------------------------------------------
-# Pre-launch validators — valid invocations must not raise
-# ---------------------------------------------------------------------------
-
-
-def test_local_with_positional_instructions_passes():
-    ns = argparse.Namespace(
-        plan=None, instructions=None, positional_instructions="fix the bug"
+def _make_fake_pipeline(stage_type: str = "plan"):
+    from gremlins.pipeline import Pipeline, StageEntry
+    entry = StageEntry(
+        name="plan", type=stage_type, client=None, prompt_paths=[], options={}
     )
-    _validate_local_args(ns, [])
+    return Pipeline(name="local", path=pathlib.Path("/fake/local.yaml"), stages=[entry])
 
 
-def test_local_with_plan_passes():
-    ns = argparse.Namespace(
-        plan="plan.md", instructions=None, positional_instructions=None
+def test_launch_unified_dispatch_calls_launch(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "gremlins.cli.resolve_pipeline_name",
+        lambda name, root: pathlib.Path(f"/fake/{name}.yaml"),
     )
-    _validate_local_args(ns, [])
-
-
-def test_local_with_instructions_flag_passes():
-    ns = argparse.Namespace(
-        plan=None, instructions="fix the bug", positional_instructions=None
+    monkeypatch.setattr(
+        "gremlins.cli.load_pipeline", lambda path: _make_fake_pipeline()
     )
-    _validate_local_args(ns, [])
+    monkeypatch.setattr(
+        "gremlins.cli.STAGE_REGISTRY", {"plan": _FakePlanStage}
+    )
+    launched = []
+    monkeypatch.setattr(
+        "gremlins.cli.launch",
+        lambda kind, **kw: launched.append((kind, kw)) or "gr-abc123",
+    )
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+
+    rc = main(["launch", "local", "--instructions", "fix the bug"])
+    assert rc == 0
+    assert len(launched) == 1
+    kind, kw = launched[0]
+    assert kind == "local"
+    assert kw["stage_inputs"].get("instructions") == "fix the bug"
 
 
-def test_gh_valid_model_passes():
-    ns = argparse.Namespace(plan=None, instructions="fix bug")
-    _validate_gh_args(ns, ["--model", "claude-sonnet-4"])
-
-
-def test_gh_valid_resume_from_passes():
-    ns = argparse.Namespace(plan=None, instructions=None)
-    _validate_gh_args(ns, ["--resume-from", "plan"])
-
-
-def test_gh_positional_instructions_passes():
-    ns = argparse.Namespace(plan=None, instructions=None)
-    _validate_gh_args(ns, ["fix the bug"])
-
-
-def test_boss_with_plan_passes():
-    _validate_boss_args("plan.md")
-
-
-def test_boss_missing_plan_raises():
-    with pytest.raises(ValueError, match="--plan is required"):
-        _validate_boss_args(None)
-
-
-def test_boss_missing_plan_with_chain_kind_exits_nonzero_no_state(
-    tmp_path, monkeypatch
-):
-    rc = main(["launch", "boss", "--chain-kind", "local"])
+def test_launch_unified_dispatch_no_name_exits_nonzero(capsys):
+    rc = main(["launch"])
     assert rc != 0
-    assert _no_state_created(tmp_path)
+    assert "gremlins launch" in capsys.readouterr().out
+
+
+def test_launch_unified_dispatch_help_no_name_exits_zero(capsys):
+    rc = main(["launch", "--help"])
+    assert rc == 0
+    assert "gremlins launch" in capsys.readouterr().out
+
+
+def test_launch_unified_dispatch_unknown_name_exits_nonzero(monkeypatch, capsys):
+    def _raise(name, root):
+        raise FileNotFoundError(f"pipeline {name!r} not found; available: local, gh")
+    monkeypatch.setattr("gremlins.cli.resolve_pipeline_name", _raise)
+    rc = main(["launch", "bogus"])
+    assert rc != 0
+    assert "bogus" in capsys.readouterr().err
+
+
+def test_launch_unified_dispatch_unknown_name_with_help_exits_nonzero(monkeypatch, capsys):
+    def _raise(name, root):
+        raise FileNotFoundError(f"pipeline {name!r} not found; available: local, gh")
+    monkeypatch.setattr("gremlins.cli.resolve_pipeline_name", _raise)
+    rc = main(["launch", "bogus", "--help"])
+    assert rc != 0
+    assert "bogus" in capsys.readouterr().err
+
+
+def test_launch_unified_dispatch_help_for_resolved_pipeline(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "gremlins.cli.resolve_pipeline_name",
+        lambda name, root: pathlib.Path(f"/fake/{name}.yaml"),
+    )
+    monkeypatch.setattr(
+        "gremlins.cli.load_pipeline", lambda path: _make_fake_pipeline()
+    )
+    monkeypatch.setattr(
+        "gremlins.cli.STAGE_REGISTRY", {"plan": _FakePlanStage}
+    )
+    rc = main(["launch", "local", "--help"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "--instructions" in out
 
 
 # ---------------------------------------------------------------------------
