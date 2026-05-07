@@ -15,6 +15,13 @@ from gremlins.prompts import BUNDLED_PROMPT_DIR, load_prompts
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 
+# Implement turns can sit silent for many minutes while the model edits files
+# or runs long subagents/tools without emitting stream events. The default
+# 120s STREAM_IDLE_TIMEOUT was firing spuriously on healthy implement runs;
+# 600s (10 min) gives enough slack to ride out the longest observed gaps
+# without masking a genuinely hung process.
+IMPLEMENT_IDLE_TIMEOUT = 600.0
+
 
 def changes_outside_git(sentinel: pathlib.Path, session_dir: pathlib.Path) -> bool:
     try:
@@ -125,6 +132,7 @@ class Implement(Stage):
             prompt,
             label="implement",
             raw_path=self.state.session_dir / "stream-implement.jsonl",
+            idle_timeout=IMPLEMENT_IDLE_TIMEOUT,
         )
 
         if self.is_git:
@@ -164,6 +172,7 @@ class Implement(Stage):
             label="implement",
             raw_path=self.state.session_dir / "stream-implement.jsonl",
             capture_events=True,
+            idle_timeout=IMPLEMENT_IDLE_TIMEOUT,
         )
 
 

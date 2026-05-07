@@ -176,10 +176,12 @@ class SubprocessClaudeClient:
         on_timeout_prompt: str | None = None,
         max_retries: int = 2,
         cwd: pathlib.Path | None = None,
-        idle_timeout: float = STREAM_IDLE_TIMEOUT,
+        idle_timeout: float | None = None,
     ) -> CompletedRun:
         if max_retries < 0:
             raise ValueError(f"max_retries must be >= 0, got {max_retries}")
+        if idle_timeout is None:
+            idle_timeout = STREAM_IDLE_TIMEOUT
         argv = self._build_argv(model)
         prefix = f"[{label}] " if label else ""
         active_prompt = prompt

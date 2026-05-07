@@ -68,7 +68,9 @@ class FakeClaudeClient:
         on_timeout_prompt: str | None = None,
         max_retries: int = 2,
         cwd: pathlib.Path | None = None,
+        idle_timeout: float | None = None,
     ) -> CompletedRun:
+        del idle_timeout  # fake doesn't stream
         self.calls.append(
             RecordedCall(
                 prompt=prompt,
