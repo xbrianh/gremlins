@@ -212,6 +212,25 @@ def load_pipeline(path: pathlib.Path) -> Pipeline:
     )
 
 
+BUNDLED_PIPELINE_DIR = pathlib.Path(__file__).resolve().parent / "pipelines"
+
+
+def resolve_pipeline_name(name: str, project_root: pathlib.Path) -> pathlib.Path:
+    project_local = project_root / ".gremlins" / "pipelines" / f"{name}.yaml"
+    if project_local.exists():
+        return project_local.resolve()
+    bundled = BUNDLED_PIPELINE_DIR / f"{name}.yaml"
+    if bundled.exists():
+        return bundled.resolve()
+    available: list[str] = []
+    if project_local.parent.exists():
+        available += sorted(p.stem for p in project_local.parent.glob("*.yaml"))
+    available += sorted(p.stem for p in BUNDLED_PIPELINE_DIR.glob("*.yaml"))
+    raise FileNotFoundError(
+        f"pipeline {name!r} not found; available: {', '.join(available) or '(none)'}"
+    )
+
+
 VALID_KINDS = {"ghgremlin", "localgremlin", "bossgremlin"}
 
 KIND_SUBCOMMAND = {
