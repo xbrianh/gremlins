@@ -73,48 +73,62 @@ def _extract_h1(path: str) -> str:
     return ""
 
 
-def _fetch_issue_title(plan: str) -> str:
-    """Try to fetch the GitHub issue title for an issue-ref --plan arg.
+def _gh_current_repo() -> str:
+    """Return ``owner/name`` of the current repo via ``gh repo view``, or ''.
 
-    Returns '' on any error so callers can fall back gracefully.
+    Best-effort: returns '' on any error so callers can fall back.
+    """
+    try:
+        r = subprocess.run(
+            ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return ""
+    if r.returncode != 0:
+        return ""
+    return r.stdout.strip()
+
+
+def _fetch_issue(plan: str) -> dict[str, Any] | None:
+    """Resolve an issue-ref --plan arg to its ``gh issue view`` JSON dict.
+
+    Returns ``None`` when ``plan`` doesn't parse as an issue ref or any gh call
+    fails. Single source of truth for issue lookups during launch — callers
+    should pass the result around rather than re-fetching.
     """
     try:
         target_repo, issue_ref = parse_issue_ref(plan, "")
-        if issue_ref is None:
-            return ""
-        if not target_repo:
-            r = subprocess.run(
-                [
-                    "gh",
-                    "repo",
-                    "view",
-                    "--json",
-                    "nameWithOwner",
-                    "-q",
-                    ".nameWithOwner",
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=10,
-            )
-            if r.returncode != 0:
-                return ""
-            target_repo = r.stdout.strip()
-        if not target_repo:
-            return ""
-        data = view_issue(issue_ref, target_repo)
-        return data.get("title") or ""
     except Exception:
-        return ""
+        return None
+    if issue_ref is None:
+        return None
+    if not target_repo:
+        target_repo = _gh_current_repo()
+    if not target_repo:
+        return None
+    try:
+        return view_issue(issue_ref, target_repo)
+    except Exception:
+        return None
 
 
 def _resolve_description_and_slug(
     instructions: str | None,
     plan: str | None,
     description: str | None,
+    *,
+    issue_title: str = "",
 ) -> tuple[str, bool, str]:
-    """Return (description, description_explicit, slug) from available inputs."""
+    """Return (description, description_explicit, slug) from available inputs.
+
+    ``issue_title`` is an optional pre-fetched title for an issue-ref ``plan``
+    so callers that already resolved the issue (e.g. bossgremlin) don't trigger
+    a second ``gh`` round-trip here.
+    """
     if description:
         slug = _slugify(description) or "gremlin"
         return description[:60], True, slug
@@ -131,7 +145,11 @@ def _resolve_description_and_slug(
     if plan:
         # Non-file plan arg (issue ref); try to fetch the issue title for a
         # meaningful slug. Best-effort: fall back to slug-from-ref on any error.
-        title = _fetch_issue_title(plan)
+        title = issue_title
+        if not title:
+            data = _fetch_issue(plan)
+            if data:
+                title = str(data.get("title") or "")
         if title:
             slug = _slugify(title) or "gremlin"
             return title[:60], False, slug
@@ -145,21 +163,22 @@ def _resolve_description_and_slug(
     return "", False, "gremlin"
 
 
-def _resolve_boss_plan(plan: str, state_dir: pathlib.Path) -> str:
+def _resolve_boss_plan(
+    plan: str, issue_data: dict[str, Any] | None, state_dir: pathlib.Path
+) -> str:
+    """Resolve a bossgremlin --plan arg to an absolute path.
+
+    Accepts a file path (passed through, normalized to absolute) or an issue
+    ref whose body has already been fetched via :func:`_fetch_issue`. Snapshots
+    the issue body to ``state_dir/plan-from-issue.md``.
+    """
     if os.path.isfile(plan):
         return str(pathlib.Path(plan).resolve())
-    target_repo, issue_num = parse_issue_ref(plan, "")
-    if issue_num is None:
-        raise ValueError(f"--plan: not a file and not an issue ref: {plan}")
-    if not target_repo:
-        r = subprocess.run(
-            ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-            capture_output=True, text=True, check=False, timeout=10,
+    if issue_data is None:
+        raise ValueError(
+            f"--plan: not a file and could not resolve as issue ref: {plan}"
         )
-        if r.returncode != 0 or not r.stdout.strip():
-            raise RuntimeError(f"could not resolve current repo: {r.stderr.strip()}")
-        target_repo = r.stdout.strip()
-    body = (view_issue(issue_num, target_repo).get("body") or "").strip()
+    body = (issue_data.get("body") or "").strip()
     if not body:
         raise ValueError(f"--plan: issue {plan} has empty body")
     snap = state_dir / "plan-from-issue.md"
@@ -390,8 +409,17 @@ def launch(
     if plan and os.path.isfile(plan):
         plan = str(pathlib.Path(plan).resolve())
 
+    # For bossgremlin issue-ref plans, fetch once up front and reuse the data
+    # for both slug derivation and the body snapshot below.
+    boss_issue_data: dict[str, Any] | None = None
+    if kind == "bossgremlin" and plan and not os.path.isfile(plan):
+        boss_issue_data = _fetch_issue(plan)
+
     desc, desc_explicit, slug = _resolve_description_and_slug(
-        instructions, plan, description
+        instructions,
+        plan,
+        description,
+        issue_title=str((boss_issue_data or {}).get("title") or ""),
     )
     rand_hex = secrets.token_hex(3)
     gr_id = f"{slug}-{rand_hex}"
@@ -416,7 +444,7 @@ def launch(
     state_dir.mkdir(parents=True, exist_ok=True)
 
     if kind == "bossgremlin" and plan:
-        plan = _resolve_boss_plan(plan, state_dir)
+        plan = _resolve_boss_plan(plan, boss_issue_data, state_dir)
 
     # pipeline_args for state.json: includes --plan and --spec when set
     stored_pipeline_args = list(resolved_pipeline_args)
