@@ -476,6 +476,7 @@ def launch(
     state_dir = _state_root() / gr_id
     state_dir.mkdir(parents=True, exist_ok=True)
 
+    workdir = None
     try:
         if kind == "bossgremlin" and plan:
             plan = _resolve_boss_plan(plan, boss_issue_data, state_dir)
@@ -528,6 +529,11 @@ def launch(
         )
     except Exception:
         shutil.rmtree(state_dir, ignore_errors=True)
+        if workdir:
+            try:
+                _git_mod.remove_worktree(project_root, workdir)
+            except Exception:
+                pass
         raise
 
     (state_dir / "pid").write_text(str(proc.pid), encoding="utf-8")
