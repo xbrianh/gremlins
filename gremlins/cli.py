@@ -44,7 +44,7 @@ from gremlins.launcher import launch, resume
 from gremlins.orchestrators.gh import gh_main
 from gremlins.orchestrators.local import local_main
 from gremlins.orchestrators.review_address import address_main, review_main
-from gremlins.pipeline import load_pipeline, resolve_pipeline_name
+from gremlins.pipeline import list_pipelines, load_pipeline, resolve_pipeline_name
 from gremlins.stages.introspect import build_launch_parser
 from gremlins.stages.registry import STAGE_REGISTRY
 from gremlins.state import validate_gr_id
@@ -130,10 +130,20 @@ _INFRA_ARGS = frozenset(
     {"description", "parent_id", "print_id", "base_ref", "client", "spec_path", "plan"}
 )
 
-_LAUNCH_BRIEF = "usage: gremlins launch <name> [opts]\nLaunch a background gremlin by pipeline name.\n"
+_LAUNCH_BRIEF = "usage: gremlins launch <name> [opts]\nLaunch a background gremlin by pipeline name. Run 'gremlins launch --list' to see available pipelines.\n"
 
 
 def _launch_main(argv: list[str]) -> int:
+    if "--list" in argv:
+        for name, path in list_pipelines(pathlib.Path.cwd()):
+            try:
+                pipeline = load_pipeline(path)
+                label = pipeline.name
+            except Exception:
+                label = "unloadable"
+            sys.stdout.write(f"{name}  {path.parent}  ({label})\n")
+        return 0
+
     name_idx = next((i for i, a in enumerate(argv) if not a.startswith("-")), None)
 
     if name_idx is None:

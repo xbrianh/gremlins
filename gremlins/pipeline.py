@@ -215,6 +215,24 @@ def load_pipeline(path: pathlib.Path) -> Pipeline:
 BUNDLED_PIPELINE_DIR = pathlib.Path(__file__).resolve().parent / "pipelines"
 
 
+def list_pipelines(project_root: pathlib.Path) -> list[tuple[str, pathlib.Path]]:
+    """Return (name, path) pairs for all resolvable pipelines, project-local first."""
+    results: list[tuple[str, pathlib.Path]] = []
+    seen: set[str] = set()
+
+    local_dir = project_root / ".gremlins" / "pipelines"
+    if local_dir.exists():
+        for p in sorted(local_dir.glob("*.yaml")):
+            results.append((p.stem, p.resolve()))
+            seen.add(p.stem)
+
+    for p in sorted(BUNDLED_PIPELINE_DIR.glob("*.yaml")):
+        if p.stem not in seen:
+            results.append((p.stem, p.resolve()))
+
+    return results
+
+
 def resolve_pipeline_name(name: str, project_root: pathlib.Path) -> pathlib.Path:
     project_local = project_root / ".gremlins" / "pipelines" / f"{name}.yaml"
     if project_local.exists():

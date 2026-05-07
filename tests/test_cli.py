@@ -418,6 +418,53 @@ def test_launch_unified_dispatch_help_for_resolved_pipeline(monkeypatch, capsys)
 
 
 # ---------------------------------------------------------------------------
+# launch --list
+# ---------------------------------------------------------------------------
+
+
+def test_launch_list_prints_pipeline_names(tmp_path, monkeypatch, capsys):
+    fake_pipelines = [
+        ("local", tmp_path / "local.yaml"),
+        ("gh", tmp_path / "gh.yaml"),
+    ]
+    monkeypatch.setattr("gremlins.cli.list_pipelines", lambda root: fake_pipelines)
+
+    from gremlins.pipeline import Pipeline, StageEntry
+
+    def fake_load(path):
+        return Pipeline(name=path.stem, path=path, stages=[])
+
+    monkeypatch.setattr("gremlins.cli.load_pipeline", fake_load)
+
+    rc = main(["launch", "--list"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "local" in out
+    assert "gh" in out
+    assert str(tmp_path) in out
+
+
+def test_launch_list_shows_unloadable_on_exception(tmp_path, monkeypatch, capsys):
+    fake_pipelines = [("broken", tmp_path / "broken.yaml")]
+    monkeypatch.setattr("gremlins.cli.list_pipelines", lambda root: fake_pipelines)
+    monkeypatch.setattr("gremlins.cli.load_pipeline", lambda path: (_ for _ in ()).throw(ValueError("bad yaml")))
+
+    rc = main(["launch", "--list"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "broken" in out
+    assert "unloadable" in out
+
+
+def test_launch_no_name_brief_mentions_list_flag(capsys):
+    rc = main(["launch"])
+    assert rc != 0
+    out = capsys.readouterr().out
+    assert "--list" in out
+    assert "local|gh|boss" not in out
+
+
+# ---------------------------------------------------------------------------
 # resume subcommand — gr_id validation
 # ---------------------------------------------------------------------------
 
