@@ -254,7 +254,7 @@ def _self_background_main(kind: str, argv: list[str]) -> int:
         instructions = args.instructions or args.positional_instructions
         gr_id = launch(
             kind,
-            instructions=instructions,
+            stage_inputs={"instructions": instructions},
             plan=args.plan,
             description=args.description,
             parent_id=args.parent_id,

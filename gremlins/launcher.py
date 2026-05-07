@@ -1,7 +1,7 @@
 """Launcher for background gremlins.
 
 Public API:
-    launch(kind, *, instructions=None, plan=None, description=None,
+    launch(kind, *, stage_inputs=None, plan=None, description=None,
            parent_id=None, project_root=None, base_ref="HEAD",
            pipeline_args=()) -> str
     resume(gr_id) -> None
@@ -398,7 +398,7 @@ def _spawn_pipeline(
 def launch(
     kind: str,
     *,
-    instructions: str | None = None,
+    stage_inputs: dict[str, Any] | None = None,
     plan: str | None = None,
     description: str | None = None,
     parent_id: str | None = None,
@@ -412,6 +412,8 @@ def launch(
     Synchronous through spawn; does not wait for the pipeline to finish.
     Raises ValueError on bad arguments, RuntimeError on infrastructure failure.
     """
+    stage_inputs = dict(stage_inputs) if stage_inputs else {}
+    instructions: str | None = stage_inputs.get("instructions")  # type: ignore[assignment]
     if kind not in VALID_KINDS:
         raise ValueError(
             f"invalid kind: {kind!r} (allowed: {', '.join(sorted(VALID_KINDS))})"
@@ -516,6 +518,7 @@ def launch(
             "pipeline_path": pipeline_path,
             "stage": "starting",
             "pid": None,
+            "stage_inputs": stage_inputs,
         }
         _write_state(state_dir, state)
 
