@@ -510,7 +510,7 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
     )
 
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run",
+        "gremlins.stages.review_code.ReviewCode.run",
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
@@ -522,7 +522,7 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run",
+        "gremlins.stages.address_code.AddressCode.run",
         lambda self, pipe: None,
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
@@ -560,7 +560,7 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run", lambda self, pipe: None
+        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -570,7 +570,7 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
@@ -607,7 +607,7 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run", lambda self, pipe: None
+        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -617,7 +617,7 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
@@ -658,7 +658,7 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run", lambda self, pipe: None
+        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -668,7 +668,7 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
@@ -710,7 +710,7 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run", lambda self, pipe: None
+        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -720,7 +720,7 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
@@ -844,7 +844,7 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
     ghaddress_models: list[str] = []
     ci_models: list[str] = []
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run",
+        "gremlins.stages.review_code.ReviewCode.run",
         lambda self, pipe: ghreview_models.append(self.model),
     )
     monkeypatch.setattr(
@@ -855,7 +855,7 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run",
+        "gremlins.stages.address_code.AddressCode.run",
         lambda self, pipe: ghaddress_models.append(self.model),
     )
     monkeypatch.setattr(
@@ -1037,7 +1037,7 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Resumed Plan\nDo more stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run", lambda self, pipe: None
+        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -1047,7 +1047,7 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
@@ -1109,7 +1109,7 @@ def test_resume_from_ghreview(tmp_path, monkeypatch):
 
     ghreview_called = []
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run",
+        "gremlins.stages.review_code.ReviewCode.run",
         lambda self, pipe: ghreview_called.append(self.pr_url),
     )
     monkeypatch.setattr(
@@ -1120,7 +1120,7 @@ def test_resume_from_ghreview(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
@@ -1175,7 +1175,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
     monkeypatch.setattr(subprocess, "run", fake_gh_run)
 
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run", lambda self, pipe: None
+        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -1185,7 +1185,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
@@ -1329,7 +1329,7 @@ def test_resume_from_commit_skips_implement(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run", lambda self, pipe: None
+        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -1339,7 +1339,7 @@ def test_resume_from_commit_skips_implement(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
 
@@ -1417,7 +1417,7 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
     ghreview_called = []
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run",
+        "gremlins.stages.review_code.ReviewCode.run",
         lambda self, pipe: ghreview_called.append(self.pr_url),
     )
     monkeypatch.setattr(
@@ -1428,7 +1428,7 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
 
@@ -1464,14 +1464,14 @@ def test_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run", lambda self, pipe: None
+        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.request_copilot.RequestCopilot.run",
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
@@ -1524,7 +1524,7 @@ def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run", lambda self, pipe: None
+        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -1534,7 +1534,7 @@ def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
 
@@ -1585,7 +1585,7 @@ def test_wait_ci_stage_ordering(tmp_path, monkeypatch):
         lambda self, pipe: order.append("verify"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run",
+        "gremlins.stages.review_code.ReviewCode.run",
         lambda self, pipe: order.append("ghreview"),
     )
     monkeypatch.setattr(
@@ -1597,7 +1597,7 @@ def test_wait_ci_stage_ordering(tmp_path, monkeypatch):
         lambda self, pipe: order.append("request-copilot"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run",
+        "gremlins.stages.address_code.AddressCode.run",
         lambda self, pipe: order.append("ghaddress"),
     )
     monkeypatch.setattr(
@@ -1651,7 +1651,7 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
     ci_stages = []
 
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run",
+        "gremlins.stages.review_code.ReviewCode.run",
         lambda self, pipe: earlier_called.append("ghreview"),
     )
     monkeypatch.setattr(
@@ -1663,7 +1663,7 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
         lambda self, pipe: earlier_called.append("request-copilot"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run",
+        "gremlins.stages.address_code.AddressCode.run",
         lambda self, pipe: earlier_called.append("ghaddress"),
     )
     monkeypatch.setattr(
@@ -1701,7 +1701,7 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run", lambda self, pipe: None
+        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -1711,7 +1711,7 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
 
@@ -1804,7 +1804,7 @@ def test_resume_from_verify(tmp_path, monkeypatch):
         lambda self, pipe: verify_calls.append(self),
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run",
+        "gremlins.stages.review_code.ReviewCode.run",
         lambda self, pipe: earlier_called.append("ghreview"),
     )
     monkeypatch.setattr(
@@ -1816,7 +1816,7 @@ def test_resume_from_verify(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
@@ -1847,7 +1847,7 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir):
         subprocess, "run", _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n")
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run", lambda self, pipe: None
+        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -1856,7 +1856,7 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir):
         "gremlins.stages.request_copilot.RequestCopilot.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
@@ -1897,7 +1897,7 @@ def test_gh_main_state_client_tracks_effective_model(
         subprocess, "run", _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n")
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run", lambda self, pipe: None
+        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -1906,7 +1906,7 @@ def test_gh_main_state_client_tracks_effective_model(
         "gremlins.stages.request_copilot.RequestCopilot.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
@@ -1967,7 +1967,7 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
         subprocess, "run", _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n")
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghreview.GHReview.run", lambda self, pipe: None
+        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -1976,7 +1976,7 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
         "gremlins.stages.request_copilot.RequestCopilot.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
-        "gremlins.stages.ghaddress.GHAddress.run", lambda self, pipe: None
+        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)

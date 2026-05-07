@@ -11,7 +11,7 @@ from gremlins.pipeline import StageEntry
 from gremlins.prompts import load_prompts
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
-from gremlins.state import emit_bail
+from gremlins.state import check_bail, emit_bail
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -35,54 +35,23 @@ class AddressCode(Stage):
         *,
         is_git: bool,
         review_stage_names: list[str] | None = None,
+        pr_url: str = "",
     ) -> None:
         super().__init__(entry, model)
         self.is_git = is_git
         self.review_stage_names = (
             review_stage_names if review_stage_names is not None else ["review-code"]
         )
+        self.pr_url = pr_url
 
     def run(self, pipe: Any) -> None:
+        target = getattr(pipe, "target", "local")
         try:
-            review_files: list[tuple[str, pathlib.Path]] = []
-            for stage_name in self.review_stage_names:
-                for m in sorted(
-                    glob.glob(str(self.state.session_dir / f"{stage_name}-*.md"))
-                ):
-                    review_files.append((stage_name, pathlib.Path(m)))
-
-            if not review_files:
-                stages_str = ", ".join(self.review_stage_names)
-                raise FileNotFoundError(
-                    f"no review files found in {self.state.session_dir} (stages: {stages_str})"
-                )
-
-            first_stage_name, first_path = review_files[0]
-            review_model = _model_from(first_path, first_stage_name)
-            text = "\n\n---\n\n".join(
-                p.read_text(encoding="utf-8") for _, p in review_files
-            )
-
-            address_commit_instr = ""
-            if self.is_git:
-                address_commit_instr = (
-                    "After making all fixes, stage the changed files by name and "
-                    "create a single git commit titled 'Address review feedback' whose "
-                    "body references the review file. Do not push."
-                )
-
-            template = load_prompts(self.prompt_paths)
-            address_prompt = template.format(
-                bail_command=self.bail_command(),
-                model=review_model,
-                text=text,
-                address_commit_instr=address_commit_instr,
-            )
-            self.run_claude(
-                address_prompt,
-                label="address-code",
-                raw_path=self.state.session_dir / "stream-address.jsonl",
-            )
+            if target == "github":
+                self.results_to_github(pipe)
+            else:
+                inputs = self._inputs_from_local(pipe)
+                self.results_to_local(inputs, pipe)
         except (SystemExit, Exception) as exc:
             emit_bail(
                 self.state.gr_id,
@@ -92,5 +61,58 @@ class AddressCode(Stage):
             )
             raise
 
+    def _inputs_from_local(self, pipe: Any) -> dict[str, str]:
+        review_files: list[tuple[str, pathlib.Path]] = []
+        for stage_name in self.review_stage_names:
+            for m in sorted(
+                glob.glob(str(self.state.session_dir / f"{stage_name}-*.md"))
+            ):
+                review_files.append((stage_name, pathlib.Path(m)))
+        if not review_files:
+            stages_str = ", ".join(self.review_stage_names)
+            raise FileNotFoundError(
+                f"no review files found in {self.state.session_dir} (stages: {stages_str})"
+            )
+        first_stage_name, first_path = review_files[0]
+        review_model = _model_from(first_path, first_stage_name)
+        text = "\n\n---\n\n".join(
+            p.read_text(encoding="utf-8") for _, p in review_files
+        )
+        return {"text": text, "review_model": review_model}
+
+    def results_to_local(self, inputs: dict[str, str], pipe: Any) -> None:
+        address_commit_instr = ""
+        if self.is_git:
+            address_commit_instr = (
+                "After making all fixes, stage the changed files by name and "
+                "create a single git commit titled 'Address review feedback' whose "
+                "body references the review file. Do not push."
+            )
+        template = load_prompts(self.prompt_paths)
+        address_prompt = template.format(
+            bail_command=self.bail_command(),
+            model=inputs["review_model"],
+            text=inputs["text"],
+            address_commit_instr=address_commit_instr,
+        )
+        self.run_claude(
+            address_prompt,
+            label="address-code",
+            raw_path=self.state.session_dir / "stream-address.jsonl",
+        )
+
+    def results_to_github(self, pipe: Any) -> None:
+        prompt = load_prompts(self.prompt_paths).format(
+            bail_command=self.bail_command(),
+            pr_url=self.pr_url,
+        )
+        self.run_claude(
+            prompt,
+            label="ghaddress",
+            raw_path=self.state.session_dir / "stream-ghaddress.jsonl",
+        )
+        check_bail(self.state.gr_id, "/ghaddress", child_key=self.state.child_key)
+
 
 register_stage("address-code", AddressCode)
+register_stage("ghaddress", AddressCode)

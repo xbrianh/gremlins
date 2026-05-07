@@ -1,18 +1,20 @@
-"""Tests for gremlins.stages.ghaddress."""
+"""Tests for AddressCode.results_to_github (formerly gremlins.stages.ghaddress)."""
 
 from __future__ import annotations
 
 import pathlib
+import types
 
 import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.pipeline import StageEntry
+from gremlins.stages.address_code import AddressCode
 from gremlins.stages.base import StageContext
-from gremlins.stages.ghaddress import GHAddress
 
 PR_URL = "https://github.com/owner/repo/pull/99"
+_GH_PIPE = types.SimpleNamespace(target="github")
 
 
 def _make_entry(prompt_path: pathlib.Path) -> StageEntry:
@@ -31,7 +33,7 @@ def _make_stage(
     gr_id: str | None = None,
     pr_url: str = PR_URL,
     style_content: str | None = None,
-) -> tuple[GHAddress, StageContext]:
+) -> tuple[AddressCode, FakeClaudeClient]:
     prompt_path = tmp_path / "ghaddress.md"
     prompt_path.write_text("Address PR {pr_url}.", encoding="utf-8")
     if style_content is not None:
@@ -46,26 +48,25 @@ def _make_stage(
         )
     else:
         entry = _make_entry(prompt_path)
-    stage = GHAddress(entry, "sonnet", pr_url=pr_url)
+    stage = AddressCode(entry, "sonnet", is_git=True, pr_url=pr_url)
     client = FakeClaudeClient(fixtures={"ghaddress": MINIMAL_EVENTS})
-    ctx = StageContext(client=client, session_dir=tmp_path, gr_id=gr_id)
-    stage.bind(ctx)
-    return stage, ctx
+    stage.bind(StageContext(client=client, session_dir=tmp_path, gr_id=gr_id))
+    return stage, client
 
 
 def test_run_calls_claude_with_pr_url(tmp_path: pathlib.Path) -> None:
-    stage, ctx = _make_stage(tmp_path)
-    stage.run(None)
-    assert len(ctx.client.calls) == 1
-    call = ctx.client.calls[0]
+    stage, client = _make_stage(tmp_path)
+    stage.run(_GH_PIPE)
+    assert len(client.calls) == 1
+    call = client.calls[0]
     assert PR_URL in call.prompt
     assert call.label == "ghaddress"
 
 
 def test_run_includes_style_from_prompt_paths(tmp_path: pathlib.Path) -> None:
-    stage, ctx = _make_stage(tmp_path, style_content="Use type hints.")
-    stage.run(None)
-    assert "Use type hints." in ctx.client.calls[0].prompt
+    stage, client = _make_stage(tmp_path, style_content="Use type hints.")
+    stage.run(_GH_PIPE)
+    assert "Use type hints." in client.calls[0].prompt
 
 
 def test_run_raises_if_unbound() -> None:
@@ -82,13 +83,13 @@ def test_run_raises_if_unbound() -> None:
         prompt_paths=[prompt_path],
         options={},
     )
-    stage = GHAddress(entry, None, pr_url=PR_URL)
+    stage = AddressCode(entry, None, is_git=True, pr_url=PR_URL)
     with pytest.raises(RuntimeError, match="not bound"):
-        stage.run(None)
+        stage.run(_GH_PIPE)
 
 
 def test_run_writes_raw_path(tmp_path: pathlib.Path) -> None:
-    stage, ctx = _make_stage(tmp_path)
-    stage.run(None)
-    call = ctx.client.calls[0]
+    stage, client = _make_stage(tmp_path)
+    stage.run(_GH_PIPE)
+    call = client.calls[0]
     assert call.raw_path == tmp_path / "stream-ghaddress.jsonl"

@@ -16,17 +16,19 @@ from typing import NoReturn
 from gremlins.clients import ClientSpec
 from gremlins.clients.protocol import ClaudeClient
 from gremlins.clients.resolve import require_stage_spec
-from gremlins.git import DirtyOnly, HeadAdvanced, PreImplState, in_git_repo, record_pre_impl_state
+from gremlins.git import (
+    DirtyOnly,
+    HeadAdvanced,
+    PreImplState,
+    in_git_repo,
+    record_pre_impl_state,
+)
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline import StageEntry
 from gremlins.runner import build_parallel_stages, install_signal_handlers, run_stages
 from gremlins.stages import (
     address_code,
     commit,
-    ghaddress,
-    ghplan,
-    ghreview,
-    handoff_branch as handoff_branch_mod,
     implement,
     open_github_pr,
     plan,
@@ -35,6 +37,9 @@ from gremlins.stages import (
     verify,
     wait_ci,
     wait_copilot,
+)
+from gremlins.stages import (
+    handoff_branch as handoff_branch_mod,
 )
 from gremlins.stages.base import Stage, StageContext
 from gremlins.stages.handoff_branch import HandoffBranchResult
@@ -404,15 +409,15 @@ class LocalPipeline(Pipeline):
 class GHPipeline(Pipeline):
     target = "github"
     STAGE_TYPES: dict[str, type[Stage]] = {
-        "plan": ghplan.GHPlan,
+        "plan": plan.Plan,
         "implement": implement.Implement,
         "handoff-branch": handoff_branch_mod.HandoffBranch,
         "verify": verify.Verify,
         "commit": commit.Commit,
         "open-github-pr": open_github_pr.OpenGitHubPR,
         "request-copilot": request_copilot.RequestCopilot,
-        "ghreview": ghreview.GHReview,
-        "ghaddress": ghaddress.GHAddress,
+        "ghreview": review_code.ReviewCode,
+        "ghaddress": address_code.AddressCode,
         "wait-ci": wait_ci.WaitCI,
         "wait-copilot": wait_copilot.WaitCopilot,
     }
@@ -480,8 +485,8 @@ class GHPipeline(Pipeline):
                         f"stage {entry.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML"
                     )
                 set_stage(self.gr_id, entry.name)
-                logger.info("[1/8] running ghplan")
-                stage = ghplan.GHPlan(
+                logger.info("[1/8] running plan")
+                stage = plan.Plan(
                     entry,
                     model,
                     ref=self.args.ref or "",
@@ -489,10 +494,7 @@ class GHPipeline(Pipeline):
                     repo=self.repo,
                 )
                 stage.bind(ctx)
-                result = stage.run(None)
-                self.issue_url = result.issue_url
-                self.issue_num = result.issue_num
-                self.issue_body = result.issue_body
+                stage.run(self)
 
             return _plan
 
@@ -655,9 +657,15 @@ class GHPipeline(Pipeline):
                 self._ensure_pr_url()
                 set_stage(self.gr_id, entry.name)
                 logger.info("[4/8] running /ghreview")
-                stage = ghreview.GHReview(entry, model, pr_url=self.pr_url)
+                stage = review_code.ReviewCode(
+                    entry,
+                    model,
+                    plan_text="",
+                    is_git=True,
+                    pr_url=self.pr_url,
+                )
                 stage.bind(ctx)
-                stage.run(None)
+                stage.run(self)
 
             return _ghreview
 
@@ -688,9 +696,14 @@ class GHPipeline(Pipeline):
                 self._ensure_pr_url()
                 set_stage(self.gr_id, entry.name)
                 logger.info("[6/8] running /ghaddress")
-                stage = ghaddress.GHAddress(entry, model, pr_url=self.pr_url)
+                stage = address_code.AddressCode(
+                    entry,
+                    model,
+                    is_git=True,
+                    pr_url=self.pr_url,
+                )
                 stage.bind(ctx)
-                stage.run(None)
+                stage.run(self)
 
             return _ghaddress
 

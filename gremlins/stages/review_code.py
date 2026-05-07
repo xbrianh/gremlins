@@ -10,7 +10,7 @@ from gremlins.pipeline import StageEntry
 from gremlins.prompts import load_prompts
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
-from gremlins.state import emit_bail, set_stage
+from gremlins.state import check_bail, emit_bail, set_stage
 
 
 def _run_reviewer(
@@ -62,12 +62,18 @@ class ReviewCode(Stage):
         *,
         plan_text: str,
         is_git: bool,
+        pr_url: str = "",
     ) -> None:
         super().__init__(entry, model)
         self.plan_text = plan_text
         self.is_git = is_git
+        self.pr_url = pr_url
 
-    def run(self, pipe: Any) -> pathlib.Path:
+    def run(self, pipe: Any) -> Any:
+        target = getattr(pipe, "target", "local")
+        return getattr(self, f"results_to_{target}")(pipe)
+
+    def results_to_local(self, pipe: Any) -> pathlib.Path:
         if self.model is None:
             raise ValueError(f"stage {self.name!r}: model must be set")
         out_file = self.state.session_dir / f"{self.name}-{self.model}.md"
@@ -131,5 +137,18 @@ class ReviewCode(Stage):
 
         return out_file
 
+    def results_to_github(self, pipe: Any) -> None:
+        prompt = load_prompts(self.prompt_paths).format(
+            bail_command=self.bail_command(),
+            pr_url=self.pr_url,
+        )
+        self.run_claude(
+            prompt,
+            label="ghreview",
+            raw_path=self.state.session_dir / "stream-ghreview.jsonl",
+        )
+        check_bail(self.state.gr_id, "/ghreview", child_key=self.state.child_key)
+
 
 register_stage("review-code", ReviewCode)
+register_stage("ghreview", ReviewCode)
