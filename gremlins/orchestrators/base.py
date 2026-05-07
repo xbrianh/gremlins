@@ -126,7 +126,7 @@ class Pipeline:
             )
 
     def _make_runner(
-        self, entry: StageEntry, ctx: StageContext, model: str
+        self, entry: StageEntry, ctx: StageContext, spec: ClientSpec
     ) -> Callable[[], None]:
         raise NotImplementedError
 
@@ -152,7 +152,7 @@ class Pipeline:
                         (
                             child.name,
                             child_ctx,
-                            self._make_runner(child, child_ctx, child_spec.model),
+                            self._make_runner(child, child_ctx, child_spec),
                         )
                     )
                 stages.extend(
@@ -174,9 +174,7 @@ class Pipeline:
                     session_dir=self.session_dir,
                     gr_id=gr_id,
                 )
-                stages.append(
-                    (e.name, self._make_runner(e, stage_ctx, stage_spec.model))
-                )
+                stages.append((e.name, self._make_runner(e, stage_ctx, stage_spec)))
         return stages
 
     def run(self, *clients: ClaudeClient) -> None:

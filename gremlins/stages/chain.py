@@ -13,7 +13,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from gremlins import handoff as handoff_mod
-from gremlins.clients import PACKAGE_DEFAULT
+from gremlins.clients import ClientSpec
 from gremlins.runner import run_stages
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
@@ -36,14 +36,15 @@ class Chain(Stage):
     def __init__(
         self,
         entry: StageEntry,
-        model: str | None,
+        client_spec: ClientSpec,
         *,
         pipeline_builder: Callable[
             [str, pathlib.Path, pathlib.Path, str | None],
             list[tuple[str, Callable[[], None]]],
         ],
     ) -> None:
-        super().__init__(entry, model)
+        super().__init__(entry, client_spec.model)
+        self._client_spec = client_spec
         self.child_pipeline_name: str = str(entry.options.get("child", "local"))
         self._pipeline_builder = pipeline_builder
 
@@ -251,7 +252,7 @@ class Chain(Stage):
 
         original_plan = str(session_dir / "plan.md")
         forward_spec = original_plan != current_plan
-        model_str = self.model or str(PACKAGE_DEFAULT)
+        model_str = str(self._client_spec)
 
         logger.info(
             "handoff %d: plan=%s, spec=%s, base=%s",

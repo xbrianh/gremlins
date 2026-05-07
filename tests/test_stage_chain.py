@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
+from gremlins.clients.resolve import ClientSpec
 from gremlins.pipeline import StageEntry
 from gremlins.stages.base import StageContext
 from gremlins.stages.chain import Chain
@@ -59,7 +60,9 @@ def _make_chain(
 
     entry = _make_entry(options)
     fake_client = client or FakeClaudeClient()
-    chain = Chain(entry, "sonnet", pipeline_builder=pipeline_builder)
+    chain = Chain(
+        entry, ClientSpec("claude", "sonnet"), pipeline_builder=pipeline_builder
+    )
     ctx = _make_ctx(tmp_path, gr_id=gr_id, client=fake_client)
     chain.bind(ctx)
     return chain
