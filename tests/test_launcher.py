@@ -954,3 +954,50 @@ def test_launch_rejects_empty_spec_path(lenv):
     launcher = _launcher()
     with pytest.raises(ValueError, match="--spec"):
         launcher.launch("localgremlin", plan=str(plan_file), spec_path=str(spec_file))
+
+
+def test_resolve_boss_plan_file_path_passthrough(tmp_path):
+    """File-path branch normalizes to absolute and ignores issue_data."""
+    launcher = _launcher()
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("# Plan\nbody\n", encoding="utf-8")
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    # Pass a relative path to confirm it's resolved to absolute.
+    rel = os.path.relpath(plan_file, os.getcwd())
+    out = launcher._resolve_boss_plan(rel, None, state_dir)
+    assert out == str(plan_file.resolve())
+    assert not (state_dir / "plan-from-issue.md").exists()
+
+
+def test_resolve_boss_plan_issue_ref_snapshots_body(tmp_path):
+    """Issue-ref branch writes the prefetched body to plan-from-issue.md."""
+    launcher = _launcher()
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    issue_data = {"number": "42", "body": "issue body text", "title": "Some title"}
+
+    out = launcher._resolve_boss_plan("#42", issue_data, state_dir)
+    snap = state_dir / "plan-from-issue.md"
+    assert out == str(snap)
+    assert snap.read_text(encoding="utf-8") == "issue body text"
+
+
+def test_resolve_boss_plan_unparseable_raises(tmp_path):
+    """Non-file plan with no resolved issue data raises ValueError."""
+    launcher = _launcher()
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    with pytest.raises(ValueError, match="not a file"):
+        launcher._resolve_boss_plan("not-a-real-thing", None, state_dir)
+
+
+def test_resolve_boss_plan_empty_body_raises(tmp_path):
+    """Issue with whitespace-only body raises ValueError."""
+    launcher = _launcher()
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    issue_data = {"number": "42", "body": "   \n\n  ", "title": "T"}
+    with pytest.raises(ValueError, match="empty body"):
+        launcher._resolve_boss_plan("#42", issue_data, state_dir)

@@ -229,6 +229,15 @@ The distinction is **what the task changes** (tracked repo files = implementatio
 
 If the spec author wrote operator-flavoured language inline with implementation work, **rewrite or drop it; do not copy it verbatim into the child plan**. Operator tasks land only in the rolling plan's `## Operator follow-ups` section, where the human operator picks them up between phase landings.
 
+## Sizing the next step
+
+Prefer **smaller, single-purpose** child plans over bundled ones. A good child plan produces a PR a human reviewer can hold in their head — roughly one focused concern, not a grab bag of "while we're here" changes. Concretely:
+
+- If the remaining `## Tasks` span multiple distinct concerns (e.g. a refactor *and* a new feature, or two unrelated subsystems), pick **one** for this child plan and leave the rest in the rolling plan for a later handoff. Do not collapse them into one child just because they share a theme.
+- When a single plan task is itself large or has natural sub-phases (scaffolding → wiring → migration → cleanup), split it: include only the next coherent slice in the child plan, and rewrite the rolling plan's task entry to reflect what remains.
+- Err on the side of "one more handoff" rather than one oversized PR. The chain is cheap; large diffs are expensive to review and risky to land.
+- Don't go pathologically small either — a child plan should still be a meaningful unit of work, not a single-line tweak. The target is "one reviewable PR", not "one commit".
+
 ## Your task
 
 1. Read the plan. Identify every task listed under `## Tasks`, plus every pending entry under `## Operator follow-ups` if the input plan has that section (a previous handoff may have written it). Both sets feed step 3's classification.
@@ -276,7 +285,7 @@ If the spec author wrote operator-flavoured language inline with implementation 
      ## Open questions
      <risks or open questions, or "(none)" if there are none>
      ```
-   - The child plan must be self-contained — a fresh gremlin with only this file must know exactly what to implement. Do not propagate the overarching goal of the chain into the child plan; scope it to the next chunk.
+   - The child plan must be self-contained — a fresh gremlin with only this file must know exactly what to implement. Do not propagate the overarching goal of the chain into the child plan; scope it to the next chunk per the **Sizing the next step** rules above. If you find yourself listing tasks that span multiple concerns or natural phases, stop and narrow the scope — push the rest back into the rolling plan for the next handoff.
    - **No operator tasks in the child plan, ever.** Before writing the child plan, re-read your own draft `## Tasks` list and ask, for each item: "Is this something a code-only gremlin in a detached worktree can do, ending in one PR?" If any task fails that test, revise — rewrite it as the underlying code change if there is one, or move it to `## Operator follow-ups` in the rolling plan and drop it from the child plan.
 
 7. Write the **signal marker** to: `{signal_path}`
