@@ -35,11 +35,9 @@ class Verify(Stage):
         model: str | None,
         *,
         is_git: bool,
-        commit_after_fix: bool,
     ) -> None:
         super().__init__(entry, model)
         self._is_git = is_git
-        self._commit_after_fix = commit_after_fix
 
     def run(self, pipe: Any) -> None:
         cmds = [c for c in self.options.get("cmds", []) if c.strip()]
@@ -49,7 +47,7 @@ class Verify(Stage):
             logger.info("verify: no cmds configured; skipping")
             return
 
-        if self._commit_after_fix and self._is_git:
+        if self.options.get("commit_after_fix", True) and self._is_git:
             commit_instr = (
                 "- After fixing, stage the changed files by name and create a single git "
                 "commit titled 'Fix failing checks'. Do not push."

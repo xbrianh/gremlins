@@ -195,7 +195,7 @@ class GHPipeline(Pipeline):
 
             def _verify() -> None:
                 set_stage(self.gr_id, entry.name)
-                stage = verify.Verify(entry, model, is_git=True, commit_after_fix=False)
+                stage = verify.Verify(entry, model, is_git=True)
                 stage.bind(ctx)
                 stage.run(None)
 

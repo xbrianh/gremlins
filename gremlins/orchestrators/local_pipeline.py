@@ -195,12 +195,7 @@ class LocalPipeline(Pipeline):
                         entry.options.get("max_attempts"),
                         model,
                     )
-                stage = verify.Verify(
-                    entry,
-                    model,
-                    is_git=is_git,
-                    commit_after_fix=is_git,
-                )
+                stage = verify.Verify(entry, model, is_git=is_git)
                 stage.bind(ctx)
                 stage.run(None)
 
