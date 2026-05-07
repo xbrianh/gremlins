@@ -274,7 +274,7 @@ def test_parallel_child_fix_prompt_uses_child_key_bail_command(tmp_path):
             / "prompts"
             / "bail_section_fix.md",
         ],
-        options={"cmds": ["false"], "max_attempts": 2},
+        options={"cmds": ["false"], "max_attempts": 2, "commit_after_fix": False},
     )
     stage = Verify(entry, "sonnet", is_git=True)
     stage.bind(
