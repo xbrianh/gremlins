@@ -10,7 +10,6 @@ from collections.abc import Callable, Iterator
 
 from gremlins.clients import ClientSpec
 from gremlins.clients.protocol import ClaudeClient
-from gremlins.clients.resolve import require_stage_spec
 from gremlins.orchestrators.base import Pipeline, die
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline import StageEntry
@@ -80,8 +79,9 @@ class LocalPipeline(Pipeline):
             shutil.copyfile(spec_src, spec_file)
 
     def _make_runner(
-        self, entry: StageEntry, ctx: StageContext, model: str
+        self, entry: StageEntry, ctx: StageContext, spec: ClientSpec
     ) -> Callable[[], None]:
+        model = spec.model
         args = self.args
         plan_file = self.session_dir / "plan.md"
         spec_file = self.session_dir / "spec.md"
@@ -220,7 +220,6 @@ class LocalPipeline(Pipeline):
             return _verify
 
         if entry.type == "chain":
-            chain_spec = require_stage_spec(self.stage_specs, entry.name)
 
             def _chain() -> None:
                 set_stage(gr_id, entry.name)
@@ -230,7 +229,7 @@ class LocalPipeline(Pipeline):
                 )
                 stage = Chain(
                     entry,
-                    str(chain_spec),
+                    spec,
                     pipeline_builder=self._build_child_stages,
                 )
                 stage.bind(ctx)

@@ -101,8 +101,9 @@ class GHPipeline(Pipeline):
         logger.info("resumed PR: %s", saved)
 
     def _make_runner(
-        self, entry: StageEntry, ctx: StageContext, model: str
+        self, entry: StageEntry, ctx: StageContext, spec: ClientSpec
     ) -> Callable[[], None]:
+        model = spec.model
         if entry.type == "plan":
 
             def _plan() -> None:
