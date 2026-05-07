@@ -10,6 +10,7 @@ from gremlins.fleet.state import (
     render_sub_stage,
 )
 
+
 def _display_kind(state: dict[str, Any]) -> str:
     pk = str(state.get("pipeline_kind") or "")
     if pk:
