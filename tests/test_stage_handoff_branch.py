@@ -13,7 +13,6 @@ from gremlins.pipeline import StageEntry
 from gremlins.stages.base import StageContext
 from gremlins.stages.handoff_branch import HandoffBranch, HandoffBranchResult
 
-
 PRE_STATE = PreImplState(head="abc123", branch="main")
 
 
@@ -31,6 +30,7 @@ def _make_stage(tmp_path: pathlib.Path) -> tuple[HandoffBranch, StageContext]:
     entry = _make_entry()
     stage = HandoffBranch(entry, None)
     from gremlins.clients.fake import FakeClaudeClient
+
     ctx = StageContext(client=FakeClaudeClient(), session_dir=tmp_path, gr_id=None)
     stage.bind(ctx)
     return stage, ctx
@@ -44,10 +44,17 @@ def test_head_advanced_creates_handoff_branch(tmp_path: pathlib.Path) -> None:
     stage, _ = _make_stage(tmp_path)
     outcome = HeadAdvanced(commit_count=2)
     with (
-        patch("gremlins.stages.handoff_branch.classify_impl_outcome", return_value=outcome),
-        patch("gremlins.stages.handoff_branch.create_handoff_branch", return_value="ghgremlin-impl-handoff-1234") as mock_create,
+        patch(
+            "gremlins.stages.handoff_branch.classify_impl_outcome", return_value=outcome
+        ),
+        patch(
+            "gremlins.stages.handoff_branch.create_handoff_branch",
+            return_value="ghgremlin-impl-handoff-1234",
+        ) as mock_create,
         patch("gremlins.stages.handoff_branch.reset_pre_branch") as mock_reset,
-        patch("gremlins.stages.handoff_branch.sweep_stale_handoff_branches") as mock_sweep,
+        patch(
+            "gremlins.stages.handoff_branch.sweep_stale_handoff_branches"
+        ) as mock_sweep,
     ):
         result = stage.run(_pipe())
     assert isinstance(result, HandoffBranchResult)
@@ -62,7 +69,10 @@ def test_head_advanced_creates_handoff_branch(tmp_path: pathlib.Path) -> None:
 def test_dirty_only_no_branch_created(tmp_path: pathlib.Path) -> None:
     stage, _ = _make_stage(tmp_path)
     with (
-        patch("gremlins.stages.handoff_branch.classify_impl_outcome", return_value=DirtyOnly()),
+        patch(
+            "gremlins.stages.handoff_branch.classify_impl_outcome",
+            return_value=DirtyOnly(),
+        ),
         patch("gremlins.stages.handoff_branch.create_handoff_branch") as mock_create,
     ):
         result = stage.run(_pipe())
@@ -73,7 +83,9 @@ def test_dirty_only_no_branch_created(tmp_path: pathlib.Path) -> None:
 
 def test_empty_impl_raises(tmp_path: pathlib.Path) -> None:
     stage, _ = _make_stage(tmp_path)
-    with patch("gremlins.stages.handoff_branch.classify_impl_outcome", return_value=EmptyImpl()):
+    with patch(
+        "gremlins.stages.handoff_branch.classify_impl_outcome", return_value=EmptyImpl()
+    ):
         with pytest.raises(RuntimeError, match="no changes"):
             stage.run(_pipe())
 
@@ -81,7 +93,9 @@ def test_empty_impl_raises(tmp_path: pathlib.Path) -> None:
 def test_divergent_head_raises(tmp_path: pathlib.Path) -> None:
     stage, _ = _make_stage(tmp_path)
     outcome = DivergentHead(pre_head="abc123", post_head="def456")
-    with patch("gremlins.stages.handoff_branch.classify_impl_outcome", return_value=outcome):
+    with patch(
+        "gremlins.stages.handoff_branch.classify_impl_outcome", return_value=outcome
+    ):
         with pytest.raises(RuntimeError, match="without advancing"):
             stage.run(_pipe())
 
@@ -96,7 +110,10 @@ def test_result_base_ref_from_pre_state(tmp_path: pathlib.Path) -> None:
     stage, _ = _make_stage(tmp_path)
     pre = PreImplState(head="deadbeef", branch="feature")
     with (
-        patch("gremlins.stages.handoff_branch.classify_impl_outcome", return_value=DirtyOnly()),
+        patch(
+            "gremlins.stages.handoff_branch.classify_impl_outcome",
+            return_value=DirtyOnly(),
+        ),
     ):
         result = stage.run(_pipe(pre))
     assert result.base_ref == "deadbeef"

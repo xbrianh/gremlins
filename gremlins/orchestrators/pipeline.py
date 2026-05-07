@@ -541,9 +541,7 @@ class GHPipeline(Pipeline):
                     if saved_head:
                         self.impl_pre_state = PreImplState(
                             head=saved_head,
-                            branch=read_state_field(
-                                self.state_file, "impl_pre_branch"
-                            ),
+                            branch=read_state_field(self.state_file, "impl_pre_branch"),
                         )
                 stage = handoff_branch_mod.HandoffBranch(entry, model)
                 stage.bind(ctx)

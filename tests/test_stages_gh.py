@@ -85,7 +85,9 @@ def test_ghreview_bail_rubric(tmp_path: pathlib.Path) -> None:
     assert "anything a human should weigh in on" not in prompt
 
 
-def test_ghreview_parallel_child_uses_child_key_bail_command(tmp_path: pathlib.Path) -> None:
+def test_ghreview_parallel_child_uses_child_key_bail_command(
+    tmp_path: pathlib.Path,
+) -> None:
     client = FakeClaudeClient(fixtures={"ghreview": MINIMAL_EVENTS})
     stage = _make_ghreview(
         client,
@@ -155,7 +157,9 @@ def test_ghaddress_prompt_includes_bail_content(tmp_path: pathlib.Path) -> None:
     )
 
 
-def test_ghaddress_parallel_child_uses_child_key_bail_command(tmp_path: pathlib.Path) -> None:
+def test_ghaddress_parallel_child_uses_child_key_bail_command(
+    tmp_path: pathlib.Path,
+) -> None:
     client = FakeClaudeClient(fixtures={"ghaddress": MINIMAL_EVENTS})
     stage = _make_ghaddress(
         client,
