@@ -81,8 +81,10 @@ def _parse_bool(v: str) -> bool:
 def stage_argspecs(stage_cls: type) -> list[ArgSpec]:
     try:
         hints = typing.get_type_hints(stage_cls.__init__)
-    except Exception:
-        hints = {}
+    except Exception as exc:
+        raise TypeError(
+            f"could not resolve type hints for {stage_cls.__name__}.__init__"
+        ) from exc
     sig = inspect.signature(stage_cls.__init__)
     specs = []
     for name, param in sig.parameters.items():
@@ -129,13 +131,18 @@ def build_launch_parser(
             )
         kwargs: dict[str, Any] = {"help": spec.help}
         if spec.type is bool:
-            kwargs["type"] = _parse_bool
+            if spec.required:
+                kwargs["type"] = _parse_bool
+                kwargs["required"] = True
+            else:
+                kwargs["action"] = argparse.BooleanOptionalAction
+                kwargs["default"] = spec.default
         else:
             kwargs["type"] = spec.type
-        if spec.required:
-            kwargs["required"] = True
-        else:
-            kwargs["default"] = spec.default
+            if spec.required:
+                kwargs["required"] = True
+            else:
+                kwargs["default"] = spec.default
         p.add_argument(flag, **kwargs)
 
     return p

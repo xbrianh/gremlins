@@ -84,6 +84,22 @@ class _UnsupportedAnnotation:
         pass
 
 
+class _WithOptionalBool:
+    def __init__(
+        self,
+        entry: _FakeEntry,
+        model: str | None,
+        *,
+        verbose: bool = False,
+    ) -> None:
+        pass
+
+
+class _UnannotatedParam:
+    def __init__(self, entry: _FakeEntry, model: str | None, *, name) -> None:
+        pass
+
+
 class _ConflictsWithInfra:
     """Stage param 'plan' collides with the infra --plan flag."""
 
@@ -170,6 +186,11 @@ def test_unsupported_annotation_raises() -> None:
         stage_argspecs(_UnsupportedAnnotation)
 
 
+def test_unannotated_param_raises() -> None:
+    with pytest.raises(TypeError, match="name"):
+        stage_argspecs(_UnannotatedParam)
+
+
 def test_help_contains_type_str() -> None:
     specs = {s.name: s for s in stage_argspecs(_AllTypes)}
     assert "str" in specs["a_str"].help
@@ -248,3 +269,20 @@ def test_help_mentions_param_name_and_type(capsys: pytest.CaptureFixture[str]) -
 def test_conflicting_name_raises() -> None:
     with pytest.raises(ValueError, match="plan"):
         build_launch_parser("mypipe", _ConflictsWithInfra)
+
+
+def test_required_bool_parsed_from_string() -> None:
+    p = build_launch_parser("mypipe", _AllTypes)
+    args = p.parse_args(["--a-str", "x", "--a-int", "1", "--a-float", "1.0",
+                         "--a-bool", "true", "--a-path", "/tmp"])
+    assert args.a_bool is True
+    args2 = p.parse_args(["--a-str", "x", "--a-int", "1", "--a-float", "1.0",
+                          "--a-bool", "false", "--a-path", "/tmp"])
+    assert args2.a_bool is False
+
+
+def test_optional_bool_uses_boolean_optional_action() -> None:
+    p = build_launch_parser("mypipe", _WithOptionalBool)
+    assert p.parse_args([]).verbose is False
+    assert p.parse_args(["--verbose"]).verbose is True
+    assert p.parse_args(["--no-verbose"]).verbose is False
