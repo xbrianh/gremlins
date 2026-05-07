@@ -224,10 +224,16 @@ def test_rescue_already_running_returns_true_no_bail(tmp_path, monkeypatch):
     sh = setup_shell_env(tmp_path)
     state_dir = _make_failed_gremlin(sh.state_root, sh.repo)
 
-    monkeypatch.setattr(rescue_mod, "_run_headless_diagnosis", lambda *a, **kw: ("fixed", "state looks good"))
+    monkeypatch.setattr(
+        rescue_mod,
+        "_run_headless_diagnosis",
+        lambda *a, **kw: ("fixed", "state looks good"),
+    )
 
     def _raise_already_running(gr_id: str) -> None:
-        raise GremlinAlreadyRunning(f"gremlin {gr_id} is still running (pid 99999) — stop it first")
+        raise GremlinAlreadyRunning(
+            f"gremlin {gr_id} is still running (pid 99999) — stop it first"
+        )
 
     monkeypatch.setattr(rescue_mod, "_resume", _raise_already_running)
     _patch_state_root(sh.state_root, monkeypatch)
