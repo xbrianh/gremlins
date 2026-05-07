@@ -71,6 +71,10 @@ def _resolve_prompt_paths(
         if p.startswith(BUNDLED_PROMPT_PREFIX):
             base = BUNDLED_PROMPT_DIR
             name = p[len(BUNDLED_PROMPT_PREFIX) :]
+            if not name:
+                raise ValueError(
+                    f"prompt {p!r} is missing a name after {BUNDLED_PROMPT_PREFIX!r}"
+                )
         else:
             base = prompt_dir
             name = p

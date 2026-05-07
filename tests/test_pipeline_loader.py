@@ -193,6 +193,22 @@ stages:
     ]
 
 
+def test_bundled_prefix_without_name_raises(tmp_path: pathlib.Path) -> None:
+    """`gremlins:` with no name after the prefix is rejected at load time."""
+    _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+stages:
+  - name: s1
+    type: verify
+    prompt: ["gremlins:"]
+""",
+    )
+    with pytest.raises(ValueError, match="missing a name"):
+        load_pipeline(tmp_path / "pipeline.yaml")
+
+
 # ---- prompt list -----------------------------------------------------------
 
 
