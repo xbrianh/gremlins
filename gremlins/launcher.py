@@ -145,6 +145,28 @@ def _resolve_description_and_slug(
     return "", False, "gremlin"
 
 
+def _resolve_boss_plan(plan: str, state_dir: pathlib.Path) -> str:
+    if os.path.isfile(plan):
+        return str(pathlib.Path(plan).resolve())
+    target_repo, issue_num = parse_issue_ref(plan, "")
+    if issue_num is None:
+        raise ValueError(f"--plan: not a file and not an issue ref: {plan}")
+    if not target_repo:
+        r = subprocess.run(
+            ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            raise RuntimeError(f"could not resolve current repo: {r.stderr.strip()}")
+        target_repo = r.stdout.strip()
+    body = (view_issue(issue_num, target_repo).get("body") or "").strip()
+    if not body:
+        raise ValueError(f"--plan: issue {plan} has empty body")
+    snap = state_dir / "plan-from-issue.md"
+    snap.write_text(body, encoding="utf-8")
+    return str(snap)
+
+
 def _write_state(state_dir: pathlib.Path, data: dict[str, Any]) -> None:
     """Atomically write state.json."""
     sf = state_dir / "state.json"
@@ -392,6 +414,9 @@ def launch(
 
     state_dir = _state_root() / gr_id
     state_dir.mkdir(parents=True, exist_ok=True)
+
+    if kind == "bossgremlin" and plan:
+        plan = _resolve_boss_plan(plan, state_dir)
 
     # pipeline_args for state.json: includes --plan and --spec when set
     stored_pipeline_args = list(resolved_pipeline_args)

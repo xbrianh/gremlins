@@ -409,6 +409,7 @@ class LocalPipeline(Pipeline):
             return _verify
 
         if entry.type == "chain":
+            chain_spec = require_stage_spec(self.stage_specs, entry.name)
 
             def _chain() -> None:
                 set_stage(gr_id, entry.name)
@@ -418,7 +419,7 @@ class LocalPipeline(Pipeline):
                 )
                 stage = Chain(
                     entry,
-                    model,
+                    str(chain_spec),
                     pipeline_builder=self._build_child_stages,
                 )
                 stage.bind(ctx)
