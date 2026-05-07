@@ -53,7 +53,6 @@ from gremlins.fleet.state import (
     humanize_age,
     iso_to_epoch,
     iter_state_files,
-    kind_short,
     liveness_of_state_file,
     load_state,
     render_sub_stage,
@@ -81,7 +80,6 @@ __all__ = [
     "liveness_of_state_file",
     "iter_state_files",
     "load_state",
-    "kind_short",
     "effective_pipeline_kind",
     "git_toplevel",
     # duration

@@ -144,29 +144,9 @@ def load_state(sf: str) -> dict[str, object] | None:
         return None
 
 
-def kind_short(kind: str) -> str:
-    if kind == "localgremlin":
-        return "local"
-    if kind == "ghgremlin":
-        return "gh"
-    if kind == "bossgremlin":
-        return "boss"
-    return kind or ""
-
-
-_LEGACY_KIND_MAP = {
-    "localgremlin": "local",
-    "ghgremlin": "gh",
-    "bossgremlin": "boss",
-}
-
-
 def effective_pipeline_kind(state: dict[str, object]) -> str:
-    """Return 'local', 'gh', or 'boss' from state, preferring pipeline_kind over kind."""
     pk = str(state.get("pipeline_kind") or "")
-    if pk in ("local", "gh", "boss"):
-        return pk
-    return _LEGACY_KIND_MAP.get(str(state.get("kind") or ""), "local")
+    return pk if pk in ("local", "gh", "boss") else "local"
 
 
 def atomic_patch_state(sf: str, patch: dict[str, object]) -> bool:

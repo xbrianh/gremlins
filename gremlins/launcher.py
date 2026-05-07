@@ -27,6 +27,7 @@ from gremlins import git as _git_mod
 from gremlins import paths as _paths
 from gremlins.clients import PACKAGE_DEFAULT
 from gremlins.gh_utils import parse_issue_ref, resolve_default_branch, view_issue
+from gremlins.fleet.state import effective_pipeline_kind
 from gremlins.pipeline import (
     Pipeline,
     load_pipeline,
@@ -628,7 +629,7 @@ def resume(gr_id: str) -> None:
     except FileNotFoundError:
         pass
 
-    pipeline_mode = _infer_mode_from_pipeline_kind(kind)
+    pipeline_mode = effective_pipeline_kind(state)
     if pipeline_path:
         try:
             _loaded = load_pipeline(pathlib.Path(pipeline_path))
