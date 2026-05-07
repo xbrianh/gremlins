@@ -313,6 +313,40 @@ def _delete_patch_state(
         pass
 
 
+def _setup_workdir(
+    kind: str, project_root: str, base_ref: str, gr_id: str
+) -> tuple[str, str, str, str]:
+    """Return (workdir, branch, worktree_base, setup_kind)."""
+    if not _git_mod.in_git_repo(cwd=project_root):
+        return _git_mod.setup_copy(project_root), "", "", "copy"
+
+    if kind == "localgremlin":
+        workdir, branch = _git_mod.setup_worktree_branch(
+            project_root, gr_id, base_ref=base_ref
+        )
+        return workdir, branch, "", "worktree-branch"
+
+    if kind == "ghgremlin":
+        default_branch = resolve_default_branch(project_root)
+        refspec = (
+            f"refs/heads/{default_branch}:refs/remotes/origin/{default_branch}"
+        )
+        fr = subprocess.run(
+            ["git", "-C", project_root, "fetch", "origin", "--quiet", refspec],
+            capture_output=True,
+            text=True,
+        )
+        if fr.returncode != 0:
+            raise RuntimeError(
+                f"git fetch origin {default_branch} failed: {fr.stderr.strip()}"
+            )
+        worktree_base = f"origin/{default_branch}"
+        return _git_mod.setup_detached_worktree(project_root, worktree_base), "", worktree_base, "worktree"
+
+    # bossgremlin
+    return _git_mod.setup_detached_worktree(project_root, base_ref), "", "", "worktree"
+
+
 def _build_spawn_env(gr_id: str) -> dict[str, str]:
     env = os.environ.copy()
     pkg_root = str(pathlib.Path(__file__).resolve().parent.parent)
@@ -457,38 +491,9 @@ def launch(
     instr_raw = instructions or ""
     (state_dir / "instructions.txt").write_text(instr_raw, encoding="utf-8")
 
-    # Worktree setup
-    branch = ""
-    worktree_base = ""
-    if _git_mod.in_git_repo(cwd=project_root):
-        if kind == "localgremlin":
-            setup_kind = "worktree-branch"
-            workdir, branch = _git_mod.setup_worktree_branch(
-                project_root, gr_id, base_ref=base_ref
-            )
-        elif kind == "ghgremlin":
-            default_branch = resolve_default_branch(project_root)
-            refspec = (
-                f"refs/heads/{default_branch}:refs/remotes/origin/{default_branch}"
-            )
-            fr = subprocess.run(
-                ["git", "-C", project_root, "fetch", "origin", "--quiet", refspec],
-                capture_output=True,
-                text=True,
-            )
-            if fr.returncode != 0:
-                raise RuntimeError(
-                    f"git fetch origin {default_branch} failed: {fr.stderr.strip()}"
-                )
-            worktree_base = f"origin/{default_branch}"
-            setup_kind = "worktree"
-            workdir = _git_mod.setup_detached_worktree(project_root, worktree_base)
-        else:  # bossgremlin
-            setup_kind = "worktree"
-            workdir = _git_mod.setup_detached_worktree(project_root, base_ref)
-    else:
-        setup_kind = "copy"
-        workdir = _git_mod.setup_copy(project_root)
+    workdir, branch, worktree_base, setup_kind = _setup_workdir(
+        kind, project_root, base_ref, gr_id
+    )
 
     now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     state = {
