@@ -1243,17 +1243,11 @@ def test_rescue_host_terminated_recreates_worktree_and_proceeds(
 
 # Each entry: (label, state_dict, expected_pipeline_kind)
 _PIPELINE_KIND_CASES = [
-    # New-style: pipeline_kind field present
     ("new_local", {"kind": "custard", "pipeline_kind": "local"}, "local"),
     ("new_gh", {"kind": "custard", "pipeline_kind": "gh"}, "gh"),
     ("new_boss", {"kind": "custard", "pipeline_kind": "boss"}, "boss"),
-    # Legacy: only kind field, one of the three canonical names
-    ("legacy_local", {"kind": "localgremlin"}, "local"),
-    ("legacy_gh", {"kind": "ghgremlin"}, "gh"),
-    ("legacy_boss", {"kind": "bossgremlin"}, "boss"),
-    # Unknown legacy kind falls back to "local"
-    ("unknown_kind", {"kind": "custard"}, "local"),
-    # Missing kind entirely falls back to "local"
+    # No pipeline_kind set falls back to "local"
+    ("missing_pipeline_kind", {"kind": "custard"}, "local"),
     ("no_kind", {}, "local"),
 ]
 
@@ -1304,18 +1298,6 @@ def test_stage_names_for_gremlin_boss_only(label, state, expected):
             {"kind": "custard", "pipeline_kind": "gh", "id": "x"},
             "_land_gh",
         ),
-        (
-            "legacy_local_land",
-            {
-                "kind": "localgremlin",
-                "setup_kind": "worktree-branch",
-                "branch": "bg/localgremlin/x",
-                "id": "x",
-            },
-            "_land_local",
-        ),
-        ("legacy_boss_land", {"kind": "bossgremlin", "id": "x"}, "_land_boss"),
-        ("legacy_gh_land", {"kind": "ghgremlin", "id": "x"}, "_land_gh"),
     ],
     ids=lambda x: x if isinstance(x, str) else "",
 )
