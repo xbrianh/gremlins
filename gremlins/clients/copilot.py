@@ -80,7 +80,7 @@ class SubprocessCopilotClient:
             argv,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
-            stderr=None,
+            stderr=subprocess.PIPE,
             start_new_session=False,
             env=os.environ.copy(),
             cwd=str(cwd) if cwd is not None else None,
@@ -106,17 +106,33 @@ class SubprocessCopilotClient:
         p = self._spawn(argv, cwd=cwd)
         try:
             assert p.stdout is not None
-            raw = p.stdout.read().decode(errors="replace")
+            assert p.stderr is not None
+            raw_out, raw_err = p.stdout.read(), p.stderr.read()
             p.stdout.close()
+            p.stderr.close()
             rc = p.wait()
         finally:
             self._untrack(p)
 
+        stdout = raw_out.decode(errors="replace")
+        stderr = raw_err.decode(errors="replace")
+
+        if raw_path is not None:
+            raw_path.parent.mkdir(parents=True, exist_ok=True)
+            with raw_path.open("w", encoding="utf-8") as f:
+                f.write(stdout)
+                if stderr:
+                    f.write("\n--- stderr ---\n")
+                    f.write(stderr)
+
         if rc != 0:
-            raise RuntimeError(f"copilot -p (model={model}, label={label}) exited {rc}")
+            detail = f"\nstderr: {stderr[:500]}" if stderr else ""
+            raise RuntimeError(
+                f"copilot -p (model={model}, label={label}) exited {rc}{detail}"
+            )
         return CompletedRun(
             exit_code=rc,
-            text_result=_strip_footer(raw),
+            text_result=_strip_footer(stdout),
             events=None,
             cost_usd=None,
         )
