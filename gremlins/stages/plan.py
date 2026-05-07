@@ -118,9 +118,7 @@ class Plan(Stage):
                 detail = f"; model said: {snippet}" if snippet else ""
                 raise RuntimeError(f"plan stage did not produce {plan_md}{detail}")
 
-    def _resolve_file_source(
-        self, path: str, plan_md: pathlib.Path, pipe: Any
-    ) -> None:
+    def _resolve_file_source(self, path: str, plan_md: pathlib.Path, pipe: Any) -> None:
         src = pathlib.Path(path)
         if src.stat().st_size == 0:
             sys.stderr.write(f"error: --plan: file is empty: {path}\n")
@@ -192,9 +190,7 @@ class Plan(Stage):
             pipe.issue_num = issue_num
             pipe.issue_body = issue_body
 
-    def _resolve_issue_source(
-        self, ref: str, plan_md: pathlib.Path, pipe: Any
-    ) -> None:
+    def _resolve_issue_source(self, ref: str, plan_md: pathlib.Path, pipe: Any) -> None:
         target_repo, issue_ref = parse_issue_ref(ref, self.repo or "")
         if issue_ref is None:
             sys.stderr.write(
@@ -217,9 +213,7 @@ class Plan(Stage):
             sys.exit(1)
         issue_body = issue_data.get("body") or ""
         if not issue_body:
-            sys.stderr.write(
-                f"error: --plan: issue {ref} has an empty body\n"
-            )
+            sys.stderr.write(f"error: --plan: issue {ref} has an empty body\n")
             sys.stderr.flush()
             sys.exit(1)
         resolved_url = issue_data.get("url") or ""
