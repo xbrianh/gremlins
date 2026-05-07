@@ -27,20 +27,11 @@ from gremlins import git as _git_mod
 from gremlins import paths as _paths
 from gremlins.clients import PACKAGE_DEFAULT
 from gremlins.gh_utils import parse_issue_ref, resolve_default_branch, view_issue
-from gremlins.pipeline import load_pipeline, resolve_pipeline_path
-
-VALID_KINDS = {"ghgremlin", "localgremlin", "bossgremlin"}
+from gremlins.pipeline import VALID_KINDS, _KIND_SUBCOMMAND, load_pipeline, resolve_pipeline_path
 
 
 class GremlinAlreadyRunning(RuntimeError):
     pass
-
-
-_KIND_SUBCOMMAND = {
-    "localgremlin": "_local",
-    "ghgremlin": "_gh",
-    "bossgremlin": "_boss",
-}
 
 
 def _state_root() -> pathlib.Path:
