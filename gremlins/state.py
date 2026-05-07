@@ -16,7 +16,7 @@ import pathlib
 import re
 import secrets
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from gremlins import paths as _paths
 
@@ -205,6 +205,45 @@ def patch_parallel_worktrees(
         _locked_update(sf, _apply)
     except Exception:
         pass
+
+
+def clear_parallel_bail(gr_id: str | None, child_key: str) -> None:
+    if not gr_id or not child_key:
+        return
+    sf = resolve_state_file(gr_id)
+    if sf is None or not sf.exists():
+        return
+    try:
+
+        def _apply(data: dict[str, Any]) -> None:
+            shards = dict(data.get("parallel_bails") or {})
+            shards.pop(child_key, None)
+            if shards:
+                data["parallel_bails"] = shards
+            else:
+                data.pop("parallel_bails", None)
+
+        _locked_update(sf, _apply)
+    except Exception:
+        pass
+
+
+def read_parallel_bail(gr_id: str | None, child_key: str) -> dict[str, str]:
+    if not gr_id or not child_key:
+        return {}
+    sf = resolve_state_file(gr_id)
+    if sf is None or not sf.exists():
+        return {}
+    try:
+        data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
+        shards: dict[str, Any] = data.get("parallel_bails") or {}
+        shard = dict(cast(dict[str, Any], shards.get(child_key) or {}))
+        return {
+            "bail_class": str(shard.get("bail_class") or ""),
+            "bail_detail": str(shard.get("bail_detail") or ""),
+        }
+    except Exception:
+        return {}
 
 
 def check_bail(

@@ -27,6 +27,7 @@ from gremlins.git import (
     has_commits,
     has_diff,
     has_dirty_worktree,
+    head_sha,
     in_git_repo,
     rev_exists,
 )
@@ -156,6 +157,19 @@ def local_main(
         _client_for_spec(default_spec)
 
     session_dir = resolve_session_dir(gr_id)
+    if gr_id and pipeline.name == "boss" and args.plan_path:
+        from gremlins.orchestrators.pipeline import read_state_field
+        from gremlins.state import resolve_state_file
+
+        state_file = resolve_state_file(gr_id)
+        if not read_state_field(state_file, "original_plan") or not read_state_field(
+            state_file, "chain_base_ref"
+        ):
+            patch_state(
+                gr_id,
+                original_plan=pathlib.Path(args.plan_path).read_text(encoding="utf-8"),
+                chain_base_ref=head_sha(),
+            )
 
     if client is not None:
         _signal_clients = [client]

@@ -597,7 +597,7 @@ def test_resume_keeps_resume_flag_for_pipeline_gremlin(lenv, monkeypatch):
     ]
 
 
-def test_resume_omits_resume_flag_for_bossgremlin(lenv, monkeypatch):
+def test_resume_passes_resume_flag_for_bossgremlin(lenv, monkeypatch):
     launcher = _launcher()
     gr_id = "resume-boss-spawn-args"
     state_dir = _gremlins_state_root(lenv) / gr_id
@@ -617,10 +617,8 @@ def test_resume_omits_resume_flag_for_bossgremlin(lenv, monkeypatch):
                 "pipeline_args": [
                     "--plan",
                     str(plan_path),
-                    "--chain-kind",
-                    "local",
                     "--resume-from",
-                    "implement",
+                    "chain",
                 ],
             }
         ),
@@ -643,10 +641,12 @@ def test_resume_omits_resume_flag_for_bossgremlin(lenv, monkeypatch):
 
     assert captured["subcommand"] == "_boss"
     assert captured["spawn_args"] == [
+        "--pipeline",
+        str(launcher.resolve_pipeline_path("boss", lenv.repo)),
         "--plan",
         str(plan_path),
-        "--chain-kind",
-        "local",
+        "--resume-from",
+        "implement",
     ]
 
 

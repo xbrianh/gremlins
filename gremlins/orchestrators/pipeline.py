@@ -28,6 +28,7 @@ from gremlins.pipeline import StageEntry
 from gremlins.runner import build_parallel_stages, install_signal_handlers, run_stages
 from gremlins.stages import (
     address_code,
+    chain,
     commit,
     implement,
     open_github_pr,
@@ -43,7 +44,7 @@ from gremlins.stages import (
 )
 from gremlins.stages.base import Stage, StageContext
 from gremlins.stages.handoff_branch import HandoffBranchResult
-from gremlins.state import patch_state, set_stage
+from gremlins.state import patch_state, resolve_state_file, set_stage
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +110,9 @@ class Pipeline:
         stage_specs: dict[str, ClientSpec] | None = None,
         spec_clients: dict[str, ClaudeClient] | None = None,
         test_client: ClaudeClient | None = None,
+        stage_recorder: Callable[[str], None] | None = None,
+        child_key: str | None = None,
+        parallel_aggregate_child_key: str | None = None,
     ) -> None:
         if self.STAGE_TYPES:
             unknown: list[str] = []
@@ -132,6 +136,13 @@ class Pipeline:
         self.stage_specs: dict[str, ClientSpec] = stage_specs or {}
         self.spec_clients: dict[str, ClaudeClient] = spec_clients or {}
         self.test_client = test_client
+        self.child_key = child_key
+        self.parallel_aggregate_child_key = parallel_aggregate_child_key
+        self._stage_recorder: Callable[[str], None]
+        if stage_recorder is not None:
+            self._stage_recorder = stage_recorder
+        else:
+            self._stage_recorder = self._default_stage_recorder
 
     def _get_client(self, spec: ClientSpec) -> ClaudeClient:
         if self.test_client is not None:
@@ -149,15 +160,18 @@ class Pipeline:
                 f"valid: {valid_names}"
             )
 
+    def _record_stage(self, stage_name: str) -> None:
+        self._stage_recorder(stage_name)
+
+    def _default_stage_recorder(self, stage_name: str) -> None:
+        set_stage(self.gr_id, stage_name)
+
     def _make_runner(
         self, entry: StageEntry, ctx: StageContext, model: str
     ) -> Callable[[], None]:
         raise NotImplementedError
 
-    def run(self, *clients: ClaudeClient) -> None:
-        install_signal_handlers(*clients)
-
-        gr_id = self.gr_id
+    def build_stage_runners(self) -> list[tuple[str, Callable[[], None]]]:
         stages: list[tuple[str, Callable[[], None]]] = []
         for e in self.pipeline_data.stages:
             if e.type == "parallel":
@@ -171,7 +185,7 @@ class Pipeline:
                     child_ctx = StageContext(
                         client=self._get_client(child_spec),
                         session_dir=child_dir,
-                        gr_id=gr_id,
+                        gr_id=self.gr_id,
                         child_key=child.name,
                     )
                     child_runners.append(
@@ -186,11 +200,12 @@ class Pipeline:
                         e.name,
                         child_runners,
                         max_concurrent=e.max_concurrent,
-                        set_stage_fn=lambda n: set_stage(gr_id, n),
+                        set_stage_fn=self._record_stage,
                         cancel_on_bail=e.cancel_on_bail,
                         bail_policy=e.bail_policy,
-                        gr_id=gr_id,
+                        gr_id=self.gr_id,
                         project_root=pathlib.Path.cwd(),
+                        aggregate_child_key=self.parallel_aggregate_child_key,
                     )
                 )
             else:
@@ -198,18 +213,24 @@ class Pipeline:
                 stage_ctx = StageContext(
                     client=self._get_client(stage_spec),
                     session_dir=self.session_dir,
-                    gr_id=gr_id,
+                    gr_id=self.gr_id,
+                    child_key=self.child_key,
                 )
                 stages.append(
                     (e.name, self._make_runner(e, stage_ctx, stage_spec.model))
                 )
+        return stages
 
-        run_stages(stages, resume_from=self.args.resume_from)
+    def run(self, *clients: ClaudeClient) -> None:
+        install_signal_handlers(*clients)
+
+        run_stages(self.build_stage_runners(), resume_from=self.args.resume_from)
 
 
 class LocalPipeline(Pipeline):
     target = "local"
     STAGE_TYPES: dict[str, type[Stage]] = {
+        "chain": chain.Chain,
         "plan": plan.Plan,
         "implement": implement.Implement,
         "verify": verify.Verify,
@@ -228,6 +249,9 @@ class LocalPipeline(Pipeline):
         stage_specs: dict[str, ClientSpec] | None = None,
         spec_clients: dict[str, ClaudeClient] | None = None,
         test_client: ClaudeClient | None = None,
+        stage_recorder: Callable[[str], None] | None = None,
+        child_key: str | None = None,
+        parallel_aggregate_child_key: str | None = None,
     ) -> None:
         super().__init__(
             stages,
@@ -238,6 +262,9 @@ class LocalPipeline(Pipeline):
             stage_specs=stage_specs,
             spec_clients=spec_clients,
             test_client=test_client,
+            stage_recorder=stage_recorder,
+            child_key=child_key,
+            parallel_aggregate_child_key=parallel_aggregate_child_key,
         )
         self.plan_copied_from_source = False
 
@@ -270,7 +297,6 @@ class LocalPipeline(Pipeline):
         plan_file = self.session_dir / "plan.md"
         spec_file = self.session_dir / "spec.md"
         is_git = self.is_git
-        gr_id = self.gr_id
         plan_copied_from_source = self.plan_copied_from_source
         instructions = " ".join(getattr(args, "instructions", None) or [])
         plan_path = getattr(args, "plan_path", None)
@@ -286,7 +312,7 @@ class LocalPipeline(Pipeline):
                     else:
                         logger.info("plan reused from snapshot -> %s", plan_file)
                 else:
-                    set_stage(gr_id, entry.name)
+                    self._record_stage(entry.name)
                     logger.info("planning (model: %s) -> %s", model, plan_file)
                     if not entry.prompt_paths:
                         _die(
@@ -316,7 +342,7 @@ class LocalPipeline(Pipeline):
                             "could not read spec.md (%s); proceeding without north-star context",
                             exc,
                         )
-                set_stage(gr_id, entry.name)
+                self._record_stage(entry.name)
                 logger.info("implementing (model: %s, from %s)", model, plan_file)
                 stage = implement.Implement(
                     entry,
@@ -330,11 +356,22 @@ class LocalPipeline(Pipeline):
 
             return _implement
 
+        if entry.type == "chain":
+
+            def _chain() -> None:
+                self._record_stage(entry.name)
+                logger.info("running chain (model: %s)", model)
+                stage = chain.Chain(entry, model)
+                stage.bind(ctx)
+                stage.run(self)
+
+            return _chain
+
         if entry.type == "review-code":
 
             def _review_code() -> None:
-                plan_text = plan_file.read_text(encoding="utf-8")
-                set_stage(gr_id, entry.name)
+                plan_text = self._review_plan_text(plan_file)
+                self._record_stage(entry.name)
                 logger.info("reviewing code (model: %s)", model)
                 stage = review_code.ReviewCode(
                     entry,
@@ -361,13 +398,14 @@ class LocalPipeline(Pipeline):
             ]
 
             def _address_code() -> None:
-                set_stage(gr_id, entry.name)
+                self._record_stage(entry.name)
                 logger.info("addressing code reviews (model: %s)", model)
                 stage = address_code.AddressCode(
                     entry,
                     model,
                     is_git=is_git,
                     review_stage_names=review_stage_names,
+                    plan_text=self._review_plan_text(plan_file),
                 )
                 stage.bind(ctx)
                 stage.run(None)
@@ -385,7 +423,7 @@ class LocalPipeline(Pipeline):
             def _verify() -> None:
                 resolved_cmds = entry.options.get("cmds", [])
                 if resolved_cmds:
-                    set_stage(gr_id, entry.name)
+                    self._record_stage(entry.name)
                     logger.info(
                         "running verify (cmds: %r, max-attempts: %s, model: %s)",
                         resolved_cmds,
@@ -404,6 +442,12 @@ class LocalPipeline(Pipeline):
             return _verify
 
         raise ValueError(f"unsupported stage type {entry.type!r} in local pipeline")
+
+    def _review_plan_text(self, plan_file: pathlib.Path) -> str:
+        original_plan = read_state_field(
+            resolve_state_file(self.gr_id), "original_plan"
+        )
+        return original_plan or plan_file.read_text(encoding="utf-8")
 
 
 class GHPipeline(Pipeline):
@@ -435,6 +479,9 @@ class GHPipeline(Pipeline):
         stage_specs: dict[str, ClientSpec] | None = None,
         spec_clients: dict[str, ClaudeClient] | None = None,
         test_client: ClaudeClient | None = None,
+        stage_recorder: Callable[[str], None] | None = None,
+        child_key: str | None = None,
+        parallel_aggregate_child_key: str | None = None,
     ) -> None:
         super().__init__(
             stages,
@@ -445,6 +492,9 @@ class GHPipeline(Pipeline):
             stage_specs=stage_specs,
             spec_clients=spec_clients,
             test_client=test_client,
+            stage_recorder=stage_recorder,
+            child_key=child_key,
+            parallel_aggregate_child_key=parallel_aggregate_child_key,
         )
         self.repo = repo
         self.state_file = state_file
@@ -484,7 +534,7 @@ class GHPipeline(Pipeline):
                     _die(
                         f"stage {entry.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML"
                     )
-                set_stage(self.gr_id, entry.name)
+                self._record_stage(entry.name)
                 logger.info("[1/8] running plan")
                 stage = plan.Plan(
                     entry,
@@ -501,7 +551,7 @@ class GHPipeline(Pipeline):
         if entry.type == "implement":
 
             def _implement() -> None:
-                set_stage(self.gr_id, entry.name)
+                self._record_stage(entry.name)
                 logger.info("[2a/8] implementing plan")
                 spec_file = self.session_dir / "spec.md"
                 spec_text = ""
@@ -534,7 +584,7 @@ class GHPipeline(Pipeline):
         if entry.type == "handoff-branch":
 
             def _handoff_branch() -> None:
-                set_stage(self.gr_id, entry.name)
+                self._record_stage(entry.name)
                 logger.info("[2b/8] creating handoff branch")
                 if self.impl_pre_state is None:
                     saved_head = read_state_field(self.state_file, "impl_pre_head")
@@ -560,7 +610,7 @@ class GHPipeline(Pipeline):
         if entry.type == "verify":
 
             def _verify() -> None:
-                set_stage(self.gr_id, entry.name)
+                self._record_stage(entry.name)
                 logger.info("[2c/8] verifying implementation")
                 stage = verify.Verify(entry, model, is_git=True, commit_after_fix=False)
                 stage.bind(ctx)
@@ -571,7 +621,7 @@ class GHPipeline(Pipeline):
         if entry.type == "commit":
 
             def _commit() -> None:
-                set_stage(self.gr_id, entry.name)
+                self._record_stage(entry.name)
                 logger.info("[2d/8] committing changes")
                 hb_result = self.impl_handoff_result
                 if hb_result is not None:
@@ -627,7 +677,7 @@ class GHPipeline(Pipeline):
         if entry.type == "open-github-pr":
 
             def _open_github_pr() -> None:
-                set_stage(self.gr_id, entry.name)
+                self._record_stage(entry.name)
                 logger.info("[2e/8] opening GitHub PR")
                 stage = open_github_pr.OpenGitHubPR(
                     entry,
@@ -648,7 +698,7 @@ class GHPipeline(Pipeline):
 
             def _request_copilot() -> None:
                 self._ensure_pr_url()
-                set_stage(self.gr_id, entry.name)
+                self._record_stage(entry.name)
                 logger.info("[3/8] requesting Copilot review")
                 stage = request_copilot.RequestCopilot(
                     entry, model, repo=self.repo, pr_num=self.pr_num
@@ -666,7 +716,7 @@ class GHPipeline(Pipeline):
                         f"stage {entry.name!r}: type 'ghreview' requires a 'prompt' field in the pipeline YAML"
                     )
                 self._ensure_pr_url()
-                set_stage(self.gr_id, entry.name)
+                self._record_stage(entry.name)
                 logger.info("[4/8] running /ghreview")
                 stage = review_code.ReviewCode(
                     entry,
@@ -684,7 +734,7 @@ class GHPipeline(Pipeline):
 
             def _wait_copilot() -> None:
                 self._ensure_pr_url()
-                set_stage(self.gr_id, entry.name)
+                self._record_stage(entry.name)
                 logger.info(
                     "[5/8] waiting for Copilot review (20s interval, 10min timeout)"
                 )
@@ -705,7 +755,7 @@ class GHPipeline(Pipeline):
                         f"stage {entry.name!r}: type 'ghaddress' requires a 'prompt' field in the pipeline YAML"
                     )
                 self._ensure_pr_url()
-                set_stage(self.gr_id, entry.name)
+                self._record_stage(entry.name)
                 logger.info("[6/8] running /ghaddress")
                 stage = address_code.AddressCode(
                     entry,
@@ -722,7 +772,7 @@ class GHPipeline(Pipeline):
 
             def _wait_ci() -> None:
                 self._ensure_pr_url()
-                set_stage(self.gr_id, entry.name)
+                self._record_stage(entry.name)
                 logger.info(
                     "[7/8] waiting for CI checks (up to 3 attempts, 20min each)"
                 )

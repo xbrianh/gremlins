@@ -12,11 +12,8 @@ Per-pipeline orchestrator entry points. Each module owns one CLI subcommand
   `address`.
 - `gh.py` — `gh_main`. Subcommand: `gh`. Loads the selected pipeline YAML
   (default `gh.yaml`) and runs stages.
-- `boss.py` — `boss_main`. Subcommand: `boss`. Not a stage sequencer —
-  drives a chain of child gremlins, subprocessing out to
-  `python -m gremlins.handoff` and `python -m gremlins.cli {stop,land,rescue}` between
-  each one. State lives in `boss_state.json` (schema preserved
-  byte-for-byte from the legacy `bossgremlin.py`).
+- `boss.py` — thin alias that runs the bundled `boss.yaml` through
+  `local_main`. Boss-specific behavior now lives in the `chain` stage.
 
 ## Conventions
 
@@ -42,13 +39,8 @@ Per-pipeline orchestrator entry points. Each module owns one CLI subcommand
 
 ## Boss-specific notes
 
-- `boss.py` subprocesses out via `_gremlins_cli_cmd` / `_gremlins_cli_env`.
-  The env helper sets `PYTHONSAFEPATH=1` and prepends the package's parent
-  to `PYTHONPATH` so `python -m gremlins.*` resolves to
-  `~/.claude/gremlins/` regardless of cwd (worktree-shadow protection).
-- Boss resume is driven by `boss_state.json`, not the runner's stage
-  vocabulary. `launcher.resume()` omits `--resume-from` for boss gremlins;
-  if a caller still passes the flag directly, `boss_main` logs that it is
-  ignoring it.
-- `SIGTERM` is trapped to set `_stop_requested` and forward to the current
-  child process; the chain checks `check_stop()` between operations.
+- The bundled boss flow is a normal local pipeline:
+  `chain -> review-chain -> address-chain`.
+- `chain` runs the named child pipeline in-process on the boss branch, stores
+  `current_child_stage` / `handoff_history` in `state.json`, and re-enters the
+  child on resume.

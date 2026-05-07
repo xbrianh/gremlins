@@ -36,6 +36,7 @@ class AddressCode(Stage):
         is_git: bool,
         review_stage_names: list[str] | None = None,
         pr_url: str = "",
+        plan_text: str = "",
     ) -> None:
         super().__init__(entry, model)
         self.is_git = is_git
@@ -43,6 +44,7 @@ class AddressCode(Stage):
             review_stage_names if review_stage_names is not None else ["review-code"]
         )
         self.pr_url = pr_url
+        self.plan_text = plan_text
 
     def run(self, pipe: Any) -> None:
         target = getattr(pipe, "target", "local")
@@ -94,6 +96,7 @@ class AddressCode(Stage):
             model=inputs["review_model"],
             text=inputs["text"],
             address_commit_instr=address_commit_instr,
+            plan_text=self.plan_text,
         )
         self.run_claude(
             address_prompt,

@@ -41,7 +41,7 @@ the module docstring at the top of [`gremlins/cli.py`](gremlins/cli.py).
 |---|---|
 | `launch local` | Full local pipeline: plan → implement → review-code → address-code |
 | `launch gh` | GitHub issue-driven pipeline (plan → implement → PR → Copilot review → address) |
-| `launch boss` | Chained serial workflow driven by a top-level spec |
+| `launch boss` | YAML boss pipeline: `chain` + end-of-chain review/address |
 | `review` | review-code stage only |
 | `address` | address-code stage only |
 | `resume` | Re-spawn an existing gremlin from its recorded stage |
@@ -60,13 +60,13 @@ the module docstring at the top of [`gremlins/cli.py`](gremlins/cli.py).
 
 | Flag | Default | Description |
 |---|---|---|
-| `--plan <path-or-ref>` | — | Path to a plan/spec file, or (for `gh`/`boss`) a GitHub issue ref (`42`, `#42`, `owner/repo#42`, or issue URL) |
+| `--plan <path-or-ref>` | — | Path to a plan/spec file, or (for `gh`) a GitHub issue ref (`42`, `#42`, `owner/repo#42`, or issue URL) |
 | `--description <text>` | — | Human-readable description stored in state |
 | `--parent <id>` | — | Parent gremlin ID (used by boss to track child ownership) |
 | `--print-id` | false | Print the gremlin ID to stdout after launch |
 | `-c`/`--instructions <text>` | — | Instructions string (mutually exclusive with `--plan`); not applicable to `launch boss` |
 | `--base-ref <ref>` | `HEAD` | Git ref to branch the worktree from; ignored for `gh` (always anchors to origin default branch) |
-| `--spec <path>` | — | Path to a coding-style spec file passed into stages; not applicable to `launch boss` |
+| `--spec <path>` | — | Path to a coding-style spec file passed into stages |
 
 #### `launch local` flags
 
@@ -96,16 +96,25 @@ the module docstring at the top of [`gremlins/cli.py`](gremlins/cli.py).
 
 #### `launch boss` flags
 
-| Flag | Default | Description |
-|---|---|---|
-| `--chain-kind <kind>` | required | Kind of child gremlins to spawn: `local` or `gh` |
-| `--client <provider:model>` | `claude:sonnet` | Client for the handoff decision agent |
-| `--resume-from <stage>` | — | Ignored at the boss level (boss resumes from `boss_state.json`) |
-| `--test <command>` | — | Test command forwarded to each child gremlin; only valid with `--chain-kind local` (rejected for `gh`) |
-| `--test-max-attempts <n>` | `3` | Maximum test-fix retry attempts forwarded to each child |
-| `-t <model>` | `sonnet` | Test-fix model forwarded to each child |
+`launch boss` is just a normal pipeline launch with `boss.yaml` selected by default.
+The bundled pipeline is:
 
-`boss` does not accept `--pipeline`; child pipeline args are built internally from `--test`/`--test-max-attempts`/`-t`.
+```yaml
+name: boss
+stages:
+  - name: chain
+    type: chain
+    options:
+      child: local
+      handoff_prompt: handoff.md
+  - name: review-chain
+    type: review-code
+  - name: address-chain
+    type: address-code
+```
+
+Use `--pipeline <name-or-path>` to override the bundled boss pipeline the same
+way you would for `launch local`.
 
 ## Pipeline configuration
 
@@ -122,7 +131,7 @@ pipelines work out of the box; a project-local YAML can override any of them.
    (project-local override).
 3. Then `gremlins/pipelines/<name>.yaml` (bundled) is checked.
 
-Defaults: `launch local` → `local`, `launch gh` → `gh`.
+Defaults: `launch local` → `local`, `launch gh` → `gh`, `launch boss` → `boss`.
 
 ### Selecting a pipeline
 
@@ -232,6 +241,18 @@ paths are explicit. To reuse a bundled prompt, copy the file from
 
 A free-form dict passed verbatim to the stage. Selected options by stage
 (see [`gremlins/stages/AGENTS.md`](gremlins/stages/AGENTS.md) for the full list):
+
+**`chain`** — runs a named child pipeline in-process until handoff says the
+chain is done:
+
+```yaml
+options:
+  child: local
+  handoff_prompt: handoff.md
+```
+
+`child` is any local-style pipeline name/path. `handoff_prompt` resolves against
+the pipeline's `prompt_dir:`.
 
 **`verify`** — runs `check_cmd` then `test_cmd`, with an agent fix-loop:
 

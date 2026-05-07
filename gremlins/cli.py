@@ -209,14 +209,6 @@ def _validate_gh_args(args: argparse.Namespace, rest: list[str]) -> None:
 
 
 def _validate_boss_args(rest: list[str], plan: str | None) -> None:
-    p = argparse.ArgumentParser(add_help=False)
-    p.add_argument("--chain-kind", default=None)
-    args, _ = p.parse_known_args(rest)
-    if args.chain_kind not in ("local", "gh"):
-        got = repr(args.chain_kind) if args.chain_kind is not None else "missing"
-        raise ValueError(
-            f"--chain-kind is required and must be 'local' or 'gh' ({got})"
-        )
     if plan is None:
         raise ValueError("--plan is required")
 

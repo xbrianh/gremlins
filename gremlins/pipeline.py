@@ -152,6 +152,16 @@ def _parse_stage_entry(
 
     prompt_paths = _resolve_prompt_paths(entry.get("prompt"), prompt_dir)
     options = dict(cast(dict[str, Any], entry.get("options") or {}))
+    if stage_type == "chain":
+        child = options.get("child")
+        if not isinstance(child, str) or not child:
+            raise ValueError(f"stage {name!r}: chain option 'child' must be a string")
+        handoff_prompt = options.get("handoff_prompt")
+        if not isinstance(handoff_prompt, str) or not handoff_prompt:
+            raise ValueError(
+                f"stage {name!r}: chain option 'handoff_prompt' must be a string"
+            )
+        options["handoff_prompt"] = str((prompt_dir / handoff_prompt).resolve())
     return StageEntry(
         name=name,
         type=stage_type,

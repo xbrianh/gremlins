@@ -29,7 +29,7 @@ review / address pipelines (`local`, `gh`, `boss`), the fleet manager
 - `stages/` — per-stage bodies: `plan`, `implement`, `review_code`, `address_code`, `verify`, `test`, `commit_pr`, `ghreview`, `ghaddress`, `request_copilot`, `wait_copilot`, `wait_ci`.
 - `orchestrators/local.py` — `local_main`, `review_main`, `address_main`.
 - `orchestrators/gh.py` — `gh_main`. Drives the gh pipeline.
-- `orchestrators/boss.py` — `boss_main`. Subprocesses out to `python -m gremlins.handoff` and `gremlins {stop,land,rescue}` between child gremlins.
+- `orchestrators/boss.py` — thin alias to `local_main` for the bundled `boss.yaml` pipeline.
 - `prompts/` — externalized prompt templates (plan, implement, review lenses, etc).
 
 ## Entry points
@@ -38,7 +38,7 @@ review / address pipelines (`local`, `gh`, `boss`), the fleet manager
 |---|---|
 | `launch local` | `orchestrators.local.local_main` |
 | `launch gh` | `orchestrators.gh.gh_main` |
-| `launch boss` | `orchestrators.boss.boss_main` |
+| `launch boss` | `orchestrators.boss.boss_main` (`local_main` alias) |
 | `review` | `orchestrators.local.review_main` |
 | `address` | `orchestrators.local.address_main` |
 | `resume` | `cli._resume_main` |

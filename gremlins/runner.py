@@ -68,6 +68,7 @@ def build_parallel_stages(
     bail_policy: str,
     gr_id: str | None,
     project_root: pathlib.Path,
+    aggregate_child_key: str | None = None,
 ) -> list[Stage]:
     """Return three stages for a parallel block: fanout, parallel, fanin.
 
@@ -328,15 +329,15 @@ def build_parallel_stages(
                 elif bail_policy == "all":
                     should_bail = bool(bailed) and len(bailed) == len(child_runners)
 
+                patch_state(gr_id, _delete=("parallel_bails",))
                 if should_bail:
                     first_shard = shards[bailed[0]]
                     emit_bail(
                         gr_id,
                         first_shard.get("bail_class", "other"),
                         first_shard.get("bail_detail", ""),
+                        child_key=aggregate_child_key,
                     )
-
-                patch_state(gr_id, _delete=("parallel_bails",))
             except RuntimeError:
                 raise
             except Exception as exc:

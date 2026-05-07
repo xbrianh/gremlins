@@ -170,9 +170,6 @@ def _patch_state(state_dir: pathlib.Path, **fields: Any) -> None:
 def _resolve_pipeline(
     kind: str, pipeline_args: tuple[str, ...], project_root: str
 ) -> tuple[list[str], str]:
-    # Returns (args_with_pipeline_injected, resolved_path); bossgremlin gets ([], "").
-    if kind == "bossgremlin":
-        return list(pipeline_args), ""
     args = list(pipeline_args)
     pipeline_val: str | None = None
     filtered: list[str] = []
@@ -247,8 +244,6 @@ def _pipeline_default_client_spec(pipeline_path: str) -> str:
 def _launch_client_label(
     kind: str, pipeline_args: list[str], pipeline_path: str
 ) -> str:
-    if kind == "bossgremlin":
-        return _extract_client_spec(pipeline_args) or str(PACKAGE_DEFAULT)
     client_spec_str = _extract_client_spec(pipeline_args)
     if client_spec_str:
         return client_spec_str
@@ -374,7 +369,7 @@ def launch(
         raise RuntimeError("gh CLI not found on PATH (required for ghgremlin)")
 
     # Validate localgremlin --plan before touching state
-    if kind == "localgremlin" and plan:
+    if kind in {"localgremlin", "bossgremlin"} and plan:
         if not os.path.isfile(plan):
             raise ValueError(f"--plan: file not found: {plan}")
         if os.path.getsize(plan) == 0:
@@ -455,8 +450,13 @@ def launch(
             setup_kind = "worktree"
             workdir = _git_mod.setup_detached_worktree(project_root, worktree_base)
         else:  # bossgremlin
-            setup_kind = "worktree"
-            workdir = _git_mod.setup_detached_worktree(project_root, base_ref)
+            setup_kind = "worktree-branch"
+            workdir, branch = _git_mod.setup_worktree_branch(
+                project_root,
+                gr_id,
+                base_ref=base_ref,
+                branch_prefix="bg/bossgremlin",
+            )
     else:
         setup_kind = "copy"
         workdir = _git_mod.setup_copy(project_root)
@@ -482,6 +482,9 @@ def launch(
         "stage": "starting",
         "pid": None,
     }
+    if kind == "bossgremlin" and plan:
+        state["original_plan"] = pathlib.Path(plan).read_text(encoding="utf-8")
+        state["chain_base_ref"] = _git_mod.head_sha(cwd=workdir)
     _write_state(state_dir, state)
 
     # Build args for the spawned _run-pipeline process
@@ -599,11 +602,8 @@ def resume(gr_id: str) -> None:
 
     has_plan = any(a == "--plan" or str(a).startswith("--plan=") for a in pipeline_args)
 
-    spawn_args: list[str] = list(pipeline_args)
-    if kind == "bossgremlin":
-        spawn_args = _drop_arg(spawn_args, "--resume-from")
-    else:
-        spawn_args.extend(["--resume-from", str(stage)])
+    spawn_args = _drop_arg(list(pipeline_args), "--resume-from")
+    spawn_args.extend(["--resume-from", str(stage)])
     if not has_plan:
         instr_file = state_dir / "instructions.txt"
         if instr_file.is_file():
@@ -656,7 +656,7 @@ def write_terminal_state(gr_id: str, exit_code: int) -> None:
     except Exception:
         pass
 
-    # Worktree cleanup on success for non-bossgremlin
+    # Worktree cleanup on success
     if exit_code == 0:
         try:
             data = json.loads(sf.read_text(encoding="utf-8"))
@@ -665,7 +665,7 @@ def write_terminal_state(gr_id: str, exit_code: int) -> None:
             workdir = data.get("workdir", "")
             setup_kind = data.get("setup_kind", "")
             if (
-                kind != "bossgremlin"
+                kind in VALID_KINDS
                 and setup_kind in ("worktree", "worktree-branch")
                 and project_root
                 and workdir
