@@ -48,6 +48,7 @@ from gremlins.fleet.rescue import (
 from gremlins.fleet.resolve import GREMLIN_STAGES, resolve_gremlin
 from gremlins.fleet.state import (
     display_id,
+    effective_pipeline_kind,
     git_toplevel,
     humanize_age,
     iso_to_epoch,
@@ -81,6 +82,7 @@ __all__ = [
     "iter_state_files",
     "load_state",
     "kind_short",
+    "effective_pipeline_kind",
     "git_toplevel",
     # duration
     "parse_duration",

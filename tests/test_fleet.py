@@ -9,8 +9,12 @@ import pytest
 
 import gremlins.fleet.constants as _constants
 import gremlins.fleet.land as _land
+import gremlins.fleet.land as _land_mod
 import gremlins.fleet.rescue as _rescue
+import gremlins.fleet.rescue as _rescue_mod
 from gremlins import fleet as gremlins
+from gremlins.fleet.resolve import GREMLIN_STAGES, stage_names_for_gremlin
+from gremlins.fleet.state import effective_pipeline_kind
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1230,3 +1234,183 @@ def test_rescue_host_terminated_recreates_worktree_and_proceeds(
     assert new["bail_reason"] == "structural"
     out = capsys.readouterr().out
     assert "recreated" in out
+
+
+# ---------------------------------------------------------------------------
+# pipeline_kind — effective_pipeline_kind and fleet dispatch correctness
+# ---------------------------------------------------------------------------
+
+
+# Each entry: (label, state_dict, expected_pipeline_kind)
+_PIPELINE_KIND_CASES = [
+    # New-style: pipeline_kind field present
+    ("new_local", {"kind": "custard", "pipeline_kind": "local"}, "local"),
+    ("new_gh", {"kind": "custard", "pipeline_kind": "gh"}, "gh"),
+    ("new_boss", {"kind": "custard", "pipeline_kind": "boss"}, "boss"),
+    # Legacy: only kind field, one of the three canonical names
+    ("legacy_local", {"kind": "localgremlin"}, "local"),
+    ("legacy_gh", {"kind": "ghgremlin"}, "gh"),
+    ("legacy_boss", {"kind": "bossgremlin"}, "boss"),
+    # Unknown legacy kind falls back to "local"
+    ("unknown_kind", {"kind": "custard"}, "local"),
+    # Missing kind entirely falls back to "local"
+    ("no_kind", {}, "local"),
+]
+
+
+@pytest.mark.parametrize(
+    "label,state,expected",
+    _PIPELINE_KIND_CASES,
+    ids=[c[0] for c in _PIPELINE_KIND_CASES],
+)
+def test_effective_pipeline_kind(label, state, expected):
+    assert effective_pipeline_kind(state) == expected
+
+
+@pytest.mark.parametrize(
+    "label,state,expected",
+    _PIPELINE_KIND_CASES,
+    ids=[c[0] for c in _PIPELINE_KIND_CASES],
+)
+def test_stage_names_for_gremlin_boss_only(label, state, expected):
+    stages = stage_names_for_gremlin(state)
+    if expected == "boss":
+        assert stages == GREMLIN_STAGES["boss"]
+    else:
+        assert stages == []
+
+
+@pytest.mark.parametrize(
+    "label,state,expected_land_fn",
+    [
+        (
+            "new_local_land",
+            {
+                "kind": "custard",
+                "pipeline_kind": "local",
+                "setup_kind": "worktree-branch",
+                "branch": "bg/localgremlin/x",
+                "id": "x",
+            },
+            "_land_local",
+        ),
+        (
+            "new_boss_land",
+            {"kind": "custard", "pipeline_kind": "boss", "id": "x"},
+            "_land_boss",
+        ),
+        (
+            "new_gh_land",
+            {"kind": "custard", "pipeline_kind": "gh", "id": "x"},
+            "_land_gh",
+        ),
+        (
+            "legacy_local_land",
+            {
+                "kind": "localgremlin",
+                "setup_kind": "worktree-branch",
+                "branch": "bg/localgremlin/x",
+                "id": "x",
+            },
+            "_land_local",
+        ),
+        ("legacy_boss_land", {"kind": "bossgremlin", "id": "x"}, "_land_boss"),
+        ("legacy_gh_land", {"kind": "ghgremlin", "id": "x"}, "_land_gh"),
+    ],
+    ids=lambda x: x if isinstance(x, str) else "",
+)
+def test_do_land_dispatches_to_correct_helper(
+    label, state, expected_land_fn, tmp_path, monkeypatch, capsys
+):
+    gr_id = "test-dispatch-id"
+    state_root = tmp_path / "state-root"
+    state_root.mkdir()
+    gr_dir = state_root / gr_id
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    full_state = {
+        "id": gr_id,
+        "status": "dead",
+        "exit_code": 0,
+        "workdir": str(workdir),
+        "project_root": str(tmp_path / "project"),
+        **state,
+    }
+    _write_state(gr_dir, full_state, finished=True)
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+
+    called = []
+
+    def fake_land_local(gr_id, sf, wdir, state, mode, **kw):
+        called.append("_land_local")
+        return True
+
+    def fake_land_boss(gr_id, sf, wdir, state, mode):
+        called.append("_land_boss")
+        return True
+
+    def fake_land_gh(gr_id, sf, wdir, state, force):
+        called.append("_land_gh")
+        return True
+
+    monkeypatch.setattr(_land_mod, "_land_local", fake_land_local)
+    monkeypatch.setattr(_land_mod, "_land_boss", fake_land_boss)
+    monkeypatch.setattr(_land_mod, "_land_gh", fake_land_gh)
+
+    ok = _land_mod.do_land(gr_id)
+    assert ok is True
+    assert called == [expected_land_fn], f"expected {expected_land_fn}, got {called}"
+
+
+def test_do_land_custom_pipeline_name_routes_to_local(tmp_path, monkeypatch):
+    """A custom-named pipeline with pipeline_kind=local must land, not fail with 'unknown kind'."""
+    gr_id = "custard-pipeline-id"
+    state_root = tmp_path / "state-root"
+    state_root.mkdir()
+    gr_dir = state_root / gr_id
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    state = {
+        "id": gr_id,
+        "kind": "custard",
+        "pipeline_kind": "local",
+        "status": "dead",
+        "exit_code": 0,
+        "workdir": str(workdir),
+        "project_root": str(tmp_path / "project"),
+        "setup_kind": "worktree-branch",
+        "branch": "bg/localgremlin/custard-pipeline-id",
+    }
+    _write_state(gr_dir, state, finished=True)
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+
+    called = []
+    monkeypatch.setattr(
+        _land_mod, "_land_local", lambda *a, **kw: called.append("_land_local") or True
+    )
+    monkeypatch.setattr(
+        _land_mod, "_land_boss", lambda *a, **kw: called.append("_land_boss") or True
+    )
+    monkeypatch.setattr(
+        _land_mod, "_land_gh", lambda *a, **kw: called.append("_land_gh") or True
+    )
+
+    ok = _land_mod.do_land(gr_id)
+    assert ok is True
+    assert called == ["_land_local"]
+
+
+def test_rescue_prompt_kind_uses_pipeline_kind():
+    """build_rescue_prompt must use effective_pipeline_kind, not the raw kind field."""
+    state = {
+        "kind": "custard",
+        "pipeline_kind": "boss",
+        "stage": "chain",
+        "description": "test",
+        "project_root": "",
+        "workdir": "",
+        "parent_id": "",
+    }
+    prompt = _rescue_mod.build_rescue_prompt(state, "log", "/sf", "/log", "/marker")
+    assert "boss" in prompt
+    assert "custard" not in prompt.split("Kind:")[1].split("\n")[0]

@@ -4,15 +4,19 @@ import os
 from typing import Any
 
 from gremlins.fleet.constants import FMT
-from gremlins.fleet.state import display_id, humanize_age, kind_short, render_sub_stage
+from gremlins.fleet.state import (
+    display_id,
+    effective_pipeline_kind,
+    humanize_age,
+    render_sub_stage,
+)
 
 
 def build_row(
     gr_id: str, sf: str, wdir: str, state: dict[str, Any], live: str
 ) -> dict[str, Any]:
     """Return a dict of display fields for a gremlin row."""
-    raw_kind = state.get("kind", "")
-    k = kind_short(raw_kind)
+    k = effective_pipeline_kind(state)
     pr = state.get("project_root", "")
     stage = state.get("stage") or "-"
     sub = state.get("sub_stage")

@@ -10,10 +10,10 @@ from typing import Any
 from gremlins.fleet.duration import parse_duration
 from gremlins.fleet.render import build_row, print_table
 from gremlins.fleet.state import (
+    effective_pipeline_kind,
     humanize_age,
     iso_to_epoch,
     iter_state_files,
-    kind_short,
     liveness_of_state_file,
     load_state,
 )
@@ -57,7 +57,7 @@ def collect_rows(
 
         # --kind filter
         if kind_filter is not None:
-            if kind_short(str(state.get("kind") or "")) != kind_filter:
+            if effective_pipeline_kind(state) != kind_filter:
                 continue
 
         # --since filter

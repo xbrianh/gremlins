@@ -13,13 +13,16 @@ from typing import Any, cast
 import gremlins.git as _git
 from gremlins.fleet import constants as _constants
 from gremlins.fleet.resolve import resolve_gremlin
-from gremlins.fleet.state import liveness_of_state_file, load_state
+from gremlins.fleet.state import (
+    effective_pipeline_kind,
+    liveness_of_state_file,
+    load_state,
+)
 
 
 def expected_branch(state: dict[str, Any], gr_id: str):
     """Return the durable branch name for a gremlin, or None if there isn't one."""
-    kind = state.get("kind", "")
-    if kind == "localgremlin":
+    if effective_pipeline_kind(state) == "local":
         return f"bg/localgremlin/{gr_id}"
     return None
 
@@ -858,24 +861,22 @@ def do_land(
         print(f"gremlin {gr_id} is still live ({live}) — use 'stop' first, then land")
         return False
 
-    kind = state.get("kind", "")
-    if kind == "localgremlin":
+    pk = effective_pipeline_kind(state)
+    if pk == "local":
         if live != "dead:finished":
             print(f"gremlin {gr_id} is not finished (liveness: {live})")
             return False
         return _land_local(gr_id, sf, wdir, state, mode or "squash", into_dir=into_dir)
-    elif kind == "bossgremlin":
+    elif pk == "boss":
         if live != "dead:finished":
             print(f"gremlin {gr_id} is not finished (liveness: {live})")
             return False
         return _land_boss(gr_id, sf, wdir, state, mode or "ff")
-    elif kind == "ghgremlin":
+    elif pk == "gh":
         if mode is not None:
             print(
                 "error: --squash/--ff are not applicable to gh gremlins (merged via PR)"
             )
             return False
         return _land_gh(gr_id, sf, wdir, state, force=force)
-    else:
-        print(f"error: unknown gremlin kind {kind!r} — cannot land")
-        return False
+    return False
