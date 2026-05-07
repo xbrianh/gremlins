@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.clients.resolve import ClientSpec
+from gremlins.clients import ClientSpec
 from gremlins.pipeline import StageEntry
 from gremlins.stages.base import StageContext
 from gremlins.stages.chain import Chain
