@@ -28,8 +28,7 @@ from gremlins import paths as _paths
 from gremlins.clients import PACKAGE_DEFAULT
 from gremlins.gh_utils import parse_issue_ref, resolve_default_branch, view_issue
 from gremlins.pipeline import (
-    KIND_SUBCOMMAND,
-    VALID_KINDS,
+    Pipeline,
     load_pipeline,
     resolve_pipeline_path,
 )
@@ -37,9 +36,6 @@ from gremlins.pipeline import (
 
 class GremlinAlreadyRunning(RuntimeError):
     pass
-
-
-_KIND_ALIASES = {"local": "localgremlin", "gh": "ghgremlin", "boss": "bossgremlin"}
 
 
 def _state_root() -> pathlib.Path:
@@ -70,6 +66,30 @@ def _extract_h1(path: str) -> str:
     except OSError:
         pass
     return ""
+
+
+_GH_STAGE_TYPES = frozenset({
+    "handoff-branch", "commit", "open-github-pr",
+    "request-copilot", "wait-copilot", "ghaddress", "ghreview", "wait-ci",
+})
+
+_MODE_SUBCOMMAND: dict[str, str] = {"local": "_local", "gh": "_gh", "boss": "_boss"}
+
+
+def _pipeline_mode(pipeline: "Pipeline") -> str:
+    if pipeline.stages and pipeline.stages[0].type == "chain":
+        return "boss"
+    if pipeline.name == "gh" or any(s.type in _GH_STAGE_TYPES for s in pipeline.stages):
+        return "gh"
+    return "local"
+
+
+def _infer_mode_from_kind(kind: str) -> str:
+    _map = {
+        "localgremlin": "local", "ghgremlin": "gh", "bossgremlin": "boss",
+        "local": "local", "gh": "gh", "boss": "boss",
+    }
+    return _map.get(kind, "local")
 
 
 def _gh_current_repo() -> str:
@@ -226,7 +246,7 @@ def _resolve_pipeline(
         else:
             filtered.append(args[i])
             i += 1
-    name = pipeline_val or KIND_SUBCOMMAND[kind].removeprefix("_")
+    name = pipeline_val or kind
     resolved = str(resolve_pipeline_path(name, pathlib.Path(project_root)))
     return ["--pipeline", resolved] + filtered, resolved
 
@@ -313,19 +333,19 @@ def _delete_patch_state(
 
 
 def _setup_workdir(
-    kind: str, project_root: str, base_ref: str, gr_id: str
+    mode: str, project_root: str, base_ref: str, gr_id: str
 ) -> tuple[str, str, str, str]:
     """Return (workdir, branch, worktree_base, setup_kind)."""
     if not _git_mod.in_git_repo(cwd=project_root):
         return _git_mod.setup_copy(project_root), "", "", "copy"
 
-    if kind == "localgremlin":
+    if mode == "local":
         workdir, branch = _git_mod.setup_worktree_branch(
             project_root, gr_id, base_ref=base_ref
         )
         return workdir, branch, "", "worktree-branch"
 
-    if kind == "ghgremlin":
+    if mode == "gh":
         default_branch = resolve_default_branch(project_root)
         refspec = f"refs/heads/{default_branch}:refs/remotes/origin/{default_branch}"
         fr = subprocess.run(
@@ -345,7 +365,7 @@ def _setup_workdir(
             "worktree",
         )
 
-    # bossgremlin
+    # boss mode: detached worktree off base_ref
     return _git_mod.setup_detached_worktree(project_root, base_ref), "", "", "worktree"
 
 
@@ -415,26 +435,15 @@ def launch(
     Synchronous through spawn; does not wait for the pipeline to finish.
     Raises ValueError on bad arguments, RuntimeError on infrastructure failure.
     """
-    kind = _KIND_ALIASES.get(kind, kind)
     stage_inputs = {} if stage_inputs is None else dict(stage_inputs)
     instructions: str | None = stage_inputs.get("instructions")
-    if kind not in VALID_KINDS:
-        raise ValueError(
-            f"invalid kind: {kind!r} (allowed: {', '.join(sorted(VALID_KINDS))})"
-        )
     if plan and instructions:
         raise ValueError("--plan and instructions are mutually exclusive")
     if shutil.which("claude") is None:
         raise RuntimeError("claude CLI not found on PATH")
-    if kind == "ghgremlin" and shutil.which("gh") is None:
-        raise RuntimeError("gh CLI not found on PATH (required for ghgremlin)")
 
-    # Validate localgremlin --plan before touching state
-    if kind == "localgremlin" and plan:
-        if not os.path.isfile(plan):
-            raise ValueError(f"--plan: file not found: {plan}")
-        if os.path.getsize(plan) == 0:
-            raise ValueError(f"--plan: file is empty: {plan}")
+    if plan and os.path.isfile(plan) and os.path.getsize(plan) == 0:
+        raise ValueError(f"--plan: file is empty: {plan}")
 
     # Validate and normalize spec_path to absolute
     if spec_path is not None:
@@ -448,17 +457,15 @@ def launch(
     if plan and os.path.isfile(plan):
         plan = str(pathlib.Path(plan).resolve())
 
-    # For bossgremlin issue-ref plans, fetch once up front and reuse the data
-    # for both slug derivation and the body snapshot below.
-    boss_issue_data: dict[str, Any] | None = None
-    if kind == "bossgremlin" and plan and not os.path.isfile(plan):
-        boss_issue_data = _fetch_issue(plan)
+    issue_data: dict[str, Any] | None = None
+    if plan and not os.path.isfile(plan):
+        issue_data = _fetch_issue(plan)
 
     desc, desc_explicit, slug = _resolve_description_and_slug(
         instructions,
         plan,
         description,
-        issue_title=str((boss_issue_data or {}).get("title") or ""),
+        issue_title=str((issue_data or {}).get("title") or ""),
     )
     rand_hex = secrets.token_hex(3)
     gr_id = f"{slug}-{rand_hex}"
@@ -479,13 +486,22 @@ def launch(
         kind, pipeline_args, project_root
     )
 
+    try:
+        _loaded_pipeline = load_pipeline(pathlib.Path(pipeline_path))
+        pipeline_mode = _pipeline_mode(_loaded_pipeline)
+    except Exception:
+        pipeline_mode = _infer_mode_from_kind(kind)
+
+    if pipeline_mode == "gh" and shutil.which("gh") is None:
+        raise RuntimeError("gh CLI not found on PATH (required for gh pipeline)")
+
     state_dir = _state_root() / gr_id
     state_dir.mkdir(parents=True, exist_ok=True)
 
     workdir = None
     try:
-        if kind == "bossgremlin" and plan:
-            plan = _resolve_boss_plan(plan, boss_issue_data, state_dir)
+        if plan and not os.path.isfile(plan):
+            plan = _resolve_boss_plan(plan, issue_data, state_dir)
 
         # pipeline_args for state.json: includes --plan and --spec when set
         stored_pipeline_args = list(resolved_pipeline_args)
@@ -499,7 +515,7 @@ def launch(
         (state_dir / "instructions.txt").write_text(instr_raw, encoding="utf-8")
 
         workdir, branch, worktree_base, setup_kind = _setup_workdir(
-            kind, project_root, base_ref, gr_id
+            pipeline_mode, project_root, base_ref, gr_id
         )
 
         now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -532,7 +548,7 @@ def launch(
             spawn_args.append(instructions)
 
         proc = _spawn_pipeline(
-            state_dir, workdir, gr_id, KIND_SUBCOMMAND[kind], spawn_args
+            state_dir, workdir, gr_id, _MODE_SUBCOMMAND[pipeline_mode], spawn_args
         )
     except Exception:
         shutil.rmtree(state_dir, ignore_errors=True)
@@ -571,12 +587,8 @@ def resume(gr_id: str) -> None:
     old_pid = state.get("pid")
     exit_code = state.get("exit_code")
 
-    if kind not in VALID_KINDS:
-        raise RuntimeError(f"invalid kind in state.json: {kind!r}")
     if not workdir or not os.path.isdir(workdir):
         raise RuntimeError(f"worktree missing: {workdir}")
-    if kind == "ghgremlin" and shutil.which("gh") is None:
-        raise RuntimeError("gh CLI not found on PATH (required for ghgremlin)")
 
     if status == "running" and old_pid is not None:
         try:
@@ -590,12 +602,32 @@ def resume(gr_id: str) -> None:
     if (state_dir / "finished").is_file() and exit_code == 0:
         raise RuntimeError(f"gremlin {gr_id} finished successfully — nothing to resume")
 
+    pipeline_args = cast(list[str], state.get("pipeline_args") or [])
+    pipeline_path = str(state.get("pipeline_path") or "")
+    project_root = str(state.get("project_root") or os.getcwd())
+    try:
+        pipeline_args, pipeline_path = _resolve_pipeline(
+            kind, tuple(pipeline_args), project_root
+        )
+    except FileNotFoundError:
+        pass
+
+    pipeline_mode = _infer_mode_from_kind(kind)
+    if pipeline_path:
+        try:
+            _loaded = load_pipeline(pathlib.Path(pipeline_path))
+            pipeline_mode = _pipeline_mode(_loaded)
+        except Exception:
+            pass
+
+    if pipeline_mode == "gh" and shutil.which("gh") is None:
+        raise RuntimeError("gh CLI not found on PATH (required for gh pipeline)")
+
     # Rewind stage if it never advanced past "starting"
     if not stage or stage == "starting":
         stage = "plan"
 
-    # Boss always resumes at "chain" unless already past it
-    if kind == "bossgremlin" and stage not in ("review-chain", "address-chain"):
+    if pipeline_mode == "boss" and stage not in ("review-chain", "address-chain"):
         stage = "chain"
 
     # Clear terminal markers and patch state for the resumed run
@@ -610,16 +642,6 @@ def resume(gr_id: str) -> None:
     try:
         rescue_count = int(state.get("rescue_count") or 0)
     except (ValueError, TypeError):
-        pass
-
-    pipeline_args = cast(list[str], state.get("pipeline_args") or [])
-    pipeline_path = str(state.get("pipeline_path") or "")
-    project_root = str(state.get("project_root") or os.getcwd())
-    try:
-        pipeline_args, pipeline_path = _resolve_pipeline(
-            kind, tuple(pipeline_args), project_root
-        )
-    except FileNotFoundError:
         pass
 
     _delete_patch_state(
@@ -664,7 +686,7 @@ def resume(gr_id: str) -> None:
         if instructions:
             spawn_args.append(instructions)
 
-    kind_subcommand = KIND_SUBCOMMAND[kind]
+    kind_subcommand = _MODE_SUBCOMMAND[pipeline_mode]
     proc = _spawn_pipeline(
         state_dir,
         workdir,
@@ -707,17 +729,14 @@ def write_terminal_state(gr_id: str, exit_code: int) -> None:
     except Exception:
         pass
 
-    # Worktree cleanup on success for non-bossgremlin
     if exit_code == 0:
         try:
             data = json.loads(sf.read_text(encoding="utf-8"))
-            kind = data.get("kind", "")
             project_root = data.get("project_root", "")
             workdir = data.get("workdir", "")
             setup_kind = data.get("setup_kind", "")
             if (
-                kind != "bossgremlin"
-                and setup_kind in ("worktree", "worktree-branch")
+                setup_kind in ("worktree", "worktree-branch")
                 and project_root
                 and workdir
             ):

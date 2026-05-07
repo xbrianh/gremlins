@@ -189,7 +189,7 @@ def _gremlins_state_root(lenv) -> pathlib.Path:
 def test_launch_returns_gr_id(lenv):
     """launch() returns a well-formed GR_ID string."""
     launcher = _launcher()
-    gr_id = launcher.launch("localgremlin", stage_inputs={"instructions": "test instructions"})
+    gr_id = launcher.launch("local", stage_inputs={"instructions": "test instructions"})
     assert gr_id, "expected a non-empty GR_ID"
     assert re.match(r"^[a-z0-9-]+-[0-9a-f]{6}$", gr_id), (
         f"GR_ID has unexpected shape: {gr_id!r}"
@@ -204,7 +204,7 @@ def test_launch_creates_state_layout(lenv):
     """launch() creates state dir with all required files and state.json fields."""
     launcher = _launcher()
     gr_id = launcher.launch(
-        "localgremlin",
+        "local",
         stage_inputs={"instructions": "test instructions"},
     )
     state_dir = _gremlins_state_root(lenv) / gr_id
@@ -218,7 +218,7 @@ def test_launch_creates_state_layout(lenv):
 
     state = _read_state(state_dir)
     assert state["id"] == gr_id
-    assert state["kind"] == "localgremlin"
+    assert state["kind"] == "local"
     assert state["setup_kind"] == "worktree-branch"
     assert state["branch"] == f"bg/localgremlin/{gr_id}"
     args = state["pipeline_args"]
@@ -230,7 +230,7 @@ def test_launch_creates_state_layout(lenv):
 def test_launch_writes_worktree(lenv):
     """localgremlin creates a named-branch worktree immediately after launch."""
     launcher = _launcher()
-    gr_id = launcher.launch("localgremlin", stage_inputs={"instructions": "test"})
+    gr_id = launcher.launch("local", stage_inputs={"instructions": "test"})
     state_dir = _gremlins_state_root(lenv) / gr_id
     state = _read_state(state_dir)
     workdir = pathlib.Path(state["workdir"])
@@ -248,7 +248,7 @@ def test_launch_persists_pipeline_args(lenv):
     """Pipeline-level flags are stored in state.json pipeline_args with resolved --pipeline."""
     launcher = _launcher()
     gr_id = launcher.launch(
-        "localgremlin",
+        "local",
         pipeline_args=("--client", "claude:opus"),
         stage_inputs={"instructions": "test"},
     )
@@ -262,7 +262,7 @@ def test_launch_persists_pipeline_default_client(lenv):
     """The resolved pipeline default client is stored in state.json."""
     launcher = _launcher()
     gr_id = launcher.launch(
-        "localgremlin",
+        "local",
         stage_inputs={"instructions": "test default client"},
     )
     state = _read_state(_gremlins_state_root(lenv) / gr_id)
@@ -273,7 +273,7 @@ def test_launch_persists_cli_client_space_form(lenv):
     """A space-separated --client flag overrides the stored default client."""
     launcher = _launcher()
     gr_id = launcher.launch(
-        "localgremlin",
+        "local",
         pipeline_args=("--client", "copilot:gpt-5.4"),
         stage_inputs={"instructions": "test cli client space"},
     )
@@ -285,7 +285,7 @@ def test_launch_persists_cli_client_equals_form(lenv):
     """An equals-form --client flag overrides the stored default client."""
     launcher = _launcher()
     gr_id = launcher.launch(
-        "localgremlin",
+        "local",
         pipeline_args=("--client=copilot:gpt-5.4",),
         stage_inputs={"instructions": "test cli client equals"},
     )
@@ -297,7 +297,7 @@ def test_launch_persists_last_repeated_cli_client(lenv):
     """Repeated --client flags follow argparse's last-value-wins behavior."""
     launcher = _launcher()
     gr_id = launcher.launch(
-        "localgremlin",
+        "local",
         pipeline_args=(
             "--client",
             "claude:sonnet",
@@ -324,7 +324,7 @@ stages:
     )
     launcher = _launcher()
     gr_id = launcher.launch(
-        "localgremlin",
+        "local",
         pipeline_args=("--pipeline", str(pipeline)),
         stage_inputs={"instructions": "test custom pipeline client"},
     )
@@ -335,7 +335,7 @@ stages:
 def test_launch_ghgremlin_persists_pipeline_default_client(lenv_with_gh):
     """ghgremlin stores the default provider/model label."""
     launcher = _launcher()
-    gr_id = launcher.launch("ghgremlin", stage_inputs={"instructions": "test gh default client"})
+    gr_id = launcher.launch("gh", stage_inputs={"instructions": "test gh default client"})
     state = _read_state(_gremlins_state_root(lenv_with_gh) / gr_id)
     assert state["client"] == "claude:sonnet"
 
@@ -344,7 +344,7 @@ def test_launch_ghgremlin_persists_cli_client_override(lenv_with_gh):
     """ghgremlin stores an explicit --client override."""
     launcher = _launcher()
     gr_id = launcher.launch(
-        "ghgremlin",
+        "gh",
         pipeline_args=("--client", "copilot:gpt-5.4"),
         stage_inputs={"instructions": "test gh cli client"},
     )
@@ -357,7 +357,7 @@ def test_launch_plan_normalized_to_absolute(lenv):
     plan_file = lenv.repo / "my-plan.md"
     plan_file.write_text("# My Plan Heading\n\nBody.\n", encoding="utf-8")
     launcher = _launcher()
-    gr_id = launcher.launch("localgremlin", plan=str(plan_file.name))
+    gr_id = launcher.launch("local", plan=str(plan_file.name))
     state = _read_state(_gremlins_state_root(lenv) / gr_id)
     idx = state["pipeline_args"].index("--plan")
     persisted = state["pipeline_args"][idx + 1]
@@ -373,16 +373,16 @@ def test_launch_h1_as_description(lenv):
         "# Hello World Feature\n\n## Tasks\n- [ ] Do it\n", encoding="utf-8"
     )
     launcher = _launcher()
-    gr_id = launcher.launch("localgremlin", plan=str(plan_file))
+    gr_id = launcher.launch("local", plan=str(plan_file))
     state = _read_state(_gremlins_state_root(lenv) / gr_id)
     assert state["description"].startswith("Hello World Feature")
 
 
-def test_launch_invalid_kind_raises(lenv):
-    """launch() raises ValueError for an unrecognized kind."""
+def test_launch_invalid_pipeline_name_raises(lenv):
+    """launch() raises FileNotFoundError for an unresolvable pipeline name."""
     launcher = _launcher()
-    with pytest.raises(ValueError, match="invalid kind"):
-        launcher.launch("notakind", stage_inputs={"instructions": "test"})
+    with pytest.raises(FileNotFoundError):
+        launcher.launch("notapipeline", stage_inputs={"instructions": "test"})
 
 
 def test_launch_plan_and_instructions_mutex(lenv):
@@ -391,7 +391,7 @@ def test_launch_plan_and_instructions_mutex(lenv):
     plan_file.write_text("# X\n", encoding="utf-8")
     launcher = _launcher()
     with pytest.raises(ValueError, match="mutually exclusive"):
-        launcher.launch("localgremlin", plan=str(plan_file), stage_inputs={"instructions": "extra"})
+        launcher.launch("local", plan=str(plan_file), stage_inputs={"instructions": "extra"})
 
 
 def test_launch_empty_plan_file_rejected(lenv):
@@ -400,7 +400,7 @@ def test_launch_empty_plan_file_rejected(lenv):
     empty.write_text("", encoding="utf-8")
     launcher = _launcher()
     with pytest.raises(ValueError, match="empty"):
-        launcher.launch("localgremlin", plan=str(empty))
+        launcher.launch("local", plan=str(empty))
     # No state dir should have been created
     dirs = (
         list((_gremlins_state_root(lenv)).glob("*"))
@@ -413,7 +413,7 @@ def test_launch_empty_plan_file_rejected(lenv):
 def test_launch_spawned_process_detached(lenv):
     """The spawned pipeline has a different process group than the parent."""
     launcher = _launcher()
-    gr_id = launcher.launch("localgremlin", stage_inputs={"instructions": "pgid test"})
+    gr_id = launcher.launch("local", stage_inputs={"instructions": "pgid test"})
     state_dir = _gremlins_state_root(lenv) / gr_id
     state = _read_state(state_dir)
     pid = state.get("pid")
@@ -432,7 +432,7 @@ def test_launch_concurrent_no_collision(lenv):
     """Concurrent launches produce distinct GR_IDs."""
     launcher = _launcher()
     ids = [
-        launcher.launch("localgremlin", stage_inputs={"instructions": f"concurrent {i}"})
+        launcher.launch("local", stage_inputs={"instructions": f"concurrent {i}"})
         for i in range(5)
     ]
     assert len(set(ids)) == len(ids), f"GR_ID collision among: {ids}"
@@ -444,7 +444,7 @@ def test_launch_explicit_project_root(lenv):
     state_root = _gremlins_state_root(lenv)
     parent_id = "fake-parent-aabbcc"
     gr_id = launcher.launch(
-        "localgremlin",
+        "local",
         stage_inputs={"instructions": "child test"},
         parent_id=parent_id,
         project_root=str(lenv.repo),
@@ -464,7 +464,7 @@ def test_resume_patches_state(lenv, monkeypatch):
     monkeypatch.delenv("GREMLINS_TEST_NOOP_PIPELINE")
     launcher = _launcher()
     monkeypatch.setenv("FAKE_CLAUDE_FAIL_AT", "plan")
-    gr_id = launcher.launch("localgremlin", stage_inputs={"instructions": "test resume"})
+    gr_id = launcher.launch("local", stage_inputs={"instructions": "test resume"})
     state_dir = _gremlins_state_root(lenv) / gr_id
     assert _wait_for_finished(state_dir, timeout=30), (
         "failed gremlin should terminate quickly"
@@ -710,7 +710,7 @@ def test_run_pipeline_writes_terminal_state_on_success(lenv, monkeypatch):
         "# Test Plan\n\n## Tasks\n- [ ] Touch a file\n", encoding="utf-8"
     )
     launcher = _launcher()
-    gr_id = launcher.launch("localgremlin", plan=str(plan_file))
+    gr_id = launcher.launch("local", plan=str(plan_file))
     state_dir = _gremlins_state_root(lenv) / gr_id
     assert _wait_for_finished(state_dir, timeout=120), (
         f"pipeline did not finish; log:\n{(state_dir / 'log').read_text(errors='replace')[-2000:]}"
@@ -726,7 +726,7 @@ def test_run_pipeline_writes_terminal_state_on_failure(lenv, monkeypatch):
     monkeypatch.delenv("GREMLINS_TEST_NOOP_PIPELINE")
     monkeypatch.setenv("FAKE_CLAUDE_FAIL_AT", "plan")
     launcher = _launcher()
-    gr_id = launcher.launch("localgremlin", stage_inputs={"instructions": "fail test"})
+    gr_id = launcher.launch("local", stage_inputs={"instructions": "fail test"})
     state_dir = _gremlins_state_root(lenv) / gr_id
     assert _wait_for_finished(state_dir, timeout=60), (
         "pipeline should terminate quickly on failure"
@@ -743,7 +743,7 @@ def test_run_pipeline_cleans_up_worktree_on_success(lenv, monkeypatch):
     plan_file = lenv.repo / "plan.md"
     plan_file.write_text("# Plan\n\n## Tasks\n- [ ] x\n", encoding="utf-8")
     launcher = _launcher()
-    gr_id = launcher.launch("localgremlin", plan=str(plan_file))
+    gr_id = launcher.launch("local", plan=str(plan_file))
     state_dir = _gremlins_state_root(lenv) / gr_id
     state = _read_state(state_dir)
     workdir = pathlib.Path(state["workdir"])
@@ -764,7 +764,7 @@ def test_full_localgremlin_pipeline(lenv, monkeypatch):
     """plan → implement → review → address all run once in order."""
     monkeypatch.delenv("GREMLINS_TEST_NOOP_PIPELINE")
     launcher = _launcher()
-    gr_id = launcher.launch("localgremlin", stage_inputs={"instructions": "test full pipeline"})
+    gr_id = launcher.launch("local", stage_inputs={"instructions": "test full pipeline"})
     state_dir = _gremlins_state_root(lenv) / gr_id
     assert _wait_for_finished(state_dir, timeout=120), (
         f"pipeline did not finish; log:\n{(state_dir / 'log').read_text(errors='replace')[-2000:]}"
@@ -798,13 +798,13 @@ def test_launch_ghgremlin_state_layout(lenv_with_gh):
     """ghgremlin creates a detached worktree off origin/<default> with correct state."""
     lenv = lenv_with_gh
     launcher = _launcher()
-    gr_id = launcher.launch("ghgremlin", stage_inputs={"instructions": "test gh launch"})
+    gr_id = launcher.launch("gh", stage_inputs={"instructions": "test gh launch"})
     state_dir = _gremlins_state_root(lenv) / gr_id
     assert state_dir.is_dir()
 
     state = _read_state(state_dir)
     assert state["id"] == gr_id
-    assert state["kind"] == "ghgremlin"
+    assert state["kind"] == "gh"
     assert state["setup_kind"] == "worktree", (
         f"ghgremlin should use detached worktree, got: {state['setup_kind']!r}"
     )
@@ -847,7 +847,7 @@ def test_launch_passes_base_ref_to_worktree_setup(lenv, monkeypatch):
     head_sha = r.stdout.strip()
 
     gr_id = launcher.launch(
-        "localgremlin", stage_inputs={"instructions": "base_ref test"}, base_ref=head_sha
+        "local", stage_inputs={"instructions": "base_ref test"}, base_ref=head_sha
     )
     state_dir = _gremlins_state_root(lenv) / gr_id
     assert _wait_for_finished(state_dir, timeout=60), (
@@ -891,7 +891,7 @@ def test_pipeline_survives_worktree_pipeline_rename(lenv, monkeypatch):
 
     launcher = _launcher()
     gr_id = launcher.launch(
-        "localgremlin", stage_inputs={"instructions": "test gremlins rename regression"}
+        "local", stage_inputs={"instructions": "test gremlins rename regression"}
     )
     state_dir = _gremlins_state_root(lenv) / gr_id
     log_path = state_dir / "log"
@@ -920,7 +920,7 @@ def test_launch_threads_spec_path_into_pipeline_args(lenv):
 
     launcher = _launcher()
     gr_id = launcher.launch(
-        "localgremlin", plan=str(plan_file), spec_path=str(spec_file)
+        "local", plan=str(plan_file), spec_path=str(spec_file)
     )
     state = _read_state(_gremlins_state_root(lenv) / gr_id)
     assert "--spec" in state["pipeline_args"]
@@ -935,7 +935,7 @@ def test_launch_rejects_missing_spec_path(lenv):
     launcher = _launcher()
     with pytest.raises(ValueError, match="--spec"):
         launcher.launch(
-            "localgremlin", plan=str(plan_file), spec_path="/nonexistent/spec.md"
+            "local", plan=str(plan_file), spec_path="/nonexistent/spec.md"
         )
     dirs = (
         list(_gremlins_state_root(lenv).glob("*"))
@@ -953,7 +953,7 @@ def test_launch_rejects_empty_spec_path(lenv):
     spec_file.write_text("", encoding="utf-8")
     launcher = _launcher()
     with pytest.raises(ValueError, match="--spec"):
-        launcher.launch("localgremlin", plan=str(plan_file), spec_path=str(spec_file))
+        launcher.launch("local", plan=str(plan_file), spec_path=str(spec_file))
 
 
 def test_resolve_boss_plan_file_path_passthrough(tmp_path):
@@ -1012,7 +1012,7 @@ def test_launch_persists_stage_inputs(lenv):
     """stage_inputs dict is written verbatim to state.json."""
     launcher = _launcher()
     gr_id = launcher.launch(
-        "localgremlin",
+        "local",
         stage_inputs={"instructions": "do the thing", "extra_key": "val"},
     )
     state = _read_state(_gremlins_state_root(lenv) / gr_id)
