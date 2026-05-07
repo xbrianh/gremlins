@@ -420,6 +420,7 @@ def test_launch_invalid_pipeline_exits_nonzero_with_message(
         "gremlins.cli.resolve_pipeline_name",
         lambda name, root: pathlib.Path(f"/fake/{name}.yaml"),
     )
+
     def _raise(_path):
         raise exc
 
