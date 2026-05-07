@@ -24,7 +24,7 @@ from gremlins.state import set_stage
 logger = logging.getLogger(__name__)
 
 
-def _die(msg: str) -> NoReturn:
+def die(msg: str) -> NoReturn:
     sys.stderr.write(f"error: {msg}\n")
     sys.stderr.flush()
     sys.exit(1)

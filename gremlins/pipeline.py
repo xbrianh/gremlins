@@ -200,7 +200,7 @@ def load_pipeline(path: pathlib.Path) -> Pipeline:
 
 VALID_KINDS = {"ghgremlin", "localgremlin", "bossgremlin"}
 
-_KIND_SUBCOMMAND = {
+KIND_SUBCOMMAND = {
     "localgremlin": "_local",
     "ghgremlin": "_gh",
     "bossgremlin": "_boss",

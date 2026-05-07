@@ -11,7 +11,7 @@ from collections.abc import Callable
 from gremlins.clients import ClientSpec
 from gremlins.clients.protocol import ClaudeClient
 from gremlins.git import DirtyOnly, HeadAdvanced, PreImplState, record_pre_impl_state
-from gremlins.orchestrators.base import Pipeline, _die, read_state_field
+from gremlins.orchestrators.base import Pipeline, die, read_state_field
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline import StageEntry
 from gremlins.stages import (
@@ -92,7 +92,7 @@ class GHPipeline(Pipeline):
             return
         saved = read_state_field(self.state_file, "pr_url")
         if not saved:
-            _die(
+            die(
                 f"--resume-from {self.args.resume_from}: no pr_url in state.json "
                 "(rewind to implement?)"
             )
@@ -109,7 +109,7 @@ class GHPipeline(Pipeline):
                 if self.args.plan_source:
                     return
                 if not entry.prompt_paths:
-                    _die(
+                    die(
                         f"stage {entry.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML"
                     )
                 set_stage(self.gr_id, entry.name)
@@ -212,7 +212,7 @@ class GHPipeline(Pipeline):
                     )
                     base_ref = read_state_field(self.state_file, "impl_base_ref")
                     if not base_ref:
-                        _die(
+                        die(
                             "--resume-from commit: no impl_base_ref in state.json "
                             "(rewind to implement?)"
                         )
@@ -229,7 +229,7 @@ class GHPipeline(Pipeline):
                             check=False,
                         )
                         if count_r.returncode != 0:
-                            _die(
+                            die(
                                 f"--resume-from commit: impl_handoff_branch '{impl_handoff_branch}' "
                                 f"not found or base_ref invalid (rewind to implement?)\n"
                                 f"{count_r.stderr.strip()}"
@@ -290,7 +290,7 @@ class GHPipeline(Pipeline):
 
             def _ghreview() -> None:
                 if not entry.prompt_paths:
-                    _die(
+                    die(
                         f"stage {entry.name!r}: type 'ghreview' requires a 'prompt' field in the pipeline YAML"
                     )
                 self._ensure_pr_url()
@@ -329,7 +329,7 @@ class GHPipeline(Pipeline):
 
             def _ghaddress() -> None:
                 if not entry.prompt_paths:
-                    _die(
+                    die(
                         f"stage {entry.name!r}: type 'ghaddress' requires a 'prompt' field in the pipeline YAML"
                     )
                 self._ensure_pr_url()

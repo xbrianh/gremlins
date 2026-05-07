@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterator
 from gremlins.clients import ClientSpec
 from gremlins.clients.protocol import ClaudeClient
 from gremlins.clients.resolve import require_stage_spec
-from gremlins.orchestrators.base import Pipeline, _die
+from gremlins.orchestrators.base import Pipeline, die
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline import StageEntry
 from gremlins.stages import address_code, implement, plan, review_code, verify
@@ -105,7 +105,7 @@ class LocalPipeline(Pipeline):
                     set_stage(gr_id, entry.name)
                     logger.info("planning (model: %s) -> %s", model, plan_file)
                     if not entry.prompt_paths:
-                        _die(
+                        die(
                             f"stage {entry.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML"
                         )
                     stage = plan.Plan(

@@ -255,5 +255,3 @@ def local_main(
     if total_cost > 0:
         logger.info("total cost: $%.4f", total_cost)
     return 0
-
-

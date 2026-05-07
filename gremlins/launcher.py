@@ -27,7 +27,12 @@ from gremlins import git as _git_mod
 from gremlins import paths as _paths
 from gremlins.clients import PACKAGE_DEFAULT
 from gremlins.gh_utils import parse_issue_ref, resolve_default_branch, view_issue
-from gremlins.pipeline import VALID_KINDS, _KIND_SUBCOMMAND, load_pipeline, resolve_pipeline_path
+from gremlins.pipeline import (
+    KIND_SUBCOMMAND,
+    VALID_KINDS,
+    load_pipeline,
+    resolve_pipeline_path,
+)
 
 
 class GremlinAlreadyRunning(RuntimeError):
@@ -218,7 +223,7 @@ def _resolve_pipeline(
         else:
             filtered.append(args[i])
             i += 1
-    name = pipeline_val or _KIND_SUBCOMMAND[kind].removeprefix("_")
+    name = pipeline_val or KIND_SUBCOMMAND[kind].removeprefix("_")
     resolved = str(resolve_pipeline_path(name, pathlib.Path(project_root)))
     return ["--pipeline", resolved] + filtered, resolved
 
@@ -319,9 +324,7 @@ def _setup_workdir(
 
     if kind == "ghgremlin":
         default_branch = resolve_default_branch(project_root)
-        refspec = (
-            f"refs/heads/{default_branch}:refs/remotes/origin/{default_branch}"
-        )
+        refspec = f"refs/heads/{default_branch}:refs/remotes/origin/{default_branch}"
         fr = subprocess.run(
             ["git", "-C", project_root, "fetch", "origin", "--quiet", refspec],
             capture_output=True,
@@ -332,7 +335,12 @@ def _setup_workdir(
                 f"git fetch origin {default_branch} failed: {fr.stderr.strip()}"
             )
         worktree_base = f"origin/{default_branch}"
-        return _git_mod.setup_detached_worktree(project_root, worktree_base), "", worktree_base, "worktree"
+        return (
+            _git_mod.setup_detached_worktree(project_root, worktree_base),
+            "",
+            worktree_base,
+            "worktree",
+        )
 
     # bossgremlin
     return _git_mod.setup_detached_worktree(project_root, base_ref), "", "", "worktree"
@@ -514,9 +522,7 @@ def launch(
     if instructions:
         spawn_args.append(instructions)
 
-    proc = _spawn_pipeline(
-        state_dir, workdir, gr_id, _KIND_SUBCOMMAND[kind], spawn_args
-    )
+    proc = _spawn_pipeline(state_dir, workdir, gr_id, KIND_SUBCOMMAND[kind], spawn_args)
 
     (state_dir / "pid").write_text(str(proc.pid), encoding="utf-8")
     _patch_state(state_dir, pid=proc.pid)
@@ -639,7 +645,7 @@ def resume(gr_id: str) -> None:
         if instructions:
             spawn_args.append(instructions)
 
-    kind_subcommand = _KIND_SUBCOMMAND[kind]
+    kind_subcommand = KIND_SUBCOMMAND[kind]
     proc = _spawn_pipeline(
         state_dir,
         workdir,
