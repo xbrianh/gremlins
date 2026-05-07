@@ -406,13 +406,13 @@ def test_gh_positional_instructions_passes():
     _validate_gh_args(ns, ["fix the bug"])
 
 
-def test_boss_valid_chain_kind_passes():
-    _validate_boss_args(["--chain-kind", "local"], "plan.md")
+def test_boss_with_plan_passes():
+    _validate_boss_args("plan.md")
 
 
 def test_boss_missing_plan_raises():
     with pytest.raises(ValueError, match="--plan is required"):
-        _validate_boss_args(["--chain-kind", "local"], None)
+        _validate_boss_args(None)
 
 
 def test_boss_missing_plan_with_chain_kind_exits_nonzero_no_state(

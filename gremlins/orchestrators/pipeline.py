@@ -42,6 +42,7 @@ from gremlins.stages import (
     handoff_branch as handoff_branch_mod,
 )
 from gremlins.stages.base import Stage, StageContext
+from gremlins.stages.chain import Chain
 from gremlins.stages.handoff_branch import HandoffBranchResult
 from gremlins.state import patch_state, set_stage
 
@@ -218,7 +219,7 @@ class LocalPipeline(Pipeline):
         "verify": verify.Verify,
         "review-code": review_code.ReviewCode,
         "address-code": address_code.AddressCode,
-        "chain": Stage,  # placeholder; real class imported at runtime in _make_runner
+        "chain": Chain,
     }
 
     def __init__(
@@ -410,22 +411,18 @@ class LocalPipeline(Pipeline):
         if entry.type == "chain":
 
             def _chain() -> None:
-                from gremlins.stages.chain import (
-                    Chain as _Chain,  # type: ignore[import]
-                )
-
                 set_stage(gr_id, entry.name)
                 logger.info(
                     "running chain stage (child: %s)",
                     entry.options.get("child", "local"),
                 )
-                stage: Stage = _Chain(  # type: ignore[assignment]
+                stage = Chain(
                     entry,
                     model,
                     pipeline_builder=self._build_child_stages,
                 )
-                stage.bind(ctx)  # type: ignore[union-attr]
-                stage.run(None)  # type: ignore[union-attr]
+                stage.bind(ctx)
+                stage.run(None)
 
             return _chain
 
@@ -447,11 +444,16 @@ class LocalPipeline(Pipeline):
         pipeline = load_pipeline(
             resolve_pipeline_path(pipeline_name, pathlib.Path.cwd())
         )
+        if any(s.type == "chain" for s in pipeline.stages):
+            raise ValueError(
+                f"child pipeline {pipeline_name!r} contains a 'chain' stage; "
+                "nested chain stages are not supported"
+            )
         child_args = _argparse.Namespace(
             plan_path=str(plan_path),
             spec_path=None,
-            cmds=None,
-            test_max_attempts=3,
+            cmds=getattr(self.args, "cmds", None),
+            test_max_attempts=getattr(self.args, "test_max_attempts", 3),
             instructions=None,
             resume_from=resume_from,
         )

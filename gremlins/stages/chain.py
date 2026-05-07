@@ -24,7 +24,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-HANDOFF_TIMEOUT = int(os.environ.get("BOSSGREMLIN_HANDOFF_TIMEOUT", "3600"))
+HANDOFF_TIMEOUT = int(
+    os.environ.get(
+        "CHAIN_HANDOFF_TIMEOUT",
+        os.environ.get("BOSSGREMLIN_HANDOFF_TIMEOUT", "3600"),
+    )
+)
 
 
 class Chain(Stage):
@@ -108,13 +113,15 @@ class Chain(Stage):
                 client=client,
             )
 
+            pre_update_plan = current_plan
+
             if os.path.isfile(sig.get("out_path", "") or ""):
                 chain_st["current_plan"] = sig["out_path"]
                 current_plan = sig["out_path"]
 
             record = {
                 "n": handoff_count,
-                "plan_in": chain_st["current_plan"],
+                "plan_in": pre_update_plan,
                 "exit_state": exit_state,
                 "signal_file": sig.get("signal_path", ""),
             }
@@ -324,4 +331,8 @@ def _resolve_state_file(gr_id: str | None) -> pathlib.Path | None:
     return resolve_state_file(gr_id)
 
 
+# Register so `load_pipeline` accepts `type: chain` in YAML. The registered
+# class isn't constructed via the registry (Chain.__init__ requires a
+# pipeline_builder kwarg supplied by the orchestrator); the registry is only
+# consulted for stage-type validation.
 register_stage("chain", Chain)
