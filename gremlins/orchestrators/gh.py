@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import pathlib
 import re
 import shutil
-import subprocess
 import sys
 from typing import NoReturn
 
@@ -24,7 +22,7 @@ from gremlins.clients.resolve import (
     validate_stage_specs,
 )
 from gremlins.env_file import load_env_file
-from gremlins.gh_utils import get_repo, parse_issue_ref, view_issue
+from gremlins.gh_utils import get_repo, view_issue
 from gremlins.logging_setup import configure_logging
 from gremlins.orchestrators.base import read_state_field
 from gremlins.orchestrators.gh_pipeline import GHPipeline
@@ -32,7 +30,6 @@ from gremlins.pipeline import (
     load_pipeline,
     resolve_pipeline_path,
 )
-from gremlins.runner import install_signal_handlers
 from gremlins.state import (
     patch_state,
     resolve_session_dir,
@@ -79,9 +76,6 @@ def _parse_gh_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
-_parse_issue_ref = parse_issue_ref
-
-
 def _fetch_issue_body(issue_num: str, repo: str) -> str:
     try:
         issue_data = view_issue(issue_num, repo)
@@ -91,147 +85,6 @@ def _fetch_issue_body(issue_num: str, repo: str) -> str:
     if not body:
         die(f"issue #{issue_num} has an empty body")
     return body
-
-
-def _update_description_from_plan(
-    plan_md: pathlib.Path,
-    state_file: pathlib.Path | None,
-    gr_id: str | None = None,
-    *,
-    issue_title: str = "",
-) -> None:
-    if state_file is None or not state_file.exists():
-        return
-    try:
-        data = json.loads(state_file.read_text(encoding="utf-8"))
-        if data.get("description_explicit"):
-            return
-        if issue_title:
-            patch_state(gr_id, description=issue_title[:60])
-            return
-        lines = plan_md.read_text(encoding="utf-8").splitlines()[:50]
-        h1 = ""
-        for line in lines:
-            m = re.match(r"^#\s+(.+)", line)
-            if m:
-                h1 = m.group(1)[:60]
-                break
-        if h1:
-            patch_state(gr_id, description=h1)
-    except Exception:
-        pass
-
-
-def _resolve_plan_source(
-    *,
-    plan_source: str,
-    repo: str,
-    plan_md: pathlib.Path,
-    model: str | None,
-    client: ClaudeClient,
-    state_file: pathlib.Path | None,
-    gr_id: str | None = None,
-) -> tuple[str, str, str]:
-    """Resolve --plan <source> into (issue_url, issue_num, issue_body)."""
-    if plan_md.exists() and plan_md.stat().st_size > 0:
-        issue_url = read_state_field(state_file, "issue_url")
-        issue_num = read_state_field(state_file, "issue_num")
-        issue_body = plan_md.read_text(encoding="utf-8")
-        label = f" (issue #{issue_num})" if issue_num else ""
-        logger.info("[1/8] plan resumed from snapshot: %s%s", plan_md, label)
-        return issue_url, issue_num, issue_body
-
-    if pathlib.Path(plan_source).is_file():
-        src = pathlib.Path(plan_source)
-        if src.stat().st_size == 0:
-            die(f"--plan: file is empty: {plan_source}")
-        issue_body = src.read_text(encoding="utf-8")
-        logger.info(
-            "[1/8] plan supplied via --plan (file): %s — posting as GitHub issue",
-            plan_source,
-        )
-
-        title_prompt = (
-            "Produce a concise GitHub issue title (under 80 characters) "
-            "summarizing the spec below. Output ONLY the title, nothing else."
-            f"\n\n{issue_body}"
-        )
-        completed = client.run(
-            title_prompt,
-            label="plan-title",
-            model=model,
-        )
-        parts = (completed.text_result or "").strip().splitlines()
-        issue_title = parts[0][:80] if parts else ""
-        if not issue_title:
-            die("--plan: title agent returned empty output")
-
-        r = subprocess.run(
-            [
-                "gh",
-                "issue",
-                "create",
-                "--repo",
-                repo,
-                "--title",
-                issue_title,
-                "--body-file",
-                plan_source,
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if r.returncode != 0:
-            die(f"--plan: failed to create GitHub issue: {r.stderr.strip()}")
-        create_out = r.stdout + r.stderr
-        m = re.search(r"https://github\.com/[^ )]+/issues/[0-9]+", create_out)
-        if not m:
-            die(
-                f"--plan: could not extract issue URL from gh output: {create_out.strip()}"
-            )
-        issue_url = m.group(0)
-        issue_num = issue_url.split("/")[-1]
-
-        patch_state(gr_id, issue_url=issue_url, issue_num=issue_num)
-        logger.info("issue: %s", issue_url)
-        shutil.copyfile(src, plan_md)
-    else:
-        target_repo, issue_ref = _parse_issue_ref(plan_source, repo)
-        if target_repo is None or issue_ref is None:
-            die(
-                f"--plan: not a readable file or recognized issue reference: {plan_source}"
-            )
-
-        try:
-            issue_data = view_issue(issue_ref, target_repo)
-        except RuntimeError as exc:
-            die(f"--plan: {exc}")
-        issue_body = issue_data.get("body") or ""
-        if not issue_body:
-            die(f"--plan: issue {plan_source} has an empty body")
-
-        resolved_url = issue_data.get("url") or ""
-        resolved_num = str(issue_data.get("number") or "")
-        issue_title = (issue_data.get("title") or "")[:60]
-
-        if target_repo == repo:
-            issue_url = resolved_url
-            issue_num = resolved_num
-        else:
-            issue_url = ""
-            issue_num = ""
-
-        plan_md.write_text(issue_body + "\n", encoding="utf-8")
-        logger.info(
-            "[1/8] plan supplied via --plan (issue %s#%s)", target_repo, issue_ref
-        )
-
-    patch_state(gr_id, issue_url=issue_url, issue_num=issue_num)
-    _update_description_from_plan(
-        plan_md, state_file, gr_id=gr_id, issue_title=issue_title
-    )
-    return issue_url, issue_num, issue_body
 
 
 def gh_main(
@@ -301,10 +154,8 @@ def gh_main(
     for spec in stage_specs.values():
         _client_for_spec(spec)
 
-    # Determine the overall effective client for plan-title and signal handlers
     default_spec = cli_spec or pipeline.default_client or PACKAGE_DEFAULT
     effective_client = client if client is not None else _client_for_spec(default_spec)
-    default_model = default_spec.model
 
     session_dir = resolve_session_dir(gr_id)
 
@@ -321,7 +172,6 @@ def gh_main(
         die(str(exc))
 
     repo = get_repo()
-    plan_md = session_dir / "plan.md"
     spec_file = session_dir / "spec.md"
 
     logger.info("session: %s", session_dir)
@@ -364,22 +214,7 @@ def gh_main(
         else 0
     )
 
-    # Install signal handlers before any pre-pipeline Claude calls (e.g.
-    # `_resolve_plan_source` invokes the model to generate an issue title);
-    # otherwise Ctrl-C during that call leaks the child process.
-    install_signal_handlers(*_signal_clients)
-
-    if args.plan_source:
-        pipe.issue_url, pipe.issue_num, pipe.issue_body = _resolve_plan_source(
-            plan_source=args.plan_source,
-            repo=repo,
-            plan_md=plan_md,
-            model=default_model,
-            client=effective_client,
-            state_file=state_file,
-            gr_id=gr_id,
-        )
-    elif resume_idx > plan_idx:
+    if resume_idx > plan_idx:
         pipe.issue_url = read_state_field(state_file, "issue_url")
         if not pipe.issue_url:
             die(

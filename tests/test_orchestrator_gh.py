@@ -15,6 +15,7 @@ import pytest
 import gremlins.orchestrators.gh as _gh_mod
 import gremlins.orchestrators.gh_pipeline as _pipeline_mod
 from gremlins.clients.fake import FakeClaudeClient
+from gremlins.gh_utils import parse_issue_ref as _parse_issue_ref
 from gremlins.git import (
     DirtyOnly,
     DivergentHead,
@@ -26,7 +27,7 @@ from gremlins.git import (
     record_pre_impl_state,
     sweep_stale_handoff_branches,
 )
-from gremlins.orchestrators.gh import _parse_gh_args, _parse_issue_ref, gh_main
+from gremlins.orchestrators.gh import _parse_gh_args, gh_main
 from gremlins.pipeline import load_pipeline, resolve_pipeline_path
 
 # ---------------------------------------------------------------------------
@@ -116,9 +117,6 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
     )
     monkeypatch.setattr(
         "gremlins.orchestrators.base.install_signal_handlers", lambda *c: None
-    )
-    monkeypatch.setattr(
-        "gremlins.orchestrators.gh.install_signal_handlers", lambda *c: None
     )
     monkeypatch.setattr("gremlins.orchestrators.gh.get_repo", lambda: "owner/repo")
 
@@ -393,13 +391,13 @@ def test_parse_instructions():
 
 
 def test_parse_plan_source():
-    args = _parse_gh_args(["--plan", "42"])
-    assert args.plan_source == "42"
+    args = _parse_gh_args(["--plan", "#42"])
+    assert args.plan_source == "#42"
     assert args.instructions == []
 
 
 def test_parse_resume_from_commit(capsys):
-    args = _parse_gh_args(["--plan", "42", "--resume-from", "commit"])
+    args = _parse_gh_args(["--plan", "#42", "--resume-from", "commit"])
     assert args.resume_from == "commit"
     captured = capsys.readouterr()
     assert "rewinding" not in captured.err
@@ -407,7 +405,7 @@ def test_parse_resume_from_commit(capsys):
 
 def test_parse_plan_and_instructions_mutual_exclusion():
     with pytest.raises(SystemExit):
-        _parse_gh_args(["--plan", "42", "also some instructions"])
+        _parse_gh_args(["--plan", "#42", "also some instructions"])
 
 
 # ---------------------------------------------------------------------------
@@ -417,8 +415,8 @@ def test_parse_plan_and_instructions_mutual_exclusion():
 
 def test_parse_issue_ref_numeric():
     repo, ref = _parse_issue_ref("42", "owner/repo")
-    assert repo == "owner/repo"
-    assert ref == "42"
+    assert repo is None
+    assert ref is None
 
 
 def test_parse_issue_ref_hash_prefix():
@@ -437,8 +435,8 @@ def test_parse_issue_ref_full_url():
     repo, ref = _parse_issue_ref(
         "https://github.com/owner/repo/issues/123", "owner/repo"
     )
-    assert repo == "owner/repo"
-    assert ref == "123"
+    assert repo is None
+    assert ref is None
 
 
 def test_parse_issue_ref_invalid():
@@ -537,7 +535,7 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
         },
     )
 
-    result = gh_main(["--plan", "42"], client=client)
+    result = gh_main(["--plan", "#42"], client=client)
     assert result == 0
 
     labels = [c.label for c in client.calls]
@@ -632,7 +630,7 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
     )
 
     result = gh_main(
-        ["--plan", "42", "--client", "claude:claude-opus-4-7"], client=client
+        ["--plan", "#42", "--client", "claude:claude-opus-4-7"], client=client
     )
     assert result == 0
 
@@ -683,7 +681,7 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
     )
 
     # Invoke with NO --model.
-    result = gh_main(["--plan", "42"], client=client)
+    result = gh_main(["--plan", "#42"], client=client)
     assert result == 0
 
     # Every recorded run must have model == "sonnet". Asserting on every call
@@ -734,7 +732,7 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
         },
     )
 
-    result = gh_main(["--plan", "42", "--client", "copilot:gpt-4o"], client=client)
+    result = gh_main(["--plan", "#42", "--client", "copilot:gpt-4o"], client=client)
     assert result == 0
 
     assert client.calls, "expected at least one client call"
@@ -876,7 +874,7 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
         },
     )
 
-    result = gh_main(["--plan", "42"], client=launch_client, gr_id=gr_id)
+    result = gh_main(["--plan", "#42"], client=launch_client, gr_id=gr_id)
     assert result == 0
 
     launch_state = json.loads(state_file.read_text(encoding="utf-8"))
@@ -938,7 +936,7 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
     )
 
     result = gh_main(
-        ["--plan", "42", "--resume-from", "implement"],
+        ["--plan", "#42", "--resume-from", "implement"],
         client=resume_client,
         gr_id=gr_id,
     )
@@ -972,7 +970,7 @@ def test_gh_main_resume_requires_persisted_stage_clients(tmp_path, monkeypatch, 
 
     with pytest.raises(SystemExit):
         gh_main(
-            ["--plan", "42", "--resume-from", "implement"],
+            ["--plan", "#42", "--resume-from", "implement"],
             client=FakeClaudeClient(fixtures={}),
             gr_id="resume-test-gr-id",
         )
@@ -1010,7 +1008,7 @@ def test_gh_main_resume_requires_each_persisted_stage_client(
 
     with pytest.raises(SystemExit):
         gh_main(
-            ["--plan", "42", "--resume-from", "implement"],
+            ["--plan", "#42", "--resume-from", "implement"],
             client=FakeClaudeClient(fixtures={}),
             gr_id="resume-test-gr-id",
         )
@@ -1075,7 +1073,7 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         _gh_mod, "_fetch_issue_body", lambda num, repo: "# Resumed Plan\nDo stuff.\n"
     )
 
-    result = gh_main(["--plan", "99", "--resume-from", "implement"], client=client)
+    result = gh_main(["--plan", "#99", "--resume-from", "implement"], client=client)
     assert result == 0
 
     labels = [c.label for c in client.calls]
@@ -1127,7 +1125,7 @@ def test_resume_from_ghreview(tmp_path, monkeypatch):
 
     client = FakeClaudeClient(fixtures={})
 
-    result = gh_main(["--plan", "5", "--resume-from", "ghreview"], client=client)
+    result = gh_main(["--plan", "#5", "--resume-from", "ghreview"], client=client)
     assert result == 0
 
     # No client.run calls (plan/implement/commit/open-pr all skipped)
@@ -1347,7 +1345,7 @@ def test_resume_from_commit_skips_implement(tmp_path, monkeypatch):
         fixtures={"commit": IMPL_EVENTS, "open-github-pr": _pr_events()}
     )
 
-    result = gh_main(["--plan", "42", "--resume-from", "commit"], client=client)
+    result = gh_main(["--plan", "#42", "--resume-from", "commit"], client=client)
     assert result == 0
 
     labels = [c.label for c in client.calls]
@@ -1360,7 +1358,7 @@ def test_resume_from_commit_skips_implement(tmp_path, monkeypatch):
 
 
 def test_parse_resume_from_open_pr(capsys):
-    args = _parse_gh_args(["--plan", "42", "--resume-from", "open-pr"])
+    args = _parse_gh_args(["--plan", "#42", "--resume-from", "open-pr"])
     assert args.resume_from == "open-pr"
 
 
@@ -1434,7 +1432,7 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
 
     client = FakeClaudeClient(fixtures={"open-github-pr": _pr_events()})
 
-    result = gh_main(["--plan", "42", "--resume-from", "open-pr"], client=client)
+    result = gh_main(["--plan", "#42", "--resume-from", "open-pr"], client=client)
     assert result == 0
 
     labels = [c.label for c in client.calls]
@@ -1496,7 +1494,7 @@ def test_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
     )
 
     result = gh_main(
-        ["--plan", "42", "--client", "claude:claude-opus-4-7"], client=client
+        ["--plan", "#42", "--client", "claude:claude-opus-4-7"], client=client
     )
     assert result == 0
 
@@ -1555,7 +1553,7 @@ def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
     )
 
     result = gh_main(
-        ["--plan", "42", "--client", "claude:claude-opus-4-7"], client=client
+        ["--plan", "#42", "--client", "claude:claude-opus-4-7"], client=client
     )
     assert result == 0
 
@@ -1614,7 +1612,7 @@ def test_wait_ci_stage_ordering(tmp_path, monkeypatch):
         },
     )
 
-    result = gh_main(["--plan", "42"], client=client)
+    result = gh_main(["--plan", "#42"], client=client)
     assert result == 0
 
     assert order[0] == "verify", "verify must run before other tracked stages"
@@ -1674,7 +1672,7 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
 
     client = FakeClaudeClient(fixtures={})
 
-    result = gh_main(["--plan", "5", "--resume-from", "ci-gate"], client=client)
+    result = gh_main(["--plan", "#5", "--resume-from", "ci-gate"], client=client)
     assert result == 0
 
     assert client.calls == [], "no client stages should run on ci-gate resume"
@@ -1732,7 +1730,7 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
     )
 
     result = gh_main(
-        ["--plan", "42", "--client", "claude:claude-opus-4-7"], client=client
+        ["--plan", "#42", "--client", "claude:claude-opus-4-7"], client=client
     )
     assert result == 0
 
@@ -1825,7 +1823,7 @@ def test_resume_from_verify(tmp_path, monkeypatch):
         fixtures={"commit": IMPL_EVENTS, "open-github-pr": _pr_events()}
     )
 
-    result = gh_main(["--plan", "5", "--resume-from", "verify"], client=client)
+    result = gh_main(["--plan", "#5", "--resume-from", "verify"], client=client)
     assert result == 0
 
     labels = [c.label for c in client.calls]
@@ -1870,7 +1868,7 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir):
         },
     )
 
-    result = gh_main(["--plan", "42"], gr_id=gr_id, client=client)
+    result = gh_main(["--plan", "#42"], gr_id=gr_id, client=client)
     assert result == 0
 
     data = json.loads((state_dir / "state.json").read_text())
@@ -1921,7 +1919,7 @@ def test_gh_main_state_client_tracks_effective_model(
     )
 
     result = gh_main(
-        ["--plan", "42", "--client", "copilot:gpt-5.4"],
+        ["--plan", "#42", "--client", "copilot:gpt-5.4"],
         gr_id=gr_id,
         client=client,
     )
@@ -1990,7 +1988,7 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
         },
     )
 
-    result = gh_main(["--plan", "42"], client=client)
+    result = gh_main(["--plan", "#42"], client=client)
     assert result == 0
 
     assert client.calls, "expected at least one client call"

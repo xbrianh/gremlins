@@ -30,24 +30,18 @@ def get_repo() -> str:
 def parse_issue_ref(plan_source: str, repo: str) -> tuple[str | None, str | None]:
     """Parse an issue reference string into ``(target_repo, issue_num)``.
 
-    Recognized shapes (matching ghgremlin's --plan contract):
-      * ``42`` / ``#42``                              → (repo, "42")
-      * ``owner/name#42``                             → ("owner/name", "42")
-      * ``https://github.com/owner/name/issues/42``   → ("owner/name", "42")
+    Recognized shapes:
+      * ``#42``                  → (repo, "42")
+      * ``owner/name#42``        → ("owner/name", "42")
 
-    Returns ``(None, None)`` when ``plan_source`` doesn't match any shape so
-    the caller can distinguish issue refs from local file paths.
+    Returns ``(None, None)`` for anything else (file paths, bare integers, URLs).
+    The ``#`` prefix is the disambiguator that distinguishes an issue ref from a
+    file path or bare integer.
     """
-    m = re.match(r"^#?([0-9]+)$", plan_source)
+    m = re.match(r"^#([0-9]+)$", plan_source)
     if m:
         return repo, m.group(1)
     m = re.match(r"^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([0-9]+)$", plan_source)
-    if m:
-        return m.group(1), m.group(2)
-    m = re.match(
-        r"^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/issues/([0-9]+)(#.*)?$",
-        plan_source,
-    )
     if m:
         return m.group(1), m.group(2)
     return None, None
