@@ -28,6 +28,8 @@ import pathlib
 import sys
 from typing import Any, cast
 
+import yaml
+
 from gremlins import paths as _paths
 from gremlins.fleet import main as fleet_main
 from gremlins.fleet.cli import (
@@ -152,9 +154,16 @@ def _launch_main(argv: list[str]) -> int:
 
     try:
         pipeline_path = resolve_pipeline_name(name, pathlib.Path.cwd())
-        pipeline = load_pipeline(pipeline_path)
     except FileNotFoundError as exc:
         sys.stderr.write(f"error: {exc}\n")
+        return 1
+
+    try:
+        pipeline = load_pipeline(pipeline_path)
+    except (ValueError, yaml.YAMLError, FileNotFoundError) as exc:
+        sys.stderr.write(
+            f"error: pipeline '{name}' is invalid: {exc}\n  (file: {pipeline_path})\n"
+        )
         return 1
 
     first = next((s for s in pipeline.stages if s.type != "parallel"), None)

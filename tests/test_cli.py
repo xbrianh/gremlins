@@ -6,6 +6,7 @@ import json
 import pathlib
 
 import pytest
+import yaml
 
 from gremlins.bail import bail_main
 from gremlins.cli import main
@@ -402,6 +403,41 @@ def test_launch_unified_dispatch_unknown_name_with_help_exits_nonzero(
     rc = main(["launch", "bogus", "--help"])
     assert rc != 0
     assert "bogus" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ValueError("duplicate stage name: 'verify'"),
+        yaml.YAMLError("mapping values are not allowed here"),
+        FileNotFoundError("prompt file not found: gremlins:missing.md"),
+    ],
+)
+def test_launch_invalid_pipeline_exits_nonzero_with_message(
+    tmp_path, monkeypatch, capsys, exc
+):
+    monkeypatch.setattr(
+        "gremlins.cli.resolve_pipeline_name",
+        lambda name, root: pathlib.Path(f"/fake/{name}.yaml"),
+    )
+
+    def _raise(_path):
+        raise exc
+
+    monkeypatch.setattr("gremlins.cli.load_pipeline", _raise)
+    launched = []
+    monkeypatch.setattr(
+        "gremlins.cli.launch", lambda *a, **kw: launched.append(1) or "gr-x"
+    )
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+
+    rc = main(["launch", "my-pipeline"])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "my-pipeline" in err
+    assert "invalid" in err
+    assert not launched
 
 
 def test_launch_unified_dispatch_help_for_resolved_pipeline(monkeypatch, capsys):
