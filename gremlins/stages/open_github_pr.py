@@ -23,11 +23,9 @@ class OpenGitHubPR(Stage):
         model: str | None,
         *,
         issue_url: str,
-        cwd: str | None = None,
     ) -> None:
         super().__init__(entry, model)
         self.issue_url = issue_url
-        self._cwd = cwd
 
     def run(self, pipe: Any) -> str:
         issue_num = self.issue_url.split("/")[-1] if self.issue_url else ""

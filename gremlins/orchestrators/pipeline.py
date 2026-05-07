@@ -514,6 +514,11 @@ class GHPipeline(Pipeline):
                             exc,
                         )
                 self.impl_pre_state = record_pre_impl_state()
+                patch_state(
+                    self.gr_id,
+                    impl_pre_head=self.impl_pre_state.head,
+                    impl_pre_branch=self.impl_pre_state.branch,
+                )
                 stage = implement.Implement(
                     entry,
                     model,
@@ -531,6 +536,15 @@ class GHPipeline(Pipeline):
             def _handoff_branch() -> None:
                 set_stage(self.gr_id, entry.name)
                 logger.info("[2b/8] creating handoff branch")
+                if self.impl_pre_state is None:
+                    saved_head = read_state_field(self.state_file, "impl_pre_head")
+                    if saved_head:
+                        self.impl_pre_state = PreImplState(
+                            head=saved_head,
+                            branch=read_state_field(
+                                self.state_file, "impl_pre_branch"
+                            ),
+                        )
                 stage = handoff_branch_mod.HandoffBranch(entry, model)
                 stage.bind(ctx)
                 result = stage.run(self)
@@ -621,7 +635,6 @@ class GHPipeline(Pipeline):
                     entry,
                     model,
                     issue_url=self.issue_url,
-                    cwd=None,
                 )
                 stage.bind(ctx)
                 pr_url = stage.run(None)

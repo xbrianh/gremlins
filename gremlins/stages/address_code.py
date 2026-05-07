@@ -46,20 +46,20 @@ class AddressCode(Stage):
 
     def run(self, pipe: Any) -> None:
         target = getattr(pipe, "target", "local")
-        try:
-            if target == "github":
-                self.results_to_github(pipe)
-            else:
+        if target == "github":
+            self.results_to_github(pipe)
+        else:
+            try:
                 inputs = self._inputs_from_local(pipe)
                 self.results_to_local(inputs, pipe)
-        except (SystemExit, Exception) as exc:
-            emit_bail(
-                self.state.gr_id,
-                "other",
-                f"address-code stage failed: {exc}"[:200],
-                child_key=self.state.child_key,
-            )
-            raise
+            except (SystemExit, Exception) as exc:
+                emit_bail(
+                    self.state.gr_id,
+                    "other",
+                    f"address-code stage failed: {exc}"[:200],
+                    child_key=self.state.child_key,
+                )
+                raise
 
     def _inputs_from_local(self, pipe: Any) -> dict[str, str]:
         review_files: list[tuple[str, pathlib.Path]] = []
