@@ -42,10 +42,13 @@ class Pipeline:
     default_client: ClientSpec | None = None
 
 
+BUNDLED_PROMPT_PREFIX = "gremlins:"
+
+
 def _resolve_prompt_dir(value: object, yaml_dir: pathlib.Path) -> pathlib.Path:
-    """Pipeline-level `prompt_dir:` (relative to YAML); default = bundled prompts."""
+    """Pipeline-level `prompt_dir:` (relative to YAML); default = YAML dir."""
     if value is None:
-        return BUNDLED_PROMPT_DIR
+        return yaml_dir
     if not isinstance(value, str):
         raise ValueError(f"prompt_dir must be a string, got {type(value)!r}")
     return (yaml_dir / value).resolve()
@@ -54,6 +57,7 @@ def _resolve_prompt_dir(value: object, yaml_dir: pathlib.Path) -> pathlib.Path:
 def _resolve_prompt_paths(
     prompt_field: object, prompt_dir: pathlib.Path
 ) -> list[pathlib.Path]:
+    """Resolve prompt names. `gremlins:NAME` -> bundled; bare NAME -> prompt_dir."""
     if prompt_field is None:
         return []
     if isinstance(prompt_field, str):
@@ -64,7 +68,17 @@ def _resolve_prompt_paths(
         raise ValueError(f"prompt must be a string or list, got {type(prompt_field)!r}")
     resolved: list[pathlib.Path] = []
     for p in raw:
-        path = (prompt_dir / p).resolve()
+        if p.startswith(BUNDLED_PROMPT_PREFIX):
+            base = BUNDLED_PROMPT_DIR
+            name = p[len(BUNDLED_PROMPT_PREFIX) :]
+            if not name:
+                raise ValueError(
+                    f"prompt {p!r} is missing a name after {BUNDLED_PROMPT_PREFIX!r}"
+                )
+        else:
+            base = prompt_dir
+            name = p
+        path = (base / name).resolve()
         if not path.exists():
             raise FileNotFoundError(f"prompt file not found: {path}")
         resolved.append(path)
