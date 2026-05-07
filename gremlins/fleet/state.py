@@ -144,14 +144,9 @@ def load_state(sf: str) -> dict[str, object] | None:
         return None
 
 
-def kind_short(kind: str) -> str:
-    if kind == "localgremlin":
-        return "local"
-    if kind == "ghgremlin":
-        return "gh"
-    if kind == "bossgremlin":
-        return "boss"
-    return kind or ""
+def effective_pipeline_kind(state: dict[str, object]) -> str:
+    pk = str(state.get("pipeline_kind") or "")
+    return pk if pk in ("local", "gh", "boss") else "local"
 
 
 def atomic_patch_state(sf: str, patch: dict[str, object]) -> bool:

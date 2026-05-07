@@ -20,7 +20,12 @@ from gremlins.fleet.resolve import (
     resolve_gremlin,
     stage_names_for_gremlin,
 )
-from gremlins.fleet.state import atomic_patch_state, liveness_of_state_file, load_state
+from gremlins.fleet.state import (
+    atomic_patch_state,
+    effective_pipeline_kind,
+    liveness_of_state_file,
+    load_state,
+)
 from gremlins.fleet.stop import do_stop
 from gremlins.launcher import GremlinAlreadyRunning
 from gremlins.launcher import resume as _resume
@@ -39,7 +44,7 @@ def build_rescue_prompt(
     interactive and headless modes — the agent never knows the difference and
     the wrapper reads the marker to decide whether to invoke the relaunch step.
     """
-    kind = state.get("kind", "localgremlin")
+    kind = effective_pipeline_kind(state)
     stage = state.get("stage") or "unknown"
     description = state.get("description") or ""
     project_root = state.get("project_root") or ""

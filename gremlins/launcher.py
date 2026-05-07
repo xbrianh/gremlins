@@ -92,7 +92,7 @@ def _pipeline_mode(pipeline: Pipeline) -> str:
     return "local"
 
 
-def _infer_mode_from_kind(kind: str) -> str:
+def _infer_mode_from_pipeline_kind(kind: str) -> str:
     _map = {
         "localgremlin": "local",
         "ghgremlin": "gh",
@@ -505,7 +505,7 @@ def launch(
         _loaded_pipeline = load_pipeline(pathlib.Path(pipeline_path))
         pipeline_mode = _pipeline_mode(_loaded_pipeline)
     except (FileNotFoundError, OSError):
-        pipeline_mode = _infer_mode_from_kind(kind)
+        pipeline_mode = _infer_mode_from_pipeline_kind(kind)
 
     if pipeline_mode == "gh" and shutil.which("gh") is None:
         raise RuntimeError("gh CLI not found on PATH (required for gh pipeline)")
@@ -537,6 +537,7 @@ def launch(
         state = {
             "id": gr_id,
             "kind": kind,
+            "pipeline_kind": pipeline_mode,
             "project_root": project_root,
             "workdir": workdir,
             "setup_kind": setup_kind,
@@ -627,7 +628,9 @@ def resume(gr_id: str) -> None:
     except FileNotFoundError:
         pass
 
-    pipeline_mode = _infer_mode_from_kind(kind)
+    from gremlins.fleet.state import effective_pipeline_kind
+
+    pipeline_mode = effective_pipeline_kind(state)
     if pipeline_path:
         try:
             _loaded = load_pipeline(pathlib.Path(pipeline_path))
