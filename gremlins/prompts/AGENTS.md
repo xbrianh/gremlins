@@ -1,0 +1,49 @@
+# `gremlins/prompts/`
+
+Bundled prompt fragments composed by stages at runtime. Pipeline YAMLs
+list filenames in their `prompt:` field; the stage loads them via
+`load_prompts(paths)` and feeds the concatenated text to the agent.
+
+## Modules
+
+- `loader.py` — `load_prompts(paths)`. Concatenates files with double
+  newlines, rstrips the result. Raises `FileNotFoundError` on a missing
+  path, `ValueError` on an empty file. Pure I/O; no formatting.
+- `__init__.py` — exposes `BUNDLED_PROMPT_DIR` (the absolute path to this
+  directory) and re-exports `load_prompts`. All bundled-prompt path
+  resolution goes through `BUNDLED_PROMPT_DIR` — don't duplicate the path
+  computation elsewhere.
+- `README.md` — runtime placeholder reference. Every `{name}` token used
+  in any fragment is documented there with its source stage. Update
+  `README.md` when adding or removing a placeholder.
+
+## Conventions
+
+- Fragments are plain Markdown. Static text only — runtime values come in
+  via Python `str.format(...)` in the calling stage.
+- Literal braces that must survive `.format(...)` (e.g. shell command
+  examples like `{{owner}}/{{repo}}`) are doubled in the source.
+- Compose, don't inline. A YAML stage entry's `prompt:` list is the unit
+  of reuse: `[code_style.md, plan_gh.md]` is preferred over copy-pasting
+  shared text into a new file. Add a new fragment when text is reused
+  across two or more stages.
+- Filenames track the stage they belong to (`plan.md`, `plan_gh.md`,
+  `implement_local.md`). Shared fragments use a topic name
+  (`code_style.md`, `bail_section.md`).
+- The `review/` subdirectory holds review-only fragments. YAMLs reference
+  them as `review/detail.md`.
+- An empty file is a load error, not silently-empty text. If a fragment
+  has nothing to say in some context, the calling stage should pass an
+  empty placeholder instead of including the file conditionally.
+
+## Load-bearing invariants
+
+- `BUNDLED_PROMPT_DIR` is the single source of truth for the bundled
+  prompt path. The pipeline parser uses it to resolve YAML `prompt:`
+  entries; tests depend on it. Don't compute the path ad-hoc.
+- The placeholder set in `README.md` is the contract between stages and
+  fragments. A stage that introduces a new `{name}` is responsible for
+  adding it to the table; a fragment that uses an undocumented
+  placeholder will `KeyError` at format time.
+- `load_prompts` rejects empty files on purpose — silent empty prompts
+  produced confusing agent behavior in the past. Keep the check.
