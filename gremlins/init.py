@@ -18,13 +18,41 @@ def _bundled_pipeline_names() -> list[str]:
     return sorted(p.stem for p in _PIPELINES_DIR.glob("*.yaml"))
 
 
-def _collect_prompt_subpaths(stages: list[Any]) -> list[str]:
-    """Walk stage list (including parallel groups) and return unique prompt subpaths.
+_BUNDLED_PREFIX = "gremlins:"
 
-    Bundled pipelines reference prompts by bare name (e.g. 'plan.md',
-    'review/detail.md'); they're resolved against the bundled prompts dir
-    via the implicit default `prompt_dir`.
+
+def _strip_bundled_prefix(name: str) -> str:
+    return name[len(_BUNDLED_PREFIX) :] if name.startswith(_BUNDLED_PREFIX) else name
+
+
+def _rewrite_prompts_to_bare(stages: list[Any]) -> None:
+    """Strip the `gremlins:` prefix on every `prompt:` entry in-place.
+
+    After init, scaffolded YAMLs reference editable local copies under
+    `.gremlins/prompts/`, so bundled-prefixed names become bare names that
+    resolve against `prompt_dir`.
     """
+    for stage in stages:
+        if not isinstance(stage, dict):
+            continue
+        s = cast(dict[str, Any], stage)
+        if "parallel" in s:
+            _rewrite_prompts_to_bare(cast(list[Any], s["parallel"]))
+            continue
+        prompts = s.get("prompt")
+        if not prompts:
+            continue
+        if isinstance(prompts, str):
+            s["prompt"] = _strip_bundled_prefix(prompts)
+        else:
+            s["prompt"] = [_strip_bundled_prefix(p) for p in cast(list[str], prompts)]
+
+
+def _collect_prompt_subpaths(stages: list[Any]) -> list[str]:
+    """Walk stage list (including parallel groups) and return unique prompt
+    subpaths, with any `gremlins:` prefix stripped — bundled pipelines
+    reference their own prompts via that prefix, but on disk they live as
+    bare names under the bundled prompts dir."""
     seen: set[str] = set()
     result: list[str] = []
 
@@ -42,9 +70,10 @@ def _collect_prompt_subpaths(stages: list[Any]) -> list[str]:
         if isinstance(prompts, str):
             prompts = [prompts]
         for p in cast(list[str], prompts):
-            if p not in seen:
-                seen.add(p)
-                result.append(p)
+            bare = _strip_bundled_prefix(p)
+            if bare not in seen:
+                seen.add(bare)
+                result.append(bare)
 
     for stage in stages:
         _walk(stage)
@@ -135,6 +164,8 @@ def _build_plan(
     for name in selected:
         data = dict(pipeline_data[name])
         data.setdefault("prompt_dir", "../prompts")
+        stages = cast(list[Any], data.get("stages", []))
+        _rewrite_prompts_to_bare(stages)
         dst = dot_gremlins / "pipelines" / f"{name}.yaml"
         content = yaml.safe_dump(data, default_flow_style=False, sort_keys=False)
         plan.append((dst, content.encode("utf-8")))

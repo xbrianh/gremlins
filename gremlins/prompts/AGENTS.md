@@ -24,9 +24,14 @@ list filenames in their `prompt:` field; the stage loads them via
 - Literal braces that must survive `.format(...)` (e.g. shell command
   examples like `{{owner}}/{{repo}}`) are doubled in the source.
 - Compose, don't inline. A YAML stage entry's `prompt:` list is the unit
-  of reuse: `[code_style.md, plan_gh.md]` is preferred over copy-pasting
-  shared text into a new file. Add a new fragment when text is reused
-  across two or more stages.
+  of reuse: `[gremlins:code_style.md, gremlins:plan_gh.md]` is preferred
+  over copy-pasting shared text into a new file. Add a new fragment when
+  text is reused across two or more stages.
+- Bundled prompts are referenced from YAML with the `gremlins:` prefix
+  (e.g. `gremlins:code_style.md`); bare names resolve from the pipeline's
+  `prompt_dir`. The prefix makes user-authored YAMLs self-describing
+  about which prompts ship with the package vs which must be provided
+  locally.
 - Filenames track the stage they belong to (`plan.md`, `plan_gh.md`,
   `implement_local.md`). Shared fragments use a topic name
   (`code_style.md`, `bail_section.md`).

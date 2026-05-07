@@ -130,6 +130,69 @@ stages:
         load_pipeline(tmp_path / "pipeline.yaml")
 
 
+# ---- gremlins: prefix for bundled prompts ---------------------------------
+
+
+def test_bundled_prefix_resolves_to_package(tmp_path: pathlib.Path) -> None:
+    """`gremlins:NAME` resolves from the bundled prompts dir."""
+    from gremlins.prompts import BUNDLED_PROMPT_DIR
+
+    _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+stages:
+  - name: s1
+    type: verify
+    prompt: [gremlins:code_style.md]
+""",
+    )
+    pipeline = load_pipeline(tmp_path / "pipeline.yaml")
+    assert pipeline.stages[0].prompt_paths == [
+        (BUNDLED_PROMPT_DIR / "code_style.md").resolve()
+    ]
+
+
+def test_bare_name_does_not_fall_back_to_bundled(tmp_path: pathlib.Path) -> None:
+    """Bare names resolve only from prompt_dir, never from bundled."""
+    _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+prompt_dir: .
+stages:
+  - name: s1
+    type: verify
+    prompt: [code_style.md]
+""",
+    )
+    with pytest.raises(FileNotFoundError):
+        load_pipeline(tmp_path / "pipeline.yaml")
+
+
+def test_mixed_bundled_and_local_prompts(tmp_path: pathlib.Path) -> None:
+    """Single stage may mix `gremlins:` and bare-name prompts."""
+    from gremlins.prompts import BUNDLED_PROMPT_DIR
+
+    local = _make_prompt(tmp_path, "local.md")
+    _write_yaml(
+        tmp_path / "pipeline.yaml",
+        f"""\
+name: p
+prompt_dir: .
+stages:
+  - name: s1
+    type: verify
+    prompt: [gremlins:code_style.md, {local.name}]
+""",
+    )
+    pipeline = load_pipeline(tmp_path / "pipeline.yaml")
+    assert pipeline.stages[0].prompt_paths == [
+        (BUNDLED_PROMPT_DIR / "code_style.md").resolve(),
+        local,
+    ]
+
+
 # ---- prompt list -----------------------------------------------------------
 
 

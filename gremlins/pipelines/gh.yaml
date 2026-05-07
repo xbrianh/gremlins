@@ -3,14 +3,14 @@ name: gh
 default_client: claude:sonnet
 
 stages:
-  - { name: plan,            type: plan,            prompt: [code_style.md, plan_gh.md] }
-  - { name: implement,       type: implement,       prompt: [code_style.md, implement_gh.md] }
+  - { name: plan,            type: plan,            prompt: [gremlins:code_style.md, gremlins:plan_gh.md] }
+  - { name: implement,       type: implement,       prompt: [gremlins:code_style.md, gremlins:implement_gh.md] }
   - { name: handoff-branch,  type: handoff-branch }
-  - { name: verify,          type: verify,          options: { cmds: ["make check", "make test"] }, prompt: [verify_fix.md, bail_section_fix.md] }
+  - { name: verify,          type: verify,          options: { cmds: ["make check", "make test"] }, prompt: [gremlins:verify_fix.md, gremlins:bail_section_fix.md] }
   - { name: commit,          type: commit }
   - { name: open-pr,         type: open-github-pr }
   - { name: request-copilot, type: request-copilot }
-  - { name: ghreview,        type: ghreview,        prompt: [code_style.md, review_gh.md] }
+  - { name: ghreview,        type: ghreview,        prompt: [gremlins:code_style.md, gremlins:review_gh.md] }
   - { name: wait-copilot,    type: wait-copilot }
-  - { name: ghaddress,       type: ghaddress,       prompt: [code_style.md, address_gh.md, bail_section.md] }
-  - { name: ci-gate,         type: wait-ci,         prompt: [ci_fix.md, bail_section_fix.md] }
+  - { name: ghaddress,       type: ghaddress,       prompt: [gremlins:code_style.md, gremlins:address_gh.md, gremlins:bail_section.md] }
+  - { name: ci-gate,         type: wait-ci,         prompt: [gremlins:ci_fix.md, gremlins:bail_section_fix.md] }
