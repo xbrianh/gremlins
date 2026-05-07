@@ -476,53 +476,65 @@ def launch(
     state_dir = _state_root() / gr_id
     state_dir.mkdir(parents=True, exist_ok=True)
 
-    if kind == "bossgremlin" and plan:
-        plan = _resolve_boss_plan(plan, boss_issue_data, state_dir)
+    workdir = None
+    try:
+        if kind == "bossgremlin" and plan:
+            plan = _resolve_boss_plan(plan, boss_issue_data, state_dir)
 
-    # pipeline_args for state.json: includes --plan and --spec when set
-    stored_pipeline_args = list(resolved_pipeline_args)
-    if spec_path and "--spec" not in stored_pipeline_args:
-        stored_pipeline_args = ["--spec", spec_path] + stored_pipeline_args
-    if plan and "--plan" not in stored_pipeline_args:
-        stored_pipeline_args = ["--plan", plan] + stored_pipeline_args
+        # pipeline_args for state.json: includes --plan and --spec when set
+        stored_pipeline_args = list(resolved_pipeline_args)
+        if spec_path and "--spec" not in stored_pipeline_args:
+            stored_pipeline_args = ["--spec", spec_path] + stored_pipeline_args
+        if plan and "--plan" not in stored_pipeline_args:
+            stored_pipeline_args = ["--plan", plan] + stored_pipeline_args
 
-    # Persist full instructions to sidecar (state.json truncates to 200 chars)
-    instr_raw = instructions or ""
-    (state_dir / "instructions.txt").write_text(instr_raw, encoding="utf-8")
+        # Persist full instructions to sidecar (state.json truncates to 200 chars)
+        instr_raw = instructions or ""
+        (state_dir / "instructions.txt").write_text(instr_raw, encoding="utf-8")
 
-    workdir, branch, worktree_base, setup_kind = _setup_workdir(
-        kind, project_root, base_ref, gr_id
-    )
+        workdir, branch, worktree_base, setup_kind = _setup_workdir(
+            kind, project_root, base_ref, gr_id
+        )
 
-    now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    state = {
-        "id": gr_id,
-        "kind": kind,
-        "project_root": project_root,
-        "workdir": workdir,
-        "setup_kind": setup_kind,
-        "branch": branch,
-        "worktree_base": worktree_base,
-        "status": "running",
-        "started_at": now_iso,
-        "instructions": instr_raw[:200],
-        "description": desc,
-        "description_explicit": desc_explicit,
-        "parent_id": parent_id or "",
-        "pipeline_args": stored_pipeline_args,
-        "client": _launch_client_label(stored_pipeline_args, pipeline_path),
-        "pipeline_path": pipeline_path,
-        "stage": "starting",
-        "pid": None,
-    }
-    _write_state(state_dir, state)
+        now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        state = {
+            "id": gr_id,
+            "kind": kind,
+            "project_root": project_root,
+            "workdir": workdir,
+            "setup_kind": setup_kind,
+            "branch": branch,
+            "worktree_base": worktree_base,
+            "status": "running",
+            "started_at": now_iso,
+            "instructions": instr_raw[:200],
+            "description": desc,
+            "description_explicit": desc_explicit,
+            "parent_id": parent_id or "",
+            "pipeline_args": stored_pipeline_args,
+            "client": _launch_client_label(stored_pipeline_args, pipeline_path),
+            "pipeline_path": pipeline_path,
+            "stage": "starting",
+            "pid": None,
+        }
+        _write_state(state_dir, state)
 
-    # Build args for the spawned _run-pipeline process
-    spawn_args = list(stored_pipeline_args)
-    if instructions:
-        spawn_args.append(instructions)
+        # Build args for the spawned _run-pipeline process
+        spawn_args = list(stored_pipeline_args)
+        if instructions:
+            spawn_args.append(instructions)
 
-    proc = _spawn_pipeline(state_dir, workdir, gr_id, KIND_SUBCOMMAND[kind], spawn_args)
+        proc = _spawn_pipeline(
+            state_dir, workdir, gr_id, KIND_SUBCOMMAND[kind], spawn_args
+        )
+    except Exception:
+        shutil.rmtree(state_dir, ignore_errors=True)
+        if workdir:
+            try:
+                _git_mod.remove_worktree(project_root, workdir)
+            except Exception:
+                pass
+        raise
 
     (state_dir / "pid").write_text(str(proc.pid), encoding="utf-8")
     _patch_state(state_dir, pid=proc.pid)
