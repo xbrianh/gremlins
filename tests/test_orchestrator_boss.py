@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
-
 from gremlins.orchestrators.boss import _strip_arg, boss_main
 
 # ---------------------------------------------------------------------------

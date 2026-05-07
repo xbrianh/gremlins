@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import pathlib
 from collections.abc import Callable
-from typing import Optional
 
 import pytest
 
 from gremlins.stages.introspect import build_launch_parser, stage_argspecs
-
 
 # ---------------------------------------------------------------------------
 # Minimal stub replacing the real StageEntry / Stage dependencies
@@ -37,7 +35,7 @@ class _AllTypes:
         a_bool: bool,
         a_path: pathlib.Path,
         opt_str: str | None = None,
-        opt_path: Optional[pathlib.Path] = None,
+        opt_path: pathlib.Path | None = None,
     ) -> None:
         pass
 
@@ -237,11 +235,7 @@ def test_stage_flags_in_kebab_case() -> None:
 
 def test_required_stage_flag_marked_required() -> None:
     p = build_launch_parser("mypipe", _KebabStage)
-    required_flags = [
-        a.option_strings[0]
-        for a in p._actions
-        if a.required
-    ]
+    required_flags = [a.option_strings[0] for a in p._actions if a.required]
     assert "--plan-file" in required_flags
 
 
@@ -260,7 +254,15 @@ def test_help_mentions_param_name_and_type(capsys: pytest.CaptureFixture[str]) -
     with pytest.raises(SystemExit):
         p.parse_args(["--help"])
     out = capsys.readouterr().out
-    for name in ("a-str", "a-int", "a-float", "a-bool", "a-path", "opt-str", "opt-path"):
+    for name in (
+        "a-str",
+        "a-int",
+        "a-float",
+        "a-bool",
+        "a-path",
+        "opt-str",
+        "opt-path",
+    ):
         assert name in out, f"--{name} missing from --help output"
     for type_str in ("str", "int", "float", "bool", "Path"):
         assert type_str in out, f"type hint {type_str!r} missing from --help output"
@@ -273,11 +275,35 @@ def test_conflicting_name_raises() -> None:
 
 def test_required_bool_parsed_from_string() -> None:
     p = build_launch_parser("mypipe", _AllTypes)
-    args = p.parse_args(["--a-str", "x", "--a-int", "1", "--a-float", "1.0",
-                         "--a-bool", "true", "--a-path", "/tmp"])
+    args = p.parse_args(
+        [
+            "--a-str",
+            "x",
+            "--a-int",
+            "1",
+            "--a-float",
+            "1.0",
+            "--a-bool",
+            "true",
+            "--a-path",
+            "/tmp",
+        ]
+    )
     assert args.a_bool is True
-    args2 = p.parse_args(["--a-str", "x", "--a-int", "1", "--a-float", "1.0",
-                          "--a-bool", "false", "--a-path", "/tmp"])
+    args2 = p.parse_args(
+        [
+            "--a-str",
+            "x",
+            "--a-int",
+            "1",
+            "--a-float",
+            "1.0",
+            "--a-bool",
+            "false",
+            "--a-path",
+            "/tmp",
+        ]
+    )
     assert args2.a_bool is False
 
 

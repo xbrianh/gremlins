@@ -320,6 +320,7 @@ def test_launch_short_help_flag_prints_help_exits_zero(capsys):
 def test_launch_unknown_kind_exits_nonzero_with_error(monkeypatch, capsys):
     def _raise(name, root):
         raise FileNotFoundError(f"pipeline {name!r} not found")
+
     monkeypatch.setattr("gremlins.cli.resolve_pipeline_name", _raise)
     rc = main(["launch", "bogus"])
     assert rc != 0
@@ -338,6 +339,7 @@ class _FakePlanStage:
 
 def _make_fake_pipeline(stage_type: str = "plan"):
     from gremlins.pipeline import Pipeline, StageEntry
+
     entry = StageEntry(
         name="plan", type=stage_type, client=None, prompt_paths=[], options={}
     )
@@ -352,9 +354,7 @@ def test_launch_unified_dispatch_calls_launch(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.cli.load_pipeline", lambda path: _make_fake_pipeline()
     )
-    monkeypatch.setattr(
-        "gremlins.cli.STAGE_REGISTRY", {"plan": _FakePlanStage}
-    )
+    monkeypatch.setattr("gremlins.cli.STAGE_REGISTRY", {"plan": _FakePlanStage})
     launched = []
     monkeypatch.setattr(
         "gremlins.cli.launch",
@@ -385,15 +385,19 @@ def test_launch_unified_dispatch_help_no_name_exits_zero(capsys):
 def test_launch_unified_dispatch_unknown_name_exits_nonzero(monkeypatch, capsys):
     def _raise(name, root):
         raise FileNotFoundError(f"pipeline {name!r} not found; available: local, gh")
+
     monkeypatch.setattr("gremlins.cli.resolve_pipeline_name", _raise)
     rc = main(["launch", "bogus"])
     assert rc != 0
     assert "bogus" in capsys.readouterr().err
 
 
-def test_launch_unified_dispatch_unknown_name_with_help_exits_nonzero(monkeypatch, capsys):
+def test_launch_unified_dispatch_unknown_name_with_help_exits_nonzero(
+    monkeypatch, capsys
+):
     def _raise(name, root):
         raise FileNotFoundError(f"pipeline {name!r} not found; available: local, gh")
+
     monkeypatch.setattr("gremlins.cli.resolve_pipeline_name", _raise)
     rc = main(["launch", "bogus", "--help"])
     assert rc != 0
@@ -408,9 +412,7 @@ def test_launch_unified_dispatch_help_for_resolved_pipeline(monkeypatch, capsys)
     monkeypatch.setattr(
         "gremlins.cli.load_pipeline", lambda path: _make_fake_pipeline()
     )
-    monkeypatch.setattr(
-        "gremlins.cli.STAGE_REGISTRY", {"plan": _FakePlanStage}
-    )
+    monkeypatch.setattr("gremlins.cli.STAGE_REGISTRY", {"plan": _FakePlanStage})
     rc = main(["launch", "local", "--help"])
     assert rc == 0
     out = capsys.readouterr().out
@@ -429,7 +431,7 @@ def test_launch_list_prints_pipeline_names(tmp_path, monkeypatch, capsys):
     ]
     monkeypatch.setattr("gremlins.cli.list_pipelines", lambda root: fake_pipelines)
 
-    from gremlins.pipeline import Pipeline, StageEntry
+    from gremlins.pipeline import Pipeline
 
     def fake_load(path):
         return Pipeline(name=path.stem, path=path, stages=[])
@@ -447,6 +449,7 @@ def test_launch_list_prints_pipeline_names(tmp_path, monkeypatch, capsys):
 def test_launch_list_shows_unloadable_on_exception(tmp_path, monkeypatch, capsys):
     fake_pipelines = [("broken", tmp_path / "broken.yaml")]
     monkeypatch.setattr("gremlins.cli.list_pipelines", lambda root: fake_pipelines)
+
     def _raise(_path):
         raise ValueError("bad yaml")
 

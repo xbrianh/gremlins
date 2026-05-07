@@ -579,7 +579,9 @@ def test_local_main_resume_requires_each_persisted_stage_client(
 # ---------------------------------------------------------------------------
 
 
-def test_local_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch, make_state_dir):
+def test_local_stage_inputs_instructions_reach_plan(
+    tmp_path, monkeypatch, make_state_dir
+):
     """stage_inputs["instructions"] from state.json is passed to plan.Plan, and
     takes precedence over the CLI positional argument."""
     gr_id = "test-si-local"
@@ -616,8 +618,10 @@ def test_local_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch, make_
     monkeypatch.setattr(_plan_mod.Plan, "__init__", _capturing_plan_init)
     monkeypatch.setattr(_plan_mod.Plan, "run", lambda self, pipe: None)
 
-    from gremlins.stages import implement as _impl_mod, review_code as _rc_mod
-    from gremlins.stages import address_code as _ac_mod, verify as _v_mod
+    from gremlins.stages import address_code as _ac_mod
+    from gremlins.stages import implement as _impl_mod
+    from gremlins.stages import review_code as _rc_mod
+    from gremlins.stages import verify as _v_mod
 
     monkeypatch.setattr(_impl_mod.Implement, "run", lambda self, pipe: None)
     monkeypatch.setattr(_rc_mod.ReviewCode, "run", lambda self, pipe: None)

@@ -335,7 +335,9 @@ stages:
 def test_launch_ghgremlin_persists_pipeline_default_client(lenv_with_gh):
     """ghgremlin stores the default provider/model label."""
     launcher = _launcher()
-    gr_id = launcher.launch("gh", stage_inputs={"instructions": "test gh default client"})
+    gr_id = launcher.launch(
+        "gh", stage_inputs={"instructions": "test gh default client"}
+    )
     state = _read_state(_gremlins_state_root(lenv_with_gh) / gr_id)
     assert state["client"] == "claude:sonnet"
 
@@ -391,7 +393,9 @@ def test_launch_plan_and_instructions_mutex(lenv):
     plan_file.write_text("# X\n", encoding="utf-8")
     launcher = _launcher()
     with pytest.raises(ValueError, match="mutually exclusive"):
-        launcher.launch("local", plan=str(plan_file), stage_inputs={"instructions": "extra"})
+        launcher.launch(
+            "local", plan=str(plan_file), stage_inputs={"instructions": "extra"}
+        )
 
 
 def test_launch_empty_plan_file_rejected(lenv):
@@ -764,7 +768,9 @@ def test_full_localgremlin_pipeline(lenv, monkeypatch):
     """plan → implement → review → address all run once in order."""
     monkeypatch.delenv("GREMLINS_TEST_NOOP_PIPELINE")
     launcher = _launcher()
-    gr_id = launcher.launch("local", stage_inputs={"instructions": "test full pipeline"})
+    gr_id = launcher.launch(
+        "local", stage_inputs={"instructions": "test full pipeline"}
+    )
     state_dir = _gremlins_state_root(lenv) / gr_id
     assert _wait_for_finished(state_dir, timeout=120), (
         f"pipeline did not finish; log:\n{(state_dir / 'log').read_text(errors='replace')[-2000:]}"
@@ -919,9 +925,7 @@ def test_launch_threads_spec_path_into_pipeline_args(lenv):
     spec_file.write_text("the overall spec", encoding="utf-8")
 
     launcher = _launcher()
-    gr_id = launcher.launch(
-        "local", plan=str(plan_file), spec_path=str(spec_file)
-    )
+    gr_id = launcher.launch("local", plan=str(plan_file), spec_path=str(spec_file))
     state = _read_state(_gremlins_state_root(lenv) / gr_id)
     assert "--spec" in state["pipeline_args"]
     idx = state["pipeline_args"].index("--spec")
@@ -934,9 +938,7 @@ def test_launch_rejects_missing_spec_path(lenv):
     plan_file.write_text("# Plan\n", encoding="utf-8")
     launcher = _launcher()
     with pytest.raises(ValueError, match="--spec"):
-        launcher.launch(
-            "local", plan=str(plan_file), spec_path="/nonexistent/spec.md"
-        )
+        launcher.launch("local", plan=str(plan_file), spec_path="/nonexistent/spec.md")
     dirs = (
         list(_gremlins_state_root(lenv).glob("*"))
         if _gremlins_state_root(lenv).exists()

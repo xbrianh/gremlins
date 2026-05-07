@@ -50,9 +50,7 @@ def _resolve_type(annotation: Any, param_name: str) -> type:
         non_none = [a for a in args if a is not type(None)]
         if len(non_none) == 1:
             return _resolve_type(non_none[0], param_name)
-    raise TypeError(
-        f"param {param_name!r} has unsupported annotation: {annotation!r}"
-    )
+    raise TypeError(f"param {param_name!r} has unsupported annotation: {annotation!r}")
 
 
 def _annotation_str(annotation: Any) -> str:
@@ -86,7 +84,7 @@ def stage_argspecs(stage_cls: type) -> list[ArgSpec]:
             f"could not resolve type hints for {stage_cls.__name__}.__init__"
         ) from exc
     sig = inspect.signature(stage_cls.__init__)
-    specs = []
+    specs: list[ArgSpec] = []
     for name, param in sig.parameters.items():
         if name in SKIP_PARAMS:
             continue
@@ -110,9 +108,7 @@ def stage_argspecs(stage_cls: type) -> list[ArgSpec]:
     return specs
 
 
-def build_launch_parser(
-    pipeline_name: str, stage_cls: type
-) -> argparse.ArgumentParser:
+def build_launch_parser(pipeline_name: str, stage_cls: type) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog=f"gremlins launch {pipeline_name}")
     p.add_argument("--description", default=None)
     p.add_argument("--parent", dest="parent_id", default=None)

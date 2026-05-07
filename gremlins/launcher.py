@@ -68,15 +68,23 @@ def _extract_h1(path: str) -> str:
     return ""
 
 
-_GH_STAGE_TYPES = frozenset({
-    "handoff-branch", "commit", "open-github-pr",
-    "request-copilot", "wait-copilot", "ghaddress", "ghreview", "wait-ci",
-})
+_GH_STAGE_TYPES = frozenset(
+    {
+        "handoff-branch",
+        "commit",
+        "open-github-pr",
+        "request-copilot",
+        "wait-copilot",
+        "ghaddress",
+        "ghreview",
+        "wait-ci",
+    }
+)
 
 _MODE_SUBCOMMAND: dict[str, str] = {"local": "_local", "gh": "_gh", "boss": "_boss"}
 
 
-def _pipeline_mode(pipeline: "Pipeline") -> str:
+def _pipeline_mode(pipeline: Pipeline) -> str:
     if pipeline.stages and pipeline.stages[0].type == "chain":
         return "boss"
     if pipeline.name == "gh" or any(s.type in _GH_STAGE_TYPES for s in pipeline.stages):
@@ -86,8 +94,12 @@ def _pipeline_mode(pipeline: "Pipeline") -> str:
 
 def _infer_mode_from_kind(kind: str) -> str:
     _map = {
-        "localgremlin": "local", "ghgremlin": "gh", "bossgremlin": "boss",
-        "local": "local", "gh": "gh", "boss": "boss",
+        "localgremlin": "local",
+        "ghgremlin": "gh",
+        "bossgremlin": "boss",
+        "local": "local",
+        "gh": "gh",
+        "boss": "boss",
     }
     return _map.get(kind, "local")
 
