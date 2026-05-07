@@ -15,6 +15,11 @@ from gremlins.prompts import BUNDLED_PROMPT_DIR, load_prompts
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 
+# Implement turns can sit silent for many minutes while the model edits files
+# or runs long subagents/tools without emitting stream events. The default
+# 120s STREAM_IDLE_TIMEOUT was firing spuriously on healthy implement runs;
+# 600s (10 min) gives enough slack to ride out the longest observed gaps
+# without masking a genuinely hung process.
 IMPLEMENT_IDLE_TIMEOUT = 600.0
 
 

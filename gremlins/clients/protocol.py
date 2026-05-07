@@ -26,7 +26,16 @@ class ClaudeClient(Protocol):
         max_retries: int = 2,
         cwd: pathlib.Path | None = None,
         idle_timeout: float | None = None,
-    ) -> CompletedRun: ...
+    ) -> CompletedRun:
+        """Run a single Claude turn.
+
+        ``idle_timeout`` is the maximum seconds to wait between successive
+        stream events from the underlying subprocess (i.e. "no event
+        received" — not wall-clock total runtime). ``None`` means use the
+        client's default (see ``STREAM_IDLE_TIMEOUT``). Clients that do not
+        stream may ignore this argument.
+        """
+        ...
 
     def reap_all(self) -> None: ...
 
