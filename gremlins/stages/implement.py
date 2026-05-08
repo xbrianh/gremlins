@@ -155,7 +155,7 @@ class Implement(Stage):
                     json.loads(state_file.read_text(encoding="utf-8")).get("issue_num")
                     or ""
                 )
-            except Exception:
+            except (OSError, ValueError, KeyError):
                 pass
 
         if issue_num:

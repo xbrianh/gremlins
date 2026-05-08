@@ -48,7 +48,9 @@ class HandoffBranch(Stage):
         return PreImplState(head=head, branch=data.get("impl_pre_branch") or "")
 
     def run(self, pipe: Any) -> HandoffBranchResult:
-        pre_state: PreImplState = pipe.impl_pre_state or self._pre_state_from_file()
+        pre_state: PreImplState = (
+            getattr(pipe, "impl_pre_state", None) or self._pre_state_from_file()
+        )
         impl_cwd = str(self.state.worktree) if self.state.worktree is not None else None
         outcome = classify_impl_outcome(pre_state, cwd=impl_cwd)
 
