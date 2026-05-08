@@ -25,7 +25,7 @@ from gremlins.env_file import load_env_file
 from gremlins.gh_utils import get_repo
 from gremlins.logging_setup import configure_logging
 from gremlins.orchestrators.base import read_state_field
-from gremlins.orchestrators.gh_pipeline import GHPipeline
+from gremlins.orchestrators.pipeline import Pipeline
 from gremlins.pipeline import (
     load_pipeline,
     resolve_pipeline_path,
@@ -174,13 +174,14 @@ def gh_main(
         shutil.copyfile(spec_src, spec_file)
 
     try:
-        pipe = GHPipeline(
+        pipe = Pipeline(
             pipeline.stages,
             args=args,
             session_dir=session_dir,
             gr_id=gr_id,
             pipeline_data=pipeline,
             repo=repo,
+            target="github",
             state_file=state_file,
             spec_clients=_spec_clients,
             stage_specs=stage_specs,

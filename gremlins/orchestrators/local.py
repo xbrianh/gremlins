@@ -27,7 +27,7 @@ from gremlins.git import (
     in_git_repo,
 )
 from gremlins.logging_setup import configure_logging
-from gremlins.orchestrators.local_pipeline import LocalPipeline
+from gremlins.orchestrators.pipeline import Pipeline
 from gremlins.pipeline import (
     load_pipeline,
     resolve_pipeline_path,
@@ -157,11 +157,12 @@ def local_main(
     else:
         _signal_clients = [to_client(default_spec)]
     try:
-        pipe = LocalPipeline(
+        pipe = Pipeline(
             pipeline.stages,
             args=args,
             session_dir=session_dir,
             gr_id=gr_id,
+            target="local",
             test_client=client,
             spec_clients=_spec_clients,
             stage_specs=stage_specs,

@@ -3,8 +3,7 @@ import pathlib
 
 import pytest
 
-from gremlins.orchestrators.gh_pipeline import GHPipeline
-from gremlins.orchestrators.local_pipeline import LocalPipeline
+from gremlins.orchestrators.pipeline import Pipeline
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline import (
     StageEntry,
@@ -39,24 +38,26 @@ def _local(
     *,
     args: argparse.Namespace,
     tmp_path: pathlib.Path,
-) -> LocalPipeline:
-    return LocalPipeline(
+) -> Pipeline:
+    return Pipeline(
         stages,
         args=args,
         session_dir=tmp_path,
         gr_id=None,
         pipeline_data=_pipeline_data(stages),
+        target="local",
     )
 
 
-def test_local_pipeline_constructs_from_bundled_yaml(tmp_path: pathlib.Path) -> None:
+def test_pipeline_constructs_from_local_yaml(tmp_path: pathlib.Path) -> None:
     pipeline_data = load_pipeline(resolve_pipeline_path("local", pathlib.Path.cwd()))
-    pipe = LocalPipeline(
+    pipe = Pipeline(
         pipeline_data.stages,
         args=_args(),
         session_dir=tmp_path,
         gr_id=None,
         pipeline_data=pipeline_data,
+        target="local",
     )
 
     assert len(pipe.stages) > 0
@@ -65,22 +66,23 @@ def test_local_pipeline_constructs_from_bundled_yaml(tmp_path: pathlib.Path) -> 
     assert "plan" in stage_types
     assert "implement" in stage_types
     assert pipe.target == "local"
-    assert LocalPipeline.STAGE_TYPES["plan"] is plan.Plan
-    assert LocalPipeline.STAGE_TYPES["implement"] is implement.Implement
-    assert LocalPipeline.STAGE_TYPES["review-code"] is review_code.ReviewCode
-    assert LocalPipeline.STAGE_TYPES["address-code"] is address_code.AddressCode
-    assert LocalPipeline.STAGE_TYPES["verify"] is verify.Verify
+    assert Pipeline.STAGE_TYPES["plan"] is plan.Plan
+    assert Pipeline.STAGE_TYPES["implement"] is implement.Implement
+    assert Pipeline.STAGE_TYPES["review-code"] is review_code.ReviewCode
+    assert Pipeline.STAGE_TYPES["address-code"] is address_code.AddressCode
+    assert Pipeline.STAGE_TYPES["verify"] is verify.Verify
 
 
-def test_gh_pipeline_constructs_from_bundled_yaml(tmp_path: pathlib.Path) -> None:
+def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
     pipeline_data = load_pipeline(resolve_pipeline_path("gh", pathlib.Path.cwd()))
-    pipe = GHPipeline(
+    pipe = Pipeline(
         pipeline_data.stages,
         args=_args(),
         session_dir=tmp_path,
         gr_id=None,
         pipeline_data=pipeline_data,
         repo="",
+        target="github",
         state_file=None,
     )
 
@@ -90,25 +92,15 @@ def test_gh_pipeline_constructs_from_bundled_yaml(tmp_path: pathlib.Path) -> Non
     assert "plan" in stage_types
     assert "implement" in stage_types
     assert pipe.target == "github"
-    assert GHPipeline.STAGE_TYPES["plan"] is plan.Plan
-    assert GHPipeline.STAGE_TYPES["implement"] is implement.Implement
-    assert GHPipeline.STAGE_TYPES["commit"] is commit.Commit
-    assert GHPipeline.STAGE_TYPES["open-github-pr"] is open_github_pr.OpenGitHubPR
-    assert GHPipeline.STAGE_TYPES["request-copilot"] is request_copilot.RequestCopilot
-    assert GHPipeline.STAGE_TYPES["ghreview"] is review_code.ReviewCode
-    assert GHPipeline.STAGE_TYPES["ghaddress"] is address_code.AddressCode
-    assert GHPipeline.STAGE_TYPES["wait-ci"] is wait_ci.WaitCI
-    assert GHPipeline.STAGE_TYPES["wait-copilot"] is wait_copilot.WaitCopilot
-
-
-def test_local_pipeline_rejects_gh_stages(tmp_path: pathlib.Path) -> None:
-    gh_stages = [
-        StageEntry(
-            name="commit", type="commit", client=None, prompt_paths=[], options={}
-        )
-    ]
-    with pytest.raises(ValueError, match="commit"):
-        _local(gh_stages, args=_args(), tmp_path=tmp_path)
+    assert Pipeline.STAGE_TYPES["plan"] is plan.Plan
+    assert Pipeline.STAGE_TYPES["implement"] is implement.Implement
+    assert Pipeline.STAGE_TYPES["commit"] is commit.Commit
+    assert Pipeline.STAGE_TYPES["open-github-pr"] is open_github_pr.OpenGitHubPR
+    assert Pipeline.STAGE_TYPES["request-copilot"] is request_copilot.RequestCopilot
+    assert Pipeline.STAGE_TYPES["ghreview"] is review_code.ReviewCode
+    assert Pipeline.STAGE_TYPES["ghaddress"] is address_code.AddressCode
+    assert Pipeline.STAGE_TYPES["wait-ci"] is wait_ci.WaitCI
+    assert Pipeline.STAGE_TYPES["wait-copilot"] is wait_copilot.WaitCopilot
 
 
 # ---------------------------------------------------------------------------
