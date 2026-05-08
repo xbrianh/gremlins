@@ -10,7 +10,7 @@ from collections.abc import Callable
 
 from gremlins.clients import ClientSpec
 from gremlins.clients.protocol import ClaudeClient
-from gremlins.git import DirtyOnly, HeadAdvanced, PreImplState, record_pre_impl_state
+from gremlins.git import DirtyOnly, HeadAdvanced, PreImplState
 from gremlins.orchestrators.base import (
     Pipeline,
     die,
@@ -148,12 +148,6 @@ class GHPipeline(Pipeline):
                             "could not read spec.md (%s); proceeding without north-star context",
                             exc,
                         )
-                self.impl_pre_state = record_pre_impl_state()
-                patch_state(
-                    self.gr_id,
-                    impl_pre_head=self.impl_pre_state.head,
-                    impl_pre_branch=self.impl_pre_state.branch,
-                )
                 stage = implement.Implement(
                     entry,
                     model,

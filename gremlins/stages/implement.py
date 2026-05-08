@@ -9,11 +9,13 @@ from typing import Any
 from gremlins.git import (
     has_dirty_worktree,
     head_sha,
+    record_pre_impl_state,
 )
 from gremlins.pipeline import StageEntry
 from gremlins.prompts import BUNDLED_PROMPT_DIR, load_prompts
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
+from gremlins.state import patch_state
 
 # Implement turns can sit silent for many minutes while the model edits files
 # or runs long subagents/tools without emitting stream events. The default
@@ -157,6 +159,14 @@ class Implement(Stage):
             plan_location_note = (
                 "Reviews go to PR comments; the only changes in this working tree "
                 "should be product code."
+            )
+
+        pre = record_pre_impl_state()
+        if hasattr(pipe, "impl_pre_state"):
+            pipe.impl_pre_state = pre
+        if self.state.gr_id:
+            patch_state(
+                self.state.gr_id, impl_pre_head=pre.head, impl_pre_branch=pre.branch
             )
 
         template = load_prompts(self.prompt_paths)
