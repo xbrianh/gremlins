@@ -12,7 +12,10 @@ import pytest
 from gremlins.git import DirtyOnly, DivergentHead, EmptyImpl, HeadAdvanced, PreImplState
 from gremlins.pipeline import StageEntry
 from gremlins.stages.base import StageContext
-from gremlins.stages.materialize_to_branch import MaterializeToBranch, MaterializeToBranchResult
+from gremlins.stages.materialize_to_branch import (
+    MaterializeToBranch,
+    MaterializeToBranchResult,
+)
 
 PRE_STATE = PreImplState(head="abc123", branch="main")
 
@@ -48,7 +51,8 @@ def test_head_advanced_creates_materialized_branch(tmp_path: pathlib.Path) -> No
     outcome = HeadAdvanced(commit_count=2)
     with (
         patch(
-            "gremlins.stages.materialize_to_branch.classify_impl_outcome", return_value=outcome
+            "gremlins.stages.materialize_to_branch.classify_impl_outcome",
+            return_value=outcome,
         ),
         patch(
             "gremlins.stages.materialize_to_branch.create_handoff_branch",
@@ -77,7 +81,9 @@ def test_dirty_only_no_branch_created(tmp_path: pathlib.Path) -> None:
             "gremlins.stages.materialize_to_branch.classify_impl_outcome",
             return_value=DirtyOnly(),
         ),
-        patch("gremlins.stages.materialize_to_branch.create_handoff_branch") as mock_create,
+        patch(
+            "gremlins.stages.materialize_to_branch.create_handoff_branch"
+        ) as mock_create,
         patch("gremlins.stages.materialize_to_branch.patch_state"),
     ):
         result = stage.run(_pipe())
@@ -89,7 +95,8 @@ def test_dirty_only_no_branch_created(tmp_path: pathlib.Path) -> None:
 def test_empty_impl_raises(tmp_path: pathlib.Path) -> None:
     stage, _ = _make_stage(tmp_path)
     with patch(
-        "gremlins.stages.materialize_to_branch.classify_impl_outcome", return_value=EmptyImpl()
+        "gremlins.stages.materialize_to_branch.classify_impl_outcome",
+        return_value=EmptyImpl(),
     ):
         with pytest.raises(RuntimeError, match="no changes"):
             stage.run(_pipe())
@@ -99,7 +106,8 @@ def test_divergent_head_raises(tmp_path: pathlib.Path) -> None:
     stage, _ = _make_stage(tmp_path)
     outcome = DivergentHead(pre_head="abc123", post_head="def456")
     with patch(
-        "gremlins.stages.materialize_to_branch.classify_impl_outcome", return_value=outcome
+        "gremlins.stages.materialize_to_branch.classify_impl_outcome",
+        return_value=outcome,
     ):
         with pytest.raises(RuntimeError, match="without advancing"):
             stage.run(_pipe())
@@ -154,7 +162,8 @@ def test_run_writes_to_state_json(tmp_path: pathlib.Path) -> None:
     outcome = HeadAdvanced(commit_count=1)
     with (
         patch(
-            "gremlins.stages.materialize_to_branch.classify_impl_outcome", return_value=outcome
+            "gremlins.stages.materialize_to_branch.classify_impl_outcome",
+            return_value=outcome,
         ),
         patch(
             "gremlins.stages.materialize_to_branch.create_handoff_branch",
