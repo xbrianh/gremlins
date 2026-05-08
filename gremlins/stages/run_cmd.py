@@ -5,16 +5,12 @@ from __future__ import annotations
 import subprocess
 from typing import Any
 
-from gremlins.pipeline import StageEntry
 from gremlins.stages.base import Stage
 from gremlins.stages.loop import RunCmdFailed
 from gremlins.stages.registry import register_stage
 
 
 class RunCmd(Stage):
-    def __init__(self, entry: StageEntry, model: str | None) -> None:
-        super().__init__(entry, model)
-
     def run(self, pipe: Any) -> None:  # noqa: ARG002
         cmds = [c for c in self.options.get("cmds", []) if c.strip()]
         if not cmds:

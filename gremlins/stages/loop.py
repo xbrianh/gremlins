@@ -29,14 +29,14 @@ class LoopExhausted(RuntimeError):
 class LoopStage(CompoundStage):
     """Iterate body runners until HEAD is stable or max_iterations is reached.
 
-    body_runners are called in order each iteration.  If a runner raises
-    RunCmdFailed the failure is noted and subsequent runners still execute
-    (so a fix agent can act on the failure) — UNLESS this is the final
-    iteration, in which case fix runners are skipped and the stage bails.
+    body_runners are called in order each iteration.  Subsequent runners only
+    execute when a preceding runner raised RunCmdFailed — on a clean iteration
+    all remaining runners are skipped.  Fix runners are also skipped on the
+    final iteration even after a failure, so the stage bails without retrying.
 
     Termination: after an iteration where no RunCmdFailed was raised, if
     HEAD is unchanged (head-stable) the loop exits cleanly.  If HEAD
-    advanced (the fix agent committed), the loop continues.
+    advanced, the loop continues (or exits on the final iteration).
     """
 
     def __init__(
@@ -55,12 +55,13 @@ class LoopStage(CompoundStage):
         cls,
         runners: list[Callable[[], None]],
         *,
+        name: str = "loop",
         max_iterations: int,
     ) -> LoopStage:
         from gremlins.pipeline import StageEntry
 
         entry = StageEntry(
-            name="loop", type="loop", client=None, prompt_paths=[], options={}
+            name=name, type="loop", client=None, prompt_paths=[], options={}
         )
         return cls(entry, body_runners=runners, max_iterations=max_iterations)
 
@@ -71,9 +72,9 @@ class LoopStage(CompoundStage):
                 head_before = _git.head_sha(self.state.cwd)
                 had_failure = False
 
-                for runner in self._body_runners:
-                    if had_failure and iteration == self._max_iterations:
-                        continue  # skip fix runners on the final attempt
+                for i, runner in enumerate(self._body_runners):
+                    if i > 0 and (not had_failure or iteration == self._max_iterations):
+                        continue
                     try:
                         runner()
                     except RunCmdFailed:
@@ -86,6 +87,8 @@ class LoopStage(CompoundStage):
                     logger.info(
                         "loop iteration %d: HEAD advanced, continuing", iteration
                     )
+                    if iteration == self._max_iterations:
+                        return  # checks passed; accept even if HEAD advanced
                 elif iteration == self._max_iterations:
                     break
 

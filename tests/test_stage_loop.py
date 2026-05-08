@@ -66,6 +66,23 @@ def test_loop_cmd_failure_then_fix_then_green(tmp_path):
     assert state["fixed"]
 
 
+def test_loop_fix_skipped_on_success(tmp_path):
+    """Fix runner must not execute when the check runner succeeds."""
+    fix_calls: list[int] = []
+
+    def check() -> None:
+        pass  # always succeeds
+
+    def fix() -> None:
+        fix_calls.append(1)
+
+    loop = LoopStage.from_runners([check, fix], max_iterations=3)
+    loop.bind(_loop_ctx(tmp_path))
+    loop.run(None)
+
+    assert fix_calls == []
+
+
 def test_loop_exhausted_raises_loop_exhausted(tmp_path):
     def check() -> None:
         raise RunCmdFailed("always fails")

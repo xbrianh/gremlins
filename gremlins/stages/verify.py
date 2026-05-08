@@ -79,11 +79,12 @@ class Verify(Stage):
                 capture_output=True,
                 text=True,
             )
-            log_file.write_text(result.stdout + result.stderr, encoding="utf-8")
+            output = result.stdout + result.stderr
+            log_file.write_text(output, encoding="utf-8")
             if result.returncode != 0:
                 logger.info("verify attempt %d: failed (exit %d)", n, result.returncode)
-                last_output[0] = log_file.read_text(encoding="utf-8")
-                raise RunCmdFailed(result.returncode)
+                last_output[0] = output
+                raise RunCmdFailed(output)
             logger.info("verify attempt %d: green", n)
             last_output[0] = None
 
@@ -106,7 +107,7 @@ class Verify(Stage):
             )
             check_bail(state.gr_id, f"verify-fix-{n}", child_key=state.child_key)
 
-        loop = LoopStage.from_runners([_run_cmd, _run_fix], max_iterations=max_attempts)
+        loop = LoopStage.from_runners([_run_cmd, _run_fix], name="verify", max_iterations=max_attempts)
         loop.bind(state)
         try:
             loop.run(pipe)
