@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import json
 import logging
 import pathlib
@@ -48,20 +47,10 @@ def _expand_stage_entries(raw_stages: list[StageEntry]) -> list[StageEntry]:
                 if child.name in child_names or child.name in top_level_names:
                     raise ValueError(f"duplicate child stage name {child.name!r}")
                 child_names.add(child.name)
-            for name, typ in [
-                (f"{entry.name}-fanout", "parallel-fanout"),
-                (entry.name, "parallel-group"),
-                (f"{entry.name}-fanin", "parallel-fanin"),
-            ]:
-                if name in seen:
-                    raise ValueError(f"pipeline has duplicate stage name {name!r}")
-                seen.add(name)
-                result.append(dataclasses.replace(entry, name=name, type=typ))
-        else:
-            if entry.name in seen:
-                raise ValueError(f"pipeline has duplicate stage name {entry.name!r}")
-            seen.add(entry.name)
-            result.append(entry)
+        if entry.name in seen:
+            raise ValueError(f"pipeline has duplicate stage name {entry.name!r}")
+        seen.add(entry.name)
+        result.append(entry)
 
     return result
 
@@ -84,10 +73,10 @@ class StageRunner:
     ) -> None:
         unknown: list[str] = []
         for s in stages:
-            if s.type == "parallel":
-                unknown.extend(c.type for c in s.body if c.type not in STAGE_BUILDERS)
-            elif s.type not in STAGE_BUILDERS:
+            if s.type not in STAGE_BUILDERS:
                 unknown.append(s.type)
+            elif s.type == "parallel":
+                unknown.extend(c.type for c in s.body if c.type not in STAGE_BUILDERS)
         if unknown:
             raise ValueError(f"StageRunner does not support stage type(s): {unknown}")
         self.stages = _expand_stage_entries(stages)
@@ -149,55 +138,19 @@ class StageRunner:
 
         return _run
 
-    def _build_parallel_stage(self, e: StageEntry, gr_id: str | None) -> Any:
-        from gremlins.stages.parallel import ParallelStage
-
-        group_dir = self.session_dir / e.name
-        group_dir.mkdir(parents=True, exist_ok=True)
-        child_runners: list[tuple[str, StageContext, Callable[[], None]]] = []
-        for child in e.body:
-            child_spec = require_stage_spec(self.stage_specs, child.name)
-            child_dir = group_dir / child.name
-            child_dir.mkdir(parents=True, exist_ok=True)
-            child_ctx = StageContext(
-                client=self._get_client(child_spec),
-                session_dir=child_dir,
-                gr_id=gr_id,
-                child_key=child.name,
-            )
-            child_runners.append(
-                (child.name, child_ctx, self._make_runner(child, child_ctx, child_spec))
-            )
-        return ParallelStage(
-            e,
-            None,
-            child_runners,
-            max_concurrent=e.max_concurrent,
-            cancel_on_bail=e.cancel_on_bail,
-            bail_policy=e.bail_policy,
-            gr_id=gr_id,
-            project_root=pathlib.Path.cwd(),
-            set_stage_fn=lambda n: set_stage(gr_id, n),
-        )
-
     def _collect_stages(
         self, stages: list[StageEntry]
     ) -> list[tuple[str, Callable[[], None]]]:
         gr_id = self.gr_id
         built: list[tuple[str, Callable[[], None]]] = []
         for e in stages:
-            if e.type == "parallel":
-                built.extend(
-                    self._build_parallel_stage(e, gr_id).build_runtime_stages()
-                )
-            else:
-                stage_spec = require_stage_spec(self.stage_specs, e.name)
-                stage_ctx = StageContext(
-                    client=self._get_client(stage_spec),
-                    session_dir=self.session_dir,
-                    gr_id=gr_id,
-                )
-                built.append((e.name, self._make_runner(e, stage_ctx, stage_spec)))
+            stage_spec = require_stage_spec(self.stage_specs, e.name)
+            stage_ctx = StageContext(
+                client=self._get_client(stage_spec),
+                session_dir=self.session_dir,
+                gr_id=gr_id,
+            )
+            built.append((e.name, self._make_runner(e, stage_ctx, stage_spec)))
         return built
 
     def run(self) -> None:

@@ -156,22 +156,24 @@ def test_validate_resume_target_parallel_group_name(tmp_path: pathlib.Path) -> N
     pipe.validate_resume_target()  # "reviews" is a valid expanded name
 
 
-def test_validate_resume_target_parallel_fanout(tmp_path: pathlib.Path) -> None:
+def test_validate_resume_target_parallel_fanout_rejected(tmp_path: pathlib.Path) -> None:
     pipe = _local(
         [_make_parallel_stage("reviews", ["review-a", "review-b"])],
         args=_args(resume_from="reviews-fanout"),
         tmp_path=tmp_path,
     )
-    pipe.validate_resume_target()  # fanout is valid
+    with pytest.raises(ValueError, match="reviews-fanout"):
+        pipe.validate_resume_target()  # fanout is internal, not a resume target
 
 
-def test_validate_resume_target_parallel_fanin(tmp_path: pathlib.Path) -> None:
+def test_validate_resume_target_parallel_fanin_rejected(tmp_path: pathlib.Path) -> None:
     pipe = _local(
         [_make_parallel_stage("reviews", ["review-a", "review-b"])],
         args=_args(resume_from="reviews-fanin"),
         tmp_path=tmp_path,
     )
-    pipe.validate_resume_target()  # fanin is valid
+    with pytest.raises(ValueError, match="reviews-fanin"):
+        pipe.validate_resume_target()  # fanin is internal, not a resume target
 
 
 def test_validate_resume_target_child_name_rejected(tmp_path: pathlib.Path) -> None:
@@ -283,15 +285,10 @@ def test_parallel_expansion_in_constructor(tmp_path: pathlib.Path) -> None:
     pipe = _local([plan_entry, parallel], args=_args(), tmp_path=tmp_path)
 
     stage_names = [s.name for s in pipe.stages]
-    assert all(s.type != "parallel" for s in pipe.stages)
-    assert "reviews-fanout" in stage_names
     assert "reviews" in stage_names
-    assert "reviews-fanin" in stage_names
     assert "review-a" not in stage_names
     by_name = {s.name: s for s in pipe.stages}
-    assert by_name["reviews-fanout"].type == "parallel-fanout"
-    assert by_name["reviews"].type == "parallel-group"
-    assert by_name["reviews-fanin"].type == "parallel-fanin"
+    assert by_name["reviews"].type == "parallel"
 
 
 def test_stage_builders_registry_covers_all_known_types() -> None:
@@ -310,6 +307,7 @@ def test_stage_builders_registry_covers_all_known_types() -> None:
         "review-code",
         "address-code",
         "chain",
+        "parallel",
     }
     assert expected <= set(STAGE_BUILDERS)
 

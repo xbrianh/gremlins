@@ -11,6 +11,6 @@ if TYPE_CHECKING:
 class CompoundStage(Stage):
     """Base for stages that own a list of child stage entries (body)."""
 
-    def __init__(self, entry: StageEntry, model: str | None) -> None:
-        super().__init__(entry, model)
+    def __init__(self, entry: StageEntry) -> None:
+        super().__init__(entry, None)
         self.body = entry.body

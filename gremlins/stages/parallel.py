@@ -35,7 +35,6 @@ class ParallelStage(CompoundStage):
     def __init__(
         self,
         entry: StageEntry,
-        model: str | None,
         child_runners: list[tuple[str, StageContext, Callable[[], None]]],
         *,
         max_concurrent: int | None,
@@ -45,7 +44,7 @@ class ParallelStage(CompoundStage):
         project_root: pathlib.Path,
         set_stage_fn: Callable[[str], None],
     ) -> None:
-        super().__init__(entry, model)
+        super().__init__(entry)
         self._child_runners = child_runners
         self._max_concurrent = max_concurrent
         self._cancel_on_bail = cancel_on_bail
@@ -68,7 +67,8 @@ class ParallelStage(CompoundStage):
         )
 
     def run(self, pipe: Any) -> None:
-        raise NotImplementedError("use build_runtime_stages()")
+        for _, fn in self.build_runtime_stages():
+            fn()
 
 
 def _parallel_stages(
@@ -87,7 +87,7 @@ def _parallel_stages(
 
     # In-process mirror of state.json parallel_worktrees[group_name].
     _worktree_paths: dict[str, pathlib.Path] = {}
-    _base_head: list[str] = [""]  # list so nested closures can mutate
+    base_head: str = ""
 
     def _in_git_repo() -> bool:
         try:
@@ -103,6 +103,7 @@ def _parallel_stages(
             return False
 
     def _hydrate_from_state() -> None:
+        nonlocal base_head
         from gremlins.state import resolve_state_file
 
         if _worktree_paths:
@@ -117,7 +118,7 @@ def _parallel_stages(
             paths: dict[str, str] = entry.get("paths") or {}
             for k, v in paths.items():
                 _worktree_paths[k] = pathlib.Path(v)
-            _base_head[0] = entry.get("base_head", "") or _base_head[0]
+            base_head = entry.get("base_head", "") or base_head
         except Exception as exc:
             logger.warning(
                 "parallel group %r: could not hydrate worktree paths: %s",
@@ -131,7 +132,7 @@ def _parallel_stages(
         patch_parallel_worktrees(
             gr_id,
             group_name,
-            base_head=_base_head[0],
+            base_head=base_head,
             paths={k: str(v) for k, v in _worktree_paths.items()},
         )
 
@@ -164,6 +165,7 @@ def _parallel_stages(
             pass
 
     def _fan_out() -> None:
+        nonlocal base_head
         set_stage_fn(fanout_name)
 
         _hydrate_from_state()
@@ -171,7 +173,7 @@ def _parallel_stages(
         if prior:
             _remove_worktrees(prior)
         _worktree_paths.clear()
-        _base_head[0] = ""
+        base_head = ""
         _clear_persisted_state()
 
         if not _in_git_repo():
@@ -191,29 +193,34 @@ def _parallel_stages(
             text=True,
             check=False,
         )
-        _base_head[0] = r.stdout.strip() if r.returncode == 0 else ""
+        base_head = r.stdout.strip() if r.returncode == 0 else ""
 
-        for child_key, ctx, _ in child_runners:
-            wt_dir = str(
-                pathlib.Path(tempfile.gettempdir())
-                / f"aibg-parallel-{group_name}-{secrets.token_hex(8)}"
-            )
-            r2 = subprocess.run(
-                ["git", "worktree", "add", "--detach", wt_dir, "HEAD"],
-                cwd=str(project_root),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if r2.returncode != 0:
-                raise RuntimeError(
-                    f"git worktree add failed for parallel child {child_key!r}: "
-                    f"{r2.stderr.strip()}"
+        try:
+            for child_key, ctx, _ in child_runners:
+                wt_dir = str(
+                    pathlib.Path(tempfile.gettempdir())
+                    / f"aibg-parallel-{group_name}-{secrets.token_hex(8)}"
                 )
-            wt_path = pathlib.Path(wt_dir)
-            _worktree_paths[child_key] = wt_path
-            ctx.worktree = wt_path
-            _persist_state()
+                r2 = subprocess.run(
+                    ["git", "worktree", "add", "--detach", wt_dir, "HEAD"],
+                    cwd=str(project_root),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if r2.returncode != 0:
+                    raise RuntimeError(
+                        f"git worktree add failed for parallel child {child_key!r}: "
+                        f"{r2.stderr.strip()}"
+                    )
+                wt_path = pathlib.Path(wt_dir)
+                _worktree_paths[child_key] = wt_path
+                ctx.worktree = wt_path
+        except Exception:
+            _remove_worktrees(list(_worktree_paths.values()))
+            _worktree_paths.clear()
+            raise
+        _persist_state()
 
     def _parallel() -> None:
         set_stage_fn(group_name)
@@ -268,7 +275,7 @@ def _parallel_stages(
                 check=False,
             )
 
-        base = _base_head[0]
+        base = base_head
         if _in_git_repo() and base:
             for child_key, _, _ in child_runners:
                 wt = _worktree_paths.get(child_key)
@@ -336,9 +343,10 @@ def _parallel_stages(
             )
 
     def _teardown_worktrees() -> None:
+        nonlocal base_head
         _remove_worktrees(list(_worktree_paths.values()))
         _worktree_paths.clear()
-        _base_head[0] = ""
+        base_head = ""
         _clear_persisted_state()
 
     return [

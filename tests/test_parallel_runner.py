@@ -61,7 +61,6 @@ def _make_parallel_stages(
     entry = _make_entry(group_name)
     return ParallelStage(
         entry,
-        None,
         child_runners,
         max_concurrent=max_concurrent,
         set_stage_fn=set_stage_fn,

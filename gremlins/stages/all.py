@@ -24,6 +24,7 @@ from gremlins.stages import (
     wait_copilot,
 )
 from gremlins.stages import materialize_to_branch as materialize_to_branch_mod
+from gremlins.clients.resolve import require_stage_spec
 from gremlins.stages.registry import register_stage_builder
 from gremlins.state import read_state_str
 
@@ -191,6 +192,40 @@ def _build_chain(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> An
     return chain.Chain(entry, spec, pipeline_builder=runner.build_child_stages)
 
 
+def _build_parallel(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
+    from gremlins.stages.base import StageContext
+    from gremlins.stages.parallel import ParallelStage
+    from gremlins.state import set_stage
+
+    group_dir = runner.session_dir / entry.name
+    group_dir.mkdir(parents=True, exist_ok=True)
+    child_runners: list[tuple[str, Any, Any]] = []
+    for child in entry.body:
+        child_spec = require_stage_spec(runner.stage_specs, child.name)
+        child_dir = group_dir / child.name
+        child_dir.mkdir(parents=True, exist_ok=True)
+        child_ctx = StageContext(
+            client=runner._get_client(child_spec),
+            session_dir=child_dir,
+            gr_id=runner.gr_id,
+            child_key=child.name,
+        )
+        child_runners.append(
+            (child.name, child_ctx, runner._make_runner(child, child_ctx, child_spec))
+        )
+    gr_id = runner.gr_id
+    return ParallelStage(
+        entry,
+        child_runners,
+        max_concurrent=entry.max_concurrent,
+        cancel_on_bail=entry.cancel_on_bail,
+        bail_policy=entry.bail_policy,
+        gr_id=gr_id,
+        project_root=pathlib.Path.cwd(),
+        set_stage_fn=lambda n: set_stage(gr_id, n),
+    )
+
+
 register_stage_builder("plan", _build_plan, needs_pipe=False)
 register_stage_builder("implement", _build_implement, needs_pipe=True)
 register_stage_builder(
@@ -207,6 +242,7 @@ register_stage_builder("wait-ci", _build_wait_ci, needs_pipe=False)
 register_stage_builder("review-code", _build_review_code, needs_pipe=False)
 register_stage_builder("address-code", _build_address_code, needs_pipe=False)
 register_stage_builder("chain", _build_chain, needs_pipe=False)
+register_stage_builder("parallel", _build_parallel, needs_pipe=True)
 
 
 __all__ = [
