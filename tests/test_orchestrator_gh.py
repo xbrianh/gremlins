@@ -1048,7 +1048,9 @@ def test_resume_from_implement(tmp_path, monkeypatch):
     session_dir, state_file = _patch_common(
         monkeypatch, tmp_path, state_data=state_data
     )
-    (session_dir / "plan.md").write_text("# Resumed Plan\nDo stuff.\n", encoding="utf-8")
+    (session_dir / "plan.md").write_text(
+        "# Resumed Plan\nDo stuff.\n", encoding="utf-8"
+    )
 
     monkeypatch.setattr(
         subprocess,
