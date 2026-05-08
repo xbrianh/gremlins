@@ -220,7 +220,7 @@ def list_pipelines(project_root: pathlib.Path) -> list[tuple[str, pathlib.Path]]
     results: list[tuple[str, pathlib.Path]] = []
     seen: set[str] = set()
 
-    local_dir = project_root / ".gremlins"
+    local_dir = project_root / ".gremlins" / "pipelines"
     if local_dir.exists():
         for p in sorted(local_dir.glob("*.yaml")):
             results.append((p.stem, p.resolve()))
@@ -234,7 +234,7 @@ def list_pipelines(project_root: pathlib.Path) -> list[tuple[str, pathlib.Path]]
 
 
 def resolve_pipeline_name(name: str, project_root: pathlib.Path) -> pathlib.Path:
-    project_local = project_root / ".gremlins" / f"{name}.yaml"
+    project_local = project_root / ".gremlins" / "pipelines" / f"{name}.yaml"
     if project_local.exists():
         return project_local.resolve()
     bundled = BUNDLED_PIPELINE_DIR / f"{name}.yaml"
@@ -257,7 +257,7 @@ def resolve_pipeline_path(name_or_path: str, base_dir: pathlib.Path) -> pathlib.
         if not resolved.exists():
             raise FileNotFoundError(f"pipeline file not found: {resolved}")
         return resolved
-    project_scoped = base_dir / ".gremlins" / f"{name_or_path}.yaml"
+    project_scoped = base_dir / ".gremlins" / "pipelines" / f"{name_or_path}.yaml"
     if project_scoped.exists():
         return project_scoped.resolve()
     bundled = (
