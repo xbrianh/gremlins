@@ -9,11 +9,11 @@ from collections.abc import Callable
 
 from gremlins.clients import ClientSpec
 from gremlins.clients.protocol import ClaudeClient
-from gremlins.git import PreImplState
 from gremlins.orchestrators.base import (
     Pipeline,
     die,
     read_stage_inputs,
+    read_state_field,
 )
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline import StageEntry
@@ -83,10 +83,6 @@ class GHPipeline(Pipeline):
         self.instructions: str = read_stage_inputs(state_file).get(
             "instructions"
         ) or " ".join(getattr(args, "instructions", None) or [])
-        self.issue_url: str = ""
-        self.issue_num: str = ""
-        self.issue_body: str = ""
-        self.impl_pre_state: PreImplState | None = None
 
     def _make_runner(
         self, entry: StageEntry, ctx: StageContext, spec: ClientSpec
@@ -130,7 +126,6 @@ class GHPipeline(Pipeline):
                 stage = implement.Implement(
                     entry,
                     model,
-                    plan_text=self.issue_body,
                     is_git=True,
                     spec_text=spec_text,
                 )
@@ -176,7 +171,7 @@ class GHPipeline(Pipeline):
                 stage = open_github_pr.OpenGitHubPR(
                     entry,
                     model,
-                    issue_url=self.issue_url,
+                    issue_url=read_state_field(self.state_file, "issue_url"),
                 )
                 stage.bind(ctx)
                 pr_url = stage.run(None)

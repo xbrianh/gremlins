@@ -105,7 +105,6 @@ class LocalPipeline(Pipeline):
         if entry.type == "implement":
 
             def _implement() -> None:
-                plan_text = plan_file.read_text(encoding="utf-8")
                 spec_text = ""
                 if spec_file.exists():
                     try:
@@ -120,7 +119,6 @@ class LocalPipeline(Pipeline):
                 stage = implement.Implement(
                     entry,
                     model,
-                    plan_text=plan_text,
                     is_git=is_git,
                     spec_text=spec_text,
                 )

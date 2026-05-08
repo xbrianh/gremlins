@@ -140,10 +140,10 @@ def test_implement_renders_spec_block_when_present(tmp_path, monkeypatch):
         prompt_paths=[_BUNDLED_PROMPTS / "implement_local.md"],
         options={},
     )
+    (session_dir / "plan.md").write_text("task 1: do something", encoding="utf-8")
     stage = implement.Implement(
         entry,
         "sonnet",
-        plan_text="task 1: do something",
         is_git=True,
         spec_text="overall spec body",
     )
@@ -189,10 +189,10 @@ def test_implement_omits_spec_block_when_absent(tmp_path, monkeypatch):
         prompt_paths=[_BUNDLED_PROMPTS / "implement_local.md"],
         options={},
     )
+    (session_dir / "plan.md").write_text("task 1: do something", encoding="utf-8")
     stage = implement.Implement(
         entry,
         "sonnet",
-        plan_text="task 1: do something",
         is_git=True,
         spec_text="",
     )
@@ -286,10 +286,10 @@ def test_implement_stage_raises_on_empty_diff(tmp_path, monkeypatch):
         options={},
     )
     client = FakeClaudeClient(fixtures={"implement": MINIMAL_EVENTS})
+    (session_dir / "plan.md").write_text("# Plan\nDo stuff.\n", encoding="utf-8")
     stage = implement.Implement(
         entry,
         "sonnet",
-        plan_text="# Plan\nDo stuff.\n",
         is_git=True,
     )
     stage.bind(_make_ctx(client, session_dir))

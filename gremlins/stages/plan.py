@@ -57,26 +57,23 @@ class Plan(Stage):
         plan_md = self.plan_file or (self.state.session_dir / "plan.md")
 
         if plan_md.exists() and plan_md.stat().st_size > 0:
-            if pipe is not None:
-                state_file = resolve_state_file(self.state.gr_id)
-                pipe.issue_url = _read_state_str(state_file, "issue_url")
-                pipe.issue_num = _read_state_str(state_file, "issue_num")
-                pipe.issue_body = plan_md.read_text(encoding="utf-8")
-                label = f" (issue #{pipe.issue_num})" if pipe.issue_num else ""
-                logger.info("[1/8] plan resumed from snapshot: %s%s", plan_md, label)
+            state_file = resolve_state_file(self.state.gr_id)
+            issue_num = _read_state_str(state_file, "issue_num")
+            label = f" (issue #{issue_num})" if issue_num else ""
+            logger.info("[1/8] plan resumed from snapshot: %s%s", plan_md, label)
             return
 
         if self.plan_source:
             src = pathlib.Path(self.plan_source)
             if src.is_file():
-                self._resolve_file_source(self.plan_source, plan_md, pipe)
+                self._resolve_file_source(self.plan_source, plan_md)
             else:
-                self._resolve_issue_source(self.plan_source, plan_md, pipe)
+                self._resolve_issue_source(self.plan_source, plan_md)
             return
 
-        self._run_agent(plan_md, pipe)
+        self._run_agent(plan_md)
 
-    def _run_agent(self, plan_md: pathlib.Path, pipe: Any) -> None:
+    def _run_agent(self, plan_md: pathlib.Path) -> None:
         if self.repo:
             plan_prompt = load_prompts(self.prompt_paths).format(
                 ref=_fmt_escape(self.ref or ""),
@@ -99,9 +96,7 @@ class Plan(Stage):
             logger.info("issue: %s", issue_url)
             patch_state(self.state.gr_id, issue_url=issue_url, issue_num=issue_num)
             issue_body = _fetch_issue_body(issue_num, self.repo)
-            pipe.issue_url = issue_url
-            pipe.issue_num = issue_num
-            pipe.issue_body = issue_body
+            plan_md.write_text(issue_body, encoding="utf-8")
         else:
             template = load_prompts(self.prompt_paths)
             prompt = template.format(
@@ -118,7 +113,7 @@ class Plan(Stage):
                 detail = f"; model said: {snippet}" if snippet else ""
                 raise RuntimeError(f"plan stage did not produce {plan_md}{detail}")
 
-    def _resolve_file_source(self, path: str, plan_md: pathlib.Path, pipe: Any) -> None:
+    def _resolve_file_source(self, path: str, plan_md: pathlib.Path) -> None:
         src = pathlib.Path(path)
         if src.stat().st_size == 0:
             sys.stderr.write(f"error: --plan: file is empty: {path}\n")
@@ -185,12 +180,8 @@ class Plan(Stage):
         shutil.copyfile(src, plan_md)
         patch_state(self.state.gr_id, issue_url=issue_url, issue_num=issue_num)
         self._update_description(plan_md, issue_title=issue_title)
-        if pipe is not None:
-            pipe.issue_url = issue_url
-            pipe.issue_num = issue_num
-            pipe.issue_body = issue_body
 
-    def _resolve_issue_source(self, ref: str, plan_md: pathlib.Path, pipe: Any) -> None:
+    def _resolve_issue_source(self, ref: str, plan_md: pathlib.Path) -> None:
         target_repo, issue_ref = parse_issue_ref(ref, self.repo or "")
         if issue_ref is None:
             sys.stderr.write(
@@ -231,10 +222,6 @@ class Plan(Stage):
         )
         patch_state(self.state.gr_id, issue_url=issue_url, issue_num=issue_num)
         self._update_description(plan_md, issue_title=issue_title)
-        if pipe is not None:
-            pipe.issue_url = issue_url
-            pipe.issue_num = issue_num
-            pipe.issue_body = issue_body
 
     def _update_description(
         self, plan_md: pathlib.Path, *, issue_title: str = ""

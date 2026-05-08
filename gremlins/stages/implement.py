@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 from typing import Any
@@ -15,7 +16,7 @@ from gremlins.pipeline import StageEntry
 from gremlins.prompts import BUNDLED_PROMPT_DIR, load_prompts
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
-from gremlins.state import patch_state
+from gremlins.state import patch_state, resolve_state_file
 
 # Implement turns can sit silent for many minutes while the model edits files
 # or runs long subagents/tools without emitting stream events. The default
@@ -85,13 +86,11 @@ class Implement(Stage):
         entry: StageEntry,
         model: str | None,
         *,
-        plan_text: str,
         is_git: bool,
         spec_text: str = "",
         cwd: str | None = None,
     ) -> None:
         super().__init__(entry, model)
-        self.plan_text = plan_text
         self.is_git = is_git
         self.spec_text = spec_text
         self._cwd = cwd
@@ -124,10 +123,11 @@ class Implement(Stage):
                 [BUNDLED_PROMPT_DIR / "impl_commit_git.md"]
             )
 
+        plan_text = (self.state.session_dir / "plan.md").read_text(encoding="utf-8")
         template = load_prompts(self.prompt_paths)
         prompt = template.format(
             spec_block=_render_spec_block(self.spec_text),
-            plan_text=self.plan_text,
+            plan_text=plan_text,
             impl_commit_instr=impl_commit_instr,
         )
         self.run_claude(
@@ -147,7 +147,17 @@ class Implement(Stage):
                 raise RuntimeError("implementation stage produced no changes; aborting")
 
     def _run_gh(self, pipe: Any) -> None:
-        issue_num = getattr(pipe, "issue_num", "")
+        state_file = resolve_state_file(self.state.gr_id)
+        issue_num = ""
+        if state_file and state_file.exists():
+            try:
+                issue_num = (
+                    json.loads(state_file.read_text(encoding="utf-8")).get("issue_num")
+                    or ""
+                )
+            except Exception:
+                pass
+
         if issue_num:
             plan_source_label = "from the GitHub issue"
             plan_location_note = (
@@ -168,11 +178,12 @@ class Implement(Stage):
                 self.state.gr_id, impl_pre_head=pre.head, impl_pre_branch=pre.branch
             )
 
+        plan_text = (self.state.session_dir / "plan.md").read_text(encoding="utf-8")
         template = load_prompts(self.prompt_paths)
         prompt = template.format(
             spec_block=_render_spec_block(self.spec_text),
             plan_source_label=plan_source_label,
-            issue_body=self.plan_text,
+            issue_body=plan_text,
             plan_location_note=plan_location_note,
         )
 

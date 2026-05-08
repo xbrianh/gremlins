@@ -1037,7 +1037,7 @@ def test_gh_main_resume_requires_each_persisted_stage_client(
 
 
 def test_resume_from_implement(tmp_path, monkeypatch):
-    """--resume-from implement reloads issue_url from state.json and runs implement onward."""
+    """--resume-from implement reads plan.md from session_dir and runs implement onward."""
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
@@ -1048,6 +1048,7 @@ def test_resume_from_implement(tmp_path, monkeypatch):
     session_dir, state_file = _patch_common(
         monkeypatch, tmp_path, state_data=state_data
     )
+    (session_dir / "plan.md").write_text("# Resumed Plan\nDo stuff.\n", encoding="utf-8")
 
     monkeypatch.setattr(
         subprocess,
@@ -1079,20 +1080,6 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         },
     )
 
-    # Simulate that the state.json has issue_url so read_state_field can return it.
-    # We need to reach into the patched resolve_state_file to make the pre-loop read work.
-    def _fake_read(sf, field):
-        if field == "issue_url":
-            return "https://github.com/owner/repo/issues/99"
-        if field == "issue_num":
-            return "99"
-        return ""
-
-    monkeypatch.setattr(_gh_mod, "read_state_field", _fake_read)
-    monkeypatch.setattr(
-        _gh_mod, "_fetch_issue_body", lambda num, repo: "# Resumed Plan\nDo stuff.\n"
-    )
-
     result = gh_main(["--plan", "#99", "--resume-from", "implement"], client=client)
     assert result == 0
 
@@ -1112,10 +1099,6 @@ def test_resume_from_ghreview(tmp_path, monkeypatch):
     data["issue_url"] = "https://github.com/owner/repo/issues/5"
     data["pr_url"] = "https://github.com/owner/repo/pull/200"
     state_file.write_text(json.dumps(data))
-
-    monkeypatch.setattr(
-        _gh_mod, "_fetch_issue_body", lambda num, repo: "# Plan\nContent.\n"
-    )
 
     ghreview_called = []
     monkeypatch.setattr(
@@ -1326,19 +1309,6 @@ def test_resume_from_commit_skips_implement(tmp_path, monkeypatch):
     data["issue_url"] = "https://github.com/owner/repo/issues/42"
     state_file.write_text(json.dumps(data))
 
-    def _fake_read(sf, field):
-        if field == "issue_url":
-            return "https://github.com/owner/repo/issues/42"
-        if field == "issue_num":
-            return "42"
-        if field == "pr_url":
-            return ""
-        return ""
-
-    monkeypatch.setattr(_gh_mod, "read_state_field", _fake_read)
-    monkeypatch.setattr(
-        _gh_mod, "_fetch_issue_body", lambda num, repo: "# Plan\nDo stuff.\n"
-    )
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
     monkeypatch.setattr(
         "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
@@ -1414,9 +1384,6 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
     data["impl_base_ref"] = base_ref
     state_file.write_text(json.dumps(data))
 
-    monkeypatch.setattr(
-        _gh_mod, "_fetch_issue_body", lambda num, repo: "# Plan\nDo stuff.\n"
-    )
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
     ghreview_called = []
     monkeypatch.setattr(
@@ -1646,10 +1613,6 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
     data["pr_url"] = "https://github.com/owner/repo/pull/200"
     state_file.write_text(json.dumps(data))
 
-    monkeypatch.setattr(
-        _gh_mod, "_fetch_issue_body", lambda num, repo: "# Plan\nContent.\n"
-    )
-
     earlier_called: list[str] = []
     ci_stages = []
 
@@ -1785,22 +1748,6 @@ def test_resume_from_verify(tmp_path, monkeypatch):
     data["impl_base_ref"] = base_ref
     data["issue_url"] = "https://github.com/owner/repo/issues/5"
     state_file.write_text(json.dumps(data))
-
-    def _fake_read(sf, field):
-        if field == "issue_url":
-            return "https://github.com/owner/repo/issues/5"
-        if field == "issue_num":
-            return "5"
-        if field == "pr_url":
-            return ""
-        if field == "model":
-            return ""
-        return ""
-
-    monkeypatch.setattr(_gh_mod, "read_state_field", _fake_read)
-    monkeypatch.setattr(
-        _gh_mod, "_fetch_issue_body", lambda num, repo: "# Plan\nContent.\n"
-    )
 
     earlier_called: list[str] = []
     verify_calls = []

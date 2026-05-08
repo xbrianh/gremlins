@@ -26,12 +26,6 @@ def _ctx(session_dir: pathlib.Path, client: FakeClaudeClient) -> StageContext:
     return StageContext(client=client, session_dir=session_dir, gr_id=None)
 
 
-class _SimplePipe:
-    issue_url: str = ""
-    issue_num: str = ""
-    issue_body: str = ""
-
-
 def test_plan_source_file_local(tmp_path: pathlib.Path) -> None:
     """plan_source=<file> with no repo just copies the file to plan.md."""
     plan_src = tmp_path / "my-plan.md"
@@ -110,15 +104,10 @@ def test_plan_source_file_github(
         _entry(), None, plan_source=str(plan_src), plan_file=plan_md, repo="owner/repo"
     )
     stage.bind(_ctx(tmp_path, client))
-
-    pipe = _SimplePipe()
-    stage.run(pipe)
+    stage.run(None)
 
     assert plan_md.exists()
     assert plan_md.read_text() == "# Feature\nDo the thing.\n"
-    assert pipe.issue_url == issue_url
-    assert pipe.issue_num == "7"
-    assert pipe.issue_body == "# Feature\nDo the thing.\n"
     assert any(c.label == "plan-title" for c in client.calls)
 
 
@@ -148,15 +137,10 @@ def test_plan_source_issue_ref_github(
     )
     client = FakeClaudeClient(fixtures={})
     stage.bind(_ctx(tmp_path, client))
-
-    pipe = _SimplePipe()
-    stage.run(pipe)
+    stage.run(None)
 
     assert plan_md.exists()
     assert "GH Plan" in plan_md.read_text()
-    assert pipe.issue_url == issue_url
-    assert pipe.issue_num == "99"
-    assert pipe.issue_body == "# GH Plan\nDetails."
     assert client.calls == []
 
 
