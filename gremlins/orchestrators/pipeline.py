@@ -192,11 +192,7 @@ class Pipeline:
         is_git = self.is_git
         gr_id = self.gr_id
         instructions = self.instructions
-        plan_val = (
-            getattr(args, "plan", None)
-            or getattr(args, "plan_path", None)
-            or getattr(args, "plan_source", None)
-        )
+        plan_val = getattr(args, "plan", None)
 
         if entry.type == "plan":
 

@@ -67,7 +67,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     if args.plan and args.instructions:
         die("--plan and positional instructions are mutually exclusive")
     if not args.resume_from and not args.plan and not args.instructions:
-        pass  # caller-level validation where needed
+        die("one of --plan, --resume-from, or positional instructions is required")
     if args.test_max_attempts <= 0:
         die("--test-max-attempts must be a positive integer")
     if args.cmds is not None:
