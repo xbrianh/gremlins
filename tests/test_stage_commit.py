@@ -16,7 +16,7 @@ from gremlins.stages.base import StageContext
 from gremlins.stages.commit import Commit
 
 ISSUE_URL = "https://github.com/owner/repo/issues/42"
-HANDOFF_BRANCH = "impl/some-feature"
+MATERIALIZED_BRANCH = "impl/some-feature"
 BASE_REF = "abc123"
 
 
@@ -34,7 +34,7 @@ def _make_stage(
     tmp_path: pathlib.Path,
     *,
     impl_outcome: ImplOutcome | None = None,
-    impl_materialized_branch: str = HANDOFF_BRANCH,
+    impl_materialized_branch: str = MATERIALIZED_BRANCH,
     base_ref: str = BASE_REF,
     issue_url: str = ISSUE_URL,
 ) -> tuple[Commit, StageContext]:
@@ -85,7 +85,7 @@ def test_handoff_clean_case_includes_branch_name(tmp_path: pathlib.Path) -> None
     ):
         stage.run(None)
     prompt = ctx.client.calls[0].prompt
-    assert HANDOFF_BRANCH in prompt
+    assert MATERIALIZED_BRANCH in prompt
     assert "already committed" in prompt
 
 
@@ -98,7 +98,7 @@ def test_handoff_dirty_case_includes_branch_name(tmp_path: pathlib.Path) -> None
     ):
         stage.run(None)
     prompt = ctx.client.calls[0].prompt
-    assert HANDOFF_BRANCH in prompt
+    assert MATERIALIZED_BRANCH in prompt
     assert "partially committed" in prompt
 
 
@@ -129,7 +129,7 @@ def test_run_raises_if_unbound() -> None:
         entry,
         None,
         impl_outcome=DirtyOnly(),
-        impl_materialized_branch=HANDOFF_BRANCH,
+        impl_materialized_branch=MATERIALIZED_BRANCH,
         base_ref=BASE_REF,
         issue_url=ISSUE_URL,
     )
@@ -158,7 +158,7 @@ def test_self_source_head_advanced(tmp_path: pathlib.Path) -> None:
     state_file.write_text(
         json.dumps(
             {
-                "impl_materialized_branch": HANDOFF_BRANCH,
+                "impl_materialized_branch": MATERIALIZED_BRANCH,
                 "impl_base_ref": BASE_REF,
                 "issue_url": ISSUE_URL,
             }
@@ -173,7 +173,7 @@ def test_self_source_head_advanced(tmp_path: pathlib.Path) -> None:
     ):
         stage.run(None)
     prompt = ctx.client.calls[0].prompt
-    assert HANDOFF_BRANCH in prompt
+    assert MATERIALIZED_BRANCH in prompt
     assert "Closes #42" in prompt
 
 
@@ -195,7 +195,7 @@ def test_self_source_dirty_only(tmp_path: pathlib.Path) -> None:
     ):
         stage.run(None)
     prompt = ctx.client.calls[0].prompt
-    assert HANDOFF_BRANCH not in prompt
+    assert MATERIALIZED_BRANCH not in prompt
 
 
 def test_self_source_raises_without_base_ref(tmp_path: pathlib.Path) -> None:
@@ -203,7 +203,7 @@ def test_self_source_raises_without_base_ref(tmp_path: pathlib.Path) -> None:
     state_file.write_text(
         json.dumps(
             {
-                "impl_materialized_branch": HANDOFF_BRANCH,
+                "impl_materialized_branch": MATERIALIZED_BRANCH,
                 "issue_url": ISSUE_URL,
             }
         )
@@ -221,7 +221,7 @@ def test_self_source_rev_list_error(tmp_path: pathlib.Path) -> None:
     state_file.write_text(
         json.dumps(
             {
-                "impl_materialized_branch": HANDOFF_BRANCH,
+                "impl_materialized_branch": MATERIALIZED_BRANCH,
                 "impl_base_ref": BASE_REF,
                 "issue_url": ISSUE_URL,
             }
