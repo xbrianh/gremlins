@@ -126,12 +126,7 @@ def current_branch(cwd: str | os.PathLike[str] | None = None) -> str:
 def resolve_base_ref(
     name: str, *, cwd: str | os.PathLike[str] | None = None
 ) -> tuple[str, str]:
-    """Resolve a symbolic ref name to (sym_name, sha).
-
-    Accepts: 'current' (use HEAD), branch names, remote-tracking refs (origin/main),
-    tag names, or raw SHAs. Branch wins over tag when names collide.
-    Raises GitError if the ref cannot be resolved.
-    """
+    """Resolve a symbolic ref name to (sym_name, sha)."""
     if name == "current":
         sha = head_sha(cwd=cwd)
         if not sha:

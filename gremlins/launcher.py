@@ -495,6 +495,13 @@ def launch(
 
     _effective_base_ref = base_ref if base_ref is not None else _pipeline_base_ref
     if _git_mod.in_git_repo(cwd=project_root):
+        if pipeline_mode == "gh":
+            _branch = _effective_base_ref.removeprefix("origin/")
+            if _branch and _branch not in ("current", "HEAD"):
+                try:
+                    _git_mod.fetch_origin(_branch, cwd=project_root)
+                except _git_mod.GitError as exc:
+                    raise RuntimeError(f"git fetch origin {_branch} failed: {exc}") from exc
         try:
             base_ref_name, base_ref_sha = _git_mod.resolve_base_ref(
                 _effective_base_ref, cwd=project_root

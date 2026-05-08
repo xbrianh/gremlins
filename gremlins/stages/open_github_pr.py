@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from gremlins.clients.protocol import CompletedRun
@@ -11,7 +10,7 @@ from gremlins.pipeline import StageEntry
 from gremlins.prompts import BUNDLED_PROMPT_DIR
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
-from gremlins.state import patch_state, resolve_state_file
+from gremlins.state import patch_state, read_state_str, resolve_state_file
 
 
 def _load(name: str) -> str:
@@ -33,16 +32,7 @@ class OpenGitHubPR(Stage):
 
     def run(self, pipe: Any) -> str:
         sf = resolve_state_file(self.state.gr_id)
-        base_ref = self.base_ref
-        if base_ref is None and sf and sf.exists():
-            try:
-                base_ref = (
-                    json.loads(sf.read_text(encoding="utf-8")).get("base_ref_name")
-                    or ""
-                )
-            except Exception:
-                base_ref = ""
-        base_ref = base_ref or "main"
+        base_ref = self.base_ref or read_state_str(sf, "base_ref_name") or "main"
 
         issue_num = self.issue_url.split("/")[-1] if self.issue_url else ""
 

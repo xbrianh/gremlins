@@ -1,9 +1,9 @@
-<!-- placeholders: ref, instructions -->
+<!-- placeholders: base_ref, instructions -->
 You are creating an implementation plan and posting it as a new GitHub issue.
 
 ## Base branch
 
-This implementation targets branch `{ref}`. Read the existing code on this branch to understand the current state before planning.
+This implementation targets branch `{base_ref}`. Read the existing code on this branch to understand the current state before planning.
 
 ## Instructions
 
