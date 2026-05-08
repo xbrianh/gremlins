@@ -5,10 +5,11 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
 from agents import Usage
 
 from gremlins.clients.protocol import CompletedRun
-from gremlins.clients.providers.openai_agents import OpenAIAgentsClient
+from gremlins.clients.providers.openai_agents import OpenAIAgentsClient, make_xai_client
 from gremlins.clients.tools import GREMLINS_TOOLS
 
 
@@ -54,3 +55,17 @@ def test_fake_completion_produces_completed_run(monkeypatch: Any) -> None:
     assert result.cost_usd is not None
     assert result.cost_usd > 0
     assert client.total_cost_usd == result.cost_usd
+
+
+def test_xai_client_constructs(monkeypatch: Any) -> None:
+    monkeypatch.setenv("XAI_API_KEY", "test-key")
+    client = make_xai_client(None)
+    assert isinstance(client, OpenAIAgentsClient)
+    assert client._model == "grok-4"
+    assert client._provider is not None
+
+
+def test_xai_client_missing_key(monkeypatch: Any) -> None:
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    with pytest.raises(RuntimeError):
+        make_xai_client(None)
