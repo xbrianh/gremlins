@@ -5,12 +5,11 @@ from __future__ import annotations
 import argparse
 import logging
 import pathlib
-import subprocess
 from collections.abc import Callable
 
 from gremlins.clients import ClientSpec
 from gremlins.clients.protocol import ClaudeClient
-from gremlins.git import DirtyOnly, HeadAdvanced, PreImplState
+from gremlins.git import PreImplState
 from gremlins.orchestrators.base import (
     Pipeline,
     die,
@@ -180,46 +179,7 @@ class GHPipeline(Pipeline):
 
             def _commit() -> None:
                 set_stage(self.gr_id, entry.name)
-                impl_handoff_branch = read_state_field(
-                    self.state_file, "impl_handoff_branch"
-                )
-                base_ref = read_state_field(self.state_file, "impl_base_ref")
-                if not base_ref:
-                    die(
-                        "--resume-from commit: no impl_base_ref in state.json "
-                        "(rewind to implement?)"
-                    )
-                if impl_handoff_branch:
-                    count_r = subprocess.run(
-                        [
-                            "git",
-                            "rev-list",
-                            "--count",
-                            f"{base_ref}..{impl_handoff_branch}",
-                        ],
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
-                    if count_r.returncode != 0:
-                        die(
-                            f"--resume-from commit: impl_handoff_branch '{impl_handoff_branch}' "
-                            f"not found or base_ref invalid (rewind to implement?)\n"
-                            f"{count_r.stderr.strip()}"
-                        )
-                    commit_count = int(count_r.stdout.strip())
-                    impl_outcome = HeadAdvanced(commit_count=commit_count)
-                else:
-                    impl_outcome = DirtyOnly()
-                stage = commit.Commit(
-                    entry,
-                    model,
-                    impl_outcome=impl_outcome,
-                    impl_handoff_branch=impl_handoff_branch,
-                    base_ref=base_ref,
-                    issue_url=self.issue_url,
-                    cwd=None,
-                )
+                stage = commit.Commit(entry, model)
                 stage.bind(ctx)
                 stage.run(None)
 

@@ -160,6 +160,12 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         "gremlins.stages.handoff_branch.patch_state", _handoff_patch_state
     )
 
+    import gremlins.stages.commit as _commit_stage_mod
+
+    monkeypatch.setattr(
+        _commit_stage_mod, "resolve_state_file", lambda gr_id=None: state_file
+    )
+
     # Strip pipeline client keys so the injected client is used for every stage.
     _real_load_pipeline = _gh_mod.load_pipeline
 
@@ -1319,6 +1325,12 @@ def test_resume_from_commit_skips_implement(tmp_path, monkeypatch):
 
     session_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
+    data = json.loads(state_file.read_text())
+    data["impl_handoff_branch"] = handoff_branch
+    data["impl_base_ref"] = base_ref
+    data["issue_url"] = "https://github.com/owner/repo/issues/42"
+    state_file.write_text(json.dumps(data))
+
     def _fake_read(sf, field):
         if field == "issue_url":
             return "https://github.com/owner/repo/issues/42"
@@ -1326,14 +1338,9 @@ def test_resume_from_commit_skips_implement(tmp_path, monkeypatch):
             return "42"
         if field == "pr_url":
             return ""
-        if field == "impl_handoff_branch":
-            return handoff_branch
-        if field == "impl_base_ref":
-            return base_ref
         return ""
 
     monkeypatch.setattr(_gh_mod, "read_state_field", _fake_read)
-    monkeypatch.setattr(_pipeline_mod, "read_state_field", _fake_read)
     monkeypatch.setattr(
         _gh_mod, "_fetch_issue_body", lambda num, repo: "# Plan\nDo stuff.\n"
     )
@@ -1783,7 +1790,13 @@ def test_resume_from_verify(tmp_path, monkeypatch):
         capture_output=True,
     )
 
-    _session_dir, _state_file = _patch_common(monkeypatch, tmp_path)
+    _session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+
+    data = json.loads(state_file.read_text())
+    data["impl_handoff_branch"] = handoff_branch
+    data["impl_base_ref"] = base_ref
+    data["issue_url"] = "https://github.com/owner/repo/issues/5"
+    state_file.write_text(json.dumps(data))
 
     def _fake_read(sf, field):
         if field == "issue_url":
@@ -1792,16 +1805,11 @@ def test_resume_from_verify(tmp_path, monkeypatch):
             return "5"
         if field == "pr_url":
             return ""
-        if field == "impl_handoff_branch":
-            return handoff_branch
-        if field == "impl_base_ref":
-            return base_ref
         if field == "model":
             return ""
         return ""
 
     monkeypatch.setattr(_gh_mod, "read_state_field", _fake_read)
-    monkeypatch.setattr(_pipeline_mod, "read_state_field", _fake_read)
     monkeypatch.setattr(
         _gh_mod, "_fetch_issue_body", lambda num, repo: "# Plan\nContent.\n"
     )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import pathlib
 from unittest.mock import patch
 
@@ -9,7 +10,7 @@ import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.git import DirtyOnly, HeadAdvanced
+from gremlins.git import DirtyOnly, GitError, HeadAdvanced, ImplOutcome
 from gremlins.pipeline import StageEntry
 from gremlins.stages.base import StageContext
 from gremlins.stages.commit import Commit
@@ -32,7 +33,7 @@ def _make_entry() -> StageEntry:
 def _make_stage(
     tmp_path: pathlib.Path,
     *,
-    impl_outcome=None,
+    impl_outcome: ImplOutcome | None = None,
     impl_handoff_branch: str = HANDOFF_BRANCH,
     base_ref: str = BASE_REF,
     issue_url: str = ISSUE_URL,
@@ -133,4 +134,106 @@ def test_run_raises_if_unbound() -> None:
         issue_url=ISSUE_URL,
     )
     with pytest.raises(RuntimeError, match="not bound"):
+        stage.run(None)
+
+
+# ---------------------------------------------------------------------------
+# Self-sourcing tests (impl_outcome=None, reads from state.json)
+# ---------------------------------------------------------------------------
+
+
+def _make_self_sourcing_stage(
+    tmp_path: pathlib.Path, state_file: pathlib.Path
+) -> tuple[Commit, StageContext]:
+    entry = _make_entry()
+    stage = Commit(entry, "sonnet")
+    client = FakeClaudeClient(fixtures={"commit": MINIMAL_EVENTS})
+    ctx = StageContext(client=client, session_dir=tmp_path, gr_id="test-gr")
+    stage.bind(ctx)
+    return stage, ctx
+
+
+def test_self_source_head_advanced(tmp_path: pathlib.Path) -> None:
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "impl_handoff_branch": HANDOFF_BRANCH,
+                "impl_base_ref": BASE_REF,
+                "issue_url": ISSUE_URL,
+            }
+        )
+    )
+    stage, ctx = _make_self_sourcing_stage(tmp_path, state_file)
+    with (
+        patch("gremlins.stages.commit.resolve_state_file", return_value=state_file),
+        patch("gremlins.stages.commit.rev_list_count", return_value=3),
+        patch("gremlins.stages.commit.log_patch", return_value="diff"),
+        patch("gremlins.stages.commit.has_dirty_worktree", return_value=False),
+    ):
+        stage.run(None)
+    prompt = ctx.client.calls[0].prompt
+    assert HANDOFF_BRANCH in prompt
+    assert "Closes #42" in prompt
+
+
+def test_self_source_dirty_only(tmp_path: pathlib.Path) -> None:
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "impl_handoff_branch": "",
+                "impl_base_ref": BASE_REF,
+                "issue_url": ISSUE_URL,
+            }
+        )
+    )
+    stage, ctx = _make_self_sourcing_stage(tmp_path, state_file)
+    with (
+        patch("gremlins.stages.commit.resolve_state_file", return_value=state_file),
+        patch("gremlins.stages.commit.diff_output", return_value="diff"),
+    ):
+        stage.run(None)
+    prompt = ctx.client.calls[0].prompt
+    assert "Create a new branch" in prompt
+
+
+def test_self_source_raises_without_base_ref(tmp_path: pathlib.Path) -> None:
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "impl_handoff_branch": HANDOFF_BRANCH,
+                "issue_url": ISSUE_URL,
+            }
+        )
+    )
+    stage, ctx = _make_self_sourcing_stage(tmp_path, state_file)
+    with (
+        patch("gremlins.stages.commit.resolve_state_file", return_value=state_file),
+        pytest.raises(RuntimeError, match="no impl_base_ref"),
+    ):
+        stage.run(None)
+
+
+def test_self_source_rev_list_error(tmp_path: pathlib.Path) -> None:
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "impl_handoff_branch": HANDOFF_BRANCH,
+                "impl_base_ref": BASE_REF,
+                "issue_url": ISSUE_URL,
+            }
+        )
+    )
+    stage, ctx = _make_self_sourcing_stage(tmp_path, state_file)
+    with (
+        patch("gremlins.stages.commit.resolve_state_file", return_value=state_file),
+        patch(
+            "gremlins.stages.commit.rev_list_count",
+            side_effect=GitError(128, "bad revision"),
+        ),
+        pytest.raises(RuntimeError),
+    ):
         stage.run(None)
