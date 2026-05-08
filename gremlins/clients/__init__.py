@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, cast
 from gremlins.clients import resolve as _resolve
 from gremlins.clients.claude import SubprocessClaudeClient
 from gremlins.clients.copilot import SubprocessCopilotClient
+from gremlins.clients.providers.openai_agents import make_openai_client
 from gremlins.stages.registry import CLIENT_FACTORIES, register_client_factory
 
 if TYPE_CHECKING:
@@ -12,6 +13,7 @@ if TYPE_CHECKING:
 
 register_client_factory("claude", lambda _: SubprocessClaudeClient())
 register_client_factory("copilot", lambda _: SubprocessCopilotClient())
+register_client_factory("openai", make_openai_client)
 
 PACKAGE_DEFAULT = _resolve.PACKAGE_DEFAULT
 ClientSpec = _resolve.ClientSpec
