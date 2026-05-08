@@ -1,6 +1,6 @@
 name: boss-terse
 default_client: claude:sonnet
-prompt_dir: ../prompts
+prompt_dir: prompts
 stages:
   - name: chain
     type: chain

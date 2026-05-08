@@ -1,6 +1,6 @@
-name: gh-no-copilot
+name: gh-terse-no-copilot
 default_client: claude:sonnet
-prompt_dir: ../prompts
+prompt_dir: prompts
 stages:
   - { name: plan,           type: plan,           prompt: [gremlins:code_style.md, gremlins:plan_gh.md, terse_no_backward.md] }
   - { name: implement,      type: implement,      prompt: [gremlins:code_style.md, terse_no_backward.md, gremlins:implement_gh.md] }
