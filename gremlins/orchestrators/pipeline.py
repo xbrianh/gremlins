@@ -98,8 +98,6 @@ class StageRunner:
         self.gr_id = gr_id
         self.is_git = in_git_repo()
         self.pipeline_data = pipeline_data
-        self.default_client = pipeline_data.default_client
-        self.base_ref = pipeline_data.base_ref
         self.repo = repo
         self.target = target
         self.state_file = state_file
@@ -202,8 +200,8 @@ class StageRunner:
                 built.append((e.name, self._make_runner(e, stage_ctx, stage_spec)))
         return built
 
-    def run(self, stages: list[StageEntry]) -> None:
-        built = self._collect_stages(stages)
+    def run(self) -> None:
+        built = self._collect_stages(self.pipeline_data.stages)
         run_stages(built, resume_from=self.args.resume_from)
 
     def build_child_stages(

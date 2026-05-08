@@ -245,7 +245,7 @@ def run_pipeline(
                     )
 
     install_signal_handlers(*_signal_clients)
-    pipe.run(pipeline.stages)
+    pipe.run()
 
     total_cost = 0.0
     for c in _spec_clients.values() if _spec_clients else [client] if client else []:
