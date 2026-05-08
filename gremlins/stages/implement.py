@@ -162,8 +162,7 @@ class Implement(Stage):
             )
 
         pre = record_pre_impl_state()
-        if hasattr(pipe, "impl_pre_state"):
-            pipe.impl_pre_state = pre
+        pipe.impl_pre_state = pre
         if self.state.gr_id:
             patch_state(
                 self.state.gr_id, impl_pre_head=pre.head, impl_pre_branch=pre.branch
