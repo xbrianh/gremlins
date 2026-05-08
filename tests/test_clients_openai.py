@@ -63,6 +63,8 @@ def test_xai_client_constructs(monkeypatch: Any) -> None:
     assert isinstance(client, OpenAIAgentsClient)
     assert client._model == "grok-4"
     assert client._provider is not None
+    assert client._provider._stored_base_url == "https://api.x.ai/v1"
+    assert client._provider._stored_api_key == "test-key"
 
 
 def test_xai_client_missing_key(monkeypatch: Any) -> None:
