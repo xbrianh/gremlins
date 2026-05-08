@@ -141,6 +141,7 @@ def lenv(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{old_path}")
     monkeypatch.delenv("PYTHONPATH", raising=False)
     monkeypatch.delenv("GR_ID", raising=False)
+    monkeypatch.delenv("GREMLINS_OVERLAY_DIR", raising=False)
     monkeypatch.chdir(repo)
 
     class _Env:
@@ -924,6 +925,43 @@ def test_pipeline_survives_worktree_pipeline_rename(lenv, monkeypatch):
         f"expected exit 0; status={state.get('status')!r}; log tail:\n"
         f"{log_path.read_text(errors='replace')[-2000:] if log_path.exists() else '<log missing>'}"
     )
+
+
+# ---------------------------------------------------------------------------
+# .gremlins overlay placement
+# ---------------------------------------------------------------------------
+
+
+def test_setup_workdir_overlay_goes_to_state_dir(lenv):
+    """_stage_gremlins_overlay copies .gremlins to state_dir, not the worktree."""
+    from gremlins import launcher
+
+    overlay_src = lenv.repo / ".gremlins"
+    (overlay_src / "pipelines").mkdir(parents=True)
+    (overlay_src / "pipelines" / "custom-local.yaml").write_text(
+        "name: custom-local\nstages: []\n", encoding="utf-8"
+    )
+
+    gr_id = "overlay-test-aabbcc"
+    state_dir = lenv.state_root / gr_id
+    state_dir.mkdir(parents=True)
+
+    workdir, _branch, _wt_base, _kind = launcher._setup_workdir(
+        "local", str(lenv.repo), "HEAD", gr_id, state_dir
+    )
+
+    try:
+        assert (state_dir / ".gremlins" / "pipelines" / "custom-local.yaml").exists()
+        assert not (pathlib.Path(workdir) / ".gremlins").exists()
+        r = subprocess.run(
+            ["git", "-C", workdir, "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert r.stdout.strip() == "", f"worktree is not clean:\n{r.stdout}"
+    finally:
+        git_mod.remove_worktree(str(lenv.repo), workdir)
 
 
 # ---------------------------------------------------------------------------

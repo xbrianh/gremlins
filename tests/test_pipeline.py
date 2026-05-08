@@ -6,7 +6,12 @@ import pytest
 from gremlins.orchestrators.gh_pipeline import GHPipeline
 from gremlins.orchestrators.local_pipeline import LocalPipeline
 from gremlins.pipeline import Pipeline as _PipelineData
-from gremlins.pipeline import StageEntry, load_pipeline, resolve_pipeline_path
+from gremlins.pipeline import (
+    StageEntry,
+    load_pipeline,
+    resolve_pipeline_name,
+    resolve_pipeline_path,
+)
 from gremlins.stages import (
     address_code,
     commit,
@@ -196,6 +201,59 @@ def test_validate_resume_target_child_name_rejected(tmp_path: pathlib.Path) -> N
     )
     with pytest.raises(ValueError, match="review-a"):
         pipe.validate_resume_target()
+
+
+# ---------------------------------------------------------------------------
+# GREMLINS_OVERLAY_DIR env-var override
+# ---------------------------------------------------------------------------
+
+_SAMPLE_YAML = """\
+name: sample
+stages:
+  - name: plan
+    type: plan
+"""
+
+
+def _make_overlay(tmp_path: pathlib.Path, name: str) -> pathlib.Path:
+    overlay = tmp_path / "overlay"
+    (overlay / "pipelines").mkdir(parents=True)
+    (overlay / "pipelines" / f"{name}.yaml").write_text(_SAMPLE_YAML, encoding="utf-8")
+    return overlay
+
+
+def test_resolve_pipeline_name_uses_overlay_dir(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    overlay = _make_overlay(tmp_path, "mylocal")
+    monkeypatch.setenv("GREMLINS_OVERLAY_DIR", str(overlay))
+    result = resolve_pipeline_name("mylocal", tmp_path / "project")
+    assert result == (overlay / "pipelines" / "mylocal.yaml").resolve()
+
+
+def test_resolve_pipeline_path_uses_overlay_dir(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    overlay = _make_overlay(tmp_path, "mylocal")
+    monkeypatch.setenv("GREMLINS_OVERLAY_DIR", str(overlay))
+    result = resolve_pipeline_path("mylocal", tmp_path / "project")
+    assert result == (overlay / "pipelines" / "mylocal.yaml").resolve()
+
+
+def test_resolve_pipeline_name_no_overlay_env_falls_through(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("GREMLINS_OVERLAY_DIR", raising=False)
+    result = resolve_pipeline_name("local", pathlib.Path.cwd())
+    assert result.name == "local.yaml"
+
+
+def test_resolve_pipeline_path_no_overlay_env_falls_through(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("GREMLINS_OVERLAY_DIR", raising=False)
+    result = resolve_pipeline_path("local", pathlib.Path.cwd())
+    assert result.name == "local.yaml"
 
 
 def test_parallel_expansion_in_constructor(tmp_path: pathlib.Path) -> None:

@@ -321,15 +321,14 @@ def _delete_patch_state(
         pass
 
 
-def _copy_gremlins_overlay(project_root: str, workdir: str) -> None:
-    # `.gremlins/` is conventionally untracked, so worktrees miss it; copy it across.
+def _stage_gremlins_overlay(project_root: str, state_dir: pathlib.Path) -> None:
     src = pathlib.Path(project_root) / ".gremlins"
     if src.is_dir():
-        shutil.copytree(src, pathlib.Path(workdir) / ".gremlins", dirs_exist_ok=True)
+        shutil.copytree(src, state_dir / ".gremlins", dirs_exist_ok=True)
 
 
 def _setup_workdir(
-    mode: str, project_root: str, base_ref: str, gr_id: str
+    mode: str, project_root: str, base_ref: str, gr_id: str, state_dir: pathlib.Path
 ) -> tuple[str, str, str, str]:
     """Return (workdir, branch, worktree_base, setup_kind)."""
     if not _git_mod.in_git_repo(cwd=project_root):
@@ -339,7 +338,7 @@ def _setup_workdir(
         workdir, branch = _git_mod.setup_worktree_branch(
             project_root, gr_id, base_ref=base_ref
         )
-        _copy_gremlins_overlay(project_root, workdir)
+        _stage_gremlins_overlay(project_root, state_dir)
         return workdir, branch, "", "worktree-branch"
 
     if mode == "gh":
@@ -356,12 +355,12 @@ def _setup_workdir(
             )
         worktree_base = f"origin/{default_branch}"
         workdir = _git_mod.setup_detached_worktree(project_root, worktree_base)
-        _copy_gremlins_overlay(project_root, workdir)
+        _stage_gremlins_overlay(project_root, state_dir)
         return workdir, "", worktree_base, "worktree"
 
     # boss mode: detached worktree off base_ref
     workdir = _git_mod.setup_detached_worktree(project_root, base_ref)
-    _copy_gremlins_overlay(project_root, workdir)
+    _stage_gremlins_overlay(project_root, state_dir)
     return workdir, "", "", "worktree"
 
 
@@ -373,6 +372,7 @@ def _build_spawn_env(gr_id: str) -> dict[str, str]:
     env["PYTHONPATH"] = os.pathsep.join(parts)
     env["PYTHONSAFEPATH"] = "1"
     env["GR_ID"] = gr_id
+    env["GREMLINS_OVERLAY_DIR"] = str(_state_root() / gr_id / ".gremlins")
     return env
 
 
@@ -517,7 +517,7 @@ def launch(
         (state_dir / "instructions.txt").write_text(instr_raw, encoding="utf-8")
 
         workdir, branch, worktree_base, setup_kind = _setup_workdir(
-            pipeline_mode, project_root, base_ref, gr_id
+            pipeline_mode, project_root, base_ref, gr_id, state_dir
         )
 
         now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")

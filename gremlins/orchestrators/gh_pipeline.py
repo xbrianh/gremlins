@@ -26,6 +26,7 @@ from gremlins.pipeline import StageEntry
 from gremlins.stages import (
     address_code,
     commit,
+    commit_pr,
     implement,
     open_github_pr,
     plan,
@@ -80,6 +81,7 @@ class GHPipeline(Pipeline):
         "handoff-branch": handoff_branch_mod.HandoffBranch,
         "verify": verify.Verify,
         "commit": commit.Commit,
+        "commit-pr": commit_pr.CommitPR,
         "open-github-pr": open_github_pr.OpenGitHubPR,
         "request-copilot": request_copilot.RequestCopilot,
         "ghreview": review_code.ReviewCode,
@@ -424,6 +426,74 @@ class GHPipeline(Pipeline):
                 self.pr_num = pr_num
 
             return _open_github_pr
+
+        if entry.type == "commit-pr":
+
+            def _commit_pr() -> None:
+                set_stage(self.gr_id, entry.name)
+                logger.info("[2de/8] committing changes and opening PR")
+                hb_result = self.impl_handoff_result
+                if hb_result is not None:
+                    impl_outcome = hb_result.outcome
+                    impl_handoff_branch = hb_result.handoff_branch
+                    base_ref = hb_result.base_ref
+                else:
+                    impl_handoff_branch = read_state_field(
+                        self.state_file, "impl_handoff_branch"
+                    )
+                    base_ref = read_state_field(self.state_file, "impl_base_ref")
+                    if not base_ref:
+                        die(
+                            "--resume-from commit-pr: no impl_base_ref in state.json "
+                            "(rewind to implement?)"
+                        )
+                    if impl_handoff_branch:
+                        count_r = subprocess.run(
+                            [
+                                "git",
+                                "rev-list",
+                                "--count",
+                                f"{base_ref}..{impl_handoff_branch}",
+                            ],
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                        if count_r.returncode != 0:
+                            die(
+                                f"--resume-from commit-pr: impl_handoff_branch '{impl_handoff_branch}' "
+                                f"not found or base_ref invalid (rewind to implement?)\n"
+                                f"{count_r.stderr.strip()}"
+                            )
+                        commit_count = int(count_r.stdout.strip())
+                        impl_outcome = HeadAdvanced(commit_count=commit_count)
+                    else:
+                        impl_outcome = DirtyOnly()
+                commit_stage = commit.Commit(
+                    entry,
+                    model,
+                    impl_outcome=impl_outcome,
+                    impl_handoff_branch=impl_handoff_branch,
+                    base_ref=base_ref,
+                    issue_url=self.issue_url,
+                    cwd=None,
+                )
+                commit_stage.bind(ctx)
+                commit_stage.run(None)
+                pr_stage = open_github_pr.OpenGitHubPR(
+                    entry,
+                    model,
+                    issue_url=self.issue_url,
+                )
+                pr_stage.bind(ctx)
+                pr_url = pr_stage.run(None)
+                pr_num = pr_url.split("/")[-1]
+                logger.info("PR: %s", pr_url)
+                patch_state(self.gr_id, pr_url=pr_url)
+                self.pr_url = pr_url
+                self.pr_num = pr_num
+
+            return _commit_pr
 
         if entry.type == "request-copilot":
 

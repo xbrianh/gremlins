@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import importlib
+import os
 import pathlib
 from typing import Any, cast
 
@@ -215,12 +216,19 @@ def load_pipeline(path: pathlib.Path) -> Pipeline:
 BUNDLED_PIPELINE_DIR = pathlib.Path(__file__).resolve().parent / "pipelines"
 
 
+def _overlay_dir(project_root: pathlib.Path) -> pathlib.Path:
+    overlay = os.environ.get("GREMLINS_OVERLAY_DIR", "")
+    if overlay:
+        return pathlib.Path(overlay)
+    return project_root / ".gremlins"
+
+
 def list_pipelines(project_root: pathlib.Path) -> list[tuple[str, pathlib.Path]]:
     """Return (name, path) pairs for all resolvable pipelines, project-local first."""
     results: list[tuple[str, pathlib.Path]] = []
     seen: set[str] = set()
 
-    local_dir = project_root / ".gremlins" / "pipelines"
+    local_dir = _overlay_dir(project_root) / "pipelines"
     if local_dir.exists():
         for p in sorted(local_dir.glob("*.yaml")):
             results.append((p.stem, p.resolve()))
@@ -234,7 +242,7 @@ def list_pipelines(project_root: pathlib.Path) -> list[tuple[str, pathlib.Path]]
 
 
 def resolve_pipeline_name(name: str, project_root: pathlib.Path) -> pathlib.Path:
-    project_local = project_root / ".gremlins" / "pipelines" / f"{name}.yaml"
+    project_local = _overlay_dir(project_root) / "pipelines" / f"{name}.yaml"
     if project_local.exists():
         return project_local.resolve()
     bundled = BUNDLED_PIPELINE_DIR / f"{name}.yaml"
@@ -257,7 +265,7 @@ def resolve_pipeline_path(name_or_path: str, base_dir: pathlib.Path) -> pathlib.
         if not resolved.exists():
             raise FileNotFoundError(f"pipeline file not found: {resolved}")
         return resolved
-    project_scoped = base_dir / ".gremlins" / "pipelines" / f"{name_or_path}.yaml"
+    project_scoped = _overlay_dir(base_dir) / "pipelines" / f"{name_or_path}.yaml"
     if project_scoped.exists():
         return project_scoped.resolve()
     bundled = (
