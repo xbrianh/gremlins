@@ -16,22 +16,13 @@ from gremlins.pipeline import StageEntry
 from gremlins.prompts import load_prompts
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
-from gremlins.state import patch_state, resolve_state_file
+from gremlins.state import patch_state, read_state_str, resolve_state_file
 
 logger = logging.getLogger(__name__)
 
 
 def _fmt_escape(s: str) -> str:
     return s.replace("{", "{{").replace("}", "}}")
-
-
-def _read_state_str(state_file: pathlib.Path | None, field: str) -> str:
-    if state_file is None or not state_file.exists():
-        return ""
-    try:
-        return json.loads(state_file.read_text(encoding="utf-8")).get(field) or ""
-    except Exception:
-        return ""
 
 
 class Plan(Stage):
@@ -43,14 +34,12 @@ class Plan(Stage):
         instructions: str = "",
         plan_file: pathlib.Path | None = None,
         plan_source: str | None = None,
-        ref: str = "",
         repo: str = "",
     ) -> None:
         super().__init__(entry, model)
         self.instructions = instructions
         self.plan_file = plan_file
         self.plan_source = plan_source
-        self.ref = ref
         self.repo = repo
 
     def run(self, pipe: Any) -> None:
@@ -58,7 +47,7 @@ class Plan(Stage):
 
         if plan_md.exists() and plan_md.stat().st_size > 0:
             state_file = resolve_state_file(self.state.gr_id)
-            issue_num = _read_state_str(state_file, "issue_num")
+            issue_num = read_state_str(state_file, "issue_num")
             label = f" (issue #{issue_num})" if issue_num else ""
             logger.info("[1/8] plan resumed from snapshot: %s%s", plan_md, label)
             return
@@ -75,8 +64,10 @@ class Plan(Stage):
 
     def _run_agent(self, plan_md: pathlib.Path) -> None:
         if self.repo:
+            state_file = resolve_state_file(self.state.gr_id)
+            base_ref_name = read_state_str(state_file, "base_ref_name")
             plan_prompt = load_prompts(self.prompt_paths).format(
-                ref=_fmt_escape(self.ref or ""),
+                base_ref=_fmt_escape(base_ref_name),
                 instructions=_fmt_escape(self.instructions),
             )
             completed = self.run_claude(

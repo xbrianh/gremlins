@@ -138,6 +138,16 @@ def emit_bail(
         pass
 
 
+def read_state_str(state_file: pathlib.Path | None, field: str) -> str:
+    """Return a string field from state.json, or '' on missing file or error."""
+    if state_file is None or not state_file.exists():
+        return ""
+    try:
+        return json.loads(state_file.read_text(encoding="utf-8")).get(field) or ""
+    except Exception:
+        return ""
+
+
 def resolve_state_file(gr_id: str | None) -> pathlib.Path | None:
     """Return path to state.json for gr_id, or None when gr_id is absent."""
     if not gr_id:

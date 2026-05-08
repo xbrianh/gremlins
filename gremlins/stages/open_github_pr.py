@@ -10,7 +10,7 @@ from gremlins.pipeline import StageEntry
 from gremlins.prompts import BUNDLED_PROMPT_DIR
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
-from gremlins.state import patch_state
+from gremlins.state import patch_state, read_state_str, resolve_state_file
 
 
 def _load(name: str) -> str:
@@ -24,11 +24,16 @@ class OpenGitHubPR(Stage):
         model: str | None,
         *,
         issue_url: str,
+        base_ref: str | None = None,
     ) -> None:
         super().__init__(entry, model)
         self.issue_url = issue_url
+        self.base_ref = base_ref
 
     def run(self, pipe: Any) -> str:
+        sf = resolve_state_file(self.state.gr_id)
+        base_ref = self.base_ref or read_state_str(sf, "base_ref_name") or "main"
+
         issue_num = self.issue_url.split("/")[-1] if self.issue_url else ""
 
         if issue_num:
@@ -38,7 +43,7 @@ class OpenGitHubPR(Stage):
                 "Do NOT include any 'Closes #N' or 'Fixes #N' link in the PR body."
             )
 
-        base_prompt = _load("open_github_pr.md").rstrip()
+        base_prompt = _load("open_github_pr.md").format(base_ref=base_ref).rstrip()
         prompt = f"{base_prompt} {closes_clause}"
 
         completed: CompletedRun = self.run_claude(

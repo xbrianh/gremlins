@@ -26,7 +26,7 @@ import yaml
 from gremlins import git as _git_mod
 from gremlins import paths as _paths
 from gremlins.clients import PACKAGE_DEFAULT
-from gremlins.gh_utils import parse_issue_ref, resolve_default_branch, view_issue
+from gremlins.gh_utils import parse_issue_ref, view_issue
 from gremlins.pipeline import (
     Pipeline,
     load_pipeline,
@@ -328,7 +328,7 @@ def _stage_gremlins_overlay(project_root: str, state_dir: pathlib.Path) -> None:
 
 
 def _setup_workdir(
-    mode: str, project_root: str, base_ref: str, gr_id: str, state_dir: pathlib.Path
+    mode: str, project_root: str, base_ref_sha: str, gr_id: str, state_dir: pathlib.Path
 ) -> tuple[str, str, str, str]:
     """Return (workdir, branch, worktree_base, setup_kind)."""
     if not _git_mod.in_git_repo(cwd=project_root):
@@ -336,30 +336,18 @@ def _setup_workdir(
 
     if mode == "local":
         workdir, branch = _git_mod.setup_worktree_branch(
-            project_root, gr_id, base_ref=base_ref
+            project_root, gr_id, base_ref=base_ref_sha or "HEAD"
         )
         _stage_gremlins_overlay(project_root, state_dir)
         return workdir, branch, "", "worktree-branch"
 
     if mode == "gh":
-        default_branch = resolve_default_branch(project_root)
-        refspec = f"refs/heads/{default_branch}:refs/remotes/origin/{default_branch}"
-        fr = subprocess.run(
-            ["git", "-C", project_root, "fetch", "origin", "--quiet", refspec],
-            capture_output=True,
-            text=True,
-        )
-        if fr.returncode != 0:
-            raise RuntimeError(
-                f"git fetch origin {default_branch} failed: {fr.stderr.strip()}"
-            )
-        worktree_base = f"origin/{default_branch}"
-        workdir = _git_mod.setup_detached_worktree(project_root, worktree_base)
+        workdir = _git_mod.setup_detached_worktree(project_root, base_ref_sha or "HEAD")
         _stage_gremlins_overlay(project_root, state_dir)
-        return workdir, "", worktree_base, "worktree"
+        return workdir, "", base_ref_sha, "worktree"
 
-    # boss mode: detached worktree off base_ref
-    workdir = _git_mod.setup_detached_worktree(project_root, base_ref)
+    # boss mode: detached worktree off base_ref_sha
+    workdir = _git_mod.setup_detached_worktree(project_root, base_ref_sha or "HEAD")
     _stage_gremlins_overlay(project_root, state_dir)
     return workdir, "", "", "worktree"
 
@@ -422,7 +410,7 @@ def launch(
     description: str | None = None,
     parent_id: str | None = None,
     project_root: str | None = None,
-    base_ref: str = "HEAD",
+    base_ref: str | None = None,
     pipeline_args: tuple[str, ...] = (),
     spec_path: str | None = None,
 ) -> str:
@@ -491,9 +479,11 @@ def launch(
         kind, pipeline_args, project_root
     )
 
+    _pipeline_base_ref = "current"
     try:
         _loaded_pipeline = load_pipeline(pathlib.Path(pipeline_path))
         pipeline_mode = _pipeline_mode(_loaded_pipeline)
+        _pipeline_base_ref = _loaded_pipeline.base_ref
     except (FileNotFoundError, OSError):
         pipeline_mode = _infer_mode_from_pipeline_kind(kind)
 
@@ -502,6 +492,26 @@ def launch(
 
     state_dir = _state_root() / gr_id
     state_dir.mkdir(parents=True, exist_ok=True)
+
+    _effective_base_ref = base_ref if base_ref is not None else _pipeline_base_ref
+    if _git_mod.in_git_repo(cwd=project_root):
+        if pipeline_mode == "gh":
+            _branch = _effective_base_ref.removeprefix("origin/")
+            if _branch and _branch not in ("current", "HEAD"):
+                try:
+                    _git_mod.fetch_origin(_branch, cwd=project_root)
+                except _git_mod.GitError as exc:
+                    raise RuntimeError(
+                        f"git fetch origin {_branch} failed: {exc}"
+                    ) from exc
+        try:
+            base_ref_name, base_ref_sha = _git_mod.resolve_base_ref(
+                _effective_base_ref, cwd=project_root
+            )
+        except _git_mod.GitError as exc:
+            raise RuntimeError(f"--base-ref: {exc}") from exc
+    else:
+        base_ref_name, base_ref_sha = _effective_base_ref, ""
 
     workdir = None
     try:
@@ -517,7 +527,7 @@ def launch(
         (state_dir / "instructions.txt").write_text(instr_raw, encoding="utf-8")
 
         workdir, branch, worktree_base, setup_kind = _setup_workdir(
-            pipeline_mode, project_root, base_ref, gr_id, state_dir
+            pipeline_mode, project_root, base_ref_sha, gr_id, state_dir
         )
 
         now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -542,6 +552,8 @@ def launch(
             "stage": "starting",
             "pid": None,
             "stage_inputs": stage_inputs,
+            "base_ref_name": base_ref_name,
+            "base_ref_sha": base_ref_sha,
         }
         _write_state(state_dir, state)
 

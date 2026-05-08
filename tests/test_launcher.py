@@ -815,8 +815,14 @@ def test_launch_ghgremlin_state_layout(lenv_with_gh):
     assert state["setup_kind"] == "worktree", (
         f"ghgremlin should use detached worktree, got: {state['setup_kind']!r}"
     )
-    assert state["worktree_base"] == "origin/main", (
-        f"worktree_base should be origin/main, got: {state['worktree_base']!r}"
+    assert state["base_ref_name"] == "main", (
+        f"base_ref_name should be 'main', got: {state['base_ref_name']!r}"
+    )
+    assert len(state.get("base_ref_sha", "")) == 40, (
+        f"base_ref_sha should be a 40-char SHA, got: {state.get('base_ref_sha')!r}"
+    )
+    assert len(state.get("worktree_base", "")) == 40, (
+        f"worktree_base should be a SHA, got: {state.get('worktree_base')!r}"
     )
     workdir = pathlib.Path(state["workdir"])
     assert workdir.is_dir(), f"worktree directory should exist: {workdir}"

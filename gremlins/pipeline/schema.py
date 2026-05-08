@@ -30,3 +30,4 @@ class Pipeline:
     path: pathlib.Path
     stages: list[StageEntry]
     default_client: ClientSpec | None = None
+    base_ref: str = "current"

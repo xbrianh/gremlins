@@ -2,6 +2,8 @@ name: boss
 
 default_client: claude:sonnet
 
+base_ref: current
+
 stages:
   - name: chain
     type: chain

@@ -208,7 +208,6 @@ class Pipeline:
                         entry,
                         model,
                         plan_source=plan_source,
-                        ref=getattr(args, "ref", "") or "",
                         instructions=instructions,
                         repo=self.repo,
                     )
