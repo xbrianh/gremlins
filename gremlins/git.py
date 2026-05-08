@@ -149,7 +149,9 @@ def resolve_base_ref(
         if r.returncode == 0:
             return name, r.stdout.strip()
 
-    raise GitError(128, f"base_ref {name!r} does not resolve to a branch, tag, or commit")
+    raise GitError(
+        128, f"base_ref {name!r} does not resolve to a branch, tag, or commit"
+    )
 
 
 def fetch_origin(

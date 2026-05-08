@@ -36,7 +36,10 @@ class OpenGitHubPR(Stage):
         base_ref = self.base_ref
         if base_ref is None and sf and sf.exists():
             try:
-                base_ref = json.loads(sf.read_text(encoding="utf-8")).get("base_ref_name") or ""
+                base_ref = (
+                    json.loads(sf.read_text(encoding="utf-8")).get("base_ref_name")
+                    or ""
+                )
             except Exception:
                 base_ref = ""
         base_ref = base_ref or "main"
