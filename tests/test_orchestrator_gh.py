@@ -13,7 +13,6 @@ import subprocess
 import pytest
 
 import gremlins.orchestrators.gh as _gh_mod
-import gremlins.orchestrators.gh_pipeline as _pipeline_mod
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.gh_utils import parse_issue_ref as _parse_issue_ref
 from gremlins.git import (
@@ -158,6 +157,9 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
 
     monkeypatch.setattr(
         "gremlins.stages.handoff_branch.patch_state", _handoff_patch_state
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.open_github_pr.patch_state", _handoff_patch_state
     )
 
     import gremlins.stages.commit as _commit_stage_mod
@@ -1100,25 +1102,17 @@ def test_resume_from_implement(tmp_path, monkeypatch):
 
 
 def test_resume_from_ghreview(tmp_path, monkeypatch):
-    """--resume-from ghreview reloads pr_url from state.json and skips earlier stages."""
+    """--resume-from ghreview skips earlier stages and calls ghreview."""
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
     session_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
-    def _fake_read(sf, field):
-        if field == "issue_url":
-            return "https://github.com/owner/repo/issues/5"
-        if field == "issue_num":
-            return "5"
-        if field == "pr_url":
-            return "https://github.com/owner/repo/pull/200"
-        if field == "model":
-            return ""
-        return ""
+    data = json.loads(state_file.read_text())
+    data["issue_url"] = "https://github.com/owner/repo/issues/5"
+    data["pr_url"] = "https://github.com/owner/repo/pull/200"
+    state_file.write_text(json.dumps(data))
 
-    monkeypatch.setattr(_gh_mod, "read_state_field", _fake_read)
-    monkeypatch.setattr(_pipeline_mod, "read_state_field", _fake_read)
     monkeypatch.setattr(
         _gh_mod, "_fetch_issue_body", lambda num, repo: "# Plan\nContent.\n"
     )
@@ -1126,7 +1120,7 @@ def test_resume_from_ghreview(tmp_path, monkeypatch):
     ghreview_called = []
     monkeypatch.setattr(
         "gremlins.stages.review_code.ReviewCode.run",
-        lambda self, pipe: ghreview_called.append(self.pr_url),
+        lambda self, pipe: ghreview_called.append(True),
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -1148,8 +1142,7 @@ def test_resume_from_ghreview(tmp_path, monkeypatch):
 
     # No client.run calls (plan/implement/commit/open-pr all skipped)
     assert client.calls == []
-    # ghreview was called with the correct PR URL
-    assert ghreview_called == ["https://github.com/owner/repo/pull/200"]
+    assert ghreview_called == [True]
 
 
 def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch):
@@ -1413,21 +1406,12 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
 
     session_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
-    def _fake_read(sf, field):
-        if field == "issue_url":
-            return "https://github.com/owner/repo/issues/42"
-        if field == "issue_num":
-            return "42"
-        if field == "pr_url":
-            return ""
-        if field == "impl_handoff_branch":
-            return handoff_branch
-        if field == "impl_base_ref":
-            return base_ref
-        return ""
+    data = json.loads(state_file.read_text())
+    data["issue_url"] = "https://github.com/owner/repo/issues/42"
+    data["impl_handoff_branch"] = handoff_branch
+    data["impl_base_ref"] = base_ref
+    state_file.write_text(json.dumps(data))
 
-    monkeypatch.setattr(_gh_mod, "read_state_field", _fake_read)
-    monkeypatch.setattr(_pipeline_mod, "read_state_field", _fake_read)
     monkeypatch.setattr(
         _gh_mod, "_fetch_issue_body", lambda num, repo: "# Plan\nDo stuff.\n"
     )
@@ -1435,7 +1419,7 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
     ghreview_called = []
     monkeypatch.setattr(
         "gremlins.stages.review_code.ReviewCode.run",
-        lambda self, pipe: ghreview_called.append(self.pr_url),
+        lambda self, pipe: ghreview_called.append(True),
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -1459,8 +1443,10 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
     assert "commit" not in labels, "commit must not run on open-pr resume"
     assert "open-github-pr" in labels
 
-    # pr_url was extracted and threaded into downstream stages
-    assert ghreview_called == ["https://github.com/owner/repo/pull/101"]
+    assert ghreview_called == [True]
+    # Verify OpenGitHubPR wrote pr_url to state.json
+    state = json.loads(state_file.read_text())
+    assert state.get("pr_url") == "https://github.com/owner/repo/pull/101"
 
 
 # ---------------------------------------------------------------------------
@@ -1469,11 +1455,11 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
 
 
 def test_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
-    """WaitCopilot receives repo and pr_num as instance attrs, session_dir via state."""
+    """WaitCopilot receives repo and session_dir; pr_url is written to state by OpenGitHubPR."""
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    session_dir, _state_file = _patch_common(monkeypatch, tmp_path)
+    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
     monkeypatch.setattr(
         subprocess,
@@ -1519,8 +1505,10 @@ def test_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
 
     stage = captured_stage["stage"]
     assert stage.repo == "owner/repo"
-    assert stage.pr_num == "77"
     assert stage.state.session_dir == session_dir
+    # pr_url written to state.json by OpenGitHubPR; pr_num derived from it in run()
+    state = json.loads(state_file.read_text())
+    assert state.get("pr_url") == "https://github.com/owner/repo/pull/77"
 
 
 # ---------------------------------------------------------------------------
@@ -1529,11 +1517,11 @@ def test_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
 
 
 def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
-    """WaitCI receives pr_url, model as instance attrs, session_dir via state."""
+    """WaitCI receives model and session_dir; pr_url is written to state by OpenGitHubPR."""
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    session_dir, _state_file = _patch_common(monkeypatch, tmp_path)
+    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
     monkeypatch.setattr(
         subprocess,
@@ -1577,9 +1565,11 @@ def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
     assert result == 0
 
     stage = captured_stage["stage"]
-    assert stage.pr_url == "https://github.com/owner/repo/pull/77"
     assert stage.model == "claude-opus-4-7"
     assert stage.state.session_dir == session_dir
+    # pr_url written to state.json by OpenGitHubPR; read from state in WaitCI.run()
+    state = json.loads(state_file.read_text())
+    assert state.get("pr_url") == "https://github.com/owner/repo/pull/77"
 
 
 def test_wait_ci_stage_ordering(tmp_path, monkeypatch):
@@ -1645,21 +1635,13 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    _session_dir, _state_file = _patch_common(monkeypatch, tmp_path)
+    _session_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
-    def _fake_read(sf, field):
-        if field == "issue_url":
-            return "https://github.com/owner/repo/issues/5"
-        if field == "issue_num":
-            return "5"
-        if field == "pr_url":
-            return "https://github.com/owner/repo/pull/200"
-        if field == "model":
-            return ""
-        return ""
+    data = json.loads(state_file.read_text())
+    data["issue_url"] = "https://github.com/owner/repo/issues/5"
+    data["pr_url"] = "https://github.com/owner/repo/pull/200"
+    state_file.write_text(json.dumps(data))
 
-    monkeypatch.setattr(_gh_mod, "read_state_field", _fake_read)
-    monkeypatch.setattr(_pipeline_mod, "read_state_field", _fake_read)
     monkeypatch.setattr(
         _gh_mod, "_fetch_issue_body", lambda num, repo: "# Plan\nContent.\n"
     )
@@ -1697,7 +1679,9 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
     assert client.calls == [], "no client stages should run on ci-gate resume"
     assert earlier_called == [], "earlier stages must be skipped"
     assert len(ci_stages) == 1
-    assert ci_stages[0].pr_url == "https://github.com/owner/repo/pull/200"
+    # pr_url is read from state.json inside WaitCI.run(); verify it's pre-populated
+    state = json.loads(state_file.read_text())
+    assert state.get("pr_url") == "https://github.com/owner/repo/pull/200"
 
 
 # ---------------------------------------------------------------------------

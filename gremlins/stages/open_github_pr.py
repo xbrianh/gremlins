@@ -10,6 +10,7 @@ from gremlins.pipeline import StageEntry
 from gremlins.prompts import BUNDLED_PROMPT_DIR
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
+from gremlins.state import patch_state
 
 
 def _load(name: str) -> str:
@@ -54,6 +55,7 @@ class OpenGitHubPR(Stage):
             label="PR",
             text_result=completed.text_result,
         )
+        patch_state(self.state.gr_id, pr_url=pr_url)
         return pr_url
 
 

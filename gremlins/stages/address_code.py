@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import glob
+import json
 import pathlib
 import re
 from typing import Any
@@ -11,7 +12,18 @@ from gremlins.pipeline import StageEntry
 from gremlins.prompts import load_prompts
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
-from gremlins.state import check_bail, emit_bail
+from gremlins.state import check_bail, emit_bail, resolve_state_file
+
+
+def _read_pr_url(gr_id: str | None) -> str:
+    sf = resolve_state_file(gr_id)
+    if sf is None or not sf.exists():
+        return ""
+    try:
+        return json.loads(sf.read_text(encoding="utf-8")).get("pr_url") or ""
+    except (json.JSONDecodeError, OSError):
+        return ""
+
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -107,9 +119,12 @@ class AddressCode(Stage):
         )
 
     def results_to_github(self, pipe: Any) -> None:
+        pr_url = self.pr_url or _read_pr_url(self.state.gr_id)
+        if not pr_url:
+            raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
         prompt = load_prompts(self.prompt_paths).format(
             bail_command=self.bail_command(),
-            pr_url=self.pr_url,
+            pr_url=pr_url,
         )
         self.run_claude(
             prompt,

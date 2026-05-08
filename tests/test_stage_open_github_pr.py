@@ -83,3 +83,21 @@ def test_run_raises_if_unbound() -> None:
     stage = OpenGitHubPR(entry, None, issue_url=ISSUE_URL)
     with pytest.raises(RuntimeError, match="not bound"):
         stage.run(None)
+
+
+def test_run_patches_pr_url_to_state(tmp_path: pathlib.Path) -> None:
+    from unittest.mock import patch as mock_patch
+
+    stage, ctx = _make_stage(tmp_path)
+    patched: list[dict] = []
+    with (
+        mock_patch(
+            "gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL
+        ),
+        mock_patch(
+            "gremlins.stages.open_github_pr.patch_state",
+            side_effect=lambda gr_id, **kw: patched.append(kw),
+        ),
+    ):
+        stage.run(None)
+    assert patched == [{"pr_url": PR_URL}]

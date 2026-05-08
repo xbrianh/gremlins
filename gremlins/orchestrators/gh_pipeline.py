@@ -14,7 +14,6 @@ from gremlins.orchestrators.base import (
     Pipeline,
     die,
     read_stage_inputs,
-    read_state_field,
 )
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline import StageEntry
@@ -33,7 +32,7 @@ from gremlins.stages import (
 )
 from gremlins.stages import handoff_branch as handoff_branch_mod
 from gremlins.stages.base import Stage, StageContext
-from gremlins.state import patch_state, set_stage
+from gremlins.state import set_stage
 
 logger = logging.getLogger(__name__)
 
@@ -88,21 +87,6 @@ class GHPipeline(Pipeline):
         self.issue_num: str = ""
         self.issue_body: str = ""
         self.impl_pre_state: PreImplState | None = None
-        self.pr_url: str = ""
-        self.pr_num: str = ""
-
-    def _ensure_pr_url(self) -> None:
-        if self.pr_url:
-            return
-        saved = read_state_field(self.state_file, "pr_url")
-        if not saved:
-            die(
-                f"--resume-from {self.args.resume_from}: no pr_url in state.json "
-                "(rewind to implement?)"
-            )
-        self.pr_url = saved
-        self.pr_num = saved.split("/")[-1]
-        logger.info("resumed PR: %s", saved)
 
     def _make_runner(
         self, entry: StageEntry, ctx: StageContext, spec: ClientSpec
@@ -196,11 +180,7 @@ class GHPipeline(Pipeline):
                 )
                 stage.bind(ctx)
                 pr_url = stage.run(None)
-                pr_num = pr_url.split("/")[-1]
                 logger.info("PR: %s", pr_url)
-                patch_state(self.gr_id, pr_url=pr_url)
-                self.pr_url = pr_url
-                self.pr_num = pr_num
 
             return _open_github_pr
 
@@ -275,11 +255,8 @@ class GHPipeline(Pipeline):
         if entry.type == "request-copilot":
 
             def _request_copilot() -> None:
-                self._ensure_pr_url()
                 set_stage(self.gr_id, entry.name)
-                stage = request_copilot.RequestCopilot(
-                    entry, model, repo=self.repo, pr_num=self.pr_num
-                )
+                stage = request_copilot.RequestCopilot(entry, model, repo=self.repo)
                 stage.bind(ctx)
                 stage.run(None)
 
@@ -292,15 +269,8 @@ class GHPipeline(Pipeline):
                     die(
                         f"stage {entry.name!r}: type 'ghreview' requires a 'prompt' field in the pipeline YAML"
                     )
-                self._ensure_pr_url()
                 set_stage(self.gr_id, entry.name)
-                stage = review_code.ReviewCode(
-                    entry,
-                    model,
-                    plan_text="",
-                    is_git=True,
-                    pr_url=self.pr_url,
-                )
+                stage = review_code.ReviewCode(entry, model, plan_text="", is_git=True)
                 stage.bind(ctx)
                 stage.run(self)
 
@@ -309,11 +279,8 @@ class GHPipeline(Pipeline):
         if entry.type == "wait-copilot":
 
             def _wait_copilot() -> None:
-                self._ensure_pr_url()
                 set_stage(self.gr_id, entry.name)
-                stage = wait_copilot.WaitCopilot(
-                    entry, model, repo=self.repo, pr_num=self.pr_num
-                )
+                stage = wait_copilot.WaitCopilot(entry, model, repo=self.repo)
                 stage.bind(ctx)
                 state = stage.run(None)
                 logger.info("Copilot review: %s", state)
@@ -327,14 +294,8 @@ class GHPipeline(Pipeline):
                     die(
                         f"stage {entry.name!r}: type 'ghaddress' requires a 'prompt' field in the pipeline YAML"
                     )
-                self._ensure_pr_url()
                 set_stage(self.gr_id, entry.name)
-                stage = address_code.AddressCode(
-                    entry,
-                    model,
-                    is_git=True,
-                    pr_url=self.pr_url,
-                )
+                stage = address_code.AddressCode(entry, model, is_git=True)
                 stage.bind(ctx)
                 stage.run(self)
 
@@ -343,9 +304,8 @@ class GHPipeline(Pipeline):
         if entry.type == "wait-ci":
 
             def _wait_ci() -> None:
-                self._ensure_pr_url()
                 set_stage(self.gr_id, entry.name)
-                stage = wait_ci.WaitCI(entry, model, pr_url=self.pr_url)
+                stage = wait_ci.WaitCI(entry, model)
                 stage.bind(ctx)
                 stage.run(None)
 

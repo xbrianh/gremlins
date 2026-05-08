@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import Callable
@@ -13,9 +14,20 @@ from gremlins.pipeline import StageEntry
 from gremlins.prompts import load_prompts
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
-from gremlins.state import check_bail, emit_bail
+from gremlins.state import check_bail, emit_bail, resolve_state_file
 
 logger = logging.getLogger(__name__)
+
+
+def _read_pr_url(gr_id: str | None) -> str:
+    sf = resolve_state_file(gr_id)
+    if sf is None or not sf.exists():
+        return ""
+    try:
+        return json.loads(sf.read_text(encoding="utf-8")).get("pr_url") or ""
+    except (json.JSONDecodeError, OSError):
+        return ""
+
 
 _FAILING_CONCLUSIONS = frozenset({"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED"})
 _PENDING_STATES = frozenset({"EXPECTED", "PENDING"})
@@ -144,7 +156,7 @@ class WaitCI(Stage):
         entry: StageEntry,
         model: str | None,
         *,
-        pr_url: str,
+        pr_url: str = "",
         max_attempts: int = 3,
         poll_timeout: int = 1200,
         poll_interval: int = 30,
@@ -164,6 +176,10 @@ class WaitCI(Stage):
         self.fix_sha_getter = fix_sha_getter
 
     def run(self, pipe: Any) -> None:
+        if not self.pr_url:
+            self.pr_url = _read_pr_url(self.state.gr_id)
+            if not self.pr_url:
+                raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
         checks, review_decision = _wait_for_checks(
             self.pr_url, self.checks_getter, self.poll_interval, self.startup_grace_secs
         )

@@ -236,7 +236,7 @@ def gh_main(
     if total_cost > 0:
         patch_state(gr_id, total_cost_usd=total_cost)
 
-    logger.info("done. PR: %s", pipe.pr_url or "(unknown)")
+    logger.info("done. PR: %s", read_state_field(state_file, "pr_url") or "(unknown)")
     if total_cost > 0:
         logger.info("total cost: $%.4f", total_cost)
     return 0
