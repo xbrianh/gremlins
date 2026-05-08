@@ -33,7 +33,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _review_stage_info(runner: StageRunner) -> tuple[list[str], dict[str, pathlib.Path]]:
+def _review_stage_info(
+    runner: StageRunner,
+) -> tuple[list[str], dict[str, pathlib.Path]]:
     names: list[str] = []
     dirs: dict[str, pathlib.Path] = {}
     for s in runner.pipeline_data.stages:
@@ -119,7 +121,9 @@ def _build_commit(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> 
     return commit.Commit(entry, spec.model)
 
 
-def _build_open_github_pr(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
+def _build_open_github_pr(
+    entry: StageEntry, spec: ClientSpec, runner: StageRunner
+) -> Any:
     return open_github_pr.OpenGitHubPR(
         entry,
         spec.model,
@@ -141,7 +145,9 @@ def _build_ghreview(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -
     return review_code.ReviewCode(entry, spec.model, plan_text="", is_git=True)
 
 
-def _build_wait_copilot(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
+def _build_wait_copilot(
+    entry: StageEntry, spec: ClientSpec, runner: StageRunner
+) -> Any:
     return wait_copilot.WaitCopilot(entry, spec.model, repo=runner.repo)
 
 
@@ -166,7 +172,9 @@ def _build_review_code(entry: StageEntry, spec: ClientSpec, runner: StageRunner)
     )
 
 
-def _build_address_code(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
+def _build_address_code(
+    entry: StageEntry, spec: ClientSpec, runner: StageRunner
+) -> Any:
     names, dirs = _review_stage_info(runner)
     logger.info("addressing code reviews (model: %s)", spec.model)
     return address_code.AddressCode(
