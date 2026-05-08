@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import pathlib
 from typing import Any
 
@@ -11,6 +12,8 @@ from gremlins.prompts import load_prompts
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import check_bail, emit_bail, read_pr_url, set_stage
+
+logger = logging.getLogger(__name__)
 
 
 def _run_reviewer(
@@ -124,6 +127,7 @@ class ReviewCode(Stage):
                 cwd=self.state.worktree,
             )
             set_stage(self.state.gr_id, self.name, {"model": f"done ({self.model})"})
+            logger.info("code review (%s): %s", self.model, out_file)
             if not out_file.exists() or out_file.stat().st_size == 0:
                 raise RuntimeError(f"review {self.model} did not produce {out_file}")
         except (SystemExit, Exception) as exc:

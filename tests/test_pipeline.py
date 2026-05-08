@@ -11,18 +11,7 @@ from gremlins.pipeline import (
     resolve_pipeline_name,
     resolve_pipeline_path,
 )
-from gremlins.stages import (
-    address_code,
-    commit,
-    implement,
-    open_github_pr,
-    plan,
-    request_copilot,
-    review_code,
-    verify,
-    wait_ci,
-    wait_copilot,
-)
+from gremlins.stages.registry import STAGE_BUILDERS
 
 
 def _args(**kwargs: object) -> argparse.Namespace:
@@ -66,11 +55,11 @@ def test_pipeline_constructs_from_local_yaml(tmp_path: pathlib.Path) -> None:
     assert "plan" in stage_types
     assert "implement" in stage_types
     assert pipe.target == "local"
-    assert Pipeline.STAGE_TYPES["plan"] is plan.Plan
-    assert Pipeline.STAGE_TYPES["implement"] is implement.Implement
-    assert Pipeline.STAGE_TYPES["review-code"] is review_code.ReviewCode
-    assert Pipeline.STAGE_TYPES["address-code"] is address_code.AddressCode
-    assert Pipeline.STAGE_TYPES["verify"] is verify.Verify
+    assert "plan" in STAGE_BUILDERS
+    assert "implement" in STAGE_BUILDERS
+    assert "review-code" in STAGE_BUILDERS
+    assert "address-code" in STAGE_BUILDERS
+    assert "verify" in STAGE_BUILDERS
 
 
 def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
@@ -92,15 +81,15 @@ def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
     assert "plan" in stage_types
     assert "implement" in stage_types
     assert pipe.target == "github"
-    assert Pipeline.STAGE_TYPES["plan"] is plan.Plan
-    assert Pipeline.STAGE_TYPES["implement"] is implement.Implement
-    assert Pipeline.STAGE_TYPES["commit"] is commit.Commit
-    assert Pipeline.STAGE_TYPES["open-github-pr"] is open_github_pr.OpenGitHubPR
-    assert Pipeline.STAGE_TYPES["request-copilot"] is request_copilot.RequestCopilot
-    assert Pipeline.STAGE_TYPES["ghreview"] is review_code.ReviewCode
-    assert Pipeline.STAGE_TYPES["ghaddress"] is address_code.AddressCode
-    assert Pipeline.STAGE_TYPES["wait-ci"] is wait_ci.WaitCI
-    assert Pipeline.STAGE_TYPES["wait-copilot"] is wait_copilot.WaitCopilot
+    assert "plan" in STAGE_BUILDERS
+    assert "implement" in STAGE_BUILDERS
+    assert "commit" in STAGE_BUILDERS
+    assert "open-github-pr" in STAGE_BUILDERS
+    assert "request-copilot" in STAGE_BUILDERS
+    assert "ghreview" in STAGE_BUILDERS
+    assert "ghaddress" in STAGE_BUILDERS
+    assert "wait-ci" in STAGE_BUILDERS
+    assert "wait-copilot" in STAGE_BUILDERS
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +260,7 @@ def test_resolve_pipeline_path_finds_project_dir_when_overlay_empty(
 
 
 def test_resolve_pipeline_name_no_overlay_env_falls_through(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("GREMLINS_OVERLAY_DIR", raising=False)
     result = resolve_pipeline_name("local", pathlib.Path.cwd())
@@ -279,7 +268,7 @@ def test_resolve_pipeline_name_no_overlay_env_falls_through(
 
 
 def test_resolve_pipeline_path_no_overlay_env_falls_through(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("GREMLINS_OVERLAY_DIR", raising=False)
     result = resolve_pipeline_path("local", pathlib.Path.cwd())
@@ -303,3 +292,35 @@ def test_parallel_expansion_in_constructor(tmp_path: pathlib.Path) -> None:
     assert by_name["reviews-fanout"].type == "parallel-fanout"
     assert by_name["reviews"].type == "parallel-group"
     assert by_name["reviews-fanin"].type == "parallel-fanin"
+
+
+def test_stage_builders_registry_covers_all_known_types() -> None:
+    expected = {
+        "plan",
+        "implement",
+        "materialize-to-branch",
+        "verify",
+        "commit",
+        "open-github-pr",
+        "request-copilot",
+        "ghreview",
+        "wait-copilot",
+        "ghaddress",
+        "wait-ci",
+        "review-code",
+        "address-code",
+        "chain",
+    }
+    assert expected <= set(STAGE_BUILDERS)
+
+
+def test_stage_needs_pipe_matches_builders() -> None:
+    from gremlins.stages.registry import STAGE_NEEDS_PIPE
+
+    assert set(STAGE_NEEDS_PIPE) == set(STAGE_BUILDERS)
+    assert STAGE_NEEDS_PIPE["implement"] is True
+    assert STAGE_NEEDS_PIPE["materialize-to-branch"] is True
+    assert STAGE_NEEDS_PIPE["ghreview"] is True
+    assert STAGE_NEEDS_PIPE["ghaddress"] is True
+    assert STAGE_NEEDS_PIPE["plan"] is False
+    assert STAGE_NEEDS_PIPE["verify"] is False

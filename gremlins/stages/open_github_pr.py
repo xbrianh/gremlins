@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from gremlins.clients.protocol import CompletedRun
@@ -11,6 +12,8 @@ from gremlins.prompts import BUNDLED_PROMPT_DIR
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import patch_state, read_state_str, resolve_state_file
+
+logger = logging.getLogger(__name__)
 
 
 def _load(name: str) -> str:
@@ -61,6 +64,7 @@ class OpenGitHubPR(Stage):
             text_result=completed.text_result,
         )
         patch_state(self.state.gr_id, pr_url=pr_url)
+        logger.info("PR: %s", pr_url)
         return pr_url
 
 
