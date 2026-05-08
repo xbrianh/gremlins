@@ -192,13 +192,12 @@ class Pipeline:
         is_git = self.is_git
         gr_id = self.gr_id
         instructions = self.instructions
-        plan_path = getattr(args, "plan_path", None)
+        plan_val = getattr(args, "plan", None)
 
         if entry.type == "plan":
 
             def _plan() -> None:
-                plan_source = getattr(args, "plan_source", None) or plan_path
-                if not entry.prompt_paths and not plan_source:
+                if not entry.prompt_paths and not plan_val:
                     die(
                         f"stage {entry.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML"
                     )
@@ -207,7 +206,7 @@ class Pipeline:
                     stage = plan.Plan(
                         entry,
                         model,
-                        plan_source=plan_source,
+                        plan_source=plan_val,
                         instructions=instructions,
                         repo=self.repo,
                     )
@@ -218,7 +217,7 @@ class Pipeline:
                     stage = plan.Plan(
                         entry,
                         model,
-                        plan_source=plan_path,
+                        plan_source=plan_val,
                         plan_file=plan_file,
                         instructions=instructions,
                     )
@@ -527,7 +526,7 @@ class Pipeline:
                 "nested chain stages are not supported"
             )
         child_args = _argparse.Namespace(
-            plan_path=str(plan_path),
+            plan=str(plan_path),
             spec_path=None,
             cmds=getattr(self.args, "cmds", None),
             test_max_attempts=getattr(self.args, "test_max_attempts", 3),

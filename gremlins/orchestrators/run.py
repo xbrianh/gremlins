@@ -1,4 +1,4 @@
-"""Orchestrator entry point for the local pipeline."""
+"""Unified internal pipeline entry point."""
 
 from __future__ import annotations
 
@@ -21,20 +21,27 @@ from gremlins.clients.resolve import (
     validate_stage_specs,
 )
 from gremlins.env_file import load_env_file
-from gremlins.git import (
-    has_commits,
-    has_dirty_worktree,
-    in_git_repo,
-)
+from gremlins.gh_utils import get_repo
+from gremlins.git import has_commits, has_dirty_worktree, in_git_repo
 from gremlins.logging_setup import configure_logging
-from gremlins.orchestrators.pipeline import Pipeline
-from gremlins.pipeline import (
-    load_pipeline,
-    resolve_pipeline_path,
-)
-from gremlins.state import patch_state, resolve_session_dir
+from gremlins.orchestrators.pipeline import Pipeline, read_state_field
+from gremlins.pipeline import load_pipeline
+from gremlins.state import patch_state, resolve_session_dir, resolve_state_file
 
 logger = logging.getLogger(__name__)
+
+_GH_STAGE_TYPES = frozenset(
+    {
+        "materialize-to-branch",
+        "commit",
+        "open-github-pr",
+        "request-copilot",
+        "wait-copilot",
+        "ghaddress",
+        "ghreview",
+        "wait-ci",
+    }
+)
 
 
 def die(msg: str) -> NoReturn:
@@ -43,33 +50,24 @@ def die(msg: str) -> NoReturn:
     sys.exit(1)
 
 
-def _parse_local_args(argv: list[str]) -> argparse.Namespace:
-    usage = (
-        "usage: gremlins.cli local [--resume-from <stage>] [--plan <path>] [--spec <path>] "
-        '[--cmd "<command>"] [--test-max-attempts <n>] '
-        "[--pipeline <name-or-path>] [--client <provider:model>] "
-        '"<instructions>"'
-    )
-    parser = argparse.ArgumentParser(add_help=False, usage=usage)
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--resume-from", dest="resume_from", default=None)
-    parser.add_argument("--plan", dest="plan_path", default=None)
+    parser.add_argument("--plan", dest="plan", default=None)
     parser.add_argument("--spec", dest="spec_path", default=None)
     parser.add_argument("--cmd", dest="cmds", action="append", default=None)
     parser.add_argument(
         "--test-max-attempts", dest="test_max_attempts", type=int, default=3
     )
-    parser.add_argument("--pipeline", dest="pipeline", default=None)
     parser.add_argument("--client", dest="client", default=None)
     parser.add_argument("instructions", nargs="*")
     args = parser.parse_args(argv)
     if args.resume_from:
         args.instructions = [s for s in args.instructions if s]
-    if args.plan_path:
-        if args.instructions:
-            die("--plan and positional instructions are mutually exclusive")
-    else:
-        if not args.instructions:
-            die(usage)
+    if args.plan and args.instructions:
+        die("--plan and positional instructions are mutually exclusive")
+    if not args.resume_from and not args.plan and not args.instructions:
+        die("one of --plan, --resume-from, or positional instructions is required")
     if args.test_max_attempts <= 0:
         die("--test-max-attempts must be a positive integer")
     if args.cmds is not None:
@@ -79,11 +77,16 @@ def _parse_local_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
-def local_main(
-    argv: list[str], *, client: ClaudeClient | None = None, gr_id: str | None = None
+def run_pipeline(
+    pipeline_path: pathlib.Path,
+    *,
+    argv: list[str],
+    gr_id: str | None = None,
+    client: ClaudeClient | None = None,
 ) -> int:
+    """Load pipeline YAML, build Pipeline, run. Sole internal pipeline entry point."""
     configure_logging()
-    args = _parse_local_args(argv)
+    args = _parse_args(argv)
 
     cli_spec: ClientSpec | None = None
     if args.client:
@@ -106,13 +109,21 @@ def local_main(
         die("claude CLI not found")
 
     try:
-        pipeline = load_pipeline(
-            resolve_pipeline_path(args.pipeline or "local", pathlib.Path.cwd())
-        )
+        pipeline = load_pipeline(pipeline_path)
     except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
         die(str(exc))
 
-    # Load or resolve stage specs; state.json is authoritative on resume
+    is_gh = any(s.type in _GH_STAGE_TYPES for s in pipeline.stages)
+    target = "github" if is_gh else "local"
+
+    repo = ""
+    state_file = resolve_state_file(gr_id)
+
+    if is_gh:
+        if shutil.which("gh") is None:
+            die("gh CLI not found")
+        repo = get_repo()
+
     stage_specs: dict[str, ClientSpec] = {}
     if args.resume_from and gr_id:
         try:
@@ -130,7 +141,6 @@ def local_main(
                 gr_id, stage_clients={k: str(v) for k, v in stage_specs.items()}
             )
 
-    # Create one client instance per unique spec (or reuse injected test client)
     _spec_clients: dict[str, ClaudeClient] = {}
 
     def _client_for_spec(spec: ClientSpec) -> ClaudeClient:
@@ -156,25 +166,6 @@ def local_main(
         _signal_clients = list(_spec_clients.values())
     else:
         _signal_clients = [to_client(default_spec)]
-    try:
-        pipe = Pipeline(
-            pipeline.stages,
-            args=args,
-            session_dir=session_dir,
-            gr_id=gr_id,
-            target="local",
-            test_client=client,
-            spec_clients=_spec_clients,
-            stage_specs=stage_specs,
-            pipeline_data=pipeline,
-        )
-        pipe.validate_resume_target()
-    except ValueError as exc:
-        die(str(exc))
-
-    _expanded_stage_names = [s.name for s in pipe.stages]
-
-    run_resume_from = args.resume_from
 
     try:
         validate_stage_specs(stage_specs, pipeline)
@@ -183,36 +174,53 @@ def local_main(
 
     plan_file = session_dir / "plan.md"
 
-    # When --plan points to a file and we're resuming past the plan stage,
-    # the plan stage won't run, so pre-populate plan.md now.
-    plan_path_arg = getattr(args, "plan_path", None)
-    if plan_path_arg and not plan_file.exists():
-        src = pathlib.Path(plan_path_arg)
+    # For local pipelines, pre-copy the plan file so stages that resume past
+    # the plan stage can find plan.md. For gh pipelines, the plan stage itself
+    # handles plan_source (may be a file path or an issue ref).
+    if not is_gh and args.plan and not plan_file.exists():
+        src = pathlib.Path(args.plan)
         if src.is_file():
             shutil.copyfile(src, plan_file)
 
     logger.info("session: %s", session_dir)
 
-    is_git = in_git_repo()
+    try:
+        pipe = Pipeline(
+            pipeline.stages,
+            args=args,
+            session_dir=session_dir,
+            gr_id=gr_id,
+            pipeline_data=pipeline,
+            repo=repo,
+            target=target,
+            state_file=state_file if is_gh else None,
+            spec_clients=_spec_clients,
+            stage_specs=stage_specs,
+            test_client=client,
+        )
+        pipe.validate_resume_target()
+    except ValueError as exc:
+        die(str(exc))
 
-    def _type_idx(stage_type: str) -> int:
-        # returns an index into pipe.stages, the same index space as _expanded_stage_names
-        for i, s in enumerate(pipe.stages):
-            if s.type == stage_type:
-                return i
-        return len(pipe.stages)
+    if not is_gh and args.resume_from:
+        _expanded_stage_names = [s.name for s in pipe.stages]
 
-    start_idx = 0
-    if run_resume_from:
+        def _type_idx(stage_type: str) -> int:
+            for i, s in enumerate(pipe.stages):
+                if s.type == stage_type:
+                    return i
+            return len(pipe.stages)
+
         start_idx = (
-            _expanded_stage_names.index(run_resume_from)
-            if run_resume_from in _expanded_stage_names
+            _expanded_stage_names.index(args.resume_from)
+            if args.resume_from in _expanded_stage_names
             else 0
         )
         if start_idx >= _type_idx("implement"):
             if not plan_file.exists() or plan_file.stat().st_size == 0:
                 die(f"--resume-from {args.resume_from} requires existing {plan_file}")
         if start_idx >= _type_idx("review-code"):
+            is_git = in_git_repo()
             if is_git:
                 if not has_dirty_worktree() and not has_commits():
                     die(
@@ -239,14 +247,19 @@ def local_main(
 
     pipe.run(*_signal_clients)
 
-    # Accumulate cost from all client instances
     total_cost = 0.0
     for c in _spec_clients.values() if _spec_clients else [client] if client else []:
         total_cost += getattr(c, "total_cost_usd", 0.0) or 0.0
     if total_cost > 0:
         patch_state(gr_id, total_cost_usd=total_cost)
 
-    logger.info("done. session artifacts in: %s", session_dir)
+    if is_gh:
+        logger.info(
+            "done. PR: %s", read_state_field(state_file, "pr_url") or "(unknown)"
+        )
+    else:
+        logger.info("done. session artifacts in: %s", session_dir)
     if total_cost > 0:
         logger.info("total cost: $%.4f", total_cost)
+
     return 0

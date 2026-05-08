@@ -1,12 +1,13 @@
-"""Internal spawn boundary: run a pipeline subcommand and record terminal state.
+"""Internal spawn boundary: run a pipeline by path and record terminal state.
 
-Usage: python -m gremlins.run_pipeline <gr_id> <kind_subcommand> [pipeline_args...]
+Usage: python -m gremlins.run_pipeline <gr_id> <pipeline_path> [args...]
 
 Not intended for direct human invocation.
 """
 
 from __future__ import annotations
 
+import pathlib
 import sys
 import traceback
 
@@ -18,21 +19,21 @@ def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
     if len(argv) < 2:
-        sys.stderr.write("run_pipeline: usage: <gr_id> <kind_subcommand> [args...]\n")
+        sys.stderr.write("run_pipeline: usage: <gr_id> <pipeline_path> [args...]\n")
         return 1
 
-    gr_id, kind_subcommand, *args = argv
+    gr_id, pipeline_arg, *args = argv
     try:
         validate_gr_id(gr_id)
     except ValueError as exc:
         sys.stderr.write(f"run_pipeline: {exc}\n")
         return 1
 
-    from gremlins.cli import main as cli_main
+    from gremlins.orchestrators.run import run_pipeline as _run_pipeline
 
     rc = 1
     try:
-        rc = cli_main([kind_subcommand, *args], gr_id=gr_id)
+        rc = _run_pipeline(pathlib.Path(pipeline_arg), argv=args, gr_id=gr_id)
     except SystemExit as e:
         rc = e.code if isinstance(e.code, int) else 1
     except BaseException:
