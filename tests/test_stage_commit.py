@@ -143,7 +143,7 @@ def test_run_raises_if_unbound() -> None:
 
 
 def _make_self_sourcing_stage(
-    tmp_path: pathlib.Path, state_file: pathlib.Path
+    tmp_path: pathlib.Path,
 ) -> tuple[Commit, StageContext]:
     entry = _make_entry()
     stage = Commit(entry, "sonnet")
@@ -164,7 +164,7 @@ def test_self_source_head_advanced(tmp_path: pathlib.Path) -> None:
             }
         )
     )
-    stage, ctx = _make_self_sourcing_stage(tmp_path, state_file)
+    stage, ctx = _make_self_sourcing_stage(tmp_path)
     with (
         patch("gremlins.stages.commit.resolve_state_file", return_value=state_file),
         patch("gremlins.stages.commit.rev_list_count", return_value=3),
@@ -188,14 +188,14 @@ def test_self_source_dirty_only(tmp_path: pathlib.Path) -> None:
             }
         )
     )
-    stage, ctx = _make_self_sourcing_stage(tmp_path, state_file)
+    stage, ctx = _make_self_sourcing_stage(tmp_path)
     with (
         patch("gremlins.stages.commit.resolve_state_file", return_value=state_file),
         patch("gremlins.stages.commit.diff_output", return_value="diff"),
     ):
         stage.run(None)
     prompt = ctx.client.calls[0].prompt
-    assert "Create a new branch" in prompt
+    assert HANDOFF_BRANCH not in prompt
 
 
 def test_self_source_raises_without_base_ref(tmp_path: pathlib.Path) -> None:
@@ -208,7 +208,7 @@ def test_self_source_raises_without_base_ref(tmp_path: pathlib.Path) -> None:
             }
         )
     )
-    stage, ctx = _make_self_sourcing_stage(tmp_path, state_file)
+    stage, ctx = _make_self_sourcing_stage(tmp_path)
     with (
         patch("gremlins.stages.commit.resolve_state_file", return_value=state_file),
         pytest.raises(RuntimeError, match="no impl_base_ref"),
@@ -227,7 +227,7 @@ def test_self_source_rev_list_error(tmp_path: pathlib.Path) -> None:
             }
         )
     )
-    stage, ctx = _make_self_sourcing_stage(tmp_path, state_file)
+    stage, ctx = _make_self_sourcing_stage(tmp_path)
     with (
         patch("gremlins.stages.commit.resolve_state_file", return_value=state_file),
         patch(

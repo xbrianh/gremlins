@@ -32,7 +32,7 @@ def _read_state(sf: pathlib.Path | None, field: str) -> str:
         return ""
     try:
         return json.loads(sf.read_text(encoding="utf-8")).get(field) or ""
-    except Exception:
+    except (json.JSONDecodeError, OSError):
         return ""
 
 
