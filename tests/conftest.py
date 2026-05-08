@@ -93,6 +93,11 @@ def _isolate_gr_id(monkeypatch):
     monkeypatch.delenv("GR_ID", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _clear_gremlins_overlay_env(monkeypatch):
+    monkeypatch.delenv("GREMLINS_OVERLAY_DIR", raising=False)
+
+
 @pytest.fixture
 def test_state_root(tmp_path, monkeypatch):
     """Create and patch an isolated gremlins state root."""
