@@ -195,6 +195,14 @@ def test_validate_resume_target_child_name_rejected(tmp_path: pathlib.Path) -> N
         pipe.validate_resume_target()
 
 
+def test_pipeline_rejects_unknown_stage_type(tmp_path: pathlib.Path) -> None:
+    stages = [
+        StageEntry(name="s", type="nonexistent", client=None, prompt_paths=[], options={})
+    ]
+    with pytest.raises(ValueError, match="nonexistent"):
+        _local(stages, args=_args(), tmp_path=tmp_path)
+
+
 # ---------------------------------------------------------------------------
 # GREMLINS_OVERLAY_DIR env-var override
 # ---------------------------------------------------------------------------

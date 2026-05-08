@@ -128,17 +128,16 @@ class Pipeline:
         spec_clients: dict[str, ClaudeClient] | None = None,
         test_client: ClaudeClient | None = None,
     ) -> None:
-        if self.STAGE_TYPES:
-            unknown: list[str] = []
-            for s in stages:
-                if s.type == "parallel":
-                    unknown.extend(
-                        c.type for c in s.children if c.type not in self.STAGE_TYPES
-                    )
-                elif s.type not in self.STAGE_TYPES:
-                    unknown.append(s.type)
-            if unknown:
-                raise ValueError(f"Pipeline does not support stage type(s): {unknown}")
+        unknown: list[str] = []
+        for s in stages:
+            if s.type == "parallel":
+                unknown.extend(
+                    c.type for c in s.children if c.type not in self.STAGE_TYPES
+                )
+            elif s.type not in self.STAGE_TYPES:
+                unknown.append(s.type)
+        if unknown:
+            raise ValueError(f"Pipeline does not support stage type(s): {unknown}")
         self.stages = _expand_stage_entries(stages)
         self.args = args
         self.session_dir = session_dir
@@ -208,7 +207,7 @@ class Pipeline:
                     stage = plan.Plan(
                         entry,
                         model,
-                        plan_source=getattr(args, "plan_source", None),
+                        plan_source=plan_source,
                         ref=getattr(args, "ref", "") or "",
                         instructions=instructions,
                         repo=self.repo,
@@ -266,12 +265,13 @@ class Pipeline:
             return _handoff_branch
 
         if entry.type == "verify":
-            cmds = getattr(args, "cmds", None)
-            if cmds is not None:
-                entry.options["cmds"] = cmds
-            entry.options.setdefault(
-                "max_attempts", getattr(args, "test_max_attempts", 3)
-            )
+            if not self.repo:
+                cmds = getattr(args, "cmds", None)
+                if cmds is not None:
+                    entry.options["cmds"] = cmds
+                entry.options.setdefault(
+                    "max_attempts", getattr(args, "test_max_attempts", 3)
+                )
 
             def _verify() -> None:
                 resolved_cmds = entry.options.get("cmds", [])
