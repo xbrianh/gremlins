@@ -25,7 +25,6 @@ def _fmt_escape(s: str) -> str:
     return s.replace("{", "{{").replace("}", "}}")
 
 
-
 class Plan(Stage):
     def __init__(
         self,
