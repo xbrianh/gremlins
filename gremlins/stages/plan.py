@@ -43,14 +43,12 @@ class Plan(Stage):
         instructions: str = "",
         plan_file: pathlib.Path | None = None,
         plan_source: str | None = None,
-        ref: str = "",
         repo: str = "",
     ) -> None:
         super().__init__(entry, model)
         self.instructions = instructions
         self.plan_file = plan_file
         self.plan_source = plan_source
-        self.ref = ref
         self.repo = repo
 
     def run(self, pipe: Any) -> None:
@@ -75,8 +73,10 @@ class Plan(Stage):
 
     def _run_agent(self, plan_md: pathlib.Path) -> None:
         if self.repo:
+            state_file = resolve_state_file(self.state.gr_id)
+            base_ref_name = _read_state_str(state_file, "base_ref_name")
             plan_prompt = load_prompts(self.prompt_paths).format(
-                ref=_fmt_escape(self.ref or ""),
+                ref=_fmt_escape(base_ref_name),
                 instructions=_fmt_escape(self.instructions),
             )
             completed = self.run_claude(

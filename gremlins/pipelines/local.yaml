@@ -2,6 +2,8 @@ name: local
 
 default_client: claude:sonnet
 
+base_ref: current
+
 stages:
   - { name: plan,         type: plan,         prompt: [gremlins:code_style.md, gremlins:plan.md] }
   - { name: implement,    type: implement,    prompt: [gremlins:code_style.md, gremlins:implement_local.md] }

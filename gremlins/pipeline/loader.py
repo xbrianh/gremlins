@@ -172,6 +172,14 @@ def load_pipeline(path: pathlib.Path) -> Pipeline:
             )
         default_client = ClientSpec.parse(default_client_raw)
 
+    base_ref_raw = raw.get("base_ref")
+    if base_ref_raw is not None:
+        if not isinstance(base_ref_raw, str) or not base_ref_raw.strip():
+            raise ValueError("base_ref must be a non-empty string")
+        pipeline_base_ref = base_ref_raw.strip()
+    else:
+        pipeline_base_ref = "current"
+
     stages: list[StageEntry] = []
     for entry in cast(list[dict[str, Any]], raw.get("stages") or []):
         stages.append(_parse_stage_entry(entry, prompt_dir))
@@ -181,4 +189,5 @@ def load_pipeline(path: pathlib.Path) -> Pipeline:
         path=path,
         stages=stages,
         default_client=default_client,
+        base_ref=pipeline_base_ref,
     )

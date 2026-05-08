@@ -113,7 +113,7 @@ def build_launch_parser(pipeline_name: str, stage_cls: type) -> argparse.Argumen
     p.add_argument("--description", default=None)
     p.add_argument("--parent", dest="parent_id", default=None)
     p.add_argument("--print-id", action="store_true")
-    p.add_argument("--base-ref", default="HEAD")
+    p.add_argument("--base-ref", default=None)
     p.add_argument("--client", default=None)
     p.add_argument("--spec", dest="spec_path", default=None)
     p.add_argument("--plan", default=None)

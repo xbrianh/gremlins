@@ -1,9 +1,9 @@
 <!-- placeholders: ref, instructions -->
 You are creating an implementation plan and posting it as a new GitHub issue.
 
-## Reference (optional)
+## Base branch
 
-{ref}
+This implementation targets branch `{ref}`. Read the existing code on this branch to understand the current state before planning.
 
 ## Instructions
 
@@ -11,12 +11,7 @@ You are creating an implementation plan and posting it as a new GitHub issue.
 
 ## Gather context
 
-If a reference was provided above, fetch it:
-
-- If it looks like an issue number (e.g. `123` or `#123`): fetch with `gh issue view <number> --json title,body,labels,comments`
-- If it looks like a PR number or PR URL: fetch with `gh pr view <ref> --json title,body,files,comments`
-- If it looks like a URL: fetch the content
-- If no reference was provided, use the instructions and codebase to understand the task
+Read any relevant source files to understand the existing code and identify what needs to change.
 
 Read any relevant code in the repo to inform the plan.
 

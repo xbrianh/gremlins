@@ -123,6 +123,35 @@ def current_branch(cwd: str | os.PathLike[str] | None = None) -> str:
     return "" if branch == "HEAD" else branch
 
 
+def resolve_base_ref(
+    name: str, *, cwd: str | os.PathLike[str] | None = None
+) -> tuple[str, str]:
+    """Resolve a symbolic ref name to (sym_name, sha).
+
+    Accepts: 'current' (use HEAD), branch names, remote-tracking refs (origin/main),
+    tag names, or raw SHAs. Branch wins over tag when names collide.
+    Raises GitError if the ref cannot be resolved.
+    """
+    if name == "current":
+        sha = head_sha(cwd=cwd)
+        if not sha:
+            raise GitError(128, "could not resolve HEAD: no commits")
+        branch = current_branch(cwd=cwd)
+        return (branch if branch else sha), sha
+
+    for refpath in (
+        f"refs/heads/{name}",
+        f"refs/remotes/{name}",
+        f"refs/tags/{name}",
+        name,  # raw SHA or other direct ref
+    ):
+        r = _run_git(["rev-parse", "--verify", refpath], cwd=cwd, check=False)
+        if r.returncode == 0:
+            return name, r.stdout.strip()
+
+    raise GitError(128, f"base_ref {name!r} does not resolve to a branch, tag, or commit")
+
+
 def fetch_origin(
     branch: str,
     *,

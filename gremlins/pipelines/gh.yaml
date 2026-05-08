@@ -2,6 +2,8 @@ name: gh
 
 default_client: claude:sonnet
 
+base_ref: main
+
 stages:
   - { name: plan,            type: plan,            prompt: [gremlins:code_style.md, gremlins:plan_gh.md] }
   - { name: implement,       type: implement,       prompt: [gremlins:code_style.md, gremlins:implement_gh.md] }
