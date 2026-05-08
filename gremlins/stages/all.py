@@ -90,7 +90,9 @@ def _build_implement(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> A
     )
 
 
-def _build_materialize_to_branch(entry: StageEntry, spec: ClientSpec, _runner: Pipeline) -> Any:
+def _build_materialize_to_branch(
+    entry: StageEntry, spec: ClientSpec, _runner: Pipeline
+) -> Any:
     return materialize_to_branch_mod.MaterializeToBranch(entry, spec.model)
 
 
@@ -125,7 +127,9 @@ def _build_open_github_pr(entry: StageEntry, spec: ClientSpec, runner: Pipeline)
     )
 
 
-def _build_request_copilot(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
+def _build_request_copilot(
+    entry: StageEntry, spec: ClientSpec, runner: Pipeline
+) -> Any:
     return request_copilot.RequestCopilot(entry, spec.model, repo=runner.repo)
 
 

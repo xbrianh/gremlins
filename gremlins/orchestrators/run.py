@@ -252,9 +252,7 @@ def run_pipeline(
         patch_state(gr_id, total_cost_usd=total_cost)
 
     if is_gh:
-        logger.info(
-            "done. PR: %s", read_state_str(state_file, "pr_url") or "(unknown)"
-        )
+        logger.info("done. PR: %s", read_state_str(state_file, "pr_url") or "(unknown)")
     else:
         logger.info("done. session artifacts in: %s", session_dir)
     if total_cost > 0:
