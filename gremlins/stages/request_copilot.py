@@ -7,11 +7,12 @@ from typing import Any
 from gremlins.pipeline import StageEntry
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
+from gremlins.state import read_pr_num
 
 
 class RequestCopilot(Stage):
     def __init__(
-        self, entry: StageEntry, model: str | None, *, repo: str, pr_num: str
+        self, entry: StageEntry, model: str | None, *, repo: str, pr_num: str = ""
     ) -> None:
         super().__init__(entry, model)
         self._repo = repo
@@ -19,7 +20,9 @@ class RequestCopilot(Stage):
 
     def run(self, pipe: Any) -> None:
         repo = self._repo
-        pr_num = self._pr_num
+        pr_num = self._pr_num or read_pr_num(self.state.gr_id)
+        if not pr_num:
+            raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
         r = self.run_subprocess(
             [
                 "gh",

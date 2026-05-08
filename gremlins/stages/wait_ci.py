@@ -13,7 +13,7 @@ from gremlins.pipeline import StageEntry
 from gremlins.prompts import load_prompts
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
-from gremlins.state import check_bail, emit_bail
+from gremlins.state import check_bail, emit_bail, read_pr_url
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +144,7 @@ class WaitCI(Stage):
         entry: StageEntry,
         model: str | None,
         *,
-        pr_url: str,
+        pr_url: str = "",
         max_attempts: int = 3,
         poll_timeout: int = 1200,
         poll_interval: int = 30,
@@ -164,8 +164,11 @@ class WaitCI(Stage):
         self.fix_sha_getter = fix_sha_getter
 
     def run(self, pipe: Any) -> None:
+        pr_url = self.pr_url or read_pr_url(self.state.gr_id)
+        if not pr_url:
+            raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
         checks, review_decision = _wait_for_checks(
-            self.pr_url, self.checks_getter, self.poll_interval, self.startup_grace_secs
+            pr_url, self.checks_getter, self.poll_interval, self.startup_grace_secs
         )
         _bail_if_review_required(
             self.state.gr_id, review_decision, child_key=self.state.child_key
@@ -195,7 +198,7 @@ class WaitCI(Stage):
                 try:
                     final_checks, review_decision = _poll_until_done(
                         self.state.gr_id,
-                        self.pr_url,
+                        pr_url,
                         self.poll_timeout,
                         self.poll_interval,
                         self.checks_getter,

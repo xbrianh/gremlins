@@ -11,7 +11,7 @@ from gremlins.pipeline import StageEntry
 from gremlins.prompts import load_prompts
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
-from gremlins.state import check_bail, emit_bail
+from gremlins.state import check_bail, emit_bail, read_pr_url
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -107,9 +107,12 @@ class AddressCode(Stage):
         )
 
     def results_to_github(self, pipe: Any) -> None:
+        pr_url = self.pr_url or read_pr_url(self.state.gr_id)
+        if not pr_url:
+            raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
         prompt = load_prompts(self.prompt_paths).format(
             bail_command=self.bail_command(),
-            pr_url=self.pr_url,
+            pr_url=pr_url,
         )
         self.run_claude(
             prompt,

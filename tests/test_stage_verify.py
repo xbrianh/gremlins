@@ -22,7 +22,11 @@ _VERIFY_PROMPT = (
 )
 
 
-def _make_entry(cmds: list[str] | None = None, max_attempts: int = 3) -> StageEntry:
+def _make_entry(
+    cmds: list[str] | None = None,
+    max_attempts: int = 3,
+    commit_after_fix: bool = False,
+) -> StageEntry:
     return StageEntry(
         name="verify",
         type="verify",
@@ -31,6 +35,7 @@ def _make_entry(cmds: list[str] | None = None, max_attempts: int = 3) -> StageEn
         options={
             "cmds": cmds if cmds is not None else [],
             "max_attempts": max_attempts,
+            "commit_after_fix": commit_after_fix,
         },
     )
 
@@ -49,13 +54,10 @@ def _make_stage(
         cmds = ["true"]
     if client is None:
         client = FakeClaudeClient(fixtures={})
-    entry = _make_entry(cmds=cmds, max_attempts=max_attempts)
-    stage = Verify(
-        entry,
-        fix_model,
-        is_git=is_git,
-        commit_after_fix=commit_after_fix,
+    entry = _make_entry(
+        cmds=cmds, max_attempts=max_attempts, commit_after_fix=commit_after_fix
     )
+    stage = Verify(entry, fix_model, is_git=is_git)
     ctx = StageContext(
         client=client, session_dir=tmp_path, gr_id=None, worktree=tmp_path
     )
@@ -204,7 +206,7 @@ def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
         fixtures={"verify-fix-1": MINIMAL_EVENTS, "verify-fix-2": MINIMAL_EVENTS}
     )
     entry = _make_entry(cmds=["false"], max_attempts=3)
-    stage = Verify(entry, "sonnet", is_git=True, commit_after_fix=False)
+    stage = Verify(entry, "sonnet", is_git=True)
     ctx = StageContext(
         client=client, session_dir=tmp_path, gr_id=gr_id, worktree=tmp_path
     )
@@ -272,9 +274,9 @@ def test_parallel_child_fix_prompt_uses_child_key_bail_command(tmp_path):
             / "prompts"
             / "bail_section_fix.md",
         ],
-        options={"cmds": ["false"], "max_attempts": 2},
+        options={"cmds": ["false"], "max_attempts": 2, "commit_after_fix": False},
     )
-    stage = Verify(entry, "sonnet", is_git=True, commit_after_fix=False)
+    stage = Verify(entry, "sonnet", is_git=True)
     stage.bind(
         StageContext(
             client=client,

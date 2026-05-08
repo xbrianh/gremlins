@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import sys
 from typing import Any
 
@@ -19,6 +20,7 @@ from gremlins.git import (
 )
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
+from gremlins.state import patch_state, resolve_state_file
 
 
 @dataclasses.dataclass
@@ -29,14 +31,27 @@ class HandoffBranchResult:
 
 
 class HandoffBranch(Stage):
-    def run(self, pipe: Any) -> HandoffBranchResult:
-        if pipe.impl_pre_state is None:
+    def _pre_state_from_file(self) -> PreImplState:
+        sf = resolve_state_file(self.state.gr_id)
+        if sf is None or not sf.exists():
             raise RuntimeError(
-                "impl_pre_state not set; cannot run handoff-branch without implement "
-                "(rewind to implement stage)"
+                "impl_pre_state not set and no state.json found; "
+                "rewind to implement stage"
             )
+        data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
+        head = data.get("impl_pre_head") or ""
+        if not head:
+            raise RuntimeError(
+                "impl_pre_state not set and impl_pre_head missing from state.json; "
+                "rewind to implement stage"
+            )
+        return PreImplState(head=head, branch=data.get("impl_pre_branch") or "")
+
+    def run(self, pipe: Any) -> HandoffBranchResult:
+        pre_state: PreImplState = (
+            getattr(pipe, "impl_pre_state", None) or self._pre_state_from_file()
+        )
         impl_cwd = str(self.state.worktree) if self.state.worktree is not None else None
-        pre_state: PreImplState = pipe.impl_pre_state
         outcome = classify_impl_outcome(pre_state, cwd=impl_cwd)
 
         if isinstance(outcome, EmptyImpl):
@@ -64,11 +79,17 @@ class HandoffBranch(Stage):
             )
             sys.stdout.flush()
 
-        return HandoffBranchResult(
+        result = HandoffBranchResult(
             outcome=outcome,
             handoff_branch=handoff_branch,
             base_ref=pre_state.head,
         )
+        patch_state(
+            self.state.gr_id,
+            impl_handoff_branch=result.handoff_branch,
+            impl_base_ref=result.base_ref,
+        )
+        return result
 
 
 register_stage("handoff-branch", HandoffBranch)

@@ -22,10 +22,9 @@ from gremlins.clients.resolve import (
     validate_stage_specs,
 )
 from gremlins.env_file import load_env_file
-from gremlins.gh_utils import get_repo, view_issue
+from gremlins.gh_utils import get_repo
 from gremlins.logging_setup import configure_logging
-from gremlins.orchestrators.base import read_state_field
-from gremlins.orchestrators.gh_pipeline import GHPipeline
+from gremlins.orchestrators.pipeline import Pipeline, read_state_field
 from gremlins.pipeline import (
     load_pipeline,
     resolve_pipeline_path,
@@ -74,17 +73,6 @@ def _parse_gh_args(argv: list[str]) -> argparse.Namespace:
         die(f"invalid -r ref: {args.ref} (allowed: A-Z a-z 0-9 . _ / # -)")
 
     return args
-
-
-def _fetch_issue_body(issue_num: str, repo: str) -> str:
-    try:
-        issue_data = view_issue(issue_num, repo)
-    except RuntimeError as exc:
-        die(f"could not fetch issue #{issue_num} body: {exc}")
-    body = (issue_data.get("body") or "").strip()
-    if not body:
-        die(f"issue #{issue_num} has an empty body")
-    return body
 
 
 def gh_main(
@@ -185,13 +173,14 @@ def gh_main(
         shutil.copyfile(spec_src, spec_file)
 
     try:
-        pipe = GHPipeline(
+        pipe = Pipeline(
             pipeline.stages,
             args=args,
             session_dir=session_dir,
             gr_id=gr_id,
             pipeline_data=pipeline,
             repo=repo,
+            target="github",
             state_file=state_file,
             spec_clients=_spec_clients,
             stage_specs=stage_specs,
@@ -200,30 +189,6 @@ def gh_main(
         pipe.validate_resume_target()
     except ValueError as exc:
         die(str(exc))
-
-    _expanded_stage_names = [s.name for s in pipe.stages]
-    _plan_stage_name = next((s.name for s in pipe.stages if s.type == "plan"), None)
-    plan_idx = (
-        _expanded_stage_names.index(_plan_stage_name)
-        if _plan_stage_name and _plan_stage_name in _expanded_stage_names
-        else 0
-    )
-    resume_idx = (
-        _expanded_stage_names.index(args.resume_from)
-        if args.resume_from and args.resume_from in _expanded_stage_names
-        else 0
-    )
-
-    if resume_idx > plan_idx:
-        pipe.issue_url = read_state_field(state_file, "issue_url")
-        if not pipe.issue_url:
-            die(
-                f"--resume-from {args.resume_from}: no issue_url in state.json "
-                "(rewind to plan?)"
-            )
-        pipe.issue_num = pipe.issue_url.split("/")[-1]
-        logger.info("resumed issue: %s", pipe.issue_url)
-        pipe.issue_body = _fetch_issue_body(pipe.issue_num, repo)
 
     try:
         pipe.run(*_signal_clients)
@@ -236,7 +201,7 @@ def gh_main(
     if total_cost > 0:
         patch_state(gr_id, total_cost_usd=total_cost)
 
-    logger.info("done. PR: %s", pipe.pr_url or "(unknown)")
+    logger.info("done. PR: %s", read_state_field(state_file, "pr_url") or "(unknown)")
     if total_cost > 0:
         logger.info("total cost: $%.4f", total_cost)
     return 0

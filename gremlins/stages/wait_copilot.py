@@ -10,6 +10,7 @@ from gremlins.gh_utils import check_copilot_review
 from gremlins.pipeline import StageEntry
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
+from gremlins.state import read_pr_num
 
 
 class WaitCopilot(Stage):
@@ -19,7 +20,7 @@ class WaitCopilot(Stage):
         model: str | None,
         *,
         repo: str,
-        pr_num: str,
+        pr_num: str = "",
         timeout: int = 600,
         interval: int = 20,
         review_checker: Callable[[], str | None] | None = None,
@@ -32,11 +33,15 @@ class WaitCopilot(Stage):
         self.review_checker = review_checker
 
     def run(self, pipe: Any) -> str:
+        pr_num = self.pr_num or read_pr_num(self.state.gr_id)
+        if not pr_num:
+            raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
+
         review_checker = self.review_checker
         if review_checker is None:
 
             def _default_checker() -> str | None:
-                return check_copilot_review(self.repo, self.pr_num)
+                return check_copilot_review(self.repo, pr_num)
 
             review_checker = _default_checker
 
