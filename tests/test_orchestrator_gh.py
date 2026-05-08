@@ -2124,7 +2124,9 @@ def test_commit_pr_resume_no_handoff_branch_uses_dirty_only(tmp_path, monkeypatc
     def _load_commit_pr_pipeline(_path):
         return _real_load_pipeline(pipeline_path)
 
-    monkeypatch.setattr("gremlins.orchestrators.gh.load_pipeline", _load_commit_pr_pipeline)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.gh.load_pipeline", _load_commit_pr_pipeline
+    )
 
     client = FakeClaudeClient(fixtures={"open-github-pr": _pr_events()})
 

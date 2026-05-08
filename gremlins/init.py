@@ -10,8 +10,10 @@ from typing import Any, cast
 
 import yaml
 
-_PIPELINES_DIR = pathlib.Path(__file__).resolve().parent / "pipelines"
-_PROMPTS_DIR = pathlib.Path(__file__).resolve().parent / "prompts"
+from gremlins import PACKAGE_ROOT
+
+_PIPELINES_DIR = PACKAGE_ROOT / "pipelines"
+_PROMPTS_DIR = PACKAGE_ROOT / "prompts"
 
 
 def _bundled_pipeline_names() -> list[str]:

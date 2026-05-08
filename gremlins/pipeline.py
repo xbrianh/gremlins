@@ -10,6 +10,7 @@ from typing import Any, cast
 
 import yaml
 
+from gremlins import PACKAGE_ROOT
 from gremlins.clients import ClientSpec
 from gremlins.prompts import BUNDLED_PROMPT_DIR
 from gremlins.stages.registry import STAGE_REGISTRY
@@ -213,7 +214,7 @@ def load_pipeline(path: pathlib.Path) -> Pipeline:
     )
 
 
-BUNDLED_PIPELINE_DIR = pathlib.Path(__file__).resolve().parent / "pipelines"
+BUNDLED_PIPELINE_DIR = PACKAGE_ROOT / "pipelines"
 
 
 def _overlay_dir(project_root: pathlib.Path) -> pathlib.Path:
@@ -268,9 +269,7 @@ def resolve_pipeline_path(name_or_path: str, base_dir: pathlib.Path) -> pathlib.
     project_scoped = _overlay_dir(base_dir) / "pipelines" / f"{name_or_path}.yaml"
     if project_scoped.exists():
         return project_scoped.resolve()
-    bundled = (
-        pathlib.Path(__file__).resolve().parent / "pipelines" / f"{name_or_path}.yaml"
-    )
+    bundled = PACKAGE_ROOT / "pipelines" / f"{name_or_path}.yaml"
     if bundled.exists():
         return bundled.resolve()
     raise FileNotFoundError(
