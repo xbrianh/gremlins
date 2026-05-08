@@ -19,13 +19,18 @@ from gremlins.clients.resolve import (
     validate_stage_specs,
 )
 from gremlins.env_file import load_env_file
+from gremlins.errors import die
 from gremlins.gh_utils import get_repo
 from gremlins.git import has_commits, has_dirty_worktree, in_git_repo
 from gremlins.logging_setup import configure_logging
-from gremlins.errors import die
 from gremlins.orchestrators.pipeline import Pipeline
 from gremlins.pipeline import load_pipeline
-from gremlins.state import patch_state, read_state_str, resolve_session_dir, resolve_state_file
+from gremlins.state import (
+    patch_state,
+    read_state_str,
+    resolve_session_dir,
+    resolve_state_file,
+)
 
 logger = logging.getLogger(__name__)
 
