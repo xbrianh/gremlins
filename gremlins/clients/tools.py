@@ -31,7 +31,10 @@ def _resolve(file_path: str, cwd: str | None) -> pathlib.Path:
 async def _read_invoke(ctx: ToolContext[Any], args_json: str) -> str:
     args: dict[str, Any] = json.loads(args_json)
     path = _resolve(args["file_path"], _cwd(ctx))
-    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError as e:
+        return f"Error: {e}"
     offset: int = args.get("offset", 0) or 0
     limit: int | None = args.get("limit")
     lines = lines[offset:]
@@ -44,7 +47,10 @@ async def _edit_invoke(ctx: ToolContext[Any], args_json: str) -> str:
     args: dict[str, Any] = json.loads(args_json)
     path = _resolve(args["file_path"], _cwd(ctx))
     old, new = args["old_string"], args["new_string"]
-    content = path.read_text(encoding="utf-8")
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError as e:
+        return f"Error: {e}"
     if old not in content:
         return f"Error: old_string not found in {args['file_path']}"
     path.write_text(content.replace(old, new, 1), encoding="utf-8")
@@ -59,7 +65,11 @@ async def _bash_invoke(ctx: ToolContext[Any], args_json: str) -> str:
         stderr=asyncio.subprocess.STDOUT,
         cwd=_cwd(ctx),
     )
-    stdout, _ = await proc.communicate()
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
+    except asyncio.TimeoutError:
+        proc.kill()
+        return "[timeout]"
     output = stdout.decode(errors="replace")
     rc = proc.returncode
     if rc != 0:
@@ -70,8 +80,11 @@ async def _bash_invoke(ctx: ToolContext[Any], args_json: str) -> str:
 async def _write_invoke(ctx: ToolContext[Any], args_json: str) -> str:
     args: dict[str, Any] = json.loads(args_json)
     path = _resolve(args["file_path"], _cwd(ctx))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(args["content"], encoding="utf-8")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(args["content"], encoding="utf-8")
+    except OSError as e:
+        return f"Error: {e}"
     return "OK"
 
 
@@ -84,10 +97,12 @@ async def _grep_invoke(ctx: ToolContext[Any], args_json: str) -> str:
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
         cwd=_cwd(ctx),
     )
     stdout, _ = await proc.communicate()
+    if proc.returncode not in (0, 1):
+        return stdout.decode(errors="replace") or f"[rg exit {proc.returncode}]"
     return stdout.decode(errors="replace") or "(no matches)"
 
 

@@ -17,6 +17,8 @@ _PRICING: dict[str, tuple[float, float]] = {
     "gpt-4.1-mini": (0.40, 1.60),
     "gpt-4.1-nano": (0.10, 0.40),
     "gpt-4-turbo": (10.00, 30.00),
+    # o1/o3: Usage.output_tokens from openai-agents SDK bundles reasoning tokens in;
+    # these prices cover the blended output rate (reasoning tokens billed at same rate).
     "o1": (15.00, 60.00),
     "o1-mini": (1.10, 4.40),
     "o3": (10.00, 40.00),
