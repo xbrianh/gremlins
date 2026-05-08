@@ -207,6 +207,23 @@ def patch_parallel_worktrees(
         pass
 
 
+def read_pr_url(gr_id: str | None) -> str:
+    """Return pr_url from state.json, or empty string if absent or unreadable."""
+    sf = resolve_state_file(gr_id)
+    if sf is None or not sf.exists():
+        return ""
+    try:
+        return json.loads(sf.read_text(encoding="utf-8")).get("pr_url") or ""
+    except (json.JSONDecodeError, OSError):
+        return ""
+
+
+def read_pr_num(gr_id: str | None) -> str:
+    """Return the PR number (last path segment of pr_url) from state.json."""
+    url = read_pr_url(gr_id)
+    return url.split("/")[-1] if url else ""
+
+
 def check_bail(
     gr_id: str | None,
     label: str = "stage",

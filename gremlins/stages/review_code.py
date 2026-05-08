@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import pathlib
 from typing import Any
 
@@ -11,17 +10,7 @@ from gremlins.pipeline import StageEntry
 from gremlins.prompts import load_prompts
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
-from gremlins.state import check_bail, emit_bail, resolve_state_file, set_stage
-
-
-def _read_pr_url(gr_id: str | None) -> str:
-    sf = resolve_state_file(gr_id)
-    if sf is None or not sf.exists():
-        return ""
-    try:
-        return json.loads(sf.read_text(encoding="utf-8")).get("pr_url") or ""
-    except (json.JSONDecodeError, OSError):
-        return ""
+from gremlins.state import check_bail, emit_bail, read_pr_url, set_stage
 
 
 def _run_reviewer(
@@ -149,7 +138,7 @@ class ReviewCode(Stage):
         return out_file
 
     def results_to_github(self, pipe: Any) -> None:
-        pr_url = self.pr_url or _read_pr_url(self.state.gr_id)
+        pr_url = self.pr_url or read_pr_url(self.state.gr_id)
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
         prompt = load_prompts(self.prompt_paths).format(

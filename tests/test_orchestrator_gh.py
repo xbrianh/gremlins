@@ -1120,7 +1120,9 @@ def test_resume_from_ghreview(tmp_path, monkeypatch):
     ghreview_called = []
     monkeypatch.setattr(
         "gremlins.stages.review_code.ReviewCode.run",
-        lambda self, pipe: ghreview_called.append(True),
+        lambda self, pipe: ghreview_called.append(
+            self.pr_url or json.loads(state_file.read_text()).get("pr_url", "")
+        ),
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -1142,7 +1144,7 @@ def test_resume_from_ghreview(tmp_path, monkeypatch):
 
     # No client.run calls (plan/implement/commit/open-pr all skipped)
     assert client.calls == []
-    assert ghreview_called == [True]
+    assert ghreview_called == ["https://github.com/owner/repo/pull/200"]
 
 
 def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch):
@@ -1419,7 +1421,9 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
     ghreview_called = []
     monkeypatch.setattr(
         "gremlins.stages.review_code.ReviewCode.run",
-        lambda self, pipe: ghreview_called.append(True),
+        lambda self, pipe: ghreview_called.append(
+            self.pr_url or json.loads(state_file.read_text()).get("pr_url", "")
+        ),
     )
     monkeypatch.setattr(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
@@ -1443,7 +1447,7 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
     assert "commit" not in labels, "commit must not run on open-pr resume"
     assert "open-github-pr" in labels
 
-    assert ghreview_called == [True]
+    assert ghreview_called == ["https://github.com/owner/repo/pull/101"]
     # Verify OpenGitHubPR wrote pr_url to state.json
     state = json.loads(state_file.read_text())
     assert state.get("pr_url") == "https://github.com/owner/repo/pull/101"
