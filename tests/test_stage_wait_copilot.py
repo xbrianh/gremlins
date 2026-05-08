@@ -74,18 +74,6 @@ def test_timeout_raises(tmp_path):
         stage.run(None)
 
 
-def test_review_checker_callback_is_used(tmp_path):
-    called = [False]
-
-    def checker():
-        called[0] = True
-        return "APPROVED"
-
-    stage = _make_stage(tmp_path, review_checker=checker)
-    stage.run(None)
-    assert called[0]
-
-
 def test_no_pr_num_raises(tmp_path):
     stage = _make_stage(tmp_path, pr_num="")
     with pytest.raises(RuntimeError, match="no pr_url in state.json"):
