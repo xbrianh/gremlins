@@ -31,7 +31,7 @@ from gremlins.stages import (
     wait_ci,
     wait_copilot,
 )
-from gremlins.stages import handoff_branch as handoff_branch_mod
+from gremlins.stages import materialize_to_branch as materialize_to_branch_mod
 from gremlins.stages.base import Stage, StageContext
 from gremlins.stages.chain import Chain
 from gremlins.state import resolve_state_file, set_stage
@@ -103,7 +103,7 @@ class Pipeline:
         "review-code": review_code.ReviewCode,
         "address-code": address_code.AddressCode,
         "chain": Chain,
-        "handoff-branch": handoff_branch_mod.HandoffBranch,
+        "materialize-to-branch": materialize_to_branch_mod.MaterializeToBranch,
         "commit": commit.Commit,
         "open-github-pr": open_github_pr.OpenGitHubPR,
         "request-copilot": request_copilot.RequestCopilot,
@@ -254,15 +254,15 @@ class Pipeline:
 
             return _implement
 
-        if entry.type == "handoff-branch":
+        if entry.type == "materialize-to-branch":
 
-            def _handoff_branch() -> None:
+            def _materialize_to_branch() -> None:
                 set_stage(gr_id, entry.name)
-                stage = handoff_branch_mod.HandoffBranch(entry, model)
+                stage = materialize_to_branch_mod.MaterializeToBranch(entry, model)
                 stage.bind(ctx)
                 stage.run(self)
 
-            return _handoff_branch
+            return _materialize_to_branch
 
         if entry.type == "verify":
             if not self.repo:

@@ -1,4 +1,4 @@
-"""HandoffBranch stage: manages the git handoff-branch lifecycle after implement."""
+"""MaterializeToBranch stage: moves detached-HEAD commits onto a real branch."""
 
 from __future__ import annotations
 
@@ -24,13 +24,13 @@ from gremlins.state import patch_state, resolve_state_file
 
 
 @dataclasses.dataclass
-class HandoffBranchResult:
+class MaterializeToBranchResult:
     outcome: ImplOutcome
-    handoff_branch: str
+    materialized_branch: str
     base_ref: str
 
 
-class HandoffBranch(Stage):
+class MaterializeToBranch(Stage):
     def _pre_state_from_file(self) -> PreImplState:
         sf = resolve_state_file(self.state.gr_id)
         if sf is None or not sf.exists():
@@ -47,7 +47,7 @@ class HandoffBranch(Stage):
             )
         return PreImplState(head=head, branch=data.get("impl_pre_branch") or "")
 
-    def run(self, pipe: Any) -> HandoffBranchResult:
+    def run(self, pipe: Any) -> MaterializeToBranchResult:
         pre_state: PreImplState = (
             getattr(pipe, "impl_pre_state", None) or self._pre_state_from_file()
         )
@@ -65,31 +65,31 @@ class HandoffBranch(Stage):
                 "committed work to hand off"
             )
 
-        handoff_branch = ""
+        materialized_branch = ""
         if isinstance(outcome, HeadAdvanced):
-            handoff_branch = create_handoff_branch(pre_state, cwd=impl_cwd)
+            materialized_branch = create_handoff_branch(pre_state, cwd=impl_cwd)
             reset_pre_branch(pre_state, cwd=impl_cwd)
-            sweep_stale_handoff_branches(handoff_branch, cwd=impl_cwd)
+            sweep_stale_handoff_branches(materialized_branch, cwd=impl_cwd)
             pre_branch_note = (
                 f" and reset {pre_state.branch}" if pre_state.branch else ""
             )
             sys.stdout.write(
-                f"    handoff-branch: moved {outcome.commit_count} commit(s) "
-                f"onto {handoff_branch}{pre_branch_note}\n"
+                f"    materialize-to-branch: moved {outcome.commit_count} commit(s) "
+                f"onto {materialized_branch}{pre_branch_note}\n"
             )
             sys.stdout.flush()
 
-        result = HandoffBranchResult(
+        result = MaterializeToBranchResult(
             outcome=outcome,
-            handoff_branch=handoff_branch,
+            materialized_branch=materialized_branch,
             base_ref=pre_state.head,
         )
         patch_state(
             self.state.gr_id,
-            impl_handoff_branch=result.handoff_branch,
+            impl_materialized_branch=result.materialized_branch,
             impl_base_ref=result.base_ref,
         )
         return result
 
 
-register_stage("handoff-branch", HandoffBranch)
+register_stage("materialize-to-branch", MaterializeToBranch)

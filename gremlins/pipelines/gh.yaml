@@ -5,7 +5,7 @@ default_client: claude:sonnet
 stages:
   - { name: plan,            type: plan,            prompt: [gremlins:code_style.md, gremlins:plan_gh.md] }
   - { name: implement,       type: implement,       prompt: [gremlins:code_style.md, gremlins:implement_gh.md] }
-  - { name: handoff-branch,  type: handoff-branch }
+  - { name: materialize-to-branch, type: materialize-to-branch }
   - { name: verify,          type: verify,          options: { cmds: ["make check", "make test"], commit_after_fix: false }, prompt: [gremlins:verify_fix.md, gremlins:bail_section_fix.md] }
   - { name: commit,          type: commit }
   - { name: open-pr,         type: open-github-pr }

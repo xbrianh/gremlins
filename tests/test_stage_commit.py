@@ -34,7 +34,7 @@ def _make_stage(
     tmp_path: pathlib.Path,
     *,
     impl_outcome: ImplOutcome | None = None,
-    impl_handoff_branch: str = HANDOFF_BRANCH,
+    impl_materialized_branch: str = HANDOFF_BRANCH,
     base_ref: str = BASE_REF,
     issue_url: str = ISSUE_URL,
 ) -> tuple[Commit, StageContext]:
@@ -45,7 +45,7 @@ def _make_stage(
         entry,
         "sonnet",
         impl_outcome=impl_outcome,
-        impl_handoff_branch=impl_handoff_branch,
+        impl_materialized_branch=impl_materialized_branch,
         base_ref=base_ref,
         issue_url=issue_url,
     )
@@ -129,7 +129,7 @@ def test_run_raises_if_unbound() -> None:
         entry,
         None,
         impl_outcome=DirtyOnly(),
-        impl_handoff_branch=HANDOFF_BRANCH,
+        impl_materialized_branch=HANDOFF_BRANCH,
         base_ref=BASE_REF,
         issue_url=ISSUE_URL,
     )
@@ -158,7 +158,7 @@ def test_self_source_head_advanced(tmp_path: pathlib.Path) -> None:
     state_file.write_text(
         json.dumps(
             {
-                "impl_handoff_branch": HANDOFF_BRANCH,
+                "impl_materialized_branch": HANDOFF_BRANCH,
                 "impl_base_ref": BASE_REF,
                 "issue_url": ISSUE_URL,
             }
@@ -182,7 +182,7 @@ def test_self_source_dirty_only(tmp_path: pathlib.Path) -> None:
     state_file.write_text(
         json.dumps(
             {
-                "impl_handoff_branch": "",
+                "impl_materialized_branch": "",
                 "impl_base_ref": BASE_REF,
                 "issue_url": ISSUE_URL,
             }
@@ -203,7 +203,7 @@ def test_self_source_raises_without_base_ref(tmp_path: pathlib.Path) -> None:
     state_file.write_text(
         json.dumps(
             {
-                "impl_handoff_branch": HANDOFF_BRANCH,
+                "impl_materialized_branch": HANDOFF_BRANCH,
                 "issue_url": ISSUE_URL,
             }
         )
@@ -221,7 +221,7 @@ def test_self_source_rev_list_error(tmp_path: pathlib.Path) -> None:
     state_file.write_text(
         json.dumps(
             {
-                "impl_handoff_branch": HANDOFF_BRANCH,
+                "impl_materialized_branch": HANDOFF_BRANCH,
                 "impl_base_ref": BASE_REF,
                 "issue_url": ISSUE_URL,
             }
