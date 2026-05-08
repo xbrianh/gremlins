@@ -1,3 +1,4 @@
+import os
 import pathlib
 
 import pytest
@@ -40,3 +41,18 @@ def test_miss_raises_with_suggestions(tmp_path: pathlib.Path) -> None:
     assert "alpha" in msg
     bundled_name = next(BUNDLED_PIPELINE_DIR.glob("*.yaml")).stem
     assert bundled_name in msg
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _preset_overlay_env():
+    prev = os.environ.get("GREMLINS_OVERLAY_DIR")
+    os.environ["GREMLINS_OVERLAY_DIR"] = "/tmp/sentinel-overlay"
+    yield
+    if prev is None:
+        os.environ.pop("GREMLINS_OVERLAY_DIR", None)
+    else:
+        os.environ["GREMLINS_OVERLAY_DIR"] = prev
+
+
+def test_overlay_env_cleared_by_autouse_fixture() -> None:
+    assert os.environ.get("GREMLINS_OVERLAY_DIR") is None
