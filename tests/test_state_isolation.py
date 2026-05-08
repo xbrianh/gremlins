@@ -197,10 +197,9 @@ def test_address_main_does_not_clobber_external_state(tmp_path, monkeypatch):
 
     address_dir = tmp_path / "address-dir"
     address_dir.mkdir()
-    for lens in ("holistic", "detail", "scope"):
-        (address_dir / f"review-code-{lens}-sonnet.md").write_text(
-            f"# {lens.title()} Review\n\n## Findings\nNone.\n"
-        )
+    (address_dir / "review-code-sonnet.md").write_text(
+        "# Review\n\n## Findings\nNone.\n"
+    )
     monkeypatch.chdir(address_dir)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
