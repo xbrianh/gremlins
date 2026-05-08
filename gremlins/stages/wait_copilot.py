@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from typing import Any
@@ -11,6 +12,8 @@ from gremlins.pipeline import StageEntry
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import read_pr_num
+
+logger = logging.getLogger(__name__)
 
 
 class WaitCopilot(Stage):
@@ -49,6 +52,7 @@ class WaitCopilot(Stage):
         while True:
             state = review_checker()
             if state:
+                logger.info("Copilot review: %s", state)
                 return state
             if time.time() >= deadline:
                 raise RuntimeError(f"Copilot review timed out after {self.timeout}s")

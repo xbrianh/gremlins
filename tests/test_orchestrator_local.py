@@ -306,7 +306,7 @@ def test_local_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir)
     assert result == 0
 
     data = json.loads((state_dir / "state.json").read_text())
-    assert data.get("stage") == "address-code"
+    assert data.get("stage") == "verify"
 
 
 def test_local_main_env_file_vars_reach_verify(tmp_path, monkeypatch):

@@ -8,10 +8,10 @@ import json
 import logging
 import pathlib
 import shutil
-import sys
 from collections.abc import Callable
-from typing import Any, NoReturn
+from typing import Any
 
+import gremlins.stages.all as _stages_all  # noqa: F401  # type: ignore[reportUnusedImport]
 from gremlins.clients import ClientSpec
 from gremlins.clients.protocol import ClaudeClient
 from gremlins.clients.resolve import require_stage_spec
@@ -19,40 +19,11 @@ from gremlins.git import in_git_repo
 from gremlins.pipeline import PipelineDef as _PipelineData
 from gremlins.pipeline import StageEntry
 from gremlins.runner import build_parallel_stages, install_signal_handlers, run_stages
-from gremlins.stages import (
-    address_code,
-    commit,
-    implement,
-    open_github_pr,
-    plan,
-    request_copilot,
-    review_code,
-    verify,
-    wait_ci,
-    wait_copilot,
-)
-from gremlins.stages import materialize_to_branch as materialize_to_branch_mod
-from gremlins.stages.base import Stage, StageContext
-from gremlins.stages.chain import Chain
+from gremlins.stages.base import StageContext
+from gremlins.stages.registry import STAGE_BUILDERS, STAGE_NEEDS_PIPE
 from gremlins.state import resolve_state_file, set_stage
 
 logger = logging.getLogger(__name__)
-
-
-def die(msg: str) -> NoReturn:
-    sys.stderr.write(f"error: {msg}\n")
-    sys.stderr.flush()
-    sys.exit(1)
-
-
-def read_state_field(sf: pathlib.Path | None, field: str) -> str:
-    if sf is None or not sf.exists():
-        return ""
-    try:
-        data = json.loads(sf.read_text(encoding="utf-8"))
-        return data.get(field) or ""
-    except Exception:
-        return ""
 
 
 def read_stage_inputs(sf: pathlib.Path | None) -> dict[str, Any]:
@@ -96,23 +67,6 @@ def _expand_stage_entries(raw_stages: list[StageEntry]) -> list[StageEntry]:
 
 
 class Pipeline:
-    STAGE_TYPES: dict[str, type[Stage]] = {
-        "plan": plan.Plan,
-        "implement": implement.Implement,
-        "verify": verify.Verify,
-        "review-code": review_code.ReviewCode,
-        "address-code": address_code.AddressCode,
-        "chain": Chain,
-        "materialize-to-branch": materialize_to_branch_mod.MaterializeToBranch,
-        "commit": commit.Commit,
-        "open-github-pr": open_github_pr.OpenGitHubPR,
-        "request-copilot": request_copilot.RequestCopilot,
-        "ghreview": review_code.ReviewCode,
-        "ghaddress": address_code.AddressCode,
-        "wait-ci": wait_ci.WaitCI,
-        "wait-copilot": wait_copilot.WaitCopilot,
-    }
-
     def __init__(
         self,
         stages: list[StageEntry],
@@ -132,9 +86,9 @@ class Pipeline:
         for s in stages:
             if s.type == "parallel":
                 unknown.extend(
-                    c.type for c in s.children if c.type not in self.STAGE_TYPES
+                    c.type for c in s.children if c.type not in STAGE_BUILDERS
                 )
-            elif s.type not in self.STAGE_TYPES:
+            elif s.type not in STAGE_BUILDERS:
                 unknown.append(s.type)
         if unknown:
             raise ValueError(f"Pipeline does not support stage type(s): {unknown}")
@@ -185,273 +139,17 @@ class Pipeline:
     def _make_runner(
         self, entry: StageEntry, ctx: StageContext, spec: ClientSpec
     ) -> Callable[[], None]:
-        model = spec.model
-        args = self.args
-        plan_file = self.session_dir / "plan.md"
-        spec_file = self.session_dir / "spec.md"
-        is_git = self.is_git
+        builder = STAGE_BUILDERS[entry.type]
         gr_id = self.gr_id
-        instructions = self.instructions
-        plan_val = getattr(args, "plan", None)
+        pipe = self
 
-        if entry.type == "plan":
+        def _run() -> None:
+            set_stage(gr_id, entry.name)
+            stage = builder(entry, spec, pipe)
+            stage.bind(ctx)
+            stage.run(pipe if STAGE_NEEDS_PIPE.get(entry.type) else None)
 
-            def _plan() -> None:
-                if not entry.prompt_paths and not plan_val:
-                    die(
-                        f"stage {entry.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML"
-                    )
-                set_stage(gr_id, entry.name)
-                if self.repo:
-                    stage = plan.Plan(
-                        entry,
-                        model,
-                        plan_source=plan_val,
-                        instructions=instructions,
-                        repo=self.repo,
-                    )
-                    stage.bind(ctx)
-                    stage.run(self)
-                else:
-                    logger.info("planning (model: %s) -> %s", model, plan_file)
-                    stage = plan.Plan(
-                        entry,
-                        model,
-                        plan_source=plan_val,
-                        plan_file=plan_file,
-                        instructions=instructions,
-                    )
-                    stage.bind(ctx)
-                    stage.run(None)
-
-            return _plan
-
-        if entry.type == "implement":
-
-            def _implement() -> None:
-                spec_text = ""
-                if spec_file.exists():
-                    try:
-                        spec_text = spec_file.read_text(encoding="utf-8")
-                    except (OSError, UnicodeDecodeError) as exc:
-                        logger.warning(
-                            "could not read spec.md (%s); proceeding without north-star context",
-                            exc,
-                        )
-                set_stage(gr_id, entry.name)
-                if not self.repo:
-                    logger.info("implementing (model: %s, from %s)", model, plan_file)
-                stage = implement.Implement(
-                    entry,
-                    model,
-                    is_git=is_git,
-                    spec_text=spec_text,
-                )
-                stage.bind(ctx)
-                stage.run(self if self.repo else None)
-
-            return _implement
-
-        if entry.type == "materialize-to-branch":
-
-            def _materialize_to_branch() -> None:
-                set_stage(gr_id, entry.name)
-                stage = materialize_to_branch_mod.MaterializeToBranch(entry, model)
-                stage.bind(ctx)
-                stage.run(self)
-
-            return _materialize_to_branch
-
-        if entry.type == "verify":
-            if not self.repo:
-                cmds = getattr(args, "cmds", None)
-                if cmds is not None:
-                    entry.options["cmds"] = cmds
-                entry.options.setdefault(
-                    "max_attempts", getattr(args, "test_max_attempts", 3)
-                )
-
-            def _verify() -> None:
-                resolved_cmds = entry.options.get("cmds", [])
-                if self.repo or resolved_cmds:
-                    set_stage(gr_id, entry.name)
-                    if resolved_cmds and not self.repo:
-                        logger.info(
-                            "running verify (cmds: %r, max-attempts: %s, model: %s)",
-                            resolved_cmds,
-                            entry.options.get("max_attempts"),
-                            model,
-                        )
-                stage = verify.Verify(entry, model, is_git=is_git)
-                stage.bind(ctx)
-                stage.run(None)
-
-            return _verify
-
-        if entry.type == "commit":
-
-            def _commit() -> None:
-                set_stage(gr_id, entry.name)
-                stage = commit.Commit(entry, model)
-                stage.bind(ctx)
-                stage.run(None)
-
-            return _commit
-
-        if entry.type == "open-github-pr":
-
-            def _open_github_pr() -> None:
-                set_stage(gr_id, entry.name)
-                stage = open_github_pr.OpenGitHubPR(
-                    entry,
-                    model,
-                    issue_url=read_state_field(self.state_file, "issue_url"),
-                )
-                stage.bind(ctx)
-                pr_url = stage.run(None)
-                logger.info("PR: %s", pr_url)
-
-            return _open_github_pr
-
-        if entry.type == "request-copilot":
-
-            def _request_copilot() -> None:
-                set_stage(gr_id, entry.name)
-                stage = request_copilot.RequestCopilot(entry, model, repo=self.repo)
-                stage.bind(ctx)
-                stage.run(None)
-
-            return _request_copilot
-
-        if entry.type == "ghreview":
-
-            def _ghreview() -> None:
-                if not entry.prompt_paths:
-                    die(
-                        f"stage {entry.name!r}: type 'ghreview' requires a 'prompt' field in the pipeline YAML"
-                    )
-                set_stage(gr_id, entry.name)
-                stage = review_code.ReviewCode(entry, model, plan_text="", is_git=True)
-                stage.bind(ctx)
-                stage.run(self)
-
-            return _ghreview
-
-        if entry.type == "wait-copilot":
-
-            def _wait_copilot() -> None:
-                set_stage(gr_id, entry.name)
-                stage = wait_copilot.WaitCopilot(entry, model, repo=self.repo)
-                stage.bind(ctx)
-                state = stage.run(None)
-                logger.info("Copilot review: %s", state)
-
-            return _wait_copilot
-
-        if entry.type == "ghaddress":
-
-            def _ghaddress() -> None:
-                if not entry.prompt_paths:
-                    die(
-                        f"stage {entry.name!r}: type 'ghaddress' requires a 'prompt' field in the pipeline YAML"
-                    )
-                set_stage(gr_id, entry.name)
-                stage = address_code.AddressCode(entry, model, is_git=True)
-                stage.bind(ctx)
-                stage.run(self)
-
-            return _ghaddress
-
-        if entry.type == "wait-ci":
-
-            def _wait_ci() -> None:
-                set_stage(gr_id, entry.name)
-                stage = wait_ci.WaitCI(entry, model)
-                stage.bind(ctx)
-                stage.run(None)
-
-            return _wait_ci
-
-        if entry.type == "review-code":
-            review_stage_names: list[str] = []
-            review_stage_dirs: dict[str, pathlib.Path] = {}
-            for s in self.pipeline_data.stages:
-                if s.type == "parallel":
-                    for child in s.children:
-                        if child.type == "review-code":
-                            review_stage_names.append(child.name)
-                            review_stage_dirs[child.name] = (
-                                self.session_dir / s.name / child.name
-                            )
-                elif s.type == "review-code":
-                    review_stage_names.append(s.name)
-                    review_stage_dirs[s.name] = self.session_dir
-
-            def _review_code() -> None:
-                plan_text = plan_file.read_text(encoding="utf-8")
-                set_stage(gr_id, entry.name)
-                logger.info("reviewing code (model: %s)", model)
-                stage = review_code.ReviewCode(
-                    entry,
-                    model,
-                    plan_text=plan_text,
-                    is_git=is_git,
-                )
-                stage.bind(ctx)
-                review_file = stage.run(None)
-                logger.info("code review (%s): %s", model, review_file)
-
-            return _review_code
-
-        if entry.type == "address-code":
-            ac_review_stage_names: list[str] = []
-            ac_review_stage_dirs: dict[str, pathlib.Path] = {}
-            for s in self.pipeline_data.stages:
-                if s.type == "parallel":
-                    for child in s.children:
-                        if child.type == "review-code":
-                            ac_review_stage_names.append(child.name)
-                            ac_review_stage_dirs[child.name] = (
-                                self.session_dir / s.name / child.name
-                            )
-                elif s.type == "review-code":
-                    ac_review_stage_names.append(s.name)
-                    ac_review_stage_dirs[s.name] = self.session_dir
-
-            def _address_code() -> None:
-                set_stage(gr_id, entry.name)
-                logger.info("addressing code reviews (model: %s)", model)
-                stage = address_code.AddressCode(
-                    entry,
-                    model,
-                    is_git=is_git,
-                    review_stage_names=ac_review_stage_names,
-                    review_stage_dirs=ac_review_stage_dirs,
-                )
-                stage.bind(ctx)
-                stage.run(None)
-
-            return _address_code
-
-        if entry.type == "chain":
-
-            def _chain() -> None:
-                set_stage(gr_id, entry.name)
-                logger.info(
-                    "running chain stage (child: %s)",
-                    entry.options.get("child", "local"),
-                )
-                stage = Chain(
-                    entry,
-                    spec,
-                    pipeline_builder=self._build_child_stages,
-                )
-                stage.bind(ctx)
-                stage.run(None)
-
-            return _chain
-
-        raise ValueError(f"unsupported stage type {entry.type!r}")
+        return _run
 
     def _collect_stages(self) -> list[tuple[str, Callable[[], None]]]:
         gr_id = self.gr_id
@@ -505,7 +203,7 @@ class Pipeline:
         stages = self._collect_stages()
         run_stages(stages, resume_from=self.args.resume_from)
 
-    def _build_child_stages(
+    def build_child_stages(
         self,
         pipeline_name: str,
         plan_path: pathlib.Path,
