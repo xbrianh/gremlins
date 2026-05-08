@@ -55,6 +55,8 @@ class OpenAIAgentsClient:
     ) -> None:
         self._model = model or "gpt-4o"
         self._total_cost_usd = 0.0
+        self._base_url = base_url
+        self._api_key = api_key
         self._provider: OpenAIProvider | None = (
             OpenAIProvider(base_url=base_url, api_key=api_key)
             if base_url or api_key
@@ -100,9 +102,20 @@ class OpenAIAgentsClient:
     def total_cost_usd(self) -> float:
         return self._total_cost_usd
 
+    @property
+    def base_url(self) -> str | None:
+        return self._base_url
+
+    @property
+    def api_key(self) -> str | None:
+        return self._api_key
+
 
 def make_openai_client(model: str | None) -> OpenAIAgentsClient:
-    return OpenAIAgentsClient(model)
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY environment variable is not set")
+    return OpenAIAgentsClient(model, api_key=api_key)
 
 
 def make_xai_client(model: str | None) -> OpenAIAgentsClient:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -9,7 +10,11 @@ import pytest
 from agents import Usage
 
 from gremlins.clients.protocol import CompletedRun
-from gremlins.clients.providers.openai_agents import OpenAIAgentsClient, make_xai_client
+from gremlins.clients.providers.openai_agents import (
+    OpenAIAgentsClient,
+    make_openai_client,
+    make_xai_client,
+)
 from gremlins.clients.tools import GREMLINS_TOOLS
 
 
@@ -62,12 +67,46 @@ def test_xai_client_constructs(monkeypatch: Any) -> None:
     client = make_xai_client(None)
     assert isinstance(client, OpenAIAgentsClient)
     assert client._model == "grok-4"
-    assert client._provider is not None
-    assert client._provider._stored_base_url == "https://api.x.ai/v1"
-    assert client._provider._stored_api_key == "test-key"
+    assert client.base_url == "https://api.x.ai/v1"
+    assert client.api_key == "test-key"
 
 
 def test_xai_client_missing_key(monkeypatch: Any) -> None:
     monkeypatch.delenv("XAI_API_KEY", raising=False)
     with pytest.raises(RuntimeError):
         make_xai_client(None)
+
+
+def test_openai_client_constructs(monkeypatch: Any) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    client = make_openai_client(None)
+    assert isinstance(client, OpenAIAgentsClient)
+    assert client.api_key == "sk-test"
+
+
+def test_openai_client_missing_key(monkeypatch: Any) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(RuntimeError):
+        make_openai_client(None)
+
+
+@pytest.mark.skipif(
+    not os.environ.get("OPENAI_API_KEY"),
+    reason="OPENAI_API_KEY not set",
+)
+def test_openai_integration_run() -> None:
+    client = make_openai_client("gpt-4o-mini")
+    result = client.run("Reply with the single word: done", label="integration-test")
+    assert result.exit_code == 0
+    assert result.text_result
+
+
+@pytest.mark.skipif(
+    not os.environ.get("XAI_API_KEY"),
+    reason="XAI_API_KEY not set",
+)
+def test_xai_integration_run() -> None:
+    client = make_xai_client("grok-3-mini-fast")
+    result = client.run("Reply with the single word: done", label="integration-test")
+    assert result.exit_code == 0
+    assert result.text_result

@@ -1,9 +1,4 @@
-"""File-system and shell tools for OpenAI agents running gremlins prompts.
-
-Tools covered: Read, Edit, Bash, Write, Grep, Glob.
-WebFetch, TodoWrite, and Task are not present in the stage prompts
-and are intentionally omitted.
-"""
+"""File-system and shell tools for OpenAI agents: Read, Edit, Bash, Write, Grep, Glob."""
 
 from __future__ import annotations
 
@@ -53,6 +48,8 @@ async def _edit_invoke(ctx: ToolContext[Any], args_json: str) -> str:
         return f"Error: {e}"
     if old not in content:
         return f"Error: old_string not found in {args['file_path']}"
+    if content.count(old) > 1:
+        return f"Error: old_string is not unique in {args['file_path']}"
     path.write_text(content.replace(old, new, 1), encoding="utf-8")
     return "OK"
 
