@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import pathlib
 
 from agents import Agent, RunConfig, Runner, Usage
+from agents.models.openai_provider import OpenAIProvider
 
 from gremlins.clients.protocol import CompletedRun
 from gremlins.clients.tools import GREMLINS_TOOLS
@@ -24,6 +26,12 @@ _PRICING: dict[str, tuple[float, float]] = {
     "o3": (10.00, 40.00),
     "o3-mini": (1.10, 4.40),
     "o4-mini": (1.10, 4.40),
+    # xAI Grok models
+    "grok-3": (3.00, 15.00),
+    "grok-3-fast": (0.60, 4.00),
+    "grok-3-mini": (0.30, 0.50),
+    "grok-3-mini-fast": (0.06, 0.40),
+    "grok-4": (3.00, 15.00),
 }
 _DEFAULT_PRICING = (2.50, 10.00)
 
@@ -38,9 +46,20 @@ def _compute_cost(model: str, usage: Usage) -> float:
 class OpenAIAgentsClient:
     """ClaudeClient implementation backed by the openai-agents SDK."""
 
-    def __init__(self, model: str | None) -> None:
+    def __init__(
+        self,
+        model: str | None,
+        *,
+        base_url: str | None = None,
+        api_key: str | None = None,
+    ) -> None:
         self._model = model or "gpt-4o"
         self._total_cost_usd = 0.0
+        self._provider: OpenAIProvider | None = (
+            OpenAIProvider(base_url=base_url, api_key=api_key)
+            if base_url or api_key
+            else None
+        )
 
     def run(
         self,
@@ -63,12 +82,11 @@ class OpenAIAgentsClient:
             model=effective_model,
         )
         ctx: dict[str, str | None] = {"cwd": str(cwd) if cwd is not None else None}
-        result = Runner.run_sync(
-            agent,
-            prompt,
-            context=ctx,
-            run_config=RunConfig(tracing_disabled=True),
-        )
+        if self._provider is not None:
+            run_config = RunConfig(tracing_disabled=True, model_provider=self._provider)
+        else:
+            run_config = RunConfig(tracing_disabled=True)
+        result = Runner.run_sync(agent, prompt, context=ctx, run_config=run_config)
         usage = result.context_wrapper.usage
         cost = _compute_cost(effective_model, usage)
         self._total_cost_usd += cost
@@ -85,3 +103,14 @@ class OpenAIAgentsClient:
 
 def make_openai_client(model: str | None) -> OpenAIAgentsClient:
     return OpenAIAgentsClient(model)
+
+
+def make_xai_client(model: str | None) -> OpenAIAgentsClient:
+    api_key = os.environ.get("XAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("XAI_API_KEY environment variable is not set")
+    return OpenAIAgentsClient(
+        model or "grok-4",
+        base_url="https://api.x.ai/v1",
+        api_key=api_key,
+    )

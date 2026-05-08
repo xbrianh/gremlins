@@ -67,7 +67,7 @@ async def _bash_invoke(ctx: ToolContext[Any], args_json: str) -> str:
     )
     try:
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         proc.kill()
         return "[timeout]"
     output = stdout.decode(errors="replace")
