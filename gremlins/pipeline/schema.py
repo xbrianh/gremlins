@@ -25,7 +25,7 @@ class StageEntry:
 
 
 @dataclasses.dataclass
-class Pipeline:
+class PipelineDef:
     name: str
     path: pathlib.Path
     stages: list[StageEntry]
