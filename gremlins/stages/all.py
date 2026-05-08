@@ -205,13 +205,13 @@ def _build_parallel(entry: StageEntry, spec: ClientSpec, runner: StageRunner) ->
         child_dir = group_dir / child.name
         child_dir.mkdir(parents=True, exist_ok=True)
         child_ctx = StageContext(
-            client=runner._get_client(child_spec),
+            client=runner.get_client(child_spec),
             session_dir=child_dir,
             gr_id=runner.gr_id,
             child_key=child.name,
         )
         child_runners.append(
-            (child.name, child_ctx, runner._make_runner(child, child_ctx, child_spec))
+            (child.name, child_ctx, runner.make_runner(child, child_ctx, child_spec))
         )
     gr_id = runner.gr_id
     return ParallelStage(

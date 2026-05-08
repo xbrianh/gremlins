@@ -66,7 +66,7 @@ class ParallelStage(CompoundStage):
             project_root=self._project_root,
         )
 
-    def run(self, pipe: Any) -> None:
+    def run(self, pipe: Any) -> None:  # noqa: ARG002
         for _, fn in self.build_runtime_stages():
             fn()
 

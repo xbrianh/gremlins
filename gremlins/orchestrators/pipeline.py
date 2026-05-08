@@ -107,7 +107,7 @@ class StageRunner:
                 raise ValueError(f"--spec: file is empty: {spec_path}")
             shutil.copyfile(spec_src, spec_file)
 
-    def _get_client(self, spec: ClientSpec) -> ClaudeClient:
+    def get_client(self, spec: ClientSpec) -> ClaudeClient:
         if self.test_client is not None:
             return self.test_client
         return self.spec_clients[str(spec)]
@@ -123,7 +123,7 @@ class StageRunner:
                 f"valid: {valid_names}"
             )
 
-    def _make_runner(
+    def make_runner(
         self, entry: StageEntry, ctx: StageContext, spec: ClientSpec
     ) -> Callable[[], None]:
         builder = STAGE_BUILDERS[entry.type]
@@ -146,11 +146,11 @@ class StageRunner:
         for e in stages:
             stage_spec = require_stage_spec(self.stage_specs, e.name)
             stage_ctx = StageContext(
-                client=self._get_client(stage_spec),
+                client=self.get_client(stage_spec),
                 session_dir=self.session_dir,
                 gr_id=gr_id,
             )
-            built.append((e.name, self._make_runner(e, stage_ctx, stage_spec)))
+            built.append((e.name, self.make_runner(e, stage_ctx, stage_spec)))
         return built
 
     def run(self) -> None:
@@ -187,7 +187,7 @@ class StageRunner:
         )
         stage_specs = collect_stage_specs(pipeline, None)
         spec_clients: dict[str, ClaudeClient] = {
-            str(spec): self._get_client(spec) for spec in stage_specs.values()
+            str(spec): self.get_client(spec) for spec in stage_specs.values()
         }
         child_runner = StageRunner(
             pipeline.stages,
