@@ -11,8 +11,9 @@ from gremlins import git as _git_mod
 from gremlins.pipeline import StageEntry
 from gremlins.prompts import load_prompts
 from gremlins.stages.base import Stage
+from gremlins.stages.loop import LoopExhausted, LoopStage, RunCmdFailed
 from gremlins.stages.registry import register_stage
-from gremlins.state import check_bail, emit_bail
+from gremlins.state import check_bail
 
 logger = logging.getLogger(__name__)
 
@@ -62,70 +63,55 @@ class Verify(Stage):
         combined_cmd = " && ".join(cmds)
         commands_section = "**Commands run:**\n" + "\n".join(f"- `{c}`" for c in cmds)
 
-        _exhausted = False
-        _agent_bailed = False
-        try:
-            for attempt in range(1, max_attempts + 1):
-                log_file = self.state.session_dir / f"verify-attempt-{attempt}.log"
-                result = subprocess.run(
-                    combined_cmd,
-                    shell=True,
-                    cwd=self.state.cwd,
-                    capture_output=True,
-                    text=True,
-                )
-                log_file.write_text(result.stdout + result.stderr, encoding="utf-8")
+        state = self.state
+        is_git = self._is_git
+        attempt: list[int] = [0]
+        last_output: list[str | None] = [None]
 
-                if result.returncode == 0:
-                    logger.info("verify attempt %d: green", attempt)
-                    return
-
-                logger.info(
-                    "verify attempt %d: failed (exit %d)", attempt, result.returncode
-                )
-
-                if attempt == max_attempts:
-                    break
-
-                diff = _diff_text(self.state.cwd, is_git=self._is_git)
-                verify_output = log_file.read_text(encoding="utf-8")
-                fix_prompt = template.format(
-                    bail_command=self.bail_command(),
-                    commands_section=commands_section,
-                    verify_output=verify_output,
-                    diff_text=diff,
-                    commit_instr=commit_instr,
-                )
-                self.run_claude(
-                    fix_prompt,
-                    label=f"verify-fix-{attempt}",
-                    raw_path=self.state.session_dir / f"stream-verify-{attempt}.jsonl",
-                )
-                _agent_bailed = True
-                check_bail(
-                    self.state.gr_id,
-                    f"verify-fix-{attempt}",
-                    child_key=self.state.child_key,
-                )
-                _agent_bailed = False
-
-            _exhausted = True
-            emit_bail(
-                self.state.gr_id,
-                "other",
-                f"verify failed after {max_attempts} attempts",
-                child_key=self.state.child_key,
+        def _run_cmd() -> None:
+            attempt[0] += 1
+            n = attempt[0]
+            log_file = state.session_dir / f"verify-attempt-{n}.log"
+            result = subprocess.run(
+                combined_cmd,
+                shell=True,
+                cwd=state.cwd,
+                capture_output=True,
+                text=True,
             )
+            log_file.write_text(result.stdout + result.stderr, encoding="utf-8")
+            if result.returncode != 0:
+                logger.info("verify attempt %d: failed (exit %d)", n, result.returncode)
+                last_output[0] = log_file.read_text(encoding="utf-8")
+                raise RunCmdFailed(result.returncode)
+            logger.info("verify attempt %d: green", n)
+            last_output[0] = None
+
+        def _run_fix() -> None:
+            if last_output[0] is None:
+                return
+            n = attempt[0]
+            diff = _diff_text(state.cwd, is_git=is_git)
+            fix_prompt = template.format(
+                bail_command=self.bail_command(),
+                commands_section=commands_section,
+                verify_output=last_output[0],
+                diff_text=diff,
+                commit_instr=commit_instr,
+            )
+            self.run_claude(
+                fix_prompt,
+                label=f"verify-fix-{n}",
+                raw_path=state.session_dir / f"stream-verify-{n}.jsonl",
+            )
+            check_bail(state.gr_id, f"verify-fix-{n}", child_key=state.child_key)
+
+        loop = LoopStage.from_runners([_run_cmd, _run_fix], max_iterations=max_attempts)
+        loop.bind(state)
+        try:
+            loop.run(pipe)
+        except LoopExhausted:
             raise RuntimeError(f"verify stage exhausted {max_attempts} attempts")
-        except (SystemExit, Exception) as exc:
-            if not _exhausted and not _agent_bailed:
-                emit_bail(
-                    self.state.gr_id,
-                    "other",
-                    f"verify stage failed: {exc}"[:200],
-                    child_key=self.state.child_key,
-                )
-            raise
 
 
 register_stage("verify", Verify)

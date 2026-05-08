@@ -156,7 +156,9 @@ def test_validate_resume_target_parallel_group_name(tmp_path: pathlib.Path) -> N
     pipe.validate_resume_target()  # "reviews" is a valid expanded name
 
 
-def test_validate_resume_target_parallel_fanout_rejected(tmp_path: pathlib.Path) -> None:
+def test_validate_resume_target_parallel_fanout_rejected(
+    tmp_path: pathlib.Path,
+) -> None:
     pipe = _local(
         [_make_parallel_stage("reviews", ["review-a", "review-b"])],
         args=_args(resume_from="reviews-fanout"),

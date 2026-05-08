@@ -7,24 +7,27 @@ import pathlib
 from typing import TYPE_CHECKING, Any
 
 from gremlins.clients import ClientSpec
+from gremlins.clients.resolve import require_stage_spec
 from gremlins.errors import die
 from gremlins.pipeline import StageEntry
 from gremlins.stages import (
     address_code,
     chain,
+    claude_prompt,
     commit,
     commit_pr,
     implement,
+    loop,
     open_github_pr,
     plan,
     request_copilot,
     review_code,
+    run_cmd,
     verify,
     wait_ci,
     wait_copilot,
 )
 from gremlins.stages import materialize_to_branch as materialize_to_branch_mod
-from gremlins.clients.resolve import require_stage_spec
 from gremlins.stages.registry import register_stage_builder
 from gremlins.state import read_state_str
 
@@ -187,6 +190,35 @@ def _build_address_code(
     )
 
 
+def _build_loop(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
+    from gremlins.stages.base import StageContext
+    from gremlins.stages.loop import LoopStage
+
+    max_iterations = entry.options.get("max_iterations", 3)
+    body_runners: list[Any] = []
+    for child in entry.body:
+        child_spec = runner.stage_specs.get(child.name, spec)
+        child_ctx = StageContext(
+            client=runner.get_client(child_spec),
+            session_dir=runner.session_dir,
+            gr_id=runner.gr_id,
+        )
+        body_runners.append(runner.make_runner(child, child_ctx, child_spec))
+    return LoopStage(entry, body_runners=body_runners, max_iterations=max_iterations)
+
+
+def _build_run_cmd(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
+    return run_cmd.RunCmd(entry, spec.model)
+
+
+def _build_claude_prompt(
+    entry: StageEntry, spec: ClientSpec, _runner: StageRunner
+) -> Any:
+    if not entry.prompt_paths:
+        die(f"stage {entry.name!r}: type 'claude-prompt' requires a 'prompt' field")
+    return claude_prompt.ClaudePrompt(entry, spec.model)
+
+
 def _build_chain(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
     logger.info("running chain stage (child: %s)", entry.options.get("child", "local"))
     return chain.Chain(entry, spec, pipeline_builder=runner.build_child_stages)
@@ -241,6 +273,9 @@ register_stage_builder("ghaddress", _build_ghaddress, needs_pipe=True)
 register_stage_builder("wait-ci", _build_wait_ci, needs_pipe=False)
 register_stage_builder("review-code", _build_review_code, needs_pipe=False)
 register_stage_builder("address-code", _build_address_code, needs_pipe=False)
+register_stage_builder("loop", _build_loop, needs_pipe=True)
+register_stage_builder("run-cmd", _build_run_cmd, needs_pipe=False)
+register_stage_builder("claude-prompt", _build_claude_prompt, needs_pipe=False)
 register_stage_builder("chain", _build_chain, needs_pipe=False)
 register_stage_builder("parallel", _build_parallel, needs_pipe=True)
 
@@ -248,13 +283,16 @@ register_stage_builder("parallel", _build_parallel, needs_pipe=True)
 __all__ = [
     "address_code",
     "chain",
+    "claude_prompt",
     "commit",
     "commit_pr",
     "implement",
+    "loop",
     "open_github_pr",
     "plan",
     "request_copilot",
     "review_code",
+    "run_cmd",
     "verify",
     "wait_ci",
     "wait_copilot",
