@@ -48,8 +48,8 @@ from conftest import (
 
 import gremlins.state as state_mod
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.orchestrators.run import run_pipeline
 from gremlins.orchestrators.review_address import address_main, review_main
+from gremlins.orchestrators.run import run_pipeline
 from gremlins.pipeline import resolve_pipeline_path
 
 
@@ -168,11 +168,14 @@ def test_local_main_does_not_clobber_external_state(tmp_path, monkeypatch):
             "address-code": MINIMAL_EVENTS,
         }
     )
-    assert run_pipeline(
-        resolve_pipeline_path("local", tmp_path),
-        argv=["--plan", str(plan_file)],
-        client=client,
-    ) == 0
+    assert (
+        run_pipeline(
+            resolve_pipeline_path("local", tmp_path),
+            argv=["--plan", str(plan_file)],
+            client=client,
+        )
+        == 0
+    )
     _assert_no_state_clobber(parent_state_file, original_content, parent_mtime)
 
 

@@ -30,16 +30,18 @@ from gremlins.state import patch_state, resolve_session_dir, resolve_state_file
 
 logger = logging.getLogger(__name__)
 
-_GH_STAGE_TYPES = frozenset({
-    "materialize-to-branch",
-    "commit",
-    "open-github-pr",
-    "request-copilot",
-    "wait-copilot",
-    "ghaddress",
-    "ghreview",
-    "wait-ci",
-})
+_GH_STAGE_TYPES = frozenset(
+    {
+        "materialize-to-branch",
+        "commit",
+        "open-github-pr",
+        "request-copilot",
+        "wait-copilot",
+        "ghaddress",
+        "ghreview",
+        "wait-ci",
+    }
+)
 
 
 def die(msg: str) -> NoReturn:
@@ -54,7 +56,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--plan", dest="plan", default=None)
     parser.add_argument("--spec", dest="spec_path", default=None)
     parser.add_argument("--cmd", dest="cmds", action="append", default=None)
-    parser.add_argument("--test-max-attempts", dest="test_max_attempts", type=int, default=3)
+    parser.add_argument(
+        "--test-max-attempts", dest="test_max_attempts", type=int, default=3
+    )
     parser.add_argument("--client", dest="client", default=None)
     parser.add_argument("instructions", nargs="*")
     args = parser.parse_args(argv)
@@ -127,11 +131,15 @@ def run_pipeline(
         except Exception as exc:
             die(f"--resume-from: corrupt state.json stage_clients: {exc}")
         if not stage_specs:
-            die("--resume-from: stage_clients not found in state.json (rerun from scratch?)")
+            die(
+                "--resume-from: stage_clients not found in state.json (rerun from scratch?)"
+            )
     if not stage_specs:
         stage_specs = collect_stage_specs(pipeline, cli_spec)
         if gr_id:
-            patch_state(gr_id, stage_clients={k: str(v) for k, v in stage_specs.items()})
+            patch_state(
+                gr_id, stage_clients={k: str(v) for k, v in stage_specs.items()}
+            )
 
     _spec_clients: dict[str, ClaudeClient] = {}
 
@@ -246,7 +254,9 @@ def run_pipeline(
         patch_state(gr_id, total_cost_usd=total_cost)
 
     if is_gh:
-        logger.info("done. PR: %s", read_state_field(state_file, "pr_url") or "(unknown)")
+        logger.info(
+            "done. PR: %s", read_state_field(state_file, "pr_url") or "(unknown)"
+        )
     else:
         logger.info("done. session artifacts in: %s", session_dir)
     if total_cost > 0:

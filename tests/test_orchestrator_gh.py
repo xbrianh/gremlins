@@ -26,12 +26,14 @@ from gremlins.git import (
     record_pre_impl_state,
     sweep_stale_handoff_branches,
 )
-from gremlins.orchestrators.run import _parse_args as _parse_gh_args, run_pipeline
+from gremlins.orchestrators.run import _parse_args as _parse_gh_args
+from gremlins.orchestrators.run import run_pipeline
 from gremlins.pipeline import load_pipeline, resolve_pipeline_path
 
 
 def _gh_pipeline_path(cwd):
     return resolve_pipeline_path("gh", cwd)
+
 
 # ---------------------------------------------------------------------------
 # Helper: minimal stream-json event list containing a PR URL in a tool_result
@@ -558,7 +560,9 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
         },
     )
 
-    result = run_pipeline(_gh_pipeline_path(tmp_path), argv=["--plan", "#42"], client=client)
+    result = run_pipeline(
+        _gh_pipeline_path(tmp_path), argv=["--plan", "#42"], client=client
+    )
     assert result == 0
 
     labels = [c.label for c in client.calls]
@@ -606,7 +610,9 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
         },
     )
 
-    result = run_pipeline(_gh_pipeline_path(tmp_path), argv=["add foo feature"], client=client)
+    result = run_pipeline(
+        _gh_pipeline_path(tmp_path), argv=["add foo feature"], client=client
+    )
     assert result == 0
 
     plan_call = next(c for c in client.calls if c.label == "plan")
@@ -706,7 +712,9 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
     )
 
     # Invoke with NO --model.
-    result = run_pipeline(_gh_pipeline_path(tmp_path), argv=["--plan", "#42"], client=client)
+    result = run_pipeline(
+        _gh_pipeline_path(tmp_path), argv=["--plan", "#42"], client=client
+    )
     assert result == 0
 
     # Every recorded run must have model == "sonnet". Asserting on every call
@@ -757,7 +765,11 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
         },
     )
 
-    result = run_pipeline(_gh_pipeline_path(tmp_path), argv=["--plan", "#42", "--client", "copilot:gpt-4o"], client=client)
+    result = run_pipeline(
+        _gh_pipeline_path(tmp_path),
+        argv=["--plan", "#42", "--client", "copilot:gpt-4o"],
+        client=client,
+    )
     assert result == 0
 
     assert client.calls, "expected at least one client call"
@@ -899,7 +911,12 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
         },
     )
 
-    result = run_pipeline(_gh_pipeline_path(tmp_path), argv=["--plan", "#42"], client=launch_client, gr_id=gr_id)
+    result = run_pipeline(
+        _gh_pipeline_path(tmp_path),
+        argv=["--plan", "#42"],
+        client=launch_client,
+        gr_id=gr_id,
+    )
     assert result == 0
 
     launch_state = json.loads(state_file.read_text(encoding="utf-8"))
@@ -1090,7 +1107,11 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         },
     )
 
-    result = run_pipeline(_gh_pipeline_path(tmp_path), argv=["--plan", "#99", "--resume-from", "implement"], client=client)
+    result = run_pipeline(
+        _gh_pipeline_path(tmp_path),
+        argv=["--plan", "#99", "--resume-from", "implement"],
+        client=client,
+    )
     assert result == 0
 
     labels = [c.label for c in client.calls]
@@ -1132,7 +1153,11 @@ def test_resume_from_ghreview(tmp_path, monkeypatch):
 
     client = FakeClaudeClient(fixtures={})
 
-    result = run_pipeline(_gh_pipeline_path(tmp_path), argv=["--plan", "#5", "--resume-from", "ghreview"], client=client)
+    result = run_pipeline(
+        _gh_pipeline_path(tmp_path),
+        argv=["--plan", "#5", "--resume-from", "ghreview"],
+        client=client,
+    )
     assert result == 0
 
     # No client.run calls (plan/implement/commit/open-pr all skipped)
@@ -1249,7 +1274,9 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
         git_dir=tmp_path,
         fixtures=fixtures,
     )
-    result = run_pipeline(_gh_pipeline_path(tmp_path), argv=["--plan", str(plan_file)], client=client)
+    result = run_pipeline(
+        _gh_pipeline_path(tmp_path), argv=["--plan", str(plan_file)], client=client
+    )
     assert result == 0
 
     labels = [c.label for c in client.calls]
@@ -1339,7 +1366,11 @@ def test_resume_from_commit_skips_implement(tmp_path, monkeypatch):
         fixtures={"commit": IMPL_EVENTS, "open-github-pr": _pr_events()}
     )
 
-    result = run_pipeline(_gh_pipeline_path(tmp_path), argv=["--plan", "#42", "--resume-from", "commit"], client=client)
+    result = run_pipeline(
+        _gh_pipeline_path(tmp_path),
+        argv=["--plan", "#42", "--resume-from", "commit"],
+        client=client,
+    )
     assert result == 0
 
     labels = [c.label for c in client.calls]
@@ -1416,7 +1447,11 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
 
     client = FakeClaudeClient(fixtures={"open-github-pr": _pr_events()})
 
-    result = run_pipeline(_gh_pipeline_path(tmp_path), argv=["--plan", "#42", "--resume-from", "open-pr"], client=client)
+    result = run_pipeline(
+        _gh_pipeline_path(tmp_path),
+        argv=["--plan", "#42", "--resume-from", "open-pr"],
+        client=client,
+    )
     assert result == 0
 
     labels = [c.label for c in client.calls]
@@ -1606,7 +1641,9 @@ def test_wait_ci_stage_ordering(tmp_path, monkeypatch):
         },
     )
 
-    result = run_pipeline(_gh_pipeline_path(tmp_path), argv=["--plan", "#42"], client=client)
+    result = run_pipeline(
+        _gh_pipeline_path(tmp_path), argv=["--plan", "#42"], client=client
+    )
     assert result == 0
 
     assert order[0] == "verify", "verify must run before other tracked stages"
@@ -1654,7 +1691,11 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
 
     client = FakeClaudeClient(fixtures={})
 
-    result = run_pipeline(_gh_pipeline_path(tmp_path), argv=["--plan", "#5", "--resume-from", "ci-gate"], client=client)
+    result = run_pipeline(
+        _gh_pipeline_path(tmp_path),
+        argv=["--plan", "#5", "--resume-from", "ci-gate"],
+        client=client,
+    )
     assert result == 0
 
     assert client.calls == [], "no client stages should run on ci-gate resume"
@@ -1794,7 +1835,11 @@ def test_resume_from_verify(tmp_path, monkeypatch):
         fixtures={"commit": IMPL_EVENTS, "open-github-pr": _pr_events()}
     )
 
-    result = run_pipeline(_gh_pipeline_path(tmp_path), argv=["--plan", "#5", "--resume-from", "verify"], client=client)
+    result = run_pipeline(
+        _gh_pipeline_path(tmp_path),
+        argv=["--plan", "#5", "--resume-from", "verify"],
+        client=client,
+    )
     assert result == 0
 
     labels = [c.label for c in client.calls]
@@ -1839,7 +1884,9 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir):
         },
     )
 
-    result = run_pipeline(_gh_pipeline_path(tmp_path), argv=["--plan", "#42"], gr_id=gr_id, client=client)
+    result = run_pipeline(
+        _gh_pipeline_path(tmp_path), argv=["--plan", "#42"], gr_id=gr_id, client=client
+    )
     assert result == 0
 
     data = json.loads((state_dir / "state.json").read_text())
@@ -1860,7 +1907,9 @@ def test_gh_main_state_client_tracks_effective_model(
     # Restore the real patch_state so stage_clients is actually written
     import gremlins.state as _state_mod
 
-    monkeypatch.setattr("gremlins.orchestrators.run.patch_state", _state_mod.patch_state)
+    monkeypatch.setattr(
+        "gremlins.orchestrators.run.patch_state", _state_mod.patch_state
+    )
 
     monkeypatch.setattr(
         subprocess, "run", _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n")
@@ -1960,7 +2009,9 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
         },
     )
 
-    result = run_pipeline(_gh_pipeline_path(tmp_path), argv=["--plan", "#42"], client=client)
+    result = run_pipeline(
+        _gh_pipeline_path(tmp_path), argv=["--plan", "#42"], client=client
+    )
     assert result == 0
 
     assert client.calls, "expected at least one client call"
@@ -2013,7 +2064,9 @@ def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
         },
     )
 
-    result = run_pipeline(_gh_pipeline_path(tmp_path), argv=["instr from cli"], client=client)
+    result = run_pipeline(
+        _gh_pipeline_path(tmp_path), argv=["instr from cli"], client=client
+    )
     assert result == 0
 
     plan_call = next(c for c in client.calls if c.label == "plan")

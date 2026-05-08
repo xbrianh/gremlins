@@ -9,13 +9,14 @@ from conftest import common_local_patches as _common_patches
 
 from gremlins.clients import ClientSpec
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.orchestrators.run import run_pipeline
 from gremlins.orchestrators.review_address import address_main, review_main
+from gremlins.orchestrators.run import run_pipeline
 from gremlins.pipeline import load_pipeline, resolve_pipeline_path
 
 
 def _local_pipeline_path(cwd):
     return resolve_pipeline_path("local", cwd)
+
 
 # ---------------------------------------------------------------------------
 # local_main smoke test (--plan mode: skips plan, runs implement→review→address)
@@ -49,7 +50,9 @@ def test_local_main_plan_mode(tmp_path, monkeypatch):
         }
     )
 
-    result = run_pipeline(_local_pipeline_path(tmp_path), argv=["--plan", str(plan_file)], client=client)
+    result = run_pipeline(
+        _local_pipeline_path(tmp_path), argv=["--plan", str(plan_file)], client=client
+    )
     assert result == 0
 
     labels = [c.label for c in client.calls]
@@ -73,9 +76,7 @@ def test_local_main_resume_from_review_code_requires_git_changes(
         lambda gr_id=None: session_dir,
     )
     monkeypatch.setattr("gremlins.orchestrators.run.in_git_repo", lambda: True)
-    monkeypatch.setattr(
-        "gremlins.orchestrators.run.has_dirty_worktree", lambda: False
-    )
+    monkeypatch.setattr("gremlins.orchestrators.run.has_dirty_worktree", lambda: False)
     monkeypatch.setattr("gremlins.orchestrators.run.has_commits", lambda: False)
 
     with pytest.raises(SystemExit):
@@ -106,9 +107,7 @@ def test_local_main_resume_from_review_code_allows_existing_git_changes(
         lambda gr_id=None: session_dir,
     )
     monkeypatch.setattr("gremlins.orchestrators.run.in_git_repo", lambda: True)
-    monkeypatch.setattr(
-        "gremlins.orchestrators.run.has_dirty_worktree", lambda: False
-    )
+    monkeypatch.setattr("gremlins.orchestrators.run.has_dirty_worktree", lambda: False)
     monkeypatch.setattr("gremlins.orchestrators.run.has_commits", lambda: True)
 
     client = _ReviewCreatingClient(
@@ -298,7 +297,12 @@ def test_local_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir)
         }
     )
 
-    result = run_pipeline(_local_pipeline_path(tmp_path), argv=["--plan", str(plan_file)], client=client, gr_id=gr_id)
+    result = run_pipeline(
+        _local_pipeline_path(tmp_path),
+        argv=["--plan", str(plan_file)],
+        client=client,
+        gr_id=gr_id,
+    )
     assert result == 0
 
     data = json.loads((state_dir / "state.json").read_text())
@@ -397,7 +401,9 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
         }
     )
 
-    result = run_pipeline(_local_pipeline_path(tmp_path), argv=["--plan", str(plan_file)], client=client)
+    result = run_pipeline(
+        _local_pipeline_path(tmp_path), argv=["--plan", str(plan_file)], client=client
+    )
     assert result == 0
     assert client.calls[0].model == "gpt-5.4"  # implement
     assert client.calls[1].label == review_label
@@ -494,7 +500,12 @@ def test_local_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
         }
     )
 
-    result = run_pipeline(_local_pipeline_path(tmp_path), argv=["--plan", str(plan_file)], client=launch_client, gr_id=gr_id)
+    result = run_pipeline(
+        _local_pipeline_path(tmp_path),
+        argv=["--plan", str(plan_file)],
+        client=launch_client,
+        gr_id=gr_id,
+    )
     assert result == 0
 
     launch_state = json.loads((state_dir / "state.json").read_text(encoding="utf-8"))

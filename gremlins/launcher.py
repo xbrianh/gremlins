@@ -81,6 +81,7 @@ _GH_STAGE_TYPES = frozenset(
     }
 )
 
+
 def _pipeline_mode(pipeline: Pipeline) -> str:
     if pipeline.stages and pipeline.stages[0].type == "chain":
         return "boss"
@@ -559,9 +560,7 @@ def launch(
         if instructions:
             spawn_args.append(instructions)
 
-        proc = _spawn_pipeline(
-            state_dir, workdir, gr_id, pipeline_path, spawn_args
-        )
+        proc = _spawn_pipeline(state_dir, workdir, gr_id, pipeline_path, spawn_args)
     except Exception:
         shutil.rmtree(state_dir, ignore_errors=True)
         if workdir:
