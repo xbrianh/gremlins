@@ -219,8 +219,8 @@ stages:
 
 def _make_overlay(tmp_path: pathlib.Path, name: str) -> pathlib.Path:
     overlay = tmp_path / "overlay"
-    (overlay / "pipelines").mkdir(parents=True)
-    (overlay / "pipelines" / f"{name}.yaml").write_text(_SAMPLE_YAML, encoding="utf-8")
+    overlay.mkdir(parents=True)
+    (overlay / f"{name}.yaml").write_text(_SAMPLE_YAML, encoding="utf-8")
     return overlay
 
 
@@ -230,7 +230,7 @@ def test_resolve_pipeline_name_uses_overlay_dir(
     overlay = _make_overlay(tmp_path, "mylocal")
     monkeypatch.setenv("GREMLINS_OVERLAY_DIR", str(overlay))
     result = resolve_pipeline_name("mylocal", tmp_path / "project")
-    assert result == (overlay / "pipelines" / "mylocal.yaml").resolve()
+    assert result == (overlay / "mylocal.yaml").resolve()
 
 
 def test_resolve_pipeline_path_uses_overlay_dir(
@@ -239,7 +239,7 @@ def test_resolve_pipeline_path_uses_overlay_dir(
     overlay = _make_overlay(tmp_path, "mylocal")
     monkeypatch.setenv("GREMLINS_OVERLAY_DIR", str(overlay))
     result = resolve_pipeline_path("mylocal", tmp_path / "project")
-    assert result == (overlay / "pipelines" / "mylocal.yaml").resolve()
+    assert result == (overlay / "mylocal.yaml").resolve()
 
 
 def test_resolve_pipeline_name_finds_project_dir_when_overlay_empty(
@@ -249,7 +249,7 @@ def test_resolve_pipeline_name_finds_project_dir_when_overlay_empty(
     empty_overlay.mkdir()
     monkeypatch.setenv("GREMLINS_OVERLAY_DIR", str(empty_overlay))
     project_root = tmp_path / "project"
-    pipeline_dir = project_root / ".gremlins" / "pipelines"
+    pipeline_dir = project_root / ".gremlins"
     pipeline_dir.mkdir(parents=True)
     (pipeline_dir / "mylocal.yaml").write_text(_SAMPLE_YAML, encoding="utf-8")
     result = resolve_pipeline_name("mylocal", project_root)
@@ -263,7 +263,7 @@ def test_resolve_pipeline_path_finds_project_dir_when_overlay_empty(
     empty_overlay.mkdir()
     monkeypatch.setenv("GREMLINS_OVERLAY_DIR", str(empty_overlay))
     project_root = tmp_path / "project"
-    pipeline_dir = project_root / ".gremlins" / "pipelines"
+    pipeline_dir = project_root / ".gremlins"
     pipeline_dir.mkdir(parents=True)
     (pipeline_dir / "mylocal.yaml").write_text(_SAMPLE_YAML, encoding="utf-8")
     result = resolve_pipeline_path("mylocal", project_root)

@@ -43,14 +43,12 @@ def test_init_all_pipelines(tmp_path, capsys):
 
     bundled = _bundled_pipeline_names()
     for name in bundled:
-        dst = dot / "pipelines" / f"{name}.yaml"
+        dst = dot / f"{name}.yaml"
         assert dst.exists(), f"missing {dst}"
         assert str(dst) in out
 
         data = yaml.safe_load(dst.read_text())
-        assert data.get("prompt_dir") == "../prompts", (
-            f"prompt_dir not injected in {dst}"
-        )
+        assert data.get("prompt_dir") == "prompts", f"prompt_dir not injected in {dst}"
         for p in _iter_stage_prompts(data.get("stages", [])):
             assert "/" not in p or p.startswith("review/"), (
                 f"prompt should be a bare name (or review/<lens>): {p}"
@@ -75,11 +73,11 @@ def test_init_single_pipeline(tmp_path, capsys):
     assert rc == 0
 
     dot = tmp_path / ".gremlins"
-    assert (dot / "pipelines" / "local.yaml").exists()
-    assert not (dot / "pipelines" / "gh.yaml").exists()
+    assert (dot / "local.yaml").exists()
+    assert not (dot / "gh.yaml").exists()
 
-    data = yaml.safe_load((dot / "pipelines" / "local.yaml").read_text())
-    assert data["prompt_dir"] == "../prompts"
+    data = yaml.safe_load((dot / "local.yaml").read_text())
+    assert data["prompt_dir"] == "prompts"
     prompt_refs = set(_iter_stage_prompts(data["stages"]))
 
     for ref in prompt_refs:
@@ -92,7 +90,7 @@ def test_init_single_pipeline(tmp_path, capsys):
 
 
 def test_init_conflict_exits_without_writing(tmp_path, capsys):
-    conflict = tmp_path / ".gremlins" / "pipelines" / "local.yaml"
+    conflict = tmp_path / ".gremlins" / "local.yaml"
     conflict.parent.mkdir(parents=True)
     conflict.write_text("existing", encoding="utf-8")
 
@@ -104,7 +102,7 @@ def test_init_conflict_exits_without_writing(tmp_path, capsys):
 
     # Nothing else written
     written = list((tmp_path / ".gremlins").rglob("*"))
-    assert set(written) == {conflict.parent, conflict}
+    assert set(written) == {conflict}
     assert conflict.read_text(encoding="utf-8") == "existing"
 
 
@@ -114,7 +112,7 @@ def test_init_conflict_exits_without_writing(tmp_path, capsys):
 
 
 def test_init_force_overwrites(tmp_path, capsys):
-    conflict = tmp_path / ".gremlins" / "pipelines" / "local.yaml"
+    conflict = tmp_path / ".gremlins" / "local.yaml"
     conflict.parent.mkdir(parents=True)
     conflict.write_text("old content", encoding="utf-8")
 
@@ -150,7 +148,7 @@ def test_init_custom_path(tmp_path, capsys):
     rc = init_main(["--path", str(target), "--pipeline", "local"])
     assert rc == 0
 
-    assert (target / ".gremlins" / "pipelines" / "local.yaml").exists()
+    assert (target / ".gremlins" / "local.yaml").exists()
 
 
 # ---------------------------------------------------------------------------
