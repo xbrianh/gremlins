@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import logging
 import pathlib
-import sys
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from gremlins.clients import ClientSpec
+from gremlins.errors import die
+from gremlins.pipeline import StageEntry
 from gremlins.stages import (
     address_code,
     chain,
@@ -23,17 +25,15 @@ from gremlins.stages import (
 )
 from gremlins.stages import materialize_to_branch as materialize_to_branch_mod
 from gremlins.stages.registry import register_stage_builder
+from gremlins.state import read_state_str
+
+if TYPE_CHECKING:
+    from gremlins.orchestrators.pipeline import Pipeline
 
 logger = logging.getLogger(__name__)
 
 
-def _die(msg: str) -> None:
-    sys.stderr.write(f"error: {msg}\n")
-    sys.stderr.flush()
-    sys.exit(1)
-
-
-def _review_stage_info(runner: Any) -> tuple[list[str], dict[str, pathlib.Path]]:
+def _review_stage_info(runner: Pipeline) -> tuple[list[str], dict[str, pathlib.Path]]:
     names: list[str] = []
     dirs: dict[str, pathlib.Path] = {}
     for s in runner.pipeline_data.stages:
@@ -48,10 +48,10 @@ def _review_stage_info(runner: Any) -> tuple[list[str], dict[str, pathlib.Path]]
     return names, dirs
 
 
-def _build_plan(entry: Any, spec: Any, runner: Any) -> Any:
+def _build_plan(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
     plan_val = getattr(runner.args, "plan", None)
     if not entry.prompt_paths and not plan_val:
-        _die(
+        die(
             f"stage {entry.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML"
         )
     if not runner.repo:
@@ -68,7 +68,7 @@ def _build_plan(entry: Any, spec: Any, runner: Any) -> Any:
     )
 
 
-def _build_implement(entry: Any, spec: Any, runner: Any) -> Any:
+def _build_implement(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
     spec_text = ""
     spec_file = runner.session_dir / "spec.md"
     if spec_file.exists():
@@ -90,11 +90,11 @@ def _build_implement(entry: Any, spec: Any, runner: Any) -> Any:
     )
 
 
-def _build_materialize_to_branch(entry: Any, spec: Any, _runner: Any) -> Any:
+def _build_materialize_to_branch(entry: StageEntry, spec: ClientSpec, _runner: Pipeline) -> Any:
     return materialize_to_branch_mod.MaterializeToBranch(entry, spec.model)
 
 
-def _build_verify(entry: Any, spec: Any, runner: Any) -> Any:
+def _build_verify(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
     if not runner.repo:
         cmds = getattr(runner.args, "cmds", None)
         if cmds is not None:
@@ -113,49 +113,47 @@ def _build_verify(entry: Any, spec: Any, runner: Any) -> Any:
     return verify.Verify(entry, spec.model, is_git=runner.is_git)
 
 
-def _build_commit(entry: Any, spec: Any, _runner: Any) -> Any:
+def _build_commit(entry: StageEntry, spec: ClientSpec, _runner: Pipeline) -> Any:
     return commit.Commit(entry, spec.model)
 
 
-def _build_open_github_pr(entry: Any, spec: Any, runner: Any) -> Any:
-    from gremlins.orchestrators.pipeline import read_state_field
-
+def _build_open_github_pr(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
     return open_github_pr.OpenGitHubPR(
         entry,
         spec.model,
-        issue_url=read_state_field(runner.state_file, "issue_url"),
+        issue_url=read_state_str(runner.state_file, "issue_url"),
     )
 
 
-def _build_request_copilot(entry: Any, spec: Any, runner: Any) -> Any:
+def _build_request_copilot(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
     return request_copilot.RequestCopilot(entry, spec.model, repo=runner.repo)
 
 
-def _build_ghreview(entry: Any, spec: Any, _runner: Any) -> Any:
+def _build_ghreview(entry: StageEntry, spec: ClientSpec, _runner: Pipeline) -> Any:
     if not entry.prompt_paths:
-        _die(
+        die(
             f"stage {entry.name!r}: type 'ghreview' requires a 'prompt' field in the pipeline YAML"
         )
     return review_code.ReviewCode(entry, spec.model, plan_text="", is_git=True)
 
 
-def _build_wait_copilot(entry: Any, spec: Any, runner: Any) -> Any:
+def _build_wait_copilot(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
     return wait_copilot.WaitCopilot(entry, spec.model, repo=runner.repo)
 
 
-def _build_ghaddress(entry: Any, spec: Any, _runner: Any) -> Any:
+def _build_ghaddress(entry: StageEntry, spec: ClientSpec, _runner: Pipeline) -> Any:
     if not entry.prompt_paths:
-        _die(
+        die(
             f"stage {entry.name!r}: type 'ghaddress' requires a 'prompt' field in the pipeline YAML"
         )
     return address_code.AddressCode(entry, spec.model, is_git=True)
 
 
-def _build_wait_ci(entry: Any, spec: Any, _runner: Any) -> Any:
+def _build_wait_ci(entry: StageEntry, spec: ClientSpec, _runner: Pipeline) -> Any:
     return wait_ci.WaitCI(entry, spec.model)
 
 
-def _build_review_code(entry: Any, spec: Any, runner: Any) -> Any:
+def _build_review_code(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
     plan_file = runner.session_dir / "plan.md"
     plan_text = plan_file.read_text(encoding="utf-8")
     logger.info("reviewing code (model: %s)", spec.model)
@@ -164,7 +162,7 @@ def _build_review_code(entry: Any, spec: Any, runner: Any) -> Any:
     )
 
 
-def _build_address_code(entry: Any, spec: Any, runner: Any) -> Any:
+def _build_address_code(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
     names, dirs = _review_stage_info(runner)
     logger.info("addressing code reviews (model: %s)", spec.model)
     return address_code.AddressCode(
@@ -176,9 +174,9 @@ def _build_address_code(entry: Any, spec: Any, runner: Any) -> Any:
     )
 
 
-def _build_chain(entry: Any, spec: Any, runner: Any) -> Any:
+def _build_chain(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
     logger.info("running chain stage (child: %s)", entry.options.get("child", "local"))
-    return chain.Chain(entry, spec, pipeline_builder=runner._build_child_stages)
+    return chain.Chain(entry, spec, pipeline_builder=runner.build_child_stages)
 
 
 register_stage_builder("plan", _build_plan, needs_pipe=False)

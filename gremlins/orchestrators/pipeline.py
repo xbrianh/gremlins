@@ -8,9 +8,8 @@ import json
 import logging
 import pathlib
 import shutil
-import sys
 from collections.abc import Callable
-from typing import Any, NoReturn
+from typing import Any
 
 import gremlins.stages.all as _stages_all  # noqa: F401  # type: ignore[reportUnusedImport]
 from gremlins.clients import ClientSpec
@@ -25,22 +24,6 @@ from gremlins.stages.registry import STAGE_BUILDERS, STAGE_NEEDS_PIPE
 from gremlins.state import resolve_state_file, set_stage
 
 logger = logging.getLogger(__name__)
-
-
-def die(msg: str) -> NoReturn:
-    sys.stderr.write(f"error: {msg}\n")
-    sys.stderr.flush()
-    sys.exit(1)
-
-
-def read_state_field(sf: pathlib.Path | None, field: str) -> str:
-    if sf is None or not sf.exists():
-        return ""
-    try:
-        data = json.loads(sf.read_text(encoding="utf-8"))
-        return data.get(field) or ""
-    except Exception:
-        return ""
 
 
 def read_stage_inputs(sf: pathlib.Path | None) -> dict[str, Any]:
@@ -220,7 +203,7 @@ class Pipeline:
         stages = self._collect_stages()
         run_stages(stages, resume_from=self.args.resume_from)
 
-    def _build_child_stages(
+    def build_child_stages(
         self,
         pipeline_name: str,
         plan_path: pathlib.Path,

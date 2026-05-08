@@ -7,8 +7,6 @@ import logging
 import os
 import pathlib
 import shutil
-import sys
-from typing import NoReturn
 
 import yaml
 
@@ -24,9 +22,10 @@ from gremlins.env_file import load_env_file
 from gremlins.gh_utils import get_repo
 from gremlins.git import has_commits, has_dirty_worktree, in_git_repo
 from gremlins.logging_setup import configure_logging
-from gremlins.orchestrators.pipeline import Pipeline, read_state_field
+from gremlins.errors import die
+from gremlins.orchestrators.pipeline import Pipeline
 from gremlins.pipeline import load_pipeline
-from gremlins.state import patch_state, resolve_session_dir, resolve_state_file
+from gremlins.state import patch_state, read_state_str, resolve_session_dir, resolve_state_file
 
 logger = logging.getLogger(__name__)
 
@@ -42,12 +41,6 @@ _GH_STAGE_TYPES = frozenset(
         "wait-ci",
     }
 )
-
-
-def die(msg: str) -> NoReturn:
-    sys.stderr.write(f"error: {msg}\n")
-    sys.stderr.flush()
-    sys.exit(1)
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -255,7 +248,7 @@ def run_pipeline(
 
     if is_gh:
         logger.info(
-            "done. PR: %s", read_state_field(state_file, "pr_url") or "(unknown)"
+            "done. PR: %s", read_state_str(state_file, "pr_url") or "(unknown)"
         )
     else:
         logger.info("done. session artifacts in: %s", session_dir)
