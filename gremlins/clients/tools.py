@@ -105,9 +105,15 @@ GREMLINS_TOOLS: list[Tool] = [
         params_json_schema={
             "type": "object",
             "properties": {
-                "file_path": {"type": "string", "description": "Absolute or relative path"},
+                "file_path": {
+                    "type": "string",
+                    "description": "Absolute or relative path",
+                },
                 "limit": {"type": "integer", "description": "Max lines to read"},
-                "offset": {"type": "integer", "description": "Line offset to start from"},
+                "offset": {
+                    "type": "integer",
+                    "description": "Line offset to start from",
+                },
             },
             "required": ["file_path"],
             "additionalProperties": False,
@@ -167,7 +173,10 @@ GREMLINS_TOOLS: list[Tool] = [
             "type": "object",
             "properties": {
                 "pattern": {"type": "string"},
-                "path": {"type": "string", "description": "Directory or file to search"},
+                "path": {
+                    "type": "string",
+                    "description": "Directory or file to search",
+                },
                 "glob": {"type": "string", "description": "Glob filter for file names"},
             },
             "required": ["pattern"],
@@ -183,7 +192,10 @@ GREMLINS_TOOLS: list[Tool] = [
             "type": "object",
             "properties": {
                 "pattern": {"type": "string"},
-                "path": {"type": "string", "description": "Base directory to search in"},
+                "path": {
+                    "type": "string",
+                    "description": "Base directory to search in",
+                },
             },
             "required": ["pattern"],
             "additionalProperties": False,

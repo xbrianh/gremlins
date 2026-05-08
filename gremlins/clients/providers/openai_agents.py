@@ -28,7 +28,9 @@ _DEFAULT_PRICING = (2.50, 10.00)
 
 def _compute_cost(model: str, usage: Usage) -> float:
     input_price, output_price = _PRICING.get(model, _DEFAULT_PRICING)
-    return (usage.input_tokens * input_price + usage.output_tokens * output_price) / 1_000_000
+    return (
+        usage.input_tokens * input_price + usage.output_tokens * output_price
+    ) / 1_000_000
 
 
 class OpenAIAgentsClient:
