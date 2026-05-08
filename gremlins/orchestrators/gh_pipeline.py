@@ -164,24 +164,9 @@ class GHPipeline(Pipeline):
 
             def _handoff_branch() -> None:
                 set_stage(self.gr_id, entry.name)
-                if self.impl_pre_state is None:
-                    saved_head = read_state_field(self.state_file, "impl_pre_head")
-                    if saved_head:
-                        self.impl_pre_state = PreImplState(
-                            head=saved_head,
-                            branch=read_state_field(self.state_file, "impl_pre_branch"),
-                        )
                 stage = handoff_branch_mod.HandoffBranch(entry, model)
                 stage.bind(ctx)
-                result = stage.run(self)
-                self.impl_handoff_result = result
-                self.impl_handoff_branch = result.handoff_branch
-                self.impl_base_ref = result.base_ref
-                patch_state(
-                    self.gr_id,
-                    impl_handoff_branch=result.handoff_branch,
-                    impl_base_ref=result.base_ref,
-                )
+                stage.run(self)
 
             return _handoff_branch
 

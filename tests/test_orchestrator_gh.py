@@ -148,6 +148,20 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         "gremlins.orchestrators.gh.patch_state", lambda gr_id=None, **kw: None
     )
 
+    # HandoffBranch.run writes impl_handoff_branch/impl_base_ref to state.json so
+    # the commit runner can read them back. Use a writing shim here since gr_id=None
+    # makes the real patch_state a no-op in tests.
+    def _handoff_patch_state(gr_id=None, _delete=(), **kw):
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+        for key in _delete:
+            data.pop(key, None)
+        data.update(kw)
+        state_file.write_text(json.dumps(data), encoding="utf-8")
+
+    monkeypatch.setattr(
+        "gremlins.stages.handoff_branch.patch_state", _handoff_patch_state
+    )
+
     # Strip pipeline client keys so the injected client is used for every stage.
     _real_load_pipeline = _gh_mod.load_pipeline
 
