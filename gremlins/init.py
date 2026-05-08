@@ -165,10 +165,10 @@ def _build_plan(
 
     for name in selected:
         data = dict(pipeline_data[name])
-        data.setdefault("prompt_dir", "../prompts")
+        data.setdefault("prompt_dir", "prompts")
         stages = cast(list[Any], data.get("stages", []))
         _rewrite_prompts_to_bare(stages)
-        dst = dot_gremlins / "pipelines" / f"{name}.yaml"
+        dst = dot_gremlins / f"{name}.yaml"
         content = yaml.safe_dump(data, default_flow_style=False, sort_keys=False)
         plan.append((dst, content.encode("utf-8")))
 

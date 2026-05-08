@@ -20,8 +20,8 @@ def _project_pipeline_dirs(project_root: pathlib.Path) -> list[pathlib.Path]:
     dirs: list[pathlib.Path] = []
     seen: set[pathlib.Path] = set()
     for d in [
-        overlay_dir(project_root) / "pipelines",
-        project_root / ".gremlins" / "pipelines",
+        overlay_dir(project_root),
+        project_root / ".gremlins",
     ]:
         resolved = d.resolve()
         if resolved not in seen:

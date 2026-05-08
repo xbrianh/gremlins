@@ -937,8 +937,8 @@ def test_setup_workdir_overlay_goes_to_state_dir(lenv):
     from gremlins import launcher
 
     overlay_src = lenv.repo / ".gremlins"
-    (overlay_src / "pipelines").mkdir(parents=True)
-    (overlay_src / "pipelines" / "custom-local.yaml").write_text(
+    overlay_src.mkdir(parents=True)
+    (overlay_src / "custom-local.yaml").write_text(
         "name: custom-local\nstages: []\n", encoding="utf-8"
     )
 
@@ -951,7 +951,7 @@ def test_setup_workdir_overlay_goes_to_state_dir(lenv):
     )
 
     try:
-        assert (state_dir / ".gremlins" / "pipelines" / "custom-local.yaml").exists()
+        assert (state_dir / ".gremlins" / "custom-local.yaml").exists()
         assert not (pathlib.Path(workdir) / ".gremlins").exists()
         r = subprocess.run(
             ["git", "-C", workdir, "status", "--porcelain"],

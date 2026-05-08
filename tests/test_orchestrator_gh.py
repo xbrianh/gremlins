@@ -802,7 +802,7 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
         stage_name: "claude:claude-opus-4-7" for stage_name, _ in stage_defs
     }
 
-    pipeline_dir = tmp_path / ".gremlins" / "pipelines"
+    pipeline_dir = tmp_path / ".gremlins"
     pipeline_dir.mkdir(parents=True)
     pipeline_path = pipeline_dir / "gh.yaml"
     prompt_dir = tmp_path / ".gremlins" / "prompts"
@@ -815,7 +815,7 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
     implement_prompt.write_text("Implement.\n", encoding="utf-8")
 
     def write_pipeline(stage_clients: dict[str, str]) -> None:
-        lines = ["name: gh", "prompt_dir: ../prompts", "", "stages:"]
+        lines = ["name: gh", "prompt_dir: prompts", "", "stages:"]
         for stage_name, stage_type in stage_defs:
             fields = [
                 f"name: {stage_name}",

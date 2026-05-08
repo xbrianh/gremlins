@@ -425,7 +425,7 @@ def test_local_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
         stage_name: "claude:claude-opus-4-7" for stage_name, _ in stage_defs
     }
 
-    pipeline_dir = tmp_path / ".gremlins" / "pipelines"
+    pipeline_dir = tmp_path / ".gremlins"
     pipeline_dir.mkdir(parents=True)
     pipeline_path = pipeline_dir / "local.yaml"
     style_path = pipeline_dir / "style.md"
