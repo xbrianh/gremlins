@@ -63,7 +63,7 @@ def collect_stage_specs(
             specs[e.name] = resolve_stage_client(
                 None, cli_spec, pipeline.default_client
             )
-            for child in e.children:
+            for child in e.body:
                 specs[child.name] = resolve_stage_client(
                     child.client, cli_spec, pipeline.default_client
                 )
@@ -102,7 +102,7 @@ def validate_stage_specs(
     expected_stage_names = {entry.name for entry in pipeline.stages}
     for entry in pipeline.stages:
         if entry.type == "parallel":
-            expected_stage_names.update(child.name for child in entry.children)
+            expected_stage_names.update(child.name for child in entry.body)
 
     missing_stage_names = sorted(expected_stage_names.difference(stage_specs))
     if missing_stage_names:

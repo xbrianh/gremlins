@@ -40,7 +40,7 @@ def _review_stage_info(
     dirs: dict[str, pathlib.Path] = {}
     for s in runner.pipeline_data.stages:
         if s.type == "parallel":
-            for child in s.children:
+            for child in s.body:
                 if child.type == "review-code":
                     names.append(child.name)
                     dirs[child.name] = runner.session_dir / s.name / child.name

@@ -18,7 +18,7 @@ from gremlins.clients.resolve import require_stage_spec
 from gremlins.git import in_git_repo
 from gremlins.pipeline import PipelineDef as _PipelineData
 from gremlins.pipeline import StageEntry
-from gremlins.runner import build_parallel_stages, run_stages
+from gremlins.runner import run_stages
 from gremlins.stages.base import StageContext
 from gremlins.stages.registry import STAGE_BUILDERS, STAGE_NEEDS_PIPE
 from gremlins.state import resolve_state_file, set_stage
@@ -44,7 +44,7 @@ def _expand_stage_entries(raw_stages: list[StageEntry]) -> list[StageEntry]:
 
     for entry in raw_stages:
         if entry.type == "parallel":
-            for child in entry.children:
+            for child in entry.body:
                 if child.name in child_names or child.name in top_level_names:
                     raise ValueError(f"duplicate child stage name {child.name!r}")
                 child_names.add(child.name)
@@ -86,7 +86,7 @@ class StageRunner:
         for s in stages:
             if s.type == "parallel":
                 unknown.extend(
-                    c.type for c in s.children if c.type not in STAGE_BUILDERS
+                    c.type for c in s.body if c.type not in STAGE_BUILDERS
                 )
             elif s.type not in STAGE_BUILDERS:
                 unknown.append(s.type)
@@ -151,6 +151,39 @@ class StageRunner:
 
         return _run
 
+    def _build_parallel_stage(
+        self, e: StageEntry, gr_id: str | None
+    ) -> Any:
+        from gremlins.stages.parallel import ParallelStage
+
+        group_dir = self.session_dir / e.name
+        group_dir.mkdir(parents=True, exist_ok=True)
+        child_runners: list[tuple[str, StageContext, Callable[[], None]]] = []
+        for child in e.body:
+            child_spec = require_stage_spec(self.stage_specs, child.name)
+            child_dir = group_dir / child.name
+            child_dir.mkdir(parents=True, exist_ok=True)
+            child_ctx = StageContext(
+                client=self._get_client(child_spec),
+                session_dir=child_dir,
+                gr_id=gr_id,
+                child_key=child.name,
+            )
+            child_runners.append(
+                (child.name, child_ctx, self._make_runner(child, child_ctx, child_spec))
+            )
+        return ParallelStage(
+            e,
+            None,
+            child_runners,
+            max_concurrent=e.max_concurrent,
+            cancel_on_bail=e.cancel_on_bail,
+            bail_policy=e.bail_policy,
+            gr_id=gr_id,
+            project_root=pathlib.Path.cwd(),
+            set_stage_fn=lambda n: set_stage(gr_id, n),
+        )
+
     def _collect_stages(
         self, stages: list[StageEntry]
     ) -> list[tuple[str, Callable[[], None]]]:
@@ -158,38 +191,7 @@ class StageRunner:
         built: list[tuple[str, Callable[[], None]]] = []
         for e in stages:
             if e.type == "parallel":
-                group_dir = self.session_dir / e.name
-                group_dir.mkdir(parents=True, exist_ok=True)
-                child_runners: list[tuple[str, StageContext, Callable[[], None]]] = []
-                for child in e.children:
-                    child_spec = require_stage_spec(self.stage_specs, child.name)
-                    child_dir = group_dir / child.name
-                    child_dir.mkdir(parents=True, exist_ok=True)
-                    child_ctx = StageContext(
-                        client=self._get_client(child_spec),
-                        session_dir=child_dir,
-                        gr_id=gr_id,
-                        child_key=child.name,
-                    )
-                    child_runners.append(
-                        (
-                            child.name,
-                            child_ctx,
-                            self._make_runner(child, child_ctx, child_spec),
-                        )
-                    )
-                built.extend(
-                    build_parallel_stages(
-                        e.name,
-                        child_runners,
-                        max_concurrent=e.max_concurrent,
-                        set_stage_fn=lambda n: set_stage(gr_id, n),
-                        cancel_on_bail=e.cancel_on_bail,
-                        bail_policy=e.bail_policy,
-                        gr_id=gr_id,
-                        project_root=pathlib.Path.cwd(),
-                    )
-                )
+                built.extend(self._build_parallel_stage(e, gr_id).build_runtime_stages())
             else:
                 stage_spec = require_stage_spec(self.stage_specs, e.name)
                 stage_ctx = StageContext(

@@ -22,8 +22,10 @@ import pytest
 
 import gremlins.state as state_mod
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.runner import build_parallel_stages, run_stages
+from gremlins.pipeline.schema import StageEntry
+from gremlins.runner import run_stages
 from gremlins.stages.base import StageContext
+from gremlins.stages.parallel import ParallelStage
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -47,6 +49,42 @@ def _make_state(state_root: pathlib.Path, gr_id: str) -> pathlib.Path:
 
 def _read_state(sf: pathlib.Path) -> dict:
     return json.loads(sf.read_text(encoding="utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_parallel_stages(
+    group_name: str,
+    child_runners: list,
+    *,
+    max_concurrent: int | None = None,
+    set_stage_fn=None,
+    cancel_on_bail: bool = False,
+    bail_policy: str = "any",
+    gr_id=None,
+    project_root: pathlib.Path | None = None,
+) -> list:
+    if set_stage_fn is None:
+        set_stage_fn = lambda _n: None
+    if project_root is None:
+        project_root = pathlib.Path.cwd()
+    entry = StageEntry(
+        name=group_name, type="parallel", client=None, prompt_paths=[], options={}
+    )
+    return ParallelStage(
+        entry,
+        None,
+        child_runners,
+        max_concurrent=max_concurrent,
+        set_stage_fn=set_stage_fn,
+        cancel_on_bail=cancel_on_bail,
+        bail_policy=bail_policy,
+        gr_id=gr_id,
+        project_root=project_root,
+    ).build_runtime_stages()
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +221,7 @@ def _build_fanin_test(
     project_root = tmp_path / "nongit"
     project_root.mkdir()
 
-    stages = build_parallel_stages(
+    stages = _make_parallel_stages(
         "reviews",
         children,
         max_concurrent=None,
@@ -278,7 +316,7 @@ def test_cancel_on_bail_skips_unstarted_children():
 
     children = [("a", ctx_a, child_a), ("b", ctx_b, child_b), ("c", ctx_c, child_c)]
 
-    stages = build_parallel_stages(
+    stages = _make_parallel_stages(
         "workers",
         children,
         max_concurrent=2,  # only 2 concurrent; c starts only after a or b finishes
@@ -329,7 +367,7 @@ def test_run_stages_resume_from_fanin_name(tmp_path, state_root):
     project_root.mkdir()
 
     ctx = _make_simple_ctx(tmp_path, "c")
-    stages = build_parallel_stages(
+    stages = _make_parallel_stages(
         "reviews",
         [("c", ctx, lambda: None)],
         max_concurrent=None,
@@ -395,7 +433,7 @@ def test_worktree_lifecycle_fanout_creates_and_fanin_removes(tmp_path):
         client=FakeClaudeClient(), session_dir=tmp_path / "b", gr_id=None, child_key="b"
     )
 
-    stages = build_parallel_stages(
+    stages = _make_parallel_stages(
         "reviews",
         [("a", ctx_a, lambda: None), ("b", ctx_b, lambda: None)],
         max_concurrent=None,
@@ -471,7 +509,7 @@ def test_fanout_persists_worktrees_and_fresh_fanin_can_clean_up(tmp_path, state_
 
     # First instance: only run fan-out, then drop the closure (simulating
     # process exit between fan-out and parallel/fan-in).
-    stages_run1 = build_parallel_stages(
+    stages_run1 = _make_parallel_stages(
         "reviews",
         [("a", _make_ctx("a"), lambda: None), ("b", _make_ctx("b"), lambda: None)],
         max_concurrent=None,
@@ -495,7 +533,7 @@ def test_fanout_persists_worktrees_and_fresh_fanin_can_clean_up(tmp_path, state_
     # Second instance: simulate fresh process. New closures, empty in-process
     # state. Run fan-in directly — it should hydrate from state.json and tear
     # down the worktrees fan-out created in run 1.
-    stages_run2 = build_parallel_stages(
+    stages_run2 = _make_parallel_stages(
         "reviews",
         [("a", _make_ctx("a"), lambda: None), ("b", _make_ctx("b"), lambda: None)],
         max_concurrent=None,
@@ -531,7 +569,7 @@ def test_fanout_resume_tears_down_prior_worktrees(tmp_path, state_root):
             child_key=name,
         )
 
-    stages_run1 = build_parallel_stages(
+    stages_run1 = _make_parallel_stages(
         "reviews",
         [("a", _make_ctx("a"), lambda: None)],
         max_concurrent=None,
@@ -551,7 +589,7 @@ def test_fanout_resume_tears_down_prior_worktrees(tmp_path, state_root):
 
     # Re-run fan-out from a fresh closure → prior worktree should be torn down,
     # new one created at a fresh path.
-    stages_run2 = build_parallel_stages(
+    stages_run2 = _make_parallel_stages(
         "reviews",
         [("a", _make_ctx("a"), lambda: None)],
         max_concurrent=None,
@@ -581,7 +619,7 @@ def test_build_parallel_stages_returns_three_named_stages():
         gr_id=None,
         child_key="r1",
     )
-    stages = build_parallel_stages(
+    stages = _make_parallel_stages(
         "reviews",
         [("r1", ctx, lambda: None)],
         max_concurrent=None,
@@ -610,7 +648,7 @@ def test_parallel_all_children_complete_with_defaults():
         child_key="b",
     )
 
-    stages = build_parallel_stages(
+    stages = _make_parallel_stages(
         "reviews",
         [
             ("a", ctx_a, lambda: ran.append("a")),

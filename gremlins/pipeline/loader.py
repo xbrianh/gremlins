@@ -108,7 +108,7 @@ def _parse_stage_entry(
             client=None,
             prompt_paths=[],
             options={},
-            children=children,
+            body=children,
             max_concurrent=max_concurrent,
             cancel_on_bail=cancel_on_bail,
             bail_policy=bail_policy,

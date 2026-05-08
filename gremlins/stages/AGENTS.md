@@ -7,6 +7,8 @@ sequencing logic of their own.
 ## Modules
 
 - `registry.py` — `STAGE_REGISTRY` and `CLIENT_FACTORIES` dicts + `register_stage` / `register_client_factory`. All stage type lookups go through here.
+- `compound.py` — `CompoundStage(Stage)` base class for stages that own a list of child stage entries (`body: list[StageEntry]`). Shared by `ParallelStage` and the future `LoopStage`.
+- `parallel.py` — `ParallelStage(CompoundStage)`. Constructed by the orchestrator with pre-built child runners; call `build_runtime_stages()` to get the three `(name, fn)` pairs (`<group>-fanout`, `<group>`, `<group>-fanin`) that implement fan-out/fan-in execution.
 - `all.py` — importing triggers side-effect registration of all stage modules. `pipeline.py` imports it automatically via `_ensure_registered()`; no manual import needed.
 - `plan.py` — `run(ctx, PlanOptions)`. Local pipeline only.
 - `implement.py` — `run(ctx, ImplementOptions)`. Dual-mode (`kind='local'` /

@@ -352,4 +352,4 @@ stages:
     pipeline = load_pipeline(yaml_path)
     assert pipeline.stages[0].client is None
     # child has no explicit client; resolution happens at run time
-    assert pipeline.stages[0].children[0].client is None
+    assert pipeline.stages[0].body[0].client is None

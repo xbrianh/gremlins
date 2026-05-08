@@ -115,7 +115,7 @@ def _make_parallel_stage(name: str, children: list[str]) -> StageEntry:
         client=None,
         prompt_paths=[],
         options={},
-        children=child_entries,
+        body=child_entries,
     )
 
 
