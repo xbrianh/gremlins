@@ -1,17 +1,13 @@
-"""YAML pipeline loader."""
-
 from __future__ import annotations
 
-import dataclasses
 import importlib
-import os
 import pathlib
 from typing import Any, cast
 
 import yaml
 
-from gremlins import PACKAGE_ROOT
 from gremlins.clients import ClientSpec
+from gremlins.pipeline.schema import BUNDLED_PROMPT_PREFIX, Pipeline, StageEntry
 from gremlins.prompts import BUNDLED_PROMPT_DIR
 from gremlins.stages.registry import STAGE_REGISTRY
 
@@ -19,32 +15,6 @@ from gremlins.stages.registry import STAGE_REGISTRY
 def _ensure_registered() -> None:
     importlib.import_module("gremlins.stages.all")
     importlib.import_module("gremlins.clients")
-
-
-@dataclasses.dataclass
-class StageEntry:
-    name: str
-    type: str
-    client: ClientSpec | None
-    prompt_paths: list[pathlib.Path]
-    options: dict[str, Any]
-    children: list[StageEntry] = dataclasses.field(  # pyright: ignore[reportUnknownVariableType]
-        default_factory=list
-    )
-    max_concurrent: int | None = None
-    cancel_on_bail: bool = False
-    bail_policy: str = "any"
-
-
-@dataclasses.dataclass
-class Pipeline:
-    name: str
-    path: pathlib.Path
-    stages: list[StageEntry]
-    default_client: ClientSpec | None = None
-
-
-BUNDLED_PROMPT_PREFIX = "gremlins:"
 
 
 def _resolve_prompt_dir(value: object, yaml_dir: pathlib.Path) -> pathlib.Path:
@@ -211,68 +181,4 @@ def load_pipeline(path: pathlib.Path) -> Pipeline:
         path=path,
         stages=stages,
         default_client=default_client,
-    )
-
-
-BUNDLED_PIPELINE_DIR = PACKAGE_ROOT / "pipelines"
-
-
-def _overlay_dir(project_root: pathlib.Path) -> pathlib.Path:
-    overlay = os.environ.get("GREMLINS_OVERLAY_DIR", "")
-    if overlay:
-        return pathlib.Path(overlay)
-    return project_root / ".gremlins"
-
-
-def list_pipelines(project_root: pathlib.Path) -> list[tuple[str, pathlib.Path]]:
-    """Return (name, path) pairs for all resolvable pipelines, project-local first."""
-    results: list[tuple[str, pathlib.Path]] = []
-    seen: set[str] = set()
-
-    local_dir = _overlay_dir(project_root) / "pipelines"
-    if local_dir.exists():
-        for p in sorted(local_dir.glob("*.yaml")):
-            results.append((p.stem, p.resolve()))
-            seen.add(p.stem)
-
-    for p in sorted(BUNDLED_PIPELINE_DIR.glob("*.yaml")):
-        if p.stem not in seen:
-            results.append((p.stem, p.resolve()))
-
-    return results
-
-
-def resolve_pipeline_name(name: str, project_root: pathlib.Path) -> pathlib.Path:
-    project_local = _overlay_dir(project_root) / "pipelines" / f"{name}.yaml"
-    if project_local.exists():
-        return project_local.resolve()
-    bundled = BUNDLED_PIPELINE_DIR / f"{name}.yaml"
-    if bundled.exists():
-        return bundled.resolve()
-    names: list[str] = []
-    if project_local.parent.exists():
-        names += sorted(p.stem for p in project_local.parent.glob("*.yaml"))
-    names += sorted(p.stem for p in BUNDLED_PIPELINE_DIR.glob("*.yaml"))
-    available = list(dict.fromkeys(names))
-    raise FileNotFoundError(
-        f"pipeline {name!r} not found; available: {', '.join(available) or '(none)'}"
-    )
-
-
-def resolve_pipeline_path(name_or_path: str, base_dir: pathlib.Path) -> pathlib.Path:
-    candidate = pathlib.Path(name_or_path)
-    if candidate.suffix == ".yaml" or len(candidate.parts) > 1:
-        resolved = candidate.resolve()
-        if not resolved.exists():
-            raise FileNotFoundError(f"pipeline file not found: {resolved}")
-        return resolved
-    project_scoped = _overlay_dir(base_dir) / "pipelines" / f"{name_or_path}.yaml"
-    if project_scoped.exists():
-        return project_scoped.resolve()
-    bundled = PACKAGE_ROOT / "pipelines" / f"{name_or_path}.yaml"
-    if bundled.exists():
-        return bundled.resolve()
-    raise FileNotFoundError(
-        f"pipeline {name_or_path!r} not found in "
-        f"{project_scoped.parent} or bundled pipelines"
     )
