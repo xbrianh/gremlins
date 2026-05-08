@@ -70,7 +70,7 @@ def _extract_h1(path: str) -> str:
 
 _GH_STAGE_TYPES = frozenset(
     {
-        "handoff-branch",
+        "materialize-to-branch",
         "commit",
         "open-github-pr",
         "request-copilot",
