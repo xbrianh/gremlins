@@ -1,0 +1,13 @@
+name: gh-no-copilot
+default_client: claude:sonnet
+prompt_dir: ../prompts
+stages:
+  - { name: plan,           type: plan,           prompt: [gremlins:code_style.md, gremlins:plan_gh.md, terse_no_backward.md] }
+  - { name: implement,      type: implement,      prompt: [gremlins:code_style.md, terse_no_backward.md, gremlins:implement_gh.md] }
+  - { name: handoff-branch, type: handoff-branch }
+  - { name: verify,         type: verify,         options: { cmds: ["make check", "make test"] }, prompt: [gremlins:verify_fix.md, gremlins:bail_section_fix.md] }
+  - { name: commit,         type: commit }
+  - { name: open-pr,        type: open-github-pr }
+  - { name: ghreview,       type: ghreview, prompt: [gremlins:code_style.md, gremlins:review_gh.md, terse_no_backward.md] }
+  - { name: ghaddress,      type: ghaddress,      prompt: [gremlins:code_style.md, gremlins:address_gh.md, gremlins:bail_section.md, terse_no_backward.md] }
+  - { name: ci-gate,        type: wait-ci,        prompt: [gremlins:ci_fix.md, gremlins:bail_section_fix.md] }

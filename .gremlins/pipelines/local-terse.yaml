@@ -1,0 +1,13 @@
+name: local-terse
+default_client: claude:sonnet
+prompt_dir: ../prompts
+stages:
+  - { name: plan,         type: plan,         prompt: [gremlins:code_style.md, gremlins:plan.md, terse_no_backward.md] }
+  - { name: implement,    type: implement,    prompt: [gremlins:code_style.md, terse_no_backward.md, gremlins:implement_local.md] }
+  - { name: verify,       type: verify,       options: { cmds: ["make check", "make test"] }, prompt: [gremlins:verify_fix.md, gremlins:bail_section_fix.md] }
+  - name: reviews
+    parallel:
+      - { name: review-code,          type: review-code, prompt: [gremlins:code_style.md, gremlins:review/detail.md, terse_no_backward.md] }
+      - { name: review-code-fidelity, type: review-code, prompt: [review_plan_fidelity.md] }
+  - { name: address-code, type: address-code, prompt: [gremlins:code_style.md, gremlins:address.md, gremlins:bail_section.md, terse_no_backward.md] }
+  - { name: verify-final,       type: verify,       prompt: [gremlins:verify_fix.md, gremlins:bail_section_fix.md] }

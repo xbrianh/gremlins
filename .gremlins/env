@@ -1,0 +1,3 @@
+  : "${VIRTUAL_ENV:=$(python -c 'import sys; print(sys.prefix)')}"
+  export VIRTUAL_ENV
+  export PATH="$VIRTUAL_ENV/bin:$PATH"

@@ -1,0 +1,19 @@
+name: boss-no-copilot
+
+default_client: claude:sonnet
+
+prompt_dir: ../prompts
+
+stages:
+  - name: chain
+    type: chain
+    options:
+      child: local-terse
+
+  - name: review-chain
+    type: review-code
+    prompt: [gremlins:code_style.md, gremlins:review/chain.md]
+
+  - name: address-chain
+    type: address-code
+    prompt: [gremlins:code_style.md, gremlins:address.md, gremlins:bail_section.md]
