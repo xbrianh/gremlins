@@ -222,8 +222,7 @@ def test_launch_creates_state_layout(lenv):
     assert state["kind"] == "local"
     assert state["setup_kind"] == "worktree-branch"
     assert state["branch"] == f"bg/local/{gr_id}"
-    args = state["pipeline_args"]
-    assert args[0] == "--pipeline" and args[1].endswith(".yaml")
+    assert state["pipeline_path"].endswith(".yaml")
     assert "test instructions" in state["instructions"]
     assert "workdir" in state and state["workdir"]
 
@@ -246,7 +245,7 @@ def test_launch_writes_worktree(lenv):
 
 
 def test_launch_persists_pipeline_args(lenv):
-    """Pipeline-level flags are stored in state.json pipeline_args with resolved --pipeline."""
+    """Pipeline-level flags are stored in state.json pipeline_args; pipeline path in pipeline_path."""
     launcher = _launcher()
     gr_id = launcher.launch(
         "local",
@@ -254,9 +253,8 @@ def test_launch_persists_pipeline_args(lenv):
         stage_inputs={"instructions": "test"},
     )
     state = _read_state(_gremlins_state_root(lenv) / gr_id)
-    args = state["pipeline_args"]
-    assert args[0] == "--pipeline" and args[1].endswith(".yaml")
-    assert args[2:] == ["--client", "claude:opus"]
+    assert state["pipeline_path"].endswith(".yaml")
+    assert state["pipeline_args"] == ["--client", "claude:opus"]
 
 
 def test_launch_persists_pipeline_default_client(lenv):
@@ -485,8 +483,7 @@ def test_resume_patches_state(lenv, monkeypatch):
     assert post_state["rescue_count"] == pre_rescue_count + 1
     assert post_state["status"] == "running"
     assert post_state["resumed_from_stage"] == "plan"
-    post_args = post_state["pipeline_args"]
-    assert post_args[0] == "--pipeline" and post_args[1].endswith(".yaml")
+    assert post_state["pipeline_path"].endswith(".yaml")
     assert not (state_dir / "finished").exists(), "finished marker must be cleared"
 
     _wait_for_finished(state_dir, timeout=60)
@@ -548,10 +545,6 @@ stages:
     assert post_state["status"] == "running"
     assert post_state["resumed_from_stage"] == "implement"
     assert post_state["pipeline_path"] == str(old_pipeline.resolve())
-    assert post_state["pipeline_args"][:2] == [
-        "--pipeline",
-        str(old_pipeline.resolve()),
-    ]
     assert not (state_dir / "finished").exists()
 
 
@@ -591,11 +584,9 @@ def test_resume_keeps_resume_flag_for_pipeline_gremlin(lenv, monkeypatch):
 
     launcher.resume(gr_id)
 
-    assert captured["subcommand"] == "_local"
     expected_pipeline = str(launcher.resolve_pipeline_path("local", lenv.repo))
+    assert captured["subcommand"] == expected_pipeline
     assert captured["spawn_args"] == [
-        "--pipeline",
-        expected_pipeline,
         "--resume-from",
         "implement",
         "resume instructions",
@@ -645,7 +636,8 @@ def test_resume_bossgremlin_resumes_at_chain_stage(lenv, monkeypatch):
 
     launcher.resume(gr_id)
 
-    assert captured["subcommand"] == "_boss"
+    expected_pipeline = str(launcher.resolve_pipeline_path("boss", lenv.repo))
+    assert captured["subcommand"] == expected_pipeline
     spawn_args = captured["spawn_args"]
     # --resume-from chain must be present (boss maps mid-chain stages back to "chain")
     assert "--resume-from" in spawn_args

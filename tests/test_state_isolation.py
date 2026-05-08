@@ -48,8 +48,9 @@ from conftest import (
 
 import gremlins.state as state_mod
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.orchestrators.local import local_main
+from gremlins.orchestrators.run import run_pipeline
 from gremlins.orchestrators.review_address import address_main, review_main
+from gremlins.pipeline import resolve_pipeline_path
 
 
 def test_autouse_isolate_gr_id_unsets_gr_id_under_inherited_env(tmp_path):
@@ -152,10 +153,10 @@ def test_local_main_does_not_clobber_external_state(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.orchestrators.local.resolve_session_dir",
+        "gremlins.orchestrators.run.resolve_session_dir",
         lambda gr_id=None: session_dir,
     )
-    monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
+    monkeypatch.setattr("gremlins.orchestrators.run.in_git_repo", lambda: False)
     monkeypatch.setattr(
         "gremlins.stages.implement.changes_outside_git", lambda s, d: True
     )
@@ -167,7 +168,11 @@ def test_local_main_does_not_clobber_external_state(tmp_path, monkeypatch):
             "address-code": MINIMAL_EVENTS,
         }
     )
-    assert local_main(["--plan", str(plan_file)], client=client) == 0
+    assert run_pipeline(
+        resolve_pipeline_path("local", tmp_path),
+        argv=["--plan", str(plan_file)],
+        client=client,
+    ) == 0
     _assert_no_state_clobber(parent_state_file, original_content, parent_mtime)
 
 

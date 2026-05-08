@@ -9,9 +9,13 @@ from conftest import common_local_patches as _common_patches
 
 from gremlins.clients import ClientSpec
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.orchestrators.local import local_main
+from gremlins.orchestrators.run import run_pipeline
 from gremlins.orchestrators.review_address import address_main, review_main
 from gremlins.pipeline import load_pipeline, resolve_pipeline_path
+
+
+def _local_pipeline_path(cwd):
+    return resolve_pipeline_path("local", cwd)
 
 # ---------------------------------------------------------------------------
 # local_main smoke test (--plan mode: skips plan, runs implement→review→address)
@@ -27,11 +31,11 @@ def test_local_main_plan_mode(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.orchestrators.local.resolve_session_dir",
+        "gremlins.orchestrators.run.resolve_session_dir",
         lambda gr_id=None: session_dir,
     )
     # tmp_path is not a git repo → is_git=False; monkeypatch for clarity.
-    monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
+    monkeypatch.setattr("gremlins.orchestrators.run.in_git_repo", lambda: False)
 
     # Fake that implement produced changes (FakeClaudeClient won't create files).
     monkeypatch.setattr(
@@ -45,7 +49,7 @@ def test_local_main_plan_mode(tmp_path, monkeypatch):
         }
     )
 
-    result = local_main(["--plan", str(plan_file)], client=client)
+    result = run_pipeline(_local_pipeline_path(tmp_path), argv=["--plan", str(plan_file)], client=client)
     assert result == 0
 
     labels = [c.label for c in client.calls]
@@ -65,18 +69,19 @@ def test_local_main_resume_from_review_code_requires_git_changes(
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.orchestrators.local.resolve_session_dir",
+        "gremlins.orchestrators.run.resolve_session_dir",
         lambda gr_id=None: session_dir,
     )
-    monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: True)
+    monkeypatch.setattr("gremlins.orchestrators.run.in_git_repo", lambda: True)
     monkeypatch.setattr(
-        "gremlins.orchestrators.local.has_dirty_worktree", lambda: False
+        "gremlins.orchestrators.run.has_dirty_worktree", lambda: False
     )
-    monkeypatch.setattr("gremlins.orchestrators.local.has_commits", lambda: False)
+    monkeypatch.setattr("gremlins.orchestrators.run.has_commits", lambda: False)
 
     with pytest.raises(SystemExit):
-        local_main(
-            ["--plan", str(plan_file), "--resume-from", "review-code"],
+        run_pipeline(
+            _local_pipeline_path(tmp_path),
+            argv=["--plan", str(plan_file), "--resume-from", "review-code"],
             client=FakeClaudeClient(fixtures={}),
         )
 
@@ -97,14 +102,14 @@ def test_local_main_resume_from_review_code_allows_existing_git_changes(
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.orchestrators.local.resolve_session_dir",
+        "gremlins.orchestrators.run.resolve_session_dir",
         lambda gr_id=None: session_dir,
     )
-    monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: True)
+    monkeypatch.setattr("gremlins.orchestrators.run.in_git_repo", lambda: True)
     monkeypatch.setattr(
-        "gremlins.orchestrators.local.has_dirty_worktree", lambda: False
+        "gremlins.orchestrators.run.has_dirty_worktree", lambda: False
     )
-    monkeypatch.setattr("gremlins.orchestrators.local.has_commits", lambda: True)
+    monkeypatch.setattr("gremlins.orchestrators.run.has_commits", lambda: True)
 
     client = _ReviewCreatingClient(
         fixtures={
@@ -113,8 +118,9 @@ def test_local_main_resume_from_review_code_allows_existing_git_changes(
         }
     )
 
-    result = local_main(
-        ["--plan", str(plan_file), "--resume-from", "review-code"],
+    result = run_pipeline(
+        _local_pipeline_path(tmp_path),
+        argv=["--plan", str(plan_file), "--resume-from", "review-code"],
         client=client,
     )
 
@@ -230,10 +236,10 @@ def test_local_main_client_specifier_model(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.orchestrators.local.resolve_session_dir",
+        "gremlins.orchestrators.run.resolve_session_dir",
         lambda gr_id=None: session_dir,
     )
-    monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
+    monkeypatch.setattr("gremlins.orchestrators.run.in_git_repo", lambda: False)
 
     monkeypatch.setattr(
         "gremlins.stages.implement.changes_outside_git", lambda s, d: True
@@ -247,8 +253,9 @@ def test_local_main_client_specifier_model(tmp_path, monkeypatch):
         }
     )
 
-    result = local_main(
-        ["--plan", str(plan_file), "--client", "copilot:gpt-4o"],
+    result = run_pipeline(
+        _local_pipeline_path(tmp_path),
+        argv=["--plan", str(plan_file), "--client", "copilot:gpt-4o"],
         client=client,
     )
     assert result == 0
@@ -274,10 +281,10 @@ def test_local_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir)
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.orchestrators.local.resolve_session_dir",
+        "gremlins.orchestrators.run.resolve_session_dir",
         lambda gr_id=None: session_dir,
     )
-    monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
+    monkeypatch.setattr("gremlins.orchestrators.run.in_git_repo", lambda: False)
 
     monkeypatch.setattr(
         "gremlins.stages.implement.changes_outside_git", lambda s, d: True
@@ -291,7 +298,7 @@ def test_local_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir)
         }
     )
 
-    result = local_main(["--plan", str(plan_file)], client=client, gr_id=gr_id)
+    result = run_pipeline(_local_pipeline_path(tmp_path), argv=["--plan", str(plan_file)], client=client, gr_id=gr_id)
     assert result == 0
 
     data = json.loads((state_dir / "state.json").read_text())
@@ -315,10 +322,10 @@ def test_local_main_env_file_vars_reach_verify(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.orchestrators.local.resolve_session_dir",
+        "gremlins.orchestrators.run.resolve_session_dir",
         lambda gr_id=None: session_dir,
     )
-    monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
+    monkeypatch.setattr("gremlins.orchestrators.run.in_git_repo", lambda: False)
 
     monkeypatch.setattr(
         "gremlins.stages.implement.changes_outside_git", lambda s, d: True
@@ -333,8 +340,9 @@ def test_local_main_env_file_vars_reach_verify(tmp_path, monkeypatch):
     )
 
     monkeypatch.delenv("GREMLIN_ENV_TEST_SENTINEL", raising=False)
-    result = local_main(
-        ["--plan", str(plan_file), "--cmd", verify_cmd],
+    result = run_pipeline(
+        _local_pipeline_path(tmp_path),
+        argv=["--plan", str(plan_file), "--cmd", verify_cmd],
         client=client,
     )
     assert result == 0
@@ -355,10 +363,10 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.orchestrators.local.resolve_session_dir",
+        "gremlins.orchestrators.run.resolve_session_dir",
         lambda gr_id=None: session_dir,
     )
-    monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
+    monkeypatch.setattr("gremlins.orchestrators.run.in_git_repo", lambda: False)
 
     monkeypatch.setattr(
         "gremlins.stages.implement.changes_outside_git", lambda s, d: True
@@ -377,7 +385,7 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(
-        "gremlins.orchestrators.local.load_pipeline", _load_pipeline_copilot_default
+        "gremlins.orchestrators.run.load_pipeline", _load_pipeline_copilot_default
     )
 
     review_label = "review-code:gpt-5.4"
@@ -389,7 +397,7 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
         }
     )
 
-    result = local_main(["--plan", str(plan_file)], client=client)
+    result = run_pipeline(_local_pipeline_path(tmp_path), argv=["--plan", str(plan_file)], client=client)
     assert result == 0
     assert client.calls[0].model == "gpt-5.4"  # implement
     assert client.calls[1].label == review_label
@@ -458,12 +466,12 @@ def test_local_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
 
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
-    monkeypatch.setattr("gremlins.orchestrators.local.load_pipeline", load_pipeline)
+    monkeypatch.setattr("gremlins.orchestrators.run.load_pipeline", load_pipeline)
     monkeypatch.setattr(
-        "gremlins.orchestrators.local.resolve_session_dir",
+        "gremlins.orchestrators.run.resolve_session_dir",
         lambda gr_id=None: session_dir,
     )
-    monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
+    monkeypatch.setattr("gremlins.orchestrators.run.in_git_repo", lambda: False)
 
     monkeypatch.setattr(
         "gremlins.stages.implement.changes_outside_git", lambda s, d: True
@@ -486,7 +494,7 @@ def test_local_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
         }
     )
 
-    result = local_main(["--plan", str(plan_file)], client=launch_client, gr_id=gr_id)
+    result = run_pipeline(_local_pipeline_path(tmp_path), argv=["--plan", str(plan_file)], client=launch_client, gr_id=gr_id)
     assert result == 0
 
     launch_state = json.loads((state_dir / "state.json").read_text(encoding="utf-8"))
@@ -504,8 +512,9 @@ def test_local_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
         }
     )
 
-    result = local_main(
-        ["--plan", str(plan_file), "--resume-from", "implement"],
+    result = run_pipeline(
+        _local_pipeline_path(tmp_path),
+        argv=["--plan", str(plan_file), "--resume-from", "implement"],
         client=resume_client,
         gr_id=gr_id,
     )
@@ -533,8 +542,9 @@ def test_local_main_resume_requires_persisted_stage_clients(
     _common_patches(monkeypatch)
 
     with pytest.raises(SystemExit):
-        local_main(
-            ["--plan", str(plan_file), "--resume-from", "implement"],
+        run_pipeline(
+            _local_pipeline_path(tmp_path),
+            argv=["--plan", str(plan_file), "--resume-from", "implement"],
             client=FakeClaudeClient(fixtures={}),
             gr_id=gr_id,
         )
@@ -565,8 +575,9 @@ def test_local_main_resume_requires_each_persisted_stage_client(
     _common_patches(monkeypatch)
 
     with pytest.raises(SystemExit):
-        local_main(
-            ["--plan", str(plan_file), "--resume-from", "implement"],
+        run_pipeline(
+            _local_pipeline_path(tmp_path),
+            argv=["--plan", str(plan_file), "--resume-from", "implement"],
             client=FakeClaudeClient(fixtures={}),
             gr_id=gr_id,
         )
@@ -600,10 +611,10 @@ def test_local_stage_inputs_instructions_reach_plan(
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.orchestrators.local.resolve_session_dir",
+        "gremlins.orchestrators.run.resolve_session_dir",
         lambda gr_id=None: session_dir,
     )
-    monkeypatch.setattr("gremlins.orchestrators.local.in_git_repo", lambda: False)
+    monkeypatch.setattr("gremlins.orchestrators.run.in_git_repo", lambda: False)
 
     received: list[str] = []
 
@@ -628,8 +639,9 @@ def test_local_stage_inputs_instructions_reach_plan(
     monkeypatch.setattr(_ac_mod.AddressCode, "run", lambda self, pipe: None)
     monkeypatch.setattr(_v_mod.Verify, "run", lambda self, pipe: None)
 
-    result = local_main(
-        ["instr from cli"],
+    result = run_pipeline(
+        _local_pipeline_path(tmp_path),
+        argv=["instr from cli"],
         client=FakeClaudeClient(fixtures={}),
         gr_id=gr_id,
     )

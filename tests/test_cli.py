@@ -219,17 +219,19 @@ def test_bail_rejects_malformed_gr_id_env(tmp_path, monkeypatch, bad_id):
     ],
 )
 def test_run_pipeline_rejects_invalid_gr_id(tmp_path, monkeypatch, bad_id):
-    rc = run_pipeline_main([bad_id, "_local"])
+    rc = run_pipeline_main([bad_id, "/fake/pipeline.yaml"])
 
     assert rc != 0
     assert _no_state_created(tmp_path)
 
 
 def test_run_pipeline_valid_id_proceeds(tmp_path, monkeypatch):
-    monkeypatch.setattr("gremlins.cli.local_main", lambda *a, **kw: 0)
-
+    monkeypatch.setattr("gremlins.orchestrators.run.run_pipeline", lambda *a, **kw: 0)
+    monkeypatch.setattr(
+        "gremlins.run_pipeline.write_terminal_state", lambda gr_id, exit_code: None
+    )
     with pytest.raises(SystemExit):
-        run_pipeline_main(["valid-gremlin-abc123", "_local"])
+        run_pipeline_main(["valid-gremlin-abc123", "/fake/pipeline.yaml"])
 
 
 def test_run_pipeline_forwards_gr_id_to_orchestrator(
@@ -240,20 +242,17 @@ def test_run_pipeline_forwards_gr_id_to_orchestrator(
 
     from gremlins.state import set_stage
 
-    def fake_local_main(argv, *, client=None, gr_id=None):
+    def fake_run_pipeline(pipeline_path, *, argv, gr_id=None, client=None):
         set_stage(gr_id, "implement")
         return 0
 
-    monkeypatch.setattr("gremlins.cli.local_main", fake_local_main)
+    monkeypatch.setattr("gremlins.orchestrators.run.run_pipeline", fake_run_pipeline)
     monkeypatch.setattr(
         "gremlins.run_pipeline.write_terminal_state", lambda gr_id, exit_code: None
     )
 
-    plan_file = tmp_path / "plan.md"
-    plan_file.write_text("# Plan\n")
-
     with pytest.raises(SystemExit) as exc_info:
-        run_pipeline_main([gr_id, "_local", "--plan", str(plan_file)])
+        run_pipeline_main([gr_id, "/fake/pipeline.yaml"])
     assert exc_info.value.code == 0
 
     data = json.loads((state_dir / "state.json").read_text())

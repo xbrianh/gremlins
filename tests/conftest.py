@@ -11,7 +11,7 @@ os.environ.setdefault("GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME", "main")
 
 import pytest
 
-import gremlins.orchestrators.local as _local_mod
+import gremlins.orchestrators.run as _run_mod
 from gremlins.clients.fake import FakeClaudeClient
 
 TESTS_DIR = pathlib.Path(__file__).resolve().parent
@@ -58,7 +58,7 @@ def common_local_patches(monkeypatch):
     )
 
     # Strip pipeline client keys so the injected client is used for every stage.
-    _real_load_pipeline = _local_mod.load_pipeline
+    _real_load_pipeline = _run_mod.load_pipeline
 
     def _load_pipeline_no_clients(path):
         pipeline = _real_load_pipeline(path)
@@ -68,7 +68,7 @@ def common_local_patches(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "gremlins.orchestrators.local.load_pipeline", _load_pipeline_no_clients
+        "gremlins.orchestrators.run.load_pipeline", _load_pipeline_no_clients
     )
 
 

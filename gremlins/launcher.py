@@ -81,9 +81,6 @@ _GH_STAGE_TYPES = frozenset(
     }
 )
 
-_MODE_SUBCOMMAND: dict[str, str] = {"local": "_local", "gh": "_gh", "boss": "_boss"}
-
-
 def _pipeline_mode(pipeline: Pipeline) -> str:
     if pipeline.stages and pipeline.stages[0].type == "chain":
         return "boss"
@@ -237,7 +234,7 @@ def _resolve_pipeline(
             i += 1
     name = pipeline_val or kind
     resolved = str(resolve_pipeline_path(name, pathlib.Path(project_root)))
-    return ["--pipeline", resolved] + filtered, resolved
+    return filtered, resolved
 
 
 def _extract_client_spec(pipeline_args: list[str]) -> str:
@@ -368,7 +365,7 @@ def _spawn_pipeline(
     state_dir: pathlib.Path,
     workdir: str,
     gr_id: str,
-    kind_subcommand: str,
+    pipeline_path: str,
     pipeline_args: list[str],
     log_mode: str = "w",
 ) -> subprocess.Popen[bytes]:
@@ -381,7 +378,7 @@ def _spawn_pipeline(
         "-m",
         "gremlins.run_pipeline",
         gr_id,
-        kind_subcommand,
+        pipeline_path,
         *pipeline_args,
     ]
     env = _build_spawn_env(gr_id)
@@ -563,7 +560,7 @@ def launch(
             spawn_args.append(instructions)
 
         proc = _spawn_pipeline(
-            state_dir, workdir, gr_id, _MODE_SUBCOMMAND[pipeline_mode], spawn_args
+            state_dir, workdir, gr_id, pipeline_path, spawn_args
         )
     except Exception:
         shutil.rmtree(state_dir, ignore_errors=True)
@@ -703,12 +700,11 @@ def resume(gr_id: str) -> None:
         if instructions:
             spawn_args.append(instructions)
 
-    kind_subcommand = _MODE_SUBCOMMAND[pipeline_mode]
     proc = _spawn_pipeline(
         state_dir,
         workdir,
         gr_id,
-        kind_subcommand,
+        pipeline_path,
         spawn_args,
         log_mode="a",
     )

@@ -15,9 +15,6 @@ User-facing subcommands:
   close     — mark a dead gremlin as closed
   log       — tail the gremlin's log file
 
-Internal (launcher-spawned, hidden from help):
-  _local, _gh, _boss
-
 Bare invocation prints fleet status.
 """
 
@@ -43,8 +40,6 @@ from gremlins.fleet.cli import (
     stop_main,
 )
 from gremlins.launcher import launch, resume
-from gremlins.orchestrators.gh import gh_main
-from gremlins.orchestrators.local import local_main
 from gremlins.orchestrators.review_address import address_main, review_main
 from gremlins.pipeline import list_pipelines, load_pipeline, resolve_pipeline_name
 from gremlins.stages.introspect import build_launch_parser
@@ -64,7 +59,7 @@ _REMOVED: dict[str, str | None] = {
 }
 
 
-def main(argv: list[str] | None = None, *, gr_id: str | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
 
@@ -88,18 +83,10 @@ def main(argv: list[str] | None = None, *, gr_id: str | None = None) -> int:
         from gremlins.init import init_main
 
         return init_main(rest)
-    if sub == "_local":
-        return local_main(rest, gr_id=gr_id)
     if sub == "review":
         return review_main(rest)
     if sub == "address":
         return address_main(rest)
-    if sub == "_gh":
-        return gh_main(rest, gr_id=gr_id)
-    if sub == "_boss":
-        from gremlins.orchestrators.boss import boss_main
-
-        return boss_main(rest, gr_id=gr_id)
     if sub == "resume":
         return _resume_main(rest)
     if sub == "stop":
