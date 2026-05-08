@@ -85,9 +85,7 @@ class StageRunner:
         unknown: list[str] = []
         for s in stages:
             if s.type == "parallel":
-                unknown.extend(
-                    c.type for c in s.body if c.type not in STAGE_BUILDERS
-                )
+                unknown.extend(c.type for c in s.body if c.type not in STAGE_BUILDERS)
             elif s.type not in STAGE_BUILDERS:
                 unknown.append(s.type)
         if unknown:
@@ -151,9 +149,7 @@ class StageRunner:
 
         return _run
 
-    def _build_parallel_stage(
-        self, e: StageEntry, gr_id: str | None
-    ) -> Any:
+    def _build_parallel_stage(self, e: StageEntry, gr_id: str | None) -> Any:
         from gremlins.stages.parallel import ParallelStage
 
         group_dir = self.session_dir / e.name
@@ -191,7 +187,9 @@ class StageRunner:
         built: list[tuple[str, Callable[[], None]]] = []
         for e in stages:
             if e.type == "parallel":
-                built.extend(self._build_parallel_stage(e, gr_id).build_runtime_stages())
+                built.extend(
+                    self._build_parallel_stage(e, gr_id).build_runtime_stages()
+                )
             else:
                 stage_spec = require_stage_spec(self.stage_specs, e.name)
                 stage_ctx = StageContext(

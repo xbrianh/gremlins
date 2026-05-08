@@ -68,8 +68,10 @@ def _make_parallel_stages(
     project_root: pathlib.Path | None = None,
 ) -> list:
     if set_stage_fn is None:
+
         def set_stage_fn(_n):
             return None
+
     if project_root is None:
         project_root = pathlib.Path.cwd()
     entry = StageEntry(

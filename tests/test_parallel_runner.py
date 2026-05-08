@@ -35,7 +35,9 @@ def _make_ctx(child_key: str) -> StageContext:
 
 
 def _make_entry(name: str = "test-group") -> StageEntry:
-    return StageEntry(name=name, type="parallel", client=None, prompt_paths=[], options={})
+    return StageEntry(
+        name=name, type="parallel", client=None, prompt_paths=[], options={}
+    )
 
 
 def _make_parallel_stages(
@@ -50,8 +52,10 @@ def _make_parallel_stages(
     project_root: pathlib.Path | None = None,
 ) -> list:
     if set_stage_fn is None:
+
         def set_stage_fn(_n):
             return None
+
     if project_root is None:
         project_root = pathlib.Path.cwd()
     entry = _make_entry(group_name)
