@@ -34,7 +34,6 @@ from gremlins.stages import (
 )
 from gremlins.stages import handoff_branch as handoff_branch_mod
 from gremlins.stages.base import Stage, StageContext
-from gremlins.stages.handoff_branch import HandoffBranchResult
 from gremlins.state import patch_state, set_stage
 
 logger = logging.getLogger(__name__)
@@ -90,9 +89,6 @@ class GHPipeline(Pipeline):
         self.issue_num: str = ""
         self.issue_body: str = ""
         self.impl_pre_state: PreImplState | None = None
-        self.impl_handoff_result: HandoffBranchResult | None = None
-        self.impl_handoff_branch: str = ""
-        self.impl_base_ref: str = ""
         self.pr_url: str = ""
         self.pr_num: str = ""
 
@@ -184,43 +180,37 @@ class GHPipeline(Pipeline):
 
             def _commit() -> None:
                 set_stage(self.gr_id, entry.name)
-                hb_result = self.impl_handoff_result
-                if hb_result is not None:
-                    impl_outcome = hb_result.outcome
-                    impl_handoff_branch = hb_result.handoff_branch
-                    base_ref = hb_result.base_ref
-                else:
-                    impl_handoff_branch = read_state_field(
-                        self.state_file, "impl_handoff_branch"
+                impl_handoff_branch = read_state_field(
+                    self.state_file, "impl_handoff_branch"
+                )
+                base_ref = read_state_field(self.state_file, "impl_base_ref")
+                if not base_ref:
+                    die(
+                        "--resume-from commit: no impl_base_ref in state.json "
+                        "(rewind to implement?)"
                     )
-                    base_ref = read_state_field(self.state_file, "impl_base_ref")
-                    if not base_ref:
+                if impl_handoff_branch:
+                    count_r = subprocess.run(
+                        [
+                            "git",
+                            "rev-list",
+                            "--count",
+                            f"{base_ref}..{impl_handoff_branch}",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if count_r.returncode != 0:
                         die(
-                            "--resume-from commit: no impl_base_ref in state.json "
-                            "(rewind to implement?)"
+                            f"--resume-from commit: impl_handoff_branch '{impl_handoff_branch}' "
+                            f"not found or base_ref invalid (rewind to implement?)\n"
+                            f"{count_r.stderr.strip()}"
                         )
-                    if impl_handoff_branch:
-                        count_r = subprocess.run(
-                            [
-                                "git",
-                                "rev-list",
-                                "--count",
-                                f"{base_ref}..{impl_handoff_branch}",
-                            ],
-                            capture_output=True,
-                            text=True,
-                            check=False,
-                        )
-                        if count_r.returncode != 0:
-                            die(
-                                f"--resume-from commit: impl_handoff_branch '{impl_handoff_branch}' "
-                                f"not found or base_ref invalid (rewind to implement?)\n"
-                                f"{count_r.stderr.strip()}"
-                            )
-                        commit_count = int(count_r.stdout.strip())
-                        impl_outcome = HeadAdvanced(commit_count=commit_count)
-                    else:
-                        impl_outcome = DirtyOnly()
+                    commit_count = int(count_r.stdout.strip())
+                    impl_outcome = HeadAdvanced(commit_count=commit_count)
+                else:
+                    impl_outcome = DirtyOnly()
                 stage = commit.Commit(
                     entry,
                     model,

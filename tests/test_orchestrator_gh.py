@@ -148,9 +148,7 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         "gremlins.orchestrators.gh.patch_state", lambda gr_id=None, **kw: None
     )
 
-    # HandoffBranch.run writes impl_handoff_branch/impl_base_ref to state.json so
-    # the commit runner can read them back. Use a writing shim here since gr_id=None
-    # makes the real patch_state a no-op in tests.
+    # gr_id=None makes patch_state a no-op; use a writing shim so the commit runner can read back the values.
     def _handoff_patch_state(gr_id=None, _delete=(), **kw):
         data = json.loads(state_file.read_text(encoding="utf-8"))
         for key in _delete:
