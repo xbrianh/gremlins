@@ -28,7 +28,7 @@ from gremlins import paths as _paths
 from gremlins.clients import PACKAGE_DEFAULT
 from gremlins.gh_utils import parse_issue_ref, view_issue
 from gremlins.pipeline import (
-    Pipeline,
+    PipelineDef,
     load_pipeline,
     resolve_pipeline_path,
 )
@@ -82,7 +82,7 @@ _GH_STAGE_TYPES = frozenset(
 )
 
 
-def _pipeline_mode(pipeline: Pipeline) -> str:
+def _pipeline_mode(pipeline: PipelineDef) -> str:
     if pipeline.stages and pipeline.stages[0].type == "chain":
         return "boss"
     if pipeline.name == "gh" or any(s.type in _GH_STAGE_TYPES for s in pipeline.stages):

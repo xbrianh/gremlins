@@ -4,7 +4,7 @@ import pathlib
 import pytest
 
 from gremlins.orchestrators.pipeline import Pipeline
-from gremlins.pipeline import Pipeline as _PipelineData
+from gremlins.pipeline import PipelineDef as _PipelineData
 from gremlins.pipeline import (
     StageEntry,
     load_pipeline,

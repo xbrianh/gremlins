@@ -338,12 +338,14 @@ class _FakePlanStage:
 
 
 def _make_fake_pipeline(stage_type: str = "plan"):
-    from gremlins.pipeline import Pipeline, StageEntry
+    from gremlins.pipeline import PipelineDef, StageEntry
 
     entry = StageEntry(
         name="plan", type=stage_type, client=None, prompt_paths=[], options={}
     )
-    return Pipeline(name="local", path=pathlib.Path("/fake/local.yaml"), stages=[entry])
+    return PipelineDef(
+        name="local", path=pathlib.Path("/fake/local.yaml"), stages=[entry]
+    )
 
 
 def test_launch_unified_dispatch_calls_launch(tmp_path, monkeypatch):
@@ -466,10 +468,10 @@ def test_launch_list_prints_pipeline_names(tmp_path, monkeypatch, capsys):
     ]
     monkeypatch.setattr("gremlins.cli.list_pipelines", lambda root: fake_pipelines)
 
-    from gremlins.pipeline import Pipeline
+    from gremlins.pipeline import PipelineDef
 
     def fake_load(path):
-        return Pipeline(name=path.stem, path=path, stages=[])
+        return PipelineDef(name=path.stem, path=path, stages=[])
 
     monkeypatch.setattr("gremlins.cli.load_pipeline", fake_load)
 

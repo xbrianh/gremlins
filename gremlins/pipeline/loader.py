@@ -7,7 +7,7 @@ from typing import Any, cast
 import yaml
 
 from gremlins.clients import ClientSpec
-from gremlins.pipeline.schema import BUNDLED_PROMPT_PREFIX, Pipeline, StageEntry
+from gremlins.pipeline.schema import BUNDLED_PROMPT_PREFIX, PipelineDef, StageEntry
 from gremlins.prompts import BUNDLED_PROMPT_DIR
 from gremlins.stages.registry import STAGE_REGISTRY
 
@@ -147,7 +147,7 @@ def _parse_stage_entry(
     )
 
 
-def load_pipeline(path: pathlib.Path) -> Pipeline:
+def load_pipeline(path: pathlib.Path) -> PipelineDef:
     _ensure_registered()
     path = path.resolve()
     if not path.exists():
@@ -184,7 +184,7 @@ def load_pipeline(path: pathlib.Path) -> Pipeline:
     for entry in cast(list[dict[str, Any]], raw.get("stages") or []):
         stages.append(_parse_stage_entry(entry, prompt_dir))
 
-    return Pipeline(
+    return PipelineDef(
         name=pipeline_name,
         path=path,
         stages=stages,

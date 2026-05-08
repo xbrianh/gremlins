@@ -9,7 +9,7 @@ from gremlins.stages.registry import CLIENT_FACTORIES
 from gremlins.state import resolve_state_file
 
 if TYPE_CHECKING:
-    from gremlins.pipeline import Pipeline
+    from gremlins.pipeline import PipelineDef
 
 
 @dataclasses.dataclass(frozen=True)
@@ -54,7 +54,7 @@ def resolve_stage_client(
 
 
 def collect_stage_specs(
-    pipeline: Pipeline,
+    pipeline: PipelineDef,
     cli_spec: ClientSpec | None,
 ) -> dict[str, ClientSpec]:
     specs: dict[str, ClientSpec] = {}
@@ -97,7 +97,7 @@ def _format_missing_stage_specs(names: Sequence[str]) -> str:
 
 
 def validate_stage_specs(
-    stage_specs: dict[str, ClientSpec], pipeline: Pipeline
+    stage_specs: dict[str, ClientSpec], pipeline: PipelineDef
 ) -> None:
     expected_stage_names = {entry.name for entry in pipeline.stages}
     for entry in pipeline.stages:
