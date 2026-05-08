@@ -1,3 +1,3 @@
-from gremlins.orchestrators.pipeline import Pipeline
+from gremlins.orchestrators.pipeline import StageRunner
 
-__all__ = ["Pipeline"]
+__all__ = ["StageRunner"]

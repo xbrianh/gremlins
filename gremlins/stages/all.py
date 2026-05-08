@@ -28,12 +28,12 @@ from gremlins.stages.registry import register_stage_builder
 from gremlins.state import read_state_str
 
 if TYPE_CHECKING:
-    from gremlins.orchestrators.pipeline import Pipeline
+    from gremlins.orchestrators.pipeline import StageRunner
 
 logger = logging.getLogger(__name__)
 
 
-def _review_stage_info(runner: Pipeline) -> tuple[list[str], dict[str, pathlib.Path]]:
+def _review_stage_info(runner: StageRunner) -> tuple[list[str], dict[str, pathlib.Path]]:
     names: list[str] = []
     dirs: dict[str, pathlib.Path] = {}
     for s in runner.pipeline_data.stages:
@@ -48,7 +48,7 @@ def _review_stage_info(runner: Pipeline) -> tuple[list[str], dict[str, pathlib.P
     return names, dirs
 
 
-def _build_plan(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
+def _build_plan(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
     plan_val = getattr(runner.args, "plan", None)
     if not entry.prompt_paths and not plan_val:
         die(
@@ -68,7 +68,7 @@ def _build_plan(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
     )
 
 
-def _build_implement(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
+def _build_implement(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
     spec_text = ""
     spec_file = runner.session_dir / "spec.md"
     if spec_file.exists():
@@ -91,12 +91,12 @@ def _build_implement(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> A
 
 
 def _build_materialize_to_branch(
-    entry: StageEntry, spec: ClientSpec, _runner: Pipeline
+    entry: StageEntry, spec: ClientSpec, _runner: StageRunner
 ) -> Any:
     return materialize_to_branch_mod.MaterializeToBranch(entry, spec.model)
 
 
-def _build_verify(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
+def _build_verify(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
     if not runner.repo:
         cmds = getattr(runner.args, "cmds", None)
         if cmds is not None:
@@ -115,11 +115,11 @@ def _build_verify(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
     return verify.Verify(entry, spec.model, is_git=runner.is_git)
 
 
-def _build_commit(entry: StageEntry, spec: ClientSpec, _runner: Pipeline) -> Any:
+def _build_commit(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
     return commit.Commit(entry, spec.model)
 
 
-def _build_open_github_pr(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
+def _build_open_github_pr(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
     return open_github_pr.OpenGitHubPR(
         entry,
         spec.model,
@@ -128,12 +128,12 @@ def _build_open_github_pr(entry: StageEntry, spec: ClientSpec, runner: Pipeline)
 
 
 def _build_request_copilot(
-    entry: StageEntry, spec: ClientSpec, runner: Pipeline
+    entry: StageEntry, spec: ClientSpec, runner: StageRunner
 ) -> Any:
     return request_copilot.RequestCopilot(entry, spec.model, repo=runner.repo)
 
 
-def _build_ghreview(entry: StageEntry, spec: ClientSpec, _runner: Pipeline) -> Any:
+def _build_ghreview(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
     if not entry.prompt_paths:
         die(
             f"stage {entry.name!r}: type 'ghreview' requires a 'prompt' field in the pipeline YAML"
@@ -141,11 +141,11 @@ def _build_ghreview(entry: StageEntry, spec: ClientSpec, _runner: Pipeline) -> A
     return review_code.ReviewCode(entry, spec.model, plan_text="", is_git=True)
 
 
-def _build_wait_copilot(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
+def _build_wait_copilot(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
     return wait_copilot.WaitCopilot(entry, spec.model, repo=runner.repo)
 
 
-def _build_ghaddress(entry: StageEntry, spec: ClientSpec, _runner: Pipeline) -> Any:
+def _build_ghaddress(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
     if not entry.prompt_paths:
         die(
             f"stage {entry.name!r}: type 'ghaddress' requires a 'prompt' field in the pipeline YAML"
@@ -153,11 +153,11 @@ def _build_ghaddress(entry: StageEntry, spec: ClientSpec, _runner: Pipeline) -> 
     return address_code.AddressCode(entry, spec.model, is_git=True)
 
 
-def _build_wait_ci(entry: StageEntry, spec: ClientSpec, _runner: Pipeline) -> Any:
+def _build_wait_ci(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
     return wait_ci.WaitCI(entry, spec.model)
 
 
-def _build_review_code(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
+def _build_review_code(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
     plan_file = runner.session_dir / "plan.md"
     plan_text = plan_file.read_text(encoding="utf-8")
     logger.info("reviewing code (model: %s)", spec.model)
@@ -166,7 +166,7 @@ def _build_review_code(entry: StageEntry, spec: ClientSpec, runner: Pipeline) ->
     )
 
 
-def _build_address_code(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
+def _build_address_code(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
     names, dirs = _review_stage_info(runner)
     logger.info("addressing code reviews (model: %s)", spec.model)
     return address_code.AddressCode(
@@ -178,7 +178,7 @@ def _build_address_code(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -
     )
 
 
-def _build_chain(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
+def _build_chain(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
     logger.info("running chain stage (child: %s)", entry.options.get("child", "local"))
     return chain.Chain(entry, spec, pipeline_builder=runner.build_child_stages)
 

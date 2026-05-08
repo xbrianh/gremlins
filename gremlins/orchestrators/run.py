@@ -23,8 +23,9 @@ from gremlins.errors import die
 from gremlins.gh_utils import get_repo
 from gremlins.git import has_commits, has_dirty_worktree, in_git_repo
 from gremlins.logging_setup import configure_logging
-from gremlins.orchestrators.pipeline import Pipeline
+from gremlins.orchestrators.pipeline import StageRunner
 from gremlins.pipeline import load_pipeline
+from gremlins.runner import install_signal_handlers
 from gremlins.state import (
     patch_state,
     read_state_str,
@@ -183,7 +184,7 @@ def run_pipeline(
     logger.info("session: %s", session_dir)
 
     try:
-        pipe = Pipeline(
+        pipe = StageRunner(
             pipeline.stages,
             args=args,
             session_dir=session_dir,
@@ -243,7 +244,8 @@ def run_pipeline(
                         f"--resume-from {args.resume_from} requires implementation changes in the worktree"
                     )
 
-    pipe.run(*_signal_clients)
+    install_signal_handlers(*_signal_clients)
+    pipe.run(pipeline.stages)
 
     total_cost = 0.0
     for c in _spec_clients.values() if _spec_clients else [client] if client else []:

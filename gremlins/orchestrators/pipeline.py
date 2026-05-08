@@ -18,7 +18,7 @@ from gremlins.clients.resolve import require_stage_spec
 from gremlins.git import in_git_repo
 from gremlins.pipeline import PipelineDef as _PipelineData
 from gremlins.pipeline import StageEntry
-from gremlins.runner import build_parallel_stages, install_signal_handlers, run_stages
+from gremlins.runner import build_parallel_stages, run_stages
 from gremlins.stages.base import StageContext
 from gremlins.stages.registry import STAGE_BUILDERS, STAGE_NEEDS_PIPE
 from gremlins.state import resolve_state_file, set_stage
@@ -66,7 +66,7 @@ def _expand_stage_entries(raw_stages: list[StageEntry]) -> list[StageEntry]:
     return result
 
 
-class Pipeline:
+class StageRunner:
     def __init__(
         self,
         stages: list[StageEntry],
@@ -91,13 +91,15 @@ class Pipeline:
             elif s.type not in STAGE_BUILDERS:
                 unknown.append(s.type)
         if unknown:
-            raise ValueError(f"Pipeline does not support stage type(s): {unknown}")
+            raise ValueError(f"StageRunner does not support stage type(s): {unknown}")
         self.stages = _expand_stage_entries(stages)
         self.args = args
         self.session_dir = session_dir
         self.gr_id = gr_id
         self.is_git = in_git_repo()
         self.pipeline_data = pipeline_data
+        self.default_client = pipeline_data.default_client
+        self.base_ref = pipeline_data.base_ref
         self.repo = repo
         self.target = target
         self.state_file = state_file
@@ -151,10 +153,12 @@ class Pipeline:
 
         return _run
 
-    def _collect_stages(self) -> list[tuple[str, Callable[[], None]]]:
+    def _collect_stages(
+        self, stages: list[StageEntry]
+    ) -> list[tuple[str, Callable[[], None]]]:
         gr_id = self.gr_id
-        stages: list[tuple[str, Callable[[], None]]] = []
-        for e in self.pipeline_data.stages:
+        built: list[tuple[str, Callable[[], None]]] = []
+        for e in stages:
             if e.type == "parallel":
                 group_dir = self.session_dir / e.name
                 group_dir.mkdir(parents=True, exist_ok=True)
@@ -176,7 +180,7 @@ class Pipeline:
                             self._make_runner(child, child_ctx, child_spec),
                         )
                     )
-                stages.extend(
+                built.extend(
                     build_parallel_stages(
                         e.name,
                         child_runners,
@@ -195,13 +199,12 @@ class Pipeline:
                     session_dir=self.session_dir,
                     gr_id=gr_id,
                 )
-                stages.append((e.name, self._make_runner(e, stage_ctx, stage_spec)))
-        return stages
+                built.append((e.name, self._make_runner(e, stage_ctx, stage_spec)))
+        return built
 
-    def run(self, *clients: ClaudeClient) -> None:
-        install_signal_handlers(*clients)
-        stages = self._collect_stages()
-        run_stages(stages, resume_from=self.args.resume_from)
+    def run(self, stages: list[StageEntry]) -> None:
+        built = self._collect_stages(stages)
+        run_stages(built, resume_from=self.args.resume_from)
 
     def build_child_stages(
         self,
@@ -235,7 +238,7 @@ class Pipeline:
         spec_clients: dict[str, ClaudeClient] = {
             str(spec): self._get_client(spec) for spec in stage_specs.values()
         }
-        child_pipeline = Pipeline(
+        child_runner = StageRunner(
             pipeline.stages,
             args=child_args,
             session_dir=session_dir,
@@ -245,4 +248,4 @@ class Pipeline:
             spec_clients=spec_clients,
             test_client=self.test_client,
         )
-        return child_pipeline._collect_stages()
+        return child_runner._collect_stages(pipeline.stages)

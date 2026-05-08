@@ -3,7 +3,7 @@ import pathlib
 
 import pytest
 
-from gremlins.orchestrators.pipeline import Pipeline
+from gremlins.orchestrators.pipeline import StageRunner
 from gremlins.pipeline import PipelineDef as _PipelineData
 from gremlins.pipeline import (
     StageEntry,
@@ -27,8 +27,8 @@ def _local(
     *,
     args: argparse.Namespace,
     tmp_path: pathlib.Path,
-) -> Pipeline:
-    return Pipeline(
+) -> StageRunner:
+    return StageRunner(
         stages,
         args=args,
         session_dir=tmp_path,
@@ -40,7 +40,7 @@ def _local(
 
 def test_pipeline_constructs_from_local_yaml(tmp_path: pathlib.Path) -> None:
     pipeline_data = load_pipeline(resolve_pipeline_path("local", pathlib.Path.cwd()))
-    pipe = Pipeline(
+    pipe = StageRunner(
         pipeline_data.stages,
         args=_args(),
         session_dir=tmp_path,
@@ -64,7 +64,7 @@ def test_pipeline_constructs_from_local_yaml(tmp_path: pathlib.Path) -> None:
 
 def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
     pipeline_data = load_pipeline(resolve_pipeline_path("gh", pathlib.Path.cwd()))
-    pipe = Pipeline(
+    pipe = StageRunner(
         pipeline_data.stages,
         args=_args(),
         session_dir=tmp_path,
