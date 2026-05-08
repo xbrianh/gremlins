@@ -12,7 +12,7 @@ from gremlins.clients.protocol import ClaudeClient
 from gremlins.clients.resolve import PACKAGE_DEFAULT
 from gremlins.git import has_diff, has_dirty_worktree, in_git_repo, rev_exists
 from gremlins.logging_setup import configure_logging
-from gremlins.orchestrators.base import die
+from gremlins.orchestrators.pipeline import die
 from gremlins.pipeline import load_pipeline, resolve_pipeline_path
 from gremlins.runner import install_signal_handlers
 from gremlins.stages import address_code, review_code
