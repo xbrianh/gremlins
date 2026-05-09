@@ -12,7 +12,6 @@ from gremlins.git import (
     head_sha,
     record_pre_impl_state,
 )
-from gremlins.pipeline import StageEntry
 from gremlins.prompts import BUNDLED_PROMPT_DIR
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
@@ -83,14 +82,16 @@ def _render_spec_block(spec_text: str) -> str:
 class Implement(Stage):
     def __init__(
         self,
-        entry: StageEntry,
+        name: str,
         model: str | None,
+        prompts: list[str],
+        options: dict[str, Any],
         *,
         is_git: bool,
         spec_text: str = "",
         cwd: str | None = None,
     ) -> None:
-        super().__init__(entry, model)
+        super().__init__(name, model, prompts, options)
         self.is_git = is_git
         self.spec_text = spec_text
         self._cwd = cwd

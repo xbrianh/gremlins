@@ -7,7 +7,6 @@ from typing import Any
 
 import pytest
 
-from gremlins.pipeline import StageEntry
 from gremlins.stages.base import StageContext
 from gremlins.stages.loop import LoopExhausted, LoopStage, RunCmdFailed
 from gremlins.stages.run_cmd import RunCmd
@@ -160,14 +159,7 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
 
 
 def _run_cmd_stage(tmp_path: Any, cmds: list[str]) -> RunCmd:
-    entry = StageEntry(
-        name="run-cmd",
-        type="run-cmd",
-        client=None,
-        prompts=[],
-        options={"cmds": cmds},
-    )
-    stage = RunCmd(entry, None)
+    stage = RunCmd("run-cmd", None, [], {"cmds": cmds})
     ctx = StageContext(
         client=_fake_client(),
         session_dir=tmp_path,

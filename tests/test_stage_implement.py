@@ -11,22 +11,11 @@ import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.pipeline import StageEntry
 from gremlins.stages.base import StageContext
 from gremlins.stages.implement import Implement
 
 _TEMPLATE_LOCAL = "plan: {plan_text}{spec_block}{impl_commit_instr}"
 _TEMPLATE_GH = "{spec_block}{plan_source_label}{issue_body}{plan_location_note}"
-
-
-def _make_entry(prompts: list[str] | None = None) -> StageEntry:
-    return StageEntry(
-        name="implement",
-        type="implement",
-        client=None,
-        prompts=prompts or [],
-        options={},
-    )
 
 
 def _make_stage(
@@ -37,12 +26,8 @@ def _make_stage(
     spec_text: str = "",
     prompts: list[str] | None = None,
 ) -> tuple[Implement, StageContext]:
-    entry = _make_entry(prompts)
     stage = Implement(
-        entry,
-        "sonnet",
-        is_git=is_git,
-        spec_text=spec_text,
+        "implement", "sonnet", prompts or [], {}, is_git=is_git, spec_text=spec_text
     )
     client = FakeClaudeClient(fixtures={"implement": MINIMAL_EVENTS})
     ctx = StageContext(client=client, session_dir=tmp_path, gr_id=None)
@@ -115,7 +100,6 @@ def test_gh_plan_source_label_without_issue_num(tmp_path: pathlib.Path) -> None:
 
 
 def test_run_raises_if_unbound() -> None:
-    entry = _make_entry()
-    stage = Implement(entry, None, is_git=False)
+    stage = Implement("implement", None, [], {}, is_git=False)
     with pytest.raises(RuntimeError, match="not bound"):
         stage.run(None)

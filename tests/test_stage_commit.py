@@ -11,23 +11,12 @@ from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.git import DirtyOnly, GitError, HeadAdvanced, ImplOutcome
-from gremlins.pipeline import StageEntry
 from gremlins.stages.base import StageContext
 from gremlins.stages.commit import Commit
 
 ISSUE_URL = "https://github.com/owner/repo/issues/42"
 MATERIALIZED_BRANCH = "impl/some-feature"
 BASE_REF = "abc123"
-
-
-def _make_entry() -> StageEntry:
-    return StageEntry(
-        name="commit",
-        type="commit",
-        client=None,
-        prompts=[],
-        options={},
-    )
 
 
 def _make_stage(
@@ -40,10 +29,11 @@ def _make_stage(
 ) -> tuple[Commit, StageContext]:
     if impl_outcome is None:
         impl_outcome = DirtyOnly()
-    entry = _make_entry()
     stage = Commit(
-        entry,
+        "commit",
         "sonnet",
+        [],
+        {},
         impl_outcome=impl_outcome,
         impl_materialized_branch=impl_materialized_branch,
         base_ref=base_ref,
@@ -124,10 +114,11 @@ def test_run_writes_raw_path(tmp_path: pathlib.Path) -> None:
 
 
 def test_run_raises_if_unbound() -> None:
-    entry = _make_entry()
     stage = Commit(
-        entry,
+        "commit",
         None,
+        [],
+        {},
         impl_outcome=DirtyOnly(),
         impl_materialized_branch=MATERIALIZED_BRANCH,
         base_ref=BASE_REF,
@@ -145,8 +136,7 @@ def test_run_raises_if_unbound() -> None:
 def _make_self_sourcing_stage(
     tmp_path: pathlib.Path,
 ) -> tuple[Commit, StageContext]:
-    entry = _make_entry()
-    stage = Commit(entry, "sonnet")
+    stage = Commit("commit", "sonnet", [], {})
     client = FakeClaudeClient(fixtures={"commit": MINIMAL_EVENTS})
     ctx = StageContext(client=client, session_dir=tmp_path, gr_id="test-gr")
     stage.bind(ctx)

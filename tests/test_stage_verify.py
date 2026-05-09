@@ -10,7 +10,6 @@ import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.pipeline import StageEntry
 from gremlins.stages.base import StageContext
 from gremlins.stages.verify import Verify
 
@@ -20,24 +19,6 @@ _VERIFY_PROMPT_PATH = (
     / "prompts"
     / "verify_fix.md"
 )
-
-
-def _make_entry(
-    cmds: list[str] | None = None,
-    max_attempts: int = 3,
-    commit_after_fix: bool = False,
-) -> StageEntry:
-    return StageEntry(
-        name="verify",
-        type="verify",
-        client=None,
-        prompts=[_VERIFY_PROMPT_PATH.read_text(encoding="utf-8")],
-        options={
-            "cmds": cmds if cmds is not None else [],
-            "max_attempts": max_attempts,
-            "commit_after_fix": commit_after_fix,
-        },
-    )
 
 
 def _make_stage(
@@ -54,10 +35,18 @@ def _make_stage(
         cmds = ["true"]
     if client is None:
         client = FakeClaudeClient(fixtures={})
-    entry = _make_entry(
-        cmds=cmds, max_attempts=max_attempts, commit_after_fix=commit_after_fix
+    options = {
+        "cmds": cmds if cmds is not None else [],
+        "max_attempts": max_attempts,
+        "commit_after_fix": commit_after_fix,
+    }
+    stage = Verify(
+        "verify",
+        fix_model,
+        [_VERIFY_PROMPT_PATH.read_text(encoding="utf-8")],
+        options,
+        is_git=is_git,
     )
-    stage = Verify(entry, fix_model, is_git=is_git)
     ctx = StageContext(
         client=client, session_dir=tmp_path, gr_id=None, worktree=tmp_path
     )
@@ -205,8 +194,14 @@ def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
     client = FakeClaudeClient(
         fixtures={"verify-fix-1": MINIMAL_EVENTS, "verify-fix-2": MINIMAL_EVENTS}
     )
-    entry = _make_entry(cmds=["false"], max_attempts=3)
-    stage = Verify(entry, "sonnet", is_git=True)
+    options = {"cmds": ["false"], "max_attempts": 3, "commit_after_fix": False}
+    stage = Verify(
+        "verify",
+        "sonnet",
+        [_VERIFY_PROMPT_PATH.read_text(encoding="utf-8")],
+        options,
+        is_git=True,
+    )
     ctx = StageContext(
         client=client, session_dir=tmp_path, gr_id=gr_id, worktree=tmp_path
     )
@@ -269,17 +264,12 @@ def test_parallel_child_fix_prompt_uses_child_key_bail_command(tmp_path):
         / "prompts"
         / "bail_section_fix.md"
     )
-    entry = StageEntry(
-        name="verify",
-        type="verify",
-        client=None,
-        prompts=[
-            _VERIFY_PROMPT_PATH.read_text(encoding="utf-8"),
-            _bail_fix_path.read_text(encoding="utf-8"),
-        ],
-        options={"cmds": ["false"], "max_attempts": 2, "commit_after_fix": False},
-    )
-    stage = Verify(entry, "sonnet", is_git=True)
+    prompts = [
+        _VERIFY_PROMPT_PATH.read_text(encoding="utf-8"),
+        _bail_fix_path.read_text(encoding="utf-8"),
+    ]
+    options = {"cmds": ["false"], "max_attempts": 2, "commit_after_fix": False}
+    stage = Verify("verify", "sonnet", prompts, options, is_git=True)
     stage.bind(
         StageContext(
             client=client,

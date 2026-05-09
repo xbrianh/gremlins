@@ -10,7 +10,6 @@ from unittest.mock import patch
 import pytest
 
 from gremlins.git import DirtyOnly, DivergentHead, EmptyImpl, HeadAdvanced, PreImplState
-from gremlins.pipeline import StageEntry
 from gremlins.stages.base import StageContext
 from gremlins.stages.materialize_to_branch import (
     MaterializeToBranch,
@@ -20,21 +19,10 @@ from gremlins.stages.materialize_to_branch import (
 PRE_STATE = PreImplState(head="abc123", branch="main")
 
 
-def _make_entry() -> StageEntry:
-    return StageEntry(
-        name="materialize-to-branch",
-        type="materialize-to-branch",
-        client=None,
-        prompts=[],
-        options={},
-    )
-
-
 def _make_stage(
     tmp_path: pathlib.Path, gr_id: str | None = None
 ) -> tuple[MaterializeToBranch, StageContext]:
-    entry = _make_entry()
-    stage = MaterializeToBranch(entry, None)
+    stage = MaterializeToBranch("materialize-to-branch", None, [], {})
     from gremlins.clients.fake import FakeClaudeClient
 
     ctx = StageContext(client=FakeClaudeClient(), session_dir=tmp_path, gr_id=gr_id)

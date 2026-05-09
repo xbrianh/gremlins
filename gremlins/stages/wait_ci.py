@@ -9,7 +9,6 @@ from typing import Any
 
 from gremlins.gh_utils import fetch_check_run_logs, get_pr_ci_status
 from gremlins.git import head_sha
-from gremlins.pipeline import StageEntry
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import check_bail, emit_bail, read_pr_url
@@ -140,8 +139,10 @@ def _collect_failure_output(failed: list[dict[str, Any]]) -> str:
 class WaitCI(Stage):
     def __init__(
         self,
-        entry: StageEntry,
+        name: str,
         model: str | None,
+        prompts: list[str],
+        options: dict[str, Any],
         *,
         pr_url: str = "",
         max_attempts: int = 3,
@@ -152,7 +153,7 @@ class WaitCI(Stage):
         head_sha_getter: Callable[[], str] | None = None,
         fix_sha_getter: Callable[[], str] | None = None,
     ) -> None:
-        super().__init__(entry, model)
+        super().__init__(name, model, prompts, options)
         self.pr_url = pr_url
         self.max_attempts = max_attempts
         self.poll_timeout = poll_timeout

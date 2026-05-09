@@ -6,7 +6,6 @@ import types
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.pipeline import StageEntry
 from gremlins.stages.address_code import AddressCode
 from gremlins.stages.base import StageContext
 from gremlins.stages.review_code import ReviewCode
@@ -34,14 +33,10 @@ def _make_ghreview(
     gr_id: str | None = None,
     pr_url: str,
 ) -> ReviewCode:
-    entry = StageEntry(
-        name="ghreview",
-        type="ghreview",
-        client=None,
-        prompts=[(_BUNDLED_PROMPTS / "review_gh.md").read_text(encoding="utf-8")],
-        options={},
+    prompts = [(_BUNDLED_PROMPTS / "review_gh.md").read_text(encoding="utf-8")]
+    stage = ReviewCode(
+        "ghreview", "sonnet", prompts, {}, plan_text="", is_git=True, pr_url=pr_url
     )
-    stage = ReviewCode(entry, "sonnet", plan_text="", is_git=True, pr_url=pr_url)
     stage.bind(_make_ctx(client, tmp_path, gr_id=gr_id))
     return stage
 
@@ -115,17 +110,11 @@ def _make_ghaddress(
     gr_id: str | None = None,
     pr_url: str,
 ) -> AddressCode:
-    entry = StageEntry(
-        name="ghaddress",
-        type="ghaddress",
-        client=None,
-        prompts=[
-            (_BUNDLED_PROMPTS / "address_gh.md").read_text(encoding="utf-8"),
-            (_BUNDLED_PROMPTS / "bail_section.md").read_text(encoding="utf-8"),
-        ],
-        options={},
-    )
-    stage = AddressCode(entry, "sonnet", is_git=True, pr_url=pr_url)
+    prompts = [
+        (_BUNDLED_PROMPTS / "address_gh.md").read_text(encoding="utf-8"),
+        (_BUNDLED_PROMPTS / "bail_section.md").read_text(encoding="utf-8"),
+    ]
+    stage = AddressCode("ghaddress", "sonnet", prompts, {}, is_git=True, pr_url=pr_url)
     stage.bind(_make_ctx(client, tmp_path, gr_id=gr_id))
     return stage
 

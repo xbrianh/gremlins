@@ -9,7 +9,7 @@ import os
 import pathlib
 import shutil
 import subprocess
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 from gremlins import handoff as handoff_mod
 from gremlins.clients import ClientSpec
@@ -17,9 +17,6 @@ from gremlins.stages.base import Stage
 from gremlins.stages.loop import RunCmdFailed
 from gremlins.stages.registry import register_stage
 from gremlins.state import emit_bail, patch_state, set_stage
-
-if TYPE_CHECKING:
-    from gremlins.pipeline import StageEntry
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +29,8 @@ HANDOFF_TIMEOUT = int(
 
 
 class Handoff(Stage):
-    def __init__(self, entry: StageEntry, client_spec: ClientSpec) -> None:
-        super().__init__(entry, client_spec.model)
+    def __init__(self, name: str, client_spec: ClientSpec) -> None:
+        super().__init__(name, client_spec.model, [], {})
         self._client_spec = client_spec
 
     def run(self, pipe: Any) -> None:  # noqa: ARG002

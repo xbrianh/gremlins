@@ -16,7 +16,6 @@ from gremlins.git import (
     log_patch,
     rev_list_count,
 )
-from gremlins.pipeline import StageEntry
 from gremlins.prompts import BUNDLED_PROMPT_DIR
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
@@ -52,8 +51,10 @@ def _get_diff(
 class Commit(Stage):
     def __init__(
         self,
-        entry: StageEntry,
+        name: str,
         model: str | None,
+        prompts: list[str],
+        options: dict[str, Any],
         *,
         impl_outcome: ImplOutcome | None = None,
         impl_materialized_branch: str | None = None,
@@ -61,7 +62,7 @@ class Commit(Stage):
         issue_url: str | None = None,
         cwd: str | None = None,
     ) -> None:
-        super().__init__(entry, model)
+        super().__init__(name, model, prompts, options)
         self.impl_outcome = impl_outcome
         self.impl_materialized_branch = impl_materialized_branch
         self.base_ref = base_ref

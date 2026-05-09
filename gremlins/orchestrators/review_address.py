@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import logging
 import pathlib
 import shutil
@@ -84,8 +83,10 @@ def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     ctx = StageContext(client=client, session_dir=session_dir, gr_id=None)
     logger.info("reviewing code (model: %s)", args.detail)
     stage = review_code.ReviewCode(
-        rc_entry,
+        rc_entry.name,
         args.detail,
+        rc_entry.prompts,
+        rc_entry.options,
         plan_text=plan_text,
         is_git=is_git,
     )
@@ -128,10 +129,11 @@ def address_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
 
     ctx = StageContext(client=client, session_dir=session_dir, gr_id=None)
     logger.info("addressing code reviews (model: %s)", args.address)
-    entry = dataclasses.replace(ac_entry, client=None)
     stage = address_code.AddressCode(
-        entry,
+        ac_entry.name,
         args.address,
+        ac_entry.prompts,
+        ac_entry.options,
         is_git=is_git,
     )
     stage.bind(ctx)

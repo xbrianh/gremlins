@@ -7,7 +7,6 @@ from typing import Any
 
 from gremlins.clients.protocol import CompletedRun
 from gremlins.gh_utils import extract_gh_url
-from gremlins.pipeline import StageEntry
 from gremlins.prompts import BUNDLED_PROMPT_DIR
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
@@ -23,13 +22,15 @@ def _load(name: str) -> str:
 class OpenGitHubPR(Stage):
     def __init__(
         self,
-        entry: StageEntry,
+        name: str,
         model: str | None,
+        prompts: list[str],
+        options: dict[str, Any],
         *,
         issue_url: str,
         base_ref: str | None = None,
     ) -> None:
-        super().__init__(entry, model)
+        super().__init__(name, model, prompts, options)
         self.issue_url = issue_url
         self.base_ref = base_ref
 

@@ -633,9 +633,13 @@ def test_local_stage_inputs_instructions_reach_plan(
 
     _real_plan_init = _plan_mod.Plan.__init__
 
-    def _capturing_plan_init(self, entry, model, *, instructions, **kw):
+    def _capturing_plan_init(
+        self, name, model, prompts, options, *, instructions, **kw
+    ):
         received.append(instructions)
-        _real_plan_init(self, entry, model, instructions=instructions, **kw)
+        _real_plan_init(
+            self, name, model, prompts, options, instructions=instructions, **kw
+        )
 
     monkeypatch.setattr(_plan_mod.Plan, "__init__", _capturing_plan_init)
     monkeypatch.setattr(_plan_mod.Plan, "run", lambda self, pipe: None)

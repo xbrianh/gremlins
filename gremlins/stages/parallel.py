@@ -11,13 +11,10 @@ import subprocess
 import tempfile
 import threading
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from gremlins.stages.base import StageContext
 from gremlins.stages.compound import CompoundStage
-
-if TYPE_CHECKING:
-    from gremlins.pipeline import StageEntry
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +31,7 @@ class ParallelStage(CompoundStage):
 
     def __init__(
         self,
-        entry: StageEntry,
+        name: str,
         child_runners: list[tuple[str, StageContext, Callable[[], None]]],
         *,
         max_concurrent: int | None,
@@ -44,7 +41,7 @@ class ParallelStage(CompoundStage):
         project_root: pathlib.Path,
         set_stage_fn: Callable[[str], None],
     ) -> None:
-        super().__init__(entry)
+        super().__init__(name)
         self._child_runners = child_runners
         self._max_concurrent = max_concurrent
         self._cancel_on_bail = cancel_on_bail
