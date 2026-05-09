@@ -158,7 +158,10 @@ class Handoff(Stage):
     @staticmethod
     def _next_handoff_index(session_dir: pathlib.Path) -> int:
         return 1 + max(
-            (int(p.name.split("-")[1].split(".")[0]) for p in session_dir.glob("handoff-*.state.json")),
+            (
+                int(p.name.split("-")[1].split(".")[0])
+                for p in session_dir.glob("handoff-*.state.json")
+            ),
             default=0,
         )
 
