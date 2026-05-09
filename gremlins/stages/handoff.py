@@ -51,10 +51,13 @@ class Handoff(Stage):
         base_ref = read_state_str(sf, "base_ref_name") or self._resolve_base_ref()
         handoff_n = self._next_handoff_index(session_dir)
 
+        prev_rolling = session_dir / f"handoff-{handoff_n - 1:03d}.md" if handoff_n > 1 else None
+        current_plan = str(prev_rolling) if prev_rolling and prev_rolling.exists() else str(plan_md)
+
         set_stage(gr_id, "handoff")
         exit_state, sig = self._run_handoff(
             handoff_n=handoff_n,
-            current_plan=str(plan_md),
+            current_plan=current_plan,
             original_plan=str(boss_spec),
             base_ref=base_ref,
             session_dir=session_dir,
@@ -157,13 +160,13 @@ class Handoff(Stage):
 
     @staticmethod
     def _next_handoff_index(session_dir: pathlib.Path) -> int:
-        return 1 + max(
-            (
-                int(p.name.split("-")[1].split(".")[0])
-                for p in session_dir.glob("handoff-*.state.json")
-            ),
-            default=0,
-        )
+        indices: list[int] = []
+        for p in session_dir.glob("handoff-*.state.json"):
+            try:
+                indices.append(int(p.stem.split(".")[0].split("-")[1]))
+            except (IndexError, ValueError):
+                pass
+        return 1 + max(indices, default=0)
 
 
 register_stage("handoff", Handoff)

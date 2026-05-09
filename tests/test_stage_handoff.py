@@ -247,22 +247,56 @@ def test_resume_continues_from_file_index(tmp_path, monkeypatch, test_state_root
     _write_state(state_dir, gr_id)
     _write_plan(tmp_path)
     (tmp_path / "boss-spec.md").write_text("# Boss Spec\n", encoding="utf-8")
-    # Simulate having already run one handoff
+    # Simulate having already run one handoff (creates handoff-001.state.json and handoff-001.md)
     _make_signal_file(tmp_path, 1, "next-plan")
 
     calls: list[int] = []
+    captured_plan: list[str] = []
 
     def fake_handoff_run(client: Any, args: argparse.Namespace) -> int:
         n = int(str(args.out).split("-")[-1].split(".")[0])
         _make_signal_file(pathlib.Path(args.out).parent, n, "chain-done")
         calls.append(n)
+        captured_plan.append(args.plan)
         return 0
 
     monkeypatch.setattr("gremlins.stages.handoff.handoff_mod.run", fake_handoff_run)
     monkeypatch.setenv("GR_ID", gr_id)
 
     h = _make_handoff(tmp_path, gr_id=gr_id)
+    monkeypatch.setattr(h, "_resolve_base_ref", lambda: "abc123")
     h.run(None)
 
     # Should have run handoff #2 (index derived from existing handoff-001.state.json)
     assert calls == [2]
+    # On resume, current_plan must be the previous rolling plan, not plan.md
+    assert captured_plan == [str(tmp_path / "handoff-001.md")]
+
+
+# ---------------------------------------------------------------------------
+# base_ref_name from state: no git fallback needed when state has the field
+# ---------------------------------------------------------------------------
+
+
+def test_base_ref_from_state(tmp_path, monkeypatch, test_state_root):
+    gr_id = "boss-handoff-baseref-aabb12"
+    state_dir = test_state_root / gr_id
+    _write_state(state_dir, gr_id, base_ref_name="deadbeef1234")
+    _write_plan(tmp_path)
+
+    captured_base: list[str] = []
+
+    def fake_handoff_run(client: Any, args: argparse.Namespace) -> int:
+        n = int(str(args.out).split("-")[-1].split(".")[0])
+        _make_signal_file(pathlib.Path(args.out).parent, n, "chain-done")
+        captured_base.append(args.base)
+        return 0
+
+    monkeypatch.setattr("gremlins.stages.handoff.handoff_mod.run", fake_handoff_run)
+    monkeypatch.setenv("GR_ID", gr_id)
+
+    h = _make_handoff(tmp_path, gr_id=gr_id)
+    # Do NOT monkeypatch _resolve_base_ref — state has base_ref_name, fallback must not run
+    h.run(None)
+
+    assert captured_base == ["deadbeef1234"]
