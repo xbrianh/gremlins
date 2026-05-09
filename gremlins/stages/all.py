@@ -12,7 +12,6 @@ from gremlins.errors import die
 from gremlins.pipeline import StageEntry
 from gremlins.stages import (
     address_code,
-    chain,
     claude_prompt,
     commit,
     commit_pr,
@@ -26,6 +25,9 @@ from gremlins.stages import (
     verify,
     wait_ci,
     wait_copilot,
+)
+from gremlins.stages import (
+    handoff as handoff_stage_mod,
 )
 from gremlins.stages import materialize_to_branch as materialize_to_branch_mod
 from gremlins.stages.registry import register_stage_builder
@@ -219,9 +221,10 @@ def _build_claude_prompt(
     return claude_prompt.ClaudePrompt(entry, spec.model)
 
 
-def _build_chain(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
-    logger.info("running chain stage (child: %s)", entry.options.get("child", "local"))
-    return chain.Chain(entry, spec, pipeline_builder=runner.build_child_stages)
+def _build_handoff(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
+    from gremlins.stages.handoff import Handoff
+
+    return Handoff(entry, spec)
 
 
 def _build_parallel(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
@@ -276,16 +279,16 @@ register_stage_builder("address-code", _build_address_code, needs_pipe=False)
 register_stage_builder("loop", _build_loop, needs_pipe=True)
 register_stage_builder("run-cmd", _build_run_cmd, needs_pipe=False)
 register_stage_builder("claude-prompt", _build_claude_prompt, needs_pipe=False)
-register_stage_builder("chain", _build_chain, needs_pipe=False)
+register_stage_builder("handoff", _build_handoff, needs_pipe=False)
 register_stage_builder("parallel", _build_parallel, needs_pipe=True)
 
 
 __all__ = [
     "address_code",
-    "chain",
     "claude_prompt",
     "commit",
     "commit_pr",
+    "handoff_stage_mod",
     "implement",
     "loop",
     "open_github_pr",

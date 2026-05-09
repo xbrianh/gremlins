@@ -308,7 +308,7 @@ def test_stage_builders_registry_covers_all_known_types() -> None:
         "wait-ci",
         "review-code",
         "address-code",
-        "chain",
+        "handoff",
         "parallel",
     }
     assert expected <= set(STAGE_BUILDERS)

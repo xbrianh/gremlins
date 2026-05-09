@@ -13,6 +13,7 @@ sequencing logic of their own.
 - `claude_prompt.py` — `ClaudePrompt(Stage)`. Loads `prompt_paths` and runs the agent; calls `check_bail` afterwards. Generic: no stage-specific template filling. Registers as stage type `"claude-prompt"`.
 - `parallel.py` — `ParallelStage(CompoundStage)`. Constructed by the orchestrator with pre-built child runners; call `build_runtime_stages()` to get the three `(name, fn)` pairs (`<group>-fanout`, `<group>`, `<group>-fanin`) that implement fan-out/fan-in execution.
 - `all.py` — importing triggers side-effect registration of all stage modules. `pipeline.py` imports it automatically via `_ensure_registered()`; no manual import needed.
+- `handoff.py` — `Handoff(Stage)`. Runs the handoff agent once per boss-loop iteration. Signals the enclosing `LoopStage`: returns normally on "chain-done" (loop exits via HEAD-stable), raises `RunCmdFailed` on "next-plan" (writes child plan to `plan.md`, loop continues), raises `RuntimeError` on "bail". Preserves the original boss spec in `boss-spec.md` and restores it to `plan.md` on "chain-done" so post-loop stages see the original spec. Registers as stage type `"handoff"`.
 - `plan.py` — `run(ctx, PlanOptions)`. Local pipeline only.
 - `implement.py` — `run(ctx, ImplementOptions)`. Dual-mode (`kind='local'` /
   `kind='gh'`). For gh: enforces the empty-implementation invariant,

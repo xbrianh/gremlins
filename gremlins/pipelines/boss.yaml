@@ -6,9 +6,10 @@ base_ref: current
 
 stages:
   - name: chain
-    type: chain
-    options:
-      child: local
+    type: loop
+    body:
+      - { name: handoff, type: handoff }
+      - { include: local }
 
   - name: review-chain
     type: review-code

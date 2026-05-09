@@ -172,10 +172,10 @@ class StageRunner:
         pipeline = load_pipeline(
             resolve_pipeline_path(pipeline_name, pathlib.Path.cwd())
         )
-        if any(s.type == "chain" for s in pipeline.stages):
+        if any(s.type == "handoff" for s in pipeline.stages):
             raise ValueError(
-                f"child pipeline {pipeline_name!r} contains a 'chain' stage; "
-                "nested chain stages are not supported"
+                f"child pipeline {pipeline_name!r} contains a 'handoff' stage; "
+                "nested boss stages are not supported"
             )
         child_args = _argparse.Namespace(
             plan=str(plan_path),

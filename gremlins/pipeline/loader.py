@@ -17,6 +17,44 @@ def _ensure_registered() -> None:
     importlib.import_module("gremlins.clients")
 
 
+def _resolve_include(name: str, parent_prompt_dir: pathlib.Path) -> list[StageEntry]:
+    """Expand `include: <name>` by loading the named bundled pipeline's stages."""
+    from gremlins.pipeline.discovery import BUNDLED_PIPELINE_DIR
+
+    yaml_path = BUNDLED_PIPELINE_DIR / f"{name}.yaml"
+    if not yaml_path.exists():
+        raise FileNotFoundError(f"include: pipeline {name!r} not found at {yaml_path}")
+
+    raw_text = yaml_path.read_text(encoding="utf-8")
+    parsed = yaml.safe_load(raw_text)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"include: pipeline {name!r} is not a YAML mapping")
+
+    raw = cast(dict[str, Any], parsed)
+    yaml_dir = yaml_path.parent
+    prompt_dir = _resolve_prompt_dir(raw.get("prompt_dir"), yaml_dir)
+
+    entries: list[StageEntry] = []
+    for entry in cast(list[dict[str, Any]], raw.get("stages") or []):
+        for stage in _parse_stage_entries_or_include(entry, prompt_dir):
+            entries.append(stage)
+    return entries
+
+
+def _parse_stage_entries_or_include(
+    entry: dict[str, Any],
+    prompt_dir: pathlib.Path,
+    depth: int = 0,
+) -> list[StageEntry]:
+    """Parse one entry, which may be an `include:` directive or a normal stage."""
+    if "include" in entry and len(entry) == 1:
+        name = entry["include"]
+        if not isinstance(name, str) or not name:
+            raise ValueError("include: value must be a non-empty string")
+        return _resolve_include(name, prompt_dir)
+    return [_parse_stage_entry(entry, prompt_dir, depth=depth)]
+
+
 def _resolve_prompt_dir(value: object, yaml_dir: pathlib.Path) -> pathlib.Path:
     """Pipeline-level `prompt_dir:` (relative to YAML); default = YAML dir."""
     if value is None:
@@ -138,12 +176,24 @@ def _parse_stage_entry(
 
     prompt_paths = _resolve_prompt_paths(entry.get("prompt"), prompt_dir)
     options = dict(cast(dict[str, Any], entry.get("options") or {}))
+
+    body: list[StageEntry] = []
+    if stage_type == "loop":
+        raw_body = entry.get("body")
+        if raw_body is not None:
+            if not isinstance(raw_body, list):
+                raise ValueError(f"stage {name!r}: 'body' must be a list")
+            for body_entry in cast(list[dict[str, Any]], raw_body):
+                for parsed in _parse_stage_entries_or_include(body_entry, prompt_dir, depth=depth + 1):
+                    body.append(parsed)
+
     return StageEntry(
         name=name,
         type=stage_type,
         client=stage_client,
         prompt_paths=prompt_paths,
         options=options,
+        body=body,
     )
 
 
@@ -182,7 +232,8 @@ def load_pipeline(path: pathlib.Path) -> PipelineDef:
 
     stages: list[StageEntry] = []
     for entry in cast(list[dict[str, Any]], raw.get("stages") or []):
-        stages.append(_parse_stage_entry(entry, prompt_dir))
+        for stage in _parse_stage_entries_or_include(entry, prompt_dir):
+            stages.append(stage)
 
     return PipelineDef(
         name=pipeline_name,
