@@ -137,7 +137,7 @@ def test_implement_renders_spec_block_when_present(tmp_path, monkeypatch):
         name="implement",
         type="implement",
         client=None,
-        prompt_paths=[_BUNDLED_PROMPTS / "implement_local.md"],
+        prompts=[(_BUNDLED_PROMPTS / "implement_local.md").read_text(encoding="utf-8")],
         options={},
     )
     (session_dir / "plan.md").write_text("task 1: do something", encoding="utf-8")
@@ -186,7 +186,7 @@ def test_implement_omits_spec_block_when_absent(tmp_path, monkeypatch):
         name="implement",
         type="implement",
         client=None,
-        prompt_paths=[_BUNDLED_PROMPTS / "implement_local.md"],
+        prompts=[(_BUNDLED_PROMPTS / "implement_local.md").read_text(encoding="utf-8")],
         options={},
     )
     (session_dir / "plan.md").write_text("task 1: do something", encoding="utf-8")
@@ -216,7 +216,7 @@ def test_plan_stage_raises_when_file_absent(tmp_path):
         name="plan",
         type="plan",
         client=None,
-        prompt_paths=[_BUNDLED_PROMPTS / "plan.md"],
+        prompts=[(_BUNDLED_PROMPTS / "plan.md").read_text(encoding="utf-8")],
         options={},
     )
     stage = plan.Plan(
@@ -248,7 +248,7 @@ def test_plan_stage_succeeds_when_file_exists(tmp_path):
         name="plan",
         type="plan",
         client=None,
-        prompt_paths=[_BUNDLED_PROMPTS / "plan.md"],
+        prompts=[(_BUNDLED_PROMPTS / "plan.md").read_text(encoding="utf-8")],
         options={},
     )
     stage = plan.Plan(
@@ -282,7 +282,7 @@ def test_implement_stage_raises_on_empty_diff(tmp_path, monkeypatch):
         name="implement",
         type="implement",
         client=None,
-        prompt_paths=[_BUNDLED_PROMPTS / "implement_local.md"],
+        prompts=[(_BUNDLED_PROMPTS / "implement_local.md").read_text(encoding="utf-8")],
         options={},
     )
     client = FakeClaudeClient(fixtures={"implement": MINIMAL_EVENTS})
@@ -317,9 +317,9 @@ def _make_review_code_stage(
         name="review-code",
         type="review-code",
         client=None,
-        prompt_paths=[
-            _BUNDLED_PROMPTS / "code_style.md",
-            _BUNDLED_PROMPTS / "review" / "detail.md",
+        prompts=[
+            (_BUNDLED_PROMPTS / "code_style.md").read_text(encoding="utf-8"),
+            (_BUNDLED_PROMPTS / "review" / "detail.md").read_text(encoding="utf-8"),
         ],
         options={},
     )
@@ -349,7 +349,7 @@ def _make_address_code_stage(
         name="address-code",
         type="address-code",
         client=None,
-        prompt_paths=[_BUNDLED_PROMPTS / "address.md"],
+        prompts=[(_BUNDLED_PROMPTS / "address.md").read_text(encoding="utf-8")],
         options={},
     )
     stage = AddressCode(entry, model, is_git=is_git)
@@ -377,18 +377,16 @@ def test_address_code_stage_calls_client_with_review_content(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_plan_stage_includes_style_from_prompt_paths(tmp_path):
+def test_plan_stage_includes_style_from_prompts(tmp_path):
     client = FakeClaudeClient(fixtures={"plan": MINIMAL_EVENTS})
     plan_file = tmp_path / "plan.md"
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    style_file = tmp_path / "style.md"
-    style_file.write_text("Be good.")
     entry = StageEntry(
         name="plan",
         type="plan",
         client=None,
-        prompt_paths=[style_file, _BUNDLED_PROMPTS / "plan.md"],
+        prompts=["Be good.", (_BUNDLED_PROMPTS / "plan.md").read_text(encoding="utf-8")],
         options={},
     )
     stage = plan.Plan(
@@ -422,15 +420,13 @@ def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
     assert client.calls[0].cwd == worktree
 
 
-def test_review_code_stage_includes_style_from_prompt_paths(tmp_path):
-    style_file = tmp_path / "style.md"
-    style_file.write_text("Be good.")
+def test_review_code_stage_includes_style_from_prompts(tmp_path):
     client = ReviewCreatingClient(fixtures={"review-code:sonnet": MINIMAL_EVENTS})
     entry = StageEntry(
         name="review-code",
         type="review-code",
         client=None,
-        prompt_paths=[style_file, _BUNDLED_PROMPTS / "review" / "detail.md"],
+        prompts=["Be good.", (_BUNDLED_PROMPTS / "review" / "detail.md").read_text(encoding="utf-8")],
         options={},
     )
     stage = ReviewCode(entry, "sonnet", plan_text="", is_git=False)
@@ -439,18 +435,16 @@ def test_review_code_stage_includes_style_from_prompt_paths(tmp_path):
     assert "Be good." in client.calls[0].prompt
 
 
-def test_address_code_stage_includes_style_from_prompt_paths(tmp_path):
+def test_address_code_stage_includes_style_from_prompts(tmp_path):
     (tmp_path / "review-code-sonnet.md").write_text(
         "# Detail Review\n\n## Findings\nNone.\n"
     )
-    style_file = tmp_path / "style.md"
-    style_file.write_text("Be good.")
     client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
     entry = StageEntry(
         name="address-code",
         type="address-code",
         client=None,
-        prompt_paths=[style_file, _BUNDLED_PROMPTS / "address.md"],
+        prompts=["Be good.", (_BUNDLED_PROMPTS / "address.md").read_text(encoding="utf-8")],
         options={},
     )
     stage = AddressCode(entry, "sonnet", is_git=False)
@@ -497,7 +491,7 @@ def test_address_code_finds_review_files_in_parallel_subdirs(tmp_path):
         name="address-code",
         type="address-code",
         client=None,
-        prompt_paths=[_BUNDLED_PROMPTS / "address.md"],
+        prompts=[(_BUNDLED_PROMPTS / "address.md").read_text(encoding="utf-8")],
         options={},
     )
     stage = AddressCode(

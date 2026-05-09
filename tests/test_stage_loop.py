@@ -164,7 +164,7 @@ def _run_cmd_stage(tmp_path: Any, cmds: list[str]) -> RunCmd:
         name="run-cmd",
         type="run-cmd",
         client=None,
-        prompt_paths=[],
+        prompts=[],
         options={"cmds": cmds},
     )
     stage = RunCmd(entry, None)

@@ -13,7 +13,6 @@ from typing import Any
 
 from gremlins.gh_utils import extract_gh_url, get_repo, parse_issue_ref, view_issue
 from gremlins.pipeline import StageEntry
-from gremlins.prompts import load_prompts
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import patch_state, read_state_str, resolve_state_file
@@ -66,7 +65,7 @@ class Plan(Stage):
         if self.repo:
             state_file = resolve_state_file(self.state.gr_id)
             base_ref_name = read_state_str(state_file, "base_ref_name")
-            plan_prompt = load_prompts(self.prompt_paths).format(
+            plan_prompt = "\n\n".join(self.prompts).rstrip().format(
                 base_ref=_fmt_escape(base_ref_name),
                 instructions=_fmt_escape(self.instructions),
             )
@@ -89,7 +88,7 @@ class Plan(Stage):
             issue_body = _fetch_issue_body(issue_num, self.repo)
             plan_md.write_text(issue_body, encoding="utf-8")
         else:
-            template = load_prompts(self.prompt_paths)
+            template = "\n\n".join(self.prompts).rstrip()
             prompt = template.format(
                 plan_file=plan_md,
                 instructions=self.instructions,

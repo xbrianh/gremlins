@@ -13,7 +13,7 @@ from gremlins.git import (
     record_pre_impl_state,
 )
 from gremlins.pipeline import StageEntry
-from gremlins.prompts import BUNDLED_PROMPT_DIR, load_prompts
+from gremlins.prompts import BUNDLED_PROMPT_DIR
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import patch_state, resolve_state_file
@@ -119,12 +119,10 @@ class Implement(Stage):
 
         impl_commit_instr = "."
         if self.is_git:
-            impl_commit_instr = load_prompts(
-                [BUNDLED_PROMPT_DIR / "impl_commit_git.md"]
-            )
+            impl_commit_instr = (BUNDLED_PROMPT_DIR / "impl_commit_git.md").read_text(encoding="utf-8").rstrip()
 
         plan_text = (self.state.session_dir / "plan.md").read_text(encoding="utf-8")
-        template = load_prompts(self.prompt_paths)
+        template = "\n\n".join(self.prompts).rstrip()
         prompt = template.format(
             spec_block=_render_spec_block(self.spec_text),
             plan_text=plan_text,
@@ -179,7 +177,7 @@ class Implement(Stage):
             )
 
         plan_text = (self.state.session_dir / "plan.md").read_text(encoding="utf-8")
-        template = load_prompts(self.prompt_paths)
+        template = "\n\n".join(self.prompts).rstrip()
         prompt = template.format(
             spec_block=_render_spec_block(self.spec_text),
             plan_source_label=plan_source_label,

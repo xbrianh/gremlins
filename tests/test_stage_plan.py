@@ -12,11 +12,11 @@ from gremlins.stages.base import StageContext
 from gremlins.stages.plan import Plan
 
 
-def _entry(prompt: str | None = None) -> StageEntry:
+def _entry(prompt_text: str | None = None) -> StageEntry:
     return StageEntry(
         name="plan",
         type="plan",
-        prompt_paths=[pathlib.Path(prompt)] if prompt else [],
+        prompts=[prompt_text] if prompt_text else [],
         options={},
         client=None,
     )

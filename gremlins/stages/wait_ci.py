@@ -10,7 +10,6 @@ from typing import Any
 from gremlins.gh_utils import fetch_check_run_logs, get_pr_ci_status
 from gremlins.git import head_sha
 from gremlins.pipeline import StageEntry
-from gremlins.prompts import load_prompts
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import check_bail, emit_bail, read_pr_url
@@ -181,7 +180,7 @@ class WaitCI(Stage):
             )
             return
 
-        template = load_prompts(self.prompt_paths)
+        template = "\n\n".join(self.prompts).rstrip()
 
         _exhausted = False
         _agent_bailed = False

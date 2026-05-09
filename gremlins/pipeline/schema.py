@@ -14,9 +14,9 @@ class StageEntry:
     name: str
     type: str
     client: ClientSpec | None
-    prompt_paths: list[pathlib.Path]
+    prompts: list[str]
     options: dict[str, Any]
-    body: list[StageEntry] = dataclasses.field(  # pyright: ignore[reportUnknownVariableType]
+    body: list[StageEntry] = dataclasses.field(
         default_factory=list
     )
     max_concurrent: int | None = None

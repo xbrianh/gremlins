@@ -8,7 +8,6 @@ import re
 from typing import Any
 
 from gremlins.pipeline import StageEntry
-from gremlins.prompts import load_prompts
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import check_bail, emit_bail, read_pr_url
@@ -93,7 +92,7 @@ class AddressCode(Stage):
                 "create a single git commit titled 'Address review feedback' whose "
                 "body references the review file. Do not push."
             )
-        template = load_prompts(self.prompt_paths)
+        template = "\n\n".join(self.prompts).rstrip()
         address_prompt = template.format(
             bail_command=self.bail_command(),
             model=inputs["review_model"],
@@ -110,7 +109,7 @@ class AddressCode(Stage):
         pr_url = self.pr_url or read_pr_url(self.state.gr_id)
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
-        prompt = load_prompts(self.prompt_paths).format(
+        prompt = "\n\n".join(self.prompts).rstrip().format(
             bail_command=self.bail_command(),
             pr_url=pr_url,
         )

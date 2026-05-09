@@ -99,21 +99,21 @@ def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
 
 def _make_stages(*names: str) -> list[StageEntry]:
     return [
-        StageEntry(name=n, type="plan", client=None, prompt_paths=[], options={})
+        StageEntry(name=n, type="plan", client=None, prompts=[], options={})
         for n in names
     ]
 
 
 def _make_parallel_stage(name: str, children: list[str]) -> StageEntry:
     child_entries = [
-        StageEntry(name=c, type="plan", client=None, prompt_paths=[], options={})
+        StageEntry(name=c, type="plan", client=None, prompts=[], options={})
         for c in children
     ]
     return StageEntry(
         name=name,
         type="parallel",
         client=None,
-        prompt_paths=[],
+        prompts=[],
         options={},
         body=child_entries,
     )
@@ -191,7 +191,7 @@ def test_validate_resume_target_child_name_rejected(tmp_path: pathlib.Path) -> N
 def test_pipeline_rejects_unknown_stage_type(tmp_path: pathlib.Path) -> None:
     stages = [
         StageEntry(
-            name="s", type="nonexistent", client=None, prompt_paths=[], options={}
+            name="s", type="nonexistent", client=None, prompts=[], options={}
         )
     ]
     with pytest.raises(ValueError, match="nonexistent"):
@@ -282,7 +282,7 @@ def test_resolve_pipeline_path_no_overlay_env_falls_through(
 def test_parallel_expansion_in_constructor(tmp_path: pathlib.Path) -> None:
     parallel = _make_parallel_stage("reviews", ["review-a", "review-b"])
     plan_entry = StageEntry(
-        name="plan", type="plan", client=None, prompt_paths=[], options={}
+        name="plan", type="plan", client=None, prompts=[], options={}
     )
     pipe = _local([plan_entry, parallel], args=_args(), tmp_path=tmp_path)
 

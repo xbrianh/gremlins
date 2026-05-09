@@ -17,7 +17,7 @@ def _make_entry() -> StageEntry:
         name="request-copilot",
         type="request-copilot",
         client=None,
-        prompt_paths=[],
+        prompts=[],
         options={},
     )
 

@@ -14,7 +14,7 @@ from gremlins.stages.wait_ci import WaitCI
 
 PR_URL = "https://github.com/owner/repo/pull/42"
 
-_CI_PROMPT = (
+_CI_PROMPT_PATH = (
     pathlib.Path(__file__).resolve().parent.parent
     / "gremlins"
     / "prompts"
@@ -51,7 +51,7 @@ def _make_entry() -> StageEntry:
         name="wait-ci",
         type="wait-ci",
         client=None,
-        prompt_paths=[_CI_PROMPT],
+        prompts=[_CI_PROMPT_PATH.read_text(encoding="utf-8")],
         options={},
     )
 

@@ -8,7 +8,6 @@ from typing import Any
 
 from gremlins.clients.protocol import ClaudeClient
 from gremlins.pipeline import StageEntry
-from gremlins.prompts import load_prompts
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import check_bail, emit_bail, read_pr_url, set_stage
@@ -87,11 +86,11 @@ class ReviewCode(Stage):
             except OSError:
                 pass
 
-        focus = load_prompts(self.prompt_paths)
+        focus = "\n\n".join(self.prompts).rstrip()
         if not focus.strip():
             raise ValueError(
-                f"stage '{self.name}': prompt_paths produced empty focus; "
-                "check that prompt_paths is non-empty and all files have content"
+                f"stage '{self.name}': prompts produced empty focus; "
+                "check that prompts is non-empty and all entries have content"
             )
 
         if self.is_git:
@@ -145,7 +144,7 @@ class ReviewCode(Stage):
         pr_url = self.pr_url or read_pr_url(self.state.gr_id)
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
-        prompt = load_prompts(self.prompt_paths).format(
+        prompt = "\n\n".join(self.prompts).rstrip().format(
             bail_command=self.bail_command(),
             pr_url=pr_url,
         )

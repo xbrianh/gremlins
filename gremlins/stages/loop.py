@@ -71,7 +71,7 @@ class LoopStage(Stage):
         from gremlins.pipeline import StageEntry
 
         entry = StageEntry(
-            name=name, type="loop", client=None, prompt_paths=[], options={}
+            name=name, type="loop", client=None, prompts=[], options={}
         )
         return cls(entry, body_runners=runners, max_iterations=max_iterations)
 

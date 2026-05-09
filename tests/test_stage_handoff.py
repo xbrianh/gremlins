@@ -25,7 +25,7 @@ def _make_entry() -> StageEntry:
     return StageEntry(
         name="handoff",
         type="handoff",
-        prompt_paths=[],
+        prompts=[],
         options={},
         client=None,
     )

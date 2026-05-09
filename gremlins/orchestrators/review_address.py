@@ -79,7 +79,7 @@ def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
 
     pipeline = load_pipeline(resolve_pipeline_path("local", pathlib.Path.cwd()))
     rc_entry = next((s for s in pipeline.stages if s.type == "review-code"), None)
-    if rc_entry is None or not rc_entry.prompt_paths[1:]:
+    if rc_entry is None or not rc_entry.prompts[1:]:
         die("local pipeline has no review-code stage with a prompt")
     ctx = StageContext(client=client, session_dir=session_dir, gr_id=None)
     logger.info("reviewing code (model: %s)", args.detail)
@@ -123,7 +123,7 @@ def address_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
 
     pipeline = load_pipeline(resolve_pipeline_path("local", pathlib.Path.cwd()))
     ac_entry = next((s for s in pipeline.stages if s.type == "address-code"), None)
-    if ac_entry is None or not ac_entry.prompt_paths:
+    if ac_entry is None or not ac_entry.prompts:
         die("local pipeline has no address-code stage with a prompt")
 
     ctx = StageContext(client=client, session_dir=session_dir, gr_id=None)
