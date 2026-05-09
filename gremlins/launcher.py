@@ -25,6 +25,7 @@ import yaml
 
 from gremlins import git as _git_mod
 from gremlins import paths as _paths
+from gremlins.utils import proc
 from gremlins.clients import PACKAGE_DEFAULT
 from gremlins.gh_utils import parse_issue_ref, view_issue
 from gremlins.pipeline import (
@@ -110,11 +111,8 @@ def _gh_current_repo() -> str:
     Best-effort: returns '' on any error so callers can fall back.
     """
     try:
-        r = subprocess.run(
+        r = proc.run(
             ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-            capture_output=True,
-            text=True,
-            check=False,
             timeout=10,
         )
     except (subprocess.SubprocessError, OSError):
@@ -464,12 +462,7 @@ def launch(
     gr_id = f"{slug}-{rand_hex}"
 
     if project_root is None:
-        r = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        r = proc.run(["git", "rev-parse", "--show-toplevel"])
         if r.returncode == 0 and r.stdout.strip():
             project_root = r.stdout.strip()
         else:
