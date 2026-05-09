@@ -72,8 +72,7 @@ def _build_plan(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any
         spec.model,
         entry.prompts,
         entry.options,
-        plan_source=plan_val,
-        plan_file=runner.session_dir / "plan.md" if not runner.repo else None,
+        plan=plan_val,
         instructions=runner.instructions,
         repo=runner.repo,
     )

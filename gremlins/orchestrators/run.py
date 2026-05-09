@@ -60,7 +60,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--resume-from", dest="resume_from", default=None)
     parser.add_argument("--plan", dest="plan", default=None)
-    parser.add_argument("--spec", dest="spec_path", default=None)
+    parser.add_argument("--spec", default=None)
     parser.add_argument("--cmd", dest="cmds", action="append", default=None)
     parser.add_argument(
         "--test-max-attempts", dest="test_max_attempts", type=int, default=3
