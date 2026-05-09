@@ -40,14 +40,18 @@ def _expand(
     prompt_dir = _resolve_prompt_dir(raw.get("prompt_dir"), yaml_dir)
     new_chain = chain + [resolved]
 
+    named_prompts: dict[str, list[str]] = {}
+    for name, value in cast(dict[str, Any], raw.get("prompts") or {}).items():
+        named_prompts[name] = _read_prompts(value, prompt_dir, {})
+
     expanded_stages: list[dict[str, Any]] = []
     for entry in cast(list[dict[str, Any]], raw.get("stages") or []):
         expanded_stages.extend(
-            _expand_entry(entry, prompt_dir, project_root, new_chain)
+            _expand_entry(entry, prompt_dir, project_root, new_chain, named_prompts)
         )
 
     result: dict[str, Any] = {
-        k: v for k, v in raw.items() if k not in ("stages", "prompt_dir")
+        k: v for k, v in raw.items() if k not in ("stages", "prompt_dir", "prompts")
     }
     result["stages"] = expanded_stages
     return result
@@ -58,6 +62,7 @@ def _expand_entry(
     prompt_dir: pathlib.Path,
     project_root: pathlib.Path,
     chain: list[pathlib.Path],
+    named_prompts: dict[str, list[str]],
 ) -> list[dict[str, Any]]:
     if "include" in entry and len(entry) == 1:
         name = entry["include"]
@@ -70,13 +75,13 @@ def _expand_entry(
     entry = dict(entry)
 
     if "prompt" in entry:
-        entry["prompt"] = _read_prompts(entry["prompt"], prompt_dir)
+        entry["prompt"] = _read_prompts(entry["prompt"], prompt_dir, named_prompts)
 
     if "parallel" in entry and isinstance(entry["parallel"], list):
         expanded_parallel: list[dict[str, Any]] = []
         for child in cast(list[Any], entry["parallel"]):
             expanded = _expand_entry(
-                cast(dict[str, Any], child), prompt_dir, project_root, chain
+                cast(dict[str, Any], child), prompt_dir, project_root, chain, named_prompts
             )
             if len(expanded) != 1:
                 raise ValueError(
@@ -90,7 +95,7 @@ def _expand_entry(
         expanded_body: list[dict[str, Any]] = []
         for body_entry in cast(list[dict[str, Any]], entry["body"]):
             expanded_body.extend(
-                _expand_entry(body_entry, prompt_dir, project_root, chain)
+                _expand_entry(body_entry, prompt_dir, project_root, chain, named_prompts)
             )
         entry["body"] = expanded_body
 
@@ -105,7 +110,20 @@ def _resolve_prompt_dir(value: object, yaml_dir: pathlib.Path) -> pathlib.Path:
     return (yaml_dir / value).resolve()
 
 
-def _read_prompts(prompt_field: object, prompt_dir: pathlib.Path) -> list[str]:
+def _read_prompt_file(path: pathlib.Path) -> str:
+    if not path.exists():
+        raise FileNotFoundError(f"prompt file not found: {path}")
+    text = path.read_text(encoding="utf-8")
+    if not text.strip():
+        raise ValueError(f"prompt file is empty: {path}")
+    return text
+
+
+def _read_prompts(
+    prompt_field: object,
+    prompt_dir: pathlib.Path,
+    named_prompts: dict[str, list[str]],
+) -> list[str]:
     if isinstance(prompt_field, str):
         raw: list[str] = [prompt_field]
     elif isinstance(prompt_field, list):
@@ -115,21 +133,16 @@ def _read_prompts(prompt_field: object, prompt_dir: pathlib.Path) -> list[str]:
 
     texts: list[str] = []
     for p in raw:
-        if p.startswith(BUNDLED_PROMPT_PREFIX):
+        if p in named_prompts:
+            texts.extend(named_prompts[p])
+        elif p.startswith(BUNDLED_PROMPT_PREFIX):
             name = p[len(BUNDLED_PROMPT_PREFIX) :]
             if not name:
                 raise ValueError(
                     f"prompt {p!r} is missing a name after {BUNDLED_PROMPT_PREFIX!r}"
                 )
-            path = (BUNDLED_PROMPT_DIR / name).resolve()
+            texts.append(_read_prompt_file((BUNDLED_PROMPT_DIR / name).resolve()))
         else:
-            path = (prompt_dir / p).resolve()
-
-        if not path.exists():
-            raise FileNotFoundError(f"prompt file not found: {path}")
-        text = path.read_text(encoding="utf-8")
-        if not text.strip():
-            raise ValueError(f"prompt file is empty: {path}")
-        texts.append(text)
+            texts.append(_read_prompt_file((prompt_dir / p).resolve()))
 
     return texts

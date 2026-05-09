@@ -13,20 +13,32 @@ import yaml
 from gremlins.init import _bundled_pipeline_names, init_main
 
 
-def _iter_stage_prompts(stages: list[Any]) -> Iterator[str]:
+def _iter_stage_prompts(
+    stages: list[Any], named_keys: set[str] | None = None
+) -> Iterator[str]:
+    named = named_keys or set()
     for stage in stages:
         if not isinstance(stage, dict):
             continue
         if "parallel" in stage:
-            yield from _iter_stage_prompts(stage["parallel"])
+            yield from _iter_stage_prompts(stage["parallel"], named)
         else:
             prompts = stage.get("prompt")
             if not prompts:
                 continue
             if isinstance(prompts, str):
-                yield prompts
-            else:
-                yield from prompts
+                prompts = [prompts]
+            for p in prompts:
+                if p not in named:
+                    yield p
+
+
+def _iter_named_prompt_values(named_prompts: dict[str, Any]) -> Iterator[str]:
+    for value in named_prompts.values():
+        if isinstance(value, str):
+            yield value
+        else:
+            yield from value
 
 
 # ---------------------------------------------------------------------------
@@ -49,9 +61,15 @@ def test_init_all_pipelines(tmp_path, capsys):
 
         data = yaml.safe_load(dst.read_text())
         assert data.get("prompt_dir") == "prompts", f"prompt_dir not injected in {dst}"
-        for p in _iter_stage_prompts(data.get("stages", [])):
+        named = data.get("prompts") or {}
+        named_keys = set(named)
+        for p in _iter_stage_prompts(data.get("stages", []), named_keys):
             assert "/" not in p or p.startswith("review/"), (
                 f"prompt should be a bare name (or review/<lens>): {p}"
+            )
+        for p in _iter_named_prompt_values(named):
+            assert "/" not in p or p.startswith("review/"), (
+                f"named prompt value should be a bare name (or review/<lens>): {p}"
             )
 
     agents_md = tmp_path / "AGENTS.md"
@@ -78,10 +96,13 @@ def test_init_single_pipeline(tmp_path, capsys):
 
     data = yaml.safe_load((dot / "local.yaml").read_text())
     assert data["prompt_dir"] == "prompts"
-    prompt_refs = set(_iter_stage_prompts(data["stages"]))
+    named = data.get("prompts") or {}
+    named_keys = set(named)
 
-    for ref in prompt_refs:
-        assert (dot / "prompts" / ref).exists()
+    for ref in _iter_stage_prompts(data["stages"], named_keys):
+        assert (dot / "prompts" / ref).exists(), f"missing prompt file: {ref}"
+    for ref in _iter_named_prompt_values(named):
+        assert (dot / "prompts" / ref).exists(), f"missing named prompt file: {ref}"
 
 
 # ---------------------------------------------------------------------------
