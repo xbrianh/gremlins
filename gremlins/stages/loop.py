@@ -43,7 +43,8 @@ class LoopStage(Stage):
 
     Resume granularity: --resume-from targets the loop stage by name; there
     is no per-iteration sub-stage addressing.  Resuming restarts the loop from
-    iteration 1, picking up any persisted state (e.g. chain_state) from disk.
+    iteration 1, picking up persisted file-based state from session_dir (e.g.
+    boss-spec.md, handoff-NNN.state.json).
     """
 
     def __init__(

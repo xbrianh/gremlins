@@ -185,19 +185,22 @@ def test_bail_emits_bail_and_raises(tmp_path, monkeypatch, test_state_root):
 
 
 # ---------------------------------------------------------------------------
-# chain_state persisted with correct handoff_count and records
+# first iteration: correct handoff index, boss-spec.md created
 # ---------------------------------------------------------------------------
 
 
-def test_chain_state_persisted(tmp_path, monkeypatch, test_state_root):
+def test_handoff_index_first_iteration(tmp_path, monkeypatch, test_state_root):
     gr_id = "boss-handoff-persist-aabb12"
     state_dir = test_state_root / gr_id
     _write_state(state_dir, gr_id)
     _write_plan(tmp_path)
 
+    calls: list[int] = []
+
     def fake_handoff_run(client: Any, args: argparse.Namespace) -> int:
         n = int(str(args.out).split("-")[-1].split(".")[0])
         _make_signal_file(pathlib.Path(args.out).parent, n, "chain-done")
+        calls.append(n)
         return 0
 
     monkeypatch.setattr("gremlins.stages.handoff.handoff_mod.run", fake_handoff_run)
@@ -207,12 +210,9 @@ def test_chain_state_persisted(tmp_path, monkeypatch, test_state_root):
     monkeypatch.setattr(h, "_resolve_base_ref", lambda: "abc123")
     h.run(None)
 
-    state = _read_state(state_dir)
-    chain_st = state["chain_state"]
-    assert chain_st["handoff_count"] == 1
-    assert len(chain_st["handoff_records"]) == 1
-    assert chain_st["handoff_records"][0]["exit_state"] == "chain-done"
-    assert chain_st["base_ref"] == "abc123"
+    assert calls == [1]
+    assert (tmp_path / "boss-spec.md").exists()
+    assert (tmp_path / "handoff-001.state.json").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -237,44 +237,66 @@ def test_handoff_nonzero_exit_raises(tmp_path, monkeypatch, test_state_root):
 
 
 # ---------------------------------------------------------------------------
-# resume with existing chain_state continues from handoff_count=1
+# resume: continues from file-based index (handoff-001.state.json → runs #2)
 # ---------------------------------------------------------------------------
 
 
-def test_resume_with_existing_chain_state(tmp_path, monkeypatch, test_state_root):
+def test_resume_continues_from_file_index(tmp_path, monkeypatch, test_state_root):
     gr_id = "boss-handoff-resume-aabb12"
     state_dir = test_state_root / gr_id
-
-    # Simulate having already run one handoff
-    chain_state = {
-        "original_plan": str(tmp_path / "boss-spec.md"),
-        "base_ref": "abc123",
-        "handoff_count": 1,
-        "handoff_records": [
-            {"n": 1, "exit_state": "next-plan", "signal_file": "", "plan_in": ""}
-        ],
-        "current_plan": str(tmp_path / "boss-spec.md"),
-    }
-    _write_state(state_dir, gr_id, chain_state=chain_state)
+    _write_state(state_dir, gr_id)
     _write_plan(tmp_path)
     (tmp_path / "boss-spec.md").write_text("# Boss Spec\n", encoding="utf-8")
+    # Simulate having already run one handoff (creates handoff-001.state.json and handoff-001.md)
+    _make_signal_file(tmp_path, 1, "next-plan")
 
     calls: list[int] = []
+    captured_plan: list[str] = []
 
     def fake_handoff_run(client: Any, args: argparse.Namespace) -> int:
         n = int(str(args.out).split("-")[-1].split(".")[0])
         _make_signal_file(pathlib.Path(args.out).parent, n, "chain-done")
         calls.append(n)
+        captured_plan.append(args.plan)
         return 0
 
     monkeypatch.setattr("gremlins.stages.handoff.handoff_mod.run", fake_handoff_run)
     monkeypatch.setenv("GR_ID", gr_id)
 
     h = _make_handoff(tmp_path, gr_id=gr_id)
+    monkeypatch.setattr(h, "_resolve_base_ref", lambda: "abc123")
     h.run(None)
 
-    # Should have run handoff #2 (continuing from count=1)
+    # Should have run handoff #2 (index derived from existing handoff-001.state.json)
     assert calls == [2]
-    state = _read_state(state_dir)
-    chain_st = state["chain_state"]
-    assert chain_st["handoff_count"] == 2
+    # On resume, current_plan must be the previous rolling plan, not plan.md
+    assert captured_plan == [str(tmp_path / "handoff-001.md")]
+
+
+# ---------------------------------------------------------------------------
+# base_ref_name from state: no git fallback needed when state has the field
+# ---------------------------------------------------------------------------
+
+
+def test_base_ref_from_state(tmp_path, monkeypatch, test_state_root):
+    gr_id = "boss-handoff-baseref-aabb12"
+    state_dir = test_state_root / gr_id
+    _write_state(state_dir, gr_id, base_ref_name="deadbeef1234")
+    _write_plan(tmp_path)
+
+    captured_base: list[str] = []
+
+    def fake_handoff_run(client: Any, args: argparse.Namespace) -> int:
+        n = int(str(args.out).split("-")[-1].split(".")[0])
+        _make_signal_file(pathlib.Path(args.out).parent, n, "chain-done")
+        captured_base.append(args.base)
+        return 0
+
+    monkeypatch.setattr("gremlins.stages.handoff.handoff_mod.run", fake_handoff_run)
+    monkeypatch.setenv("GR_ID", gr_id)
+
+    h = _make_handoff(tmp_path, gr_id=gr_id)
+    # Do NOT monkeypatch _resolve_base_ref — state has base_ref_name, fallback must not run
+    h.run(None)
+
+    assert captured_base == ["deadbeef1234"]

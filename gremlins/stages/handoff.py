@@ -9,14 +9,14 @@ import os
 import pathlib
 import shutil
 import subprocess
-from typing import Any, cast
+from typing import Any
 
 from gremlins import handoff as handoff_mod
 from gremlins.clients import ClientSpec
 from gremlins.stages.base import Stage
 from gremlins.stages.loop import RunCmdFailed
 from gremlins.stages.registry import register_stage
-from gremlins.state import emit_bail, patch_state, set_stage
+from gremlins.state import emit_bail, read_state_str, resolve_state_file, set_stage
 
 logger = logging.getLogger(__name__)
 
@@ -38,66 +38,41 @@ class Handoff(Stage):
         gr_id = self.state.gr_id
         client = self.state.client
 
-        chain_st = self._load_chain_state()
-        if chain_st is None:
-            spec_path = session_dir / "plan.md"
-            if not spec_path.is_file():
-                raise RuntimeError(f"handoff stage: plan file not found: {spec_path}")
-            boss_spec = session_dir / "boss-spec.md"
-            shutil.copyfile(spec_path, boss_spec)
-            base_ref = self._resolve_base_ref()
-            chain_st = cast(
-                dict[str, Any],
-                {
-                    "original_plan": str(boss_spec),
-                    "base_ref": base_ref,
-                    "handoff_count": 0,
-                    "handoff_records": [],
-                    "child_records": [],
-                    "current_plan": str(boss_spec),
-                },
-            )
-            self._save_chain_state(chain_st)
-            patch_state(gr_id, original_plan=str(spec_path))
+        boss_spec = session_dir / "boss-spec.md"
+        plan_md = session_dir / "plan.md"
 
-        current_plan: str = str(chain_st["current_plan"])
-        base_ref: str = str(chain_st["base_ref"])
-        original_plan: str = str(chain_st["original_plan"])
-        handoff_count: int = int(chain_st.get("handoff_count", 0))  # type: ignore[arg-type]
+        if not plan_md.is_file():
+            raise RuntimeError(f"handoff stage: plan file not found: {plan_md}")
 
-        handoff_count += 1
-        chain_st["handoff_count"] = handoff_count
-        self._save_chain_state(chain_st)
+        if not boss_spec.exists():
+            shutil.copyfile(plan_md, boss_spec)
+
+        sf = resolve_state_file(gr_id)
+        base_ref = read_state_str(sf, "base_ref_name") or self._resolve_base_ref()
+        handoff_n = self._next_handoff_index(session_dir)
+
+        prev_rolling = (
+            session_dir / f"handoff-{handoff_n - 1:03d}.md" if handoff_n > 1 else None
+        )
+        current_plan = (
+            str(prev_rolling)
+            if prev_rolling and prev_rolling.exists()
+            else str(plan_md)
+        )
 
         set_stage(gr_id, "handoff")
         exit_state, sig = self._run_handoff(
-            handoff_n=handoff_count,
+            handoff_n=handoff_n,
             current_plan=current_plan,
-            original_plan=original_plan,
+            original_plan=str(boss_spec),
             base_ref=base_ref,
             session_dir=session_dir,
             client=client,
         )
 
-        pre_update_plan = current_plan
-        if os.path.isfile(sig.get("out_path", "") or ""):
-            chain_st["current_plan"] = sig["out_path"]
-
-        chain_st["handoff_records"].append(
-            {
-                "n": handoff_count,
-                "plan_in": pre_update_plan,
-                "exit_state": exit_state,
-                "signal_file": sig.get("signal_path", ""),
-            }
-        )
-        self._save_chain_state(chain_st)
-
         if exit_state == "chain-done":
-            logger.info("chain complete after %d handoff(s)", handoff_count)
-            boss_spec = session_dir / "boss-spec.md"
-            if boss_spec.exists():
-                shutil.copyfile(boss_spec, session_dir / "plan.md")
+            logger.info("chain complete after %d handoff(s)", handoff_n)
+            shutil.copyfile(boss_spec, plan_md)
             return
 
         if exit_state == "bail":
@@ -112,9 +87,8 @@ class Handoff(Stage):
             raise RuntimeError(
                 f"handoff returned next-plan but child_plan not found: {child_plan_path!r}"
             )
-        shutil.copyfile(child_plan_path, session_dir / "plan.md")
-        # RunCmdFailed signals the boss loop to execute the child pipeline runners.
-        raise RunCmdFailed(f"next-plan: handoff {handoff_count}")
+        shutil.copyfile(child_plan_path, plan_md)
+        raise RunCmdFailed(f"next-plan: handoff {handoff_n}")
 
     def _run_handoff(
         self,
@@ -129,7 +103,10 @@ class Handoff(Stage):
         out_path = session_dir / f"handoff-{handoff_n:03d}.md"
         signal_path = session_dir / f"handoff-{handoff_n:03d}.state.json"
 
-        forward_spec = original_plan != current_plan
+        forward_spec = (
+            pathlib.Path(original_plan).read_bytes()
+            != pathlib.Path(current_plan).read_bytes()
+        )
         model_str = str(self._client_spec)
 
         logger.info(
@@ -187,21 +164,15 @@ class Handoff(Stage):
         )
         return r.stdout.strip() if r.returncode == 0 else "HEAD"
 
-    def _load_chain_state(self) -> dict[str, Any] | None:
-        from gremlins.state import resolve_state_file
-
-        sf = resolve_state_file(self.state.gr_id)
-        if sf is None or not sf.exists():
-            return None
-        try:
-            data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
-            st = data.get("chain_state")
-            return dict(st) if st else None
-        except Exception:
-            return None
-
-    def _save_chain_state(self, chain_st: dict[str, Any]) -> None:
-        patch_state(self.state.gr_id, chain_state=chain_st)
+    @staticmethod
+    def _next_handoff_index(session_dir: pathlib.Path) -> int:
+        indices: list[int] = []
+        for p in session_dir.glob("handoff-*.state.json"):
+            try:
+                indices.append(int(p.stem.split(".")[0].split("-")[1]))
+            except (IndexError, ValueError):
+                pass
+        return 1 + max(indices, default=0)
 
 
 register_stage("handoff", Handoff)
