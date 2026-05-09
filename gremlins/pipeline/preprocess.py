@@ -81,7 +81,11 @@ def _expand_entry(
         expanded_parallel: list[dict[str, Any]] = []
         for child in cast(list[Any], entry["parallel"]):
             expanded = _expand_entry(
-                cast(dict[str, Any], child), prompt_dir, project_root, chain, named_prompts
+                cast(dict[str, Any], child),
+                prompt_dir,
+                project_root,
+                chain,
+                named_prompts,
             )
             if len(expanded) != 1:
                 raise ValueError(
@@ -95,7 +99,9 @@ def _expand_entry(
         expanded_body: list[dict[str, Any]] = []
         for body_entry in cast(list[dict[str, Any]], entry["body"]):
             expanded_body.extend(
-                _expand_entry(body_entry, prompt_dir, project_root, chain, named_prompts)
+                _expand_entry(
+                    body_entry, prompt_dir, project_root, chain, named_prompts
+                )
             )
         entry["body"] = expanded_body
 

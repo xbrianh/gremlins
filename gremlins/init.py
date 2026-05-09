@@ -46,7 +46,9 @@ def _rewrite_prompts_to_bare(stages: list[Any], named_keys: set[str]) -> None:
         if not prompts:
             continue
         if isinstance(prompts, str):
-            s["prompt"] = prompts if prompts in named_keys else _strip_bundled_prefix(prompts)
+            s["prompt"] = (
+                prompts if prompts in named_keys else _strip_bundled_prefix(prompts)
+            )
         else:
             s["prompt"] = [
                 p if p in named_keys else _strip_bundled_prefix(p)
@@ -61,7 +63,9 @@ def _rewrite_named_prompts_to_bare(named_prompts: dict[str, Any]) -> None:
         if isinstance(val, str):
             named_prompts[key] = _strip_bundled_prefix(val)
         else:
-            named_prompts[key] = [_strip_bundled_prefix(p) for p in cast(list[str], val)]
+            named_prompts[key] = [
+                _strip_bundled_prefix(p) for p in cast(list[str], val)
+            ]
 
 
 def _collect_prompt_subpaths(
