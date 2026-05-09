@@ -88,13 +88,11 @@ class Implement(Stage):
         options: dict[str, Any],
         *,
         is_git: bool,
-        spec: pathlib.Path | None = None,
         spec_text: str = "",
         cwd: str | None = None,
     ) -> None:
         super().__init__(name, model, prompts, options)
         self.is_git = is_git
-        self.spec = spec
         self.spec_text = spec_text
         self._cwd = cwd
 
