@@ -32,18 +32,16 @@ class Plan(Stage):
         options: dict[str, Any],
         *,
         instructions: str = "",
-        plan_file: pathlib.Path | None = None,
-        plan_source: str | None = None,
+        plan: str | None = None,
         repo: str = "",
     ) -> None:
         super().__init__(name, model, prompts, options)
         self.instructions = instructions
-        self.plan_file = plan_file
-        self.plan_source = plan_source
+        self.plan = plan
         self.repo = repo
 
     def run(self, pipe: Any) -> None:
-        plan_md = self.plan_file or (self.state.session_dir / "plan.md")
+        plan_md = self.state.session_dir / "plan.md"
 
         if plan_md.exists() and plan_md.stat().st_size > 0:
             state_file = resolve_state_file(self.state.gr_id)
@@ -52,12 +50,12 @@ class Plan(Stage):
             logger.info("[1/8] plan resumed from snapshot: %s%s", plan_md, label)
             return
 
-        if self.plan_source:
-            src = pathlib.Path(self.plan_source)
+        if self.plan:
+            src = pathlib.Path(self.plan)
             if src.is_file():
-                self._resolve_file_source(self.plan_source, plan_md)
+                self._resolve_file_source(self.plan, plan_md)
             else:
-                self._resolve_issue_source(self.plan_source, plan_md)
+                self._resolve_issue_source(self.plan, plan_md)
             return
 
         self._run_agent(plan_md)

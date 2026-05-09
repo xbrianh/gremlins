@@ -100,7 +100,7 @@ class StageRunner:
             getattr(args, "instructions", None) or []
         )
 
-        spec_path = getattr(args, "spec_path", None)
+        spec_path = getattr(args, "spec", None)
         spec_file = session_dir / "spec.md"
         if spec_path and not spec_file.exists():
             spec_src = pathlib.Path(spec_path)

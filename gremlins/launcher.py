@@ -419,6 +419,11 @@ def launch(
     """
     stage_inputs = {} if stage_inputs is None else dict(stage_inputs)
     instructions: str | None = stage_inputs.get("instructions")
+    if plan is None:
+        plan = stage_inputs.pop("plan", None)
+    if spec_path is None:
+        spec_raw = stage_inputs.pop("spec", None)
+        spec_path = str(spec_raw) if spec_raw is not None else None
     if plan and instructions:
         raise ValueError("--plan and instructions are mutually exclusive")
     if shutil.which("claude") is None:
