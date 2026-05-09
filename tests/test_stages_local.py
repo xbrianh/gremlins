@@ -199,7 +199,6 @@ def test_implement_omits_spec_block_when_absent(tmp_path, monkeypatch):
 
 def test_plan_stage_raises_when_file_absent(tmp_path):
     client = FakeClaudeClient(fixtures={"plan": MINIMAL_EVENTS})
-    plan_file = tmp_path / "plan.md"
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     stage = plan.Plan(
@@ -207,7 +206,6 @@ def test_plan_stage_raises_when_file_absent(tmp_path):
         "sonnet",
         [(_BUNDLED_PROMPTS / "plan.md").read_text(encoding="utf-8")],
         {},
-        plan_file=plan_file,
         instructions="do stuff",
     )
     stage.bind(_make_ctx(client, session_dir))
@@ -219,9 +217,9 @@ def test_plan_stage_raises_when_file_absent(tmp_path):
 
 
 def test_plan_stage_succeeds_when_file_exists(tmp_path):
-    plan_file = tmp_path / "plan.md"
     session_dir = tmp_path / "session"
     session_dir.mkdir()
+    plan_file = session_dir / "plan.md"
 
     class _WritingClient(FakeClaudeClient):
         def run(self, prompt, *, label, **kwargs):
@@ -234,7 +232,6 @@ def test_plan_stage_succeeds_when_file_exists(tmp_path):
         "haiku",
         [(_BUNDLED_PROMPTS / "plan.md").read_text(encoding="utf-8")],
         {},
-        plan_file=plan_file,
         instructions="do stuff",
     )
     stage.bind(_make_ctx(client, session_dir))
@@ -348,7 +345,6 @@ def test_address_code_stage_calls_client_with_review_content(tmp_path):
 
 def test_plan_stage_includes_style_from_prompts(tmp_path):
     client = FakeClaudeClient(fixtures={"plan": MINIMAL_EVENTS})
-    plan_file = tmp_path / "plan.md"
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     stage = plan.Plan(
@@ -359,7 +355,6 @@ def test_plan_stage_includes_style_from_prompts(tmp_path):
             (_BUNDLED_PROMPTS / "plan.md").read_text(encoding="utf-8"),
         ],
         {},
-        plan_file=plan_file,
         instructions="do stuff",
     )
     stage.bind(_make_ctx(client, session_dir))
