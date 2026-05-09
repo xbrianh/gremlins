@@ -46,33 +46,9 @@ from gremlins.stages.introspect import build_launch_parser
 from gremlins.stages.registry import STAGE_REGISTRY
 from gremlins.state import validate_gr_id
 
-# None → generic "no longer valid"; str → migration hint naming the new form
-_REMOVED: dict[str, str | None] = {
-    "fleet": None,
-    "handoff": None,
-    "bail": None,
-    "session-summary": None,
-    "_run-pipeline": None,
-    "local": "gremlins launch local",
-    "gh": "gremlins launch gh",
-    "boss": "gremlins launch boss",
-}
-
-
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
-
-    if argv and argv[0] in _REMOVED:
-        redirect = _REMOVED[argv[0]]
-        if redirect:
-            sys.stderr.write(
-                f"error: '{argv[0]}' is no longer a top-level subcommand;"
-                f" use '{redirect}'\n"
-            )
-        else:
-            sys.stderr.write(f"error: '{argv[0]}' is no longer a valid subcommand\n")
-        return 1
 
     sub = argv[0] if argv else ""
     rest = argv[1:]
