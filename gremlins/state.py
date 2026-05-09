@@ -276,7 +276,11 @@ def check_bail(
 
 
 def get_prev_child_branch(gr_id: str | None) -> str:
-    """Return the branch from child_records at handoff_count-1, or '' on missing/error."""
+    """Return the branch from child_records at handoff_count-1, or '' on missing/error.
+
+    Transitional (Phase B): reads handoff_count from chain_state, which is no
+    longer written by Handoff after Phase A.  Migrate to artifacts in Phase B.
+    """
     sf = resolve_state_file(gr_id)
     if sf is None or not sf.exists():
         return ""
@@ -300,6 +304,9 @@ def upsert_child_record(gr_id: str | None, **fields: Any) -> None:
     """Upsert a child_records entry at handoff_count in chain_state.
 
     Filters None values from fields. Raises on read/write errors — caller logs.
+
+    Transitional (Phase B): reads handoff_count from chain_state, which is no
+    longer written by Handoff after Phase A.  Migrate to artifacts in Phase B.
     """
     sf = resolve_state_file(gr_id)
     if sf is None or not sf.exists() or not gr_id:
