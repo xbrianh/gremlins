@@ -734,7 +734,6 @@ def test_write_terminal_state_preserves_worktree_for_gh(lenv, monkeypatch, tmp_p
     fake_workdir = tmp_path / "workdir"
     fake_workdir.mkdir()
     state_json = {
-        "pipeline_kind": "gh",
         "project_root": str(lenv.repo),
         "workdir": str(fake_workdir),
     }
@@ -742,7 +741,7 @@ def test_write_terminal_state_preserves_worktree_for_gh(lenv, monkeypatch, tmp_p
 
     launcher.write_terminal_state("test-gr-id-abc123", exit_code=0)
 
-    assert removed == [], "worktree must not be removed for gh-mode pipelines on exit"
+    assert removed == [], "worktree must not be removed on exit"
 
 
 def test_write_terminal_state_preserves_worktree_for_local(lenv, monkeypatch, tmp_path):
@@ -758,7 +757,6 @@ def test_write_terminal_state_preserves_worktree_for_local(lenv, monkeypatch, tm
     fake_workdir = tmp_path / "workdir"
     fake_workdir.mkdir()
     state_json = {
-        "pipeline_kind": "local",
         "project_root": str(lenv.repo),
         "workdir": str(fake_workdir),
         "setup_kind": "worktree-branch",
@@ -783,7 +781,6 @@ def test_write_terminal_state_preserves_worktree_for_boss(lenv, monkeypatch, tmp
     fake_workdir = tmp_path / "workdir"
     fake_workdir.mkdir()
     state_json = {
-        "pipeline_kind": "boss",
         "project_root": str(lenv.repo),
         "workdir": str(fake_workdir),
         "setup_kind": "worktree",
@@ -792,7 +789,7 @@ def test_write_terminal_state_preserves_worktree_for_boss(lenv, monkeypatch, tmp
 
     launcher.write_terminal_state("test-gr-id-ghi789", exit_code=0)
 
-    assert removed == [], "worktree must not be removed for boss-mode pipelines"
+    assert removed == [], "worktree must not be removed on exit"
 
 
 # ---------------------------------------------------------------------------

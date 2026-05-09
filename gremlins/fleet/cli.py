@@ -75,10 +75,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Show only stalled gremlins.",
     )
     parser.add_argument(
-        "--kind",
-        choices=["local", "gh", "boss"],
-        metavar="local|gh|boss",
-        help="Filter to a specific gremlin kind.",
+        "--pipeline",
+        metavar="NAME",
+        help="Filter to gremlins using this pipeline (substring match against pipeline name).",
     )
     parser.add_argument(
         "--since",

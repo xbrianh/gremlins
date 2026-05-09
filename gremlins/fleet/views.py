@@ -9,7 +9,6 @@ import time
 from gremlins.fleet.duration import parse_duration
 from gremlins.fleet.render import FleetRow, build_row, print_table
 from gremlins.fleet.state import (
-    effective_pipeline_kind,
     humanize_age,
     iso_to_epoch,
     iter_state_files,
@@ -20,7 +19,7 @@ from gremlins.fleet.state import (
 
 def collect_rows(
     here_root: str | None = None,
-    kind_filter: str | None = None,
+    pipeline_filter: str | None = None,
     since_secs: float | None = None,
     liveness_filter: set[str] | None = None,
     include_closed: bool = False,
@@ -29,7 +28,7 @@ def collect_rows(
     Collect and return a list of FleetRows, sorted by started_at ascending.
 
     here_root         — if set, restrict to gremlins with this project_root.
-    kind_filter       — if set ('local', 'gh', or 'boss'), restrict to that kind.
+    pipeline_filter   — if set, restrict to gremlins whose pipeline name contains this substring.
     since_secs        — if set, restrict to gremlins started within this many seconds.
     liveness_filter   — if set, a set of prefixes ('running', 'dead', 'stalled').
     include_closed    — if True, include closed gremlins (for drill-in / --recent).
@@ -54,9 +53,15 @@ def collect_rows(
             if state.get("project_root", "") != here_root:
                 continue
 
-        # --kind filter
-        if kind_filter is not None:
-            if effective_pipeline_kind(state) != kind_filter:
+        # --pipeline filter
+        if pipeline_filter is not None:
+            pipeline_path = str(state.get("pipeline_path") or "")
+            pipeline_name = (
+                os.path.basename(pipeline_path).replace(".yaml", "")
+                if pipeline_path
+                else str(state.get("kind") or "")
+            )
+            if pipeline_filter not in pipeline_name:
                 continue
 
         # --since filter
@@ -102,7 +107,7 @@ def do_list(args: argparse.Namespace, here_root: str | None = None) -> None:
 
     rows = collect_rows(
         here_root=here_root,
-        kind_filter=args.kind,
+        pipeline_filter=args.pipeline,
         since_secs=since_secs,
         liveness_filter=liveness_filter,
         include_closed=False,
@@ -134,7 +139,7 @@ def do_recent(args: argparse.Namespace, here_root: str | None = None) -> None:
 
     rows = collect_rows(
         here_root=here_root,
-        kind_filter=args.kind,
+        pipeline_filter=args.pipeline,
         since_secs=since_secs,
         liveness_filter={"dead:"},
         include_closed=True,

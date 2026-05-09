@@ -7,7 +7,6 @@ from typing import Any
 from gremlins.fleet.constants import FMT
 from gremlins.fleet.state import (
     display_id,
-    effective_pipeline_kind,
     humanize_age,
     render_sub_stage,
 )
@@ -35,7 +34,12 @@ def build_row(
     gr_id: str, _sf: str, wdir: str, state: dict[str, Any], live: str
 ) -> FleetRow:
     """Return a FleetRow with all display fields resolved."""
-    k = effective_pipeline_kind(state)
+    pipeline_path = str(state.get("pipeline_path") or "")
+    pipeline_name = (
+        os.path.basename(pipeline_path).replace(".yaml", "")
+        if pipeline_path
+        else str(state.get("kind") or "unknown")
+    )
     pr = state.get("project_root", "")
     stage = state.get("stage") or "-"
     sub = state.get("sub_stage")
@@ -44,14 +48,10 @@ def build_row(
 
     sub_disp = render_sub_stage(sub)
     stage_disp = stage
-    if sub_disp:
+    if stage == "waiting" and sub_disp:
+        stage_disp = f"waiting:{sub_disp}"
+    elif sub_disp:
         stage_disp = f"{stage} ({sub_disp})"
-
-    # Boss in waiting: surface the child's current pipeline stage.
-    if k == "boss" and stage == "waiting":
-        child_stage = str(state.get("chain_current_child_stage") or "")
-        if child_stage:
-            stage_disp = f"waiting:{child_stage}"
 
     rescue_count = state.get("rescue_count") or 0
     try:
@@ -60,9 +60,6 @@ def build_row(
         rescue_count = 0
 
     stage_trim = stage_disp[:22]
-    # Rescue marker is appended AFTER the 28-char trim so it stays visible even
-    # when the raw liveness reason is long; the row may overflow the column in
-    # those cases but the (rescue) indicator is more important than alignment.
     live_trim = live[:28]
     if rescue_count == 1:
         live_trim = f"{live_trim} (rescue)"
@@ -82,7 +79,7 @@ def build_row(
 
     return FleetRow(
         started_at=str(started_at),
-        kind=k,
+        kind=pipeline_name,
         sid=sid,
         boss=boss_disp,
         stage=stage_trim,

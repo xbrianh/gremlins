@@ -7,6 +7,7 @@ import os
 import pathlib
 from typing import Any
 
+from gremlins.pipeline import pipeline_uses_gh
 from gremlins.git import (
     has_dirty_worktree,
     head_sha,
@@ -103,7 +104,8 @@ class Implement(Stage):
         )
 
     def run(self, pipe: Any) -> None:
-        if getattr(pipe, "target", "local") == "github":
+        pipeline_data = getattr(pipe, "pipeline_data", None)
+        if pipeline_data is not None and pipeline_uses_gh(pipeline_data):
             self._run_gh(pipe)
         else:
             self._run_local()

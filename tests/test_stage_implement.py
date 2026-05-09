@@ -11,11 +11,23 @@ import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
+from gremlins.pipeline import PipelineDef, StageEntry
 from gremlins.stages.base import StageContext
 from gremlins.stages.implement import Implement
 
 _TEMPLATE_LOCAL = "plan: {plan_text}{spec_block}{impl_commit_instr}"
 _TEMPLATE_GH = "{spec_block}{plan_source_label}{issue_body}{plan_location_note}"
+
+_GH_PIPELINE = PipelineDef(
+    name="gh",
+    path=pathlib.Path("."),
+    stages=[StageEntry(name="open-github-pr", type="open-github-pr", client=None, prompts=[], options={})],
+)
+_LOCAL_PIPELINE = PipelineDef(
+    name="local",
+    path=pathlib.Path("."),
+    stages=[StageEntry(name="plan", type="plan", client=None, prompts=[], options={})],
+)
 
 
 def _make_stage(
@@ -68,7 +80,7 @@ def test_gh_calls_claude_with_issue_body(tmp_path: pathlib.Path) -> None:
     stage, ctx = _make_stage(
         tmp_path, plan_text="issue body here", prompts=[_TEMPLATE_GH]
     )
-    pipe = SimpleNamespace(target="github")
+    pipe = SimpleNamespace(pipeline_data=_GH_PIPELINE)
     stage.run(pipe)
     assert len(ctx.client.calls) == 1
     call = ctx.client.calls[0]
@@ -85,7 +97,7 @@ def test_gh_plan_source_label_with_issue_num(
         "gremlins.stages.implement.resolve_state_file", lambda gr_id=None: state_file
     )
     stage, ctx = _make_stage(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH])
-    pipe = SimpleNamespace(target="github")
+    pipe = SimpleNamespace(pipeline_data=_GH_PIPELINE)
     stage.run(pipe)
     prompt = ctx.client.calls[0].prompt
     assert "from the GitHub issue" in prompt
@@ -93,7 +105,7 @@ def test_gh_plan_source_label_with_issue_num(
 
 def test_gh_plan_source_label_without_issue_num(tmp_path: pathlib.Path) -> None:
     stage, ctx = _make_stage(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH])
-    pipe = SimpleNamespace(target="github")
+    pipe = SimpleNamespace(pipeline_data=_GH_PIPELINE)
     stage.run(pipe)
     prompt = ctx.client.calls[0].prompt
     assert "below" in prompt

@@ -65,7 +65,6 @@ class StageRunner:
         gr_id: str | None,
         pipeline_data: _PipelineData,
         repo: str = "",
-        target: str = "local",
         state_file: pathlib.Path | None = None,
         stage_specs: dict[str, ClientSpec] | None = None,
         spec_clients: dict[str, ClaudeClient] | None = None,
@@ -88,7 +87,6 @@ class StageRunner:
         self.is_git = in_git_repo()
         self.pipeline_data = pipeline_data
         self.repo = repo
-        self.target = target
         self.state_file = state_file
         self.stage_specs: dict[str, ClientSpec] = stage_specs or {}
         self.spec_clients: dict[str, ClaudeClient] = spec_clients or {}

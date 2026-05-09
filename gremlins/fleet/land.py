@@ -14,18 +14,22 @@ import gremlins.git as _git
 from gremlins.fleet import constants as _constants
 from gremlins.fleet.resolve import resolve_gremlin
 from gremlins.fleet.state import (
-    effective_pipeline_kind,
     liveness_of_state_file,
     load_state,
 )
-from gremlins.state import read_pr_url
+from gremlins.state import landable_shape, read_pr_url
 from gremlins.utils import proc
 
 
 def expected_branch(state: dict[str, Any], gr_id: str):
     """Return the durable branch name for a gremlin, or None if there isn't one."""
-    if effective_pipeline_kind(state) == "local":
-        return f"bg/local/{gr_id}"
+    artifacts = list(state.get("artifacts") or [])
+    for art in reversed(artifacts):
+        if art.get("type") == "branch":
+            return str(art.get("name") or "") or None
+        if art.get("type") == "pr":
+            branch = str(art.get("branch") or "")
+            return branch or None
     return None
 
 
@@ -614,9 +618,17 @@ def _land_local(
         )
         return False
 
-    branch = state.get("branch", "")
+    artifacts = list(state.get("artifacts") or [])
+    branch = ""
+    for art in reversed(artifacts):
+        if art.get("type") == "branch":
+            branch = str(art.get("name") or "")
+            break
+        if art.get("type") == "pr":
+            branch = str(art.get("branch") or "")
+            break
     if not branch:
-        print(f"error: no branch field in state for {gr_id}")
+        print(f"error: no branch artifact in state for {gr_id}")
         return False
 
     project_root = state.get("project_root") or ""
@@ -843,22 +855,31 @@ def do_land(
         print(f"gremlin {gr_id} is still live ({live}) — use 'stop' first, then land")
         return False
 
-    pk = effective_pipeline_kind(state)
-    if pk == "local":
-        if live != "dead:finished":
-            print(f"gremlin {gr_id} is not finished (liveness: {live})")
-            return False
-        return _land_local(gr_id, sf, wdir, state, mode or "squash", into_dir=into_dir)
-    elif pk == "boss":
-        if live != "dead:finished":
-            print(f"gremlin {gr_id} is not finished (liveness: {live})")
-            return False
-        return _land_boss(gr_id, sf, wdir, state, mode or "ff")
-    elif pk == "gh":
+    shape = landable_shape(state)
+
+    if shape == "many_prs":
+        print("error: stacked PR series — merge in order on GitHub")
+        return False
+    if shape == "many_branches":
+        print("error: multiple unmerged branches; merge manually")
+        return False
+
+    if shape == "one_pr":
         if mode is not None:
             print(
                 "error: --squash/--ff are not applicable to gh gremlins (merged via PR)"
             )
             return False
         return _land_gh(gr_id, sf, wdir, state, force=force)
-    return False
+
+    if shape == "one_branch":
+        if live != "dead:finished":
+            print(f"gremlin {gr_id} is not finished (liveness: {live})")
+            return False
+        return _land_local(gr_id, sf, wdir, state, mode or "squash", into_dir=into_dir)
+
+    # shape == "empty": check if boss worktree has commits
+    if live != "dead:finished":
+        print(f"gremlin {gr_id} is not finished (liveness: {live})")
+        return False
+    return _land_boss(gr_id, sf, wdir, state, mode or "ff")

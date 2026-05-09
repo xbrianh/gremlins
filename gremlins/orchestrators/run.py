@@ -120,7 +120,6 @@ def run_pipeline(
         die(str(exc))
 
     is_gh = _any_stage_is_gh(pipeline.stages)
-    target = "github" if is_gh else "local"
 
     repo = ""
     state_file = resolve_state_file(gr_id)
@@ -198,7 +197,6 @@ def run_pipeline(
             gr_id=gr_id,
             pipeline_data=pipeline,
             repo=repo,
-            target=target,
             state_file=state_file if is_gh else None,
             spec_clients=_spec_clients,
             stage_specs=stage_specs,

@@ -5,11 +5,7 @@ from typing import Any
 
 import yaml
 
-from gremlins.fleet.state import effective_pipeline_kind, iter_state_files
-
-GREMLIN_STAGES = {
-    "boss": ["handoff", "waiting", "landing", "rescuing"],
-}
+from gremlins.fleet.state import iter_state_files
 
 
 def stage_names_for_gremlin(state: dict[str, Any]) -> list[str]:
@@ -22,8 +18,7 @@ def stage_names_for_gremlin(state: dict[str, Any]) -> list[str]:
             return [s.name for s in pipeline.stages]
         except (FileNotFoundError, ValueError, yaml.YAMLError):
             pass
-    pk = effective_pipeline_kind(state)
-    return list(GREMLIN_STAGES.get(pk, []))
+    return []
 
 
 def resolve_gremlin(target: str) -> tuple[str, str, str] | None:

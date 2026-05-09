@@ -13,8 +13,6 @@ import gremlins.fleet.land as _land_mod
 import gremlins.fleet.rescue as _rescue
 import gremlins.fleet.rescue as _rescue_mod
 from gremlins import fleet as gremlins
-from gremlins.fleet.resolve import GREMLIN_STAGES, stage_names_for_gremlin
-from gremlins.fleet.state import effective_pipeline_kind
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -237,12 +235,11 @@ def test_build_row_no_rescue_suffix_when_zero():
     assert "(rescue" not in row.liveness
 
 
-def test_build_row_boss_waiting_with_child_stage():
+def test_build_row_waiting_with_sub_stage():
     state = {
-        "kind": "boss",
-        "pipeline_kind": "boss",
+        "kind": "bossgremlin",
         "stage": "waiting",
-        "chain_current_child_stage": "implement",
+        "sub_stage": "implement",
         "started_at": "",
     }
     row = gremlins.build_row("g1", "/sf", "/wdir", state, "waiting (3m12s)")
@@ -667,7 +664,7 @@ def test_land_local_squash_lands_branch_and_deletes_it(tmp_path, monkeypatch, ca
         "status": "dead",
         "exit_code": 0,
         "setup_kind": "worktree-branch",
-        "branch": branch,
+        "artifacts": [{"type": "branch", "name": branch}],
         "workdir": str(workdir),
         "project_root": str(project_root),
     }
@@ -756,7 +753,7 @@ def test_land_local_squash_folds_commit_synthesis_cost_into_total(
         "status": "dead",
         "exit_code": 0,
         "setup_kind": "worktree-branch",
-        "branch": branch,
+        "artifacts": [{"type": "branch", "name": branch}],
         "workdir": str(workdir),
         "project_root": str(project_root),
         "total_cost_usd": 1.0,
@@ -798,11 +795,10 @@ def test_land_local_refuses_when_branch_missing_from_state(
         "id": "x",
         "kind": "localgremlin",
         "setup_kind": "worktree-branch",
-        "branch": "",
     }
     ok = _land._land_local("x", "/sf", "/wdir", state, mode="squash")
     assert ok is False
-    assert "no branch field" in capsys.readouterr().out
+    assert "no branch artifact" in capsys.readouterr().out
 
 
 def test_land_local_into_dir_nonexistent_fails(tmp_path, monkeypatch, capsys):
@@ -811,7 +807,7 @@ def test_land_local_into_dir_nonexistent_fails(tmp_path, monkeypatch, capsys):
         "id": "x",
         "kind": "localgremlin",
         "setup_kind": "worktree-branch",
-        "branch": "bg/local/x",
+        "artifacts": [{"type": "branch", "name": "bg/local/x"}],
         "project_root": str(tmp_path / "project"),
     }
     ok = _land._land_local(
@@ -883,7 +879,7 @@ def test_land_local_into_dir_lands_in_worktree(tmp_path, monkeypatch, capsys):
         "status": "dead",
         "exit_code": 0,
         "setup_kind": "worktree-branch",
-        "branch": branch,
+        "artifacts": [{"type": "branch", "name": branch}],
         "workdir": str(workdir),
         "project_root": str(project_root),
         "total_cost_usd": 1.0,
@@ -956,7 +952,7 @@ def test_land_proceeds_with_untracked_files_present(tmp_path, monkeypatch, capsy
         "status": "dead",
         "exit_code": 0,
         "setup_kind": "worktree-branch",
-        "branch": branch,
+        "artifacts": [{"type": "branch", "name": branch}],
         "workdir": str(workdir),
         "project_root": str(project_root),
     }
@@ -1021,7 +1017,7 @@ def test_land_refuses_with_tracked_modifications(tmp_path, monkeypatch, capsys):
         "status": "dead",
         "exit_code": 0,
         "setup_kind": "worktree-branch",
-        "branch": branch,
+        "artifacts": [{"type": "branch", "name": branch}],
         "workdir": str(workdir),
         "project_root": str(project_root),
     }
@@ -1083,7 +1079,7 @@ def test_squash_land_failure_preserves_untracked_files(tmp_path, monkeypatch):
         "status": "dead",
         "exit_code": 0,
         "setup_kind": "worktree-branch",
-        "branch": branch,
+        "artifacts": [{"type": "branch", "name": branch}],
         "workdir": str(workdir),
         "project_root": str(project_root),
     }
@@ -1299,73 +1295,47 @@ def test_rescue_host_terminated_recreates_worktree_and_proceeds(
     assert "recreated" in out
 
 
-# ---------------------------------------------------------------------------
-# pipeline_kind — effective_pipeline_kind and fleet dispatch correctness
-# ---------------------------------------------------------------------------
-
-
-# Each entry: (label, state_dict, expected_pipeline_kind)
-_PIPELINE_KIND_CASES = [
-    ("new_local", {"kind": "custard", "pipeline_kind": "local"}, "local"),
-    ("new_gh", {"kind": "custard", "pipeline_kind": "gh"}, "gh"),
-    ("new_boss", {"kind": "custard", "pipeline_kind": "boss"}, "boss"),
-    # No pipeline_kind set falls back to "local"
-    ("missing_pipeline_kind", {"kind": "custard"}, "local"),
-    ("no_kind", {}, "local"),
-]
-
-
 @pytest.mark.parametrize(
-    "label,state,expected",
-    _PIPELINE_KIND_CASES,
-    ids=[c[0] for c in _PIPELINE_KIND_CASES],
-)
-def test_effective_pipeline_kind(label, state, expected):
-    assert effective_pipeline_kind(state) == expected
-
-
-@pytest.mark.parametrize(
-    "label,state,expected",
-    _PIPELINE_KIND_CASES,
-    ids=[c[0] for c in _PIPELINE_KIND_CASES],
-)
-def test_stage_names_for_gremlin_boss_only(label, state, expected):
-    stages = stage_names_for_gremlin(state)
-    if expected == "boss":
-        assert stages == GREMLIN_STAGES["boss"]
-    else:
-        assert stages == []
-
-
-@pytest.mark.parametrize(
-    "label,state,expected_land_fn",
+    "label,state,artifacts,expected_land_fn",
     [
         (
-            "new_local_land",
+            "one_branch",
             {
-                "kind": "custard",
-                "pipeline_kind": "local",
+                "kind": "localgremlin",
                 "setup_kind": "worktree-branch",
-                "branch": "bg/local/x",
                 "id": "x",
+                "artifacts": [{"type": "branch", "name": "bg/local/x"}],
             },
+            [],
             "_land_local",
         ),
         (
-            "new_boss_land",
-            {"kind": "custard", "pipeline_kind": "boss", "id": "x"},
+            "empty_with_workdir",
+            {
+                "kind": "bossgremlin",
+                "id": "x",
+            },
+            [],
             "_land_boss",
         ),
         (
-            "new_gh_land",
-            {"kind": "custard", "pipeline_kind": "gh", "id": "x"},
+            "one_pr",
+            {
+                "kind": "ghgremlin",
+                "id": "x",
+                "artifacts": [
+                    {"type": "branch", "name": "feat"},
+                    {"type": "pr", "url": "https://github.com/o/r/pull/1", "branch": "feat"},
+                ],
+            },
+            [],
             "_land_gh",
         ),
     ],
     ids=lambda x: x if isinstance(x, str) else "",
 )
 def test_do_land_dispatches_to_correct_helper(
-    label, state, expected_land_fn, tmp_path, monkeypatch, capsys
+    label, state, artifacts, expected_land_fn, tmp_path, monkeypatch, capsys
 ):
     gr_id = "test-dispatch-id"
     state_root = tmp_path / "state-root"
@@ -1407,8 +1377,8 @@ def test_do_land_dispatches_to_correct_helper(
     assert called == [expected_land_fn], f"expected {expected_land_fn}, got {called}"
 
 
-def test_do_land_custom_pipeline_name_routes_to_local(tmp_path, monkeypatch):
-    """A custom-named pipeline with pipeline_kind=local must land, not fail with 'unknown kind'."""
+def test_do_land_one_branch_routes_to_local(tmp_path, monkeypatch):
+    """A gremlin with one branch artifact dispatches to _land_local."""
     gr_id = "custard-pipeline-id"
     state_root = tmp_path / "state-root"
     state_root.mkdir()
@@ -1418,13 +1388,12 @@ def test_do_land_custom_pipeline_name_routes_to_local(tmp_path, monkeypatch):
     state = {
         "id": gr_id,
         "kind": "custard",
-        "pipeline_kind": "local",
         "status": "dead",
         "exit_code": 0,
         "workdir": str(workdir),
         "project_root": str(tmp_path / "project"),
         "setup_kind": "worktree-branch",
-        "branch": "bg/local/custard-pipeline-id",
+        "artifacts": [{"type": "branch", "name": "bg/local/custard-pipeline-id"}],
     }
     _write_state(gr_dir, state, finished=True)
     monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
@@ -1445,11 +1414,11 @@ def test_do_land_custom_pipeline_name_routes_to_local(tmp_path, monkeypatch):
     assert called == ["_land_local"]
 
 
-def test_rescue_prompt_kind_uses_pipeline_kind():
-    """build_rescue_prompt must use effective_pipeline_kind, not the raw kind field."""
+def test_rescue_prompt_uses_pipeline_name():
+    """build_rescue_prompt uses pipeline name from pipeline_path, not raw kind."""
     state = {
         "kind": "custard",
-        "pipeline_kind": "boss",
+        "pipeline_path": "/some/path/boss.yaml",
         "stage": "chain",
         "description": "test",
         "project_root": "",
@@ -1458,4 +1427,4 @@ def test_rescue_prompt_kind_uses_pipeline_kind():
     }
     prompt = _rescue_mod.build_rescue_prompt(state, "log", "/sf", "/log", "/marker")
     assert "boss" in prompt
-    assert "custard" not in prompt.split("Kind:")[1].split("\n")[0]
+    assert "custard" not in prompt.split("Pipeline:")[1].split("\n")[0]

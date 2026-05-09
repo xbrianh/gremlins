@@ -34,7 +34,6 @@ def _local(
         session_dir=tmp_path,
         gr_id=None,
         pipeline_data=_pipeline_data(stages),
-        target="local",
     )
 
 
@@ -46,7 +45,6 @@ def test_pipeline_constructs_from_local_yaml(tmp_path: pathlib.Path) -> None:
         session_dir=tmp_path,
         gr_id=None,
         pipeline_data=pipeline_data,
-        target="local",
     )
 
     assert len(pipe.stages) > 0
@@ -54,7 +52,6 @@ def test_pipeline_constructs_from_local_yaml(tmp_path: pathlib.Path) -> None:
     stage_types = [s.type for s in pipe.stages]
     assert "plan" in stage_types
     assert "implement" in stage_types
-    assert pipe.target == "local"
     assert "plan" in STAGE_BUILDERS
     assert "implement" in STAGE_BUILDERS
     assert "review-code" in STAGE_BUILDERS
@@ -71,7 +68,6 @@ def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
         gr_id=None,
         pipeline_data=pipeline_data,
         repo="",
-        target="github",
         state_file=None,
     )
 
@@ -80,7 +76,6 @@ def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
     stage_types = [s.type for s in pipe.stages]
     assert "plan" in stage_types
     assert "implement" in stage_types
-    assert pipe.target == "github"
     assert "plan" in STAGE_BUILDERS
     assert "implement" in STAGE_BUILDERS
     assert "commit" in STAGE_BUILDERS

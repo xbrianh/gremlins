@@ -269,6 +269,42 @@ def last_artifact_branch(gr_id: str | None) -> str:
     return ""
 
 
+def landable_shape(
+    state: dict[str, Any],
+) -> str:
+    """Classify artifact shape for land dispatch.
+
+    Returns one of: 'empty', 'one_branch', 'many_branches', 'one_pr', 'many_prs'.
+    A pr artifact supersedes its associated branch artifact.
+    """
+    artifacts = list(state.get("artifacts") or [])
+    branches: dict[str, bool] = {}  # name -> has_pr
+    prs: list[dict[str, Any]] = []
+
+    for art in artifacts:
+        if art.get("type") == "branch":
+            name = str(art.get("name") or "")
+            if name and name not in branches:
+                branches[name] = False
+        elif art.get("type") == "pr":
+            prs.append(art)
+            branch = str(art.get("branch") or "")
+            if branch in branches:
+                branches[branch] = True
+
+    unmerged = [n for n, has_pr in branches.items() if not has_pr]
+
+    if not prs and not unmerged:
+        return "empty"
+    if not prs and len(unmerged) == 1:
+        return "one_branch"
+    if not prs:
+        return "many_branches"
+    if len(prs) == 1:
+        return "one_pr"
+    return "many_prs"
+
+
 def check_bail(
     gr_id: str | None,
     label: str = "stage",
