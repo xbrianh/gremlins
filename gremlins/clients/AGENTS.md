@@ -29,10 +29,16 @@ directly — the protocol is the seam tests swap out.
   `resolve_stage_client`, `require_stage_spec`,
   `load_stage_specs_from_state`, `validate_stage_specs`) that decide which
   client each stage gets and persist that decision to `state.json`.
-- `__init__.py` — registers the `claude` and `copilot` factories with
-  `gremlins.stages.registry.CLIENT_FACTORIES` at import time and exposes
+- `__init__.py` — registers the `claude`, `copilot`, and `openai` factories
+  with `gremlins.stages.registry.CLIENT_FACTORIES` at import time and exposes
   `to_client(spec)` for the orchestrator. Importing the package is what
   wires the providers up.
+- `tools.py` — `GREMLINS_TOOLS`, the list of `openai-agents` `FunctionTool`
+  objects (Read, Edit, Bash, Write, Grep, Glob) that back the OpenAI
+  provider's agent loop.
+- `providers/` — vendor-SDK backends. All `agents`/`openai` SDK imports live
+  here; nothing outside `__init__.py` imports from this subpackage. See
+  `providers/AGENTS.md` for the full boundary contract.
 
 ## Conventions
 
