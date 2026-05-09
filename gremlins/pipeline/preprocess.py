@@ -73,12 +73,16 @@ def _expand_entry(
         entry["prompt"] = _read_prompts(entry["prompt"], prompt_dir)
 
     if "parallel" in entry and isinstance(entry["parallel"], list):
-        entry["parallel"] = [
-            _expand_entry(cast(dict[str, Any], child), prompt_dir, project_root, chain)[
-                0
-            ]
-            for child in cast(list[Any], entry["parallel"])
-        ]
+        expanded_parallel: list[dict[str, Any]] = []
+        for child in cast(list[Any], entry["parallel"]):
+            expanded = _expand_entry(cast(dict[str, Any], child), prompt_dir, project_root, chain)
+            if len(expanded) != 1:
+                raise ValueError(
+                    f"parallel child expanded to {len(expanded)} stages via include; "
+                    "includes inside parallel groups must resolve to exactly one stage"
+                )
+            expanded_parallel.append(expanded[0])
+        entry["parallel"] = expanded_parallel
 
     if "body" in entry and isinstance(entry["body"], list):
         expanded_body: list[dict[str, Any]] = []

@@ -94,9 +94,11 @@ def _parse_stage_entry(
         stage_client = ClientSpec.parse(client_spec_raw)
 
     raw_prompts = entry.get("prompt")
-    prompts: list[str] = (
-        cast(list[str], raw_prompts) if isinstance(raw_prompts, list) else []
-    )
+    if raw_prompts is not None and not isinstance(raw_prompts, list):
+        raise ValueError(
+            f"stage {name!r}: 'prompt' must be a list after preprocessing, got {type(raw_prompts)!r}"
+        )
+    prompts: list[str] = cast(list[str], raw_prompts) if raw_prompts is not None else []
 
     options = dict(cast(dict[str, Any], entry.get("options") or {}))
 
