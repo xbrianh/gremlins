@@ -17,12 +17,18 @@ def run(
 
 
 def run_ok(cmd: list[str], *, cwd: str | None = None) -> bool:
-    r = subprocess.run(cmd, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    r = subprocess.run(
+        cmd, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
     return r.returncode == 0
 
 
-def run_quiet(cmd: list[str], *, cwd: str | None = None) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(cmd, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+def run_quiet(
+    cmd: list[str], *, cwd: str | None = None
+) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        cmd, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
 
 
 def run_or_raise(cmd: list[str], *, cwd: str | None = None) -> str:

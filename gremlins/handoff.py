@@ -123,7 +123,9 @@ def collect_git_context(
         die(f"could not compute merge-base between {inspect_rev!r} and {target!r}")
     merge_base = result.stdout.strip()
 
-    result = proc.run(["git", "log", f"{merge_base}..{inspect_rev}", "--oneline"], check=True)
+    result = proc.run(
+        ["git", "log", f"{merge_base}..{inspect_rev}", "--oneline"], check=True
+    )
     git_log = result.stdout.strip()
 
     result = proc.run(["git", "diff", f"{merge_base}..{inspect_rev}"], check=True)

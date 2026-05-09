@@ -161,7 +161,9 @@ def is_ancestor(
     ref_a: str, ref_b: str, *, cwd: str | os.PathLike[str] | None = None
 ) -> bool:
     try:
-        return proc.run_ok(["git", "merge-base", "--is-ancestor", ref_a, ref_b], cwd=cwd)  # type: ignore[arg-type]
+        return proc.run_ok(
+            ["git", "merge-base", "--is-ancestor", ref_a, ref_b], cwd=cwd
+        )  # type: ignore[arg-type]
     except OSError:
         return False
 
@@ -319,8 +321,12 @@ def classify_impl_outcome(pre: PreImplState, cwd: str | None = None) -> ImplOutc
     post_head = head_r.stdout.strip() if head_r.returncode == 0 else ""
 
     if post_head and post_head != pre.head:
-        if proc.run_ok(["git", "merge-base", "--is-ancestor", pre.head, post_head], cwd=cwd):
-            count_r = proc.run(["git", "rev-list", "--count", f"{pre.head}..HEAD"], cwd=cwd)
+        if proc.run_ok(
+            ["git", "merge-base", "--is-ancestor", pre.head, post_head], cwd=cwd
+        ):
+            count_r = proc.run(
+                ["git", "rev-list", "--count", f"{pre.head}..HEAD"], cwd=cwd
+            )
             count = int(count_r.stdout.strip() or "0") if count_r.returncode == 0 else 0
             return HeadAdvanced(commit_count=count)
         return DivergentHead(pre_head=pre.head, post_head=post_head)
@@ -339,7 +345,9 @@ def create_handoff_branch(pre: PreImplState, cwd: str | None = None) -> str:
     same repo don't collide.
     """
     handoff = f"ghgremlin-impl-handoff-{os.getpid()}"
-    if proc.run_ok(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{handoff}"], cwd=cwd):
+    if proc.run_ok(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{handoff}"], cwd=cwd
+    ):
         raise RuntimeError(
             f"hand-off branch {handoff} already exists; refusing to clobber"
         )
@@ -377,7 +385,12 @@ def sweep_stale_handoff_branches(handoff_branch: str, cwd: str | None = None) ->
     stale branches that are ancestors of the current HEAD.
     """
     list_r = proc.run(
-        ["git", "for-each-ref", "--format=%(refname:short)", "refs/heads/ghgremlin-impl-handoff-*"],
+        [
+            "git",
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/heads/ghgremlin-impl-handoff-*",
+        ],
         cwd=cwd,
     )
     if list_r.returncode != 0:
@@ -409,7 +422,9 @@ def setup_worktree_branch(
     workdir = tempfile.mkdtemp(prefix="aibg-localgremlin.")
     os.rmdir(workdir)
     branch = f"{branch_prefix}/{gr_id}"
-    r = proc.run(["git", "worktree", "add", "-b", branch, workdir, base_ref], cwd=project_root)
+    r = proc.run(
+        ["git", "worktree", "add", "-b", branch, workdir, base_ref], cwd=project_root
+    )
     if r.returncode != 0:
         raise RuntimeError(f"git worktree add -b {branch!r} failed: {r.stderr.strip()}")
     return workdir, branch
@@ -422,7 +437,9 @@ def setup_detached_worktree(project_root: str, base_ref: str) -> str:
     """
     workdir = tempfile.mkdtemp(prefix="aibg-gremlin.")
     os.rmdir(workdir)
-    r = proc.run(["git", "worktree", "add", "--detach", workdir, base_ref], cwd=project_root)
+    r = proc.run(
+        ["git", "worktree", "add", "--detach", workdir, base_ref], cwd=project_root
+    )
     if r.returncode != 0:
         raise RuntimeError(
             f"git worktree add --detach {base_ref!r} failed: {r.stderr.strip()}"
@@ -446,7 +463,9 @@ def toplevel(cwd: str | os.PathLike[str] | None = None) -> str:
 def remove_worktree(project_root: str, workdir: str) -> None:
     """Remove a git worktree and prune stale entries. Best-effort; never raises."""
     try:
-        proc.run_quiet(["git", "worktree", "remove", "--force", workdir], cwd=project_root)
+        proc.run_quiet(
+            ["git", "worktree", "remove", "--force", workdir], cwd=project_root
+        )
         proc.run_quiet(["git", "worktree", "prune"], cwd=project_root)
     except Exception:
         pass
