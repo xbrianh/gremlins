@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import sys
 from typing import Any
 
@@ -20,7 +21,9 @@ from gremlins.git import (
 )
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
-from gremlins.state import patch_state, resolve_state_file
+from gremlins.state import patch_state, resolve_state_file, upsert_child_record
+
+logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass
@@ -89,6 +92,13 @@ class MaterializeToBranch(Stage):
             impl_materialized_branch=result.materialized_branch,
             impl_base_ref=result.base_ref,
         )
+        if materialized_branch and self.state.gr_id:
+            try:
+                upsert_child_record(self.state.gr_id, branch=materialized_branch)
+            except Exception:
+                logger.warning(
+                    "failed to record child branch in chain_state", exc_info=True
+                )
         return result
 
 

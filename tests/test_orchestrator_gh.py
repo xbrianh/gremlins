@@ -2072,3 +2072,74 @@ def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
     plan_call = next(c for c in client.calls if c.label == "plan")
     assert "instr from state" in plan_call.prompt
     assert "instr from cli" not in plan_call.prompt
+
+
+# ---------------------------------------------------------------------------
+# _any_stage_is_gh: recursive gh-type detection
+# ---------------------------------------------------------------------------
+
+
+def test_any_stage_is_gh_detects_top_level_gh_stage() -> None:
+    from gremlins.orchestrators.run import _any_stage_is_gh
+    from gremlins.pipeline.schema import StageEntry
+
+    stages = [
+        StageEntry(
+            name="open-pr", type="open-github-pr", client=None, prompts=[], options={}
+        )
+    ]
+    assert _any_stage_is_gh(stages) is True
+
+
+def test_any_stage_is_gh_false_for_local_stages() -> None:
+    from gremlins.orchestrators.run import _any_stage_is_gh
+    from gremlins.pipeline.schema import StageEntry
+
+    stages = [
+        StageEntry(name="plan", type="plan", client=None, prompts=[], options={}),
+        StageEntry(
+            name="implement", type="implement", client=None, prompts=[], options={}
+        ),
+    ]
+    assert _any_stage_is_gh(stages) is False
+
+
+def test_any_stage_is_gh_recurses_into_loop_body() -> None:
+    """A loop containing gh-mode body stages is detected as gh."""
+    from gremlins.orchestrators.run import _any_stage_is_gh
+    from gremlins.pipeline.schema import StageEntry
+
+    gh_body = [
+        StageEntry(name="handoff", type="handoff", client=None, prompts=[], options={}),
+        StageEntry(
+            name="open-pr", type="open-github-pr", client=None, prompts=[], options={}
+        ),
+    ]
+    loop = StageEntry(
+        name="chain", type="loop", client=None, prompts=[], options={}, body=gh_body
+    )
+    stages = [loop]
+    assert _any_stage_is_gh(stages) is True
+
+
+def test_any_stage_is_gh_false_for_local_loop_body() -> None:
+    """A loop with only local-mode body stages is not detected as gh."""
+    from gremlins.orchestrators.run import _any_stage_is_gh
+    from gremlins.pipeline.schema import StageEntry
+
+    local_body = [
+        StageEntry(name="handoff", type="handoff", client=None, prompts=[], options={}),
+        StageEntry(
+            name="implement", type="implement", client=None, prompts=[], options={}
+        ),
+    ]
+    loop = StageEntry(
+        name="chain", type="loop", client=None, prompts=[], options={}, body=local_body
+    )
+    stages = [
+        loop,
+        StageEntry(
+            name="review-chain", type="review-code", client=None, prompts=[], options={}
+        ),
+    ]
+    assert _any_stage_is_gh(stages) is False

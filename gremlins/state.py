@@ -16,7 +16,7 @@ import pathlib
 import re
 import secrets
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from gremlins import paths as _paths
 
@@ -273,3 +273,50 @@ def check_bail(
         raise
     except Exception:
         pass
+
+
+def get_prev_child_branch(gr_id: str | None) -> str:
+    """Return the branch from child_records at handoff_count-1, or '' on missing/error."""
+    sf = resolve_state_file(gr_id)
+    if sf is None or not sf.exists():
+        return ""
+    try:
+        data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
+        chain_st = data.get("chain_state")
+        if not isinstance(chain_st, dict):
+            return ""
+        cs = cast(dict[str, Any], chain_st)
+        n = int(cs.get("handoff_count", 0))
+        records: list[dict[str, Any]] = list(cs.get("child_records") or [])
+        for rec in records:
+            if rec.get("n") == n - 1:
+                return str(rec.get("branch") or "")
+    except Exception:
+        pass
+    return ""
+
+
+def upsert_child_record(gr_id: str | None, **fields: Any) -> None:
+    """Upsert a child_records entry at handoff_count in chain_state.
+
+    Filters None values from fields. Raises on read/write errors — caller logs.
+    """
+    sf = resolve_state_file(gr_id)
+    if sf is None or not sf.exists() or not gr_id:
+        return
+    data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
+    chain_st = data.get("chain_state")
+    if not isinstance(chain_st, dict):
+        return
+    cs = cast(dict[str, Any], chain_st)
+    n = int(cs.get("handoff_count", 0))
+    updates = {k: v for k, v in fields.items() if v is not None}
+    records: list[dict[str, Any]] = list(cs.get("child_records") or [])
+    for rec in records:
+        if rec.get("n") == n:
+            rec.update(updates)
+            break
+    else:
+        records.append({"n": n, **updates})
+    cs["child_records"] = records
+    patch_state(gr_id, chain_state=cs)
