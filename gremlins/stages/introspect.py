@@ -11,7 +11,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-SKIP_PARAMS = frozenset({"self", "entry", "model"})
 SUPPORTED_TYPES: tuple[type, ...] = (str, int, float, bool, pathlib.Path)
 
 _INFRA_FLAGS = frozenset(
@@ -86,7 +85,7 @@ def stage_argspecs(stage_cls: type) -> list[ArgSpec]:
     sig = inspect.signature(stage_cls.__init__)
     specs: list[ArgSpec] = []
     for name, param in sig.parameters.items():
-        if name in SKIP_PARAMS:
+        if param.kind is not inspect.Parameter.KEYWORD_ONLY:
             continue
         annotation = hints.get(name, param.annotation)
         if annotation is inspect.Parameter.empty:
