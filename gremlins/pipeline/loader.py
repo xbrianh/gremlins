@@ -7,7 +7,7 @@ from typing import Any, cast
 from gremlins.clients import ClientSpec
 from gremlins.pipeline.preprocess import expand_pipeline
 from gremlins.pipeline.schema import PipelineDef, StageEntry
-from gremlins.stages.registry import STAGE_REGISTRY
+from gremlins.stages import STAGE_REGISTRY
 
 
 def _ensure_registered() -> None:

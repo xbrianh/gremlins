@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from gremlins.stages.base import Stage
+from .base import Stage
 
 
 class CompoundStage(Stage):

@@ -23,7 +23,13 @@ importlib.import_module("gremlins.stages.registry")
 stage_mods = [
     k for k in sys.modules
     if k.startswith("gremlins.stages.")
-    and k not in ("gremlins.stages.registry", "gremlins.stages", "gremlins.stages.base")
+    and k not in (
+        "gremlins.stages.registry",
+        "gremlins.stages",
+        "gremlins.stages.base",
+        "gremlins.stages.compound",
+        "gremlins.stages.loop",
+    )
 ]
 assert not stage_mods, f"unexpected stage modules: {stage_mods}"
 assert "gremlins.pipeline" not in sys.modules, "gremlins.pipeline was imported"
