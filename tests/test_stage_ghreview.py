@@ -13,7 +13,11 @@ from gremlins.stages.base import StageContext
 from gremlins.stages.review_code import ReviewCode
 
 PR_URL = "https://github.com/owner/repo/pull/42"
-_GH_PIPE = types.SimpleNamespace(target="github")
+_GH_PIPE = types.SimpleNamespace(
+    pipeline_data=types.SimpleNamespace(
+        stages=[types.SimpleNamespace(type="ghreview")]
+    )
+)
 
 
 def _make_stage(

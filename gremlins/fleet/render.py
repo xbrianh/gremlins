@@ -39,7 +39,7 @@ def build_row(
         os.path.basename(pipeline_path).replace(".yaml", "")
         if pipeline_path
         else str(state.get("kind") or "unknown")
-    )
+    )[:15]
     pr = state.get("project_root", "")
     stage = state.get("stage") or "-"
     sub = state.get("sub_stage")

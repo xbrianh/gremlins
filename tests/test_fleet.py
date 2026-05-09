@@ -1313,6 +1313,7 @@ def test_rescue_host_terminated_recreates_worktree_and_proceeds(
             "empty_with_workdir",
             {
                 "kind": "bossgremlin",
+                "setup_kind": "worktree-detached",
                 "id": "x",
             },
             [],

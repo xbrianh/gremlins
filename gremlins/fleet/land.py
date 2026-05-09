@@ -618,15 +618,7 @@ def _land_local(
         )
         return False
 
-    artifacts = list(state.get("artifacts") or [])
-    branch = ""
-    for art in reversed(artifacts):
-        if art.get("type") == "branch":
-            branch = str(art.get("name") or "")
-            break
-        if art.get("type") == "pr":
-            branch = str(art.get("branch") or "")
-            break
+    branch = expected_branch(state, gr_id)
     if not branch:
         print(f"error: no branch artifact in state for {gr_id}")
         return False
@@ -878,7 +870,10 @@ def do_land(
             return False
         return _land_local(gr_id, sf, wdir, state, mode or "squash", into_dir=into_dir)
 
-    # shape == "empty": check if boss worktree has commits
+    # shape == "empty": only boss gremlins (worktree-detached) have commits to land
+    if state.get("setup_kind") != "worktree-detached":
+        print(f"error: gremlin {gr_id} has no branch or PR artifacts to land")
+        return False
     if live != "dead:finished":
         print(f"gremlin {gr_id} is not finished (liveness: {live})")
         return False

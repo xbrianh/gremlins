@@ -14,7 +14,11 @@ _BUNDLED_PROMPTS = (
     pathlib.Path(__file__).resolve().parent.parent / "gremlins" / "prompts"
 )
 
-_GH_PIPE = types.SimpleNamespace(target="github")
+_GH_PIPE = types.SimpleNamespace(
+    pipeline_data=types.SimpleNamespace(
+        stages=[types.SimpleNamespace(type="ghreview")]
+    )
+)
 
 
 def _make_ctx(

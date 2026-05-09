@@ -300,6 +300,8 @@ def landable_shape(
         return "one_branch"
     if not prs:
         return "many_branches"
+    if unmerged:
+        return "many_branches"
     if len(prs) == 1:
         return "one_pr"
     return "many_prs"

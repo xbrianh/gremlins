@@ -31,7 +31,6 @@ __all__ = [
     "BUNDLED_PROMPT_PREFIX",
     "PipelineDef",
     "StageEntry",
-    "_GH_STAGE_TYPES",
     "list_pipelines",
     "load_pipeline",
     "overlay_dir",
