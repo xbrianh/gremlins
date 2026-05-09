@@ -107,7 +107,9 @@ class Verify(Stage):
             )
             check_bail(state.gr_id, f"verify-fix-{n}", child_key=state.child_key)
 
-        loop = LoopStage.from_runners([_run_cmd, _run_fix], name="verify", max_iterations=max_attempts)
+        loop = LoopStage.from_runners(
+            [_run_cmd, _run_fix], name="verify", max_iterations=max_attempts
+        )
         loop.bind(state)
         try:
             loop.run(pipe)

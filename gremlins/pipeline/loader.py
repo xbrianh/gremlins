@@ -184,7 +184,9 @@ def _parse_stage_entry(
             if not isinstance(raw_body, list):
                 raise ValueError(f"stage {name!r}: 'body' must be a list")
             for body_entry in cast(list[dict[str, Any]], raw_body):
-                for parsed in _parse_stage_entries_or_include(body_entry, prompt_dir, depth=depth + 1):
+                for parsed in _parse_stage_entries_or_include(
+                    body_entry, prompt_dir, depth=depth + 1
+                ):
                     body.append(parsed)
 
     return StageEntry(

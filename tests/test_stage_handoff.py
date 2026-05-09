@@ -139,7 +139,9 @@ def test_next_plan_writes_plan_and_raises(tmp_path, monkeypatch, test_state_root
 
     def fake_handoff_run(client: Any, args: argparse.Namespace) -> int:
         n = int(str(args.out).split("-")[-1].split(".")[0])
-        _make_signal_file(pathlib.Path(args.out).parent, n, "next-plan", str(child_plan))
+        _make_signal_file(
+            pathlib.Path(args.out).parent, n, "next-plan", str(child_plan)
+        )
         return 0
 
     monkeypatch.setattr("gremlins.stages.handoff.handoff_mod.run", fake_handoff_run)

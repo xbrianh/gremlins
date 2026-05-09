@@ -1,4 +1,5 @@
 """Handoff stage: runs the handoff agent once per boss loop iteration."""
+
 from __future__ import annotations
 
 import argparse
@@ -84,12 +85,14 @@ class Handoff(Stage):
         if os.path.isfile(sig.get("out_path", "") or ""):
             chain_st["current_plan"] = sig["out_path"]
 
-        chain_st["handoff_records"].append({
-            "n": handoff_count,
-            "plan_in": pre_update_plan,
-            "exit_state": exit_state,
-            "signal_file": sig.get("signal_path", ""),
-        })
+        chain_st["handoff_records"].append(
+            {
+                "n": handoff_count,
+                "plan_in": pre_update_plan,
+                "exit_state": exit_state,
+                "signal_file": sig.get("signal_path", ""),
+            }
+        )
         self._save_chain_state(chain_st)
 
         if exit_state == "chain-done":
@@ -156,7 +159,9 @@ class Handoff(Stage):
             raise RuntimeError(f"handoff signal file not written: {signal_path}")
 
         try:
-            sig_data: dict[str, Any] = json.loads(signal_path.read_text(encoding="utf-8"))
+            sig_data: dict[str, Any] = json.loads(
+                signal_path.read_text(encoding="utf-8")
+            )
         except Exception as exc:
             raise RuntimeError(
                 f"could not parse handoff signal file {signal_path}: {exc}"
