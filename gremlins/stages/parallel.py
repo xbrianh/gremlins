@@ -7,7 +7,6 @@ import json
 import logging
 import pathlib
 import secrets
-import subprocess
 import tempfile
 import threading
 from collections.abc import Callable
@@ -15,6 +14,7 @@ from typing import Any
 
 from gremlins.stages.base import StageContext
 from gremlins.stages.compound import CompoundStage
+from gremlins.utils import proc
 
 logger = logging.getLogger(__name__)
 
@@ -88,14 +88,7 @@ def _parallel_stages(
 
     def _in_git_repo() -> bool:
         try:
-            r = subprocess.run(
-                ["git", "rev-parse", "--git-dir"],
-                cwd=str(project_root),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
-            return r.returncode == 0
+            return proc.run_ok(["git", "rev-parse", "--git-dir"], cwd=str(project_root))
         except Exception:
             return False
 
@@ -143,21 +136,11 @@ def _parallel_stages(
             return
         for wt in paths:
             try:
-                subprocess.run(
-                    ["git", "worktree", "remove", "--force", str(wt)],
-                    cwd=str(project_root),
-                    capture_output=True,
-                    check=False,
-                )
+                proc.run_quiet(["git", "worktree", "remove", "--force", str(wt)], cwd=str(project_root))
             except Exception:
                 pass
         try:
-            subprocess.run(
-                ["git", "worktree", "prune"],
-                cwd=str(project_root),
-                capture_output=True,
-                check=False,
-            )
+            proc.run_quiet(["git", "worktree", "prune"], cwd=str(project_root))
         except Exception:
             pass
 
@@ -176,20 +159,9 @@ def _parallel_stages(
         if not _in_git_repo():
             return
 
-        subprocess.run(
-            ["git", "worktree", "prune"],
-            cwd=str(project_root),
-            capture_output=True,
-            check=False,
-        )
+        proc.run_quiet(["git", "worktree", "prune"], cwd=str(project_root))
 
-        r = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(project_root),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        r = proc.run(["git", "rev-parse", "HEAD"], cwd=str(project_root))
         base_head = r.stdout.strip() if r.returncode == 0 else ""
 
         try:
@@ -198,13 +170,7 @@ def _parallel_stages(
                     pathlib.Path(tempfile.gettempdir())
                     / f"aibg-parallel-{group_name}-{secrets.token_hex(8)}"
                 )
-                r2 = subprocess.run(
-                    ["git", "worktree", "add", "--detach", wt_dir, "HEAD"],
-                    cwd=str(project_root),
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
+                r2 = proc.run(["git", "worktree", "add", "--detach", wt_dir, "HEAD"], cwd=str(project_root))
                 if r2.returncode != 0:
                     raise RuntimeError(
                         f"git worktree add failed for parallel child {child_key!r}: "
@@ -265,12 +231,7 @@ def _parallel_stages(
         from gremlins.state import emit_bail, patch_state, resolve_state_file
 
         if _in_git_repo():
-            subprocess.run(
-                ["git", "worktree", "prune"],
-                cwd=str(project_root),
-                capture_output=True,
-                check=False,
-            )
+            proc.run_quiet(["git", "worktree", "prune"], cwd=str(project_root))
 
         base = base_head
         if _in_git_repo() and base:
@@ -278,26 +239,14 @@ def _parallel_stages(
                 wt = _worktree_paths.get(child_key)
                 if wt is None or not wt.is_dir():
                     continue
-                r = subprocess.run(
-                    ["git", "rev-parse", "HEAD"],
-                    cwd=str(wt),
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
+                r = proc.run(["git", "rev-parse", "HEAD"], cwd=str(wt))
                 child_head = r.stdout.strip() if r.returncode == 0 else ""
                 if child_head and child_head != base:
                     raise NotImplementedError(
                         f"parallel child {child_key!r} mutated its worktree "
                         "(fan-in merge for mutating parallel is not yet implemented)"
                     )
-                status_r = subprocess.run(
-                    ["git", "status", "--porcelain"],
-                    cwd=str(wt),
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
+                status_r = proc.run(["git", "status", "--porcelain"], cwd=str(wt))
                 if status_r.stdout.strip():
                     raise NotImplementedError(
                         f"parallel child {child_key!r} has uncommitted changes "

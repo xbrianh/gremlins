@@ -29,6 +29,7 @@ from gremlins.fleet.state import (
 from gremlins.fleet.stop import do_stop
 from gremlins.launcher import GremlinAlreadyRunning
 from gremlins.launcher import resume as _resume
+from gremlins.utils import proc
 
 _atomic_patch_state = atomic_patch_state
 
@@ -458,19 +459,10 @@ def _recreate_worktree(state: dict[str, Any]) -> tuple[bool, str]:
 
     # Prune stale worktree entries so that git worktree add doesn't fail
     # with "is already registered" when the directory was deleted by the host.
-    subprocess.run(
-        ["git", "worktree", "prune"],
-        capture_output=True,
-        cwd=project_root,
-    )
+    proc.run_quiet(["git", "worktree", "prune"], cwd=project_root)
 
     if branch:
-        r = subprocess.run(
-            ["git", "worktree", "add", workdir, branch],
-            capture_output=True,
-            text=True,
-            cwd=project_root,
-        )
+        r = proc.run(["git", "worktree", "add", workdir, branch], cwd=project_root)
         if r.returncode == 0:
             return True, f"recreated from branch {branch!r}"
         branch_err = r.stderr.strip()
@@ -478,12 +470,7 @@ def _recreate_worktree(state: dict[str, Any]) -> tuple[bool, str]:
         branch_err = ""
 
     ref = worktree_base or "HEAD"
-    r = subprocess.run(
-        ["git", "worktree", "add", "--detach", workdir, ref],
-        capture_output=True,
-        text=True,
-        cwd=project_root,
-    )
+    r = proc.run(["git", "worktree", "add", "--detach", workdir, ref], cwd=project_root)
     if r.returncode == 0:
         suffix = f" (branch {branch!r} was gone)" if branch_err else ""
         return True, f"recreated detached at {ref!r}{suffix}"
