@@ -7,7 +7,13 @@ sequencing logic of their own.
 ## Modules
 
 - `registry.py` — `STAGE_REGISTRY` and `CLIENT_FACTORIES` dicts + `register_stage` / `register_client_factory`. All stage type lookups go through here.
+- `compound.py` — `CompoundStage(Stage)` base class for stages that own a list of child stage entries (`body: list[StageEntry]`). Shared by `ParallelStage` and `LoopStage`.
+- `loop.py` — `LoopStage(CompoundStage)`. Iterates pre-built body runner callables until HEAD is stable or `max_iterations` is exhausted. Body runners are called in order; `RunCmdFailed` is caught and noted (subsequent runners still execute so a fix agent can act), except on the final iteration where fix runners are skipped and the stage bails. `LoopStage.from_runners([...], max_iterations=N)` constructs from closures without needing a YAML body. Also exports `RunCmdFailed` (sentinel raised by command-check runners) and `LoopExhausted` (raised on exhaustion so callers can translate the message).
+- `run_cmd.py` — `RunCmd(Stage)`. Runs `options["cmds"]` joined with `&&`; writes output to `run-cmd.log` and raises `RunCmdFailed` on non-zero exit. Registers as stage type `"run-cmd"`.
+- `claude_prompt.py` — `ClaudePrompt(Stage)`. Loads `prompt_paths` and runs the agent; calls `check_bail` afterwards. Generic: no stage-specific template filling. Registers as stage type `"claude-prompt"`.
+- `parallel.py` — `ParallelStage(CompoundStage)`. Constructed by the orchestrator with pre-built child runners; call `build_runtime_stages()` to get the three `(name, fn)` pairs (`<group>-fanout`, `<group>`, `<group>-fanin`) that implement fan-out/fan-in execution.
 - `all.py` — importing triggers side-effect registration of all stage modules. `pipeline.py` imports it automatically via `_ensure_registered()`; no manual import needed.
+- `handoff.py` — `Handoff(Stage)`. Runs the handoff agent once per boss-loop iteration. Signals the enclosing `LoopStage`: returns normally on "chain-done" (loop exits via HEAD-stable), raises `RunCmdFailed` on "next-plan" (writes child plan to `plan.md`, loop continues), raises `RuntimeError` on "bail". Preserves the original boss spec in `boss-spec.md` and restores it to `plan.md` on "chain-done" so post-loop stages see the original spec. Registers as stage type `"handoff"`.
 - `plan.py` — `run(ctx, PlanOptions)`. Local pipeline only.
 - `implement.py` — `run(ctx, ImplementOptions)`. Dual-mode (`kind='local'` /
   `kind='gh'`). For gh: enforces the empty-implementation invariant,
@@ -26,7 +32,7 @@ sequencing logic of their own.
   <pr_url>`.
 - `request_copilot.py` — `run`. Requests Copilot review by adding
   `copilot-pull-request-reviewer` to the PR's reviewer list.
-- `verify.py` — `run(ctx, VerifyOptions)`. Runs `check_cmd && test_cmd` (skipping empties), re-invokes agent to fix failures up to `max_attempts`; bails on exhaustion. Takes `is_git` (controls diff capture) and `commit_after_fix` (controls commit instruction in fix prompt). Used by both gh and local pipelines. Registers as stage type `"verify"`.
+- `verify.py` — `Verify(Stage)`. Constructs a `LoopStage` from two closures (`_run_cmd`, `_run_fix`) and delegates the retry loop to it. `_run_cmd` runs `cmds` joined with `&&` and raises `RunCmdFailed` on failure; `_run_fix` formats the fix prompt and invokes the agent. `LoopExhausted` from `LoopStage` is translated to `RuntimeError("verify stage exhausted N attempts")`. Takes `is_git` (controls diff capture) and `commit_after_fix` (controls commit instruction). Registers as stage type `"verify"`.
 - `wait_ci.py` — `run(ctx, WaitCiOptions)`. Gh pipeline (`ci-gate`). Polls PR CI checks via `gh_utils`; re-invokes agent to fix failures; bails on `REVIEW_REQUIRED` or attempt exhaustion. Registers as stage type `"wait-ci"`.
 - `wait_copilot.py` — `run`. Polls until Copilot posts a non-PENDING review.
 

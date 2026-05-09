@@ -10,8 +10,10 @@ import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.pipeline import load_pipeline
-from gremlins.runner import build_parallel_stages, run_stages
+from gremlins.pipeline.schema import StageEntry
+from gremlins.runner import run_stages
 from gremlins.stages.base import StageContext
+from gremlins.stages.parallel import ParallelStage
 
 # ---------------------------------------------------------------------------
 # Fixtures helpers
@@ -32,28 +34,61 @@ def _make_ctx(child_key: str) -> StageContext:
     )
 
 
+def _make_entry(name: str = "test-group") -> StageEntry:
+    return StageEntry(
+        name=name, type="parallel", client=None, prompt_paths=[], options={}
+    )
+
+
+def _make_parallel_stages(
+    group_name: str,
+    child_runners: list,
+    *,
+    max_concurrent: int | None = None,
+    set_stage_fn=None,
+    cancel_on_bail: bool = False,
+    bail_policy: str = "any",
+    gr_id=None,
+    project_root: pathlib.Path | None = None,
+) -> list:
+    if set_stage_fn is None:
+
+        def set_stage_fn(_n):
+            return None
+
+    if project_root is None:
+        project_root = pathlib.Path.cwd()
+    entry = _make_entry(group_name)
+    return ParallelStage(
+        entry,
+        child_runners,
+        max_concurrent=max_concurrent,
+        set_stage_fn=set_stage_fn,
+        cancel_on_bail=cancel_on_bail,
+        bail_policy=bail_policy,
+        gr_id=gr_id,
+        project_root=project_root,
+    ).build_runtime_stages()
+
+
 def _parallel_wrapper(
     children: list[tuple[str, object]],
     *,
     max_concurrent: int | None = None,
     set_stage_fn: object = None,
 ) -> object:
-    """Return the parallel-stage callable from build_parallel_stages."""
+    """Return the parallel-stage callable from ParallelStage."""
     if set_stage_fn is None:
 
         def set_stage_fn(_name: str) -> None:
             pass
 
     triples = [(n, _make_ctx(n), fn) for n, fn in children]  # type: ignore[misc]
-    stages = build_parallel_stages(
+    stages = _make_parallel_stages(
         "test-group",
         triples,
         max_concurrent=max_concurrent,
-        set_stage_fn=set_stage_fn,  # type: ignore[arg-type]
-        cancel_on_bail=False,
-        bail_policy="any",
-        gr_id=None,
-        project_root=pathlib.Path.cwd(),
+        set_stage_fn=set_stage_fn,
     )
     return stages[1][1]  # index 1 is the parallel stage
 
@@ -215,15 +250,9 @@ def test_run_stages_drives_parallel_group() -> None:
     log: list[str] = []
 
     children = [("r1", lambda: log.append("r1")), ("r2", lambda: log.append("r2"))]
-    parallel_stages = build_parallel_stages(
+    parallel_stages = _make_parallel_stages(
         "reviews",
         [(_n, _make_ctx(_n), _fn) for _n, _fn in children],
-        max_concurrent=None,
-        set_stage_fn=lambda _n: None,
-        cancel_on_bail=False,
-        bail_policy="any",
-        gr_id=None,
-        project_root=pathlib.Path.cwd(),
     )
 
     stages = [
@@ -241,15 +270,9 @@ def test_run_stages_resume_from_group_skips_before_group() -> None:
     log: list[str] = []
 
     children = [("r1", lambda: log.append("r1")), ("r2", lambda: log.append("r2"))]
-    parallel_stages = build_parallel_stages(
+    parallel_stages = _make_parallel_stages(
         "reviews",
         [(_n, _make_ctx(_n), _fn) for _n, _fn in children],
-        max_concurrent=None,
-        set_stage_fn=lambda _n: None,
-        cancel_on_bail=False,
-        bail_policy="any",
-        gr_id=None,
-        project_root=pathlib.Path.cwd(),
     )
 
     stages = [
@@ -307,14 +330,5 @@ stages:
 
 
 def test_build_parallel_stages_names() -> None:
-    stages = build_parallel_stages(
-        "reviews",
-        [("r1", _make_ctx("r1"), lambda: None)],
-        max_concurrent=None,
-        set_stage_fn=lambda _n: None,
-        cancel_on_bail=False,
-        bail_policy="any",
-        gr_id=None,
-        project_root=pathlib.Path.cwd(),
-    )
+    stages = _make_parallel_stages("reviews", [("r1", _make_ctx("r1"), lambda: None)])
     assert [n for n, _ in stages] == ["reviews-fanout", "reviews", "reviews-fanin"]

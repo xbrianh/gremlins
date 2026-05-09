@@ -7,38 +7,46 @@ import pathlib
 from typing import TYPE_CHECKING, Any
 
 from gremlins.clients import ClientSpec
+from gremlins.clients.resolve import require_stage_spec
 from gremlins.errors import die
 from gremlins.pipeline import StageEntry
 from gremlins.stages import (
     address_code,
-    chain,
+    claude_prompt,
     commit,
     commit_pr,
     implement,
+    loop,
     open_github_pr,
     plan,
     request_copilot,
     review_code,
+    run_cmd,
     verify,
     wait_ci,
     wait_copilot,
+)
+from gremlins.stages import (
+    handoff as handoff_stage_mod,
 )
 from gremlins.stages import materialize_to_branch as materialize_to_branch_mod
 from gremlins.stages.registry import register_stage_builder
 from gremlins.state import read_state_str
 
 if TYPE_CHECKING:
-    from gremlins.orchestrators.pipeline import Pipeline
+    from gremlins.orchestrators.pipeline import StageRunner
 
 logger = logging.getLogger(__name__)
 
 
-def _review_stage_info(runner: Pipeline) -> tuple[list[str], dict[str, pathlib.Path]]:
+def _review_stage_info(
+    runner: StageRunner,
+) -> tuple[list[str], dict[str, pathlib.Path]]:
     names: list[str] = []
     dirs: dict[str, pathlib.Path] = {}
     for s in runner.pipeline_data.stages:
         if s.type == "parallel":
-            for child in s.children:
+            for child in s.body:
                 if child.type == "review-code":
                     names.append(child.name)
                     dirs[child.name] = runner.session_dir / s.name / child.name
@@ -48,7 +56,7 @@ def _review_stage_info(runner: Pipeline) -> tuple[list[str], dict[str, pathlib.P
     return names, dirs
 
 
-def _build_plan(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
+def _build_plan(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
     plan_val = getattr(runner.args, "plan", None)
     if not entry.prompt_paths and not plan_val:
         die(
@@ -68,7 +76,7 @@ def _build_plan(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
     )
 
 
-def _build_implement(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
+def _build_implement(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
     spec_text = ""
     spec_file = runner.session_dir / "spec.md"
     if spec_file.exists():
@@ -91,12 +99,12 @@ def _build_implement(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> A
 
 
 def _build_materialize_to_branch(
-    entry: StageEntry, spec: ClientSpec, _runner: Pipeline
+    entry: StageEntry, spec: ClientSpec, _runner: StageRunner
 ) -> Any:
     return materialize_to_branch_mod.MaterializeToBranch(entry, spec.model)
 
 
-def _build_verify(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
+def _build_verify(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
     if not runner.repo:
         cmds = getattr(runner.args, "cmds", None)
         if cmds is not None:
@@ -115,11 +123,13 @@ def _build_verify(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
     return verify.Verify(entry, spec.model, is_git=runner.is_git)
 
 
-def _build_commit(entry: StageEntry, spec: ClientSpec, _runner: Pipeline) -> Any:
+def _build_commit(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
     return commit.Commit(entry, spec.model)
 
 
-def _build_open_github_pr(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
+def _build_open_github_pr(
+    entry: StageEntry, spec: ClientSpec, runner: StageRunner
+) -> Any:
     return open_github_pr.OpenGitHubPR(
         entry,
         spec.model,
@@ -128,12 +138,12 @@ def _build_open_github_pr(entry: StageEntry, spec: ClientSpec, runner: Pipeline)
 
 
 def _build_request_copilot(
-    entry: StageEntry, spec: ClientSpec, runner: Pipeline
+    entry: StageEntry, spec: ClientSpec, runner: StageRunner
 ) -> Any:
     return request_copilot.RequestCopilot(entry, spec.model, repo=runner.repo)
 
 
-def _build_ghreview(entry: StageEntry, spec: ClientSpec, _runner: Pipeline) -> Any:
+def _build_ghreview(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
     if not entry.prompt_paths:
         die(
             f"stage {entry.name!r}: type 'ghreview' requires a 'prompt' field in the pipeline YAML"
@@ -141,11 +151,13 @@ def _build_ghreview(entry: StageEntry, spec: ClientSpec, _runner: Pipeline) -> A
     return review_code.ReviewCode(entry, spec.model, plan_text="", is_git=True)
 
 
-def _build_wait_copilot(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
+def _build_wait_copilot(
+    entry: StageEntry, spec: ClientSpec, runner: StageRunner
+) -> Any:
     return wait_copilot.WaitCopilot(entry, spec.model, repo=runner.repo)
 
 
-def _build_ghaddress(entry: StageEntry, spec: ClientSpec, _runner: Pipeline) -> Any:
+def _build_ghaddress(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
     if not entry.prompt_paths:
         die(
             f"stage {entry.name!r}: type 'ghaddress' requires a 'prompt' field in the pipeline YAML"
@@ -153,11 +165,11 @@ def _build_ghaddress(entry: StageEntry, spec: ClientSpec, _runner: Pipeline) -> 
     return address_code.AddressCode(entry, spec.model, is_git=True)
 
 
-def _build_wait_ci(entry: StageEntry, spec: ClientSpec, _runner: Pipeline) -> Any:
+def _build_wait_ci(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
     return wait_ci.WaitCI(entry, spec.model)
 
 
-def _build_review_code(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
+def _build_review_code(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
     plan_file = runner.session_dir / "plan.md"
     plan_text = plan_file.read_text(encoding="utf-8")
     logger.info("reviewing code (model: %s)", spec.model)
@@ -166,7 +178,9 @@ def _build_review_code(entry: StageEntry, spec: ClientSpec, runner: Pipeline) ->
     )
 
 
-def _build_address_code(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
+def _build_address_code(
+    entry: StageEntry, spec: ClientSpec, runner: StageRunner
+) -> Any:
     names, dirs = _review_stage_info(runner)
     logger.info("addressing code reviews (model: %s)", spec.model)
     return address_code.AddressCode(
@@ -178,9 +192,73 @@ def _build_address_code(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -
     )
 
 
-def _build_chain(entry: StageEntry, spec: ClientSpec, runner: Pipeline) -> Any:
-    logger.info("running chain stage (child: %s)", entry.options.get("child", "local"))
-    return chain.Chain(entry, spec, pipeline_builder=runner.build_child_stages)
+def _build_loop(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
+    from gremlins.stages.base import StageContext
+    from gremlins.stages.loop import LoopStage
+
+    max_iterations = entry.options.get("max_iterations", 3)
+    body_runners: list[Any] = []
+    for child in entry.body:
+        child_spec = runner.stage_specs.get(child.name, spec)
+        child_ctx = StageContext(
+            client=runner.get_client(child_spec),
+            session_dir=runner.session_dir,
+            gr_id=runner.gr_id,
+        )
+        body_runners.append(runner.make_runner(child, child_ctx, child_spec))
+    return LoopStage(entry, body_runners=body_runners, max_iterations=max_iterations)
+
+
+def _build_run_cmd(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
+    return run_cmd.RunCmd(entry, spec.model)
+
+
+def _build_claude_prompt(
+    entry: StageEntry, spec: ClientSpec, _runner: StageRunner
+) -> Any:
+    if not entry.prompt_paths:
+        die(f"stage {entry.name!r}: type 'claude-prompt' requires a 'prompt' field")
+    return claude_prompt.ClaudePrompt(entry, spec.model)
+
+
+def _build_handoff(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
+    from gremlins.stages.handoff import Handoff
+
+    return Handoff(entry, spec)
+
+
+def _build_parallel(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
+    from gremlins.stages.base import StageContext
+    from gremlins.stages.parallel import ParallelStage
+    from gremlins.state import set_stage
+
+    group_dir = runner.session_dir / entry.name
+    group_dir.mkdir(parents=True, exist_ok=True)
+    child_runners: list[tuple[str, Any, Any]] = []
+    for child in entry.body:
+        child_spec = require_stage_spec(runner.stage_specs, child.name)
+        child_dir = group_dir / child.name
+        child_dir.mkdir(parents=True, exist_ok=True)
+        child_ctx = StageContext(
+            client=runner.get_client(child_spec),
+            session_dir=child_dir,
+            gr_id=runner.gr_id,
+            child_key=child.name,
+        )
+        child_runners.append(
+            (child.name, child_ctx, runner.make_runner(child, child_ctx, child_spec))
+        )
+    gr_id = runner.gr_id
+    return ParallelStage(
+        entry,
+        child_runners,
+        max_concurrent=entry.max_concurrent,
+        cancel_on_bail=entry.cancel_on_bail,
+        bail_policy=entry.bail_policy,
+        gr_id=gr_id,
+        project_root=pathlib.Path.cwd(),
+        set_stage_fn=lambda n: set_stage(gr_id, n),
+    )
 
 
 register_stage_builder("plan", _build_plan, needs_pipe=False)
@@ -198,19 +276,26 @@ register_stage_builder("ghaddress", _build_ghaddress, needs_pipe=True)
 register_stage_builder("wait-ci", _build_wait_ci, needs_pipe=False)
 register_stage_builder("review-code", _build_review_code, needs_pipe=False)
 register_stage_builder("address-code", _build_address_code, needs_pipe=False)
-register_stage_builder("chain", _build_chain, needs_pipe=False)
+register_stage_builder("loop", _build_loop, needs_pipe=True)
+register_stage_builder("run-cmd", _build_run_cmd, needs_pipe=False)
+register_stage_builder("claude-prompt", _build_claude_prompt, needs_pipe=False)
+register_stage_builder("handoff", _build_handoff, needs_pipe=False)
+register_stage_builder("parallel", _build_parallel, needs_pipe=True)
 
 
 __all__ = [
     "address_code",
-    "chain",
+    "claude_prompt",
     "commit",
     "commit_pr",
+    "handoff_stage_mod",
     "implement",
+    "loop",
     "open_github_pr",
     "plan",
     "request_copilot",
     "review_code",
+    "run_cmd",
     "verify",
     "wait_ci",
     "wait_copilot",

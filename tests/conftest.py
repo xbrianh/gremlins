@@ -54,7 +54,7 @@ def common_local_patches(monkeypatch):
         shutil, "which", lambda n: "/fake/claude" if n == "claude" else None
     )
     monkeypatch.setattr(
-        "gremlins.orchestrators.pipeline.install_signal_handlers", lambda *c: None
+        "gremlins.orchestrators.run.install_signal_handlers", lambda *c: None
     )
 
     # Strip pipeline client keys so the injected client is used for every stage.

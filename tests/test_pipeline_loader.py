@@ -352,4 +352,75 @@ stages:
     pipeline = load_pipeline(yaml_path)
     assert pipeline.stages[0].client is None
     # child has no explicit client; resolution happens at run time
-    assert pipeline.stages[0].children[0].client is None
+    assert pipeline.stages[0].body[0].client is None
+
+
+# ---- include: directive ---------------------------------------------------
+
+
+def test_include_directive_expands_bundled_pipeline(tmp_path: pathlib.Path) -> None:
+    """{ include: local } inlines all stages from the bundled local pipeline."""
+    yaml_path = _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+stages:
+  - { include: local }
+""",
+    )
+    pipeline = load_pipeline(yaml_path)
+    stage_types = [s.type for s in pipeline.stages]
+    assert "plan" in stage_types
+    assert "implement" in stage_types
+    assert "verify" in stage_types
+
+
+def test_include_unknown_pipeline_raises(tmp_path: pathlib.Path) -> None:
+    yaml_path = _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+stages:
+  - { include: no-such-pipeline }
+""",
+    )
+    with pytest.raises(FileNotFoundError, match="no-such-pipeline"):
+        load_pipeline(yaml_path)
+
+
+def test_loop_body_with_include_expands(tmp_path: pathlib.Path) -> None:
+    """Loop body supports { include: <name> } to inline another pipeline's stages."""
+    yaml_path = _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+stages:
+  - name: myloop
+    type: loop
+    body:
+      - { name: handoff, type: handoff }
+      - { include: local }
+""",
+    )
+    pipeline = load_pipeline(yaml_path)
+    assert len(pipeline.stages) == 1
+    loop = pipeline.stages[0]
+    assert loop.type == "loop"
+    assert loop.body[0].type == "handoff"
+    body_types = [b.type for b in loop.body]
+    assert "plan" in body_types
+    assert "implement" in body_types
+
+
+def test_boss_yaml_loads() -> None:
+    """boss.yaml loads with loop/handoff structure replacing the old chain stage."""
+    from gremlins.pipeline import load_pipeline, resolve_pipeline_path
+
+    pipeline = load_pipeline(resolve_pipeline_path("boss", pathlib.Path.cwd()))
+    names = [s.name for s in pipeline.stages]
+    assert names == ["chain", "review-chain", "address-chain"]
+    chain_entry = pipeline.stages[0]
+    assert chain_entry.type == "loop"
+    body_types = [b.type for b in chain_entry.body]
+    assert body_types[0] == "handoff"
+    assert "implement" in body_types

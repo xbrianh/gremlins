@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import json
 import logging
 import pathlib
@@ -18,7 +17,7 @@ from gremlins.clients.resolve import require_stage_spec
 from gremlins.git import in_git_repo
 from gremlins.pipeline import PipelineDef as _PipelineData
 from gremlins.pipeline import StageEntry
-from gremlins.runner import build_parallel_stages, install_signal_handlers, run_stages
+from gremlins.runner import run_stages
 from gremlins.stages.base import StageContext
 from gremlins.stages.registry import STAGE_BUILDERS, STAGE_NEEDS_PIPE
 from gremlins.state import resolve_state_file, set_stage
@@ -44,29 +43,19 @@ def _expand_stage_entries(raw_stages: list[StageEntry]) -> list[StageEntry]:
 
     for entry in raw_stages:
         if entry.type == "parallel":
-            for child in entry.children:
+            for child in entry.body:
                 if child.name in child_names or child.name in top_level_names:
                     raise ValueError(f"duplicate child stage name {child.name!r}")
                 child_names.add(child.name)
-            for name, typ in [
-                (f"{entry.name}-fanout", "parallel-fanout"),
-                (entry.name, "parallel-group"),
-                (f"{entry.name}-fanin", "parallel-fanin"),
-            ]:
-                if name in seen:
-                    raise ValueError(f"pipeline has duplicate stage name {name!r}")
-                seen.add(name)
-                result.append(dataclasses.replace(entry, name=name, type=typ))
-        else:
-            if entry.name in seen:
-                raise ValueError(f"pipeline has duplicate stage name {entry.name!r}")
-            seen.add(entry.name)
-            result.append(entry)
+        if entry.name in seen:
+            raise ValueError(f"pipeline has duplicate stage name {entry.name!r}")
+        seen.add(entry.name)
+        result.append(entry)
 
     return result
 
 
-class Pipeline:
+class StageRunner:
     def __init__(
         self,
         stages: list[StageEntry],
@@ -84,14 +73,14 @@ class Pipeline:
     ) -> None:
         unknown: list[str] = []
         for s in stages:
-            if s.type == "parallel":
-                unknown.extend(
-                    c.type for c in s.children if c.type not in STAGE_BUILDERS
-                )
-            elif s.type not in STAGE_BUILDERS:
+            if s.type not in STAGE_BUILDERS:
                 unknown.append(s.type)
+            elif s.type == "parallel":
+                unknown.extend(c.type for c in s.body if c.type not in STAGE_BUILDERS)
+            elif s.type == "loop":
+                unknown.extend(c.type for c in s.body if c.type not in STAGE_BUILDERS)
         if unknown:
-            raise ValueError(f"Pipeline does not support stage type(s): {unknown}")
+            raise ValueError(f"StageRunner does not support stage type(s): {unknown}")
         self.stages = _expand_stage_entries(stages)
         self.args = args
         self.session_dir = session_dir
@@ -120,7 +109,7 @@ class Pipeline:
                 raise ValueError(f"--spec: file is empty: {spec_path}")
             shutil.copyfile(spec_src, spec_file)
 
-    def _get_client(self, spec: ClientSpec) -> ClaudeClient:
+    def get_client(self, spec: ClientSpec) -> ClaudeClient:
         if self.test_client is not None:
             return self.test_client
         return self.spec_clients[str(spec)]
@@ -136,7 +125,7 @@ class Pipeline:
                 f"valid: {valid_names}"
             )
 
-    def _make_runner(
+    def make_runner(
         self, entry: StageEntry, ctx: StageContext, spec: ClientSpec
     ) -> Callable[[], None]:
         builder = STAGE_BUILDERS[entry.type]
@@ -151,98 +140,21 @@ class Pipeline:
 
         return _run
 
-    def _collect_stages(self) -> list[tuple[str, Callable[[], None]]]:
-        gr_id = self.gr_id
-        stages: list[tuple[str, Callable[[], None]]] = []
-        for e in self.pipeline_data.stages:
-            if e.type == "parallel":
-                group_dir = self.session_dir / e.name
-                group_dir.mkdir(parents=True, exist_ok=True)
-                child_runners: list[tuple[str, StageContext, Callable[[], None]]] = []
-                for child in e.children:
-                    child_spec = require_stage_spec(self.stage_specs, child.name)
-                    child_dir = group_dir / child.name
-                    child_dir.mkdir(parents=True, exist_ok=True)
-                    child_ctx = StageContext(
-                        client=self._get_client(child_spec),
-                        session_dir=child_dir,
-                        gr_id=gr_id,
-                        child_key=child.name,
-                    )
-                    child_runners.append(
-                        (
-                            child.name,
-                            child_ctx,
-                            self._make_runner(child, child_ctx, child_spec),
-                        )
-                    )
-                stages.extend(
-                    build_parallel_stages(
-                        e.name,
-                        child_runners,
-                        max_concurrent=e.max_concurrent,
-                        set_stage_fn=lambda n: set_stage(gr_id, n),
-                        cancel_on_bail=e.cancel_on_bail,
-                        bail_policy=e.bail_policy,
-                        gr_id=gr_id,
-                        project_root=pathlib.Path.cwd(),
-                    )
-                )
-            else:
-                stage_spec = require_stage_spec(self.stage_specs, e.name)
-                stage_ctx = StageContext(
-                    client=self._get_client(stage_spec),
-                    session_dir=self.session_dir,
-                    gr_id=gr_id,
-                )
-                stages.append((e.name, self._make_runner(e, stage_ctx, stage_spec)))
-        return stages
-
-    def run(self, *clients: ClaudeClient) -> None:
-        install_signal_handlers(*clients)
-        stages = self._collect_stages()
-        run_stages(stages, resume_from=self.args.resume_from)
-
-    def build_child_stages(
-        self,
-        pipeline_name: str,
-        plan_path: pathlib.Path,
-        session_dir: pathlib.Path,
-        resume_from: str | None,
+    def _collect_stages(
+        self, stages: list[StageEntry]
     ) -> list[tuple[str, Callable[[], None]]]:
-        import argparse as _argparse
-
-        from gremlins.clients.resolve import collect_stage_specs
-        from gremlins.pipeline import load_pipeline, resolve_pipeline_path
-
-        pipeline = load_pipeline(
-            resolve_pipeline_path(pipeline_name, pathlib.Path.cwd())
-        )
-        if any(s.type == "chain" for s in pipeline.stages):
-            raise ValueError(
-                f"child pipeline {pipeline_name!r} contains a 'chain' stage; "
-                "nested chain stages are not supported"
+        gr_id = self.gr_id
+        built: list[tuple[str, Callable[[], None]]] = []
+        for e in stages:
+            stage_spec = require_stage_spec(self.stage_specs, e.name)
+            stage_ctx = StageContext(
+                client=self.get_client(stage_spec),
+                session_dir=self.session_dir,
+                gr_id=gr_id,
             )
-        child_args = _argparse.Namespace(
-            plan=str(plan_path),
-            spec_path=None,
-            cmds=getattr(self.args, "cmds", None),
-            test_max_attempts=getattr(self.args, "test_max_attempts", 3),
-            instructions=None,
-            resume_from=resume_from,
-        )
-        stage_specs = collect_stage_specs(pipeline, None)
-        spec_clients: dict[str, ClaudeClient] = {
-            str(spec): self._get_client(spec) for spec in stage_specs.values()
-        }
-        child_pipeline = Pipeline(
-            pipeline.stages,
-            args=child_args,
-            session_dir=session_dir,
-            gr_id=self.gr_id,
-            pipeline_data=pipeline,
-            stage_specs=stage_specs,
-            spec_clients=spec_clients,
-            test_client=self.test_client,
-        )
-        return child_pipeline._collect_stages()
+            built.append((e.name, self.make_runner(e, stage_ctx, stage_spec)))
+        return built
+
+    def run(self) -> None:
+        built = self._collect_stages(self.pipeline_data.stages)
+        run_stages(built, resume_from=self.args.resume_from)
