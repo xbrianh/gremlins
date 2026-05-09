@@ -254,7 +254,8 @@ def read_artifacts(gr_id: str | None) -> list[dict[str, Any]]:
         return []
     try:
         data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
-        return [a for a in (data.get("artifacts") or []) if isinstance(a, dict)]
+        artifacts: list[Any] = data.get("artifacts") or []
+        return [a for a in artifacts if isinstance(a, dict)]
     except (json.JSONDecodeError, OSError):
         return []
 
