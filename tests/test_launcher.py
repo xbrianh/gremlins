@@ -887,9 +887,7 @@ def test_launch_passes_base_ref_to_worktree_setup(lenv, monkeypatch):
     captured = {}
     real_setup = git_mod.setup_worktree_branch
 
-    def fake_setup(
-        project_root, gr_id, base_ref="HEAD", branch_prefix="bg/local"
-    ):
+    def fake_setup(project_root, gr_id, base_ref="HEAD", branch_prefix="bg/local"):
         captured["base_ref"] = base_ref
         return real_setup(
             project_root, gr_id, base_ref=base_ref, branch_prefix=branch_prefix

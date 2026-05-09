@@ -450,9 +450,7 @@ def _recreate_worktree(state: dict[str, Any]) -> tuple[bool, str]:
     workdir = state.get("workdir") or ""
     gr_id_val = str(state.get("id") or "")
     branch = (
-        f"bg/local/{gr_id_val}"
-        if effective_pipeline_kind(state) == "local"
-        else ""
+        f"bg/local/{gr_id_val}" if effective_pipeline_kind(state) == "local" else ""
     )
     worktree_base = state.get("worktree_base") or ""
     project_root = state.get("project_root") or ""
