@@ -740,14 +740,3 @@ def write_terminal_state(gr_id: str, exit_code: int) -> None:
         os.replace(tmp, sf)
     except Exception:
         pass
-
-    if exit_code == 0:
-        try:
-            data = json.loads(sf.read_text(encoding="utf-8"))
-            pipeline_kind = data.get("pipeline_kind", "")
-            project_root = data.get("project_root", "")
-            workdir = data.get("workdir", "")
-            if pipeline_kind == "gh" and project_root and workdir:
-                _git_mod.remove_worktree(project_root, workdir)
-        except Exception:
-            pass

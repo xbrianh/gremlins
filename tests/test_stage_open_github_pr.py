@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import pathlib
 from unittest.mock import patch
 
@@ -88,3 +89,144 @@ def test_run_patches_pr_url_to_state(tmp_path: pathlib.Path) -> None:
     ):
         stage.run(None)
     assert patched == [{"pr_url": PR_URL}]
+
+
+# ---------------------------------------------------------------------------
+# Stacked-PR: chain_state base-ref resolution
+# ---------------------------------------------------------------------------
+
+
+def _make_stage_with_gr(
+    tmp_path: pathlib.Path, gr_id: str = "test-gr"
+) -> tuple[OpenGitHubPR, StageContext]:
+    from gremlins.clients.fake import FakeClaudeClient
+
+    stage = OpenGitHubPR("open-pr", "sonnet", [], {}, issue_url="")
+    client = FakeClaudeClient(fixtures={"open-github-pr": MINIMAL_EVENTS})
+    ctx = StageContext(client=client, session_dir=tmp_path, gr_id=gr_id)
+    stage.bind(ctx)
+    return stage, ctx
+
+
+def _write_state(tmp_path: pathlib.Path, data: dict) -> pathlib.Path:
+    sf = tmp_path / "state.json"
+    sf.write_text(json.dumps(data), encoding="utf-8")
+    return sf
+
+
+def test_stacked_pr_uses_prev_child_branch(tmp_path: pathlib.Path) -> None:
+    """For child N>1, PR base is the previous child's materialized branch."""
+    _write_state(
+        tmp_path,
+        {
+            "base_ref_name": "main",
+            "chain_state": {
+                "handoff_count": 2,
+                "child_records": [
+                    {"n": 1, "branch": "gremlin/abc-child-1"},
+                ],
+            },
+        },
+    )
+    stage, ctx = _make_stage_with_gr(tmp_path)
+    prompts_seen: list[str] = []
+    with (
+        patch(
+            "gremlins.stages.open_github_pr.resolve_state_file",
+            return_value=tmp_path / "state.json",
+        ),
+        patch(
+            "gremlins.stages.open_github_pr.get_prev_child_branch",
+            return_value="gremlin/abc-child-1",
+        ),
+        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
+        patch("gremlins.stages.open_github_pr.upsert_child_record"),
+        patch(
+            "gremlins.stages.open_github_pr.patch_state",
+        ),
+        patch.object(
+            stage,
+            "run_claude",
+            side_effect=lambda prompt, **kw: (
+                prompts_seen.append(prompt)
+                or type("R", (), {"events": [], "text_result": ""})()
+            ),
+        ),
+    ):
+        stage.run(None)
+    assert prompts_seen, "run_claude should have been called"
+    assert "gremlin/abc-child-1" in prompts_seen[0], (
+        "PR prompt should target previous child branch, not main"
+    )
+
+
+def test_first_child_uses_base_ref_name(tmp_path: pathlib.Path) -> None:
+    """For child 1 (no previous child record), PR base is base_ref_name."""
+    _write_state(
+        tmp_path,
+        {
+            "base_ref_name": "main",
+            "chain_state": {
+                "handoff_count": 1,
+                "child_records": [],
+            },
+        },
+    )
+    stage, ctx = _make_stage_with_gr(tmp_path)
+    prompts_seen: list[str] = []
+    with (
+        patch(
+            "gremlins.stages.open_github_pr.resolve_state_file",
+            return_value=tmp_path / "state.json",
+        ),
+        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
+        patch("gremlins.stages.open_github_pr.patch_state"),
+        patch.object(
+            stage,
+            "run_claude",
+            side_effect=lambda prompt, **kw: (
+                prompts_seen.append(prompt)
+                or type("R", (), {"events": [], "text_result": ""})()
+            ),
+        ),
+    ):
+        stage.run(None)
+    assert prompts_seen, "run_claude should have been called"
+    assert "main" in prompts_seen[0]
+
+
+def test_record_child_pr_writes_pr_info_to_chain_state(tmp_path: pathlib.Path) -> None:
+    """After opening a PR, pr_url and pr_number are stored in child_records."""
+    sf = _write_state(
+        tmp_path,
+        {
+            "base_ref_name": "main",
+            "chain_state": {
+                "handoff_count": 1,
+                "child_records": [{"n": 1, "branch": "gremlin/abc-child-1"}],
+            },
+        },
+    )
+    stage, ctx = _make_stage_with_gr(tmp_path)
+    upsert_calls: list[dict] = []
+    with (
+        patch(
+            "gremlins.stages.open_github_pr.resolve_state_file",
+            return_value=sf,
+        ),
+        patch(
+            "gremlins.stages.open_github_pr.extract_gh_url",
+            return_value="https://github.com/owner/repo/pull/314",
+        ),
+        patch(
+            "gremlins.stages.open_github_pr.upsert_child_record",
+            side_effect=lambda gr_id, **kw: upsert_calls.append({"gr_id": gr_id, **kw}),
+        ),
+        patch("gremlins.stages.open_github_pr.patch_state"),
+    ):
+        stage.run(None)
+    assert upsert_calls, "upsert_child_record should be called with PR info"
+    call = upsert_calls[0]
+    assert call["gr_id"] == "test-gr"
+    assert call["pr_url"] == "https://github.com/owner/repo/pull/314"
+    assert call["pr_number"] == 314

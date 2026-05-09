@@ -1,0 +1,20 @@
+name: gh-terse-no-copilot
+
+default_client: claude:sonnet
+
+base_ref: main
+
+prompts:
+  code-style: gremlins:code_style.md
+  verify: [gremlins:verify_fix.md, gremlins:bail_section_fix.md]
+
+stages:
+  - { name: plan,            type: plan,            prompt: [code-style, gremlins:plan_gh.md] }
+  - { name: implement,       type: implement,       prompt: [code-style, gremlins:implement_gh.md] }
+  - { name: materialize-to-branch, type: materialize-to-branch }
+  - { name: verify,          type: verify,          options: { cmds: ["make check", "make test"], commit_after_fix: false }, prompt: verify }
+  - { name: commit,          type: commit }
+  - { name: open-pr,         type: open-github-pr }
+  - { name: ghreview,        type: ghreview,        prompt: [code-style, gremlins:review_gh.md] }
+  - { name: ghaddress,       type: ghaddress,       prompt: [code-style, gremlins:address_gh.md, gremlins:bail_section.md] }
+  - { name: ci-gate,         type: wait-ci,         prompt: [gremlins:ci_fix.md, gremlins:bail_section_fix.md] }
