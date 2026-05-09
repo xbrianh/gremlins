@@ -184,23 +184,12 @@ def test_result_base_ref_from_pre_state(tmp_path: pathlib.Path) -> None:
     assert result.base_ref == "deadbeef"
 
 
-def test_head_advanced_records_branch_in_chain_state(tmp_path: pathlib.Path) -> None:
-    """When HeadAdvanced, the materialized branch is written to chain_state.child_records."""
+def test_head_advanced_records_branch_artifact(tmp_path: pathlib.Path) -> None:
+    """When HeadAdvanced, the materialized branch is recorded as a branch artifact."""
     state_file = tmp_path / "state.json"
-    state_file.write_text(
-        json.dumps(
-            {
-                "impl_pre_head": "abc123",
-                "chain_state": {
-                    "handoff_count": 2,
-                    "child_records": [{"n": 1, "branch": "gremlin/child-1"}],
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
+    state_file.write_text(json.dumps({"impl_pre_head": "abc123"}), encoding="utf-8")
     stage, _ = _make_stage(tmp_path, gr_id="test-gr")
-    upsert_calls: list[dict] = []
+    artifact_calls: list[tuple] = []
     outcome = HeadAdvanced(commit_count=1)
     with (
         patch(
@@ -217,47 +206,18 @@ def test_head_advanced_records_branch_in_chain_state(tmp_path: pathlib.Path) -> 
             "gremlins.stages.materialize_to_branch.resolve_state_file",
             return_value=state_file,
         ),
+        patch("gremlins.stages.materialize_to_branch.patch_state"),
         patch(
-            "gremlins.stages.materialize_to_branch.patch_state",
-        ),
-        patch(
-            "gremlins.stages.materialize_to_branch.upsert_child_record",
-            side_effect=lambda gr_id, **kw: upsert_calls.append({"gr_id": gr_id, **kw}),
+            "gremlins.stages.materialize_to_branch.append_artifact",
+            side_effect=lambda gr_id, artifact: artifact_calls.append(
+                (gr_id, artifact)
+            ),
         ),
     ):
         result = stage.run(_pipe())
     assert result.materialized_branch == "gremlin/child-2"
-    assert upsert_calls, "upsert_child_record should be called"
-    assert upsert_calls[0]["gr_id"] == "test-gr"
-    assert upsert_calls[0]["branch"] == "gremlin/child-2"
-
-
-def test_no_chain_state_branch_recording_skipped(tmp_path: pathlib.Path) -> None:
-    """When state.json has no chain_state, branch recording is silently skipped."""
-    state_file = tmp_path / "state.json"
-    state_file.write_text(json.dumps({"impl_pre_head": "abc123"}), encoding="utf-8")
-    stage, _ = _make_stage(tmp_path, gr_id="test-gr")
-    chain_patches: list[dict] = []
-    with (
-        patch(
-            "gremlins.stages.materialize_to_branch.classify_impl_outcome",
-            return_value=HeadAdvanced(commit_count=1),
-        ),
-        patch(
-            "gremlins.stages.materialize_to_branch.create_handoff_branch",
-            return_value="gremlin/child-1",
-        ),
-        patch("gremlins.stages.materialize_to_branch.reset_pre_branch"),
-        patch("gremlins.stages.materialize_to_branch.sweep_stale_handoff_branches"),
-        patch(
-            "gremlins.stages.materialize_to_branch.resolve_state_file",
-            return_value=state_file,
-        ),
-        patch(
-            "gremlins.stages.materialize_to_branch.patch_state",
-            side_effect=lambda gr_id, **kw: chain_patches.append(kw),
-        ),
-    ):
-        stage.run(_pipe())
-    chain_calls = [p for p in chain_patches if "chain_state" in p]
-    assert chain_calls == [], "no chain_state update when chain_state absent"
+    assert artifact_calls, "append_artifact should be called"
+    assert artifact_calls[0] == (
+        "test-gr",
+        {"type": "branch", "name": "gremlin/child-2"},
+    )

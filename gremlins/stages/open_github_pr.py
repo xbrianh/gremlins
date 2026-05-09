@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any
 
 from gremlins.clients.protocol import CompletedRun
@@ -12,11 +11,10 @@ from gremlins.prompts import BUNDLED_PROMPT_DIR
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import (
-    get_prev_child_branch,
-    patch_state,
+    append_artifact,
+    last_artifact_branch,
     read_state_str,
     resolve_state_file,
-    upsert_child_record,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,7 +42,7 @@ class OpenGitHubPR(Stage):
     def run(self, pipe: Any) -> str:
         sf = resolve_state_file(self.state.gr_id)
         base_ref = (
-            get_prev_child_branch(self.state.gr_id)
+            last_artifact_branch(self.state.gr_id)
             or self.base_ref
             or read_state_str(sf, "base_ref_name")
             or "main"
@@ -76,13 +74,10 @@ class OpenGitHubPR(Stage):
             label="PR",
             text_result=completed.text_result,
         )
-        m = re.search(r"/pull/(\d+)$", pr_url)
-        pr_number = int(m.group(1)) if m else None
-        try:
-            upsert_child_record(self.state.gr_id, pr_url=pr_url, pr_number=pr_number)
-        except Exception:
-            logger.warning("failed to record child PR in chain_state", exc_info=True)
-        patch_state(self.state.gr_id, pr_url=pr_url)
+        impl_branch = read_state_str(sf, "impl_materialized_branch")
+        append_artifact(
+            self.state.gr_id, {"type": "pr", "url": pr_url, "branch": impl_branch}
+        )
         logger.info("PR: %s", pr_url)
         return pr_url
 

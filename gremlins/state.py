@@ -11,14 +11,17 @@ from __future__ import annotations
 import datetime
 import fcntl
 import json
+import logging
 import os
 import pathlib
 import re
 import secrets
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
 
 from gremlins import paths as _paths
+
+logger = logging.getLogger(__name__)
 
 _GR_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -218,20 +221,52 @@ def patch_parallel_worktrees(
 
 
 def read_pr_url(gr_id: str | None) -> str:
-    """Return pr_url from state.json, or empty string if absent or unreadable."""
-    sf = resolve_state_file(gr_id)
-    if sf is None or not sf.exists():
-        return ""
-    try:
-        return json.loads(sf.read_text(encoding="utf-8")).get("pr_url") or ""
-    except (json.JSONDecodeError, OSError):
-        return ""
+    for art in reversed(read_artifacts(gr_id)):
+        if art.get("type") == "pr":
+            return str(art.get("url") or "")
+    return ""
 
 
 def read_pr_num(gr_id: str | None) -> str:
-    """Return the PR number (last path segment of pr_url) from state.json."""
     url = read_pr_url(gr_id)
     return url.split("/")[-1] if url else ""
+
+
+def append_artifact(gr_id: str | None, artifact: dict[str, Any]) -> None:
+    sf = resolve_state_file(gr_id)
+    if sf is None or not sf.exists():
+        return
+    try:
+
+        def _apply(data: dict[str, Any]) -> None:
+            arts: list[Any] = list(data.get("artifacts") or [])
+            arts.append(artifact)
+            data["artifacts"] = arts
+
+        _locked_update(sf, _apply)
+    except Exception:
+        logger.warning("failed to append artifact", exc_info=True)
+
+
+def read_artifacts(gr_id: str | None) -> list[dict[str, Any]]:
+    sf = resolve_state_file(gr_id)
+    if sf is None or not sf.exists():
+        return []
+    try:
+        data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
+        artifacts: list[Any] = data.get("artifacts") or []
+        return [a for a in artifacts if isinstance(a, dict)]
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def last_artifact_branch(gr_id: str | None) -> str:
+    for art in reversed(read_artifacts(gr_id)):
+        if art.get("type") == "branch":
+            return str(art.get("name") or "")
+        if art.get("type") == "pr":
+            return str(art.get("branch") or "")
+    return ""
 
 
 def check_bail(
@@ -273,57 +308,3 @@ def check_bail(
         raise
     except Exception:
         pass
-
-
-def get_prev_child_branch(gr_id: str | None) -> str:
-    """Return the branch from child_records at handoff_count-1, or '' on missing/error.
-
-    Transitional (Phase B): reads handoff_count from chain_state, which is no
-    longer written by Handoff after Phase A.  Migrate to artifacts in Phase B.
-    """
-    sf = resolve_state_file(gr_id)
-    if sf is None or not sf.exists():
-        return ""
-    try:
-        data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
-        chain_st = data.get("chain_state")
-        if not isinstance(chain_st, dict):
-            return ""
-        cs = cast(dict[str, Any], chain_st)
-        n = int(cs.get("handoff_count", 0))
-        records: list[dict[str, Any]] = list(cs.get("child_records") or [])
-        for rec in records:
-            if rec.get("n") == n - 1:
-                return str(rec.get("branch") or "")
-    except Exception:
-        pass
-    return ""
-
-
-def upsert_child_record(gr_id: str | None, **fields: Any) -> None:
-    """Upsert a child_records entry at handoff_count in chain_state.
-
-    Filters None values from fields. Raises on read/write errors — caller logs.
-
-    Transitional (Phase B): reads handoff_count from chain_state, which is no
-    longer written by Handoff after Phase A.  Migrate to artifacts in Phase B.
-    """
-    sf = resolve_state_file(gr_id)
-    if sf is None or not sf.exists() or not gr_id:
-        return
-    data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
-    chain_st = data.get("chain_state")
-    if not isinstance(chain_st, dict):
-        return
-    cs = cast(dict[str, Any], chain_st)
-    n = int(cs.get("handoff_count", 0))
-    updates = {k: v for k, v in fields.items() if v is not None}
-    records: list[dict[str, Any]] = list(cs.get("child_records") or [])
-    for rec in records:
-        if rec.get("n") == n:
-            rec.update(updates)
-            break
-    else:
-        records.append({"n": n, **updates})
-    cs["child_records"] = records
-    patch_state(gr_id, chain_state=cs)

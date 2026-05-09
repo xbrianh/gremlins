@@ -21,7 +21,7 @@ from gremlins.git import (
 )
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
-from gremlins.state import patch_state, resolve_state_file, upsert_child_record
+from gremlins.state import append_artifact, patch_state, resolve_state_file
 
 logger = logging.getLogger(__name__)
 
@@ -92,13 +92,10 @@ class MaterializeToBranch(Stage):
             impl_materialized_branch=result.materialized_branch,
             impl_base_ref=result.base_ref,
         )
-        if materialized_branch and self.state.gr_id:
-            try:
-                upsert_child_record(self.state.gr_id, branch=materialized_branch)
-            except Exception:
-                logger.warning(
-                    "failed to record child branch in chain_state", exc_info=True
-                )
+        if materialized_branch:
+            append_artifact(
+                self.state.gr_id, {"type": "branch", "name": materialized_branch}
+            )
         return result
 
 

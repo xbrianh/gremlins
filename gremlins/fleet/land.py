@@ -18,13 +18,14 @@ from gremlins.fleet.state import (
     liveness_of_state_file,
     load_state,
 )
+from gremlins.state import read_pr_url
 from gremlins.utils import proc
 
 
 def expected_branch(state: dict[str, Any], gr_id: str):
     """Return the durable branch name for a gremlin, or None if there isn't one."""
     if effective_pipeline_kind(state) == "local":
-        return f"bg/localgremlin/{gr_id}"
+        return f"bg/local/{gr_id}"
     return None
 
 
@@ -171,7 +172,7 @@ def _cleanup_gremlin(
             print(f"removed worktree {workdir}")
 
     if delete_branch:
-        branch = state.get("branch") or expected_branch(state, gr_id)
+        branch = expected_branch(state, gr_id)
         if branch:
             try:
                 _git.delete_branch(branch, force=True, cwd=cwd)
@@ -689,12 +690,9 @@ def _land_gh(
     gr_id: str, sf: str, wdir: str, state: dict[str, Any], force: bool = False
 ) -> bool:
     """Merge a gh gremlin's PR and clean up."""
-    pr_url = state.get("pr_url", "")
+    pr_url = read_pr_url(gr_id)
     if not pr_url:
-        print(f"error: no pr_url in state for {gr_id}")
-        print(
-            "This gremlin may have been launched before pr_url tracking was added to ghgremlin.sh."
-        )
+        print(f"error: no pr_url recorded for {gr_id}")
         return False
 
     project_root = _resolve_landing_cwd(state)

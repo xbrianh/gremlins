@@ -629,7 +629,7 @@ def test_land_local_squash_lands_branch_and_deletes_it(tmp_path, monkeypatch, ca
     project_root.mkdir()
     _init_git_repo(project_root)
 
-    branch = "bg/localgremlin/test-id-aabb12"
+    branch = "bg/local/test-id-aabb12"
     subprocess.run(
         ["git", "checkout", "-b", branch],
         cwd=project_root,
@@ -718,7 +718,7 @@ def test_land_local_squash_folds_commit_synthesis_cost_into_total(
     project_root.mkdir()
     _init_git_repo(project_root)
 
-    branch = "bg/localgremlin/test-id-cost12"
+    branch = "bg/local/test-id-cost12"
     subprocess.run(
         ["git", "checkout", "-b", branch],
         cwd=project_root,
@@ -784,7 +784,7 @@ def test_land_local_refuses_non_worktree_branch_setup(tmp_path, monkeypatch, cap
         "id": "x",
         "kind": "localgremlin",
         "setup_kind": "cp-snapshot",  # not worktree-branch
-        "branch": "bg/localgremlin/x",
+        "branch": "bg/local/x",
     }
     ok = _land._land_local("x", "/sf", "/wdir", state, mode="squash")
     assert ok is False
@@ -811,7 +811,7 @@ def test_land_local_into_dir_nonexistent_fails(tmp_path, monkeypatch, capsys):
         "id": "x",
         "kind": "localgremlin",
         "setup_kind": "worktree-branch",
-        "branch": "bg/localgremlin/x",
+        "branch": "bg/local/x",
         "project_root": str(tmp_path / "project"),
     }
     ok = _land._land_local(
@@ -833,7 +833,7 @@ def test_land_local_into_dir_lands_in_worktree(tmp_path, monkeypatch, capsys):
     _init_git_repo(project_root)
 
     gr_id = "land-into-wt-12345678"
-    branch = f"bg/localgremlin/{gr_id}"
+    branch = f"bg/local/{gr_id}"
 
     # Create feature branch with a commit.
     subprocess.run(
@@ -915,7 +915,7 @@ def test_land_proceeds_with_untracked_files_present(tmp_path, monkeypatch, capsy
     project_root.mkdir()
     _init_git_repo(project_root)
 
-    branch = "bg/localgremlin/test-id-untr12"
+    branch = "bg/local/test-id-untr12"
     subprocess.run(
         ["git", "checkout", "-b", branch],
         cwd=project_root,
@@ -984,7 +984,7 @@ def test_land_refuses_with_tracked_modifications(tmp_path, monkeypatch, capsys):
     project_root.mkdir()
     _init_git_repo(project_root)
 
-    branch = "bg/localgremlin/test-id-dirty1"
+    branch = "bg/local/test-id-dirty1"
     subprocess.run(
         ["git", "checkout", "-b", branch],
         cwd=project_root,
@@ -1045,7 +1045,7 @@ def test_squash_land_failure_preserves_untracked_files(tmp_path, monkeypatch):
 
     # Create a conflicting branch: adds a file that will conflict with an
     # untracked file of the same name already present in the working tree.
-    branch = "bg/localgremlin/test-id-conf12"
+    branch = "bg/local/test-id-conf12"
     subprocess.run(
         ["git", "checkout", "-b", branch],
         cwd=project_root,
@@ -1281,7 +1281,7 @@ def test_rescue_host_terminated_recreates_worktree_and_proceeds(
 
     def fake_recreate(s):
         workdir.mkdir(exist_ok=True)
-        return True, "recreated from branch 'bg/localgremlin/test-id-htdd12'"
+        return True, "recreated from branch 'bg/local/test-id-htdd12'"
 
     monkeypatch.setattr(_rescue, "_recreate_worktree", fake_recreate)
     monkeypatch.setattr(
@@ -1346,7 +1346,7 @@ def test_stage_names_for_gremlin_boss_only(label, state, expected):
                 "kind": "custard",
                 "pipeline_kind": "local",
                 "setup_kind": "worktree-branch",
-                "branch": "bg/localgremlin/x",
+                "branch": "bg/local/x",
                 "id": "x",
             },
             "_land_local",
@@ -1424,7 +1424,7 @@ def test_do_land_custom_pipeline_name_routes_to_local(tmp_path, monkeypatch):
         "workdir": str(workdir),
         "project_root": str(tmp_path / "project"),
         "setup_kind": "worktree-branch",
-        "branch": "bg/localgremlin/custard-pipeline-id",
+        "branch": "bg/local/custard-pipeline-id",
     }
     _write_state(gr_dir, state, finished=True)
     monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
