@@ -96,8 +96,12 @@ def _build_implement(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -
             runner.session_dir / "plan.md",
         )
     return implement.Implement(
-        entry.name, spec.model, entry.prompts, entry.options,
-        is_git=runner.is_git, spec_text=spec_text,
+        entry.name,
+        spec.model,
+        entry.prompts,
+        entry.options,
+        is_git=runner.is_git,
+        spec_text=spec_text,
     )
 
 
@@ -124,7 +128,9 @@ def _build_verify(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> A
                 options.get("max_attempts"),
                 spec.model,
             )
-    return verify.Verify(entry.name, spec.model, entry.prompts, options, is_git=runner.is_git)
+    return verify.Verify(
+        entry.name, spec.model, entry.prompts, options, is_git=runner.is_git
+    )
 
 
 def _build_commit(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
@@ -188,8 +194,12 @@ def _build_review_code(entry: StageEntry, spec: ClientSpec, runner: StageRunner)
     plan_text = plan_file.read_text(encoding="utf-8")
     logger.info("reviewing code (model: %s)", spec.model)
     return review_code.ReviewCode(
-        entry.name, spec.model, entry.prompts, entry.options,
-        plan_text=plan_text, is_git=runner.is_git,
+        entry.name,
+        spec.model,
+        entry.prompts,
+        entry.options,
+        plan_text=plan_text,
+        is_git=runner.is_git,
     )
 
 
@@ -223,7 +233,9 @@ def _build_loop(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any
             gr_id=runner.gr_id,
         )
         body_runners.append(runner.make_runner(child, child_ctx, child_spec))
-    return LoopStage(entry.name, body_runners=body_runners, max_iterations=max_iterations)
+    return LoopStage(
+        entry.name, body_runners=body_runners, max_iterations=max_iterations
+    )
 
 
 def _build_run_cmd(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
@@ -235,7 +247,9 @@ def _build_claude_prompt(
 ) -> Any:
     if not entry.prompts:
         die(f"stage {entry.name!r}: type 'claude-prompt' requires a 'prompt' field")
-    return claude_prompt.ClaudePrompt(entry.name, spec.model, entry.prompts, entry.options)
+    return claude_prompt.ClaudePrompt(
+        entry.name, spec.model, entry.prompts, entry.options
+    )
 
 
 def _build_handoff(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:

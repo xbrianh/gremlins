@@ -35,8 +35,18 @@ def _make_stage(
         cmds = ["true"]
     if client is None:
         client = FakeClaudeClient(fixtures={})
-    options = {"cmds": cmds if cmds is not None else [], "max_attempts": max_attempts, "commit_after_fix": commit_after_fix}
-    stage = Verify("verify", fix_model, [_VERIFY_PROMPT_PATH.read_text(encoding="utf-8")], options, is_git=is_git)
+    options = {
+        "cmds": cmds if cmds is not None else [],
+        "max_attempts": max_attempts,
+        "commit_after_fix": commit_after_fix,
+    }
+    stage = Verify(
+        "verify",
+        fix_model,
+        [_VERIFY_PROMPT_PATH.read_text(encoding="utf-8")],
+        options,
+        is_git=is_git,
+    )
     ctx = StageContext(
         client=client, session_dir=tmp_path, gr_id=None, worktree=tmp_path
     )
@@ -185,7 +195,13 @@ def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
         fixtures={"verify-fix-1": MINIMAL_EVENTS, "verify-fix-2": MINIMAL_EVENTS}
     )
     options = {"cmds": ["false"], "max_attempts": 3, "commit_after_fix": False}
-    stage = Verify("verify", "sonnet", [_VERIFY_PROMPT_PATH.read_text(encoding="utf-8")], options, is_git=True)
+    stage = Verify(
+        "verify",
+        "sonnet",
+        [_VERIFY_PROMPT_PATH.read_text(encoding="utf-8")],
+        options,
+        is_git=True,
+    )
     ctx = StageContext(
         client=client, session_dir=tmp_path, gr_id=gr_id, worktree=tmp_path
     )

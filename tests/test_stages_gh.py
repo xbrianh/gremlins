@@ -34,7 +34,9 @@ def _make_ghreview(
     pr_url: str,
 ) -> ReviewCode:
     prompts = [(_BUNDLED_PROMPTS / "review_gh.md").read_text(encoding="utf-8")]
-    stage = ReviewCode("ghreview", "sonnet", prompts, {}, plan_text="", is_git=True, pr_url=pr_url)
+    stage = ReviewCode(
+        "ghreview", "sonnet", prompts, {}, plan_text="", is_git=True, pr_url=pr_url
+    )
     stage.bind(_make_ctx(client, tmp_path, gr_id=gr_id))
     return stage
 

@@ -90,7 +90,13 @@ def test_plan_source_file_github(
     client = FakeClaudeClient(fixtures=fixtures)
 
     stage = Plan(
-        "plan", None, [], {}, plan_source=str(plan_src), plan_file=plan_md, repo="owner/repo"
+        "plan",
+        None,
+        [],
+        {},
+        plan_source=str(plan_src),
+        plan_file=plan_md,
+        repo="owner/repo",
     )
     stage.bind(_ctx(tmp_path, client))
     stage.run(None)

@@ -26,7 +26,9 @@ def _make_stage(
     spec_text: str = "",
     prompts: list[str] | None = None,
 ) -> tuple[Implement, StageContext]:
-    stage = Implement("implement", "sonnet", prompts or [], {}, is_git=is_git, spec_text=spec_text)
+    stage = Implement(
+        "implement", "sonnet", prompts or [], {}, is_git=is_git, spec_text=spec_text
+    )
     client = FakeClaudeClient(fixtures={"implement": MINIMAL_EVENTS})
     ctx = StageContext(client=client, session_dir=tmp_path, gr_id=None)
     stage.bind(ctx)

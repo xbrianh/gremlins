@@ -24,7 +24,9 @@ def _make_stage(
     style_content: str | None = None,
 ) -> tuple[AddressCode, FakeClaudeClient]:
     prompt_text = "Address PR {pr_url}."
-    prompts = [style_content, prompt_text] if style_content is not None else [prompt_text]
+    prompts = (
+        [style_content, prompt_text] if style_content is not None else [prompt_text]
+    )
     stage = AddressCode("ghaddress", "sonnet", prompts, {}, is_git=True, pr_url=pr_url)
     client = FakeClaudeClient(fixtures={"ghaddress": MINIMAL_EVENTS})
     stage.bind(StageContext(client=client, session_dir=tmp_path, gr_id=gr_id))
@@ -47,7 +49,9 @@ def test_run_includes_style_from_prompt_paths(tmp_path: pathlib.Path) -> None:
 
 
 def test_run_raises_if_unbound() -> None:
-    stage = AddressCode("ghaddress", None, ["Address PR {pr_url}."], {}, is_git=True, pr_url=PR_URL)
+    stage = AddressCode(
+        "ghaddress", None, ["Address PR {pr_url}."], {}, is_git=True, pr_url=PR_URL
+    )
     with pytest.raises(RuntimeError, match="not bound"):
         stage.run(_GH_PIPE)
 
