@@ -24,6 +24,7 @@ class SequenceStage(Stage):
     def run(self, pipe: Any) -> None:  # noqa: ARG002
         for sub_ctx, runner in self._body:
             sub_ctx.worktree = self.state.worktree
+            sub_ctx.child_key = self.state.child_key
             runner()
 
 

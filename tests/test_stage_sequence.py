@@ -65,3 +65,16 @@ def test_sequence_propagates_worktree() -> None:
     stage.run(None)
 
     assert observed == [wt]
+
+
+def test_sequence_propagates_child_key() -> None:
+    parent_ctx = _ctx()
+    parent_ctx.child_key = "my-child"
+
+    sub_ctx = _ctx()
+
+    stage = SequenceStage("seq", body=[(sub_ctx, lambda: None)])
+    stage.bind(parent_ctx)
+    stage.run(None)
+
+    assert sub_ctx.child_key == "my-child"
