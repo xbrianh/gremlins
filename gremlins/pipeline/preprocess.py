@@ -75,7 +75,9 @@ def _expand_entry(
     if "parallel" in entry and isinstance(entry["parallel"], list):
         expanded_parallel: list[dict[str, Any]] = []
         for child in cast(list[Any], entry["parallel"]):
-            expanded = _expand_entry(cast(dict[str, Any], child), prompt_dir, project_root, chain)
+            expanded = _expand_entry(
+                cast(dict[str, Any], child), prompt_dir, project_root, chain
+            )
             if len(expanded) != 1:
                 raise ValueError(
                     f"parallel child expanded to {len(expanded)} stages via include; "
