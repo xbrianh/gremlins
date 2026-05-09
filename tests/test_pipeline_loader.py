@@ -202,6 +202,155 @@ stages:
         load_pipeline(tmp_path / "pipeline.yaml")
 
 
+# ---- named prompts (top-level prompts: mapping) ----------------------------
+
+
+def test_named_prompt_single_file(tmp_path: pathlib.Path) -> None:
+    _make_prompt(tmp_path, "base.md")
+    _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+prompt_dir: .
+prompts:
+  base: base.md
+stages:
+  - name: s1
+    type: verify
+    prompt: base
+""",
+    )
+    pipeline = load_pipeline(tmp_path / "pipeline.yaml")
+    assert pipeline.stages[0].prompts == ["prompt content"]
+
+
+def test_named_prompt_list_of_files(tmp_path: pathlib.Path) -> None:
+    _make_prompt(tmp_path, "a.md")
+    (tmp_path / "b.md").write_text("other content", encoding="utf-8")
+    _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+prompt_dir: .
+prompts:
+  combo: [a.md, b.md]
+stages:
+  - name: s1
+    type: verify
+    prompt: combo
+""",
+    )
+    pipeline = load_pipeline(tmp_path / "pipeline.yaml")
+    assert pipeline.stages[0].prompts == ["prompt content", "other content"]
+
+
+def test_named_prompt_mixed_with_bare_path(tmp_path: pathlib.Path) -> None:
+    _make_prompt(tmp_path, "base.md")
+    (tmp_path / "extra.md").write_text("extra content", encoding="utf-8")
+    _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+prompt_dir: .
+prompts:
+  base: base.md
+stages:
+  - name: s1
+    type: verify
+    prompt: [base, extra.md]
+""",
+    )
+    pipeline = load_pipeline(tmp_path / "pipeline.yaml")
+    assert pipeline.stages[0].prompts == ["prompt content", "extra content"]
+
+
+def test_named_prompt_mixed_with_bundled(tmp_path: pathlib.Path) -> None:
+    _make_prompt(tmp_path, "local.md")
+    _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+prompt_dir: .
+prompts:
+  local-base: local.md
+stages:
+  - name: s1
+    type: verify
+    prompt: [local-base, gremlins:code_style.md]
+""",
+    )
+    pipeline = load_pipeline(tmp_path / "pipeline.yaml")
+    assert len(pipeline.stages[0].prompts) == 2
+    assert pipeline.stages[0].prompts[0] == "prompt content"
+    assert pipeline.stages[0].prompts[1].strip()
+
+
+def test_named_prompt_shared_across_stages(tmp_path: pathlib.Path) -> None:
+    _make_prompt(tmp_path, "shared.md")
+    _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+prompt_dir: .
+prompts:
+  shared: shared.md
+stages:
+  - name: s1
+    type: verify
+    prompt: shared
+  - name: s2
+    type: verify
+    prompt: shared
+""",
+    )
+    pipeline = load_pipeline(tmp_path / "pipeline.yaml")
+    assert pipeline.stages[0].prompts == ["prompt content"]
+    assert pipeline.stages[1].prompts == ["prompt content"]
+
+
+def test_named_prompt_bundled_value(tmp_path: pathlib.Path) -> None:
+    _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+prompts:
+  style: gremlins:code_style.md
+stages:
+  - name: s1
+    type: verify
+    prompt: style
+""",
+    )
+    pipeline = load_pipeline(tmp_path / "pipeline.yaml")
+    assert len(pipeline.stages[0].prompts) == 1
+    assert pipeline.stages[0].prompts[0].strip()
+
+
+def test_named_prompt_in_parallel_group(tmp_path: pathlib.Path) -> None:
+    _make_prompt(tmp_path, "shared.md")
+    _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+prompt_dir: .
+prompts:
+  shared: shared.md
+stages:
+  - name: group
+    parallel:
+      - name: s1
+        type: verify
+        prompt: shared
+      - name: s2
+        type: verify
+        prompt: shared
+""",
+    )
+    pipeline = load_pipeline(tmp_path / "pipeline.yaml")
+    assert pipeline.stages[0].body[0].prompts == ["prompt content"]
+    assert pipeline.stages[0].body[1].prompts == ["prompt content"]
+
+
 # ---- prompt list -----------------------------------------------------------
 
 

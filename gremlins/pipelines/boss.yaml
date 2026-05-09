@@ -4,6 +4,9 @@ default_client: claude:sonnet
 
 base_ref: current
 
+prompts:
+  code-style: gremlins:code_style.md
+
 stages:
   - name: chain
     type: loop
@@ -13,8 +16,8 @@ stages:
 
   - name: review-chain
     type: review-code
-    prompt: [gremlins:code_style.md, gremlins:review/chain.md]
+    prompt: [code-style, gremlins:review/chain.md]
 
   - name: address-chain
     type: address-code
-    prompt: [gremlins:code_style.md, gremlins:address.md, gremlins:bail_section.md]
+    prompt: [code-style, gremlins:address.md, gremlins:bail_section.md]

@@ -27,36 +27,72 @@ def _strip_bundled_prefix(name: str) -> str:
     return name[len(_BUNDLED_PREFIX) :] if name.startswith(_BUNDLED_PREFIX) else name
 
 
-def _rewrite_prompts_to_bare(stages: list[Any]) -> None:
+def _rewrite_prompts_to_bare(stages: list[Any], named_keys: set[str]) -> None:
     """Strip the `gremlins:` prefix on every `prompt:` entry in-place.
 
     After init, scaffolded YAMLs reference editable local copies under
     `.gremlins/prompts/`, so bundled-prefixed names become bare names that
-    resolve against `prompt_dir`.
+    resolve against `prompt_dir`. Named-entry references (keys in `named_keys`)
+    are left unchanged.
     """
     for stage in stages:
         if not isinstance(stage, dict):
             continue
         s = cast(dict[str, Any], stage)
         if "parallel" in s:
-            _rewrite_prompts_to_bare(cast(list[Any], s["parallel"]))
+            _rewrite_prompts_to_bare(cast(list[Any], s["parallel"]), named_keys)
             continue
         prompts = s.get("prompt")
         if not prompts:
             continue
         if isinstance(prompts, str):
-            s["prompt"] = _strip_bundled_prefix(prompts)
+            s["prompt"] = (
+                prompts if prompts in named_keys else _strip_bundled_prefix(prompts)
+            )
         else:
-            s["prompt"] = [_strip_bundled_prefix(p) for p in cast(list[str], prompts)]
+            s["prompt"] = [
+                p if p in named_keys else _strip_bundled_prefix(p)
+                for p in cast(list[str], prompts)
+            ]
 
 
-def _collect_prompt_subpaths(stages: list[Any]) -> list[str]:
-    """Walk stage list (including parallel groups) and return unique prompt
-    subpaths, with any `gremlins:` prefix stripped — bundled pipelines
-    reference their own prompts via that prefix, but on disk they live as
-    bare names under the bundled prompts dir."""
+def _rewrite_named_prompts_to_bare(named_prompts: dict[str, Any]) -> None:
+    """Strip `gremlins:` prefix from values in the top-level prompts: mapping."""
+    for key in named_prompts:
+        val = named_prompts[key]
+        if isinstance(val, str):
+            named_prompts[key] = _strip_bundled_prefix(val)
+        else:
+            named_prompts[key] = [
+                _strip_bundled_prefix(p) for p in cast(list[str], val)
+            ]
+
+
+def _collect_prompt_subpaths(
+    stages: list[Any], named_prompts: dict[str, Any] | None = None
+) -> list[str]:
+    """Return unique subpaths for all prompt files.
+
+    Collects from the named prompts mapping (if any) and from stage `prompt:`
+    fields, skipping stage items that are named-entry references.
+    """
     seen: set[str] = set()
     result: list[str] = []
+
+    def _add(p: str) -> None:
+        bare = _strip_bundled_prefix(p)
+        if bare not in seen:
+            seen.add(bare)
+            result.append(bare)
+
+    named_keys: set[str] = set()
+    for key, value in (named_prompts or {}).items():
+        named_keys.add(key)
+        if isinstance(value, str):
+            _add(value)
+        else:
+            for p in cast(list[str], value):
+                _add(p)
 
     def _walk(stage: Any) -> None:
         if not isinstance(stage, dict):
@@ -72,10 +108,8 @@ def _collect_prompt_subpaths(stages: list[Any]) -> list[str]:
         if isinstance(prompts, str):
             prompts = [prompts]
         for p in cast(list[str], prompts):
-            bare = _strip_bundled_prefix(p)
-            if bare not in seen:
-                seen.add(bare)
-                result.append(bare)
+            if p not in named_keys:
+                _add(p)
 
     for stage in stages:
         _walk(stage)
@@ -156,7 +190,9 @@ def _build_plan(
 
     seen_subpaths: set[str] = set()
     for name in selected:
-        for subpath in _collect_prompt_subpaths(pipeline_data[name].get("stages", [])):
+        raw = pipeline_data[name]
+        named = cast(dict[str, Any], raw.get("prompts") or {})
+        for subpath in _collect_prompt_subpaths(raw.get("stages", []), named):
             if subpath not in seen_subpaths:
                 seen_subpaths.add(subpath)
                 src = _PROMPTS_DIR / subpath
@@ -167,7 +203,11 @@ def _build_plan(
         data = dict(pipeline_data[name])
         data.setdefault("prompt_dir", "prompts")
         stages = cast(list[Any], data.get("stages", []))
-        _rewrite_prompts_to_bare(stages)
+        named = cast(dict[str, Any], data.get("prompts") or {})
+        named_keys = set(named)
+        _rewrite_prompts_to_bare(stages, named_keys)
+        if named:
+            _rewrite_named_prompts_to_bare(named)
         dst = dot_gremlins / f"{name}.yaml"
         content = yaml.safe_dump(data, default_flow_style=False, sort_keys=False)
         plan.append((dst, content.encode("utf-8")))
