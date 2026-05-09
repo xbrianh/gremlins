@@ -77,7 +77,7 @@ def test_xai_client_missing_key(monkeypatch: Any) -> None:
         make_xai_client(None)
 
 
-def test_openai_client_constructs(monkeypatch: Any) -> None:
+def test_openai_client_constructs_with_api_key(monkeypatch: Any) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     client = make_openai_client(None)
     assert isinstance(client, OpenAIAgentsClient)
