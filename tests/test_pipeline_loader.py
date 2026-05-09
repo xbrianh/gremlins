@@ -46,7 +46,7 @@ stages:
     assert pipeline.stages[0].name == "plan"
     assert pipeline.stages[0].type == "plan"
     assert pipeline.stages[0].client is None
-    assert pipeline.stages[0].prompt_paths == [prompt]
+    assert pipeline.stages[0].prompts == ["prompt content"]
 
 
 # ---- per-stage client override ---------------------------------------------
@@ -135,8 +135,6 @@ stages:
 
 def test_bundled_prefix_resolves_to_package(tmp_path: pathlib.Path) -> None:
     """`gremlins:NAME` resolves from the bundled prompts dir."""
-    from gremlins.prompts import BUNDLED_PROMPT_DIR
-
     _write_yaml(
         tmp_path / "pipeline.yaml",
         """\
@@ -148,9 +146,8 @@ stages:
 """,
     )
     pipeline = load_pipeline(tmp_path / "pipeline.yaml")
-    assert pipeline.stages[0].prompt_paths == [
-        (BUNDLED_PROMPT_DIR / "code_style.md").resolve()
-    ]
+    assert len(pipeline.stages[0].prompts) == 1
+    assert pipeline.stages[0].prompts[0].strip()  # non-empty content
 
 
 def test_bare_name_does_not_fall_back_to_bundled(tmp_path: pathlib.Path) -> None:
@@ -172,8 +169,6 @@ stages:
 
 def test_mixed_bundled_and_local_prompts(tmp_path: pathlib.Path) -> None:
     """Single stage may mix `gremlins:` and bare-name prompts."""
-    from gremlins.prompts import BUNDLED_PROMPT_DIR
-
     local = _make_prompt(tmp_path, "local.md")
     _write_yaml(
         tmp_path / "pipeline.yaml",
@@ -187,10 +182,8 @@ stages:
 """,
     )
     pipeline = load_pipeline(tmp_path / "pipeline.yaml")
-    assert pipeline.stages[0].prompt_paths == [
-        (BUNDLED_PROMPT_DIR / "code_style.md").resolve(),
-        local,
-    ]
+    assert len(pipeline.stages[0].prompts) == 2
+    assert pipeline.stages[0].prompts[1] == "prompt content"
 
 
 def test_bundled_prefix_without_name_raises(tmp_path: pathlib.Path) -> None:
@@ -213,21 +206,21 @@ stages:
 
 
 def test_prompt_list_resolves_both_paths(tmp_path: pathlib.Path) -> None:
-    a = _make_prompt(tmp_path, "a.md")
-    b = _make_prompt(tmp_path, "b.md")
+    _make_prompt(tmp_path, "a.md")
+    _make_prompt(tmp_path, "b.md")
     _write_yaml(
         tmp_path / "pipeline.yaml",
-        f"""\
+        """\
 name: p
 prompt_dir: .
 stages:
   - name: s1
     type: verify
-    prompt: [{a.name}, {b.name}]
+    prompt: [a.md, b.md]
 """,
     )
     pipeline = load_pipeline(tmp_path / "pipeline.yaml")
-    assert pipeline.stages[0].prompt_paths == [a, b]
+    assert pipeline.stages[0].prompts == ["prompt content", "prompt content"]
 
 
 # ---- repeated type with distinct names ------------------------------------

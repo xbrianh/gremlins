@@ -22,7 +22,7 @@ def _make_entry() -> StageEntry:
         name="open-pr",
         type="open-github-pr",
         client=None,
-        prompt_paths=[],
+        prompts=[],
         options={},
     )
 

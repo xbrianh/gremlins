@@ -25,7 +25,7 @@ def _make_entry() -> StageEntry:
         name="commit",
         type="commit",
         client=None,
-        prompt_paths=[],
+        prompts=[],
         options={},
     )
 

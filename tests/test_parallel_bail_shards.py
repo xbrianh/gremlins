@@ -75,7 +75,7 @@ def _make_parallel_stages(
     if project_root is None:
         project_root = pathlib.Path.cwd()
     entry = StageEntry(
-        name=group_name, type="parallel", client=None, prompt_paths=[], options={}
+        name=group_name, type="parallel", client=None, prompts=[], options={}
     )
     return ParallelStage(
         entry,

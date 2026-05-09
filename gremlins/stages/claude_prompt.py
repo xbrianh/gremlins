@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from gremlins.prompts import load_prompts
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import check_bail
@@ -12,7 +11,7 @@ from gremlins.state import check_bail
 
 class ClaudePrompt(Stage):
     def run(self, pipe: Any) -> None:  # noqa: ARG002
-        prompt = load_prompts(self.prompt_paths)
+        prompt = "\n\n".join(self.prompts).rstrip()
         self.run_claude(
             prompt,
             label=self.name,

@@ -25,7 +25,7 @@ def _make_entry() -> StageEntry:
         name="materialize-to-branch",
         type="materialize-to-branch",
         client=None,
-        prompt_paths=[],
+        prompts=[],
         options={},
     )
 

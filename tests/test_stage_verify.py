@@ -14,7 +14,7 @@ from gremlins.pipeline import StageEntry
 from gremlins.stages.base import StageContext
 from gremlins.stages.verify import Verify
 
-_VERIFY_PROMPT = (
+_VERIFY_PROMPT_PATH = (
     pathlib.Path(__file__).resolve().parent.parent
     / "gremlins"
     / "prompts"
@@ -31,7 +31,7 @@ def _make_entry(
         name="verify",
         type="verify",
         client=None,
-        prompt_paths=[_VERIFY_PROMPT],
+        prompts=[_VERIFY_PROMPT_PATH.read_text(encoding="utf-8")],
         options={
             "cmds": cmds if cmds is not None else [],
             "max_attempts": max_attempts,
@@ -263,16 +263,19 @@ def test_commit_after_fix_true_in_prompt(tmp_path):
 
 def test_parallel_child_fix_prompt_uses_child_key_bail_command(tmp_path):
     client = FakeClaudeClient(fixtures={"verify-fix-1": MINIMAL_EVENTS})
+    _bail_fix_path = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "gremlins"
+        / "prompts"
+        / "bail_section_fix.md"
+    )
     entry = StageEntry(
         name="verify",
         type="verify",
         client=None,
-        prompt_paths=[
-            _VERIFY_PROMPT,
-            pathlib.Path(__file__).resolve().parent.parent
-            / "gremlins"
-            / "prompts"
-            / "bail_section_fix.md",
+        prompts=[
+            _VERIFY_PROMPT_PATH.read_text(encoding="utf-8"),
+            _bail_fix_path.read_text(encoding="utf-8"),
         ],
         options={"cmds": ["false"], "max_attempts": 2, "commit_after_fix": False},
     )

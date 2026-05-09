@@ -9,7 +9,6 @@ from typing import Any
 
 from gremlins import git as _git_mod
 from gremlins.pipeline import StageEntry
-from gremlins.prompts import load_prompts
 from gremlins.stages.base import Stage
 from gremlins.stages.loop import LoopExhausted, LoopStage, RunCmdFailed
 from gremlins.stages.registry import register_stage
@@ -59,7 +58,7 @@ class Verify(Stage):
                 "The next stage (commit) will handle staging and committing."
             )
 
-        template = load_prompts(self.prompt_paths)
+        template = "\n\n".join(self.prompts).rstrip()
         combined_cmd = " && ".join(cmds)
         commands_section = "**Commands run:**\n" + "\n".join(f"- `{c}`" for c in cmds)
 

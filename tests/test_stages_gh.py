@@ -38,7 +38,7 @@ def _make_ghreview(
         name="ghreview",
         type="ghreview",
         client=None,
-        prompt_paths=[_BUNDLED_PROMPTS / "review_gh.md"],
+        prompts=[(_BUNDLED_PROMPTS / "review_gh.md").read_text(encoding="utf-8")],
         options={},
     )
     stage = ReviewCode(entry, "sonnet", plan_text="", is_git=True, pr_url=pr_url)
@@ -119,9 +119,9 @@ def _make_ghaddress(
         name="ghaddress",
         type="ghaddress",
         client=None,
-        prompt_paths=[
-            _BUNDLED_PROMPTS / "address_gh.md",
-            _BUNDLED_PROMPTS / "bail_section.md",
+        prompts=[
+            (_BUNDLED_PROMPTS / "address_gh.md").read_text(encoding="utf-8"),
+            (_BUNDLED_PROMPTS / "bail_section.md").read_text(encoding="utf-8"),
         ],
         options={},
     )

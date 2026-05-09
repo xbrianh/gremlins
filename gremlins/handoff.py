@@ -26,7 +26,7 @@ from typing import Any, NoReturn, TypeVar, cast
 from gremlins.clients import PACKAGE_DEFAULT, ClientSpec, to_client
 from gremlins.clients.protocol import ClaudeClient
 from gremlins.logging_setup import configure_logging
-from gremlins.prompts import BUNDLED_PROMPT_DIR, load_prompts
+from gremlins.prompts import BUNDLED_PROMPT_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -67,10 +67,13 @@ def die(msg: str) -> NoReturn:
 
 
 def _load_handoff_style() -> str:
-    try:
-        return load_prompts([BUNDLED_PROMPT_DIR / "code_style.md"])
-    except (FileNotFoundError, ValueError) as exc:
-        die(f"error loading prompt: {exc}")
+    path = BUNDLED_PROMPT_DIR / "code_style.md"
+    if not path.exists():
+        die(f"error loading prompt: prompt file not found: {path}")
+    text = path.read_text(encoding="utf-8").rstrip()
+    if not text.strip():
+        die(f"error loading prompt: prompt file is empty: {path}")
+    return text
 
 
 def run_git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:

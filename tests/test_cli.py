@@ -341,7 +341,7 @@ def _make_fake_pipeline(stage_type: str = "plan"):
     from gremlins.pipeline import PipelineDef, StageEntry
 
     entry = StageEntry(
-        name="plan", type=stage_type, client=None, prompt_paths=[], options={}
+        name="plan", type=stage_type, client=None, prompts=[], options={}
     )
     return PipelineDef(
         name="local", path=pathlib.Path("/fake/local.yaml"), stages=[entry]

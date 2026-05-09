@@ -35,7 +35,7 @@ class Stage:
     def __init__(self, entry: StageEntry, model: str | None) -> None:
         self.name = entry.name
         self.model = model
-        self.prompt_paths = entry.prompt_paths
+        self.prompts = entry.prompts
         self.options = entry.options
         self._mutable_state: StageContext | None = None
 

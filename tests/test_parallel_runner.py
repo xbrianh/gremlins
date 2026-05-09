@@ -35,9 +35,7 @@ def _make_ctx(child_key: str) -> StageContext:
 
 
 def _make_entry(name: str = "test-group") -> StageEntry:
-    return StageEntry(
-        name=name, type="parallel", client=None, prompt_paths=[], options={}
-    )
+    return StageEntry(name=name, type="parallel", client=None, prompts=[], options={})
 
 
 def _make_parallel_stages(

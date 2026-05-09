@@ -5,16 +5,28 @@ from typing import TYPE_CHECKING, cast
 from gremlins.clients import resolve as _resolve
 from gremlins.clients.claude import SubprocessClaudeClient
 from gremlins.clients.copilot import SubprocessCopilotClient
-from gremlins.clients.providers.openai_agents import make_openai_client, make_xai_client
 from gremlins.stages.registry import CLIENT_FACTORIES, register_client_factory
 
 if TYPE_CHECKING:
     from gremlins.clients.protocol import ClaudeClient
 
+
+def _make_openai_client(model: str | None) -> object:
+    from gremlins.clients.providers.openai_agents import make_openai_client
+
+    return make_openai_client(model)
+
+
+def _make_xai_client(model: str | None) -> object:
+    from gremlins.clients.providers.openai_agents import make_xai_client
+
+    return make_xai_client(model)
+
+
 register_client_factory("claude", lambda _: SubprocessClaudeClient())
 register_client_factory("copilot", lambda _: SubprocessCopilotClient())
-register_client_factory("openai", make_openai_client)
-register_client_factory("xai", make_xai_client)
+register_client_factory("openai", _make_openai_client)
+register_client_factory("xai", _make_xai_client)
 
 PACKAGE_DEFAULT = _resolve.PACKAGE_DEFAULT
 ClientSpec = _resolve.ClientSpec

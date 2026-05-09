@@ -58,7 +58,7 @@ def _review_stage_info(
 
 def _build_plan(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
     plan_val = getattr(runner.args, "plan", None)
-    if not entry.prompt_paths and not plan_val:
+    if not entry.prompts and not plan_val:
         die(
             f"stage {entry.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML"
         )
@@ -144,7 +144,7 @@ def _build_request_copilot(
 
 
 def _build_ghreview(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
-    if not entry.prompt_paths:
+    if not entry.prompts:
         die(
             f"stage {entry.name!r}: type 'ghreview' requires a 'prompt' field in the pipeline YAML"
         )
@@ -158,7 +158,7 @@ def _build_wait_copilot(
 
 
 def _build_ghaddress(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
-    if not entry.prompt_paths:
+    if not entry.prompts:
         die(
             f"stage {entry.name!r}: type 'ghaddress' requires a 'prompt' field in the pipeline YAML"
         )
@@ -216,7 +216,7 @@ def _build_run_cmd(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) ->
 def _build_claude_prompt(
     entry: StageEntry, spec: ClientSpec, _runner: StageRunner
 ) -> Any:
-    if not entry.prompt_paths:
+    if not entry.prompts:
         die(f"stage {entry.name!r}: type 'claude-prompt' requires a 'prompt' field")
     return claude_prompt.ClaudePrompt(entry, spec.model)
 

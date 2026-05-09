@@ -15,13 +15,16 @@ from gremlins.pipeline import StageEntry
 from gremlins.stages.base import StageContext
 from gremlins.stages.implement import Implement
 
+_TEMPLATE_LOCAL = "plan: {plan_text}{spec_block}{impl_commit_instr}"
+_TEMPLATE_GH = "{spec_block}{plan_source_label}{issue_body}{plan_location_note}"
 
-def _make_entry(prompt_paths: list[pathlib.Path] | None = None) -> StageEntry:
+
+def _make_entry(prompts: list[str] | None = None) -> StageEntry:
     return StageEntry(
         name="implement",
         type="implement",
         client=None,
-        prompt_paths=prompt_paths or [],
+        prompts=prompts or [],
         options={},
     )
 
@@ -32,9 +35,9 @@ def _make_stage(
     plan_text: str = "do the thing",
     is_git: bool = True,
     spec_text: str = "",
-    prompt_paths: list[pathlib.Path] | None = None,
+    prompts: list[str] | None = None,
 ) -> tuple[Implement, StageContext]:
-    entry = _make_entry(prompt_paths)
+    entry = _make_entry(prompts)
     stage = Implement(
         entry,
         "sonnet",
@@ -50,17 +53,15 @@ def _make_stage(
 
 def test_local_calls_claude(tmp_path: pathlib.Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
-    stage, ctx = _make_stage(tmp_path, is_git=False)
+    stage, ctx = _make_stage(
+        tmp_path,
+        is_git=False,
+        prompts=[_TEMPLATE_LOCAL],
+    )
     sentinel = tmp_path / ".pre-impl"
     sentinel.touch()
     (tmp_path / "output.txt").write_text("new file")
-    with (
-        patch(
-            "gremlins.stages.implement.load_prompts",
-            return_value="plan: {plan_text}{spec_block}{impl_commit_instr}",
-        ),
-        patch("gremlins.stages.implement.changes_outside_git", return_value=True),
-    ):
+    with patch("gremlins.stages.implement.changes_outside_git", return_value=True):
         stage.run(None)
     assert len(ctx.client.calls) == 1
     assert ctx.client.calls[0].label == "implement"
@@ -68,26 +69,22 @@ def test_local_calls_claude(tmp_path: pathlib.Path, monkeypatch) -> None:
 
 def test_local_raises_when_no_changes(tmp_path: pathlib.Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
-    stage, ctx = _make_stage(tmp_path, is_git=False)
-    with (
-        patch(
-            "gremlins.stages.implement.load_prompts",
-            return_value="plan: {plan_text}{spec_block}{impl_commit_instr}",
-        ),
-        patch("gremlins.stages.implement.changes_outside_git", return_value=False),
-    ):
+    stage, ctx = _make_stage(
+        tmp_path,
+        is_git=False,
+        prompts=[_TEMPLATE_LOCAL],
+    )
+    with patch("gremlins.stages.implement.changes_outside_git", return_value=False):
         with pytest.raises(RuntimeError, match="no changes"):
             stage.run(None)
 
 
 def test_gh_calls_claude_with_issue_body(tmp_path: pathlib.Path) -> None:
-    stage, ctx = _make_stage(tmp_path, plan_text="issue body here")
+    stage, ctx = _make_stage(
+        tmp_path, plan_text="issue body here", prompts=[_TEMPLATE_GH]
+    )
     pipe = SimpleNamespace(target="github")
-    with patch(
-        "gremlins.stages.implement.load_prompts",
-        return_value="{spec_block}{plan_source_label}{issue_body}{plan_location_note}",
-    ):
-        stage.run(pipe)
+    stage.run(pipe)
     assert len(ctx.client.calls) == 1
     call = ctx.client.calls[0]
     assert call.label == "implement"
@@ -102,25 +99,17 @@ def test_gh_plan_source_label_with_issue_num(
     monkeypatch.setattr(
         "gremlins.stages.implement.resolve_state_file", lambda gr_id=None: state_file
     )
-    stage, ctx = _make_stage(tmp_path, plan_text="body")
+    stage, ctx = _make_stage(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH])
     pipe = SimpleNamespace(target="github")
-    with patch(
-        "gremlins.stages.implement.load_prompts",
-        return_value="{spec_block}{plan_source_label}{issue_body}{plan_location_note}",
-    ):
-        stage.run(pipe)
+    stage.run(pipe)
     prompt = ctx.client.calls[0].prompt
     assert "from the GitHub issue" in prompt
 
 
 def test_gh_plan_source_label_without_issue_num(tmp_path: pathlib.Path) -> None:
-    stage, ctx = _make_stage(tmp_path, plan_text="body")
+    stage, ctx = _make_stage(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH])
     pipe = SimpleNamespace(target="github")
-    with patch(
-        "gremlins.stages.implement.load_prompts",
-        return_value="{spec_block}{plan_source_label}{issue_body}{plan_location_note}",
-    ):
-        stage.run(pipe)
+    stage.run(pipe)
     prompt = ctx.client.calls[0].prompt
     assert "below" in prompt
 
