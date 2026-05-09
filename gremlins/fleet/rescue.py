@@ -27,6 +27,7 @@ from gremlins.fleet.state import (
     load_state,
 )
 from gremlins.fleet.stop import do_stop
+from gremlins.fleet.land import expected_branch
 from gremlins.launcher import GremlinAlreadyRunning
 from gremlins.launcher import resume as _resume
 from gremlins.utils import proc
@@ -448,7 +449,7 @@ def _recreate_worktree(state: dict[str, Any]) -> tuple[bool, str]:
     Returns (success: bool, detail: str).
     """
     workdir = state.get("workdir") or ""
-    branch = state.get("branch") or ""
+    branch = expected_branch(state, str(state.get("id") or "")) or ""
     worktree_base = state.get("worktree_base") or ""
     project_root = state.get("project_root") or ""
 

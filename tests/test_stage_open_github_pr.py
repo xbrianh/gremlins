@@ -73,22 +73,24 @@ def test_run_raises_if_unbound() -> None:
         stage.run(None)
 
 
-def test_run_patches_pr_url_to_state(tmp_path: pathlib.Path) -> None:
+def test_run_records_pr_artifact(tmp_path: pathlib.Path) -> None:
     from unittest.mock import patch as mock_patch
 
     stage, ctx = _make_stage(tmp_path)
-    patched: list[dict] = []
+    artifact_calls: list[tuple] = []
     with (
         mock_patch(
             "gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL
         ),
         mock_patch(
-            "gremlins.stages.open_github_pr.patch_state",
-            side_effect=lambda gr_id, **kw: patched.append(kw),
+            "gremlins.stages.open_github_pr.append_artifact",
+            side_effect=lambda gr_id, artifact: artifact_calls.append((gr_id, artifact)),
         ),
     ):
         stage.run(None)
-    assert patched == [{"pr_url": PR_URL}]
+    assert len(artifact_calls) == 1
+    assert artifact_calls[0][1]["type"] == "pr"
+    assert artifact_calls[0][1]["url"] == PR_URL
 
 
 # ---------------------------------------------------------------------------
@@ -114,20 +116,9 @@ def _write_state(tmp_path: pathlib.Path, data: dict) -> pathlib.Path:
     return sf
 
 
-def test_stacked_pr_uses_prev_child_branch(tmp_path: pathlib.Path) -> None:
-    """For child N>1, PR base is the previous child's materialized branch."""
-    _write_state(
-        tmp_path,
-        {
-            "base_ref_name": "main",
-            "chain_state": {
-                "handoff_count": 2,
-                "child_records": [
-                    {"n": 1, "branch": "gremlin/abc-child-1"},
-                ],
-            },
-        },
-    )
+def test_stacked_pr_uses_last_artifact_branch(tmp_path: pathlib.Path) -> None:
+    """For child N>1, PR base is the last branch artifact."""
+    _write_state(tmp_path, {"base_ref_name": "main"})
     stage, ctx = _make_stage_with_gr(tmp_path)
     prompts_seen: list[str] = []
     with (
@@ -136,14 +127,11 @@ def test_stacked_pr_uses_prev_child_branch(tmp_path: pathlib.Path) -> None:
             return_value=tmp_path / "state.json",
         ),
         patch(
-            "gremlins.stages.open_github_pr.get_prev_child_branch",
+            "gremlins.stages.open_github_pr.last_artifact_branch",
             return_value="gremlin/abc-child-1",
         ),
         patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
-        patch("gremlins.stages.open_github_pr.upsert_child_record"),
-        patch(
-            "gremlins.stages.open_github_pr.patch_state",
-        ),
+        patch("gremlins.stages.open_github_pr.append_artifact"),
         patch.object(
             stage,
             "run_claude",
@@ -161,17 +149,8 @@ def test_stacked_pr_uses_prev_child_branch(tmp_path: pathlib.Path) -> None:
 
 
 def test_first_child_uses_base_ref_name(tmp_path: pathlib.Path) -> None:
-    """For child 1 (no previous child record), PR base is base_ref_name."""
-    _write_state(
-        tmp_path,
-        {
-            "base_ref_name": "main",
-            "chain_state": {
-                "handoff_count": 1,
-                "child_records": [],
-            },
-        },
-    )
+    """For child 1 (no previous artifact branch), PR base is base_ref_name."""
+    _write_state(tmp_path, {"base_ref_name": "main"})
     stage, ctx = _make_stage_with_gr(tmp_path)
     prompts_seen: list[str] = []
     with (
@@ -180,7 +159,7 @@ def test_first_child_uses_base_ref_name(tmp_path: pathlib.Path) -> None:
             return_value=tmp_path / "state.json",
         ),
         patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
-        patch("gremlins.stages.open_github_pr.patch_state"),
+        patch("gremlins.stages.open_github_pr.append_artifact"),
         patch.object(
             stage,
             "run_claude",
@@ -195,20 +174,11 @@ def test_first_child_uses_base_ref_name(tmp_path: pathlib.Path) -> None:
     assert "main" in prompts_seen[0]
 
 
-def test_record_child_pr_writes_pr_info_to_chain_state(tmp_path: pathlib.Path) -> None:
-    """After opening a PR, pr_url and pr_number are stored in child_records."""
-    sf = _write_state(
-        tmp_path,
-        {
-            "base_ref_name": "main",
-            "chain_state": {
-                "handoff_count": 1,
-                "child_records": [{"n": 1, "branch": "gremlin/abc-child-1"}],
-            },
-        },
-    )
+def test_record_child_pr_appends_pr_artifact(tmp_path: pathlib.Path) -> None:
+    """After opening a PR, a pr artifact with url and branch is appended."""
+    sf = _write_state(tmp_path, {"base_ref_name": "main", "impl_materialized_branch": "gremlin/abc-child-1"})
     stage, ctx = _make_stage_with_gr(tmp_path)
-    upsert_calls: list[dict] = []
+    artifact_calls: list[tuple] = []
     with (
         patch(
             "gremlins.stages.open_github_pr.resolve_state_file",
@@ -219,14 +189,14 @@ def test_record_child_pr_writes_pr_info_to_chain_state(tmp_path: pathlib.Path) -
             return_value="https://github.com/owner/repo/pull/314",
         ),
         patch(
-            "gremlins.stages.open_github_pr.upsert_child_record",
-            side_effect=lambda gr_id, **kw: upsert_calls.append({"gr_id": gr_id, **kw}),
+            "gremlins.stages.open_github_pr.append_artifact",
+            side_effect=lambda gr_id, artifact: artifact_calls.append((gr_id, artifact)),
         ),
-        patch("gremlins.stages.open_github_pr.patch_state"),
     ):
         stage.run(None)
-    assert upsert_calls, "upsert_child_record should be called with PR info"
-    call = upsert_calls[0]
-    assert call["gr_id"] == "test-gr"
-    assert call["pr_url"] == "https://github.com/owner/repo/pull/314"
-    assert call["pr_number"] == 314
+    assert artifact_calls, "append_artifact should be called with PR info"
+    gr_id, artifact = artifact_calls[0]
+    assert gr_id == "test-gr"
+    assert artifact["type"] == "pr"
+    assert artifact["url"] == "https://github.com/owner/repo/pull/314"
+    assert artifact["branch"] == "gremlin/abc-child-1"

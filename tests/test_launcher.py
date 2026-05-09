@@ -209,7 +209,6 @@ def test_launch_creates_state_layout(lenv):
     assert state["id"] == gr_id
     assert state["kind"] == "local"
     assert state["setup_kind"] == "worktree-branch"
-    assert state["branch"] == f"bg/local/{gr_id}"
     assert state["pipeline_path"].endswith(".yaml")
     assert "test instructions" in state["instructions"]
     assert "workdir" in state and state["workdir"]

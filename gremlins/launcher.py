@@ -538,7 +538,6 @@ def launch(
             "project_root": project_root,
             "workdir": workdir,
             "setup_kind": setup_kind,
-            "branch": branch,
             "worktree_base": worktree_base,
             "status": "running",
             "started_at": now_iso,

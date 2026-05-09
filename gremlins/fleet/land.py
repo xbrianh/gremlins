@@ -171,7 +171,7 @@ def _cleanup_gremlin(
             print(f"removed worktree {workdir}")
 
     if delete_branch:
-        branch = state.get("branch") or expected_branch(state, gr_id)
+        branch = expected_branch(state, gr_id)
         if branch:
             try:
                 _git.delete_branch(branch, force=True, cwd=cwd)
