@@ -22,6 +22,7 @@ from gremlins.stages import (
     request_copilot,
     review_code,
     run_cmd,
+    sequence,
     verify,
     wait_ci,
     wait_copilot,
@@ -240,6 +241,23 @@ def _build_loop(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any
     )
 
 
+def _build_sequence(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
+    from gremlins.stages.base import StageContext
+    from gremlins.stages.sequence import SequenceStage
+
+    body: list[Any] = []
+    for child in entry.body:
+        child_spec = runner.stage_specs.get(child.name, spec)
+        child_ctx = StageContext(
+            client=runner.get_client(child_spec),
+            session_dir=runner.session_dir,
+            gr_id=runner.gr_id,
+        )
+        child_runner = runner.make_runner(child, child_ctx, child_spec, scope=entry.body)
+        body.append((child_ctx, child_runner))
+    return SequenceStage(entry.name, body=body)
+
+
 def _build_run_cmd(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
     return run_cmd.RunCmd(entry.name, spec.model, entry.prompts, entry.options)
 
@@ -314,6 +332,7 @@ register_stage_builder("wait-ci", _build_wait_ci, needs_pipe=False)
 register_stage_builder("review-code", _build_review_code, needs_pipe=False)
 register_stage_builder("address-code", _build_address_code, needs_pipe=False)
 register_stage_builder("loop", _build_loop, needs_pipe=True)
+register_stage_builder("sequence", _build_sequence, needs_pipe=True)
 register_stage_builder("run-cmd", _build_run_cmd, needs_pipe=False)
 register_stage_builder("claude-prompt", _build_claude_prompt, needs_pipe=False)
 register_stage_builder("handoff", _build_handoff, needs_pipe=False)
@@ -333,6 +352,7 @@ __all__ = [
     "request_copilot",
     "review_code",
     "run_cmd",
+    "sequence",
     "verify",
     "wait_ci",
     "wait_copilot",

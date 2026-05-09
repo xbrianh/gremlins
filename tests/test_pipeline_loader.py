@@ -577,6 +577,100 @@ stages:
     assert "implement" in body_types
 
 
+# ---- sequence stage type --------------------------------------------------
+
+
+def test_parallel_include_multi_stage_wraps_as_sequence(
+    tmp_path: pathlib.Path,
+) -> None:
+    """include: inside parallel: that expands to >1 stage becomes a sequence child."""
+    gremlins_dir = tmp_path / ".gremlins"
+    gremlins_dir.mkdir()
+    _write_yaml(
+        gremlins_dir / "sub.yaml",
+        """\
+name: sub
+stages:
+  - {name: request-x, type: verify}
+  - {name: wait-x, type: verify}
+""",
+    )
+    yaml_path = _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+stages:
+  - name: reviews
+    parallel:
+      - {name: review, type: verify}
+      - {include: sub}
+""",
+    )
+    pipeline = load_pipeline(yaml_path)
+    group = pipeline.stages[0]
+    assert group.type == "parallel"
+    assert len(group.body) == 2
+    review_child = group.body[0]
+    assert review_child.name == "review"
+    assert review_child.type == "verify"
+    seq_child = group.body[1]
+    assert seq_child.name == "sub"
+    assert seq_child.type == "sequence"
+    assert [b.name for b in seq_child.body] == ["request-x", "wait-x"]
+
+
+def test_parallel_include_single_stage_no_sequence_wrap(
+    tmp_path: pathlib.Path,
+) -> None:
+    """include: inside parallel: that expands to exactly 1 stage stays unwrapped."""
+    gremlins_dir = tmp_path / ".gremlins"
+    gremlins_dir.mkdir()
+    _write_yaml(
+        gremlins_dir / "single.yaml",
+        """\
+name: single
+stages:
+  - {name: only, type: verify}
+""",
+    )
+    yaml_path = _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+stages:
+  - name: reviews
+    parallel:
+      - {include: single}
+""",
+    )
+    pipeline = load_pipeline(yaml_path)
+    group = pipeline.stages[0]
+    child = group.body[0]
+    assert child.name == "only"
+    assert child.type == "verify"
+
+
+def test_toplevel_sequence_stage_loads(tmp_path: pathlib.Path) -> None:
+    """A top-level {type: sequence, body: [...]} stage parses correctly."""
+    yaml_path = _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+stages:
+  - name: my-seq
+    type: sequence
+    body:
+      - {name: step-a, type: verify}
+      - {name: step-b, type: verify}
+""",
+    )
+    pipeline = load_pipeline(yaml_path)
+    assert len(pipeline.stages) == 1
+    seq = pipeline.stages[0]
+    assert seq.type == "sequence"
+    assert [b.name for b in seq.body] == ["step-a", "step-b"]
+
+
 def test_boss_yaml_loads() -> None:
     """boss.yaml loads with loop/handoff structure replacing the old chain stage."""
     from gremlins.pipeline import load_pipeline, resolve_pipeline_path

@@ -324,3 +324,51 @@ stages:
 def test_build_parallel_stages_names() -> None:
     stages = _make_parallel_stages("reviews", [("r1", _make_ctx("r1"), lambda: None)])
     assert [n for n, _ in stages] == ["reviews-fanout", "reviews", "reviews-fanin"]
+
+
+# ---------------------------------------------------------------------------
+# SequenceStage as a parallel child — worktree propagation
+# ---------------------------------------------------------------------------
+
+
+def test_parallel_sequence_child_worktree_flows() -> None:
+    """SequenceStage inside a parallel group sees the fanout worktree in all sub-stages."""
+    from gremlins.stages.sequence import SequenceStage
+
+    observed: list[pathlib.Path | None] = []
+
+    sub_ctx_a = StageContext(client=FakeClaudeClient(), session_dir=pathlib.Path("/tmp"), gr_id=None)
+    sub_ctx_b = StageContext(client=FakeClaudeClient(), session_dir=pathlib.Path("/tmp"), gr_id=None)
+
+    def capture_a() -> None:
+        observed.append(sub_ctx_a.worktree)
+
+    def capture_b() -> None:
+        observed.append(sub_ctx_b.worktree)
+
+    seq_ctx = StageContext(
+        client=FakeClaudeClient(),
+        session_dir=pathlib.Path("/tmp"),
+        gr_id=None,
+        child_key="seq",
+    )
+    seq_stage = SequenceStage("seq", body=[(sub_ctx_a, capture_a), (sub_ctx_b, capture_b)])
+
+    def seq_runner() -> None:
+        seq_stage.bind(seq_ctx)
+        seq_stage.run(None)
+
+    project_root = pathlib.Path.cwd()
+    stages = _make_parallel_stages(
+        "reviews",
+        [("seq", seq_ctx, seq_runner)],
+        project_root=project_root,
+    )
+    for _, fn in stages:
+        fn()
+
+    assert len(observed) == 2
+    # Both sub-stages saw the same non-None worktree that is not the project root
+    assert all(wt is not None for wt in observed)
+    assert all(wt != project_root for wt in observed)
+    assert observed[0] == observed[1]
