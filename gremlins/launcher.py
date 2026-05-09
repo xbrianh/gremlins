@@ -32,7 +32,7 @@ from gremlins.pipeline import (
     load_pipeline,
     resolve_pipeline_path,
 )
-from gremlins.utils import proc as _proc_utils
+from gremlins.utils import proc
 
 
 class GremlinAlreadyRunning(RuntimeError):
@@ -111,7 +111,7 @@ def _gh_current_repo() -> str:
     Best-effort: returns '' on any error so callers can fall back.
     """
     try:
-        r = _proc_utils.run(
+        r = proc.run(
             ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
             timeout=10,
         )
@@ -462,7 +462,7 @@ def launch(
     gr_id = f"{slug}-{rand_hex}"
 
     if project_root is None:
-        r = _proc_utils.run(["git", "rev-parse", "--show-toplevel"])
+        r = proc.run(["git", "rev-parse", "--show-toplevel"])
         if r.returncode == 0 and r.stdout.strip():
             project_root = r.stdout.strip()
         else:
@@ -560,7 +560,7 @@ def launch(
         if instructions:
             spawn_args.append(instructions)
 
-        proc = _spawn_pipeline(state_dir, workdir, gr_id, pipeline_path, spawn_args)
+        p = _spawn_pipeline(state_dir, workdir, gr_id, pipeline_path, spawn_args)
     except Exception:
         shutil.rmtree(state_dir, ignore_errors=True)
         if workdir:
@@ -570,8 +570,8 @@ def launch(
                 pass
         raise
 
-    (state_dir / "pid").write_text(str(proc.pid), encoding="utf-8")
-    _patch_state(state_dir, pid=proc.pid)
+    (state_dir / "pid").write_text(str(p.pid), encoding="utf-8")
+    _patch_state(state_dir, pid=p.pid)
 
     return gr_id
 
