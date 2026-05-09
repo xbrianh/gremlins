@@ -136,7 +136,10 @@ def _parallel_stages(
             return
         for wt in paths:
             try:
-                proc.run_quiet(["git", "worktree", "remove", "--force", str(wt)], cwd=str(project_root))
+                proc.run_quiet(
+                    ["git", "worktree", "remove", "--force", str(wt)],
+                    cwd=str(project_root),
+                )
             except Exception:
                 pass
         try:
@@ -170,7 +173,10 @@ def _parallel_stages(
                     pathlib.Path(tempfile.gettempdir())
                     / f"aibg-parallel-{group_name}-{secrets.token_hex(8)}"
                 )
-                r2 = proc.run(["git", "worktree", "add", "--detach", wt_dir, "HEAD"], cwd=str(project_root))
+                r2 = proc.run(
+                    ["git", "worktree", "add", "--detach", wt_dir, "HEAD"],
+                    cwd=str(project_root),
+                )
                 if r2.returncode != 0:
                     raise RuntimeError(
                         f"git worktree add failed for parallel child {child_key!r}: "
