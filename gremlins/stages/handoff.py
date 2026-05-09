@@ -115,6 +115,7 @@ class Handoff(Stage):
                 f"handoff returned next-plan but child_plan not found: {child_plan_path!r}"
             )
         shutil.copyfile(child_plan_path, session_dir / "plan.md")
+        # RunCmdFailed signals the boss loop to execute the child pipeline runners.
         raise RunCmdFailed(f"next-plan: handoff {handoff_count}")
 
     def _run_handoff(

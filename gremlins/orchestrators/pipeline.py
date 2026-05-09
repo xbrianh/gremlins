@@ -77,6 +77,8 @@ class StageRunner:
                 unknown.append(s.type)
             elif s.type == "parallel":
                 unknown.extend(c.type for c in s.body if c.type not in STAGE_BUILDERS)
+            elif s.type == "loop":
+                unknown.extend(c.type for c in s.body if c.type not in STAGE_BUILDERS)
         if unknown:
             raise ValueError(f"StageRunner does not support stage type(s): {unknown}")
         self.stages = _expand_stage_entries(stages)

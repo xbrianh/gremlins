@@ -8,7 +8,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from gremlins import git as _git
-from gremlins.stages.compound import CompoundStage
+from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import emit_bail
 
@@ -19,14 +19,20 @@ logger = logging.getLogger(__name__)
 
 
 class RunCmdFailed(Exception):
-    """Raised by RunCmd (or verify's _run_cmd closure) on non-zero exit."""
+    """Raised to signal a failure that triggers the loop's body continuation.
+
+    In verify: raised by RunCmd / _run_cmd when a check command exits non-zero,
+    causing the fix runner to execute.  In handoff: raised when the handoff
+    agent returns "next-plan", signalling the child pipeline runners to proceed.
+    On a clean iteration (no RunCmdFailed), subsequent body runners are skipped.
+    """
 
 
 class LoopExhausted(RuntimeError):
     """Raised by LoopStage when max_iterations is reached without head-stable."""
 
 
-class LoopStage(CompoundStage):
+class LoopStage(Stage):
     """Iterate body runners until HEAD is stable or max_iterations is reached.
 
     body_runners are called in order each iteration.  Subsequent runners only
@@ -50,7 +56,7 @@ class LoopStage(CompoundStage):
         body_runners: list[Callable[[], None]],
         max_iterations: int,
     ) -> None:
-        super().__init__(entry)
+        super().__init__(entry, None)
         self._body_runners = body_runners
         self._max_iterations = max_iterations
 
