@@ -46,6 +46,7 @@ from gremlins.stages.introspect import build_launch_parser
 from gremlins.stages.registry import STAGE_REGISTRY
 from gremlins.state import validate_gr_id
 
+
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
