@@ -734,22 +734,78 @@ def test_run_pipeline_writes_terminal_state_on_failure(lenv, monkeypatch):
     assert (state_dir / "finished").exists()
 
 
-def test_run_pipeline_cleans_up_worktree_on_success(lenv, monkeypatch):
-    """On exit_code=0 and localgremlin, _run-pipeline removes the git worktree."""
-    monkeypatch.delenv("GREMLINS_TEST_NOOP_PIPELINE")
-    plan_file = lenv.repo / "plan.md"
-    plan_file.write_text("# Plan\n\n## Tasks\n- [ ] x\n", encoding="utf-8")
+def test_write_terminal_state_removes_worktree_for_gh(lenv, monkeypatch, tmp_path):
+    """On success, worktree is removed only when pipeline_kind == 'gh'."""
+    removed = []
+    monkeypatch.setattr(
+        "gremlins.git.remove_worktree", lambda root, wd: removed.append(wd)
+    )
+
     launcher = _launcher()
-    gr_id = launcher.launch("local", plan=str(plan_file))
-    state_dir = _gremlins_state_root(lenv) / gr_id
-    state = _read_state(state_dir)
-    workdir = pathlib.Path(state["workdir"])
-    assert _wait_for_finished(state_dir, timeout=120)
-    final_state = _read_state(state_dir)
-    if final_state["exit_code"] == 0:
-        assert _wait_for_workdir_removed(workdir, timeout=30), (
-            "worktree should be removed after successful completion"
-        )
+    state_dir = lenv.state_root / "test-gr-id-abc123"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    fake_workdir = tmp_path / "workdir"
+    fake_workdir.mkdir()
+    state_json = {
+        "pipeline_kind": "gh",
+        "project_root": str(lenv.repo),
+        "workdir": str(fake_workdir),
+    }
+    (state_dir / "state.json").write_text(json.dumps(state_json), encoding="utf-8")
+
+    launcher.write_terminal_state("test-gr-id-abc123", exit_code=0)
+
+    assert str(fake_workdir) in removed
+
+
+def test_write_terminal_state_preserves_worktree_for_local(lenv, monkeypatch, tmp_path):
+    """On success, worktree is NOT removed for local-mode pipelines."""
+    removed = []
+    monkeypatch.setattr(
+        "gremlins.git.remove_worktree", lambda root, wd: removed.append(wd)
+    )
+
+    launcher = _launcher()
+    state_dir = lenv.state_root / "test-gr-id-def456"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    fake_workdir = tmp_path / "workdir"
+    fake_workdir.mkdir()
+    state_json = {
+        "pipeline_kind": "local",
+        "project_root": str(lenv.repo),
+        "workdir": str(fake_workdir),
+        "setup_kind": "worktree-branch",
+    }
+    (state_dir / "state.json").write_text(json.dumps(state_json), encoding="utf-8")
+
+    launcher.write_terminal_state("test-gr-id-def456", exit_code=0)
+
+    assert removed == [], "worktree must not be removed for local-mode pipelines"
+
+
+def test_write_terminal_state_preserves_worktree_for_boss(lenv, monkeypatch, tmp_path):
+    """On success, worktree is NOT removed for boss-mode pipelines."""
+    removed = []
+    monkeypatch.setattr(
+        "gremlins.git.remove_worktree", lambda root, wd: removed.append(wd)
+    )
+
+    launcher = _launcher()
+    state_dir = lenv.state_root / "test-gr-id-ghi789"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    fake_workdir = tmp_path / "workdir"
+    fake_workdir.mkdir()
+    state_json = {
+        "pipeline_kind": "local",
+        "project_root": str(lenv.repo),
+        "workdir": str(fake_workdir),
+        "setup_kind": "worktree",
+    }
+    (state_dir / "state.json").write_text(json.dumps(state_json), encoding="utf-8")
+
+    launcher.write_terminal_state("test-gr-id-ghi789", exit_code=0)
+
+    assert removed == [], "worktree must not be removed for boss-mode pipelines"
 
 
 # ---------------------------------------------------------------------------

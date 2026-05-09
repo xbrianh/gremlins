@@ -717,7 +717,7 @@ def write_terminal_state(gr_id: str, exit_code: int) -> None:
 
     Called by the _run-pipeline subcommand's finally block. Mirrors finish.sh:
     touches the finished marker, patches state.json, and on success removes
-    the worktree (except boss pipeline). Best-effort throughout.
+    the worktree for gh-mode pipelines only. Best-effort throughout.
     """
     state_dir = _state_root() / gr_id
     sf = state_dir / "state.json"
@@ -744,14 +744,10 @@ def write_terminal_state(gr_id: str, exit_code: int) -> None:
     if exit_code == 0:
         try:
             data = json.loads(sf.read_text(encoding="utf-8"))
+            pipeline_kind = data.get("pipeline_kind", "")
             project_root = data.get("project_root", "")
             workdir = data.get("workdir", "")
-            setup_kind = data.get("setup_kind", "")
-            if (
-                setup_kind in ("worktree", "worktree-branch")
-                and project_root
-                and workdir
-            ):
+            if pipeline_kind == "gh" and project_root and workdir:
                 _git_mod.remove_worktree(project_root, workdir)
         except Exception:
             pass
