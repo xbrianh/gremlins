@@ -1,0 +1,23 @@
+name: boss-gh-terse-no-copilot
+
+default_client: claude:sonnet
+
+base_ref: main
+
+prompts:
+  code-style: gremlins:code_style.md
+
+stages:
+  - name: chain
+    type: loop
+    body:
+      - { name: handoff, type: handoff }
+      - { include: gh-terse-no-copilot }
+
+  - name: review-chain
+    type: review-code
+    prompt: [code-style, gremlins:review/chain.md]
+
+  - name: address-chain
+    type: address-code
+    prompt: [code-style, gremlins:address.md, gremlins:bail_section.md]

@@ -89,7 +89,31 @@ class MaterializeToBranch(Stage):
             impl_materialized_branch=result.materialized_branch,
             impl_base_ref=result.base_ref,
         )
+        if materialized_branch and self.state.gr_id:
+            self._record_child_branch(materialized_branch)
         return result
+
+    def _record_child_branch(self, branch: str) -> None:
+        sf = resolve_state_file(self.state.gr_id)
+        if sf is None or not sf.exists():
+            return
+        try:
+            data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
+            chain_st = data.get("chain_state")
+            if not isinstance(chain_st, dict):
+                return
+            n = int(chain_st.get("handoff_count", 0))
+            records: list[dict[str, Any]] = list(chain_st.get("child_records") or [])
+            for rec in records:
+                if rec.get("n") == n:
+                    rec["branch"] = branch
+                    break
+            else:
+                records.append({"n": n, "branch": branch})
+            chain_st["child_records"] = records
+            patch_state(self.state.gr_id, chain_state=chain_st)
+        except Exception:
+            pass
 
 
 register_stage("materialize-to-branch", MaterializeToBranch)

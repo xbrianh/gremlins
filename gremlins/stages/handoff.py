@@ -53,6 +53,7 @@ class Handoff(Stage):
                     "base_ref": base_ref,
                     "handoff_count": 0,
                     "handoff_records": [],
+                    "child_records": [],
                     "current_plan": str(boss_spec),
                 },
             )

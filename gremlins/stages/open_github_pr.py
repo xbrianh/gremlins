@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from typing import Any
 
 from gremlins.clients.protocol import CompletedRun
@@ -36,7 +38,8 @@ class OpenGitHubPR(Stage):
 
     def run(self, pipe: Any) -> str:
         sf = resolve_state_file(self.state.gr_id)
-        base_ref = self.base_ref or read_state_str(sf, "base_ref_name") or "main"
+        chain_base_ref = self._prev_child_branch(sf)
+        base_ref = chain_base_ref or self.base_ref or read_state_str(sf, "base_ref_name") or "main"
 
         issue_num = self.issue_url.split("/")[-1] if self.issue_url else ""
 
@@ -64,9 +67,54 @@ class OpenGitHubPR(Stage):
             label="PR",
             text_result=completed.text_result,
         )
+        self._record_child_pr(sf, pr_url)
         patch_state(self.state.gr_id, pr_url=pr_url)
         logger.info("PR: %s", pr_url)
         return pr_url
+
+    def _prev_child_branch(self, sf: Any) -> str:
+        if sf is None or not sf.exists():
+            return ""
+        try:
+            data = json.loads(sf.read_text(encoding="utf-8"))
+            chain_st = data.get("chain_state")
+            if not isinstance(chain_st, dict):
+                return ""
+            n = int(chain_st.get("handoff_count", 0))
+            for rec in chain_st.get("child_records") or []:
+                if rec.get("n") == n - 1:
+                    return str(rec.get("branch") or "")
+        except Exception:
+            pass
+        return ""
+
+    def _record_child_pr(self, sf: Any, pr_url: str) -> None:
+        if sf is None or not sf.exists() or not self.state.gr_id:
+            return
+        try:
+            data = json.loads(sf.read_text(encoding="utf-8"))
+            chain_st = data.get("chain_state")
+            if not isinstance(chain_st, dict):
+                return
+            n = int(chain_st.get("handoff_count", 0))
+            m = re.search(r"/pull/(\d+)$", pr_url)
+            pr_number = int(m.group(1)) if m else None
+            records: list[dict[str, Any]] = list(chain_st.get("child_records") or [])
+            for rec in records:
+                if rec.get("n") == n:
+                    rec["pr_url"] = pr_url
+                    if pr_number is not None:
+                        rec["pr_number"] = pr_number
+                    break
+            else:
+                new_rec: dict[str, Any] = {"n": n, "pr_url": pr_url}
+                if pr_number is not None:
+                    new_rec["pr_number"] = pr_number
+                records.append(new_rec)
+            chain_st["child_records"] = records
+            patch_state(self.state.gr_id, chain_state=chain_st)
+        except Exception:
+            pass
 
 
 register_stage("open-github-pr", OpenGitHubPR)

@@ -100,17 +100,6 @@ def _wait_for_finished(state_dir: pathlib.Path, timeout: float = 60.0) -> bool:
     return False
 
 
-def _wait_for_workdir_removed(workdir: pathlib.Path, timeout: float = 30.0) -> bool:
-    # The `finished` marker is touched before worktree cleanup runs (the marker
-    # ordering suppresses session-summary's crashed-detection race), so a test
-    # that asserts on cleanup must wait for the workdir separately.
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if not workdir.exists():
-            return True
-        time.sleep(0.1)
-    return False
-
 
 def _read_state(state_dir: pathlib.Path) -> dict:
     return json.loads((state_dir / "state.json").read_text(encoding="utf-8"))
@@ -734,8 +723,8 @@ def test_run_pipeline_writes_terminal_state_on_failure(lenv, monkeypatch):
     assert (state_dir / "finished").exists()
 
 
-def test_write_terminal_state_removes_worktree_for_gh(lenv, monkeypatch, tmp_path):
-    """On success, worktree is removed only when pipeline_kind == 'gh'."""
+def test_write_terminal_state_preserves_worktree_for_gh(lenv, monkeypatch, tmp_path):
+    """On success, worktree is NOT removed for gh-mode pipelines (only explicit close/land removes it)."""
     removed = []
     monkeypatch.setattr(
         "gremlins.git.remove_worktree", lambda root, wd: removed.append(wd)
@@ -755,7 +744,7 @@ def test_write_terminal_state_removes_worktree_for_gh(lenv, monkeypatch, tmp_pat
 
     launcher.write_terminal_state("test-gr-id-abc123", exit_code=0)
 
-    assert str(fake_workdir) in removed
+    assert removed == [], "worktree must not be removed for gh-mode pipelines on exit"
 
 
 def test_write_terminal_state_preserves_worktree_for_local(lenv, monkeypatch, tmp_path):
