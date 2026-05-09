@@ -796,7 +796,7 @@ def test_write_terminal_state_preserves_worktree_for_boss(lenv, monkeypatch, tmp
     fake_workdir = tmp_path / "workdir"
     fake_workdir.mkdir()
     state_json = {
-        "pipeline_kind": "local",
+        "pipeline_kind": "boss",
         "project_root": str(lenv.repo),
         "workdir": str(fake_workdir),
         "setup_kind": "worktree",
