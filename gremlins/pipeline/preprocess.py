@@ -10,7 +10,9 @@ from gremlins.pipeline.schema import BUNDLED_PROMPT_PREFIX
 from gremlins.prompts import BUNDLED_PROMPT_DIR
 
 
-def expand_pipeline(yaml_path: pathlib.Path, project_root: pathlib.Path | None = None) -> dict[str, Any]:
+def expand_pipeline(
+    yaml_path: pathlib.Path, project_root: pathlib.Path | None = None
+) -> dict[str, Any]:
     """Read YAML, resolve all include: and prompt: references, return self-contained dict."""
     if project_root is None:
         d = yaml_path.parent
@@ -44,7 +46,9 @@ def _expand(
             _expand_entry(entry, prompt_dir, project_root, new_chain)
         )
 
-    result: dict[str, Any] = {k: v for k, v in raw.items() if k not in ("stages", "prompt_dir")}
+    result: dict[str, Any] = {
+        k: v for k, v in raw.items() if k not in ("stages", "prompt_dir")
+    }
     result["stages"] = expanded_stages
     return result
 
@@ -70,7 +74,9 @@ def _expand_entry(
 
     if "parallel" in entry and isinstance(entry["parallel"], list):
         entry["parallel"] = [
-            _expand_entry(cast(dict[str, Any], child), prompt_dir, project_root, chain)[0]
+            _expand_entry(cast(dict[str, Any], child), prompt_dir, project_root, chain)[
+                0
+            ]
             for child in cast(list[Any], entry["parallel"])
         ]
 
@@ -104,7 +110,7 @@ def _read_prompts(prompt_field: object, prompt_dir: pathlib.Path) -> list[str]:
     texts: list[str] = []
     for p in raw:
         if p.startswith(BUNDLED_PROMPT_PREFIX):
-            name = p[len(BUNDLED_PROMPT_PREFIX):]
+            name = p[len(BUNDLED_PROMPT_PREFIX) :]
             if not name:
                 raise ValueError(
                     f"prompt {p!r} is missing a name after {BUNDLED_PROMPT_PREFIX!r}"

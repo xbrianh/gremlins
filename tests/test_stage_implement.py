@@ -80,7 +80,9 @@ def test_local_raises_when_no_changes(tmp_path: pathlib.Path, monkeypatch) -> No
 
 
 def test_gh_calls_claude_with_issue_body(tmp_path: pathlib.Path) -> None:
-    stage, ctx = _make_stage(tmp_path, plan_text="issue body here", prompts=[_TEMPLATE_GH])
+    stage, ctx = _make_stage(
+        tmp_path, plan_text="issue body here", prompts=[_TEMPLATE_GH]
+    )
     pipe = SimpleNamespace(target="github")
     stage.run(pipe)
     assert len(ctx.client.calls) == 1

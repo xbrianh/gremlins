@@ -386,7 +386,10 @@ def test_plan_stage_includes_style_from_prompts(tmp_path):
         name="plan",
         type="plan",
         client=None,
-        prompts=["Be good.", (_BUNDLED_PROMPTS / "plan.md").read_text(encoding="utf-8")],
+        prompts=[
+            "Be good.",
+            (_BUNDLED_PROMPTS / "plan.md").read_text(encoding="utf-8"),
+        ],
         options={},
     )
     stage = plan.Plan(
@@ -426,7 +429,10 @@ def test_review_code_stage_includes_style_from_prompts(tmp_path):
         name="review-code",
         type="review-code",
         client=None,
-        prompts=["Be good.", (_BUNDLED_PROMPTS / "review" / "detail.md").read_text(encoding="utf-8")],
+        prompts=[
+            "Be good.",
+            (_BUNDLED_PROMPTS / "review" / "detail.md").read_text(encoding="utf-8"),
+        ],
         options={},
     )
     stage = ReviewCode(entry, "sonnet", plan_text="", is_git=False)
@@ -444,7 +450,10 @@ def test_address_code_stage_includes_style_from_prompts(tmp_path):
         name="address-code",
         type="address-code",
         client=None,
-        prompts=["Be good.", (_BUNDLED_PROMPTS / "address.md").read_text(encoding="utf-8")],
+        prompts=[
+            "Be good.",
+            (_BUNDLED_PROMPTS / "address.md").read_text(encoding="utf-8"),
+        ],
         options={},
     )
     stage = AddressCode(entry, "sonnet", is_git=False)

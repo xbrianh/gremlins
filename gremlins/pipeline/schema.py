@@ -9,6 +9,10 @@ from gremlins.clients import ClientSpec
 BUNDLED_PROMPT_PREFIX = "gremlins:"
 
 
+def _empty_stage_list() -> list[StageEntry]:
+    return []
+
+
 @dataclasses.dataclass
 class StageEntry:
     name: str
@@ -16,9 +20,7 @@ class StageEntry:
     client: ClientSpec | None
     prompts: list[str]
     options: dict[str, Any]
-    body: list[StageEntry] = dataclasses.field(
-        default_factory=list
-    )
+    body: list[StageEntry] = dataclasses.field(default_factory=_empty_stage_list)
     max_concurrent: int | None = None
     cancel_on_bail: bool = False
     bail_policy: str = "any"

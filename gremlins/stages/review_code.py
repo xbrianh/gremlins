@@ -144,9 +144,13 @@ class ReviewCode(Stage):
         pr_url = self.pr_url or read_pr_url(self.state.gr_id)
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
-        prompt = "\n\n".join(self.prompts).rstrip().format(
-            bail_command=self.bail_command(),
-            pr_url=pr_url,
+        prompt = (
+            "\n\n".join(self.prompts)
+            .rstrip()
+            .format(
+                bail_command=self.bail_command(),
+                pr_url=pr_url,
+            )
         )
         self.run_claude(
             prompt,

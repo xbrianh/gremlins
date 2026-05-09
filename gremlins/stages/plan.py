@@ -65,9 +65,13 @@ class Plan(Stage):
         if self.repo:
             state_file = resolve_state_file(self.state.gr_id)
             base_ref_name = read_state_str(state_file, "base_ref_name")
-            plan_prompt = "\n\n".join(self.prompts).rstrip().format(
-                base_ref=_fmt_escape(base_ref_name),
-                instructions=_fmt_escape(self.instructions),
+            plan_prompt = (
+                "\n\n".join(self.prompts)
+                .rstrip()
+                .format(
+                    base_ref=_fmt_escape(base_ref_name),
+                    instructions=_fmt_escape(self.instructions),
+                )
             )
             completed = self.run_claude(
                 plan_prompt,

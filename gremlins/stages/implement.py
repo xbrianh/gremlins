@@ -119,7 +119,11 @@ class Implement(Stage):
 
         impl_commit_instr = "."
         if self.is_git:
-            impl_commit_instr = (BUNDLED_PROMPT_DIR / "impl_commit_git.md").read_text(encoding="utf-8").rstrip()
+            impl_commit_instr = (
+                (BUNDLED_PROMPT_DIR / "impl_commit_git.md")
+                .read_text(encoding="utf-8")
+                .rstrip()
+            )
 
         plan_text = (self.state.session_dir / "plan.md").read_text(encoding="utf-8")
         template = "\n\n".join(self.prompts).rstrip()

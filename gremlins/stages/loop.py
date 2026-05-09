@@ -70,9 +70,7 @@ class LoopStage(Stage):
     ) -> LoopStage:
         from gremlins.pipeline import StageEntry
 
-        entry = StageEntry(
-            name=name, type="loop", client=None, prompts=[], options={}
-        )
+        entry = StageEntry(name=name, type="loop", client=None, prompts=[], options={})
         return cls(entry, body_runners=runners, max_iterations=max_iterations)
 
     def run(self, pipe: Any) -> None:  # noqa: ARG002

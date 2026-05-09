@@ -94,7 +94,9 @@ def _parse_stage_entry(
         stage_client = ClientSpec.parse(client_spec_raw)
 
     raw_prompts = entry.get("prompt")
-    prompts: list[str] = cast(list[str], raw_prompts) if isinstance(raw_prompts, list) else []
+    prompts: list[str] = (
+        cast(list[str], raw_prompts) if isinstance(raw_prompts, list) else []
+    )
 
     options = dict(cast(dict[str, Any], entry.get("options") or {}))
 
@@ -123,7 +125,7 @@ def load_pipeline(path: pathlib.Path) -> PipelineDef:
     if not path.exists():
         raise FileNotFoundError(f"pipeline file not found: {path}")
 
-    raw = cast(dict[str, Any], expand_pipeline(path))
+    raw = expand_pipeline(path)
 
     pipeline_name = str(raw.get("name") or path.stem)
 
