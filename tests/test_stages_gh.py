@@ -15,9 +15,7 @@ _BUNDLED_PROMPTS = (
 )
 
 _GH_PIPE = types.SimpleNamespace(
-    pipeline_data=types.SimpleNamespace(
-        stages=[types.SimpleNamespace(type="ghreview")]
-    )
+    pipeline_data=types.SimpleNamespace(stages=[types.SimpleNamespace(type="ghreview")])
 )
 
 

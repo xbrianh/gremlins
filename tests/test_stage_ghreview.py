@@ -14,9 +14,7 @@ from gremlins.stages.review_code import ReviewCode
 
 PR_URL = "https://github.com/owner/repo/pull/42"
 _GH_PIPE = types.SimpleNamespace(
-    pipeline_data=types.SimpleNamespace(
-        stages=[types.SimpleNamespace(type="ghreview")]
-    )
+    pipeline_data=types.SimpleNamespace(stages=[types.SimpleNamespace(type="ghreview")])
 )
 
 
