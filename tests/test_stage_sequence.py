@@ -78,3 +78,19 @@ def test_sequence_propagates_child_key() -> None:
     stage.run(None)
 
     assert sub_ctx.child_key == "my-child"
+
+
+def test_sequence_propagates_session_dir() -> None:
+    shard_dir = pathlib.Path("/tmp/shard-session")
+
+    parent_ctx = _ctx()
+    parent_ctx.session_dir = shard_dir
+
+    sub_ctx = _ctx()
+    assert sub_ctx.session_dir != shard_dir
+
+    stage = SequenceStage("seq", body=[(sub_ctx, lambda: None)])
+    stage.bind(parent_ctx)
+    stage.run(None)
+
+    assert sub_ctx.session_dir == shard_dir

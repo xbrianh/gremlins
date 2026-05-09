@@ -90,6 +90,11 @@ def _expand_entry(
                 chain,
                 named_prompts,
             )
+            if len(expanded) == 0:
+                raise ValueError(
+                    "parallel child expanded to 0 stages via include; "
+                    "includes inside parallel groups must resolve to at least one stage"
+                )
             if len(expanded) == 1:
                 expanded_parallel.append(expanded[0])
             else:

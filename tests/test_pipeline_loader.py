@@ -619,6 +619,33 @@ stages:
     assert [b.name for b in seq_child.body] == ["request-x", "wait-x"]
 
 
+def test_parallel_include_empty_expansion_raises(
+    tmp_path: pathlib.Path,
+) -> None:
+    """include: inside parallel: that expands to 0 stages is rejected."""
+    gremlins_dir = tmp_path / ".gremlins"
+    gremlins_dir.mkdir()
+    _write_yaml(
+        gremlins_dir / "empty.yaml",
+        """\
+name: empty
+stages: []
+""",
+    )
+    yaml_path = _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+stages:
+  - name: reviews
+    parallel:
+      - {include: empty}
+""",
+    )
+    with pytest.raises(ValueError, match="expanded to 0 stages"):
+        load_pipeline(yaml_path)
+
+
 def test_parallel_include_single_stage_no_sequence_wrap(
     tmp_path: pathlib.Path,
 ) -> None:
