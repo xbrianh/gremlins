@@ -7,7 +7,6 @@ import pathlib
 import re
 from typing import Any
 
-from gremlins.pipeline import StageEntry
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import check_bail, emit_bail, read_pr_url
@@ -29,15 +28,17 @@ def _model_from(path: pathlib.Path, stage_name: str) -> str:
 class AddressCode(Stage):
     def __init__(
         self,
-        entry: StageEntry,
+        name: str,
         model: str | None,
+        prompts: list[str],
+        options: dict[str, Any],
         *,
         is_git: bool,
         review_stage_names: list[str] | None = None,
         review_stage_dirs: dict[str, pathlib.Path] | None = None,
         pr_url: str = "",
     ) -> None:
-        super().__init__(entry, model)
+        super().__init__(name, model, prompts, options)
         self.is_git = is_git
         self.review_stage_names = (
             review_stage_names if review_stage_names is not None else ["review-code"]

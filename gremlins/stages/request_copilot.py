@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from gremlins.pipeline import StageEntry
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import read_pr_num
@@ -12,9 +11,16 @@ from gremlins.state import read_pr_num
 
 class RequestCopilot(Stage):
     def __init__(
-        self, entry: StageEntry, model: str | None, *, repo: str, pr_num: str = ""
+        self,
+        name: str,
+        model: str | None,
+        prompts: list[str],
+        options: dict[str, Any],
+        *,
+        repo: str,
+        pr_num: str = "",
     ) -> None:
-        super().__init__(entry, model)
+        super().__init__(name, model, prompts, options)
         self._repo = repo
         self._pr_num = pr_num
 

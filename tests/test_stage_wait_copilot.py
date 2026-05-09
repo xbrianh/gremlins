@@ -5,19 +5,8 @@ from __future__ import annotations
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.pipeline import StageEntry
 from gremlins.stages.base import StageContext
 from gremlins.stages.wait_copilot import WaitCopilot
-
-
-def _make_entry() -> StageEntry:
-    return StageEntry(
-        name="wait-copilot",
-        type="wait-copilot",
-        client=None,
-        prompts=[],
-        options={},
-    )
 
 
 def _make_stage(
@@ -30,10 +19,11 @@ def _make_stage(
     review_checker=None,
     gr_id=None,
 ) -> WaitCopilot:
-    entry = _make_entry()
     stage = WaitCopilot(
-        entry,
+        "wait-copilot",
         None,
+        [],
+        {},
         repo=repo,
         pr_num=pr_num,
         timeout=timeout,

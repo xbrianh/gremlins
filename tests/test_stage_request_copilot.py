@@ -7,24 +7,12 @@ import subprocess
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.pipeline import StageEntry
 from gremlins.stages.base import StageContext
 from gremlins.stages.request_copilot import RequestCopilot
 
 
-def _make_entry() -> StageEntry:
-    return StageEntry(
-        name="request-copilot",
-        type="request-copilot",
-        client=None,
-        prompts=[],
-        options={},
-    )
-
-
 def _make_stage(tmp_path, *, repo: str, pr_num: str) -> RequestCopilot:
-    entry = _make_entry()
-    stage = RequestCopilot(entry, None, repo=repo, pr_num=pr_num)
+    stage = RequestCopilot("request-copilot", None, [], {}, repo=repo, pr_num=pr_num)
     ctx = StageContext(
         client=FakeClaudeClient(fixtures={}),
         session_dir=tmp_path,

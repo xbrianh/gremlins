@@ -67,8 +67,10 @@ def _build_plan(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any
             "planning (model: %s) -> %s", spec.model, runner.session_dir / "plan.md"
         )
     return plan.Plan(
-        entry,
+        entry.name,
         spec.model,
+        entry.prompts,
+        entry.options,
         plan_source=plan_val,
         plan_file=runner.session_dir / "plan.md" if not runner.repo else None,
         instructions=runner.instructions,
@@ -94,45 +96,49 @@ def _build_implement(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -
             runner.session_dir / "plan.md",
         )
     return implement.Implement(
-        entry, spec.model, is_git=runner.is_git, spec_text=spec_text
+        entry.name, spec.model, entry.prompts, entry.options,
+        is_git=runner.is_git, spec_text=spec_text,
     )
 
 
 def _build_materialize_to_branch(
     entry: StageEntry, spec: ClientSpec, _runner: StageRunner
 ) -> Any:
-    return materialize_to_branch_mod.MaterializeToBranch(entry, spec.model)
+    return materialize_to_branch_mod.MaterializeToBranch(
+        entry.name, spec.model, entry.prompts, entry.options
+    )
 
 
 def _build_verify(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
+    options = dict(entry.options)
     if not runner.repo:
         cmds = getattr(runner.args, "cmds", None)
         if cmds is not None:
-            entry.options["cmds"] = cmds
-        entry.options.setdefault(
-            "max_attempts", getattr(runner.args, "test_max_attempts", 3)
-        )
-        resolved_cmds = entry.options.get("cmds", [])
+            options["cmds"] = cmds
+        options.setdefault("max_attempts", getattr(runner.args, "test_max_attempts", 3))
+        resolved_cmds = options.get("cmds", [])
         if resolved_cmds:
             logger.info(
                 "running verify (cmds: %r, max-attempts: %s, model: %s)",
                 resolved_cmds,
-                entry.options.get("max_attempts"),
+                options.get("max_attempts"),
                 spec.model,
             )
-    return verify.Verify(entry, spec.model, is_git=runner.is_git)
+    return verify.Verify(entry.name, spec.model, entry.prompts, options, is_git=runner.is_git)
 
 
 def _build_commit(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
-    return commit.Commit(entry, spec.model)
+    return commit.Commit(entry.name, spec.model, entry.prompts, entry.options)
 
 
 def _build_open_github_pr(
     entry: StageEntry, spec: ClientSpec, runner: StageRunner
 ) -> Any:
     return open_github_pr.OpenGitHubPR(
-        entry,
+        entry.name,
         spec.model,
+        entry.prompts,
+        entry.options,
         issue_url=read_state_str(runner.state_file, "issue_url"),
     )
 
@@ -140,7 +146,9 @@ def _build_open_github_pr(
 def _build_request_copilot(
     entry: StageEntry, spec: ClientSpec, runner: StageRunner
 ) -> Any:
-    return request_copilot.RequestCopilot(entry, spec.model, repo=runner.repo)
+    return request_copilot.RequestCopilot(
+        entry.name, spec.model, entry.prompts, entry.options, repo=runner.repo
+    )
 
 
 def _build_ghreview(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
@@ -148,13 +156,17 @@ def _build_ghreview(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -
         die(
             f"stage {entry.name!r}: type 'ghreview' requires a 'prompt' field in the pipeline YAML"
         )
-    return review_code.ReviewCode(entry, spec.model, plan_text="", is_git=True)
+    return review_code.ReviewCode(
+        entry.name, spec.model, entry.prompts, entry.options, plan_text="", is_git=True
+    )
 
 
 def _build_wait_copilot(
     entry: StageEntry, spec: ClientSpec, runner: StageRunner
 ) -> Any:
-    return wait_copilot.WaitCopilot(entry, spec.model, repo=runner.repo)
+    return wait_copilot.WaitCopilot(
+        entry.name, spec.model, entry.prompts, entry.options, repo=runner.repo
+    )
 
 
 def _build_ghaddress(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
@@ -162,11 +174,13 @@ def _build_ghaddress(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) 
         die(
             f"stage {entry.name!r}: type 'ghaddress' requires a 'prompt' field in the pipeline YAML"
         )
-    return address_code.AddressCode(entry, spec.model, is_git=True)
+    return address_code.AddressCode(
+        entry.name, spec.model, entry.prompts, entry.options, is_git=True
+    )
 
 
 def _build_wait_ci(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
-    return wait_ci.WaitCI(entry, spec.model)
+    return wait_ci.WaitCI(entry.name, spec.model, entry.prompts, entry.options)
 
 
 def _build_review_code(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
@@ -174,7 +188,8 @@ def _build_review_code(entry: StageEntry, spec: ClientSpec, runner: StageRunner)
     plan_text = plan_file.read_text(encoding="utf-8")
     logger.info("reviewing code (model: %s)", spec.model)
     return review_code.ReviewCode(
-        entry, spec.model, plan_text=plan_text, is_git=runner.is_git
+        entry.name, spec.model, entry.prompts, entry.options,
+        plan_text=plan_text, is_git=runner.is_git,
     )
 
 
@@ -184,8 +199,10 @@ def _build_address_code(
     names, dirs = _review_stage_info(runner)
     logger.info("addressing code reviews (model: %s)", spec.model)
     return address_code.AddressCode(
-        entry,
+        entry.name,
         spec.model,
+        entry.prompts,
+        entry.options,
         is_git=runner.is_git,
         review_stage_names=names,
         review_stage_dirs=dirs,
@@ -206,11 +223,11 @@ def _build_loop(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any
             gr_id=runner.gr_id,
         )
         body_runners.append(runner.make_runner(child, child_ctx, child_spec))
-    return LoopStage(entry, body_runners=body_runners, max_iterations=max_iterations)
+    return LoopStage(entry.name, body_runners=body_runners, max_iterations=max_iterations)
 
 
 def _build_run_cmd(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
-    return run_cmd.RunCmd(entry, spec.model)
+    return run_cmd.RunCmd(entry.name, spec.model, entry.prompts, entry.options)
 
 
 def _build_claude_prompt(
@@ -218,13 +235,13 @@ def _build_claude_prompt(
 ) -> Any:
     if not entry.prompts:
         die(f"stage {entry.name!r}: type 'claude-prompt' requires a 'prompt' field")
-    return claude_prompt.ClaudePrompt(entry, spec.model)
+    return claude_prompt.ClaudePrompt(entry.name, spec.model, entry.prompts, entry.options)
 
 
 def _build_handoff(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
     from gremlins.stages.handoff import Handoff
 
-    return Handoff(entry, spec)
+    return Handoff(entry.name, spec)
 
 
 def _build_parallel(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
@@ -250,7 +267,7 @@ def _build_parallel(entry: StageEntry, spec: ClientSpec, runner: StageRunner) ->
         )
     gr_id = runner.gr_id
     return ParallelStage(
-        entry,
+        entry.name,
         child_runners,
         max_concurrent=entry.max_concurrent,
         cancel_on_bail=entry.cancel_on_bail,

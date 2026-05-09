@@ -8,7 +8,6 @@ import subprocess
 from typing import Any
 
 from gremlins import git as _git_mod
-from gremlins.pipeline import StageEntry
 from gremlins.stages.base import Stage
 from gremlins.stages.loop import LoopExhausted, LoopStage, RunCmdFailed
 from gremlins.stages.registry import register_stage
@@ -31,12 +30,14 @@ def _diff_text(cwd: pathlib.Path, *, is_git: bool) -> str:
 class Verify(Stage):
     def __init__(
         self,
-        entry: StageEntry,
+        name: str,
         model: str | None,
+        prompts: list[str],
+        options: dict[str, Any],
         *,
         is_git: bool,
     ) -> None:
-        super().__init__(entry, model)
+        super().__init__(name, model, prompts, options)
         self._is_git = is_git
 
     def run(self, pipe: Any) -> None:

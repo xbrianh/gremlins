@@ -12,7 +12,6 @@ import sys
 from typing import Any
 
 from gremlins.gh_utils import extract_gh_url, get_repo, parse_issue_ref, view_issue
-from gremlins.pipeline import StageEntry
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import patch_state, read_state_str, resolve_state_file
@@ -27,15 +26,17 @@ def _fmt_escape(s: str) -> str:
 class Plan(Stage):
     def __init__(
         self,
-        entry: StageEntry,
+        name: str,
         model: str | None,
+        prompts: list[str],
+        options: dict[str, Any],
         *,
         instructions: str = "",
         plan_file: pathlib.Path | None = None,
         plan_source: str | None = None,
         repo: str = "",
     ) -> None:
-        super().__init__(entry, model)
+        super().__init__(name, model, prompts, options)
         self.instructions = instructions
         self.plan_file = plan_file
         self.plan_source = plan_source

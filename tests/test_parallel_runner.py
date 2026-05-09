@@ -10,7 +10,6 @@ import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.pipeline import load_pipeline
-from gremlins.pipeline.schema import StageEntry
 from gremlins.runner import run_stages
 from gremlins.stages.base import StageContext
 from gremlins.stages.parallel import ParallelStage
@@ -34,10 +33,6 @@ def _make_ctx(child_key: str) -> StageContext:
     )
 
 
-def _make_entry(name: str = "test-group") -> StageEntry:
-    return StageEntry(name=name, type="parallel", client=None, prompts=[], options={})
-
-
 def _make_parallel_stages(
     group_name: str,
     child_runners: list,
@@ -56,9 +51,8 @@ def _make_parallel_stages(
 
     if project_root is None:
         project_root = pathlib.Path.cwd()
-    entry = _make_entry(group_name)
     return ParallelStage(
-        entry,
+        group_name,
         child_runners,
         max_concurrent=max_concurrent,
         set_stage_fn=set_stage_fn,

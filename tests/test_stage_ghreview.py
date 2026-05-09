@@ -9,22 +9,11 @@ import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.pipeline import StageEntry
 from gremlins.stages.base import StageContext
 from gremlins.stages.review_code import ReviewCode
 
 PR_URL = "https://github.com/owner/repo/pull/42"
 _GH_PIPE = types.SimpleNamespace(target="github")
-
-
-def _make_entry(prompt_text: str) -> StageEntry:
-    return StageEntry(
-        name="ghreview",
-        type="ghreview",
-        client=None,
-        prompts=[prompt_text],
-        options={},
-    )
 
 
 def _make_stage(
@@ -35,17 +24,8 @@ def _make_stage(
     style_content: str | None = None,
 ) -> tuple[ReviewCode, FakeClaudeClient]:
     prompt_text = "Review PR {pr_url}."
-    if style_content is not None:
-        entry = StageEntry(
-            name="ghreview",
-            type="ghreview",
-            client=None,
-            prompts=[style_content, prompt_text],
-            options={},
-        )
-    else:
-        entry = _make_entry(prompt_text)
-    stage = ReviewCode(entry, "sonnet", plan_text="", is_git=True, pr_url=pr_url)
+    prompts = [style_content, prompt_text] if style_content is not None else [prompt_text]
+    stage = ReviewCode("ghreview", "sonnet", prompts, {}, plan_text="", is_git=True, pr_url=pr_url)
     client = FakeClaudeClient(fixtures={"ghreview": MINIMAL_EVENTS})
     stage.bind(StageContext(client=client, session_dir=tmp_path, gr_id=gr_id))
     return stage, client
@@ -67,14 +47,7 @@ def test_run_includes_style_from_prompt_paths(tmp_path: pathlib.Path) -> None:
 
 
 def test_run_raises_if_unbound() -> None:
-    entry = StageEntry(
-        name="ghreview",
-        type="ghreview",
-        client=None,
-        prompts=["Review PR {pr_url}."],
-        options={},
-    )
-    stage = ReviewCode(entry, None, plan_text="", is_git=True, pr_url=PR_URL)
+    stage = ReviewCode("ghreview", None, ["Review PR {pr_url}."], {}, plan_text="", is_git=True, pr_url=PR_URL)
     with pytest.raises(RuntimeError, match="not bound"):
         stage.run(_GH_PIPE)
 

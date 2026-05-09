@@ -22,7 +22,6 @@ import pytest
 
 import gremlins.state as state_mod
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.pipeline.schema import StageEntry
 from gremlins.runner import run_stages
 from gremlins.stages.base import StageContext
 from gremlins.stages.parallel import ParallelStage
@@ -74,11 +73,8 @@ def _make_parallel_stages(
 
     if project_root is None:
         project_root = pathlib.Path.cwd()
-    entry = StageEntry(
-        name=group_name, type="parallel", client=None, prompts=[], options={}
-    )
     return ParallelStage(
-        entry,
+        group_name,
         child_runners,
         max_concurrent=max_concurrent,
         set_stage_fn=set_stage_fn,

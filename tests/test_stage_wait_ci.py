@@ -8,7 +8,6 @@ import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.pipeline import StageEntry
 from gremlins.stages.base import StageContext
 from gremlins.stages.wait_ci import WaitCI
 
@@ -46,16 +45,6 @@ _FAILING_CHECK = {
 }
 
 
-def _make_entry() -> StageEntry:
-    return StageEntry(
-        name="wait-ci",
-        type="wait-ci",
-        client=None,
-        prompts=[_CI_PROMPT_PATH.read_text(encoding="utf-8")],
-        options={},
-    )
-
-
 def _make_stage(
     client: Any,
     tmp_path: Any,
@@ -64,8 +53,8 @@ def _make_stage(
     model: str = "sonnet",
     **kwargs: Any,
 ) -> tuple[WaitCI, StageContext]:
-    entry = _make_entry()
-    stage = WaitCI(entry, model, pr_url=PR_URL, **kwargs)
+    prompts = [_CI_PROMPT_PATH.read_text(encoding="utf-8")]
+    stage = WaitCI("wait-ci", model, prompts, {}, pr_url=PR_URL, **kwargs)
     ctx = StageContext(client=client, session_dir=tmp_path, gr_id=gr_id)
     stage.bind(ctx)
     return stage, ctx

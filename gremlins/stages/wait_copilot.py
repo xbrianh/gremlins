@@ -8,7 +8,6 @@ from collections.abc import Callable
 from typing import Any
 
 from gremlins.gh_utils import check_copilot_review
-from gremlins.pipeline import StageEntry
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import read_pr_num
@@ -19,8 +18,10 @@ logger = logging.getLogger(__name__)
 class WaitCopilot(Stage):
     def __init__(
         self,
-        entry: StageEntry,
+        name: str,
         model: str | None,
+        prompts: list[str],
+        options: dict[str, Any],
         *,
         repo: str,
         pr_num: str = "",
@@ -28,7 +29,7 @@ class WaitCopilot(Stage):
         interval: int = 20,
         review_checker: Callable[[], str | None] | None = None,
     ) -> None:
-        super().__init__(entry, model)
+        super().__init__(name, model, prompts, options)
         self.repo = repo
         self.pr_num = pr_num
         self.timeout = timeout

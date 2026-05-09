@@ -7,7 +7,6 @@ import pathlib
 from typing import Any
 
 from gremlins.clients.protocol import ClaudeClient
-from gremlins.pipeline import StageEntry
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import check_bail, emit_bail, read_pr_url, set_stage
@@ -59,14 +58,16 @@ Do NOT make any code changes — only write the review file.
 class ReviewCode(Stage):
     def __init__(
         self,
-        entry: StageEntry,
+        name: str,
         model: str | None,
+        prompts: list[str],
+        options: dict[str, Any],
         *,
         plan_text: str,
         is_git: bool,
         pr_url: str = "",
     ) -> None:
-        super().__init__(entry, model)
+        super().__init__(name, model, prompts, options)
         self.plan_text = plan_text
         self.is_git = is_git
         self.pr_url = pr_url

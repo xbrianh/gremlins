@@ -6,7 +6,7 @@ import pytest
 from conftest import MINIMAL_EVENTS, ReviewCreatingClient
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.pipeline import StageEntry, load_pipeline, resolve_pipeline_path
+from gremlins.pipeline import load_pipeline, resolve_pipeline_path
 from gremlins.stages import implement, plan
 from gremlins.stages.address_code import AddressCode
 from gremlins.stages.base import StageContext
@@ -133,17 +133,12 @@ def test_implement_renders_spec_block_when_present(tmp_path, monkeypatch):
             return super().run(prompt, label=label, **kwargs)
 
     client = _CommittingClient(fixtures={"implement": MINIMAL_EVENTS})
-    entry = StageEntry(
-        name="implement",
-        type="implement",
-        client=None,
-        prompts=[(_BUNDLED_PROMPTS / "implement_local.md").read_text(encoding="utf-8")],
-        options={},
-    )
     (session_dir / "plan.md").write_text("task 1: do something", encoding="utf-8")
     stage = implement.Implement(
-        entry,
+        "implement",
         "sonnet",
+        [(_BUNDLED_PROMPTS / "implement_local.md").read_text(encoding="utf-8")],
+        {},
         is_git=True,
         spec_text="overall spec body",
     )
@@ -182,17 +177,12 @@ def test_implement_omits_spec_block_when_absent(tmp_path, monkeypatch):
             return super().run(prompt, label=label, **kwargs)
 
     client = _CommittingClient(fixtures={"implement": MINIMAL_EVENTS})
-    entry = StageEntry(
-        name="implement",
-        type="implement",
-        client=None,
-        prompts=[(_BUNDLED_PROMPTS / "implement_local.md").read_text(encoding="utf-8")],
-        options={},
-    )
     (session_dir / "plan.md").write_text("task 1: do something", encoding="utf-8")
     stage = implement.Implement(
-        entry,
+        "implement",
         "sonnet",
+        [(_BUNDLED_PROMPTS / "implement_local.md").read_text(encoding="utf-8")],
+        {},
         is_git=True,
         spec_text="",
     )
@@ -212,16 +202,11 @@ def test_plan_stage_raises_when_file_absent(tmp_path):
     plan_file = tmp_path / "plan.md"
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    entry = StageEntry(
-        name="plan",
-        type="plan",
-        client=None,
-        prompts=[(_BUNDLED_PROMPTS / "plan.md").read_text(encoding="utf-8")],
-        options={},
-    )
     stage = plan.Plan(
-        entry,
+        "plan",
         "sonnet",
+        [(_BUNDLED_PROMPTS / "plan.md").read_text(encoding="utf-8")],
+        {},
         plan_file=plan_file,
         instructions="do stuff",
     )
@@ -244,16 +229,11 @@ def test_plan_stage_succeeds_when_file_exists(tmp_path):
             return super().run(prompt, label=label, **kwargs)
 
     client = _WritingClient(fixtures={"plan": MINIMAL_EVENTS})
-    entry = StageEntry(
-        name="plan",
-        type="plan",
-        client=None,
-        prompts=[(_BUNDLED_PROMPTS / "plan.md").read_text(encoding="utf-8")],
-        options={},
-    )
     stage = plan.Plan(
-        entry,
+        "plan",
         "haiku",
+        [(_BUNDLED_PROMPTS / "plan.md").read_text(encoding="utf-8")],
+        {},
         plan_file=plan_file,
         instructions="do stuff",
     )
@@ -278,18 +258,13 @@ def test_implement_stage_raises_on_empty_diff(tmp_path, monkeypatch):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
-    entry = StageEntry(
-        name="implement",
-        type="implement",
-        client=None,
-        prompts=[(_BUNDLED_PROMPTS / "implement_local.md").read_text(encoding="utf-8")],
-        options={},
-    )
     client = FakeClaudeClient(fixtures={"implement": MINIMAL_EVENTS})
     (session_dir / "plan.md").write_text("# Plan\nDo stuff.\n", encoding="utf-8")
     stage = implement.Implement(
-        entry,
+        "implement",
         "sonnet",
+        [(_BUNDLED_PROMPTS / "implement_local.md").read_text(encoding="utf-8")],
+        {},
         is_git=True,
     )
     stage.bind(_make_ctx(client, session_dir))
@@ -313,19 +288,14 @@ def _make_review_code_stage(
     is_git: bool = False,
     gr_id=None,
 ) -> ReviewCode:
-    entry = StageEntry(
-        name="review-code",
-        type="review-code",
-        client=None,
-        prompts=[
+    stage = ReviewCode(
+        "review-code",
+        model,
+        [
             (_BUNDLED_PROMPTS / "code_style.md").read_text(encoding="utf-8"),
             (_BUNDLED_PROMPTS / "review" / "detail.md").read_text(encoding="utf-8"),
         ],
-        options={},
-    )
-    stage = ReviewCode(
-        entry,
-        model,
+        {},
         plan_text=plan_text,
         is_git=is_git,
     )
@@ -345,14 +315,13 @@ def _make_address_code_stage(
     is_git: bool = False,
     gr_id=None,
 ) -> AddressCode:
-    entry = StageEntry(
-        name="address-code",
-        type="address-code",
-        client=None,
-        prompts=[(_BUNDLED_PROMPTS / "address.md").read_text(encoding="utf-8")],
-        options={},
+    stage = AddressCode(
+        "address-code",
+        model,
+        [(_BUNDLED_PROMPTS / "address.md").read_text(encoding="utf-8")],
+        {},
+        is_git=is_git,
     )
-    stage = AddressCode(entry, model, is_git=is_git)
     stage.bind(_make_ctx(client, session_dir, gr_id=gr_id))
     return stage
 
@@ -382,19 +351,14 @@ def test_plan_stage_includes_style_from_prompts(tmp_path):
     plan_file = tmp_path / "plan.md"
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    entry = StageEntry(
-        name="plan",
-        type="plan",
-        client=None,
-        prompts=[
+    stage = plan.Plan(
+        "plan",
+        "sonnet",
+        [
             "Be good.",
             (_BUNDLED_PROMPTS / "plan.md").read_text(encoding="utf-8"),
         ],
-        options={},
-    )
-    stage = plan.Plan(
-        entry,
-        "sonnet",
+        {},
         plan_file=plan_file,
         instructions="do stuff",
     )
@@ -425,17 +389,17 @@ def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
 
 def test_review_code_stage_includes_style_from_prompts(tmp_path):
     client = ReviewCreatingClient(fixtures={"review-code:sonnet": MINIMAL_EVENTS})
-    entry = StageEntry(
-        name="review-code",
-        type="review-code",
-        client=None,
-        prompts=[
+    stage = ReviewCode(
+        "review-code",
+        "sonnet",
+        [
             "Be good.",
             (_BUNDLED_PROMPTS / "review" / "detail.md").read_text(encoding="utf-8"),
         ],
-        options={},
+        {},
+        plan_text="",
+        is_git=False,
     )
-    stage = ReviewCode(entry, "sonnet", plan_text="", is_git=False)
     stage.bind(_make_ctx(client, tmp_path))
     stage.run(None)
     assert "Be good." in client.calls[0].prompt
@@ -446,17 +410,16 @@ def test_address_code_stage_includes_style_from_prompts(tmp_path):
         "# Detail Review\n\n## Findings\nNone.\n"
     )
     client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
-    entry = StageEntry(
-        name="address-code",
-        type="address-code",
-        client=None,
-        prompts=[
+    stage = AddressCode(
+        "address-code",
+        "sonnet",
+        [
             "Be good.",
             (_BUNDLED_PROMPTS / "address.md").read_text(encoding="utf-8"),
         ],
-        options={},
+        {},
+        is_git=False,
     )
-    stage = AddressCode(entry, "sonnet", is_git=False)
     stage.bind(_make_ctx(client, tmp_path))
     stage.run(None)
     assert "Be good." in client.calls[0].prompt
@@ -496,16 +459,11 @@ def test_address_code_finds_review_files_in_parallel_subdirs(tmp_path):
     )
 
     client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
-    entry = StageEntry(
-        name="address-code",
-        type="address-code",
-        client=None,
-        prompts=[(_BUNDLED_PROMPTS / "address.md").read_text(encoding="utf-8")],
-        options={},
-    )
     stage = AddressCode(
-        entry,
+        "address-code",
         "sonnet",
+        [(_BUNDLED_PROMPTS / "address.md").read_text(encoding="utf-8")],
+        {},
         is_git=False,
         review_stage_names=["review-code", "review-code-fidelity"],
         review_stage_dirs={

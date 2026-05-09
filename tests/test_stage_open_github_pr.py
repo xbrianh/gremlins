@@ -9,7 +9,6 @@ import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.pipeline import StageEntry
 from gremlins.stages.base import StageContext
 from gremlins.stages.open_github_pr import OpenGitHubPR
 
@@ -17,23 +16,12 @@ ISSUE_URL = "https://github.com/owner/repo/issues/42"
 PR_URL = "https://github.com/owner/repo/pull/42"
 
 
-def _make_entry() -> StageEntry:
-    return StageEntry(
-        name="open-pr",
-        type="open-github-pr",
-        client=None,
-        prompts=[],
-        options={},
-    )
-
-
 def _make_stage(
     tmp_path: pathlib.Path,
     *,
     issue_url: str = ISSUE_URL,
 ) -> tuple[OpenGitHubPR, StageContext]:
-    entry = _make_entry()
-    stage = OpenGitHubPR(entry, "sonnet", issue_url=issue_url)
+    stage = OpenGitHubPR("open-pr", "sonnet", [], {}, issue_url=issue_url)
     client = FakeClaudeClient(fixtures={"open-github-pr": MINIMAL_EVENTS})
     ctx = StageContext(client=client, session_dir=tmp_path, gr_id=None)
     stage.bind(ctx)
@@ -79,8 +67,7 @@ def test_run_writes_raw_path(tmp_path: pathlib.Path) -> None:
 
 
 def test_run_raises_if_unbound() -> None:
-    entry = _make_entry()
-    stage = OpenGitHubPR(entry, None, issue_url=ISSUE_URL)
+    stage = OpenGitHubPR("open-pr", None, [], {}, issue_url=ISSUE_URL)
     with pytest.raises(RuntimeError, match="not bound"):
         stage.run(None)
 

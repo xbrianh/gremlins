@@ -7,19 +7,8 @@ import pathlib
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.pipeline import StageEntry
 from gremlins.stages.base import StageContext
 from gremlins.stages.plan import Plan
-
-
-def _entry(prompt_text: str | None = None) -> StageEntry:
-    return StageEntry(
-        name="plan",
-        type="plan",
-        prompts=[prompt_text] if prompt_text else [],
-        options={},
-        client=None,
-    )
 
 
 def _ctx(session_dir: pathlib.Path, client: FakeClaudeClient) -> StageContext:
@@ -32,7 +21,7 @@ def test_plan_source_file_local(tmp_path: pathlib.Path) -> None:
     plan_src.write_text("# My Plan\nDo stuff.\n")
 
     plan_md = tmp_path / "plan.md"
-    stage = Plan(_entry(), None, plan_source=str(plan_src), plan_file=plan_md)
+    stage = Plan("plan", None, [], {}, plan_source=str(plan_src), plan_file=plan_md)
     client = FakeClaudeClient(fixtures={})
     stage.bind(_ctx(tmp_path, client))
     stage.run(None)
@@ -59,7 +48,7 @@ def test_plan_source_issue_ref_local(
     monkeypatch.setattr("gremlins.stages.plan.view_issue", _fake_view_issue)
     monkeypatch.setattr("gremlins.stages.plan.parse_issue_ref", _fake_parse_issue_ref)
 
-    stage = Plan(_entry(), None, plan_source="#42", plan_file=plan_md)
+    stage = Plan("plan", None, [], {}, plan_source="#42", plan_file=plan_md)
     client = FakeClaudeClient(fixtures={})
     stage.bind(_ctx(tmp_path, client))
     stage.run(None)
@@ -101,7 +90,7 @@ def test_plan_source_file_github(
     client = FakeClaudeClient(fixtures=fixtures)
 
     stage = Plan(
-        _entry(), None, plan_source=str(plan_src), plan_file=plan_md, repo="owner/repo"
+        "plan", None, [], {}, plan_source=str(plan_src), plan_file=plan_md, repo="owner/repo"
     )
     stage.bind(_ctx(tmp_path, client))
     stage.run(None)
@@ -133,7 +122,7 @@ def test_plan_source_issue_ref_github(
     monkeypatch.setattr("gremlins.stages.plan.view_issue", _fake_view_issue)
 
     stage = Plan(
-        _entry(), None, plan_source="#99", plan_file=plan_md, repo="owner/repo"
+        "plan", None, [], {}, plan_source="#99", plan_file=plan_md, repo="owner/repo"
     )
     client = FakeClaudeClient(fixtures={})
     stage.bind(_ctx(tmp_path, client))
@@ -149,7 +138,7 @@ def test_plan_reuses_existing_plan_md(tmp_path: pathlib.Path) -> None:
     plan_md = tmp_path / "plan.md"
     plan_md.write_text("# Cached Plan\n")
 
-    stage = Plan(_entry(), None, plan_file=plan_md)
+    stage = Plan("plan", None, [], {}, plan_file=plan_md)
     client = FakeClaudeClient(fixtures={})
     stage.bind(_ctx(tmp_path, client))
     stage.run(None)

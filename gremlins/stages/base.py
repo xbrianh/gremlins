@@ -4,12 +4,9 @@ import dataclasses
 import pathlib
 import shlex
 import subprocess
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 from gremlins.clients.protocol import ClaudeClient, CompletedRun
-
-if TYPE_CHECKING:
-    from gremlins.pipeline import StageEntry
 
 
 @dataclasses.dataclass
@@ -32,11 +29,13 @@ class StageContext:
 
 
 class Stage:
-    def __init__(self, entry: StageEntry, model: str | None) -> None:
-        self.name = entry.name
+    def __init__(
+        self, name: str, model: str | None, prompts: list[str], options: dict[str, Any]
+    ) -> None:
+        self.name = name
         self.model = model
-        self.prompts = entry.prompts
-        self.options = entry.options
+        self.prompts = prompts
+        self.options = options
         self._mutable_state: StageContext | None = None
 
     def bind(self, state: StageContext) -> None:

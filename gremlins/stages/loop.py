@@ -5,15 +5,12 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from gremlins import git as _git
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import emit_bail
-
-if TYPE_CHECKING:
-    from gremlins.pipeline import StageEntry
 
 logger = logging.getLogger(__name__)
 
@@ -51,12 +48,12 @@ class LoopStage(Stage):
 
     def __init__(
         self,
-        entry: StageEntry,
+        name: str,
         *,
         body_runners: list[Callable[[], None]],
         max_iterations: int,
     ) -> None:
-        super().__init__(entry, None)
+        super().__init__(name, None, [], {})
         self._body_runners = body_runners
         self._max_iterations = max_iterations
 
@@ -68,10 +65,7 @@ class LoopStage(Stage):
         name: str = "loop",
         max_iterations: int,
     ) -> LoopStage:
-        from gremlins.pipeline import StageEntry
-
-        entry = StageEntry(name=name, type="loop", client=None, prompts=[], options={})
-        return cls(entry, body_runners=runners, max_iterations=max_iterations)
+        return cls(name, body_runners=runners, max_iterations=max_iterations)
 
     def run(self, pipe: Any) -> None:  # noqa: ARG002
         exhausted = False
