@@ -42,7 +42,7 @@ from gremlins.fleet.cli import (
 from gremlins.launcher import launch, resume
 from gremlins.orchestrators.review_address import address_main, review_main
 from gremlins.pipeline import list_pipelines, load_pipeline, resolve_pipeline_name
-from gremlins.stages.introspect import build_launch_parser
+from gremlins.stages.base import Stage
 from gremlins.stages.registry import STAGE_REGISTRY
 from gremlins.state import validate_gr_id
 
@@ -87,14 +87,53 @@ def main(argv: list[str] | None = None) -> int:
     return fleet_main(argv)
 
 
-class _EmptyStage:
-    def __init__(self) -> None:
-        pass
+_INFRA_ARGS = frozenset({"description", "parent_id", "print_id", "base_ref", "client"})
 
-
-_INFRA_ARGS = frozenset(
-    {"description", "parent_id", "print_id", "base_ref", "client", "spec_path", "plan"}
+_INFRA_FLAG_NAMES = frozenset(
+    {"description", "parent", "print-id", "base-ref", "client"}
 )
+
+
+def _parse_bool(v: str) -> bool:
+    if v.lower() in ("1", "true", "yes"):
+        return True
+    if v.lower() in ("0", "false", "no"):
+        return False
+    raise argparse.ArgumentTypeError(f"invalid bool value: {v!r}")
+
+
+def build_launch_parser(
+    pipeline_name: str, stage_cls: type[Stage]
+) -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog=f"gremlins launch {pipeline_name}")
+    p.add_argument("--description", default=None)
+    p.add_argument("--parent", dest="parent_id", default=None)
+    p.add_argument("--print-id", action="store_true")
+    p.add_argument("--base-ref", default=None)
+    p.add_argument("--client", default=None)
+    for si in stage_cls.orchestration_args():
+        flag = "--" + si.name.replace("_", "-")
+        if flag.lstrip("-") in _INFRA_FLAG_NAMES:
+            raise ValueError(
+                f"stage input {si.name!r} conflicts with infra flag {flag!r}"
+            )
+        kwargs: dict[str, Any] = {"help": si.help}
+        if si.type is bool:
+            if si.required:
+                kwargs["type"] = _parse_bool
+                kwargs["required"] = True
+            else:
+                kwargs["action"] = argparse.BooleanOptionalAction
+                kwargs["default"] = si.default
+        else:
+            kwargs["type"] = si.type
+            if si.required:
+                kwargs["required"] = True
+            else:
+                kwargs["default"] = si.default
+        p.add_argument(flag, **kwargs)
+    return p
+
 
 _LAUNCH_BRIEF = "usage: gremlins launch <name> [opts]\nLaunch a background gremlin by pipeline name. Run 'gremlins launch --list' to see available pipelines.\n"
 
@@ -133,11 +172,13 @@ def _launch_main(argv: list[str]) -> int:
     first = next((s for s in pipeline.stages if s.type != "parallel"), None)
     try:
         stage_cls = (
-            cast(type, STAGE_REGISTRY[first.type]) if first is not None else _EmptyStage
+            cast(type[Stage], STAGE_REGISTRY[first.type])
+            if first is not None
+            else Stage
         )
         parser = build_launch_parser(name, stage_cls)
     except (KeyError, TypeError):
-        parser = build_launch_parser(name, _EmptyStage)
+        parser = build_launch_parser(name, Stage)
 
     try:
         args = parser.parse_args(argv[1:])
@@ -156,11 +197,9 @@ def _self_background_main(
         gr_id = launch(
             pipeline_name,
             stage_inputs=stage_inputs,
-            plan=args.plan,
             description=args.description,
             parent_id=args.parent_id,
             base_ref=args.base_ref,
-            spec_path=args.spec_path,
             pipeline_args=pipeline_args,
         )
     except (ValueError, RuntimeError) as exc:

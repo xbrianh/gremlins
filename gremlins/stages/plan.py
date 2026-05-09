@@ -12,7 +12,7 @@ import sys
 from typing import Any
 
 from gremlins.gh_utils import extract_gh_url, get_repo, parse_issue_ref, view_issue
-from gremlins.stages.base import Stage
+from gremlins.stages.base import Stage, StageInput
 from gremlins.stages.registry import register_stage
 from gremlins.state import patch_state, read_state_str, resolve_state_file
 
@@ -39,6 +39,32 @@ class Plan(Stage):
         self.instructions = instructions
         self.plan = plan
         self.repo = repo
+
+    @classmethod
+    def orchestration_args(cls) -> list[StageInput]:
+        return [
+            StageInput(
+                "instructions",
+                str,
+                required=False,
+                default="",
+                help="extra instructions for the planning agent",
+            ),
+            StageInput(
+                "plan",
+                str,
+                required=False,
+                default=None,
+                help="path to a plan file or GitHub issue ref (owner/repo#N or #N)",
+            ),
+            StageInput(
+                "repo",
+                str,
+                required=False,
+                default="",
+                help="GitHub repo (owner/name) to operate on",
+            ),
+        ]
 
     def run(self, pipe: Any) -> None:
         plan_md = self.state.session_dir / "plan.md"
