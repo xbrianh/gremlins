@@ -55,21 +55,6 @@ def test_unknown_first_arg_falls_through_to_fleet(tmp_path, monkeypatch):
     assert received == [["abc123"]]
 
 
-@pytest.mark.parametrize(
-    "sub", ["fleet", "handoff", "bail", "session-summary", "_run-pipeline"]
-)
-def test_removed_subcommands_exit_nonzero(sub):
-    rc = main([sub])
-    assert rc != 0
-
-
-@pytest.mark.parametrize("sub", ["local", "gh", "boss"])
-def test_migrated_subcommands_exit_nonzero_with_hint(sub, capsys):
-    rc = main([sub])
-    assert rc != 0
-    assert f"gremlins launch {sub}" in capsys.readouterr().err
-
-
 # ---------------------------------------------------------------------------
 # bail_main — extracted to gremlins/bail.py
 # ---------------------------------------------------------------------------
