@@ -5,7 +5,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import sys
-from typing import Any
+from typing import Any, cast
 
 from gremlins.git import (
     DivergentHead,
@@ -102,6 +102,7 @@ class MaterializeToBranch(Stage):
             chain_st = data.get("chain_state")
             if not isinstance(chain_st, dict):
                 return
+            chain_st = cast(dict[str, Any], chain_st)
             n = int(chain_st.get("handoff_count", 0))
             records: list[dict[str, Any]] = list(chain_st.get("child_records") or [])
             for rec in records:

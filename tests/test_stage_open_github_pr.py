@@ -135,17 +135,17 @@ def test_stacked_pr_uses_prev_child_branch(tmp_path: pathlib.Path) -> None:
             "gremlins.stages.open_github_pr.resolve_state_file",
             return_value=tmp_path / "state.json",
         ),
-        patch(
-            "gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL
-        ),
+        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
         patch(
             "gremlins.stages.open_github_pr.patch_state",
         ),
         patch.object(
             stage,
             "run_claude",
-            side_effect=lambda prompt, **kw: prompts_seen.append(prompt)
-            or type("R", (), {"events": [], "text_result": ""})(),
+            side_effect=lambda prompt, **kw: (
+                prompts_seen.append(prompt)
+                or type("R", (), {"events": [], "text_result": ""})()
+            ),
         ),
     ):
         stage.run(None)
@@ -174,15 +174,15 @@ def test_first_child_uses_base_ref_name(tmp_path: pathlib.Path) -> None:
             "gremlins.stages.open_github_pr.resolve_state_file",
             return_value=tmp_path / "state.json",
         ),
-        patch(
-            "gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL
-        ),
+        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
         patch("gremlins.stages.open_github_pr.patch_state"),
         patch.object(
             stage,
             "run_claude",
-            side_effect=lambda prompt, **kw: prompts_seen.append(prompt)
-            or type("R", (), {"events": [], "text_result": ""})(),
+            side_effect=lambda prompt, **kw: (
+                prompts_seen.append(prompt)
+                or type("R", (), {"events": [], "text_result": ""})()
+            ),
         ),
     ):
         stage.run(None)

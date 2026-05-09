@@ -740,4 +740,3 @@ def write_terminal_state(gr_id: str, exit_code: int) -> None:
         os.replace(tmp, sf)
     except Exception:
         pass
-

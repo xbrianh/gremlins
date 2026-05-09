@@ -188,13 +188,15 @@ def test_head_advanced_records_branch_in_chain_state(tmp_path: pathlib.Path) -> 
     """When HeadAdvanced, the materialized branch is written to chain_state.child_records."""
     state_file = tmp_path / "state.json"
     state_file.write_text(
-        json.dumps({
-            "impl_pre_head": "abc123",
-            "chain_state": {
-                "handoff_count": 2,
-                "child_records": [{"n": 1, "branch": "gremlin/child-1"}],
-            },
-        }),
+        json.dumps(
+            {
+                "impl_pre_head": "abc123",
+                "chain_state": {
+                    "handoff_count": 2,
+                    "child_records": [{"n": 1, "branch": "gremlin/child-1"}],
+                },
+            }
+        ),
         encoding="utf-8",
     )
     stage, _ = _make_stage(tmp_path, gr_id="test-gr")

@@ -2083,7 +2083,11 @@ def test_any_stage_is_gh_detects_top_level_gh_stage() -> None:
     from gremlins.orchestrators.run import _any_stage_is_gh
     from gremlins.pipeline.schema import StageEntry
 
-    stages = [StageEntry(name="open-pr", type="open-github-pr", client=None, prompts=[], options={})]
+    stages = [
+        StageEntry(
+            name="open-pr", type="open-github-pr", client=None, prompts=[], options={}
+        )
+    ]
     assert _any_stage_is_gh(stages) is True
 
 
@@ -2093,7 +2097,9 @@ def test_any_stage_is_gh_false_for_local_stages() -> None:
 
     stages = [
         StageEntry(name="plan", type="plan", client=None, prompts=[], options={}),
-        StageEntry(name="implement", type="implement", client=None, prompts=[], options={}),
+        StageEntry(
+            name="implement", type="implement", client=None, prompts=[], options={}
+        ),
     ]
     assert _any_stage_is_gh(stages) is False
 
@@ -2105,9 +2111,13 @@ def test_any_stage_is_gh_recurses_into_loop_body() -> None:
 
     gh_body = [
         StageEntry(name="handoff", type="handoff", client=None, prompts=[], options={}),
-        StageEntry(name="open-pr", type="open-github-pr", client=None, prompts=[], options={}),
+        StageEntry(
+            name="open-pr", type="open-github-pr", client=None, prompts=[], options={}
+        ),
     ]
-    loop = StageEntry(name="chain", type="loop", client=None, prompts=[], options={}, body=gh_body)
+    loop = StageEntry(
+        name="chain", type="loop", client=None, prompts=[], options={}, body=gh_body
+    )
     stages = [loop]
     assert _any_stage_is_gh(stages) is True
 
@@ -2119,11 +2129,17 @@ def test_any_stage_is_gh_false_for_local_loop_body() -> None:
 
     local_body = [
         StageEntry(name="handoff", type="handoff", client=None, prompts=[], options={}),
-        StageEntry(name="implement", type="implement", client=None, prompts=[], options={}),
+        StageEntry(
+            name="implement", type="implement", client=None, prompts=[], options={}
+        ),
     ]
-    loop = StageEntry(name="chain", type="loop", client=None, prompts=[], options={}, body=local_body)
+    loop = StageEntry(
+        name="chain", type="loop", client=None, prompts=[], options={}, body=local_body
+    )
     stages = [
         loop,
-        StageEntry(name="review-chain", type="review-code", client=None, prompts=[], options={}),
+        StageEntry(
+            name="review-chain", type="review-code", client=None, prompts=[], options={}
+        ),
     ]
     assert _any_stage_is_gh(stages) is False

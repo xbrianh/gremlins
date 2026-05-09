@@ -100,7 +100,6 @@ def _wait_for_finished(state_dir: pathlib.Path, timeout: float = 60.0) -> bool:
     return False
 
 
-
 def _read_state(state_dir: pathlib.Path) -> dict:
     return json.loads((state_dir / "state.json").read_text(encoding="utf-8"))
 

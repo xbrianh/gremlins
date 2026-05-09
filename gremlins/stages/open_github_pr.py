@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, cast
 
 from gremlins.clients.protocol import CompletedRun
 from gremlins.gh_utils import extract_gh_url
@@ -39,7 +39,12 @@ class OpenGitHubPR(Stage):
     def run(self, pipe: Any) -> str:
         sf = resolve_state_file(self.state.gr_id)
         chain_base_ref = self._prev_child_branch(sf)
-        base_ref = chain_base_ref or self.base_ref or read_state_str(sf, "base_ref_name") or "main"
+        base_ref = (
+            chain_base_ref
+            or self.base_ref
+            or read_state_str(sf, "base_ref_name")
+            or "main"
+        )
 
         issue_num = self.issue_url.split("/")[-1] if self.issue_url else ""
 
@@ -80,8 +85,10 @@ class OpenGitHubPR(Stage):
             chain_st = data.get("chain_state")
             if not isinstance(chain_st, dict):
                 return ""
+            chain_st = cast(dict[str, Any], chain_st)
             n = int(chain_st.get("handoff_count", 0))
-            for rec in chain_st.get("child_records") or []:
+            records: list[dict[str, Any]] = list(chain_st.get("child_records") or [])
+            for rec in records:
                 if rec.get("n") == n - 1:
                     return str(rec.get("branch") or "")
         except Exception:
@@ -96,6 +103,7 @@ class OpenGitHubPR(Stage):
             chain_st = data.get("chain_state")
             if not isinstance(chain_st, dict):
                 return
+            chain_st = cast(dict[str, Any], chain_st)
             n = int(chain_st.get("handoff_count", 0))
             m = re.search(r"/pull/(\d+)$", pr_url)
             pr_number = int(m.group(1)) if m else None
