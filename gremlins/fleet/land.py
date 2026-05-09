@@ -18,6 +18,7 @@ from gremlins.fleet.state import (
     liveness_of_state_file,
     load_state,
 )
+from gremlins.utils import proc
 
 
 def expected_branch(state: dict[str, Any], gr_id: str):
@@ -700,7 +701,7 @@ def _land_gh(
     cwd = project_root if project_root and os.path.isdir(project_root) else None
 
     print(f"Checking PR: {pr_url}")
-    r = subprocess.run(
+    r = proc.run(
         [
             "gh",
             "pr",
@@ -709,8 +710,6 @@ def _land_gh(
             "--json",
             "state,mergeable,reviewDecision,statusCheckRollup",
         ],
-        capture_output=True,
-        text=True,
         cwd=cwd,
     )
     if r.returncode != 0:
@@ -771,12 +770,7 @@ def _land_gh(
     if mergeable == "UNKNOWN":
         print("GitHub is computing mergeability — waiting 5s and retrying...")
         time.sleep(5)
-        r = subprocess.run(
-            ["gh", "pr", "view", pr_url, "--json", "mergeable"],
-            capture_output=True,
-            text=True,
-            cwd=cwd,
-        )
+        r = proc.run(["gh", "pr", "view", pr_url, "--json", "mergeable"], cwd=cwd)
         if r.returncode == 0:
             try:
                 mergeable = json.loads(r.stdout).get("mergeable", "UNKNOWN")
@@ -789,12 +783,7 @@ def _land_gh(
         return False
 
     print(f"Merging: {pr_url}")
-    r = subprocess.run(
-        ["gh", "pr", "merge", pr_url, "--squash", "--delete-branch"],
-        capture_output=True,
-        text=True,
-        cwd=cwd,
-    )
+    r = proc.run(["gh", "pr", "merge", pr_url, "--squash", "--delete-branch"], cwd=cwd)
     if r.returncode != 0:
         if "already merged" in r.stdout.lower() or "already merged" in r.stderr.lower():
             print("PR was already merged.")
@@ -803,12 +792,7 @@ def _land_gh(
             # tries to switch off the deleted branch and fails on a detached
             # HEAD cwd) even though the PR did merge. Re-verify before bailing.
             err = r.stderr.strip() or r.stdout.strip()
-            v = subprocess.run(
-                ["gh", "pr", "view", pr_url, "--json", "state"],
-                capture_output=True,
-                text=True,
-                cwd=cwd,
-            )
+            v = proc.run(["gh", "pr", "view", pr_url, "--json", "state"], cwd=cwd)
             verified_merged = False
             verify_err = ""
             if v.returncode == 0:

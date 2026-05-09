@@ -11,14 +11,13 @@ import re
 import subprocess
 from typing import Any, cast
 
+from gremlins.utils import proc
+
 
 def get_repo() -> str:
     """Return the current repo's ``owner/name`` via ``gh repo view``."""
-    r = subprocess.run(
+    r = proc.run(
         ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-        capture_output=True,
-        text=True,
-        check=False,
     )
     if r.returncode != 0:
         raise RuntimeError(
@@ -60,7 +59,7 @@ def view_issue(issue_ref: str, repo: str) -> dict[str, Any]:
     indefinitely.
     """
     try:
-        r = subprocess.run(
+        r = proc.run(
             [
                 "gh",
                 "issue",
@@ -71,9 +70,6 @@ def view_issue(issue_ref: str, repo: str) -> dict[str, Any]:
                 "--json",
                 "number,url,body,title",
             ],
-            capture_output=True,
-            text=True,
-            check=False,
             timeout=VIEW_ISSUE_TIMEOUT,
         )
     except subprocess.TimeoutExpired as exc:
@@ -180,7 +176,7 @@ def get_pr_ci_status(pr_url: str) -> dict[str, Any]:
     - 'head_sha': current PR headRefOid (commit SHA), or '' if unavailable
     """
     try:
-        r = subprocess.run(
+        r = proc.run(
             [
                 "gh",
                 "pr",
@@ -189,9 +185,6 @@ def get_pr_ci_status(pr_url: str) -> dict[str, Any]:
                 "--json",
                 "statusCheckRollup,reviewDecision,headRefOid",
             ],
-            capture_output=True,
-            text=True,
-            check=False,
             timeout=GET_PR_CI_STATUS_TIMEOUT,
         )
     except subprocess.TimeoutExpired as exc:
@@ -223,13 +216,7 @@ def fetch_check_run_logs(details_url: str) -> str:
     if not m:
         return ""
     run_id = m.group(1)
-    r = subprocess.run(
-        ["gh", "run", "view", run_id, "--log-failed"],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=30,
-    )
+    r = proc.run(["gh", "run", "view", run_id, "--log-failed"], timeout=30)
     if r.returncode == 0:
         return r.stdout.strip()[:10000]
     return ""
@@ -238,7 +225,7 @@ def fetch_check_run_logs(details_url: str) -> str:
 def resolve_default_branch(project_root: str) -> str:
     """Resolve origin's default branch via gh CLI. Raises RuntimeError on failure."""
     try:
-        r = subprocess.run(
+        r = proc.run(
             [
                 "gh",
                 "repo",
@@ -248,8 +235,6 @@ def resolve_default_branch(project_root: str) -> str:
                 "-q",
                 ".defaultBranchRef.name",
             ],
-            capture_output=True,
-            text=True,
             cwd=project_root,
             timeout=30,
         )
@@ -264,7 +249,7 @@ def resolve_default_branch(project_root: str) -> str:
 
 def check_copilot_review(repo: str, pr_num: str) -> str | None:
     """Return the first non-PENDING Copilot review state, or None if not ready."""
-    r = subprocess.run(
+    r = proc.run(
         [
             "gh",
             "api",
@@ -272,9 +257,6 @@ def check_copilot_review(repo: str, pr_num: str) -> str | None:
             "--jq",
             '.[] | select(.user.login | test("[Cc]opilot")) | .state',
         ],
-        capture_output=True,
-        text=True,
-        check=False,
     )
     if r.returncode != 0:
         return None

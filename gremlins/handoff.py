@@ -17,7 +17,6 @@ import logging
 import pathlib
 import re
 import shutil
-import subprocess
 import sys
 import threading
 from collections.abc import Callable
@@ -27,6 +26,7 @@ from gremlins.clients import PACKAGE_DEFAULT, ClientSpec, to_client
 from gremlins.clients.protocol import ClaudeClient
 from gremlins.logging_setup import configure_logging
 from gremlins.prompts import BUNDLED_PROMPT_DIR
+from gremlins.utils import proc
 
 logger = logging.getLogger(__name__)
 
@@ -76,15 +76,6 @@ def _load_handoff_style() -> str:
     return text
 
 
-def run_git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git"] + list(args),
-        capture_output=True,
-        text=True,
-        check=check,
-    )
-
-
 def auto_name_out(plan_path: pathlib.Path) -> pathlib.Path:
     """Given plan.md → plan-001.md; given plan-001.md → plan-002.md, etc."""
     # Strip trailing -NNN so plan-001.md produces plan-002.md, not plan-001-001.md
@@ -111,31 +102,33 @@ def collect_git_context(
     inspect_rev = rev or "HEAD"
 
     # Validate target ref exists early so we get a clear error message
-    result = run_git("rev-parse", "--verify", target, check=False)
+    result = proc.run(["git", "rev-parse", "--verify", target])
     if result.returncode != 0:
         die(f"--base ref not found in repo: {target!r}")
 
     if rev is not None:
-        result = run_git("rev-parse", "--verify", rev, check=False)
+        result = proc.run(["git", "rev-parse", "--verify", rev])
         if result.returncode != 0:
             die(f"--rev ref not found in repo: {rev!r}")
 
-    result = run_git("rev-parse", "--abbrev-ref", inspect_rev, check=False)
+    result = proc.run(["git", "rev-parse", "--abbrev-ref", inspect_rev])
     branch = result.stdout.strip() if result.returncode == 0 else inspect_rev
     if branch == "HEAD":
         # Detached HEAD: surface the SHA so the prompt doesn't read "Branch: HEAD".
-        sha = run_git("rev-parse", inspect_rev, check=False).stdout.strip()
+        sha = proc.run(["git", "rev-parse", inspect_rev]).stdout.strip()
         branch = f"(detached at {sha[:12]})" if sha else "(detached)"
 
-    result = run_git("merge-base", inspect_rev, target, check=False)
+    result = proc.run(["git", "merge-base", inspect_rev, target])
     if result.returncode != 0:
         die(f"could not compute merge-base between {inspect_rev!r} and {target!r}")
     merge_base = result.stdout.strip()
 
-    result = run_git("log", f"{merge_base}..{inspect_rev}", "--oneline")
+    result = proc.run(
+        ["git", "log", f"{merge_base}..{inspect_rev}", "--oneline"], check=True
+    )
     git_log = result.stdout.strip()
 
-    result = run_git("diff", f"{merge_base}..{inspect_rev}")
+    result = proc.run(["git", "diff", f"{merge_base}..{inspect_rev}"], check=True)
     git_diff = result.stdout
 
     return branch, git_log, git_diff

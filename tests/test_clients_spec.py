@@ -123,8 +123,6 @@ stages:
 
 def test_address_code_in_loop_finds_sibling_reviews(tmp_path, monkeypatch):
     """address-code inside a loop scopes review lookup to its loop body, not the boss top level."""
-    from gremlins.clients.resolve import collect_stage_specs as _collect
-    from gremlins.orchestrators.pipeline import StageRunner
     from gremlins.stages.all import _review_stage_info
 
     pipeline_path = _write(
