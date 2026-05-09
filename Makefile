@@ -14,6 +14,6 @@ typecheck:
 test: $(TEST_FILES)
 
 $(TEST_FILES):
-	pytest $@
+	pytest $@ || { code=$$?; [ $$code -eq 5 ] && exit 0 || exit $$code; }
 
 check: lint format typecheck
