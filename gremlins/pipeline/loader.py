@@ -17,7 +17,7 @@ def _ensure_registered() -> None:
     importlib.import_module("gremlins.clients")
 
 
-def _resolve_include(name: str, parent_prompt_dir: pathlib.Path) -> list[StageEntry]:
+def _resolve_include(name: str) -> list[StageEntry]:
     """Expand `include: <name>` by loading the named bundled pipeline's stages."""
     from gremlins.pipeline.discovery import BUNDLED_PIPELINE_DIR
 
@@ -51,7 +51,7 @@ def _parse_stage_entries_or_include(
         name = entry["include"]
         if not isinstance(name, str) or not name:
             raise ValueError("include: value must be a non-empty string")
-        return _resolve_include(name, prompt_dir)
+        return _resolve_include(name)
     return [_parse_stage_entry(entry, prompt_dir, depth=depth)]
 
 

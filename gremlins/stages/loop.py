@@ -37,6 +37,10 @@ class LoopStage(CompoundStage):
     Termination: after an iteration where no RunCmdFailed was raised, if
     HEAD is unchanged (head-stable) the loop exits cleanly.  If HEAD
     advanced, the loop continues (or exits on the final iteration).
+
+    Resume granularity: --resume-from targets the loop stage by name; there
+    is no per-iteration sub-stage addressing.  Resuming restarts the loop from
+    iteration 1, picking up any persisted state (e.g. chain_state) from disk.
     """
 
     def __init__(

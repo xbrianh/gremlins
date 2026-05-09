@@ -85,8 +85,6 @@ _GH_STAGE_TYPES = frozenset(
 def _pipeline_mode(pipeline: PipelineDef) -> str:
     first = pipeline.stages[0] if pipeline.stages else None
     if first is not None:
-        if first.type == "chain":
-            return "boss"
         if first.type == "loop" and any(b.type == "handoff" for b in first.body):
             return "boss"
     if pipeline.name == "gh" or any(s.type in _GH_STAGE_TYPES for s in pipeline.stages):
