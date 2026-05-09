@@ -43,14 +43,18 @@ def test_prog_includes_pipeline_name() -> None:
 
 
 def test_stage_input_exposes_flag() -> None:
-    stage = _stage_with(StageInput("plan", str, required=False, default=None, help="plan path"))
+    stage = _stage_with(
+        StageInput("plan", str, required=False, default=None, help="plan path")
+    )
     p = build_launch_parser("mypipe", stage)
     flags = [s for a in p._actions for s in a.option_strings]
     assert "--plan" in flags
 
 
 def test_flag_name_kebab_cased() -> None:
-    stage = _stage_with(StageInput("plan_file", str, required=False, default=None, help=""))
+    stage = _stage_with(
+        StageInput("plan_file", str, required=False, default=None, help="")
+    )
     p = build_launch_parser("mypipe", stage)
     flags = [s for a in p._actions for s in a.option_strings]
     assert "--plan-file" in flags
@@ -67,12 +71,18 @@ def test_required_flag_marked_required() -> None:
 def test_optional_flag_not_required() -> None:
     stage = _stage_with(StageInput("topic", str, required=False, default="x", help=""))
     p = build_launch_parser("mypipe", stage)
-    optional = {a.option_strings[0]: a for a in p._actions if a.option_strings and not a.required}
+    optional = {
+        a.option_strings[0]: a
+        for a in p._actions
+        if a.option_strings and not a.required
+    }
     assert "--topic" in optional
 
 
 def test_bool_optional_uses_boolean_optional_action() -> None:
-    stage = _stage_with(StageInput("verbose", bool, required=False, default=False, help=""))
+    stage = _stage_with(
+        StageInput("verbose", bool, required=False, default=False, help="")
+    )
     p = build_launch_parser("mypipe", stage)
     assert p.parse_args([]).verbose is False
     assert p.parse_args(["--verbose"]).verbose is True
@@ -87,13 +97,17 @@ def test_bool_required_parsed_from_string() -> None:
 
 
 def test_infra_flag_collision_raises() -> None:
-    stage = _stage_with(StageInput("description", str, required=False, default=None, help=""))
+    stage = _stage_with(
+        StageInput("description", str, required=False, default=None, help="")
+    )
     with pytest.raises(ValueError, match="description"):
         build_launch_parser("mypipe", stage)
 
 
 def test_client_collision_raises() -> None:
-    stage = _stage_with(StageInput("client", str, required=False, default=None, help=""))
+    stage = _stage_with(
+        StageInput("client", str, required=False, default=None, help="")
+    )
     with pytest.raises(ValueError, match="client"):
         build_launch_parser("mypipe", stage)
 

@@ -43,9 +43,27 @@ class Plan(Stage):
     @classmethod
     def orchestration_args(cls) -> list[StageInput]:
         return [
-            StageInput("instructions", str, required=False, default="", help="extra instructions for the planning agent"),
-            StageInput("plan", str, required=False, default=None, help="path to a plan file or GitHub issue ref (owner/repo#N or #N)"),
-            StageInput("repo", str, required=False, default="", help="GitHub repo (owner/name) to operate on"),
+            StageInput(
+                "instructions",
+                str,
+                required=False,
+                default="",
+                help="extra instructions for the planning agent",
+            ),
+            StageInput(
+                "plan",
+                str,
+                required=False,
+                default=None,
+                help="path to a plan file or GitHub issue ref (owner/repo#N or #N)",
+            ),
+            StageInput(
+                "repo",
+                str,
+                required=False,
+                default="",
+                help="GitHub repo (owner/name) to operate on",
+            ),
         ]
 
     def run(self, pipe: Any) -> None:

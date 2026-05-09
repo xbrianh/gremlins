@@ -325,7 +325,11 @@ class _FakePlanStage:
     def orchestration_args(cls):
         from gremlins.stages.base import StageInput
 
-        return [StageInput("instructions", str, required=False, default="", help="instructions")]
+        return [
+            StageInput(
+                "instructions", str, required=False, default="", help="instructions"
+            )
+        ]
 
 
 def _make_fake_pipeline(stage_type: str = "plan"):
