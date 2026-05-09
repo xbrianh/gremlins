@@ -253,7 +253,9 @@ def _build_sequence(entry: StageEntry, spec: ClientSpec, runner: StageRunner) ->
             session_dir=runner.session_dir,
             gr_id=runner.gr_id,
         )
-        child_runner = runner.make_runner(child, child_ctx, child_spec, scope=entry.body)
+        child_runner = runner.make_runner(
+            child, child_ctx, child_spec, scope=entry.body
+        )
         body.append((child_ctx, child_runner))
     return SequenceStage(entry.name, body=body)
 

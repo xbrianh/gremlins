@@ -41,9 +41,7 @@ def test_sequence_stops_on_exception() -> None:
     def fail() -> None:
         raise RuntimeError("boom")
 
-    stage = _make_sequence(
-        [lambda: log.append("a"), fail, lambda: log.append("c")]
-    )
+    stage = _make_sequence([lambda: log.append("a"), fail, lambda: log.append("c")])
     with pytest.raises(RuntimeError, match="boom"):
         stage.run(None)
     assert log == ["a"]

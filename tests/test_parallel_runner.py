@@ -337,8 +337,12 @@ def test_parallel_sequence_child_worktree_flows() -> None:
 
     observed: list[pathlib.Path | None] = []
 
-    sub_ctx_a = StageContext(client=FakeClaudeClient(), session_dir=pathlib.Path("/tmp"), gr_id=None)
-    sub_ctx_b = StageContext(client=FakeClaudeClient(), session_dir=pathlib.Path("/tmp"), gr_id=None)
+    sub_ctx_a = StageContext(
+        client=FakeClaudeClient(), session_dir=pathlib.Path("/tmp"), gr_id=None
+    )
+    sub_ctx_b = StageContext(
+        client=FakeClaudeClient(), session_dir=pathlib.Path("/tmp"), gr_id=None
+    )
 
     def capture_a() -> None:
         observed.append(sub_ctx_a.worktree)
@@ -352,7 +356,9 @@ def test_parallel_sequence_child_worktree_flows() -> None:
         gr_id=None,
         child_key="seq",
     )
-    seq_stage = SequenceStage("seq", body=[(sub_ctx_a, capture_a), (sub_ctx_b, capture_b)])
+    seq_stage = SequenceStage(
+        "seq", body=[(sub_ctx_a, capture_a), (sub_ctx_b, capture_b)]
+    )
 
     def seq_runner() -> None:
         seq_stage.bind(seq_ctx)
