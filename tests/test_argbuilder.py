@@ -5,11 +5,14 @@ from __future__ import annotations
 import pytest
 
 from gremlins.cli import build_launch_parser
-from gremlins.stages.base import StageInput
+from gremlins.stages.base import Stage, StageInput
 
 
-def _stage_with(*inputs: StageInput) -> type:
-    class _Stage:
+def _stage_with(*inputs: StageInput) -> type[Stage]:
+    class _Stage(Stage):
+        def __init__(self) -> None:  # type: ignore[override]
+            pass
+
         @classmethod
         def orchestration_args(cls) -> list[StageInput]:
             return list(inputs)

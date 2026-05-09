@@ -42,7 +42,7 @@ from gremlins.fleet.cli import (
 from gremlins.launcher import launch, resume
 from gremlins.orchestrators.review_address import address_main, review_main
 from gremlins.pipeline import list_pipelines, load_pipeline, resolve_pipeline_name
-from gremlins.stages.base import Stage, StageInput
+from gremlins.stages.base import Stage
 from gremlins.stages.registry import STAGE_REGISTRY
 from gremlins.state import validate_gr_id
 
@@ -85,15 +85,6 @@ def main(argv: list[str] | None = None) -> int:
 
     # No subcommand or unknown first arg → fleet status (id-prefix drill-in works here)
     return fleet_main(argv)
-
-
-class _EmptyStage(Stage):
-    def __init__(self) -> None:  # noqa: D107
-        pass
-
-    @classmethod
-    def orchestration_args(cls) -> list[StageInput]:
-        return []
 
 
 _INFRA_ARGS = frozenset({"description", "parent_id", "print_id", "base_ref", "client"})
@@ -183,11 +174,11 @@ def _launch_main(argv: list[str]) -> int:
         stage_cls = (
             cast(type[Stage], STAGE_REGISTRY[first.type])
             if first is not None
-            else _EmptyStage
+            else Stage
         )
         parser = build_launch_parser(name, stage_cls)
     except (KeyError, TypeError):
-        parser = build_launch_parser(name, _EmptyStage)
+        parser = build_launch_parser(name, Stage)
 
     try:
         args = parser.parse_args(argv[1:])
