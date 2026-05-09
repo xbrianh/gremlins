@@ -81,19 +81,27 @@ def _expand_entry(
     if "parallel" in entry and isinstance(entry["parallel"], list):
         expanded_parallel: list[dict[str, Any]] = []
         for child in cast(list[Any], entry["parallel"]):
+            child_dict = cast(dict[str, Any], child)
+            include_name = child_dict.get("include") if len(child_dict) == 1 else None
             expanded = _expand_entry(
-                cast(dict[str, Any], child),
+                child_dict,
                 prompt_dir,
                 project_root,
                 chain,
                 named_prompts,
             )
-            if len(expanded) != 1:
+            if len(expanded) == 0:
                 raise ValueError(
-                    f"parallel child expanded to {len(expanded)} stages via include; "
-                    "includes inside parallel groups must resolve to exactly one stage"
+                    "parallel child expanded to 0 stages via include; "
+                    "includes inside parallel groups must resolve to at least one stage"
                 )
-            expanded_parallel.append(expanded[0])
+            if len(expanded) == 1:
+                expanded_parallel.append(expanded[0])
+            else:
+                name = include_name or f"sequence-{len(expanded_parallel)}"
+                expanded_parallel.append(
+                    {"name": name, "type": "sequence", "body": expanded}
+                )
         entry["parallel"] = expanded_parallel
 
     if "body" in entry and isinstance(entry["body"], list):

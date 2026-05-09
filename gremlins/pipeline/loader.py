@@ -103,7 +103,7 @@ def _parse_stage_entry(
     options = dict(cast(dict[str, Any], entry.get("options") or {}))
 
     body: list[StageEntry] = []
-    if stage_type == "loop":
+    if stage_type in ("loop", "sequence"):
         raw_body = entry.get("body")
         if raw_body is not None:
             if not isinstance(raw_body, list):
