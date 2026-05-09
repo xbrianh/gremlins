@@ -1,4 +1,6 @@
 from gremlins.stages.base import Stage, StageContext, StageInput
+from gremlins.stages.compound import CompoundStage
+from gremlins.stages.loop import LoopExhausted, LoopStage, RunCmdFailed
 from gremlins.stages.registry import (
     CLIENT_FACTORIES,
     STAGE_BUILDERS,
@@ -8,8 +10,6 @@ from gremlins.stages.registry import (
     register_stage,
     register_stage_builder,
 )
-from gremlins.stages.compound import CompoundStage
-from gremlins.stages.loop import LoopExhausted, LoopStage, RunCmdFailed
 
 __all__ = [
     "Stage",
