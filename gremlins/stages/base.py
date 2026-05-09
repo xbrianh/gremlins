@@ -4,9 +4,17 @@ import dataclasses
 import pathlib
 import shlex
 import subprocess
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 from gremlins.clients.protocol import ClaudeClient, CompletedRun
+
+
+class StageInput(NamedTuple):
+    name: str
+    type: type
+    required: bool
+    default: Any
+    help: str
 
 
 @dataclasses.dataclass
@@ -75,6 +83,10 @@ class Stage:
     ) -> subprocess.CompletedProcess[Any]:
         kw.setdefault("cwd", str(self.state.cwd))
         return cast(subprocess.CompletedProcess[Any], subprocess.run(argv, **kw))
+
+    @classmethod
+    def orchestration_args(cls) -> list[StageInput]:
+        return []
 
     def run(self, pipe: Any) -> Any:
         raise NotImplementedError
