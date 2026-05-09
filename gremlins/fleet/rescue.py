@@ -22,7 +22,6 @@ from gremlins.fleet.resolve import (
 )
 from gremlins.fleet.state import (
     atomic_patch_state,
-    effective_pipeline_kind,
     liveness_of_state_file,
     load_state,
 )
@@ -45,7 +44,12 @@ def build_rescue_prompt(
     interactive and headless modes — the agent never knows the difference and
     the wrapper reads the marker to decide whether to invoke the relaunch step.
     """
-    kind = effective_pipeline_kind(state)
+    pipeline_path = str(state.get("pipeline_path") or "")
+    pipeline_name = (
+        os.path.basename(pipeline_path).replace(".yaml", "")
+        if pipeline_path
+        else str(state.get("kind") or "unknown")
+    )
     stage = state.get("stage") or "unknown"
     description = state.get("description") or ""
     project_root = state.get("project_root") or ""
@@ -116,10 +120,10 @@ def build_rescue_prompt(
 
 ## Gremlin context
 
-Kind: {kind}
+Pipeline: {pipeline_name}
 Description: {description}
 Failed at stage: {stage}
-Stage order for {kind}: {" → ".join(stages)}
+Stage order for {pipeline_name}: {" → ".join(stages)}
 State dir: {os.path.dirname(state_file_path)}
 Worktree: {workdir or "(unknown)"}
 Project root: {project_root or "(unknown)"}
@@ -449,9 +453,9 @@ def _recreate_worktree(state: dict[str, Any]) -> tuple[bool, str]:
     """
     workdir = state.get("workdir") or ""
     gr_id_val = str(state.get("id") or "")
-    branch = (
-        f"bg/local/{gr_id_val}" if effective_pipeline_kind(state) == "local" else ""
-    )
+    from gremlins.state import last_artifact_branch as _last_artifact_branch
+
+    branch = _last_artifact_branch(gr_id_val)
     worktree_base = state.get("worktree_base") or ""
     project_root = state.get("project_root") or ""
 

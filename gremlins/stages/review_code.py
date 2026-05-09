@@ -7,6 +7,7 @@ import pathlib
 from typing import Any
 
 from gremlins.clients.protocol import ClaudeClient
+from gremlins.pipeline import pipeline_uses_gh
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import check_bail, emit_bail, read_pr_url, set_stage
@@ -73,8 +74,9 @@ class ReviewCode(Stage):
         self.pr_url = pr_url
 
     def run(self, pipe: Any) -> Any:
-        target = getattr(pipe, "target", "local")
-        return getattr(self, f"results_to_{target}")(pipe)
+        if pipe is not None and pipeline_uses_gh(pipe.pipeline_data):
+            return self.results_to_github(pipe)
+        return self.results_to_local(pipe)
 
     def results_to_local(self, pipe: Any) -> pathlib.Path:
         if self.model is None:

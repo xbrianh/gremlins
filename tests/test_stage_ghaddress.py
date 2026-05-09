@@ -13,7 +13,11 @@ from gremlins.stages.address_code import AddressCode
 from gremlins.stages.base import StageContext
 
 PR_URL = "https://github.com/owner/repo/pull/99"
-_GH_PIPE = types.SimpleNamespace(target="github")
+_GH_PIPE = types.SimpleNamespace(
+    pipeline_data=types.SimpleNamespace(
+        stages=[types.SimpleNamespace(type="ghaddress")]
+    )
+)
 
 
 def _make_stage(

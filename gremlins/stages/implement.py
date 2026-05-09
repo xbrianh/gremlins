@@ -12,6 +12,7 @@ from gremlins.git import (
     head_sha,
     record_pre_impl_state,
 )
+from gremlins.pipeline import pipeline_uses_gh
 from gremlins.prompts import BUNDLED_PROMPT_DIR
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
@@ -103,7 +104,8 @@ class Implement(Stage):
         )
 
     def run(self, pipe: Any) -> None:
-        if getattr(pipe, "target", "local") == "github":
+        pipeline_data = getattr(pipe, "pipeline_data", None)
+        if pipeline_data is not None and pipeline_uses_gh(pipeline_data):
             self._run_gh(pipe)
         else:
             self._run_local()

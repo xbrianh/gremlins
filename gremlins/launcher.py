@@ -30,6 +30,7 @@ from gremlins.gh_utils import parse_issue_ref, view_issue
 from gremlins.pipeline import (
     PipelineDef,
     load_pipeline,
+    pipeline_uses_gh,
     resolve_pipeline_path,
 )
 from gremlins.utils import proc
@@ -69,40 +70,21 @@ def _extract_h1(path: str) -> str:
     return ""
 
 
-_GH_STAGE_TYPES = frozenset(
-    {
-        "materialize-to-branch",
-        "commit",
-        "open-github-pr",
-        "request-copilot",
-        "wait-copilot",
-        "ghaddress",
-        "ghreview",
-        "wait-ci",
-    }
-)
-
-
-def _pipeline_mode(pipeline: PipelineDef) -> str:
+def pipeline_uses_loop_handoff(pipeline: PipelineDef) -> bool:
     first = pipeline.stages[0] if pipeline.stages else None
-    if first is not None:
-        if first.type == "loop" and any(b.type == "handoff" for b in first.body):
-            return "boss"
-    if pipeline.name == "gh" or any(s.type in _GH_STAGE_TYPES for s in pipeline.stages):
-        return "gh"
-    return "local"
+    return (
+        first is not None
+        and first.type == "loop"
+        and any(b.type == "handoff" for b in (first.body or []))
+    )
 
 
-def _infer_mode_from_pipeline_kind(kind: str) -> str:
-    _map = {
-        "localgremlin": "local",
-        "ghgremlin": "gh",
-        "bossgremlin": "boss",
-        "local": "local",
-        "gh": "gh",
-        "boss": "boss",
-    }
-    return _map.get(kind, "local")
+def _pipeline_setup_kind(pipeline: PipelineDef) -> str:
+    if any(s.type == "materialize-to-branch" for s in pipeline.stages):
+        return "worktree-detached"
+    if pipeline_uses_loop_handoff(pipeline):
+        return "worktree-detached"
+    return "worktree-branch"
 
 
 def _gh_current_repo() -> str:
@@ -326,28 +308,27 @@ def _stage_gremlins_overlay(project_root: str, state_dir: pathlib.Path) -> None:
 
 
 def _setup_workdir(
-    mode: str, project_root: str, base_ref_sha: str, gr_id: str, state_dir: pathlib.Path
+    setup_kind: str,
+    project_root: str,
+    base_ref_sha: str,
+    gr_id: str,
+    state_dir: pathlib.Path,
 ) -> tuple[str, str, str, str]:
     """Return (workdir, branch, worktree_base, setup_kind)."""
     if not _git_mod.in_git_repo(cwd=project_root):
         return _git_mod.setup_copy(project_root), "", "", "copy"
 
-    if mode == "local":
+    if setup_kind == "worktree-branch":
         workdir, branch = _git_mod.setup_worktree_branch(
             project_root, gr_id, base_ref=base_ref_sha or "HEAD"
         )
         _stage_gremlins_overlay(project_root, state_dir)
         return workdir, branch, "", "worktree-branch"
 
-    if mode == "gh":
-        workdir = _git_mod.setup_detached_worktree(project_root, base_ref_sha or "HEAD")
-        _stage_gremlins_overlay(project_root, state_dir)
-        return workdir, "", base_ref_sha, "worktree"
-
-    # boss mode: detached worktree off base_ref_sha
+    # worktree-detached (gh, boss)
     workdir = _git_mod.setup_detached_worktree(project_root, base_ref_sha or "HEAD")
     _stage_gremlins_overlay(project_root, state_dir)
-    return workdir, "", "", "worktree"
+    return workdir, "", base_ref_sha, "worktree"
 
 
 def _build_spawn_env(gr_id: str) -> dict[str, str]:
@@ -475,14 +456,18 @@ def launch(
     )
 
     _pipeline_base_ref = "current"
+    _loaded_pipeline = None
     try:
         _loaded_pipeline = load_pipeline(pathlib.Path(pipeline_path))
-        pipeline_mode = _pipeline_mode(_loaded_pipeline)
         _pipeline_base_ref = _loaded_pipeline.base_ref
     except (FileNotFoundError, OSError):
-        pipeline_mode = _infer_mode_from_pipeline_kind(kind)
+        pass
 
-    if pipeline_mode == "gh" and shutil.which("gh") is None:
+    if (
+        _loaded_pipeline is not None
+        and pipeline_uses_gh(_loaded_pipeline)
+        and shutil.which("gh") is None
+    ):
         raise RuntimeError("gh CLI not found on PATH (required for gh pipeline)")
 
     state_dir = _state_root() / gr_id
@@ -490,7 +475,7 @@ def launch(
 
     _effective_base_ref = base_ref if base_ref is not None else _pipeline_base_ref
     if _git_mod.in_git_repo(cwd=project_root):
-        if pipeline_mode == "gh":
+        if _loaded_pipeline is not None and pipeline_uses_gh(_loaded_pipeline):
             _branch = _effective_base_ref.removeprefix("origin/")
             if _branch and _branch not in ("current", "HEAD"):
                 try:
@@ -526,15 +511,19 @@ def launch(
             artifacts_dir.mkdir(exist_ok=True)
             (artifacts_dir / "plan.md").write_text(issue_data["body"], encoding="utf-8")
 
-        workdir, _, worktree_base, setup_kind = _setup_workdir(
-            pipeline_mode, project_root, base_ref_sha, gr_id, state_dir
+        _setup_kind_arg = (
+            _pipeline_setup_kind(_loaded_pipeline)
+            if _loaded_pipeline is not None
+            else "worktree-branch"
+        )
+        workdir, branch, worktree_base, setup_kind = _setup_workdir(
+            _setup_kind_arg, project_root, base_ref_sha, gr_id, state_dir
         )
 
         now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         state = {
             "id": gr_id,
             "kind": kind,
-            "pipeline_kind": pipeline_mode,
             "project_root": project_root,
             "workdir": workdir,
             "setup_kind": setup_kind,
@@ -555,6 +544,11 @@ def launch(
             "base_ref_sha": base_ref_sha,
         }
         _write_state(state_dir, state)
+
+        if setup_kind == "worktree-branch" and branch:
+            from gremlins.state import append_artifact
+
+            append_artifact(gr_id, {"type": "branch", "name": branch})
 
         # Build args for the spawned _run-pipeline process
         spawn_args = list(stored_pipeline_args)
@@ -624,24 +618,29 @@ def resume(gr_id: str) -> None:
     except FileNotFoundError:
         pass
 
-    from gremlins.fleet.state import effective_pipeline_kind
-
-    pipeline_mode = effective_pipeline_kind(state)
+    _loaded_resume = None
     if pipeline_path:
         try:
-            _loaded = load_pipeline(pathlib.Path(pipeline_path))
-            pipeline_mode = _pipeline_mode(_loaded)
+            _loaded_resume = load_pipeline(pathlib.Path(pipeline_path))
         except (FileNotFoundError, OSError):
             pass
 
-    if pipeline_mode == "gh" and shutil.which("gh") is None:
+    if (
+        _loaded_resume is not None
+        and pipeline_uses_gh(_loaded_resume)
+        and shutil.which("gh") is None
+    ):
         raise RuntimeError("gh CLI not found on PATH (required for gh pipeline)")
 
     # Rewind stage if it never advanced past "starting"
     if not stage or stage == "starting":
         stage = "plan"
 
-    if pipeline_mode == "boss" and stage not in ("review-chain", "address-chain"):
+    if (
+        _loaded_resume is not None
+        and pipeline_uses_loop_handoff(_loaded_resume)
+        and stage not in ("review-chain", "address-chain")
+    ):
         stage = "chain"
 
     # Clear terminal markers and patch state for the resumed run

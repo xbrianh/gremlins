@@ -1,13 +1,13 @@
 # `gremlins/`
 
 Orchestration package for background gremlins. Owns the plan / implement /
-review / address pipelines (`local`, `gh`, `boss`), the fleet manager
+review / address pipelines, the fleet manager
 (`fleet/`), the chain-step decision agent (`handoff.py`), and the launcher
 (`launcher.py`).
 
 ## Module layout
 
-- `cli.py` — top-level dispatch: `gremlins {launch,review,address,resume,stop,rescue,land,rm,close,log}`. `launch` accepts `local|gh|boss` as its first positional. Bare invocation prints fleet status.
+- `cli.py` — top-level dispatch: `gremlins {launch,review,address,resume,stop,rescue,land,rm,close,log}`. `launch` accepts a pipeline file or skill name. Bare invocation prints fleet status.
 - `bail.py` — `python -m gremlins.bail <class> [detail]`. Writes bail marker to `state.json`.
 - `run_pipeline.py` — `python -m gremlins.run_pipeline <gr_id> <kind>`. Spawned by the launcher; wraps `cli.main` and writes terminal state on exit.
 - `session_summary.py` — thin re-export of `fleet.session_summary.main` for `python -m gremlins.session_summary`.

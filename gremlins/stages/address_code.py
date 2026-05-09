@@ -7,6 +7,7 @@ import pathlib
 import re
 from typing import Any
 
+from gremlins.pipeline import pipeline_uses_gh
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import check_bail, emit_bail, read_pr_url
@@ -47,8 +48,7 @@ class AddressCode(Stage):
         self.pr_url = pr_url
 
     def run(self, pipe: Any) -> None:
-        target = getattr(pipe, "target", "local")
-        if target == "github":
+        if pipe is not None and pipeline_uses_gh(pipe.pipeline_data):
             self.results_to_github(pipe)
         else:
             try:

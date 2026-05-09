@@ -174,11 +174,6 @@ def load_state(sf: str) -> dict[str, object] | None:
         return None
 
 
-def effective_pipeline_kind(state: dict[str, object]) -> str:
-    pk = str(state.get("pipeline_kind") or "")
-    return pk if pk in ("local", "gh", "boss") else "local"
-
-
 def atomic_patch_state(sf: str, patch: dict[str, object]) -> bool:
     """Merge patch into state.json atomically. Returns True on success."""
     tmp = f"{sf}.patch.tmp.{os.getpid()}"
