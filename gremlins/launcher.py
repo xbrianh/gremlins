@@ -25,7 +25,6 @@ import yaml
 
 from gremlins import git as _git_mod
 from gremlins import paths as _paths
-from gremlins.utils import proc
 from gremlins.clients import PACKAGE_DEFAULT
 from gremlins.gh_utils import parse_issue_ref, view_issue
 from gremlins.pipeline import (
@@ -33,6 +32,7 @@ from gremlins.pipeline import (
     load_pipeline,
     resolve_pipeline_path,
 )
+from gremlins.utils import proc as _proc_utils
 
 
 class GremlinAlreadyRunning(RuntimeError):
@@ -111,7 +111,7 @@ def _gh_current_repo() -> str:
     Best-effort: returns '' on any error so callers can fall back.
     """
     try:
-        r = proc.run(
+        r = _proc_utils.run(
             ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
             timeout=10,
         )
@@ -462,7 +462,7 @@ def launch(
     gr_id = f"{slug}-{rand_hex}"
 
     if project_root is None:
-        r = proc.run(["git", "rev-parse", "--show-toplevel"])
+        r = _proc_utils.run(["git", "rev-parse", "--show-toplevel"])
         if r.returncode == 0 and r.stdout.strip():
             project_root = r.stdout.strip()
         else:

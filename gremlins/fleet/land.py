@@ -11,7 +11,6 @@ import time
 from typing import Any, cast
 
 import gremlins.git as _git
-from gremlins.utils import proc
 from gremlins.fleet import constants as _constants
 from gremlins.fleet.resolve import resolve_gremlin
 from gremlins.fleet.state import (
@@ -19,6 +18,7 @@ from gremlins.fleet.state import (
     liveness_of_state_file,
     load_state,
 )
+from gremlins.utils import proc
 
 
 def expected_branch(state: dict[str, Any], gr_id: str):
