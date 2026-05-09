@@ -643,7 +643,7 @@ def test_resume_refuses_running_gremlin(lenv):
         "id": gr_id,
         "kind": "localgremlin",
         "workdir": str(lenv.repo),
-        "branch": f"bg/localgremlin/{gr_id}",
+        "branch": f"bg/local/{gr_id}",
         "stage": "plan",
         "status": "running",
         "pid": os.getpid(),
@@ -667,7 +667,7 @@ def test_resume_refuses_finished_success(lenv):
         "id": gr_id,
         "kind": "localgremlin",
         "workdir": str(lenv.repo),
-        "branch": f"bg/localgremlin/{gr_id}",
+        "branch": f"bg/local/{gr_id}",
         "stage": "address-code",
         "status": "done",
         "exit_code": 0,
@@ -888,7 +888,7 @@ def test_launch_passes_base_ref_to_worktree_setup(lenv, monkeypatch):
     real_setup = git_mod.setup_worktree_branch
 
     def fake_setup(
-        project_root, gr_id, base_ref="HEAD", branch_prefix="bg/localgremlin"
+        project_root, gr_id, base_ref="HEAD", branch_prefix="bg/local"
     ):
         captured["base_ref"] = base_ref
         return real_setup(

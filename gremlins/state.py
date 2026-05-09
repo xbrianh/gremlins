@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime
 import fcntl
 import json
+import logging
 import os
 import pathlib
 import re
@@ -19,6 +20,8 @@ from collections.abc import Callable
 from typing import Any
 
 from gremlins import paths as _paths
+
+logger = logging.getLogger(__name__)
 
 _GR_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -242,7 +245,7 @@ def append_artifact(gr_id: str | None, artifact: dict[str, Any]) -> None:
 
         _locked_update(sf, _apply)
     except Exception:
-        pass
+        logger.warning("failed to append artifact", exc_info=True)
 
 
 def read_artifacts(gr_id: str | None) -> list[dict[str, Any]]:
@@ -251,7 +254,7 @@ def read_artifacts(gr_id: str | None) -> list[dict[str, Any]]:
         return []
     try:
         data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
-        return list(data.get("artifacts") or [])
+        return [a for a in (data.get("artifacts") or []) if isinstance(a, dict)]
     except (json.JSONDecodeError, OSError):
         return []
 
