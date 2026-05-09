@@ -44,7 +44,8 @@ def _review_stage_info(
 ) -> tuple[list[str], dict[str, pathlib.Path]]:
     names: list[str] = []
     dirs: dict[str, pathlib.Path] = {}
-    for s in runner.pipeline_data.stages:
+    scope = runner.current_scope or list(runner.pipeline_data.stages)
+    for s in scope:
         if s.type == "parallel":
             for child in s.body:
                 if child.type == "review-code":
@@ -232,7 +233,9 @@ def _build_loop(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any
             session_dir=runner.session_dir,
             gr_id=runner.gr_id,
         )
-        body_runners.append(runner.make_runner(child, child_ctx, child_spec))
+        body_runners.append(
+            runner.make_runner(child, child_ctx, child_spec, scope=entry.body)
+        )
     return LoopStage(
         entry.name, body_runners=body_runners, max_iterations=max_iterations
     )
@@ -277,7 +280,11 @@ def _build_parallel(entry: StageEntry, spec: ClientSpec, runner: StageRunner) ->
             child_key=child.name,
         )
         child_runners.append(
-            (child.name, child_ctx, runner.make_runner(child, child_ctx, child_spec))
+            (
+                child.name,
+                child_ctx,
+                runner.make_runner(child, child_ctx, child_spec, scope=entry.body),
+            )
         )
     gr_id = runner.gr_id
     return ParallelStage(

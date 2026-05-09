@@ -119,3 +119,47 @@ stages:
     incomplete = {k: v for k, v in specs.items() if k not in {"leaf-b", "leaf-c"}}
     with pytest.raises(ValueError, match=r"'leaf-b', 'leaf-c'"):
         validate_stage_specs(incomplete, pipeline)
+
+
+def test_address_code_in_loop_finds_sibling_reviews(tmp_path, monkeypatch):
+    """address-code inside a loop scopes review lookup to its loop body, not the boss top level."""
+    from gremlins.clients.resolve import collect_stage_specs as _collect
+    from gremlins.orchestrators.pipeline import StageRunner
+    from gremlins.stages.all import _review_stage_info
+
+    pipeline_path = _write(
+        tmp_path,
+        "boss",
+        """
+name: boss
+default_client: claude:sonnet
+stages:
+  - { name: review-chain, type: review-code }
+  - name: chain
+    type: loop
+    body:
+      - name: reviews
+        parallel:
+          - { name: review-code, type: review-code }
+          - { name: review-code-fidelity, type: review-code }
+      - { name: address-code, type: address-code }
+""",
+    )
+    pipeline = load_pipeline(pipeline_path)
+    chain_entry = next(s for s in pipeline.stages if s.name == "chain")
+    address_entry = next(s for s in chain_entry.body if s.name == "address-code")
+
+    class _Stub:
+        pass
+
+    runner = _Stub()
+    runner.pipeline_data = pipeline
+    runner.session_dir = tmp_path
+    runner.current_scope = chain_entry.body
+    names, dirs = _review_stage_info(runner)  # type: ignore[arg-type]
+    assert sorted(names) == ["review-code", "review-code-fidelity"]
+
+    runner.current_scope = []
+    names_top, _ = _review_stage_info(runner)  # type: ignore[arg-type]
+    assert names_top == ["review-chain"]
+    assert address_entry.type == "address-code"  # sanity

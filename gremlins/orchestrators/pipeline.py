@@ -93,6 +93,7 @@ class StageRunner:
         self.stage_specs: dict[str, ClientSpec] = stage_specs or {}
         self.spec_clients: dict[str, ClaudeClient] = spec_clients or {}
         self.test_client = test_client
+        self.current_scope: list[StageEntry] = []
 
         sf = state_file if state_file is not None else resolve_state_file(gr_id)
         self.instructions: str = read_stage_inputs(sf).get("instructions") or " ".join(
@@ -126,17 +127,27 @@ class StageRunner:
             )
 
     def make_runner(
-        self, entry: StageEntry, ctx: StageContext, spec: ClientSpec
+        self,
+        entry: StageEntry,
+        ctx: StageContext,
+        spec: ClientSpec,
+        scope: list[StageEntry] | None = None,
     ) -> Callable[[], None]:
         builder = STAGE_BUILDERS[entry.type]
         gr_id = self.gr_id
         pipe = self
+        scope_list = list(scope) if scope is not None else []
 
         def _run() -> None:
             set_stage(gr_id, entry.name)
-            stage = builder(entry, spec, pipe)
-            stage.bind(ctx)
-            stage.run(pipe if STAGE_NEEDS_PIPE.get(entry.type) else None)
+            previous_scope = pipe.current_scope
+            pipe.current_scope = scope_list
+            try:
+                stage = builder(entry, spec, pipe)
+                stage.bind(ctx)
+                stage.run(pipe if STAGE_NEEDS_PIPE.get(entry.type) else None)
+            finally:
+                pipe.current_scope = previous_scope
 
         return _run
 
@@ -152,7 +163,9 @@ class StageRunner:
                 session_dir=self.session_dir,
                 gr_id=gr_id,
             )
-            built.append((e.name, self.make_runner(e, stage_ctx, stage_spec)))
+            built.append(
+                (e.name, self.make_runner(e, stage_ctx, stage_spec, scope=stages))
+            )
         return built
 
     def run(self) -> None:
