@@ -158,4 +158,3 @@ class StageRunner:
     def run(self) -> None:
         built = self._collect_stages(self.pipeline_data.stages)
         run_stages(built, resume_from=self.args.resume_from)
-
