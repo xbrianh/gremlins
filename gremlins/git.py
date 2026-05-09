@@ -163,7 +163,7 @@ def is_ancestor(
     try:
         return proc.run_ok(
             ["git", "merge-base", "--is-ancestor", ref_a, ref_b], cwd=cwd
-        )  # type: ignore[arg-type]
+        )
     except OSError:
         return False
 
@@ -205,7 +205,7 @@ def ff_merge(ref: str, *, cwd: str | os.PathLike[str] | None = None) -> None:
 
 def branch_exists(branch: str, *, cwd: str | os.PathLike[str] | None = None) -> bool:
     try:
-        return proc.run_ok(  # type: ignore[arg-type]
+        return proc.run_ok(
             ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=cwd
         )
     except OSError:
