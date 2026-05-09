@@ -25,7 +25,9 @@ def run_ok(cmd: list[str], *, cwd: str | os.PathLike[str] | None = None) -> bool
 
 
 def run_quiet(cmd: list[str], *, cwd: str | os.PathLike[str] | None = None) -> int:
-    r = subprocess.run(cmd, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    r = subprocess.run(
+        cmd, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
     return r.returncode
 
 
