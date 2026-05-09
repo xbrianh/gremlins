@@ -42,6 +42,7 @@ def _expand(
 
     named_prompts: dict[str, list[str]] = {}
     for name, value in cast(dict[str, Any], raw.get("prompts") or {}).items():
+        # Named prompts can't reference each other — pass empty dict to prevent cycles.
         named_prompts[name] = _read_prompts(value, prompt_dir, {})
 
     expanded_stages: list[dict[str, Any]] = []
@@ -149,6 +150,11 @@ def _read_prompts(
                 )
             texts.append(_read_prompt_file((BUNDLED_PROMPT_DIR / name).resolve()))
         else:
-            texts.append(_read_prompt_file((prompt_dir / p).resolve()))
+            path = (prompt_dir / p).resolve()
+            if not path.exists() and named_prompts:
+                raise FileNotFoundError(
+                    f"prompt {p!r} not found as a named entry or file under {prompt_dir}"
+                )
+            texts.append(_read_prompt_file(path))
 
     return texts

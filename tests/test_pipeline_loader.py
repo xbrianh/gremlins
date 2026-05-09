@@ -326,6 +326,31 @@ stages:
     assert pipeline.stages[0].prompts[0].strip()
 
 
+def test_named_prompt_in_parallel_group(tmp_path: pathlib.Path) -> None:
+    _make_prompt(tmp_path, "shared.md")
+    _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+prompt_dir: .
+prompts:
+  shared: shared.md
+stages:
+  - name: group
+    parallel:
+      - name: s1
+        type: verify
+        prompt: shared
+      - name: s2
+        type: verify
+        prompt: shared
+""",
+    )
+    pipeline = load_pipeline(tmp_path / "pipeline.yaml")
+    assert pipeline.stages[0].body[0].prompts == ["prompt content"]
+    assert pipeline.stages[0].body[1].prompts == ["prompt content"]
+
+
 # ---- prompt list -----------------------------------------------------------
 
 
