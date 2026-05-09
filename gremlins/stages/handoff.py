@@ -51,8 +51,14 @@ class Handoff(Stage):
         base_ref = read_state_str(sf, "base_ref_name") or self._resolve_base_ref()
         handoff_n = self._next_handoff_index(session_dir)
 
-        prev_rolling = session_dir / f"handoff-{handoff_n - 1:03d}.md" if handoff_n > 1 else None
-        current_plan = str(prev_rolling) if prev_rolling and prev_rolling.exists() else str(plan_md)
+        prev_rolling = (
+            session_dir / f"handoff-{handoff_n - 1:03d}.md" if handoff_n > 1 else None
+        )
+        current_plan = (
+            str(prev_rolling)
+            if prev_rolling and prev_rolling.exists()
+            else str(plan_md)
+        )
 
         set_stage(gr_id, "handoff")
         exit_state, sig = self._run_handoff(
