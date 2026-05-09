@@ -200,7 +200,7 @@ def test_head_advanced_records_branch_in_chain_state(tmp_path: pathlib.Path) -> 
         encoding="utf-8",
     )
     stage, _ = _make_stage(tmp_path, gr_id="test-gr")
-    chain_patches: list[dict] = []
+    upsert_calls: list[dict] = []
     outcome = HeadAdvanced(commit_count=1)
     with (
         patch(
@@ -219,17 +219,17 @@ def test_head_advanced_records_branch_in_chain_state(tmp_path: pathlib.Path) -> 
         ),
         patch(
             "gremlins.stages.materialize_to_branch.patch_state",
-            side_effect=lambda gr_id, **kw: chain_patches.append(kw),
+        ),
+        patch(
+            "gremlins.stages.materialize_to_branch.upsert_child_record",
+            side_effect=lambda gr_id, **kw: upsert_calls.append({"gr_id": gr_id, **kw}),
         ),
     ):
         result = stage.run(_pipe())
     assert result.materialized_branch == "gremlin/child-2"
-    chain_calls = [p for p in chain_patches if "chain_state" in p]
-    assert chain_calls, "chain_state should be updated"
-    records = chain_calls[0]["chain_state"]["child_records"]
-    rec = next((r for r in records if r.get("n") == 2), None)
-    assert rec is not None
-    assert rec["branch"] == "gremlin/child-2"
+    assert upsert_calls, "upsert_child_record should be called"
+    assert upsert_calls[0]["gr_id"] == "test-gr"
+    assert upsert_calls[0]["branch"] == "gremlin/child-2"
 
 
 def test_no_chain_state_branch_recording_skipped(tmp_path: pathlib.Path) -> None:

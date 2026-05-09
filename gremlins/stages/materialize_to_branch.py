@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import sys
-from typing import Any, cast
+from typing import Any
 
 from gremlins.git import (
     DivergentHead,
@@ -20,7 +21,9 @@ from gremlins.git import (
 )
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
-from gremlins.state import patch_state, resolve_state_file
+from gremlins.state import patch_state, resolve_state_file, upsert_child_record
+
+logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass
@@ -90,31 +93,13 @@ class MaterializeToBranch(Stage):
             impl_base_ref=result.base_ref,
         )
         if materialized_branch and self.state.gr_id:
-            self._record_child_branch(materialized_branch)
+            try:
+                upsert_child_record(self.state.gr_id, branch=materialized_branch)
+            except Exception:
+                logger.warning(
+                    "failed to record child branch in chain_state", exc_info=True
+                )
         return result
-
-    def _record_child_branch(self, branch: str) -> None:
-        sf = resolve_state_file(self.state.gr_id)
-        if sf is None or not sf.exists():
-            return
-        try:
-            data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
-            chain_st = data.get("chain_state")
-            if not isinstance(chain_st, dict):
-                return
-            chain_st = cast(dict[str, Any], chain_st)
-            n = int(chain_st.get("handoff_count", 0))
-            records: list[dict[str, Any]] = list(chain_st.get("child_records") or [])
-            for rec in records:
-                if rec.get("n") == n:
-                    rec["branch"] = branch
-                    break
-            else:
-                records.append({"n": n, "branch": branch})
-            chain_st["child_records"] = records
-            patch_state(self.state.gr_id, chain_state=chain_st)
-        except Exception:
-            pass
 
 
 register_stage("materialize-to-branch", MaterializeToBranch)

@@ -135,7 +135,12 @@ def test_stacked_pr_uses_prev_child_branch(tmp_path: pathlib.Path) -> None:
             "gremlins.stages.open_github_pr.resolve_state_file",
             return_value=tmp_path / "state.json",
         ),
+        patch(
+            "gremlins.stages.open_github_pr.get_prev_child_branch",
+            return_value="gremlin/abc-child-1",
+        ),
         patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
+        patch("gremlins.stages.open_github_pr.upsert_child_record"),
         patch(
             "gremlins.stages.open_github_pr.patch_state",
         ),
@@ -203,7 +208,7 @@ def test_record_child_pr_writes_pr_info_to_chain_state(tmp_path: pathlib.Path) -
         },
     )
     stage, ctx = _make_stage_with_gr(tmp_path)
-    patched: list[dict] = []
+    upsert_calls: list[dict] = []
     with (
         patch(
             "gremlins.stages.open_github_pr.resolve_state_file",
@@ -214,16 +219,14 @@ def test_record_child_pr_writes_pr_info_to_chain_state(tmp_path: pathlib.Path) -
             return_value="https://github.com/owner/repo/pull/314",
         ),
         patch(
-            "gremlins.stages.open_github_pr.patch_state",
-            side_effect=lambda gr_id, **kw: patched.append(kw),
+            "gremlins.stages.open_github_pr.upsert_child_record",
+            side_effect=lambda gr_id, **kw: upsert_calls.append({"gr_id": gr_id, **kw}),
         ),
+        patch("gremlins.stages.open_github_pr.patch_state"),
     ):
         stage.run(None)
-    # Two patch_state calls: one for chain_state, one for pr_url
-    chain_calls = [p for p in patched if "chain_state" in p]
-    assert chain_calls, "chain_state should be patched with PR info"
-    records = chain_calls[0]["chain_state"]["child_records"]
-    rec = next((r for r in records if r.get("n") == 1), None)
-    assert rec is not None
-    assert rec["pr_url"] == "https://github.com/owner/repo/pull/314"
-    assert rec["pr_number"] == 314
+    assert upsert_calls, "upsert_child_record should be called with PR info"
+    call = upsert_calls[0]
+    assert call["gr_id"] == "test-gr"
+    assert call["pr_url"] == "https://github.com/owner/repo/pull/314"
+    assert call["pr_number"] == 314
