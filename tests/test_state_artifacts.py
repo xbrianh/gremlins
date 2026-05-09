@@ -6,7 +6,7 @@ import pathlib
 import gremlins.state as state_mod
 
 
-def _make_state_dir(tmp_path, gr_id):
+def _make_state_dir(tmp_path: pathlib.Path, gr_id: str) -> tuple[pathlib.Path, pathlib.Path]:
     state_root = tmp_path / "state"
     state_dir = state_root / gr_id
     state_dir.mkdir(parents=True)

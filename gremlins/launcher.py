@@ -526,7 +526,7 @@ def launch(
             artifacts_dir.mkdir(exist_ok=True)
             (artifacts_dir / "plan.md").write_text(issue_data["body"], encoding="utf-8")
 
-        workdir, branch, worktree_base, setup_kind = _setup_workdir(
+        workdir, _, worktree_base, setup_kind = _setup_workdir(
             pipeline_mode, project_root, base_ref_sha, gr_id, state_dir
         )
 

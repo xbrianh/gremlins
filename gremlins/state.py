@@ -229,7 +229,7 @@ def read_pr_num(gr_id: str | None) -> str:
     return url.split("/")[-1] if url else ""
 
 
-def append_artifact(gr_id: str | None, artifact: dict) -> None:
+def append_artifact(gr_id: str | None, artifact: dict[str, Any]) -> None:
     sf = resolve_state_file(gr_id)
     if sf is None or not sf.exists():
         return
@@ -243,12 +243,13 @@ def append_artifact(gr_id: str | None, artifact: dict) -> None:
         pass
 
 
-def read_artifacts(gr_id: str | None) -> list[dict]:
+def read_artifacts(gr_id: str | None) -> list[dict[str, Any]]:
     sf = resolve_state_file(gr_id)
     if sf is None or not sf.exists():
         return []
     try:
-        return list(json.loads(sf.read_text(encoding="utf-8")).get("artifacts") or [])
+        data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
+        return list(data.get("artifacts") or [])
     except (json.JSONDecodeError, OSError):
         return []
 
