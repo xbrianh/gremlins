@@ -7,6 +7,7 @@ import pytest
 from gremlins.clients.resolve import (
     PACKAGE_DEFAULT,
     ClientSpec,
+    collect_stage_specs,
     require_stage_spec,
     resolve_stage_client,
     validate_stage_specs,
@@ -82,3 +83,39 @@ def test_validate_stage_specs_reports_all_missing_stages(tmp_path):
 
     with pytest.raises(ValueError, match=r"stage_clients missing stages:"):
         validate_stage_specs({"plan": ClientSpec("claude", "sonnet")}, pipeline)
+
+
+def _write(tmp_path, name, body):
+    path = tmp_path / f"{name}.yaml"
+    path.write_text(body)
+    return path
+
+
+def test_collect_and_validate_descend_into_nested_compounds(tmp_path):
+    pipeline_path = _write(
+        tmp_path,
+        "nested",
+        """
+name: nested
+default_client: claude:sonnet
+stages:
+  - name: outer
+    type: loop
+    body:
+      - { name: leaf-a, type: plan }
+      - name: inner
+        parallel:
+          - { name: leaf-b, type: plan }
+          - { name: leaf-c, type: plan }
+""",
+    )
+    pipeline = load_pipeline(pipeline_path)
+
+    specs = collect_stage_specs(pipeline, cli_spec=None)
+    assert {"outer", "leaf-a", "inner", "leaf-b", "leaf-c"} <= set(specs)
+
+    validate_stage_specs(specs, pipeline)
+
+    incomplete = {k: v for k, v in specs.items() if k not in {"leaf-b", "leaf-c"}}
+    with pytest.raises(ValueError, match=r"'leaf-b', 'leaf-c'"):
+        validate_stage_specs(incomplete, pipeline)

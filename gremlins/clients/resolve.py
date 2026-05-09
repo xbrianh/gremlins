@@ -9,7 +9,7 @@ from gremlins.stages.registry import CLIENT_FACTORIES
 from gremlins.state import resolve_state_file
 
 if TYPE_CHECKING:
-    from gremlins.pipeline import PipelineDef
+    from gremlins.pipeline import PipelineDef, StageEntry
 
 
 @dataclasses.dataclass(frozen=True)
@@ -58,27 +58,17 @@ def collect_stage_specs(
     cli_spec: ClientSpec | None,
 ) -> dict[str, ClientSpec]:
     specs: dict[str, ClientSpec] = {}
-    for e in pipeline.stages:
-        if e.type == "parallel":
+
+    def _walk(entries: list[StageEntry]) -> None:
+        for e in entries:
+            entry_client = None if e.type == "parallel" else e.client
             specs[e.name] = resolve_stage_client(
-                None, cli_spec, pipeline.default_client
+                entry_client, cli_spec, pipeline.default_client
             )
-            for child in e.body:
-                specs[child.name] = resolve_stage_client(
-                    child.client, cli_spec, pipeline.default_client
-                )
-        elif e.type == "loop":
-            specs[e.name] = resolve_stage_client(
-                e.client, cli_spec, pipeline.default_client
-            )
-            for child in e.body:
-                specs[child.name] = resolve_stage_client(
-                    child.client, cli_spec, pipeline.default_client
-                )
-        else:
-            specs[e.name] = resolve_stage_client(
-                e.client, cli_spec, pipeline.default_client
-            )
+            if e.body:
+                _walk(e.body)
+
+    _walk(list(pipeline.stages))
     return specs
 
 
@@ -107,12 +97,15 @@ def _format_missing_stage_specs(names: Sequence[str]) -> str:
 def validate_stage_specs(
     stage_specs: dict[str, ClientSpec], pipeline: PipelineDef
 ) -> None:
-    expected_stage_names = {entry.name for entry in pipeline.stages}
-    for entry in pipeline.stages:
-        if entry.type == "parallel":
-            expected_stage_names.update(child.name for child in entry.body)
-        elif entry.type == "loop":
-            expected_stage_names.update(child.name for child in entry.body)
+    expected_stage_names: set[str] = set()
+
+    def _walk(entries: list[StageEntry]) -> None:
+        for entry in entries:
+            expected_stage_names.add(entry.name)
+            if entry.body:
+                _walk(entry.body)
+
+    _walk(list(pipeline.stages))
 
     missing_stage_names = sorted(expected_stage_names.difference(stage_specs))
     if missing_stage_names:

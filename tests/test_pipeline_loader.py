@@ -429,6 +429,29 @@ stages:
         load_pipeline(tmp_path / "pipeline.yaml")
 
 
+def test_parallel_inside_loop_body_is_allowed(tmp_path: pathlib.Path) -> None:
+    yaml_path = _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+stages:
+  - name: outer
+    type: loop
+    body:
+      - name: inner
+        parallel:
+          - {name: leaf-a, type: verify}
+          - {name: leaf-b, type: verify}
+""",
+    )
+    pipeline = load_pipeline(yaml_path)
+    outer = pipeline.stages[0]
+    assert outer.type == "loop"
+    inner = outer.body[0]
+    assert inner.type == "parallel"
+    assert [c.name for c in inner.body] == ["leaf-a", "leaf-b"]
+
+
 # ---- client field population -----------------------------------------------
 
 
