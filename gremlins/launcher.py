@@ -526,6 +526,11 @@ def launch(
         instr_raw = instructions or ""
         (state_dir / "instructions.txt").write_text(instr_raw, encoding="utf-8")
 
+        if issue_data and issue_data.get("body"):
+            artifacts_dir = state_dir / "artifacts"
+            artifacts_dir.mkdir(exist_ok=True)
+            (artifacts_dir / "plan.md").write_text(issue_data["body"], encoding="utf-8")
+
         workdir, branch, worktree_base, setup_kind = _setup_workdir(
             pipeline_mode, project_root, base_ref_sha, gr_id, state_dir
         )

@@ -1117,3 +1117,32 @@ def test_stage_inputs_survives_resume(lenv, monkeypatch):
 
     post_state = _read_state(state_dir)
     assert post_state["stage_inputs"] == saved_stage_inputs
+
+
+# ---------------------------------------------------------------------------
+# Boss pipeline + issue-ref plan materializes plan.md
+# ---------------------------------------------------------------------------
+
+
+def test_launch_boss_plan_issue_ref_materializes_plan_md(lenv, monkeypatch):
+    """Boss + --plan #N writes the issue body to artifacts/plan.md before chain runs."""
+    launcher = _launcher()
+
+    issue_body = "# My Plan\n\nDo the thing."
+    monkeypatch.setattr(
+        launcher,
+        "_fetch_issue",
+        lambda plan: {"title": "My Plan", "body": issue_body, "number": 317, "url": ""},
+    )
+
+    class _Proc:
+        pid = 42000
+
+    monkeypatch.setattr(launcher, "_spawn_pipeline", lambda *args, **kwargs: _Proc())
+
+    gr_id = launcher.launch("boss", plan="#317", project_root=str(lenv.repo))
+    state_dir = _gremlins_state_root(lenv) / gr_id
+    plan_md = state_dir / "artifacts" / "plan.md"
+
+    assert plan_md.exists(), f"plan.md not found at {plan_md}"
+    assert plan_md.read_text(encoding="utf-8").strip() == issue_body.strip()
