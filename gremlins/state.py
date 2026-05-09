@@ -234,10 +234,12 @@ def append_artifact(gr_id: str | None, artifact: dict[str, Any]) -> None:
     if sf is None or not sf.exists():
         return
     try:
+
         def _apply(data: dict[str, Any]) -> None:
             arts: list[Any] = list(data.get("artifacts") or [])
             arts.append(artifact)
             data["artifacts"] = arts
+
         _locked_update(sf, _apply)
     except Exception:
         pass
@@ -302,5 +304,3 @@ def check_bail(
         raise
     except Exception:
         pass
-
-

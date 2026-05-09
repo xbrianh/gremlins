@@ -93,7 +93,9 @@ class MaterializeToBranch(Stage):
             impl_base_ref=result.base_ref,
         )
         if materialized_branch:
-            append_artifact(self.state.gr_id, {"type": "branch", "name": materialized_branch})
+            append_artifact(
+                self.state.gr_id, {"type": "branch", "name": materialized_branch}
+            )
         return result
 
 

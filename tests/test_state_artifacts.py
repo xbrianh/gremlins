@@ -6,7 +6,9 @@ import pathlib
 import gremlins.state as state_mod
 
 
-def _make_state_dir(tmp_path: pathlib.Path, gr_id: str) -> tuple[pathlib.Path, pathlib.Path]:
+def _make_state_dir(
+    tmp_path: pathlib.Path, gr_id: str
+) -> tuple[pathlib.Path, pathlib.Path]:
     state_root = tmp_path / "state"
     state_dir = state_root / gr_id
     state_dir.mkdir(parents=True)
@@ -21,7 +23,10 @@ def test_append_artifact_appends_in_order(tmp_path, monkeypatch):
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
 
     state_mod.append_artifact(gr_id, {"type": "branch", "name": "feat-1"})
-    state_mod.append_artifact(gr_id, {"type": "pr", "url": "https://github.com/o/r/pull/1", "branch": "feat-1"})
+    state_mod.append_artifact(
+        gr_id,
+        {"type": "pr", "url": "https://github.com/o/r/pull/1", "branch": "feat-1"},
+    )
 
     data = json.loads(sf.read_text())
     assert data["artifacts"] == [
@@ -45,9 +50,15 @@ def test_read_pr_url_returns_last_pr_url(tmp_path, monkeypatch):
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
 
     state_mod.append_artifact(gr_id, {"type": "branch", "name": "feat-1"})
-    state_mod.append_artifact(gr_id, {"type": "pr", "url": "https://github.com/o/r/pull/1", "branch": "feat-1"})
+    state_mod.append_artifact(
+        gr_id,
+        {"type": "pr", "url": "https://github.com/o/r/pull/1", "branch": "feat-1"},
+    )
     state_mod.append_artifact(gr_id, {"type": "branch", "name": "feat-2"})
-    state_mod.append_artifact(gr_id, {"type": "pr", "url": "https://github.com/o/r/pull/2", "branch": "feat-2"})
+    state_mod.append_artifact(
+        gr_id,
+        {"type": "pr", "url": "https://github.com/o/r/pull/2", "branch": "feat-2"},
+    )
 
     assert state_mod.read_pr_url(gr_id) == "https://github.com/o/r/pull/2"
 
@@ -75,7 +86,10 @@ def test_last_artifact_branch_from_pr_entry(tmp_path, monkeypatch):
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
 
     state_mod.append_artifact(gr_id, {"type": "branch", "name": "feat-1"})
-    state_mod.append_artifact(gr_id, {"type": "pr", "url": "https://github.com/o/r/pull/1", "branch": "feat-1"})
+    state_mod.append_artifact(
+        gr_id,
+        {"type": "pr", "url": "https://github.com/o/r/pull/1", "branch": "feat-1"},
+    )
     assert state_mod.last_artifact_branch(gr_id) == "feat-1"
 
 
@@ -93,8 +107,14 @@ def test_last_artifact_branch_multiple_prs(tmp_path, monkeypatch):
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
 
     state_mod.append_artifact(gr_id, {"type": "branch", "name": "feat-1"})
-    state_mod.append_artifact(gr_id, {"type": "pr", "url": "https://github.com/o/r/pull/1", "branch": "feat-1"})
+    state_mod.append_artifact(
+        gr_id,
+        {"type": "pr", "url": "https://github.com/o/r/pull/1", "branch": "feat-1"},
+    )
     state_mod.append_artifact(gr_id, {"type": "branch", "name": "feat-2"})
-    state_mod.append_artifact(gr_id, {"type": "pr", "url": "https://github.com/o/r/pull/2", "branch": "feat-2"})
+    state_mod.append_artifact(
+        gr_id,
+        {"type": "pr", "url": "https://github.com/o/r/pull/2", "branch": "feat-2"},
+    )
 
     assert state_mod.last_artifact_branch(gr_id) == "feat-2"

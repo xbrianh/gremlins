@@ -209,10 +209,15 @@ def test_head_advanced_records_branch_artifact(tmp_path: pathlib.Path) -> None:
         patch("gremlins.stages.materialize_to_branch.patch_state"),
         patch(
             "gremlins.stages.materialize_to_branch.append_artifact",
-            side_effect=lambda gr_id, artifact: artifact_calls.append((gr_id, artifact)),
+            side_effect=lambda gr_id, artifact: artifact_calls.append(
+                (gr_id, artifact)
+            ),
         ),
     ):
         result = stage.run(_pipe())
     assert result.materialized_branch == "gremlin/child-2"
     assert artifact_calls, "append_artifact should be called"
-    assert artifact_calls[0] == ("test-gr", {"type": "branch", "name": "gremlin/child-2"})
+    assert artifact_calls[0] == (
+        "test-gr",
+        {"type": "branch", "name": "gremlin/child-2"},
+    )

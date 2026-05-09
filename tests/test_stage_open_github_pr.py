@@ -84,7 +84,9 @@ def test_run_records_pr_artifact(tmp_path: pathlib.Path) -> None:
         ),
         mock_patch(
             "gremlins.stages.open_github_pr.append_artifact",
-            side_effect=lambda gr_id, artifact: artifact_calls.append((gr_id, artifact)),
+            side_effect=lambda gr_id, artifact: artifact_calls.append(
+                (gr_id, artifact)
+            ),
         ),
     ):
         stage.run(None)
@@ -176,7 +178,10 @@ def test_first_child_uses_base_ref_name(tmp_path: pathlib.Path) -> None:
 
 def test_record_child_pr_appends_pr_artifact(tmp_path: pathlib.Path) -> None:
     """After opening a PR, a pr artifact with url and branch is appended."""
-    sf = _write_state(tmp_path, {"base_ref_name": "main", "impl_materialized_branch": "gremlin/abc-child-1"})
+    sf = _write_state(
+        tmp_path,
+        {"base_ref_name": "main", "impl_materialized_branch": "gremlin/abc-child-1"},
+    )
     stage, ctx = _make_stage_with_gr(tmp_path)
     artifact_calls: list[tuple] = []
     with (
@@ -190,7 +195,9 @@ def test_record_child_pr_appends_pr_artifact(tmp_path: pathlib.Path) -> None:
         ),
         patch(
             "gremlins.stages.open_github_pr.append_artifact",
-            side_effect=lambda gr_id, artifact: artifact_calls.append((gr_id, artifact)),
+            side_effect=lambda gr_id, artifact: artifact_calls.append(
+                (gr_id, artifact)
+            ),
         ),
     ):
         stage.run(None)

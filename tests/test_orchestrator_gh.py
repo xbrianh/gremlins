@@ -172,7 +172,8 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         "gremlins.stages.materialize_to_branch.patch_state", _handoff_patch_state
     )
     monkeypatch.setattr(
-        "gremlins.stages.materialize_to_branch.append_artifact", _handoff_append_artifact
+        "gremlins.stages.materialize_to_branch.append_artifact",
+        _handoff_append_artifact,
     )
     monkeypatch.setattr(
         "gremlins.stages.open_github_pr.append_artifact", _handoff_append_artifact
@@ -1138,15 +1139,24 @@ def test_resume_from_ghreview(tmp_path, monkeypatch):
 
     data = json.loads(state_file.read_text())
     data["issue_url"] = "https://github.com/owner/repo/issues/5"
-    data.setdefault("artifacts", []).append({"type": "pr", "url": "https://github.com/owner/repo/pull/200", "branch": ""})
+    data.setdefault("artifacts", []).append(
+        {"type": "pr", "url": "https://github.com/owner/repo/pull/200", "branch": ""}
+    )
     state_file.write_text(json.dumps(data))
 
     ghreview_called = []
     monkeypatch.setattr(
         "gremlins.stages.review_code.ReviewCode.run",
         lambda self, pipe: ghreview_called.append(
-            self.pr_url or next(
-                (a["url"] for a in reversed(json.loads(state_file.read_text()).get("artifacts", [])) if a.get("type") == "pr"),
+            self.pr_url
+            or next(
+                (
+                    a["url"]
+                    for a in reversed(
+                        json.loads(state_file.read_text()).get("artifacts", [])
+                    )
+                    if a.get("type") == "pr"
+                ),
                 "",
             )
         ),
@@ -1443,8 +1453,15 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.stages.review_code.ReviewCode.run",
         lambda self, pipe: ghreview_called.append(
-            self.pr_url or next(
-                (a["url"] for a in reversed(json.loads(state_file.read_text()).get("artifacts", [])) if a.get("type") == "pr"),
+            self.pr_url
+            or next(
+                (
+                    a["url"]
+                    for a in reversed(
+                        json.loads(state_file.read_text()).get("artifacts", [])
+                    )
+                    if a.get("type") == "pr"
+                ),
                 "",
             )
         ),
@@ -1479,7 +1496,10 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
     # Verify OpenGitHubPR wrote pr artifact to state.json
     state = json.loads(state_file.read_text())
     pr_artifacts = [a for a in state.get("artifacts", []) if a.get("type") == "pr"]
-    assert pr_artifacts and pr_artifacts[-1].get("url") == "https://github.com/owner/repo/pull/101"
+    assert (
+        pr_artifacts
+        and pr_artifacts[-1].get("url") == "https://github.com/owner/repo/pull/101"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1544,7 +1564,10 @@ def test_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
     # pr artifact written to state.json by OpenGitHubPR; pr_num derived from it in run()
     state = json.loads(state_file.read_text())
     pr_artifacts = [a for a in state.get("artifacts", []) if a.get("type") == "pr"]
-    assert pr_artifacts and pr_artifacts[-1].get("url") == "https://github.com/owner/repo/pull/77"
+    assert (
+        pr_artifacts
+        and pr_artifacts[-1].get("url") == "https://github.com/owner/repo/pull/77"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1608,7 +1631,10 @@ def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
     # pr artifact written to state.json by OpenGitHubPR; read from state in WaitCI.run()
     state = json.loads(state_file.read_text())
     pr_artifacts = [a for a in state.get("artifacts", []) if a.get("type") == "pr"]
-    assert pr_artifacts and pr_artifacts[-1].get("url") == "https://github.com/owner/repo/pull/77"
+    assert (
+        pr_artifacts
+        and pr_artifacts[-1].get("url") == "https://github.com/owner/repo/pull/77"
+    )
 
 
 def test_wait_ci_stage_ordering(tmp_path, monkeypatch):
@@ -1680,7 +1706,9 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
 
     data = json.loads(state_file.read_text())
     data["issue_url"] = "https://github.com/owner/repo/issues/5"
-    data.setdefault("artifacts", []).append({"type": "pr", "url": "https://github.com/owner/repo/pull/200", "branch": ""})
+    data.setdefault("artifacts", []).append(
+        {"type": "pr", "url": "https://github.com/owner/repo/pull/200", "branch": ""}
+    )
     state_file.write_text(json.dumps(data))
 
     earlier_called: list[str] = []
@@ -1723,7 +1751,10 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
     # pr artifact is read from state.json inside WaitCI.run(); verify it's pre-populated
     state = json.loads(state_file.read_text())
     pr_artifacts = [a for a in state.get("artifacts", []) if a.get("type") == "pr"]
-    assert pr_artifacts and pr_artifacts[-1].get("url") == "https://github.com/owner/repo/pull/200"
+    assert (
+        pr_artifacts
+        and pr_artifacts[-1].get("url") == "https://github.com/owner/repo/pull/200"
+    )
 
 
 # ---------------------------------------------------------------------------
