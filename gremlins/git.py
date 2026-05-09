@@ -33,7 +33,7 @@ def _run_git(
     check: bool = True,
     timeout: float | None = None,
 ):
-    r = proc.run(["git"] + args, cwd=cwd, timeout=timeout)  # type: ignore[arg-type]
+    r = proc.run(["git"] + args, cwd=cwd, timeout=timeout)
     if check and r.returncode != 0:
         raise GitError(r.returncode, r.stderr.strip())
     return r
@@ -41,7 +41,7 @@ def _run_git(
 
 def in_git_repo(cwd: str | os.PathLike[str] | None = None) -> bool:
     try:
-        return proc.run_ok(["git", "rev-parse", "--git-dir"], cwd=cwd)  # type: ignore[arg-type]
+        return proc.run_ok(["git", "rev-parse", "--git-dir"], cwd=cwd)
     except OSError:
         return False
 
@@ -74,14 +74,14 @@ def has_commits(cwd: str | os.PathLike[str] | None = None) -> bool:
 
 def rev_exists(rev: str, cwd: str | os.PathLike[str] | None = None) -> bool:
     try:
-        return proc.run_ok(["git", "rev-parse", "--verify", rev], cwd=cwd)  # type: ignore[arg-type]
+        return proc.run_ok(["git", "rev-parse", "--verify", rev], cwd=cwd)
     except OSError:
         return False
 
 
 def has_diff(ref_a: str, ref_b: str, cwd: str | os.PathLike[str] | None = None) -> bool:
     try:
-        return not proc.run_ok(["git", "diff", "--quiet", ref_a, ref_b], cwd=cwd)  # type: ignore[arg-type]
+        return not proc.run_ok(["git", "diff", "--quiet", ref_a, ref_b], cwd=cwd)
     except OSError:
         return False
 

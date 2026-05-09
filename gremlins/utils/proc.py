@@ -24,12 +24,9 @@ def run_ok(cmd: list[str], *, cwd: str | os.PathLike[str] | None = None) -> bool
     return r.returncode == 0
 
 
-def run_quiet(
-    cmd: list[str], *, cwd: str | os.PathLike[str] | None = None
-) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(
-        cmd, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    )
+def run_quiet(cmd: list[str], *, cwd: str | os.PathLike[str] | None = None) -> int:
+    r = subprocess.run(cmd, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return r.returncode
 
 
 def run_or_raise(cmd: list[str], *, cwd: str | os.PathLike[str] | None = None) -> str:
