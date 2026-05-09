@@ -1325,7 +1325,11 @@ def test_rescue_host_terminated_recreates_worktree_and_proceeds(
                 "id": "x",
                 "artifacts": [
                     {"type": "branch", "name": "feat"},
-                    {"type": "pr", "url": "https://github.com/o/r/pull/1", "branch": "feat"},
+                    {
+                        "type": "pr",
+                        "url": "https://github.com/o/r/pull/1",
+                        "branch": "feat",
+                    },
                 ],
             },
             [],

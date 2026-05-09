@@ -21,7 +21,15 @@ _TEMPLATE_GH = "{spec_block}{plan_source_label}{issue_body}{plan_location_note}"
 _GH_PIPELINE = PipelineDef(
     name="gh",
     path=pathlib.Path("."),
-    stages=[StageEntry(name="open-github-pr", type="open-github-pr", client=None, prompts=[], options={})],
+    stages=[
+        StageEntry(
+            name="open-github-pr",
+            type="open-github-pr",
+            client=None,
+            prompts=[],
+            options={},
+        )
+    ],
 )
 _LOCAL_PIPELINE = PipelineDef(
     name="local",

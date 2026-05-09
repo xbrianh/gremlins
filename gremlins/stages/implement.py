@@ -7,12 +7,12 @@ import os
 import pathlib
 from typing import Any
 
-from gremlins.pipeline import pipeline_uses_gh
 from gremlins.git import (
     has_dirty_worktree,
     head_sha,
     record_pre_impl_state,
 )
+from gremlins.pipeline import pipeline_uses_gh
 from gremlins.prompts import BUNDLED_PROMPT_DIR
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage

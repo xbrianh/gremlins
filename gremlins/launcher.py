@@ -70,7 +70,6 @@ def _extract_h1(path: str) -> str:
     return ""
 
 
-
 def pipeline_uses_loop_handoff(pipeline: PipelineDef) -> bool:
     first = pipeline.stages[0] if pipeline.stages else None
     return (
@@ -309,7 +308,11 @@ def _stage_gremlins_overlay(project_root: str, state_dir: pathlib.Path) -> None:
 
 
 def _setup_workdir(
-    setup_kind: str, project_root: str, base_ref_sha: str, gr_id: str, state_dir: pathlib.Path
+    setup_kind: str,
+    project_root: str,
+    base_ref_sha: str,
+    gr_id: str,
+    state_dir: pathlib.Path,
 ) -> tuple[str, str, str, str]:
     """Return (workdir, branch, worktree_base, setup_kind)."""
     if not _git_mod.in_git_repo(cwd=project_root):
@@ -460,7 +463,11 @@ def launch(
     except (FileNotFoundError, OSError):
         pass
 
-    if _loaded_pipeline is not None and pipeline_uses_gh(_loaded_pipeline) and shutil.which("gh") is None:
+    if (
+        _loaded_pipeline is not None
+        and pipeline_uses_gh(_loaded_pipeline)
+        and shutil.which("gh") is None
+    ):
         raise RuntimeError("gh CLI not found on PATH (required for gh pipeline)")
 
     state_dir = _state_root() / gr_id
@@ -504,7 +511,11 @@ def launch(
             artifacts_dir.mkdir(exist_ok=True)
             (artifacts_dir / "plan.md").write_text(issue_data["body"], encoding="utf-8")
 
-        _setup_kind_arg = _pipeline_setup_kind(_loaded_pipeline) if _loaded_pipeline is not None else "worktree-branch"
+        _setup_kind_arg = (
+            _pipeline_setup_kind(_loaded_pipeline)
+            if _loaded_pipeline is not None
+            else "worktree-branch"
+        )
         workdir, branch, worktree_base, setup_kind = _setup_workdir(
             _setup_kind_arg, project_root, base_ref_sha, gr_id, state_dir
         )
@@ -536,6 +547,7 @@ def launch(
 
         if setup_kind == "worktree-branch" and branch:
             from gremlins.state import append_artifact
+
             append_artifact(gr_id, {"type": "branch", "name": branch})
 
         # Build args for the spawned _run-pipeline process
@@ -613,14 +625,22 @@ def resume(gr_id: str) -> None:
         except (FileNotFoundError, OSError):
             pass
 
-    if _loaded_resume is not None and pipeline_uses_gh(_loaded_resume) and shutil.which("gh") is None:
+    if (
+        _loaded_resume is not None
+        and pipeline_uses_gh(_loaded_resume)
+        and shutil.which("gh") is None
+    ):
         raise RuntimeError("gh CLI not found on PATH (required for gh pipeline)")
 
     # Rewind stage if it never advanced past "starting"
     if not stage or stage == "starting":
         stage = "plan"
 
-    if _loaded_resume is not None and pipeline_uses_loop_handoff(_loaded_resume) and stage not in ("review-chain", "address-chain"):
+    if (
+        _loaded_resume is not None
+        and pipeline_uses_loop_handoff(_loaded_resume)
+        and stage not in ("review-chain", "address-chain")
+    ):
         stage = "chain"
 
     # Clear terminal markers and patch state for the resumed run
