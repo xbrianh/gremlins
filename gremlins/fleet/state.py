@@ -9,7 +9,7 @@ from collections.abc import Iterator
 from typing import cast
 
 from gremlins import git as _git_mod
-from gremlins.fleet import constants as _constants
+import gremlins.fleet.constants as _constants
 
 
 def iso_to_epoch(iso: str) -> float | None:

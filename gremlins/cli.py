@@ -33,13 +33,11 @@ from gremlins.fleet.cli import (
     close_main,
     land_main,
     log_main,
+    main as fleet_main,
     rescue_main,
     rm_main,
     skip_main,
     stop_main,
-)
-from gremlins.fleet.cli import (
-    main as fleet_main,
 )
 from gremlins.launcher import launch, resume
 from gremlins.orchestrators.review_address import address_main, review_main

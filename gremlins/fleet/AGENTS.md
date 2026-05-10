@@ -20,8 +20,8 @@ Fleet manager package for background gremlins. Reads every gremlin state file un
 | `views.py` | `collect_rows`, `do_list`, `do_recent`, `do_drill_in` |
 | `cli.py` | `parse_args`, `render_view`, `_main_impl`, `main`, `ack_main`, `skip_main`, `stop_main`, `rescue_main`, `land_main`, `rm_main`, `close_main`, `log_main` |
 | `session_summary.py` | SessionStart/UserPromptSubmit hook: filters gremlins by `project_root`, reports running + newly-finished, marks finished as `summarized`, prunes closed state dirs older than 14 days |
-| `__init__.py` | Re-exports public surface + installs `_FleetModule` for monkeypatch support |
+| `__init__.py` | Package docstring only |
 
 ## Monkeypatch design
 
-Tests patch `BG_STALL_SECS` and `STATE_ROOT` on the `fleet` module object. `state.py` imports `constants` as a module object (`from gremlins.fleet import constants as _constants`) and reads `_constants.BG_STALL_SECS` / `_constants.STATE_ROOT` inside function bodies so that monkeypatches propagate. `__init__.py` installs `_FleetModule` (a `types.ModuleType` subclass) whose `__setattr__` forwards writes to those two names into `sys.modules["gremlins.fleet.constants"]`.
+Tests patch `BG_STALL_SECS` and `STATE_ROOT` directly on `gremlins.fleet.constants`. Submodules import `constants` as a module object (`import gremlins.fleet.constants as _constants`) and read `_constants.BG_STALL_SECS` / `_constants.STATE_ROOT` inside function bodies so that monkeypatches propagate.
