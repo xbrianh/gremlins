@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from gremlins.stages.base import StageContext
+from gremlins.stages.base import StageState
 from gremlins.stages.loop import LoopExhausted, LoopStage, RunCmdFailed
 from gremlins.stages.run_cmd import RunCmd
 
@@ -18,8 +18,8 @@ def _fake_client() -> Any:
     return FakeClaudeClient(fixtures={})
 
 
-def _loop_ctx(tmp_path: Any) -> StageContext:
-    return StageContext(
+def _loop_state(tmp_path: Any) -> StageState:
+    return StageState(
         client=_fake_client(),
         session_dir=tmp_path,
         gr_id=None,
@@ -39,8 +39,7 @@ def test_loop_head_stable_exits_cleanly(tmp_path):
         calls.append("run")
 
     loop = LoopStage.from_runners([runner], max_iterations=3)
-    loop.bind(_loop_ctx(tmp_path))
-    loop.run(None)
+    loop.run(_loop_state(tmp_path))
 
     assert calls == ["run"]
 
@@ -58,8 +57,7 @@ def test_loop_cmd_failure_then_fix_then_green(tmp_path):
         state["fixed"] = True
 
     loop = LoopStage.from_runners([check, fix], max_iterations=3)
-    loop.bind(_loop_ctx(tmp_path))
-    loop.run(None)
+    loop.run(_loop_state(tmp_path))
 
     assert state["attempt"] == 2
     assert state["fixed"]
@@ -76,8 +74,7 @@ def test_loop_fix_skipped_on_success(tmp_path):
         fix_calls.append(1)
 
     loop = LoopStage.from_runners([check, fix], max_iterations=3)
-    loop.bind(_loop_ctx(tmp_path))
-    loop.run(None)
+    loop.run(_loop_state(tmp_path))
 
     assert fix_calls == []
 
@@ -90,9 +87,8 @@ def test_loop_exhausted_raises_loop_exhausted(tmp_path):
         pass
 
     loop = LoopStage.from_runners([check, fix], max_iterations=3)
-    loop.bind(_loop_ctx(tmp_path))
     with pytest.raises(LoopExhausted):
-        loop.run(None)
+        loop.run(_loop_state(tmp_path))
 
 
 def test_loop_fix_skipped_on_final_iteration(tmp_path):
@@ -108,9 +104,8 @@ def test_loop_fix_skipped_on_final_iteration(tmp_path):
         fix_calls.append(attempt[0])
 
     loop = LoopStage.from_runners([check, fix], max_iterations=3)
-    loop.bind(_loop_ctx(tmp_path))
     with pytest.raises(LoopExhausted):
-        loop.run(None)
+        loop.run(_loop_state(tmp_path))
 
     # fix ran for iterations 1 and 2, NOT 3
     assert fix_calls == [1, 2]
@@ -123,9 +118,8 @@ def test_loop_bail_propagates_immediately(tmp_path):
         raise RuntimeError("stage bailed: bail_class=other")
 
     loop = LoopStage.from_runners([bail_runner], max_iterations=3)
-    loop.bind(_loop_ctx(tmp_path))
     with pytest.raises(RuntimeError, match="stage bailed"):
-        loop.run(None)
+        loop.run(_loop_state(tmp_path))
 
 
 def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
@@ -138,16 +132,15 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
     def fix() -> None:
         pass
 
-    ctx = StageContext(
+    loop_state = StageState(
         client=_fake_client(),
         session_dir=tmp_path,
         gr_id=gr_id,
         worktree=tmp_path,
     )
     loop = LoopStage.from_runners([check, fix], max_iterations=2)
-    loop.bind(ctx)
     with pytest.raises(LoopExhausted):
-        loop.run(None)
+        loop.run(loop_state)
 
     data = json.loads((state_dir / "state.json").read_text())
     assert data.get("bail_class") == "other"
@@ -158,45 +151,44 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
 # ---------------------------------------------------------------------------
 
 
-def _run_cmd_stage(tmp_path: Any, cmds: list[str]) -> RunCmd:
+def _run_cmd_stage(tmp_path: Any, cmds: list[str]) -> tuple[RunCmd, StageState]:
     stage = RunCmd("run-cmd", None, [], {"cmds": cmds})
-    ctx = StageContext(
+    state = StageState(
         client=_fake_client(),
         session_dir=tmp_path,
         gr_id=None,
         worktree=tmp_path,
     )
-    stage.bind(ctx)
-    return stage
+    return stage, state
 
 
 def test_run_cmd_success(tmp_path):
-    stage = _run_cmd_stage(tmp_path, ["true"])
-    stage.run(None)  # must not raise
+    stage, state = _run_cmd_stage(tmp_path, ["true"])
+    stage.run(state)  # must not raise
 
 
 def test_run_cmd_failure_raises_run_cmd_failed(tmp_path):
-    stage = _run_cmd_stage(tmp_path, ["false"])
+    stage, state = _run_cmd_stage(tmp_path, ["false"])
     with pytest.raises(RunCmdFailed):
-        stage.run(None)
+        stage.run(state)
 
 
 def test_run_cmd_failure_writes_log(tmp_path):
-    stage = _run_cmd_stage(tmp_path, ["echo boom >&2; false"])
+    stage, state = _run_cmd_stage(tmp_path, ["echo boom >&2; false"])
     with pytest.raises(RunCmdFailed):
-        stage.run(None)
+        stage.run(state)
     log = tmp_path / "run-cmd.log"
     assert log.exists()
 
 
 def test_run_cmd_empty_cmds_is_noop(tmp_path):
-    stage = _run_cmd_stage(tmp_path, [])
-    stage.run(None)  # must not raise, no log written
+    stage, state = _run_cmd_stage(tmp_path, [])
+    stage.run(state)  # must not raise, no log written
     assert not (tmp_path / "run-cmd.log").exists()
 
 
 def test_run_cmd_output_in_exception(tmp_path):
-    stage = _run_cmd_stage(tmp_path, ["echo hello_output; false"])
+    stage, state = _run_cmd_stage(tmp_path, ["echo hello_output; false"])
     with pytest.raises(RunCmdFailed) as exc_info:
-        stage.run(None)
+        stage.run(state)
     assert "hello_output" in str(exc_info.value)

@@ -10,7 +10,7 @@ from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.pipeline.loader import load_pipeline
 from gremlins.stages import implement, plan
 from gremlins.stages.address_code import AddressCode
-from gremlins.stages.base import StageContext
+from gremlins.stages.base import StageState
 from gremlins.stages.implement import _render_spec_block
 from gremlins.stages.review_code import ReviewCode
 
@@ -26,8 +26,8 @@ def test_local_yaml_loads_and_validates(tmp_path):
     assert names == ["plan", "implement", "review-code", "address-code", "verify"]
 
 
-def _make_ctx(client, session_dir, *, gr_id=None):
-    return StageContext(client=client, session_dir=session_dir, gr_id=gr_id)
+def _make_state(client, session_dir, *, gr_id=None):
+    return StageState(client=client, session_dir=session_dir, gr_id=gr_id)
 
 
 def _init_git_repo(path: pathlib.Path) -> None:
@@ -143,8 +143,8 @@ def test_implement_renders_spec_block_when_present(tmp_path, monkeypatch):
         is_git=True,
         spec_text="overall spec body",
     )
-    stage.bind(_make_ctx(client, session_dir))
-    stage.run(None)
+    state = _make_state(client, session_dir)
+    stage.run(state)
     prompt = client.calls[0].prompt
     assert "Overarching goal (north star)" in prompt
     assert "overall spec body" in prompt
@@ -187,8 +187,8 @@ def test_implement_omits_spec_block_when_absent(tmp_path, monkeypatch):
         is_git=True,
         spec_text="",
     )
-    stage.bind(_make_ctx(client, session_dir))
-    stage.run(None)
+    state = _make_state(client, session_dir)
+    stage.run(state)
     prompt = client.calls[0].prompt
     assert "Overarching goal" not in prompt
 
@@ -209,9 +209,9 @@ def test_plan_stage_raises_when_file_absent(tmp_path):
         {},
         instructions="do stuff",
     )
-    stage.bind(_make_ctx(client, session_dir))
+    state = _make_state(client, session_dir)
     with pytest.raises(RuntimeError, match="plan stage did not produce"):
-        stage.run(None)
+        stage.run(state)
     assert len(client.calls) == 1
     assert client.calls[0].label == "plan"
     assert client.calls[0].model == "sonnet"
@@ -235,8 +235,8 @@ def test_plan_stage_succeeds_when_file_exists(tmp_path):
         {},
         instructions="do stuff",
     )
-    stage.bind(_make_ctx(client, session_dir))
-    stage.run(None)
+    state = _make_state(client, session_dir)
+    stage.run(state)
     assert plan_file.exists()
     assert client.calls[0].label == "plan"
     assert client.calls[0].model == "haiku"
@@ -265,9 +265,9 @@ def test_implement_stage_raises_on_empty_diff(tmp_path, monkeypatch):
         {},
         is_git=True,
     )
-    stage.bind(_make_ctx(client, session_dir))
+    state = _make_state(client, session_dir)
     with pytest.raises(RuntimeError, match="no committed work"):
-        stage.run(None)
+        stage.run(state)
     assert len(client.calls) == 1
     assert client.calls[0].label == "implement"
 
@@ -297,7 +297,6 @@ def _make_review_code_stage(
         plan_text=plan_text,
         is_git=is_git,
     )
-    stage.bind(_make_ctx(client, session_dir, gr_id=gr_id))
     return stage
 
 
@@ -320,7 +319,6 @@ def _make_address_code_stage(
         {},
         is_git=is_git,
     )
-    stage.bind(_make_ctx(client, session_dir, gr_id=gr_id))
     return stage
 
 
@@ -330,7 +328,8 @@ def test_address_code_stage_calls_client_with_review_content(tmp_path):
 
     client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
     stage = _make_address_code_stage(client, tmp_path)
-    stage.run(None)
+    state = _make_state(client, tmp_path)
+    stage.run(state)
 
     assert len(client.calls) == 1
     call = client.calls[0]
@@ -358,28 +357,26 @@ def test_plan_stage_includes_style_from_prompts(tmp_path):
         {},
         instructions="do stuff",
     )
-    stage.bind(_make_ctx(client, session_dir))
+    state = _make_state(client, session_dir)
     with pytest.raises(RuntimeError, match="plan stage did not produce"):
-        stage.run(None)
+        stage.run(state)
     assert "Be good." in client.calls[0].prompt
 
 
 def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
-    """When ctx.worktree is set (parallel child), client.run gets cwd=worktree
+    """When state.worktree is set (parallel child), client.run gets cwd=worktree
     so claude -p reads/writes the isolated worktree, not the parent process cwd."""
     client = ReviewCreatingClient(fixtures={"review-code:sonnet": MINIMAL_EVENTS})
     worktree = tmp_path / "wt"
     worktree.mkdir()
     stage = _make_review_code_stage(client, tmp_path)
-    stage.bind(
-        StageContext(
-            client=client,
-            session_dir=tmp_path,
-            gr_id=None,
-            worktree=worktree,
-        )
+    state = StageState(
+        client=client,
+        session_dir=tmp_path,
+        gr_id=None,
+        worktree=worktree,
     )
-    stage.run(None)
+    stage.run(state)
     assert client.calls[0].cwd == worktree
 
 
@@ -396,8 +393,8 @@ def test_review_code_stage_includes_style_from_prompts(tmp_path):
         plan_text="",
         is_git=False,
     )
-    stage.bind(_make_ctx(client, tmp_path))
-    stage.run(None)
+    state = _make_state(client, tmp_path)
+    stage.run(state)
     assert "Be good." in client.calls[0].prompt
 
 
@@ -416,8 +413,8 @@ def test_address_code_stage_includes_style_from_prompts(tmp_path):
         {},
         is_git=False,
     )
-    stage.bind(_make_ctx(client, tmp_path))
-    stage.run(None)
+    state = _make_state(client, tmp_path)
+    stage.run(state)
     assert "Be good." in client.calls[0].prompt
 
 
@@ -426,7 +423,8 @@ def test_review_code_stage_writes_stage_to_state(tmp_path, make_state_dir):
     state_dir = make_state_dir(gr_id)
     client = ReviewCreatingClient(fixtures={"review-code:sonnet": MINIMAL_EVENTS})
     stage = _make_review_code_stage(client, tmp_path, gr_id=gr_id)
-    stage.run(None)
+    state = _make_state(client, tmp_path, gr_id=gr_id)
+    stage.run(state)
     data = json.loads((state_dir / "state.json").read_text())
     assert data.get("stage") == "review-code"
 
@@ -436,8 +434,9 @@ def test_address_code_stage_emits_bail_on_failure(tmp_path, make_state_dir):
     state_dir = make_state_dir(gr_id)
     client = FakeClaudeClient(fixtures={})
     stage = _make_address_code_stage(client, tmp_path, gr_id=gr_id)
+    state = _make_state(client, tmp_path, gr_id=gr_id)
     with pytest.raises(FileNotFoundError):
-        stage.run(None)
+        stage.run(state)
     data = json.loads((state_dir / "state.json").read_text())
     assert data.get("bail_class") == "other"
 
@@ -467,8 +466,8 @@ def test_address_code_finds_review_files_in_parallel_subdirs(tmp_path):
             "review-code-fidelity": child2_dir,
         },
     )
-    stage.bind(_make_ctx(client, tmp_path))
-    stage.run(None)
+    state = _make_state(client, tmp_path)
+    stage.run(state)
 
     assert len(client.calls) == 1
     prompt = client.calls[0].prompt

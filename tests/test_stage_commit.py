@@ -11,7 +11,7 @@ from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.git import GitError
-from gremlins.stages.base import StageContext
+from gremlins.stages.base import StageState
 from gremlins.stages.commit import Commit
 
 ISSUE_URL = "https://github.com/owner/repo/issues/42"
@@ -25,7 +25,7 @@ def _make_stage(
     impl_materialized_branch: str = MATERIALIZED_BRANCH,
     base_ref: str = BASE_REF,
     issue_url: str = ISSUE_URL,
-) -> tuple[Commit, StageContext]:
+) -> tuple[Commit, StageState]:
     stage = Commit(
         "commit",
         "sonnet",
@@ -36,88 +36,73 @@ def _make_stage(
         issue_url=issue_url,
     )
     client = FakeClaudeClient(fixtures={"commit": MINIMAL_EVENTS})
-    ctx = StageContext(client=client, session_dir=tmp_path, gr_id=None)
-    stage.bind(ctx)
-    return stage, ctx
+    state = StageState(client=client, session_dir=tmp_path, gr_id=None)
+    return stage, state
 
 
 def test_run_calls_claude_with_diff(tmp_path: pathlib.Path) -> None:
-    stage, ctx = _make_stage(tmp_path)
+    stage, state = _make_stage(tmp_path)
     with (
         patch("gremlins.stages.commit.rev_list_count", return_value=1),
         patch("gremlins.stages.commit.log_patch", return_value="fake diff content"),
     ):
-        stage.run(None)
-    assert len(ctx.client.calls) == 1
-    call = ctx.client.calls[0]
+        stage.run(state)
+    assert len(state.client.calls) == 1
+    call = state.client.calls[0]
     assert call.label == "commit"
     assert "fake diff content" in call.prompt
 
 
 def test_handoff_case_includes_branch_name(tmp_path: pathlib.Path) -> None:
-    stage, ctx = _make_stage(tmp_path)
+    stage, state = _make_stage(tmp_path)
     with (
         patch("gremlins.stages.commit.rev_list_count", return_value=2),
         patch("gremlins.stages.commit.log_patch", return_value="diff"),
     ):
-        stage.run(None)
-    prompt = ctx.client.calls[0].prompt
+        stage.run(state)
+    prompt = state.client.calls[0].prompt
     assert MATERIALIZED_BRANCH in prompt
     assert "already committed" in prompt
 
 
 def test_issue_num_adds_closes_clause(tmp_path: pathlib.Path) -> None:
-    stage, ctx = _make_stage(tmp_path, issue_url="https://github.com/o/r/issues/42")
+    stage, state = _make_stage(tmp_path, issue_url="https://github.com/o/r/issues/42")
     with (
         patch("gremlins.stages.commit.rev_list_count", return_value=1),
         patch("gremlins.stages.commit.log_patch", return_value="diff"),
     ):
-        stage.run(None)
-    assert "Closes #42" in ctx.client.calls[0].prompt
+        stage.run(state)
+    assert "Closes #42" in state.client.calls[0].prompt
 
 
 def test_no_issue_url_skips_closes(tmp_path: pathlib.Path) -> None:
-    stage, ctx = _make_stage(tmp_path, issue_url="")
+    stage, state = _make_stage(tmp_path, issue_url="")
     with (
         patch("gremlins.stages.commit.rev_list_count", return_value=1),
         patch("gremlins.stages.commit.log_patch", return_value="diff"),
     ):
-        stage.run(None)
-    assert "End the commit message with 'Closes" not in ctx.client.calls[0].prompt
+        stage.run(state)
+    assert "End the commit message with 'Closes" not in state.client.calls[0].prompt
 
 
 def test_run_writes_raw_path(tmp_path: pathlib.Path) -> None:
-    stage, ctx = _make_stage(tmp_path)
+    stage, state = _make_stage(tmp_path)
     with (
         patch("gremlins.stages.commit.rev_list_count", return_value=1),
         patch("gremlins.stages.commit.log_patch", return_value="diff"),
     ):
-        stage.run(None)
-    assert ctx.client.calls[0].raw_path == tmp_path / "stream-commit.jsonl"
-
-
-def test_run_raises_if_unbound() -> None:
-    stage = Commit(
-        "commit",
-        None,
-        [],
-        {},
-        impl_materialized_branch=MATERIALIZED_BRANCH,
-        base_ref=BASE_REF,
-        issue_url=ISSUE_URL,
-    )
-    with pytest.raises(RuntimeError, match="not bound"):
-        stage.run(None)
+        stage.run(state)
+    assert state.client.calls[0].raw_path == tmp_path / "stream-commit.jsonl"
 
 
 def test_rev_list_error_raises(tmp_path: pathlib.Path) -> None:
-    stage, ctx = _make_stage(tmp_path)
+    stage, state = _make_stage(tmp_path)
     with patch(
         "gremlins.stages.commit.rev_list_count",
         side_effect=GitError(128, "bad revision"),
     ):
         with pytest.raises(RuntimeError):
-            stage.run(None)
+            stage.run(state)
 
 
 # ---------------------------------------------------------------------------
@@ -127,12 +112,11 @@ def test_rev_list_error_raises(tmp_path: pathlib.Path) -> None:
 
 def _make_self_sourcing_stage(
     tmp_path: pathlib.Path,
-) -> tuple[Commit, StageContext]:
+) -> tuple[Commit, StageState]:
     stage = Commit("commit", "sonnet", [], {})
     client = FakeClaudeClient(fixtures={"commit": MINIMAL_EVENTS})
-    ctx = StageContext(client=client, session_dir=tmp_path, gr_id="test-gr")
-    stage.bind(ctx)
-    return stage, ctx
+    state = StageState(client=client, session_dir=tmp_path, gr_id="test-gr")
+    return stage, state
 
 
 def test_self_source_head_advanced(tmp_path: pathlib.Path) -> None:
@@ -146,14 +130,14 @@ def test_self_source_head_advanced(tmp_path: pathlib.Path) -> None:
             }
         )
     )
-    stage, ctx = _make_self_sourcing_stage(tmp_path)
+    stage, state = _make_self_sourcing_stage(tmp_path)
     with (
         patch("gremlins.stages.commit.resolve_state_file", return_value=state_file),
         patch("gremlins.stages.commit.rev_list_count", return_value=3),
         patch("gremlins.stages.commit.log_patch", return_value="diff"),
     ):
-        stage.run(None)
-    prompt = ctx.client.calls[0].prompt
+        stage.run(state)
+    prompt = state.client.calls[0].prompt
     assert MATERIALIZED_BRANCH in prompt
     assert "Closes #42" in prompt
 
@@ -169,12 +153,12 @@ def test_self_source_raises_without_materialized_branch(tmp_path: pathlib.Path) 
             }
         )
     )
-    stage, ctx = _make_self_sourcing_stage(tmp_path)
+    stage, state = _make_self_sourcing_stage(tmp_path)
     with (
         patch("gremlins.stages.commit.resolve_state_file", return_value=state_file),
         pytest.raises(RuntimeError, match="no impl_materialized_branch"),
     ):
-        stage.run(None)
+        stage.run(state)
 
 
 def test_self_source_raises_without_base_ref(tmp_path: pathlib.Path) -> None:
@@ -187,12 +171,12 @@ def test_self_source_raises_without_base_ref(tmp_path: pathlib.Path) -> None:
             }
         )
     )
-    stage, ctx = _make_self_sourcing_stage(tmp_path)
+    stage, state = _make_self_sourcing_stage(tmp_path)
     with (
         patch("gremlins.stages.commit.resolve_state_file", return_value=state_file),
         pytest.raises(RuntimeError, match="no impl_base_ref"),
     ):
-        stage.run(None)
+        stage.run(state)
 
 
 def test_self_source_rev_list_error(tmp_path: pathlib.Path) -> None:
@@ -206,7 +190,7 @@ def test_self_source_rev_list_error(tmp_path: pathlib.Path) -> None:
             }
         )
     )
-    stage, ctx = _make_self_sourcing_stage(tmp_path)
+    stage, state = _make_self_sourcing_stage(tmp_path)
     with (
         patch("gremlins.stages.commit.resolve_state_file", return_value=state_file),
         patch(
@@ -215,4 +199,4 @@ def test_self_source_rev_list_error(tmp_path: pathlib.Path) -> None:
         ),
         pytest.raises(RuntimeError),
     ):
-        stage.run(None)
+        stage.run(state)

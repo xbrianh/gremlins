@@ -304,13 +304,3 @@ def test_stage_builders_registry_covers_all_known_types() -> None:
     assert expected <= set(STAGE_BUILDERS)
 
 
-def test_stage_needs_pipe_matches_builders() -> None:
-    from gremlins.stages.registry import STAGE_NEEDS_PIPE
-
-    assert set(STAGE_NEEDS_PIPE) == set(STAGE_BUILDERS)
-    assert STAGE_NEEDS_PIPE["implement"] is True
-    assert STAGE_NEEDS_PIPE["materialize-to-branch"] is True
-    assert STAGE_NEEDS_PIPE["ghreview"] is True
-    assert STAGE_NEEDS_PIPE["ghaddress"] is True
-    assert STAGE_NEEDS_PIPE["plan"] is False
-    assert STAGE_NEEDS_PIPE["verify"] is False

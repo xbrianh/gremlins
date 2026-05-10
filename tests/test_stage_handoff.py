@@ -11,8 +11,7 @@ import pytest
 
 from gremlins.clients.client import Client
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.schema import StageEntry
-from gremlins.stages.base import StageContext
+from gremlins.stages.base import StageState
 from gremlins.stages.handoff import Handoff
 from gremlins.stages.loop import RunCmdFailed
 
@@ -21,23 +20,13 @@ from gremlins.stages.loop import RunCmdFailed
 # ---------------------------------------------------------------------------
 
 
-def _make_entry() -> StageEntry:
-    return StageEntry(
-        name="handoff",
-        type="handoff",
-        prompts=[],
-        options={},
-        client=None,
-    )
-
-
-def _make_ctx(
+def _make_state(
     tmp_path: pathlib.Path,
     *,
     gr_id: str | None = None,
     client: FakeClaudeClient | None = None,
-) -> StageContext:
-    return StageContext(
+) -> StageState:
+    return StageState(
         client=client or FakeClaudeClient(),
         session_dir=tmp_path,
         gr_id=gr_id,
@@ -49,13 +38,11 @@ def _make_handoff(
     *,
     gr_id: str | None = None,
     client: FakeClaudeClient | None = None,
-) -> Handoff:
-    entry = _make_entry()
+) -> tuple[Handoff, StageState]:
     fake_client = client or FakeClaudeClient()
-    h = Handoff(entry, Client("claude", "sonnet"))
-    ctx = _make_ctx(tmp_path, gr_id=gr_id, client=fake_client)
-    h.bind(ctx)
-    return h
+    h = Handoff("handoff", Client("claude", "sonnet"))
+    state = _make_state(tmp_path, gr_id=gr_id, client=fake_client)
+    return h, state
 
 
 def _write_plan(tmp_path: pathlib.Path, text: str = "# Plan\n\nDo stuff.\n") -> None:
@@ -113,9 +100,9 @@ def test_chain_done_immediately(tmp_path, monkeypatch, test_state_root):
     monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
     monkeypatch.setenv("GR_ID", gr_id)
 
-    h = _make_handoff(tmp_path, gr_id=gr_id)
-    monkeypatch.setattr(h, "_resolve_base_ref", lambda: "abc123")
-    h.run(None)
+    h, state = _make_handoff(tmp_path, gr_id=gr_id)
+    monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
+    h.run(state)
 
     assert calls == ["handoff"]
     # boss-spec.md should have been created and plan.md restored from it
@@ -147,11 +134,11 @@ def test_next_plan_writes_plan_and_raises(tmp_path, monkeypatch, test_state_root
     monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
     monkeypatch.setenv("GR_ID", gr_id)
 
-    h = _make_handoff(tmp_path, gr_id=gr_id)
-    monkeypatch.setattr(h, "_resolve_base_ref", lambda: "abc123")
+    h, state = _make_handoff(tmp_path, gr_id=gr_id)
+    monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
 
     with pytest.raises(RunCmdFailed, match="next-plan"):
-        h.run(None)
+        h.run(state)
 
     assert (tmp_path / "plan.md").read_text(encoding="utf-8") == "# Child Plan\n"
 
@@ -174,14 +161,14 @@ def test_bail_emits_bail_and_raises(tmp_path, monkeypatch, test_state_root):
     monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
     monkeypatch.setenv("GR_ID", gr_id)
 
-    h = _make_handoff(tmp_path, gr_id=gr_id)
-    monkeypatch.setattr(h, "_resolve_base_ref", lambda: "abc123")
+    h, state = _make_handoff(tmp_path, gr_id=gr_id)
+    monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
 
     with pytest.raises(RuntimeError, match="chain halted by handoff"):
-        h.run(None)
+        h.run(state)
 
-    state = _read_state(state_dir)
-    assert state.get("bail_class") == "other"
+    state_data = _read_state(state_dir)
+    assert state_data.get("bail_class") == "other"
 
 
 # ---------------------------------------------------------------------------
@@ -206,9 +193,9 @@ def test_handoff_index_first_iteration(tmp_path, monkeypatch, test_state_root):
     monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
     monkeypatch.setenv("GR_ID", gr_id)
 
-    h = _make_handoff(tmp_path, gr_id=gr_id)
-    monkeypatch.setattr(h, "_resolve_base_ref", lambda: "abc123")
-    h.run(None)
+    h, state = _make_handoff(tmp_path, gr_id=gr_id)
+    monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
+    h.run(state)
 
     assert calls == [1]
     assert (tmp_path / "boss-spec.md").exists()
@@ -229,11 +216,11 @@ def test_handoff_nonzero_exit_raises(tmp_path, monkeypatch, test_state_root):
     monkeypatch.setattr("gremlins.stages.handoff.run", lambda *a, **kw: 1)
     monkeypatch.setenv("GR_ID", gr_id)
 
-    h = _make_handoff(tmp_path, gr_id=gr_id)
-    monkeypatch.setattr(h, "_resolve_base_ref", lambda: "abc123")
+    h, state = _make_handoff(tmp_path, gr_id=gr_id)
+    monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
 
     with pytest.raises(RuntimeError, match="handoff agent exited 1"):
-        h.run(None)
+        h.run(state)
 
 
 # ---------------------------------------------------------------------------
@@ -263,9 +250,9 @@ def test_resume_continues_from_file_index(tmp_path, monkeypatch, test_state_root
     monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
     monkeypatch.setenv("GR_ID", gr_id)
 
-    h = _make_handoff(tmp_path, gr_id=gr_id)
-    monkeypatch.setattr(h, "_resolve_base_ref", lambda: "abc123")
-    h.run(None)
+    h, state = _make_handoff(tmp_path, gr_id=gr_id)
+    monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
+    h.run(state)
 
     # Should have run handoff #2 (index derived from existing handoff-001.state.json)
     assert calls == [2]
@@ -295,8 +282,8 @@ def test_base_ref_from_state(tmp_path, monkeypatch, test_state_root):
     monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
     monkeypatch.setenv("GR_ID", gr_id)
 
-    h = _make_handoff(tmp_path, gr_id=gr_id)
+    h, state = _make_handoff(tmp_path, gr_id=gr_id)
     # Do NOT monkeypatch _resolve_base_ref — state has base_ref_name, fallback must not run
-    h.run(None)
+    h.run(state)
 
     assert captured_base == ["deadbeef1234"]

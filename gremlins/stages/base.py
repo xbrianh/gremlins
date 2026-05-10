@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast
 
 from gremlins.clients.client import Client
 from gremlins.clients.protocol import CompletedRun
+from gremlins.git import PreImplState
 
 if TYPE_CHECKING:
     from gremlins.schema import PipelineDef, StageEntry
@@ -32,7 +33,7 @@ class StageRunner(Protocol):
     def make_runner(
         self,
         entry: StageEntry,
-        ctx: StageContext,
+        state: StageState,
         spec: Client,
         scope: list[StageEntry] | None = None,
     ) -> Callable[[], None]: ...
@@ -47,12 +48,13 @@ class StageInput(NamedTuple):
 
 
 @dataclasses.dataclass
-class StageContext:
+class StageState:
     client: Client
     session_dir: pathlib.Path
     gr_id: str | None
     child_key: str | None = None
     worktree: pathlib.Path | None = None
+    impl_pre_state: PreImplState | None = None
 
     @property
     def cwd(self) -> pathlib.Path:
@@ -73,49 +75,40 @@ class Stage:
         self.model = model
         self.prompts = prompts
         self.options = options
-        self._mutable_state: StageContext | None = None
-
-    def bind(self, state: StageContext) -> None:
-        self._mutable_state = state
-
-    @property
-    def state(self) -> StageContext:
-        if self._mutable_state is None:
-            raise RuntimeError(f"stage {self.name!r} not bound")
-        return self._mutable_state
 
     def run_claude(
         self,
         prompt: str,
         *,
+        state: StageState,
         label: str,
         raw_path: pathlib.Path | None = None,
         **kw: Any,
     ) -> CompletedRun:
-        return self.state.client.run(
+        return state.client.run(
             prompt,
             label=label,
             model=self.model,
             raw_path=raw_path,
-            cwd=self.state.worktree,
+            cwd=state.worktree,
             **kw,
         )
 
-    def bail_command(self) -> str:
+    def bail_command(self, state: StageState) -> str:
         command = ["python", "-m", "gremlins.bail"]
-        if self.state.child_key:
-            command.extend(["--child-key", self.state.child_key])
+        if state.child_key:
+            command.extend(["--child-key", state.child_key])
         return shlex.join(command)
 
     def run_subprocess(
-        self, argv: list[str], **kw: Any
+        self, argv: list[str], state: StageState, **kw: Any
     ) -> subprocess.CompletedProcess[Any]:
-        kw.setdefault("cwd", str(self.state.cwd))
+        kw.setdefault("cwd", str(state.cwd))
         return cast(subprocess.CompletedProcess[Any], subprocess.run(argv, **kw))
 
     @classmethod
     def orchestration_args(cls) -> list[StageInput]:
         return []
 
-    def run(self, pipe: Any) -> Any:
+    def run(self, state: StageState) -> Any:
         raise NotImplementedError

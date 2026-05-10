@@ -18,7 +18,7 @@ from gremlins.git import (
     reset_pre_branch,
     sweep_stale_handoff_branches,
 )
-from gremlins.stages.base import Stage
+from gremlins.stages.base import Stage, StageState
 from gremlins.stages.registry import register_stage
 from gremlins.state import append_artifact, patch_state, resolve_state_file
 
@@ -33,14 +33,22 @@ class MaterializeToBranchResult:
 
 
 class MaterializeToBranch(Stage):
-    def _pre_state_from_file(self) -> PreImplState:
-        sf = resolve_state_file(self.state.gr_id)
+    def _pre_state_from_file(self, state: StageState) -> PreImplState:
+        # Check session-dir sidecar written by Implement._run_gh first.
+        sidecar = state.session_dir / ".impl-pre-state.json"
+        if sidecar.exists():
+            data: dict[str, Any] = json.loads(sidecar.read_text(encoding="utf-8"))
+            head = data.get("head") or ""
+            if head:
+                return PreImplState(head=head, branch=data.get("branch") or "")
+
+        sf = resolve_state_file(state.gr_id)
         if sf is None or not sf.exists():
             raise RuntimeError(
                 "impl_pre_state not set and no state.json found; "
                 "rewind to implement stage"
             )
-        data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
+        data = json.loads(sf.read_text(encoding="utf-8"))
         head = data.get("impl_pre_head") or ""
         if not head:
             raise RuntimeError(
@@ -49,11 +57,11 @@ class MaterializeToBranch(Stage):
             )
         return PreImplState(head=head, branch=data.get("impl_pre_branch") or "")
 
-    def run(self, pipe: Any) -> MaterializeToBranchResult:
+    def run(self, state: StageState) -> MaterializeToBranchResult:
         pre_state: PreImplState = (
-            getattr(pipe, "impl_pre_state", None) or self._pre_state_from_file()
+            state.impl_pre_state or self._pre_state_from_file(state)
         )
-        impl_cwd = str(self.state.worktree) if self.state.worktree is not None else None
+        impl_cwd = str(state.worktree) if state.worktree is not None else None
         outcome = classify_impl_outcome(pre_state, cwd=impl_cwd)
 
         if isinstance(outcome, EmptyImpl):
@@ -78,12 +86,12 @@ class MaterializeToBranch(Stage):
         sys.stdout.flush()
 
         patch_state(
-            self.state.gr_id,
+            state.gr_id,
             impl_materialized_branch=materialized_branch,
             impl_base_ref=pre_state.head,
         )
         append_artifact(
-            self.state.gr_id, {"type": "branch", "name": materialized_branch}
+            state.gr_id, {"type": "branch", "name": materialized_branch}
         )
         return MaterializeToBranchResult(
             outcome=outcome,

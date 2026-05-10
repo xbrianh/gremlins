@@ -11,7 +11,7 @@ import pytest
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.pipeline.loader import load_pipeline
 from gremlins.runner import run_stages
-from gremlins.stages.base import StageContext
+from gremlins.stages.base import StageState as StageContext
 from gremlins.stages.parallel import ParallelStage
 
 # ---------------------------------------------------------------------------
@@ -361,8 +361,7 @@ def test_parallel_sequence_child_worktree_flows() -> None:
     )
 
     def seq_runner() -> None:
-        seq_stage.bind(seq_ctx)
-        seq_stage.run(None)
+        seq_stage.run(seq_ctx)
 
     project_root = pathlib.Path.cwd()
     stages = _make_parallel_stages(

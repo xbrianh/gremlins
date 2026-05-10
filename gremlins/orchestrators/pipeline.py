@@ -17,8 +17,8 @@ from gremlins.runner import run_stages
 from gremlins.schema import PipelineDef as _PipelineData
 from gremlins.schema import StageEntry
 from gremlins.stage_clients import require_stage_spec
-from gremlins.stages.base import StageContext
-from gremlins.stages.registry import STAGE_BUILDERS, STAGE_NEEDS_PIPE
+from gremlins.stages.base import StageState
+from gremlins.stages.registry import STAGE_BUILDERS
 from gremlins.state import resolve_state_file, set_stage
 
 logger = logging.getLogger(__name__)
@@ -126,7 +126,7 @@ class StageRunner:
     def make_runner(
         self,
         entry: StageEntry,
-        ctx: StageContext,
+        state: StageState,
         spec: Client,
         scope: list[StageEntry] | None = None,
     ) -> Callable[[], None]:
@@ -141,8 +141,7 @@ class StageRunner:
             pipe.current_scope = scope_list
             try:
                 stage = builder(entry, spec, pipe)
-                stage.bind(ctx)
-                stage.run(pipe if STAGE_NEEDS_PIPE.get(entry.type) else None)
+                stage.run(state)
             finally:
                 pipe.current_scope = previous_scope
 
@@ -155,13 +154,13 @@ class StageRunner:
         built: list[tuple[str, Callable[[], None]]] = []
         for e in stages:
             stage_spec = require_stage_spec(self.stage_specs, e.name)
-            stage_ctx = StageContext(
+            stage_state = StageState(
                 client=self.get_client(stage_spec),
                 session_dir=self.session_dir,
                 gr_id=gr_id,
             )
             built.append(
-                (e.name, self.make_runner(e, stage_ctx, stage_spec, scope=stages))
+                (e.name, self.make_runner(e, stage_state, stage_spec, scope=stages))
             )
         return built
 

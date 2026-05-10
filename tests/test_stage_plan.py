@@ -7,12 +7,12 @@ import pathlib
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.stages.base import StageContext
+from gremlins.stages.base import StageState
 from gremlins.stages.plan import Plan
 
 
-def _ctx(session_dir: pathlib.Path, client: FakeClaudeClient) -> StageContext:
-    return StageContext(client=client, session_dir=session_dir, gr_id=None)
+def _state(session_dir: pathlib.Path, client: FakeClaudeClient) -> StageState:
+    return StageState(client=client, session_dir=session_dir, gr_id=None)
 
 
 def test_plan_source_file_local(tmp_path: pathlib.Path) -> None:
@@ -22,8 +22,7 @@ def test_plan_source_file_local(tmp_path: pathlib.Path) -> None:
 
     stage = Plan("plan", None, [], {}, plan=str(plan_src))
     client = FakeClaudeClient(fixtures={})
-    stage.bind(_ctx(tmp_path, client))
-    stage.run(None)
+    stage.run(_state(tmp_path, client))
 
     plan_md = tmp_path / "plan.md"
     assert plan_md.exists()
@@ -48,8 +47,7 @@ def test_plan_source_issue_ref_local(
 
     stage = Plan("plan", None, [], {}, plan="#42")
     client = FakeClaudeClient(fixtures={})
-    stage.bind(_ctx(tmp_path, client))
-    stage.run(None)
+    stage.run(_state(tmp_path, client))
 
     plan_md = tmp_path / "plan.md"
     assert plan_md.exists()
@@ -95,8 +93,7 @@ def test_plan_source_file_github(
         plan=str(plan_src),
         repo="owner/repo",
     )
-    stage.bind(_ctx(tmp_path, client))
-    stage.run(None)
+    stage.run(_state(tmp_path, client))
 
     plan_md = tmp_path / "plan.md"
     assert plan_md.exists()
@@ -126,8 +123,7 @@ def test_plan_source_issue_ref_github(
 
     stage = Plan("plan", None, [], {}, plan="#99", repo="owner/repo")
     client = FakeClaudeClient(fixtures={})
-    stage.bind(_ctx(tmp_path, client))
-    stage.run(None)
+    stage.run(_state(tmp_path, client))
 
     plan_md = tmp_path / "plan.md"
     assert plan_md.exists()
@@ -142,8 +138,7 @@ def test_plan_reuses_existing_plan_md(tmp_path: pathlib.Path) -> None:
 
     stage = Plan("plan", None, [], {})
     client = FakeClaudeClient(fixtures={})
-    stage.bind(_ctx(tmp_path, client))
-    stage.run(None)
+    stage.run(_state(tmp_path, client))
 
     assert client.calls == []
     assert plan_md.read_text() == "# Cached Plan\n"
@@ -154,8 +149,7 @@ def test_plan_without_plan_resolves_session_dir(tmp_path: pathlib.Path) -> None:
     (tmp_path / "plan.md").write_text("# Existing\n")
     stage = Plan("plan", None, [], {})
     client = FakeClaudeClient(fixtures={})
-    stage.bind(_ctx(tmp_path, client))
-    stage.run(None)
+    stage.run(_state(tmp_path, client))
     assert client.calls == []
 
 
@@ -188,8 +182,7 @@ def test_resolve_issue_source_empty_repo_writes_url(
         lambda _id, **kw: captured.update(kw),
     )
     stage = Plan("plan", None, [], {}, plan="#355", repo="")
-    stage.bind(_ctx(tmp_path, FakeClaudeClient(fixtures={})))
-    stage.run(None)
+    stage.run(_state(tmp_path, FakeClaudeClient(fixtures={})))
     assert captured.get("issue_url") == "https://github.com/owner/repo/issues/355"
     assert captured.get("issue_num") == "355"
 
@@ -205,8 +198,7 @@ def test_resolve_issue_source_matching_repo_writes_url(
         lambda _id, **kw: captured.update(kw),
     )
     stage = Plan("plan", None, [], {}, plan="#355", repo="owner/repo")
-    stage.bind(_ctx(tmp_path, FakeClaudeClient(fixtures={})))
-    stage.run(None)
+    stage.run(_state(tmp_path, FakeClaudeClient(fixtures={})))
     assert captured.get("issue_url") == "https://github.com/owner/repo/issues/355"
     assert captured.get("issue_num") == "355"
 
@@ -222,7 +214,6 @@ def test_resolve_issue_source_cross_repo_clears_url(
         lambda _id, **kw: captured.update(kw),
     )
     stage = Plan("plan", None, [], {}, plan="owner/b#355", repo="owner/a")
-    stage.bind(_ctx(tmp_path, FakeClaudeClient(fixtures={})))
-    stage.run(None)
+    stage.run(_state(tmp_path, FakeClaudeClient(fixtures={})))
     assert captured.get("issue_url") == ""
     assert captured.get("issue_num") == ""

@@ -1530,8 +1530,9 @@ def test_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
 
     captured_stage = {}
 
-    def record_wait_copilot(self, pipe):
+    def record_wait_copilot(self, state):
         captured_stage["stage"] = self
+        captured_stage["state"] = state
         return "APPROVED"
 
     monkeypatch.setattr(
@@ -1556,7 +1557,7 @@ def test_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
 
     stage = captured_stage["stage"]
     assert stage.repo == "owner/repo"
-    assert stage.state.session_dir == session_dir
+    assert captured_stage["state"].session_dir == session_dir
     # pr artifact written to state.json by OpenGitHubPR; pr_num derived from it in run()
     state = json.loads(state_file.read_text())
     pr_artifacts = [a for a in state.get("artifacts", []) if a.get("type") == "pr"]
@@ -1600,8 +1601,9 @@ def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
 
     captured_stage = {}
 
-    def record_wait_ci(self, pipe):
+    def record_wait_ci(self, state):
         captured_stage["stage"] = self
+        captured_stage["state"] = state
 
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", record_wait_ci)
 
@@ -1623,7 +1625,7 @@ def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
 
     stage = captured_stage["stage"]
     assert stage.model == "claude-opus-4-7"
-    assert stage.state.session_dir == session_dir
+    assert captured_stage["state"].session_dir == session_dir
     # pr artifact written to state.json by OpenGitHubPR; read from state in WaitCI.run()
     state = json.loads(state_file.read_text())
     pr_artifacts = [a for a in state.get("artifacts", []) if a.get("type") == "pr"]
@@ -1787,8 +1789,9 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
 
     captured_stage = {}
 
-    def record_verify(self, pipe):
+    def record_verify(self, state):
         captured_stage["stage"] = self
+        captured_stage["state"] = state
 
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", record_verify)
 
@@ -1811,7 +1814,7 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
     stage = captured_stage["stage"]
     assert stage.model == "claude-opus-4-7"
     assert stage.options.get("cmds") == ["make check", "make test"]
-    assert stage.state.session_dir == session_dir
+    assert captured_stage["state"].session_dir == session_dir
 
 
 def test_resume_from_verify(tmp_path, monkeypatch):
