@@ -145,6 +145,7 @@ def _build_open_github_pr(
         entry.prompts,
         entry.options,
         issue_url=read_state_str(runner.state_file, "issue_url"),
+        base_ref=entry.options.get("base_ref") or None,
     )
 
 
