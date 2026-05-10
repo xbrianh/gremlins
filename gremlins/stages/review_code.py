@@ -8,7 +8,13 @@ from typing import Any
 
 from gremlins.clients.protocol import ClaudeClient
 from gremlins.stages import Stage, register_stage
-from gremlins.state import check_bail, emit_bail, pipeline_uses_gh, read_pr_url, set_stage
+from gremlins.state import (
+    check_bail,
+    emit_bail,
+    pipeline_uses_gh,
+    read_pr_url,
+    set_stage,
+)
 
 logger = logging.getLogger(__name__)
 
