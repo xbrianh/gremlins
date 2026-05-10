@@ -539,6 +539,8 @@ def launch(
             "stage_inputs": stage_inputs,
             "base_ref_name": base_ref_name,
             "base_ref_sha": base_ref_sha,
+            "issue_url": str(issue_data.get("url") or "") if issue_data else "",
+            "issue_num": str(issue_data.get("number") or "") if issue_data else "",
         }
         _write_state(state_dir, state)
 

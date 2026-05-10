@@ -1128,3 +1128,30 @@ def test_launch_boss_plan_issue_ref_materializes_plan_md(lenv, monkeypatch):
 
     assert plan_md.exists(), f"plan.md not found at {plan_md}"
     assert plan_md.read_text(encoding="utf-8").strip() == issue_body.strip()
+
+
+def test_launch_plan_issue_ref_writes_issue_url_and_num(lenv, monkeypatch):
+    """--plan #N populates issue_url and issue_num in state.json from fetched issue data."""
+    launcher = _launcher()
+
+    monkeypatch.setattr(
+        launcher,
+        "_fetch_issue",
+        lambda plan: {
+            "title": "My Plan",
+            "body": "# My Plan\n\nDo the thing.",
+            "number": 378,
+            "url": "https://github.com/owner/repo/issues/378",
+        },
+    )
+
+    class _Proc:
+        pid = 42001
+
+    monkeypatch.setattr(launcher, "_spawn_pipeline", lambda *args, **kwargs: _Proc())
+
+    gr_id = launcher.launch("boss", plan="#378", project_root=str(lenv.repo))
+    state = _read_state(_gremlins_state_root(lenv) / gr_id)
+
+    assert state["issue_url"] == "https://github.com/owner/repo/issues/378"
+    assert state["issue_num"] == "378"
