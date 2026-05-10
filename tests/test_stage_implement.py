@@ -30,7 +30,13 @@ def _make_state(
     is_gh: bool = False,
 ) -> tuple[Implement, StageState]:
     stage = Implement(
-        "implement", "sonnet", prompts or [], {}, is_git=is_git, spec_text=spec_text, is_gh=is_gh
+        "implement",
+        "sonnet",
+        prompts or [],
+        {},
+        is_git=is_git,
+        spec_text=spec_text,
+        is_gh=is_gh,
     )
     client = FakeClaudeClient(fixtures={"implement": MINIMAL_EVENTS})
     state = StageState(client=client, session_dir=tmp_path, gr_id=None)
@@ -128,7 +134,9 @@ def test_gh_plan_source_label_with_issue_num(
     monkeypatch.setattr(
         "gremlins.stages.implement.resolve_state_file", lambda gr_id=None: state_file
     )
-    stage, state = _make_state(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH], is_gh=True)
+    stage, state = _make_state(
+        tmp_path, plan_text="body", prompts=[_TEMPLATE_GH], is_gh=True
+    )
     with (
         patch(
             "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
@@ -144,7 +152,9 @@ def test_gh_plan_source_label_with_issue_num(
 
 
 def test_gh_plan_source_label_without_issue_num(tmp_path: pathlib.Path) -> None:
-    stage, state = _make_state(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH], is_gh=True)
+    stage, state = _make_state(
+        tmp_path, plan_text="body", prompts=[_TEMPLATE_GH], is_gh=True
+    )
     with (
         patch(
             "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
@@ -178,7 +188,9 @@ def test_local_git_raises_on_divergent_head(
 
 
 def test_gh_raises_on_empty_impl(tmp_path: pathlib.Path) -> None:
-    stage, state = _make_state(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH], is_gh=True)
+    stage, state = _make_state(
+        tmp_path, plan_text="body", prompts=[_TEMPLATE_GH], is_gh=True
+    )
     with (
         patch(
             "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
@@ -193,7 +205,9 @@ def test_gh_raises_on_empty_impl(tmp_path: pathlib.Path) -> None:
 
 
 def test_gh_raises_on_divergent_head(tmp_path: pathlib.Path) -> None:
-    stage, state = _make_state(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH], is_gh=True)
+    stage, state = _make_state(
+        tmp_path, plan_text="body", prompts=[_TEMPLATE_GH], is_gh=True
+    )
     with (
         patch(
             "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE

@@ -302,5 +302,3 @@ def test_stage_builders_registry_covers_all_known_types() -> None:
         "parallel",
     }
     assert expected <= set(STAGE_BUILDERS)
-
-

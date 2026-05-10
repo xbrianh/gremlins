@@ -196,9 +196,7 @@ class Implement(Stage):
             encoding="utf-8",
         )
         if state.gr_id:
-            patch_state(
-                state.gr_id, impl_pre_head=pre.head, impl_pre_branch=pre.branch
-            )
+            patch_state(state.gr_id, impl_pre_head=pre.head, impl_pre_branch=pre.branch)
 
         plan_text = (state.session_dir / "plan.md").read_text(encoding="utf-8")
         template = "\n\n".join(self.prompts).rstrip()

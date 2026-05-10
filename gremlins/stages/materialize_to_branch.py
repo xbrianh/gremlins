@@ -58,8 +58,8 @@ class MaterializeToBranch(Stage):
         return PreImplState(head=head, branch=data.get("impl_pre_branch") or "")
 
     def run(self, state: StageState) -> MaterializeToBranchResult:
-        pre_state: PreImplState = (
-            state.impl_pre_state or self._pre_state_from_file(state)
+        pre_state: PreImplState = state.impl_pre_state or self._pre_state_from_file(
+            state
         )
         impl_cwd = str(state.worktree) if state.worktree is not None else None
         outcome = classify_impl_outcome(pre_state, cwd=impl_cwd)
@@ -90,9 +90,7 @@ class MaterializeToBranch(Stage):
             impl_materialized_branch=materialized_branch,
             impl_base_ref=pre_state.head,
         )
-        append_artifact(
-            state.gr_id, {"type": "branch", "name": materialized_branch}
-        )
+        append_artifact(state.gr_id, {"type": "branch", "name": materialized_branch})
         return MaterializeToBranchResult(
             outcome=outcome,
             materialized_branch=materialized_branch,

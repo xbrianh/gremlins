@@ -25,7 +25,14 @@ def _make_stage(
         [style_content, prompt_text] if style_content is not None else [prompt_text]
     )
     stage = ReviewCode(
-        "ghreview", "sonnet", prompts, {}, plan_text="", is_git=True, pr_url=pr_url, is_gh=True
+        "ghreview",
+        "sonnet",
+        prompts,
+        {},
+        plan_text="",
+        is_git=True,
+        pr_url=pr_url,
+        is_gh=True,
     )
     client = FakeClaudeClient(fixtures={"ghreview": MINIMAL_EVENTS})
     state = StageState(client=client, session_dir=tmp_path, gr_id=gr_id)

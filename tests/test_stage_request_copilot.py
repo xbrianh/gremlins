@@ -11,7 +11,9 @@ from gremlins.stages.base import StageState
 from gremlins.stages.request_copilot import RequestCopilot
 
 
-def _make_stage(tmp_path, *, repo: str, pr_num: str) -> tuple[RequestCopilot, StageState]:
+def _make_stage(
+    tmp_path, *, repo: str, pr_num: str
+) -> tuple[RequestCopilot, StageState]:
     stage = RequestCopilot("request-copilot", None, [], {}, repo=repo, pr_num=pr_num)
     state = StageState(
         client=FakeClaudeClient(fixtures={}),

@@ -279,4 +279,7 @@ def test_parallel_child_fix_prompt_uses_child_key_bail_command(tmp_path):
     with pytest.raises(RuntimeError, match="exhausted 2 attempts"):
         stage.run(state)
 
-    assert "python -m gremlins.bail --child-key verify-child" in state.client.calls[0].prompt
+    assert (
+        "python -m gremlins.bail --child-key verify-child"
+        in state.client.calls[0].prompt
+    )

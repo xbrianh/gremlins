@@ -69,7 +69,9 @@ def test_issue_num_adds_closes_clause(tmp_path: pathlib.Path) -> None:
 
 def test_no_issue_url_skips_closes(tmp_path: pathlib.Path) -> None:
     stage, state = _make_state(tmp_path, gr_id="test-gr", issue_url="")
-    sf = _write_state(tmp_path, {"issue_url": "", "impl_materialized_branch": "impl/feature-abc123"})
+    sf = _write_state(
+        tmp_path, {"issue_url": "", "impl_materialized_branch": "impl/feature-abc123"}
+    )
     with (
         patch("gremlins.stages.open_github_pr.resolve_state_file", return_value=sf),
         patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
@@ -109,9 +111,7 @@ def test_run_records_pr_artifact(tmp_path: pathlib.Path) -> None:
     artifact_calls: list[tuple] = []
     with (
         patch("gremlins.stages.open_github_pr.resolve_state_file", return_value=sf),
-        patch(
-            "gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL
-        ),
+        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
         patch(
             "gremlins.stages.open_github_pr.append_artifact",
             side_effect=lambda gr_id, artifact: artifact_calls.append(
@@ -143,7 +143,11 @@ def test_stacked_pr_uses_prior_pr_branch(tmp_path: pathlib.Path) -> None:
     """For child N>1, PR base is the previous child's PR branch."""
     sf = _write_state(
         tmp_path,
-        {"base_ref_name": "main", "impl_materialized_branch": "gremlin/child-2", "issue_url": ""},
+        {
+            "base_ref_name": "main",
+            "impl_materialized_branch": "gremlin/child-2",
+            "issue_url": "",
+        },
     )
     stage, state = _make_state_with_gr(tmp_path)
     prompts_seen: list[str] = []
@@ -218,7 +222,11 @@ def test_first_child_uses_base_ref_name(tmp_path: pathlib.Path) -> None:
     """For child 1 (no previous artifact branch), PR base is base_ref_name."""
     sf = _write_state(
         tmp_path,
-        {"base_ref_name": "main", "impl_materialized_branch": "gremlin/child-1", "issue_url": ""},
+        {
+            "base_ref_name": "main",
+            "impl_materialized_branch": "gremlin/child-1",
+            "issue_url": "",
+        },
     )
     stage, state = _make_state_with_gr(tmp_path)
     prompts_seen: list[str] = []
@@ -261,7 +269,11 @@ def test_explicit_base_ref_used_when_no_prior_pr(tmp_path: pathlib.Path) -> None
     """Stage-level base_ref is used when there is no prior PR artifact branch."""
     sf = _write_state(
         tmp_path,
-        {"base_ref_name": "main", "impl_materialized_branch": "gremlin/child-1", "issue_url": ""},
+        {
+            "base_ref_name": "main",
+            "impl_materialized_branch": "gremlin/child-1",
+            "issue_url": "",
+        },
     )
     stage = OpenGitHubPR("open-pr", "sonnet", [], {}, base_ref="feature-base")
     client = FakeClaudeClient(fixtures={"open-github-pr": MINIMAL_EVENTS})
@@ -292,7 +304,11 @@ def test_last_pr_branch_takes_priority_over_base_ref(tmp_path: pathlib.Path) -> 
     """last_pr_branch takes priority over stage-level base_ref when stacking."""
     sf = _write_state(
         tmp_path,
-        {"base_ref_name": "main", "impl_materialized_branch": "gremlin/child-2", "issue_url": ""},
+        {
+            "base_ref_name": "main",
+            "impl_materialized_branch": "gremlin/child-2",
+            "issue_url": "",
+        },
     )
     stage = OpenGitHubPR("open-pr", "sonnet", [], {}, base_ref="feature-base")
     client = FakeClaudeClient(fixtures={"open-github-pr": MINIMAL_EVENTS})
@@ -327,7 +343,11 @@ def test_record_child_pr_appends_pr_artifact(tmp_path: pathlib.Path) -> None:
     """After opening a PR, a pr artifact with url and branch is appended."""
     sf = _write_state(
         tmp_path,
-        {"base_ref_name": "main", "impl_materialized_branch": "gremlin/abc-child-1", "issue_url": ""},
+        {
+            "base_ref_name": "main",
+            "impl_materialized_branch": "gremlin/abc-child-1",
+            "issue_url": "",
+        },
     )
     stage, state = _make_state_with_gr(tmp_path)
     artifact_calls: list[tuple] = []

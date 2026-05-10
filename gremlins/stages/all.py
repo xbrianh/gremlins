@@ -155,7 +155,13 @@ def _build_ghreview(entry: StageEntry, spec: Client, _runner: StageRunner) -> An
             f"stage {entry.name!r}: type 'ghreview' requires a 'prompt' field in the pipeline YAML"
         )
     return review_code.ReviewCode(
-        entry.name, spec.model, entry.prompts, entry.options, plan_text="", is_git=True, is_gh=True
+        entry.name,
+        spec.model,
+        entry.prompts,
+        entry.options,
+        plan_text="",
+        is_git=True,
+        is_gh=True,
     )
 
 

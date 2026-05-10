@@ -130,8 +130,7 @@ class ReviewCode(Stage):
                 context=code_context,
                 where_field="**File:** `path/to/file.ext:<line>`",
                 label=f"{self.name}:{self.model}",
-                raw_path=state.session_dir
-                / f"stream-{self.name}-{self.model}.jsonl",
+                raw_path=state.session_dir / f"stream-{self.name}-{self.model}.jsonl",
                 cwd=state.worktree,
             )
             set_stage(state.gr_id, self.name, {"model": f"done ({self.model})"})

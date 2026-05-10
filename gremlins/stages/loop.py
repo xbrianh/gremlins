@@ -106,9 +106,7 @@ class LoopStage(Stage):
         except LoopExhausted:
             raise
         except (SystemExit, Exception) as exc:
-            if not exhausted and not _bail_already_set(
-                state.gr_id, state.child_key
-            ):
+            if not exhausted and not _bail_already_set(state.gr_id, state.child_key):
                 emit_bail(
                     state.gr_id,
                     "other",

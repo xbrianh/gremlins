@@ -71,7 +71,9 @@ def _make_getter(responses: list[tuple[list[dict[str, Any]], str]]):
 def test_no_checks_skips(tmp_path: pathlib.Path) -> None:
     client = FakeClaudeClient(fixtures={})
     getter = _make_getter([([], "")])
-    stage, state = _make_stage(client, tmp_path, startup_grace_secs=0, checks_getter=getter)
+    stage, state = _make_stage(
+        client, tmp_path, startup_grace_secs=0, checks_getter=getter
+    )
     stage.run(state)
     assert client.calls == []
 

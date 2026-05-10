@@ -24,7 +24,9 @@ def _make_stage(
     prompts = (
         [style_content, prompt_text] if style_content is not None else [prompt_text]
     )
-    stage = AddressCode("ghaddress", "sonnet", prompts, {}, is_git=True, pr_url=pr_url, is_gh=True)
+    stage = AddressCode(
+        "ghaddress", "sonnet", prompts, {}, is_git=True, pr_url=pr_url, is_gh=True
+    )
     client = FakeClaudeClient(fixtures={"ghaddress": MINIMAL_EVENTS})
     state = StageState(client=client, session_dir=tmp_path, gr_id=gr_id)
     return stage, client, state
