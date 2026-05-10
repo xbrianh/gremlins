@@ -120,7 +120,7 @@ def _write_state(tmp_path: pathlib.Path, data: dict) -> pathlib.Path:
 
 def test_stacked_pr_uses_prior_pr_branch(tmp_path: pathlib.Path) -> None:
     """For child N>1, PR base is the previous child's PR branch."""
-    _write_state(tmp_path, {"base_ref_name": "main"})
+    _write_state(tmp_path, {"base_ref_name": "main", "impl_materialized_branch": "gremlin/child-2"})
     stage, ctx = _make_stage_with_gr(tmp_path)
     prompts_seen: list[str] = []
     with (
@@ -163,6 +163,7 @@ def test_single_pr_with_branch_artifact_uses_base_ref_name(
         tmp_path,
         {
             "base_ref_name": "main",
+            "impl_materialized_branch": "ghgremlin-impl-foo-abc123",
             "artifacts": [{"type": "branch", "name": "ghgremlin-impl-foo-abc123"}],
         },
     )
@@ -196,7 +197,7 @@ def test_single_pr_with_branch_artifact_uses_base_ref_name(
 
 def test_first_child_uses_base_ref_name(tmp_path: pathlib.Path) -> None:
     """For child 1 (no previous artifact branch), PR base is base_ref_name."""
-    _write_state(tmp_path, {"base_ref_name": "main"})
+    _write_state(tmp_path, {"base_ref_name": "main", "impl_materialized_branch": "gremlin/child-1"})
     stage, ctx = _make_stage_with_gr(tmp_path)
     prompts_seen: list[str] = []
     with (

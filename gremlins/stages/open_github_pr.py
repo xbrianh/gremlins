@@ -74,6 +74,10 @@ class OpenGitHubPR(Stage):
             text_result=completed.text_result,
         )
         impl_branch = read_state_str(sf, "impl_materialized_branch")
+        if sf is not None and not impl_branch:
+            raise RuntimeError(
+                "impl_materialized_branch is empty; materialize-to-branch must run before open-github-pr"
+            )
         append_artifact(
             self.state.gr_id, {"type": "pr", "url": pr_url, "branch": impl_branch}
         )
