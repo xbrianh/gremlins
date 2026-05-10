@@ -7,12 +7,12 @@ import pathlib
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.stages.base import StageState
+from gremlins.stages.base import RuntimeState
 from gremlins.stages.sequence import SequenceStage
 
 
-def _state() -> StageState:
-    return StageState(
+def _state() -> RuntimeState:
+    return RuntimeState(
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
         gr_id=None,
@@ -20,8 +20,8 @@ def _state() -> StageState:
 
 
 def _make_sequence(
-    runners: list, parent_state: StageState | None = None
-) -> tuple[SequenceStage, list, StageState]:
+    runners: list, parent_state: RuntimeState | None = None
+) -> tuple[SequenceStage, list, RuntimeState]:
     body = [(_state(), fn) for fn in runners]
     stage = SequenceStage("seq", body=body)
     return stage, body, parent_state or _state()

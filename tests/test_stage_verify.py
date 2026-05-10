@@ -10,7 +10,7 @@ import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.stages.base import StageState
+from gremlins.stages.base import RuntimeState
 from gremlins.stages.verify import Verify
 
 _VERIFY_PROMPT_PATH = (
@@ -30,7 +30,7 @@ def _make_stage(
     fix_model: str = "sonnet",
     is_git: bool = True,
     commit_after_fix: bool = False,
-) -> tuple[Verify, StageState]:
+) -> tuple[Verify, RuntimeState]:
     if cmds is None:
         cmds = ["true"]
     if client is None:
@@ -47,7 +47,7 @@ def _make_stage(
         options,
         is_git=is_git,
     )
-    state = StageState(
+    state = RuntimeState(
         client=client, session_dir=tmp_path, gr_id=None, worktree=tmp_path
     )
     return stage, state
@@ -201,7 +201,7 @@ def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
         options,
         is_git=True,
     )
-    state = StageState(
+    state = RuntimeState(
         client=client, session_dir=tmp_path, gr_id=gr_id, worktree=tmp_path
     )
 
@@ -268,7 +268,7 @@ def test_parallel_child_fix_prompt_uses_child_key_bail_command(tmp_path):
     ]
     options = {"cmds": ["false"], "max_attempts": 2, "commit_after_fix": False}
     stage = Verify("verify", "sonnet", prompts, options, is_git=True)
-    state = StageState(
+    state = RuntimeState(
         client=client,
         session_dir=tmp_path,
         gr_id="gr-verify",

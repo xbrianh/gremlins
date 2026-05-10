@@ -11,7 +11,7 @@ from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.git import DivergentHead, EmptyImpl, HeadAdvanced, PreImplState
-from gremlins.stages.base import StageState
+from gremlins.stages.base import RuntimeState
 from gremlins.stages.implement import Implement
 
 _TEMPLATE_LOCAL = "plan: {plan_text}{spec_block}{impl_commit_instr}"
@@ -28,7 +28,7 @@ def _make_state(
     spec_text: str = "",
     prompts: list[str] | None = None,
     is_gh: bool = False,
-) -> tuple[Implement, StageState]:
+) -> tuple[Implement, RuntimeState]:
     stage = Implement(
         "implement",
         "sonnet",
@@ -39,7 +39,7 @@ def _make_state(
         is_gh=is_gh,
     )
     client = FakeClaudeClient(fixtures={"implement": MINIMAL_EVENTS})
-    state = StageState(client=client, session_dir=tmp_path, gr_id=None)
+    state = RuntimeState(client=client, session_dir=tmp_path, gr_id=None)
     (tmp_path / "plan.md").write_text(plan_text, encoding="utf-8")
     return stage, state
 

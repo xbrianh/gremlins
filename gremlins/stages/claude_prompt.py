@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from gremlins.stages.base import Stage, StageState
+from gremlins.stages.base import Stage, RuntimeState
 from gremlins.stages.registry import register_stage
 from gremlins.state import check_bail
 
 
 class ClaudePrompt(Stage):
-    def run(self, state: StageState) -> None:
+    def run(self, state: RuntimeState) -> None:
         prompt = "\n\n".join(self.prompts).rstrip()
         self.run_claude(
             prompt,

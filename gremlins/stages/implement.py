@@ -14,7 +14,7 @@ from gremlins.git import (
     record_pre_impl_state,
 )
 from gremlins.prompts import BUNDLED_PROMPT_DIR
-from gremlins.stages.base import Stage, StageState
+from gremlins.stages.base import Stage, RuntimeState
 from gremlins.stages.registry import register_stage
 from gremlins.state import patch_state, resolve_state_file
 
@@ -99,18 +99,18 @@ class Implement(Stage):
         self._cwd = cwd
         self.is_gh = is_gh
 
-    def _impl_cwd(self, state: StageState) -> str | None:
+    def _impl_cwd(self, state: RuntimeState) -> str | None:
         return self._cwd or (
             str(state.worktree) if state.worktree is not None else None
         )
 
-    def run(self, state: StageState) -> None:
+    def run(self, state: RuntimeState) -> None:
         if self.is_gh:
             self._run_gh(state)
         else:
             self._run_local(state)
 
-    def _run_local(self, state: StageState) -> None:
+    def _run_local(self, state: RuntimeState) -> None:
         cwd_arg = str(state.worktree) if state.worktree is not None else None
         pre = None
         pre_sentinel: pathlib.Path | None = None
@@ -161,7 +161,7 @@ class Implement(Stage):
             if not changes_outside_git(pre_sentinel, state.session_dir):
                 raise RuntimeError("implementation stage produced no changes; aborting")
 
-    def _run_gh(self, state: StageState) -> None:
+    def _run_gh(self, state: RuntimeState) -> None:
         state_file = resolve_state_file(state.gr_id)
         issue_num = ""
         if state_file and state_file.exists():

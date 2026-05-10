@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import pathlib
 from unittest.mock import patch
 
 import pytest
 
 from gremlins.git import DivergentHead, EmptyImpl, HeadAdvanced, PreImplState
-from gremlins.stages.base import StageState
+from gremlins.stages.base import RuntimeState
 from gremlins.stages.materialize_to_branch import (
     MaterializeToBranch,
     MaterializeToBranchResult,
@@ -22,19 +21,15 @@ def _make_state(
     tmp_path: pathlib.Path,
     gr_id: str | None = None,
     pre_state: PreImplState | None = PRE_STATE,
-) -> tuple[MaterializeToBranch, StageState]:
+) -> tuple[MaterializeToBranch, RuntimeState]:
     stage = MaterializeToBranch("materialize-to-branch", None, [], {})
     from gremlins.clients.fake import FakeClaudeClient
 
-    if pre_state is not None:
-        (tmp_path / ".impl-pre-state.json").write_text(
-            json.dumps({"head": pre_state.head, "branch": pre_state.branch}),
-            encoding="utf-8",
-        )
-    state = StageState(
+    state = RuntimeState(
         client=FakeClaudeClient(),
         session_dir=tmp_path,
         gr_id=gr_id,
+        impl_pre_state=pre_state,
     )
     return stage, state
 
@@ -88,25 +83,16 @@ def test_divergent_head_raises(tmp_path: pathlib.Path) -> None:
             stage.run(state)
 
 
-def test_none_pre_state_no_state_file_raises(tmp_path: pathlib.Path) -> None:
-    # gr_id=None → resolve_state_file returns None → RuntimeError
+def test_none_pre_state_raises(tmp_path: pathlib.Path) -> None:
     stage, state = _make_state(tmp_path, gr_id=None, pre_state=None)
     with pytest.raises(RuntimeError, match="rewind to implement"):
         stage.run(state)
 
 
-def test_none_pre_state_reads_from_state_json(tmp_path: pathlib.Path) -> None:
-    state_file = tmp_path / "state.json"
-    state_file.write_text(
-        json.dumps({"impl_pre_head": "feed1234", "impl_pre_branch": "feat/x"}),
-        encoding="utf-8",
-    )
-    stage, state = _make_state(tmp_path, gr_id="test-gr", pre_state=None)
+def test_pre_state_from_state_json(tmp_path: pathlib.Path) -> None:
+    pre = PreImplState(head="feed1234", branch="feat/x")
+    stage, state = _make_state(tmp_path, gr_id="test-gr", pre_state=pre)
     with (
-        patch(
-            "gremlins.stages.materialize_to_branch.resolve_state_file",
-            return_value=state_file,
-        ),
         patch(
             "gremlins.stages.materialize_to_branch.classify_impl_outcome",
             return_value=HeadAdvanced(commit_count=1),
@@ -126,17 +112,9 @@ def test_none_pre_state_reads_from_state_json(tmp_path: pathlib.Path) -> None:
 
 
 def test_none_pre_state_missing_head_raises(tmp_path: pathlib.Path) -> None:
-    state_file = tmp_path / "state.json"
-    state_file.write_text(json.dumps({}), encoding="utf-8")
     stage, state = _make_state(tmp_path, gr_id="test-gr", pre_state=None)
-    with (
-        patch(
-            "gremlins.stages.materialize_to_branch.resolve_state_file",
-            return_value=state_file,
-        ),
-    ):
-        with pytest.raises(RuntimeError, match="impl_pre_head missing"):
-            stage.run(state)
+    with pytest.raises(RuntimeError, match="rewind to implement"):
+        stage.run(state)
 
 
 def test_run_writes_to_state_json(tmp_path: pathlib.Path) -> None:
@@ -188,8 +166,6 @@ def test_result_base_ref_from_pre_state(tmp_path: pathlib.Path) -> None:
 
 def test_head_advanced_records_branch_artifact(tmp_path: pathlib.Path) -> None:
     """When HeadAdvanced, the materialized branch is recorded as a branch artifact."""
-    state_file = tmp_path / "state.json"
-    state_file.write_text(json.dumps({"impl_pre_head": "abc123"}), encoding="utf-8")
     stage, state = _make_state(tmp_path, gr_id="test-gr")
     artifact_calls: list[tuple[str | None, dict[str, str]]] = []
 
@@ -208,10 +184,6 @@ def test_head_advanced_records_branch_artifact(tmp_path: pathlib.Path) -> None:
         ),
         patch("gremlins.stages.materialize_to_branch.reset_pre_branch"),
         patch("gremlins.stages.materialize_to_branch.sweep_stale_handoff_branches"),
-        patch(
-            "gremlins.stages.materialize_to_branch.resolve_state_file",
-            return_value=state_file,
-        ),
         patch("gremlins.stages.materialize_to_branch.patch_state"),
         patch(
             "gremlins.stages.materialize_to_branch.append_artifact",

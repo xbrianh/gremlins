@@ -12,7 +12,7 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
-from gremlins.stages.base import StageState
+from gremlins.stages.base import RuntimeState
 from gremlins.stages.compound import CompoundStage
 from gremlins.utils import proc
 
@@ -32,7 +32,7 @@ class ParallelStage(CompoundStage):
     def __init__(
         self,
         name: str,
-        child_runners: list[tuple[str, StageState, Callable[[], None]]],
+        child_runners: list[tuple[str, RuntimeState, Callable[[], None]]],
         *,
         max_concurrent: int | None,
         cancel_on_bail: bool,
@@ -63,14 +63,14 @@ class ParallelStage(CompoundStage):
             project_root=self._project_root,
         )
 
-    def run(self, state: StageState) -> None:  # noqa: ARG002
+    def run(self, state: RuntimeState) -> None:  # noqa: ARG002
         for _, fn in self.build_runtime_stages():
             fn()
 
 
 def _parallel_stages(
     group_name: str,
-    child_runners: list[tuple[str, StageState, Callable[[], None]]],
+    child_runners: list[tuple[str, RuntimeState, Callable[[], None]]],
     *,
     max_concurrent: int | None,
     set_stage_fn: Callable[[str], None],

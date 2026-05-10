@@ -10,7 +10,7 @@ from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.pipeline.loader import load_pipeline
 from gremlins.stages import implement, plan
 from gremlins.stages.address_code import AddressCode
-from gremlins.stages.base import StageState
+from gremlins.stages.base import RuntimeState
 from gremlins.stages.implement import _render_spec_block
 from gremlins.stages.review_code import ReviewCode
 
@@ -27,7 +27,7 @@ def test_local_yaml_loads_and_validates(tmp_path):
 
 
 def _make_state(client, session_dir, *, gr_id=None):
-    return StageState(client=client, session_dir=session_dir, gr_id=gr_id)
+    return RuntimeState(client=client, session_dir=session_dir, gr_id=gr_id)
 
 
 def _init_git_repo(path: pathlib.Path) -> None:
@@ -370,7 +370,7 @@ def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
     worktree = tmp_path / "wt"
     worktree.mkdir()
     stage = _make_review_code_stage(client, tmp_path)
-    state = StageState(
+    state = RuntimeState(
         client=client,
         session_dir=tmp_path,
         gr_id=None,

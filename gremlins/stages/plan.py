@@ -12,9 +12,9 @@ import sys
 from typing import Any
 
 from gremlins.gh_utils import extract_gh_url, get_repo, parse_issue_ref, view_issue
-from gremlins.stages.base import Stage, StageInput, StageState
+from gremlins.stages.base import RuntimeState, Stage, StageInput
 from gremlins.stages.registry import register_stage
-from gremlins.state import patch_state, read_state_str, resolve_state_file
+from gremlins.state import patch_state, resolve_state_file
 
 logger = logging.getLogger(__name__)
 
@@ -66,13 +66,11 @@ class Plan(Stage):
             ),
         ]
 
-    def run(self, state: StageState) -> None:
+    def run(self, state: RuntimeState) -> None:
         plan_md = state.session_dir / "plan.md"
 
         if plan_md.exists() and plan_md.stat().st_size > 0:
-            state_file = resolve_state_file(state.gr_id)
-            issue_num = read_state_str(state_file, "issue_num")
-            label = f" (issue #{issue_num})" if issue_num else ""
+            label = f" (issue #{state.issue_num})" if state.issue_num else ""
             logger.info("[1/8] plan resumed from snapshot: %s%s", plan_md, label)
             return
 
@@ -86,10 +84,9 @@ class Plan(Stage):
 
         self._run_agent(plan_md, state)
 
-    def _run_agent(self, plan_md: pathlib.Path, state: StageState) -> None:
+    def _run_agent(self, plan_md: pathlib.Path, state: RuntimeState) -> None:
         if self.repo:
-            state_file = resolve_state_file(state.gr_id)
-            base_ref_name = read_state_str(state_file, "base_ref_name")
+            base_ref_name = state.base_ref_name
             plan_prompt = (
                 "\n\n".join(self.prompts)
                 .rstrip()
@@ -135,7 +132,7 @@ class Plan(Stage):
                 raise RuntimeError(f"plan stage did not produce {plan_md}{detail}")
 
     def _resolve_file_source(
-        self, path: str, plan_md: pathlib.Path, state: StageState
+        self, path: str, plan_md: pathlib.Path, state: RuntimeState
     ) -> None:
         src = pathlib.Path(path)
         if src.stat().st_size == 0:
@@ -206,7 +203,7 @@ class Plan(Stage):
         self._update_description(plan_md, issue_title=issue_title, state=state)
 
     def _resolve_issue_source(
-        self, ref: str, plan_md: pathlib.Path, state: StageState
+        self, ref: str, plan_md: pathlib.Path, state: RuntimeState
     ) -> None:
         target_repo, issue_ref = parse_issue_ref(ref, self.repo or "")
         if issue_ref is None:
@@ -252,7 +249,7 @@ class Plan(Stage):
         self._update_description(plan_md, issue_title=issue_title, state=state)
 
     def _update_description(
-        self, plan_md: pathlib.Path, *, issue_title: str = "", state: StageState
+        self, plan_md: pathlib.Path, *, issue_title: str = "", state: RuntimeState
     ) -> None:
         state_file = resolve_state_file(state.gr_id)
         if state_file is None or not state_file.exists():

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from gremlins.stages.base import Stage, StageState
+from gremlins.stages.base import Stage, RuntimeState
 from gremlins.stages.registry import register_stage
 from gremlins.state import read_pr_num
 
@@ -24,7 +24,7 @@ class RequestCopilot(Stage):
         self._repo = repo
         self._pr_num = pr_num
 
-    def run(self, state: StageState) -> None:
+    def run(self, state: RuntimeState) -> None:
         repo = self._repo
         pr_num = self._pr_num or read_pr_num(state.gr_id)
         if not pr_num:

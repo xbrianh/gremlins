@@ -8,7 +8,7 @@ import subprocess
 from typing import Any
 
 from gremlins import git as _git_mod
-from gremlins.stages.base import Stage, StageState
+from gremlins.stages.base import Stage, RuntimeState
 from gremlins.stages.loop import LoopExhausted, LoopStage, RunCmdFailed
 from gremlins.stages.registry import register_stage
 from gremlins.state import check_bail
@@ -40,7 +40,7 @@ class Verify(Stage):
         super().__init__(name, model, prompts, options)
         self._is_git = is_git
 
-    def run(self, state: StageState) -> None:
+    def run(self, state: RuntimeState) -> None:
         cmds = [c for c in self.options.get("cmds", []) if c.strip()]
         max_attempts = self.options.get("max_attempts", 3)
 

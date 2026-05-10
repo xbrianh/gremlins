@@ -7,7 +7,7 @@ import pathlib
 import re
 from typing import Any
 
-from gremlins.stages.base import Stage, StageState
+from gremlins.stages.base import Stage, RuntimeState
 from gremlins.stages.registry import register_stage
 from gremlins.state import check_bail, emit_bail, read_pr_url
 
@@ -48,7 +48,7 @@ class AddressCode(Stage):
         self.pr_url = pr_url
         self.is_gh = is_gh
 
-    def run(self, state: StageState) -> None:
+    def run(self, state: RuntimeState) -> None:
         if self.is_gh:
             self.results_to_github(state)
         else:
@@ -64,7 +64,7 @@ class AddressCode(Stage):
                 )
                 raise
 
-    def _inputs_from_local(self, state: StageState) -> dict[str, str]:
+    def _inputs_from_local(self, state: RuntimeState) -> dict[str, str]:
         review_files: list[tuple[str, pathlib.Path]] = []
         for stage_name in self.review_stage_names:
             search_dir = self.review_stage_dirs.get(stage_name, state.session_dir)
@@ -86,7 +86,7 @@ class AddressCode(Stage):
         )
         return {"text": text, "review_model": review_model}
 
-    def results_to_local(self, inputs: dict[str, str], state: StageState) -> None:
+    def results_to_local(self, inputs: dict[str, str], state: RuntimeState) -> None:
         address_commit_instr = ""
         if self.is_git:
             address_commit_instr = (
@@ -108,7 +108,7 @@ class AddressCode(Stage):
             raw_path=state.session_dir / "stream-address.jsonl",
         )
 
-    def results_to_github(self, state: StageState) -> None:
+    def results_to_github(self, state: RuntimeState) -> None:
         pr_url = self.pr_url or read_pr_url(state.gr_id)
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")

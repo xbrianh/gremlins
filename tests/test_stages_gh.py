@@ -6,7 +6,7 @@ from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.stages.address_code import AddressCode
-from gremlins.stages.base import StageState
+from gremlins.stages.base import RuntimeState
 from gremlins.stages.review_code import ReviewCode
 
 _BUNDLED_PROMPTS = (
@@ -19,8 +19,8 @@ def _make_state(
     tmp_path: pathlib.Path,
     *,
     gr_id: str | None = None,
-) -> StageState:
-    return StageState(client=client, session_dir=tmp_path, gr_id=gr_id)
+) -> RuntimeState:
+    return RuntimeState(client=client, session_dir=tmp_path, gr_id=gr_id)
 
 
 def _make_ghreview(
@@ -87,7 +87,7 @@ def test_ghreview_parallel_child_uses_child_key_bail_command(
     stage = _make_ghreview(
         client, tmp_path, pr_url="https://github.com/owner/repo/pull/1"
     )
-    state = StageState(
+    state = RuntimeState(
         client=client,
         session_dir=tmp_path,
         gr_id="gr-123",
@@ -146,7 +146,7 @@ def test_ghaddress_parallel_child_uses_child_key_bail_command(
     stage = _make_ghaddress(
         client, tmp_path, pr_url="https://github.com/owner/repo/pull/1"
     )
-    state = StageState(
+    state = RuntimeState(
         client=client,
         session_dir=tmp_path,
         gr_id="gr-123",

@@ -11,7 +11,7 @@ import pytest
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.pipeline.loader import load_pipeline
 from gremlins.runner import run_stages
-from gremlins.stages.base import StageState
+from gremlins.stages.base import RuntimeState
 from gremlins.stages.parallel import ParallelStage
 
 # ---------------------------------------------------------------------------
@@ -24,8 +24,8 @@ def _write_yaml(path: pathlib.Path, content: str) -> pathlib.Path:
     return path
 
 
-def _make_ctx(child_key: str) -> StageState:
-    return StageState(
+def _make_ctx(child_key: str) -> RuntimeState:
+    return RuntimeState(
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
         gr_id=None,
@@ -337,10 +337,10 @@ def test_parallel_sequence_child_worktree_flows() -> None:
 
     observed: list[pathlib.Path | None] = []
 
-    sub_ctx_a = StageState(
+    sub_ctx_a = RuntimeState(
         client=FakeClaudeClient(), session_dir=pathlib.Path("/tmp"), gr_id=None
     )
-    sub_ctx_b = StageState(
+    sub_ctx_b = RuntimeState(
         client=FakeClaudeClient(), session_dir=pathlib.Path("/tmp"), gr_id=None
     )
 
@@ -350,7 +350,7 @@ def test_parallel_sequence_child_worktree_flows() -> None:
     def capture_b() -> None:
         observed.append(sub_ctx_b.worktree)
 
-    seq_ctx = StageState(
+    seq_ctx = RuntimeState(
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
         gr_id=None,
