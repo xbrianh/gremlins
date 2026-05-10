@@ -35,7 +35,7 @@ def _parse_review_args(argv: list[str]) -> argparse.Namespace:
 def review_main(argv: list[str], *, client: Client | None = None) -> int:
     configure_logging()
     if client is None:
-        client = Client("claude", "sonnet")
+        client = PACKAGE_DEFAULT
     install_signal_handlers(client)
     args = _parse_review_args(argv)
 
@@ -106,7 +106,7 @@ def _parse_address_args(argv: list[str]) -> argparse.Namespace:
 def address_main(argv: list[str], *, client: Client | None = None) -> int:
     configure_logging()
     if client is None:
-        client = Client("claude", "sonnet")
+        client = PACKAGE_DEFAULT
     install_signal_handlers(client)
     args = _parse_address_args(argv)
 

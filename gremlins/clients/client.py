@@ -48,7 +48,7 @@ class Client:
         if self._impl is None:
             if self.provider not in CLIENT_FACTORIES:
                 raise ValueError(f"unknown provider {self.provider!r}")
-            self._impl = CLIENT_FACTORIES[self.provider](self.model or None)
+            self._impl = CLIENT_FACTORIES[self.provider](self.model)
         return self._impl
 
     def run(
@@ -67,7 +67,7 @@ class Client:
         return self._get_impl().run(
             prompt,
             label=label,
-            model=self.model,
+            model=model if model is not None else self.model,
             raw_path=raw_path,
             capture_events=capture_events,
             on_timeout_prompt=on_timeout_prompt,
