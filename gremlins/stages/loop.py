@@ -92,7 +92,9 @@ class LoopStage(Stage):
             parse_stage(child_d, depth=depth)
             for child_d in cast(list[dict[str, Any]], raw_children)
         ]
-        stage = cls(d["name"], body=body, max_iterations=max_iterations, pr_stack=pr_stack)
+        stage = cls(
+            d["name"], body=body, max_iterations=max_iterations, pr_stack=pr_stack
+        )
         stage.client = get_client_from_yaml(d)
         return stage
 
