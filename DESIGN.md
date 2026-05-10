@@ -358,7 +358,7 @@ The boss reuses the §2 dividing line, applied at a different scale:
   PRs, writing `boss_state.json`, parsing children's `state.json`,
   deciding when the chain has structurally stalled.
 - **Agentic, exactly once per step:** the **handoff agent**
-  (`gremlins/handoff.py`). It reads the rolling plan, the chain spec, and
+  (`gremlins/stages/handoff.py`). It reads the rolling plan, the chain spec, and
   the diff accumulated on the branch, and produces one of three
   decisions: `next-plan` (here is the plan for child N+1), `chain-done`
   (we are finished), or `bail` (something is structurally wrong, stop and

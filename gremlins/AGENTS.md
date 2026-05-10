@@ -15,7 +15,6 @@ review / address pipelines, the fleet manager
 - `git.py` — `in_git_repo`, `git_head`, branch / worktree helpers.
 - `gh_utils.py` — `gh` CLI wrappers and stream-json URL extractors used by the gh orchestrator.
 - `fleet/` — fleet manager package: status listing + `stop` / `rescue` / `land` / `close` / `rm` / `log` ops. See [`fleet/AGENTS.md`](fleet/AGENTS.md) for the per-module breakdown.
-- `handoff.py` — chain-step decision agent (next-plan / chain-done / bail).
 - `clients/protocol.py` — `ClaudeClient` Protocol + `CompletedRun` dataclass.
 - `clients/stream.py` — `stream_events` + `_emit_event` (stream-json parser and stderr renderer).
 - `clients/claude.py` — `SubprocessClaudeClient` (production subprocess runner).
@@ -28,7 +27,7 @@ review / address pipelines, the fleet manager
 - `stages/` — per-stage bodies: `plan`, `implement`, `review_code`, `address_code`, `verify`, `test`, `commit_pr`, `ghreview`, `ghaddress`, `request_copilot`, `wait_copilot`, `wait_ci`.
 - `orchestrators/local.py` — `local_main`, `review_main`, `address_main`.
 - `orchestrators/gh.py` — `gh_main`. Drives the gh pipeline.
-- `orchestrators/boss.py` — `boss_main`. Subprocesses out to `python -m gremlins.handoff` and `gremlins {stop,land,rescue}` between child gremlins.
+- `orchestrators/boss.py` — `boss_main`. Runs the `Handoff` stage (in-process) and `gremlins {stop,land,rescue}` between child gremlins.
 - `prompts/` — externalized prompt templates (plan, implement, review lenses, etc).
 
 ## Entry points
@@ -43,7 +42,6 @@ review / address pipelines, the fleet manager
 | `resume` | `cli._resume_main` |
 | `stop` / `rescue` / `land` / `rm` / `close` / `log` | `fleet.cli.*_main` |
 | (bare / id-prefix) | `fleet.main` |
-| `handoff` | `handoff.main` (via `python -m gremlins.handoff`) |
 
 ## Testability seam: `ClaudeClient`
 
