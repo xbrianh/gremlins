@@ -8,9 +8,9 @@ import pathlib
 from typing import Any
 
 from gremlins.git import (
-    classify_impl_outcome,
     DirtyOnly,
     EmptyImpl,
+    classify_impl_outcome,
     record_pre_impl_state,
 )
 from gremlins.prompts import BUNDLED_PROMPT_DIR
