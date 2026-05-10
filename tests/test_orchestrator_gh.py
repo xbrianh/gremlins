@@ -2130,35 +2130,43 @@ def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_any_stage_is_gh_detects_top_level_gh_stage() -> None:
-    from gremlins.orchestrators.run import _any_stage_is_gh
-    from gremlins.pipeline.schema import StageEntry
+def _make_pipeline(*stages):
+    import pathlib
 
-    stages = [
+    from gremlins.schema import PipelineDef
+
+    return PipelineDef(name="test", path=pathlib.Path("test.yaml"), stages=list(stages))
+
+
+def test_pipeline_uses_gh_detects_top_level_gh_stage() -> None:
+    from gremlins.schema import StageEntry
+    from gremlins.state import pipeline_uses_gh
+
+    pipeline = _make_pipeline(
         StageEntry(
             name="open-pr", type="open-github-pr", client=None, prompts=[], options={}
         )
-    ]
-    assert _any_stage_is_gh(stages) is True
+    )
+    assert pipeline_uses_gh(pipeline) is True
 
 
-def test_any_stage_is_gh_false_for_local_stages() -> None:
-    from gremlins.orchestrators.run import _any_stage_is_gh
-    from gremlins.pipeline.schema import StageEntry
+def test_pipeline_uses_gh_false_for_local_stages() -> None:
+    from gremlins.schema import StageEntry
+    from gremlins.state import pipeline_uses_gh
 
-    stages = [
+    pipeline = _make_pipeline(
         StageEntry(name="plan", type="plan", client=None, prompts=[], options={}),
         StageEntry(
             name="implement", type="implement", client=None, prompts=[], options={}
         ),
-    ]
-    assert _any_stage_is_gh(stages) is False
+    )
+    assert pipeline_uses_gh(pipeline) is False
 
 
-def test_any_stage_is_gh_recurses_into_loop_body() -> None:
+def test_pipeline_uses_gh_recurses_into_loop_body() -> None:
     """A loop containing gh-mode body stages is detected as gh."""
-    from gremlins.orchestrators.run import _any_stage_is_gh
-    from gremlins.pipeline.schema import StageEntry
+    from gremlins.schema import StageEntry
+    from gremlins.state import pipeline_uses_gh
 
     gh_body = [
         StageEntry(name="handoff", type="handoff", client=None, prompts=[], options={}),
@@ -2169,14 +2177,13 @@ def test_any_stage_is_gh_recurses_into_loop_body() -> None:
     loop = StageEntry(
         name="chain", type="loop", client=None, prompts=[], options={}, body=gh_body
     )
-    stages = [loop]
-    assert _any_stage_is_gh(stages) is True
+    assert pipeline_uses_gh(_make_pipeline(loop)) is True
 
 
-def test_any_stage_is_gh_false_for_local_loop_body() -> None:
+def test_pipeline_uses_gh_false_for_local_loop_body() -> None:
     """A loop with only local-mode body stages is not detected as gh."""
-    from gremlins.orchestrators.run import _any_stage_is_gh
-    from gremlins.pipeline.schema import StageEntry
+    from gremlins.schema import StageEntry
+    from gremlins.state import pipeline_uses_gh
 
     local_body = [
         StageEntry(name="handoff", type="handoff", client=None, prompts=[], options={}),
@@ -2187,10 +2194,10 @@ def test_any_stage_is_gh_false_for_local_loop_body() -> None:
     loop = StageEntry(
         name="chain", type="loop", client=None, prompts=[], options={}, body=local_body
     )
-    stages = [
+    pipeline = _make_pipeline(
         loop,
         StageEntry(
             name="review-chain", type="review-code", client=None, prompts=[], options={}
         ),
-    ]
-    assert _any_stage_is_gh(stages) is False
+    )
+    assert pipeline_uses_gh(pipeline) is False

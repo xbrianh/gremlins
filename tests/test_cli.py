@@ -333,7 +333,7 @@ class _FakePlanStage:
 
 
 def _make_fake_pipeline(stage_type: str = "plan"):
-    from gremlins.pipeline import PipelineDef, StageEntry
+    from gremlins.schema import PipelineDef, StageEntry
 
     entry = StageEntry(
         name="plan", type=stage_type, client=None, prompts=[], options={}
@@ -463,7 +463,7 @@ def test_launch_list_prints_pipeline_names(tmp_path, monkeypatch, capsys):
     ]
     monkeypatch.setattr("gremlins.cli.list_pipelines", lambda root: fake_pipelines)
 
-    from gremlins.pipeline import PipelineDef
+    from gremlins.schema import PipelineDef
 
     def fake_load(path):
         return PipelineDef(name=path.stem, path=path, stages=[])

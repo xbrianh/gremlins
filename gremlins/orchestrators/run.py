@@ -24,36 +24,17 @@ from gremlins.gh_utils import get_repo
 from gremlins.git import has_commits, has_dirty_worktree, in_git_repo
 from gremlins.logging_setup import configure_logging
 from gremlins.orchestrators.pipeline import StageRunner
-from gremlins.pipeline import StageEntry, load_pipeline
+from gremlins.pipeline import load_pipeline
 from gremlins.runner import install_signal_handlers
 from gremlins.state import (
     patch_state,
+    pipeline_uses_gh,
     read_pr_url,
     resolve_session_dir,
     resolve_state_file,
 )
 
 logger = logging.getLogger(__name__)
-
-_GH_STAGE_TYPES = frozenset(
-    {
-        "materialize-to-branch",
-        "commit",
-        "open-github-pr",
-        "request-copilot",
-        "wait-copilot",
-        "ghaddress",
-        "ghreview",
-        "wait-ci",
-    }
-)
-
-
-def _any_stage_is_gh(stages: list[StageEntry]) -> bool:
-    return any(
-        s.type in _GH_STAGE_TYPES or (s.body and _any_stage_is_gh(s.body))
-        for s in stages
-    )
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -119,7 +100,7 @@ def run_pipeline(
     except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
         die(str(exc))
 
-    is_gh = _any_stage_is_gh(pipeline.stages)
+    is_gh = pipeline_uses_gh(pipeline)
 
     repo = ""
     state_file = resolve_state_file(gr_id)

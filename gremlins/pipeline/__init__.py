@@ -6,13 +6,11 @@ from gremlins.pipeline.discovery import (
     resolve_pipeline_path,
 )
 from gremlins.pipeline.loader import load_pipeline
-from gremlins.pipeline.schema import BUNDLED_PROMPT_PREFIX, PipelineDef, StageEntry
+from gremlins.pipeline.schema import BUNDLED_PROMPT_PREFIX
 
 __all__ = [
     "BUNDLED_PIPELINE_DIR",
     "BUNDLED_PROMPT_PREFIX",
-    "PipelineDef",
-    "StageEntry",
     "list_pipelines",
     "load_pipeline",
     "overlay_dir",

@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 from gremlins import paths as _paths
 
 if TYPE_CHECKING:
-    from gremlins.pipeline.schema import PipelineDef, StageEntry
+    from gremlins.schema import PipelineDef, StageEntry
 
 logger = logging.getLogger(__name__)
 

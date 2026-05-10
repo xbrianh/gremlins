@@ -12,7 +12,7 @@ from gremlins.clients.protocol import ClaudeClient, CompletedRun
 
 if TYPE_CHECKING:
     from gremlins.clients import ClientSpec
-    from gremlins.pipeline import PipelineDef, StageEntry
+    from gremlins.schema import PipelineDef, StageEntry
 
 
 class StageRunner(Protocol):

@@ -11,7 +11,7 @@ import pytest
 
 from gremlins.clients import ClientSpec
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.pipeline import StageEntry
+from gremlins.schema import StageEntry
 from gremlins.stages import RunCmdFailed, StageContext
 from gremlins.stages.handoff import Handoff
 

@@ -3,26 +3,13 @@ from __future__ import annotations
 import dataclasses
 import json
 from collections.abc import Sequence
-from typing import Protocol
+from typing import TYPE_CHECKING
 
 from gremlins.clients.registry import CLIENT_FACTORIES
 from gremlins.state import resolve_state_file
 
-
-class StageEntry(Protocol):
-    name: str
-    type: str
-    client: ClientSpec | None
-
-    @property
-    def body(self) -> Sequence[StageEntry]: ...
-
-
-class PipelineDef(Protocol):
-    default_client: ClientSpec | None
-
-    @property
-    def stages(self) -> Sequence[StageEntry]: ...
+if TYPE_CHECKING:
+    from gremlins.schema import PipelineDef, StageEntry
 
 
 @dataclasses.dataclass(frozen=True)
@@ -72,7 +59,7 @@ def collect_stage_specs(
 ) -> dict[str, ClientSpec]:
     specs: dict[str, ClientSpec] = {}
 
-    def _walk(entries: Sequence[StageEntry]) -> None:
+    def _walk(entries: list[StageEntry]) -> None:
         for e in entries:
             entry_client = None if e.type == "parallel" else e.client
             specs[e.name] = resolve_stage_client(
@@ -81,7 +68,7 @@ def collect_stage_specs(
             if e.body:
                 _walk(e.body)
 
-    _walk(pipeline.stages)
+    _walk(list(pipeline.stages))
     return specs
 
 
@@ -112,13 +99,13 @@ def validate_stage_specs(
 ) -> None:
     expected_stage_names: set[str] = set()
 
-    def _walk(entries: Sequence[StageEntry]) -> None:
+    def _walk(entries: list[StageEntry]) -> None:
         for entry in entries:
             expected_stage_names.add(entry.name)
             if entry.body:
                 _walk(entry.body)
 
-    _walk(pipeline.stages)
+    _walk(list(pipeline.stages))
 
     missing_stage_names = sorted(expected_stage_names.difference(stage_specs))
     if missing_stage_names:
