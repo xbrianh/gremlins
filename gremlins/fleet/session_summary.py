@@ -187,13 +187,13 @@ def _render_summary(
                 f" (stage: {stage_disp}){desc_suffix} — log: {g['log']}\n"
             )
         elif live.startswith("dead:"):
-            reason = live[len("dead:"):]
+            reason = live[len("dead:") :]
             running_block += (
                 f"- `{g['id']}` ({g['kind']}): **{reason}**"
                 f" (stage: {stage_disp}){desc_suffix} — log: {g['log']}\n"
             )
         elif live.startswith("stalled:"):
-            reason = live[len("stalled:"):]
+            reason = live[len("stalled:") :]
             running_block += (
                 f"- `{g['id']}` ({g['kind']}): **stalled?**"
                 f" ({reason}, stage: {stage_disp}, pid {pid_str}){desc_suffix} — log: {g['log']}\n"
