@@ -71,7 +71,7 @@ def _fmt_duration(secs: int) -> str:
 def liveness_of_state_file(sf: str, state: dict[str, object] | None = None) -> str:
     """
     Classify a gremlin's liveness from its state.json path.
-    Returns one of: running, waiting (<duration>), dead:<reason>, stalled:<reason>.
+    Returns one of: running, waiting (<duration>), finished, dead:<reason>, stalled:<reason>.
     Replicates liveness.sh inline — no shell-out.
     Pass an already-loaded state dict to avoid a second JSON parse.
     """
