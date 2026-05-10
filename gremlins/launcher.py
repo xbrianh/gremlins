@@ -30,9 +30,9 @@ from gremlins.gh_utils import parse_issue_ref, view_issue
 from gremlins.pipeline import (
     PipelineDef,
     load_pipeline,
-    pipeline_uses_gh,
     resolve_pipeline_path,
 )
+from gremlins.state import pipeline_uses_gh
 from gremlins.utils import proc
 
 
