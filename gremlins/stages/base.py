@@ -87,14 +87,14 @@ class Stage:
         return self._mutable_state
 
     def _resolve_retry(self) -> dict[str, Any]:
-        stage_retry = self.options.get("retry") or {}
+        stage_retry = cast(dict[str, Any], self.options.get("retry") or {})
         pr = self.state.pipeline_retry
 
-        idle_timeout = stage_retry.get("idle_timeout")
+        idle_timeout: Any = stage_retry.get("idle_timeout")
         if idle_timeout is None and pr is not None:
             idle_timeout = pr.idle_timeout
 
-        backoff = stage_retry.get("backoff")
+        backoff: Any = stage_retry.get("backoff")
         if backoff is None and pr is not None:
             backoff = pr.backoff
 

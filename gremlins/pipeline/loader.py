@@ -126,11 +126,12 @@ def _parse_retry(raw: Any, context: str) -> RetryConfig | None:
         return None
     if not isinstance(raw, dict):
         raise ValueError(f"{context}: 'retry' must be a mapping")
-    idle_timeout = raw.get("idle_timeout")
-    backoff = raw.get("backoff")
+    d = cast(dict[str, Any], raw)
+    idle_timeout_raw: Any = d.get("idle_timeout")
+    backoff_raw: Any = d.get("backoff")
     return RetryConfig(
-        idle_timeout=float(idle_timeout) if idle_timeout is not None else None,
-        backoff=list(backoff) if backoff is not None else None,
+        idle_timeout=float(idle_timeout_raw) if idle_timeout_raw is not None else None,
+        backoff=list(backoff_raw) if backoff_raw is not None else None,
     )
 
 

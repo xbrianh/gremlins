@@ -698,8 +698,6 @@ stages:
 
 
 def test_pipeline_retry_block_parsed(tmp_path: pathlib.Path) -> None:
-    from gremlins.schema import RetryConfig
-
     prompt = _make_prompt(tmp_path)
     yaml_path = _write_yaml(
         tmp_path / "pipeline.yaml",
