@@ -3,4 +3,4 @@
 
 {issue_body}
 
-Implement the plan above by making the code changes in this repo. You may commit checkpoints as you go (recommended for multi-step plans — a later stage handles branching and PR creation regardless), but do not push to any remote. Do NOT create any meta/scaffolding files in the repo — no `.claude-workflow/` directory, no `plan.md`, no review docs, no notes-to-self. {plan_location_note}
+Implement the plan above by making the code changes in this repo. You MUST commit all changes before finishing. Use `git add` + `git commit` as you work; multiple commits are encouraged for traceability. Do not push to any remote. Do NOT create any meta/scaffolding files in the repo — no `.claude-workflow/` directory, no `plan.md`, no review docs, no notes-to-self. {plan_location_note}

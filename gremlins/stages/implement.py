@@ -8,8 +8,10 @@ import pathlib
 from typing import Any
 
 from gremlins.git import (
-    has_dirty_worktree,
-    head_sha,
+    DirtyOnly,
+    DivergentHead,
+    EmptyImpl,
+    classify_impl_outcome,
     record_pre_impl_state,
 )
 from gremlins.prompts import BUNDLED_PROMPT_DIR
@@ -110,15 +112,15 @@ class Implement(Stage):
 
     def _run_local(self) -> None:
         cwd_arg = str(self.state.worktree) if self.state.worktree is not None else None
-        pre_head = ""
+        pre = None
         pre_sentinel: pathlib.Path | None = None
         if self.is_git:
-            pre_head = head_sha(cwd=cwd_arg)
+            pre = record_pre_impl_state(cwd=cwd_arg)
         else:
             pre_sentinel = self.state.session_dir / ".pre-impl"
             pre_sentinel.touch()
 
-        impl_commit_instr = "."
+        impl_commit_instr = ""
         if self.is_git:
             impl_commit_instr = (
                 (BUNDLED_PROMPT_DIR / "impl_commit_git.md")
@@ -141,11 +143,22 @@ class Implement(Stage):
         )
 
         if self.is_git:
-            post_head = head_sha(cwd=cwd_arg)
-            if post_head == pre_head and not has_dirty_worktree(cwd=cwd_arg):
-                raise RuntimeError("implementation stage produced no changes; aborting")
+            if pre is None:
+                raise RuntimeError("pre-impl state not captured")
+            outcome = classify_impl_outcome(pre, cwd=cwd_arg)
+            if isinstance(outcome, DirtyOnly):
+                raise RuntimeError(
+                    "implement left uncommitted changes; the agent must commit before returning"
+                )
+            if isinstance(outcome, EmptyImpl):
+                raise RuntimeError("implement produced no work")
+            if isinstance(outcome, DivergentHead):
+                raise RuntimeError(
+                    f"implement diverged from pre-impl HEAD {pre.head[:7]}; expected a fast-forward"
+                )
         else:
-            assert pre_sentinel is not None
+            if pre_sentinel is None:
+                raise RuntimeError("pre-impl sentinel not created")
             if not changes_outside_git(pre_sentinel, self.state.session_dir):
                 raise RuntimeError("implementation stage produced no changes; aborting")
 
@@ -174,7 +187,7 @@ class Implement(Stage):
                 "should be product code."
             )
 
-        pre = record_pre_impl_state()
+        pre = record_pre_impl_state(cwd=self._impl_cwd)
         pipe.impl_pre_state = pre
         if self.state.gr_id:
             patch_state(
@@ -197,6 +210,18 @@ class Implement(Stage):
             capture_events=True,
             idle_timeout=IMPLEMENT_IDLE_TIMEOUT,
         )
+
+        outcome = classify_impl_outcome(pre, cwd=self._impl_cwd)
+        if isinstance(outcome, DirtyOnly):
+            raise RuntimeError(
+                "implement left uncommitted changes; the agent must commit before returning"
+            )
+        if isinstance(outcome, EmptyImpl):
+            raise RuntimeError("implement produced no work")
+        if isinstance(outcome, DivergentHead):
+            raise RuntimeError(
+                f"implement diverged from pre-impl HEAD {pre.head[:7]}; expected a fast-forward"
+            )
 
 
 register_stage("implement", Implement)
