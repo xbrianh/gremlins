@@ -103,7 +103,9 @@ def collect_git_context(
 
     result = proc.run(["git", "merge-base", inspect_rev, target])
     if result.returncode != 0:
-        raise RuntimeError(f"could not compute merge-base between {inspect_rev!r} and {target!r}")
+        raise RuntimeError(
+            f"could not compute merge-base between {inspect_rev!r} and {target!r}"
+        )
     merge_base = result.stdout.strip()
 
     result = proc.run(
