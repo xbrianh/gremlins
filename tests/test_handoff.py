@@ -6,8 +6,8 @@ import pathlib
 
 from conftest import MINIMAL_EVENTS
 
-from gremlins.clients.fake import FakeClaudeClient
 from gremlins.clients.client import Client
+from gremlins.clients.fake import FakeClaudeClient
 from gremlins.stages import handoff
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"

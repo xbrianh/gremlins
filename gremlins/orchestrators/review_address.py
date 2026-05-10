@@ -9,7 +9,7 @@ import shutil
 
 import gremlins.stages.address_code as address_code
 import gremlins.stages.review_code as review_code
-from gremlins.clients.client import Client, PACKAGE_DEFAULT
+from gremlins.clients.client import PACKAGE_DEFAULT, Client
 from gremlins.errors import die
 from gremlins.git import has_diff, has_dirty_worktree, in_git_repo, rev_exists
 from gremlins.logging_setup import configure_logging

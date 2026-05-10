@@ -55,9 +55,7 @@ def _format_missing_stage_specs(names: Sequence[str]) -> str:
     return f"stage_clients missing stage{suffix}: {missing}"
 
 
-def validate_stage_specs(
-    stage_specs: dict[str, Client], pipeline: PipelineDef
-) -> None:
+def validate_stage_specs(stage_specs: dict[str, Client], pipeline: PipelineDef) -> None:
     expected_stage_names: set[str] = set()
 
     def _walk(entries: list[StageEntry]) -> None:

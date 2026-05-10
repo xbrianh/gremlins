@@ -9,8 +9,8 @@ from typing import Any
 
 import pytest
 
-from gremlins.clients.fake import FakeClaudeClient
 from gremlins.clients.client import Client
+from gremlins.clients.fake import FakeClaudeClient
 from gremlins.schema import StageEntry
 from gremlins.stages.base import StageContext
 from gremlins.stages.handoff import Handoff

@@ -38,14 +38,10 @@ HANDOFF_TIMEOUT = int(
 
 
 def sanitize_model_for(spec: Client) -> str:
-    return (
-        CLAUDE_SANITIZE_MODEL if spec.provider == "claude" else spec.model
-    )
+    return CLAUDE_SANITIZE_MODEL if spec.provider == "claude" else spec.model
 
 
-def with_reap_after(
-    client: Client, timeout: int | None, fn: Callable[[], T]
-) -> T:
+def with_reap_after(client: Client, timeout: int | None, fn: Callable[[], T]) -> T:
     """Run fn, reaping the client's subprocesses if it doesn't return in time."""
     if timeout is None:
         return fn()

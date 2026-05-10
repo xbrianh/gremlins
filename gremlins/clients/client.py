@@ -16,10 +16,14 @@ class Client:
     @classmethod
     def parse(cls, s: str) -> Client:
         if ":" not in s:
-            raise ValueError(f"invalid client specifier {s!r}: expected 'provider:model'")
+            raise ValueError(
+                f"invalid client specifier {s!r}: expected 'provider:model'"
+            )
         provider, _, model = s.partition(":")
         if not provider:
-            raise ValueError(f"invalid client specifier {s!r}: expected 'provider:model'")
+            raise ValueError(
+                f"invalid client specifier {s!r}: expected 'provider:model'"
+            )
         if not model:
             raise ValueError(f"invalid client specifier {s!r}: model must not be empty")
         if provider not in CLIENT_FACTORIES:

@@ -132,9 +132,7 @@ def _build_commit(entry: StageEntry, spec: Client, _runner: StageRunner) -> Any:
     return commit.Commit(entry.name, spec.model, entry.prompts, entry.options)
 
 
-def _build_open_github_pr(
-    entry: StageEntry, spec: Client, runner: StageRunner
-) -> Any:
+def _build_open_github_pr(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
     return open_github_pr.OpenGitHubPR(
         entry.name,
         spec.model,
@@ -145,9 +143,7 @@ def _build_open_github_pr(
     )
 
 
-def _build_request_copilot(
-    entry: StageEntry, spec: Client, runner: StageRunner
-) -> Any:
+def _build_request_copilot(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
     return request_copilot.RequestCopilot(
         entry.name, spec.model, entry.prompts, entry.options, repo=runner.repo
     )
@@ -163,9 +159,7 @@ def _build_ghreview(entry: StageEntry, spec: Client, _runner: StageRunner) -> An
     )
 
 
-def _build_wait_copilot(
-    entry: StageEntry, spec: Client, runner: StageRunner
-) -> Any:
+def _build_wait_copilot(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
     return wait_copilot.WaitCopilot(
         entry.name, spec.model, entry.prompts, entry.options, repo=runner.repo
     )
@@ -199,9 +193,7 @@ def _build_review_code(entry: StageEntry, spec: Client, runner: StageRunner) -> 
     )
 
 
-def _build_address_code(
-    entry: StageEntry, spec: Client, runner: StageRunner
-) -> Any:
+def _build_address_code(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
     names, dirs = _review_stage_info(runner)
     logger.info("addressing code reviews (model: %s)", spec.model)
     return address_code.AddressCode(
@@ -259,9 +251,7 @@ def _build_run_cmd(entry: StageEntry, spec: Client, _runner: StageRunner) -> Any
     return run_cmd.RunCmd(entry.name, spec.model, entry.prompts, entry.options)
 
 
-def _build_claude_prompt(
-    entry: StageEntry, spec: Client, _runner: StageRunner
-) -> Any:
+def _build_claude_prompt(entry: StageEntry, spec: Client, _runner: StageRunner) -> Any:
     if not entry.prompts:
         die(f"stage {entry.name!r}: type 'claude-prompt' requires a 'prompt' field")
     return claude_prompt.ClaudePrompt(
