@@ -163,10 +163,10 @@ def test_stacked_pr_uses_prior_pr_branch(tmp_path: pathlib.Path) -> None:
     )
 
 
-def test_single_pr_with_branch_artifact_uses_base_ref_name(
+def test_single_pr_without_prior_pr_branch_uses_base_ref_name(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Regression: a branch artifact (just materialized) must NOT be used as PR base."""
+    """Regression: when no prior PR branch exists, base_ref_name is used as the PR base."""
     stage, state = _make_state_with_gr(
         tmp_path,
         base_ref_name="main",
@@ -174,9 +174,7 @@ def test_single_pr_with_branch_artifact_uses_base_ref_name(
     )
     prompts_seen: list[str] = []
     with (
-        patch(
-            "gremlins.state.resolve_state_file", return_value=tmp_path / "state.json"
-        ),
+        patch("gremlins.stages.open_github_pr.last_pr_branch", return_value=""),
         patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
         patch("gremlins.stages.open_github_pr.append_artifact"),
         patch.object(

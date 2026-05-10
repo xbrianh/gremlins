@@ -1,5 +1,3 @@
-"""Stage base types: RuntimeState dataclass and Stage base class."""
-
 from __future__ import annotations
 
 import argparse
@@ -63,7 +61,7 @@ class RuntimeState:
     def get_client(self, spec: Client) -> Client:
         if self.test_client is not None:
             return self.test_client
-        return self.spec_clients[str(spec)]
+        return self.spec_clients.get(str(spec), spec)
 
     def make_runner(
         self,
@@ -107,7 +105,7 @@ def _read_state_json(sf: pathlib.Path | None) -> dict[str, Any]:
         return {}
     try:
         return json.loads(sf.read_text(encoding="utf-8"))
-    except Exception:
+    except json.JSONDecodeError:
         return {}
 
 
@@ -123,7 +121,7 @@ def _read_impl_pre_state(
             head = data.get("head") or ""
             if head:
                 return PreImplState(head=head, branch=data.get("branch") or "")
-        except Exception:
+        except (json.JSONDecodeError, OSError):
             pass
     head = sd.get("impl_pre_head") or ""
     if head:
