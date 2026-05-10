@@ -69,7 +69,9 @@ def test_dirty_only_raises(tmp_path: pathlib.Path) -> None:
             "gremlins.stages.materialize_to_branch.classify_impl_outcome",
             return_value=DirtyOnly(),
         ),
-        patch("gremlins.stages.materialize_to_branch.create_handoff_branch") as mock_create,
+        patch(
+            "gremlins.stages.materialize_to_branch.create_handoff_branch"
+        ) as mock_create,
     ):
         with pytest.raises(RuntimeError, match="unexpected impl outcome"):
             stage.run(_pipe())
