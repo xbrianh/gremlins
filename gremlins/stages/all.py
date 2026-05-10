@@ -29,7 +29,7 @@ from gremlins.schema import StageEntry
 from gremlins.stage_clients import require_stage_spec
 from gremlins.stages.base import StageRunner, StageState
 from gremlins.stages.registry import register_stage_builder
-from gremlins.state import pipeline_uses_gh, read_state_str
+from gremlins.state import pipeline_uses_gh
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +133,7 @@ def _build_commit(entry: StageEntry, spec: Client, _runner: StageRunner) -> Any:
     return commit.Commit(entry.name, spec.model, entry.prompts, entry.options)
 
 
-def _build_open_github_pr(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
+def _build_open_github_pr(entry: StageEntry, spec: Client, _runner: StageRunner) -> Any:
     return open_github_pr.OpenGitHubPR(
         entry.name,
         spec.model,
@@ -265,7 +265,7 @@ def _build_handoff(entry: StageEntry, spec: Client, _runner: StageRunner) -> Any
     return Handoff(entry.name, spec)
 
 
-def _build_parallel(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
+def _build_parallel(entry: StageEntry, _spec: Client, runner: StageRunner) -> Any:
     from gremlins.stages.parallel import ParallelStage
     from gremlins.state import set_stage
 

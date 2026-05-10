@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any
-
-from gremlins.stages.base import Stage
+from gremlins.stages.base import Stage, StageState
 from gremlins.stages.registry import register_stage
 
 
 class CommitPR(Stage):
     """Registry placeholder; execution handled by GHPipeline._make_runner."""
 
-    def run(self, pipe: Any) -> None:  # pragma: no cover
+    def run(self, state: StageState) -> None:  # noqa: ARG002  # pragma: no cover
         raise NotImplementedError
 
 

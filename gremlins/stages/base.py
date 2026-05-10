@@ -110,5 +110,5 @@ class Stage:
     def orchestration_args(cls) -> list[StageInput]:
         return []
 
-    def run(self, state: StageState) -> Any:
+    def run(self, state: StageState) -> Any:  # noqa: ARG002
         raise NotImplementedError
