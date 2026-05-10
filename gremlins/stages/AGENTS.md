@@ -70,5 +70,5 @@ Any new `gremlins/stages/introspect.py` (planned for #258) must import only `ins
   is the firewall that keeps no-op runs out of `commit-pr` / `ghreview`.
   Don't soften it.
 - `commit_pr.py` selects its action clause based on the `ImplOutcome`
-  classification from the implement stage. The shape
-  (`HeadAdvanced`) — keep them aligned.
+  classification from the implement stage. The shape (`HeadAdvanced`)
+  maps to a single prompt in `../prompts/` — keep them aligned.
