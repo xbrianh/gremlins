@@ -182,7 +182,9 @@ class SubprocessClaudeClient:
     ) -> CompletedRun:
         if idle_timeout is None:
             idle_timeout = STREAM_IDLE_TIMEOUT
-        schedule = [float(v) for v in (backoff if backoff is not None else DEFAULT_BACKOFF)]
+        schedule = [
+            float(v) for v in (backoff if backoff is not None else DEFAULT_BACKOFF)
+        ]
         argv = self._build_argv(model)
         prefix = f"[{label}] " if label else ""
         active_prompt = prompt

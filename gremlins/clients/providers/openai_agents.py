@@ -76,7 +76,7 @@ class OpenAIAgentsClient:
         cwd: pathlib.Path | None = None,
         idle_timeout: float | None = None,
     ) -> CompletedRun:
-        del backoff
+        del raw_path, capture_events, on_timeout_prompt, idle_timeout, backoff
         effective_model = model or self._model
         agent = Agent(
             name=f"gremlins-{label}",

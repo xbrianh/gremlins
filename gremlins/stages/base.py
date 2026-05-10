@@ -101,12 +101,14 @@ class Stage:
         if raw_backoff is not None:
             if not isinstance(raw_backoff, (list, tuple)):
                 raise ValueError(f"stage {self.name!r}: 'retry.backoff' must be a list")
-            for i, v in enumerate(raw_backoff):
+            for i, v in enumerate(cast(list[Any], raw_backoff)):
                 if not isinstance(v, (int, float)) or v < 0:
                     raise ValueError(
                         f"stage {self.name!r}: 'retry.backoff[{i}]' must be a non-negative number"
                     )
-            backoff: list[float] | None = [float(v) for v in raw_backoff]
+            backoff: list[float] | None = [
+                float(v) for v in cast(list[Any], raw_backoff)
+            ]
         elif pr is not None:
             backoff = pr.backoff
         else:
@@ -154,5 +156,5 @@ class Stage:
     def orchestration_args(cls) -> list[StageInput]:
         return []
 
-    def run(self, pipe: Any) -> Any:
+    def run(self, pipe: Any) -> Any:  # noqa: ARG002
         raise NotImplementedError

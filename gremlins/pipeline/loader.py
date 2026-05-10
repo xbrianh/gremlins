@@ -133,12 +133,12 @@ def _parse_retry(raw: Any, context: str) -> RetryConfig | None:
     if backoff_raw is not None:
         if not isinstance(backoff_raw, (list, tuple)):
             raise ValueError(f"{context}: 'backoff' must be a list")
-        for i, v in enumerate(backoff_raw):
+        for i, v in enumerate(cast(list[Any], backoff_raw)):
             if not isinstance(v, (int, float)):
                 raise ValueError(f"{context}: 'backoff[{i}]' must be a number")
             if v < 0:
                 raise ValueError(f"{context}: 'backoff[{i}]' must be >= 0")
-        backoff = [float(v) for v in backoff_raw]
+        backoff = [float(v) for v in cast(list[Any], backoff_raw)]
     return RetryConfig(
         idle_timeout=float(idle_timeout_raw) if idle_timeout_raw is not None else None,
         backoff=backoff,

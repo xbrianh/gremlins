@@ -101,7 +101,7 @@ class SubprocessCopilotClient:
         cwd: pathlib.Path | None = None,
         idle_timeout: float | None = None,
     ) -> CompletedRun:
-        del idle_timeout, backoff  # copilot reads stdout to EOF; no streaming idle concept
+        del capture_events, on_timeout_prompt, idle_timeout, backoff
         argv = self._build_argv(model, prompt)
         p = self._spawn(argv, cwd=cwd)
         try:
