@@ -7,13 +7,13 @@ import pathlib
 from unittest.mock import patch
 
 import pytest
-from conftest import MINIMAL_EVENTS, gh_pipeline as _gh_pipeline
+from conftest import MINIMAL_EVENTS
+from conftest import gh_pipeline as _gh_pipeline
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.git import DivergentHead, EmptyImpl, HeadAdvanced, PreImplState
 from gremlins.stages.base import RuntimeState
 from gremlins.stages.implement import Implement
-
 
 _TEMPLATE_LOCAL = "plan: {plan_text}{spec_block}{impl_commit_instr}"
 _TEMPLATE_GH = "{spec_block}{plan_source_label}{issue_body}{plan_location_note}"
