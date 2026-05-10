@@ -16,7 +16,6 @@ import gremlins.orchestrators.run as _run_mod
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.gh_utils import parse_issue_ref as _parse_issue_ref
 from gremlins.git import (
-    DirtyOnly,
     DivergentHead,
     EmptyImpl,
     HeadAdvanced,
@@ -292,14 +291,6 @@ def test_classify_empty_impl(tmp_path):
     pre = record_pre_impl_state(cwd=str(tmp_path))
     outcome = classify_impl_outcome(pre, cwd=str(tmp_path))
     assert isinstance(outcome, EmptyImpl)
-
-
-def test_classify_dirty_only(tmp_path):
-    _init_git_repo(tmp_path)
-    pre = record_pre_impl_state(cwd=str(tmp_path))
-    (tmp_path / "new.txt").write_text("dirty\n")
-    outcome = classify_impl_outcome(pre, cwd=str(tmp_path))
-    assert isinstance(outcome, DirtyOnly)
 
 
 def test_classify_head_advanced(tmp_path):

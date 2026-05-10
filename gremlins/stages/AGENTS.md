@@ -17,7 +17,7 @@ sequencing logic of their own.
 - `plan.py` — `run(ctx, PlanOptions)`. Local pipeline only.
 - `implement.py` — `run(ctx, ImplementOptions)`. Dual-mode (`kind='local'` /
   `kind='gh'`). For gh: enforces the empty-implementation invariant,
-  classifies the outcome (`HeadAdvanced` / `DirtyOnly` / `EmptyImpl` /
+  classifies the outcome (`HeadAdvanced` / `EmptyImpl` /
   `DivergentHead`), creates the impl-handoff branch, and returns an
   `ImplStageResult` with the pre-impl state and classified outcome.
 - `review_code.py` — `run(ctx, ReviewCodeOptions)`. Local pipeline only
@@ -70,6 +70,5 @@ Any new `gremlins/stages/introspect.py` (planned for #258) must import only `ins
   is the firewall that keeps no-op runs out of `commit-pr` / `ghreview`.
   Don't soften it.
 - `commit_pr.py` selects its action clause based on the `ImplOutcome`
-  classification from the implement stage. The three shapes
-  (`HeadAdvanced`, `DirtyOnly`, plus the empty-handoff fallback) are
-  distinct prompts in `../prompts/` — keep them aligned.
+  classification from the implement stage. The shape (`HeadAdvanced`)
+  maps to a single prompt in `../prompts/` — keep them aligned.

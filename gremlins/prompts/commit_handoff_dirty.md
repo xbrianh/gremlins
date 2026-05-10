@@ -1,2 +1,0 @@
-<!-- placeholders: handoff_branch, commit_count, pre_head -->
-The implementation work is partially committed on the current branch ('{handoff_branch}'), with {commit_count} commit(s) above {pre_head} plus uncommitted local changes still in the worktree. Rename the current branch with 'git branch -m <new-name>'. Include the remaining changes — either amend the most recent commit with 'git commit --amend' (if they belong with that commit) or create a new commit.
