@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import dataclasses
-import logging
 import pathlib
 from typing import Any
 
@@ -30,78 +29,14 @@ from gremlins.schema import StageEntry
 from gremlins.stage_clients import require_stage_spec
 from gremlins.stages.base import RuntimeState
 from gremlins.stages.registry import register_stage_builder
-from gremlins.state import pipeline_uses_gh
-
-logger = logging.getLogger(__name__)
 
 
-def _review_stage_info(
-    state: RuntimeState,
-) -> tuple[list[str], dict[str, pathlib.Path]]:
-    names: list[str] = []
-    dirs: dict[str, pathlib.Path] = {}
-    scope = state.current_scope or (
-        list(state.pipeline_data.stages) if state.pipeline_data else []
-    )
-    for s in scope:
-        if s.type == "parallel":
-            for child in s.body:
-                if child.type == "review-code":
-                    names.append(child.name)
-                    dirs[child.name] = state.session_dir / s.name / child.name
-        elif s.type == "review-code":
-            names.append(s.name)
-            dirs[s.name] = state.session_dir
-    return names, dirs
+def _build_plan(entry: StageEntry, spec: Client, _state: RuntimeState) -> Any:
+    return plan.Plan(entry.name, spec.model, entry.prompts, entry.options)
 
 
-def _build_plan(entry: StageEntry, spec: Client, state: RuntimeState) -> Any:
-    plan_val = getattr(state.args, "plan", None)
-    if not entry.prompts and not plan_val:
-        die(
-            f"stage {entry.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML"
-        )
-    if not state.repo:
-        logger.info(
-            "planning (model: %s) -> %s", spec.model, state.session_dir / "plan.md"
-        )
-    return plan.Plan(
-        entry.name,
-        spec.model,
-        entry.prompts,
-        entry.options,
-        plan=plan_val,
-        instructions=state.instructions,
-        repo=state.repo,
-    )
-
-
-def _build_implement(entry: StageEntry, spec: Client, state: RuntimeState) -> Any:
-    spec_text = ""
-    spec_file = state.session_dir / "spec.md"
-    if spec_file.exists():
-        try:
-            spec_text = spec_file.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            logger.warning(
-                "could not read spec.md (%s); proceeding without north-star context",
-                exc,
-            )
-    if not state.repo:
-        logger.info(
-            "implementing (model: %s, from %s)",
-            spec.model,
-            state.session_dir / "plan.md",
-        )
-    return implement.Implement(
-        entry.name,
-        spec.model,
-        entry.prompts,
-        entry.options,
-        is_git=state.is_git,
-        spec_text=spec_text,
-        is_gh=bool(state.pipeline_data and pipeline_uses_gh(state.pipeline_data)),
-    )
+def _build_implement(entry: StageEntry, spec: Client, _state: RuntimeState) -> Any:
+    return implement.Implement(entry.name, spec.model, entry.prompts, entry.options)
 
 
 def _build_materialize_to_branch(
@@ -112,24 +47,8 @@ def _build_materialize_to_branch(
     )
 
 
-def _build_verify(entry: StageEntry, spec: Client, state: RuntimeState) -> Any:
-    options = dict(entry.options)
-    if not state.repo:
-        cmds = getattr(state.args, "cmds", None)
-        if cmds is not None:
-            options["cmds"] = cmds
-        options.setdefault("max_attempts", getattr(state.args, "test_max_attempts", 3))
-        resolved_cmds = options.get("cmds", [])
-        if resolved_cmds:
-            logger.info(
-                "running verify (cmds: %r, max-attempts: %s, model: %s)",
-                resolved_cmds,
-                options.get("max_attempts"),
-                spec.model,
-            )
-    return verify.Verify(
-        entry.name, spec.model, entry.prompts, options, is_git=state.is_git
-    )
+def _build_verify(entry: StageEntry, spec: Client, _state: RuntimeState) -> Any:
+    return verify.Verify(entry.name, spec.model, entry.prompts, entry.options)
 
 
 def _build_commit(entry: StageEntry, spec: Client, _state: RuntimeState) -> Any:
@@ -146,9 +65,11 @@ def _build_open_github_pr(entry: StageEntry, spec: Client, _state: RuntimeState)
     )
 
 
-def _build_request_copilot(entry: StageEntry, spec: Client, state: RuntimeState) -> Any:
+def _build_request_copilot(
+    entry: StageEntry, spec: Client, _state: RuntimeState
+) -> Any:
     return request_copilot.RequestCopilot(
-        entry.name, spec.model, entry.prompts, entry.options, repo=state.repo
+        entry.name, spec.model, entry.prompts, entry.options
     )
 
 
@@ -162,15 +83,12 @@ def _build_ghreview(entry: StageEntry, spec: Client, _state: RuntimeState) -> An
         spec.model,
         entry.prompts,
         entry.options,
-        plan_text="",
-        is_git=True,
-        is_gh=True,
     )
 
 
-def _build_wait_copilot(entry: StageEntry, spec: Client, state: RuntimeState) -> Any:
+def _build_wait_copilot(entry: StageEntry, spec: Client, _state: RuntimeState) -> Any:
     return wait_copilot.WaitCopilot(
-        entry.name, spec.model, entry.prompts, entry.options, repo=state.repo
+        entry.name, spec.model, entry.prompts, entry.options
     )
 
 
@@ -180,7 +98,7 @@ def _build_ghaddress(entry: StageEntry, spec: Client, _state: RuntimeState) -> A
             f"stage {entry.name!r}: type 'ghaddress' requires a 'prompt' field in the pipeline YAML"
         )
     return address_code.AddressCode(
-        entry.name, spec.model, entry.prompts, entry.options, is_git=True, is_gh=True
+        entry.name, spec.model, entry.prompts, entry.options
     )
 
 
@@ -188,33 +106,13 @@ def _build_wait_ci(entry: StageEntry, spec: Client, _state: RuntimeState) -> Any
     return wait_ci.WaitCI(entry.name, spec.model, entry.prompts, entry.options)
 
 
-def _build_review_code(entry: StageEntry, spec: Client, state: RuntimeState) -> Any:
-    plan_file = state.session_dir / "plan.md"
-    plan_text = plan_file.read_text(encoding="utf-8")
-    logger.info("reviewing code (model: %s)", spec.model)
-    return review_code.ReviewCode(
-        entry.name,
-        spec.model,
-        entry.prompts,
-        entry.options,
-        plan_text=plan_text,
-        is_git=state.is_git,
-        is_gh=bool(state.pipeline_data and pipeline_uses_gh(state.pipeline_data)),
-    )
+def _build_review_code(entry: StageEntry, spec: Client, _state: RuntimeState) -> Any:
+    return review_code.ReviewCode(entry.name, spec.model, entry.prompts, entry.options)
 
 
-def _build_address_code(entry: StageEntry, spec: Client, state: RuntimeState) -> Any:
-    names, dirs = _review_stage_info(state)
-    logger.info("addressing code reviews (model: %s)", spec.model)
+def _build_address_code(entry: StageEntry, spec: Client, _state: RuntimeState) -> Any:
     return address_code.AddressCode(
-        entry.name,
-        spec.model,
-        entry.prompts,
-        entry.options,
-        is_git=state.is_git,
-        review_stage_names=names,
-        review_stage_dirs=dirs,
-        is_gh=bool(state.pipeline_data and pipeline_uses_gh(state.pipeline_data)),
+        entry.name, spec.model, entry.prompts, entry.options
     )
 
 

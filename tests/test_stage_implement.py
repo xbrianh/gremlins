@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 from conftest import MINIMAL_EVENTS
+from conftest import gh_pipeline as _gh_pipeline
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.git import DivergentHead, EmptyImpl, HeadAdvanced, PreImplState
@@ -29,18 +30,19 @@ def _make_state(
     prompts: list[str] | None = None,
     is_gh: bool = False,
 ) -> tuple[Implement, RuntimeState]:
-    stage = Implement(
-        "implement",
-        "sonnet",
-        prompts or [],
-        {},
-        is_git=is_git,
-        spec_text=spec_text,
-        is_gh=is_gh,
-    )
+    stage = Implement("implement", "sonnet", prompts or [], {})
     client = FakeClaudeClient(fixtures={"implement": MINIMAL_EVENTS})
-    state = RuntimeState(client=client, session_dir=tmp_path, gr_id=None)
+    pipeline_data = _gh_pipeline() if is_gh else None
+    state = RuntimeState(
+        client=client,
+        session_dir=tmp_path,
+        gr_id=None,
+        is_git=is_git,
+        pipeline_data=pipeline_data,
+    )
     (tmp_path / "plan.md").write_text(plan_text, encoding="utf-8")
+    if spec_text:
+        (tmp_path / "spec.md").write_text(spec_text, encoding="utf-8")
     return stage, state
 
 

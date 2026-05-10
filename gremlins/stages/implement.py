@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import pathlib
 from typing import Any
@@ -16,7 +17,9 @@ from gremlins.git import (
 from gremlins.prompts import BUNDLED_PROMPT_DIR
 from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.registry import register_stage
-from gremlins.state import patch_state, resolve_state_file
+from gremlins.state import patch_state, pipeline_uses_gh, resolve_state_file
+
+logger = logging.getLogger(__name__)
 
 # Implement turns can sit silent for many minutes while the model edits files
 # or runs long subagents/tools without emitting stream events. The default
@@ -80,6 +83,19 @@ def _render_spec_block(spec_text: str) -> str:
     )
 
 
+def _read_spec(session_dir: pathlib.Path) -> str:
+    spec_file = session_dir / "spec.md"
+    if not spec_file.exists():
+        return ""
+    try:
+        return spec_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning(
+            "could not read spec.md (%s); proceeding without north-star context", exc
+        )
+        return ""
+
+
 class Implement(Stage):
     def __init__(
         self,
@@ -87,41 +103,29 @@ class Implement(Stage):
         model: str | None,
         prompts: list[str],
         options: dict[str, Any],
-        *,
-        is_git: bool,
-        spec_text: str = "",
-        cwd: str | None = None,
-        is_gh: bool = False,
     ) -> None:
         super().__init__(name, model, prompts, options)
-        self.is_git = is_git
-        self.spec_text = spec_text
-        self._cwd = cwd
-        self.is_gh = is_gh
-
-    def _impl_cwd(self, state: RuntimeState) -> str | None:
-        return self._cwd or (
-            str(state.worktree) if state.worktree is not None else None
-        )
 
     def run(self, state: RuntimeState) -> None:
-        if self.is_gh:
-            self._run_gh(state)
+        is_gh = bool(state.pipeline_data and pipeline_uses_gh(state.pipeline_data))
+        spec_text = _read_spec(state.session_dir)
+        if is_gh:
+            self._run_gh(state, spec_text)
         else:
-            self._run_local(state)
+            self._run_local(state, spec_text)
 
-    def _run_local(self, state: RuntimeState) -> None:
+    def _run_local(self, state: RuntimeState, spec_text: str) -> None:
         cwd_arg = str(state.worktree) if state.worktree is not None else None
         pre = None
         pre_sentinel: pathlib.Path | None = None
-        if self.is_git:
+        if state.is_git:
             pre = record_pre_impl_state(cwd=cwd_arg)
         else:
             pre_sentinel = state.session_dir / ".pre-impl"
             pre_sentinel.touch()
 
         impl_commit_instr = ""
-        if self.is_git:
+        if state.is_git:
             impl_commit_instr = (
                 (BUNDLED_PROMPT_DIR / "impl_commit_git.md")
                 .read_text(encoding="utf-8")
@@ -131,7 +135,7 @@ class Implement(Stage):
         plan_text = (state.session_dir / "plan.md").read_text(encoding="utf-8")
         template = "\n\n".join(self.prompts).rstrip()
         prompt = template.format(
-            spec_block=_render_spec_block(self.spec_text),
+            spec_block=_render_spec_block(spec_text),
             plan_text=plan_text,
             impl_commit_instr=impl_commit_instr,
         )
@@ -143,7 +147,7 @@ class Implement(Stage):
             idle_timeout=IMPLEMENT_IDLE_TIMEOUT,
         )
 
-        if self.is_git:
+        if state.is_git:
             if pre is None:
                 raise RuntimeError("pre-impl state not captured")
             outcome = classify_impl_outcome(pre, cwd=cwd_arg)
@@ -161,7 +165,7 @@ class Implement(Stage):
             if not changes_outside_git(pre_sentinel, state.session_dir):
                 raise RuntimeError("implementation stage produced no changes; aborting")
 
-    def _run_gh(self, state: RuntimeState) -> None:
+    def _run_gh(self, state: RuntimeState, spec_text: str) -> None:
         state_file = resolve_state_file(state.gr_id)
         issue_num = ""
         if state_file and state_file.exists():
@@ -186,7 +190,7 @@ class Implement(Stage):
                 "should be product code."
             )
 
-        impl_cwd = self._impl_cwd(state)
+        impl_cwd = str(state.worktree) if state.worktree is not None else None
         pre = record_pre_impl_state(cwd=impl_cwd)
         # Write sidecar so MaterializeToBranch can read pre-impl state.
         (state.session_dir / ".impl-pre-state.json").write_text(
@@ -199,7 +203,7 @@ class Implement(Stage):
         plan_text = (state.session_dir / "plan.md").read_text(encoding="utf-8")
         template = "\n\n".join(self.prompts).rstrip()
         prompt = template.format(
-            spec_block=_render_spec_block(self.spec_text),
+            spec_block=_render_spec_block(spec_text),
             plan_source_label=plan_source_label,
             issue_body=plan_text,
             plan_location_note=plan_location_note,

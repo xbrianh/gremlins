@@ -24,7 +24,6 @@ def _make_stage(
         None,
         [],
         {},
-        repo=repo,
         pr_num=pr_num,
         timeout=timeout,
         interval=interval,
@@ -34,6 +33,7 @@ def _make_stage(
         client=FakeClaudeClient(fixtures={}),
         session_dir=tmp_path,
         gr_id=gr_id,
+        repo=repo,
     )
     return stage, state
 

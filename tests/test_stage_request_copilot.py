@@ -14,11 +14,12 @@ from gremlins.stages.request_copilot import RequestCopilot
 def _make_stage(
     tmp_path, *, repo: str, pr_num: str
 ) -> tuple[RequestCopilot, RuntimeState]:
-    stage = RequestCopilot("request-copilot", None, [], {}, repo=repo, pr_num=pr_num)
+    stage = RequestCopilot("request-copilot", None, [], {}, pr_num=pr_num)
     state = RuntimeState(
         client=FakeClaudeClient(fixtures={}),
         session_dir=tmp_path,
         gr_id=None,
+        repo=repo,
     )
     return stage, state
 

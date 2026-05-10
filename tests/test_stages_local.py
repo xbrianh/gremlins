@@ -8,6 +8,7 @@ from conftest import MINIMAL_EVENTS, ReviewCreatingClient
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.pipeline.loader import load_pipeline
+from gremlins.schema import StageEntry as _StageEntry
 from gremlins.stages import implement, plan
 from gremlins.stages.address_code import AddressCode
 from gremlins.stages.base import RuntimeState
@@ -135,15 +136,15 @@ def test_implement_renders_spec_block_when_present(tmp_path, monkeypatch):
 
     client = _CommittingClient(fixtures={"implement": MINIMAL_EVENTS})
     (session_dir / "plan.md").write_text("task 1: do something", encoding="utf-8")
+    (session_dir / "spec.md").write_text("overall spec body", encoding="utf-8")
     stage = implement.Implement(
         "implement",
         "sonnet",
         [(_BUNDLED_PROMPTS / "implement_local.md").read_text(encoding="utf-8")],
         {},
-        is_git=True,
-        spec_text="overall spec body",
     )
     state = _make_state(client, session_dir)
+    state.is_git = True
     stage.run(state)
     prompt = client.calls[0].prompt
     assert "Overarching goal (north star)" in prompt
@@ -184,10 +185,9 @@ def test_implement_omits_spec_block_when_absent(tmp_path, monkeypatch):
         "sonnet",
         [(_BUNDLED_PROMPTS / "implement_local.md").read_text(encoding="utf-8")],
         {},
-        is_git=True,
-        spec_text="",
     )
     state = _make_state(client, session_dir)
+    state.is_git = True
     stage.run(state)
     prompt = client.calls[0].prompt
     assert "Overarching goal" not in prompt
@@ -207,9 +207,9 @@ def test_plan_stage_raises_when_file_absent(tmp_path):
         "sonnet",
         [(_BUNDLED_PROMPTS / "plan.md").read_text(encoding="utf-8")],
         {},
-        instructions="do stuff",
     )
     state = _make_state(client, session_dir)
+    state.instructions = "do stuff"
     with pytest.raises(RuntimeError, match="plan stage did not produce"):
         stage.run(state)
     assert len(client.calls) == 1
@@ -233,9 +233,9 @@ def test_plan_stage_succeeds_when_file_exists(tmp_path):
         "haiku",
         [(_BUNDLED_PROMPTS / "plan.md").read_text(encoding="utf-8")],
         {},
-        instructions="do stuff",
     )
     state = _make_state(client, session_dir)
+    state.instructions = "do stuff"
     stage.run(state)
     assert plan_file.exists()
     assert client.calls[0].label == "plan"
@@ -263,9 +263,9 @@ def test_implement_stage_raises_on_empty_diff(tmp_path, monkeypatch):
         "sonnet",
         [(_BUNDLED_PROMPTS / "implement_local.md").read_text(encoding="utf-8")],
         {},
-        is_git=True,
     )
     state = _make_state(client, session_dir)
+    state.is_git = True
     with pytest.raises(RuntimeError, match="no committed work"):
         stage.run(state)
     assert len(client.calls) == 1
@@ -282,8 +282,6 @@ def _make_review_code_stage(
     session_dir,
     *,
     model: str = "sonnet",
-    plan_text: str = "",
-    is_git: bool = False,
     gr_id=None,
 ) -> ReviewCode:
     stage = ReviewCode(
@@ -294,8 +292,6 @@ def _make_review_code_stage(
             (_BUNDLED_PROMPTS / "review" / "detail.md").read_text(encoding="utf-8"),
         ],
         {},
-        plan_text=plan_text,
-        is_git=is_git,
     )
     return stage
 
@@ -309,7 +305,6 @@ def _make_address_code_stage(
     session_dir,
     *,
     model: str = "sonnet",
-    is_git: bool = False,
     gr_id=None,
 ) -> AddressCode:
     stage = AddressCode(
@@ -317,7 +312,6 @@ def _make_address_code_stage(
         model,
         [(_BUNDLED_PROMPTS / "address.md").read_text(encoding="utf-8")],
         {},
-        is_git=is_git,
     )
     return stage
 
@@ -355,9 +349,9 @@ def test_plan_stage_includes_style_from_prompts(tmp_path):
             (_BUNDLED_PROMPTS / "plan.md").read_text(encoding="utf-8"),
         ],
         {},
-        instructions="do stuff",
     )
     state = _make_state(client, session_dir)
+    state.instructions = "do stuff"
     with pytest.raises(RuntimeError, match="plan stage did not produce"):
         stage.run(state)
     assert "Be good." in client.calls[0].prompt
@@ -390,8 +384,6 @@ def test_review_code_stage_includes_style_from_prompts(tmp_path):
             (_BUNDLED_PROMPTS / "review" / "detail.md").read_text(encoding="utf-8"),
         ],
         {},
-        plan_text="",
-        is_git=False,
     )
     state = _make_state(client, tmp_path)
     stage.run(state)
@@ -411,7 +403,6 @@ def test_address_code_stage_includes_style_from_prompts(tmp_path):
             (_BUNDLED_PROMPTS / "address.md").read_text(encoding="utf-8"),
         ],
         {},
-        is_git=False,
     )
     state = _make_state(client, tmp_path)
     stage.run(state)
@@ -459,14 +450,36 @@ def test_address_code_finds_review_files_in_parallel_subdirs(tmp_path):
         "sonnet",
         [(_BUNDLED_PROMPTS / "address.md").read_text(encoding="utf-8")],
         {},
-        is_git=False,
-        review_stage_names=["review-code", "review-code-fidelity"],
-        review_stage_dirs={
-            "review-code": child1_dir,
-            "review-code-fidelity": child2_dir,
-        },
     )
-    state = _make_state(client, tmp_path)
+    parallel_entry = _StageEntry(
+        name="reviews",
+        type="parallel",
+        client=None,
+        prompts=[],
+        options={},
+        body=[
+            _StageEntry(
+                name="review-code",
+                type="review-code",
+                client=None,
+                prompts=[],
+                options={},
+            ),
+            _StageEntry(
+                name="review-code-fidelity",
+                type="review-code",
+                client=None,
+                prompts=[],
+                options={},
+            ),
+        ],
+    )
+    state = RuntimeState(
+        client=client,
+        session_dir=tmp_path,
+        gr_id=None,
+        current_scope=[parallel_entry],
+    )
     stage.run(state)
 
     assert len(client.calls) == 1

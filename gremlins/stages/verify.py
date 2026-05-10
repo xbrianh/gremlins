@@ -34,21 +34,27 @@ class Verify(Stage):
         model: str | None,
         prompts: list[str],
         options: dict[str, Any],
-        *,
-        is_git: bool,
     ) -> None:
         super().__init__(name, model, prompts, options)
-        self._is_git = is_git
 
     def run(self, state: RuntimeState) -> None:
-        cmds = [c for c in self.options.get("cmds", []) if c.strip()]
-        max_attempts = self.options.get("max_attempts", 3)
+        options = dict(self.options)
+        if not state.repo:
+            cmds_arg = getattr(state.args, "cmds", None)
+            if cmds_arg is not None:
+                options["cmds"] = cmds_arg
+            options.setdefault(
+                "max_attempts", getattr(state.args, "test_max_attempts", 3)
+            )
+        cmds = [c for c in options.get("cmds", []) if c.strip()]
+        max_attempts = options.get("max_attempts", 3)
 
         if not cmds:
             logger.info("verify: no cmds configured; skipping")
             return
 
-        if self.options.get("commit_after_fix", True) and self._is_git:
+        is_git = state.is_git
+        if options.get("commit_after_fix", True) and is_git:
             commit_instr = (
                 "- After fixing, stage the changed files by name and create a single git "
                 "commit titled 'Fix failing checks'. Do not push."
@@ -62,8 +68,6 @@ class Verify(Stage):
         template = "\n\n".join(self.prompts).rstrip()
         combined_cmd = " && ".join(cmds)
         commands_section = "**Commands run:**\n" + "\n".join(f"- `{c}`" for c in cmds)
-
-        is_git = self._is_git
         attempt: list[int] = [0]
         last_output: list[str | None] = [None]
 

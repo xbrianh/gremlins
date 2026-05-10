@@ -41,14 +41,14 @@ def _make_stage(
         "commit_after_fix": commit_after_fix,
     }
     stage = Verify(
-        "verify",
-        fix_model,
-        [_VERIFY_PROMPT_PATH.read_text(encoding="utf-8")],
-        options,
-        is_git=is_git,
+        "verify", fix_model, [_VERIFY_PROMPT_PATH.read_text(encoding="utf-8")], options
     )
     state = RuntimeState(
-        client=client, session_dir=tmp_path, gr_id=None, worktree=tmp_path
+        client=client,
+        session_dir=tmp_path,
+        gr_id=None,
+        worktree=tmp_path,
+        is_git=is_git,
     )
     return stage, state
 
@@ -195,14 +195,10 @@ def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
     )
     options = {"cmds": ["false"], "max_attempts": 3, "commit_after_fix": False}
     stage = Verify(
-        "verify",
-        "sonnet",
-        [_VERIFY_PROMPT_PATH.read_text(encoding="utf-8")],
-        options,
-        is_git=True,
+        "verify", "sonnet", [_VERIFY_PROMPT_PATH.read_text(encoding="utf-8")], options
     )
     state = RuntimeState(
-        client=client, session_dir=tmp_path, gr_id=gr_id, worktree=tmp_path
+        client=client, session_dir=tmp_path, gr_id=gr_id, worktree=tmp_path, is_git=True
     )
 
     with pytest.raises(RuntimeError, match="exhausted"):
@@ -267,13 +263,14 @@ def test_parallel_child_fix_prompt_uses_child_key_bail_command(tmp_path):
         _bail_fix_path.read_text(encoding="utf-8"),
     ]
     options = {"cmds": ["false"], "max_attempts": 2, "commit_after_fix": False}
-    stage = Verify("verify", "sonnet", prompts, options, is_git=True)
+    stage = Verify("verify", "sonnet", prompts, options)
     state = RuntimeState(
         client=client,
         session_dir=tmp_path,
         gr_id="gr-verify",
         child_key="verify-child",
         worktree=tmp_path,
+        is_git=True,
     )
 
     with pytest.raises(RuntimeError, match="exhausted 2 attempts"):

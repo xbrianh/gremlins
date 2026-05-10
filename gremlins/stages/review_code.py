@@ -12,6 +12,7 @@ from gremlins.stages.registry import register_stage
 from gremlins.state import (
     check_bail,
     emit_bail,
+    pipeline_uses_gh,
     read_pr_url,
     set_stage,
 )
@@ -68,19 +69,14 @@ class ReviewCode(Stage):
         prompts: list[str],
         options: dict[str, Any],
         *,
-        plan_text: str,
-        is_git: bool,
         pr_url: str = "",
-        is_gh: bool = False,
     ) -> None:
         super().__init__(name, model, prompts, options)
-        self.plan_text = plan_text
-        self.is_git = is_git
         self.pr_url = pr_url
-        self.is_gh = is_gh
 
     def run(self, state: RuntimeState) -> Any:
-        if self.is_gh:
+        is_gh = bool(state.pipeline_data and pipeline_uses_gh(state.pipeline_data))
+        if is_gh:
             return self.results_to_github(state)
         return self.results_to_local(state)
 
@@ -102,7 +98,11 @@ class ReviewCode(Stage):
                 "check that prompts is non-empty and all entries have content"
             )
 
-        if self.is_git:
+        is_git = state.is_git
+        plan_file = state.session_dir / "plan.md"
+        plan_text = plan_file.read_text(encoding="utf-8") if plan_file.exists() else ""
+
+        if is_git:
             code_scope = (
                 "Review the changes introduced by the most recent commit "
                 "(HEAD vs HEAD~1) plus any uncommitted working-tree changes. "
@@ -113,9 +113,9 @@ class ReviewCode(Stage):
                 "Review the uncommitted changes in this directory (`git diff` if "
                 "available, otherwise inspect recently modified files)."
             )
-        if self.plan_text:
+        if plan_text:
             code_context = (
-                f"The plan for this change is:\n\n{self.plan_text}\n\n{code_scope}"
+                f"The plan for this change is:\n\n{plan_text}\n\n{code_scope}"
             )
         else:
             code_context = code_scope

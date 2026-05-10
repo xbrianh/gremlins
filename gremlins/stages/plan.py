@@ -11,6 +11,7 @@ import subprocess
 import sys
 from typing import Any
 
+from gremlins.errors import die
 from gremlins.gh_utils import extract_gh_url, get_repo, parse_issue_ref, view_issue
 from gremlins.stages.base import RuntimeState, Stage, StageInput
 from gremlins.stages.registry import register_stage
@@ -30,15 +31,8 @@ class Plan(Stage):
         model: str | None,
         prompts: list[str],
         options: dict[str, Any],
-        *,
-        instructions: str = "",
-        plan: str | None = None,
-        repo: str = "",
     ) -> None:
         super().__init__(name, model, prompts, options)
-        self.instructions = instructions
-        self.plan = plan
-        self.repo = repo
 
     @classmethod
     def orchestration_args(cls) -> list[StageInput]:
@@ -67,6 +61,11 @@ class Plan(Stage):
         ]
 
     def run(self, state: RuntimeState) -> None:
+        plan_val = getattr(state.args, "plan", None)
+        if not self.prompts and not plan_val:
+            die(
+                f"stage {self.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML"
+            )
         plan_md = state.session_dir / "plan.md"
 
         if plan_md.exists() and plan_md.stat().st_size > 0:
@@ -74,25 +73,25 @@ class Plan(Stage):
             logger.info("[1/8] plan resumed from snapshot: %s%s", plan_md, label)
             return
 
-        if self.plan:
-            src = pathlib.Path(self.plan)
+        if plan_val:
+            src = pathlib.Path(plan_val)
             if src.is_file():
-                self._resolve_file_source(self.plan, plan_md, state)
+                self._resolve_file_source(plan_val, plan_md, state)
             else:
-                self._resolve_issue_source(self.plan, plan_md, state)
+                self._resolve_issue_source(plan_val, plan_md, state)
             return
 
         self._run_agent(plan_md, state)
 
     def _run_agent(self, plan_md: pathlib.Path, state: RuntimeState) -> None:
-        if self.repo:
+        if state.repo:
             base_ref_name = state.base_ref_name
             plan_prompt = (
                 "\n\n".join(self.prompts)
                 .rstrip()
                 .format(
                     base_ref=_fmt_escape(base_ref_name),
-                    instructions=_fmt_escape(self.instructions),
+                    instructions=_fmt_escape(state.instructions),
                 )
             )
             completed = self.run_claude(
@@ -112,13 +111,13 @@ class Plan(Stage):
             issue_num = issue_url.split("/")[-1]
             logger.info("issue: %s", issue_url)
             patch_state(state.gr_id, issue_url=issue_url, issue_num=issue_num)
-            issue_body = _fetch_issue_body(issue_num, self.repo)
+            issue_body = _fetch_issue_body(issue_num, state.repo)
             plan_md.write_text(issue_body, encoding="utf-8")
         else:
             template = "\n\n".join(self.prompts).rstrip()
             prompt = template.format(
                 plan_file=plan_md,
-                instructions=self.instructions,
+                instructions=state.instructions,
             )
             completed = self.run_claude(
                 prompt,
@@ -141,7 +140,7 @@ class Plan(Stage):
             sys.exit(1)
         issue_body = src.read_text(encoding="utf-8")
 
-        if not self.repo:
+        if not state.repo:
             shutil.copyfile(src, plan_md)
             return
 
@@ -171,7 +170,7 @@ class Plan(Stage):
                 "issue",
                 "create",
                 "--repo",
-                self.repo,
+                state.repo,
                 "--title",
                 issue_title,
                 "--body-file",
@@ -205,14 +204,14 @@ class Plan(Stage):
     def _resolve_issue_source(
         self, ref: str, plan_md: pathlib.Path, state: RuntimeState
     ) -> None:
-        target_repo, issue_ref = parse_issue_ref(ref, self.repo or "")
+        target_repo, issue_ref = parse_issue_ref(ref, state.repo or "")
         if issue_ref is None:
             sys.stderr.write(
                 f"error: --plan: not a readable file or recognized issue reference: {ref}\n"
             )
             sys.stderr.flush()
             sys.exit(1)
-        pr_repo = self.repo
+        pr_repo = state.repo
         if not pr_repo:
             try:
                 pr_repo = get_repo()
