@@ -101,13 +101,13 @@ def test_liveness_running_with_live_pid_and_fresh_log(tmp_path):
     assert _state.liveness_of_state_file(sf) == "running"
 
 
-def test_liveness_dead_finished_zero_exit(tmp_path):
+def test_liveness_finished_zero_exit(tmp_path):
     sf = _write_state(
         tmp_path / "g",
         {"status": "running", "pid": 99999, "exit_code": 0},
         finished=True,
     )
-    assert _state.liveness_of_state_file(sf) == "dead:finished"
+    assert _state.liveness_of_state_file(sf) == "finished"
 
 
 def test_liveness_dead_with_nonzero_exit(tmp_path):

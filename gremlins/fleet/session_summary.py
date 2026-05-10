@@ -181,7 +181,12 @@ def _render_summary(
         pid_str = g["pid"] or "?"
         stage_disp = g["stage"] or "?"
         live = g["live"]
-        if live.startswith("dead:"):
+        if live == "finished":
+            running_block += (
+                f"- `{g['id']}` ({g['kind']}): **finished**"
+                f" (stage: {stage_disp}){desc_suffix} — log: {g['log']}\n"
+            )
+        elif live.startswith("dead:"):
             reason = live[len("dead:") :]
             running_block += (
                 f"- `{g['id']}` ({g['kind']}): **{reason}**"

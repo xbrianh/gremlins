@@ -888,7 +888,7 @@ def do_land(
         return _land_gh(gr_id, wdir, state, force=force)
 
     if shape == "one_branch":
-        if live != "dead:finished":
+        if live != "finished":
             print(f"gremlin {gr_id} is not finished (liveness: {live})")
             return False
         return _land_local(gr_id, sf, wdir, state, mode or "squash", into_dir=into_dir)
@@ -897,7 +897,7 @@ def do_land(
     if state.get("setup_kind") != "worktree-detached":
         print(f"error: gremlin {gr_id} has no branch or PR artifacts to land")
         return False
-    if live != "dead:finished":
+    if live != "finished":
         print(f"gremlin {gr_id} is not finished (liveness: {live})")
         return False
     return _land_boss(gr_id, sf, wdir, state, mode or "ff")

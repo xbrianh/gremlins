@@ -94,6 +94,7 @@ def do_list(args: argparse.Namespace, here_root: str | None = None) -> None:
             liveness_filter.add("waiting")
         if args.dead:
             liveness_filter.add("dead:")
+            liveness_filter.add("finished")
         if args.stalled:
             liveness_filter.add("stalled:")
 
@@ -141,7 +142,7 @@ def do_recent(args: argparse.Namespace, here_root: str | None = None) -> None:
         here_root=here_root,
         pipeline_filter=args.pipeline,
         since_secs=since_secs,
-        liveness_filter={"dead:"},
+        liveness_filter={"dead:", "finished"},
         include_closed=True,
     )
 
