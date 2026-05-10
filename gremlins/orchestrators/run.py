@@ -11,7 +11,6 @@ import shutil
 import yaml
 
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
-from gremlins.clients.protocol import _ClientImpl
 from gremlins.env_file import load_env_file
 from gremlins.errors import die
 from gremlins.gh_utils import get_repo
@@ -68,7 +67,7 @@ def run_pipeline(
     *,
     argv: list[str],
     gr_id: str | None = None,
-    client: _ClientImpl | None = None,
+    client: Client | None = None,
 ) -> int:
     """Load pipeline YAML, build Pipeline, run. Sole internal pipeline entry point."""
     configure_logging()
@@ -126,9 +125,9 @@ def run_pipeline(
                 gr_id, stage_clients={k: str(v) for k, v in stage_specs.items()}
             )
 
-    _spec_clients: dict[str, _ClientImpl] = {}
+    _spec_clients: dict[str, Client] = {}
 
-    def _client_for_spec(spec: Client) -> _ClientImpl:
+    def _client_for_spec(spec: Client) -> Client:
         if client is not None:
             return client
         key = str(spec)

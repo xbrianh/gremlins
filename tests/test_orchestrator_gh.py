@@ -2012,7 +2012,7 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
 
     # Override load_pipeline (wins over _patch_common's version) to inject
     # default_client without a live client instance.
-    from gremlins.clients.client import Client as _ClientSpec
+    from gremlins.clients.client import Client
 
     _real_load_pipeline = _run_mod.load_pipeline
 
@@ -2021,7 +2021,7 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
         stripped_stages = [dataclasses.replace(s, client=None) for s in pipeline.stages]
         return dataclasses.replace(
             pipeline,
-            default_client=_ClientSpec("copilot", "gpt-5.4"),
+            default_client=Client("copilot", "gpt-5.4"),
             stages=stripped_stages,
         )
 

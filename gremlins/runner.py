@@ -19,14 +19,14 @@ import sys
 import types
 from collections.abc import Callable, Sequence
 
-from gremlins.clients.protocol import _ClientImpl
+from gremlins.clients.client import Client
 
 logger = logging.getLogger(__name__)
 
 Stage = tuple[str, Callable[[], None]]
 
 
-def install_signal_handlers(*clients: _ClientImpl) -> None:
+def install_signal_handlers(*clients: Client) -> None:
     """Register SIGINT/SIGTERM handlers that reap claude children before
     exit. Pass the live ClaudeClient(s) (real or fake) — their ``reap_all`` is
     what gets called."""

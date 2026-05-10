@@ -1,19 +1,17 @@
 from __future__ import annotations
 
 import pathlib
-from typing import TYPE_CHECKING
+from typing import Any
 
+from gremlins.clients.protocol import CompletedRun
 from gremlins.clients.registry import CLIENT_FACTORIES
-
-if TYPE_CHECKING:
-    from gremlins.clients.protocol import CompletedRun, _ClientImpl
 
 
 class Client:
     def __init__(self, provider: str, model: str) -> None:
         self.provider = provider
         self.model = model
-        self._impl: _ClientImpl | None = None
+        self._impl: Any = None
 
     @classmethod
     def parse(cls, s: str) -> Client:
@@ -42,7 +40,7 @@ class Client:
     def __hash__(self) -> int:
         return hash((self.provider, self.model))
 
-    def _get_impl(self) -> _ClientImpl:
+    def _get_impl(self) -> Any:
         if self._impl is None:
             if self.provider not in CLIENT_FACTORIES:
                 raise ValueError(f"unknown provider {self.provider!r}")

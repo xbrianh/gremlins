@@ -16,7 +16,6 @@ from collections.abc import Callable
 from typing import Any, TypeVar, cast
 
 from gremlins.clients.client import Client
-from gremlins.clients.protocol import _ClientImpl
 from gremlins.prompts import BUNDLED_PROMPT_DIR
 from gremlins.stages.base import Stage
 from gremlins.stages.loop import RunCmdFailed
@@ -45,7 +44,7 @@ def sanitize_model_for(spec: Client) -> str:
 
 
 def with_reap_after(
-    client: _ClientImpl, timeout: int | None, fn: Callable[[], T]
+    client: Client, timeout: int | None, fn: Callable[[], T]
 ) -> T:
     """Run fn, reaping the client's subprocesses if it doesn't return in time."""
     if timeout is None:
@@ -339,7 +338,7 @@ def _read_rolling_plan_for_sanitize(out_path: pathlib.Path) -> str | None:
 
 
 def sanitize_rolling_plan(
-    client: _ClientImpl,
+    client: Client,
     out_path: pathlib.Path,
     spec: Client,
     *,
@@ -416,7 +415,7 @@ def _parse_client_spec(client_arg: str) -> Client:
         raise RuntimeError(str(exc)) from exc
 
 
-def run(client: _ClientImpl, args: argparse.Namespace) -> int:
+def run(client: Client, args: argparse.Namespace) -> int:
     plan_path = pathlib.Path(args.plan).resolve()
     if not plan_path.exists():
         sys.stderr.write(f"error: --plan does not exist: {plan_path}\n")
