@@ -10,6 +10,8 @@ prompts:
 stages:
   - name: chain
     type: loop
+    options:
+      pr_stack: true
     body:
       - { name: handoff, type: handoff }
       - { include: local }
