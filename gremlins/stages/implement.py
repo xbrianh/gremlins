@@ -8,7 +8,6 @@ import pathlib
 from typing import Any
 
 from gremlins.git import (
-    DirtyOnly,
     DivergentHead,
     EmptyImpl,
     classify_impl_outcome,
@@ -146,12 +145,10 @@ class Implement(Stage):
             if pre is None:
                 raise RuntimeError("pre-impl state not captured")
             outcome = classify_impl_outcome(pre, cwd=cwd_arg)
-            if isinstance(outcome, DirtyOnly):
-                raise RuntimeError(
-                    "implement left uncommitted changes; the agent must commit before returning"
-                )
             if isinstance(outcome, EmptyImpl):
-                raise RuntimeError("implement produced no work")
+                raise RuntimeError(
+                    "implement produced no committed work; the agent must commit before returning"
+                )
             if isinstance(outcome, DivergentHead):
                 raise RuntimeError(
                     f"implement diverged from pre-impl HEAD {pre.head[:7]}; expected a fast-forward"
@@ -212,12 +209,10 @@ class Implement(Stage):
         )
 
         outcome = classify_impl_outcome(pre, cwd=self._impl_cwd)
-        if isinstance(outcome, DirtyOnly):
-            raise RuntimeError(
-                "implement left uncommitted changes; the agent must commit before returning"
-            )
         if isinstance(outcome, EmptyImpl):
-            raise RuntimeError("implement produced no work")
+            raise RuntimeError(
+                "implement produced no committed work; the agent must commit before returning"
+            )
         if isinstance(outcome, DivergentHead):
             raise RuntimeError(
                 f"implement diverged from pre-impl HEAD {pre.head[:7]}; expected a fast-forward"

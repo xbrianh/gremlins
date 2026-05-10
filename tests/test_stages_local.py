@@ -264,7 +264,7 @@ def test_implement_stage_raises_on_empty_diff(tmp_path, monkeypatch):
         is_git=True,
     )
     stage.bind(_make_ctx(client, session_dir))
-    with pytest.raises(RuntimeError, match="no work"):
+    with pytest.raises(RuntimeError, match="no committed work"):
         stage.run(None)
     assert len(client.calls) == 1
     assert client.calls[0].label == "implement"

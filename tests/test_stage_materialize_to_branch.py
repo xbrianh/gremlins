@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from gremlins.git import DirtyOnly, DivergentHead, EmptyImpl, HeadAdvanced, PreImplState
+from gremlins.git import DivergentHead, EmptyImpl, HeadAdvanced, PreImplState
 from gremlins.stages import StageContext
 from gremlins.stages.materialize_to_branch import (
     MaterializeToBranch,
@@ -60,22 +60,6 @@ def test_head_advanced_creates_materialized_branch(tmp_path: pathlib.Path) -> No
     mock_create.assert_called_once()
     mock_reset.assert_called_once()
     mock_sweep.assert_called_once()
-
-
-def test_dirty_only_raises(tmp_path: pathlib.Path) -> None:
-    stage, _ = _make_stage(tmp_path)
-    with (
-        patch(
-            "gremlins.stages.materialize_to_branch.classify_impl_outcome",
-            return_value=DirtyOnly(),
-        ),
-        patch(
-            "gremlins.stages.materialize_to_branch.create_handoff_branch"
-        ) as mock_create,
-    ):
-        with pytest.raises(RuntimeError, match="unexpected impl outcome"):
-            stage.run(_pipe())
-    mock_create.assert_not_called()
 
 
 def test_empty_impl_raises(tmp_path: pathlib.Path) -> None:

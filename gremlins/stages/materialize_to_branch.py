@@ -11,7 +11,6 @@ from typing import Any
 from gremlins.git import (
     DivergentHead,
     EmptyImpl,
-    HeadAdvanced,
     ImplOutcome,
     PreImplState,
     classify_impl_outcome,
@@ -65,11 +64,6 @@ class MaterializeToBranch(Stage):
                 f"implementation changed HEAD from {outcome.pre_head} to {outcome.post_head} "
                 "without advancing from the starting commit; refusing to treat this as "
                 "committed work to hand off"
-            )
-        if not isinstance(outcome, HeadAdvanced):
-            raise RuntimeError(
-                f"unexpected impl outcome {type(outcome).__name__!r} at materialize stage; "
-                "implement stage must produce committed work"
             )
 
         materialized_branch = create_handoff_branch(pre_state, cwd=impl_cwd)
