@@ -49,10 +49,13 @@ class AddressCode(Stage):
     type = "address-code"
 
     @classmethod
-    def from_yaml(cls, d: dict[str, Any]) -> AddressCode:
+    def from_yaml(cls, d: dict[str, Any], depth: int = 0) -> AddressCode:
         from gremlins.pipeline.loader import get_client_from_yaml
 
-        stage = cls(d["name"], None, d.get("prompt") or [], d.get("options") or {})
+        prompts: list[str] = d.get("prompt") or []
+        if not prompts and d.get("type") == "ghaddress":
+            raise ValueError(f"stage {d['name']!r}: 'prompt' is required for ghaddress")
+        stage = cls(d["name"], None, prompts, d.get("options") or {})
         stage.client = get_client_from_yaml(d)
         return stage
 

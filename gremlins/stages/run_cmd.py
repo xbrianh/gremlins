@@ -14,7 +14,7 @@ class RunCmd(Stage):
     type = "run-cmd"
 
     @classmethod
-    def from_yaml(cls, d: dict[str, Any]) -> RunCmd:
+    def from_yaml(cls, d: dict[str, Any], depth: int = 0) -> RunCmd:
         from gremlins.pipeline.loader import get_client_from_yaml
 
         stage = cls(d["name"], None, d.get("prompt") or [], d.get("options") or {})

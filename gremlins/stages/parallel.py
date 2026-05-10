@@ -28,54 +28,24 @@ def _noop_set_stage(_n: str) -> None:
 
 
 class ParallelStage(CompoundStage):
-    """Fan-out/fan-in execution of a parallel pipeline block.
-
-    Can be constructed two ways:
-    - From YAML via ``from_yaml()``: body is a list of child Stage objects;
-      child runners are built lazily in ``run()`` from the runtime state.
-    - Directly with pre-built child_runners (legacy, used by tests and the
-      old builder path): body_runners are stored and used as-is.
-    """
+    """Fan-out/fan-in execution of a parallel pipeline block."""
 
     type = "parallel"
 
     def __init__(
         self,
         name: str,
-        body: list[Stage] | list[tuple[str, RuntimeState, Callable[[], None]]],
+        body: list[Stage],
         *,
         max_concurrent: int | None = None,
         cancel_on_bail: bool = False,
         bail_policy: str = "any",
-        # legacy constructor kwargs (pre-built runners path)
-        gr_id: str | None = None,
-        project_root: pathlib.Path | None = None,
-        set_stage_fn: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__(name)
         self._max_concurrent = max_concurrent
         self._cancel_on_bail = cancel_on_bail
         self._bail_policy = bail_policy
-
-        # Detect which constructor form was used by checking element types.
-        # Legacy form: list of (name, state, runner) triples.
-        # New form: list of Stage objects.
-        if body and isinstance(body[0], tuple):
-            self._child_runners: list[tuple[str, RuntimeState, Callable[[], None]]] = (
-                body  # type: ignore[assignment]
-            )
-            self.body = []
-            self._gr_id = gr_id
-            self._project_root = project_root or pathlib.Path.cwd()
-            self._set_stage_fn = set_stage_fn or _noop_set_stage
-            self._legacy_mode = True
-        else:
-            self.body = body  # type: ignore[assignment]
-            self._child_runners = []
-            self._gr_id = gr_id
-            self._project_root = project_root
-            self._set_stage_fn = set_stage_fn
-            self._legacy_mode = False
+        self.body = body
 
     @property
     def max_concurrent(self) -> int | None:
@@ -140,19 +110,13 @@ class ParallelStage(CompoundStage):
 
     def build_runtime_stages(
         self,
-        child_runners: list[tuple[str, RuntimeState, Callable[[], None]]] | None = None,
+        child_runners: list[tuple[str, RuntimeState, Callable[[], None]]],
         *,
         gr_id: str | None = None,
         project_root: pathlib.Path | None = None,
         set_stage_fn: Callable[[str], None] | None = None,
     ) -> list[_Stage]:
         """Return the three runtime stages for this parallel block."""
-        if child_runners is None:
-            # Legacy mode: use pre-built runners stored in __init__
-            child_runners = self._child_runners
-            gr_id = gr_id if gr_id is not None else self._gr_id
-            project_root = project_root or self._project_root
-            set_stage_fn = set_stage_fn or self._set_stage_fn
         return _parallel_stages(
             self.name,
             child_runners,
@@ -168,17 +132,14 @@ class ParallelStage(CompoundStage):
         from gremlins.stage_clients import require_stage_spec
         from gremlins.state import set_stage
 
-        if self._legacy_mode:
-            for _, fn in self.build_runtime_stages():
-                fn()
-            return
-
         gr_id = state.gr_id
         group_dir = state.session_dir / self.name
         group_dir.mkdir(parents=True, exist_ok=True)
         child_runners: list[tuple[str, RuntimeState, Callable[[], None]]] = []
         for child in self.body:
             child_spec = require_stage_spec(state.stage_specs, child.name)
+            if child.model is None:
+                child.model = child_spec.model
             child_dir = group_dir / child.name
             child_dir.mkdir(parents=True, exist_ok=True)
             child_state = dataclasses.replace(

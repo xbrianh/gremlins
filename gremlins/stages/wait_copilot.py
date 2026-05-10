@@ -19,7 +19,7 @@ class WaitCopilot(Stage):
     type = "wait-copilot"
 
     @classmethod
-    def from_yaml(cls, d: dict[str, Any]) -> WaitCopilot:
+    def from_yaml(cls, d: dict[str, Any], depth: int = 0) -> WaitCopilot:
         from gremlins.pipeline.loader import get_client_from_yaml
 
         stage = cls(d["name"], None, d.get("prompt") or [], d.get("options") or {})

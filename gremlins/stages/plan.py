@@ -28,7 +28,7 @@ class Plan(Stage):
     type = "plan"
 
     @classmethod
-    def from_yaml(cls, d: dict[str, Any]) -> Plan:
+    def from_yaml(cls, d: dict[str, Any], depth: int = 0) -> Plan:
         from gremlins.pipeline.loader import get_client_from_yaml
 
         stage = cls(d["name"], None, d.get("prompt") or [], d.get("options") or {})

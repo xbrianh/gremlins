@@ -6,7 +6,7 @@ import dataclasses
 import json
 import logging
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from gremlins import git as _git
 from gremlins.stages.base import RuntimeState, Stage
@@ -74,13 +74,21 @@ class LoopStage(Stage):
         return cls(name, body_runners=runners, max_iterations=max_iterations)
 
     @classmethod
-    def from_yaml(cls, d: dict[str, Any]) -> LoopStage:
+    def from_yaml(cls, d: dict[str, Any], depth: int = 0) -> LoopStage:
         from gremlins.pipeline.loader import get_client_from_yaml, parse_stage
 
-        options: dict[str, Any] = d.get("options") or {}
-        max_iterations: int = options.get("max_iterations", 3)
-        children_raw: list[dict[str, Any]] = d.get("body") or []
-        body = [parse_stage(child_d) for child_d in children_raw]
+        raw_options: object = d.get("options") or {}
+        if not isinstance(raw_options, dict):
+            raise ValueError(f"stage {d['name']!r}: 'options' must be a mapping")
+        options = cast(dict[str, Any], raw_options)
+        max_iterations: int = int(options.get("max_iterations", 3))
+        raw_children: object = d.get("body") or []
+        if not isinstance(raw_children, list):
+            raise ValueError(f"stage {d['name']!r}: 'body' must be a list")
+        body = [
+            parse_stage(child_d, depth=depth)
+            for child_d in cast(list[dict[str, Any]], raw_children)
+        ]
         stage = cls(d["name"], body=body, max_iterations=max_iterations)
         stage.client = get_client_from_yaml(d)
         return stage
@@ -89,6 +97,8 @@ class LoopStage(Stage):
         result: list[Callable[[], None]] = []
         for child in self.body:
             child_spec = state.stage_specs.get(child.name, state.client)
+            if child.model is None:
+                child.model = child_spec.model
             child_state = dataclasses.replace(
                 state, client=state.get_client(child_spec)
             )

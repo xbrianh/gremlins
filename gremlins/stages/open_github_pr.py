@@ -23,7 +23,7 @@ class OpenGitHubPR(Stage):
     type = "open-github-pr"
 
     @classmethod
-    def from_yaml(cls, d: dict[str, Any]) -> OpenGitHubPR:
+    def from_yaml(cls, d: dict[str, Any], depth: int = 0) -> OpenGitHubPR:
         from gremlins.pipeline.loader import get_client_from_yaml
 
         options: dict[str, Any] = d.get("options") or {}

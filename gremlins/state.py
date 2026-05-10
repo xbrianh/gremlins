@@ -36,8 +36,6 @@ _GH_STAGE_TYPES = frozenset(
         "open-github-pr",
         "request-copilot",
         "wait-copilot",
-        "ghaddress",
-        "ghreview",
         "wait-ci",
     }
 )

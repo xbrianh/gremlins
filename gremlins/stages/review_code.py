@@ -65,10 +65,13 @@ class ReviewCode(Stage):
     type = "review-code"
 
     @classmethod
-    def from_yaml(cls, d: dict[str, Any]) -> ReviewCode:
+    def from_yaml(cls, d: dict[str, Any], depth: int = 0) -> ReviewCode:
         from gremlins.pipeline.loader import get_client_from_yaml
 
-        stage = cls(d["name"], None, d.get("prompt") or [], d.get("options") or {})
+        prompts: list[str] = d.get("prompt") or []
+        if not prompts and d.get("type") == "ghreview":
+            raise ValueError(f"stage {d['name']!r}: 'prompt' is required for ghreview")
+        stage = cls(d["name"], None, prompts, d.get("options") or {})
         stage.client = get_client_from_yaml(d)
         return stage
 

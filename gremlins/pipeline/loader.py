@@ -45,7 +45,7 @@ def parse_stage(d: dict[str, Any], depth: int = 0) -> Stage:
         raise ValueError(f"stage {name!r}: must have a 'type' field")
     if stage_type not in STAGE_REGISTRY:
         raise ValueError(f"stage {name!r}: unknown type {stage_type!r}")
-    return STAGE_REGISTRY[stage_type].from_yaml(d)
+    return STAGE_REGISTRY[stage_type].from_yaml(d, depth=depth)
 
 
 def load_pipeline(path: pathlib.Path) -> PipelineDef:

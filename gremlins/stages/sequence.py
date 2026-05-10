@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.registry import register_stage
@@ -31,11 +31,16 @@ class SequenceStage(Stage):
         self._pre_body = body
 
     @classmethod
-    def from_yaml(cls, d: dict[str, Any]) -> SequenceStage:
+    def from_yaml(cls, d: dict[str, Any], depth: int = 0) -> SequenceStage:
         from gremlins.pipeline.loader import get_client_from_yaml, parse_stage
 
-        children_raw: list[dict[str, Any]] = d.get("body") or []
-        children = [parse_stage(child_d) for child_d in children_raw]
+        raw_children: object = d.get("body") or []
+        if not isinstance(raw_children, list):
+            raise ValueError(f"stage {d['name']!r}: 'body' must be a list")
+        children = [
+            parse_stage(child_d, depth=depth)
+            for child_d in cast(list[dict[str, Any]], raw_children)
+        ]
         stage = cls(d["name"])
         stage.body = children
         stage.client = get_client_from_yaml(d)
@@ -51,6 +56,8 @@ class SequenceStage(Stage):
         else:
             for child in self.body:
                 child_spec = state.stage_specs.get(child.name, state.client)
+                if child.model is None:
+                    child.model = child_spec.model
                 child_state = dataclasses.replace(
                     state, client=state.get_client(child_spec)
                 )

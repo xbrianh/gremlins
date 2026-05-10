@@ -554,7 +554,7 @@ class Handoff(Stage):
     type = "handoff"
 
     @classmethod
-    def from_yaml(cls, d: dict[str, Any]) -> Handoff:
+    def from_yaml(cls, d: dict[str, Any], depth: int = 0) -> Handoff:
         from gremlins.pipeline.loader import get_client_from_yaml
 
         stage = cls(d["name"])
