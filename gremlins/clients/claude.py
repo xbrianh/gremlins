@@ -189,7 +189,9 @@ class SubprocessClaudeClient:
         for attempt in range(len(schedule) + 1):
             p = self._spawn(argv, active_prompt, cwd=cwd)
             try:
-                result = self._consume(p, prefix, raw_path, capture_events, idle_timeout)
+                result = self._consume(
+                    p, prefix, raw_path, capture_events, idle_timeout
+                )
             except StreamTimeoutError:
                 if attempt >= len(schedule):
                     raise
