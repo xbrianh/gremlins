@@ -162,7 +162,9 @@ def test_plan_without_plan_resolves_session_dir(tmp_path: pathlib.Path) -> None:
 # --- _resolve_issue_source: same-repo / cross-repo guard ---
 
 
-def _issue_source_mocks(monkeypatch: pytest.MonkeyPatch, pr_repo: str = "owner/repo") -> None:
+def _issue_source_mocks(
+    monkeypatch: pytest.MonkeyPatch, pr_repo: str = "owner/repo"
+) -> None:
     monkeypatch.setattr("gremlins.stages.plan.get_repo", lambda: pr_repo)
     monkeypatch.setattr(
         "gremlins.stages.plan.view_issue",
