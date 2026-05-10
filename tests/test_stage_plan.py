@@ -162,17 +162,13 @@ def test_plan_without_plan_resolves_session_dir(tmp_path: pathlib.Path) -> None:
 # --- _resolve_issue_source: same-repo / cross-repo guard ---
 
 
-def _issue_source_mocks(monkeypatch: pytest.MonkeyPatch, target_repo: str) -> None:
-    monkeypatch.setattr("gremlins.stages.plan.get_repo", lambda: target_repo)
-    monkeypatch.setattr(
-        "gremlins.stages.plan.parse_issue_ref",
-        lambda _ref, _default: (target_repo, "355"),
-    )
+def _issue_source_mocks(monkeypatch: pytest.MonkeyPatch, pr_repo: str = "owner/repo") -> None:
+    monkeypatch.setattr("gremlins.stages.plan.get_repo", lambda: pr_repo)
     monkeypatch.setattr(
         "gremlins.stages.plan.view_issue",
         lambda _ref, _repo: {
             "body": "# Plan\nDo the thing.",
-            "url": "https://github.com/owner/repo/issues/355",
+            "url": f"https://github.com/{_repo}/issues/355",
             "number": 355,
             "title": "Fix it",
         },
@@ -183,7 +179,7 @@ def test_resolve_issue_source_empty_repo_writes_url(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """repo='' (gh-terse default) should write the resolved issue_url."""
-    _issue_source_mocks(monkeypatch, "owner/repo")
+    _issue_source_mocks(monkeypatch, pr_repo="owner/repo")
     captured: dict[str, object] = {}
     monkeypatch.setattr(
         "gremlins.stages.plan.patch_state",
@@ -200,7 +196,7 @@ def test_resolve_issue_source_matching_repo_writes_url(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Explicit repo matching target_repo should write the resolved issue_url."""
-    _issue_source_mocks(monkeypatch, "owner/repo")
+    _issue_source_mocks(monkeypatch, pr_repo="owner/repo")
     captured: dict[str, object] = {}
     monkeypatch.setattr(
         "gremlins.stages.plan.patch_state",
@@ -216,14 +212,14 @@ def test_resolve_issue_source_matching_repo_writes_url(
 def test_resolve_issue_source_cross_repo_clears_url(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Explicit repo differing from target_repo should clear issue_url."""
-    _issue_source_mocks(monkeypatch, "owner/b")
+    """Cross-repo ref (owner/b#355) with repo=owner/a should clear issue_url."""
+    _issue_source_mocks(monkeypatch, pr_repo="owner/a")
     captured: dict[str, object] = {}
     monkeypatch.setattr(
         "gremlins.stages.plan.patch_state",
         lambda _id, **kw: captured.update(kw),
     )
-    stage = Plan("plan", None, [], {}, plan="#355", repo="owner/a")
+    stage = Plan("plan", None, [], {}, plan="owner/b#355", repo="owner/a")
     stage.bind(_ctx(tmp_path, FakeClaudeClient(fixtures={})))
     stage.run(None)
     assert captured.get("issue_url") == ""
