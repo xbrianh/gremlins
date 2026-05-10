@@ -11,9 +11,9 @@ import shutil
 import yaml
 
 from gremlins.clients import (
+    PACKAGE_DEFAULT,
     ClaudeClient,
     ClientSpec,
-    PACKAGE_DEFAULT,
     collect_stage_specs,
     load_stage_specs_from_state,
     to_client,

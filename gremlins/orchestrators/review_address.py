@@ -7,7 +7,7 @@ import logging
 import pathlib
 import shutil
 
-from gremlins.clients import ClaudeClient, PACKAGE_DEFAULT
+from gremlins.clients import PACKAGE_DEFAULT, ClaudeClient
 from gremlins.errors import die
 from gremlins.git import has_diff, has_dirty_worktree, in_git_repo, rev_exists
 from gremlins.logging_setup import configure_logging
