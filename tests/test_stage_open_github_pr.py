@@ -241,6 +241,78 @@ def test_run_raises_if_impl_branch_missing(tmp_path: pathlib.Path) -> None:
         stage.run(None)
 
 
+def test_explicit_base_ref_used_when_no_prior_pr(tmp_path: pathlib.Path) -> None:
+    """Stage-level base_ref is used when there is no prior PR artifact branch."""
+    _write_state(
+        tmp_path,
+        {"base_ref_name": "main", "impl_materialized_branch": "gremlin/child-1"},
+    )
+    stage = OpenGitHubPR(
+        "open-pr", "sonnet", [], {}, issue_url="", base_ref="feature-base"
+    )
+    client = FakeClaudeClient(fixtures={"open-github-pr": MINIMAL_EVENTS})
+    ctx = StageContext(client=client, session_dir=tmp_path, gr_id="test-gr")
+    stage.bind(ctx)
+    prompts_seen: list[str] = []
+    with (
+        patch(
+            "gremlins.stages.open_github_pr.resolve_state_file",
+            return_value=tmp_path / "state.json",
+        ),
+        patch("gremlins.stages.open_github_pr.last_pr_branch", return_value=None),
+        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
+        patch("gremlins.stages.open_github_pr.append_artifact"),
+        patch.object(
+            stage,
+            "run_claude",
+            side_effect=lambda prompt, **kw: (
+                prompts_seen.append(prompt)
+                or type("R", (), {"events": [], "text_result": ""})()
+            ),
+        ),
+    ):
+        stage.run(None)
+    assert "feature-base" in prompts_seen[0]
+
+
+def test_last_pr_branch_takes_priority_over_base_ref(tmp_path: pathlib.Path) -> None:
+    """last_pr_branch takes priority over stage-level base_ref when stacking."""
+    _write_state(
+        tmp_path,
+        {"base_ref_name": "main", "impl_materialized_branch": "gremlin/child-2"},
+    )
+    stage = OpenGitHubPR(
+        "open-pr", "sonnet", [], {}, issue_url="", base_ref="feature-base"
+    )
+    client = FakeClaudeClient(fixtures={"open-github-pr": MINIMAL_EVENTS})
+    ctx = StageContext(client=client, session_dir=tmp_path, gr_id="test-gr")
+    stage.bind(ctx)
+    prompts_seen: list[str] = []
+    with (
+        patch(
+            "gremlins.stages.open_github_pr.resolve_state_file",
+            return_value=tmp_path / "state.json",
+        ),
+        patch(
+            "gremlins.stages.open_github_pr.last_pr_branch",
+            return_value="gremlin/child-1",
+        ),
+        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
+        patch("gremlins.stages.open_github_pr.append_artifact"),
+        patch.object(
+            stage,
+            "run_claude",
+            side_effect=lambda prompt, **kw: (
+                prompts_seen.append(prompt)
+                or type("R", (), {"events": [], "text_result": ""})()
+            ),
+        ),
+    ):
+        stage.run(None)
+    assert "gremlin/child-1" in prompts_seen[0]
+    assert "feature-base" not in prompts_seen[0]
+
+
 def test_record_child_pr_appends_pr_artifact(tmp_path: pathlib.Path) -> None:
     """After opening a PR, a pr artifact with url and branch is appended."""
     sf = _write_state(

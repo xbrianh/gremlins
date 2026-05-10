@@ -426,6 +426,44 @@ because:
 The boss is the right abstraction precisely because it stays out of the
 child's pipeline and confines its own agency to one decision per step.
 
+### 4.5 PR stacking in looped pipelines
+
+When a pipeline contains a `loop` stage and that loop body includes an
+`open-github-pr` stage, every PR after the first is automatically based on
+the previous PR's branch. No per-pipeline configuration is required.
+
+**The mechanism.** `OpenGitHubPR.run` resolves the PR base ref with this
+fallback chain:
+
+    last_pr_branch(gr_id)  →  stage base_ref option  →  state.json base_ref_name  →  "main"
+
+`last_pr_branch` walks the artifact list in reverse and returns the `branch`
+field of the most recent `pr`-type artifact. Because all loop iterations share
+one `gr_id` and one `state.json`, every iteration after the first finds the
+previous iteration's PR branch at the head of the artifact list.
+
+**The invariant.** `open_github_pr.py` raises if `impl_materialized_branch`
+is empty before appending a PR artifact, so every `pr` artifact in the list
+has a non-empty `branch` field. `last_pr_branch` therefore always returns a
+real branch name, never an empty string that would fall through to `main`.
+
+**What this means in practice.** A boss pipeline (or any looped gh pipeline)
+produces a stack of PRs by default. PR #1 targets `main` (or
+`base_ref_name` from state). PR #2 targets PR #1's branch. PR #3 targets
+PR #2's branch, and so on. The artifact list is the authoritative record.
+
+**The escape hatch.** Stacking is a consequence of loop iterations sharing
+one `gr_id`. To produce side-by-side PRs based on a fixed ref, launch each
+iteration as an independent gremlin rather than as loop iterations in a
+single run — each gets its own `gr_id` and an empty artifact list, so
+`last_pr_branch` returns nothing and the PR targets `main` (or whatever
+`base_ref_name` is in that gremlin's state).
+
+Within a looped pipeline you can also set `base_ref` under the
+`open-github-pr` stage's `options:` to control the first-iteration base and
+the fallback when the artifact list is empty, but this does not suppress
+stacking once prior PR artifacts exist.
+
 ## 5. Cost model
 
 Per-gremlin cost is dominated by two things:
