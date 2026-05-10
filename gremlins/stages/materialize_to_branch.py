@@ -80,9 +80,7 @@ class MaterializeToBranch(Stage):
         materialized_branch = create_handoff_branch(pre_state, cwd=impl_cwd)
         reset_pre_branch(pre_state, cwd=impl_cwd)
         sweep_stale_handoff_branches(materialized_branch, cwd=impl_cwd)
-        pre_branch_note = (
-            f" and reset {pre_state.branch}" if pre_state.branch else ""
-        )
+        pre_branch_note = f" and reset {pre_state.branch}" if pre_state.branch else ""
         sys.stdout.write(
             f"    materialize-to-branch: moved {outcome.commit_count} commit(s) "
             f"onto {materialized_branch}{pre_branch_note}\n"
@@ -94,7 +92,9 @@ class MaterializeToBranch(Stage):
             impl_materialized_branch=materialized_branch,
             impl_base_ref=pre_state.head,
         )
-        append_artifact(self.state.gr_id, {"type": "branch", "name": materialized_branch})
+        append_artifact(
+            self.state.gr_id, {"type": "branch", "name": materialized_branch}
+        )
         return MaterializeToBranchResult(
             outcome=outcome,
             materialized_branch=materialized_branch,
