@@ -25,7 +25,7 @@ import yaml
 
 from gremlins import git as _git_mod
 from gremlins import paths as _paths
-from gremlins.clients import PACKAGE_DEFAULT
+from gremlins.clients.resolve import PACKAGE_DEFAULT
 from gremlins.gh_utils import parse_issue_ref, view_issue
 from gremlins.pipeline import load_pipeline, resolve_pipeline_path
 from gremlins.schema import PipelineDef

@@ -11,7 +11,7 @@ from collections.abc import Callable
 from typing import Any
 
 import gremlins.stages.all as _stages_all  # noqa: F401  # type: ignore[reportUnusedImport]
-from gremlins.clients import ClientSpec
+from gremlins.clients.resolve import ClientSpec
 from gremlins.clients.protocol import ClaudeClient
 from gremlins.clients.resolve import require_stage_spec
 from gremlins.git import in_git_repo

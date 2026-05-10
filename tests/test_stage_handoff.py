@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from gremlins.clients import ClientSpec
+from gremlins.clients.resolve import ClientSpec
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.schema import StageEntry
 from gremlins.stages import RunCmdFailed, StageContext

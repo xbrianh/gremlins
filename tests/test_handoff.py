@@ -6,7 +6,7 @@ import pathlib
 
 from conftest import MINIMAL_EVENTS
 
-from gremlins.clients import ClientSpec
+from gremlins.clients.resolve import ClientSpec
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.stages import handoff
 

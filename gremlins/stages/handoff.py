@@ -15,7 +15,7 @@ import threading
 from collections.abc import Callable
 from typing import Any, TypeVar, cast
 
-from gremlins.clients import ClientSpec
+from gremlins.clients.resolve import ClientSpec
 from gremlins.clients.protocol import ClaudeClient
 from gremlins.prompts import BUNDLED_PROMPT_DIR
 from gremlins.stages import RunCmdFailed, Stage, register_stage
