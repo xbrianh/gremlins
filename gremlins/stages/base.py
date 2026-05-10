@@ -48,7 +48,6 @@ class RuntimeState:
     # runtime-derived (populated from state.json before each stage run)
     issue_url: str = ""
     base_ref_name: str = ""
-    impl_materialized_branch: str = ""
     issue_num: str = ""
     impl_pre_state: PreImplState | None = None
 
@@ -85,7 +84,6 @@ class RuntimeState:
                 current_scope=scope_list,
                 issue_url=sd.get("issue_url") or "",
                 base_ref_name=sd.get("base_ref_name") or "",
-                impl_materialized_branch=sd.get("impl_materialized_branch") or "",
                 issue_num=sd.get("issue_num") or "",
                 impl_pre_state=_read_impl_pre_state(base_state.session_dir, sd),
             )
@@ -114,12 +112,12 @@ def _read_impl_pre_state(
             data: dict[str, Any] = json.loads(sidecar.read_text(encoding="utf-8"))
             head = data.get("head") or ""
             if head:
-                return PreImplState(head=head, branch=data.get("branch") or "")
+                return PreImplState(head=head)
         except (json.JSONDecodeError, OSError):
             pass
     head = sd.get("impl_pre_head") or ""
     if head:
-        return PreImplState(head=head, branch=sd.get("impl_pre_branch") or "")
+        return PreImplState(head=head)
     return None
 
 

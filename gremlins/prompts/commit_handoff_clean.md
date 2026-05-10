@@ -1,2 +1,0 @@
-<!-- placeholders: handoff_branch, commit_count, pre_head -->
-The implementation work is already committed on the current branch ('{handoff_branch}'), with {commit_count} commit(s) above {pre_head}. Rename the current branch with 'git branch -m <new-name>'. Do NOT make additional commits unless required to add the 'Closes #N' line — if needed, amend the most recent commit with 'git commit --amend'.

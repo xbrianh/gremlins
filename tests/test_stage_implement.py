@@ -18,7 +18,7 @@ from gremlins.stages.implement import Implement
 _TEMPLATE_LOCAL = "plan: {plan_text}{spec_block}{impl_commit_instr}"
 _TEMPLATE_GH = "{spec_block}{plan_source_label}{issue_body}{plan_location_note}"
 
-_FAKE_PRE = PreImplState(head="abc123", branch="main")
+_FAKE_PRE = PreImplState(head="abc123")
 
 
 def _make_state(

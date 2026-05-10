@@ -31,8 +31,6 @@ _GR_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 _GH_STAGE_TYPES = frozenset(
     {
-        "materialize-to-branch",
-        "commit",
         "open-github-pr",
         "request-copilot",
         "wait-copilot",

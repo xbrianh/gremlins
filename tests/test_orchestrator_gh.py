@@ -21,9 +21,7 @@ from gremlins.git import (
     HeadAdvanced,
     PreImplState,
     classify_impl_outcome,
-    create_handoff_branch,
     record_pre_impl_state,
-    sweep_stale_handoff_branches,
 )
 from gremlins.orchestrators.run import _parse_args as _parse_gh_args
 from gremlins.orchestrators.run import run_pipeline
@@ -154,14 +152,7 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
     )
 
     # gr_id=None makes patch_state a no-op; use a writing shim so the commit runner can read back the values.
-    def _handoff_patch_state(gr_id=None, _delete=(), **kw):
-        data = json.loads(state_file.read_text(encoding="utf-8"))
-        for key in _delete:
-            data.pop(key, None)
-        data.update(kw)
-        state_file.write_text(json.dumps(data), encoding="utf-8")
-
-    def _handoff_append_artifact(gr_id=None, artifact=None):
+    def _append_artifact(gr_id=None, artifact=None):
         data = json.loads(state_file.read_text(encoding="utf-8"))
         arts = list(data.get("artifacts") or [])
         arts.append(artifact)
@@ -169,20 +160,7 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         state_file.write_text(json.dumps(data), encoding="utf-8")
 
     monkeypatch.setattr(
-        "gremlins.stages.materialize_to_branch.patch_state", _handoff_patch_state
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.materialize_to_branch.append_artifact",
-        _handoff_append_artifact,
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.open_github_pr.append_artifact", _handoff_append_artifact
-    )
-
-    import gremlins.stages.commit as _commit_stage_mod
-
-    monkeypatch.setattr(
-        _commit_stage_mod, "resolve_state_file", lambda gr_id=None: state_file
+        "gremlins.stages.open_github_pr.append_artifact", _append_artifact
     )
 
     # Strip pipeline client keys so the injected client is used for every stage.
@@ -249,6 +227,11 @@ def _make_gh_subprocess(
         # gh pr diff
         if sub == "pr" and "diff" in cmd:
             return subprocess.CompletedProcess(cmd, 0, stdout=pr_diff, stderr="")
+        # gh pr view (open_github_pr._get_pr_branch)
+        if sub == "pr" and "view" in cmd and "--json" in cmd:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="issue-42-impl-slug\n", stderr=""
+            )
         # gh api (wait-copilot)
         if sub == "api":
             return subprocess.CompletedProcess(
@@ -339,77 +322,6 @@ def test_classify_divergent_head(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# impl-handoff branch lifecycle (real temp git repo)
-# ---------------------------------------------------------------------------
-
-
-def test_handoff_branch_lifecycle(tmp_path):
-    """create_handoff_branch creates a branch at current HEAD; sweep_stale removes merged ones."""
-    _init_git_repo(tmp_path)
-
-    # Make an implementation commit
-    (tmp_path / "impl.txt").write_text("work\n")
-    subprocess.run(
-        ["git", "add", "impl.txt"], cwd=tmp_path, check=True, capture_output=True
-    )
-    subprocess.run(
-        ["git", "commit", "-m", "impl"], cwd=tmp_path, check=True, capture_output=True
-    )
-
-    pre = PreImplState(
-        head=subprocess.run(
-            ["git", "rev-parse", "HEAD~1"],
-            cwd=tmp_path,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip(),
-        branch="",
-    )
-
-    handoff = create_handoff_branch(pre, cwd=str(tmp_path))
-    assert handoff.startswith("ghgremlin-impl-handoff-")
-
-    # Verify we're on the handoff branch
-    current = subprocess.run(
-        ["git", "symbolic-ref", "--short", "HEAD"],
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    assert current == handoff
-
-    # Create a "stale" handoff branch pointing to the same HEAD (simulating prior run)
-    stale_branch = "ghgremlin-impl-handoff-9999"
-    subprocess.run(
-        ["git", "branch", stale_branch],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-    )
-
-    # sweep_stale should delete the merged stale branch
-    sweep_stale_handoff_branches(handoff, cwd=str(tmp_path))
-
-    refs = subprocess.run(
-        [
-            "git",
-            "for-each-ref",
-            "--format=%(refname:short)",
-            "refs/heads/ghgremlin-impl-handoff-*",
-        ],
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.splitlines()
-    # Stale merged branch should be gone; current handoff should still exist
-    assert handoff in refs
-    assert stale_branch not in refs
-
-
-# ---------------------------------------------------------------------------
 # _parse_gh_args — arg parsing unit tests
 # ---------------------------------------------------------------------------
 
@@ -483,9 +395,7 @@ def test_gh_pipeline_stage_names(tmp_path):
     assert names == [
         "plan",
         "implement",
-        "materialize-to-branch",
         "verify",
-        "commit",
         "open-pr",
         "request-copilot",
         "ghreview",
@@ -562,7 +472,6 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
         git_dir=tmp_path,
         fixtures={
             "implement": IMPL_EVENTS,
-            "commit": IMPL_EVENTS,
             "open-github-pr": _pr_events(),
         },
     )
@@ -576,7 +485,6 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
     # plan stage must NOT have been called
     assert "plan" not in labels
     assert "implement" in labels
-    assert "commit" in labels
 
 
 def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch):
@@ -799,9 +707,7 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
     stage_defs = [
         ("plan", "plan"),
         ("implement", "implement"),
-        ("materialize-to-branch", "materialize-to-branch"),
         ("verify", "verify"),
-        ("commit", "commit"),
         ("open-pr", "open-github-pr"),
         ("request-copilot", "request-copilot"),
         ("ghreview", "ghreview"),
@@ -812,9 +718,7 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
     original_stage_clients = {
         "plan": "claude:claude-sonnet-4-6",
         "implement": "claude:claude-haiku-4-5-20251001",
-        "materialize-to-branch": "claude:claude-sonnet-4-6",
         "verify": "claude:claude-opus-4-1",
-        "commit": "copilot:gpt-4o",
         "open-pr": "copilot:gpt-4o",
         "request-copilot": "claude:claude-sonnet-4-6",
         "ghreview": "claude:claude-haiku-4-5-20251001",
@@ -938,29 +842,6 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
     ghreview_models.clear()
     ghaddress_models.clear()
     ci_models.clear()
-    subprocess.run(
-        ["git", "switch", "main"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-    )
-    branch_list = subprocess.run(
-        ["git", "branch", "--list", "ghgremlin-impl-handoff-*"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    for branch in branch_list.stdout.splitlines():
-        branch_name = branch.replace("*", "").strip()
-        if not branch_name:
-            continue
-        subprocess.run(
-            ["git", "branch", "-D", branch_name],
-            cwd=tmp_path,
-            check=True,
-            capture_output=True,
-        )
     (tmp_path / "impl.txt").write_text("resume seed\n", encoding="utf-8")
     subprocess.run(
         ["git", "add", "impl.txt"],
@@ -979,7 +860,6 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
         git_dir=tmp_path,
         fixtures={
             "implement": IMPL_EVENTS,
-            "commit": IMPL_EVENTS,
             "open-github-pr": _pr_events(),
         },
     )
@@ -995,7 +875,6 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
     called_models = {call.label: call.model for call in resume_client.calls}
     assert called_models == {
         "implement": "claude-haiku-4-5-20251001",
-        "commit": "gpt-4o",
         "open-github-pr": "gpt-4o",
     }
     assert verify_models == ["claude-opus-4-1"]
@@ -1044,9 +923,7 @@ def test_gh_main_resume_requires_each_persisted_stage_client(
             "stage_clients": {
                 "plan": "claude:sonnet",
                 "implement": "claude:sonnet",
-                "materialize-to-branch": "claude:sonnet",
                 "verify": "claude:sonnet",
-                "commit": "claude:sonnet",
                 "open-pr": "claude:sonnet",
                 "request-copilot": "claude:sonnet",
                 "wait-copilot": "claude:sonnet",
@@ -1254,10 +1131,6 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
             {"type": "system", "subtype": "init"},
             {"type": "result", "subtype": "success", "total_cost_usd": 0.07},
         ],
-        "commit": [
-            {"type": "system", "subtype": "init"},
-            {"type": "result", "subtype": "success", "total_cost_usd": 0.03},
-        ],
         "open-github-pr": [
             {"type": "system", "subtype": "init"},
             {
@@ -1301,7 +1174,6 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
     labels = [c.label for c in client.calls]
     assert "plan-title" in labels
     assert "implement" in labels
-    assert "commit" in labels
     assert "open-github-pr" in labels
 
     # Read on-disk state.json — verifies both the accumulation and the persistence step.
@@ -1309,96 +1181,11 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
     assert "total_cost_usd" in state, "total_cost_usd was not persisted to state.json"
 
     total = state["total_cost_usd"]
-    expected = 0.13 + 0.07 + 0.03 + 0.02
+    expected = 0.13 + 0.07 + 0.02
     assert total == pytest.approx(expected), (
         f"expected total {expected:.2f}, got {total:.4f}; "
         f"a regression dropping plan-title cost (0.13) would show total ≈ {expected - 0.13:.2f}"
     )
-
-
-# ---------------------------------------------------------------------------
-# Regression: --resume-from commit must not re-run implement
-# ---------------------------------------------------------------------------
-
-
-def test_resume_from_commit_skips_implement(tmp_path, monkeypatch):
-    """--resume-from commit picks up at commit without re-running implement.
-
-    Regression guard for the bug where the orchestrator silently rewound
-    commit → implement, which caused an EmptyImpl loop when the
-    impl-handoff branch was already present.
-    """
-    _init_git_repo(tmp_path)
-    monkeypatch.chdir(tmp_path)
-
-    # Simulate a completed implement stage: one commit above the init commit.
-    (tmp_path / "impl.txt").write_text("impl content\n")
-    subprocess.run(
-        ["git", "add", "impl.txt"], cwd=tmp_path, check=True, capture_output=True
-    )
-    subprocess.run(
-        ["git", "commit", "-m", "feat: add impl.txt"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-    )
-
-    base_ref = subprocess.run(
-        ["git", "rev-parse", "HEAD~1"],
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-
-    # Create the impl-handoff branch at the impl commit.
-    handoff_branch = "ghgremlin-impl-handoff-9999"
-    subprocess.run(
-        ["git", "branch", handoff_branch], cwd=tmp_path, check=True, capture_output=True
-    )
-
-    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
-
-    data = json.loads(state_file.read_text())
-    data["impl_materialized_branch"] = handoff_branch
-    data["impl_base_ref"] = base_ref
-    data["issue_url"] = "https://github.com/owner/repo/issues/42"
-    state_file.write_text(json.dumps(data))
-
-    monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
-    monkeypatch.setattr(
-        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.request_copilot.RequestCopilot.run",
-        lambda self, pipe: None,
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
-    )
-    monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
-
-    client = FakeClaudeClient(
-        fixtures={"commit": IMPL_EVENTS, "open-github-pr": _pr_events()}
-    )
-
-    result = run_pipeline(
-        _gh_pipeline_path(tmp_path),
-        argv=["--plan", "#42", "--resume-from", "commit"],
-        client=client,
-    )
-    assert result == 0
-
-    labels = [c.label for c in client.calls]
-    assert "implement" not in labels, "implement must not run on commit resume"
-    assert "commit" in labels
-
-    # The commit prompt must contain content from the impl diff.
-    commit_call = next(c for c in client.calls if c.label == "commit")
-    assert "impl content" in commit_call.prompt or "impl.txt" in commit_call.prompt
 
 
 def test_parse_resume_from_open_pr(capsys):
@@ -1407,11 +1194,11 @@ def test_parse_resume_from_open_pr(capsys):
 
 
 def test_resume_from_open_pr(tmp_path, monkeypatch):
-    """--resume-from open-pr skips plan/implement/commit and runs open-github-pr onward."""
+    """--resume-from open-pr skips plan/implement and runs open-github-pr onward."""
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    # Simulate a completed implement + commit: one commit above init.
+    # Simulate a completed implement: one commit above init.
     (tmp_path / "impl.txt").write_text("impl content\n")
     subprocess.run(
         ["git", "add", "impl.txt"], cwd=tmp_path, check=True, capture_output=True
@@ -1423,25 +1210,10 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
         capture_output=True,
     )
 
-    base_ref = subprocess.run(
-        ["git", "rev-parse", "HEAD~1"],
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-
-    handoff_branch = "ghgremlin-impl-handoff-open-pr-test"
-    subprocess.run(
-        ["git", "branch", handoff_branch], cwd=tmp_path, check=True, capture_output=True
-    )
-
     session_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
     data = json.loads(state_file.read_text())
     data["issue_url"] = "https://github.com/owner/repo/issues/42"
-    data["impl_materialized_branch"] = handoff_branch
-    data["impl_base_ref"] = base_ref
     state_file.write_text(json.dumps(data))
 
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
@@ -1485,7 +1257,6 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
 
     labels = [c.label for c in client.calls]
     assert "implement" not in labels, "implement must not run on open-pr resume"
-    assert "commit" not in labels, "commit must not run on open-pr resume"
     assert "open-github-pr" in labels
 
     assert ghreview_called == ["https://github.com/owner/repo/pull/101"]
@@ -1832,26 +1603,10 @@ def test_resume_from_verify(tmp_path, monkeypatch):
         check=True,
         capture_output=True,
     )
-    base_ref = subprocess.run(
-        ["git", "rev-parse", "HEAD~1"],
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    handoff_branch = "ghgremlin-impl-handoff-verify-test"
-    subprocess.run(
-        ["git", "branch", handoff_branch],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-    )
 
     _session_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
     data = json.loads(state_file.read_text())
-    data["impl_materialized_branch"] = handoff_branch
-    data["impl_base_ref"] = base_ref
     data["issue_url"] = "https://github.com/owner/repo/issues/5"
     state_file.write_text(json.dumps(data))
 
@@ -1880,9 +1635,7 @@ def test_resume_from_verify(tmp_path, monkeypatch):
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
 
-    client = FakeClaudeClient(
-        fixtures={"commit": IMPL_EVENTS, "open-github-pr": _pr_events()}
-    )
+    client = FakeClaudeClient(fixtures={"open-github-pr": _pr_events()})
 
     result = run_pipeline(
         _gh_pipeline_path(tmp_path),

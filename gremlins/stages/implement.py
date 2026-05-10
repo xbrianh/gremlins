@@ -202,13 +202,12 @@ class Implement(Stage):
 
         impl_cwd = str(state.worktree) if state.worktree is not None else None
         pre = record_pre_impl_state(cwd=impl_cwd)
-        # Write sidecar so MaterializeToBranch can read pre-impl state.
         (state.session_dir / ".impl-pre-state.json").write_text(
-            json.dumps({"head": pre.head, "branch": pre.branch}),
+            json.dumps({"head": pre.head}),
             encoding="utf-8",
         )
         if state.gr_id:
-            patch_state(state.gr_id, impl_pre_head=pre.head, impl_pre_branch=pre.branch)
+            patch_state(state.gr_id, impl_pre_head=pre.head)
 
         plan_text = (state.session_dir / "plan.md").read_text(encoding="utf-8")
         template = "\n\n".join(self.prompts).rstrip()

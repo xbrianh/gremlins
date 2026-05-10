@@ -77,7 +77,6 @@ def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
     assert "implement" in stage_types
     assert "plan" in STAGE_REGISTRY
     assert "implement" in STAGE_REGISTRY
-    assert "commit" in STAGE_REGISTRY
     assert "open-github-pr" in STAGE_REGISTRY
     assert "request-copilot" in STAGE_REGISTRY
     assert "ghreview" in STAGE_REGISTRY
@@ -273,9 +272,7 @@ def test_stage_builders_registry_covers_all_known_types() -> None:
     expected = {
         "plan",
         "implement",
-        "materialize-to-branch",
         "verify",
-        "commit",
         "open-github-pr",
         "request-copilot",
         "ghreview",
