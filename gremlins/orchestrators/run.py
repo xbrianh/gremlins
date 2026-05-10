@@ -12,11 +12,6 @@ import yaml
 
 from gremlins.clients.protocol import ClaudeClient
 from gremlins.clients.resolve import PACKAGE_DEFAULT, ClientSpec, to_client
-from gremlins.stage_clients import (
-    collect_stage_specs,
-    load_stage_specs_from_state,
-    validate_stage_specs,
-)
 from gremlins.env_file import load_env_file
 from gremlins.errors import die
 from gremlins.gh_utils import get_repo
@@ -25,6 +20,11 @@ from gremlins.logging_setup import configure_logging
 from gremlins.orchestrators.pipeline import StageRunner
 from gremlins.pipeline.loader import load_pipeline
 from gremlins.runner import install_signal_handlers
+from gremlins.stage_clients import (
+    collect_stage_specs,
+    load_stage_specs_from_state,
+    validate_stage_specs,
+)
 from gremlins.state import (
     patch_state,
     pipeline_uses_gh,

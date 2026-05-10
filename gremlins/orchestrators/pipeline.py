@@ -13,11 +13,11 @@ from typing import Any
 import gremlins.stages.all as _stages_all  # noqa: F401  # type: ignore[reportUnusedImport]
 from gremlins.clients.protocol import ClaudeClient
 from gremlins.clients.resolve import ClientSpec
-from gremlins.stage_clients import require_stage_spec
 from gremlins.git import in_git_repo
 from gremlins.runner import run_stages
 from gremlins.schema import PipelineDef as _PipelineData
 from gremlins.schema import StageEntry
+from gremlins.stage_clients import require_stage_spec
 from gremlins.stages.base import StageContext
 from gremlins.stages.registry import STAGE_BUILDERS, STAGE_NEEDS_PIPE
 from gremlins.state import resolve_state_file, set_stage

@@ -5,14 +5,14 @@ from __future__ import annotations
 import pytest
 
 from gremlins.clients.resolve import PACKAGE_DEFAULT, ClientSpec
+from gremlins.pipeline.discovery import resolve_pipeline_path
+from gremlins.pipeline.loader import load_pipeline
 from gremlins.stage_clients import (
     collect_stage_specs,
     require_stage_spec,
     resolve_stage_client,
     validate_stage_specs,
 )
-from gremlins.pipeline.discovery import resolve_pipeline_path
-from gremlins.pipeline.loader import load_pipeline
 
 
 def test_parse_valid():
