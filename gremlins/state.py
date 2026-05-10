@@ -17,13 +17,39 @@ import pathlib
 import re
 import secrets
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from gremlins import paths as _paths
+
+if TYPE_CHECKING:
+    from gremlins.pipeline.schema import PipelineDef, StageEntry
 
 logger = logging.getLogger(__name__)
 
 _GR_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+_GH_STAGE_TYPES = frozenset(
+    {
+        "materialize-to-branch",
+        "commit",
+        "open-github-pr",
+        "request-copilot",
+        "wait-copilot",
+        "ghaddress",
+        "ghreview",
+        "wait-ci",
+    }
+)
+
+
+def _stages_use_gh(stages: list[StageEntry]) -> bool:
+    return any(
+        s.type in _GH_STAGE_TYPES or (s.body and _stages_use_gh(s.body)) for s in stages
+    )
+
+
+def pipeline_uses_gh(pipeline: PipelineDef) -> bool:
+    return _stages_use_gh(pipeline.stages)
 
 
 def validate_gr_id(gr_id: str) -> None:

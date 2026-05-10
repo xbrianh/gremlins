@@ -12,10 +12,9 @@ from gremlins.git import (
     head_sha,
     record_pre_impl_state,
 )
-from gremlins.pipeline import pipeline_uses_gh
 from gremlins.prompts import BUNDLED_PROMPT_DIR
 from gremlins.stages import Stage, register_stage
-from gremlins.state import patch_state, resolve_state_file
+from gremlins.state import patch_state, pipeline_uses_gh, resolve_state_file
 
 # Implement turns can sit silent for many minutes while the model edits files
 # or runs long subagents/tools without emitting stream events. The default

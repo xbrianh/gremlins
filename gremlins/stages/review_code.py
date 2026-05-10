@@ -7,9 +7,14 @@ import pathlib
 from typing import Any
 
 from gremlins.clients.protocol import ClaudeClient
-from gremlins.pipeline import pipeline_uses_gh
 from gremlins.stages import Stage, register_stage
-from gremlins.state import check_bail, emit_bail, read_pr_url, set_stage
+from gremlins.state import (
+    check_bail,
+    emit_bail,
+    pipeline_uses_gh,
+    read_pr_url,
+    set_stage,
+)
 
 logger = logging.getLogger(__name__)
 
