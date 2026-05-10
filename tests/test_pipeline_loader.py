@@ -6,8 +6,7 @@ import pathlib
 
 import pytest
 
-import gremlins.pipeline  # noqa: F401
-from gremlins.pipeline import load_pipeline
+from gremlins.pipeline.loader import load_pipeline
 
 
 def _write_yaml(path: pathlib.Path, content: str) -> pathlib.Path:
@@ -700,7 +699,8 @@ stages:
 
 def test_boss_yaml_loads() -> None:
     """boss.yaml loads with loop/handoff structure replacing the old chain stage."""
-    from gremlins.pipeline import load_pipeline, resolve_pipeline_path
+    from gremlins.pipeline.discovery import resolve_pipeline_path
+    from gremlins.pipeline.loader import load_pipeline
 
     pipeline = load_pipeline(resolve_pipeline_path("boss", pathlib.Path.cwd()))
     names = [s.name for s in pipeline.stages]

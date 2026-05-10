@@ -27,7 +27,8 @@ from gremlins.git import (
 )
 from gremlins.orchestrators.run import _parse_args as _parse_gh_args
 from gremlins.orchestrators.run import run_pipeline
-from gremlins.pipeline import load_pipeline, resolve_pipeline_path
+from gremlins.pipeline.discovery import resolve_pipeline_path
+from gremlins.pipeline.loader import load_pipeline
 
 
 def _gh_pipeline_path(cwd):

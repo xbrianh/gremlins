@@ -12,7 +12,8 @@ from gremlins.clients.resolve import (
     resolve_stage_client,
     validate_stage_specs,
 )
-from gremlins.pipeline import load_pipeline, resolve_pipeline_path
+from gremlins.pipeline.discovery import resolve_pipeline_path
+from gremlins.pipeline.loader import load_pipeline
 
 
 def test_parse_valid():

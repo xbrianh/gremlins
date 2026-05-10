@@ -6,7 +6,8 @@ import pytest
 from conftest import MINIMAL_EVENTS, ReviewCreatingClient
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.pipeline import load_pipeline, resolve_pipeline_path
+from gremlins.pipeline.discovery import resolve_pipeline_path
+from gremlins.pipeline.loader import load_pipeline
 from gremlins.stages import StageContext, implement, plan
 from gremlins.stages.address_code import AddressCode
 from gremlins.stages.implement import _render_spec_block
