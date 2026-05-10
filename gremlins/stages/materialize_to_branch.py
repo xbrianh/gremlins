@@ -66,15 +66,10 @@ class MaterializeToBranch(Stage):
                 "without advancing from the starting commit; refusing to treat this as "
                 "committed work to hand off"
             )
-
         if not isinstance(outcome, HeadAdvanced):
-            # DirtyOnly: uncommitted changes but no commits — nothing to hand off.
-            # Don't overwrite impl_materialized_branch; leave any prior value intact.
-            patch_state(self.state.gr_id, impl_base_ref=pre_state.head)
-            return MaterializeToBranchResult(
-                outcome=outcome,
-                materialized_branch="",
-                base_ref=pre_state.head,
+            raise RuntimeError(
+                f"unexpected impl outcome {type(outcome).__name__!r} at materialize stage; "
+                "implement stage must produce committed work"
             )
 
         materialized_branch = create_handoff_branch(pre_state, cwd=impl_cwd)
