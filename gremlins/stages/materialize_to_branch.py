@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import sys
+from typing import Any
 
 from gremlins.git import (
     DivergentHead,
@@ -30,6 +31,16 @@ class MaterializeToBranchResult:
 
 
 class MaterializeToBranch(Stage):
+    type = "materialize-to-branch"
+
+    @classmethod
+    def from_yaml(cls, d: dict[str, Any]) -> MaterializeToBranch:
+        from gremlins.pipeline.loader import _get_client_from_yaml
+
+        stage = cls(d["name"], None, d.get("prompt") or [], d.get("options") or {})
+        stage.client = _get_client_from_yaml(d)
+        return stage
+
     def run(self, state: RuntimeState) -> MaterializeToBranchResult:
         pre_state = state.impl_pre_state
         if pre_state is None:

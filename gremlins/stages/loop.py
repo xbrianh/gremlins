@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 from collections.abc import Callable
@@ -47,14 +48,18 @@ class LoopStage(Stage):
     boss-spec.md, handoff-NNN.state.json).
     """
 
+    type = "loop"
+
     def __init__(
         self,
         name: str,
         *,
-        body_runners: list[Callable[[], None]],
+        body: list[Stage] | None = None,
+        body_runners: list[Callable[[], None]] | None = None,
         max_iterations: int,
     ) -> None:
         super().__init__(name, None, [], {})
+        self.body = body or []
         self._body_runners = body_runners
         self._max_iterations = max_iterations
 
@@ -68,14 +73,37 @@ class LoopStage(Stage):
     ) -> LoopStage:
         return cls(name, body_runners=runners, max_iterations=max_iterations)
 
+    @classmethod
+    def from_yaml(cls, d: dict[str, Any]) -> LoopStage:
+        from gremlins.pipeline.loader import _get_client_from_yaml, _parse_stage
+
+        max_iterations = (d.get("options") or {}).get("max_iterations", 3)
+        body = [_parse_stage(child_d) for child_d in (d.get("body") or [])]
+        stage = cls(d["name"], body=body, max_iterations=max_iterations)
+        stage.client = _get_client_from_yaml(d)
+        return stage
+
+    def _build_runners(self, state: RuntimeState) -> list[Callable[[], None]]:
+        result = []
+        for child in self.body:
+            child_spec = state.stage_specs.get(child.name, state.client)
+            child_state = dataclasses.replace(state, client=state.get_client(child_spec))
+            result.append(child_state.make_runner(child, scope=self.body))
+        return result
+
     def run(self, state: RuntimeState) -> None:
+        runners = (
+            self._body_runners
+            if self._body_runners is not None
+            else self._build_runners(state)
+        )
         exhausted = False
         try:
             for iteration in range(1, self._max_iterations + 1):
                 head_before = _git.head_sha(state.cwd)
                 had_failure = False
 
-                for i, runner in enumerate(self._body_runners):
+                for i, runner in enumerate(runners):
                     if i > 0 and (not had_failure or iteration == self._max_iterations):
                         continue
                     try:

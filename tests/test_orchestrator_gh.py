@@ -188,12 +188,16 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
     # Strip pipeline client keys so the injected client is used for every stage.
     _real_load_pipeline = _run_mod.load_pipeline
 
+    def _strip_clients(stage):
+        stage.client = None
+        for child in stage.body:
+            _strip_clients(child)
+
     def _load_pipeline_no_clients(path):
         pipeline = _real_load_pipeline(path)
-        stripped_stages = [dataclasses.replace(s, client=None) for s in pipeline.stages]
-        return dataclasses.replace(
-            pipeline, default_client=None, stages=stripped_stages
-        )
+        for s in pipeline.stages:
+            _strip_clients(s)
+        return dataclasses.replace(pipeline, default_client=None)
 
     monkeypatch.setattr(
         "gremlins.orchestrators.run.load_pipeline", _load_pipeline_no_clients
@@ -2014,13 +2018,18 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
 
     _real_load_pipeline = _run_mod.load_pipeline
 
+    def _strip_clients_2(stage):
+        stage.client = None
+        for child in stage.body:
+            _strip_clients_2(child)
+
     def _load_pipeline_copilot_default(path):
         pipeline = _real_load_pipeline(path)
-        stripped_stages = [dataclasses.replace(s, client=None) for s in pipeline.stages]
+        for s in pipeline.stages:
+            _strip_clients_2(s)
         return dataclasses.replace(
             pipeline,
             default_client=Client("copilot", "gpt-5.4"),
-            stages=stripped_stages,
         )
 
     monkeypatch.setattr(
@@ -2133,65 +2142,55 @@ def _make_pipeline(*stages):
 
 
 def test_pipeline_uses_gh_detects_top_level_gh_stage() -> None:
-    from gremlins.schema import StageEntry
+    from gremlins.stages.open_github_pr import OpenGitHubPR
     from gremlins.state import pipeline_uses_gh
 
-    pipeline = _make_pipeline(
-        StageEntry(
-            name="open-pr", type="open-github-pr", client=None, prompts=[], options={}
-        )
-    )
+    pipeline = _make_pipeline(OpenGitHubPR("open-pr", None, [], {}))
     assert pipeline_uses_gh(pipeline) is True
 
 
 def test_pipeline_uses_gh_false_for_local_stages() -> None:
-    from gremlins.schema import StageEntry
+    from gremlins.stages.implement import Implement
+    from gremlins.stages.plan import Plan
     from gremlins.state import pipeline_uses_gh
 
     pipeline = _make_pipeline(
-        StageEntry(name="plan", type="plan", client=None, prompts=[], options={}),
-        StageEntry(
-            name="implement", type="implement", client=None, prompts=[], options={}
-        ),
+        Plan("plan", None, [], {}),
+        Implement("implement", None, [], {}),
     )
     assert pipeline_uses_gh(pipeline) is False
 
 
 def test_pipeline_uses_gh_recurses_into_loop_body() -> None:
     """A loop containing gh-mode body stages is detected as gh."""
-    from gremlins.schema import StageEntry
+    from gremlins.stages.handoff import Handoff
+    from gremlins.stages.loop import LoopStage
+    from gremlins.stages.open_github_pr import OpenGitHubPR
     from gremlins.state import pipeline_uses_gh
 
     gh_body = [
-        StageEntry(name="handoff", type="handoff", client=None, prompts=[], options={}),
-        StageEntry(
-            name="open-pr", type="open-github-pr", client=None, prompts=[], options={}
-        ),
+        Handoff("handoff"),
+        OpenGitHubPR("open-pr", None, [], {}),
     ]
-    loop = StageEntry(
-        name="chain", type="loop", client=None, prompts=[], options={}, body=gh_body
-    )
+    loop = LoopStage("chain", body=gh_body, max_iterations=3)
     assert pipeline_uses_gh(_make_pipeline(loop)) is True
 
 
 def test_pipeline_uses_gh_false_for_local_loop_body() -> None:
     """A loop with only local-mode body stages is not detected as gh."""
-    from gremlins.schema import StageEntry
+    from gremlins.stages.handoff import Handoff
+    from gremlins.stages.implement import Implement
+    from gremlins.stages.loop import LoopStage
+    from gremlins.stages.review_code import ReviewCode
     from gremlins.state import pipeline_uses_gh
 
     local_body = [
-        StageEntry(name="handoff", type="handoff", client=None, prompts=[], options={}),
-        StageEntry(
-            name="implement", type="implement", client=None, prompts=[], options={}
-        ),
+        Handoff("handoff"),
+        Implement("implement", None, [], {}),
     ]
-    loop = StageEntry(
-        name="chain", type="loop", client=None, prompts=[], options={}, body=local_body
-    )
+    loop = LoopStage("chain", body=local_body, max_iterations=3)
     pipeline = _make_pipeline(
         loop,
-        StageEntry(
-            name="review-chain", type="review-code", client=None, prompts=[], options={}
-        ),
+        ReviewCode("review-chain", None, [], {}),
     )
     assert pipeline_uses_gh(pipeline) is False

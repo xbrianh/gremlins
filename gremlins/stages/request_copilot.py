@@ -10,6 +10,16 @@ from gremlins.state import read_pr_num
 
 
 class RequestCopilot(Stage):
+    type = "request-copilot"
+
+    @classmethod
+    def from_yaml(cls, d: dict[str, Any]) -> RequestCopilot:
+        from gremlins.pipeline.loader import _get_client_from_yaml
+
+        stage = cls(d["name"], None, d.get("prompt") or [], d.get("options") or {})
+        stage.client = _get_client_from_yaml(d)
+        return stage
+
     def __init__(
         self,
         name: str,

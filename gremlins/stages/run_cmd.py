@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from typing import Any
 
 from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.loop import RunCmdFailed
@@ -10,6 +11,16 @@ from gremlins.stages.registry import register_stage
 
 
 class RunCmd(Stage):
+    type = "run-cmd"
+
+    @classmethod
+    def from_yaml(cls, d: dict[str, Any]) -> RunCmd:
+        from gremlins.pipeline.loader import _get_client_from_yaml
+
+        stage = cls(d["name"], None, d.get("prompt") or [], d.get("options") or {})
+        stage.client = _get_client_from_yaml(d)
+        return stage
+
     def run(self, state: RuntimeState) -> None:
         cmds = [c for c in self.options.get("cmds", []) if c.strip()]
         if not cmds:

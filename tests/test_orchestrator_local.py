@@ -380,13 +380,18 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
     # Override load_pipeline to inject default_client without a live client instance.
     _real_load_pipeline = load_pipeline
 
+    def _strip_clients(stage):
+        stage.client = None
+        for child in stage.body:
+            _strip_clients(child)
+
     def _load_pipeline_copilot_default(path):
         pipeline = _real_load_pipeline(path)
-        stripped_stages = [dataclasses.replace(s, client=None) for s in pipeline.stages]
+        for s in pipeline.stages:
+            _strip_clients(s)
         return dataclasses.replace(
             pipeline,
             default_client=Client("copilot", "gpt-5.4"),
-            stages=stripped_stages,
         )
 
     monkeypatch.setattr(

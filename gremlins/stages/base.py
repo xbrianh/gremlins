@@ -14,14 +14,14 @@ from gremlins.clients.protocol import CompletedRun
 
 if TYPE_CHECKING:
     from gremlins.git import PreImplState
-    from gremlins.schema import PipelineDef, StageEntry
+    from gremlins.schema import PipelineDef
 
 
 def _client_dict() -> dict[str, Client]:
     return {}
 
 
-def _stage_entry_list() -> list[StageEntry]:
+def _stage_list() -> list[Stage]:
     return []
 
 
@@ -44,9 +44,7 @@ class RuntimeState:
     # per-stage optional
     child_key: str | None = None
     worktree: pathlib.Path | None = None
-    current_scope: list[StageEntry] = dataclasses.field(
-        default_factory=_stage_entry_list
-    )
+    current_scope: list[Stage] = dataclasses.field(default_factory=_stage_list)
     # runtime-derived (populated from state.json before each stage run)
     issue_url: str = ""
     base_ref_name: str = ""
@@ -65,16 +63,14 @@ class RuntimeState:
 
     def make_runner(
         self,
-        entry: StageEntry,
-        spec: Client,
-        scope: list[StageEntry] | None = None,
+        entry: Stage,
+        scope: list[Stage] | None = None,
     ) -> Callable[[], None]:
         base_state = self
         gr_id = self.gr_id
         scope_list = list(scope) if scope is not None else []
 
         def _run() -> None:
-            from gremlins.stages.registry import STAGE_BUILDERS
             from gremlins.state import resolve_state_file, set_stage
 
             set_stage(gr_id, entry.name)
@@ -93,9 +89,7 @@ class RuntimeState:
                 issue_num=sd.get("issue_num") or "",
                 impl_pre_state=_read_impl_pre_state(base_state.session_dir, sd),
             )
-            builder = STAGE_BUILDERS[entry.type]
-            stage = builder(entry, spec, state)
-            stage.run(state)
+            entry.run(state)
 
         return _run
 
@@ -138,6 +132,8 @@ class StageInput(NamedTuple):
 
 
 class Stage:
+    type: str = ""
+
     def __init__(
         self, name: str, model: str | None, prompts: list[str], options: dict[str, Any]
     ) -> None:
@@ -145,6 +141,8 @@ class Stage:
         self.model = model
         self.prompts = prompts
         self.options = options
+        self.client: Client | None = None
+        self.body: list[Stage] = []
 
     def run_claude(
         self,
@@ -155,10 +153,11 @@ class Stage:
         raw_path: pathlib.Path | None = None,
         **kw: Any,
     ) -> CompletedRun:
+        model = self.model or state.client.model
         return state.client.run(
             prompt,
             label=label,
-            model=self.model,
+            model=model,
             raw_path=raw_path,
             cwd=state.worktree,
             **kw,

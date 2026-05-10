@@ -8,7 +8,8 @@ from gremlins.clients.client import PACKAGE_DEFAULT, Client
 from gremlins.state import resolve_state_file
 
 if TYPE_CHECKING:
-    from gremlins.schema import PipelineDef, StageEntry
+    from gremlins.schema import PipelineDef
+    from gremlins.stages.base import Stage
 
 
 def resolve_stage_client(
@@ -25,7 +26,7 @@ def collect_stage_specs(
 ) -> dict[str, Client]:
     specs: dict[str, Client] = {}
 
-    def _walk(entries: list[StageEntry]) -> None:
+    def _walk(entries: list[Stage]) -> None:
         for e in entries:
             entry_client = None if e.type == "parallel" else e.client
             specs[e.name] = resolve_stage_client(
@@ -58,7 +59,7 @@ def _format_missing_stage_specs(names: Sequence[str]) -> str:
 def validate_stage_specs(stage_specs: dict[str, Client], pipeline: PipelineDef) -> None:
     expected_stage_names: set[str] = set()
 
-    def _walk(entries: list[StageEntry]) -> None:
+    def _walk(entries: list[Stage]) -> None:
         for entry in entries:
             expected_stage_names.add(entry.name)
             if entry.body:

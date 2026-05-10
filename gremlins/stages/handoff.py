@@ -551,9 +551,18 @@ def run(client: Client, args: argparse.Namespace) -> int:
 
 
 class Handoff(Stage):
-    def __init__(self, name: str, client_spec: Client) -> None:
-        super().__init__(name, client_spec.model, [], {})
-        self._client_spec = client_spec
+    type = "handoff"
+
+    @classmethod
+    def from_yaml(cls, d: dict[str, Any]) -> Handoff:
+        from gremlins.pipeline.loader import _get_client_from_yaml
+
+        stage = cls(d["name"])
+        stage.client = _get_client_from_yaml(d)
+        return stage
+
+    def __init__(self, name: str) -> None:
+        super().__init__(name, None, [], {})
 
     def run(self, state: RuntimeState) -> None:
         session_dir = state.session_dir
@@ -628,7 +637,7 @@ class Handoff(Stage):
             pathlib.Path(original_plan).read_bytes()
             != pathlib.Path(current_plan).read_bytes()
         )
-        model_str = str(self._client_spec)
+        model_str = str(client)
 
         logger.info(
             "handoff %d: plan=%s, spec=%s, base=%s",
