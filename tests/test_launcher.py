@@ -1121,7 +1121,9 @@ def test_launch_boss_plan_issue_ref_materializes_plan_md(lenv, monkeypatch):
         lambda plan: {"title": "My Plan", "body": issue_body, "number": 317, "url": ""},
     )
 
-    monkeypatch.setattr(launcher, "_spawn_pipeline", lambda *args, **kwargs: _FakeProc())
+    monkeypatch.setattr(
+        launcher, "_spawn_pipeline", lambda *args, **kwargs: _FakeProc()
+    )
 
     gr_id = launcher.launch("boss", plan="#317", project_root=str(lenv.repo))
     state_dir = _gremlins_state_root(lenv) / gr_id
@@ -1145,7 +1147,9 @@ def test_launch_plan_issue_ref_writes_issue_url_and_num(lenv, monkeypatch):
         },
     )
 
-    monkeypatch.setattr(launcher, "_spawn_pipeline", lambda *args, **kwargs: _FakeProc())
+    monkeypatch.setattr(
+        launcher, "_spawn_pipeline", lambda *args, **kwargs: _FakeProc()
+    )
 
     gr_id = launcher.launch("boss", plan="#378", project_root=str(lenv.repo))
     state = _read_state(_gremlins_state_root(lenv) / gr_id)
