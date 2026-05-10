@@ -43,7 +43,9 @@ class Verify(Stage):
             cmds_arg = getattr(state.args, "cmds", None)
             if cmds_arg is not None:
                 options["cmds"] = cmds_arg
-            options.setdefault("max_attempts", getattr(state.args, "test_max_attempts", 3))
+            options.setdefault(
+                "max_attempts", getattr(state.args, "test_max_attempts", 3)
+            )
         cmds = [c for c in options.get("cmds", []) if c.strip()]
         max_attempts = options.get("max_attempts", 3)
 

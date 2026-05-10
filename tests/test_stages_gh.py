@@ -5,18 +5,28 @@ import pathlib
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
+from gremlins.schema import PipelineDef as _PipelineDef
+from gremlins.schema import StageEntry as _StageEntry
 from gremlins.stages.address_code import AddressCode
 from gremlins.stages.base import RuntimeState
 from gremlins.stages.review_code import ReviewCode
-from gremlins.schema import PipelineDef as _PipelineDef, StageEntry as _StageEntry
 
 
 def _gh_pipeline() -> _PipelineDef:
     return _PipelineDef(
         name="test",
         path=pathlib.Path("."),
-        stages=[_StageEntry(name="open-github-pr", type="open-github-pr", client=None, prompts=[], options={})],
+        stages=[
+            _StageEntry(
+                name="open-github-pr",
+                type="open-github-pr",
+                client=None,
+                prompts=[],
+                options={},
+            )
+        ],
     )
+
 
 _BUNDLED_PROMPTS = (
     pathlib.Path(__file__).resolve().parent.parent / "gremlins" / "prompts"
@@ -29,7 +39,13 @@ def _make_state(
     *,
     gr_id: str | None = None,
 ) -> RuntimeState:
-    return RuntimeState(client=client, session_dir=tmp_path, gr_id=gr_id, is_git=True, pipeline_data=_gh_pipeline())
+    return RuntimeState(
+        client=client,
+        session_dir=tmp_path,
+        gr_id=gr_id,
+        is_git=True,
+        pipeline_data=_gh_pipeline(),
+    )
 
 
 def _make_ghreview(

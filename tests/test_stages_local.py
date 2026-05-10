@@ -8,7 +8,7 @@ from conftest import MINIMAL_EVENTS, ReviewCreatingClient
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.pipeline.loader import load_pipeline
-from gremlins.schema import PipelineDef as _PipelineDef, StageEntry as _StageEntry
+from gremlins.schema import StageEntry as _StageEntry
 from gremlins.stages import implement, plan
 from gremlins.stages.address_code import AddressCode
 from gremlins.stages.base import RuntimeState
@@ -458,8 +458,20 @@ def test_address_code_finds_review_files_in_parallel_subdirs(tmp_path):
         prompts=[],
         options={},
         body=[
-            _StageEntry(name="review-code", type="review-code", client=None, prompts=[], options={}),
-            _StageEntry(name="review-code-fidelity", type="review-code", client=None, prompts=[], options={}),
+            _StageEntry(
+                name="review-code",
+                type="review-code",
+                client=None,
+                prompts=[],
+                options={},
+            ),
+            _StageEntry(
+                name="review-code-fidelity",
+                type="review-code",
+                client=None,
+                prompts=[],
+                options={},
+            ),
         ],
     )
     state = RuntimeState(

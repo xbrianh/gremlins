@@ -11,11 +11,11 @@ import subprocess
 import sys
 from typing import Any
 
+from gremlins.errors import die
 from gremlins.gh_utils import extract_gh_url, get_repo, parse_issue_ref, view_issue
 from gremlins.stages.base import RuntimeState, Stage, StageInput
 from gremlins.stages.registry import register_stage
 from gremlins.state import patch_state, resolve_state_file
-from gremlins.errors import die
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +63,9 @@ class Plan(Stage):
     def run(self, state: RuntimeState) -> None:
         plan_val = getattr(state.args, "plan", None)
         if not self.prompts and not plan_val:
-            die(f"stage {self.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML")
+            die(
+                f"stage {self.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML"
+            )
         plan_md = state.session_dir / "plan.md"
 
         if plan_md.exists() and plan_md.stat().st_size > 0:

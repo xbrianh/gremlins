@@ -65,8 +65,12 @@ def _build_open_github_pr(entry: StageEntry, spec: Client, _state: RuntimeState)
     )
 
 
-def _build_request_copilot(entry: StageEntry, spec: Client, _state: RuntimeState) -> Any:
-    return request_copilot.RequestCopilot(entry.name, spec.model, entry.prompts, entry.options)
+def _build_request_copilot(
+    entry: StageEntry, spec: Client, _state: RuntimeState
+) -> Any:
+    return request_copilot.RequestCopilot(
+        entry.name, spec.model, entry.prompts, entry.options
+    )
 
 
 def _build_ghreview(entry: StageEntry, spec: Client, _state: RuntimeState) -> Any:
@@ -83,7 +87,9 @@ def _build_ghreview(entry: StageEntry, spec: Client, _state: RuntimeState) -> An
 
 
 def _build_wait_copilot(entry: StageEntry, spec: Client, _state: RuntimeState) -> Any:
-    return wait_copilot.WaitCopilot(entry.name, spec.model, entry.prompts, entry.options)
+    return wait_copilot.WaitCopilot(
+        entry.name, spec.model, entry.prompts, entry.options
+    )
 
 
 def _build_ghaddress(entry: StageEntry, spec: Client, _state: RuntimeState) -> Any:
@@ -105,7 +111,9 @@ def _build_review_code(entry: StageEntry, spec: Client, _state: RuntimeState) ->
 
 
 def _build_address_code(entry: StageEntry, spec: Client, _state: RuntimeState) -> Any:
-    return address_code.AddressCode(entry.name, spec.model, entry.prompts, entry.options)
+    return address_code.AddressCode(
+        entry.name, spec.model, entry.prompts, entry.options
+    )
 
 
 def _build_loop(entry: StageEntry, spec: Client, state: RuntimeState) -> Any:

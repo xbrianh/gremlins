@@ -14,7 +14,9 @@ from gremlins.state import check_bail, emit_bail, pipeline_uses_gh, read_pr_url
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
-def _review_stage_info(state: RuntimeState) -> tuple[list[str], dict[str, pathlib.Path]]:
+def _review_stage_info(
+    state: RuntimeState,
+) -> tuple[list[str], dict[str, pathlib.Path]]:
     names: list[str] = []
     dirs: dict[str, pathlib.Path] = {}
     scope = state.current_scope or (
@@ -84,10 +86,7 @@ class AddressCode(Stage):
                 review_files.append((stage_name, pathlib.Path(m)))
         if not review_files:
             stages_str = ", ".join(names)
-            searched = ", ".join(
-                str(dirs.get(s, state.session_dir))
-                for s in names
-            )
+            searched = ", ".join(str(dirs.get(s, state.session_dir)) for s in names)
             raise FileNotFoundError(
                 f"no review files found in [{searched}] (stages: {stages_str})"
             )

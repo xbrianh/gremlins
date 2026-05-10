@@ -90,7 +90,9 @@ def _read_spec(session_dir: pathlib.Path) -> str:
     try:
         return spec_file.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        logger.warning("could not read spec.md (%s); proceeding without north-star context", exc)
+        logger.warning(
+            "could not read spec.md (%s); proceeding without north-star context", exc
+        )
         return ""
 
 
