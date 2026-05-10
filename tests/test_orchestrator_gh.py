@@ -2130,7 +2130,7 @@ def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _make_pipeline(*stages: "StageEntry") -> "PipelineDef":
+def _make_pipeline(*stages):
     import pathlib
 
     from gremlins.schema import PipelineDef
