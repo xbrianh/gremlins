@@ -12,7 +12,7 @@ import sys
 from typing import Any
 
 from gremlins.gh_utils import extract_gh_url, get_repo, parse_issue_ref, view_issue
-from gremlins.stages.base import Stage, StageInput
+from gremlins.stages.base import Stage, StageInput, StageState
 from gremlins.stages.registry import register_stage
 from gremlins.state import patch_state, read_state_str, resolve_state_file
 
@@ -66,11 +66,11 @@ class Plan(Stage):
             ),
         ]
 
-    def run(self, pipe: Any) -> None:
-        plan_md = self.state.session_dir / "plan.md"
+    def run(self, state: StageState) -> None:
+        plan_md = state.session_dir / "plan.md"
 
         if plan_md.exists() and plan_md.stat().st_size > 0:
-            state_file = resolve_state_file(self.state.gr_id)
+            state_file = resolve_state_file(state.gr_id)
             issue_num = read_state_str(state_file, "issue_num")
             label = f" (issue #{issue_num})" if issue_num else ""
             logger.info("[1/8] plan resumed from snapshot: %s%s", plan_md, label)
@@ -79,16 +79,16 @@ class Plan(Stage):
         if self.plan:
             src = pathlib.Path(self.plan)
             if src.is_file():
-                self._resolve_file_source(self.plan, plan_md)
+                self._resolve_file_source(self.plan, plan_md, state)
             else:
-                self._resolve_issue_source(self.plan, plan_md)
+                self._resolve_issue_source(self.plan, plan_md, state)
             return
 
-        self._run_agent(plan_md)
+        self._run_agent(plan_md, state)
 
-    def _run_agent(self, plan_md: pathlib.Path) -> None:
+    def _run_agent(self, plan_md: pathlib.Path, state: StageState) -> None:
         if self.repo:
-            state_file = resolve_state_file(self.state.gr_id)
+            state_file = resolve_state_file(state.gr_id)
             base_ref_name = read_state_str(state_file, "base_ref_name")
             plan_prompt = (
                 "\n\n".join(self.prompts)
@@ -100,8 +100,9 @@ class Plan(Stage):
             )
             completed = self.run_claude(
                 plan_prompt,
+                state=state,
                 label="plan",
-                raw_path=self.state.session_dir / "ghplan-out.jsonl",
+                raw_path=state.session_dir / "ghplan-out.jsonl",
                 capture_events=True,
             )
             issue_url = extract_gh_url(
@@ -113,7 +114,7 @@ class Plan(Stage):
             )
             issue_num = issue_url.split("/")[-1]
             logger.info("issue: %s", issue_url)
-            patch_state(self.state.gr_id, issue_url=issue_url, issue_num=issue_num)
+            patch_state(state.gr_id, issue_url=issue_url, issue_num=issue_num)
             issue_body = _fetch_issue_body(issue_num, self.repo)
             plan_md.write_text(issue_body, encoding="utf-8")
         else:
@@ -124,15 +125,18 @@ class Plan(Stage):
             )
             completed = self.run_claude(
                 prompt,
+                state=state,
                 label="plan",
-                raw_path=self.state.session_dir / "stream-plan.jsonl",
+                raw_path=state.session_dir / "stream-plan.jsonl",
             )
             if not plan_md.exists() or plan_md.stat().st_size == 0:
                 snippet = (completed.text_result or "")[:200].strip()
                 detail = f"; model said: {snippet}" if snippet else ""
                 raise RuntimeError(f"plan stage did not produce {plan_md}{detail}")
 
-    def _resolve_file_source(self, path: str, plan_md: pathlib.Path) -> None:
+    def _resolve_file_source(
+        self, path: str, plan_md: pathlib.Path, state: StageState
+    ) -> None:
         src = pathlib.Path(path)
         if src.stat().st_size == 0:
             sys.stderr.write(f"error: --plan: file is empty: {path}\n")
@@ -154,8 +158,9 @@ class Plan(Stage):
         )
         completed = self.run_claude(
             title_prompt,
+            state=state,
             label="plan-title",
-            raw_path=self.state.session_dir / "plan-title.jsonl",
+            raw_path=state.session_dir / "plan-title.jsonl",
         )
         parts = (completed.text_result or "").strip().splitlines()
         issue_title = parts[0][:80] if parts else ""
@@ -197,10 +202,12 @@ class Plan(Stage):
         issue_num = issue_url.split("/")[-1]
         logger.info("issue: %s", issue_url)
         shutil.copyfile(src, plan_md)
-        patch_state(self.state.gr_id, issue_url=issue_url, issue_num=issue_num)
-        self._update_description(plan_md, issue_title=issue_title)
+        patch_state(state.gr_id, issue_url=issue_url, issue_num=issue_num)
+        self._update_description(plan_md, issue_title=issue_title, state=state)
 
-    def _resolve_issue_source(self, ref: str, plan_md: pathlib.Path) -> None:
+    def _resolve_issue_source(
+        self, ref: str, plan_md: pathlib.Path, state: StageState
+    ) -> None:
         target_repo, issue_ref = parse_issue_ref(ref, self.repo or "")
         if issue_ref is None:
             sys.stderr.write(
@@ -241,13 +248,13 @@ class Plan(Stage):
         logger.info(
             "[1/8] plan supplied via --plan (issue %s#%s)", target_repo, issue_ref
         )
-        patch_state(self.state.gr_id, issue_url=issue_url, issue_num=issue_num)
-        self._update_description(plan_md, issue_title=issue_title)
+        patch_state(state.gr_id, issue_url=issue_url, issue_num=issue_num)
+        self._update_description(plan_md, issue_title=issue_title, state=state)
 
     def _update_description(
-        self, plan_md: pathlib.Path, *, issue_title: str = ""
+        self, plan_md: pathlib.Path, *, issue_title: str = "", state: StageState
     ) -> None:
-        state_file = resolve_state_file(self.state.gr_id)
+        state_file = resolve_state_file(state.gr_id)
         if state_file is None or not state_file.exists():
             return
         try:
@@ -255,7 +262,7 @@ class Plan(Stage):
             if data.get("description_explicit"):
                 return
             if issue_title:
-                patch_state(self.state.gr_id, description=issue_title[:60])
+                patch_state(state.gr_id, description=issue_title[:60])
                 return
             lines = plan_md.read_text(encoding="utf-8").splitlines()[:50]
             h1 = ""
@@ -265,7 +272,7 @@ class Plan(Stage):
                     h1 = m.group(1)[:60]
                     break
             if h1:
-                patch_state(self.state.gr_id, description=h1)
+                patch_state(state.gr_id, description=h1)
         except Exception:
             pass
 

@@ -9,7 +9,7 @@ from typing import Any
 
 from gremlins.gh_utils import fetch_check_run_logs, get_pr_ci_status
 from gremlins.git import head_sha
-from gremlins.stages.base import Stage
+from gremlins.stages.base import Stage, StageState
 from gremlins.stages.registry import register_stage
 from gremlins.state import check_bail, emit_bail, read_pr_url
 
@@ -163,15 +163,15 @@ class WaitCI(Stage):
         self.head_sha_getter = head_sha_getter
         self.fix_sha_getter = fix_sha_getter
 
-    def run(self, pipe: Any) -> None:
-        pr_url = self.pr_url or read_pr_url(self.state.gr_id)
+    def run(self, state: StageState) -> None:
+        pr_url = self.pr_url or read_pr_url(state.gr_id)
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
         checks, review_decision = _wait_for_checks(
             pr_url, self.checks_getter, self.poll_interval, self.startup_grace_secs
         )
         _bail_if_review_required(
-            self.state.gr_id, review_decision, child_key=self.state.child_key
+            state.gr_id, review_decision, child_key=state.child_key
         )
 
         if not checks:
@@ -197,14 +197,14 @@ class WaitCI(Stage):
                 )
                 try:
                     final_checks, review_decision = _poll_until_done(
-                        self.state.gr_id,
+                        state.gr_id,
                         pr_url,
                         self.poll_timeout,
                         self.poll_interval,
                         self.checks_getter,
                         required_sha=fix_sha,
                         head_sha_getter=self.head_sha_getter,
-                        child_key=self.state.child_key,
+                        child_key=state.child_key,
                     )
                 except _ReviewRequiredError:
                     _review_bailed = True
@@ -223,47 +223,48 @@ class WaitCI(Stage):
                     break
 
                 failure_output = _collect_failure_output(failed)
-                log_file = self.state.session_dir / f"ci-attempt-{attempt}.log"
+                log_file = state.session_dir / f"ci-attempt-{attempt}.log"
                 log_file.write_text(failure_output, encoding="utf-8")
 
                 fix_prompt = template.format(
-                    bail_command=self.bail_command(),
+                    bail_command=self.bail_command(state),
                     failure_output=failure_output,
                 )
                 self.run_claude(
                     fix_prompt,
+                    state=state,
                     label=f"ci-fix-{attempt}",
-                    raw_path=self.state.session_dir / f"stream-ci-fix-{attempt}.jsonl",
+                    raw_path=state.session_dir / f"stream-ci-fix-{attempt}.jsonl",
                 )
                 _agent_bailed = True
                 check_bail(
-                    self.state.gr_id,
+                    state.gr_id,
                     f"ci-fix-{attempt}",
-                    child_key=self.state.child_key,
+                    child_key=state.child_key,
                 )
                 _agent_bailed = False
 
                 fix_sha = (
                     self.fix_sha_getter()
                     if self.fix_sha_getter is not None
-                    else head_sha(cwd=self.state.cwd)
+                    else head_sha(cwd=state.cwd)
                 )
 
             _exhausted = True
             emit_bail(
-                self.state.gr_id,
+                state.gr_id,
                 "other",
                 f"CI failed after {self.max_attempts} attempts",
-                child_key=self.state.child_key,
+                child_key=state.child_key,
             )
             raise RuntimeError(f"ci-gate exhausted {self.max_attempts} attempts")
         except (SystemExit, Exception) as exc:
             if not _exhausted and not _agent_bailed and not _review_bailed:
                 emit_bail(
-                    self.state.gr_id,
+                    state.gr_id,
                     "other",
                     f"ci-gate failed: {exc}"[:200],
-                    child_key=self.state.child_key,
+                    child_key=state.child_key,
                 )
             raise
 

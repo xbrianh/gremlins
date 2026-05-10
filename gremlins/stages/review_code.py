@@ -7,12 +7,11 @@ import pathlib
 from typing import Any
 
 from gremlins.clients.client import Client
-from gremlins.stages.base import Stage
+from gremlins.stages.base import Stage, StageState
 from gremlins.stages.registry import register_stage
 from gremlins.state import (
     check_bail,
     emit_bail,
-    pipeline_uses_gh,
     read_pr_url,
     set_stage,
 )
@@ -72,23 +71,25 @@ class ReviewCode(Stage):
         plan_text: str,
         is_git: bool,
         pr_url: str = "",
+        is_gh: bool = False,
     ) -> None:
         super().__init__(name, model, prompts, options)
         self.plan_text = plan_text
         self.is_git = is_git
         self.pr_url = pr_url
+        self.is_gh = is_gh
 
-    def run(self, pipe: Any) -> Any:
-        if pipe is not None and pipeline_uses_gh(pipe.pipeline_data):
-            return self.results_to_github(pipe)
-        return self.results_to_local(pipe)
+    def run(self, state: StageState) -> Any:
+        if self.is_gh:
+            return self.results_to_github(state)
+        return self.results_to_local(state)
 
-    def results_to_local(self, pipe: Any) -> pathlib.Path:
+    def results_to_local(self, state: StageState) -> pathlib.Path:
         if self.model is None:
             raise ValueError(f"stage {self.name!r}: model must be set")
-        out_file = self.state.session_dir / f"{self.name}-{self.model}.md"
+        out_file = state.session_dir / f"{self.name}-{self.model}.md"
 
-        for stale in self.state.session_dir.glob(f"{self.name}-*.md"):
+        for stale in state.session_dir.glob(f"{self.name}-*.md"):
             try:
                 stale.unlink()
             except OSError:
@@ -120,52 +121,52 @@ class ReviewCode(Stage):
             code_context = code_scope
 
         try:
-            set_stage(self.state.gr_id, self.name, {"model": f"running ({self.model})"})
+            set_stage(state.gr_id, self.name, {"model": f"running ({self.model})"})
             _run_reviewer(
-                client=self.state.client,
+                client=state.client,
                 model=self.model,
                 out_file=out_file,
                 focus=focus,
                 context=code_context,
                 where_field="**File:** `path/to/file.ext:<line>`",
                 label=f"{self.name}:{self.model}",
-                raw_path=self.state.session_dir
-                / f"stream-{self.name}-{self.model}.jsonl",
-                cwd=self.state.worktree,
+                raw_path=state.session_dir / f"stream-{self.name}-{self.model}.jsonl",
+                cwd=state.worktree,
             )
-            set_stage(self.state.gr_id, self.name, {"model": f"done ({self.model})"})
+            set_stage(state.gr_id, self.name, {"model": f"done ({self.model})"})
             logger.info("code review (%s): %s", self.model, out_file)
             if not out_file.exists() or out_file.stat().st_size == 0:
                 raise RuntimeError(f"review {self.model} did not produce {out_file}")
         except (SystemExit, Exception) as exc:
             emit_bail(
-                self.state.gr_id,
+                state.gr_id,
                 "other",
                 f"{self.name} stage failed: {exc}"[:200],
-                child_key=self.state.child_key,
+                child_key=state.child_key,
             )
             raise
 
         return out_file
 
-    def results_to_github(self, pipe: Any) -> None:
-        pr_url = self.pr_url or read_pr_url(self.state.gr_id)
+    def results_to_github(self, state: StageState) -> None:
+        pr_url = self.pr_url or read_pr_url(state.gr_id)
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
         prompt = (
             "\n\n".join(self.prompts)
             .rstrip()
             .format(
-                bail_command=self.bail_command(),
+                bail_command=self.bail_command(state),
                 pr_url=pr_url,
             )
         )
         self.run_claude(
             prompt,
+            state=state,
             label="ghreview",
-            raw_path=self.state.session_dir / "stream-ghreview.jsonl",
+            raw_path=state.session_dir / "stream-ghreview.jsonl",
         )
-        check_bail(self.state.gr_id, "/ghreview", child_key=self.state.child_key)
+        check_bail(state.gr_id, "/ghreview", child_key=state.child_key)
 
 
 register_stage("review-code", ReviewCode)

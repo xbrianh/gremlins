@@ -8,7 +8,7 @@ from collections.abc import Callable
 from typing import Any
 
 from gremlins import git as _git
-from gremlins.stages.base import Stage
+from gremlins.stages.base import Stage, StageState
 from gremlins.stages.registry import register_stage
 from gremlins.state import emit_bail
 
@@ -68,11 +68,11 @@ class LoopStage(Stage):
     ) -> LoopStage:
         return cls(name, body_runners=runners, max_iterations=max_iterations)
 
-    def run(self, pipe: Any) -> None:  # noqa: ARG002
+    def run(self, state: StageState) -> None:
         exhausted = False
         try:
             for iteration in range(1, self._max_iterations + 1):
-                head_before = _git.head_sha(self.state.cwd)
+                head_before = _git.head_sha(state.cwd)
                 had_failure = False
 
                 for i, runner in enumerate(self._body_runners):
@@ -84,7 +84,7 @@ class LoopStage(Stage):
                         had_failure = True
 
                 if not had_failure:
-                    head_after = _git.head_sha(self.state.cwd)
+                    head_after = _git.head_sha(state.cwd)
                     if head_after == head_before:
                         return  # head-stable termination
                     logger.info(
@@ -97,23 +97,21 @@ class LoopStage(Stage):
 
             exhausted = True
             emit_bail(
-                self.state.gr_id,
+                state.gr_id,
                 "other",
                 f"loop exhausted {self._max_iterations} iterations",
-                child_key=self.state.child_key,
+                child_key=state.child_key,
             )
             raise LoopExhausted(f"loop exhausted {self._max_iterations} iterations")
         except LoopExhausted:
             raise
         except (SystemExit, Exception) as exc:
-            if not exhausted and not _bail_already_set(
-                self.state.gr_id, self.state.child_key
-            ):
+            if not exhausted and not _bail_already_set(state.gr_id, state.child_key):
                 emit_bail(
-                    self.state.gr_id,
+                    state.gr_id,
                     "other",
                     f"loop stage failed: {exc}"[:200],
-                    child_key=self.state.child_key,
+                    child_key=state.child_key,
                 )
             raise
 

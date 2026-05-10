@@ -10,86 +10,116 @@ import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.stages.base import StageContext
+from gremlins.stages.base import StageState
 from gremlins.stages.open_github_pr import OpenGitHubPR
 
-ISSUE_URL = "https://github.com/owner/repo/issues/42"
 PR_URL = "https://github.com/owner/repo/pull/42"
 
 
-def _make_stage(
+def _write_state(path: pathlib.Path, data: dict) -> pathlib.Path:
+    sf = path / "state.json"
+    sf.write_text(json.dumps(data), encoding="utf-8")
+    return sf
+
+
+def _make_state(
     tmp_path: pathlib.Path,
     *,
-    issue_url: str = ISSUE_URL,
-) -> tuple[OpenGitHubPR, StageContext]:
-    stage = OpenGitHubPR("open-pr", "sonnet", [], {}, issue_url=issue_url)
+    gr_id: str | None = None,
+    issue_url: str = "https://github.com/owner/repo/issues/42",
+) -> tuple[OpenGitHubPR, StageState]:
+    stage = OpenGitHubPR("open-pr", "sonnet", [], {})
     client = FakeClaudeClient(fixtures={"open-github-pr": MINIMAL_EVENTS})
-    ctx = StageContext(client=client, session_dir=tmp_path, gr_id=None)
-    stage.bind(ctx)
-    return stage, ctx
+    state = StageState(client=client, session_dir=tmp_path, gr_id=gr_id)
+    _write_state(
+        tmp_path,
+        {"issue_url": issue_url, "impl_materialized_branch": "impl/feature-abc123"},
+    )
+    return stage, state
 
 
 def test_run_calls_claude_with_push_prompt(tmp_path: pathlib.Path) -> None:
-    stage, ctx = _make_stage(tmp_path)
-    with patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL):
-        stage.run(None)
-    assert len(ctx.client.calls) == 1
-    call = ctx.client.calls[0]
+    stage, state = _make_state(tmp_path, gr_id="test-gr")
+    sf = tmp_path / "state.json"
+    with (
+        patch("gremlins.stages.open_github_pr.resolve_state_file", return_value=sf),
+        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
+        patch("gremlins.stages.open_github_pr.append_artifact"),
+    ):
+        stage.run(state)
+    assert len(state.client.calls) == 1
+    call = state.client.calls[0]
     assert call.label == "open-github-pr"
     assert "push" in call.prompt.lower()
 
 
 def test_issue_num_adds_closes_clause(tmp_path: pathlib.Path) -> None:
-    stage, ctx = _make_stage(tmp_path, issue_url="https://github.com/o/r/issues/42")
-    with patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL):
-        stage.run(None)
-    assert "Closes #42" in ctx.client.calls[0].prompt
+    stage, state = _make_state(
+        tmp_path, gr_id="test-gr", issue_url="https://github.com/o/r/issues/42"
+    )
+    sf = tmp_path / "state.json"
+    with (
+        patch("gremlins.stages.open_github_pr.resolve_state_file", return_value=sf),
+        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
+        patch("gremlins.stages.open_github_pr.append_artifact"),
+    ):
+        stage.run(state)
+    assert "Closes #42" in state.client.calls[0].prompt
 
 
 def test_no_issue_url_skips_closes(tmp_path: pathlib.Path) -> None:
-    stage, ctx = _make_stage(tmp_path, issue_url="")
-    with patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL):
-        stage.run(None)
-    assert "Include 'Closes" not in ctx.client.calls[0].prompt
+    stage, state = _make_state(tmp_path, gr_id="test-gr", issue_url="")
+    sf = _write_state(
+        tmp_path, {"issue_url": "", "impl_materialized_branch": "impl/feature-abc123"}
+    )
+    with (
+        patch("gremlins.stages.open_github_pr.resolve_state_file", return_value=sf),
+        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
+        patch("gremlins.stages.open_github_pr.append_artifact"),
+    ):
+        stage.run(state)
+    assert "Include 'Closes" not in state.client.calls[0].prompt
 
 
 def test_run_returns_pr_url(tmp_path: pathlib.Path) -> None:
-    stage, ctx = _make_stage(tmp_path)
-    with patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL):
-        result = stage.run(None)
+    stage, state = _make_state(tmp_path, gr_id="test-gr")
+    sf = tmp_path / "state.json"
+    with (
+        patch("gremlins.stages.open_github_pr.resolve_state_file", return_value=sf),
+        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
+        patch("gremlins.stages.open_github_pr.append_artifact"),
+    ):
+        result = stage.run(state)
     assert result == PR_URL
 
 
 def test_run_writes_raw_path(tmp_path: pathlib.Path) -> None:
-    stage, ctx = _make_stage(tmp_path)
-    with patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL):
-        stage.run(None)
-    assert ctx.client.calls[0].raw_path == tmp_path / "stream-open-github-pr.jsonl"
-
-
-def test_run_raises_if_unbound() -> None:
-    stage = OpenGitHubPR("open-pr", None, [], {}, issue_url=ISSUE_URL)
-    with pytest.raises(RuntimeError, match="not bound"):
-        stage.run(None)
+    stage, state = _make_state(tmp_path, gr_id="test-gr")
+    sf = tmp_path / "state.json"
+    with (
+        patch("gremlins.stages.open_github_pr.resolve_state_file", return_value=sf),
+        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
+        patch("gremlins.stages.open_github_pr.append_artifact"),
+    ):
+        stage.run(state)
+    assert state.client.calls[0].raw_path == tmp_path / "stream-open-github-pr.jsonl"
 
 
 def test_run_records_pr_artifact(tmp_path: pathlib.Path) -> None:
-    from unittest.mock import patch as mock_patch
-
-    stage, ctx = _make_stage(tmp_path)
+    stage, state = _make_state(tmp_path, gr_id="test-gr")
+    sf = tmp_path / "state.json"
     artifact_calls: list[tuple] = []
     with (
-        mock_patch(
-            "gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL
-        ),
-        mock_patch(
+        patch("gremlins.stages.open_github_pr.resolve_state_file", return_value=sf),
+        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
+        patch(
             "gremlins.stages.open_github_pr.append_artifact",
             side_effect=lambda gr_id, artifact: artifact_calls.append(
                 (gr_id, artifact)
             ),
         ),
     ):
-        stage.run(None)
+        stage.run(state)
     assert len(artifact_calls) == 1
     assert artifact_calls[0][1]["type"] == "pr"
     assert artifact_calls[0][1]["url"] == PR_URL
@@ -100,36 +130,31 @@ def test_run_records_pr_artifact(tmp_path: pathlib.Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_stage_with_gr(
+def _make_state_with_gr(
     tmp_path: pathlib.Path, gr_id: str = "test-gr"
-) -> tuple[OpenGitHubPR, StageContext]:
-    from gremlins.clients.fake import FakeClaudeClient
-
-    stage = OpenGitHubPR("open-pr", "sonnet", [], {}, issue_url="")
+) -> tuple[OpenGitHubPR, StageState]:
+    stage = OpenGitHubPR("open-pr", "sonnet", [], {})
     client = FakeClaudeClient(fixtures={"open-github-pr": MINIMAL_EVENTS})
-    ctx = StageContext(client=client, session_dir=tmp_path, gr_id=gr_id)
-    stage.bind(ctx)
-    return stage, ctx
-
-
-def _write_state(tmp_path: pathlib.Path, data: dict) -> pathlib.Path:
-    sf = tmp_path / "state.json"
-    sf.write_text(json.dumps(data), encoding="utf-8")
-    return sf
+    state = StageState(client=client, session_dir=tmp_path, gr_id=gr_id)
+    return stage, state
 
 
 def test_stacked_pr_uses_prior_pr_branch(tmp_path: pathlib.Path) -> None:
     """For child N>1, PR base is the previous child's PR branch."""
-    _write_state(
+    sf = _write_state(
         tmp_path,
-        {"base_ref_name": "main", "impl_materialized_branch": "gremlin/child-2"},
+        {
+            "base_ref_name": "main",
+            "impl_materialized_branch": "gremlin/child-2",
+            "issue_url": "",
+        },
     )
-    stage, ctx = _make_stage_with_gr(tmp_path)
+    stage, state = _make_state_with_gr(tmp_path)
     prompts_seen: list[str] = []
     with (
         patch(
             "gremlins.stages.open_github_pr.resolve_state_file",
-            return_value=tmp_path / "state.json",
+            return_value=sf,
         ),
         patch(
             "gremlins.stages.open_github_pr.last_pr_branch",
@@ -146,7 +171,7 @@ def test_stacked_pr_uses_prior_pr_branch(tmp_path: pathlib.Path) -> None:
             ),
         ),
     ):
-        stage.run(None)
+        stage.run(state)
     assert prompts_seen, "run_claude should have been called"
     assert "gremlin/abc-child-1" in prompts_seen[0], (
         "PR prompt should target previous child branch, not main"
@@ -156,23 +181,18 @@ def test_stacked_pr_uses_prior_pr_branch(tmp_path: pathlib.Path) -> None:
 def test_single_pr_with_branch_artifact_uses_base_ref_name(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Regression: a branch artifact (just materialized) must NOT be used as PR base.
-
-    Before the fix, `last_artifact_branch` returned the just-materialized head
-    branch, so `gh pr create` was invoked with --base == --head and failed.
-    The base for a non-stacked PR must come from base_ref_name.
-    """
-    _write_state(
+    """Regression: a branch artifact (just materialized) must NOT be used as PR base."""
+    sf = _write_state(
         tmp_path,
         {
             "base_ref_name": "main",
             "impl_materialized_branch": "ghgremlin-impl-foo-abc123",
             "artifacts": [{"type": "branch", "name": "ghgremlin-impl-foo-abc123"}],
+            "issue_url": "",
         },
     )
-    stage, ctx = _make_stage_with_gr(tmp_path)
+    stage, state = _make_state_with_gr(tmp_path)
     prompts_seen: list[str] = []
-    sf = tmp_path / "state.json"
     with (
         patch(
             "gremlins.stages.open_github_pr.resolve_state_file",
@@ -190,7 +210,7 @@ def test_single_pr_with_branch_artifact_uses_base_ref_name(
             ),
         ),
     ):
-        stage.run(None)
+        stage.run(state)
     assert prompts_seen, "run_claude should have been called"
     assert "main" in prompts_seen[0]
     assert "ghgremlin-impl-foo-abc123" not in prompts_seen[0], (
@@ -200,16 +220,20 @@ def test_single_pr_with_branch_artifact_uses_base_ref_name(
 
 def test_first_child_uses_base_ref_name(tmp_path: pathlib.Path) -> None:
     """For child 1 (no previous artifact branch), PR base is base_ref_name."""
-    _write_state(
+    sf = _write_state(
         tmp_path,
-        {"base_ref_name": "main", "impl_materialized_branch": "gremlin/child-1"},
+        {
+            "base_ref_name": "main",
+            "impl_materialized_branch": "gremlin/child-1",
+            "issue_url": "",
+        },
     )
-    stage, ctx = _make_stage_with_gr(tmp_path)
+    stage, state = _make_state_with_gr(tmp_path)
     prompts_seen: list[str] = []
     with (
         patch(
             "gremlins.stages.open_github_pr.resolve_state_file",
-            return_value=tmp_path / "state.json",
+            return_value=sf,
         ),
         patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
         patch("gremlins.stages.open_github_pr.append_artifact"),
@@ -222,42 +246,43 @@ def test_first_child_uses_base_ref_name(tmp_path: pathlib.Path) -> None:
             ),
         ),
     ):
-        stage.run(None)
+        stage.run(state)
     assert prompts_seen, "run_claude should have been called"
     assert "main" in prompts_seen[0]
 
 
 def test_run_raises_if_impl_branch_missing(tmp_path: pathlib.Path) -> None:
-    _write_state(tmp_path, {"base_ref_name": "main"})
-    stage, _ = _make_stage_with_gr(tmp_path)
+    sf = _write_state(tmp_path, {"base_ref_name": "main", "issue_url": ""})
+    stage, state = _make_state_with_gr(tmp_path)
     with (
         patch(
             "gremlins.stages.open_github_pr.resolve_state_file",
-            return_value=tmp_path / "state.json",
+            return_value=sf,
         ),
         patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
         pytest.raises(RuntimeError, match="impl_materialized_branch is empty"),
     ):
-        stage.run(None)
+        stage.run(state)
 
 
 def test_explicit_base_ref_used_when_no_prior_pr(tmp_path: pathlib.Path) -> None:
     """Stage-level base_ref is used when there is no prior PR artifact branch."""
-    _write_state(
+    sf = _write_state(
         tmp_path,
-        {"base_ref_name": "main", "impl_materialized_branch": "gremlin/child-1"},
+        {
+            "base_ref_name": "main",
+            "impl_materialized_branch": "gremlin/child-1",
+            "issue_url": "",
+        },
     )
-    stage = OpenGitHubPR(
-        "open-pr", "sonnet", [], {}, issue_url="", base_ref="feature-base"
-    )
+    stage = OpenGitHubPR("open-pr", "sonnet", [], {}, base_ref="feature-base")
     client = FakeClaudeClient(fixtures={"open-github-pr": MINIMAL_EVENTS})
-    ctx = StageContext(client=client, session_dir=tmp_path, gr_id="test-gr")
-    stage.bind(ctx)
+    state = StageState(client=client, session_dir=tmp_path, gr_id="test-gr")
     prompts_seen: list[str] = []
     with (
         patch(
             "gremlins.stages.open_github_pr.resolve_state_file",
-            return_value=tmp_path / "state.json",
+            return_value=sf,
         ),
         patch("gremlins.stages.open_github_pr.last_pr_branch", return_value=None),
         patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
@@ -271,27 +296,28 @@ def test_explicit_base_ref_used_when_no_prior_pr(tmp_path: pathlib.Path) -> None
             ),
         ),
     ):
-        stage.run(None)
+        stage.run(state)
     assert "feature-base" in prompts_seen[0]
 
 
 def test_last_pr_branch_takes_priority_over_base_ref(tmp_path: pathlib.Path) -> None:
     """last_pr_branch takes priority over stage-level base_ref when stacking."""
-    _write_state(
+    sf = _write_state(
         tmp_path,
-        {"base_ref_name": "main", "impl_materialized_branch": "gremlin/child-2"},
+        {
+            "base_ref_name": "main",
+            "impl_materialized_branch": "gremlin/child-2",
+            "issue_url": "",
+        },
     )
-    stage = OpenGitHubPR(
-        "open-pr", "sonnet", [], {}, issue_url="", base_ref="feature-base"
-    )
+    stage = OpenGitHubPR("open-pr", "sonnet", [], {}, base_ref="feature-base")
     client = FakeClaudeClient(fixtures={"open-github-pr": MINIMAL_EVENTS})
-    ctx = StageContext(client=client, session_dir=tmp_path, gr_id="test-gr")
-    stage.bind(ctx)
+    state = StageState(client=client, session_dir=tmp_path, gr_id="test-gr")
     prompts_seen: list[str] = []
     with (
         patch(
             "gremlins.stages.open_github_pr.resolve_state_file",
-            return_value=tmp_path / "state.json",
+            return_value=sf,
         ),
         patch(
             "gremlins.stages.open_github_pr.last_pr_branch",
@@ -308,7 +334,7 @@ def test_last_pr_branch_takes_priority_over_base_ref(tmp_path: pathlib.Path) -> 
             ),
         ),
     ):
-        stage.run(None)
+        stage.run(state)
     assert "gremlin/child-1" in prompts_seen[0]
     assert "feature-base" not in prompts_seen[0]
 
@@ -317,9 +343,13 @@ def test_record_child_pr_appends_pr_artifact(tmp_path: pathlib.Path) -> None:
     """After opening a PR, a pr artifact with url and branch is appended."""
     sf = _write_state(
         tmp_path,
-        {"base_ref_name": "main", "impl_materialized_branch": "gremlin/abc-child-1"},
+        {
+            "base_ref_name": "main",
+            "impl_materialized_branch": "gremlin/abc-child-1",
+            "issue_url": "",
+        },
     )
-    stage, ctx = _make_stage_with_gr(tmp_path)
+    stage, state = _make_state_with_gr(tmp_path)
     artifact_calls: list[tuple] = []
     with (
         patch(
@@ -337,7 +367,7 @@ def test_record_child_pr_appends_pr_artifact(tmp_path: pathlib.Path) -> None:
             ),
         ),
     ):
-        stage.run(None)
+        stage.run(state)
     assert artifact_calls, "append_artifact should be called with PR info"
     gr_id, artifact = artifact_calls[0]
     assert gr_id == "test-gr"

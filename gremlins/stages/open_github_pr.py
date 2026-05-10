@@ -8,7 +8,7 @@ from typing import Any
 from gremlins.clients.protocol import CompletedRun
 from gremlins.gh_utils import extract_gh_url
 from gremlins.prompts import BUNDLED_PROMPT_DIR
-from gremlins.stages.base import Stage
+from gremlins.stages.base import Stage, StageState
 from gremlins.stages.registry import register_stage
 from gremlins.state import (
     append_artifact,
@@ -32,23 +32,22 @@ class OpenGitHubPR(Stage):
         prompts: list[str],
         options: dict[str, Any],
         *,
-        issue_url: str,
         base_ref: str | None = None,
     ) -> None:
         super().__init__(name, model, prompts, options)
-        self.issue_url = issue_url
         self.base_ref = base_ref
 
-    def run(self, pipe: Any) -> str:
-        sf = resolve_state_file(self.state.gr_id)
+    def run(self, state: StageState) -> str:
+        sf = resolve_state_file(state.gr_id)
+        issue_url = read_state_str(sf, "issue_url")
         base_ref = (
-            last_pr_branch(self.state.gr_id)
+            last_pr_branch(state.gr_id)
             or self.base_ref
             or read_state_str(sf, "base_ref_name")
             or "main"
         )
 
-        issue_num = self.issue_url.split("/")[-1] if self.issue_url else ""
+        issue_num = issue_url.split("/")[-1] if issue_url else ""
 
         if issue_num:
             closes_clause = f"Include 'Closes #{issue_num}' in the PR body."
@@ -62,8 +61,9 @@ class OpenGitHubPR(Stage):
 
         completed: CompletedRun = self.run_claude(
             prompt,
+            state=state,
             label="open-github-pr",
-            raw_path=self.state.session_dir / "stream-open-github-pr.jsonl",
+            raw_path=state.session_dir / "stream-open-github-pr.jsonl",
             capture_events=True,
         )
 
@@ -80,7 +80,7 @@ class OpenGitHubPR(Stage):
                 "impl_materialized_branch is empty; materialize-to-branch must run before open-github-pr"
             )
         append_artifact(
-            self.state.gr_id, {"type": "pr", "url": pr_url, "branch": impl_branch}
+            state.gr_id, {"type": "pr", "url": pr_url, "branch": impl_branch}
         )
         logger.info("PR: %s", pr_url)
         return pr_url

@@ -7,9 +7,9 @@ import pathlib
 import re
 from typing import Any
 
-from gremlins.stages.base import Stage
+from gremlins.stages.base import Stage, StageState
 from gremlins.stages.registry import register_stage
-from gremlins.state import check_bail, emit_bail, pipeline_uses_gh, read_pr_url
+from gremlins.state import check_bail, emit_bail, read_pr_url
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -37,6 +37,7 @@ class AddressCode(Stage):
         review_stage_names: list[str] | None = None,
         review_stage_dirs: dict[str, pathlib.Path] | None = None,
         pr_url: str = "",
+        is_gh: bool = False,
     ) -> None:
         super().__init__(name, model, prompts, options)
         self.is_git = is_git
@@ -45,33 +46,34 @@ class AddressCode(Stage):
         )
         self.review_stage_dirs = review_stage_dirs or {}
         self.pr_url = pr_url
+        self.is_gh = is_gh
 
-    def run(self, pipe: Any) -> None:
-        if pipe is not None and pipeline_uses_gh(pipe.pipeline_data):
-            self.results_to_github(pipe)
+    def run(self, state: StageState) -> None:
+        if self.is_gh:
+            self.results_to_github(state)
         else:
             try:
-                inputs = self._inputs_from_local(pipe)
-                self.results_to_local(inputs, pipe)
+                inputs = self._inputs_from_local(state)
+                self.results_to_local(inputs, state)
             except (SystemExit, Exception) as exc:
                 emit_bail(
-                    self.state.gr_id,
+                    state.gr_id,
                     "other",
                     f"address-code stage failed: {exc}"[:200],
-                    child_key=self.state.child_key,
+                    child_key=state.child_key,
                 )
                 raise
 
-    def _inputs_from_local(self, pipe: Any) -> dict[str, str]:
+    def _inputs_from_local(self, state: StageState) -> dict[str, str]:
         review_files: list[tuple[str, pathlib.Path]] = []
         for stage_name in self.review_stage_names:
-            search_dir = self.review_stage_dirs.get(stage_name, self.state.session_dir)
+            search_dir = self.review_stage_dirs.get(stage_name, state.session_dir)
             for m in sorted(glob.glob(str(search_dir / f"{stage_name}-*.md"))):
                 review_files.append((stage_name, pathlib.Path(m)))
         if not review_files:
             stages_str = ", ".join(self.review_stage_names)
             searched = ", ".join(
-                str(self.review_stage_dirs.get(s, self.state.session_dir))
+                str(self.review_stage_dirs.get(s, state.session_dir))
                 for s in self.review_stage_names
             )
             raise FileNotFoundError(
@@ -84,7 +86,7 @@ class AddressCode(Stage):
         )
         return {"text": text, "review_model": review_model}
 
-    def results_to_local(self, inputs: dict[str, str], pipe: Any) -> None:
+    def results_to_local(self, inputs: dict[str, str], state: StageState) -> None:
         address_commit_instr = ""
         if self.is_git:
             address_commit_instr = (
@@ -94,35 +96,37 @@ class AddressCode(Stage):
             )
         template = "\n\n".join(self.prompts).rstrip()
         address_prompt = template.format(
-            bail_command=self.bail_command(),
+            bail_command=self.bail_command(state),
             model=inputs["review_model"],
             text=inputs["text"],
             address_commit_instr=address_commit_instr,
         )
         self.run_claude(
             address_prompt,
+            state=state,
             label="address-code",
-            raw_path=self.state.session_dir / "stream-address.jsonl",
+            raw_path=state.session_dir / "stream-address.jsonl",
         )
 
-    def results_to_github(self, pipe: Any) -> None:
-        pr_url = self.pr_url or read_pr_url(self.state.gr_id)
+    def results_to_github(self, state: StageState) -> None:
+        pr_url = self.pr_url or read_pr_url(state.gr_id)
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
         prompt = (
             "\n\n".join(self.prompts)
             .rstrip()
             .format(
-                bail_command=self.bail_command(),
+                bail_command=self.bail_command(state),
                 pr_url=pr_url,
             )
         )
         self.run_claude(
             prompt,
+            state=state,
             label="ghaddress",
-            raw_path=self.state.session_dir / "stream-ghaddress.jsonl",
+            raw_path=state.session_dir / "stream-ghaddress.jsonl",
         )
-        check_bail(self.state.gr_id, "/ghaddress", child_key=self.state.child_key)
+        check_bail(state.gr_id, "/ghaddress", child_key=state.child_key)
 
 
 register_stage("address-code", AddressCode)

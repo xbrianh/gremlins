@@ -17,7 +17,7 @@ from typing import Any, TypeVar, cast
 
 from gremlins.clients.client import Client
 from gremlins.prompts import BUNDLED_PROMPT_DIR
-from gremlins.stages.base import Stage
+from gremlins.stages.base import Stage, StageState
 from gremlins.stages.loop import RunCmdFailed
 from gremlins.stages.registry import register_stage
 from gremlins.state import emit_bail, read_state_str, resolve_state_file, set_stage
@@ -555,10 +555,10 @@ class Handoff(Stage):
         super().__init__(name, client_spec.model, [], {})
         self._client_spec = client_spec
 
-    def run(self, pipe: Any) -> None:  # noqa: ARG002
-        session_dir = self.state.session_dir
-        gr_id = self.state.gr_id
-        client = self.state.client
+    def run(self, state: StageState) -> None:
+        session_dir = state.session_dir
+        gr_id = state.gr_id
+        client = state.client
 
         boss_spec = session_dir / "boss-spec.md"
         plan_md = session_dir / "plan.md"
@@ -570,7 +570,7 @@ class Handoff(Stage):
             shutil.copyfile(plan_md, boss_spec)
 
         sf = resolve_state_file(gr_id)
-        base_ref = read_state_str(sf, "base_ref_name") or self._resolve_base_ref()
+        base_ref = read_state_str(sf, "base_ref_name") or self._resolve_base_ref(state)
         handoff_n = self._next_handoff_index(session_dir)
 
         prev_rolling = (
@@ -676,12 +676,12 @@ class Handoff(Stage):
         logger.info("handoff %d result: %s", handoff_n, exit_state)
         return exit_state, sig_data
 
-    def _resolve_base_ref(self) -> str:
+    def _resolve_base_ref(self, state: StageState) -> str:
         r = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             capture_output=True,
             text=True,
-            cwd=str(self.state.cwd),
+            cwd=str(state.cwd),
             check=False,
         )
         return r.stdout.strip() if r.returncode == 0 else "HEAD"

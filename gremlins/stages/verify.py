@@ -8,7 +8,7 @@ import subprocess
 from typing import Any
 
 from gremlins import git as _git_mod
-from gremlins.stages.base import Stage
+from gremlins.stages.base import Stage, StageState
 from gremlins.stages.loop import LoopExhausted, LoopStage, RunCmdFailed
 from gremlins.stages.registry import register_stage
 from gremlins.state import check_bail
@@ -40,7 +40,7 @@ class Verify(Stage):
         super().__init__(name, model, prompts, options)
         self._is_git = is_git
 
-    def run(self, pipe: Any) -> None:
+    def run(self, state: StageState) -> None:
         cmds = [c for c in self.options.get("cmds", []) if c.strip()]
         max_attempts = self.options.get("max_attempts", 3)
 
@@ -63,7 +63,6 @@ class Verify(Stage):
         combined_cmd = " && ".join(cmds)
         commands_section = "**Commands run:**\n" + "\n".join(f"- `{c}`" for c in cmds)
 
-        state = self.state
         is_git = self._is_git
         attempt: list[int] = [0]
         last_output: list[str | None] = [None]
@@ -94,7 +93,7 @@ class Verify(Stage):
             n = attempt[0]
             diff = _diff_text(state.cwd, is_git=is_git)
             fix_prompt = template.format(
-                bail_command=self.bail_command(),
+                bail_command=self.bail_command(state),
                 commands_section=commands_section,
                 verify_output=last_output[0],
                 diff_text=diff,
@@ -102,6 +101,7 @@ class Verify(Stage):
             )
             self.run_claude(
                 fix_prompt,
+                state=state,
                 label=f"verify-fix-{n}",
                 raw_path=state.session_dir / f"stream-verify-{n}.jsonl",
             )
@@ -110,9 +110,8 @@ class Verify(Stage):
         loop = LoopStage.from_runners(
             [_run_cmd, _run_fix], name="verify", max_iterations=max_attempts
         )
-        loop.bind(state)
         try:
-            loop.run(pipe)
+            loop.run(state)
         except LoopExhausted:
             raise RuntimeError(f"verify stage exhausted {max_attempts} attempts")
 

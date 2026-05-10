@@ -14,9 +14,9 @@ from gremlins.git import (
     record_pre_impl_state,
 )
 from gremlins.prompts import BUNDLED_PROMPT_DIR
-from gremlins.stages.base import Stage
+from gremlins.stages.base import Stage, StageState
 from gremlins.stages.registry import register_stage
-from gremlins.state import patch_state, pipeline_uses_gh, resolve_state_file
+from gremlins.state import patch_state, resolve_state_file
 
 # Implement turns can sit silent for many minutes while the model edits files
 # or runs long subagents/tools without emitting stream events. The default
@@ -91,33 +91,33 @@ class Implement(Stage):
         is_git: bool,
         spec_text: str = "",
         cwd: str | None = None,
+        is_gh: bool = False,
     ) -> None:
         super().__init__(name, model, prompts, options)
         self.is_git = is_git
         self.spec_text = spec_text
         self._cwd = cwd
+        self.is_gh = is_gh
 
-    @property
-    def _impl_cwd(self) -> str | None:
+    def _impl_cwd(self, state: StageState) -> str | None:
         return self._cwd or (
-            str(self.state.worktree) if self.state.worktree is not None else None
+            str(state.worktree) if state.worktree is not None else None
         )
 
-    def run(self, pipe: Any) -> None:
-        pipeline_data = getattr(pipe, "pipeline_data", None)
-        if pipeline_data is not None and pipeline_uses_gh(pipeline_data):
-            self._run_gh(pipe)
+    def run(self, state: StageState) -> None:
+        if self.is_gh:
+            self._run_gh(state)
         else:
-            self._run_local()
+            self._run_local(state)
 
-    def _run_local(self) -> None:
-        cwd_arg = str(self.state.worktree) if self.state.worktree is not None else None
+    def _run_local(self, state: StageState) -> None:
+        cwd_arg = str(state.worktree) if state.worktree is not None else None
         pre = None
         pre_sentinel: pathlib.Path | None = None
         if self.is_git:
             pre = record_pre_impl_state(cwd=cwd_arg)
         else:
-            pre_sentinel = self.state.session_dir / ".pre-impl"
+            pre_sentinel = state.session_dir / ".pre-impl"
             pre_sentinel.touch()
 
         impl_commit_instr = ""
@@ -128,7 +128,7 @@ class Implement(Stage):
                 .rstrip()
             )
 
-        plan_text = (self.state.session_dir / "plan.md").read_text(encoding="utf-8")
+        plan_text = (state.session_dir / "plan.md").read_text(encoding="utf-8")
         template = "\n\n".join(self.prompts).rstrip()
         prompt = template.format(
             spec_block=_render_spec_block(self.spec_text),
@@ -137,8 +137,9 @@ class Implement(Stage):
         )
         self.run_claude(
             prompt,
+            state=state,
             label="implement",
-            raw_path=self.state.session_dir / "stream-implement.jsonl",
+            raw_path=state.session_dir / "stream-implement.jsonl",
             idle_timeout=IMPLEMENT_IDLE_TIMEOUT,
         )
 
@@ -157,11 +158,11 @@ class Implement(Stage):
         else:
             if pre_sentinel is None:
                 raise RuntimeError("pre-impl sentinel not created")
-            if not changes_outside_git(pre_sentinel, self.state.session_dir):
+            if not changes_outside_git(pre_sentinel, state.session_dir):
                 raise RuntimeError("implementation stage produced no changes; aborting")
 
-    def _run_gh(self, pipe: Any) -> None:
-        state_file = resolve_state_file(self.state.gr_id)
+    def _run_gh(self, state: StageState) -> None:
+        state_file = resolve_state_file(state.gr_id)
         issue_num = ""
         if state_file and state_file.exists():
             try:
@@ -185,14 +186,17 @@ class Implement(Stage):
                 "should be product code."
             )
 
-        pre = record_pre_impl_state(cwd=self._impl_cwd)
-        pipe.impl_pre_state = pre
-        if self.state.gr_id:
-            patch_state(
-                self.state.gr_id, impl_pre_head=pre.head, impl_pre_branch=pre.branch
-            )
+        impl_cwd = self._impl_cwd(state)
+        pre = record_pre_impl_state(cwd=impl_cwd)
+        # Write sidecar so MaterializeToBranch can read pre-impl state.
+        (state.session_dir / ".impl-pre-state.json").write_text(
+            json.dumps({"head": pre.head, "branch": pre.branch}),
+            encoding="utf-8",
+        )
+        if state.gr_id:
+            patch_state(state.gr_id, impl_pre_head=pre.head, impl_pre_branch=pre.branch)
 
-        plan_text = (self.state.session_dir / "plan.md").read_text(encoding="utf-8")
+        plan_text = (state.session_dir / "plan.md").read_text(encoding="utf-8")
         template = "\n\n".join(self.prompts).rstrip()
         prompt = template.format(
             spec_block=_render_spec_block(self.spec_text),
@@ -203,13 +207,14 @@ class Implement(Stage):
 
         self.run_claude(
             prompt,
+            state=state,
             label="implement",
-            raw_path=self.state.session_dir / "stream-implement.jsonl",
+            raw_path=state.session_dir / "stream-implement.jsonl",
             capture_events=True,
             idle_timeout=IMPLEMENT_IDLE_TIMEOUT,
         )
 
-        outcome = classify_impl_outcome(pre, cwd=self._impl_cwd)
+        outcome = classify_impl_outcome(pre, cwd=impl_cwd)
         if isinstance(outcome, EmptyImpl):
             raise RuntimeError(
                 "implement produced no committed work; the agent must commit before returning"

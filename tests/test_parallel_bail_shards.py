@@ -23,7 +23,7 @@ import pytest
 import gremlins.state as state_mod
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.runner import run_stages
-from gremlins.stages.base import StageContext
+from gremlins.stages.base import StageState
 from gremlins.stages.parallel import ParallelStage
 
 # ---------------------------------------------------------------------------
@@ -188,8 +188,8 @@ def test_patch_state_concurrent_no_lost_updates(state_root):
 # ---------------------------------------------------------------------------
 
 
-def _make_simple_ctx(tmp_path: pathlib.Path, child_key: str) -> StageContext:
-    return StageContext(
+def _make_simple_ctx(tmp_path: pathlib.Path, child_key: str) -> StageState:
+    return StageState(
         client=FakeClaudeClient(),
         session_dir=tmp_path / child_key,
         gr_id=None,
@@ -293,19 +293,19 @@ def test_cancel_on_bail_skips_unstarted_children():
     def child_c() -> None:
         ran.append("c")
 
-    ctx_a = StageContext(
+    ctx_a = StageState(
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
         gr_id=None,
         child_key="a",
     )
-    ctx_b = StageContext(
+    ctx_b = StageState(
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
         gr_id=None,
         child_key="b",
     )
-    ctx_c = StageContext(
+    ctx_c = StageState(
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
         gr_id=None,
@@ -424,10 +424,10 @@ def test_worktree_lifecycle_fanout_creates_and_fanin_removes(tmp_path):
     repo.mkdir()
     _init_git_repo(repo)
 
-    ctx_a = StageContext(
+    ctx_a = StageState(
         client=FakeClaudeClient(), session_dir=tmp_path / "a", gr_id=None, child_key="a"
     )
-    ctx_b = StageContext(
+    ctx_b = StageState(
         client=FakeClaudeClient(), session_dir=tmp_path / "b", gr_id=None, child_key="b"
     )
 
@@ -497,8 +497,8 @@ def test_fanout_persists_worktrees_and_fresh_fanin_can_clean_up(tmp_path, state_
     repo.mkdir()
     _init_git_repo(repo)
 
-    def _make_ctx(name: str) -> StageContext:
-        return StageContext(
+    def _make_ctx(name: str) -> StageState:
+        return StageState(
             client=FakeClaudeClient(),
             session_dir=tmp_path / name,
             gr_id=gr_id,
@@ -559,8 +559,8 @@ def test_fanout_resume_tears_down_prior_worktrees(tmp_path, state_root):
     repo.mkdir()
     _init_git_repo(repo)
 
-    def _make_ctx(name: str) -> StageContext:
-        return StageContext(
+    def _make_ctx(name: str) -> StageState:
+        return StageState(
             client=FakeClaudeClient(),
             session_dir=tmp_path / name,
             gr_id=gr_id,
@@ -611,7 +611,7 @@ def test_fanout_resume_tears_down_prior_worktrees(tmp_path, state_root):
 
 
 def test_build_parallel_stages_returns_three_named_stages():
-    ctx = StageContext(
+    ctx = StageState(
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
         gr_id=None,
@@ -633,13 +633,13 @@ def test_build_parallel_stages_returns_three_named_stages():
 
 def test_parallel_all_children_complete_with_defaults():
     ran: list[str] = []
-    ctx_a = StageContext(
+    ctx_a = StageState(
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
         gr_id=None,
         child_key="a",
     )
-    ctx_b = StageContext(
+    ctx_b = StageState(
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
         gr_id=None,

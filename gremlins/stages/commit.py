@@ -12,7 +12,7 @@ from gremlins.git import (
     rev_list_count,
 )
 from gremlins.prompts import BUNDLED_PROMPT_DIR
-from gremlins.stages.base import Stage
+from gremlins.stages.base import Stage, StageState
 from gremlins.stages.registry import register_stage
 from gremlins.state import resolve_state_file
 
@@ -49,8 +49,8 @@ class Commit(Stage):
         self.issue_url = issue_url
         self._cwd = cwd
 
-    def _resolve_inputs(self) -> tuple[str, str, str]:
-        sf = resolve_state_file(self.state.gr_id)
+    def _resolve_inputs(self, state: StageState) -> tuple[str, str, str]:
+        sf = resolve_state_file(state.gr_id)
 
         impl_materialized_branch = self.impl_materialized_branch or _read_state(
             sf, "impl_materialized_branch"
@@ -66,12 +66,12 @@ class Commit(Stage):
 
         return (impl_materialized_branch, base_ref, issue_url)
 
-    def run(self, pipe: Any) -> None:
-        impl_materialized_branch, base_ref, issue_url = self._resolve_inputs()
+    def run(self, state: StageState) -> None:
+        impl_materialized_branch, base_ref, issue_url = self._resolve_inputs(state)
 
         issue_num = issue_url.split("/")[-1] if issue_url else ""
         cwd_arg = self._cwd or (
-            str(self.state.worktree) if self.state.worktree is not None else None
+            str(state.worktree) if state.worktree is not None else None
         )
 
         try:
@@ -104,8 +104,9 @@ class Commit(Stage):
 
         self.run_claude(
             prompt,
+            state=state,
             label="commit",
-            raw_path=self.state.session_dir / "stream-commit.jsonl",
+            raw_path=state.session_dir / "stream-commit.jsonl",
             capture_events=True,
         )
 

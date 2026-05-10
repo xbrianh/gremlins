@@ -8,7 +8,7 @@ import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.stages.base import StageContext
+from gremlins.stages.base import StageState
 from gremlins.stages.wait_ci import WaitCI
 
 PR_URL = "https://github.com/owner/repo/pull/42"
@@ -52,12 +52,11 @@ def _make_stage(
     gr_id: Any = None,
     model: str = "sonnet",
     **kwargs: Any,
-) -> tuple[WaitCI, StageContext]:
+) -> tuple[WaitCI, StageState]:
     prompts = [_CI_PROMPT_PATH.read_text(encoding="utf-8")]
     stage = WaitCI("wait-ci", model, prompts, {}, pr_url=PR_URL, **kwargs)
-    ctx = StageContext(client=client, session_dir=tmp_path, gr_id=gr_id)
-    stage.bind(ctx)
-    return stage, ctx
+    state = StageState(client=client, session_dir=tmp_path, gr_id=gr_id)
+    return stage, state
 
 
 def _make_getter(responses: list[tuple[list[dict[str, Any]], str]]):
@@ -72,17 +71,19 @@ def _make_getter(responses: list[tuple[list[dict[str, Any]], str]]):
 def test_no_checks_skips(tmp_path: pathlib.Path) -> None:
     client = FakeClaudeClient(fixtures={})
     getter = _make_getter([([], "")])
-    stage, _ = _make_stage(client, tmp_path, startup_grace_secs=0, checks_getter=getter)
-    stage.run(None)
+    stage, state = _make_stage(
+        client, tmp_path, startup_grace_secs=0, checks_getter=getter
+    )
+    stage.run(state)
     assert client.calls == []
 
 
 def test_review_required_no_checks_bails(tmp_path: pathlib.Path) -> None:
     client = FakeClaudeClient(fixtures={})
     getter = _make_getter([([], "REVIEW_REQUIRED")])
-    stage, _ = _make_stage(client, tmp_path, checks_getter=getter)
+    stage, state = _make_stage(client, tmp_path, checks_getter=getter)
     with pytest.raises(RuntimeError, match="PR blocked by required human review"):
-        stage.run(None)
+        stage.run(state)
     assert client.calls == []
 
 
@@ -94,8 +95,8 @@ def test_all_checks_passing_returns(tmp_path: pathlib.Path) -> None:
             ([_PASSING_CHECK], "APPROVED"),
         ]
     )
-    stage, _ = _make_stage(client, tmp_path, checks_getter=getter)
-    stage.run(None)
+    stage, state = _make_stage(client, tmp_path, checks_getter=getter)
+    stage.run(state)
     assert client.calls == []
 
 
@@ -109,17 +110,17 @@ def test_checks_pending_then_passing(tmp_path: pathlib.Path) -> None:
             return [_PENDING_CHECK], ""
         return [_PASSING_CHECK], ""
 
-    stage, _ = _make_stage(client, tmp_path, poll_interval=0, checks_getter=getter)
-    stage.run(None)
+    stage, state = _make_stage(client, tmp_path, poll_interval=0, checks_getter=getter)
+    stage.run(state)
     assert client.calls == []
 
 
 def test_review_required_bails(tmp_path: pathlib.Path) -> None:
     client = FakeClaudeClient(fixtures={})
     getter = _make_getter([([_PASSING_CHECK], "REVIEW_REQUIRED")])
-    stage, _ = _make_stage(client, tmp_path, checks_getter=getter)
+    stage, state = _make_stage(client, tmp_path, checks_getter=getter)
     with pytest.raises(RuntimeError, match="PR blocked by required human review"):
-        stage.run(None)
+        stage.run(state)
     assert client.calls == []
 
 
@@ -132,9 +133,9 @@ def test_review_required_after_fix_bails(tmp_path: pathlib.Path) -> None:
             ([_PASSING_CHECK], "REVIEW_REQUIRED"),
         ]
     )
-    stage, _ = _make_stage(client, tmp_path, poll_interval=0, checks_getter=getter)
+    stage, state = _make_stage(client, tmp_path, poll_interval=0, checks_getter=getter)
     with pytest.raises(RuntimeError, match="PR blocked by required human review"):
-        stage.run(None)
+        stage.run(state)
     assert len(client.calls) == 1
     assert client.calls[0].label == "ci-fix-1"
 
@@ -147,9 +148,9 @@ def test_review_required_while_pending_bails(tmp_path: pathlib.Path) -> None:
             ([_PENDING_CHECK], "REVIEW_REQUIRED"),
         ]
     )
-    stage, _ = _make_stage(client, tmp_path, poll_interval=0, checks_getter=getter)
+    stage, state = _make_stage(client, tmp_path, poll_interval=0, checks_getter=getter)
     with pytest.raises(RuntimeError, match="PR blocked by required human review"):
-        stage.run(None)
+        stage.run(state)
     assert client.calls == []
 
 
@@ -163,8 +164,8 @@ def test_fix_on_failure_then_pass(tmp_path: pathlib.Path) -> None:
             return [_FAILING_CHECK], ""
         return [_PASSING_CHECK], ""
 
-    stage, _ = _make_stage(client, tmp_path, poll_interval=0, checks_getter=getter)
-    stage.run(None)
+    stage, state = _make_stage(client, tmp_path, poll_interval=0, checks_getter=getter)
+    stage.run(state)
     assert len(client.calls) == 1
     assert client.calls[0].label == "ci-fix-1"
 
@@ -184,9 +185,9 @@ def test_exhausted_bails(tmp_path: pathlib.Path) -> None:
             ([_FAILING_CHECK], ""),
         ]
     )
-    stage, _ = _make_stage(client, tmp_path, poll_interval=0, checks_getter=getter)
+    stage, state = _make_stage(client, tmp_path, poll_interval=0, checks_getter=getter)
     with pytest.raises(RuntimeError, match="ci-gate exhausted 3 attempts"):
-        stage.run(None)
+        stage.run(state)
     fix_labels = [c.label for c in client.calls]
     assert fix_labels == ["ci-fix-1", "ci-fix-2"]
 
@@ -201,10 +202,10 @@ def test_timeout_counts_as_failed(tmp_path: pathlib.Path) -> None:
             return [_PENDING_CHECK], ""
         return [_PASSING_CHECK], ""
 
-    stage, _ = _make_stage(
+    stage, state = _make_stage(
         client, tmp_path, poll_timeout=0, poll_interval=0, checks_getter=getter
     )
-    stage.run(None)
+    stage.run(state)
     assert client.calls == []
 
 
@@ -226,7 +227,7 @@ def test_post_fix_waits_for_sha_propagation(tmp_path: pathlib.Path) -> None:
             return "old_sha"
         return "new_sha"
 
-    stage, _ = _make_stage(
+    stage, state = _make_stage(
         client,
         tmp_path,
         poll_interval=0,
@@ -234,7 +235,7 @@ def test_post_fix_waits_for_sha_propagation(tmp_path: pathlib.Path) -> None:
         head_sha_getter=head_sha_getter,
         fix_sha_getter=lambda: "new_sha",
     )
-    stage.run(None)
+    stage.run(state)
     assert len(client.calls) == 1
     assert sha_call[0] >= 2
 
@@ -250,14 +251,14 @@ def test_post_fix_no_sha_available_falls_back(tmp_path: pathlib.Path) -> None:
             return [_FAILING_CHECK], ""
         return [_PASSING_CHECK], ""
 
-    stage, _ = _make_stage(
+    stage, state = _make_stage(
         client,
         tmp_path,
         poll_interval=0,
         checks_getter=getter,
         fix_sha_getter=lambda: "",
     )
-    stage.run(None)
+    stage.run(state)
     assert len(client.calls) == 1
 
 
@@ -271,10 +272,10 @@ def test_grace_period_waits_for_checks_to_appear(tmp_path: pathlib.Path) -> None
             return [], ""
         return [_PASSING_CHECK], ""
 
-    stage, _ = _make_stage(
+    stage, state = _make_stage(
         client, tmp_path, poll_interval=0, startup_grace_secs=60, checks_getter=getter
     )
-    stage.run(None)
+    stage.run(state)
     assert client.calls == []
     assert call_count[0] >= 2
 
@@ -288,10 +289,10 @@ def test_no_checks_after_grace_skips(tmp_path: pathlib.Path) -> None:
         call_count[0] += 1
         return [], ""
 
-    stage, _ = _make_stage(
+    stage, state = _make_stage(
         client, tmp_path, poll_interval=0, startup_grace_secs=1, checks_getter=getter
     )
-    stage.run(None)
+    stage.run(state)
     assert client.calls == []
     assert call_count[0] >= 2
 
@@ -308,10 +309,10 @@ def test_poll_empty_mid_run_continues_polling(tmp_path: pathlib.Path) -> None:
             return [], ""
         return [_PASSING_CHECK], ""
 
-    stage, _ = _make_stage(
+    stage, state = _make_stage(
         client, tmp_path, poll_interval=0, startup_grace_secs=0, checks_getter=getter
     )
-    stage.run(None)
+    stage.run(state)
     assert client.calls == []
     assert call_count[0] >= 3
 
@@ -323,9 +324,9 @@ def test_review_required_emits_bail_to_state(
     state_dir = make_state_dir(gr_id)
     client = FakeClaudeClient(fixtures={})
     getter = _make_getter([([], "REVIEW_REQUIRED")])
-    stage, _ = _make_stage(client, tmp_path, gr_id=gr_id, checks_getter=getter)
+    stage, state = _make_stage(client, tmp_path, gr_id=gr_id, checks_getter=getter)
     with pytest.raises(RuntimeError):
-        stage.run(None)
+        stage.run(state)
     data = json.loads((state_dir / "state.json").read_text())
     assert data.get("bail_class") == "other"
 
@@ -338,7 +339,7 @@ def test_check_bail_raises_from_state(tmp_path: pathlib.Path, make_state_dir) ->
 
     client = FakeClaudeClient(fixtures={"ci-fix-1": MINIMAL_EVENTS})
     getter = _make_getter([([_FAILING_CHECK], ""), ([_FAILING_CHECK], "")])
-    stage, _ = _make_stage(
+    stage, state = _make_stage(
         client,
         tmp_path,
         gr_id=gr_id,
@@ -348,4 +349,4 @@ def test_check_bail_raises_from_state(tmp_path: pathlib.Path, make_state_dir) ->
         checks_getter=getter,
     )
     with pytest.raises(RuntimeError, match="bailed"):
-        stage.run(None)
+        stage.run(state)

@@ -7,19 +7,20 @@ import subprocess
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.stages.base import StageContext
+from gremlins.stages.base import StageState
 from gremlins.stages.request_copilot import RequestCopilot
 
 
-def _make_stage(tmp_path, *, repo: str, pr_num: str) -> RequestCopilot:
+def _make_stage(
+    tmp_path, *, repo: str, pr_num: str
+) -> tuple[RequestCopilot, StageState]:
     stage = RequestCopilot("request-copilot", None, [], {}, repo=repo, pr_num=pr_num)
-    ctx = StageContext(
+    state = StageState(
         client=FakeClaudeClient(fixtures={}),
         session_dir=tmp_path,
         gr_id=None,
     )
-    stage.bind(ctx)
-    return stage
+    return stage, state
 
 
 def test_run_calls_gh_pr_edit(tmp_path, monkeypatch):
@@ -31,8 +32,8 @@ def test_run_calls_gh_pr_edit(tmp_path, monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    stage = _make_stage(tmp_path, repo="owner/repo", pr_num="42")
-    stage.run(None)
+    stage, state = _make_stage(tmp_path, repo="owner/repo", pr_num="42")
+    stage.run(state)
 
     assert len(calls) == 1
     cmd = calls[0]
@@ -52,6 +53,6 @@ def test_run_raises_on_nonzero_returncode(tmp_path, monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    stage = _make_stage(tmp_path, repo="owner/repo", pr_num="7")
+    stage, state = _make_stage(tmp_path, repo="owner/repo", pr_num="7")
     with pytest.raises(RuntimeError, match="could not request Copilot review"):
-        stage.run(None)
+        stage.run(state)

@@ -12,7 +12,7 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
-from gremlins.stages.base import StageContext
+from gremlins.stages.base import StageState
 from gremlins.stages.compound import CompoundStage
 from gremlins.utils import proc
 
@@ -32,7 +32,7 @@ class ParallelStage(CompoundStage):
     def __init__(
         self,
         name: str,
-        child_runners: list[tuple[str, StageContext, Callable[[], None]]],
+        child_runners: list[tuple[str, StageState, Callable[[], None]]],
         *,
         max_concurrent: int | None,
         cancel_on_bail: bool,
@@ -63,14 +63,14 @@ class ParallelStage(CompoundStage):
             project_root=self._project_root,
         )
 
-    def run(self, pipe: Any) -> None:  # noqa: ARG002
+    def run(self, state: StageState) -> None:  # noqa: ARG002
         for _, fn in self.build_runtime_stages():
             fn()
 
 
 def _parallel_stages(
     group_name: str,
-    child_runners: list[tuple[str, StageContext, Callable[[], None]]],
+    child_runners: list[tuple[str, StageState, Callable[[], None]]],
     *,
     max_concurrent: int | None,
     set_stage_fn: Callable[[str], None],
@@ -168,7 +168,7 @@ def _parallel_stages(
         base_head = r.stdout.strip() if r.returncode == 0 else ""
 
         try:
-            for child_key, ctx, _ in child_runners:
+            for child_key, child_state, _ in child_runners:
                 wt_dir = str(
                     pathlib.Path(tempfile.gettempdir())
                     / f"aibg-parallel-{group_name}-{secrets.token_hex(8)}"
@@ -184,7 +184,7 @@ def _parallel_stages(
                     )
                 wt_path = pathlib.Path(wt_dir)
                 _worktree_paths[child_key] = wt_path
-                ctx.worktree = wt_path
+                child_state.worktree = wt_path
         except Exception:
             _remove_worktrees(list(_worktree_paths.values()))
             _worktree_paths.clear()
@@ -199,9 +199,9 @@ def _parallel_stages(
 
         _hydrate_from_state()
 
-        for child_key, ctx, _ in active:
-            if child_key in _worktree_paths and ctx.worktree is None:
-                ctx.worktree = _worktree_paths[child_key]
+        for child_key, child_state, _ in active:
+            if child_key in _worktree_paths and child_state.worktree is None:
+                child_state.worktree = _worktree_paths[child_key]
 
         workers = max_concurrent if max_concurrent is not None else len(active)
         cancel_event = threading.Event() if cancel_on_bail else None
