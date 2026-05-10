@@ -62,23 +62,18 @@ def test_head_advanced_creates_materialized_branch(tmp_path: pathlib.Path) -> No
     mock_sweep.assert_called_once()
 
 
-def test_dirty_only_no_branch_created(tmp_path: pathlib.Path) -> None:
+def test_dirty_only_raises(tmp_path: pathlib.Path) -> None:
     stage, _ = _make_stage(tmp_path)
     with (
         patch(
             "gremlins.stages.materialize_to_branch.classify_impl_outcome",
             return_value=DirtyOnly(),
         ),
-        patch(
-            "gremlins.stages.materialize_to_branch.create_handoff_branch"
-        ) as mock_create,
-        patch("gremlins.stages.materialize_to_branch.patch_state") as mock_patch_state,
+        patch("gremlins.stages.materialize_to_branch.create_handoff_branch") as mock_create,
     ):
-        result = stage.run(_pipe())
-    assert result.materialized_branch == ""
-    assert result.base_ref == "abc123"
+        with pytest.raises(RuntimeError, match="unexpected impl outcome"):
+            stage.run(_pipe())
     mock_create.assert_not_called()
-    mock_patch_state.assert_called_once_with(None, impl_base_ref="abc123")
 
 
 def test_empty_impl_raises(tmp_path: pathlib.Path) -> None:
@@ -123,13 +118,20 @@ def test_none_pre_state_reads_from_state_json(tmp_path: pathlib.Path) -> None:
         ),
         patch(
             "gremlins.stages.materialize_to_branch.classify_impl_outcome",
-            return_value=DirtyOnly(),
+            return_value=HeadAdvanced(commit_count=1),
         ),
+        patch(
+            "gremlins.stages.materialize_to_branch.create_handoff_branch",
+            return_value="ghgremlin-impl-handoff-99",
+        ),
+        patch("gremlins.stages.materialize_to_branch.reset_pre_branch"),
+        patch("gremlins.stages.materialize_to_branch.sweep_stale_handoff_branches"),
         patch("gremlins.stages.materialize_to_branch.patch_state"),
+        patch("gremlins.stages.materialize_to_branch.append_artifact"),
     ):
         result = stage.run(_pipe(None))
     assert result.base_ref == "feed1234"
-    assert result.materialized_branch == ""
+    assert result.materialized_branch == "ghgremlin-impl-handoff-99"
 
 
 def test_none_pre_state_missing_head_raises(tmp_path: pathlib.Path) -> None:
@@ -161,6 +163,7 @@ def test_run_writes_to_state_json(tmp_path: pathlib.Path) -> None:
         patch("gremlins.stages.materialize_to_branch.reset_pre_branch"),
         patch("gremlins.stages.materialize_to_branch.sweep_stale_handoff_branches"),
         patch("gremlins.stages.materialize_to_branch.patch_state") as mock_patch,
+        patch("gremlins.stages.materialize_to_branch.append_artifact"),
     ):
         result = stage.run(_pipe())
     mock_patch.assert_called_once_with(
@@ -177,9 +180,16 @@ def test_result_base_ref_from_pre_state(tmp_path: pathlib.Path) -> None:
     with (
         patch(
             "gremlins.stages.materialize_to_branch.classify_impl_outcome",
-            return_value=DirtyOnly(),
+            return_value=HeadAdvanced(commit_count=1),
         ),
+        patch(
+            "gremlins.stages.materialize_to_branch.create_handoff_branch",
+            return_value="ghgremlin-impl-handoff-77",
+        ),
+        patch("gremlins.stages.materialize_to_branch.reset_pre_branch"),
+        patch("gremlins.stages.materialize_to_branch.sweep_stale_handoff_branches"),
         patch("gremlins.stages.materialize_to_branch.patch_state"),
+        patch("gremlins.stages.materialize_to_branch.append_artifact"),
     ):
         result = stage.run(_pipe(pre))
     assert result.base_ref == "deadbeef"
@@ -190,7 +200,11 @@ def test_head_advanced_records_branch_artifact(tmp_path: pathlib.Path) -> None:
     state_file = tmp_path / "state.json"
     state_file.write_text(json.dumps({"impl_pre_head": "abc123"}), encoding="utf-8")
     stage, _ = _make_stage(tmp_path, gr_id="test-gr")
-    artifact_calls: list[tuple] = []
+    artifact_calls: list[tuple[str | None, dict[str, str]]] = []
+
+    def _capture(gr_id: str | None, artifact: dict[str, str]) -> None:
+        artifact_calls.append((gr_id, artifact))
+
     outcome = HeadAdvanced(commit_count=1)
     with (
         patch(
@@ -210,9 +224,7 @@ def test_head_advanced_records_branch_artifact(tmp_path: pathlib.Path) -> None:
         patch("gremlins.stages.materialize_to_branch.patch_state"),
         patch(
             "gremlins.stages.materialize_to_branch.append_artifact",
-            side_effect=lambda gr_id, artifact: artifact_calls.append(
-                (gr_id, artifact)
-            ),
+            side_effect=_capture,
         ),
     ):
         result = stage.run(_pipe())
