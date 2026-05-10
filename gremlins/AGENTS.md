@@ -10,7 +10,6 @@ review / address pipelines, the fleet manager
 - `cli.py` — top-level dispatch: `gremlins {launch,review,address,resume,stop,rescue,land,rm,close,log}`. `launch` accepts a pipeline file or skill name. Bare invocation prints fleet status.
 - `bail.py` — `python -m gremlins.bail <class> [detail]`. Writes bail marker to `state.json`.
 - `run_pipeline.py` — `python -m gremlins.run_pipeline <gr_id> <kind>`. Spawned by the launcher; wraps `cli.main` and writes terminal state on exit.
-- `session_summary.py` — thin re-export of `fleet.session_summary.main` for `python -m gremlins.session_summary`.
 - `runner.py` — `run_stages` sequencer (with `resume_from`) + SIGINT/SIGTERM handlers that reap `claude -p` children.
 - `state.py` — session-dir resolution, `set_stage` / `emit_bail` / `patch_state` / `check_bail`.
 - `git.py` — `in_git_repo`, `git_head`, branch / worktree helpers.
