@@ -170,8 +170,7 @@ def _detach_to_pr_base(state: RuntimeState) -> None:
     if not branch:
         return
     logger.info("detaching worktree to previous PR branch: %s", branch)
-    _git.fetch_origin(branch, cwd=state.cwd)
-    _git.checkout_detach(f"origin/{branch}", cwd=state.cwd)
+    _git.git_detach_to_branch(branch, cwd=state.cwd)
 
 
 def _bail_already_set(gr_id: str | None, child_key: str | None) -> bool:
