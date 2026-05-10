@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from gremlins.stages.base import Stage
-from gremlins.stages.registry import register_stage
+from gremlins.stages import Stage, register_stage
 
 
 class CommitPR(Stage):

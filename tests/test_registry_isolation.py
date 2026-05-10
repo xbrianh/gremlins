@@ -10,10 +10,10 @@ import sys
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
-def test_registry_does_not_pull_in_stages_or_pipeline() -> None:
-    # Import registry via its normal package path so Python executes
-    # stages/__init__.py — which imports Stage/StageContext (and their deps)
-    # but nothing that pulls in pipeline or concrete stage modules.
+def test_registry_is_a_leaf_module() -> None:
+    # Verify that importing gremlins.stages.registry does NOT pull in concrete
+    # stage implementations — only the leaf modules registry, stages, and base
+    # should appear in sys.modules under gremlins.stages.*.
     script = """
 import sys
 import importlib
@@ -23,7 +23,11 @@ importlib.import_module("gremlins.stages.registry")
 stage_mods = [
     k for k in sys.modules
     if k.startswith("gremlins.stages.")
-    and k not in ("gremlins.stages.registry", "gremlins.stages", "gremlins.stages.base")
+    and k not in (
+        "gremlins.stages.registry",
+        "gremlins.stages",
+        "gremlins.stages.base",
+    )
 ]
 assert not stage_mods, f"unexpected stage modules: {stage_mods}"
 assert "gremlins.pipeline" not in sys.modules, "gremlins.pipeline was imported"

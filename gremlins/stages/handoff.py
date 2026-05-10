@@ -13,9 +13,8 @@ from typing import Any
 
 from gremlins import handoff as handoff_mod
 from gremlins.clients import ClientSpec
-from gremlins.stages.base import Stage
+from gremlins.stages import Stage, register_stage
 from gremlins.stages.loop import RunCmdFailed
-from gremlins.stages.registry import register_stage
 from gremlins.state import emit_bail, read_state_str, resolve_state_file, set_stage
 
 logger = logging.getLogger(__name__)

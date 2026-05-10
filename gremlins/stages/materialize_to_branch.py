@@ -19,8 +19,7 @@ from gremlins.git import (
     reset_pre_branch,
     sweep_stale_handoff_branches,
 )
-from gremlins.stages.base import Stage
-from gremlins.stages.registry import register_stage
+from gremlins.stages import Stage, register_stage
 from gremlins.state import append_artifact, patch_state, resolve_state_file
 
 logger = logging.getLogger(__name__)
