@@ -6,8 +6,7 @@ import logging
 import pathlib
 from typing import Any
 
-from gremlins.clients.resolve import ClientSpec
-from gremlins.clients.resolve import require_stage_spec
+from gremlins.clients.resolve import ClientSpec, require_stage_spec
 from gremlins.errors import die
 from gremlins.schema import StageEntry
 from gremlins.stages import (
