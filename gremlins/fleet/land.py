@@ -132,9 +132,59 @@ def _fast_forward_main(cwd: str | None):
             print("warning: local main has diverged from origin/main — update manually")
 
 
+def _remove_worktree(wdir: str, state: dict[str, Any], cwd: str | None) -> None:
+    """Touch closed marker and remove the gremlin's worktree.
+
+    Marks closed first so the gremlin disappears from default views even if
+    filesystem removal fails. Best-effort: warnings printed on failure.
+    """
+    try:
+        pathlib.Path(os.path.join(wdir, "closed")).touch()
+    except OSError:
+        pass
+
+    workdir = state.get("workdir") or ""
+    if workdir and os.path.exists(workdir):
+        _git.remove_worktree(cwd or os.getcwd(), workdir)
+        if os.path.exists(workdir):
+            try:
+                shutil.rmtree(workdir)
+            except OSError as e:
+                print(f"warning: could not remove worktree {workdir}: {e}")
+        if not os.path.exists(workdir):
+            print(f"removed worktree {workdir}")
+
+
+def _finalize_cleanup(
+    gr_id: str,
+    wdir: str,
+    state: dict[str, Any],
+    cwd: str | None,
+    *,
+    delete_branch: bool = True,
+    remove_state_dir: bool = True,
+) -> None:
+    """Optionally delete the gremlin branch and state directory."""
+    if delete_branch:
+        branch = expected_branch(state, gr_id)
+        if branch:
+            try:
+                _git.delete_branch(branch, force=True, cwd=cwd)
+                print(f"deleted branch {branch}")
+            except _git.GitError as e:
+                if "not found" not in e.stderr:
+                    print(f"warning: could not delete branch {branch}: {e.stderr}")
+
+    if remove_state_dir:
+        try:
+            shutil.rmtree(wdir)
+            print(f"removed state directory {wdir}")
+        except OSError as e:
+            print(f"warning: could not remove state directory {wdir}: {e}")
+
+
 def _cleanup_gremlin(
     gr_id: str,
-    sf: str,
     wdir: str,
     state: dict[str, Any],
     cwd: str | None,
@@ -159,39 +209,15 @@ def _cleanup_gremlin(
             )
             return False
 
-    # Mark closed before cleanup so a partial failure doesn't allow a re-run.
-    try:
-        pathlib.Path(os.path.join(wdir, "closed")).touch()
-    except OSError:
-        pass
-
-    if workdir and os.path.exists(workdir):
-        _git.remove_worktree(cwd or os.getcwd(), workdir)
-        if os.path.exists(workdir):
-            try:
-                shutil.rmtree(workdir)
-            except OSError as e:
-                print(f"warning: could not remove worktree {workdir}: {e}")
-        if not os.path.exists(workdir):
-            print(f"removed worktree {workdir}")
-
-    if delete_branch:
-        branch = expected_branch(state, gr_id)
-        if branch:
-            try:
-                _git.delete_branch(branch, force=True, cwd=cwd)
-                print(f"deleted branch {branch}")
-            except _git.GitError as e:
-                if "not found" not in e.stderr:
-                    print(f"warning: could not delete branch {branch}: {e.stderr}")
-
-    if remove_state_dir:
-        try:
-            shutil.rmtree(wdir)
-            print(f"removed state directory {wdir}")
-        except OSError as e:
-            print(f"warning: could not remove state directory {wdir}: {e}")
-
+    _remove_worktree(wdir, state, cwd)
+    _finalize_cleanup(
+        gr_id,
+        wdir,
+        state,
+        cwd,
+        delete_branch=delete_branch,
+        remove_state_dir=remove_state_dir,
+    )
     return True
 
 
@@ -221,7 +247,6 @@ def do_rm(target: str) -> bool:
 
     if not _cleanup_gremlin(
         gr_id,
-        sf,
         wdir,
         cast(dict[str, Any], state),
         cwd_for_git,
@@ -508,7 +533,6 @@ def _squash_land(
         print(f"{current} is already up to date with {source_label}.")
         _cleanup_gremlin(
             gr_id,
-            sf,
             wdir,
             state,
             cwd,
@@ -549,14 +573,13 @@ def _squash_land(
     _persist_land_cost(sf, state, land_cost)
     _print_cost(state)
     _cleanup_gremlin(
-        gr_id, sf, wdir, state, cwd, delete_branch=delete_branch, remove_state_dir=False
+        gr_id, wdir, state, cwd, delete_branch=delete_branch, remove_state_dir=False
     )
     return True
 
 
 def _ff_land(
     gr_id: str,
-    sf: str,
     wdir: str,
     state: dict[str, Any],
     cwd: str | None,
@@ -582,7 +605,6 @@ def _ff_land(
         print(f"{current} is already up to date with {source_label}.")
         _cleanup_gremlin(
             gr_id,
-            sf,
             wdir,
             state,
             cwd,
@@ -602,7 +624,7 @@ def _ff_land(
     print(f"Landed {source_label} onto {current}.")
     _print_cost(state)
     _cleanup_gremlin(
-        gr_id, sf, wdir, state, cwd, delete_branch=delete_branch, remove_state_dir=False
+        gr_id, wdir, state, cwd, delete_branch=delete_branch, remove_state_dir=False
     )
     return True
 
@@ -652,7 +674,7 @@ def _land_local(
             gr_id, sf, wdir, state, cwd, branch, branch, current, delete_branch=True
         )
     return _ff_land(
-        gr_id, sf, wdir, state, cwd, branch, branch, current, delete_branch=True
+        gr_id, wdir, state, cwd, branch, branch, current, delete_branch=True
     )
 
 
@@ -686,13 +708,11 @@ def _land_boss(
             gr_id, sf, wdir, state, cwd, boss_head, label, current, delete_branch=False
         )
     return _ff_land(
-        gr_id, sf, wdir, state, cwd, boss_head, label, current, delete_branch=False
+        gr_id, wdir, state, cwd, boss_head, label, current, delete_branch=False
     )
 
 
-def _land_gh(
-    gr_id: str, sf: str, wdir: str, state: dict[str, Any], force: bool = False
-) -> bool:
+def _land_gh(gr_id: str, wdir: str, state: dict[str, Any], force: bool = False) -> bool:
     """Merge a gh gremlin's PR and clean up."""
     pr_url = read_pr_url(gr_id)
     if not pr_url:
@@ -732,8 +752,9 @@ def _land_gh(
     if pr_state == "MERGED":
         print("PR already merged.")
         _fast_forward_main(cwd)
-        _cleanup_gremlin(
-            gr_id, sf, wdir, state, cwd, delete_branch=False, remove_state_dir=False
+        _remove_worktree(wdir, state, cwd)
+        _finalize_cleanup(
+            gr_id, wdir, state, cwd, delete_branch=False, remove_state_dir=False
         )
         return True
 
@@ -742,8 +763,9 @@ def _land_gh(
             print(
                 "PR is closed (not merged) — force flag set, cleaning up without merge."
             )
-            _cleanup_gremlin(
-                gr_id, sf, wdir, state, cwd, delete_branch=False, remove_state_dir=False
+            _remove_worktree(wdir, state, cwd)
+            _finalize_cleanup(
+                gr_id, wdir, state, cwd, delete_branch=False, remove_state_dir=False
             )
             return True
         print(f"PR is closed (not merged): {pr_url}")
@@ -785,6 +807,7 @@ def _land_gh(
         return False
 
     print(f"Merging: {pr_url}")
+    _remove_worktree(wdir, state, cwd)
     r = proc.run(["gh", "pr", "merge", pr_url, "--squash", "--delete-branch"], cwd=cwd)
     if r.returncode != 0:
         if "already merged" in r.stdout.lower() or "already merged" in r.stderr.lower():
@@ -823,8 +846,8 @@ def _land_gh(
         print("PR merged.")
 
     _fast_forward_main(cwd)
-    _cleanup_gremlin(
-        gr_id, sf, wdir, state, cwd, delete_branch=False, remove_state_dir=False
+    _finalize_cleanup(
+        gr_id, wdir, state, cwd, delete_branch=False, remove_state_dir=False
     )
     return True
 
@@ -862,7 +885,7 @@ def do_land(
                 "error: --squash/--ff are not applicable to gh gremlins (merged via PR)"
             )
             return False
-        return _land_gh(gr_id, sf, wdir, state, force=force)
+        return _land_gh(gr_id, wdir, state, force=force)
 
     if shape == "one_branch":
         if live != "dead:finished":
