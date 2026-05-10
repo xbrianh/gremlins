@@ -16,7 +16,7 @@ def _ensure_registered() -> None:
     importlib.import_module("gremlins.clients")
 
 
-def _get_client_from_yaml(d: dict[str, Any]) -> Client | None:
+def get_client_from_yaml(d: dict[str, Any]) -> Client | None:
     raw = d.get("client")
     if raw is None:
         return None

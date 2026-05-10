@@ -32,12 +32,12 @@ class SequenceStage(Stage):
 
     @classmethod
     def from_yaml(cls, d: dict[str, Any]) -> SequenceStage:
-        from gremlins.pipeline.loader import _get_client_from_yaml, _parse_stage
+        from gremlins.pipeline.loader import get_client_from_yaml, _parse_stage
 
         children = [_parse_stage(child_d) for child_d in (d.get("body") or [])]
         stage = cls(d["name"])
         stage.body = children
-        stage.client = _get_client_from_yaml(d)
+        stage.client = get_client_from_yaml(d)
         return stage
 
     def run(self, state: RuntimeState) -> None:

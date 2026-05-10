@@ -75,12 +75,12 @@ class LoopStage(Stage):
 
     @classmethod
     def from_yaml(cls, d: dict[str, Any]) -> LoopStage:
-        from gremlins.pipeline.loader import _get_client_from_yaml, _parse_stage
+        from gremlins.pipeline.loader import get_client_from_yaml, _parse_stage
 
         max_iterations = (d.get("options") or {}).get("max_iterations", 3)
         body = [_parse_stage(child_d) for child_d in (d.get("body") or [])]
         stage = cls(d["name"], body=body, max_iterations=max_iterations)
-        stage.client = _get_client_from_yaml(d)
+        stage.client = get_client_from_yaml(d)
         return stage
 
     def _build_runners(self, state: RuntimeState) -> list[Callable[[], None]]:

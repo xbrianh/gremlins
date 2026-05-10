@@ -96,7 +96,7 @@ def _make_stages(*names: str) -> list[Stage]:
 
 
 def _make_parallel_stage(name: str, children: list[str]) -> ParallelStage:
-    child_stages = [Plan(c, None, [], {}) for c in children]
+    child_stages: list[Stage] = [Plan(c, None, [], {}) for c in children]
     return ParallelStage(name, child_stages)
 
 

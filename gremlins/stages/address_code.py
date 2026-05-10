@@ -50,10 +50,10 @@ class AddressCode(Stage):
 
     @classmethod
     def from_yaml(cls, d: dict[str, Any]) -> AddressCode:
-        from gremlins.pipeline.loader import _get_client_from_yaml
+        from gremlins.pipeline.loader import get_client_from_yaml
 
         stage = cls(d["name"], None, d.get("prompt") or [], d.get("options") or {})
-        stage.client = _get_client_from_yaml(d)
+        stage.client = get_client_from_yaml(d)
         return stage
 
     def __init__(
