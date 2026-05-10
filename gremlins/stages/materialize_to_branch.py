@@ -67,35 +67,39 @@ class MaterializeToBranch(Stage):
                 "committed work to hand off"
             )
 
-        materialized_branch = ""
-        if isinstance(outcome, HeadAdvanced):
-            materialized_branch = create_handoff_branch(pre_state, cwd=impl_cwd)
-            reset_pre_branch(pre_state, cwd=impl_cwd)
-            sweep_stale_handoff_branches(materialized_branch, cwd=impl_cwd)
-            pre_branch_note = (
-                f" and reset {pre_state.branch}" if pre_state.branch else ""
+        if not isinstance(outcome, HeadAdvanced):
+            # DirtyOnly: uncommitted changes but no commits — nothing to hand off.
+            # Don't overwrite impl_materialized_branch; leave any prior value intact.
+            patch_state(self.state.gr_id, impl_base_ref=pre_state.head)
+            return MaterializeToBranchResult(
+                outcome=outcome,
+                materialized_branch="",
+                base_ref=pre_state.head,
             )
-            sys.stdout.write(
-                f"    materialize-to-branch: moved {outcome.commit_count} commit(s) "
-                f"onto {materialized_branch}{pre_branch_note}\n"
-            )
-            sys.stdout.flush()
 
-        result = MaterializeToBranchResult(
+        materialized_branch = create_handoff_branch(pre_state, cwd=impl_cwd)
+        reset_pre_branch(pre_state, cwd=impl_cwd)
+        sweep_stale_handoff_branches(materialized_branch, cwd=impl_cwd)
+        pre_branch_note = f" and reset {pre_state.branch}" if pre_state.branch else ""
+        sys.stdout.write(
+            f"    materialize-to-branch: moved {outcome.commit_count} commit(s) "
+            f"onto {materialized_branch}{pre_branch_note}\n"
+        )
+        sys.stdout.flush()
+
+        patch_state(
+            self.state.gr_id,
+            impl_materialized_branch=materialized_branch,
+            impl_base_ref=pre_state.head,
+        )
+        append_artifact(
+            self.state.gr_id, {"type": "branch", "name": materialized_branch}
+        )
+        return MaterializeToBranchResult(
             outcome=outcome,
             materialized_branch=materialized_branch,
             base_ref=pre_state.head,
         )
-        patch_state(
-            self.state.gr_id,
-            impl_materialized_branch=result.materialized_branch,
-            impl_base_ref=result.base_ref,
-        )
-        if materialized_branch:
-            append_artifact(
-                self.state.gr_id, {"type": "branch", "name": materialized_branch}
-            )
-        return result
 
 
 register_stage("materialize-to-branch", MaterializeToBranch)

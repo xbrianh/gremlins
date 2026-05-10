@@ -72,12 +72,13 @@ def test_dirty_only_no_branch_created(tmp_path: pathlib.Path) -> None:
         patch(
             "gremlins.stages.materialize_to_branch.create_handoff_branch"
         ) as mock_create,
-        patch("gremlins.stages.materialize_to_branch.patch_state"),
+        patch("gremlins.stages.materialize_to_branch.patch_state") as mock_patch_state,
     ):
         result = stage.run(_pipe())
     assert result.materialized_branch == ""
     assert result.base_ref == "abc123"
     mock_create.assert_not_called()
+    mock_patch_state.assert_called_once_with(None, impl_base_ref="abc123")
 
 
 def test_empty_impl_raises(tmp_path: pathlib.Path) -> None:
