@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pathlib
 
-import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
