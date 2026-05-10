@@ -5,7 +5,7 @@ import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from gremlins.stages.registry import CLIENT_FACTORIES
+from gremlins.clients.registry import CLIENT_FACTORIES
 from gremlins.state import resolve_state_file
 
 if TYPE_CHECKING:
