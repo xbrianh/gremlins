@@ -170,6 +170,10 @@ def _gremlins_state_root(lenv) -> pathlib.Path:
     return lenv.state_root
 
 
+class _FakeProc:
+    pid = 12345
+
+
 # ---------------------------------------------------------------------------
 # launch() — basic contracts
 # ---------------------------------------------------------------------------
@@ -1117,10 +1121,9 @@ def test_launch_boss_plan_issue_ref_materializes_plan_md(lenv, monkeypatch):
         lambda plan: {"title": "My Plan", "body": issue_body, "number": 317, "url": ""},
     )
 
-    class _Proc:
-        pid = 42000
-
-    monkeypatch.setattr(launcher, "_spawn_pipeline", lambda *args, **kwargs: _Proc())
+    monkeypatch.setattr(
+        launcher, "_spawn_pipeline", lambda *args, **kwargs: _FakeProc()
+    )
 
     gr_id = launcher.launch("boss", plan="#317", project_root=str(lenv.repo))
     state_dir = _gremlins_state_root(lenv) / gr_id
@@ -1128,3 +1131,28 @@ def test_launch_boss_plan_issue_ref_materializes_plan_md(lenv, monkeypatch):
 
     assert plan_md.exists(), f"plan.md not found at {plan_md}"
     assert plan_md.read_text(encoding="utf-8").strip() == issue_body.strip()
+
+
+def test_launch_plan_issue_ref_writes_issue_url_and_num(lenv, monkeypatch):
+    launcher = _launcher()
+
+    monkeypatch.setattr(
+        launcher,
+        "_fetch_issue",
+        lambda plan: {
+            "title": "My Plan",
+            "body": "# My Plan\n\nDo the thing.",
+            "number": 378,
+            "url": "https://github.com/owner/repo/issues/378",
+        },
+    )
+
+    monkeypatch.setattr(
+        launcher, "_spawn_pipeline", lambda *args, **kwargs: _FakeProc()
+    )
+
+    gr_id = launcher.launch("boss", plan="#378", project_root=str(lenv.repo))
+    state = _read_state(_gremlins_state_root(lenv) / gr_id)
+
+    assert state["issue_url"] == "https://github.com/owner/repo/issues/378"
+    assert state["issue_num"] == "378"
