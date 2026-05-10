@@ -44,13 +44,8 @@ from fixtures.shell_env import (
 
 import gremlins.fleet.constants as _constants
 import gremlins.fleet.rescue as rescue_mod
-from gremlins import fleet
+from gremlins.fleet.rescue import do_rescue as _do_rescue
 from gremlins.launcher import GremlinAlreadyRunning
-
-
-def _load_gremlins_module():
-    """Return the fleet module — the canonical home for do_rescue."""
-    return fleet
 
 
 def _make_failed_gremlin(
@@ -104,10 +99,9 @@ def test_rescue_diagnosis_runs_in_scratch_dir_not_worktree(tmp_path, monkeypatch
     for k, v in sh.env.items():
         monkeypatch.setenv(k, v)
 
-    gremlins_mod = _load_gremlins_module()
     _patch_state_root(sh.state_root, monkeypatch)
 
-    ok = gremlins_mod.do_rescue("victim-abcdef", headless=False)
+    ok = _do_rescue("victim-abcdef", headless=False)
     # unsalvageable verdict returns False (no relaunch). That's expected.
     assert ok is False
 
@@ -134,10 +128,9 @@ def test_rescue_unsalvageable_records_bail(tmp_path, monkeypatch):
     for k, v in sh.env.items():
         monkeypatch.setenv(k, v)
 
-    gremlins_mod = _load_gremlins_module()
     _patch_state_root(sh.state_root, monkeypatch)
 
-    gremlins_mod.do_rescue("victim-abcdef", headless=False)
+    _do_rescue("victim-abcdef", headless=False)
 
     state = json.loads((state_dir / "state.json").read_text())
     assert state["bail_reason"] == "unsalvageable"
@@ -155,10 +148,9 @@ def test_rescue_structural_records_bail(tmp_path, monkeypatch):
     for k, v in sh.env.items():
         monkeypatch.setenv(k, v)
 
-    gremlins_mod = _load_gremlins_module()
     _patch_state_root(sh.state_root, monkeypatch)
 
-    gremlins_mod.do_rescue("victim-abcdef", headless=False)
+    _do_rescue("victim-abcdef", headless=False)
 
     state = json.loads((state_dir / "state.json").read_text())
     assert state["bail_reason"] == "structural"
@@ -181,10 +173,9 @@ def test_rescue_no_marker_records_diagnosis_no_marker(tmp_path, monkeypatch):
     for k, v in sh.env.items():
         monkeypatch.setenv(k, v)
 
-    gremlins_mod = _load_gremlins_module()
     _patch_state_root(sh.state_root, monkeypatch)
 
-    gremlins_mod.do_rescue("victim-abcdef", headless=False)
+    _do_rescue("victim-abcdef", headless=False)
 
     state = json.loads((state_dir / "state.json").read_text())
     assert state["bail_reason"] == "diagnosis_no_marker"
@@ -209,10 +200,9 @@ def test_rescue_fixed_verdict_invokes_launcher_resume(tmp_path, monkeypatch):
     for k, v in sh.env.items():
         monkeypatch.setenv(k, v)
 
-    gremlins_mod = _load_gremlins_module()
     _patch_state_root(sh.state_root, monkeypatch)
 
-    ok = gremlins_mod.do_rescue("victim-abcdef", headless=False)
+    ok = _do_rescue("victim-abcdef", headless=False)
     assert ok is True
 
     assert len(resume_calls) == 1, resume_calls
@@ -259,10 +249,9 @@ def test_rescue_headless_excluded_class_refused(tmp_path, monkeypatch):
     for k, v in sh.env.items():
         monkeypatch.setenv(k, v)
 
-    gremlins_mod = _load_gremlins_module()
     _patch_state_root(sh.state_root, monkeypatch)
 
-    ok = gremlins_mod.do_rescue("victim-abcdef", headless=True)
+    ok = _do_rescue("victim-abcdef", headless=True)
     assert ok is False
 
     final = json.loads((state_dir / "state.json").read_text())
@@ -287,10 +276,9 @@ def test_rescue_nonzero_exit_records_diagnosis_claude_error(tmp_path, monkeypatc
     for k, v in sh.env.items():
         monkeypatch.setenv(k, v)
 
-    gremlins_mod = _load_gremlins_module()
     _patch_state_root(sh.state_root, monkeypatch)
 
-    ok = gremlins_mod.do_rescue("victim-abcdef", headless=False)
+    ok = _do_rescue("victim-abcdef", headless=False)
     assert ok is False
 
     state = json.loads((state_dir / "state.json").read_text())
@@ -305,7 +293,6 @@ def test_rescue_claude_not_found_records_diagnosis_claude_error(tmp_path, monkey
     for k, v in sh.env.items():
         monkeypatch.setenv(k, v)
 
-    gremlins_mod = _load_gremlins_module()
     _patch_state_root(sh.state_root, monkeypatch)
 
     original_popen = subprocess.Popen
@@ -319,7 +306,7 @@ def test_rescue_claude_not_found_records_diagnosis_claude_error(tmp_path, monkey
     # Also patch it in the rescue module's own subprocess reference.
     monkeypatch.setattr(rescue_mod.subprocess, "Popen", popen_raise_if_claude)
 
-    ok = gremlins_mod.do_rescue("victim-abcdef", headless=False)
+    ok = _do_rescue("victim-abcdef", headless=False)
     assert ok is False
 
     state = json.loads((state_dir / "state.json").read_text())
@@ -413,10 +400,9 @@ def test_rescue_diagnosis_streams_events_to_stderr(tmp_path, monkeypatch, capsys
     for k, v in sh.env.items():
         monkeypatch.setenv(k, v)
 
-    gremlins_mod = _load_gremlins_module()
     _patch_state_root(sh.state_root, monkeypatch)
 
-    gremlins_mod.do_rescue("victim-abcdef", headless=False)
+    _do_rescue("victim-abcdef", headless=False)
 
     captured = capsys.readouterr()
     rescue_lines = [ln for ln in captured.err.splitlines() if ln.startswith("[rescue]")]
