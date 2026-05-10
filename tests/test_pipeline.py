@@ -4,8 +4,13 @@ import pathlib
 import pytest
 
 from gremlins.orchestrators.pipeline import StageRunner
-from gremlins.pipeline import load_pipeline, resolve_pipeline_name, resolve_pipeline_path
-from gremlins.schema import PipelineDef as _PipelineData, StageEntry
+from gremlins.pipeline import (
+    load_pipeline,
+    resolve_pipeline_name,
+    resolve_pipeline_path,
+)
+from gremlins.schema import PipelineDef as _PipelineData
+from gremlins.schema import StageEntry
 from gremlins.stages import STAGE_BUILDERS
 
 
