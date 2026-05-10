@@ -8,7 +8,7 @@ The remaining work is to add the sanitize pass and test coverage for the handoff
 
 ## Approach
 
-Add `build_sanitize_prompt` and `sanitize_rolling_plan` to `gremlins/handoff.py`. After the main agent writes the rolling plan, run a second `claude -p --model haiku` pass that enforces format rules mechanically and overwrites the file in-place. Failure is non-fatal.
+Add `build_sanitize_prompt` and `sanitize_rolling_plan` to `gremlins/stages/handoff.py`. After the main agent writes the rolling plan, run a second `claude -p --model haiku` pass that enforces format rules mechanically and overwrites the file in-place. Failure is non-fatal.
 
 ## Tasks
 

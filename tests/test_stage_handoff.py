@@ -109,7 +109,7 @@ def test_chain_done_immediately(tmp_path, monkeypatch, test_state_root):
         calls.append("handoff")
         return 0
 
-    monkeypatch.setattr("gremlins.stages.handoff.handoff_mod.run", fake_handoff_run)
+    monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
     monkeypatch.setenv("GR_ID", gr_id)
 
     h = _make_handoff(tmp_path, gr_id=gr_id)
@@ -143,7 +143,7 @@ def test_next_plan_writes_plan_and_raises(tmp_path, monkeypatch, test_state_root
         )
         return 0
 
-    monkeypatch.setattr("gremlins.stages.handoff.handoff_mod.run", fake_handoff_run)
+    monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
     monkeypatch.setenv("GR_ID", gr_id)
 
     h = _make_handoff(tmp_path, gr_id=gr_id)
@@ -170,7 +170,7 @@ def test_bail_emits_bail_and_raises(tmp_path, monkeypatch, test_state_root):
         _make_signal_file(tmp_path, 1, "bail", reason="scope too big")
         return 0
 
-    monkeypatch.setattr("gremlins.stages.handoff.handoff_mod.run", fake_handoff_run)
+    monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
     monkeypatch.setenv("GR_ID", gr_id)
 
     h = _make_handoff(tmp_path, gr_id=gr_id)
@@ -202,7 +202,7 @@ def test_handoff_index_first_iteration(tmp_path, monkeypatch, test_state_root):
         calls.append(n)
         return 0
 
-    monkeypatch.setattr("gremlins.stages.handoff.handoff_mod.run", fake_handoff_run)
+    monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
     monkeypatch.setenv("GR_ID", gr_id)
 
     h = _make_handoff(tmp_path, gr_id=gr_id)
@@ -225,7 +225,7 @@ def test_handoff_nonzero_exit_raises(tmp_path, monkeypatch, test_state_root):
     _write_state(state_dir, gr_id)
     _write_plan(tmp_path)
 
-    monkeypatch.setattr("gremlins.stages.handoff.handoff_mod.run", lambda *a, **kw: 1)
+    monkeypatch.setattr("gremlins.stages.handoff.run", lambda *a, **kw: 1)
     monkeypatch.setenv("GR_ID", gr_id)
 
     h = _make_handoff(tmp_path, gr_id=gr_id)
@@ -259,7 +259,7 @@ def test_resume_continues_from_file_index(tmp_path, monkeypatch, test_state_root
         captured_plan.append(args.plan)
         return 0
 
-    monkeypatch.setattr("gremlins.stages.handoff.handoff_mod.run", fake_handoff_run)
+    monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
     monkeypatch.setenv("GR_ID", gr_id)
 
     h = _make_handoff(tmp_path, gr_id=gr_id)
@@ -291,7 +291,7 @@ def test_base_ref_from_state(tmp_path, monkeypatch, test_state_root):
         captured_base.append(args.base)
         return 0
 
-    monkeypatch.setattr("gremlins.stages.handoff.handoff_mod.run", fake_handoff_run)
+    monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
     monkeypatch.setenv("GR_ID", gr_id)
 
     h = _make_handoff(tmp_path, gr_id=gr_id)

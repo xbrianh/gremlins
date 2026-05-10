@@ -13,9 +13,9 @@ Per-pipeline orchestrator entry points. Each module owns one CLI subcommand
 - `gh.py` — `gh_main`. Subcommand: `gh`. Loads the selected pipeline YAML
   (default `gh.yaml`) and runs stages.
 - `boss.py` — `boss_main`. Subcommand: `boss`. Not a stage sequencer —
-  drives a chain of child gremlins, subprocessing out to
-  `python -m gremlins.handoff` and `python -m gremlins.cli {stop,land,rescue}` between
-  each one. State lives in `boss_state.json` (schema preserved
+  drives a chain of child gremlins, running the `Handoff` stage in-process
+  and subprocessing out to `python -m gremlins.cli {stop,land,rescue}` between
+  each one. The handoff agent lives in `gremlins/stages/handoff.py`. State lives in `boss_state.json` (schema preserved
   byte-for-byte from the legacy `bossgremlin.py`).
 
 ## Conventions

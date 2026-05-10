@@ -1,14 +1,14 @@
-"""Tests for gremlins/handoff.py."""
+"""Tests for gremlins/stages/handoff.py."""
 
+import argparse
 import json
 import pathlib
 
-import pytest
 from conftest import MINIMAL_EVENTS
 
-from gremlins import handoff
 from gremlins.clients import ClientSpec
 from gremlins.clients.fake import FakeClaudeClient
+from gremlins.stages import handoff
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 
@@ -81,51 +81,6 @@ def test_auto_name_out_strips_existing_numeric_suffix(tmp_path):
     (tmp_path / "plan-001.md").touch()
     out = handoff.auto_name_out(tmp_path / "plan-001.md")
     assert out == tmp_path / "plan-002.md"
-
-
-# ---------------------------------------------------------------------------
-# parse_args
-# ---------------------------------------------------------------------------
-
-
-def test_parse_args_requires_plan():
-    with pytest.raises(SystemExit):
-        handoff.parse_args([])
-
-
-def test_parse_args_defaults():
-    args = handoff.parse_args(["--plan", "/tmp/plan.md"])
-    assert args.plan == "/tmp/plan.md"
-    assert args.spec is None
-    assert args.out is None
-    assert args.base is None
-    assert args.client == "claude:sonnet"
-    assert args.rev is None
-
-
-def test_parse_args_full():
-    args = handoff.parse_args(
-        [
-            "--plan",
-            "/p.md",
-            "--spec",
-            "/s.md",
-            "--out",
-            "/o.md",
-            "--base",
-            "develop",
-            "--client",
-            "claude:haiku",
-            "--rev",
-            "feature-branch",
-        ]
-    )
-    assert args.plan == "/p.md"
-    assert args.spec == "/s.md"
-    assert args.out == "/o.md"
-    assert args.base == "develop"
-    assert args.client == "claude:haiku"
-    assert args.rev == "feature-branch"
 
 
 # ---------------------------------------------------------------------------
@@ -221,70 +176,6 @@ def test_build_prompt_omits_spec_section_by_default(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# main — refusal cases
-# ---------------------------------------------------------------------------
-
-
-def test_main_missing_plan_arg_exits():
-    with pytest.raises(SystemExit):
-        handoff.main([])
-
-
-def test_main_claude_not_in_path(monkeypatch, tmp_path, capsys):
-    monkeypatch.setattr(handoff.shutil, "which", lambda n: None)
-    with pytest.raises(SystemExit) as exc:
-        handoff.main(["--plan", str(tmp_path / "p.md")])
-    assert exc.value.code == 1
-    err = capsys.readouterr().err
-    assert "claude CLI not found" in err
-
-
-def test_main_plan_does_not_exist(monkeypatch, tmp_path, capsys):
-    monkeypatch.setattr(handoff.shutil, "which", lambda n: "/fake/claude")
-    with pytest.raises(SystemExit):
-        handoff.main(["--plan", str(tmp_path / "missing.md")])
-    err = capsys.readouterr().err
-    assert "does not exist" in err
-
-
-def test_main_plan_is_directory(monkeypatch, tmp_path, capsys):
-    monkeypatch.setattr(handoff.shutil, "which", lambda n: "/fake/claude")
-    d = tmp_path / "plan-dir"
-    d.mkdir()
-    with pytest.raises(SystemExit):
-        handoff.main(["--plan", str(d)])
-    err = capsys.readouterr().err
-    assert "not a file" in err
-
-
-def test_main_plan_is_empty(monkeypatch, tmp_path, capsys):
-    monkeypatch.setattr(handoff.shutil, "which", lambda n: "/fake/claude")
-    p = tmp_path / "empty.md"
-    p.touch()
-    with pytest.raises(SystemExit):
-        handoff.main(["--plan", str(p)])
-    err = capsys.readouterr().err
-    assert "is empty" in err
-
-
-def test_main_out_parent_does_not_exist(monkeypatch, tmp_path, capsys):
-    monkeypatch.setattr(handoff.shutil, "which", lambda n: "/fake/claude")
-    p = tmp_path / "plan.md"
-    p.write_text("# Plan\n")
-    with pytest.raises(SystemExit):
-        handoff.main(
-            [
-                "--plan",
-                str(p),
-                "--out",
-                str(tmp_path / "missing-dir" / "out.md"),
-            ]
-        )
-    err = capsys.readouterr().err
-    assert "parent directory does not exist" in err
-
-
-# ---------------------------------------------------------------------------
 # run — signal parsing (next-plan / chain-done / bail)
 # ---------------------------------------------------------------------------
 
@@ -323,7 +214,15 @@ def _stub_happy_run(
         handoff_error=handoff_error,
         sanitize_error=sanitize_error,
     )
-    args = handoff.parse_args(["--plan", str(plan_path)])
+    args = argparse.Namespace(
+        plan=str(plan_path),
+        spec=None,
+        out=None,
+        base=None,
+        client="claude:sonnet",
+        timeout=None,
+        rev=None,
+    )
     return args, client, sig_path, child_path, out_path
 
 
@@ -396,7 +295,15 @@ def test_run_signal_file_not_written(monkeypatch, tmp_path, capsys):
         handoff, "collect_git_context", lambda base_ref, rev=None: ("b", "", "")
     )
     monkeypatch.setattr(handoff, "_load_handoff_style", lambda: "Keep it simple.")
-    args = handoff.parse_args(["--plan", str(plan_path)])
+    args = argparse.Namespace(
+        plan=str(plan_path),
+        spec=None,
+        out=None,
+        base=None,
+        client="claude:sonnet",
+        timeout=None,
+        rev=None,
+    )
     client = FakeClaudeClient(fixtures={"handoff": MINIMAL_EVENTS})
     rc = handoff.run(client, args)
     assert rc == 1
@@ -552,11 +459,11 @@ def test_run_operator_followups_preserved_in_signal(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# main — spec is best-effort
+# run — spec is best-effort
 # ---------------------------------------------------------------------------
 
 
-def test_main_missing_spec_warns_and_continues(monkeypatch, tmp_path, capsys):
+def test_run_missing_spec_warns_and_continues(monkeypatch, tmp_path, capsys):
     args, client, _, _, _ = _stub_happy_run(
         monkeypatch,
         tmp_path,
@@ -573,40 +480,6 @@ def test_main_missing_spec_warns_and_continues(monkeypatch, tmp_path, capsys):
     err = capsys.readouterr().err
     assert "warning" in err.lower()
     assert "spec" in err.lower()
-
-
-def test_main_builds_client_and_runs(monkeypatch, tmp_path):
-    plan_path = tmp_path / "plan.md"
-    plan_path.write_text("# Plan\n- [ ] thing\n")
-    out_path = handoff.auto_name_out(plan_path)
-    sig_path = out_path.parent / (out_path.stem + ".state.json")
-    client = WritingHandoffClient(
-        out_path=out_path,
-        signal_path=sig_path,
-        signal_payload={
-            "exit_state": "chain-done",
-            "child_plan": None,
-            "reason": None,
-            "operator_followups": [],
-        },
-    )
-    monkeypatch.setattr(handoff.shutil, "which", lambda n: "/fake/claude")
-    monkeypatch.setattr(
-        handoff,
-        "to_client",
-        lambda spec: setattr(client, "_gremlins_client_spec", str(spec)) or client,
-    )
-    monkeypatch.setattr(
-        handoff,
-        "collect_git_context",
-        lambda base_ref, rev=None: ("test-branch", "log line", "diff body"),
-    )
-    monkeypatch.setattr(handoff, "_load_handoff_style", lambda: "Keep it simple.")
-
-    rc = handoff.main(["--plan", str(plan_path), "--client", "claude:haiku"])
-    assert rc == 0
-    assert [call.label for call in client.calls] == ["handoff", "handoff:sanitize"]
-    assert client.calls[0].model == "haiku"
 
 
 # ---------------------------------------------------------------------------
