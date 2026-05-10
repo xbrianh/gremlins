@@ -75,7 +75,7 @@ class LoopStage(Stage):
 
     @classmethod
     def from_yaml(cls, d: dict[str, Any]) -> LoopStage:
-        from gremlins.pipeline.loader import get_client_from_yaml, _parse_stage
+        from gremlins.pipeline.loader import _parse_stage, get_client_from_yaml
 
         max_iterations = (d.get("options") or {}).get("max_iterations", 3)
         body = [_parse_stage(child_d) for child_d in (d.get("body") or [])]

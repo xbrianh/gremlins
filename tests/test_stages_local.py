@@ -9,12 +9,12 @@ from gremlins.clients.fake import FakeClaudeClient
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.pipeline.loader import load_pipeline
 from gremlins.stages import implement, plan
-from gremlins.stages.parallel import ParallelStage
-from gremlins.stages.review_code import ReviewCode as _ReviewCode
 from gremlins.stages.address_code import AddressCode
 from gremlins.stages.base import RuntimeState
 from gremlins.stages.implement import _render_spec_block
+from gremlins.stages.parallel import ParallelStage
 from gremlins.stages.review_code import ReviewCode
+from gremlins.stages.review_code import ReviewCode as _ReviewCode
 
 _BUNDLED_PROMPTS = (
     pathlib.Path(__file__).resolve().parent.parent / "gremlins" / "prompts"

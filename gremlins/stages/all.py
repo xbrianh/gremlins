@@ -9,7 +9,6 @@ import gremlins.stages.commit_pr as commit_pr
 import gremlins.stages.handoff as handoff_stage_mod
 import gremlins.stages.implement as implement
 import gremlins.stages.loop as loop
-import gremlins.stages.materialize_to_branch as materialize_to_branch_mod
 import gremlins.stages.open_github_pr as open_github_pr
 import gremlins.stages.parallel as parallel
 import gremlins.stages.plan as plan
