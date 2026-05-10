@@ -247,7 +247,9 @@ def test_explicit_base_ref_used_when_no_prior_pr(tmp_path: pathlib.Path) -> None
         tmp_path,
         {"base_ref_name": "main", "impl_materialized_branch": "gremlin/child-1"},
     )
-    stage = OpenGitHubPR("open-pr", "sonnet", [], {}, issue_url="", base_ref="feature-base")
+    stage = OpenGitHubPR(
+        "open-pr", "sonnet", [], {}, issue_url="", base_ref="feature-base"
+    )
     client = FakeClaudeClient(fixtures={"open-github-pr": MINIMAL_EVENTS})
     ctx = StageContext(client=client, session_dir=tmp_path, gr_id="test-gr")
     stage.bind(ctx)
@@ -279,7 +281,9 @@ def test_last_pr_branch_takes_priority_over_base_ref(tmp_path: pathlib.Path) -> 
         tmp_path,
         {"base_ref_name": "main", "impl_materialized_branch": "gremlin/child-2"},
     )
-    stage = OpenGitHubPR("open-pr", "sonnet", [], {}, issue_url="", base_ref="feature-base")
+    stage = OpenGitHubPR(
+        "open-pr", "sonnet", [], {}, issue_url="", base_ref="feature-base"
+    )
     client = FakeClaudeClient(fixtures={"open-github-pr": MINIMAL_EVENTS})
     ctx = StageContext(client=client, session_dir=tmp_path, gr_id="test-gr")
     stage.bind(ctx)
