@@ -5,8 +5,7 @@ from __future__ import annotations
 import subprocess
 from typing import Any
 
-from gremlins.stages import Stage, register_stage
-from gremlins.stages.loop import RunCmdFailed
+from gremlins.stages import RunCmdFailed, Stage, register_stage
 
 
 class RunCmd(Stage):

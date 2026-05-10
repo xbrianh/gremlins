@@ -8,8 +8,7 @@ import subprocess
 from typing import Any
 
 from gremlins import git as _git_mod
-from gremlins.stages import Stage, register_stage
-from gremlins.stages.loop import LoopExhausted, LoopStage, RunCmdFailed
+from gremlins.stages import LoopExhausted, LoopStage, RunCmdFailed, Stage, register_stage
 from gremlins.state import check_bail
 
 logger = logging.getLogger(__name__)

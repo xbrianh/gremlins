@@ -9,8 +9,8 @@ import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
+from gremlins.stages import StageContext
 from gremlins.stages.address_code import AddressCode
-from gremlins.stages.base import StageContext
 
 PR_URL = "https://github.com/owner/repo/pull/99"
 _GH_PIPE = types.SimpleNamespace(
