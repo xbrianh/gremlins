@@ -227,6 +227,13 @@ def read_pr_url(gr_id: str | None) -> str:
     return ""
 
 
+def last_pr_branch(gr_id: str | None) -> str:
+    for art in reversed(read_artifacts(gr_id)):
+        if art.get("type") == "pr":
+            return str(art.get("branch") or "")
+    return ""
+
+
 def read_pr_num(gr_id: str | None) -> str:
     url = read_pr_url(gr_id)
     return url.split("/")[-1] if url else ""
