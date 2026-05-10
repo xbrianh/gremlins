@@ -60,7 +60,7 @@ class Client:
         raw_path: pathlib.Path | None = None,
         capture_events: bool = False,
         on_timeout_prompt: str | None = None,
-        backoff: list[int] | None = None,
+        backoff: list[float] | None = None,
         cwd: pathlib.Path | None = None,
         idle_timeout: float | None = None,
     ) -> CompletedRun:

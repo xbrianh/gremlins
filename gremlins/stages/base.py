@@ -87,22 +87,36 @@ class Stage:
         return self._mutable_state
 
     def _resolve_retry(self) -> dict[str, Any]:
-        stage_retry = cast(dict[str, Any], self.options.get("retry") or {})
+        raw_stage_retry = self.options.get("retry")
+        if raw_stage_retry is not None and not isinstance(raw_stage_retry, dict):
+            raise ValueError(f"stage {self.name!r}: 'retry' must be a mapping")
+        stage_retry = cast(dict[str, Any], raw_stage_retry or {})
         pr = self.state.pipeline_retry
 
         idle_timeout: Any = stage_retry.get("idle_timeout")
         if idle_timeout is None and pr is not None:
             idle_timeout = pr.idle_timeout
 
-        backoff: Any = stage_retry.get("backoff")
-        if backoff is None and pr is not None:
+        raw_backoff: Any = stage_retry.get("backoff")
+        if raw_backoff is not None:
+            if not isinstance(raw_backoff, (list, tuple)):
+                raise ValueError(f"stage {self.name!r}: 'retry.backoff' must be a list")
+            for i, v in enumerate(raw_backoff):
+                if not isinstance(v, (int, float)) or v < 0:
+                    raise ValueError(
+                        f"stage {self.name!r}: 'retry.backoff[{i}]' must be a non-negative number"
+                    )
+            backoff: list[float] | None = [float(v) for v in raw_backoff]
+        elif pr is not None:
             backoff = pr.backoff
+        else:
+            backoff = None
 
         out: dict[str, Any] = {}
         if idle_timeout is not None:
             out["idle_timeout"] = float(idle_timeout)
         if backoff is not None:
-            out["backoff"] = list(backoff)
+            out["backoff"] = backoff
         return out
 
     def run_claude(

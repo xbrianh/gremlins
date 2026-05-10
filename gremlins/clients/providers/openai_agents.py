@@ -72,10 +72,11 @@ class OpenAIAgentsClient:
         raw_path: pathlib.Path | None = None,
         capture_events: bool = False,
         on_timeout_prompt: str | None = None,
-        max_retries: int = 2,
+        backoff: list[float] | None = None,
         cwd: pathlib.Path | None = None,
         idle_timeout: float | None = None,
     ) -> CompletedRun:
+        del backoff
         effective_model = model or self._model
         agent = Agent(
             name=f"gremlins-{label}",

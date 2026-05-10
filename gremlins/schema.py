@@ -14,7 +14,7 @@ def _empty_stage_list() -> list[StageEntry]:
 @dataclasses.dataclass
 class RetryConfig:
     idle_timeout: float | None = None
-    backoff: list[int] | None = None
+    backoff: list[float] | None = None
 
 
 @dataclasses.dataclass

@@ -15,7 +15,7 @@ class StreamTimeoutError(RuntimeError):
     pass
 
 
-DEFAULT_BACKOFF: list[int] = [1, 5, 25]
+DEFAULT_BACKOFF: list[float] = [1, 5, 25]
 
 CLAUDE_FLAGS_BASE = [
     "--permission-mode",
@@ -176,13 +176,13 @@ class SubprocessClaudeClient:
         raw_path: pathlib.Path | None = None,
         capture_events: bool = False,
         on_timeout_prompt: str | None = None,
-        backoff: list[int] | None = None,
+        backoff: list[float] | None = None,
         cwd: pathlib.Path | None = None,
         idle_timeout: float | None = None,
     ) -> CompletedRun:
         if idle_timeout is None:
             idle_timeout = STREAM_IDLE_TIMEOUT
-        schedule = backoff if backoff is not None else DEFAULT_BACKOFF
+        schedule = [float(v) for v in (backoff if backoff is not None else DEFAULT_BACKOFF)]
         argv = self._build_argv(model)
         prefix = f"[{label}] " if label else ""
         active_prompt = prompt
