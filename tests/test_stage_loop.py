@@ -7,8 +7,7 @@ from typing import Any
 
 import pytest
 
-from gremlins.stages.base import StageContext
-from gremlins.stages.loop import LoopExhausted, LoopStage, RunCmdFailed
+from gremlins.stages import LoopExhausted, LoopStage, RunCmdFailed, StageContext
 from gremlins.stages.run_cmd import RunCmd
 
 

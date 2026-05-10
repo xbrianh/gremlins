@@ -10,7 +10,7 @@ import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.stages.base import StageContext
+from gremlins.stages import StageContext
 from gremlins.stages.verify import Verify
 
 _VERIFY_PROMPT_PATH = (

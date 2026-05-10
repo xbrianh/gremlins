@@ -323,7 +323,7 @@ class _FakePlanStage:
 
     @classmethod
     def orchestration_args(cls):
-        from gremlins.stages.base import StageInput
+        from gremlins.stages import StageInput
 
         return [
             StageInput(

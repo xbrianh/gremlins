@@ -7,7 +7,7 @@ import pathlib
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.stages.base import StageContext
+from gremlins.stages import StageContext
 from gremlins.stages.plan import Plan
 
 
