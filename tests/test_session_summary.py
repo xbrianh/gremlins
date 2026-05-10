@@ -195,7 +195,7 @@ def test_newly_finished_gremlin_shown_at_user_prompt_submit(
 def test_already_summarized_gremlin_not_re_announced(tmp_path, monkeypatch, capsys):
     # A gremlin that was already summarized must not appear in the
     # "finished since last check" block again. It may still appear in the
-    # running block (as dead:finished) because the bash running-block filter
+    # running block (as finished) because the bash running-block filter
     # only checks status=="running", not the summarized marker.
     state_root = tmp_path / "claude-gremlins"
     project_root = "/myproject"

@@ -100,7 +100,7 @@ def liveness_of_state_file(sf: str, state: dict[str, object] | None = None) -> s
             return f"dead:bailed:{gr_bail_reason}"
         if gr_exit_code is not None and gr_exit_code != 0 and gr_exit_code != "null":
             return f"dead:exit {gr_exit_code}"
-        return "dead:finished"
+        return "finished"
 
     if gr_status == "running":
         # PID gone but no finish marker → crashed silently.

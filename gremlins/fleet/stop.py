@@ -25,7 +25,7 @@ def do_stop(target: str) -> bool:
 
     live = liveness_of_state_file(sf, state)
 
-    if live == "dead:finished":
+    if live == "finished":
         print(f"gremlin {gr_id} already finished successfully — nothing to stop")
         return False
     if live == "dead:stopped":

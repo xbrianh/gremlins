@@ -107,7 +107,7 @@ def test_liveness_dead_finished_zero_exit(tmp_path):
         {"status": "running", "pid": 99999, "exit_code": 0},
         finished=True,
     )
-    assert _state.liveness_of_state_file(sf) == "dead:finished"
+    assert _state.liveness_of_state_file(sf) == "finished"
 
 
 def test_liveness_dead_with_nonzero_exit(tmp_path):

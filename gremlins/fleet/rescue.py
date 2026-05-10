@@ -507,7 +507,7 @@ def do_rescue(target: str, headless: bool = False, from_boss: bool = False) -> b
     if live == "running":
         print(f"gremlin {gr_id} is still running — use 'stop' first, then rescue")
         return False
-    if live == "dead:finished":
+    if live == "finished":
         print(f"gremlin {gr_id} finished successfully — nothing to rescue")
         return False
     if live.startswith("stalled:"):
