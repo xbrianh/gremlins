@@ -10,8 +10,8 @@ import subprocess
 import time
 from typing import Any, cast
 
-import gremlins.git as _git
 import gremlins.fleet.constants as _constants
+import gremlins.git as _git
 from gremlins.fleet.resolve import resolve_gremlin
 from gremlins.fleet.state import (
     liveness_of_state_file,

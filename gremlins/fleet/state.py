@@ -8,8 +8,8 @@ import time
 from collections.abc import Iterator
 from typing import cast
 
-from gremlins import git as _git_mod
 import gremlins.fleet.constants as _constants
+from gremlins import git as _git_mod
 
 
 def iso_to_epoch(iso: str) -> float | None:
