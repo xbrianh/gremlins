@@ -11,12 +11,10 @@ import shutil
 import yaml
 
 from gremlins.clients.protocol import ClaudeClient
-from gremlins.clients.resolve import (
-    PACKAGE_DEFAULT,
-    ClientSpec,
+from gremlins.clients.resolve import PACKAGE_DEFAULT, ClientSpec, to_client
+from gremlins.stage_clients import (
     collect_stage_specs,
     load_stage_specs_from_state,
-    to_client,
     validate_stage_specs,
 )
 from gremlins.env_file import load_env_file

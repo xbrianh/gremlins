@@ -145,7 +145,7 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         "gremlins.orchestrators.run.resolve_state_file", lambda gr_id=None: state_file
     )
     monkeypatch.setattr(
-        "gremlins.clients.resolve.resolve_state_file", lambda gr_id=None: state_file
+        "gremlins.stage_clients.resolve_state_file", lambda gr_id=None: state_file
     )
 
     # Stub out patch_state so tests don't write to real state files.

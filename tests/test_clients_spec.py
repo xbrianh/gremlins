@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from gremlins.clients.resolve import (
-    PACKAGE_DEFAULT,
-    ClientSpec,
+from gremlins.clients.resolve import PACKAGE_DEFAULT, ClientSpec
+from gremlins.stage_clients import (
     collect_stage_specs,
     require_stage_spec,
     resolve_stage_client,

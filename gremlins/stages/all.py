@@ -23,7 +23,8 @@ import gremlins.stages.sequence as sequence
 import gremlins.stages.verify as verify
 import gremlins.stages.wait_ci as wait_ci
 import gremlins.stages.wait_copilot as wait_copilot
-from gremlins.clients.resolve import ClientSpec, require_stage_spec
+from gremlins.clients.resolve import ClientSpec
+from gremlins.stage_clients import require_stage_spec
 from gremlins.errors import die
 from gremlins.schema import StageEntry
 from gremlins.stages.base import StageRunner
