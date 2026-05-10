@@ -17,8 +17,8 @@ from gremlins.clients import (
     collect_stage_specs,
     load_stage_specs_from_state,
     to_client,
+    validate_stage_specs,
 )
-from gremlins.clients.resolve import validate_stage_specs
 from gremlins.env_file import load_env_file
 from gremlins.errors import die
 from gremlins.gh_utils import get_repo

@@ -20,6 +20,7 @@ __all__ = [
     "resolve_stage_client",
     "stream_events",
     "to_client",
+    "validate_stage_specs",
 ]
 
 
@@ -46,6 +47,7 @@ collect_stage_specs = _resolve.collect_stage_specs
 load_stage_specs_from_state = _resolve.load_stage_specs_from_state
 require_stage_spec = _resolve.require_stage_spec
 resolve_stage_client = _resolve.resolve_stage_client
+validate_stage_specs = _resolve.validate_stage_specs
 
 
 def to_client(spec: ClientSpec) -> ClaudeClient:

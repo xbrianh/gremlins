@@ -6,7 +6,7 @@ import shlex
 import subprocess
 from typing import Any, NamedTuple, cast
 
-from gremlins.clients.protocol import ClaudeClient, CompletedRun
+from gremlins.clients import ClaudeClient, CompletedRun
 
 
 class StageInput(NamedTuple):

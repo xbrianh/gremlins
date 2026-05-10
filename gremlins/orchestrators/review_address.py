@@ -31,7 +31,7 @@ def _parse_review_args(argv: list[str]) -> argparse.Namespace:
 
 def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     configure_logging()
-    from gremlins.clients import PACKAGE_DEFAULT, to_client
+    from gremlins.clients import to_client
 
     if client is None:
         client = to_client(PACKAGE_DEFAULT)
@@ -104,7 +104,7 @@ def _parse_address_args(argv: list[str]) -> argparse.Namespace:
 
 def address_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
     configure_logging()
-    from gremlins.clients import PACKAGE_DEFAULT, to_client
+    from gremlins.clients import to_client
 
     if client is None:
         client = to_client(PACKAGE_DEFAULT)
