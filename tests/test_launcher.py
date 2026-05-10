@@ -884,17 +884,17 @@ def test_launch_gh_plan_issue_ref_not_snapshotted(lenv_with_gh):
 
 
 def test_launch_passes_base_ref_to_worktree_setup(lenv, monkeypatch):
-    """launch(base_ref=<sha>) calls setup_worktree_branch with base_ref=<sha>."""
+    """launch(base_ref=<sha>) passes the sha to the worktree setup and persists it."""
+    import gremlins.launcher as _launcher_mod
+
     captured = {}
-    real_setup = git_mod.setup_worktree_branch
+    real_setup = _launcher_mod._setup_named_worktree
 
-    def fake_setup(project_root, gr_id, base_ref="HEAD", branch_prefix="bg/local"):
-        captured["base_ref"] = base_ref
-        return real_setup(
-            project_root, gr_id, base_ref=base_ref, branch_prefix=branch_prefix
-        )
+    def fake_setup(project_root, gr_id, base_ref_sha):
+        captured["base_ref_sha"] = base_ref_sha
+        return real_setup(project_root, gr_id, base_ref_sha)
 
-    monkeypatch.setattr(git_mod, "setup_worktree_branch", fake_setup)
+    monkeypatch.setattr(_launcher_mod, "_setup_named_worktree", fake_setup)
 
     launcher = _launcher()
     # Use the actual HEAD SHA so worktree add succeeds.
@@ -915,8 +915,8 @@ def test_launch_passes_base_ref_to_worktree_setup(lenv, monkeypatch):
         f"pipeline did not finish; log:\n{(state_dir / 'log').read_text(errors='replace')[-2000:]}"
     )
 
-    assert captured.get("base_ref") == head_sha, (
-        f"expected base_ref={head_sha!r}, got {captured.get('base_ref')!r}"
+    assert captured.get("base_ref_sha") == head_sha, (
+        f"expected base_ref_sha={head_sha!r}, got {captured.get('base_ref_sha')!r}"
     )
 
 

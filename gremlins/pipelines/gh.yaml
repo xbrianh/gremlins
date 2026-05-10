@@ -11,9 +11,7 @@ prompts:
 stages:
   - { name: plan,            type: plan,            prompt: [code-style, gremlins:plan_gh.md] }
   - { name: implement,       type: implement,       prompt: [code-style, gremlins:implement_gh.md] }
-  - { name: materialize-to-branch, type: materialize-to-branch }
   - { name: verify,          type: verify,          options: { cmds: ["make check", "make test"], commit_after_fix: false }, prompt: verify }
-  - { name: commit,          type: commit }
   - { name: open-pr,         type: open-github-pr }
   - { name: request-copilot, type: request-copilot }
   - { name: ghreview,        type: ghreview,        prompt: [code-style, gremlins:review_gh.md] }

@@ -11,12 +11,24 @@ from gremlins.prompts import BUNDLED_PROMPT_DIR
 from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import append_artifact, last_pr_branch
+from gremlins.utils import proc
 
 logger = logging.getLogger(__name__)
 
 
 def _load(name: str) -> str:
     return (BUNDLED_PROMPT_DIR / name).read_text(encoding="utf-8")
+
+
+def _get_pr_branch(pr_url: str) -> str:
+    r = proc.run(
+        ["gh", "pr", "view", pr_url, "--json", "headRefName", "-q", ".headRefName"],
+        timeout=15,
+    )
+    if r.returncode != 0:
+        logger.warning("_get_pr_branch: gh pr view failed for %s", pr_url)
+        return ""
+    return r.stdout.strip()
 
 
 class OpenGitHubPR(Stage):
@@ -85,14 +97,8 @@ class OpenGitHubPR(Stage):
             label="PR",
             text_result=completed.text_result,
         )
-        impl_branch = state.impl_materialized_branch
-        if not impl_branch:
-            raise RuntimeError(
-                "impl_materialized_branch is empty; materialize-to-branch must run before open-github-pr"
-            )
-        append_artifact(
-            state.gr_id, {"type": "pr", "url": pr_url, "branch": impl_branch}
-        )
+        branch = _get_pr_branch(pr_url)
+        append_artifact(state.gr_id, {"type": "pr", "url": pr_url, "branch": branch})
         logger.info("PR: %s", pr_url)
         return pr_url
 

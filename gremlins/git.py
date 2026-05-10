@@ -13,7 +13,6 @@ from __future__ import annotations
 import dataclasses
 import os
 import shutil
-import sys
 import tempfile
 
 from gremlins.utils import proc
@@ -263,17 +262,11 @@ def ls_others(*, cwd: str | os.PathLike[str] | None = None) -> str:
         return ""
 
 
-# ---------------------------------------------------------------------------
-# ghgremlin impl-handoff branch lifecycle (Phase 3)
-# ---------------------------------------------------------------------------
-
-
 @dataclasses.dataclass
 class PreImplState:
     """Git state captured before the implement stage runs."""
 
     head: str
-    branch: str  # empty string when HEAD is detached (the launch.sh worktree default)
 
 
 @dataclasses.dataclass
@@ -300,14 +293,12 @@ ImplOutcome = EmptyImpl | HeadAdvanced | DivergentHead
 
 
 def record_pre_impl_state(cwd: str | None = None) -> PreImplState:
-    """Capture HEAD commit and symbolic branch ref before running the implement stage."""
+    """Capture HEAD commit before running the implement stage."""
     head_r = proc.run(["git", "rev-parse", "HEAD"], cwd=cwd)
     head = head_r.stdout.strip() if head_r.returncode == 0 else ""
     if not head:
         raise RuntimeError("could not resolve HEAD before implement stage")
-    branch_r = proc.run(["git", "symbolic-ref", "--short", "HEAD"], cwd=cwd)
-    branch = branch_r.stdout.strip() if branch_r.returncode == 0 else ""
-    return PreImplState(head=head, branch=branch)
+    return PreImplState(head=head)
 
 
 def classify_impl_outcome(pre: PreImplState, cwd: str | None = None) -> ImplOutcome:
@@ -332,99 +323,6 @@ def classify_impl_outcome(pre: PreImplState, cwd: str | None = None) -> ImplOutc
             "stage all changes and commit before proceeding"
         )
     return EmptyImpl()
-
-
-def create_handoff_branch(pre: PreImplState, cwd: str | None = None) -> str:
-    """Create a ghgremlin-impl-handoff-<pid> branch at current HEAD.
-
-    Returns the branch name. Raises if the branch already exists or git switch fails.
-    The PID suffix scopes the name to this process so concurrent gremlins in the
-    same repo don't collide.
-    """
-    handoff = f"ghgremlin-impl-handoff-{os.getpid()}"
-    if proc.run_ok(
-        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{handoff}"], cwd=cwd
-    ):
-        raise RuntimeError(
-            f"hand-off branch {handoff} already exists; refusing to clobber"
-        )
-    switch_r = proc.run(["git", "switch", "-c", handoff], cwd=cwd)
-    if switch_r.returncode != 0:
-        raise RuntimeError(
-            f"could not create hand-off branch {handoff}: {switch_r.stderr.strip()}"
-        )
-    return handoff
-
-
-def reset_pre_branch(pre: PreImplState, cwd: str | None = None) -> None:
-    """Reset the pre-impl branch ref back to pre.head.
-
-    No-op when HEAD was detached at impl start (pre.branch is empty), which is
-    the normal case under launch.sh's detached worktree. Under direct invocation
-    from a named branch this resets that branch to PRE_HEAD so implementation
-    commits don't leak onto the chain's start ref (intentional destructive reset).
-    """
-    if not pre.branch:
-        return
-    r = proc.run(["git", "branch", "-f", pre.branch, pre.head], cwd=cwd)
-    if r.returncode != 0:
-        raise RuntimeError(
-            f"could not reset {pre.branch} to {pre.head}: {r.stderr.strip()}"
-        )
-
-
-def sweep_stale_handoff_branches(handoff_branch: str, cwd: str | None = None) -> None:
-    """Delete ghgremlin-impl-handoff-* branches from prior failed runs that are
-    already merged into HEAD. Leaves divergent ones in place with a warning.
-
-    Called after create_handoff_branch so HEAD is on the new handoff branch and
-    git branch -d (which refuses to delete the current branch) can safely delete
-    stale branches that are ancestors of the current HEAD.
-    """
-    list_r = proc.run(
-        [
-            "git",
-            "for-each-ref",
-            "--format=%(refname:short)",
-            "refs/heads/ghgremlin-impl-handoff-*",
-        ],
-        cwd=cwd,
-    )
-    if list_r.returncode != 0:
-        return
-    for stale in list_r.stdout.splitlines():
-        stale = stale.strip()
-        if not stale or stale == handoff_branch:
-            continue
-        if proc.run_ok(["git", "merge-base", "--is-ancestor", stale, "HEAD"], cwd=cwd):
-            proc.run_quiet(["git", "branch", "-d", stale], cwd=cwd)
-        else:
-            sys.stderr.write(
-                f"warning: leaving divergent hand-off branch {stale} in place "
-                "(unique commits would be lost)\n"
-            )
-            sys.stderr.flush()
-
-
-def setup_worktree_branch(
-    project_root: str,
-    gr_id: str,
-    base_ref: str = "HEAD",
-    branch_prefix: str = "bg/local",
-) -> tuple[str, str]:
-    """Add a named-branch worktree at base_ref. Returns (workdir_path, branch_name).
-
-    Raises RuntimeError on failure.
-    """
-    workdir = tempfile.mkdtemp(prefix="aibg-localgremlin.")
-    os.rmdir(workdir)
-    branch = f"{branch_prefix}/{gr_id}"
-    r = proc.run(
-        ["git", "worktree", "add", "-b", branch, workdir, base_ref], cwd=project_root
-    )
-    if r.returncode != 0:
-        raise RuntimeError(f"git worktree add -b {branch!r} failed: {r.stderr.strip()}")
-    return workdir, branch
 
 
 def setup_detached_worktree(project_root: str, base_ref: str) -> str:

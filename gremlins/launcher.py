@@ -19,6 +19,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import tempfile
 from typing import Any, cast
 
 import yaml
@@ -78,9 +79,7 @@ def pipeline_uses_loop_handoff(pipeline: PipelineDef) -> bool:
 
 
 def _pipeline_setup_kind(pipeline: PipelineDef) -> str:
-    if any(s.type == "materialize-to-branch" for s in pipeline.stages):
-        return "worktree-detached"
-    if pipeline_uses_loop_handoff(pipeline):
+    if pipeline_uses_gh(pipeline) or pipeline_uses_loop_handoff(pipeline):
         return "worktree-detached"
     return "worktree-branch"
 
@@ -317,9 +316,7 @@ def _setup_workdir(
         return _git_mod.setup_copy(project_root), "", "", "copy"
 
     if setup_kind == "worktree-branch":
-        workdir, branch = _git_mod.setup_worktree_branch(
-            project_root, gr_id, base_ref=base_ref_sha or "HEAD"
-        )
+        workdir, branch = _setup_named_worktree(project_root, gr_id, base_ref_sha)
         _stage_gremlins_overlay(project_root, state_dir)
         return workdir, branch, "", "worktree-branch"
 
@@ -327,6 +324,21 @@ def _setup_workdir(
     workdir = _git_mod.setup_detached_worktree(project_root, base_ref_sha or "HEAD")
     _stage_gremlins_overlay(project_root, state_dir)
     return workdir, "", base_ref_sha, "worktree"
+
+
+def _setup_named_worktree(
+    project_root: str, gr_id: str, base_ref_sha: str
+) -> tuple[str, str]:
+    workdir = tempfile.mkdtemp(prefix="aibg-localgremlin.")
+    os.rmdir(workdir)
+    branch = f"bg/local/{gr_id}"
+    r = proc.run(
+        ["git", "worktree", "add", "-b", branch, workdir, base_ref_sha or "HEAD"],
+        cwd=project_root,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"git worktree add -b {branch!r} failed: {r.stderr.strip()}")
+    return workdir, branch
 
 
 def _build_spawn_env(gr_id: str) -> dict[str, str]:
