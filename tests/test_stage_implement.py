@@ -7,30 +7,12 @@ import pathlib
 from unittest.mock import patch
 
 import pytest
-from conftest import MINIMAL_EVENTS
+from conftest import MINIMAL_EVENTS, gh_pipeline as _gh_pipeline
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.git import DivergentHead, EmptyImpl, HeadAdvanced, PreImplState
-from gremlins.schema import PipelineDef as _PipelineDef
-from gremlins.schema import StageEntry as _StageEntry
 from gremlins.stages.base import RuntimeState
 from gremlins.stages.implement import Implement
-
-
-def _gh_pipeline() -> _PipelineDef:
-    return _PipelineDef(
-        name="test",
-        path=pathlib.Path("."),
-        stages=[
-            _StageEntry(
-                name="open-github-pr",
-                type="open-github-pr",
-                client=None,
-                prompts=[],
-                options={},
-            )
-        ],
-    )
 
 
 _TEMPLATE_LOCAL = "plan: {plan_text}{spec_block}{impl_commit_instr}"

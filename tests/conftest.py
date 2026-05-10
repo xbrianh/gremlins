@@ -13,8 +13,26 @@ import pytest
 
 import gremlins.orchestrators.run as _run_mod
 from gremlins.clients.fake import FakeClaudeClient
+from gremlins.schema import PipelineDef as _PipelineDef
+from gremlins.schema import StageEntry as _StageEntry
 
 TESTS_DIR = pathlib.Path(__file__).resolve().parent
+
+
+def gh_pipeline() -> _PipelineDef:
+    return _PipelineDef(
+        name="test",
+        path=pathlib.Path("."),
+        stages=[
+            _StageEntry(
+                name="open-github-pr",
+                type="open-github-pr",
+                client=None,
+                prompts=[],
+                options={},
+            )
+        ],
+    )
 if str(TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(TESTS_DIR))
 
