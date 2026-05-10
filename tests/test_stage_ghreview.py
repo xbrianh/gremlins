@@ -9,7 +9,7 @@ import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.stages import StageContext
+from gremlins.stages.base import StageContext
 from gremlins.stages.review_code import ReviewCode
 
 PR_URL = "https://github.com/owner/repo/pull/42"

@@ -7,7 +7,7 @@ import subprocess
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.stages import StageContext
+from gremlins.stages.base import StageContext
 from gremlins.stages.request_copilot import RequestCopilot
 
 

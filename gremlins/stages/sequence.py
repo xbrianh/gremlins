@@ -11,7 +11,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from gremlins.stages import Stage, StageContext, register_stage
+from gremlins.stages.base import Stage, StageContext
+from gremlins.stages.registry import register_stage
 
 
 class SequenceStage(Stage):

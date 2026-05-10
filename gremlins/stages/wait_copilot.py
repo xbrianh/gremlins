@@ -8,7 +8,8 @@ from collections.abc import Callable
 from typing import Any
 
 from gremlins.gh_utils import check_copilot_review
-from gremlins.stages import Stage, register_stage
+from gremlins.stages.base import Stage
+from gremlins.stages.registry import register_stage
 from gremlins.state import read_pr_num
 
 logger = logging.getLogger(__name__)

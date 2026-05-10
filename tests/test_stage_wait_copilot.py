@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.stages import StageContext
+from gremlins.stages.base import StageContext
 from gremlins.stages.wait_copilot import WaitCopilot
 
 

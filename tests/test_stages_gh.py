@@ -6,7 +6,7 @@ import types
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.stages import StageContext
+from gremlins.stages.base import StageContext
 from gremlins.stages.address_code import AddressCode
 from gremlins.stages.review_code import ReviewCode
 

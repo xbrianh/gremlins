@@ -10,7 +10,7 @@ import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.stages import StageContext
+from gremlins.stages.base import StageContext
 from gremlins.stages.open_github_pr import OpenGitHubPR
 
 ISSUE_URL = "https://github.com/owner/repo/issues/42"

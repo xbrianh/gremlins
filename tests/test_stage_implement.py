@@ -13,7 +13,7 @@ from conftest import MINIMAL_EVENTS
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.git import DivergentHead, EmptyImpl, HeadAdvanced, PreImplState
 from gremlins.schema import PipelineDef, StageEntry
-from gremlins.stages import StageContext
+from gremlins.stages.base import StageContext
 from gremlins.stages.implement import Implement
 
 _TEMPLATE_LOCAL = "plan: {plan_text}{spec_block}{impl_commit_instr}"

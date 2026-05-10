@@ -17,7 +17,8 @@ from gremlins.git import in_git_repo
 from gremlins.runner import run_stages
 from gremlins.schema import PipelineDef as _PipelineData
 from gremlins.schema import StageEntry
-from gremlins.stages import STAGE_BUILDERS, STAGE_NEEDS_PIPE, StageContext
+from gremlins.stages.base import StageContext
+from gremlins.stages.registry import STAGE_BUILDERS, STAGE_NEEDS_PIPE
 from gremlins.state import resolve_state_file, set_stage
 
 logger = logging.getLogger(__name__)

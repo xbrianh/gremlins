@@ -9,7 +9,8 @@ from typing import Any
 
 from gremlins.gh_utils import fetch_check_run_logs, get_pr_ci_status
 from gremlins.git import head_sha
-from gremlins.stages import Stage, register_stage
+from gremlins.stages.base import Stage
+from gremlins.stages.registry import register_stage
 from gremlins.state import check_bail, emit_bail, read_pr_url
 
 logger = logging.getLogger(__name__)

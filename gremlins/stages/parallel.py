@@ -12,7 +12,8 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
-from gremlins.stages import CompoundStage, StageContext
+from gremlins.stages.base import StageContext
+from gremlins.stages.compound import CompoundStage
 from gremlins.utils import proc
 
 logger = logging.getLogger(__name__)

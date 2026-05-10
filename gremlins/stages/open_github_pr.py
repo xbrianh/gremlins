@@ -8,7 +8,8 @@ from typing import Any
 from gremlins.clients.protocol import CompletedRun
 from gremlins.gh_utils import extract_gh_url
 from gremlins.prompts import BUNDLED_PROMPT_DIR
-from gremlins.stages import Stage, register_stage
+from gremlins.stages.base import Stage
+from gremlins.stages.registry import register_stage
 from gremlins.state import (
     append_artifact,
     last_pr_branch,
