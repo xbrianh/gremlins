@@ -6,7 +6,7 @@ import pathlib
 import shlex
 import subprocess
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast
 
 from gremlins.clients.protocol import ClaudeClient, CompletedRun
 
@@ -15,7 +15,6 @@ if TYPE_CHECKING:
     from gremlins.pipeline import PipelineDef, StageEntry
 
 
-@runtime_checkable
 class StageRunner(Protocol):
     args: argparse.Namespace
     session_dir: pathlib.Path
