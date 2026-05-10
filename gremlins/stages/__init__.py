@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from gremlins.clients.registry import CLIENT_FACTORIES, register_client_factory
 from gremlins.stages.base import Stage, StageContext, StageInput
 from gremlins.stages.registry import (
     STAGE_BUILDERS,
@@ -24,11 +23,9 @@ __all__ = [
     "Stage",
     "StageContext",
     "StageInput",
-    "CLIENT_FACTORIES",
     "STAGE_BUILDERS",
     "STAGE_NEEDS_PIPE",
     "STAGE_REGISTRY",
-    "register_client_factory",
     "register_stage",
     "register_stage_builder",
 ]
