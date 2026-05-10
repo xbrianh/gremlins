@@ -4,7 +4,7 @@ import importlib
 import pathlib
 from typing import Any, cast
 
-from gremlins.clients import ClientSpec
+from gremlins.clients.resolve import ClientSpec
 from gremlins.pipeline.preprocess import expand_pipeline
 from gremlins.schema import PipelineDef, StageEntry
 from gremlins.stages import STAGE_REGISTRY

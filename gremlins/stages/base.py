@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast
 from gremlins.clients.protocol import ClaudeClient, CompletedRun
 
 if TYPE_CHECKING:
-    from gremlins.clients import ClientSpec
+    from gremlins.clients.resolve import ClientSpec
     from gremlins.schema import PipelineDef, StageEntry
 
 

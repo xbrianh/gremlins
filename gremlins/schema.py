@@ -4,7 +4,7 @@ import dataclasses
 import pathlib
 from typing import Any
 
-from gremlins.clients import ClientSpec
+from gremlins.clients.resolve import ClientSpec
 
 
 def _empty_stage_list() -> list[StageEntry]:

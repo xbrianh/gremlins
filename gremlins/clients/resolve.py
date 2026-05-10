@@ -3,12 +3,13 @@ from __future__ import annotations
 import dataclasses
 import json
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from gremlins.clients.registry import CLIENT_FACTORIES
 from gremlins.state import resolve_state_file
 
 if TYPE_CHECKING:
+    from gremlins.clients.protocol import ClaudeClient
     from gremlins.schema import PipelineDef, StageEntry
 
 
@@ -120,3 +121,7 @@ def require_stage_spec(
         return stage_specs[name]
     except KeyError as exc:
         raise ValueError(_format_missing_stage_specs([name])) from exc
+
+
+def to_client(spec: ClientSpec) -> ClaudeClient:
+    return cast("ClaudeClient", CLIENT_FACTORIES[spec.provider](spec.model or None))

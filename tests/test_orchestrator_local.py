@@ -7,8 +7,8 @@ from conftest import REVIEW_LABELS as _REVIEW_LABELS
 from conftest import ReviewCreatingClient as _ReviewCreatingClient
 from conftest import common_local_patches as _common_patches
 
-from gremlins.clients import ClientSpec
 from gremlins.clients.fake import FakeClaudeClient
+from gremlins.clients.resolve import ClientSpec
 from gremlins.orchestrators.review_address import address_main, review_main
 from gremlins.orchestrators.run import run_pipeline
 from gremlins.pipeline import load_pipeline, resolve_pipeline_path
