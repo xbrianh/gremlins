@@ -227,6 +227,20 @@ def test_first_child_uses_base_ref_name(tmp_path: pathlib.Path) -> None:
     assert "main" in prompts_seen[0]
 
 
+def test_run_raises_if_impl_branch_missing(tmp_path: pathlib.Path) -> None:
+    _write_state(tmp_path, {"base_ref_name": "main"})
+    stage, _ = _make_stage_with_gr(tmp_path)
+    with (
+        patch(
+            "gremlins.stages.open_github_pr.resolve_state_file",
+            return_value=tmp_path / "state.json",
+        ),
+        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
+        pytest.raises(RuntimeError, match="impl_materialized_branch is empty"),
+    ):
+        stage.run(None)
+
+
 def test_record_child_pr_appends_pr_artifact(tmp_path: pathlib.Path) -> None:
     """After opening a PR, a pr artifact with url and branch is appended."""
     sf = _write_state(
