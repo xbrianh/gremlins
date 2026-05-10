@@ -712,9 +712,7 @@ def _land_boss(
     )
 
 
-def _land_gh(
-    gr_id: str, wdir: str, state: dict[str, Any], force: bool = False
-) -> bool:
+def _land_gh(gr_id: str, wdir: str, state: dict[str, Any], force: bool = False) -> bool:
     """Merge a gh gremlin's PR and clean up."""
     pr_url = read_pr_url(gr_id)
     if not pr_url:
