@@ -15,7 +15,8 @@ from gremlins.logging_setup import configure_logging
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.pipeline.loader import load_pipeline
 from gremlins.runner import install_signal_handlers
-from gremlins.stages import address_code, review_code
+import gremlins.stages.address_code as address_code
+import gremlins.stages.review_code as review_code
 from gremlins.stages.base import StageContext
 
 logger = logging.getLogger(__name__)
