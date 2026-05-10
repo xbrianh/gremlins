@@ -207,13 +207,15 @@ class Plan(Stage):
             )
             sys.stderr.flush()
             sys.exit(1)
-        if not target_repo:
+        pr_repo = self.repo
+        if not pr_repo:
             try:
-                target_repo = get_repo()
+                pr_repo = get_repo()
             except RuntimeError as exc:
                 sys.stderr.write(f"error: --plan: could not resolve repo: {exc}\n")
                 sys.stderr.flush()
                 sys.exit(1)
+        target_repo = target_repo or pr_repo
         try:
             issue_data = view_issue(issue_ref, target_repo)
         except RuntimeError as exc:
@@ -229,7 +231,7 @@ class Plan(Stage):
         resolved_num = str(issue_data.get("number") or "")
         issue_title = (issue_data.get("title") or "")[:60]
         plan_md.write_text(issue_body + "\n", encoding="utf-8")
-        if self.repo and target_repo == self.repo:
+        if target_repo == pr_repo:
             issue_url = resolved_url
             issue_num = resolved_num
         else:
