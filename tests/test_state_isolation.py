@@ -50,7 +50,7 @@ import gremlins.state as state_mod
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.orchestrators.review_address import address_main, review_main
 from gremlins.orchestrators.run import run_pipeline
-from gremlins.pipeline import resolve_pipeline_path
+from gremlins.pipeline.discovery import resolve_pipeline_path
 
 
 def test_autouse_isolate_gr_id_unsets_gr_id_under_inherited_env(tmp_path):

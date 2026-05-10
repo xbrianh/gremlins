@@ -11,7 +11,8 @@ from gremlins.clients import ClientSpec
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.orchestrators.review_address import address_main, review_main
 from gremlins.orchestrators.run import run_pipeline
-from gremlins.pipeline import load_pipeline, resolve_pipeline_path
+from gremlins.pipeline.discovery import resolve_pipeline_path
+from gremlins.pipeline.loader import load_pipeline
 
 
 def _local_pipeline_path(cwd):

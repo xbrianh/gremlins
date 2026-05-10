@@ -12,7 +12,7 @@ def stage_names_for_gremlin(state: dict[str, Any]) -> list[str]:
     pipeline_path = state.get("pipeline_path")
     if pipeline_path:
         try:
-            from gremlins.pipeline import load_pipeline
+            from gremlins.pipeline.loader import load_pipeline
 
             pipeline = load_pipeline(pathlib.Path(str(pipeline_path)))
             return [s.name for s in pipeline.stages]

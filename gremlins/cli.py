@@ -43,7 +43,8 @@ from gremlins.fleet.cli import (
 )
 from gremlins.launcher import launch, resume
 from gremlins.orchestrators.review_address import address_main, review_main
-from gremlins.pipeline import list_pipelines, load_pipeline, resolve_pipeline_name
+from gremlins.pipeline.discovery import list_pipelines, resolve_pipeline_name
+from gremlins.pipeline.loader import load_pipeline
 from gremlins.stages import STAGE_REGISTRY, Stage
 from gremlins.state import validate_gr_id
 

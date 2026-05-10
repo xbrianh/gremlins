@@ -3,7 +3,7 @@ import pathlib
 
 import pytest
 
-from gremlins.pipeline import BUNDLED_PIPELINE_DIR, resolve_pipeline_name
+from gremlins.pipeline.discovery import BUNDLED_PIPELINE_DIR, resolve_pipeline_name
 
 
 def test_hit_bundled(tmp_path: pathlib.Path) -> None:

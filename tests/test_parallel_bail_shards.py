@@ -668,7 +668,7 @@ def test_parallel_all_children_complete_with_defaults():
 
 
 def test_pipeline_cancel_on_bail_and_bail_policy_parsed(tmp_path):
-    from gremlins.pipeline import load_pipeline
+    from gremlins.pipeline.loader import load_pipeline
 
     yaml_content = """\
 name: p
@@ -689,7 +689,7 @@ stages:
 
 
 def test_pipeline_bail_policy_invalid_raises(tmp_path):
-    from gremlins.pipeline import load_pipeline
+    from gremlins.pipeline.loader import load_pipeline
 
     yaml_content = """\
 name: p
