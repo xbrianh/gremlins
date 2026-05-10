@@ -13,8 +13,8 @@ from gremlins.clients.fake import FakeClaudeClient
 from gremlins.clients.resolve import ClientSpec
 from gremlins.schema import StageEntry
 from gremlins.stages.base import StageContext
-from gremlins.stages.loop import RunCmdFailed
 from gremlins.stages.handoff import Handoff
+from gremlins.stages.loop import RunCmdFailed
 
 # ---------------------------------------------------------------------------
 # Helpers
