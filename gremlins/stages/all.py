@@ -98,7 +98,7 @@ def _build_implement(entry: StageEntry, spec: Client, state: RuntimeState) -> An
         entry.options,
         is_git=state.is_git,
         spec_text=spec_text,
-        is_gh=pipeline_uses_gh(state.pipeline_data),
+        is_gh=bool(state.pipeline_data and pipeline_uses_gh(state.pipeline_data)),
     )
 
 
@@ -197,7 +197,7 @@ def _build_review_code(entry: StageEntry, spec: Client, state: RuntimeState) -> 
         entry.options,
         plan_text=plan_text,
         is_git=state.is_git,
-        is_gh=pipeline_uses_gh(state.pipeline_data),
+        is_gh=bool(state.pipeline_data and pipeline_uses_gh(state.pipeline_data)),
     )
 
 
@@ -212,7 +212,7 @@ def _build_address_code(entry: StageEntry, spec: Client, state: RuntimeState) ->
         is_git=state.is_git,
         review_stage_names=names,
         review_stage_dirs=dirs,
-        is_gh=pipeline_uses_gh(state.pipeline_data),
+        is_gh=bool(state.pipeline_data and pipeline_uses_gh(state.pipeline_data)),
     )
 
 

@@ -16,7 +16,7 @@ from gremlins.errors import die
 from gremlins.gh_utils import get_repo
 from gremlins.git import has_commits, has_dirty_worktree, in_git_repo
 from gremlins.logging_setup import configure_logging
-from gremlins.orchestrators.pipeline import StageRunner
+from gremlins.orchestrators.pipeline import Pipeline
 from gremlins.pipeline.loader import load_pipeline
 from gremlins.runner import install_signal_handlers
 from gremlins.stage_clients import (
@@ -169,7 +169,7 @@ def run_pipeline(
     logger.info("session: %s", session_dir)
 
     try:
-        pipe = StageRunner(
+        pipe = Pipeline(
             pipeline.stages,
             args=args,
             session_dir=session_dir,

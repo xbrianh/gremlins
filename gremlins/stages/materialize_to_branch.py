@@ -10,7 +10,6 @@ from gremlins.git import (
     DivergentHead,
     EmptyImpl,
     ImplOutcome,
-    PreImplState,
     classify_impl_outcome,
     create_handoff_branch,
     reset_pre_branch,

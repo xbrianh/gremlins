@@ -19,6 +19,14 @@ if TYPE_CHECKING:
     from gremlins.schema import PipelineDef, StageEntry
 
 
+def _client_dict() -> dict[str, Client]:
+    return {}
+
+
+def _stage_entry_list() -> list[StageEntry]:
+    return []
+
+
 @dataclasses.dataclass
 class RuntimeState:
     # required per-stage
@@ -31,14 +39,14 @@ class RuntimeState:
     pipeline_data: PipelineDef | None = None
     repo: str = ""
     instructions: str = ""
-    stage_specs: dict[str, Client] = dataclasses.field(default_factory=dict)
-    spec_clients: dict[str, Client] = dataclasses.field(default_factory=dict)
+    stage_specs: dict[str, Client] = dataclasses.field(default_factory=_client_dict)
+    spec_clients: dict[str, Client] = dataclasses.field(default_factory=_client_dict)
     is_git: bool = False
     test_client: Client | None = None
     # per-stage optional
     child_key: str | None = None
     worktree: pathlib.Path | None = None
-    current_scope: list[StageEntry] = dataclasses.field(default_factory=list)
+    current_scope: list[StageEntry] = dataclasses.field(default_factory=_stage_entry_list)
     # runtime-derived (populated from state.json before each stage run)
     issue_url: str = ""
     base_ref_name: str = ""

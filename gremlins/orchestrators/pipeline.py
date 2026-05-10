@@ -54,7 +54,7 @@ def _expand_stage_entries(raw_stages: list[StageEntry]) -> list[StageEntry]:
     return result
 
 
-class StageRunner:
+class Pipeline:
     def __init__(
         self,
         stages: list[StageEntry],
@@ -78,7 +78,7 @@ class StageRunner:
             elif s.type == "loop":
                 unknown.extend(c.type for c in s.body if c.type not in STAGE_BUILDERS)
         if unknown:
-            raise ValueError(f"StageRunner does not support stage type(s): {unknown}")
+            raise ValueError(f"Pipeline does not support stage type(s): {unknown}")
         self.stages = _expand_stage_entries(stages)
         self.args = args
         self.session_dir = session_dir
