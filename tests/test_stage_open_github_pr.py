@@ -168,11 +168,13 @@ def test_single_pr_with_branch_artifact_uses_base_ref_name(
     )
     stage, ctx = _make_stage_with_gr(tmp_path)
     prompts_seen: list[str] = []
+    sf = tmp_path / "state.json"
     with (
         patch(
             "gremlins.stages.open_github_pr.resolve_state_file",
-            return_value=tmp_path / "state.json",
+            return_value=sf,
         ),
+        patch("gremlins.state.resolve_state_file", return_value=sf),
         patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
         patch("gremlins.stages.open_github_pr.append_artifact"),
         patch.object(
