@@ -325,6 +325,18 @@ def classify_impl_outcome(pre: PreImplState, cwd: str | None = None) -> ImplOutc
     return EmptyImpl()
 
 
+def checkout_detach(ref: str, *, cwd: str | os.PathLike[str] | None = None) -> None:
+    """Detach HEAD to <ref>. Raises GitError on failure."""
+    _run_git(["checkout", "--detach", ref], cwd=cwd)
+
+
+def git_detach_to_branch(
+    branch: str, *, cwd: str | os.PathLike[str] | None = None
+) -> None:
+    fetch_origin(branch, cwd=cwd)
+    checkout_detach(f"origin/{branch}", cwd=cwd)
+
+
 def setup_detached_worktree(project_root: str, base_ref: str) -> str:
     """Add a detached worktree at base_ref. Returns the worktree path.
 

@@ -11,7 +11,7 @@ from typing import Any, cast
 from gremlins import git as _git
 from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.registry import register_stage
-from gremlins.state import emit_bail
+from gremlins.state import emit_bail, last_pr_branch
 
 logger = logging.getLogger(__name__)
 
@@ -57,11 +57,13 @@ class LoopStage(Stage):
         body: list[Stage] | None = None,
         body_runners: list[Callable[[], None]] | None = None,
         max_iterations: int,
+        pr_stack: bool = False,
     ) -> None:
         super().__init__(name, None, [], {})
         self.body = body or []
         self._body_runners = body_runners
         self._max_iterations = max_iterations
+        self._pr_stack = pr_stack
 
     @classmethod
     def from_runners(
@@ -82,6 +84,7 @@ class LoopStage(Stage):
             raise ValueError(f"stage {d['name']!r}: 'options' must be a mapping")
         options = cast(dict[str, Any], raw_options)
         max_iterations: int = int(options.get("max_iterations", 3))
+        pr_stack: bool = bool(options.get("pr_stack", False))
         raw_children: object = d.get("body") or []
         if not isinstance(raw_children, list):
             raise ValueError(f"stage {d['name']!r}: 'body' must be a list")
@@ -89,7 +92,9 @@ class LoopStage(Stage):
             parse_stage(child_d, depth=depth)
             for child_d in cast(list[dict[str, Any]], raw_children)
         ]
-        stage = cls(d["name"], body=body, max_iterations=max_iterations)
+        stage = cls(
+            d["name"], body=body, max_iterations=max_iterations, pr_stack=pr_stack
+        )
         stage.client = get_client_from_yaml(d)
         return stage
 
@@ -114,6 +119,8 @@ class LoopStage(Stage):
         exhausted = False
         try:
             for iteration in range(1, self._max_iterations + 1):
+                if self._pr_stack:
+                    _detach_to_pr_base(state)
                 head_before = _git.head_sha(state.cwd)
                 had_failure = False
 
@@ -156,6 +163,14 @@ class LoopStage(Stage):
                     child_key=state.child_key,
                 )
             raise
+
+
+def _detach_to_pr_base(state: RuntimeState) -> None:
+    branch = last_pr_branch(state.gr_id)
+    if not branch:
+        return
+    logger.info("detaching worktree to previous PR branch: %s", branch)
+    _git.git_detach_to_branch(branch, cwd=state.cwd)
 
 
 def _bail_already_set(gr_id: str | None, child_key: str | None) -> bool:
