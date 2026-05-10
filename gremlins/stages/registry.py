@@ -1,18 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING
 
-STAGE_REGISTRY: dict[str, Callable[..., Any]] = {}
-STAGE_BUILDERS: dict[str, Callable[..., Any]] = {}
+if TYPE_CHECKING:
+    from gremlins.stages.base import Stage
 
-
-def register_stage(name: str, fn: Callable[..., Any]) -> None:
-    STAGE_REGISTRY[name] = fn
+STAGE_REGISTRY: dict[str, type[Stage]] = {}
 
 
-def register_stage_builder(
-    name: str,
-    builder: Callable[..., Any],
-) -> None:
-    STAGE_BUILDERS[name] = builder
+def register_stage(name: str, stage_cls: type[Stage]) -> None:
+    STAGE_REGISTRY[name] = stage_cls

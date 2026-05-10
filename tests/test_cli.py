@@ -333,13 +333,13 @@ class _FakePlanStage:
 
 
 def _make_fake_pipeline(stage_type: str = "plan"):
-    from gremlins.schema import PipelineDef, StageEntry
+    from gremlins.schema import PipelineDef
+    from gremlins.stages.plan import Plan
 
-    entry = StageEntry(
-        name="plan", type=stage_type, client=None, prompts=[], options={}
-    )
+    stage = Plan("plan", None, [], {})
+    stage.type = stage_type
     return PipelineDef(
-        name="local", path=pathlib.Path("/fake/local.yaml"), stages=[entry]
+        name="local", path=pathlib.Path("/fake/local.yaml"), stages=[stage]
     )
 
 

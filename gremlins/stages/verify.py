@@ -28,6 +28,16 @@ def _diff_text(cwd: pathlib.Path, *, is_git: bool) -> str:
 
 
 class Verify(Stage):
+    type = "verify"
+
+    @classmethod
+    def from_yaml(cls, d: dict[str, Any], depth: int = 0) -> Verify:
+        from gremlins.pipeline.loader import get_client_from_yaml
+
+        stage = cls(d["name"], None, d.get("prompt") or [], d.get("options") or {})
+        stage.client = get_client_from_yaml(d)
+        return stage
+
     def __init__(
         self,
         name: str,

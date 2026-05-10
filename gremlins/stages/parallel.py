@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import dataclasses
 import json
 import logging
 import pathlib
@@ -10,10 +11,11 @@ import secrets
 import tempfile
 import threading
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
-from gremlins.stages.base import RuntimeState
+from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.compound import CompoundStage
+from gremlins.stages.registry import register_stage
 from gremlins.utils import proc
 
 logger = logging.getLogger(__name__)
@@ -21,50 +23,144 @@ logger = logging.getLogger(__name__)
 _Stage = tuple[str, Callable[[], None]]
 
 
-class ParallelStage(CompoundStage):
-    """Fan-out/fan-in execution of a parallel pipeline block.
+def _noop_set_stage(_n: str) -> None:
+    pass
 
-    Call ``build_runtime_stages()`` to get the three ``(name, fn)`` pairs
-    that ``_collect_stages`` extends into the run list.  The three stages are
-    ``<name>-fanout``, ``<name>``, and ``<name>-fanin``.
-    """
+
+class ParallelStage(CompoundStage):
+    """Fan-out/fan-in execution of a parallel pipeline block."""
+
+    type = "parallel"
 
     def __init__(
         self,
         name: str,
-        child_runners: list[tuple[str, RuntimeState, Callable[[], None]]],
+        body: list[Stage],
         *,
-        max_concurrent: int | None,
-        cancel_on_bail: bool,
-        bail_policy: str,
-        gr_id: str | None,
-        project_root: pathlib.Path,
-        set_stage_fn: Callable[[str], None],
+        max_concurrent: int | None = None,
+        cancel_on_bail: bool = False,
+        bail_policy: str = "any",
     ) -> None:
         super().__init__(name)
-        self._child_runners = child_runners
         self._max_concurrent = max_concurrent
         self._cancel_on_bail = cancel_on_bail
         self._bail_policy = bail_policy
-        self._gr_id = gr_id
-        self._project_root = project_root
-        self._set_stage_fn = set_stage_fn
+        self.body = body
 
-    def build_runtime_stages(self) -> list[_Stage]:
+    @property
+    def max_concurrent(self) -> int | None:
+        return self._max_concurrent
+
+    @property
+    def cancel_on_bail(self) -> bool:
+        return self._cancel_on_bail
+
+    @property
+    def bail_policy(self) -> str:
+        return self._bail_policy
+
+    @classmethod
+    def from_yaml(cls, d: dict[str, Any], depth: int = 0) -> ParallelStage:
+        from gremlins.pipeline.loader import parse_stage
+
+        if depth > 0:
+            raise ValueError(
+                f"nested parallel groups are not allowed (stage {d.get('name', '?')!r})"
+            )
+        name = d.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError("parallel group must have a 'name' field")
+        children_field: object = d.get("parallel") or []
+        if not isinstance(children_field, list):
+            raise ValueError(f"parallel group {name!r}: 'parallel' must be a list")
+        seen: set[str] = set()
+        body: list[Stage] = []
+        for child_raw in cast(list[dict[str, Any]], children_field):
+            child = parse_stage(child_raw, depth=depth + 1)
+            if child.name in seen:
+                raise ValueError(
+                    f"parallel group {name!r}: duplicate child name {child.name!r}"
+                )
+            seen.add(child.name)
+            body.append(child)
+        max_concurrent = d.get("max_concurrent")
+        if max_concurrent is not None and (
+            not isinstance(max_concurrent, int) or max_concurrent <= 0
+        ):
+            raise ValueError(
+                f"parallel group {name!r}: 'max_concurrent' must be a positive integer"
+            )
+        raw_cancel = d.get("cancel_on_bail", False)
+        if not isinstance(raw_cancel, bool):
+            raise ValueError(
+                f"parallel group {name!r}: 'cancel_on_bail' must be a boolean"
+            )
+        bail_policy = str(d.get("bail_policy") or "any")
+        if bail_policy not in ("any", "all"):
+            raise ValueError(
+                f"parallel group {name!r}: 'bail_policy' must be 'any' or 'all'"
+            )
+        return cls(
+            name,
+            body,
+            max_concurrent=max_concurrent,
+            cancel_on_bail=raw_cancel,
+            bail_policy=bail_policy,
+        )
+
+    def build_runtime_stages(
+        self,
+        child_runners: list[tuple[str, RuntimeState, Callable[[], None]]],
+        *,
+        gr_id: str | None = None,
+        project_root: pathlib.Path | None = None,
+        set_stage_fn: Callable[[str], None] | None = None,
+    ) -> list[_Stage]:
         """Return the three runtime stages for this parallel block."""
         return _parallel_stages(
             self.name,
-            self._child_runners,
+            child_runners,
             max_concurrent=self._max_concurrent,
-            set_stage_fn=self._set_stage_fn,
+            set_stage_fn=set_stage_fn or _noop_set_stage,
             cancel_on_bail=self._cancel_on_bail,
             bail_policy=self._bail_policy,
-            gr_id=self._gr_id,
-            project_root=self._project_root,
+            gr_id=gr_id,
+            project_root=project_root or pathlib.Path.cwd(),
         )
 
-    def run(self, state: RuntimeState) -> None:  # noqa: ARG002
-        for _, fn in self.build_runtime_stages():
+    def run(self, state: RuntimeState) -> None:
+        from gremlins.stage_clients import require_stage_spec
+        from gremlins.state import set_stage
+
+        gr_id = state.gr_id
+        group_dir = state.session_dir / self.name
+        group_dir.mkdir(parents=True, exist_ok=True)
+        child_runners: list[tuple[str, RuntimeState, Callable[[], None]]] = []
+        for child in self.body:
+            child_spec = require_stage_spec(state.stage_specs, child.name)
+            if child.model is None:
+                child.model = child_spec.model
+            child_dir = group_dir / child.name
+            child_dir.mkdir(parents=True, exist_ok=True)
+            child_state = dataclasses.replace(
+                state,
+                client=state.get_client(child_spec),
+                session_dir=child_dir,
+                child_key=child.name,
+            )
+            child_runners.append(
+                (
+                    child.name,
+                    child_state,
+                    child_state.make_runner(child, scope=self.body),
+                )
+            )
+        for _, fn in self.build_runtime_stages(
+            child_runners,
+            gr_id=gr_id,
+            project_root=pathlib.Path.cwd(),
+            set_stage_fn=lambda n: set_stage(gr_id, n),
+        ):
             fn()
 
 
@@ -306,3 +402,6 @@ def _parallel_stages(
         (group_name, _parallel),
         (fanin_name, _fan_in),
     ]
+
+
+register_stage("parallel", ParallelStage)

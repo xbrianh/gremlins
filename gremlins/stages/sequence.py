@@ -8,7 +8,9 @@ directory and any bails route through ``parallel_bails[child_key]``.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable
+from typing import Any, cast
 
 from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.registry import register_stage
@@ -17,21 +19,49 @@ from gremlins.stages.registry import register_stage
 class SequenceStage(Stage):
     """Run body runners sequentially, propagating worktree/child_key/session_dir."""
 
+    type = "sequence"
+
     def __init__(
         self,
         name: str,
         *,
-        body: list[tuple[RuntimeState, Callable[[], None]]],
+        body: list[tuple[RuntimeState, Callable[[], None]]] | None = None,
     ) -> None:
         super().__init__(name, None, [], {})
-        self._body = body
+        self._pre_body = body
+
+    @classmethod
+    def from_yaml(cls, d: dict[str, Any], depth: int = 0) -> SequenceStage:
+        from gremlins.pipeline.loader import get_client_from_yaml, parse_stage
+
+        raw_children: object = d.get("body") or []
+        if not isinstance(raw_children, list):
+            raise ValueError(f"stage {d['name']!r}: 'body' must be a list")
+        children = [
+            parse_stage(child_d, depth=depth)
+            for child_d in cast(list[dict[str, Any]], raw_children)
+        ]
+        stage = cls(d["name"])
+        stage.body = children
+        stage.client = get_client_from_yaml(d)
+        return stage
 
     def run(self, state: RuntimeState) -> None:
-        for sub_state, runner in self._body:
-            sub_state.worktree = state.worktree
-            sub_state.child_key = state.child_key
-            sub_state.session_dir = state.session_dir
-            runner()
+        if self._pre_body is not None:
+            for sub_state, runner in self._pre_body:
+                sub_state.worktree = state.worktree
+                sub_state.child_key = state.child_key
+                sub_state.session_dir = state.session_dir
+                runner()
+        else:
+            for child in self.body:
+                child_spec = state.stage_specs.get(child.name, state.client)
+                if child.model is None:
+                    child.model = child_spec.model
+                child_state = dataclasses.replace(
+                    state, client=state.get_client(child_spec)
+                )
+                child_state.make_runner(child, scope=self.body)()
 
 
 register_stage("sequence", SequenceStage)

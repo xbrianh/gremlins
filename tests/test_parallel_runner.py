@@ -53,14 +53,16 @@ def _make_parallel_stages(
         project_root = pathlib.Path.cwd()
     return ParallelStage(
         group_name,
-        child_runners,
+        [],
         max_concurrent=max_concurrent,
-        set_stage_fn=set_stage_fn,
         cancel_on_bail=cancel_on_bail,
         bail_policy=bail_policy,
+    ).build_runtime_stages(
+        child_runners,
         gr_id=gr_id,
         project_root=project_root,
-    ).build_runtime_stages()
+        set_stage_fn=set_stage_fn,
+    )
 
 
 def _parallel_wrapper(

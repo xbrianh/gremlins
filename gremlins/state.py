@@ -22,7 +22,8 @@ from typing import TYPE_CHECKING, Any
 from gremlins import paths as _paths
 
 if TYPE_CHECKING:
-    from gremlins.schema import PipelineDef, StageEntry
+    from gremlins.schema import PipelineDef
+    from gremlins.stages.base import Stage
 
 logger = logging.getLogger(__name__)
 
@@ -35,14 +36,12 @@ _GH_STAGE_TYPES = frozenset(
         "open-github-pr",
         "request-copilot",
         "wait-copilot",
-        "ghaddress",
-        "ghreview",
         "wait-ci",
     }
 )
 
 
-def _stages_use_gh(stages: list[StageEntry]) -> bool:
+def _stages_use_gh(stages: list[Stage]) -> bool:
     return any(
         s.type in _GH_STAGE_TYPES or (s.body and _stages_use_gh(s.body)) for s in stages
     )

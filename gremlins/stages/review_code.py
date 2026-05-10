@@ -62,6 +62,19 @@ Do NOT make any code changes — only write the review file.
 
 
 class ReviewCode(Stage):
+    type = "review-code"
+
+    @classmethod
+    def from_yaml(cls, d: dict[str, Any], depth: int = 0) -> ReviewCode:
+        from gremlins.pipeline.loader import get_client_from_yaml
+
+        prompts: list[str] = d.get("prompt") or []
+        if not prompts and d.get("type") == "ghreview":
+            raise ValueError(f"stage {d['name']!r}: 'prompt' is required for ghreview")
+        stage = cls(d["name"], None, prompts, d.get("options") or {})
+        stage.client = get_client_from_yaml(d)
+        return stage
+
     def __init__(
         self,
         name: str,
@@ -81,9 +94,10 @@ class ReviewCode(Stage):
         return self.results_to_local(state)
 
     def results_to_local(self, state: RuntimeState) -> pathlib.Path:
-        if self.model is None:
+        model = self.model or state.client.model
+        if not model:
             raise ValueError(f"stage {self.name!r}: model must be set")
-        out_file = state.session_dir / f"{self.name}-{self.model}.md"
+        out_file = state.session_dir / f"{self.name}-{model}.md"
 
         for stale in state.session_dir.glob(f"{self.name}-*.md"):
             try:
@@ -121,22 +135,22 @@ class ReviewCode(Stage):
             code_context = code_scope
 
         try:
-            set_stage(state.gr_id, self.name, {"model": f"running ({self.model})"})
+            set_stage(state.gr_id, self.name, {"model": f"running ({model})"})
             _run_reviewer(
                 client=state.client,
-                model=self.model,
+                model=model,
                 out_file=out_file,
                 focus=focus,
                 context=code_context,
                 where_field="**File:** `path/to/file.ext:<line>`",
-                label=f"{self.name}:{self.model}",
-                raw_path=state.session_dir / f"stream-{self.name}-{self.model}.jsonl",
+                label=f"{self.name}:{model}",
+                raw_path=state.session_dir / f"stream-{self.name}-{model}.jsonl",
                 cwd=state.worktree,
             )
-            set_stage(state.gr_id, self.name, {"model": f"done ({self.model})"})
-            logger.info("code review (%s): %s", self.model, out_file)
+            set_stage(state.gr_id, self.name, {"model": f"done ({model})"})
+            logger.info("code review (%s): %s", model, out_file)
             if not out_file.exists() or out_file.stat().st_size == 0:
-                raise RuntimeError(f"review {self.model} did not produce {out_file}")
+                raise RuntimeError(f"review {model} did not produce {out_file}")
         except (SystemExit, Exception) as exc:
             emit_bail(
                 state.gr_id,

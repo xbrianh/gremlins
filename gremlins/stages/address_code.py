@@ -46,6 +46,19 @@ def _model_from(path: pathlib.Path, stage_name: str) -> str:
 
 
 class AddressCode(Stage):
+    type = "address-code"
+
+    @classmethod
+    def from_yaml(cls, d: dict[str, Any], depth: int = 0) -> AddressCode:
+        from gremlins.pipeline.loader import get_client_from_yaml
+
+        prompts: list[str] = d.get("prompt") or []
+        if not prompts and d.get("type") == "ghaddress":
+            raise ValueError(f"stage {d['name']!r}: 'prompt' is required for ghaddress")
+        stage = cls(d["name"], None, prompts, d.get("options") or {})
+        stage.client = get_client_from_yaml(d)
+        return stage
+
     def __init__(
         self,
         name: str,

@@ -7,20 +7,22 @@ from gremlins.orchestrators.pipeline import Pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_name, resolve_pipeline_path
 from gremlins.pipeline.loader import load_pipeline
 from gremlins.schema import PipelineDef as _PipelineData
-from gremlins.schema import StageEntry
-from gremlins.stages.registry import STAGE_BUILDERS
+from gremlins.stages.base import Stage
+from gremlins.stages.parallel import ParallelStage
+from gremlins.stages.plan import Plan
+from gremlins.stages.registry import STAGE_REGISTRY
 
 
 def _args(**kwargs: object) -> argparse.Namespace:
     return argparse.Namespace(**kwargs)
 
 
-def _pipeline_data(stages: list[StageEntry] | None = None) -> _PipelineData:
+def _pipeline_data(stages: list[Stage] | None = None) -> _PipelineData:
     return _PipelineData(name="test", path=pathlib.Path("."), stages=stages or [])
 
 
 def _local(
-    stages: list[StageEntry],
+    stages: list[Stage],
     *,
     args: argparse.Namespace,
     tmp_path: pathlib.Path,
@@ -45,15 +47,15 @@ def test_pipeline_constructs_from_local_yaml(tmp_path: pathlib.Path) -> None:
     )
 
     assert len(pipe.stages) > 0
-    assert all(isinstance(s, StageEntry) for s in pipe.stages)
+    assert all(isinstance(s, Stage) for s in pipe.stages)
     stage_types = [s.type for s in pipe.stages]
     assert "plan" in stage_types
     assert "implement" in stage_types
-    assert "plan" in STAGE_BUILDERS
-    assert "implement" in STAGE_BUILDERS
-    assert "review-code" in STAGE_BUILDERS
-    assert "address-code" in STAGE_BUILDERS
-    assert "verify" in STAGE_BUILDERS
+    assert "plan" in STAGE_REGISTRY
+    assert "implement" in STAGE_REGISTRY
+    assert "review-code" in STAGE_REGISTRY
+    assert "address-code" in STAGE_REGISTRY
+    assert "verify" in STAGE_REGISTRY
 
 
 def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
@@ -69,19 +71,19 @@ def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
     )
 
     assert len(pipe.stages) > 0
-    assert all(isinstance(s, StageEntry) for s in pipe.stages)
+    assert all(isinstance(s, Stage) for s in pipe.stages)
     stage_types = [s.type for s in pipe.stages]
     assert "plan" in stage_types
     assert "implement" in stage_types
-    assert "plan" in STAGE_BUILDERS
-    assert "implement" in STAGE_BUILDERS
-    assert "commit" in STAGE_BUILDERS
-    assert "open-github-pr" in STAGE_BUILDERS
-    assert "request-copilot" in STAGE_BUILDERS
-    assert "ghreview" in STAGE_BUILDERS
-    assert "ghaddress" in STAGE_BUILDERS
-    assert "wait-ci" in STAGE_BUILDERS
-    assert "wait-copilot" in STAGE_BUILDERS
+    assert "plan" in STAGE_REGISTRY
+    assert "implement" in STAGE_REGISTRY
+    assert "commit" in STAGE_REGISTRY
+    assert "open-github-pr" in STAGE_REGISTRY
+    assert "request-copilot" in STAGE_REGISTRY
+    assert "ghreview" in STAGE_REGISTRY
+    assert "ghaddress" in STAGE_REGISTRY
+    assert "wait-ci" in STAGE_REGISTRY
+    assert "wait-copilot" in STAGE_REGISTRY
 
 
 # ---------------------------------------------------------------------------
@@ -89,26 +91,13 @@ def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_stages(*names: str) -> list[StageEntry]:
-    return [
-        StageEntry(name=n, type="plan", client=None, prompts=[], options={})
-        for n in names
-    ]
+def _make_stages(*names: str) -> list[Stage]:
+    return [Plan(n, None, [], {}) for n in names]
 
 
-def _make_parallel_stage(name: str, children: list[str]) -> StageEntry:
-    child_entries = [
-        StageEntry(name=c, type="plan", client=None, prompts=[], options={})
-        for c in children
-    ]
-    return StageEntry(
-        name=name,
-        type="parallel",
-        client=None,
-        prompts=[],
-        options={},
-        body=child_entries,
-    )
+def _make_parallel_stage(name: str, children: list[str]) -> ParallelStage:
+    child_stages: list[Stage] = [Plan(c, None, [], {}) for c in children]
+    return ParallelStage(name, child_stages)
 
 
 def test_validate_resume_target_no_resume_from(tmp_path: pathlib.Path) -> None:
@@ -181,11 +170,10 @@ def test_validate_resume_target_child_name_rejected(tmp_path: pathlib.Path) -> N
 
 
 def test_pipeline_rejects_unknown_stage_type(tmp_path: pathlib.Path) -> None:
-    stages = [
-        StageEntry(name="s", type="nonexistent", client=None, prompts=[], options={})
-    ]
+    s = Plan("s", None, [], {})
+    s.type = "nonexistent"
     with pytest.raises(ValueError, match="nonexistent"):
-        _local(stages, args=_args(), tmp_path=tmp_path)
+        _local([s], args=_args(), tmp_path=tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -271,9 +259,7 @@ def test_resolve_pipeline_path_no_overlay_env_falls_through(
 
 def test_parallel_expansion_in_constructor(tmp_path: pathlib.Path) -> None:
     parallel = _make_parallel_stage("reviews", ["review-a", "review-b"])
-    plan_entry = StageEntry(
-        name="plan", type="plan", client=None, prompts=[], options={}
-    )
+    plan_entry = Plan("plan", None, [], {})
     pipe = _local([plan_entry, parallel], args=_args(), tmp_path=tmp_path)
 
     stage_names = [s.name for s in pipe.stages]
@@ -301,4 +287,4 @@ def test_stage_builders_registry_covers_all_known_types() -> None:
         "handoff",
         "parallel",
     }
-    assert expected <= set(STAGE_BUILDERS)
+    assert expected <= set(STAGE_REGISTRY)

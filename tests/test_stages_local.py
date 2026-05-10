@@ -8,12 +8,13 @@ from conftest import MINIMAL_EVENTS, ReviewCreatingClient
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.pipeline.loader import load_pipeline
-from gremlins.schema import StageEntry as _StageEntry
 from gremlins.stages import implement, plan
 from gremlins.stages.address_code import AddressCode
 from gremlins.stages.base import RuntimeState
 from gremlins.stages.implement import _render_spec_block
+from gremlins.stages.parallel import ParallelStage
 from gremlins.stages.review_code import ReviewCode
+from gremlins.stages.review_code import ReviewCode as _ReviewCode
 
 _BUNDLED_PROMPTS = (
     pathlib.Path(__file__).resolve().parent.parent / "gremlins" / "prompts"
@@ -451,34 +452,18 @@ def test_address_code_finds_review_files_in_parallel_subdirs(tmp_path):
         [(_BUNDLED_PROMPTS / "address.md").read_text(encoding="utf-8")],
         {},
     )
-    parallel_entry = _StageEntry(
-        name="reviews",
-        type="parallel",
-        client=None,
-        prompts=[],
-        options={},
-        body=[
-            _StageEntry(
-                name="review-code",
-                type="review-code",
-                client=None,
-                prompts=[],
-                options={},
-            ),
-            _StageEntry(
-                name="review-code-fidelity",
-                type="review-code",
-                client=None,
-                prompts=[],
-                options={},
-            ),
+    parallel_stage = ParallelStage(
+        "reviews",
+        [
+            _ReviewCode("review-code", None, [], {}),
+            _ReviewCode("review-code-fidelity", None, [], {}),
         ],
     )
     state = RuntimeState(
         client=client,
         session_dir=tmp_path,
         gr_id=None,
-        current_scope=[parallel_entry],
+        current_scope=[parallel_stage],
     )
     stage.run(state)
 

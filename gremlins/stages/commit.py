@@ -31,6 +31,16 @@ def _read_state(sf: pathlib.Path | None, field: str) -> str:
 
 
 class Commit(Stage):
+    type = "commit"
+
+    @classmethod
+    def from_yaml(cls, d: dict[str, Any], depth: int = 0) -> Commit:
+        from gremlins.pipeline.loader import get_client_from_yaml
+
+        stage = cls(d["name"], None, d.get("prompt") or [], d.get("options") or {})
+        stage.client = get_client_from_yaml(d)
+        return stage
+
     def __init__(
         self,
         name: str,

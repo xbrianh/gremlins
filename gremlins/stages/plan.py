@@ -25,6 +25,16 @@ def _fmt_escape(s: str) -> str:
 
 
 class Plan(Stage):
+    type = "plan"
+
+    @classmethod
+    def from_yaml(cls, d: dict[str, Any], depth: int = 0) -> Plan:
+        from gremlins.pipeline.loader import get_client_from_yaml
+
+        stage = cls(d["name"], None, d.get("prompt") or [], d.get("options") or {})
+        stage.client = get_client_from_yaml(d)
+        return stage
+
     def __init__(
         self,
         name: str,

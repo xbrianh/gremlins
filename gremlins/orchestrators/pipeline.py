@@ -15,10 +15,9 @@ from gremlins.clients.client import Client
 from gremlins.git import in_git_repo
 from gremlins.runner import run_stages
 from gremlins.schema import PipelineDef as _PipelineData
-from gremlins.schema import StageEntry
 from gremlins.stage_clients import require_stage_spec
-from gremlins.stages.base import RuntimeState
-from gremlins.stages.registry import STAGE_BUILDERS
+from gremlins.stages.base import RuntimeState, Stage
+from gremlins.stages.registry import STAGE_REGISTRY
 from gremlins.state import resolve_state_file
 
 logger = logging.getLogger(__name__)
@@ -34,11 +33,11 @@ def read_stage_inputs(sf: pathlib.Path | None) -> dict[str, Any]:
         return {}
 
 
-def _expand_stage_entries(raw_stages: list[StageEntry]) -> list[StageEntry]:
+def _expand_stage_entries(raw_stages: list[Stage]) -> list[Stage]:
     top_level_names = {e.name for e in raw_stages}
     child_names: set[str] = set()
     seen: set[str] = set()
-    result: list[StageEntry] = []
+    result: list[Stage] = []
 
     for entry in raw_stages:
         if entry.type == "parallel":
@@ -57,7 +56,7 @@ def _expand_stage_entries(raw_stages: list[StageEntry]) -> list[StageEntry]:
 class Pipeline:
     def __init__(
         self,
-        stages: list[StageEntry],
+        stages: list[Stage],
         *,
         args: argparse.Namespace,
         session_dir: pathlib.Path,
@@ -71,12 +70,12 @@ class Pipeline:
     ) -> None:
         unknown: list[str] = []
         for s in stages:
-            if s.type not in STAGE_BUILDERS:
+            if s.type not in STAGE_REGISTRY:
                 unknown.append(s.type)
             elif s.type == "parallel":
-                unknown.extend(c.type for c in s.body if c.type not in STAGE_BUILDERS)
+                unknown.extend(c.type for c in s.body if c.type not in STAGE_REGISTRY)
             elif s.type == "loop":
-                unknown.extend(c.type for c in s.body if c.type not in STAGE_BUILDERS)
+                unknown.extend(c.type for c in s.body if c.type not in STAGE_REGISTRY)
         if unknown:
             raise ValueError(f"Pipeline does not support stage type(s): {unknown}")
         self.stages = _expand_stage_entries(stages)
@@ -118,7 +117,7 @@ class Pipeline:
             )
 
     def _collect_stages(
-        self, stages: list[StageEntry]
+        self, stages: list[Stage]
     ) -> list[tuple[str, Callable[[], None]]]:
         built: list[tuple[str, Callable[[], None]]] = []
         for e in stages:
@@ -126,6 +125,11 @@ class Pipeline:
             resolved = self.test_client or self.spec_clients.get(
                 str(stage_spec), stage_spec
             )
+            # Propagate the spec model to the stage so that stages calling
+            # run_claude (which falls back to state.client.model when self.model
+            # is None) use the spec model rather than the live client's model.
+            if e.model is None and stage_spec.model:
+                e.model = stage_spec.model
             stage_state = RuntimeState(
                 client=resolved,
                 session_dir=self.session_dir,
@@ -140,7 +144,7 @@ class Pipeline:
                 is_git=self.is_git,
                 test_client=self.test_client,
             )
-            built.append((e.name, stage_state.make_runner(e, stage_spec, scope=stages)))
+            built.append((e.name, stage_state.make_runner(e, scope=stages)))
         return built
 
     def run(self) -> None:
