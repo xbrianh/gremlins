@@ -19,7 +19,6 @@ from gremlins.git import (
     DivergentHead,
     EmptyImpl,
     HeadAdvanced,
-    PreImplState,
     classify_impl_outcome,
     record_pre_impl_state,
 )

@@ -95,9 +95,7 @@ class OpenGitHubPR(Stage):
             text_result=completed.text_result,
         )
         branch = _get_pr_branch(pr_url)
-        append_artifact(
-            state.gr_id, {"type": "pr", "url": pr_url, "branch": branch}
-        )
+        append_artifact(state.gr_id, {"type": "pr", "url": pr_url, "branch": branch})
         logger.info("PR: %s", pr_url)
         return pr_url
 
