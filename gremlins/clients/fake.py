@@ -72,11 +72,11 @@ class FakeClaudeClient(Client):
         raw_path: pathlib.Path | None = None,
         capture_events: bool = False,
         on_timeout_prompt: str | None = None,
-        max_retries: int = 2,
+        backoff: list[int] | None = None,
         cwd: pathlib.Path | None = None,
         idle_timeout: float | None = None,
     ) -> CompletedRun:
-        del on_timeout_prompt, max_retries, idle_timeout
+        del on_timeout_prompt, backoff, idle_timeout
         self.calls.append(
             RecordedCall(
                 prompt=prompt,
