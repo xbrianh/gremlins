@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import subprocess
 
-from gremlins.stages.base import Stage, RuntimeState
+from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.loop import RunCmdFailed
 from gremlins.stages.registry import register_stage
 

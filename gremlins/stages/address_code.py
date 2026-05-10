@@ -7,7 +7,7 @@ import pathlib
 import re
 from typing import Any
 
-from gremlins.stages.base import Stage, RuntimeState
+from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import check_bail, emit_bail, read_pr_url
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from gremlins.stages.base import Stage, RuntimeState
+from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.registry import register_stage
 
 

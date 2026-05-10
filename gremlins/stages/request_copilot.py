@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from gremlins.stages.base import Stage, RuntimeState
+from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import read_pr_num
 

@@ -123,7 +123,9 @@ class Pipeline:
         built: list[tuple[str, Callable[[], None]]] = []
         for e in stages:
             stage_spec = require_stage_spec(self.stage_specs, e.name)
-            resolved = self.test_client or self.spec_clients.get(str(stage_spec), stage_spec)
+            resolved = self.test_client or self.spec_clients.get(
+                str(stage_spec), stage_spec
+            )
             stage_state = RuntimeState(
                 client=resolved,
                 session_dir=self.session_dir,

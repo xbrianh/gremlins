@@ -7,7 +7,7 @@ import pathlib
 from typing import Any
 
 from gremlins.clients.client import Client
-from gremlins.stages.base import Stage, RuntimeState
+from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import (
     check_bail,

@@ -46,7 +46,9 @@ class RuntimeState:
     # per-stage optional
     child_key: str | None = None
     worktree: pathlib.Path | None = None
-    current_scope: list[StageEntry] = dataclasses.field(default_factory=_stage_entry_list)
+    current_scope: list[StageEntry] = dataclasses.field(
+        default_factory=_stage_entry_list
+    )
     # runtime-derived (populated from state.json before each stage run)
     issue_url: str = ""
     base_ref_name: str = ""
@@ -78,7 +80,11 @@ class RuntimeState:
             from gremlins.state import resolve_state_file, set_stage
 
             set_stage(gr_id, entry.name)
-            sf = base_state.state_file if base_state.state_file is not None else resolve_state_file(gr_id)
+            sf = (
+                base_state.state_file
+                if base_state.state_file is not None
+                else resolve_state_file(gr_id)
+            )
             sd = _read_state_json(sf)
             state = dataclasses.replace(
                 base_state,

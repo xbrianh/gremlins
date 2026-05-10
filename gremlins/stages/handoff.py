@@ -17,7 +17,7 @@ from typing import Any, TypeVar, cast
 
 from gremlins.clients.client import Client
 from gremlins.prompts import BUNDLED_PROMPT_DIR
-from gremlins.stages.base import Stage, RuntimeState
+from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.loop import RunCmdFailed
 from gremlins.stages.registry import register_stage
 from gremlins.state import emit_bail, set_stage

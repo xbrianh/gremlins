@@ -174,7 +174,9 @@ def test_single_pr_with_branch_artifact_uses_base_ref_name(
     )
     prompts_seen: list[str] = []
     with (
-        patch("gremlins.state.resolve_state_file", return_value=tmp_path / "state.json"),
+        patch(
+            "gremlins.state.resolve_state_file", return_value=tmp_path / "state.json"
+        ),
         patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
         patch("gremlins.stages.open_github_pr.append_artifact"),
         patch.object(

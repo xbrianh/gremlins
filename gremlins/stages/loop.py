@@ -8,7 +8,7 @@ from collections.abc import Callable
 from typing import Any
 
 from gremlins import git as _git
-from gremlins.stages.base import Stage, RuntimeState
+from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import emit_bail
 

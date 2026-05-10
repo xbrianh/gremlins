@@ -40,7 +40,9 @@ def _review_stage_info(
 ) -> tuple[list[str], dict[str, pathlib.Path]]:
     names: list[str] = []
     dirs: dict[str, pathlib.Path] = {}
-    scope = state.current_scope or (list(state.pipeline_data.stages) if state.pipeline_data else [])
+    scope = state.current_scope or (
+        list(state.pipeline_data.stages) if state.pipeline_data else []
+    )
     for s in scope:
         if s.type == "parallel":
             for child in s.body:
@@ -224,7 +226,9 @@ def _build_loop(entry: StageEntry, spec: Client, state: RuntimeState) -> Any:
     for child in entry.body:
         child_spec = state.stage_specs.get(child.name, spec)
         child_state = dataclasses.replace(state, client=state.get_client(child_spec))
-        body_runners.append(child_state.make_runner(child, child_spec, scope=entry.body))
+        body_runners.append(
+            child_state.make_runner(child, child_spec, scope=entry.body)
+        )
     return LoopStage(
         entry.name, body_runners=body_runners, max_iterations=max_iterations
     )
@@ -278,7 +282,11 @@ def _build_parallel(entry: StageEntry, _spec: Client, state: RuntimeState) -> An
             child_key=child.name,
         )
         child_runners.append(
-            (child.name, child_state, child_state.make_runner(child, child_spec, scope=entry.body))
+            (
+                child.name,
+                child_state,
+                child_state.make_runner(child, child_spec, scope=entry.body),
+            )
         )
     gr_id = state.gr_id
     return ParallelStage(

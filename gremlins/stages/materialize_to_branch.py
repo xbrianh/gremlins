@@ -33,9 +33,7 @@ class MaterializeToBranch(Stage):
     def run(self, state: RuntimeState) -> MaterializeToBranchResult:
         pre_state = state.impl_pre_state
         if pre_state is None:
-            raise RuntimeError(
-                "no impl_pre_state found; rewind to implement stage"
-            )
+            raise RuntimeError("no impl_pre_state found; rewind to implement stage")
         impl_cwd = str(state.worktree) if state.worktree is not None else None
         outcome = classify_impl_outcome(pre_state, cwd=impl_cwd)
 
