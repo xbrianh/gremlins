@@ -15,8 +15,7 @@ from gremlins.clients import ClientSpec
 from gremlins.clients.protocol import ClaudeClient
 from gremlins.clients.resolve import require_stage_spec
 from gremlins.git import in_git_repo
-from gremlins.pipeline import PipelineDef as _PipelineData
-from gremlins.pipeline import StageEntry
+from gremlins.schema import PipelineDef as _PipelineData, StageEntry
 from gremlins.runner import run_stages
 from gremlins.stages import STAGE_BUILDERS, STAGE_NEEDS_PIPE, StageContext
 from gremlins.state import resolve_state_file, set_stage

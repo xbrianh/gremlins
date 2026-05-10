@@ -24,7 +24,8 @@ from gremlins.gh_utils import get_repo
 from gremlins.git import has_commits, has_dirty_worktree, in_git_repo
 from gremlins.logging_setup import configure_logging
 from gremlins.orchestrators.pipeline import StageRunner
-from gremlins.pipeline import StageEntry, load_pipeline
+from gremlins.pipeline import load_pipeline
+from gremlins.schema import StageEntry
 from gremlins.runner import install_signal_handlers
 from gremlins.state import (
     patch_state,

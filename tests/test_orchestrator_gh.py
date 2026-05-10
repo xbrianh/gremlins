@@ -2132,7 +2132,7 @@ def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
 
 def test_any_stage_is_gh_detects_top_level_gh_stage() -> None:
     from gremlins.orchestrators.run import _any_stage_is_gh
-    from gremlins.pipeline.schema import StageEntry
+    from gremlins.schema import StageEntry
 
     stages = [
         StageEntry(
@@ -2144,7 +2144,7 @@ def test_any_stage_is_gh_detects_top_level_gh_stage() -> None:
 
 def test_any_stage_is_gh_false_for_local_stages() -> None:
     from gremlins.orchestrators.run import _any_stage_is_gh
-    from gremlins.pipeline.schema import StageEntry
+    from gremlins.schema import StageEntry
 
     stages = [
         StageEntry(name="plan", type="plan", client=None, prompts=[], options={}),
@@ -2158,7 +2158,7 @@ def test_any_stage_is_gh_false_for_local_stages() -> None:
 def test_any_stage_is_gh_recurses_into_loop_body() -> None:
     """A loop containing gh-mode body stages is detected as gh."""
     from gremlins.orchestrators.run import _any_stage_is_gh
-    from gremlins.pipeline.schema import StageEntry
+    from gremlins.schema import StageEntry
 
     gh_body = [
         StageEntry(name="handoff", type="handoff", client=None, prompts=[], options={}),
@@ -2176,7 +2176,7 @@ def test_any_stage_is_gh_recurses_into_loop_body() -> None:
 def test_any_stage_is_gh_false_for_local_loop_body() -> None:
     """A loop with only local-mode body stages is not detected as gh."""
     from gremlins.orchestrators.run import _any_stage_is_gh
-    from gremlins.pipeline.schema import StageEntry
+    from gremlins.schema import StageEntry
 
     local_body = [
         StageEntry(name="handoff", type="handoff", client=None, prompts=[], options={}),

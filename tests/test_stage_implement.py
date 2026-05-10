@@ -11,7 +11,7 @@ import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.pipeline import PipelineDef, StageEntry
+from gremlins.schema import PipelineDef, StageEntry
 from gremlins.stages import StageContext
 from gremlins.stages.implement import Implement
 

@@ -9,7 +9,7 @@ from typing import Any
 from gremlins.clients import ClientSpec
 from gremlins.clients.resolve import require_stage_spec
 from gremlins.errors import die
-from gremlins.pipeline import StageEntry
+from gremlins.schema import StageEntry
 from gremlins.stages import (
     address_code,
     claude_prompt,
