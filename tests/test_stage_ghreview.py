@@ -9,6 +9,15 @@ from conftest import MINIMAL_EVENTS
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.stages.base import RuntimeState
 from gremlins.stages.review_code import ReviewCode
+from gremlins.schema import PipelineDef as _PipelineDef, StageEntry as _StageEntry
+
+
+def _gh_pipeline() -> _PipelineDef:
+    return _PipelineDef(
+        name="test",
+        path=pathlib.Path("."),
+        stages=[_StageEntry(name="open-github-pr", type="open-github-pr", client=None, prompts=[], options={})],
+    )
 
 PR_URL = "https://github.com/owner/repo/pull/42"
 
@@ -24,18 +33,9 @@ def _make_stage(
     prompts = (
         [style_content, prompt_text] if style_content is not None else [prompt_text]
     )
-    stage = ReviewCode(
-        "ghreview",
-        "sonnet",
-        prompts,
-        {},
-        plan_text="",
-        is_git=True,
-        pr_url=pr_url,
-        is_gh=True,
-    )
+    stage = ReviewCode("ghreview", "sonnet", prompts, {}, pr_url=pr_url)
     client = FakeClaudeClient(fixtures={"ghreview": MINIMAL_EVENTS})
-    state = RuntimeState(client=client, session_dir=tmp_path, gr_id=gr_id)
+    state = RuntimeState(client=client, session_dir=tmp_path, gr_id=gr_id, is_git=True, pipeline_data=_gh_pipeline())
     return stage, client, state
 
 

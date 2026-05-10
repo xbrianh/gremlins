@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import pathlib
 
 import pytest
@@ -20,9 +21,11 @@ def test_plan_source_file_local(tmp_path: pathlib.Path) -> None:
     plan_src = tmp_path / "my-plan.md"
     plan_src.write_text("# My Plan\nDo stuff.\n")
 
-    stage = Plan("plan", None, [], {}, plan=str(plan_src))
+    stage = Plan("plan", None, [], {})
     client = FakeClaudeClient(fixtures={})
-    stage.run(_state(tmp_path, client))
+    state = _state(tmp_path, client)
+    state.args = argparse.Namespace(plan=str(plan_src))
+    stage.run(state)
 
     plan_md = tmp_path / "plan.md"
     assert plan_md.exists()
@@ -45,9 +48,11 @@ def test_plan_source_issue_ref_local(
     monkeypatch.setattr("gremlins.stages.plan.view_issue", _fake_view_issue)
     monkeypatch.setattr("gremlins.stages.plan.parse_issue_ref", _fake_parse_issue_ref)
 
-    stage = Plan("plan", None, [], {}, plan="#42")
+    stage = Plan("plan", None, [], {})
     client = FakeClaudeClient(fixtures={})
-    stage.run(_state(tmp_path, client))
+    state = _state(tmp_path, client)
+    state.args = argparse.Namespace(plan="#42")
+    stage.run(state)
 
     plan_md = tmp_path / "plan.md"
     assert plan_md.exists()
@@ -85,15 +90,11 @@ def test_plan_source_file_github(
     }
     client = FakeClaudeClient(fixtures=fixtures)
 
-    stage = Plan(
-        "plan",
-        None,
-        [],
-        {},
-        plan=str(plan_src),
-        repo="owner/repo",
-    )
-    stage.run(_state(tmp_path, client))
+    stage = Plan("plan", None, [], {})
+    state = _state(tmp_path, client)
+    state.args = argparse.Namespace(plan=str(plan_src))
+    state.repo = "owner/repo"
+    stage.run(state)
 
     plan_md = tmp_path / "plan.md"
     assert plan_md.exists()
@@ -121,9 +122,12 @@ def test_plan_source_issue_ref_github(
     monkeypatch.setattr("gremlins.stages.plan.parse_issue_ref", _fake_parse_issue_ref)
     monkeypatch.setattr("gremlins.stages.plan.view_issue", _fake_view_issue)
 
-    stage = Plan("plan", None, [], {}, plan="#99", repo="owner/repo")
+    stage = Plan("plan", None, [], {})
     client = FakeClaudeClient(fixtures={})
-    stage.run(_state(tmp_path, client))
+    state = _state(tmp_path, client)
+    state.args = argparse.Namespace(plan="#99")
+    state.repo = "owner/repo"
+    stage.run(state)
 
     plan_md = tmp_path / "plan.md"
     assert plan_md.exists()
@@ -136,7 +140,7 @@ def test_plan_reuses_existing_plan_md(tmp_path: pathlib.Path) -> None:
     plan_md = tmp_path / "plan.md"
     plan_md.write_text("# Cached Plan\n")
 
-    stage = Plan("plan", None, [], {})
+    stage = Plan("plan", None, ["dummy prompt"], {})
     client = FakeClaudeClient(fixtures={})
     stage.run(_state(tmp_path, client))
 
@@ -147,7 +151,7 @@ def test_plan_reuses_existing_plan_md(tmp_path: pathlib.Path) -> None:
 def test_plan_without_plan_resolves_session_dir(tmp_path: pathlib.Path) -> None:
     """Constructing Plan without plan= resolves plan_md to session_dir/plan.md."""
     (tmp_path / "plan.md").write_text("# Existing\n")
-    stage = Plan("plan", None, [], {})
+    stage = Plan("plan", None, ["dummy prompt"], {})
     client = FakeClaudeClient(fixtures={})
     stage.run(_state(tmp_path, client))
     assert client.calls == []
@@ -181,8 +185,12 @@ def test_resolve_issue_source_empty_repo_writes_url(
         "gremlins.stages.plan.patch_state",
         lambda _id, **kw: captured.update(kw),
     )
-    stage = Plan("plan", None, [], {}, plan="#355", repo="")
-    stage.run(_state(tmp_path, FakeClaudeClient(fixtures={})))
+    stage = Plan("plan", None, [], {})
+    client = FakeClaudeClient(fixtures={})
+    state = _state(tmp_path, client)
+    state.args = argparse.Namespace(plan="#355")
+    state.repo = ""
+    stage.run(state)
     assert captured.get("issue_url") == "https://github.com/owner/repo/issues/355"
     assert captured.get("issue_num") == "355"
 
@@ -197,8 +205,12 @@ def test_resolve_issue_source_matching_repo_writes_url(
         "gremlins.stages.plan.patch_state",
         lambda _id, **kw: captured.update(kw),
     )
-    stage = Plan("plan", None, [], {}, plan="#355", repo="owner/repo")
-    stage.run(_state(tmp_path, FakeClaudeClient(fixtures={})))
+    stage = Plan("plan", None, [], {})
+    client = FakeClaudeClient(fixtures={})
+    state = _state(tmp_path, client)
+    state.args = argparse.Namespace(plan="#355")
+    state.repo = "owner/repo"
+    stage.run(state)
     assert captured.get("issue_url") == "https://github.com/owner/repo/issues/355"
     assert captured.get("issue_num") == "355"
 
@@ -213,7 +225,11 @@ def test_resolve_issue_source_cross_repo_clears_url(
         "gremlins.stages.plan.patch_state",
         lambda _id, **kw: captured.update(kw),
     )
-    stage = Plan("plan", None, [], {}, plan="owner/b#355", repo="owner/a")
-    stage.run(_state(tmp_path, FakeClaudeClient(fixtures={})))
+    stage = Plan("plan", None, [], {})
+    client = FakeClaudeClient(fixtures={})
+    state = _state(tmp_path, client)
+    state.args = argparse.Namespace(plan="owner/b#355")
+    state.repo = "owner/a"
+    stage.run(state)
     assert captured.get("issue_url") == ""
     assert captured.get("issue_num") == ""

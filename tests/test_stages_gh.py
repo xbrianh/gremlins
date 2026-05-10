@@ -8,6 +8,15 @@ from gremlins.clients.fake import FakeClaudeClient
 from gremlins.stages.address_code import AddressCode
 from gremlins.stages.base import RuntimeState
 from gremlins.stages.review_code import ReviewCode
+from gremlins.schema import PipelineDef as _PipelineDef, StageEntry as _StageEntry
+
+
+def _gh_pipeline() -> _PipelineDef:
+    return _PipelineDef(
+        name="test",
+        path=pathlib.Path("."),
+        stages=[_StageEntry(name="open-github-pr", type="open-github-pr", client=None, prompts=[], options={})],
+    )
 
 _BUNDLED_PROMPTS = (
     pathlib.Path(__file__).resolve().parent.parent / "gremlins" / "prompts"
@@ -20,7 +29,7 @@ def _make_state(
     *,
     gr_id: str | None = None,
 ) -> RuntimeState:
-    return RuntimeState(client=client, session_dir=tmp_path, gr_id=gr_id)
+    return RuntimeState(client=client, session_dir=tmp_path, gr_id=gr_id, is_git=True, pipeline_data=_gh_pipeline())
 
 
 def _make_ghreview(
@@ -31,16 +40,7 @@ def _make_ghreview(
     pr_url: str,
 ) -> ReviewCode:
     prompts = [(_BUNDLED_PROMPTS / "review_gh.md").read_text(encoding="utf-8")]
-    stage = ReviewCode(
-        "ghreview",
-        "sonnet",
-        prompts,
-        {},
-        plan_text="",
-        is_git=True,
-        pr_url=pr_url,
-        is_gh=True,
-    )
+    stage = ReviewCode("ghreview", "sonnet", prompts, {}, pr_url=pr_url)
     return stage
 
 
@@ -92,6 +92,8 @@ def test_ghreview_parallel_child_uses_child_key_bail_command(
         session_dir=tmp_path,
         gr_id="gr-123",
         child_key="review-child",
+        is_git=True,
+        pipeline_data=_gh_pipeline(),
     )
     stage.run(state)
     assert "python -m gremlins.bail --child-key review-child" in client.calls[0].prompt
@@ -108,9 +110,7 @@ def _make_ghaddress(
         (_BUNDLED_PROMPTS / "address_gh.md").read_text(encoding="utf-8"),
         (_BUNDLED_PROMPTS / "bail_section.md").read_text(encoding="utf-8"),
     ]
-    stage = AddressCode(
-        "ghaddress", "sonnet", prompts, {}, is_git=True, pr_url=pr_url, is_gh=True
-    )
+    stage = AddressCode("ghaddress", "sonnet", prompts, {}, pr_url=pr_url)
     return stage
 
 
@@ -151,6 +151,8 @@ def test_ghaddress_parallel_child_uses_child_key_bail_command(
         session_dir=tmp_path,
         gr_id="gr-123",
         child_key="address-child",
+        is_git=True,
+        pipeline_data=_gh_pipeline(),
     )
     stage.run(state)
     assert "python -m gremlins.bail --child-key address-child" in client.calls[0].prompt

@@ -79,16 +79,11 @@ def review_main(argv: list[str], *, client: Client | None = None) -> int:
     rc_entry = next((s for s in pipeline.stages if s.type == "review-code"), None)
     if rc_entry is None or not rc_entry.prompts[1:]:
         die("local pipeline has no review-code stage with a prompt")
-    state = RuntimeState(client=client, session_dir=session_dir, gr_id=None)
+    state = RuntimeState(client=client, session_dir=session_dir, gr_id=None, is_git=is_git)
+    if plan_text:
+        (session_dir / "plan.md").write_text(plan_text, encoding="utf-8")
     logger.info("reviewing code (model: %s)", args.detail)
-    stage = review_code.ReviewCode(
-        rc_entry.name,
-        args.detail,
-        rc_entry.prompts,
-        rc_entry.options,
-        plan_text=plan_text,
-        is_git=is_git,
-    )
+    stage = review_code.ReviewCode(rc_entry.name, args.detail, rc_entry.prompts, rc_entry.options)
     review_file = stage.run(state)
     logger.info("code review (%s): %s", args.detail, review_file)
     return 0
@@ -123,14 +118,8 @@ def address_main(argv: list[str], *, client: Client | None = None) -> int:
     if ac_entry is None or not ac_entry.prompts:
         die("local pipeline has no address-code stage with a prompt")
 
-    state = RuntimeState(client=client, session_dir=session_dir, gr_id=None)
+    state = RuntimeState(client=client, session_dir=session_dir, gr_id=None, is_git=is_git)
     logger.info("addressing code reviews (model: %s)", args.address)
-    stage = address_code.AddressCode(
-        ac_entry.name,
-        args.address,
-        ac_entry.prompts,
-        ac_entry.options,
-        is_git=is_git,
-    )
+    stage = address_code.AddressCode(ac_entry.name, args.address, ac_entry.prompts, ac_entry.options)
     stage.run(state)
     return 0

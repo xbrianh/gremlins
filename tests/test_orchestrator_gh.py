@@ -1551,8 +1551,7 @@ def test_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
     )
     assert result == 0
 
-    stage = captured_stage["stage"]
-    assert stage.repo == "owner/repo"
+    assert captured_stage["state"].repo == "owner/repo"
     assert captured_stage["state"].session_dir == session_dir
     # pr artifact written to state.json by OpenGitHubPR; pr_num derived from it in run()
     state = json.loads(state_file.read_text())

@@ -17,15 +17,13 @@ class RequestCopilot(Stage):
         prompts: list[str],
         options: dict[str, Any],
         *,
-        repo: str,
         pr_num: str = "",
     ) -> None:
         super().__init__(name, model, prompts, options)
-        self._repo = repo
         self._pr_num = pr_num
 
     def run(self, state: RuntimeState) -> None:
-        repo = self._repo
+        repo = state.repo
         pr_num = self._pr_num or read_pr_num(state.gr_id)
         if not pr_num:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")

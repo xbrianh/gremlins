@@ -632,18 +632,10 @@ def test_local_stage_inputs_instructions_reach_plan(
 
     from gremlins.stages import plan as _plan_mod
 
-    _real_plan_init = _plan_mod.Plan.__init__
+    def _capturing_plan_run(self, state):
+        received.append(state.instructions)
 
-    def _capturing_plan_init(
-        self, name, model, prompts, options, *, instructions, **kw
-    ):
-        received.append(instructions)
-        _real_plan_init(
-            self, name, model, prompts, options, instructions=instructions, **kw
-        )
-
-    monkeypatch.setattr(_plan_mod.Plan, "__init__", _capturing_plan_init)
-    monkeypatch.setattr(_plan_mod.Plan, "run", lambda self, pipe: None)
+    monkeypatch.setattr(_plan_mod.Plan, "run", _capturing_plan_run)
 
     from gremlins.stages import address_code as _ac_mod
     from gremlins.stages import implement as _impl_mod

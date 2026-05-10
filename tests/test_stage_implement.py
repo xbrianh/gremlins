@@ -11,8 +11,17 @@ from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.git import DivergentHead, EmptyImpl, HeadAdvanced, PreImplState
+from gremlins.schema import PipelineDef as _PipelineDef, StageEntry as _StageEntry
 from gremlins.stages.base import RuntimeState
 from gremlins.stages.implement import Implement
+
+
+def _gh_pipeline() -> _PipelineDef:
+    return _PipelineDef(
+        name="test",
+        path=pathlib.Path("."),
+        stages=[_StageEntry(name="open-github-pr", type="open-github-pr", client=None, prompts=[], options={})],
+    )
 
 _TEMPLATE_LOCAL = "plan: {plan_text}{spec_block}{impl_commit_instr}"
 _TEMPLATE_GH = "{spec_block}{plan_source_label}{issue_body}{plan_location_note}"
@@ -29,18 +38,13 @@ def _make_state(
     prompts: list[str] | None = None,
     is_gh: bool = False,
 ) -> tuple[Implement, RuntimeState]:
-    stage = Implement(
-        "implement",
-        "sonnet",
-        prompts or [],
-        {},
-        is_git=is_git,
-        spec_text=spec_text,
-        is_gh=is_gh,
-    )
+    stage = Implement("implement", "sonnet", prompts or [], {})
     client = FakeClaudeClient(fixtures={"implement": MINIMAL_EVENTS})
-    state = RuntimeState(client=client, session_dir=tmp_path, gr_id=None)
+    pipeline_data = _gh_pipeline() if is_gh else None
+    state = RuntimeState(client=client, session_dir=tmp_path, gr_id=None, is_git=is_git, pipeline_data=pipeline_data)
     (tmp_path / "plan.md").write_text(plan_text, encoding="utf-8")
+    if spec_text:
+        (tmp_path / "spec.md").write_text(spec_text, encoding="utf-8")
     return stage, state
 
 

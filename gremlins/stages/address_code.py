@@ -9,9 +9,27 @@ from typing import Any
 
 from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.registry import register_stage
-from gremlins.state import check_bail, emit_bail, read_pr_url
+from gremlins.state import check_bail, emit_bail, pipeline_uses_gh, read_pr_url
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _review_stage_info(state: RuntimeState) -> tuple[list[str], dict[str, pathlib.Path]]:
+    names: list[str] = []
+    dirs: dict[str, pathlib.Path] = {}
+    scope = state.current_scope or (
+        list(state.pipeline_data.stages) if state.pipeline_data else []
+    )
+    for s in scope:
+        if s.type == "parallel":
+            for child in s.body:
+                if child.type == "review-code":
+                    names.append(child.name)
+                    dirs[child.name] = state.session_dir / s.name / child.name
+        elif s.type == "review-code":
+            names.append(s.name)
+            dirs[s.name] = state.session_dir
+    return names, dirs
 
 
 def _model_from(path: pathlib.Path, stage_name: str) -> str:
@@ -33,23 +51,14 @@ class AddressCode(Stage):
         prompts: list[str],
         options: dict[str, Any],
         *,
-        is_git: bool,
-        review_stage_names: list[str] | None = None,
-        review_stage_dirs: dict[str, pathlib.Path] | None = None,
         pr_url: str = "",
-        is_gh: bool = False,
     ) -> None:
         super().__init__(name, model, prompts, options)
-        self.is_git = is_git
-        self.review_stage_names = (
-            review_stage_names if review_stage_names is not None else ["review-code"]
-        )
-        self.review_stage_dirs = review_stage_dirs or {}
         self.pr_url = pr_url
-        self.is_gh = is_gh
 
     def run(self, state: RuntimeState) -> None:
-        if self.is_gh:
+        is_gh = bool(state.pipeline_data and pipeline_uses_gh(state.pipeline_data))
+        if is_gh:
             self.results_to_github(state)
         else:
             try:
@@ -65,16 +74,19 @@ class AddressCode(Stage):
                 raise
 
     def _inputs_from_local(self, state: RuntimeState) -> dict[str, str]:
+        names, dirs = _review_stage_info(state)
+        if not names:
+            names = ["review-code"]
         review_files: list[tuple[str, pathlib.Path]] = []
-        for stage_name in self.review_stage_names:
-            search_dir = self.review_stage_dirs.get(stage_name, state.session_dir)
+        for stage_name in names:
+            search_dir = dirs.get(stage_name, state.session_dir)
             for m in sorted(glob.glob(str(search_dir / f"{stage_name}-*.md"))):
                 review_files.append((stage_name, pathlib.Path(m)))
         if not review_files:
-            stages_str = ", ".join(self.review_stage_names)
+            stages_str = ", ".join(names)
             searched = ", ".join(
-                str(self.review_stage_dirs.get(s, state.session_dir))
-                for s in self.review_stage_names
+                str(dirs.get(s, state.session_dir))
+                for s in names
             )
             raise FileNotFoundError(
                 f"no review files found in [{searched}] (stages: {stages_str})"
@@ -88,7 +100,7 @@ class AddressCode(Stage):
 
     def results_to_local(self, inputs: dict[str, str], state: RuntimeState) -> None:
         address_commit_instr = ""
-        if self.is_git:
+        if state.is_git:
             address_commit_instr = (
                 "After making all fixes, stage the changed files by name and "
                 "create a single git commit titled 'Address review feedback' whose "

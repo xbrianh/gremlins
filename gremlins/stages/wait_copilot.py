@@ -23,20 +23,19 @@ class WaitCopilot(Stage):
         prompts: list[str],
         options: dict[str, Any],
         *,
-        repo: str,
         pr_num: str = "",
         timeout: int = 600,
         interval: int = 20,
         review_checker: Callable[[], str | None] | None = None,
     ) -> None:
         super().__init__(name, model, prompts, options)
-        self.repo = repo
         self.pr_num = pr_num
         self.timeout = timeout
         self.interval = interval
         self.review_checker = review_checker
 
     def run(self, state: RuntimeState) -> str:
+        repo = state.repo
         pr_num = self.pr_num or read_pr_num(state.gr_id)
         if not pr_num:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
@@ -45,7 +44,7 @@ class WaitCopilot(Stage):
         if review_checker is None:
 
             def _default_checker() -> str | None:
-                return check_copilot_review(self.repo, pr_num)
+                return check_copilot_review(repo, pr_num)
 
             review_checker = _default_checker
 
