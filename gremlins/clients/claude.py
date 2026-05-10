@@ -15,6 +15,8 @@ class StreamTimeoutError(RuntimeError):
     pass
 
 
+DEFAULT_BACKOFF: list[int] = [1, 5, 25]
+
 CLAUDE_FLAGS_BASE = [
     "--permission-mode",
     "bypassPermissions",
@@ -174,31 +176,28 @@ class SubprocessClaudeClient:
         raw_path: pathlib.Path | None = None,
         capture_events: bool = False,
         on_timeout_prompt: str | None = None,
-        max_retries: int = 2,
+        backoff: list[int] | None = None,
         cwd: pathlib.Path | None = None,
         idle_timeout: float | None = None,
     ) -> CompletedRun:
-        if max_retries < 0:
-            raise ValueError(f"max_retries must be >= 0, got {max_retries}")
         if idle_timeout is None:
             idle_timeout = STREAM_IDLE_TIMEOUT
+        schedule = backoff if backoff is not None else DEFAULT_BACKOFF
         argv = self._build_argv(model)
         prefix = f"[{label}] " if label else ""
         active_prompt = prompt
-        for attempt in range(max_retries + 1):
+        for attempt in range(len(schedule) + 1):
             p = self._spawn(argv, active_prompt, cwd=cwd)
             try:
-                result = self._consume(
-                    p, prefix, raw_path, capture_events, idle_timeout
-                )
+                result = self._consume(p, prefix, raw_path, capture_events, idle_timeout)
             except StreamTimeoutError:
-                if attempt == max_retries:
+                if attempt >= len(schedule):
                     raise
                 sys.stderr.write(
                     f"{prefix}stream idle timeout, retrying"
-                    f" ({attempt + 1}/{max_retries})...\n"
+                    f" ({attempt + 1}/{len(schedule)})...\n"
                 )
-                time.sleep(5)
+                time.sleep(schedule[attempt])
                 if on_timeout_prompt is not None:
                     active_prompt = on_timeout_prompt
                 continue

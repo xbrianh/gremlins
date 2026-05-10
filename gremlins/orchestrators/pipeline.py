@@ -159,6 +159,7 @@ class StageRunner:
                 client=self.get_client(stage_spec),
                 session_dir=self.session_dir,
                 gr_id=gr_id,
+                pipeline_retry=self.pipeline_data.retry,
             )
             built.append(
                 (e.name, self.make_runner(e, stage_ctx, stage_spec, scope=stages))

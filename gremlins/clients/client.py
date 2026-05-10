@@ -60,7 +60,7 @@ class Client:
         raw_path: pathlib.Path | None = None,
         capture_events: bool = False,
         on_timeout_prompt: str | None = None,
-        max_retries: int = 2,
+        backoff: list[int] | None = None,
         cwd: pathlib.Path | None = None,
         idle_timeout: float | None = None,
     ) -> CompletedRun:
@@ -71,7 +71,7 @@ class Client:
             raw_path=raw_path,
             capture_events=capture_events,
             on_timeout_prompt=on_timeout_prompt,
-            max_retries=max_retries,
+            backoff=backoff,
             cwd=cwd,
             idle_timeout=idle_timeout,
         )

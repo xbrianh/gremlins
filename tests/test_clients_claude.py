@@ -155,7 +155,7 @@ def test_retry_succeeds_on_second_attempt(tmp_path, monkeypatch):
     monkeypatch.setattr("time.sleep", lambda _: None)
 
     client = SubprocessClaudeClient()
-    result = client.run("hello", label="test", max_retries=2)
+    result = client.run("hello", label="test", backoff=[0, 0])
     assert result.exit_code == 0
     assert int(count_file.read_text()) == 2  # called twice
 
@@ -173,7 +173,7 @@ def test_retry_exhaustion_raises_stream_timeout_error(tmp_path, monkeypatch):
 
     client = SubprocessClaudeClient()
     with pytest.raises(StreamTimeoutError):
-        client.run("hello", label="test", max_retries=2)
+        client.run("hello", label="test", backoff=[0, 0])
     assert int(count_file.read_text()) == 3  # initial + 2 retries
 
 
@@ -201,7 +201,7 @@ def test_idle_timeout_raises_stream_timeout_error(tmp_path, monkeypatch):
 
     client = SubprocessClaudeClient()
     with pytest.raises(StreamTimeoutError):
-        client.run("hello", label="test", idle_timeout=0.1, max_retries=0)
+        client.run("hello", label="test", idle_timeout=0.1, backoff=[])
 
 
 def test_on_timeout_prompt_used_on_retry(tmp_path, monkeypatch):
@@ -234,6 +234,50 @@ if stdin_out:
 
     client = SubprocessClaudeClient()
     client.run(
-        "original", label="test", on_timeout_prompt="retry-prompt", max_retries=2
+        "original", label="test", on_timeout_prompt="retry-prompt", backoff=[0, 0]
     )
     assert stdin_out.read_text(encoding="utf-8") == "retry-prompt"
+
+
+def test_backoff_schedule_sleep_values(tmp_path, monkeypatch):
+    """Verify time.sleep is called with the exact backoff values in order."""
+    bin_dir = tmp_path / "bin"
+    _install_timeout_stub(bin_dir)
+    count_file = tmp_path / "count.txt"
+    count_file.write_text("0")
+
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("STUB_COUNT_FILE", str(count_file))
+    monkeypatch.setenv("STUB_FAIL_TIMES", "99")
+
+    sleep_calls: list[float] = []
+    monkeypatch.setattr("time.sleep", lambda s: sleep_calls.append(s))
+
+    client = SubprocessClaudeClient()
+    with pytest.raises(StreamTimeoutError):
+        client.run("hello", label="test", backoff=[2, 7, 30])
+
+    assert sleep_calls == [2, 7, 30]
+    assert int(count_file.read_text()) == 4  # 1 initial + 3 retries
+
+
+def test_empty_backoff_no_retries(tmp_path, monkeypatch):
+    """backoff=[] means a single attempt with no retries."""
+    bin_dir = tmp_path / "bin"
+    _install_timeout_stub(bin_dir)
+    count_file = tmp_path / "count.txt"
+    count_file.write_text("0")
+
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("STUB_COUNT_FILE", str(count_file))
+    monkeypatch.setenv("STUB_FAIL_TIMES", "99")
+
+    sleep_calls: list[float] = []
+    monkeypatch.setattr("time.sleep", lambda s: sleep_calls.append(s))
+
+    client = SubprocessClaudeClient()
+    with pytest.raises(StreamTimeoutError):
+        client.run("hello", label="test", backoff=[])
+
+    assert sleep_calls == []
+    assert int(count_file.read_text()) == 1

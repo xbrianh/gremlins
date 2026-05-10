@@ -697,6 +697,49 @@ stages:
     assert [b.name for b in seq.body] == ["step-a", "step-b"]
 
 
+def test_pipeline_retry_block_parsed(tmp_path: pathlib.Path) -> None:
+    from gremlins.schema import RetryConfig
+
+    prompt = _make_prompt(tmp_path)
+    yaml_path = _write_yaml(
+        tmp_path / "pipeline.yaml",
+        f"""\
+name: test-pipe
+default_client: claude:sonnet
+prompt_dir: .
+retry:
+  idle_timeout: 600
+  backoff: [2, 10, 60]
+stages:
+  - name: plan
+    type: plan
+    prompt: {prompt.name}
+""",
+    )
+    pipeline = load_pipeline(yaml_path)
+    assert pipeline.retry is not None
+    assert pipeline.retry.idle_timeout == 600.0
+    assert pipeline.retry.backoff == [2, 10, 60]
+
+
+def test_pipeline_retry_block_absent(tmp_path: pathlib.Path) -> None:
+    prompt = _make_prompt(tmp_path)
+    yaml_path = _write_yaml(
+        tmp_path / "pipeline.yaml",
+        f"""\
+name: test-pipe
+default_client: claude:sonnet
+prompt_dir: .
+stages:
+  - name: plan
+    type: plan
+    prompt: {prompt.name}
+""",
+    )
+    pipeline = load_pipeline(yaml_path)
+    assert pipeline.retry is None
+
+
 def test_boss_yaml_loads() -> None:
     """boss.yaml loads with loop/handoff structure replacing the old chain stage."""
     from gremlins.pipeline.discovery import resolve_pipeline_path

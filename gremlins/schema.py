@@ -12,6 +12,12 @@ def _empty_stage_list() -> list[StageEntry]:
 
 
 @dataclasses.dataclass
+class RetryConfig:
+    idle_timeout: float | None = None
+    backoff: list[int] | None = None
+
+
+@dataclasses.dataclass
 class StageEntry:
     name: str
     type: str
@@ -31,3 +37,4 @@ class PipelineDef:
     stages: list[StageEntry]
     default_client: Client | None = None
     base_ref: str = "current"
+    retry: RetryConfig | None = None

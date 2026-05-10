@@ -6,7 +6,7 @@ from typing import Any, cast
 
 from gremlins.clients.client import Client
 from gremlins.pipeline.preprocess import expand_pipeline
-from gremlins.schema import PipelineDef, StageEntry
+from gremlins.schema import PipelineDef, RetryConfig, StageEntry
 from gremlins.stages.registry import STAGE_REGISTRY
 
 
@@ -121,6 +121,19 @@ def _parse_stage_entry(
     )
 
 
+def _parse_retry(raw: Any, context: str) -> RetryConfig | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"{context}: 'retry' must be a mapping")
+    idle_timeout = raw.get("idle_timeout")
+    backoff = raw.get("backoff")
+    return RetryConfig(
+        idle_timeout=float(idle_timeout) if idle_timeout is not None else None,
+        backoff=list(backoff) if backoff is not None else None,
+    )
+
+
 def load_pipeline(path: pathlib.Path) -> PipelineDef:
     _ensure_registered()
     path = path.resolve()
@@ -148,6 +161,8 @@ def load_pipeline(path: pathlib.Path) -> PipelineDef:
     else:
         pipeline_base_ref = "current"
 
+    pipeline_retry = _parse_retry(raw.get("retry"), context="pipeline retry")
+
     stages: list[StageEntry] = []
     for entry in cast(list[dict[str, Any]], raw.get("stages") or []):
         stages.append(_parse_stage_entry(entry))
@@ -158,4 +173,5 @@ def load_pipeline(path: pathlib.Path) -> PipelineDef:
         stages=stages,
         default_client=default_client,
         base_ref=pipeline_base_ref,
+        retry=pipeline_retry,
     )

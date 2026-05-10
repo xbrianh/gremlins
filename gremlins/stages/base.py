@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast
 
 from gremlins.clients.client import Client
 from gremlins.clients.protocol import CompletedRun
+from gremlins.schema import RetryConfig
 
 if TYPE_CHECKING:
     from gremlins.schema import PipelineDef, StageEntry
@@ -53,6 +54,7 @@ class StageContext:
     gr_id: str | None
     child_key: str | None = None
     worktree: pathlib.Path | None = None
+    pipeline_retry: RetryConfig | None = None
 
     @property
     def cwd(self) -> pathlib.Path:
@@ -84,6 +86,25 @@ class Stage:
             raise RuntimeError(f"stage {self.name!r} not bound")
         return self._mutable_state
 
+    def _resolve_retry(self) -> dict[str, Any]:
+        stage_retry = self.options.get("retry") or {}
+        pr = self.state.pipeline_retry
+
+        idle_timeout = stage_retry.get("idle_timeout")
+        if idle_timeout is None and pr is not None:
+            idle_timeout = pr.idle_timeout
+
+        backoff = stage_retry.get("backoff")
+        if backoff is None and pr is not None:
+            backoff = pr.backoff
+
+        out: dict[str, Any] = {}
+        if idle_timeout is not None:
+            out["idle_timeout"] = float(idle_timeout)
+        if backoff is not None:
+            out["backoff"] = list(backoff)
+        return out
+
     def run_claude(
         self,
         prompt: str,
@@ -92,13 +113,15 @@ class Stage:
         raw_path: pathlib.Path | None = None,
         **kw: Any,
     ) -> CompletedRun:
+        retry = self._resolve_retry()
+        retry.update(kw)
         return self.state.client.run(
             prompt,
             label=label,
             model=self.model,
             raw_path=raw_path,
             cwd=self.state.worktree,
-            **kw,
+            **retry,
         )
 
     def bail_command(self) -> str:
