@@ -9,8 +9,8 @@ import subprocess
 import tempfile
 from typing import Any, cast
 
+import gremlins.fleet.constants as _constants
 from gremlins.clients.stream import stream_events
-from gremlins.fleet import constants as _constants
 from gremlins.fleet.constants import (
     EXCLUDED_BAIL_CLASSES,
     HEADLESS_DIAGNOSIS_TIMEOUT_SECS,

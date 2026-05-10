@@ -7,12 +7,16 @@ import subprocess
 
 import pytest
 
+import gremlins.fleet.ack as _ack
+import gremlins.fleet.close as _close
 import gremlins.fleet.constants as _constants
+import gremlins.fleet.duration as _duration
 import gremlins.fleet.land as _land
 import gremlins.fleet.land as _land_mod
+import gremlins.fleet.render as _render
 import gremlins.fleet.rescue as _rescue
 import gremlins.fleet.rescue as _rescue_mod
-from gremlins import fleet as gremlins
+import gremlins.fleet.state as _state
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -94,7 +98,7 @@ def test_liveness_running_with_live_pid_and_fresh_log(tmp_path):
         {"status": "running", "pid": os.getpid()},
         log_text="recent",
     )
-    assert gremlins.liveness_of_state_file(sf) == "running"
+    assert _state.liveness_of_state_file(sf) == "running"
 
 
 def test_liveness_dead_finished_zero_exit(tmp_path):
@@ -103,7 +107,7 @@ def test_liveness_dead_finished_zero_exit(tmp_path):
         {"status": "running", "pid": 99999, "exit_code": 0},
         finished=True,
     )
-    assert gremlins.liveness_of_state_file(sf) == "dead:finished"
+    assert _state.liveness_of_state_file(sf) == "dead:finished"
 
 
 def test_liveness_dead_with_nonzero_exit(tmp_path):
@@ -112,7 +116,7 @@ def test_liveness_dead_with_nonzero_exit(tmp_path):
         {"status": "running", "pid": 99999, "exit_code": 2},
         finished=True,
     )
-    assert gremlins.liveness_of_state_file(sf) == "dead:exit 2"
+    assert _state.liveness_of_state_file(sf) == "dead:exit 2"
 
 
 def test_liveness_dead_bailed_includes_reason(tmp_path):
@@ -121,7 +125,7 @@ def test_liveness_dead_bailed_includes_reason(tmp_path):
         {"status": "bailed", "exit_code": 2, "bail_reason": "structural"},
         finished=True,
     )
-    assert gremlins.liveness_of_state_file(sf) == "dead:bailed:structural"
+    assert _state.liveness_of_state_file(sf) == "dead:bailed:structural"
 
 
 def test_liveness_dead_crashed_when_pid_gone(tmp_path):
@@ -130,7 +134,7 @@ def test_liveness_dead_crashed_when_pid_gone(tmp_path):
         tmp_path / "g",
         {"status": "running", "pid": 999999},
     )
-    assert gremlins.liveness_of_state_file(sf).startswith("dead:crashed")
+    assert _state.liveness_of_state_file(sf).startswith("dead:crashed")
 
 
 def test_liveness_stalled_when_log_is_old(tmp_path, monkeypatch):
@@ -143,7 +147,7 @@ def test_liveness_stalled_when_log_is_old(tmp_path, monkeypatch):
     old = os.path.getmtime(log_path) - 10000
     os.utime(log_path, (old, old))
     monkeypatch.setattr(_constants, "BG_STALL_SECS", 100)
-    assert gremlins.liveness_of_state_file(sf).startswith("stalled:")
+    assert _state.liveness_of_state_file(sf).startswith("stalled:")
 
 
 def test_boss_waiting_with_old_log_shows_waiting_duration(tmp_path):
@@ -160,7 +164,7 @@ def test_boss_waiting_with_old_log_shows_waiting_duration(tmp_path):
     log_path = tmp_path / "g" / "log"
     old = os.path.getmtime(log_path) - 200
     os.utime(log_path, (old, old))
-    live = gremlins.liveness_of_state_file(sf)
+    live = _state.liveness_of_state_file(sf)
     assert live.startswith("waiting (")
     assert "stalled" not in live
 
@@ -175,7 +179,7 @@ def test_boss_waiting_no_log_shows_waiting(tmp_path):
             "stage": "waiting",
         },
     )
-    live = gremlins.liveness_of_state_file(sf)
+    live = _state.liveness_of_state_file(sf)
     assert live == "waiting"
 
 
@@ -194,7 +198,7 @@ def test_boss_non_waiting_stage_shows_running(tmp_path, monkeypatch):
     old = os.path.getmtime(log_path) - 10000
     os.utime(log_path, (old, old))
     monkeypatch.setattr(_constants, "BG_STALL_SECS", 100)
-    assert gremlins.liveness_of_state_file(sf) == "running"
+    assert _state.liveness_of_state_file(sf) == "running"
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +213,7 @@ def test_build_row_rescue_suffix_singular():
         "rescue_count": 1,
         "started_at": "",
     }
-    row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
+    row = _render.build_row("g1", "/sf", "/wdir", state, "running")
     assert "(rescue)" in row.liveness
 
 
@@ -220,7 +224,7 @@ def test_build_row_rescue_suffix_multiple():
         "rescue_count": 3,
         "started_at": "",
     }
-    row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
+    row = _render.build_row("g1", "/sf", "/wdir", state, "running")
     assert "(rescue x3)" in row.liveness
 
 
@@ -231,7 +235,7 @@ def test_build_row_no_rescue_suffix_when_zero():
         "rescue_count": 0,
         "started_at": "",
     }
-    row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
+    row = _render.build_row("g1", "/sf", "/wdir", state, "running")
     assert "(rescue" not in row.liveness
 
 
@@ -242,7 +246,7 @@ def test_build_row_waiting_with_sub_stage():
         "sub_stage": "implement",
         "started_at": "",
     }
-    row = gremlins.build_row("g1", "/sf", "/wdir", state, "waiting (3m12s)")
+    row = _render.build_row("g1", "/sf", "/wdir", state, "waiting (3m12s)")
     assert row.stage == "waiting:implement"
 
 
@@ -253,13 +257,13 @@ def test_build_row_client_from_state():
         "started_at": "",
         "client": "copilot:gpt-5.4",
     }
-    row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
+    row = _render.build_row("g1", "/sf", "/wdir", state, "running")
     assert row.client == "copilot:gpt-5.4"
 
 
 def test_build_row_client_missing_field_shows_dash():
     state = {"kind": "localgremlin", "stage": "implement", "started_at": ""}
-    row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
+    row = _render.build_row("g1", "/sf", "/wdir", state, "running")
     assert row.client == "—"
 
 
@@ -271,7 +275,7 @@ def test_build_row_preserves_long_client_label():
         "started_at": "",
         "client": client,
     }
-    row = gremlins.build_row("g1", "/sf", "/wdir", state, "running")
+    row = _render.build_row("g1", "/sf", "/wdir", state, "running")
     assert row.client == client
 
 
@@ -399,7 +403,7 @@ def test_rescue_headless_excludes_class(tmp_path, monkeypatch, capsys, bail_clas
         bail_class=bail_class,
         bail_detail="upstream-set detail",
     )
-    ok = gremlins.do_rescue("test-id-aabb12", headless=True)
+    ok = _rescue.do_rescue("test-id-aabb12", headless=True)
     assert ok is False
     new = json.loads((gr_dir / "state.json").read_text())
     assert new["bail_reason"] == f"excluded_class:{bail_class}"
@@ -415,7 +419,7 @@ def test_rescue_headless_does_not_exclude_other_class(tmp_path, monkeypatch):
     monkeypatch.setattr(
         _rescue, "_run_headless_diagnosis", lambda *a, **kw: ("structural", "fake")
     )
-    ok = gremlins.do_rescue("test-id-aabb12", headless=True)
+    ok = _rescue.do_rescue("test-id-aabb12", headless=True)
     assert ok is False
     new = json.loads((gr_dir / "state.json").read_text())
     # Should bail with "structural" (from the stubbed diagnosis), NOT excluded_class
@@ -430,16 +434,16 @@ def test_rescue_headless_does_not_exclude_other_class(tmp_path, monkeypatch):
 @pytest.mark.parametrize("rescue_count", [3, 4, 10])
 def test_rescue_headless_at_or_above_cap_refuses(tmp_path, monkeypatch, rescue_count):
     gr_dir, _ = _setup_dead_gremlin(tmp_path, monkeypatch, rescue_count=rescue_count)
-    ok = gremlins.do_rescue("test-id-aabb12", headless=True)
+    ok = _rescue.do_rescue("test-id-aabb12", headless=True)
     assert ok is False
     new = json.loads((gr_dir / "state.json").read_text())
     assert new["bail_reason"] == "attempts_exhausted"
-    assert f"reached cap of {gremlins.RESCUE_CAP}" in new["bail_detail"]
+    assert f"reached cap of {_constants.RESCUE_CAP}" in new["bail_detail"]
 
 
 def test_rescue_headless_below_cap_proceeds_past_check(tmp_path, monkeypatch):
     gr_dir, _ = _setup_dead_gremlin(
-        tmp_path, monkeypatch, rescue_count=gremlins.RESCUE_CAP - 1
+        tmp_path, monkeypatch, rescue_count=_constants.RESCUE_CAP - 1
     )
     # Stub diagnosis so we don't actually run claude
     monkeypatch.setattr(
@@ -447,7 +451,7 @@ def test_rescue_headless_below_cap_proceeds_past_check(tmp_path, monkeypatch):
         "_run_headless_diagnosis",
         lambda *a, **kw: ("structural", "agent flagged"),
     )
-    ok = gremlins.do_rescue("test-id-aabb12", headless=True)
+    ok = _rescue.do_rescue("test-id-aabb12", headless=True)
     assert ok is False
     new = json.loads((gr_dir / "state.json").read_text())
     # Bails with "structural" from diagnosis, not "attempts_exhausted"
@@ -465,7 +469,7 @@ def test_rescue_headless_running_refused(tmp_path, monkeypatch, capsys):
     (gr_dir / "finished").unlink()
     (gr_dir / "log").write_text("recent")
 
-    ok = gremlins.do_rescue("test-id-aabb12", headless=True)
+    ok = _rescue.do_rescue("test-id-aabb12", headless=True)
     assert ok is False
     out = capsys.readouterr().out
     assert "still running" in out
@@ -478,7 +482,7 @@ def test_rescue_headless_running_refused(tmp_path, monkeypatch, capsys):
 
 def test_close_dead_gremlin_marks_closed(tmp_path, monkeypatch, capsys):
     gr_dir, _ = _setup_dead_gremlin(tmp_path, monkeypatch)
-    ok = gremlins.do_close("test-id-aabb12")
+    ok = _close.do_close("test-id-aabb12")
     assert ok is True
     assert (gr_dir / "closed").exists()
 
@@ -486,7 +490,7 @@ def test_close_dead_gremlin_marks_closed(tmp_path, monkeypatch, capsys):
 def test_close_already_closed_is_idempotent(tmp_path, monkeypatch, capsys):
     gr_dir, _ = _setup_dead_gremlin(tmp_path, monkeypatch)
     (gr_dir / "closed").touch()
-    ok = gremlins.do_close("test-id-aabb12")
+    ok = _close.do_close("test-id-aabb12")
     assert ok is True
     assert "already closed" in capsys.readouterr().out
 
@@ -501,7 +505,7 @@ def test_close_running_refused(tmp_path, monkeypatch, capsys):
     (gr_dir / "finished").unlink()
     (gr_dir / "log").write_text("recent")
 
-    ok = gremlins.do_close("test-id-aabb12")
+    ok = _close.do_close("test-id-aabb12")
     assert ok is False
     assert not (gr_dir / "closed").exists()
     assert "still live" in capsys.readouterr().out
@@ -511,7 +515,7 @@ def test_close_not_found(tmp_path, monkeypatch, capsys):
     state_root = tmp_path / "state-root"
     state_root.mkdir()
     monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
-    ok = gremlins.do_close("nonexistent-id")
+    ok = _close.do_close("nonexistent-id")
     assert ok is False
     assert "no gremlin matched" in capsys.readouterr().out
 
@@ -548,7 +552,7 @@ def test_ack_on_bailed_child_sets_external_outcome_landed(
     tmp_path, monkeypatch, capsys
 ):
     gr_dir, _ = _setup_bailed_gremlin(tmp_path, monkeypatch)
-    ok = gremlins.do_ack("test-id-aabb12")
+    ok = _ack.do_ack("test-id-aabb12")
     assert ok is True
     state = json.loads((gr_dir / "state.json").read_text())
     assert state["external_outcome"] == "landed"
@@ -562,7 +566,7 @@ def test_ack_on_running_child_refuses(tmp_path, monkeypatch, capsys):
     gr_dir, _ = _setup_bailed_gremlin(
         tmp_path, monkeypatch, status="running", exit_code=None
     )
-    ok = gremlins.do_ack("test-id-aabb12")
+    ok = _ack.do_ack("test-id-aabb12")
     assert ok is False
     assert "not bailed" in capsys.readouterr().err
     state = json.loads((gr_dir / "state.json").read_text())
@@ -573,7 +577,7 @@ def test_ack_on_completed_child_refuses(tmp_path, monkeypatch, capsys):
     gr_dir, _ = _setup_bailed_gremlin(
         tmp_path, monkeypatch, status="completed", exit_code=0
     )
-    ok = gremlins.do_ack("test-id-aabb12")
+    ok = _ack.do_ack("test-id-aabb12")
     assert ok is False
     assert "not bailed" in capsys.readouterr().err
     state = json.loads((gr_dir / "state.json").read_text())
@@ -584,7 +588,7 @@ def test_skip_on_bailed_child_sets_external_outcome_abandoned(
     tmp_path, monkeypatch, capsys
 ):
     gr_dir, _ = _setup_bailed_gremlin(tmp_path, monkeypatch)
-    ok = gremlins.do_skip("test-id-aabb12")
+    ok = _ack.do_skip("test-id-aabb12")
     assert ok is True
     state = json.loads((gr_dir / "state.json").read_text())
     assert state["external_outcome"] == "abandoned"
@@ -598,7 +602,7 @@ def test_skip_on_running_child_refuses(tmp_path, monkeypatch, capsys):
     gr_dir, _ = _setup_bailed_gremlin(
         tmp_path, monkeypatch, status="running", exit_code=None
     )
-    ok = gremlins.do_skip("test-id-aabb12")
+    ok = _ack.do_skip("test-id-aabb12")
     assert ok is False
     assert "not bailed" in capsys.readouterr().err
     state = json.loads((gr_dir / "state.json").read_text())
@@ -609,7 +613,7 @@ def test_skip_on_completed_child_refuses(tmp_path, monkeypatch, capsys):
     gr_dir, _ = _setup_bailed_gremlin(
         tmp_path, monkeypatch, status="completed", exit_code=0
     )
-    ok = gremlins.do_skip("test-id-aabb12")
+    ok = _ack.do_skip("test-id-aabb12")
     assert ok is False
     assert "not bailed" in capsys.readouterr().err
     state = json.loads((gr_dir / "state.json").read_text())
@@ -1130,17 +1134,17 @@ def test_write_bail_marks_terminal(tmp_path):
 
 
 def test_parse_duration():
-    assert gremlins.parse_duration("30s") == 30
-    assert gremlins.parse_duration("5m") == 300
-    assert gremlins.parse_duration("2h") == 7200
-    assert gremlins.parse_duration("1d") == 86400
+    assert _duration.parse_duration("30s") == 30
+    assert _duration.parse_duration("5m") == 300
+    assert _duration.parse_duration("2h") == 7200
+    assert _duration.parse_duration("1d") == 86400
 
 
 def test_parse_duration_invalid():
     with pytest.raises(ValueError):
-        gremlins.parse_duration("5x")
+        _duration.parse_duration("5x")
     with pytest.raises(ValueError):
-        gremlins.parse_duration("abc")
+        _duration.parse_duration("abc")
 
 
 # ---------------------------------------------------------------------------
@@ -1155,7 +1159,7 @@ def test_liveness_host_terminated_when_pid_gone_and_workdir_missing(tmp_path):
         tmp_path / "g",
         {"status": "running", "pid": 999999, "workdir": str(workdir)},
     )
-    assert gremlins.liveness_of_state_file(sf) == "dead:host-terminated"
+    assert _state.liveness_of_state_file(sf) == "dead:host-terminated"
 
 
 def test_liveness_crashed_when_pid_gone_but_workdir_exists(tmp_path):
@@ -1165,7 +1169,7 @@ def test_liveness_crashed_when_pid_gone_but_workdir_exists(tmp_path):
         tmp_path / "g",
         {"status": "running", "pid": 999999, "workdir": str(workdir)},
     )
-    live = gremlins.liveness_of_state_file(sf)
+    live = _state.liveness_of_state_file(sf)
     assert live.startswith("dead:crashed")
 
 
@@ -1174,7 +1178,7 @@ def test_liveness_crashed_when_pid_gone_and_no_workdir_in_state(tmp_path):
         tmp_path / "g",
         {"status": "running", "pid": 999999},
     )
-    live = gremlins.liveness_of_state_file(sf)
+    live = _state.liveness_of_state_file(sf)
     assert live.startswith("dead:crashed")
 
 
@@ -1206,7 +1210,7 @@ def test_rescue_host_terminated_project_root_gone_bails_headless(
     _write_state(gr_dir, state)
     monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
 
-    ok = gremlins.do_rescue(gr_id, headless=True)
+    ok = _rescue.do_rescue(gr_id, headless=True)
     assert ok is False
     new = json.loads((gr_dir / "state.json").read_text())
     assert new["bail_reason"] == "host_terminated_unrecoverable"
@@ -1243,7 +1247,7 @@ def test_rescue_host_terminated_worktree_recreation_failure_bails_headless(
         _rescue, "_recreate_worktree", lambda s: (False, "git not a repo")
     )
 
-    ok = gremlins.do_rescue(gr_id, headless=True)
+    ok = _rescue.do_rescue(gr_id, headless=True)
     assert ok is False
     new = json.loads((gr_dir / "state.json").read_text())
     assert new["bail_reason"] == "host_terminated_unrecoverable"
@@ -1286,7 +1290,7 @@ def test_rescue_host_terminated_recreates_worktree_and_proceeds(
         lambda *a, **kw: ("structural", "fake structural"),
     )
 
-    ok = gremlins.do_rescue(gr_id, headless=True)
+    ok = _rescue.do_rescue(gr_id, headless=True)
     assert ok is False  # structural bail, not host-terminated
     new = json.loads((gr_dir / "state.json").read_text())
     # Should have bailed with "structural", not "host_terminated_unrecoverable"

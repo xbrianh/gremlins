@@ -28,7 +28,6 @@ from typing import Any, cast
 import yaml
 
 from gremlins import paths as _paths
-from gremlins.fleet import main as fleet_main
 from gremlins.fleet.cli import (
     ack_main,
     close_main,
@@ -38,6 +37,9 @@ from gremlins.fleet.cli import (
     rm_main,
     skip_main,
     stop_main,
+)
+from gremlins.fleet.cli import (
+    main as fleet_main,
 )
 from gremlins.launcher import launch, resume
 from gremlins.orchestrators.review_address import address_main, review_main

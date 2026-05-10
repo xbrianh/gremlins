@@ -7,7 +7,7 @@ import sys
 import time
 import types
 
-from gremlins.fleet import constants as _constants
+import gremlins.fleet.constants as _constants
 from gremlins.fleet.ack import do_ack, do_skip
 from gremlins.fleet.close import do_close
 from gremlins.fleet.land import do_land, do_rm
