@@ -118,8 +118,8 @@ def _write_state(tmp_path: pathlib.Path, data: dict) -> pathlib.Path:
     return sf
 
 
-def test_stacked_pr_uses_last_artifact_branch(tmp_path: pathlib.Path) -> None:
-    """For child N>1, PR base is the last branch artifact."""
+def test_stacked_pr_uses_prior_pr_branch(tmp_path: pathlib.Path) -> None:
+    """For child N>1, PR base is the previous child's PR branch."""
     _write_state(tmp_path, {"base_ref_name": "main"})
     stage, ctx = _make_stage_with_gr(tmp_path)
     prompts_seen: list[str] = []
@@ -129,7 +129,7 @@ def test_stacked_pr_uses_last_artifact_branch(tmp_path: pathlib.Path) -> None:
             return_value=tmp_path / "state.json",
         ),
         patch(
-            "gremlins.stages.open_github_pr.last_artifact_branch",
+            "gremlins.stages.open_github_pr.last_pr_branch",
             return_value="gremlin/abc-child-1",
         ),
         patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
@@ -147,6 +147,50 @@ def test_stacked_pr_uses_last_artifact_branch(tmp_path: pathlib.Path) -> None:
     assert prompts_seen, "run_claude should have been called"
     assert "gremlin/abc-child-1" in prompts_seen[0], (
         "PR prompt should target previous child branch, not main"
+    )
+
+
+def test_single_pr_with_branch_artifact_uses_base_ref_name(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Regression: a branch artifact (just materialized) must NOT be used as PR base.
+
+    Before the fix, `last_artifact_branch` returned the just-materialized head
+    branch, so `gh pr create` was invoked with --base == --head and failed.
+    The base for a non-stacked PR must come from base_ref_name.
+    """
+    _write_state(
+        tmp_path,
+        {
+            "base_ref_name": "main",
+            "artifacts": [{"type": "branch", "name": "ghgremlin-impl-foo-abc123"}],
+        },
+    )
+    stage, ctx = _make_stage_with_gr(tmp_path)
+    prompts_seen: list[str] = []
+    sf = tmp_path / "state.json"
+    with (
+        patch(
+            "gremlins.stages.open_github_pr.resolve_state_file",
+            return_value=sf,
+        ),
+        patch("gremlins.state.resolve_state_file", return_value=sf),
+        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
+        patch("gremlins.stages.open_github_pr.append_artifact"),
+        patch.object(
+            stage,
+            "run_claude",
+            side_effect=lambda prompt, **kw: (
+                prompts_seen.append(prompt)
+                or type("R", (), {"events": [], "text_result": ""})()
+            ),
+        ),
+    ):
+        stage.run(None)
+    assert prompts_seen, "run_claude should have been called"
+    assert "main" in prompts_seen[0]
+    assert "ghgremlin-impl-foo-abc123" not in prompts_seen[0], (
+        "the just-materialized head branch must not appear as the PR base"
     )
 
 

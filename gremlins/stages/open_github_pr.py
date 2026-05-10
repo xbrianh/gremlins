@@ -12,7 +12,7 @@ from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import (
     append_artifact,
-    last_artifact_branch,
+    last_pr_branch,
     read_state_str,
     resolve_state_file,
 )
@@ -42,7 +42,7 @@ class OpenGitHubPR(Stage):
     def run(self, pipe: Any) -> str:
         sf = resolve_state_file(self.state.gr_id)
         base_ref = (
-            last_artifact_branch(self.state.gr_id)
+            last_pr_branch(self.state.gr_id)
             or self.base_ref
             or read_state_str(sf, "base_ref_name")
             or "main"
