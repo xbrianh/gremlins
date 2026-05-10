@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, cast
 from gremlins.clients import resolve as _resolve
 from gremlins.clients.claude import SubprocessClaudeClient
 from gremlins.clients.copilot import SubprocessCopilotClient
-from gremlins.stages.registry import CLIENT_FACTORIES, register_client_factory
+from gremlins.clients.registry import CLIENT_FACTORIES, register_client_factory
 
 if TYPE_CHECKING:
     from gremlins.clients.protocol import ClaudeClient
