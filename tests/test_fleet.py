@@ -1419,6 +1419,66 @@ def test_do_land_one_branch_routes_to_local(tmp_path, monkeypatch):
     assert called == ["_land_local"]
 
 
+def test_land_gh_removes_worktree_before_gh_merge(tmp_path, monkeypatch, capsys):
+    """_remove_worktree must be called before gh pr merge so --delete-branch succeeds."""
+    import types
+
+    pr_url = "https://github.com/o/r/pull/42"
+    gr_id = "gh-land-order-test12"
+
+    state_root = tmp_path / "state-root"
+    state_root.mkdir()
+    gr_dir = state_root / gr_id
+    gr_dir.mkdir(parents=True)
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    state = {
+        "id": gr_id,
+        "kind": "ghgremlin",
+        "status": "dead",
+        "exit_code": 0,
+        "workdir": str(workdir),
+        "project_root": str(tmp_path / "project"),
+        "artifacts": [{"type": "pr", "url": pr_url, "branch": "feat"}],
+    }
+    (gr_dir / "state.json").write_text(json.dumps(state))
+    sf = str(gr_dir / "state.json")
+
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+    monkeypatch.setattr(_land, "read_pr_url", lambda gr_id: pr_url)
+    monkeypatch.setattr(_land, "_resolve_landing_cwd", lambda s: str(tmp_path))
+
+    call_order: list[str] = []
+
+    def fake_remove_worktree(wdir, state, cwd):
+        call_order.append("_remove_worktree")
+
+    def fake_proc_run(cmd, **kwargs):
+        if "merge" in cmd:
+            call_order.append("gh_merge")
+            result = types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        elif "view" in cmd:
+            result = types.SimpleNamespace(
+                returncode=0,
+                stdout='{"state":"OPEN","mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[]}',
+                stderr="",
+            )
+        else:
+            result = types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        return result
+
+    monkeypatch.setattr(_land, "_remove_worktree", fake_remove_worktree)
+    monkeypatch.setattr(_land.proc, "run", fake_proc_run)
+    monkeypatch.setattr(_land, "_fast_forward_main", lambda cwd: None)
+    monkeypatch.setattr(_land, "_finalize_cleanup", lambda *a, **kw: None)
+
+    ok = _land._land_gh(gr_id, sf, str(gr_dir), state)
+    assert ok is True
+    assert call_order.index("_remove_worktree") < call_order.index("gh_merge")
+    out = capsys.readouterr().out
+    assert "warning" not in out
+
+
 def test_rescue_prompt_uses_pipeline_name():
     """build_rescue_prompt uses pipeline name from pipeline_path, not raw kind."""
     state = {
