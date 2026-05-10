@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from gremlins.clients import ClientSpec
 from gremlins.clients.resolve import require_stage_spec
@@ -31,11 +31,9 @@ from gremlins.stages import (
     handoff as handoff_stage_mod,
 )
 from gremlins.stages import materialize_to_branch as materialize_to_branch_mod
+from gremlins.stages.base import StageRunner
 from gremlins.stages.registry import register_stage_builder
 from gremlins.state import read_state_str
-
-if TYPE_CHECKING:
-    from gremlins.orchestrators.pipeline import StageRunner
 
 logger = logging.getLogger(__name__)
 
