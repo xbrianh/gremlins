@@ -23,7 +23,7 @@ import gremlins.stages.sequence as sequence
 import gremlins.stages.verify as verify
 import gremlins.stages.wait_ci as wait_ci
 import gremlins.stages.wait_copilot as wait_copilot
-from gremlins.clients.resolve import ClientSpec
+from gremlins.clients.client import Client
 from gremlins.errors import die
 from gremlins.schema import StageEntry
 from gremlins.stage_clients import require_stage_spec
@@ -52,7 +52,7 @@ def _review_stage_info(
     return names, dirs
 
 
-def _build_plan(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
+def _build_plan(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
     plan_val = getattr(runner.args, "plan", None)
     if not entry.prompts and not plan_val:
         die(
@@ -73,7 +73,7 @@ def _build_plan(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any
     )
 
 
-def _build_implement(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
+def _build_implement(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
     spec_text = ""
     spec_file = runner.session_dir / "spec.md"
     if spec_file.exists():
@@ -101,14 +101,14 @@ def _build_implement(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -
 
 
 def _build_materialize_to_branch(
-    entry: StageEntry, spec: ClientSpec, _runner: StageRunner
+    entry: StageEntry, spec: Client, _runner: StageRunner
 ) -> Any:
     return materialize_to_branch_mod.MaterializeToBranch(
         entry.name, spec.model, entry.prompts, entry.options
     )
 
 
-def _build_verify(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
+def _build_verify(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
     options = dict(entry.options)
     if not runner.repo:
         cmds = getattr(runner.args, "cmds", None)
@@ -128,13 +128,11 @@ def _build_verify(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> A
     )
 
 
-def _build_commit(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
+def _build_commit(entry: StageEntry, spec: Client, _runner: StageRunner) -> Any:
     return commit.Commit(entry.name, spec.model, entry.prompts, entry.options)
 
 
-def _build_open_github_pr(
-    entry: StageEntry, spec: ClientSpec, runner: StageRunner
-) -> Any:
+def _build_open_github_pr(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
     return open_github_pr.OpenGitHubPR(
         entry.name,
         spec.model,
@@ -145,15 +143,13 @@ def _build_open_github_pr(
     )
 
 
-def _build_request_copilot(
-    entry: StageEntry, spec: ClientSpec, runner: StageRunner
-) -> Any:
+def _build_request_copilot(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
     return request_copilot.RequestCopilot(
         entry.name, spec.model, entry.prompts, entry.options, repo=runner.repo
     )
 
 
-def _build_ghreview(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
+def _build_ghreview(entry: StageEntry, spec: Client, _runner: StageRunner) -> Any:
     if not entry.prompts:
         die(
             f"stage {entry.name!r}: type 'ghreview' requires a 'prompt' field in the pipeline YAML"
@@ -163,15 +159,13 @@ def _build_ghreview(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -
     )
 
 
-def _build_wait_copilot(
-    entry: StageEntry, spec: ClientSpec, runner: StageRunner
-) -> Any:
+def _build_wait_copilot(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
     return wait_copilot.WaitCopilot(
         entry.name, spec.model, entry.prompts, entry.options, repo=runner.repo
     )
 
 
-def _build_ghaddress(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
+def _build_ghaddress(entry: StageEntry, spec: Client, _runner: StageRunner) -> Any:
     if not entry.prompts:
         die(
             f"stage {entry.name!r}: type 'ghaddress' requires a 'prompt' field in the pipeline YAML"
@@ -181,11 +175,11 @@ def _build_ghaddress(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) 
     )
 
 
-def _build_wait_ci(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
+def _build_wait_ci(entry: StageEntry, spec: Client, _runner: StageRunner) -> Any:
     return wait_ci.WaitCI(entry.name, spec.model, entry.prompts, entry.options)
 
 
-def _build_review_code(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
+def _build_review_code(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
     plan_file = runner.session_dir / "plan.md"
     plan_text = plan_file.read_text(encoding="utf-8")
     logger.info("reviewing code (model: %s)", spec.model)
@@ -199,9 +193,7 @@ def _build_review_code(entry: StageEntry, spec: ClientSpec, runner: StageRunner)
     )
 
 
-def _build_address_code(
-    entry: StageEntry, spec: ClientSpec, runner: StageRunner
-) -> Any:
+def _build_address_code(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
     names, dirs = _review_stage_info(runner)
     logger.info("addressing code reviews (model: %s)", spec.model)
     return address_code.AddressCode(
@@ -215,7 +207,7 @@ def _build_address_code(
     )
 
 
-def _build_loop(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
+def _build_loop(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
     from gremlins.stages.base import StageContext
     from gremlins.stages.loop import LoopStage
 
@@ -236,7 +228,7 @@ def _build_loop(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any
     )
 
 
-def _build_sequence(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
+def _build_sequence(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
     from gremlins.stages.base import StageContext
     from gremlins.stages.sequence import SequenceStage
 
@@ -255,13 +247,11 @@ def _build_sequence(entry: StageEntry, spec: ClientSpec, runner: StageRunner) ->
     return SequenceStage(entry.name, body=body)
 
 
-def _build_run_cmd(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
+def _build_run_cmd(entry: StageEntry, spec: Client, _runner: StageRunner) -> Any:
     return run_cmd.RunCmd(entry.name, spec.model, entry.prompts, entry.options)
 
 
-def _build_claude_prompt(
-    entry: StageEntry, spec: ClientSpec, _runner: StageRunner
-) -> Any:
+def _build_claude_prompt(entry: StageEntry, spec: Client, _runner: StageRunner) -> Any:
     if not entry.prompts:
         die(f"stage {entry.name!r}: type 'claude-prompt' requires a 'prompt' field")
     return claude_prompt.ClaudePrompt(
@@ -269,13 +259,13 @@ def _build_claude_prompt(
     )
 
 
-def _build_handoff(entry: StageEntry, spec: ClientSpec, _runner: StageRunner) -> Any:
+def _build_handoff(entry: StageEntry, spec: Client, _runner: StageRunner) -> Any:
     from gremlins.stages.handoff import Handoff
 
     return Handoff(entry.name, spec)
 
 
-def _build_parallel(entry: StageEntry, spec: ClientSpec, runner: StageRunner) -> Any:
+def _build_parallel(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
     from gremlins.stages.base import StageContext
     from gremlins.stages.parallel import ParallelStage
     from gremlins.state import set_stage

@@ -4,7 +4,7 @@ import importlib
 import pathlib
 from typing import Any, cast
 
-from gremlins.clients.resolve import ClientSpec
+from gremlins.clients.client import Client
 from gremlins.pipeline.preprocess import expand_pipeline
 from gremlins.schema import PipelineDef, StageEntry
 from gremlins.stages.registry import STAGE_REGISTRY
@@ -85,13 +85,13 @@ def _parse_stage_entry(
         raise ValueError(f"stage {name!r}: unknown type {stage_type!r}")
 
     client_spec_raw = entry.get("client")
-    stage_client: ClientSpec | None = None
+    stage_client: Client | None = None
     if client_spec_raw is not None:
         if not isinstance(client_spec_raw, str):
             raise ValueError(
                 f"stage {name!r}: 'client' must be a string, got {type(client_spec_raw)!r}"
             )
-        stage_client = ClientSpec.parse(client_spec_raw)
+        stage_client = Client.parse(client_spec_raw)
 
     raw_prompts = entry.get("prompt")
     if raw_prompts is not None and not isinstance(raw_prompts, list):
@@ -131,14 +131,14 @@ def load_pipeline(path: pathlib.Path) -> PipelineDef:
 
     pipeline_name = str(raw.get("name") or path.stem)
 
-    default_client: ClientSpec | None = None
+    default_client: Client | None = None
     default_client_raw = raw.get("default_client")
     if default_client_raw is not None:
         if not isinstance(default_client_raw, str):
             raise ValueError(
                 f"default_client must be a string, got {type(default_client_raw)!r}"
             )
-        default_client = ClientSpec.parse(default_client_raw)
+        default_client = Client.parse(default_client_raw)
 
     base_ref_raw = raw.get("base_ref")
     if base_ref_raw is not None:

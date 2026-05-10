@@ -11,8 +11,7 @@ from collections.abc import Callable
 from typing import Any
 
 import gremlins.stages.all as _stages_all  # noqa: F401  # type: ignore[reportUnusedImport]
-from gremlins.clients.protocol import ClaudeClient
-from gremlins.clients.resolve import ClientSpec
+from gremlins.clients.client import Client
 from gremlins.git import in_git_repo
 from gremlins.runner import run_stages
 from gremlins.schema import PipelineDef as _PipelineData
@@ -66,9 +65,9 @@ class StageRunner:
         pipeline_data: _PipelineData,
         repo: str = "",
         state_file: pathlib.Path | None = None,
-        stage_specs: dict[str, ClientSpec] | None = None,
-        spec_clients: dict[str, ClaudeClient] | None = None,
-        test_client: ClaudeClient | None = None,
+        stage_specs: dict[str, Client] | None = None,
+        spec_clients: dict[str, Client] | None = None,
+        test_client: Client | None = None,
     ) -> None:
         unknown: list[str] = []
         for s in stages:
@@ -88,8 +87,8 @@ class StageRunner:
         self.pipeline_data = pipeline_data
         self.repo = repo
         self.state_file = state_file
-        self.stage_specs: dict[str, ClientSpec] = stage_specs or {}
-        self.spec_clients: dict[str, ClaudeClient] = spec_clients or {}
+        self.stage_specs: dict[str, Client] = stage_specs or {}
+        self.spec_clients: dict[str, Client] = spec_clients or {}
         self.test_client = test_client
         self.current_scope: list[StageEntry] = []
 
@@ -108,7 +107,7 @@ class StageRunner:
                 raise ValueError(f"--spec: file is empty: {spec_path}")
             shutil.copyfile(spec_src, spec_file)
 
-    def get_client(self, spec: ClientSpec) -> ClaudeClient:
+    def get_client(self, spec: Client) -> Client:
         if self.test_client is not None:
             return self.test_client
         return self.spec_clients[str(spec)]
@@ -128,7 +127,7 @@ class StageRunner:
         self,
         entry: StageEntry,
         ctx: StageContext,
-        spec: ClientSpec,
+        spec: Client,
         scope: list[StageEntry] | None = None,
     ) -> Callable[[], None]:
         builder = STAGE_BUILDERS[entry.type]

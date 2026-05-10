@@ -8,10 +8,10 @@ import subprocess
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast
 
-from gremlins.clients.protocol import ClaudeClient, CompletedRun
+from gremlins.clients.client import Client
+from gremlins.clients.protocol import CompletedRun
 
 if TYPE_CHECKING:
-    from gremlins.clients.resolve import ClientSpec
     from gremlins.schema import PipelineDef, StageEntry
 
 
@@ -23,17 +23,17 @@ class StageRunner(Protocol):
     pipeline_data: PipelineDef
     repo: str
     state_file: pathlib.Path | None
-    stage_specs: dict[str, ClientSpec]
+    stage_specs: dict[str, Client]
     instructions: str
     current_scope: list[StageEntry]
 
-    def get_client(self, spec: ClientSpec) -> ClaudeClient: ...
+    def get_client(self, spec: Client) -> Client: ...
 
     def make_runner(
         self,
         entry: StageEntry,
         ctx: StageContext,
-        spec: ClientSpec,
+        spec: Client,
         scope: list[StageEntry] | None = None,
     ) -> Callable[[], None]: ...
 
@@ -48,7 +48,7 @@ class StageInput(NamedTuple):
 
 @dataclasses.dataclass
 class StageContext:
-    client: ClaudeClient
+    client: Client
     session_dir: pathlib.Path
     gr_id: str | None
     child_key: str | None = None

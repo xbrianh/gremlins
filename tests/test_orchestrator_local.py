@@ -7,8 +7,8 @@ from conftest import REVIEW_LABELS as _REVIEW_LABELS
 from conftest import ReviewCreatingClient as _ReviewCreatingClient
 from conftest import common_local_patches as _common_patches
 
+from gremlins.clients.client import Client
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.clients.resolve import ClientSpec
 from gremlins.orchestrators.review_address import address_main, review_main
 from gremlins.orchestrators.run import run_pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
@@ -385,7 +385,7 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
         stripped_stages = [dataclasses.replace(s, client=None) for s in pipeline.stages]
         return dataclasses.replace(
             pipeline,
-            default_client=ClientSpec("copilot", "gpt-5.4"),
+            default_client=Client("copilot", "gpt-5.4"),
             stages=stripped_stages,
         )
 

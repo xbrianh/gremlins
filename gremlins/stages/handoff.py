@@ -15,8 +15,7 @@ import threading
 from collections.abc import Callable
 from typing import Any, TypeVar, cast
 
-from gremlins.clients.protocol import ClaudeClient
-from gremlins.clients.resolve import ClientSpec
+from gremlins.clients.client import Client
 from gremlins.prompts import BUNDLED_PROMPT_DIR
 from gremlins.stages.base import Stage
 from gremlins.stages.loop import RunCmdFailed
@@ -38,15 +37,11 @@ HANDOFF_TIMEOUT = int(
 )
 
 
-def sanitize_model_for(client_spec: ClientSpec) -> str:
-    return (
-        CLAUDE_SANITIZE_MODEL if client_spec.provider == "claude" else client_spec.model
-    )
+def sanitize_model_for(spec: Client) -> str:
+    return CLAUDE_SANITIZE_MODEL if spec.provider == "claude" else spec.model
 
 
-def with_reap_after(
-    client: ClaudeClient, timeout: int | None, fn: Callable[[], T]
-) -> T:
+def with_reap_after(client: Client, timeout: int | None, fn: Callable[[], T]) -> T:
     """Run fn, reaping the client's subprocesses if it doesn't return in time."""
     if timeout is None:
         return fn()
@@ -339,9 +334,9 @@ def _read_rolling_plan_for_sanitize(out_path: pathlib.Path) -> str | None:
 
 
 def sanitize_rolling_plan(
-    client: ClaudeClient,
+    client: Client,
     out_path: pathlib.Path,
-    client_spec: ClientSpec,
+    spec: Client,
     *,
     timeout: int | None = None,
 ) -> None:
@@ -349,7 +344,7 @@ def sanitize_rolling_plan(
     if plan_text is None:
         return
     prompt = build_sanitize_prompt(plan_text, out_path)
-    model = sanitize_model_for(client_spec)
+    model = sanitize_model_for(spec)
     logger.info("sanitizing rolling plan (model: %s)", model)
     try:
         with_reap_after(
@@ -409,14 +404,14 @@ def _read_optional_spec(spec_arg: str | None) -> str | None:
     return None
 
 
-def _parse_client_spec(client_arg: str) -> ClientSpec:
+def _parse_client_spec(client_arg: str) -> Client:
     try:
-        return ClientSpec.parse(client_arg)
+        return Client.parse(client_arg)
     except ValueError as exc:
         raise RuntimeError(str(exc)) from exc
 
 
-def run(client: ClaudeClient, args: argparse.Namespace) -> int:
+def run(client: Client, args: argparse.Namespace) -> int:
     plan_path = pathlib.Path(args.plan).resolve()
     if not plan_path.exists():
         sys.stderr.write(f"error: --plan does not exist: {plan_path}\n")
@@ -549,14 +544,14 @@ def run(client: ClaudeClient, args: argparse.Namespace) -> int:
     sanitize_rolling_plan(
         client,
         out_path,
-        client_spec,
+        spec=client_spec,
         timeout=min(args.timeout, 60) if args.timeout is not None else None,
     )
     return 0
 
 
 class Handoff(Stage):
-    def __init__(self, name: str, client_spec: ClientSpec) -> None:
+    def __init__(self, name: str, client_spec: Client) -> None:
         super().__init__(name, client_spec.model, [], {})
         self._client_spec = client_spec
 

@@ -1,4 +1,4 @@
-"""Recording test double for the ClaudeClient Protocol."""
+"""Recording test double for the Claude client."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import pathlib
 from dataclasses import dataclass
 from typing import Any, cast
 
+from gremlins.clients.client import Client
 from gremlins.clients.protocol import CompletedRun
 
 
@@ -20,7 +21,7 @@ class RecordedCall:
     cwd: pathlib.Path | None = None
 
 
-class FakeClaudeClient:
+class FakeClaudeClient(Client):
     """Test double — never spawns subprocesses.
 
     Construct with ``fixtures={label: <path-to-jsonl-or-list-of-events>}``;
@@ -35,9 +36,14 @@ class FakeClaudeClient:
         *,
         fixtures: dict[str, object] | None = None,
     ) -> None:
+        super().__init__("fake", "fake")
         self.calls: list[RecordedCall] = []
         self._fixtures: dict[str, object] = dict(fixtures or {})
-        self.total_cost_usd: float = 0.0
+        self._total_cost_usd: float = 0.0
+
+    @property  # type: ignore[override]
+    def total_cost_usd(self) -> float:
+        return self._total_cost_usd
 
     def reap_all(self) -> None:
         pass  # Fake never spawns; nothing to reap.
@@ -70,7 +76,7 @@ class FakeClaudeClient:
         cwd: pathlib.Path | None = None,
         idle_timeout: float | None = None,
     ) -> CompletedRun:
-        del idle_timeout  # fake doesn't stream
+        del on_timeout_prompt, max_retries, idle_timeout
         self.calls.append(
             RecordedCall(
                 prompt=prompt,
@@ -100,7 +106,7 @@ class FakeClaudeClient:
                 raw_cost = evt.get("total_cost_usd", evt.get("cost_usd"))
                 if isinstance(raw_cost, (int, float)):
                     cost_usd = float(raw_cost)
-                    self.total_cost_usd += cost_usd
+                    self._total_cost_usd += cost_usd
                 raw_result = evt.get("result")
                 if isinstance(raw_result, str):
                     result_text = raw_result

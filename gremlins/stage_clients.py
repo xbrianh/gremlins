@@ -4,7 +4,7 @@ import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from gremlins.clients.resolve import PACKAGE_DEFAULT, ClientSpec
+from gremlins.clients.client import PACKAGE_DEFAULT, Client
 from gremlins.state import resolve_state_file
 
 if TYPE_CHECKING:
@@ -12,18 +12,18 @@ if TYPE_CHECKING:
 
 
 def resolve_stage_client(
-    stage_client: ClientSpec | None,
-    cli: ClientSpec | None,
-    pipeline_default: ClientSpec | None,
-) -> ClientSpec:
+    stage_client: Client | None,
+    cli: Client | None,
+    pipeline_default: Client | None,
+) -> Client:
     return stage_client or cli or pipeline_default or PACKAGE_DEFAULT
 
 
 def collect_stage_specs(
     pipeline: PipelineDef,
-    cli_spec: ClientSpec | None,
-) -> dict[str, ClientSpec]:
-    specs: dict[str, ClientSpec] = {}
+    cli_spec: Client | None,
+) -> dict[str, Client]:
+    specs: dict[str, Client] = {}
 
     def _walk(entries: list[StageEntry]) -> None:
         for e in entries:
@@ -38,7 +38,7 @@ def collect_stage_specs(
     return specs
 
 
-def load_stage_specs_from_state(gr_id: str | None) -> dict[str, ClientSpec]:
+def load_stage_specs_from_state(gr_id: str | None) -> dict[str, Client]:
     if not gr_id:
         return {}
     sf = resolve_state_file(gr_id)
@@ -46,7 +46,7 @@ def load_stage_specs_from_state(gr_id: str | None) -> dict[str, ClientSpec]:
         return {}
     data = json.loads(sf.read_text(encoding="utf-8"))
     stored = data.get("stage_clients", {})
-    return {str(k): ClientSpec.parse(str(v)) for k, v in stored.items()}
+    return {str(k): Client.parse(str(v)) for k, v in stored.items()}
 
 
 def _format_missing_stage_specs(names: Sequence[str]) -> str:
@@ -55,9 +55,7 @@ def _format_missing_stage_specs(names: Sequence[str]) -> str:
     return f"stage_clients missing stage{suffix}: {missing}"
 
 
-def validate_stage_specs(
-    stage_specs: dict[str, ClientSpec], pipeline: PipelineDef
-) -> None:
+def validate_stage_specs(stage_specs: dict[str, Client], pipeline: PipelineDef) -> None:
     expected_stage_names: set[str] = set()
 
     def _walk(entries: list[StageEntry]) -> None:
@@ -74,9 +72,9 @@ def validate_stage_specs(
 
 
 def require_stage_spec(
-    stage_specs: dict[str, ClientSpec],
+    stage_specs: dict[str, Client],
     name: str,
-) -> ClientSpec:
+) -> Client:
     try:
         return stage_specs[name]
     except KeyError as exc:

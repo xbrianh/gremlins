@@ -10,8 +10,7 @@ import shutil
 
 import yaml
 
-from gremlins.clients.protocol import ClaudeClient
-from gremlins.clients.resolve import PACKAGE_DEFAULT, ClientSpec, to_client
+from gremlins.clients.client import PACKAGE_DEFAULT, Client
 from gremlins.env_file import load_env_file
 from gremlins.errors import die
 from gremlins.gh_utils import get_repo
@@ -68,16 +67,16 @@ def run_pipeline(
     *,
     argv: list[str],
     gr_id: str | None = None,
-    client: ClaudeClient | None = None,
+    client: Client | None = None,
 ) -> int:
     """Load pipeline YAML, build Pipeline, run. Sole internal pipeline entry point."""
     configure_logging()
     args = _parse_args(argv)
 
-    cli_spec: ClientSpec | None = None
+    cli_spec: Client | None = None
     if args.client:
         try:
-            cli_spec = ClientSpec.parse(args.client)
+            cli_spec = Client.parse(args.client)
         except ValueError as exc:
             die(str(exc))
 
@@ -109,7 +108,7 @@ def run_pipeline(
             die("gh CLI not found")
         repo = get_repo()
 
-    stage_specs: dict[str, ClientSpec] = {}
+    stage_specs: dict[str, Client] = {}
     if args.resume_from and gr_id:
         try:
             stage_specs = load_stage_specs_from_state(gr_id)
@@ -126,14 +125,14 @@ def run_pipeline(
                 gr_id, stage_clients={k: str(v) for k, v in stage_specs.items()}
             )
 
-    _spec_clients: dict[str, ClaudeClient] = {}
+    _spec_clients: dict[str, Client] = {}
 
-    def _client_for_spec(spec: ClientSpec) -> ClaudeClient:
+    def _client_for_spec(spec: Client) -> Client:
         if client is not None:
             return client
         key = str(spec)
         if key not in _spec_clients:
-            _spec_clients[key] = to_client(spec)
+            _spec_clients[key] = spec
         return _spec_clients[key]
 
     for spec in stage_specs.values():
@@ -150,7 +149,7 @@ def run_pipeline(
     elif _spec_clients:
         _signal_clients = list(_spec_clients.values())
     else:
-        _signal_clients = [to_client(default_spec)]
+        _signal_clients = [default_spec]
 
     try:
         validate_stage_specs(stage_specs, pipeline)

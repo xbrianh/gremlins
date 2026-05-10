@@ -9,8 +9,7 @@ import shutil
 
 import gremlins.stages.address_code as address_code
 import gremlins.stages.review_code as review_code
-from gremlins.clients.protocol import ClaudeClient
-from gremlins.clients.resolve import PACKAGE_DEFAULT
+from gremlins.clients.client import PACKAGE_DEFAULT, Client
 from gremlins.errors import die
 from gremlins.git import has_diff, has_dirty_worktree, in_git_repo, rev_exists
 from gremlins.logging_setup import configure_logging
@@ -33,12 +32,10 @@ def _parse_review_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def review_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
+def review_main(argv: list[str], *, client: Client | None = None) -> int:
     configure_logging()
-    from gremlins.clients.claude import SubprocessClaudeClient
-
     if client is None:
-        client = SubprocessClaudeClient()
+        client = PACKAGE_DEFAULT
     install_signal_handlers(client)
     args = _parse_review_args(argv)
 
@@ -106,12 +103,10 @@ def _parse_address_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def address_main(argv: list[str], *, client: ClaudeClient | None = None) -> int:
+def address_main(argv: list[str], *, client: Client | None = None) -> int:
     configure_logging()
-    from gremlins.clients.claude import SubprocessClaudeClient
-
     if client is None:
-        client = SubprocessClaudeClient()
+        client = PACKAGE_DEFAULT
     install_signal_handlers(client)
     args = _parse_address_args(argv)
 

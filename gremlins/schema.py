@@ -4,7 +4,7 @@ import dataclasses
 import pathlib
 from typing import Any
 
-from gremlins.clients.resolve import ClientSpec
+from gremlins.clients.client import Client
 
 
 def _empty_stage_list() -> list[StageEntry]:
@@ -15,7 +15,7 @@ def _empty_stage_list() -> list[StageEntry]:
 class StageEntry:
     name: str
     type: str
-    client: ClientSpec | None
+    client: Client | None
     prompts: list[str]
     options: dict[str, Any]
     body: list[StageEntry] = dataclasses.field(default_factory=_empty_stage_list)
@@ -29,5 +29,5 @@ class PipelineDef:
     name: str
     path: pathlib.Path
     stages: list[StageEntry]
-    default_client: ClientSpec | None = None
+    default_client: Client | None = None
     base_ref: str = "current"
