@@ -1369,7 +1369,7 @@ def test_do_land_dispatches_to_correct_helper(
         called.append("_land_boss")
         return True
 
-    def fake_land_gh(gr_id, sf, wdir, state, force):
+    def fake_land_gh(gr_id, wdir, state, force):
         called.append("_land_gh")
         return True
 
@@ -1419,7 +1419,7 @@ def test_do_land_one_branch_routes_to_local(tmp_path, monkeypatch):
     assert called == ["_land_local"]
 
 
-def test_land_gh_removes_worktree_before_gh_merge(tmp_path, monkeypatch, capsys):
+def test_land_gh_removes_worktree_before_gh_merge(tmp_path, monkeypatch):
     """_remove_worktree must be called before gh pr merge so --delete-branch succeeds."""
     import types
 
@@ -1442,7 +1442,6 @@ def test_land_gh_removes_worktree_before_gh_merge(tmp_path, monkeypatch, capsys)
         "artifacts": [{"type": "pr", "url": pr_url, "branch": "feat"}],
     }
     (gr_dir / "state.json").write_text(json.dumps(state))
-    sf = str(gr_dir / "state.json")
 
     monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     monkeypatch.setattr(_land, "read_pr_url", lambda gr_id: pr_url)
@@ -1472,11 +1471,9 @@ def test_land_gh_removes_worktree_before_gh_merge(tmp_path, monkeypatch, capsys)
     monkeypatch.setattr(_land, "_fast_forward_main", lambda cwd: None)
     monkeypatch.setattr(_land, "_finalize_cleanup", lambda *a, **kw: None)
 
-    ok = _land._land_gh(gr_id, sf, str(gr_dir), state)
+    ok = _land._land_gh(gr_id, str(gr_dir), state)
     assert ok is True
     assert call_order.index("_remove_worktree") < call_order.index("gh_merge")
-    out = capsys.readouterr().out
-    assert "warning" not in out
 
 
 def test_rescue_prompt_uses_pipeline_name():

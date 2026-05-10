@@ -135,8 +135,8 @@ def _fast_forward_main(cwd: str | None):
 def _remove_worktree(wdir: str, state: dict[str, Any], cwd: str | None) -> None:
     """Touch closed marker and remove the gremlin's worktree.
 
-    Marks closed before touching the filesystem so a partial failure can't
-    allow a re-run. Best-effort: warnings printed on failure.
+    Marks closed first so the gremlin disappears from default views even if
+    filesystem removal fails. Best-effort: warnings printed on failure.
     """
     try:
         pathlib.Path(os.path.join(wdir, "closed")).touch()
@@ -185,7 +185,6 @@ def _finalize_cleanup(
 
 def _cleanup_gremlin(
     gr_id: str,
-    sf: str,
     wdir: str,
     state: dict[str, Any],
     cwd: str | None,
@@ -248,7 +247,6 @@ def do_rm(target: str) -> bool:
 
     if not _cleanup_gremlin(
         gr_id,
-        sf,
         wdir,
         cast(dict[str, Any], state),
         cwd_for_git,
@@ -535,7 +533,6 @@ def _squash_land(
         print(f"{current} is already up to date with {source_label}.")
         _cleanup_gremlin(
             gr_id,
-            sf,
             wdir,
             state,
             cwd,
@@ -576,14 +573,13 @@ def _squash_land(
     _persist_land_cost(sf, state, land_cost)
     _print_cost(state)
     _cleanup_gremlin(
-        gr_id, sf, wdir, state, cwd, delete_branch=delete_branch, remove_state_dir=False
+        gr_id, wdir, state, cwd, delete_branch=delete_branch, remove_state_dir=False
     )
     return True
 
 
 def _ff_land(
     gr_id: str,
-    sf: str,
     wdir: str,
     state: dict[str, Any],
     cwd: str | None,
@@ -609,7 +605,6 @@ def _ff_land(
         print(f"{current} is already up to date with {source_label}.")
         _cleanup_gremlin(
             gr_id,
-            sf,
             wdir,
             state,
             cwd,
@@ -629,7 +624,7 @@ def _ff_land(
     print(f"Landed {source_label} onto {current}.")
     _print_cost(state)
     _cleanup_gremlin(
-        gr_id, sf, wdir, state, cwd, delete_branch=delete_branch, remove_state_dir=False
+        gr_id, wdir, state, cwd, delete_branch=delete_branch, remove_state_dir=False
     )
     return True
 
@@ -679,7 +674,7 @@ def _land_local(
             gr_id, sf, wdir, state, cwd, branch, branch, current, delete_branch=True
         )
     return _ff_land(
-        gr_id, sf, wdir, state, cwd, branch, branch, current, delete_branch=True
+        gr_id, wdir, state, cwd, branch, branch, current, delete_branch=True
     )
 
 
@@ -713,12 +708,12 @@ def _land_boss(
             gr_id, sf, wdir, state, cwd, boss_head, label, current, delete_branch=False
         )
     return _ff_land(
-        gr_id, sf, wdir, state, cwd, boss_head, label, current, delete_branch=False
+        gr_id, wdir, state, cwd, boss_head, label, current, delete_branch=False
     )
 
 
 def _land_gh(
-    gr_id: str, sf: str, wdir: str, state: dict[str, Any], force: bool = False
+    gr_id: str, wdir: str, state: dict[str, Any], force: bool = False
 ) -> bool:
     """Merge a gh gremlin's PR and clean up."""
     pr_url = read_pr_url(gr_id)
@@ -892,7 +887,7 @@ def do_land(
                 "error: --squash/--ff are not applicable to gh gremlins (merged via PR)"
             )
             return False
-        return _land_gh(gr_id, sf, wdir, state, force=force)
+        return _land_gh(gr_id, wdir, state, force=force)
 
     if shape == "one_branch":
         if live != "dead:finished":
