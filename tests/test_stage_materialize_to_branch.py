@@ -21,16 +21,20 @@ PRE_STATE = PreImplState(head="abc123", branch="main")
 def _make_state(
     tmp_path: pathlib.Path,
     gr_id: str | None = None,
-    impl_pre_state: PreImplState | None = PRE_STATE,
+    pre_state: PreImplState | None = PRE_STATE,
 ) -> tuple[MaterializeToBranch, StageState]:
     stage = MaterializeToBranch("materialize-to-branch", None, [], {})
     from gremlins.clients.fake import FakeClaudeClient
 
+    if pre_state is not None:
+        (tmp_path / ".impl-pre-state.json").write_text(
+            json.dumps({"head": pre_state.head, "branch": pre_state.branch}),
+            encoding="utf-8",
+        )
     state = StageState(
         client=FakeClaudeClient(),
         session_dir=tmp_path,
         gr_id=gr_id,
-        impl_pre_state=impl_pre_state,
     )
     return stage, state
 
@@ -86,7 +90,7 @@ def test_divergent_head_raises(tmp_path: pathlib.Path) -> None:
 
 def test_none_pre_state_no_state_file_raises(tmp_path: pathlib.Path) -> None:
     # gr_id=None → resolve_state_file returns None → RuntimeError
-    stage, state = _make_state(tmp_path, gr_id=None, impl_pre_state=None)
+    stage, state = _make_state(tmp_path, gr_id=None, pre_state=None)
     with pytest.raises(RuntimeError, match="rewind to implement"):
         stage.run(state)
 
@@ -97,7 +101,7 @@ def test_none_pre_state_reads_from_state_json(tmp_path: pathlib.Path) -> None:
         json.dumps({"impl_pre_head": "feed1234", "impl_pre_branch": "feat/x"}),
         encoding="utf-8",
     )
-    stage, state = _make_state(tmp_path, gr_id="test-gr", impl_pre_state=None)
+    stage, state = _make_state(tmp_path, gr_id="test-gr", pre_state=None)
     with (
         patch(
             "gremlins.stages.materialize_to_branch.resolve_state_file",
@@ -124,7 +128,7 @@ def test_none_pre_state_reads_from_state_json(tmp_path: pathlib.Path) -> None:
 def test_none_pre_state_missing_head_raises(tmp_path: pathlib.Path) -> None:
     state_file = tmp_path / "state.json"
     state_file.write_text(json.dumps({}), encoding="utf-8")
-    stage, state = _make_state(tmp_path, gr_id="test-gr", impl_pre_state=None)
+    stage, state = _make_state(tmp_path, gr_id="test-gr", pre_state=None)
     with (
         patch(
             "gremlins.stages.materialize_to_branch.resolve_state_file",
@@ -163,7 +167,7 @@ def test_run_writes_to_state_json(tmp_path: pathlib.Path) -> None:
 
 def test_result_base_ref_from_pre_state(tmp_path: pathlib.Path) -> None:
     pre = PreImplState(head="deadbeef", branch="feature")
-    stage, state = _make_state(tmp_path, impl_pre_state=pre)
+    stage, state = _make_state(tmp_path, pre_state=pre)
     with (
         patch(
             "gremlins.stages.materialize_to_branch.classify_impl_outcome",

@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast
 
 from gremlins.clients.client import Client
 from gremlins.clients.protocol import CompletedRun
-from gremlins.git import PreImplState
 
 if TYPE_CHECKING:
     from gremlins.schema import PipelineDef, StageEntry
@@ -54,7 +53,6 @@ class StageState:
     gr_id: str | None
     child_key: str | None = None
     worktree: pathlib.Path | None = None
-    impl_pre_state: PreImplState | None = None
 
     @property
     def cwd(self) -> pathlib.Path:

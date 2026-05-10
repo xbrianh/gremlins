@@ -188,9 +188,7 @@ class Implement(Stage):
 
         impl_cwd = self._impl_cwd(state)
         pre = record_pre_impl_state(cwd=impl_cwd)
-        state.impl_pre_state = pre
-        # Write sidecar so MaterializeToBranch can read it even when
-        # running in a separate StageState instance (e.g. no gr_id).
+        # Write sidecar so MaterializeToBranch can read pre-impl state.
         (state.session_dir / ".impl-pre-state.json").write_text(
             json.dumps({"head": pre.head, "branch": pre.branch}),
             encoding="utf-8",

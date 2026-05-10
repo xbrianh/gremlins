@@ -30,7 +30,7 @@ def _make_stage(
     fix_model: str = "sonnet",
     is_git: bool = True,
     commit_after_fix: bool = False,
-) -> tuple[Verify, Any]:
+) -> tuple[Verify, StageState]:
     if cmds is None:
         cmds = ["true"]
     if client is None:

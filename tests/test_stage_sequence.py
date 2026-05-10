@@ -21,7 +21,7 @@ def _state() -> StageState:
 
 def _make_sequence(
     runners: list, parent_state: StageState | None = None
-) -> SequenceStage:
+) -> tuple[SequenceStage, list, StageState]:
     body = [(_state(), fn) for fn in runners]
     stage = SequenceStage("seq", body=body)
     return stage, body, parent_state or _state()

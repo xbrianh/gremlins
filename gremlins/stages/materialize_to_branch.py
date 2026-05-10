@@ -45,22 +45,18 @@ class MaterializeToBranch(Stage):
         sf = resolve_state_file(state.gr_id)
         if sf is None or not sf.exists():
             raise RuntimeError(
-                "impl_pre_state not set and no state.json found; "
-                "rewind to implement stage"
+                "no sidecar and no state.json found; rewind to implement stage"
             )
         data = json.loads(sf.read_text(encoding="utf-8"))
         head = data.get("impl_pre_head") or ""
         if not head:
             raise RuntimeError(
-                "impl_pre_state not set and impl_pre_head missing from state.json; "
-                "rewind to implement stage"
+                "impl_pre_head missing from state.json; rewind to implement stage"
             )
         return PreImplState(head=head, branch=data.get("impl_pre_branch") or "")
 
     def run(self, state: StageState) -> MaterializeToBranchResult:
-        pre_state: PreImplState = state.impl_pre_state or self._pre_state_from_file(
-            state
-        )
+        pre_state: PreImplState = self._pre_state_from_file(state)
         impl_cwd = str(state.worktree) if state.worktree is not None else None
         outcome = classify_impl_outcome(pre_state, cwd=impl_cwd)
 
