@@ -14,7 +14,8 @@ from gremlins.git import (
     record_pre_impl_state,
 )
 from gremlins.prompts import BUNDLED_PROMPT_DIR
-from gremlins.stages import Stage, register_stage
+from gremlins.stages.base import Stage
+from gremlins.stages.registry import register_stage
 from gremlins.state import patch_state, pipeline_uses_gh, resolve_state_file
 
 # Implement turns can sit silent for many minutes while the model edits files

@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from gremlins.git import DivergentHead, EmptyImpl, HeadAdvanced, PreImplState
-from gremlins.stages import StageContext
+from gremlins.stages.base import StageContext
 from gremlins.stages.materialize_to_branch import (
     MaterializeToBranch,
     MaterializeToBranchResult,

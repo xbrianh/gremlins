@@ -8,7 +8,7 @@ from gremlins.pipeline.discovery import resolve_pipeline_name, resolve_pipeline_
 from gremlins.pipeline.loader import load_pipeline
 from gremlins.schema import PipelineDef as _PipelineData
 from gremlins.schema import StageEntry
-from gremlins.stages import STAGE_BUILDERS
+from gremlins.stages.registry import STAGE_BUILDERS
 
 
 def _args(**kwargs: object) -> argparse.Namespace:
@@ -305,7 +305,7 @@ def test_stage_builders_registry_covers_all_known_types() -> None:
 
 
 def test_stage_needs_pipe_matches_builders() -> None:
-    from gremlins.stages import STAGE_NEEDS_PIPE
+    from gremlins.stages.registry import STAGE_NEEDS_PIPE
 
     assert set(STAGE_NEEDS_PIPE) == set(STAGE_BUILDERS)
     assert STAGE_NEEDS_PIPE["implement"] is True

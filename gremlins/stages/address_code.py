@@ -7,7 +7,8 @@ import pathlib
 import re
 from typing import Any
 
-from gremlins.stages import Stage, register_stage
+from gremlins.stages.base import Stage
+from gremlins.stages.registry import register_stage
 from gremlins.state import check_bail, emit_bail, pipeline_uses_gh, read_pr_url
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")

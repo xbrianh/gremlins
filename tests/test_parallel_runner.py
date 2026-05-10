@@ -11,7 +11,7 @@ import pytest
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.pipeline.loader import load_pipeline
 from gremlins.runner import run_stages
-from gremlins.stages import StageContext
+from gremlins.stages.base import StageContext
 from gremlins.stages.parallel import ParallelStage
 
 # ---------------------------------------------------------------------------

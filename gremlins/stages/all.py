@@ -6,30 +6,26 @@ import logging
 import pathlib
 from typing import Any
 
+import gremlins.stages.address_code as address_code
+import gremlins.stages.claude_prompt as claude_prompt
+import gremlins.stages.commit as commit
+import gremlins.stages.commit_pr as commit_pr
+import gremlins.stages.handoff as handoff_stage_mod
+import gremlins.stages.implement as implement
+import gremlins.stages.loop as loop
+import gremlins.stages.materialize_to_branch as materialize_to_branch_mod
+import gremlins.stages.open_github_pr as open_github_pr
+import gremlins.stages.plan as plan
+import gremlins.stages.request_copilot as request_copilot
+import gremlins.stages.review_code as review_code
+import gremlins.stages.run_cmd as run_cmd
+import gremlins.stages.sequence as sequence
+import gremlins.stages.verify as verify
+import gremlins.stages.wait_ci as wait_ci
+import gremlins.stages.wait_copilot as wait_copilot
 from gremlins.clients.resolve import ClientSpec, require_stage_spec
 from gremlins.errors import die
 from gremlins.schema import StageEntry
-from gremlins.stages import (
-    address_code,
-    claude_prompt,
-    commit,
-    commit_pr,
-    implement,
-    loop,
-    open_github_pr,
-    plan,
-    request_copilot,
-    review_code,
-    run_cmd,
-    sequence,
-    verify,
-    wait_ci,
-    wait_copilot,
-)
-from gremlins.stages import (
-    handoff as handoff_stage_mod,
-)
-from gremlins.stages import materialize_to_branch as materialize_to_branch_mod
 from gremlins.stages.base import StageRunner
 from gremlins.stages.registry import register_stage_builder
 from gremlins.state import read_state_str

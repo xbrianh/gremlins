@@ -11,7 +11,7 @@ from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.git import GitError
-from gremlins.stages import StageContext
+from gremlins.stages.base import StageContext
 from gremlins.stages.commit import Commit
 
 ISSUE_URL = "https://github.com/owner/repo/issues/42"

@@ -12,7 +12,8 @@ import sys
 from typing import Any
 
 from gremlins.gh_utils import extract_gh_url, get_repo, parse_issue_ref, view_issue
-from gremlins.stages import Stage, StageInput, register_stage
+from gremlins.stages.base import Stage, StageInput
+from gremlins.stages.registry import register_stage
 from gremlins.state import patch_state, read_state_str, resolve_state_file
 
 logger = logging.getLogger(__name__)
