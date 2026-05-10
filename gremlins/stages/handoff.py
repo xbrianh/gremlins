@@ -13,7 +13,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Callable
-from typing import Any, NoReturn, TypeVar, cast
+from typing import Any, TypeVar, cast
 
 from gremlins.clients import ClientSpec
 from gremlins.clients.protocol import ClaudeClient
@@ -57,19 +57,13 @@ def with_reap_after(
         timer.cancel()
 
 
-def die(msg: str) -> NoReturn:
-    sys.stderr.write(f"error: {msg}\n")
-    sys.stderr.flush()
-    sys.exit(1)
-
-
 def _load_handoff_style() -> str:
     path = BUNDLED_PROMPT_DIR / "code_style.md"
     if not path.exists():
-        die(f"error loading prompt: prompt file not found: {path}")
+        raise RuntimeError(f"error loading prompt: prompt file not found: {path}")
     text = path.read_text(encoding="utf-8").rstrip()
     if not text.strip():
-        die(f"error loading prompt: prompt file is empty: {path}")
+        raise RuntimeError(f"error loading prompt: prompt file is empty: {path}")
     return text
 
 
@@ -94,12 +88,12 @@ def collect_git_context(
 
     result = proc.run(["git", "rev-parse", "--verify", target])
     if result.returncode != 0:
-        die(f"--base ref not found in repo: {target!r}")
+        raise RuntimeError(f"--base ref not found in repo: {target!r}")
 
     if rev is not None:
         result = proc.run(["git", "rev-parse", "--verify", rev])
         if result.returncode != 0:
-            die(f"--rev ref not found in repo: {rev!r}")
+            raise RuntimeError(f"--rev ref not found in repo: {rev!r}")
 
     result = proc.run(["git", "rev-parse", "--abbrev-ref", inspect_rev])
     branch = result.stdout.strip() if result.returncode == 0 else inspect_rev
@@ -109,7 +103,7 @@ def collect_git_context(
 
     result = proc.run(["git", "merge-base", inspect_rev, target])
     if result.returncode != 0:
-        die(f"could not compute merge-base between {inspect_rev!r} and {target!r}")
+        raise RuntimeError(f"could not compute merge-base between {inspect_rev!r} and {target!r}")
     merge_base = result.stdout.strip()
 
     result = proc.run(
@@ -415,32 +409,43 @@ def _parse_client_spec(client_arg: str) -> ClientSpec:
     try:
         return ClientSpec.parse(client_arg)
     except ValueError as exc:
-        die(str(exc))
+        raise RuntimeError(str(exc)) from exc
 
 
 def run(client: ClaudeClient, args: argparse.Namespace) -> int:
     plan_path = pathlib.Path(args.plan).resolve()
     if not plan_path.exists():
-        die(f"--plan does not exist: {plan_path}")
+        sys.stderr.write(f"error: --plan does not exist: {plan_path}\n")
+        return 1
     if not plan_path.is_file():
-        die(f"--plan is not a file: {plan_path}")
+        sys.stderr.write(f"error: --plan is not a file: {plan_path}\n")
+        return 1
     if plan_path.stat().st_size == 0:
-        die(f"--plan is empty: {plan_path}")
+        sys.stderr.write(f"error: --plan is empty: {plan_path}\n")
+        return 1
     try:
         plan_text = plan_path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
-        die(f"--plan is not valid UTF-8: {plan_path}")
+        sys.stderr.write(f"error: --plan is not valid UTF-8: {plan_path}\n")
+        return 1
     except OSError as exc:
-        die(f"failed to read --plan {plan_path}: {exc}")
+        sys.stderr.write(f"error: failed to read --plan {plan_path}: {exc}\n")
+        return 1
 
     spec_text = _read_optional_spec(args.spec)
 
     if args.out:
         out_path = pathlib.Path(args.out).resolve()
         if not out_path.parent.exists():
-            die(f"--out parent directory does not exist: {out_path.parent}")
+            sys.stderr.write(
+                f"error: --out parent directory does not exist: {out_path.parent}\n"
+            )
+            return 1
         if not out_path.parent.is_dir():
-            die(f"--out parent path is not a directory: {out_path.parent}")
+            sys.stderr.write(
+                f"error: --out parent path is not a directory: {out_path.parent}\n"
+            )
+            return 1
     else:
         out_path = auto_name_out(plan_path)
 
@@ -449,23 +454,30 @@ def run(client: ClaudeClient, args: argparse.Namespace) -> int:
 
     try:
         branch, git_log, git_diff = collect_git_context(args.base, rev=args.rev)
-    except SystemExit:
-        raise
     except Exception as exc:
-        die(f"git context collection failed: {exc}")
+        sys.stderr.write(f"error: git context collection failed: {exc}\n")
+        return 1
 
-    prompt = build_prompt(
-        plan_text=plan_text,
-        branch=branch,
-        git_log=git_log,
-        git_diff=git_diff,
-        out_path=out_path,
-        child_plan_path=child_plan_path,
-        signal_path=signal_path,
-        spec_text=spec_text,
-    )
+    try:
+        prompt = build_prompt(
+            plan_text=plan_text,
+            branch=branch,
+            git_log=git_log,
+            git_diff=git_diff,
+            out_path=out_path,
+            child_plan_path=child_plan_path,
+            signal_path=signal_path,
+            spec_text=spec_text,
+        )
+    except RuntimeError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 1
 
-    client_spec = _parse_client_spec(args.client)
+    try:
+        client_spec = _parse_client_spec(args.client)
+    except RuntimeError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 1
     logger.info("running handoff agent (client: %s)", client_spec)
     try:
         with_reap_after(
