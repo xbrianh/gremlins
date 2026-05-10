@@ -212,20 +212,34 @@ def test_pr_stack_detaches_to_prior_pr_branch(tmp_path, make_state_dir, monkeypa
     gr_id = "pr-stack-test"
     state_dir = make_state_dir(gr_id)
     (state_dir / "state.json").write_text(
-        json.dumps({
-            "id": gr_id,
-            "stage": "",
-            "bail_class": "",
-            "artifacts": [{"type": "pr", "url": "https://github.com/x/r/pull/1", "branch": "feat-abc"}],
-        })
+        json.dumps(
+            {
+                "id": gr_id,
+                "stage": "",
+                "bail_class": "",
+                "artifacts": [
+                    {
+                        "type": "pr",
+                        "url": "https://github.com/x/r/pull/1",
+                        "branch": "feat-abc",
+                    }
+                ],
+            }
+        )
     )
 
     detach_calls: list[str] = []
     from gremlins.stages import loop as _loop_mod
 
-    monkeypatch.setattr(_loop_mod._git, "git_detach_to_branch", lambda branch, cwd=None: detach_calls.append(branch))
+    monkeypatch.setattr(
+        _loop_mod._git,
+        "git_detach_to_branch",
+        lambda branch, cwd=None: detach_calls.append(branch),
+    )
 
-    loop = LoopStage("test", body_runners=[lambda: None], max_iterations=1, pr_stack=True)
+    loop = LoopStage(
+        "test", body_runners=[lambda: None], max_iterations=1, pr_stack=True
+    )
     loop.run(_loop_state_with_gr(tmp_path, gr_id))
 
     assert detach_calls == ["feat-abc"]
@@ -238,9 +252,15 @@ def test_pr_stack_skipped_when_no_prior_pr(tmp_path, make_state_dir, monkeypatch
     git_calls: list[str] = []
     from gremlins.stages import loop as _loop_mod
 
-    monkeypatch.setattr(_loop_mod._git, "git_detach_to_branch", lambda branch, cwd=None: git_calls.append(branch))
+    monkeypatch.setattr(
+        _loop_mod._git,
+        "git_detach_to_branch",
+        lambda branch, cwd=None: git_calls.append(branch),
+    )
 
-    loop = LoopStage("test", body_runners=[lambda: None], max_iterations=1, pr_stack=True)
+    loop = LoopStage(
+        "test", body_runners=[lambda: None], max_iterations=1, pr_stack=True
+    )
     loop.run(_loop_state_with_gr(tmp_path, gr_id))
 
     assert git_calls == []
@@ -250,20 +270,34 @@ def test_pr_stack_false_skips_detach(tmp_path, make_state_dir, monkeypatch):
     gr_id = "pr-stack-disabled"
     state_dir = make_state_dir(gr_id)
     (state_dir / "state.json").write_text(
-        json.dumps({
-            "id": gr_id,
-            "stage": "",
-            "bail_class": "",
-            "artifacts": [{"type": "pr", "url": "https://github.com/x/r/pull/1", "branch": "feat-xyz"}],
-        })
+        json.dumps(
+            {
+                "id": gr_id,
+                "stage": "",
+                "bail_class": "",
+                "artifacts": [
+                    {
+                        "type": "pr",
+                        "url": "https://github.com/x/r/pull/1",
+                        "branch": "feat-xyz",
+                    }
+                ],
+            }
+        )
     )
 
     git_calls: list[str] = []
     from gremlins.stages import loop as _loop_mod
 
-    monkeypatch.setattr(_loop_mod._git, "git_detach_to_branch", lambda branch, cwd=None: git_calls.append(branch))
+    monkeypatch.setattr(
+        _loop_mod._git,
+        "git_detach_to_branch",
+        lambda branch, cwd=None: git_calls.append(branch),
+    )
 
-    loop = LoopStage("test", body_runners=[lambda: None], max_iterations=1, pr_stack=False)
+    loop = LoopStage(
+        "test", body_runners=[lambda: None], max_iterations=1, pr_stack=False
+    )
     loop.run(_loop_state_with_gr(tmp_path, gr_id))
 
     assert git_calls == []

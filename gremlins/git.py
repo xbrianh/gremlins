@@ -330,7 +330,9 @@ def checkout_detach(ref: str, *, cwd: str | os.PathLike[str] | None = None) -> N
     _run_git(["checkout", "--detach", ref], cwd=cwd)
 
 
-def git_detach_to_branch(branch: str, *, cwd: str | os.PathLike[str] | None = None) -> None:
+def git_detach_to_branch(
+    branch: str, *, cwd: str | os.PathLike[str] | None = None
+) -> None:
     fetch_origin(branch, cwd=cwd)
     checkout_detach(f"origin/{branch}", cwd=cwd)
 
