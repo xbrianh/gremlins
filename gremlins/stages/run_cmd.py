@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import subprocess
 
-from gremlins.stages.base import Stage, StageState
+from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.loop import RunCmdFailed
 from gremlins.stages.registry import register_stage
 
 
 class RunCmd(Stage):
-    def run(self, state: StageState) -> None:
+    def run(self, state: RuntimeState) -> None:
         cmds = [c for c in self.options.get("cmds", []) if c.strip()]
         if not cmds:
             return

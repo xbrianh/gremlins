@@ -7,7 +7,7 @@ import pathlib
 from typing import Any
 
 from gremlins.clients.client import Client
-from gremlins.stages.base import Stage, StageState
+from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import (
     check_bail,
@@ -79,12 +79,12 @@ class ReviewCode(Stage):
         self.pr_url = pr_url
         self.is_gh = is_gh
 
-    def run(self, state: StageState) -> Any:
+    def run(self, state: RuntimeState) -> Any:
         if self.is_gh:
             return self.results_to_github(state)
         return self.results_to_local(state)
 
-    def results_to_local(self, state: StageState) -> pathlib.Path:
+    def results_to_local(self, state: RuntimeState) -> pathlib.Path:
         if self.model is None:
             raise ValueError(f"stage {self.name!r}: model must be set")
         out_file = state.session_dir / f"{self.name}-{self.model}.md"
@@ -148,7 +148,7 @@ class ReviewCode(Stage):
 
         return out_file
 
-    def results_to_github(self, state: StageState) -> None:
+    def results_to_github(self, state: RuntimeState) -> None:
         pr_url = self.pr_url or read_pr_url(state.gr_id)
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")

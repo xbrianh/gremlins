@@ -178,10 +178,6 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
     monkeypatch.setattr(
         "gremlins.stages.open_github_pr.append_artifact", _handoff_append_artifact
     )
-    monkeypatch.setattr(
-        "gremlins.stages.open_github_pr.resolve_state_file",
-        lambda gr_id=None: state_file,
-    )
 
     import gremlins.stages.commit as _commit_stage_mod
 

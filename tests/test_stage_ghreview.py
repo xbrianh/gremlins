@@ -7,7 +7,7 @@ import pathlib
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.stages.base import StageState
+from gremlins.stages.base import RuntimeState
 from gremlins.stages.review_code import ReviewCode
 
 PR_URL = "https://github.com/owner/repo/pull/42"
@@ -19,7 +19,7 @@ def _make_stage(
     gr_id: str | None = None,
     pr_url: str = PR_URL,
     style_content: str | None = None,
-) -> tuple[ReviewCode, FakeClaudeClient, StageState]:
+) -> tuple[ReviewCode, FakeClaudeClient, RuntimeState]:
     prompt_text = "Review PR {pr_url}."
     prompts = (
         [style_content, prompt_text] if style_content is not None else [prompt_text]
@@ -35,7 +35,7 @@ def _make_stage(
         is_gh=True,
     )
     client = FakeClaudeClient(fixtures={"ghreview": MINIMAL_EVENTS})
-    state = StageState(client=client, session_dir=tmp_path, gr_id=gr_id)
+    state = RuntimeState(client=client, session_dir=tmp_path, gr_id=gr_id)
     return stage, client, state
 
 

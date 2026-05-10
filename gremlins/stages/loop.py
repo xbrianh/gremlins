@@ -8,7 +8,7 @@ from collections.abc import Callable
 from typing import Any
 
 from gremlins import git as _git
-from gremlins.stages.base import Stage, StageState
+from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import emit_bail
 
@@ -68,7 +68,7 @@ class LoopStage(Stage):
     ) -> LoopStage:
         return cls(name, body_runners=runners, max_iterations=max_iterations)
 
-    def run(self, state: StageState) -> None:
+    def run(self, state: RuntimeState) -> None:
         exhausted = False
         try:
             for iteration in range(1, self._max_iterations + 1):

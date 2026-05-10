@@ -12,7 +12,7 @@ from gremlins.git import (
     rev_list_count,
 )
 from gremlins.prompts import BUNDLED_PROMPT_DIR
-from gremlins.stages.base import Stage, StageState
+from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import resolve_state_file
 
@@ -49,7 +49,7 @@ class Commit(Stage):
         self.issue_url = issue_url
         self._cwd = cwd
 
-    def _resolve_inputs(self, state: StageState) -> tuple[str, str, str]:
+    def _resolve_inputs(self, state: RuntimeState) -> tuple[str, str, str]:
         sf = resolve_state_file(state.gr_id)
 
         impl_materialized_branch = self.impl_materialized_branch or _read_state(
@@ -66,7 +66,7 @@ class Commit(Stage):
 
         return (impl_materialized_branch, base_ref, issue_url)
 
-    def run(self, state: StageState) -> None:
+    def run(self, state: RuntimeState) -> None:
         impl_materialized_branch, base_ref, issue_url = self._resolve_inputs(state)
 
         issue_num = issue_url.split("/")[-1] if issue_url else ""

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import pathlib
 from typing import Any
@@ -27,7 +28,7 @@ from gremlins.clients.client import Client
 from gremlins.errors import die
 from gremlins.schema import StageEntry
 from gremlins.stage_clients import require_stage_spec
-from gremlins.stages.base import StageRunner, StageState
+from gremlins.stages.base import RuntimeState
 from gremlins.stages.registry import register_stage_builder
 from gremlins.state import pipeline_uses_gh
 
@@ -35,32 +36,34 @@ logger = logging.getLogger(__name__)
 
 
 def _review_stage_info(
-    runner: StageRunner,
+    state: RuntimeState,
 ) -> tuple[list[str], dict[str, pathlib.Path]]:
     names: list[str] = []
     dirs: dict[str, pathlib.Path] = {}
-    scope = runner.current_scope or list(runner.pipeline_data.stages)
+    scope = state.current_scope or (
+        list(state.pipeline_data.stages) if state.pipeline_data else []
+    )
     for s in scope:
         if s.type == "parallel":
             for child in s.body:
                 if child.type == "review-code":
                     names.append(child.name)
-                    dirs[child.name] = runner.session_dir / s.name / child.name
+                    dirs[child.name] = state.session_dir / s.name / child.name
         elif s.type == "review-code":
             names.append(s.name)
-            dirs[s.name] = runner.session_dir
+            dirs[s.name] = state.session_dir
     return names, dirs
 
 
-def _build_plan(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
-    plan_val = getattr(runner.args, "plan", None)
+def _build_plan(entry: StageEntry, spec: Client, state: RuntimeState) -> Any:
+    plan_val = getattr(state.args, "plan", None)
     if not entry.prompts and not plan_val:
         die(
             f"stage {entry.name!r}: type 'plan' requires a 'prompt' field in the pipeline YAML"
         )
-    if not runner.repo:
+    if not state.repo:
         logger.info(
-            "planning (model: %s) -> %s", spec.model, runner.session_dir / "plan.md"
+            "planning (model: %s) -> %s", spec.model, state.session_dir / "plan.md"
         )
     return plan.Plan(
         entry.name,
@@ -68,14 +71,14 @@ def _build_plan(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
         entry.prompts,
         entry.options,
         plan=plan_val,
-        instructions=runner.instructions,
-        repo=runner.repo,
+        instructions=state.instructions,
+        repo=state.repo,
     )
 
 
-def _build_implement(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
+def _build_implement(entry: StageEntry, spec: Client, state: RuntimeState) -> Any:
     spec_text = ""
-    spec_file = runner.session_dir / "spec.md"
+    spec_file = state.session_dir / "spec.md"
     if spec_file.exists():
         try:
             spec_text = spec_file.read_text(encoding="utf-8")
@@ -84,38 +87,38 @@ def _build_implement(entry: StageEntry, spec: Client, runner: StageRunner) -> An
                 "could not read spec.md (%s); proceeding without north-star context",
                 exc,
             )
-    if not runner.repo:
+    if not state.repo:
         logger.info(
             "implementing (model: %s, from %s)",
             spec.model,
-            runner.session_dir / "plan.md",
+            state.session_dir / "plan.md",
         )
     return implement.Implement(
         entry.name,
         spec.model,
         entry.prompts,
         entry.options,
-        is_git=runner.is_git,
+        is_git=state.is_git,
         spec_text=spec_text,
-        is_gh=pipeline_uses_gh(runner.pipeline_data),
+        is_gh=bool(state.pipeline_data and pipeline_uses_gh(state.pipeline_data)),
     )
 
 
 def _build_materialize_to_branch(
-    entry: StageEntry, spec: Client, _runner: StageRunner
+    entry: StageEntry, spec: Client, _state: RuntimeState
 ) -> Any:
     return materialize_to_branch_mod.MaterializeToBranch(
         entry.name, spec.model, entry.prompts, entry.options
     )
 
 
-def _build_verify(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
+def _build_verify(entry: StageEntry, spec: Client, state: RuntimeState) -> Any:
     options = dict(entry.options)
-    if not runner.repo:
-        cmds = getattr(runner.args, "cmds", None)
+    if not state.repo:
+        cmds = getattr(state.args, "cmds", None)
         if cmds is not None:
             options["cmds"] = cmds
-        options.setdefault("max_attempts", getattr(runner.args, "test_max_attempts", 3))
+        options.setdefault("max_attempts", getattr(state.args, "test_max_attempts", 3))
         resolved_cmds = options.get("cmds", [])
         if resolved_cmds:
             logger.info(
@@ -125,15 +128,15 @@ def _build_verify(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
                 spec.model,
             )
     return verify.Verify(
-        entry.name, spec.model, entry.prompts, options, is_git=runner.is_git
+        entry.name, spec.model, entry.prompts, options, is_git=state.is_git
     )
 
 
-def _build_commit(entry: StageEntry, spec: Client, _runner: StageRunner) -> Any:
+def _build_commit(entry: StageEntry, spec: Client, _state: RuntimeState) -> Any:
     return commit.Commit(entry.name, spec.model, entry.prompts, entry.options)
 
 
-def _build_open_github_pr(entry: StageEntry, spec: Client, _runner: StageRunner) -> Any:
+def _build_open_github_pr(entry: StageEntry, spec: Client, _state: RuntimeState) -> Any:
     return open_github_pr.OpenGitHubPR(
         entry.name,
         spec.model,
@@ -143,13 +146,13 @@ def _build_open_github_pr(entry: StageEntry, spec: Client, _runner: StageRunner)
     )
 
 
-def _build_request_copilot(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
+def _build_request_copilot(entry: StageEntry, spec: Client, state: RuntimeState) -> Any:
     return request_copilot.RequestCopilot(
-        entry.name, spec.model, entry.prompts, entry.options, repo=runner.repo
+        entry.name, spec.model, entry.prompts, entry.options, repo=state.repo
     )
 
 
-def _build_ghreview(entry: StageEntry, spec: Client, _runner: StageRunner) -> Any:
+def _build_ghreview(entry: StageEntry, spec: Client, _state: RuntimeState) -> Any:
     if not entry.prompts:
         die(
             f"stage {entry.name!r}: type 'ghreview' requires a 'prompt' field in the pipeline YAML"
@@ -165,13 +168,13 @@ def _build_ghreview(entry: StageEntry, spec: Client, _runner: StageRunner) -> An
     )
 
 
-def _build_wait_copilot(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
+def _build_wait_copilot(entry: StageEntry, spec: Client, state: RuntimeState) -> Any:
     return wait_copilot.WaitCopilot(
-        entry.name, spec.model, entry.prompts, entry.options, repo=runner.repo
+        entry.name, spec.model, entry.prompts, entry.options, repo=state.repo
     )
 
 
-def _build_ghaddress(entry: StageEntry, spec: Client, _runner: StageRunner) -> Any:
+def _build_ghaddress(entry: StageEntry, spec: Client, _state: RuntimeState) -> Any:
     if not entry.prompts:
         die(
             f"stage {entry.name!r}: type 'ghaddress' requires a 'prompt' field in the pipeline YAML"
@@ -181,12 +184,12 @@ def _build_ghaddress(entry: StageEntry, spec: Client, _runner: StageRunner) -> A
     )
 
 
-def _build_wait_ci(entry: StageEntry, spec: Client, _runner: StageRunner) -> Any:
+def _build_wait_ci(entry: StageEntry, spec: Client, _state: RuntimeState) -> Any:
     return wait_ci.WaitCI(entry.name, spec.model, entry.prompts, entry.options)
 
 
-def _build_review_code(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
-    plan_file = runner.session_dir / "plan.md"
+def _build_review_code(entry: StageEntry, spec: Client, state: RuntimeState) -> Any:
+    plan_file = state.session_dir / "plan.md"
     plan_text = plan_file.read_text(encoding="utf-8")
     logger.info("reviewing code (model: %s)", spec.model)
     return review_code.ReviewCode(
@@ -195,69 +198,59 @@ def _build_review_code(entry: StageEntry, spec: Client, runner: StageRunner) -> 
         entry.prompts,
         entry.options,
         plan_text=plan_text,
-        is_git=runner.is_git,
-        is_gh=pipeline_uses_gh(runner.pipeline_data),
+        is_git=state.is_git,
+        is_gh=bool(state.pipeline_data and pipeline_uses_gh(state.pipeline_data)),
     )
 
 
-def _build_address_code(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
-    names, dirs = _review_stage_info(runner)
+def _build_address_code(entry: StageEntry, spec: Client, state: RuntimeState) -> Any:
+    names, dirs = _review_stage_info(state)
     logger.info("addressing code reviews (model: %s)", spec.model)
     return address_code.AddressCode(
         entry.name,
         spec.model,
         entry.prompts,
         entry.options,
-        is_git=runner.is_git,
+        is_git=state.is_git,
         review_stage_names=names,
         review_stage_dirs=dirs,
-        is_gh=pipeline_uses_gh(runner.pipeline_data),
+        is_gh=bool(state.pipeline_data and pipeline_uses_gh(state.pipeline_data)),
     )
 
 
-def _build_loop(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
+def _build_loop(entry: StageEntry, spec: Client, state: RuntimeState) -> Any:
     from gremlins.stages.loop import LoopStage
 
     max_iterations = entry.options.get("max_iterations", 3)
     body_runners: list[Any] = []
     for child in entry.body:
-        child_spec = runner.stage_specs.get(child.name, spec)
-        child_state = StageState(
-            client=runner.get_client(child_spec),
-            session_dir=runner.session_dir,
-            gr_id=runner.gr_id,
-        )
+        child_spec = state.stage_specs.get(child.name, spec)
+        child_state = dataclasses.replace(state, client=state.get_client(child_spec))
         body_runners.append(
-            runner.make_runner(child, child_state, child_spec, scope=entry.body)
+            child_state.make_runner(child, child_spec, scope=entry.body)
         )
     return LoopStage(
         entry.name, body_runners=body_runners, max_iterations=max_iterations
     )
 
 
-def _build_sequence(entry: StageEntry, spec: Client, runner: StageRunner) -> Any:
+def _build_sequence(entry: StageEntry, spec: Client, state: RuntimeState) -> Any:
     from gremlins.stages.sequence import SequenceStage
 
     body: list[Any] = []
     for child in entry.body:
-        child_spec = runner.stage_specs.get(child.name, spec)
-        child_state = StageState(
-            client=runner.get_client(child_spec),
-            session_dir=runner.session_dir,
-            gr_id=runner.gr_id,
-        )
-        child_runner = runner.make_runner(
-            child, child_state, child_spec, scope=entry.body
-        )
+        child_spec = state.stage_specs.get(child.name, spec)
+        child_state = dataclasses.replace(state, client=state.get_client(child_spec))
+        child_runner = child_state.make_runner(child, child_spec, scope=entry.body)
         body.append((child_state, child_runner))
     return SequenceStage(entry.name, body=body)
 
 
-def _build_run_cmd(entry: StageEntry, spec: Client, _runner: StageRunner) -> Any:
+def _build_run_cmd(entry: StageEntry, spec: Client, _state: RuntimeState) -> Any:
     return run_cmd.RunCmd(entry.name, spec.model, entry.prompts, entry.options)
 
 
-def _build_claude_prompt(entry: StageEntry, spec: Client, _runner: StageRunner) -> Any:
+def _build_claude_prompt(entry: StageEntry, spec: Client, _state: RuntimeState) -> Any:
     if not entry.prompts:
         die(f"stage {entry.name!r}: type 'claude-prompt' requires a 'prompt' field")
     return claude_prompt.ClaudePrompt(
@@ -265,37 +258,37 @@ def _build_claude_prompt(entry: StageEntry, spec: Client, _runner: StageRunner) 
     )
 
 
-def _build_handoff(entry: StageEntry, spec: Client, _runner: StageRunner) -> Any:
+def _build_handoff(entry: StageEntry, spec: Client, _state: RuntimeState) -> Any:
     from gremlins.stages.handoff import Handoff
 
     return Handoff(entry.name, spec)
 
 
-def _build_parallel(entry: StageEntry, _spec: Client, runner: StageRunner) -> Any:
+def _build_parallel(entry: StageEntry, _spec: Client, state: RuntimeState) -> Any:
     from gremlins.stages.parallel import ParallelStage
     from gremlins.state import set_stage
 
-    group_dir = runner.session_dir / entry.name
+    group_dir = state.session_dir / entry.name
     group_dir.mkdir(parents=True, exist_ok=True)
     child_runners: list[tuple[str, Any, Any]] = []
     for child in entry.body:
-        child_spec = require_stage_spec(runner.stage_specs, child.name)
+        child_spec = require_stage_spec(state.stage_specs, child.name)
         child_dir = group_dir / child.name
         child_dir.mkdir(parents=True, exist_ok=True)
-        child_state = StageState(
-            client=runner.get_client(child_spec),
+        child_state = dataclasses.replace(
+            state,
+            client=state.get_client(child_spec),
             session_dir=child_dir,
-            gr_id=runner.gr_id,
             child_key=child.name,
         )
         child_runners.append(
             (
                 child.name,
                 child_state,
-                runner.make_runner(child, child_state, child_spec, scope=entry.body),
+                child_state.make_runner(child, child_spec, scope=entry.body),
             )
         )
-    gr_id = runner.gr_id
+    gr_id = state.gr_id
     return ParallelStage(
         entry.name,
         child_runners,

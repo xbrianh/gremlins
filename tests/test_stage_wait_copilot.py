@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.stages.base import StageState
+from gremlins.stages.base import RuntimeState
 from gremlins.stages.wait_copilot import WaitCopilot
 
 
@@ -18,7 +18,7 @@ def _make_stage(
     interval: int = 0,
     review_checker=None,
     gr_id=None,
-) -> tuple[WaitCopilot, StageState]:
+) -> tuple[WaitCopilot, RuntimeState]:
     stage = WaitCopilot(
         "wait-copilot",
         None,
@@ -30,7 +30,7 @@ def _make_stage(
         interval=interval,
         review_checker=review_checker,
     )
-    state = StageState(
+    state = RuntimeState(
         client=FakeClaudeClient(fixtures={}),
         session_dir=tmp_path,
         gr_id=gr_id,

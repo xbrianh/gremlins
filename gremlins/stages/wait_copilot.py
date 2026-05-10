@@ -8,7 +8,7 @@ from collections.abc import Callable
 from typing import Any
 
 from gremlins.gh_utils import check_copilot_review
-from gremlins.stages.base import Stage, StageState
+from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import read_pr_num
 
@@ -36,7 +36,7 @@ class WaitCopilot(Stage):
         self.interval = interval
         self.review_checker = review_checker
 
-    def run(self, state: StageState) -> str:
+    def run(self, state: RuntimeState) -> str:
         pr_num = self.pr_num or read_pr_num(state.gr_id)
         if not pr_num:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")

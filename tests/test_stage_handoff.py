@@ -11,7 +11,7 @@ import pytest
 
 from gremlins.clients.client import Client
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.stages.base import StageState
+from gremlins.stages.base import RuntimeState
 from gremlins.stages.handoff import Handoff
 from gremlins.stages.loop import RunCmdFailed
 
@@ -25,8 +25,8 @@ def _make_state(
     *,
     gr_id: str | None = None,
     client: FakeClaudeClient | None = None,
-) -> StageState:
-    return StageState(
+) -> RuntimeState:
+    return RuntimeState(
         client=client or FakeClaudeClient(),
         session_dir=tmp_path,
         gr_id=gr_id,
@@ -38,7 +38,7 @@ def _make_handoff(
     *,
     gr_id: str | None = None,
     client: FakeClaudeClient | None = None,
-) -> tuple[Handoff, StageState]:
+) -> tuple[Handoff, RuntimeState]:
     fake_client = client or FakeClaudeClient()
     h = Handoff("handoff", Client("claude", "sonnet"))
     state = _make_state(tmp_path, gr_id=gr_id, client=fake_client)
@@ -267,8 +267,6 @@ def test_resume_continues_from_file_index(tmp_path, monkeypatch, test_state_root
 
 def test_base_ref_from_state(tmp_path, monkeypatch, test_state_root):
     gr_id = "boss-handoff-baseref-aabb12"
-    state_dir = test_state_root / gr_id
-    _write_state(state_dir, gr_id, base_ref_name="deadbeef1234")
     _write_plan(tmp_path)
 
     captured_base: list[str] = []
@@ -280,9 +278,9 @@ def test_base_ref_from_state(tmp_path, monkeypatch, test_state_root):
         return 0
 
     monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
-    monkeypatch.setenv("GR_ID", gr_id)
 
     h, state = _make_handoff(tmp_path, gr_id=gr_id)
+    state.base_ref_name = "deadbeef1234"
     # Do NOT monkeypatch _resolve_base_ref — state has base_ref_name, fallback must not run
     h.run(state)
 

@@ -11,7 +11,7 @@ from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.git import GitError
-from gremlins.stages.base import StageState
+from gremlins.stages.base import RuntimeState
 from gremlins.stages.commit import Commit
 
 ISSUE_URL = "https://github.com/owner/repo/issues/42"
@@ -25,7 +25,7 @@ def _make_stage(
     impl_materialized_branch: str = MATERIALIZED_BRANCH,
     base_ref: str = BASE_REF,
     issue_url: str = ISSUE_URL,
-) -> tuple[Commit, StageState]:
+) -> tuple[Commit, RuntimeState]:
     stage = Commit(
         "commit",
         "sonnet",
@@ -36,7 +36,7 @@ def _make_stage(
         issue_url=issue_url,
     )
     client = FakeClaudeClient(fixtures={"commit": MINIMAL_EVENTS})
-    state = StageState(client=client, session_dir=tmp_path, gr_id=None)
+    state = RuntimeState(client=client, session_dir=tmp_path, gr_id=None)
     return stage, state
 
 
@@ -112,10 +112,10 @@ def test_rev_list_error_raises(tmp_path: pathlib.Path) -> None:
 
 def _make_self_sourcing_stage(
     tmp_path: pathlib.Path,
-) -> tuple[Commit, StageState]:
+) -> tuple[Commit, RuntimeState]:
     stage = Commit("commit", "sonnet", [], {})
     client = FakeClaudeClient(fixtures={"commit": MINIMAL_EVENTS})
-    state = StageState(client=client, session_dir=tmp_path, gr_id="test-gr")
+    state = RuntimeState(client=client, session_dir=tmp_path, gr_id="test-gr")
     return stage, state
 
 

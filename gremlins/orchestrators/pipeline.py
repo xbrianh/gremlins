@@ -17,9 +17,9 @@ from gremlins.runner import run_stages
 from gremlins.schema import PipelineDef as _PipelineData
 from gremlins.schema import StageEntry
 from gremlins.stage_clients import require_stage_spec
-from gremlins.stages.base import StageState
+from gremlins.stages.base import RuntimeState
 from gremlins.stages.registry import STAGE_BUILDERS
-from gremlins.state import resolve_state_file, set_stage
+from gremlins.state import resolve_state_file
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ def _expand_stage_entries(raw_stages: list[StageEntry]) -> list[StageEntry]:
     return result
 
 
-class StageRunner:
+class Pipeline:
     def __init__(
         self,
         stages: list[StageEntry],
@@ -78,7 +78,7 @@ class StageRunner:
             elif s.type == "loop":
                 unknown.extend(c.type for c in s.body if c.type not in STAGE_BUILDERS)
         if unknown:
-            raise ValueError(f"StageRunner does not support stage type(s): {unknown}")
+            raise ValueError(f"Pipeline does not support stage type(s): {unknown}")
         self.stages = _expand_stage_entries(stages)
         self.args = args
         self.session_dir = session_dir
@@ -90,7 +90,6 @@ class StageRunner:
         self.stage_specs: dict[str, Client] = stage_specs or {}
         self.spec_clients: dict[str, Client] = spec_clients or {}
         self.test_client = test_client
-        self.current_scope: list[StageEntry] = []
 
         sf = state_file if state_file is not None else resolve_state_file(gr_id)
         self.instructions: str = read_stage_inputs(sf).get("instructions") or " ".join(
@@ -107,11 +106,6 @@ class StageRunner:
                 raise ValueError(f"--spec: file is empty: {spec_path}")
             shutil.copyfile(spec_src, spec_file)
 
-    def get_client(self, spec: Client) -> Client:
-        if self.test_client is not None:
-            return self.test_client
-        return self.spec_clients[str(spec)]
-
     def validate_resume_target(self) -> None:
         resume_from = getattr(self.args, "resume_from", None)
         if not resume_from:
@@ -123,45 +117,30 @@ class StageRunner:
                 f"valid: {valid_names}"
             )
 
-    def make_runner(
-        self,
-        entry: StageEntry,
-        state: StageState,
-        spec: Client,
-        scope: list[StageEntry] | None = None,
-    ) -> Callable[[], None]:
-        builder = STAGE_BUILDERS[entry.type]
-        gr_id = self.gr_id
-        pipe = self
-        scope_list = list(scope) if scope is not None else []
-
-        def _run() -> None:
-            set_stage(gr_id, entry.name)
-            previous_scope = pipe.current_scope
-            pipe.current_scope = scope_list
-            try:
-                stage = builder(entry, spec, pipe)
-                stage.run(state)
-            finally:
-                pipe.current_scope = previous_scope
-
-        return _run
-
     def _collect_stages(
         self, stages: list[StageEntry]
     ) -> list[tuple[str, Callable[[], None]]]:
-        gr_id = self.gr_id
         built: list[tuple[str, Callable[[], None]]] = []
         for e in stages:
             stage_spec = require_stage_spec(self.stage_specs, e.name)
-            stage_state = StageState(
-                client=self.get_client(stage_spec),
+            resolved = self.test_client or self.spec_clients.get(
+                str(stage_spec), stage_spec
+            )
+            stage_state = RuntimeState(
+                client=resolved,
                 session_dir=self.session_dir,
-                gr_id=gr_id,
+                gr_id=self.gr_id,
+                state_file=self.state_file,
+                args=self.args,
+                pipeline_data=self.pipeline_data,
+                repo=self.repo,
+                instructions=self.instructions,
+                stage_specs=self.stage_specs,
+                spec_clients=self.spec_clients,
+                is_git=self.is_git,
+                test_client=self.test_client,
             )
-            built.append(
-                (e.name, self.make_runner(e, stage_state, stage_spec, scope=stages))
-            )
+            built.append((e.name, stage_state.make_runner(e, stage_spec, scope=stages)))
         return built
 
     def run(self) -> None:

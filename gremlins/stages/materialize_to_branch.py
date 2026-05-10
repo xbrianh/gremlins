@@ -3,24 +3,21 @@
 from __future__ import annotations
 
 import dataclasses
-import json
 import logging
 import sys
-from typing import Any
 
 from gremlins.git import (
     DivergentHead,
     EmptyImpl,
     ImplOutcome,
-    PreImplState,
     classify_impl_outcome,
     create_handoff_branch,
     reset_pre_branch,
     sweep_stale_handoff_branches,
 )
-from gremlins.stages.base import Stage, StageState
+from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.registry import register_stage
-from gremlins.state import append_artifact, patch_state, resolve_state_file
+from gremlins.state import append_artifact, patch_state
 
 logger = logging.getLogger(__name__)
 
@@ -33,30 +30,10 @@ class MaterializeToBranchResult:
 
 
 class MaterializeToBranch(Stage):
-    def _pre_state_from_file(self, state: StageState) -> PreImplState:
-        # Check session-dir sidecar written by Implement._run_gh first.
-        sidecar = state.session_dir / ".impl-pre-state.json"
-        if sidecar.exists():
-            data: dict[str, Any] = json.loads(sidecar.read_text(encoding="utf-8"))
-            head = data.get("head") or ""
-            if head:
-                return PreImplState(head=head, branch=data.get("branch") or "")
-
-        sf = resolve_state_file(state.gr_id)
-        if sf is None or not sf.exists():
-            raise RuntimeError(
-                "no sidecar and no state.json found; rewind to implement stage"
-            )
-        data = json.loads(sf.read_text(encoding="utf-8"))
-        head = data.get("impl_pre_head") or ""
-        if not head:
-            raise RuntimeError(
-                "impl_pre_head missing from state.json; rewind to implement stage"
-            )
-        return PreImplState(head=head, branch=data.get("impl_pre_branch") or "")
-
-    def run(self, state: StageState) -> MaterializeToBranchResult:
-        pre_state: PreImplState = self._pre_state_from_file(state)
+    def run(self, state: RuntimeState) -> MaterializeToBranchResult:
+        pre_state = state.impl_pre_state
+        if pre_state is None:
+            raise RuntimeError("no impl_pre_state found; rewind to implement stage")
         impl_cwd = str(state.worktree) if state.worktree is not None else None
         outcome = classify_impl_outcome(pre_state, cwd=impl_cwd)
 

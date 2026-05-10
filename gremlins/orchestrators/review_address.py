@@ -16,7 +16,7 @@ from gremlins.logging_setup import configure_logging
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.pipeline.loader import load_pipeline
 from gremlins.runner import install_signal_handlers
-from gremlins.stages.base import StageState
+from gremlins.stages.base import RuntimeState
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +79,7 @@ def review_main(argv: list[str], *, client: Client | None = None) -> int:
     rc_entry = next((s for s in pipeline.stages if s.type == "review-code"), None)
     if rc_entry is None or not rc_entry.prompts[1:]:
         die("local pipeline has no review-code stage with a prompt")
-    state = StageState(client=client, session_dir=session_dir, gr_id=None)
+    state = RuntimeState(client=client, session_dir=session_dir, gr_id=None)
     logger.info("reviewing code (model: %s)", args.detail)
     stage = review_code.ReviewCode(
         rc_entry.name,
@@ -123,7 +123,7 @@ def address_main(argv: list[str], *, client: Client | None = None) -> int:
     if ac_entry is None or not ac_entry.prompts:
         die("local pipeline has no address-code stage with a prompt")
 
-    state = StageState(client=client, session_dir=session_dir, gr_id=None)
+    state = RuntimeState(client=client, session_dir=session_dir, gr_id=None)
     logger.info("addressing code reviews (model: %s)", args.address)
     stage = address_code.AddressCode(
         ac_entry.name,

@@ -8,7 +8,7 @@ import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.stages.base import StageState
+from gremlins.stages.base import RuntimeState
 from gremlins.stages.wait_ci import WaitCI
 
 PR_URL = "https://github.com/owner/repo/pull/42"
@@ -52,10 +52,10 @@ def _make_stage(
     gr_id: Any = None,
     model: str = "sonnet",
     **kwargs: Any,
-) -> tuple[WaitCI, StageState]:
+) -> tuple[WaitCI, RuntimeState]:
     prompts = [_CI_PROMPT_PATH.read_text(encoding="utf-8")]
     stage = WaitCI("wait-ci", model, prompts, {}, pr_url=PR_URL, **kwargs)
-    state = StageState(client=client, session_dir=tmp_path, gr_id=gr_id)
+    state = RuntimeState(client=client, session_dir=tmp_path, gr_id=gr_id)
     return stage, state
 
 

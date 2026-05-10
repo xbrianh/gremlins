@@ -8,14 +8,9 @@ from typing import Any
 from gremlins.clients.protocol import CompletedRun
 from gremlins.gh_utils import extract_gh_url
 from gremlins.prompts import BUNDLED_PROMPT_DIR
-from gremlins.stages.base import Stage, StageState
+from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.registry import register_stage
-from gremlins.state import (
-    append_artifact,
-    last_pr_branch,
-    read_state_str,
-    resolve_state_file,
-)
+from gremlins.state import append_artifact, last_pr_branch
 
 logger = logging.getLogger(__name__)
 
@@ -37,13 +32,12 @@ class OpenGitHubPR(Stage):
         super().__init__(name, model, prompts, options)
         self.base_ref = base_ref
 
-    def run(self, state: StageState) -> str:
-        sf = resolve_state_file(state.gr_id)
-        issue_url = read_state_str(sf, "issue_url")
+    def run(self, state: RuntimeState) -> str:
+        issue_url = state.issue_url
         base_ref = (
             last_pr_branch(state.gr_id)
             or self.base_ref
-            or read_state_str(sf, "base_ref_name")
+            or state.base_ref_name
             or "main"
         )
 
@@ -74,8 +68,8 @@ class OpenGitHubPR(Stage):
             label="PR",
             text_result=completed.text_result,
         )
-        impl_branch = read_state_str(sf, "impl_materialized_branch")
-        if sf is not None and not impl_branch:
+        impl_branch = state.impl_materialized_branch
+        if not impl_branch:
             raise RuntimeError(
                 "impl_materialized_branch is empty; materialize-to-branch must run before open-github-pr"
             )

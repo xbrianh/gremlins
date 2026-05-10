@@ -9,7 +9,7 @@ from typing import Any
 
 from gremlins.gh_utils import fetch_check_run_logs, get_pr_ci_status
 from gremlins.git import head_sha
-from gremlins.stages.base import Stage, StageState
+from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import check_bail, emit_bail, read_pr_url
 
@@ -163,7 +163,7 @@ class WaitCI(Stage):
         self.head_sha_getter = head_sha_getter
         self.fix_sha_getter = fix_sha_getter
 
-    def run(self, state: StageState) -> None:
+    def run(self, state: RuntimeState) -> None:
         pr_url = self.pr_url or read_pr_url(state.gr_id)
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")

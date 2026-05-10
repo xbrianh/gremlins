@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from gremlins.stages.base import StageState
+from gremlins.stages.base import RuntimeState
 from gremlins.stages.loop import LoopExhausted, LoopStage, RunCmdFailed
 from gremlins.stages.run_cmd import RunCmd
 
@@ -18,8 +18,8 @@ def _fake_client() -> Any:
     return FakeClaudeClient(fixtures={})
 
 
-def _loop_state(tmp_path: Any) -> StageState:
-    return StageState(
+def _loop_state(tmp_path: Any) -> RuntimeState:
+    return RuntimeState(
         client=_fake_client(),
         session_dir=tmp_path,
         gr_id=None,
@@ -132,7 +132,7 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
     def fix() -> None:
         pass
 
-    loop_state = StageState(
+    loop_state = RuntimeState(
         client=_fake_client(),
         session_dir=tmp_path,
         gr_id=gr_id,
@@ -151,9 +151,9 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
 # ---------------------------------------------------------------------------
 
 
-def _run_cmd_stage(tmp_path: Any, cmds: list[str]) -> tuple[RunCmd, StageState]:
+def _run_cmd_stage(tmp_path: Any, cmds: list[str]) -> tuple[RunCmd, RuntimeState]:
     stage = RunCmd("run-cmd", None, [], {"cmds": cmds})
-    state = StageState(
+    state = RuntimeState(
         client=_fake_client(),
         session_dir=tmp_path,
         gr_id=None,
