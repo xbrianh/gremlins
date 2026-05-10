@@ -229,7 +229,8 @@ class Plan(Stage):
         resolved_num = str(issue_data.get("number") or "")
         issue_title = (issue_data.get("title") or "")[:60]
         plan_md.write_text(issue_body + "\n", encoding="utf-8")
-        if self.repo and target_repo == self.repo:
+        same_repo = (not self.repo) or (target_repo == self.repo)
+        if same_repo:
             issue_url = resolved_url
             issue_num = resolved_num
         else:
