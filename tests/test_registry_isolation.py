@@ -27,6 +27,8 @@ stage_mods = [
         "gremlins.stages.registry",
         "gremlins.stages",
         "gremlins.stages.base",
+        "gremlins.stages.compound",
+        "gremlins.stages.loop",
     )
 ]
 assert not stage_mods, f"unexpected stage modules: {stage_mods}"
