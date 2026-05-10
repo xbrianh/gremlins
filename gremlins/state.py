@@ -43,7 +43,9 @@ _GH_STAGE_TYPES = frozenset(
 
 
 def _stages_use_gh(stages: list[StageEntry]) -> bool:
-    return any(s.type in _GH_STAGE_TYPES or (s.body and _stages_use_gh(s.body)) for s in stages)
+    return any(
+        s.type in _GH_STAGE_TYPES or (s.body and _stages_use_gh(s.body)) for s in stages
+    )
 
 
 def pipeline_uses_gh(pipeline: PipelineDef) -> bool:
