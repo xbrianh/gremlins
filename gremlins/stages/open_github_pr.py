@@ -25,7 +25,10 @@ def _get_pr_branch(pr_url: str) -> str:
         ["gh", "pr", "view", pr_url, "--json", "headRefName", "-q", ".headRefName"],
         timeout=15,
     )
-    return r.stdout.strip() if r.returncode == 0 else ""
+    if r.returncode != 0:
+        logger.warning("_get_pr_branch: gh pr view failed for %s", pr_url)
+        return ""
+    return r.stdout.strip()
 
 
 class OpenGitHubPR(Stage):

@@ -63,7 +63,7 @@ def test_no_issue_url_skips_closes(tmp_path: pathlib.Path) -> None:
     stage, state = _make_state(tmp_path, gr_id="test-gr", issue_url="")
     with (
         patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
-        patch("gremlins.stages.open_github_pr._get_pr_branch", return_value=""),
+        patch("gremlins.stages.open_github_pr._get_pr_branch", return_value=PR_BRANCH),
         patch("gremlins.stages.open_github_pr.append_artifact"),
     ):
         stage.run(state)
