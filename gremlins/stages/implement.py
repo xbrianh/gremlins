@@ -8,8 +8,9 @@ import pathlib
 from typing import Any
 
 from gremlins.git import (
-    has_dirty_worktree,
-    head_sha,
+    classify_impl_outcome,
+    DirtyOnly,
+    EmptyImpl,
     record_pre_impl_state,
 )
 from gremlins.prompts import BUNDLED_PROMPT_DIR
@@ -110,10 +111,10 @@ class Implement(Stage):
 
     def _run_local(self) -> None:
         cwd_arg = str(self.state.worktree) if self.state.worktree is not None else None
-        pre_head = ""
+        pre = None
         pre_sentinel: pathlib.Path | None = None
         if self.is_git:
-            pre_head = head_sha(cwd=cwd_arg)
+            pre = record_pre_impl_state(cwd=cwd_arg)
         else:
             pre_sentinel = self.state.session_dir / ".pre-impl"
             pre_sentinel.touch()
@@ -141,9 +142,14 @@ class Implement(Stage):
         )
 
         if self.is_git:
-            post_head = head_sha(cwd=cwd_arg)
-            if post_head == pre_head and not has_dirty_worktree(cwd=cwd_arg):
-                raise RuntimeError("implementation stage produced no changes; aborting")
+            assert pre is not None
+            outcome = classify_impl_outcome(pre, cwd=cwd_arg)
+            if isinstance(outcome, DirtyOnly):
+                raise RuntimeError(
+                    "implement left uncommitted changes; the agent must commit before returning"
+                )
+            if isinstance(outcome, EmptyImpl):
+                raise RuntimeError("implement produced no work")
         else:
             assert pre_sentinel is not None
             if not changes_outside_git(pre_sentinel, self.state.session_dir):
@@ -197,6 +203,14 @@ class Implement(Stage):
             capture_events=True,
             idle_timeout=IMPLEMENT_IDLE_TIMEOUT,
         )
+
+        outcome = classify_impl_outcome(pre)
+        if isinstance(outcome, DirtyOnly):
+            raise RuntimeError(
+                "implement left uncommitted changes; the agent must commit before returning"
+            )
+        if isinstance(outcome, EmptyImpl):
+            raise RuntimeError("implement produced no work")
 
 
 register_stage("implement", Implement)
