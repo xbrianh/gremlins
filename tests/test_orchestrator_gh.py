@@ -2012,7 +2012,7 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
 
     # Override load_pipeline (wins over _patch_common's version) to inject
     # default_client without a live client instance.
-    from gremlins.clients.resolve import ClientSpec as _ClientSpec
+    from gremlins.clients.client import Client as _ClientSpec
 
     _real_load_pipeline = _run_mod.load_pipeline
 

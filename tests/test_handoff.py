@@ -7,7 +7,7 @@ import pathlib
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.clients.resolve import ClientSpec
+from gremlins.clients.client import Client
 from gremlins.stages import handoff
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
@@ -517,7 +517,7 @@ def test_sanitize_rolling_plan_rewrites_file(monkeypatch, tmp_path):
         signal_payload={},
         sanitize_text=cleaned,
     )
-    handoff.sanitize_rolling_plan(client, out_path, ClientSpec.parse("claude:sonnet"))
+    handoff.sanitize_rolling_plan(client, out_path, Client("claude", "sonnet"))
     assert out_path.read_text() == cleaned
 
 
@@ -531,7 +531,7 @@ def test_sanitize_rolling_plan_nonzero_is_nonfatal(monkeypatch, tmp_path, capsys
         signal_payload={},
         sanitize_error=RuntimeError("sanitize failed"),
     )
-    handoff.sanitize_rolling_plan(client, out_path, ClientSpec.parse("claude:sonnet"))
+    handoff.sanitize_rolling_plan(client, out_path, Client("claude", "sonnet"))
     err = capsys.readouterr().err
     assert "warning" in err.lower()
     assert out_path.read_text() == original

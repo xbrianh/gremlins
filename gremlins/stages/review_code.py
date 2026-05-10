@@ -6,7 +6,7 @@ import logging
 import pathlib
 from typing import Any
 
-from gremlins.clients.protocol import ClaudeClient
+from gremlins.clients.protocol import _ClientImpl
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import (
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 def _run_reviewer(
     *,
-    client: ClaudeClient,
+    client: _ClientImpl,
     model: str,
     out_file: pathlib.Path,
     focus: str,

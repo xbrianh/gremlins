@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from gremlins.clients.resolve import PACKAGE_DEFAULT, ClientSpec
+from gremlins.clients.client import PACKAGE_DEFAULT, Client
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.pipeline.loader import load_pipeline
 from gremlins.stage_clients import (
@@ -16,29 +16,29 @@ from gremlins.stage_clients import (
 
 
 def test_parse_valid():
-    spec = ClientSpec.parse("claude:sonnet")
+    spec = Client.parse("claude:sonnet")
     assert spec.provider == "claude"
     assert spec.model == "sonnet"
 
 
 def test_parse_empty_model():
     with pytest.raises(ValueError, match="model must not be empty"):
-        ClientSpec.parse("claude:")
+        Client.parse("claude:")
 
 
 def test_parse_no_colon_raises():
     with pytest.raises(ValueError, match="expected 'provider:model'"):
-        ClientSpec.parse("claude")
+        Client.parse("claude")
 
 
 def test_parse_unknown_provider_raises():
     with pytest.raises(ValueError, match="unknown provider"):
-        ClientSpec.parse("unknown:model")
+        Client.parse("unknown:model")
 
 
 def test_str_round_trip():
     for s in ("claude:sonnet", "copilot:gpt-4o"):
-        assert str(ClientSpec.parse(s)) == s
+        assert str(Client.parse(s)) == s
 
 
 def test_package_default():
@@ -47,20 +47,20 @@ def test_package_default():
 
 
 def test_resolve_stage_wins():
-    stage = ClientSpec("claude", "opus")
-    cli = ClientSpec("copilot", "gpt-4o")
-    pipeline_default = ClientSpec("claude", "haiku")
+    stage = Client("claude", "opus")
+    cli = Client("copilot", "gpt-4o")
+    pipeline_default = Client("claude", "haiku")
     assert resolve_stage_client(stage, cli, pipeline_default) is stage
 
 
 def test_resolve_cli_wins_over_pipeline():
-    cli = ClientSpec("copilot", "gpt-4o")
-    pipeline_default = ClientSpec("claude", "haiku")
+    cli = Client("copilot", "gpt-4o")
+    pipeline_default = Client("claude", "haiku")
     assert resolve_stage_client(None, cli, pipeline_default) is cli
 
 
 def test_resolve_pipeline_default_wins_over_package():
-    pipeline_default = ClientSpec("claude", "haiku")
+    pipeline_default = Client("claude", "haiku")
     assert resolve_stage_client(None, None, pipeline_default) is pipeline_default
 
 
@@ -69,7 +69,7 @@ def test_resolve_falls_back_to_package_default():
 
 
 def test_require_stage_spec_returns_present_stage():
-    spec = ClientSpec("claude", "opus")
+    spec = Client("claude", "opus")
     assert require_stage_spec({"implement": spec}, "implement") is spec
 
 
@@ -82,7 +82,7 @@ def test_validate_stage_specs_reports_all_missing_stages(tmp_path):
     pipeline = load_pipeline(resolve_pipeline_path("gh", tmp_path))
 
     with pytest.raises(ValueError, match=r"stage_clients missing stages:"):
-        validate_stage_specs({"plan": ClientSpec("claude", "sonnet")}, pipeline)
+        validate_stage_specs({"plan": Client("claude", "sonnet")}, pipeline)
 
 
 def _write(tmp_path, name, body):

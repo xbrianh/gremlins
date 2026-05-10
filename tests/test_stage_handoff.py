@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.clients.resolve import ClientSpec
+from gremlins.clients.client import Client
 from gremlins.schema import StageEntry
 from gremlins.stages.base import StageContext
 from gremlins.stages.handoff import Handoff
@@ -52,7 +52,7 @@ def _make_handoff(
 ) -> Handoff:
     entry = _make_entry()
     fake_client = client or FakeClaudeClient()
-    h = Handoff(entry, ClientSpec("claude", "sonnet"))
+    h = Handoff(entry, Client("claude", "sonnet"))
     ctx = _make_ctx(tmp_path, gr_id=gr_id, client=fake_client)
     h.bind(ctx)
     return h

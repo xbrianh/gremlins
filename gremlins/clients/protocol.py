@@ -13,7 +13,7 @@ class CompletedRun:
     cost_usd: float | None = None
 
 
-class ClaudeClient(Protocol):
+class _ClientImpl(Protocol):
     def run(
         self,
         prompt: str,
