@@ -282,11 +282,6 @@ class EmptyImpl:
 
 
 @dataclasses.dataclass
-class DirtyOnly:
-    """HEAD unchanged but worktree has uncommitted changes."""
-
-
-@dataclasses.dataclass
 class HeadAdvanced:
     """HEAD advanced fast-forward from pre-impl state."""
 
@@ -301,7 +296,7 @@ class DivergentHead:
     post_head: str
 
 
-ImplOutcome = EmptyImpl | DirtyOnly | HeadAdvanced | DivergentHead
+ImplOutcome = EmptyImpl | HeadAdvanced | DivergentHead
 
 
 def record_pre_impl_state(cwd: str | None = None) -> PreImplState:
@@ -331,9 +326,6 @@ def classify_impl_outcome(pre: PreImplState, cwd: str | None = None) -> ImplOutc
             return HeadAdvanced(commit_count=count)
         return DivergentHead(pre_head=pre.head, post_head=post_head)
 
-    status_r = proc.run(["git", "status", "--porcelain"], cwd=cwd)
-    if status_r.stdout.strip():
-        return DirtyOnly()
     return EmptyImpl()
 
 

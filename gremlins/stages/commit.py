@@ -7,12 +7,7 @@ import pathlib
 from typing import Any
 
 from gremlins.git import (
-    DirtyOnly,
     GitError,
-    HeadAdvanced,
-    ImplOutcome,
-    diff_output,
-    has_dirty_worktree,
     log_patch,
     rev_list_count,
 )
@@ -34,19 +29,6 @@ def _read_state(sf: pathlib.Path | None, field: str) -> str:
         return ""
 
 
-def _get_diff(
-    outcome: ImplOutcome,
-    impl_materialized_branch: str,
-    base_ref: str,
-    cwd: str | None,
-) -> str:
-    if isinstance(outcome, HeadAdvanced):
-        diff = log_patch(f"{base_ref}..{impl_materialized_branch}", cwd=cwd).strip()
-    else:
-        diff = diff_output(["HEAD"], cwd=cwd).strip()
-    return diff or "(no diff available)"
-
-
 class Commit(Stage):
     def __init__(
         self,
@@ -55,22 +37,18 @@ class Commit(Stage):
         prompts: list[str],
         options: dict[str, Any],
         *,
-        impl_outcome: ImplOutcome | None = None,
         impl_materialized_branch: str | None = None,
         base_ref: str | None = None,
         issue_url: str | None = None,
         cwd: str | None = None,
     ) -> None:
         super().__init__(name, model, prompts, options)
-        self.impl_outcome = impl_outcome
         self.impl_materialized_branch = impl_materialized_branch
         self.base_ref = base_ref
         self.issue_url = issue_url
         self._cwd = cwd
 
-    def _resolve_inputs(
-        self,
-    ) -> tuple[ImplOutcome, str, str, str]:
+    def _resolve_inputs(self) -> tuple[str, str, str]:
         sf = resolve_state_file(self.state.gr_id)
 
         impl_materialized_branch = self.impl_materialized_branch or _read_state(
@@ -79,54 +57,37 @@ class Commit(Stage):
         base_ref = self.base_ref or _read_state(sf, "impl_base_ref")
         if not base_ref:
             raise RuntimeError("no impl_base_ref in state.json (rewind to implement?)")
-
+        if not impl_materialized_branch:
+            raise RuntimeError(
+                "no impl_materialized_branch in state.json (rewind to materialize-to-branch?)"
+            )
         issue_url = self.issue_url or _read_state(sf, "issue_url")
 
-        if impl_materialized_branch:
-            try:
-                commit_count = rev_list_count(f"{base_ref}..{impl_materialized_branch}")
-            except GitError as exc:
-                raise RuntimeError(str(exc)) from exc
-            impl_outcome: ImplOutcome = HeadAdvanced(commit_count=commit_count)
-        else:
-            impl_outcome = DirtyOnly()
-
-        return (impl_outcome, impl_materialized_branch, base_ref, issue_url)
+        return (impl_materialized_branch, base_ref, issue_url)
 
     def run(self, pipe: Any) -> None:
-        if self.impl_outcome is None:
-            impl_outcome, impl_materialized_branch, base_ref, issue_url = (
-                self._resolve_inputs()
-            )
-        else:
-            impl_outcome = self.impl_outcome
-            impl_materialized_branch = self.impl_materialized_branch or ""
-            base_ref = self.base_ref or ""
-            issue_url = self.issue_url or ""
+        impl_materialized_branch, base_ref, issue_url = self._resolve_inputs()
 
         issue_num = issue_url.split("/")[-1] if issue_url else ""
         cwd_arg = self._cwd or (
             str(self.state.worktree) if self.state.worktree is not None else None
         )
 
-        diff = _get_diff(impl_outcome, impl_materialized_branch, base_ref, cwd_arg)
+        try:
+            commit_count = rev_list_count(
+                f"{base_ref}..{impl_materialized_branch}", cwd=cwd_arg
+            )
+        except GitError as exc:
+            raise RuntimeError(str(exc)) from exc
 
-        if isinstance(impl_outcome, HeadAdvanced):
-            worktree_dirty = has_dirty_worktree(cwd=cwd_arg)
-            if worktree_dirty:
-                action_clause = _load("commit_handoff_dirty.md").format(
-                    handoff_branch=impl_materialized_branch,
-                    commit_count=impl_outcome.commit_count,
-                    pre_head=base_ref,
-                )
-            else:
-                action_clause = _load("commit_handoff_clean.md").format(
-                    handoff_branch=impl_materialized_branch,
-                    commit_count=impl_outcome.commit_count,
-                    pre_head=base_ref,
-                )
-        else:
-            action_clause = _load("commit_fresh.md")
+        diff = log_patch(f"{base_ref}..{impl_materialized_branch}", cwd=cwd_arg).strip()
+        diff = diff or "(no diff available)"
+
+        action_clause = _load("commit_handoff_clean.md").format(
+            handoff_branch=impl_materialized_branch,
+            commit_count=commit_count,
+            pre_head=base_ref,
+        )
 
         if issue_num:
             branch_clause = f"Name the branch 'issue-{issue_num}-<short-slug>'."
