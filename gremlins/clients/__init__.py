@@ -1,14 +1,26 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 from gremlins.clients import resolve as _resolve
 from gremlins.clients.claude import SubprocessClaudeClient
 from gremlins.clients.copilot import SubprocessCopilotClient
+from gremlins.clients.protocol import ClaudeClient, CompletedRun
+from gremlins.clients.stream import stream_events
 from gremlins.stages.registry import CLIENT_FACTORIES, register_client_factory
 
-if TYPE_CHECKING:
-    from gremlins.clients.protocol import ClaudeClient
+__all__ = [
+    "ClaudeClient",
+    "ClientSpec",
+    "CompletedRun",
+    "PACKAGE_DEFAULT",
+    "collect_stage_specs",
+    "load_stage_specs_from_state",
+    "require_stage_spec",
+    "resolve_stage_client",
+    "stream_events",
+    "to_client",
+]
 
 
 def _make_openai_client(model: str | None) -> object:

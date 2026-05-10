@@ -19,7 +19,7 @@ import sys
 import types
 from collections.abc import Callable, Sequence
 
-from gremlins.clients.protocol import ClaudeClient
+from gremlins.clients import ClaudeClient
 
 logger = logging.getLogger(__name__)
 

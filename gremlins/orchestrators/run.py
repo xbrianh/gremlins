@@ -10,14 +10,15 @@ import shutil
 
 import yaml
 
-from gremlins.clients import ClientSpec, to_client
-from gremlins.clients.protocol import ClaudeClient
-from gremlins.clients.resolve import (
+from gremlins.clients import (
+    ClaudeClient,
+    ClientSpec,
     PACKAGE_DEFAULT,
     collect_stage_specs,
     load_stage_specs_from_state,
-    validate_stage_specs,
+    to_client,
 )
+from gremlins.clients.resolve import validate_stage_specs
 from gremlins.env_file import load_env_file
 from gremlins.errors import die
 from gremlins.gh_utils import get_repo

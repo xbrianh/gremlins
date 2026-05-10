@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from gremlins.clients.protocol import CompletedRun
+from gremlins.clients import CompletedRun
 from gremlins.gh_utils import extract_gh_url
 from gremlins.prompts import BUNDLED_PROMPT_DIR
 from gremlins.stages import Stage, register_stage

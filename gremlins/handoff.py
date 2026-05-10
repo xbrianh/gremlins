@@ -22,8 +22,7 @@ import threading
 from collections.abc import Callable
 from typing import Any, NoReturn, TypeVar, cast
 
-from gremlins.clients import PACKAGE_DEFAULT, ClientSpec, to_client
-from gremlins.clients.protocol import ClaudeClient
+from gremlins.clients import ClaudeClient, PACKAGE_DEFAULT, ClientSpec, to_client
 from gremlins.logging_setup import configure_logging
 from gremlins.prompts import BUNDLED_PROMPT_DIR
 from gremlins.utils import proc

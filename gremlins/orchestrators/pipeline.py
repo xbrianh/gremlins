@@ -11,9 +11,7 @@ from collections.abc import Callable
 from typing import Any
 
 import gremlins.stages.all as _stages_all  # noqa: F401  # type: ignore[reportUnusedImport]
-from gremlins.clients import ClientSpec
-from gremlins.clients.protocol import ClaudeClient
-from gremlins.clients.resolve import require_stage_spec
+from gremlins.clients import ClaudeClient, ClientSpec, require_stage_spec
 from gremlins.git import in_git_repo
 from gremlins.pipeline import PipelineDef as _PipelineData
 from gremlins.pipeline import StageEntry
