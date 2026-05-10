@@ -11,7 +11,7 @@ import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.git import DirtyOnly, EmptyImpl, HeadAdvanced, PreImplState
+from gremlins.git import DirtyOnly, DivergentHead, EmptyImpl, HeadAdvanced, PreImplState
 from gremlins.schema import PipelineDef, StageEntry
 from gremlins.stages import StageContext
 from gremlins.stages.implement import Implement
@@ -199,6 +199,24 @@ def test_gh_plan_source_label_without_issue_num(tmp_path: pathlib.Path) -> None:
     assert "below" in prompt
 
 
+def test_local_git_raises_on_divergent_head(
+    tmp_path: pathlib.Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    stage, ctx = _make_stage(tmp_path, is_git=True, prompts=[_TEMPLATE_LOCAL])
+    with (
+        patch(
+            "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
+        ),
+        patch(
+            "gremlins.stages.implement.classify_impl_outcome",
+            return_value=DivergentHead(pre_head="abc123", post_head="def456"),
+        ),
+        pytest.raises(RuntimeError, match="diverged"),
+    ):
+        stage.run(None)
+
+
 def test_gh_raises_on_dirty_only(tmp_path: pathlib.Path) -> None:
     stage, ctx = _make_stage(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH])
     pipe = SimpleNamespace(pipeline_data=_GH_PIPELINE)
@@ -227,6 +245,22 @@ def test_gh_raises_on_empty_impl(tmp_path: pathlib.Path) -> None:
             return_value=EmptyImpl(),
         ),
         pytest.raises(RuntimeError, match="no work"),
+    ):
+        stage.run(pipe)
+
+
+def test_gh_raises_on_divergent_head(tmp_path: pathlib.Path) -> None:
+    stage, ctx = _make_stage(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH])
+    pipe = SimpleNamespace(pipeline_data=_GH_PIPELINE)
+    with (
+        patch(
+            "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
+        ),
+        patch(
+            "gremlins.stages.implement.classify_impl_outcome",
+            return_value=DivergentHead(pre_head="abc123", post_head="def456"),
+        ),
+        pytest.raises(RuntimeError, match="diverged"),
     ):
         stage.run(pipe)
 

@@ -9,6 +9,7 @@ from typing import Any
 
 from gremlins.git import (
     DirtyOnly,
+    DivergentHead,
     EmptyImpl,
     classify_impl_outcome,
     record_pre_impl_state,
@@ -119,7 +120,7 @@ class Implement(Stage):
             pre_sentinel = self.state.session_dir / ".pre-impl"
             pre_sentinel.touch()
 
-        impl_commit_instr = "."
+        impl_commit_instr = ""
         if self.is_git:
             impl_commit_instr = (
                 (BUNDLED_PROMPT_DIR / "impl_commit_git.md")
@@ -142,7 +143,8 @@ class Implement(Stage):
         )
 
         if self.is_git:
-            assert pre is not None
+            if pre is None:
+                raise RuntimeError("pre-impl state not captured")
             outcome = classify_impl_outcome(pre, cwd=cwd_arg)
             if isinstance(outcome, DirtyOnly):
                 raise RuntimeError(
@@ -150,8 +152,13 @@ class Implement(Stage):
                 )
             if isinstance(outcome, EmptyImpl):
                 raise RuntimeError("implement produced no work")
+            if isinstance(outcome, DivergentHead):
+                raise RuntimeError(
+                    f"implement diverged from pre-impl HEAD {pre.head[:7]}; expected a fast-forward"
+                )
         else:
-            assert pre_sentinel is not None
+            if pre_sentinel is None:
+                raise RuntimeError("pre-impl sentinel not created")
             if not changes_outside_git(pre_sentinel, self.state.session_dir):
                 raise RuntimeError("implementation stage produced no changes; aborting")
 
@@ -180,7 +187,7 @@ class Implement(Stage):
                 "should be product code."
             )
 
-        pre = record_pre_impl_state()
+        pre = record_pre_impl_state(cwd=self._impl_cwd)
         pipe.impl_pre_state = pre
         if self.state.gr_id:
             patch_state(
@@ -204,13 +211,17 @@ class Implement(Stage):
             idle_timeout=IMPLEMENT_IDLE_TIMEOUT,
         )
 
-        outcome = classify_impl_outcome(pre)
+        outcome = classify_impl_outcome(pre, cwd=self._impl_cwd)
         if isinstance(outcome, DirtyOnly):
             raise RuntimeError(
                 "implement left uncommitted changes; the agent must commit before returning"
             )
         if isinstance(outcome, EmptyImpl):
             raise RuntimeError("implement produced no work")
+        if isinstance(outcome, DivergentHead):
+            raise RuntimeError(
+                f"implement diverged from pre-impl HEAD {pre.head[:7]}; expected a fast-forward"
+            )
 
 
 register_stage("implement", Implement)
