@@ -87,11 +87,15 @@ def test_local_raises_when_no_changes(tmp_path: pathlib.Path, monkeypatch) -> No
             stage.run(None)
 
 
-def test_local_git_succeeds_on_head_advanced(tmp_path: pathlib.Path, monkeypatch) -> None:
+def test_local_git_succeeds_on_head_advanced(
+    tmp_path: pathlib.Path, monkeypatch
+) -> None:
     monkeypatch.chdir(tmp_path)
     stage, ctx = _make_stage(tmp_path, is_git=True, prompts=[_TEMPLATE_LOCAL])
     with (
-        patch("gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE),
+        patch(
+            "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
+        ),
         patch(
             "gremlins.stages.implement.classify_impl_outcome",
             return_value=HeadAdvanced(commit_count=2),
@@ -105,7 +109,9 @@ def test_local_git_raises_on_dirty_only(tmp_path: pathlib.Path, monkeypatch) -> 
     monkeypatch.chdir(tmp_path)
     stage, ctx = _make_stage(tmp_path, is_git=True, prompts=[_TEMPLATE_LOCAL])
     with (
-        patch("gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE),
+        patch(
+            "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
+        ),
         patch(
             "gremlins.stages.implement.classify_impl_outcome",
             return_value=DirtyOnly(),
@@ -119,7 +125,9 @@ def test_local_git_raises_on_empty_impl(tmp_path: pathlib.Path, monkeypatch) -> 
     monkeypatch.chdir(tmp_path)
     stage, ctx = _make_stage(tmp_path, is_git=True, prompts=[_TEMPLATE_LOCAL])
     with (
-        patch("gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE),
+        patch(
+            "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
+        ),
         patch(
             "gremlins.stages.implement.classify_impl_outcome",
             return_value=EmptyImpl(),
@@ -135,7 +143,9 @@ def test_gh_calls_claude_with_issue_body(tmp_path: pathlib.Path) -> None:
     )
     pipe = SimpleNamespace(pipeline_data=_GH_PIPELINE)
     with (
-        patch("gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE),
+        patch(
+            "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
+        ),
         patch(
             "gremlins.stages.implement.classify_impl_outcome",
             return_value=HeadAdvanced(commit_count=1),
@@ -159,7 +169,9 @@ def test_gh_plan_source_label_with_issue_num(
     stage, ctx = _make_stage(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH])
     pipe = SimpleNamespace(pipeline_data=_GH_PIPELINE)
     with (
-        patch("gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE),
+        patch(
+            "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
+        ),
         patch(
             "gremlins.stages.implement.classify_impl_outcome",
             return_value=HeadAdvanced(commit_count=1),
@@ -174,7 +186,9 @@ def test_gh_plan_source_label_without_issue_num(tmp_path: pathlib.Path) -> None:
     stage, ctx = _make_stage(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH])
     pipe = SimpleNamespace(pipeline_data=_GH_PIPELINE)
     with (
-        patch("gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE),
+        patch(
+            "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
+        ),
         patch(
             "gremlins.stages.implement.classify_impl_outcome",
             return_value=HeadAdvanced(commit_count=1),
@@ -189,7 +203,9 @@ def test_gh_raises_on_dirty_only(tmp_path: pathlib.Path) -> None:
     stage, ctx = _make_stage(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH])
     pipe = SimpleNamespace(pipeline_data=_GH_PIPELINE)
     with (
-        patch("gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE),
+        patch(
+            "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
+        ),
         patch(
             "gremlins.stages.implement.classify_impl_outcome",
             return_value=DirtyOnly(),
@@ -203,7 +219,9 @@ def test_gh_raises_on_empty_impl(tmp_path: pathlib.Path) -> None:
     stage, ctx = _make_stage(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH])
     pipe = SimpleNamespace(pipeline_data=_GH_PIPELINE)
     with (
-        patch("gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE),
+        patch(
+            "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
+        ),
         patch(
             "gremlins.stages.implement.classify_impl_outcome",
             return_value=EmptyImpl(),
