@@ -23,7 +23,7 @@ from __future__ import annotations
 import argparse
 import pathlib
 import sys
-from typing import Any, cast
+from typing import Any
 
 import yaml
 
@@ -174,11 +174,7 @@ def _launch_main(argv: list[str]) -> int:
 
     first = next((s for s in pipeline.stages if s.type != "parallel"), None)
     try:
-        stage_cls = (
-            cast(type[Stage], STAGE_REGISTRY[first.type])
-            if first is not None
-            else Stage
-        )
+        stage_cls = STAGE_REGISTRY[first.type] if first is not None else Stage
         parser = build_launch_parser(name, stage_cls)
     except (KeyError, TypeError):
         parser = build_launch_parser(name, Stage)

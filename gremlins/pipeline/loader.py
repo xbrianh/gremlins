@@ -27,7 +27,7 @@ def get_client_from_yaml(d: dict[str, Any]) -> Client | None:
     return Client.parse(raw)
 
 
-def _parse_stage(d: dict[str, Any], depth: int = 0) -> Stage:
+def parse_stage(d: dict[str, Any], depth: int = 0) -> Stage:
     if "parallel" in d:
         from gremlins.stages.parallel import ParallelStage
 
@@ -77,7 +77,7 @@ def load_pipeline(path: pathlib.Path) -> PipelineDef:
 
     stages: list[Stage] = []
     for entry in cast(list[dict[str, Any]], raw.get("stages") or []):
-        stages.append(_parse_stage(entry))
+        stages.append(parse_stage(entry))
 
     return PipelineDef(
         name=pipeline_name,

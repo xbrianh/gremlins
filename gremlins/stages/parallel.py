@@ -11,7 +11,7 @@ import secrets
 import tempfile
 import threading
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.compound import CompoundStage
@@ -21,6 +21,10 @@ from gremlins.utils import proc
 logger = logging.getLogger(__name__)
 
 _Stage = tuple[str, Callable[[], None]]
+
+
+def _noop_set_stage(_n: str) -> None:
+    pass
 
 
 class ParallelStage(CompoundStage):
@@ -63,7 +67,7 @@ class ParallelStage(CompoundStage):
             self.body = []
             self._gr_id = gr_id
             self._project_root = project_root or pathlib.Path.cwd()
-            self._set_stage_fn = set_stage_fn or (lambda _n: None)
+            self._set_stage_fn = set_stage_fn or _noop_set_stage
             self._legacy_mode = True
         else:
             self.body = body  # type: ignore[assignment]
@@ -87,7 +91,7 @@ class ParallelStage(CompoundStage):
 
     @classmethod
     def from_yaml(cls, d: dict[str, Any], depth: int = 0) -> ParallelStage:
-        from gremlins.pipeline.loader import _parse_stage
+        from gremlins.pipeline.loader import parse_stage
 
         if depth > 0:
             raise ValueError(
@@ -96,13 +100,13 @@ class ParallelStage(CompoundStage):
         name = d.get("name")
         if not isinstance(name, str) or not name:
             raise ValueError("parallel group must have a 'name' field")
-        children_raw = d.get("parallel", [])
-        if not isinstance(children_raw, list):
+        children_field: object = d.get("parallel") or []
+        if not isinstance(children_field, list):
             raise ValueError(f"parallel group {name!r}: 'parallel' must be a list")
         seen: set[str] = set()
         body: list[Stage] = []
-        for child_raw in children_raw:
-            child = _parse_stage(child_raw, depth=depth + 1)
+        for child_raw in cast(list[dict[str, Any]], children_field):
+            child = parse_stage(child_raw, depth=depth + 1)
             if child.name in seen:
                 raise ValueError(
                     f"parallel group {name!r}: duplicate child name {child.name!r}"
@@ -153,7 +157,7 @@ class ParallelStage(CompoundStage):
             self.name,
             child_runners,
             max_concurrent=self._max_concurrent,
-            set_stage_fn=set_stage_fn or (lambda _n: None),
+            set_stage_fn=set_stage_fn or _noop_set_stage,
             cancel_on_bail=self._cancel_on_bail,
             bail_policy=self._bail_policy,
             gr_id=gr_id,
@@ -184,7 +188,11 @@ class ParallelStage(CompoundStage):
                 child_key=child.name,
             )
             child_runners.append(
-                (child.name, child_state, child_state.make_runner(child, scope=self.body))
+                (
+                    child.name,
+                    child_state,
+                    child_state.make_runner(child, scope=self.body),
+                )
             )
         for _, fn in self.build_runtime_stages(
             child_runners,

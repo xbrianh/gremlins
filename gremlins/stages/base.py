@@ -176,6 +176,10 @@ class Stage:
         return cast(subprocess.CompletedProcess[Any], subprocess.run(argv, **kw))
 
     @classmethod
+    def from_yaml(cls, d: dict[str, Any]) -> Stage:
+        raise NotImplementedError
+
+    @classmethod
     def orchestration_args(cls) -> list[StageInput]:
         return []
 
