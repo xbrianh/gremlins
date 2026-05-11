@@ -195,7 +195,7 @@ def _make_gh_subprocess(
                 }
             )
             return subprocess.CompletedProcess(cmd, 0, stdout=data, stderr="")
-        # gh pr edit (request-copilot)
+        # gh pr edit (github-request-copilot-review)
         if sub == "pr" and "edit" in cmd:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         # gh pr diff
@@ -371,7 +371,7 @@ def test_gh_pipeline_stage_names(tmp_path):
         "implement",
         "verify",
         "open-pr",
-        "request-copilot",
+        "github-request-copilot-review",
         "ghreview",
         "wait-copilot",
         "ghaddress",
@@ -1220,7 +1220,7 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        lambda self, pipe: earlier_called.append("request-copilot"),
+        lambda self, pipe: earlier_called.append("github-request-copilot-review"),
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.AddressCode.run",
