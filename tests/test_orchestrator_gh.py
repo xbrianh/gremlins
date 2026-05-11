@@ -13,6 +13,10 @@ import subprocess
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
+from gremlins.orchestrators.run import _parse_args as _parse_gh_args
+from gremlins.orchestrators.run import run_pipeline
+from gremlins.pipeline import Pipeline
+from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.utils.git import (
     DivergentHead,
     EmptyImpl,
@@ -20,10 +24,6 @@ from gremlins.utils.git import (
     classify_impl_outcome,
     record_pre_impl_state,
 )
-from gremlins.orchestrators.run import _parse_args as _parse_gh_args
-from gremlins.orchestrators.run import run_pipeline
-from gremlins.pipeline import Pipeline
-from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.utils.github import parse_issue_ref as _parse_issue_ref
 
 

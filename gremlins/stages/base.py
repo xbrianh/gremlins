@@ -13,8 +13,8 @@ from gremlins.clients.client import Client
 from gremlins.clients.protocol import CompletedRun
 
 if TYPE_CHECKING:
-    from gremlins.utils.git import PreImplState
     from gremlins.pipeline import Pipeline
+    from gremlins.utils.git import PreImplState
 
 
 def _client_dict() -> dict[str, Client]:
