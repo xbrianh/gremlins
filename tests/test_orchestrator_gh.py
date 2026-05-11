@@ -1399,7 +1399,8 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir):
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
-        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run", lambda self, pipe: None
+        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
+        lambda self, pipe: None,
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
@@ -1450,7 +1451,8 @@ def test_gh_main_state_client_tracks_effective_model(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
-        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run", lambda self, pipe: None
+        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
+        lambda self, pipe: None,
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
@@ -1525,7 +1527,8 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
-        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run", lambda self, pipe: None
+        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
+        lambda self, pipe: None,
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
@@ -1579,7 +1582,8 @@ def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
-        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run", lambda self, pipe: None
+        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
+        lambda self, pipe: None,
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
