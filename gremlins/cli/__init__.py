@@ -56,7 +56,3 @@ def main(argv: list[str] | None = None) -> int:
         return skip_main(rest)
 
     return fleet_main(argv)
-
-
-if __name__ == "__main__":
-    sys.exit(main())

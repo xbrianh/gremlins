@@ -1,4 +1,4 @@
-"""Tests for gremlins/cli.py dispatch."""
+"""Tests for gremlins/cli/ dispatch."""
 
 from __future__ import annotations
 

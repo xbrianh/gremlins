@@ -1,7 +1,7 @@
 # `gremlins/orchestrators/`
 
 Per-pipeline orchestrator entry points. Each module owns one CLI subcommand
-(see `../cli.py` dispatch) and wires the appropriate stages from
+(see `../cli/` dispatch) and wires the appropriate stages from
 `../stages/` into a sequence.
 
 ## Modules
@@ -21,7 +21,7 @@ Per-pipeline orchestrator entry points. Each module owns one CLI subcommand
 ## Conventions
 
 - Each `*_main(argv)` returns an int exit code; the CLI dispatch in
-  `../cli.py` calls them with `sys.argv[2:]`.
+  `../cli/` calls them with `sys.argv[2:]`.
 - `local.py` and `gh.py` build a real `SubprocessClaudeClient()` by default
   and pass it into stages via the `client: ClaudeClient` seam (see parent
   AGENTS.md). Tests inject a `FakeClaudeClient`. Never have an orchestrator

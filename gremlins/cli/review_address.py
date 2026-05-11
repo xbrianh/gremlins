@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 def _parse_review_args(argv: list[str]) -> argparse.Namespace:
     usage = (
-        "usage: gremlins.cli review [--dir <path>] [--plan <path>] [-b <detail-model>]"
+        "usage: gremlins review [--dir <path>] [--plan <path>] [-b <detail-model>]"
     )
     parser = argparse.ArgumentParser(add_help=False, usage=usage)
     parser.add_argument("--dir", dest="dir", default=".")
@@ -59,7 +59,7 @@ def review_main(argv: list[str], *, client: Client | None = None) -> int:
 
 
 def _parse_address_args(argv: list[str]) -> argparse.Namespace:
-    usage = "usage: gremlins.cli address [--dir <path>] [-x <address-model>]"
+    usage = "usage: gremlins address [--dir <path>] [-x <address-model>]"
     parser = argparse.ArgumentParser(add_help=False, usage=usage)
     parser.add_argument("--dir", dest="dir", default=".")
     parser.add_argument("-x", dest="address", default=PACKAGE_DEFAULT.model)
