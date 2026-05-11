@@ -132,7 +132,6 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         "id": "gr-test",
         "kind": "ghgremlin",
         "stage": "starting",
-        "bail_class": "",
     }
     if state_data:
         initial.update(state_data)

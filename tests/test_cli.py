@@ -7,7 +7,7 @@ import pathlib
 
 import pytest
 
-from gremlins.bail import bail_main
+import gremlins.executor.state as state_mod
 from gremlins.cli import main
 from gremlins.run_pipeline import main as run_pipeline_main
 from gremlins.utils.yaml import YamlLoadError
@@ -56,134 +56,80 @@ def test_unknown_first_arg_falls_through_to_fleet(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# bail_main — extracted to gremlins/bail.py
+# write_bail_file / check_bail
 # ---------------------------------------------------------------------------
 
 
-def test_bail_writes_bail_class_and_detail(state_root, monkeypatch):
-    gr_id = "test-gremlin-001"
-    sf = _make_state(state_root, gr_id)
-    monkeypatch.setenv("GR_ID", gr_id)
+def test_write_bail_file_creates_file(state_root, monkeypatch):
+    gr_id = "gr-bail-file-a"
+    state_dir = state_root / gr_id
+    state_dir.mkdir(parents=True)
+    sf = state_dir / "state.json"
+    sf.write_text(json.dumps({"id": gr_id}))
 
-    rc = bail_main(["other", "test reason"])
+    state_mod.write_bail_file(gr_id, "test-attempt", "other", "reason")
 
-    assert rc == 0
-    data = json.loads(sf.read_text())
-    assert data["bail_class"] == "other"
-    assert data["bail_detail"] == "test reason"
-
-
-def test_bail_without_detail_omits_bail_detail_key(state_root, monkeypatch):
-    gr_id = "test-gremlin-002"
-    sf = _make_state(state_root, gr_id)
-    data = json.loads(sf.read_text())
-    data["bail_detail"] = "stale"
-    sf.write_text(json.dumps(data))
-
-    monkeypatch.setenv("GR_ID", gr_id)
-
-    rc = bail_main(["secrets"])
-
-    assert rc == 0
-    result = json.loads(sf.read_text())
-    assert result["bail_class"] == "secrets"
-    assert "bail_detail" not in result
+    bail_path = state_dir / "bail_test-attempt.json"
+    assert bail_path.exists()
+    data = json.loads(bail_path.read_text())
+    assert data["class"] == "other"
+    assert data["detail"] == "reason"
 
 
-def test_bail_with_child_key_flag_writes_parallel_shard(state_root, monkeypatch):
-    gr_id = "test-gremlin-child-001"
-    sf = _make_state(state_root, gr_id)
-    monkeypatch.setenv("GR_ID", gr_id)
+def test_write_bail_file_idempotent(state_root, monkeypatch):
+    gr_id = "gr-bail-file-idempotent"
+    state_dir = state_root / gr_id
+    state_dir.mkdir(parents=True)
+    sf = state_dir / "state.json"
+    sf.write_text(json.dumps({"id": gr_id}))
 
-    rc = bail_main(["--child-key", "verify-fix", "other", "test reason"])
+    state_mod.write_bail_file(gr_id, "attempt-1", "other", "first")
+    state_mod.write_bail_file(gr_id, "attempt-1", "security", "second")
 
-    assert rc == 0
-    data = json.loads(sf.read_text())
-    assert "bail_class" not in data
-    assert data["parallel_bails"]["verify-fix"]["bail_class"] == "other"
-    assert data["parallel_bails"]["verify-fix"]["bail_detail"] == "test reason"
-
-
-def test_bail_with_child_key_env_writes_parallel_shard(state_root, monkeypatch):
-    gr_id = "test-gremlin-child-002"
-    sf = _make_state(state_root, gr_id)
-    monkeypatch.setenv("GR_ID", gr_id)
-    monkeypatch.setenv("GREMLIN_CHILD_KEY", "ghreview")
-
-    rc = bail_main(["security", "needs manual review"])
-
-    assert rc == 0
-    data = json.loads(sf.read_text())
-    assert "bail_class" not in data
-    assert data["parallel_bails"]["ghreview"]["bail_class"] == "security"
-    assert data["parallel_bails"]["ghreview"]["bail_detail"] == "needs manual review"
+    data = json.loads((state_dir / "bail_attempt-1.json").read_text())
+    assert data["class"] == "other"  # not overwritten
 
 
-def test_bail_child_key_flag_overrides_env(state_root, monkeypatch):
-    gr_id = "test-gremlin-child-003"
-    sf = _make_state(state_root, gr_id)
-    monkeypatch.setenv("GR_ID", gr_id)
-    monkeypatch.setenv("GREMLIN_CHILD_KEY", "from-env")
+def test_write_bail_file_noop_without_attempt(state_root, monkeypatch):
+    gr_id = "gr-bail-noop"
+    state_dir = state_root / gr_id
+    state_dir.mkdir(parents=True)
+    (state_dir / "state.json").write_text(json.dumps({"id": gr_id}))
 
-    rc = bail_main(["--child-key", "from-flag", "other", "reason"])
-
-    assert rc == 0
-    data = json.loads(sf.read_text())
-    assert "from-env" not in data.get("parallel_bails", {})
-    assert data["parallel_bails"]["from-flag"]["bail_class"] == "other"
+    state_mod.write_bail_file(gr_id, "", "other", "reason")
+    bail_files = list(state_dir.glob("bail_*.json"))
+    assert not bail_files
 
 
-def test_bail_without_gr_id_exits_zero_no_write(tmp_path, monkeypatch):
-    monkeypatch.delenv("GR_ID", raising=False)
+def test_check_bail_detects_bail_file(state_root, monkeypatch):
+    gr_id = "gr-check-bail-file"
+    state_dir = state_root / gr_id
+    state_dir.mkdir(parents=True)
+    sf = state_dir / "state.json"
+    sf.write_text(json.dumps({"id": gr_id, "attempt": "my-attempt"}))
+    (state_dir / "bail_my-attempt.json").write_text(json.dumps({"class": "other"}))
 
-    rc = bail_main(["other", "no gremlin context"])
-
-    assert rc == 0
-    assert _no_state_created(tmp_path)
-
-
-def test_bail_invalid_class_exits_nonzero(tmp_path, monkeypatch):
-    monkeypatch.setenv("GR_ID", "test-gremlin-003")
-
-    with pytest.raises(SystemExit) as exc_info:
-        bail_main(["bogus_class"])
-    assert exc_info.value.code != 0
+    with pytest.raises(RuntimeError, match="bailed"):
+        state_mod.check_bail(gr_id, "test")
 
 
-@pytest.mark.parametrize(
-    "bail_class",
-    ["reviewer_requested_changes", "security", "secrets", "other"],
-)
-def test_bail_all_valid_classes_accepted(state_root, monkeypatch, bail_class):
-    gr_id = f"test-gremlin-{bail_class}"
-    sf = _make_state(state_root, gr_id)
-    monkeypatch.setenv("GR_ID", gr_id)
-
-    rc = bail_main([bail_class, "reason"])
-
-    assert rc == 0
-    data = json.loads(sf.read_text())
-    assert data["bail_class"] == bail_class
+def test_check_bail_no_bail_file(state_root, monkeypatch):
+    gr_id = "gr-check-no-bail"
+    state_dir = state_root / gr_id
+    state_dir.mkdir(parents=True)
+    sf = state_dir / "state.json"
+    sf.write_text(json.dumps({"id": gr_id, "attempt": "my-attempt"}))
+    state_mod.check_bail(gr_id, "test")  # should not raise
 
 
-@pytest.mark.parametrize(
-    "bad_id",
-    [
-        "",
-        "../escape",
-        "foo/bar",
-        "foo\\bar",
-        "foo..bar",
-        "id with spaces",
-        "id;injection",
-    ],
-)
-def test_bail_rejects_malformed_gr_id_env(tmp_path, monkeypatch, bad_id):
-    monkeypatch.setenv("GR_ID", bad_id)
-
-    rc = bail_main(["other", "reason"])
-
-    assert rc != 0
+def test_check_bail_stale_attempt_not_detected(state_root, monkeypatch):
+    gr_id = "gr-stale-bail"
+    state_dir = state_root / gr_id
+    state_dir.mkdir(parents=True)
+    sf = state_dir / "state.json"
+    sf.write_text(json.dumps({"id": gr_id, "attempt": "current-attempt"}))
+    (state_dir / "bail_old-attempt.json").write_text(json.dumps({"class": "other"}))
+    state_mod.check_bail(gr_id, "test")  # stale bail should not raise
 
 
 # ---------------------------------------------------------------------------

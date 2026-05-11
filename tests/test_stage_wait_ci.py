@@ -320,22 +320,31 @@ def test_poll_empty_mid_run_continues_polling(tmp_path: pathlib.Path) -> None:
 def test_review_required_emits_bail_to_state(
     tmp_path: pathlib.Path, make_state_dir
 ) -> None:
+    import gremlins.executor.state as state_mod
     gr_id = "test-gr-id"
     state_dir = make_state_dir(gr_id)
+    attempt = "wait-ci-test"
+    state_mod.patch_state(gr_id, attempt=attempt)
     client = FakeClaudeClient(fixtures={})
     getter = _make_getter([([], "REVIEW_REQUIRED")])
     stage, state = _make_stage(client, tmp_path, gr_id=gr_id, checks_getter=getter)
+    state.attempt = attempt
     with pytest.raises(RuntimeError):
         stage.run(state)
-    data = json.loads((state_dir / "state.json").read_text())
-    assert data.get("bail_class") == "other"
+    bail_file = state_dir / f"bail_{attempt}.json"
+    assert bail_file.exists()
+    data = json.loads(bail_file.read_text())
+    assert data["class"] == "other"
 
 
 def test_check_bail_raises_from_state(tmp_path: pathlib.Path, make_state_dir) -> None:
     gr_id = "test-gr-id"
     state_dir = make_state_dir(gr_id)
+    attempt = "ci-fix-test-attempt"
     sf = state_dir / "state.json"
-    sf.write_text(json.dumps({"id": gr_id, "bail_class": "other"}))
+    sf.write_text(json.dumps({"id": gr_id, "attempt": attempt}))
+    # Write bail file as the agent would have
+    (state_dir / f"bail_{attempt}.json").write_text(json.dumps({"class": "other"}))
 
     client = FakeClaudeClient(fixtures={"ci-fix-1": MINIMAL_EVENTS})
     getter = _make_getter([([_FAILING_CHECK], ""), ([_FAILING_CHECK], "")])
@@ -348,5 +357,6 @@ def test_check_bail_raises_from_state(tmp_path: pathlib.Path, make_state_dir) ->
         startup_grace_secs=0,
         checks_getter=getter,
     )
+    state.attempt = attempt
     with pytest.raises(RuntimeError, match="bailed"):
         stage.run(state)

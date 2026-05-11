@@ -100,38 +100,52 @@ def set_stage(
         pass
 
 
-def emit_bail(
+def write_bail_file(
     gr_id: str | None,
+    attempt: str,
     bail_class: str,
     bail_detail: str = "",
-    *,
-    child_key: str | None = None,
 ) -> None:
-    """Write bail_class (and optional bail_detail) to state.json."""
+    """Write bail_{attempt}.json atomically to state dir. No-op if attempt or gr_id empty."""
+    sf = resolve_state_file(gr_id)
+    if sf is None or not sf.exists() or not attempt or not bail_class:
+        return
     try:
-        if not gr_id or not bail_class:
-            return
-        sf = resolve_state_file(gr_id)
-        if sf is None or not sf.exists():
-            return
-        if child_key is None:
-            if bail_detail:
-                patch_state(gr_id, bail_class=bail_class, bail_detail=bail_detail)
-            else:
-                patch_state(gr_id, _delete=("bail_detail",), bail_class=bail_class)
-        else:
-            shard: dict[str, str] = {"bail_class": bail_class}
-            if bail_detail:
-                shard["bail_detail"] = bail_detail
-
-            def _merge(data: dict[str, Any]) -> None:
-                shards: dict[str, Any] = dict(data.get("parallel_bails") or {})
-                shards[child_key] = shard
-                data["parallel_bails"] = shards
-
-            locked_update(sf, _merge)
+        state_dir = sf.parent
+        bail_path = state_dir / f"bail_{attempt}.json"
+        if bail_path.exists():
+            return  # idempotent
+        payload = json.dumps(
+            {
+                "class": bail_class,
+                "detail": bail_detail,
+                "ts": datetime.datetime.now(datetime.UTC).isoformat(),
+            },
+            ensure_ascii=False,
+        )
+        tmp = state_dir / f".bail_{attempt}_{secrets.token_hex(4)}.tmp"
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.rename(bail_path)
     except Exception:
         pass
+
+
+def read_bail_info(gr_id: str | None) -> dict[str, str] | None:
+    """Return bail file contents for current attempt, or None if no bail."""
+    sf = resolve_state_file(gr_id)
+    if sf is None or not sf.exists():
+        return None
+    try:
+        data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
+        attempt = data.get("attempt") or ""
+        if not attempt:
+            return None
+        bail_path = sf.parent / f"bail_{attempt}.json"
+        if not bail_path.exists():
+            return None
+        return dict(json.loads(bail_path.read_text(encoding="utf-8")))
+    except Exception:
+        return None
 
 
 def read_state_str(state_file: pathlib.Path | None, field: str) -> str:
@@ -291,29 +305,35 @@ def check_bail(
     *,
     child_key: str | None = None,
 ) -> None:
-    """Raise RuntimeError if a bail_class was written to state.json."""
+    """Raise RuntimeError if bail_{attempt}.json exists in state dir."""
     sf = resolve_state_file(gr_id)
     if sf is None or not sf.exists():
         return
     try:
         data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
         if child_key is None:
-            bail_class = data.get("bail_class", "")
+            attempt = data.get("attempt") or ""
         else:
-            parallel_bails: dict[str, Any] = data.get("parallel_bails") or {}
-            shard: dict[str, Any] = parallel_bails.get(child_key) or {}
-            bail_class = shard.get("bail_class", "")
-        if bail_class:
-            detail_path = (
-                f"parallel_bails[{child_key!r}].bail_detail"
-                if child_key is not None
-                else "bail_detail"
-            )
-            raise RuntimeError(
-                f"{label} bailed: bail_class={bail_class} (see state.json {detail_path})"
-            )
+            attempt = (data.get("parallel_attempts") or {}).get(child_key) or ""
+        if attempt and (sf.parent / f"bail_{attempt}.json").exists():
+            raise RuntimeError(f"{label} bailed (see bail_{attempt}.json)")
     except RuntimeError:
         raise
+    except Exception:
+        pass
+
+
+def _patch_parallel_attempt(gr_id: str | None, child_key: str, attempt: str) -> None:
+    """Write parallel_attempts[child_key] = attempt into state.json."""
+    sf = resolve_state_file(gr_id)
+    if sf is None or not sf.exists() or not attempt:
+        return
+    try:
+        def _apply(data: dict[str, Any]) -> None:
+            pa: dict[str, Any] = dict(data.get("parallel_attempts") or {})
+            pa[child_key] = attempt
+            data["parallel_attempts"] = pa
+        locked_update(sf, _apply)
     except Exception:
         pass
 
@@ -387,6 +407,7 @@ class State:
     base_ref_name: str = ""
     issue_num: str = ""
     loop_iteration: int = 1
+    attempt: str = ""
     impl_pre_state: PreImplState | None = None
 
     @property
@@ -405,10 +426,16 @@ class State:
     ) -> Callable[[], None]:
         base_state = self
         gr_id = self.gr_id
+        attempt = f"{entry.name}-{secrets.token_hex(4)}" if gr_id else ""
         scope_list = list(scope) if scope is not None else []
 
         def _run() -> None:
             set_stage(gr_id, entry.name)
+            if attempt:
+                if base_state.child_key:
+                    _patch_parallel_attempt(gr_id, base_state.child_key, attempt)
+                else:
+                    patch_state(gr_id, attempt=attempt)
             sf = (
                 base_state.state_file
                 if base_state.state_file is not None
@@ -418,6 +445,7 @@ class State:
             state = dataclasses.replace(
                 base_state,
                 current_scope=scope_list,
+                attempt=attempt,
                 issue_url=sd.get("issue_url") or "",
                 base_ref_name=sd.get("base_ref_name") or "",
                 issue_num=sd.get("issue_num") or "",
@@ -439,8 +467,8 @@ class State:
     def set_stage(self, stage: str, sub_stage: object = None) -> None:
         set_stage(self.gr_id, stage, sub_stage)
 
-    def emit_bail(self, bail_class: str, bail_detail: str = "") -> None:
-        emit_bail(self.gr_id, bail_class, bail_detail, child_key=self.child_key)
+    def write_bail_file(self, bail_class: str, bail_detail: str = "") -> None:
+        write_bail_file(self.gr_id, self.attempt, bail_class, bail_detail)
 
     def check_bail(self, label: str = "stage") -> None:
         check_bail(self.gr_id, label, child_key=self.child_key)

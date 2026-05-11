@@ -15,11 +15,12 @@ from typing import Any, cast
 
 from gremlins.executor.state import (
     State,
-    emit_bail,
+    _patch_parallel_attempt,
     patch_parallel_worktrees,
     patch_state,
     resolve_state_file,
     set_stage,
+    write_bail_file,
 )
 from gremlins.stages.base import Stage
 from gremlins.utils import proc
@@ -121,6 +122,7 @@ class ParallelStage(Stage):
         gr_id: str | None = None,
         project_root: pathlib.Path | None = None,
         set_stage_fn: Callable[[str], None] | None = None,
+        parent_attempt: str = "",
     ) -> list[_Stage]:
         """Return the three runtime stages for this parallel block."""
         return _parallel_stages(
@@ -132,6 +134,7 @@ class ParallelStage(Stage):
             bail_policy=self._bail_policy,
             gr_id=gr_id,
             project_root=project_root or pathlib.Path.cwd(),
+            parent_attempt=parent_attempt,
         )
 
     def run(self, state: State) -> None:
@@ -165,6 +168,7 @@ class ParallelStage(Stage):
             gr_id=gr_id,
             project_root=pathlib.Path.cwd(),
             set_stage_fn=lambda n: set_stage(gr_id, n),
+            parent_attempt=state.attempt,
         ):
             fn()
 
@@ -179,6 +183,7 @@ def _parallel_stages(
     bail_policy: str,
     gr_id: str | None,
     project_root: pathlib.Path,
+    parent_attempt: str = "",
 ) -> list[_Stage]:
     fanout_name = f"{group_name}-fanout"
     fanin_name = f"{group_name}-fanin"
@@ -354,28 +359,38 @@ def _parallel_stages(
 
         sf = resolve_state_file(gr_id)
         bailed: list[str] = []
-        shards: dict[str, dict[str, str]] = {}
         should_bail = False
         if sf is not None and sf.exists():
             try:
                 data = json.loads(sf.read_text(encoding="utf-8"))
-                shards = data.get("parallel_bails") or {}
-                bailed = [k for k, v in shards.items() if v.get("bail_class")]
+                parallel_attempts: dict[str, str] = data.get("parallel_attempts") or {}
+                first_bail: dict[str, str] = {}
+                for key, _, _ in child_runners:
+                    child_attempt = parallel_attempts.get(key) or ""
+                    if child_attempt and (sf.parent / f"bail_{child_attempt}.json").exists():
+                        bailed.append(key)
+                        if not first_bail:
+                            try:
+                                first_bail = dict(json.loads(
+                                    (sf.parent / f"bail_{child_attempt}.json").read_text(encoding="utf-8")
+                                ))
+                            except Exception:
+                                first_bail = {"class": "other"}
 
                 if bail_policy == "any":
                     should_bail = bool(bailed)
                 elif bail_policy == "all":
                     should_bail = bool(bailed) and len(bailed) == len(child_runners)
 
-                if should_bail:
-                    first_shard = shards[bailed[0]]
-                    emit_bail(
+                if should_bail and first_bail:
+                    write_bail_file(
                         gr_id,
-                        first_shard.get("bail_class", "other"),
-                        first_shard.get("bail_detail", ""),
+                        parent_attempt,
+                        first_bail.get("class") or "other",
+                        first_bail.get("detail") or "",
                     )
 
-                patch_state(gr_id, _delete=("parallel_bails",))
+                patch_state(gr_id, _delete=("parallel_attempts",))
             except RuntimeError:
                 raise
             except Exception as exc:

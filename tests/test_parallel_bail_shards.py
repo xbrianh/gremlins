@@ -66,6 +66,7 @@ def _make_parallel_stages(
     bail_policy: str = "any",
     gr_id=None,
     project_root: pathlib.Path | None = None,
+    parent_attempt: str = "",
 ) -> list:
     if set_stage_fn is None:
 
@@ -85,66 +86,61 @@ def _make_parallel_stages(
         gr_id=gr_id,
         project_root=project_root,
         set_stage_fn=set_stage_fn,
+        parent_attempt=parent_attempt,
     )
 
 
 # ---------------------------------------------------------------------------
-# Per-child bail shards
+# Per-child bail via bail files
 # ---------------------------------------------------------------------------
 
 
-def test_emit_bail_with_child_key_writes_shard(state_root):
-    gr_id = "gr-shard-a"
+def test_write_bail_file_no_child_key_writes_bail_file(state_root):
+    gr_id = "gr-bail-file-a"
     sf = _make_state(state_root, gr_id)
+    state_dir = sf.parent
+    state_mod.patch_state(gr_id, attempt="stage-abc")
 
-    state_mod.emit_bail(gr_id, "other", "child A bailed", child_key="child-a")
+    state_mod.write_bail_file(gr_id, "stage-abc", "other", "child A bailed")
 
-    data = _read_state(sf)
-    assert "bail_class" not in data or not data.get("bail_class")
-    assert data["parallel_bails"]["child-a"]["bail_class"] == "other"
-    assert data["parallel_bails"]["child-a"]["bail_detail"] == "child A bailed"
+    bail_path = state_dir / "bail_stage-abc.json"
+    assert bail_path.exists()
+    data = json.loads(bail_path.read_text())
+    assert data["class"] == "other"
+    assert data["detail"] == "child A bailed"
 
 
-def test_emit_bail_two_children_both_shards_present(state_root):
-    gr_id = "gr-shard-two"
+def test_check_bail_reads_attempt_from_state_json(state_root):
+    gr_id = "gr-check-attempt"
     sf = _make_state(state_root, gr_id)
+    state_dir = sf.parent
+    state_mod.patch_state(gr_id, attempt="my-attempt-abc")
 
-    state_mod.emit_bail(gr_id, "other", "A", child_key="child-a")
-    state_mod.emit_bail(gr_id, "security", "B", child_key="child-b")
+    # No bail file yet → no raise
+    state_mod.check_bail(gr_id, "test")
 
-    data = _read_state(sf)
-    assert data["parallel_bails"]["child-a"]["bail_class"] == "other"
-    assert data["parallel_bails"]["child-b"]["bail_class"] == "security"
-    # Top-level bail_class must not be set.
-    assert not data.get("bail_class")
+    # Write bail file → raises
+    (state_dir / "bail_my-attempt-abc.json").write_text(json.dumps({"class": "other"}))
+    with pytest.raises(RuntimeError, match="bailed"):
+        state_mod.check_bail(gr_id, "test")
 
 
-def test_check_bail_child_key_reads_only_own_shard(state_root):
-    gr_id = "gr-check-shard"
-    _make_state(state_root, gr_id)
+def test_check_bail_child_key_reads_parallel_attempts(state_root):
+    gr_id = "gr-parallel-attempt"
+    sf = _make_state(state_root, gr_id)
+    state_dir = sf.parent
+    state_mod._patch_parallel_attempt(gr_id, "child-a", "attempt-a")
 
-    state_mod.emit_bail(gr_id, "other", "A failed", child_key="child-a")
+    # No bail file yet
+    state_mod.check_bail(gr_id, "test", child_key="child-a")
 
-    # child-a's shard has a bail → check_bail raises.
+    # Write bail for child-a
+    (state_dir / "bail_attempt-a.json").write_text(json.dumps({"class": "other"}))
     with pytest.raises(RuntimeError, match="bailed"):
         state_mod.check_bail(gr_id, "test", child_key="child-a")
 
-    # child-b's shard is empty → no raise.
+    # child-b has no bail
     state_mod.check_bail(gr_id, "test", child_key="child-b")
-
-
-def test_check_bail_no_child_key_reads_top_level(state_root):
-    gr_id = "gr-check-toplevel"
-    _make_state(state_root, gr_id)
-
-    # Only a child shard is set; top-level should be clear.
-    state_mod.emit_bail(gr_id, "other", "child failed", child_key="child-a")
-    state_mod.check_bail(gr_id, "top-level")  # should not raise
-
-    # Now set a top-level bail.
-    state_mod.emit_bail(gr_id, "security", "top-level thing")
-    with pytest.raises(RuntimeError, match="bailed"):
-        state_mod.check_bail(gr_id, "top-level")
 
 
 # ---------------------------------------------------------------------------
@@ -206,21 +202,28 @@ def _build_fanin_test(
     gr_id: str,
     shards: dict[str, str],  # child_key -> bail_class (empty = no bail)
     bail_policy: str,
+    parent_attempt: str = "parent-attempt",
 ) -> tuple[pathlib.Path, list]:
     sf = _make_state(state_root, gr_id)
-    # Pre-populate parallel_bails as fan-out+parallel would have done.
-    parallel_bails = {}
+    state_dir = sf.parent
+
+    # Pre-populate parallel_attempts and bail files as fan-out+parallel would have done.
+    parallel_attempts: dict[str, str] = {}
     for key, bc in shards.items():
+        attempt = f"attempt-{key}"
+        parallel_attempts[key] = attempt
         if bc:
-            parallel_bails[key] = {"bail_class": bc}
-    state_mod.patch_state(gr_id, parallel_bails=parallel_bails)
+            (state_dir / f"bail_{attempt}.json").write_text(
+                json.dumps({"class": bc, "detail": ""})
+            )
+    state_mod.patch_state(gr_id, parallel_attempts=parallel_attempts)
 
     child_keys = list(shards.keys())
     children = [(k, _make_simple_ctx(tmp_path, k), lambda: None) for k in child_keys]
 
     # We need a git-less project root so fan-in's worktree logic is skipped.
     project_root = tmp_path / "nongit"
-    project_root.mkdir()
+    project_root.mkdir(exist_ok=True)
 
     stages = _make_parallel_stages(
         "reviews",
@@ -231,11 +234,12 @@ def _build_fanin_test(
         bail_policy=bail_policy,
         gr_id=gr_id,
         project_root=project_root,
+        parent_attempt=parent_attempt,
     )
     return sf, stages
 
 
-def test_bail_policy_any_one_bailed_sets_top_level(tmp_path, state_root):
+def test_bail_policy_any_one_bailed_sets_parent_bail(tmp_path, state_root):
     gr_id = "gr-policy-any"
     shards = {"child-a": "other", "child-b": ""}
     sf, stages = _build_fanin_test(tmp_path, state_root, gr_id, shards, "any")
@@ -244,25 +248,30 @@ def test_bail_policy_any_one_bailed_sets_top_level(tmp_path, state_root):
     with pytest.raises(RuntimeError, match="bailed"):
         stages[2][1]()  # fanin is index 2
 
+    state_dir = sf.parent
+    bail_path = state_dir / "bail_parent-attempt.json"
+    assert bail_path.exists()
+    bail_data = json.loads(bail_path.read_text())
+    assert bail_data["class"] == "other"
     data = _read_state(sf)
-    assert data.get("bail_class") == "other"
-    assert "parallel_bails" not in data
+    assert "parallel_attempts" not in data
 
 
-def test_bail_policy_all_one_bailed_no_top_level(tmp_path, state_root):
+def test_bail_policy_all_one_bailed_no_parent_bail(tmp_path, state_root):
     gr_id = "gr-policy-all-partial"
     shards = {"child-a": "other", "child-b": ""}
     sf, stages = _build_fanin_test(tmp_path, state_root, gr_id, shards, "all")
 
-    # Only one bailed; policy=all requires all → no top-level bail.
+    # Only one bailed; policy=all requires all → no parent bail.
     stages[2][1]()  # fanin should not raise
 
+    state_dir = sf.parent
+    assert not (state_dir / "bail_parent-attempt.json").exists()
     data = _read_state(sf)
-    assert not data.get("bail_class")
-    assert "parallel_bails" not in data
+    assert "parallel_attempts" not in data
 
 
-def test_bail_policy_all_both_bailed_sets_top_level(tmp_path, state_root):
+def test_bail_policy_all_both_bailed_sets_parent_bail(tmp_path, state_root):
     gr_id = "gr-policy-all-both"
     shards = {"child-a": "other", "child-b": "reviewer_requested_changes"}
     sf, stages = _build_fanin_test(tmp_path, state_root, gr_id, shards, "all")
@@ -270,9 +279,11 @@ def test_bail_policy_all_both_bailed_sets_top_level(tmp_path, state_root):
     with pytest.raises(RuntimeError, match="bailed"):
         stages[2][1]()
 
+    state_dir = sf.parent
+    bail_path = state_dir / "bail_parent-attempt.json"
+    assert bail_path.exists()
     data = _read_state(sf)
-    assert data.get("bail_class")
-    assert "parallel_bails" not in data
+    assert "parallel_attempts" not in data
 
 
 # ---------------------------------------------------------------------------
@@ -351,18 +362,19 @@ def test_fanin_resume_aggregates_existing_shards(tmp_path, state_root):
     with pytest.raises(RuntimeError, match="bailed"):
         run_stages(stages[2:], resume_from="reviews-fanin")
 
+    state_dir = sf.parent
+    assert (state_dir / "bail_parent-attempt.json").exists()
     data = _read_state(sf)
-    assert data.get("bail_class") == "other"
-    assert "parallel_bails" not in data
+    assert "parallel_attempts" not in data
 
 
 def test_run_stages_resume_from_fanin_name(tmp_path, state_root):
     gr_id = "gr-resume-fanin-name"
     sf = _make_state(state_root, gr_id)
-    state_mod.patch_state(
-        gr_id,
-        parallel_bails={"c": {"bail_class": "other"}},
-    )
+    state_dir = sf.parent
+    # Pre-populate parallel_attempts and bail file as children would have written.
+    state_mod.patch_state(gr_id, parallel_attempts={"c": "attempt-c"})
+    (state_dir / "bail_attempt-c.json").write_text(json.dumps({"class": "other", "detail": ""}))
 
     project_root = tmp_path / "nongit2"
     project_root.mkdir()
@@ -377,6 +389,7 @@ def test_run_stages_resume_from_fanin_name(tmp_path, state_root):
         bail_policy="any",
         gr_id=gr_id,
         project_root=project_root,
+        parent_attempt="fanin-resume-parent",
     )
 
     # The three stage names should be reviews-fanout, reviews, reviews-fanin.
@@ -387,9 +400,9 @@ def test_run_stages_resume_from_fanin_name(tmp_path, state_root):
     with pytest.raises(RuntimeError, match="bailed"):
         run_stages(stages, resume_from="reviews-fanin")
 
+    assert (state_dir / "bail_fanin-resume-parent.json").exists()
     data = _read_state(sf)
-    assert data.get("bail_class") == "other"
-    assert "parallel_bails" not in data
+    assert "parallel_attempts" not in data
 
 
 # ---------------------------------------------------------------------------

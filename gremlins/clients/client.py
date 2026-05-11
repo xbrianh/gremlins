@@ -63,6 +63,7 @@ class Client:
         max_retries: int = 2,
         cwd: pathlib.Path | None = None,
         idle_timeout: float | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> CompletedRun:
         return self._get_impl().run(
             prompt,
@@ -74,6 +75,7 @@ class Client:
             max_retries=max_retries,
             cwd=cwd,
             idle_timeout=idle_timeout,
+            extra_env=extra_env,
         )
 
     def reap_all(self) -> None:

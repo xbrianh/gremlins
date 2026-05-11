@@ -123,8 +123,11 @@ def test_loop_bail_propagates_immediately(tmp_path):
 
 
 def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
+    import gremlins.executor.state as state_mod
     gr_id = "loop-test-gr"
     state_dir = make_state_dir(gr_id)
+    attempt = "loop-test-attempt"
+    state_mod.patch_state(gr_id, attempt=attempt)
 
     def check() -> None:
         raise RunCmdFailed("fail")
@@ -137,13 +140,16 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
         session_dir=tmp_path,
         gr_id=gr_id,
         worktree=tmp_path,
+        attempt=attempt,
     )
     loop = LoopStage.from_runners([check, fix], max_iterations=2)
     with pytest.raises(LoopExhausted):
         loop.run(loop_state)
 
-    data = json.loads((state_dir / "state.json").read_text())
-    assert data.get("bail_class") == "other"
+    bail_file = state_dir / f"bail_{attempt}.json"
+    assert bail_file.exists()
+    data = json.loads(bail_file.read_text())
+    assert data["class"] == "other"
 
 
 # ---------------------------------------------------------------------------

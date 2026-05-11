@@ -41,20 +41,29 @@ class Stage:
         **kw: Any,
     ) -> CompletedRun:
         model = self.model or state.client.model
+        extra_env: dict[str, str] = {}
+        if state.attempt and state.state_file is not None:
+            extra_env["GREMLIN_ATTEMPT"] = state.attempt
+            extra_env["GREMLIN_STATE_DIR"] = str(state.state_file.parent)
         return state.client.run(
             prompt,
             label=label,
             model=model,
             raw_path=raw_path,
             cwd=state.worktree,
+            extra_env=extra_env or None,
             **kw,
         )
 
     def bail_command(self, state: State) -> str:
-        command = ["python", "-m", "gremlins.bail"]
-        if state.child_key:
-            command.extend(["--child-key", state.child_key])
-        return shlex.join(command)
+        script = (
+            "import sys,json,os,pathlib; "
+            "d=pathlib.Path(os.environ['GREMLIN_STATE_DIR']); "
+            "a=os.environ['GREMLIN_ATTEMPT']; "
+            "p=d/f'bail_{a}.json'; "
+            "p.exists() or p.write_text(json.dumps({'class':sys.argv[1],'detail':sys.argv[2] if len(sys.argv)>2 else ''}))"
+        )
+        return f"python -c {shlex.quote(script)}"
 
     def run_subprocess(
         self, argv: list[str], state: State, **kw: Any

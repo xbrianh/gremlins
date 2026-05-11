@@ -6,6 +6,7 @@ import json
 import os
 import time
 
+from gremlins.executor.state import read_bail_info as _read_bail_info
 from gremlins.fleet.duration import parse_duration
 from gremlins.fleet.render import FleetRow, build_row, print_table
 from gremlins.fleet.state import (
@@ -205,9 +206,11 @@ def do_drill_in(target: str) -> None:
     # immediately visible. bail_class is upstream-set by review/address
     # stages; bail_reason/bail_detail are headless-rescue-set when it
     # declined to proceed.
-    bail_class = state.get("bail_class")
+    _gr_id_for_bail = state.get("id") or ""
+    _bail_file = _read_bail_info(_gr_id_for_bail) if _gr_id_for_bail else None
+    bail_class = (_bail_file.get("class") or "") if _bail_file else (state.get("bail_class") or "")
     bail_reason = state.get("bail_reason")
-    bail_detail = state.get("bail_detail")
+    bail_detail = (_bail_file.get("detail") or "") if _bail_file else (state.get("bail_detail") or "")
     if bail_class or bail_reason:
         print("  bail:")
         if bail_class:
