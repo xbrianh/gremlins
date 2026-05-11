@@ -16,6 +16,7 @@ from gremlins.cli.fleet import (
     stop_main,
 )
 from gremlins.cli.launch import launch_main
+from gremlins.cli.prompt_for_assistant import prompt_for_assistant_main
 from gremlins.cli.resume import resume_main
 
 
@@ -46,5 +47,7 @@ def main(argv: list[str] | None = None) -> int:
         return ack_main(rest)
     if sub == "skip":
         return skip_main(rest)
+    if sub == "prompt-for-assistant":
+        return prompt_for_assistant_main(rest)
 
     return fleet_main(argv)
