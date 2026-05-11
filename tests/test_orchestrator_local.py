@@ -11,8 +11,8 @@ from gremlins.clients.client import Client
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.orchestrators.review_address import address_main, review_main
 from gremlins.orchestrators.run import run_pipeline
+from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
-from gremlins.pipeline.loader import load_pipeline
 
 
 def _local_pipeline_path(cwd):
@@ -264,7 +264,7 @@ def test_local_main_client_specifier_model(tmp_path, monkeypatch):
 
 
 def test_local_pipeline_stage_names(tmp_path):
-    pipeline = load_pipeline(resolve_pipeline_path("local", tmp_path))
+    pipeline = Pipeline.from_yaml(resolve_pipeline_path("local", tmp_path))
     names = [s.name for s in pipeline.stages]
     assert names == ["plan", "implement", "review-code", "address-code", "verify"]
 
@@ -377,16 +377,16 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
         "gremlins.stages.implement.changes_outside_git", lambda s, d: True
     )
 
-    # Override load_pipeline to inject default_client without a live client instance.
-    _real_load_pipeline = load_pipeline
+    # Override Pipeline.from_yaml to inject default_client without a live client instance.
+    _real_from_yaml = Pipeline.from_yaml
 
     def _strip_clients(stage):
         stage.client = None
         for child in stage.body:
             _strip_clients(child)
 
-    def _load_pipeline_copilot_default(path):
-        pipeline = _real_load_pipeline(path)
+    def _from_yaml_copilot_default(path):
+        pipeline = _real_from_yaml(path)
         for s in pipeline.stages:
             _strip_clients(s)
         return dataclasses.replace(
@@ -395,7 +395,7 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(
-        "gremlins.orchestrators.run.load_pipeline", _load_pipeline_copilot_default
+        "gremlins.pipeline.Pipeline.from_yaml", _from_yaml_copilot_default
     )
 
     review_label = "review-code:gpt-5.4"
@@ -476,9 +476,10 @@ def test_local_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
 
     write_pipeline(original_stage_clients)
 
+    _real_from_yaml = Pipeline.from_yaml
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
-    monkeypatch.setattr("gremlins.orchestrators.run.load_pipeline", load_pipeline)
+    monkeypatch.setattr("gremlins.pipeline.Pipeline.from_yaml", _real_from_yaml)
     monkeypatch.setattr(
         "gremlins.orchestrators.run.resolve_session_dir",
         lambda gr_id=None: session_dir,

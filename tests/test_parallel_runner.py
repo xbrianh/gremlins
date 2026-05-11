@@ -9,7 +9,7 @@ import time
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.pipeline.loader import load_pipeline
+from gremlins.pipeline import Pipeline
 from gremlins.runner import run_stages
 from gremlins.stages.base import RuntimeState
 from gremlins.stages.parallel import ParallelStage
@@ -104,7 +104,7 @@ stages:
   - {name: test-post, type: verify}
 """,
     )
-    pipeline = load_pipeline(tmp_path / "pipeline.yaml")
+    pipeline = Pipeline.from_yaml(tmp_path / "pipeline.yaml")
     names = [s.name for s in pipeline.stages]
     assert names == ["test-pre", "implement", "test-post"]
 
@@ -300,7 +300,7 @@ stages:
       - {name: r2, type: verify}
 """,
     )
-    pipeline = load_pipeline(tmp_path / "pipeline.yaml")
+    pipeline = Pipeline.from_yaml(tmp_path / "pipeline.yaml")
     assert pipeline.stages[0].max_concurrent == 2
 
 
@@ -315,7 +315,7 @@ stages:
 """,
     )
     with pytest.raises(ValueError, match="max_concurrent"):
-        load_pipeline(tmp_path / "pipeline.yaml")
+        Pipeline.from_yaml(tmp_path / "pipeline.yaml")
 
 
 # ---------------------------------------------------------------------------

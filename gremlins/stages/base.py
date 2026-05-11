@@ -14,7 +14,7 @@ from gremlins.clients.protocol import CompletedRun
 
 if TYPE_CHECKING:
     from gremlins.git import PreImplState
-    from gremlins.schema import PipelineDef
+    from gremlins.pipeline import Pipeline
 
 
 def _client_dict() -> dict[str, Client]:
@@ -34,7 +34,7 @@ class RuntimeState:
     gr_id: str | None = None
     state_file: pathlib.Path | None = None
     args: argparse.Namespace = dataclasses.field(default_factory=argparse.Namespace)
-    pipeline_data: PipelineDef | None = None
+    pipeline_data: Pipeline | None = None
     repo: str = ""
     instructions: str = ""
     stage_specs: dict[str, Client] = dataclasses.field(default_factory=_client_dict)

@@ -11,16 +11,15 @@ os.environ.setdefault("GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME", "main")
 
 import pytest
 
-import gremlins.orchestrators.run as _run_mod
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.schema import PipelineDef as _PipelineDef
+from gremlins.pipeline import Pipeline
 from gremlins.stages.open_github_pr import OpenGitHubPR
 
 TESTS_DIR = pathlib.Path(__file__).resolve().parent
 
 
-def gh_pipeline() -> _PipelineDef:
-    return _PipelineDef(
+def gh_pipeline() -> Pipeline:
+    return Pipeline(
         name="test",
         path=pathlib.Path("."),
         stages=[OpenGitHubPR("open-github-pr", None, [], {})],
@@ -70,10 +69,12 @@ def common_local_patches(monkeypatch):
     )
 
     # Strip pipeline client keys so the injected client is used for every stage.
-    _real_load_pipeline = _run_mod.load_pipeline
+    import gremlins.pipeline as _pipeline_mod
 
-    def _load_pipeline_no_clients(path):
-        pipeline = _real_load_pipeline(path)
+    _real_from_yaml = _pipeline_mod.Pipeline.from_yaml
+
+    def _from_yaml_no_clients(path):
+        pipeline = _real_from_yaml(path)
 
         def _strip_clients(stage):
             stage.client = None
@@ -84,9 +85,7 @@ def common_local_patches(monkeypatch):
             _strip_clients(s)
         return dataclasses.replace(pipeline, default_client=None)
 
-    monkeypatch.setattr(
-        "gremlins.orchestrators.run.load_pipeline", _load_pipeline_no_clients
-    )
+    monkeypatch.setattr("gremlins.pipeline.Pipeline.from_yaml", _from_yaml_no_clients)
 
 
 @pytest.fixture(autouse=True)

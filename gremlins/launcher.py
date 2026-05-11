@@ -28,9 +28,8 @@ from gremlins import git as _git_mod
 from gremlins import paths as _paths
 from gremlins.clients.client import PACKAGE_DEFAULT
 from gremlins.gh_utils import parse_issue_ref, view_issue
+from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
-from gremlins.pipeline.loader import load_pipeline
-from gremlins.schema import PipelineDef
 from gremlins.state import pipeline_uses_gh
 from gremlins.utils import proc
 
@@ -69,7 +68,7 @@ def _extract_h1(path: str) -> str:
     return ""
 
 
-def pipeline_uses_loop_handoff(pipeline: PipelineDef) -> bool:
+def pipeline_uses_loop_handoff(pipeline: Pipeline) -> bool:
     first = pipeline.stages[0] if pipeline.stages else None
     return (
         first is not None
@@ -78,7 +77,7 @@ def pipeline_uses_loop_handoff(pipeline: PipelineDef) -> bool:
     )
 
 
-def _pipeline_setup_kind(pipeline: PipelineDef) -> str:
+def _pipeline_setup_kind(pipeline: Pipeline) -> str:
     if pipeline_uses_gh(pipeline) or pipeline_uses_loop_handoff(pipeline):
         return "worktree-detached"
     return "worktree-branch"
@@ -244,7 +243,7 @@ def _pipeline_default_client_spec(pipeline_path: str) -> str:
     if not pipeline_path:
         return ""
     try:
-        pipeline = load_pipeline(pathlib.Path(pipeline_path))
+        pipeline = Pipeline.from_yaml(pathlib.Path(pipeline_path))
     except (FileNotFoundError, ValueError, yaml.YAMLError):
         return ""
     return str(pipeline.default_client) if pipeline.default_client else ""
@@ -468,7 +467,7 @@ def launch(
     _pipeline_base_ref = "current"
     _loaded_pipeline = None
     try:
-        _loaded_pipeline = load_pipeline(pathlib.Path(pipeline_path))
+        _loaded_pipeline = Pipeline.from_yaml(pathlib.Path(pipeline_path))
         _pipeline_base_ref = _loaded_pipeline.base_ref
     except (FileNotFoundError, OSError):
         pass
@@ -633,7 +632,7 @@ def resume(gr_id: str) -> None:
     _loaded_resume = None
     if pipeline_path:
         try:
-            _loaded_resume = load_pipeline(pathlib.Path(pipeline_path))
+            _loaded_resume = Pipeline.from_yaml(pathlib.Path(pipeline_path))
         except (FileNotFoundError, OSError):
             pass
 

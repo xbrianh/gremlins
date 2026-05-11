@@ -1,1 +1,0 @@
-BUNDLED_PROMPT_PREFIX = "gremlins:"

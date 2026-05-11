@@ -43,8 +43,8 @@ from gremlins.fleet.cli import (
 )
 from gremlins.launcher import launch, resume
 from gremlins.orchestrators.review_address import address_main, review_main
+from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import list_pipelines, resolve_pipeline_name
-from gremlins.pipeline.loader import load_pipeline
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import STAGE_REGISTRY
 from gremlins.state import validate_gr_id
@@ -145,7 +145,7 @@ def _launch_main(argv: list[str]) -> int:
     if "--list" in argv:
         for name, path in list_pipelines(pathlib.Path.cwd()):
             try:
-                pipeline = load_pipeline(path)
+                pipeline = Pipeline.from_yaml(path)
                 label = pipeline.name
             except Exception:
                 label = "unloadable"
@@ -165,7 +165,7 @@ def _launch_main(argv: list[str]) -> int:
         return 1
 
     try:
-        pipeline = load_pipeline(pipeline_path)
+        pipeline = Pipeline.from_yaml(pipeline_path)
     except (ValueError, yaml.YAMLError, FileNotFoundError) as exc:
         sys.stderr.write(
             f"error: pipeline '{name}' is invalid: {exc}\n  (file: {pipeline_path})\n"

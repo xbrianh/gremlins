@@ -6,8 +6,8 @@ import pytest
 from conftest import MINIMAL_EVENTS, ReviewCreatingClient
 
 from gremlins.clients.fake import FakeClaudeClient
+from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
-from gremlins.pipeline.loader import load_pipeline
 from gremlins.stages import implement, plan
 from gremlins.stages.address_code import AddressCode
 from gremlins.stages.base import RuntimeState
@@ -22,7 +22,7 @@ _BUNDLED_PROMPTS = (
 
 
 def test_local_yaml_loads_and_validates(tmp_path):
-    pipeline = load_pipeline(resolve_pipeline_path("local", tmp_path))
+    pipeline = Pipeline.from_yaml(resolve_pipeline_path("local", tmp_path))
     assert len(pipeline.stages) == 5
     names = [s.name for s in pipeline.stages]
     assert names == ["plan", "implement", "review-code", "address-code", "verify"]

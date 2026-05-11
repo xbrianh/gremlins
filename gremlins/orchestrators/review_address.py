@@ -13,8 +13,8 @@ from gremlins.clients.client import PACKAGE_DEFAULT, Client
 from gremlins.errors import die
 from gremlins.git import has_diff, has_dirty_worktree, in_git_repo, rev_exists
 from gremlins.logging_setup import configure_logging
+from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
-from gremlins.pipeline.loader import load_pipeline
 from gremlins.runner import install_signal_handlers
 from gremlins.stages.base import RuntimeState
 
@@ -75,7 +75,7 @@ def review_main(argv: list[str], *, client: Client | None = None) -> int:
                 "nothing to review: HEAD~1..HEAD has no changes and working tree is clean"
             )
 
-    pipeline = load_pipeline(resolve_pipeline_path("local", pathlib.Path.cwd()))
+    pipeline = Pipeline.from_yaml(resolve_pipeline_path("local", pathlib.Path.cwd()))
     rc_entry = next((s for s in pipeline.stages if s.type == "review-code"), None)
     if rc_entry is None or not rc_entry.prompts[1:]:
         die("local pipeline has no review-code stage with a prompt")
@@ -117,7 +117,7 @@ def address_main(argv: list[str], *, client: Client | None = None) -> int:
 
     is_git = in_git_repo()
 
-    pipeline = load_pipeline(resolve_pipeline_path("local", pathlib.Path.cwd()))
+    pipeline = Pipeline.from_yaml(resolve_pipeline_path("local", pathlib.Path.cwd()))
     ac_entry = next((s for s in pipeline.stages if s.type == "address-code"), None)
     if ac_entry is None or not ac_entry.prompts:
         die("local pipeline has no address-code stage with a prompt")
