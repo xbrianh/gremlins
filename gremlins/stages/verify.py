@@ -15,9 +15,7 @@ from gremlins.utils import git as _git_mod
 logger = logging.getLogger(__name__)
 
 
-def _diff_text(cwd: pathlib.Path, *, is_git: bool) -> str:
-    if not is_git:
-        return ""
+def _diff_text(cwd: pathlib.Path) -> str:
     try:
         unstaged = _git_mod.diff_output(cwd=cwd)
         staged = _git_mod.diff_output(["--cached"], cwd=cwd)
@@ -62,18 +60,6 @@ class Verify(Stage):
             logger.info("verify: no cmds configured; skipping")
             return
 
-        is_git = state.is_git
-        if options.get("commit_after_fix", True) and is_git:
-            commit_instr = (
-                "- After fixing, stage the changed files by name and create a single git "
-                "commit titled 'Fix failing checks'. Do not push."
-            )
-        else:
-            commit_instr = (
-                "- After fixing, leave changes uncommitted — do not stage or commit. "
-                "The next stage (commit) will handle staging and committing."
-            )
-
         template = "\n\n".join(self.prompts).rstrip()
         combined_cmd = " && ".join(cmds)
         commands_section = "**Commands run:**\n" + "\n".join(f"- `{c}`" for c in cmds)
@@ -104,13 +90,12 @@ class Verify(Stage):
             if last_output[0] is None:
                 return
             n = attempt[0]
-            diff = _diff_text(state.cwd, is_git=is_git)
+            diff = _diff_text(state.cwd)
             fix_prompt = template.format(
                 bail_command=self.bail_command(state),
                 commands_section=commands_section,
                 verify_output=last_output[0],
                 diff_text=diff,
-                commit_instr=commit_instr,
             )
             self.run_claude(
                 fix_prompt,

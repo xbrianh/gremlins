@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import pathlib
 from typing import Any
 
@@ -16,7 +15,6 @@ from gremlins.utils.git import (
     classify_impl_outcome,
     record_pre_impl_state,
 )
-from gremlins.utils.yaml import load_bundled_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -26,39 +24,6 @@ logger = logging.getLogger(__name__)
 # 600s (10 min) gives enough slack to ride out the longest observed gaps
 # without masking a genuinely hung process.
 IMPLEMENT_IDLE_TIMEOUT = 600.0
-
-
-def changes_outside_git(sentinel: pathlib.Path, session_dir: pathlib.Path) -> bool:
-    try:
-        threshold = sentinel.stat().st_mtime
-    except Exception:
-        return False
-    cwd = pathlib.Path(".").resolve()
-    try:
-        session_resolved = session_dir.resolve()
-    except Exception:
-        session_resolved = session_dir
-    for dirpath, dirnames, filenames in os.walk(cwd):
-        dirnames[:] = [d for d in dirnames if d != ".git"]
-        dp = pathlib.Path(dirpath)
-        try:
-            dp_resolved = dp.resolve()
-            if (
-                dp_resolved == session_resolved
-                or session_resolved in dp_resolved.parents
-            ):
-                dirnames[:] = []
-                continue
-        except Exception:
-            pass
-        for f in filenames:
-            fp = dp / f
-            try:
-                if fp.stat().st_mtime > threshold:
-                    return True
-            except Exception:
-                continue
-    return False
 
 
 def _render_spec_block(spec_text: str) -> str:
@@ -125,24 +90,12 @@ class Implement(Stage):
 
     def _run_local(self, state: State, spec_text: str) -> None:
         cwd_arg = str(state.worktree) if state.worktree is not None else None
-        pre = None
-        pre_sentinel: pathlib.Path | None = None
-        if state.is_git:
-            pre = record_pre_impl_state(cwd=cwd_arg)
-        else:
-            pre_sentinel = state.session_dir / ".pre-impl"
-            pre_sentinel.touch()
-
-        impl_commit_instr = ""
-        if state.is_git:
-            impl_commit_instr = load_bundled_prompt("impl_commit_git.md").rstrip()
-
+        pre = record_pre_impl_state(cwd=cwd_arg)
         plan_text = (state.session_dir / "plan.md").read_text(encoding="utf-8")
         template = "\n\n".join(self.prompts).rstrip()
         prompt = template.format(
             spec_block=_render_spec_block(spec_text),
             plan_text=plan_text,
-            impl_commit_instr=impl_commit_instr,
         )
         self.run_claude(
             prompt,
@@ -151,24 +104,15 @@ class Implement(Stage):
             raw_path=state.session_dir / "stream-implement.jsonl",
             idle_timeout=IMPLEMENT_IDLE_TIMEOUT,
         )
-
-        if state.is_git:
-            if pre is None:
-                raise RuntimeError("pre-impl state not captured")
-            outcome = classify_impl_outcome(pre, cwd=cwd_arg)
-            if isinstance(outcome, EmptyImpl):
-                raise RuntimeError(
-                    "implement produced no committed work; the agent must commit before returning"
-                )
-            if isinstance(outcome, DivergentHead):
-                raise RuntimeError(
-                    f"implement diverged from pre-impl HEAD {pre.head[:7]}; expected a fast-forward"
-                )
-        else:
-            if pre_sentinel is None:
-                raise RuntimeError("pre-impl sentinel not created")
-            if not changes_outside_git(pre_sentinel, state.session_dir):
-                raise RuntimeError("implementation stage produced no changes; aborting")
+        outcome = classify_impl_outcome(pre, cwd=cwd_arg)
+        if isinstance(outcome, EmptyImpl):
+            raise RuntimeError(
+                "implement produced no committed work; the agent must commit before returning"
+            )
+        if isinstance(outcome, DivergentHead):
+            raise RuntimeError(
+                f"implement diverged from pre-impl HEAD {pre.head[:7]}; expected a fast-forward"
+            )
 
     def _run_gh(self, state: State, spec_text: str) -> None:
         state_file = resolve_state_file(state.gr_id)

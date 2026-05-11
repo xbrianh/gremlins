@@ -105,21 +105,14 @@ class ReviewCode(Stage):
                 "check that prompts is non-empty and all entries have content"
             )
 
-        is_git = state.is_git
         plan_file = state.session_dir / "plan.md"
         plan_text = plan_file.read_text(encoding="utf-8") if plan_file.exists() else ""
 
-        if is_git:
-            code_scope = (
-                "Review the changes introduced by the most recent commit "
-                "(HEAD vs HEAD~1) plus any uncommitted working-tree changes. "
-                "Use `git diff HEAD~1 HEAD` and `git diff` to see the scope."
-            )
-        else:
-            code_scope = (
-                "Review the uncommitted changes in this directory (`git diff` if "
-                "available, otherwise inspect recently modified files)."
-            )
+        code_scope = (
+            "Review the changes introduced by the most recent commit "
+            "(HEAD vs HEAD~1) plus any uncommitted working-tree changes. "
+            "Use `git diff HEAD~1 HEAD` and `git diff` to see the scope."
+        )
         if plan_text:
             code_context = (
                 f"The plan for this change is:\n\n{plan_text}\n\n{code_scope}"
