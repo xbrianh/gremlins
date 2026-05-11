@@ -1,10 +1,10 @@
-"""Tests for open_github_pr utilities."""
+"""Tests for github_open_pull_request utilities."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from gremlins.stages.open_github_pr import extract_pr_branch_from_events
+from gremlins.stages.github_open_pull_request import extract_pr_branch_from_events
 
 
 def _bash_tool_use(cmd: str, tool_id: str = "tu_1") -> dict[str, Any]:

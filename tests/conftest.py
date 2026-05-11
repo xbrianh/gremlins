@@ -12,7 +12,7 @@ import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.pipeline import Pipeline
-from gremlins.stages.open_github_pr import OpenGitHubPR
+from gremlins.stages.github_open_pull_request import GitHubOpenPullRequest
 
 TESTS_DIR = pathlib.Path(__file__).resolve().parent
 
@@ -21,7 +21,7 @@ def gh_pipeline() -> Pipeline:
     return Pipeline(
         name="test",
         path=pathlib.Path("."),
-        stages=[OpenGitHubPR("open-github-pr", None, [], {})],
+        stages=[GitHubOpenPullRequest("github-open-pull-request", None, [], {})],
     )
 
 

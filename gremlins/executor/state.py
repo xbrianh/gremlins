@@ -29,7 +29,7 @@ _GR_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 _GH_STAGE_TYPES = frozenset(
     {
-        "open-github-pr",
+        "github-open-pull-request",
         "request-copilot",
         "wait-copilot",
         "wait-ci",

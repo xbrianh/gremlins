@@ -80,7 +80,7 @@ def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
     assert "implement" in stage_types
     assert "plan" in STAGE_TYPES
     assert "implement" in STAGE_TYPES
-    assert "open-github-pr" in STAGE_TYPES
+    assert "github-open-pull-request" in STAGE_TYPES
     assert "request-copilot" in STAGE_TYPES
     assert "ghreview" in STAGE_TYPES
     assert "ghaddress" in STAGE_TYPES
@@ -276,7 +276,7 @@ def test_stage_builders_registry_covers_all_known_types() -> None:
         "plan",
         "implement",
         "verify",
-        "open-github-pr",
+        "github-open-pull-request",
         "request-copilot",
         "ghreview",
         "wait-copilot",
