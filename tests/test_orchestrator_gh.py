@@ -1039,7 +1039,9 @@ def test_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
         fixtures={
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "github-open-pull-request": _pr_events("https://github.com/owner/repo/pull/77"),
+            "github-open-pull-request": _pr_events(
+                "https://github.com/owner/repo/pull/77"
+            ),
         },
     )
 
@@ -1106,7 +1108,9 @@ def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
         fixtures={
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "github-open-pull-request": _pr_events("https://github.com/owner/repo/pull/77"),
+            "github-open-pull-request": _pr_events(
+                "https://github.com/owner/repo/pull/77"
+            ),
         },
     )
 
@@ -1294,7 +1298,9 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
         fixtures={
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "github-open-pull-request": _pr_events("https://github.com/owner/repo/pull/77"),
+            "github-open-pull-request": _pr_events(
+                "https://github.com/owner/repo/pull/77"
+            ),
         },
     )
 
@@ -1637,9 +1643,9 @@ def test_pipeline_uses_gh_false_for_local_stages() -> None:
 def test_pipeline_uses_gh_recurses_into_loop_body() -> None:
     """A loop containing gh-mode body stages is detected as gh."""
     from gremlins.executor.state import pipeline_uses_gh
+    from gremlins.stages.github_open_pull_request import GitHubOpenPullRequest
     from gremlins.stages.handoff import Handoff
     from gremlins.stages.loop import LoopStage
-    from gremlins.stages.github_open_pull_request import GitHubOpenPullRequest
 
     gh_body = [
         Handoff("handoff"),

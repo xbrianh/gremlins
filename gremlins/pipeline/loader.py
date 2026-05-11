@@ -5,10 +5,10 @@ from typing import Any
 from gremlins.clients.client import Client
 from gremlins.stages.address_code import AddressCode
 from gremlins.stages.base import Stage
+from gremlins.stages.github_open_pull_request import GitHubOpenPullRequest
 from gremlins.stages.handoff import Handoff
 from gremlins.stages.implement import Implement
 from gremlins.stages.loop import LoopStage
-from gremlins.stages.github_open_pull_request import GitHubOpenPullRequest
 from gremlins.stages.parallel import ParallelStage
 from gremlins.stages.plan import Plan
 from gremlins.stages.request_copilot import RequestCopilot
