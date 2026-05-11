@@ -326,6 +326,13 @@ def _stage_list() -> list[Stage]:
     return []
 
 
+def _int_or(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _read_state_json(sf: pathlib.Path | None) -> dict[str, Any]:
     if sf is None or not sf.exists():
         return {}
@@ -414,7 +421,7 @@ class State:
                 issue_url=sd.get("issue_url") or "",
                 base_ref_name=sd.get("base_ref_name") or "",
                 issue_num=sd.get("issue_num") or "",
-                loop_iteration=int(sd.get("loop_iteration") or 1),
+                loop_iteration=_int_or(sd.get("loop_iteration"), 1),
                 impl_pre_state=_read_impl_pre_state(base_state.session_dir, sd),
             )
             entry.run(state)

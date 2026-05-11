@@ -80,7 +80,7 @@ class OpenGitHubPR(Stage):
         iter_clause = (
             f" This is loop iteration {n}; append '-iter{n}' to the branch slug"
             f" to avoid colliding with a prior iteration's branch"
-            f" (e.g. 'issue-431-some-slug-iter{n}')."
+            f" (e.g. 'issue-NNN-some-slug-iter{n}')."
             if n > 1
             else ""
         )
