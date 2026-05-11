@@ -22,6 +22,6 @@ def read_markdown_title(path: str) -> str:
                 m = re.match(r"^#\s+(.+)", line)
                 if m:
                     return m.group(1).strip()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         pass
     return ""
