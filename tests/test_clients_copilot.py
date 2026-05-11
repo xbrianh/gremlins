@@ -26,6 +26,12 @@ if argv_out:
     with open(argv_out, "w") as f:
         json.dump(sys.argv[1:], f)
 
+env_out = os.environ.get("STUB_ENV_OUT")
+if env_out:
+    import json
+    with open(env_out, "w") as f:
+        json.dump(dict(os.environ), f)
+
 stdin_out = os.environ.get("STUB_STDIN_OUT")
 if stdin_out:
     with open(stdin_out, "w") as f:
@@ -182,3 +188,29 @@ def test_strip_footer_preserves_bullet_in_body() -> None:
 def test_copilot_total_cost_usd_is_zero() -> None:
     client = SubprocessCopilotClient()
     assert client.total_cost_usd == 0.0
+
+
+def test_copilot_run_accepts_extra_env_without_type_error(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    _install_stub(bin_dir, _STUB_COPILOT_SRC)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    client = SubprocessCopilotClient()
+    # Must not raise TypeError
+    result = client.run("prompt", label="x", extra_env={"FOO": "bar"})
+    assert result.exit_code == 0
+
+
+def test_copilot_extra_env_merged_into_subprocess_env(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    _install_stub(bin_dir, _STUB_COPILOT_SRC)
+    env_out = tmp_path / "env.json"
+
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("STUB_ENV_OUT", str(env_out))
+
+    client = SubprocessCopilotClient()
+    client.run("prompt", label="x", extra_env={"FOO": "bar"})
+
+    captured = json.loads(env_out.read_text(encoding="utf-8"))
+    assert captured.get("FOO") == "bar"

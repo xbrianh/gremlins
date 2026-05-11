@@ -74,15 +74,21 @@ class SubprocessCopilotClient:
         return cmd
 
     def _spawn(
-        self, argv: list[str], cwd: pathlib.Path | None = None
+        self,
+        argv: list[str],
+        cwd: pathlib.Path | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> subprocess.Popen[bytes]:
+        env = os.environ.copy()
+        if extra_env:
+            env.update(extra_env)
         p = subprocess.Popen(
             argv,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=False,
-            env=os.environ.copy(),
+            env=env,
             cwd=str(cwd) if cwd is not None else None,
         )
         self._track(p)
@@ -100,10 +106,11 @@ class SubprocessCopilotClient:
         max_retries: int = 2,
         cwd: pathlib.Path | None = None,
         idle_timeout: float | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> CompletedRun:
         del idle_timeout  # copilot reads stdout to EOF; no streaming idle concept
         argv = self._build_argv(model, prompt)
-        p = self._spawn(argv, cwd=cwd)
+        p = self._spawn(argv, cwd=cwd, extra_env=extra_env)
         try:
             raw_out, raw_err = p.communicate()
             rc = p.returncode
