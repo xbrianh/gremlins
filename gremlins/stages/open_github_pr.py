@@ -6,9 +6,9 @@ import logging
 from typing import Any
 
 from gremlins.clients.protocol import CompletedRun
-from gremlins.stages.base import RuntimeState, Stage
+from gremlins.executor.state import State
+from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
-from gremlins.state import append_artifact, last_pr_branch
 from gremlins.utils import proc
 from gremlins.utils.github import extract_gh_url
 from gremlins.utils.yaml import render_bundled_prompt
@@ -57,10 +57,10 @@ class OpenGitHubPR(Stage):
         super().__init__(name, model, prompts, options)
         self.base_ref = base_ref
 
-    def run(self, state: RuntimeState) -> str:
+    def run(self, state: State) -> str:
         issue_url = state.issue_url
         base_ref = (
-            last_pr_branch(state.gr_id)
+            state.last_pr_branch()
             or self.base_ref
             or state.base_ref_name
             or "main"
@@ -96,7 +96,7 @@ class OpenGitHubPR(Stage):
             text_result=completed.text_result,
         )
         branch = _get_pr_branch(pr_url)
-        append_artifact(state.gr_id, {"type": "pr", "url": pr_url, "branch": branch})
+        state.append_artifact({"type": "pr", "url": pr_url, "branch": branch})
         logger.info("PR: %s", pr_url)
         return pr_url
 

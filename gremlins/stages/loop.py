@@ -8,9 +8,9 @@ import logging
 from collections.abc import Callable
 from typing import Any, cast
 
-from gremlins.stages.base import RuntimeState, Stage
+from gremlins.executor.state import State, resolve_state_file
+from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
-from gremlins.state import emit_bail, last_pr_branch
 from gremlins.utils import git as _git
 
 logger = logging.getLogger(__name__)
@@ -98,7 +98,7 @@ class LoopStage(Stage):
         stage.client = get_client_from_dict(d)
         return stage
 
-    def _build_runners(self, state: RuntimeState) -> list[Callable[[], None]]:
+    def _build_runners(self, state: State) -> list[Callable[[], None]]:
         result: list[Callable[[], None]] = []
         for child in self.body:
             child_spec = state.stage_specs.get(child.name, state.client)
@@ -110,7 +110,7 @@ class LoopStage(Stage):
             result.append(child_state.make_runner(child, scope=self.body))
         return result
 
-    def run(self, state: RuntimeState) -> None:
+    def run(self, state: State) -> None:
         runners = (
             self._body_runners
             if self._body_runners is not None
@@ -145,28 +145,24 @@ class LoopStage(Stage):
                     break
 
             exhausted = True
-            emit_bail(
-                state.gr_id,
+            state.emit_bail(
                 "other",
                 f"loop exhausted {self._max_iterations} iterations",
-                child_key=state.child_key,
             )
             raise LoopExhausted(f"loop exhausted {self._max_iterations} iterations")
         except LoopExhausted:
             raise
         except (SystemExit, Exception) as exc:
             if not exhausted and not _bail_already_set(state.gr_id, state.child_key):
-                emit_bail(
-                    state.gr_id,
+                state.emit_bail(
                     "other",
                     f"loop stage failed: {exc}"[:200],
-                    child_key=state.child_key,
                 )
             raise
 
 
-def _detach_to_pr_base(state: RuntimeState) -> None:
-    branch = last_pr_branch(state.gr_id)
+def _detach_to_pr_base(state: State) -> None:
+    branch = state.last_pr_branch()
     if not branch:
         return
     logger.info("detaching worktree to previous PR branch: %s", branch)
@@ -174,8 +170,6 @@ def _detach_to_pr_base(state: RuntimeState) -> None:
 
 
 def _bail_already_set(gr_id: str | None, child_key: str | None) -> bool:
-    from gremlins.state import resolve_state_file
-
     sf = resolve_state_file(gr_id)
     if sf is None or not sf.exists():
         return False

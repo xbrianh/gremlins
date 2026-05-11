@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from gremlins.stages.base import RuntimeState, Stage
+from gremlins.executor.state import State
+from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
-from gremlins.state import check_bail
 
 
 class ClaudePrompt(Stage):
@@ -23,7 +23,7 @@ class ClaudePrompt(Stage):
         stage.client = get_client_from_dict(d)
         return stage
 
-    def run(self, state: RuntimeState) -> None:
+    def run(self, state: State) -> None:
         prompt = "\n\n".join(self.prompts).rstrip()
         self.run_claude(
             prompt,
@@ -31,7 +31,7 @@ class ClaudePrompt(Stage):
             label=self.name,
             raw_path=state.session_dir / f"stream-{self.name}.jsonl",
         )
-        check_bail(state.gr_id, self.name, child_key=state.child_key)
+        state.check_bail(self.name)
 
 
 register_stage("claude-prompt", ClaudePrompt)

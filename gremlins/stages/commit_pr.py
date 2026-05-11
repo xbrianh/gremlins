@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from gremlins.stages.base import RuntimeState, Stage
+from gremlins.executor.state import State
+from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 
 
@@ -21,7 +22,7 @@ class CommitPR(Stage):
         stage.client = get_client_from_dict(d)
         return stage
 
-    def run(self, state: RuntimeState) -> None:  # noqa: ARG002  # pragma: no cover
+    def run(self, state: State) -> None:  # noqa: ARG002  # pragma: no cover
         raise NotImplementedError
 
 

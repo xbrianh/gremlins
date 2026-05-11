@@ -7,9 +7,9 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from gremlins.stages.base import RuntimeState, Stage
+from gremlins.executor.state import State, emit_bail
+from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
-from gremlins.state import check_bail, emit_bail, read_pr_url
 from gremlins.utils.git import head_sha
 from gremlins.utils.github import fetch_check_run_logs, get_pr_ci_status
 
@@ -173,8 +173,8 @@ class WaitCI(Stage):
         self.head_sha_getter = head_sha_getter
         self.fix_sha_getter = fix_sha_getter
 
-    def run(self, state: RuntimeState) -> None:
-        pr_url = self.pr_url or read_pr_url(state.gr_id)
+    def run(self, state: State) -> None:
+        pr_url = self.pr_url or state.read_pr_url()
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
         checks, review_decision = _wait_for_checks(
@@ -247,11 +247,7 @@ class WaitCI(Stage):
                     raw_path=state.session_dir / f"stream-ci-fix-{attempt}.jsonl",
                 )
                 _agent_bailed = True
-                check_bail(
-                    state.gr_id,
-                    f"ci-fix-{attempt}",
-                    child_key=state.child_key,
-                )
+                state.check_bail(f"ci-fix-{attempt}")
                 _agent_bailed = False
 
                 fix_sha = (
@@ -261,20 +257,16 @@ class WaitCI(Stage):
                 )
 
             _exhausted = True
-            emit_bail(
-                state.gr_id,
+            state.emit_bail(
                 "other",
                 f"CI failed after {self.max_attempts} attempts",
-                child_key=state.child_key,
             )
             raise RuntimeError(f"ci-gate exhausted {self.max_attempts} attempts")
         except (SystemExit, Exception) as exc:
             if not _exhausted and not _agent_bailed and not _review_bailed:
-                emit_bail(
-                    state.gr_id,
+                state.emit_bail(
                     "other",
                     f"ci-gate failed: {exc}"[:200],
-                    child_key=state.child_key,
                 )
             raise
 
