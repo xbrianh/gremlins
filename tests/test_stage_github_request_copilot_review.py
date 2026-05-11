@@ -14,7 +14,9 @@ from gremlins.stages.github_request_copilot_review import GitHubRequestCopilotRe
 def _make_stage(
     tmp_path, *, repo: str, pr_num: str
 ) -> tuple[GitHubRequestCopilotReview, RuntimeState]:
-    stage = GitHubRequestCopilotReview("github-request-copilot-review", None, [], {}, pr_num=pr_num)
+    stage = GitHubRequestCopilotReview(
+        "github-request-copilot-review", None, [], {}, pr_num=pr_num
+    )
     state = RuntimeState(
         client=FakeClaudeClient(fixtures={}),
         session_dir=tmp_path,
