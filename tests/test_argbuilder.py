@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from gremlins.cli import build_launch_parser
+from gremlins.cli.launch import build_launch_parser
 from gremlins.stages.base import Stage, StageInput
 
 

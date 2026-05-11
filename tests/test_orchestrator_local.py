@@ -9,7 +9,7 @@ from conftest import common_local_patches as _common_patches
 
 from gremlins.clients.client import Client
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.orchestrators.review_address import address_main, review_main
+from gremlins.cli.review_address import address_main, review_main
 from gremlins.orchestrators.run import run_pipeline
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path

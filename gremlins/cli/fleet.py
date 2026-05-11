@@ -314,7 +314,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
     sys.exit(0)
 
 
-def main(argv: list[str] | None = None) -> int:
+def fleet_main(argv: list[str] | None = None) -> int:
     """Entry point. Wraps ``_main_impl`` in a top-level try/except so the
     "exit 0 on the listing path even on unexpected errors" promise from the
     module docstring holds regardless of how this is invoked — bare ``gremlins``

@@ -48,7 +48,7 @@ from conftest import (
 
 import gremlins.state as state_mod
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.orchestrators.review_address import address_main, review_main
+from gremlins.cli.review_address import address_main, review_main
 from gremlins.orchestrators.run import run_pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
 
