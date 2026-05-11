@@ -8,7 +8,7 @@ import os
 import pathlib
 import shutil
 
-from gremlins.clients.client import PACKAGE_DEFAULT, Client
+from gremlins.clients.client import Client
 from gremlins.env_file import load_env_file
 from gremlins.errors import die
 from gremlins.executor.pipeline import Pipeline
@@ -22,11 +22,7 @@ from gremlins.executor.state import (
 from gremlins.logging_setup import configure_logging
 from gremlins.pipeline import Pipeline as _Pipeline
 from gremlins.runner import install_signal_handlers
-from gremlins.stage_clients import (
-    collect_stage_specs,
-    load_stage_specs_from_state,
-    validate_stage_specs,
-)
+from gremlins.stages.base import Stage
 from gremlins.utils.git import has_commits, has_dirty_worktree, in_git_repo
 from gremlins.utils.github import get_repo
 from gremlins.utils.yaml import YamlLoadError
@@ -59,6 +55,29 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             if not c.strip():
                 die("--cmd: command must be a non-empty string")
     return args
+
+
+def _apply_client_override(stages: list[Stage], cli: Client) -> None:
+    for stage in stages:
+        stage.client = cli
+        if stage.body:
+            _apply_client_override(stage.body, cli)
+
+
+def _unique_clients(stages: list[Stage]) -> list[Client]:
+    seen: set[int] = set()
+    result: list[Client] = []
+    for stage in stages:
+        c = stage.client
+        if c is not None and id(c) not in seen:
+            seen.add(id(c))
+            result.append(c)
+        if stage.body:
+            for bc in _unique_clients(stage.body):
+                if id(bc) not in seen:
+                    seen.add(id(bc))
+                    result.append(bc)
+    return result
 
 
 def run_pipeline(
@@ -107,53 +126,12 @@ def run_pipeline(
             die("gh CLI not found")
         repo = get_repo()
 
-    stage_specs: dict[str, Client] = {}
-    if args.resume_from and gr_id:
-        try:
-            stage_specs = load_stage_specs_from_state(gr_id)
-        except Exception as exc:
-            die(f"--resume-from: corrupt state.json stage_clients: {exc}")
-        if not stage_specs:
-            die(
-                "--resume-from: stage_clients not found in state.json (rerun from scratch?)"
-            )
-    if not stage_specs:
-        stage_specs = collect_stage_specs(pipeline, cli_spec)
-        if gr_id:
-            patch_state(
-                gr_id, stage_clients={k: str(v) for k, v in stage_specs.items()}
-            )
-
-    _spec_clients: dict[str, Client] = {}
-
-    def _client_for_spec(spec: Client) -> Client:
-        if client is not None:
-            return client
-        key = str(spec)
-        if key not in _spec_clients:
-            _spec_clients[key] = spec
-        return _spec_clients[key]
-
-    for spec in stage_specs.values():
-        _client_for_spec(spec)
-
-    default_spec = cli_spec or pipeline.default_client or PACKAGE_DEFAULT
-    if client is None:
-        _client_for_spec(default_spec)
+    if cli_spec:
+        _apply_client_override(list(pipeline.stages), cli_spec)
 
     session_dir = resolve_session_dir(gr_id)
 
-    if client is not None:
-        _signal_clients = [client]
-    elif _spec_clients:
-        _signal_clients = list(_spec_clients.values())
-    else:
-        _signal_clients = [default_spec]
-
-    try:
-        validate_stage_specs(stage_specs, pipeline)
-    except ValueError as exc:
-        die(str(exc))
+    _signal_clients = [client] if client is not None else _unique_clients(list(pipeline.stages))
 
     plan_file = session_dir / "plan.md"
 
@@ -176,8 +154,6 @@ def run_pipeline(
             pipeline_data=pipeline,
             repo=repo,
             state_file=state_file if is_gh else None,
-            spec_clients=_spec_clients,
-            stage_specs=stage_specs,
             test_client=client,
         )
         pipe.validate_resume_target()
@@ -231,7 +207,7 @@ def run_pipeline(
     pipe.run()
 
     total_cost = 0.0
-    for c in _spec_clients.values() if _spec_clients else [client] if client else []:
+    for c in ([client] if client else _unique_clients(list(pipeline.stages))):
         total_cost += getattr(c, "total_cost_usd", 0.0) or 0.0
     if total_cost > 0:
         patch_state(gr_id, total_cost_usd=total_cost)

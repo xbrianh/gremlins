@@ -55,10 +55,7 @@ class SequenceStage(Stage):
                 runner()
         else:
             for child in self.body:
-                child_spec = state.stage_specs.get(child.name, state.client)
-                if child.model is None:
-                    child.model = child_spec.model
                 child_state = dataclasses.replace(
-                    state, client=state.get_client(child_spec)
+                    state, client=state.test_client or child.client
                 )
                 child_state.make_runner(child, scope=self.body)()

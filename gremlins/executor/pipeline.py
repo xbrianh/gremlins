@@ -15,7 +15,6 @@ from gremlins.executor.state import State, resolve_state_file
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.loader import STAGE_TYPES
 from gremlins.runner import run_stages
-from gremlins.stage_clients import require_stage_spec
 from gremlins.stages.base import Stage
 from gremlins.utils.git import in_git_repo
 
@@ -63,8 +62,6 @@ class Pipeline:
         pipeline_data: _PipelineData,
         repo: str = "",
         state_file: pathlib.Path | None = None,
-        stage_specs: dict[str, Client] | None = None,
-        spec_clients: dict[str, Client] | None = None,
         test_client: Client | None = None,
     ) -> None:
         unknown: list[str] = []
@@ -85,8 +82,6 @@ class Pipeline:
         self.pipeline_data = pipeline_data
         self.repo = repo
         self.state_file = state_file
-        self.stage_specs: dict[str, Client] = stage_specs or {}
-        self.spec_clients: dict[str, Client] = spec_clients or {}
         self.test_client = test_client
 
         sf = state_file if state_file is not None else resolve_state_file(gr_id)
@@ -120,15 +115,9 @@ class Pipeline:
     ) -> list[tuple[str, Callable[[], None]]]:
         built: list[tuple[str, Callable[[], None]]] = []
         for e in stages:
-            stage_spec = require_stage_spec(self.stage_specs, e.name)
-            resolved = self.test_client or self.spec_clients.get(
-                str(stage_spec), stage_spec
-            )
-            # Propagate the spec model to the stage so that stages calling
-            # run_claude (which falls back to state.client.model when self.model
-            # is None) use the spec model rather than the live client's model.
-            if e.model is None and stage_spec.model:
-                e.model = stage_spec.model
+            resolved = self.test_client or e.client
+            if e.model is None and e.client and e.client.model:
+                e.model = e.client.model
             stage_state = State(
                 client=resolved,
                 session_dir=self.session_dir,
@@ -138,8 +127,6 @@ class Pipeline:
                 pipeline_data=self.pipeline_data,
                 repo=self.repo,
                 instructions=self.instructions,
-                stage_specs=self.stage_specs,
-                spec_clients=self.spec_clients,
                 is_git=self.is_git,
                 test_client=self.test_client,
             )
