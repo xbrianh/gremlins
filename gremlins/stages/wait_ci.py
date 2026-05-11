@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from gremlins.git import head_sha
+from gremlins.utils.git import head_sha
 from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import check_bail, emit_bail, read_pr_url

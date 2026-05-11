@@ -13,7 +13,7 @@ import subprocess
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.git import (
+from gremlins.utils.git import (
     DivergentHead,
     EmptyImpl,
     HeadAdvanced,

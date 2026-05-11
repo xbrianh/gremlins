@@ -13,7 +13,7 @@ from gremlins.clients.client import Client
 from gremlins.clients.protocol import CompletedRun
 
 if TYPE_CHECKING:
-    from gremlins.git import PreImplState
+    from gremlins.utils.git import PreImplState
     from gremlins.pipeline import Pipeline
 
 
@@ -104,7 +104,7 @@ def _read_state_json(sf: pathlib.Path | None) -> dict[str, Any]:
 def _read_impl_pre_state(
     session_dir: pathlib.Path, sd: dict[str, Any]
 ) -> PreImplState | None:
-    from gremlins.git import PreImplState
+    from gremlins.utils.git import PreImplState
 
     sidecar = session_dir / ".impl-pre-state.json"
     if sidecar.exists():

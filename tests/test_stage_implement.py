@@ -11,7 +11,7 @@ from conftest import MINIMAL_EVENTS
 from conftest import gh_pipeline as _gh_pipeline
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.git import DivergentHead, EmptyImpl, HeadAdvanced, PreImplState
+from gremlins.utils.git import DivergentHead, EmptyImpl, HeadAdvanced, PreImplState
 from gremlins.stages.base import RuntimeState
 from gremlins.stages.implement import Implement
 

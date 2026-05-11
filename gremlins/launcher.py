@@ -22,7 +22,7 @@ import sys
 import tempfile
 from typing import Any, cast
 
-from gremlins import git as _git_mod
+from gremlins.utils import git as _git_mod
 from gremlins import paths as _paths
 from gremlins.clients.client import PACKAGE_DEFAULT
 from gremlins.pipeline import Pipeline

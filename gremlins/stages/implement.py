@@ -8,7 +8,7 @@ import os
 import pathlib
 from typing import Any
 
-from gremlins.git import (
+from gremlins.utils.git import (
     DivergentHead,
     EmptyImpl,
     classify_impl_outcome,

@@ -12,7 +12,7 @@ from typing import Any
 
 import gremlins.stages.all as _stages_all  # noqa: F401  # type: ignore[reportUnusedImport]
 from gremlins.clients.client import Client
-from gremlins.git import in_git_repo
+from gremlins.utils.git import in_git_repo
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.runner import run_stages
 from gremlins.stage_clients import require_stage_spec
