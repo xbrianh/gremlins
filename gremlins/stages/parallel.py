@@ -149,6 +149,7 @@ class ParallelStage(Stage):
                 client=state.test_client or child.client,
                 session_dir=child_dir,
                 child_key=child.name,
+                parent_stage=state.parent_stage or self.name,
             )
             child_runners.append(
                 (

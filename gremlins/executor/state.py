@@ -397,6 +397,7 @@ class State:
     test_client: Client | None = None
     # per-stage optional
     child_key: str | None = None
+    parent_stage: str = ""
     worktree: pathlib.Path | None = None
     current_scope: list[Stage] = dataclasses.field(default_factory=_stage_list)
     # runtime-derived (populated from state.json before each stage run)
@@ -422,7 +423,7 @@ class State:
         scope_list = list(scope) if scope is not None else []
 
         def _run() -> None:
-            set_stage(gr_id, entry.name)
+            base_state.set_stage(entry.name)
             if attempt:
                 if base_state.child_key:
                     _patch_parallel_attempt(gr_id, base_state.child_key, attempt)
@@ -457,7 +458,10 @@ class State:
         return read_state_str(self.state_file, field)
 
     def set_stage(self, stage: str, sub_stage: object = None) -> None:
-        set_stage(self.gr_id, stage, sub_stage)
+        if self.parent_stage and sub_stage is None:
+            set_stage(self.gr_id, self.parent_stage, sub_stage=stage)
+        else:
+            set_stage(self.gr_id, stage, sub_stage)
 
     def write_bail_file(self, bail_class: str, bail_detail: str = "") -> None:
         write_bail_file(self.gr_id, self.attempt, bail_class, bail_detail)

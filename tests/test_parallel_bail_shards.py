@@ -721,3 +721,39 @@ stages:
     p.write_text(yaml_content)
     with pytest.raises(ValueError, match="bail_policy"):
         Pipeline.from_yaml(p)
+
+
+# ---------------------------------------------------------------------------
+# parent_stage pinning: parallel child failure records top-level stage name
+# ---------------------------------------------------------------------------
+
+
+def test_parallel_child_set_stage_writes_parent_as_stage(tmp_path, state_root):
+    gr_id = "gr-parent-stage-pin"
+    sf = _make_state(state_root, gr_id)
+
+    state = State(
+        client=FakeClaudeClient(),
+        session_dir=tmp_path,
+        gr_id=gr_id,
+        parent_stage="reviews",
+    )
+
+    # Simulate what make_runner does at the start of a child stage transition.
+    state.set_stage("ghreview")
+
+    data = _read_state(sf)
+    assert data["stage"] == "reviews"
+    assert data["sub_stage"] == "ghreview"
+
+    # The recorded stage must be a valid resume_from target in a pipeline that
+    # has "reviews" as a top-level name.
+    pipeline_stages: list[tuple[str, object]] = [
+        ("plan", lambda: None),
+        ("reviews-fanout", lambda: None),
+        ("reviews", lambda: None),
+        ("reviews-fanin", lambda: None),
+        ("ghaddress", lambda: None),
+    ]
+    # Should not raise — this is what gremlins resume does.
+    run_stages(pipeline_stages, resume_from=data["stage"])
