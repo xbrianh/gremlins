@@ -385,7 +385,7 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
         for child in stage.body:
             _strip_clients(child)
 
-    def _load_pipeline_copilot_default(path):
+    def _from_yaml_copilot_default(path):
         pipeline = _real_from_yaml(path)
         for s in pipeline.stages:
             _strip_clients(s)
@@ -395,7 +395,7 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(
-        "gremlins.pipeline.Pipeline.from_yaml", _load_pipeline_copilot_default
+        "gremlins.pipeline.Pipeline.from_yaml", _from_yaml_copilot_default
     )
 
     review_label = "review-code:gpt-5.4"

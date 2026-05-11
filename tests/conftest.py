@@ -12,14 +12,14 @@ os.environ.setdefault("GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME", "main")
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.pipeline import Pipeline as _PipelineDef
+from gremlins.pipeline import Pipeline
 from gremlins.stages.open_github_pr import OpenGitHubPR
 
 TESTS_DIR = pathlib.Path(__file__).resolve().parent
 
 
-def gh_pipeline() -> _PipelineDef:
-    return _PipelineDef(
+def gh_pipeline() -> Pipeline:
+    return Pipeline(
         name="test",
         path=pathlib.Path("."),
         stages=[OpenGitHubPR("open-github-pr", None, [], {})],

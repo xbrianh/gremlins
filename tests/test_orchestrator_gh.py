@@ -169,14 +169,14 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         for child in stage.body:
             _strip_clients(child)
 
-    def _load_pipeline_no_clients(path):
+    def _from_yaml_no_clients(path):
         pipeline = _real_from_yaml(path)
         for s in pipeline.stages:
             _strip_clients(s)
         return dataclasses.replace(pipeline, default_client=None)
 
     monkeypatch.setattr(
-        "gremlins.pipeline.Pipeline.from_yaml", _load_pipeline_no_clients
+        "gremlins.pipeline.Pipeline.from_yaml", _from_yaml_no_clients
     )
 
     # set_stage is a no-op in tests — gr_id is not passed to gh_main.
@@ -1764,7 +1764,7 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
 
     session_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
-    # Override load_pipeline (wins over _patch_common's version) to inject
+    # Override Pipeline.from_yaml (wins over _patch_common's version) to inject
     # default_client without a live client instance.
     from gremlins.clients.client import Client
 
@@ -1775,7 +1775,7 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
         for child in stage.body:
             _strip_clients_2(child)
 
-    def _load_pipeline_copilot_default(path):
+    def _from_yaml_copilot_default(path):
         pipeline = _real_from_yaml(path)
         for s in pipeline.stages:
             _strip_clients_2(s)
@@ -1785,7 +1785,7 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(
-        "gremlins.pipeline.Pipeline.from_yaml", _load_pipeline_copilot_default
+        "gremlins.pipeline.Pipeline.from_yaml", _from_yaml_copilot_default
     )
 
     monkeypatch.setattr(
