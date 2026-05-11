@@ -149,24 +149,30 @@ def build_prompt(
     style_section = _load("handoff_style_section.md").format(
         code_style=_load("code_style.md").rstrip()
     )
-    return _load("handoff.md").format(
-        spec_section=spec_section,
-        style_section=style_section,
-        plan_text=plan_text,
-        branch=branch,
-        log_body=log_body,
-        diff_body=diff_body,
-        diff_trunc=diff_trunc,
-        out_path=out_path,
-        child_plan_path=child_plan_path,
-        signal_path=signal_path,
-    ).rstrip()
+    return (
+        _load("handoff.md")
+        .format(
+            spec_section=spec_section,
+            style_section=style_section,
+            plan_text=plan_text,
+            branch=branch,
+            log_body=log_body,
+            diff_body=diff_body,
+            diff_trunc=diff_trunc,
+            out_path=out_path,
+            child_plan_path=child_plan_path,
+            signal_path=signal_path,
+        )
+        .rstrip()
+    )
 
 
 def build_sanitize_prompt(rolling_plan_text: str, out_path: pathlib.Path) -> str:
-    return _load("handoff_sanitize.md").format(
-        rolling_plan_text=rolling_plan_text, out_path=out_path
-    ).rstrip()
+    return (
+        _load("handoff_sanitize.md")
+        .format(rolling_plan_text=rolling_plan_text, out_path=out_path)
+        .rstrip()
+    )
 
 
 def _restore_rolling_plan(
