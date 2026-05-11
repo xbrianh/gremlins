@@ -24,7 +24,7 @@ from typing import Any, cast
 
 from gremlins import paths as _paths
 from gremlins.clients.client import PACKAGE_DEFAULT
-from gremlins.executor.state import pipeline_uses_gh
+from gremlins.executor.state import patch_state, pipeline_uses_gh, write_state
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.utils import git as _git_mod
@@ -169,27 +169,6 @@ def _resolve_description_and_slug(
     return "", False, "gremlin"
 
 
-def _write_state(state_dir: pathlib.Path, data: dict[str, Any]) -> None:
-    """Atomically write state.json."""
-    sf = state_dir / "state.json"
-    tmp = state_dir / f"state.json.{os.getpid()}.{secrets.token_hex(4)}.tmp"
-    tmp.write_text(json.dumps(data), encoding="utf-8")
-    os.replace(tmp, sf)
-
-
-def _patch_state(state_dir: pathlib.Path, **fields: Any) -> None:
-    """Merge fields into state.json atomically. Best-effort."""
-    sf = state_dir / "state.json"
-    try:
-        data = json.loads(sf.read_text(encoding="utf-8"))
-        data.update(fields)
-        tmp = state_dir / f"state.json.{os.getpid()}.{secrets.token_hex(4)}.tmp"
-        tmp.write_text(json.dumps(data), encoding="utf-8")
-        os.replace(tmp, sf)
-    except Exception:
-        pass
-
-
 def _resolve_pipeline(
     kind: str, pipeline_args: tuple[str, ...], project_root: str
 ) -> tuple[list[str], str]:
@@ -261,23 +240,6 @@ def _launch_client_label(pipeline_args: list[str], pipeline_path: str) -> str:
 def _persisted_client_label(state: dict[str, Any]) -> str:
     client = str(state.get("client") or "")
     return client or str(PACKAGE_DEFAULT)
-
-
-def _delete_patch_state(
-    state_dir: pathlib.Path, delete_keys: tuple[str, ...], **fields: Any
-) -> None:
-    """Remove delete_keys and merge fields into state.json atomically. Best-effort."""
-    sf = state_dir / "state.json"
-    try:
-        data = json.loads(sf.read_text(encoding="utf-8"))
-        for k in delete_keys:
-            data.pop(k, None)
-        data.update(fields)
-        tmp = state_dir / f"state.json.{os.getpid()}.{secrets.token_hex(4)}.tmp"
-        tmp.write_text(json.dumps(data), encoding="utf-8")
-        os.replace(tmp, sf)
-    except Exception:
-        pass
 
 
 def _stage_gremlins_overlay(project_root: str, state_dir: pathlib.Path) -> None:
@@ -537,7 +499,7 @@ def launch(
             "issue_url": str(issue_data.get("url", "")) if issue_data else "",
             "issue_num": str(issue_data.get("number", "")) if issue_data else "",
         }
-        _write_state(state_dir, state)
+        write_state(state_dir, state)
 
         if setup_kind == "worktree-branch" and branch:
             from gremlins.executor.state import append_artifact
@@ -560,7 +522,7 @@ def launch(
         raise
 
     (state_dir / "pid").write_text(str(p.pid), encoding="utf-8")
-    _patch_state(state_dir, pid=p.pid)
+    patch_state(gr_id, pid=p.pid)
 
     return gr_id
 
@@ -651,9 +613,9 @@ def resume(gr_id: str) -> None:
     except (ValueError, TypeError):
         pass
 
-    _delete_patch_state(
-        state_dir,
-        (
+    patch_state(
+        gr_id,
+        _delete=(
             "exit_code",
             "ended_at",
             "sub_stage",
@@ -703,7 +665,7 @@ def resume(gr_id: str) -> None:
     )
 
     (state_dir / "pid").write_text(str(proc.pid), encoding="utf-8")
-    _patch_state(state_dir, pid=proc.pid)
+    patch_state(gr_id, pid=proc.pid)
 
 
 def write_terminal_state(gr_id: str, exit_code: int) -> None:

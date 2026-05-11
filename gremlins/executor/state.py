@@ -7,6 +7,7 @@ import dataclasses
 import datetime
 import json
 import logging
+import os
 import pathlib
 import re
 import secrets
@@ -156,6 +157,14 @@ def read_state_str(state_file: pathlib.Path | None, field: str) -> str:
         return json.loads(state_file.read_text(encoding="utf-8")).get(field) or ""
     except Exception:
         return ""
+
+
+def write_state(state_dir: pathlib.Path, data: dict[str, Any]) -> None:
+    """Atomically write state.json (initial creation, no merge)."""
+    sf = state_dir / "state.json"
+    tmp = state_dir / f"state.json.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+    tmp.write_text(json.dumps(data), encoding="utf-8")
+    os.replace(tmp, sf)
 
 
 def patch_state(
