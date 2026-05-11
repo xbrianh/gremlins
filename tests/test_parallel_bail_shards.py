@@ -759,7 +759,9 @@ def test_parallel_child_set_stage_writes_parent_as_stage(tmp_path, state_root):
     run_stages(pipeline_stages, resume_from=data["stage"])
 
 
-def test_parallel_child_set_stage_with_sub_stage_payload_writes_parent_as_stage(tmp_path, state_root):
+def test_parallel_child_set_stage_with_sub_stage_payload_writes_parent_as_stage(
+    tmp_path, state_root
+):
     gr_id = "gr-parent-stage-pin-sub"
     sf = _make_state(state_root, gr_id)
 
