@@ -329,3 +329,41 @@ def test_loop_patches_loop_iteration_to_state(tmp_path, make_state_dir):
         loop.run(loop_state)
 
     assert seen_iterations == [1, 2, 3]
+
+
+def test_pr_stack_iter2_detaches_to_iter1_branch(tmp_path, make_state_dir, monkeypatch):
+    """Detach fires at start of iter2 using the artifact written during iter1."""
+    gr_id = "pr-stack-two-iter"
+    make_state_dir(gr_id)
+
+    detach_calls: list[str] = []
+    from gremlins.stages import loop as _loop_mod
+
+    monkeypatch.setattr(
+        _loop_mod._git,
+        "git_detach_to_branch",
+        lambda branch, cwd=None: detach_calls.append(branch),
+    )
+
+    count = 0
+
+    def runner() -> None:
+        nonlocal count
+        count += 1
+        if count == 1:
+            from gremlins.executor.state import append_artifact
+
+            append_artifact(
+                gr_id,
+                {
+                    "type": "pr",
+                    "url": "https://github.com/x/r/pull/1",
+                    "branch": "feat-iter1",
+                },
+            )
+            raise RunCmdFailed("next-plan")
+
+    loop = LoopStage("test", body_runners=[runner], max_iterations=2, pr_stack=True)
+    loop.run(_loop_state_with_gr(tmp_path, gr_id))
+
+    assert detach_calls == ["feat-iter1"]
