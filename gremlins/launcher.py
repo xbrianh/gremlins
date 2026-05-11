@@ -14,7 +14,6 @@ import datetime
 import json
 import os
 import pathlib
-import re
 import secrets
 import shutil
 import subprocess
@@ -30,6 +29,7 @@ from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.utils import git as _git_mod
 from gremlins.utils import proc
 from gremlins.utils.github import parse_issue_ref, view_issue
+from gremlins.utils.text import read_markdown_title, slugify
 from gremlins.utils.yaml import YamlLoadError
 
 
@@ -40,31 +40,6 @@ class GremlinAlreadyRunning(RuntimeError):
 def _state_root() -> pathlib.Path:
     return _paths.state_root()
 
-
-def _slugify(text: str, max_len: int = 40) -> str:
-    """Reduce arbitrary text to [a-z0-9-]+, at most max_len chars."""
-    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
-    slug = re.sub(r"-+", "-", slug)
-    if len(slug) > max_len:
-        trimmed = slug[:max_len].rstrip("-")
-        head, _, _ = trimmed.rpartition("-")
-        if head and len(head) >= 20:
-            trimmed = head
-        slug = trimmed
-    return slug
-
-
-def _extract_h1(path: str) -> str:
-    """Extract the first H1 heading text from a file. Returns '' on failure."""
-    try:
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                m = re.match(r"^#\s+(.+)", line)
-                if m:
-                    return m.group(1).strip()
-    except OSError:
-        pass
-    return ""
 
 
 def pipeline_uses_loop_handoff(pipeline: Pipeline) -> bool:
@@ -136,16 +111,16 @@ def _resolve_description_and_slug(
     a second ``gh`` round-trip here.
     """
     if description:
-        slug = _slugify(description) or "gremlin"
+        slug = slugify(description) or "gremlin"
         return description[:60], True, slug
 
     if plan and os.path.isfile(plan):
-        h1 = _extract_h1(plan)
+        h1 = read_markdown_title(plan)
         if h1:
-            slug = _slugify(h1) or "gremlin"
+            slug = slugify(h1) or "gremlin"
             return h1[:60], False, slug
         base = os.path.splitext(os.path.basename(plan))[0]
-        slug = _slugify(base) or "gremlin"
+        slug = slugify(base) or "gremlin"
         return "", False, slug
 
     if plan:
@@ -157,13 +132,13 @@ def _resolve_description_and_slug(
             if data:
                 title = str(data.get("title") or "")
         if title:
-            slug = _slugify(title) or "gremlin"
+            slug = slugify(title) or "gremlin"
             return title[:60], False, slug
-        slug = _slugify(plan) or "gremlin"
+        slug = slugify(plan) or "gremlin"
         return "", False, slug
 
     if instructions:
-        slug = _slugify(instructions[:80]) or "gremlin"
+        slug = slugify(instructions[:80]) or "gremlin"
         return instructions[:60], False, slug
 
     return "", False, "gremlin"
