@@ -146,11 +146,6 @@ def test_local_main_does_not_clobber_external_state(tmp_path, monkeypatch):
         "gremlins.executor.run.resolve_session_dir",
         lambda gr_id=None: session_dir,
     )
-    monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: False)
-    monkeypatch.setattr(
-        "gremlins.stages.implement.changes_outside_git", lambda s, d: True
-    )
-
     client = _ReviewCreatingClient(
         fixtures={
             "implement": MINIMAL_EVENTS,

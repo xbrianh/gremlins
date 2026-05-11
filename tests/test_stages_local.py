@@ -145,7 +145,6 @@ def test_implement_renders_spec_block_when_present(tmp_path, monkeypatch):
         {},
     )
     state = _make_state(client, session_dir)
-    state.is_git = True
     stage.run(state)
     prompt = client.calls[0].prompt
     assert "Overarching goal (north star)" in prompt
@@ -188,7 +187,6 @@ def test_implement_omits_spec_block_when_absent(tmp_path, monkeypatch):
         {},
     )
     state = _make_state(client, session_dir)
-    state.is_git = True
     stage.run(state)
     prompt = client.calls[0].prompt
     assert "Overarching goal" not in prompt
@@ -266,7 +264,6 @@ def test_implement_stage_raises_on_empty_diff(tmp_path, monkeypatch):
         {},
     )
     state = _make_state(client, session_dir)
-    state.is_git = True
     with pytest.raises(RuntimeError, match="no committed work"):
         stage.run(state)
     assert len(client.calls) == 1
