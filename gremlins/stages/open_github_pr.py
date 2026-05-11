@@ -24,10 +24,9 @@ def extract_pr_branch_from_events(events: list[dict[str, Any]]) -> str:
             continue
         msg = cast(dict[str, Any], evt.get("message") or {})
         for item in cast(list[Any], msg.get("content") or []):
-            c = cast(dict[str, Any], item)
-            if c.get("type") != "tool_use" or c.get("name") != "Bash":
+            if item.get("type") != "tool_use" or item.get("name") != "Bash":
                 continue
-            inp = cast(dict[str, Any], c.get("input") or {})
+            inp = cast(dict[str, Any], item.get("input") or {})
             cmd = str(inp.get("command") or "")
             if "gh pr create" not in cmd:
                 continue

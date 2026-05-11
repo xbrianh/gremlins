@@ -345,11 +345,12 @@ def test_pr_stack_iter2_detaches_to_iter1_branch(tmp_path, make_state_dir, monke
         lambda branch, cwd=None: detach_calls.append(branch),
     )
 
-    iteration = [0]
+    count = 0
 
     def runner() -> None:
-        iteration[0] += 1
-        if iteration[0] == 1:
+        nonlocal count
+        count += 1
+        if count == 1:
             from gremlins.executor.state import append_artifact
 
             append_artifact(
