@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import gremlins.stages.address_code as address_code
-import gremlins.stages.claude_prompt as claude_prompt
 import gremlins.stages.commit_pr as commit_pr
 import gremlins.stages.handoff as handoff_stage_mod
 import gremlins.stages.implement as implement
@@ -21,7 +20,6 @@ import gremlins.stages.wait_copilot as wait_copilot
 
 __all__ = [
     "address_code",
-    "claude_prompt",
     "commit_pr",
     "handoff_stage_mod",
     "implement",
