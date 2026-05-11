@@ -3,7 +3,7 @@
 import json
 import pathlib
 
-import gremlins.state as state_mod
+import gremlins.executor.state as state_mod
 
 
 def _make_state_dir(

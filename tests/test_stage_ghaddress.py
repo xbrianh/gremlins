@@ -9,7 +9,7 @@ from conftest import gh_pipeline as _gh_pipeline
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.stages.address_code import AddressCode
-from gremlins.stages.base import RuntimeState
+from gremlins.executor.state import State as RuntimeState
 
 PR_URL = "https://github.com/owner/repo/pull/99"
 

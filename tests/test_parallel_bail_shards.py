@@ -20,10 +20,10 @@ import time
 
 import pytest
 
-import gremlins.state as state_mod
+import gremlins.executor.state as state_mod
 from gremlins.clients.fake import FakeClaudeClient
+from gremlins.executor.state import State as RuntimeState
 from gremlins.runner import run_stages
-from gremlins.stages.base import RuntimeState
 from gremlins.stages.parallel import ParallelStage
 
 # ---------------------------------------------------------------------------

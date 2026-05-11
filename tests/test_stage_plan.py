@@ -8,7 +8,7 @@ import pathlib
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.stages.base import RuntimeState
+from gremlins.executor.state import State as RuntimeState
 from gremlins.stages.plan import Plan
 
 
@@ -182,7 +182,7 @@ def test_resolve_issue_source_empty_repo_writes_url(
     _issue_source_mocks(monkeypatch, pr_repo="owner/repo")
     captured: dict[str, object] = {}
     monkeypatch.setattr(
-        "gremlins.stages.plan.patch_state",
+        "gremlins.executor.state.patch_state",
         lambda _id, **kw: captured.update(kw),
     )
     stage = Plan("plan", None, [], {})
@@ -202,7 +202,7 @@ def test_resolve_issue_source_matching_repo_writes_url(
     _issue_source_mocks(monkeypatch, pr_repo="owner/repo")
     captured: dict[str, object] = {}
     monkeypatch.setattr(
-        "gremlins.stages.plan.patch_state",
+        "gremlins.executor.state.patch_state",
         lambda _id, **kw: captured.update(kw),
     )
     stage = Plan("plan", None, [], {})
@@ -222,7 +222,7 @@ def test_resolve_issue_source_cross_repo_clears_url(
     _issue_source_mocks(monkeypatch, pr_repo="owner/a")
     captured: dict[str, object] = {}
     monkeypatch.setattr(
-        "gremlins.stages.plan.patch_state",
+        "gremlins.executor.state.patch_state",
         lambda _id, **kw: captured.update(kw),
     )
     stage = Plan("plan", None, [], {})

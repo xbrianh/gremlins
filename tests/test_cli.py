@@ -225,7 +225,7 @@ def test_run_pipeline_forwards_gr_id_to_orchestrator(
     gr_id = "test-pipeline-gr"
     state_dir = make_state_dir(gr_id)
 
-    from gremlins.state import set_stage
+    from gremlins.executor.state import set_stage
 
     def fake_run_pipeline(pipeline_path, *, argv, gr_id=None, client=None):
         set_stage(gr_id, "implement")
