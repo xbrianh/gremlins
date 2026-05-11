@@ -26,7 +26,7 @@ from gremlins import paths as _paths
 from gremlins.clients.client import PACKAGE_DEFAULT
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
-from gremlins.state import pipeline_uses_gh
+from gremlins.executor.state import pipeline_uses_gh
 from gremlins.utils import git as _git_mod
 from gremlins.utils import proc
 from gremlins.utils.github import parse_issue_ref, view_issue
@@ -556,7 +556,7 @@ def launch(
         _write_state(state_dir, state)
 
         if setup_kind == "worktree-branch" and branch:
-            from gremlins.state import append_artifact
+            from gremlins.executor.state import append_artifact
 
             append_artifact(gr_id, {"type": "branch", "name": branch})
 

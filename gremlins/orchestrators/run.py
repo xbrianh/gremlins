@@ -20,7 +20,7 @@ from gremlins.stage_clients import (
     load_stage_specs_from_state,
     validate_stage_specs,
 )
-from gremlins.state import (
+from gremlins.executor.state import (
     patch_state,
     pipeline_uses_gh,
     read_pr_url,

@@ -4,7 +4,7 @@ import argparse
 import sys
 
 from gremlins.launcher import resume
-from gremlins.state import validate_gr_id
+from gremlins.executor.state import validate_gr_id
 
 
 def resume_main(argv: list[str]) -> int:

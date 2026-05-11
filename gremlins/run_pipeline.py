@@ -12,7 +12,7 @@ import sys
 import traceback
 
 from gremlins.launcher import write_terminal_state
-from gremlins.state import validate_gr_id
+from gremlins.executor.state import validate_gr_id
 
 
 def main(argv: list[str] | None = None) -> int:

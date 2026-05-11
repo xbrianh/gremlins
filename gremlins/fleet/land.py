@@ -17,7 +17,7 @@ from gremlins.fleet.state import (
     liveness_of_state_file,
     load_state,
 )
-from gremlins.state import landable_shape, read_pr_url
+from gremlins.executor.state import landable_shape, read_pr_url
 from gremlins.utils import proc
 
 
