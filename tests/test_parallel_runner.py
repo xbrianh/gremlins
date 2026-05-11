@@ -9,7 +9,7 @@ import time
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.pipeline import _run_stages as run_stages
+from gremlins.executor.pipeline import run_stages
 from gremlins.executor.state import State
 from gremlins.pipeline import Pipeline
 from gremlins.stages.parallel import ParallelStage

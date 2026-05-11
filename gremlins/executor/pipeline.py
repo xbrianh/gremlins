@@ -50,12 +50,16 @@ def _expand_stage_entries(raw_stages: list[Stage]) -> list[Stage]:
     return result
 
 
-def _run_stages(
+def run_stages(
     stages: list[tuple[str, Callable[[], None]]], *, resume_from: str | None = None
 ) -> None:
     start_idx = 0
     if resume_from is not None:
         names = [name for name, _ in stages]
+        if resume_from not in names:
+            raise ValueError(
+                f"resume_from {resume_from!r} is not a valid stage; valid: {names}"
+            )
         start_idx = names.index(resume_from)
     for _, fn in stages[start_idx:]:
         fn()
@@ -142,5 +146,5 @@ class Pipeline:
         return built
 
     def run(self) -> None:
-        built = self._collect_stages(self.pipeline_data.stages)
-        _run_stages(built, resume_from=self.args.resume_from)
+        built = self._collect_stages(self.stages)
+        run_stages(built, resume_from=self.args.resume_from)
