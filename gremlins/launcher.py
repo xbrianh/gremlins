@@ -39,7 +39,6 @@ def _state_root() -> pathlib.Path:
     return _paths.state_root()
 
 
-
 def _resolve_description_and_slug(
     instructions: str | None,
     plan: str | None,
