@@ -16,7 +16,6 @@ from gremlins.git import has_commits, has_dirty_worktree, in_git_repo
 from gremlins.logging_setup import configure_logging
 from gremlins.orchestrators.pipeline import Pipeline
 from gremlins.pipeline import Pipeline as _Pipeline
-from gremlins.utils.yaml import YamlLoadError
 from gremlins.runner import install_signal_handlers
 from gremlins.stage_clients import (
     collect_stage_specs,
@@ -30,6 +29,7 @@ from gremlins.state import (
     resolve_session_dir,
     resolve_state_file,
 )
+from gremlins.utils.yaml import YamlLoadError
 
 logger = logging.getLogger(__name__)
 

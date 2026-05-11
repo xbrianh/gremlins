@@ -45,5 +45,7 @@ def _parse(source: str | bytes, label: str) -> dict[str, Any]:
             msg += f" (line {mark.line + 1}, column {mark.column + 1})"
         raise YamlLoadError(msg) from exc
     if not isinstance(parsed, dict):
-        raise YamlLoadError(f"expected a YAML mapping in {label}, got {type(parsed).__name__}")
+        raise YamlLoadError(
+            f"expected a YAML mapping in {label}, got {type(parsed).__name__}"
+        )
     return cast(dict[str, Any], parsed)

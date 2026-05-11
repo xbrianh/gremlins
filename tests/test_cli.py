@@ -6,6 +6,7 @@ import json
 import pathlib
 
 import pytest
+
 from gremlins.bail import bail_main
 from gremlins.cli import main
 from gremlins.run_pipeline import main as run_pipeline_main

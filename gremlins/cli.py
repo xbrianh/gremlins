@@ -26,7 +26,6 @@ import sys
 from typing import Any
 
 from gremlins import paths as _paths
-from gremlins.utils.yaml import YamlLoadError
 from gremlins.fleet.cli import (
     ack_main,
     close_main,
@@ -47,6 +46,7 @@ from gremlins.pipeline.discovery import list_pipelines, resolve_pipeline_name
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import STAGE_REGISTRY
 from gremlins.state import validate_gr_id
+from gremlins.utils.yaml import YamlLoadError
 
 
 def main(argv: list[str] | None = None) -> int:
