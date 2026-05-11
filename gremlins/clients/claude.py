@@ -26,7 +26,7 @@ class SubprocessClaudeClient:
     """Production ClaudeClient: spawns ``claude -p`` subprocesses.
 
     Owns the live-children list so ``reap_all()`` (called from the SIGINT/
-    SIGTERM handlers installed by ``runner.install_signal_handlers``) can
+    SIGTERM handlers installed by ``executor.run._install_signal_handlers``) can
     terminate every concurrently-running ``claude -p`` before the orchestrator
     exits.
     """

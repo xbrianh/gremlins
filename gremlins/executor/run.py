@@ -7,6 +7,10 @@ import logging
 import os
 import pathlib
 import shutil
+import signal
+import sys
+import types
+from collections.abc import Sequence
 
 from gremlins.clients.client import Client
 from gremlins.env_file import load_env_file
@@ -21,13 +25,25 @@ from gremlins.executor.state import (
 )
 from gremlins.logging_setup import configure_logging
 from gremlins.pipeline import Pipeline as _Pipeline
-from gremlins.runner import install_signal_handlers
 from gremlins.stages.base import Stage
 from gremlins.utils.git import has_commits, has_dirty_worktree, in_git_repo
 from gremlins.utils.github import get_repo
 from gremlins.utils.yaml import YamlLoadError
 
 logger = logging.getLogger(__name__)
+
+
+def _install_signal_handlers(clients: Sequence[Client]) -> None:
+    def handler(signum: int, frame: types.FrameType | None) -> None:
+        for c in clients:
+            try:
+                c.reap_all()
+            except Exception:
+                pass
+        sys.exit(130)
+
+    signal.signal(signal.SIGINT, handler)
+    signal.signal(signal.SIGTERM, handler)
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -214,7 +230,7 @@ def run_pipeline(
                         f"--resume-from {args.resume_from} requires implementation changes in the worktree"
                     )
 
-    install_signal_handlers(*_signal_clients)
+    _install_signal_handlers(_signal_clients)
     pipe.run()
 
     total_cost = 0.0

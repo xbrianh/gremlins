@@ -1,46 +1,19 @@
-"""Generic stage runner: signal handler installation and stage sequencing.
+"""Stage sequencing.
 
 ``run_stages`` executes a list of ``(name, callable)`` pairs in order,
 skipping stages before ``resume_from``. Stage callables raise on failure;
 the runner does not catch — propagation is the orchestrator's signal that
 a stage bailed.
-
-``install_signal_handlers`` wires SIGINT/SIGTERM to ``client.reap_all()``
-followed by ``sys.exit(130)`` so a Ctrl-C'd run doesn't leave orphaned
-``claude -p`` processes burning tokens (the parity contract for the bash
-``trap 'kill -- -$$'`` shape).
 """
 
 from __future__ import annotations
 
 import logging
-import signal
-import sys
-import types
 from collections.abc import Callable, Sequence
-
-from gremlins.clients.client import Client
 
 logger = logging.getLogger(__name__)
 
 Stage = tuple[str, Callable[[], None]]
-
-
-def install_signal_handlers(*clients: Client) -> None:
-    """Register SIGINT/SIGTERM handlers that reap claude children before
-    exit. Pass the live ClaudeClient(s) (real or fake) — their ``reap_all`` is
-    what gets called."""
-
-    def handler(signum: int, frame: types.FrameType | None) -> None:
-        for c in clients:
-            try:
-                c.reap_all()
-            except Exception:
-                pass
-        sys.exit(130)
-
-    signal.signal(signal.SIGINT, handler)
-    signal.signal(signal.SIGTERM, handler)
 
 
 def run_stages(stages: Sequence[Stage], *, resume_from: str | None = None) -> None:
