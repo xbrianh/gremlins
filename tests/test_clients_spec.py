@@ -1,4 +1,4 @@
-"""Tests for Client parsing."""
+"""Tests for Client parsing and stage client resolution."""
 
 from __future__ import annotations
 

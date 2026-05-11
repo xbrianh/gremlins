@@ -116,8 +116,6 @@ class Pipeline:
         built: list[tuple[str, Callable[[], None]]] = []
         for e in stages:
             resolved = self.test_client or e.client or PACKAGE_DEFAULT
-            if e.model is None and e.client and e.client.model:
-                e.model = e.client.model
             stage_state = State(
                 client=resolved,
                 session_dir=self.session_dir,
