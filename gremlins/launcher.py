@@ -41,7 +41,6 @@ def _state_root() -> pathlib.Path:
     return _paths.state_root()
 
 
-
 def pipeline_uses_loop_handoff(pipeline: Pipeline) -> bool:
     first = pipeline.stages[0] if pipeline.stages else None
     return (
