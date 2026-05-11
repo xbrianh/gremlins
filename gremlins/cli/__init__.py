@@ -18,7 +18,6 @@ from gremlins.cli.fleet import (
 from gremlins.cli.init import init_main
 from gremlins.cli.launch import launch_main
 from gremlins.cli.resume import resume_main
-from gremlins.cli.review_address import address_main, review_main
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -32,10 +31,6 @@ def main(argv: list[str] | None = None) -> int:
         return launch_main(rest)
     if sub == "init":
         return init_main(rest)
-    if sub == "review":
-        return review_main(rest)
-    if sub == "address":
-        return address_main(rest)
     if sub == "resume":
         return resume_main(rest)
     if sub == "stop":

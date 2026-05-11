@@ -7,7 +7,6 @@ from conftest import REVIEW_LABELS as _REVIEW_LABELS
 from conftest import ReviewCreatingClient as _ReviewCreatingClient
 from conftest import common_local_patches as _common_patches
 
-from gremlins.cli.review_address import address_main, review_main
 from gremlins.clients.client import Client
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.run import run_pipeline
@@ -129,89 +128,6 @@ def test_local_main_resume_from_review_code_allows_existing_git_changes(
         "review-code:sonnet",
         "address-code",
     ]
-
-
-# ---------------------------------------------------------------------------
-# review_main smoke test
-# ---------------------------------------------------------------------------
-
-
-def test_review_main_calls_client(tmp_path, monkeypatch):
-    _common_patches(monkeypatch)
-    monkeypatch.setattr("gremlins.executor.review_address.in_git_repo", lambda: False)
-
-    client = _ReviewCreatingClient(
-        fixtures={lbl: MINIMAL_EVENTS for lbl in _REVIEW_LABELS}
-    )
-
-    result = review_main(["--dir", str(tmp_path)], client=client)
-    assert result == 0
-    assert {c.label for c in client.calls} == _REVIEW_LABELS
-
-
-def test_review_main_requires_commit_diff_or_dirty_worktree(
-    tmp_path, monkeypatch, capsys
-):
-    _common_patches(monkeypatch)
-    monkeypatch.setattr("gremlins.executor.review_address.in_git_repo", lambda: True)
-    monkeypatch.setattr("gremlins.executor.review_address.rev_exists", lambda rev: True)
-    monkeypatch.setattr(
-        "gremlins.executor.review_address.has_diff", lambda base, head: False
-    )
-    monkeypatch.setattr(
-        "gremlins.executor.review_address.has_dirty_worktree", lambda: False
-    )
-
-    with pytest.raises(SystemExit):
-        review_main(["--dir", str(tmp_path)], client=FakeClaudeClient(fixtures={}))
-
-    assert (
-        "nothing to review: HEAD~1..HEAD has no changes and working tree is clean"
-        in capsys.readouterr().err
-    )
-
-
-def test_review_main_allows_dirty_worktree_without_commit_diff(tmp_path, monkeypatch):
-    _common_patches(monkeypatch)
-    monkeypatch.setattr("gremlins.executor.review_address.in_git_repo", lambda: True)
-    monkeypatch.setattr("gremlins.executor.review_address.rev_exists", lambda rev: True)
-    monkeypatch.setattr(
-        "gremlins.executor.review_address.has_diff", lambda base, head: False
-    )
-    monkeypatch.setattr(
-        "gremlins.executor.review_address.has_dirty_worktree", lambda: True
-    )
-
-    client = _ReviewCreatingClient(
-        fixtures={lbl: MINIMAL_EVENTS for lbl in _REVIEW_LABELS}
-    )
-
-    result = review_main(["--dir", str(tmp_path)], client=client)
-
-    assert result == 0
-    assert {call.label for call in client.calls} == _REVIEW_LABELS
-
-
-# ---------------------------------------------------------------------------
-# address_main smoke test
-# ---------------------------------------------------------------------------
-
-
-def test_address_main_calls_client(tmp_path, monkeypatch):
-    (tmp_path / "review-code-sonnet.md").write_text(
-        "# Detail Review\n\n## Findings\nNone.\n"
-    )
-
-    _common_patches(monkeypatch)
-    monkeypatch.setattr("gremlins.executor.review_address.in_git_repo", lambda: False)
-
-    client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
-
-    result = address_main(["--dir", str(tmp_path)], client=client)
-    assert result == 0
-    assert len(client.calls) == 1
-    assert client.calls[0].label == "address-code"
-    assert client.calls[0].model == "sonnet"
 
 
 def test_local_main_client_specifier_model(tmp_path, monkeypatch):

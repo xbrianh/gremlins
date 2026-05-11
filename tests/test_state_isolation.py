@@ -39,8 +39,6 @@ from conftest import ReviewCreatingClient as _ReviewCreatingClient
 from conftest import common_local_patches as _common_patches
 
 import gremlins.executor.state as state_mod
-from gremlins.cli.review_address import address_main, review_main
-from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.run import run_pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
 
@@ -168,41 +166,6 @@ def test_local_main_does_not_clobber_external_state(tmp_path, monkeypatch):
         )
         == 0
     )
-    _assert_no_state_clobber(parent_state_file, original_content, parent_mtime)
-
-
-def test_review_main_does_not_clobber_external_state(tmp_path, monkeypatch):
-    parent_state_file, original_content, parent_mtime = _stage_parent_state(
-        tmp_path, monkeypatch
-    )
-
-    review_dir = tmp_path / "review-dir"
-    review_dir.mkdir()
-    monkeypatch.chdir(review_dir)
-    _common_patches(monkeypatch)
-    monkeypatch.setattr("gremlins.executor.review_address.in_git_repo", lambda: False)
-    client = _ReviewCreatingClient(
-        fixtures={lbl: MINIMAL_EVENTS for lbl in _REVIEW_LABELS}
-    )
-    assert review_main(["--dir", str(review_dir)], client=client) == 0
-    _assert_no_state_clobber(parent_state_file, original_content, parent_mtime)
-
-
-def test_address_main_does_not_clobber_external_state(tmp_path, monkeypatch):
-    parent_state_file, original_content, parent_mtime = _stage_parent_state(
-        tmp_path, monkeypatch
-    )
-
-    address_dir = tmp_path / "address-dir"
-    address_dir.mkdir()
-    (address_dir / "review-code-sonnet.md").write_text(
-        "# Review\n\n## Findings\nNone.\n"
-    )
-    monkeypatch.chdir(address_dir)
-    _common_patches(monkeypatch)
-    monkeypatch.setattr("gremlins.executor.review_address.in_git_repo", lambda: False)
-    client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
-    assert address_main(["--dir", str(address_dir)], client=client) == 0
     _assert_no_state_clobber(parent_state_file, original_content, parent_mtime)
 
 
