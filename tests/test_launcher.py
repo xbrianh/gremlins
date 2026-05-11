@@ -22,7 +22,7 @@ import platformdirs
 import pytest
 from fixtures.shell_env import install_fake_bin
 
-import gremlins.git as git_mod
+import gremlins.utils.git as git_mod
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 FIXTURES_DIR = pathlib.Path(__file__).resolve().parent / "fixtures"
@@ -729,7 +729,7 @@ def test_write_terminal_state_preserves_worktree_for_gh(lenv, monkeypatch, tmp_p
     """On success, worktree is NOT removed for gh-mode pipelines (only explicit close/land removes it)."""
     removed = []
     monkeypatch.setattr(
-        "gremlins.git.remove_worktree", lambda root, wd: removed.append(wd)
+        "gremlins.utils.git.remove_worktree", lambda root, wd: removed.append(wd)
     )
 
     launcher = _launcher()
@@ -752,7 +752,7 @@ def test_write_terminal_state_preserves_worktree_for_local(lenv, monkeypatch, tm
     """On success, worktree is NOT removed for local-mode pipelines."""
     removed = []
     monkeypatch.setattr(
-        "gremlins.git.remove_worktree", lambda root, wd: removed.append(wd)
+        "gremlins.utils.git.remove_worktree", lambda root, wd: removed.append(wd)
     )
 
     launcher = _launcher()
@@ -776,7 +776,7 @@ def test_write_terminal_state_preserves_worktree_for_boss(lenv, monkeypatch, tmp
     """On success, worktree is NOT removed for boss-mode pipelines."""
     removed = []
     monkeypatch.setattr(
-        "gremlins.git.remove_worktree", lambda root, wd: removed.append(wd)
+        "gremlins.utils.git.remove_worktree", lambda root, wd: removed.append(wd)
     )
 
     launcher = _launcher()

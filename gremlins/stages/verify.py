@@ -7,11 +7,11 @@ import pathlib
 import subprocess
 from typing import Any
 
-from gremlins import git as _git_mod
 from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.loop import LoopExhausted, LoopStage, RunCmdFailed
 from gremlins.stages.registry import register_stage
 from gremlins.state import check_bail
+from gremlins.utils import git as _git_mod
 
 logger = logging.getLogger(__name__)
 

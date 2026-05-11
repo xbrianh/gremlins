@@ -8,15 +8,15 @@ import os
 import pathlib
 from typing import Any
 
-from gremlins.git import (
+from gremlins.stages.base import RuntimeState, Stage
+from gremlins.stages.registry import register_stage
+from gremlins.state import patch_state, pipeline_uses_gh, resolve_state_file
+from gremlins.utils.git import (
     DivergentHead,
     EmptyImpl,
     classify_impl_outcome,
     record_pre_impl_state,
 )
-from gremlins.stages.base import RuntimeState, Stage
-from gremlins.stages.registry import register_stage
-from gremlins.state import patch_state, pipeline_uses_gh, resolve_state_file
 from gremlins.utils.yaml import load_bundled_prompt
 
 logger = logging.getLogger(__name__)

@@ -18,9 +18,9 @@ import sys
 import time
 from typing import Any, cast
 
-from gremlins import git as _git_mod
 from gremlins import paths as _paths
 from gremlins.fleet.state import liveness_of_state_file
+from gremlins.utils import git as _git_mod
 
 
 def main(argv: list[str]) -> int:
