@@ -14,7 +14,6 @@ from gremlins.clients.client import PACKAGE_DEFAULT, Client
 from gremlins.executor.state import State, resolve_state_file
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.loader import STAGE_TYPES
-from gremlins.runner import run_stages
 from gremlins.stages.base import Stage
 from gremlins.utils.git import in_git_repo
 
@@ -49,6 +48,17 @@ def _expand_stage_entries(raw_stages: list[Stage]) -> list[Stage]:
         result.append(entry)
 
     return result
+
+
+def _run_stages(
+    stages: list[tuple[str, Callable[[], None]]], *, resume_from: str | None = None
+) -> None:
+    start_idx = 0
+    if resume_from is not None:
+        names = [name for name, _ in stages]
+        start_idx = names.index(resume_from)
+    for _, fn in stages[start_idx:]:
+        fn()
 
 
 class Pipeline:
@@ -133,4 +143,4 @@ class Pipeline:
 
     def run(self) -> None:
         built = self._collect_stages(self.pipeline_data.stages)
-        run_stages(built, resume_from=self.args.resume_from)
+        _run_stages(built, resume_from=self.args.resume_from)
