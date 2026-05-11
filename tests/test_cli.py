@@ -459,7 +459,9 @@ def test_launch_list_prints_pipeline_names(tmp_path, monkeypatch, capsys):
         ("local", tmp_path / "local.yaml"),
         ("gh", tmp_path / "gh.yaml"),
     ]
-    monkeypatch.setattr("gremlins.cli.launch.list_pipelines", lambda root: fake_pipelines)
+    monkeypatch.setattr(
+        "gremlins.cli.launch.list_pipelines", lambda root: fake_pipelines
+    )
 
     from gremlins.pipeline import Pipeline
 
@@ -478,7 +480,9 @@ def test_launch_list_prints_pipeline_names(tmp_path, monkeypatch, capsys):
 
 def test_launch_list_shows_unloadable_on_exception(tmp_path, monkeypatch, capsys):
     fake_pipelines = [("broken", tmp_path / "broken.yaml")]
-    monkeypatch.setattr("gremlins.cli.launch.list_pipelines", lambda root: fake_pipelines)
+    monkeypatch.setattr(
+        "gremlins.cli.launch.list_pipelines", lambda root: fake_pipelines
+    )
 
     def _raise(_path):
         raise ValueError("bad yaml")
