@@ -139,7 +139,9 @@ def run_pipeline(
         die("git not found on PATH")
 
     if not in_git_repo():
-        die(f"gremlins requires a git repository; {pathlib.Path.cwd()} is not inside a git worktree")
+        die(
+            f"gremlins requires a git repository; {pathlib.Path.cwd()} is not inside a git worktree"
+        )
 
     try:
         pipeline = _Pipeline.from_yaml(pipeline_path)
