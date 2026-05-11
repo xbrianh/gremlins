@@ -172,5 +172,3 @@ class ReviewCode(Stage):
             raw_path=state.session_dir / "stream-ghreview.jsonl",
         )
         state.check_bail("/ghreview")
-
-

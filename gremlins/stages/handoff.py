@@ -557,5 +557,3 @@ class Handoff(Stage):
             except (IndexError, ValueError):
                 pass
         return 1 + max(indices, default=0)
-
-

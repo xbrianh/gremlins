@@ -231,5 +231,3 @@ class Implement(Stage):
             raise RuntimeError(
                 f"implement diverged from pre-impl HEAD {pre.head[:7]}; expected a fast-forward"
             )
-
-

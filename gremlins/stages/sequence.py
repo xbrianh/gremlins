@@ -62,5 +62,3 @@ class SequenceStage(Stage):
                     state, client=state.get_client(child_spec)
                 )
                 child_state.make_runner(child, scope=self.body)()
-
-

@@ -295,5 +295,3 @@ def _fetch_issue_body(issue_num: str, repo: str) -> str:
         sys.stderr.flush()
         sys.exit(1)
     return body
-
-

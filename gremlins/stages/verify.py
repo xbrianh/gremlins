@@ -127,5 +127,3 @@ class Verify(Stage):
             loop.run(state)
         except LoopExhausted:
             raise RuntimeError(f"verify stage exhausted {max_attempts} attempts")
-
-

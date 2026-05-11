@@ -399,5 +399,3 @@ def _parallel_stages(
         (group_name, _parallel),
         (fanin_name, _fan_in),
     ]
-
-

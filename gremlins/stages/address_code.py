@@ -148,5 +148,3 @@ class AddressCode(Stage):
             raw_path=state.session_dir / "stream-ghaddress.jsonl",
         )
         state.check_bail("/ghaddress")
-
-

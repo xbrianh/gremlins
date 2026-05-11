@@ -23,5 +23,3 @@ class CommitPR(Stage):
 
     def run(self, state: State) -> None:  # noqa: ARG002  # pragma: no cover
         raise NotImplementedError
-
-

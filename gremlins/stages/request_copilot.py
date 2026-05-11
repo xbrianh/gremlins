@@ -58,5 +58,3 @@ class RequestCopilot(Stage):
                 f"could not request Copilot review (is it enabled in repo settings?): "
                 f"exit {r.returncode}: {detail}"
             )
-
-

@@ -182,5 +182,3 @@ def _bail_already_set(gr_id: str | None, child_key: str | None) -> bool:
         return bool(data.get("bail_class"))
     except Exception:
         return False
-
-

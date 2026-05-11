@@ -38,5 +38,3 @@ class RunCmd(Stage):
             log_path = state.session_dir / "run-cmd.log"
             log_path.write_text(output, encoding="utf-8")
             raise RunCmdFailed(output)
-
-

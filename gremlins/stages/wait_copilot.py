@@ -66,5 +66,3 @@ class WaitCopilot(Stage):
             if time.time() >= deadline:
                 raise RuntimeError(f"Copilot review timed out after {self.timeout}s")
             time.sleep(self.interval)
-
-

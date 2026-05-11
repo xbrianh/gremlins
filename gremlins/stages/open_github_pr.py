@@ -128,5 +128,3 @@ class OpenGitHubPR(Stage):
         state.append_artifact({"type": "pr", "url": pr_url, "branch": branch})
         logger.info("PR: %s", pr_url)
         return pr_url
-
-

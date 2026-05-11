@@ -256,5 +256,3 @@ class WaitCI(Stage):
                     f"ci-gate failed: {exc}"[:200],
                 )
             raise
-
-
