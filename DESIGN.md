@@ -23,7 +23,7 @@ Each stage is one of two kinds:
 
 - **Deterministic stages** are plain Python. They run shell commands, talk to
   `gh`, manage worktrees, parse JSON, wait on CI. They do not invoke a model.
-  Examples: `verify`, `request-copilot`, `wait-copilot`, `wait-ci`.
+  Examples: `verify`, `request-copilot`, `github-wait-copilot`, `github-wait-ci`.
 - **Agentic stages** invoke `claude -p` via an injected `ClaudeClient`. They
   receive a prompt assembled from pipeline-declared prompt files, run to
   completion, and produce an artifact on disk (a markdown file, a commit, a
@@ -504,7 +504,7 @@ this design.
 1. **Too few stage edges benefited.** The strongest candidate edge was
    `review-code → address-code`, where address could plausibly reuse
    review's reads and findings. Most other edges either do not run
-   back-to-back (`verify`, `wait-copilot`, `wait-ci`, CI gates) or do
+   back-to-back (`verify`, `github-wait-copilot`, `github-wait-ci`, CI gates) or do
    not preserve enough useful context to matter (`implement → review-code`
    rereads a tree that implement just changed).
 
