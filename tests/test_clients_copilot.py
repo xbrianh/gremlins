@@ -110,7 +110,7 @@ def test_copilot_client_sends_prompt_via_argv(tmp_path, monkeypatch):
     assert argv[p_idx + 1] == "the prompt"
 
 
-def test_copilot_client_passes_allow_all_tools_flag(tmp_path, monkeypatch):
+def test_copilot_client_passes_allow_all_flag(tmp_path, monkeypatch):
     bin_dir = tmp_path / "bin"
     _install_stub(bin_dir, _STUB_COPILOT_SRC)
     argv_out = tmp_path / "argv.json"
@@ -119,11 +119,14 @@ def test_copilot_client_passes_allow_all_tools_flag(tmp_path, monkeypatch):
     monkeypatch.setenv("STUB_ARGV_OUT", str(argv_out))
 
     client = SubprocessCopilotClient()
-    client.run("prompt", label="test")
+    client.run("the-prompt", label="test")
 
     argv = json.loads(argv_out.read_text(encoding="utf-8"))
-    assert "--allow-all-tools" in argv
-    assert "-p" in argv
+    assert "--allow-all" in argv
+    assert "--allow-all-tools" not in argv
+    # prompt must be the last argument
+    assert argv[-1] == "the-prompt"
+    assert argv[-2] == "-p"
 
 
 def test_copilot_client_passes_model_when_specified(tmp_path, monkeypatch):
