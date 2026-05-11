@@ -404,7 +404,7 @@ def setup_workdir(
         stage_gremlins_overlay(project_root, state_dir)
         return workdir, branch, "", "worktree-branch"
 
-    if setup_kind != "worktree":
+    if setup_kind not in ("worktree", "worktree-detached", "local"):
         raise ValueError(f"unknown setup_kind: {setup_kind!r}")
 
     workdir = setup_detached_worktree(project_root, base_ref_sha or "HEAD")
