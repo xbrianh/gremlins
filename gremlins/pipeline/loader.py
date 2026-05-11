@@ -15,8 +15,8 @@ from gremlins.stages.plan import Plan
 from gremlins.stages.review_code import ReviewCode
 from gremlins.stages.run_cmd import RunCmd
 from gremlins.stages.sequence import SequenceStage
-from gremlins.stages.verify import Verify
 from gremlins.stages.github_wait_ci import GitHubWaitCI
+from gremlins.stages.verify import Verify
 from gremlins.stages.wait_copilot import WaitCopilot
 
 STAGE_TYPES: dict[str, type[Stage]] = {
