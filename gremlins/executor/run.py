@@ -131,7 +131,9 @@ def run_pipeline(
 
     session_dir = resolve_session_dir(gr_id)
 
-    _signal_clients = [client] if client is not None else _unique_clients(list(pipeline.stages))
+    _signal_clients = (
+        [client] if client is not None else _unique_clients(list(pipeline.stages))
+    )
 
     plan_file = session_dir / "plan.md"
 
@@ -207,7 +209,7 @@ def run_pipeline(
     pipe.run()
 
     total_cost = 0.0
-    for c in ([client] if client else _unique_clients(list(pipeline.stages))):
+    for c in [client] if client else _unique_clients(list(pipeline.stages)):
         total_cost += getattr(c, "total_cost_usd", 0.0) or 0.0
     if total_cost > 0:
         patch_state(gr_id, total_cost_usd=total_cost)

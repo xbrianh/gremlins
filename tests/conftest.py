@@ -1,4 +1,3 @@
-import dataclasses
 import json
 import logging
 import os
@@ -67,7 +66,6 @@ def common_local_patches(monkeypatch):
     monkeypatch.setattr(
         "gremlins.executor.run.install_signal_handlers", lambda *c: None
     )
-
 
 
 @pytest.fixture(autouse=True)
