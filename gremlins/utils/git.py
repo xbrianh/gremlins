@@ -339,19 +339,12 @@ def git_detach_to_branch(
 
 
 def setup_detached_worktree(project_root: str, base_ref: str) -> str:
-    """Add a detached worktree at base_ref. Returns the worktree path.
-
-    Raises RuntimeError on failure.
-    """
+    """Add a detached worktree at base_ref. Returns the worktree path."""
     workdir = tempfile.mkdtemp(prefix="aibg-gremlin.")
     os.rmdir(workdir)
-    r = proc.run(
-        ["git", "worktree", "add", "--detach", workdir, base_ref], cwd=project_root
+    _run_git(
+        ["worktree", "add", "--detach", workdir, base_ref], cwd=project_root
     )
-    if r.returncode != 0:
-        raise RuntimeError(
-            f"git worktree add --detach {base_ref!r} failed: {r.stderr.strip()}"
-        )
     return workdir
 
 
@@ -391,12 +384,10 @@ def setup_named_worktree(
     workdir = tempfile.mkdtemp(prefix="aibg-localgremlin.")
     os.rmdir(workdir)
     branch = f"bg/local/{gr_id}"
-    r = proc.run(
-        ["git", "worktree", "add", "-b", branch, workdir, base_ref_sha or "HEAD"],
+    _run_git(
+        ["worktree", "add", "-b", branch, workdir, base_ref_sha or "HEAD"],
         cwd=project_root,
     )
-    if r.returncode != 0:
-        raise RuntimeError(f"git worktree add -b {branch!r} failed: {r.stderr.strip()}")
     return workdir, branch
 
 
@@ -407,7 +398,6 @@ def setup_workdir(
     gr_id: str,
     state_dir: os.PathLike[str],
 ) -> tuple[str, str, str, str]:
-    """Return (workdir, branch, worktree_base, setup_kind)."""
     if not in_git_repo(cwd=project_root):
         return setup_copy(project_root), "", "", "copy"
 
@@ -415,6 +405,9 @@ def setup_workdir(
         workdir, branch = setup_named_worktree(project_root, gr_id, base_ref_sha)
         stage_gremlins_overlay(project_root, state_dir)
         return workdir, branch, "", "worktree-branch"
+
+    if setup_kind != "worktree":
+        raise ValueError(f"unknown setup_kind: {setup_kind!r}")
 
     workdir = setup_detached_worktree(project_root, base_ref_sha or "HEAD")
     stage_gremlins_overlay(project_root, state_dir)
