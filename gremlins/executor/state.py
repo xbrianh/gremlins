@@ -444,7 +444,7 @@ class State:
                 else resolve_state_file(gr_id)
             )
             sd = _read_state_json(sf)
-            state = dataclasses.replace(
+            state: State = dataclasses.replace(
                 base_state,
                 current_scope=scope_list,
                 attempt=attempt,

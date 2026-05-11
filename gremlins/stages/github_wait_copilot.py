@@ -18,7 +18,7 @@ class GitHubWaitCopilot(Stage):
     type = "github-wait-copilot"
 
     @classmethod
-    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> GitHubWaitCopilot:
+    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> GitHubWaitCopilot:  # noqa: ARG002
         from gremlins.pipeline.loader import get_client_from_dict
 
         stage = cls(d["name"], None, d.get("prompt") or [], d.get("options") or {})
