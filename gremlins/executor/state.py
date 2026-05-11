@@ -314,7 +314,8 @@ def check_bail(
         if child_key is None:
             attempt = data.get("attempt") or ""
         else:
-            attempt = (data.get("parallel_attempts") or {}).get(child_key) or ""
+            pa: dict[str, Any] = data.get("parallel_attempts") or {}
+            attempt: str = pa.get(child_key) or ""
         if attempt and (sf.parent / f"bail_{attempt}.json").exists():
             raise RuntimeError(f"{label} bailed (see bail_{attempt}.json)")
     except RuntimeError:

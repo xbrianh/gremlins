@@ -15,7 +15,6 @@ from typing import Any, cast
 
 from gremlins.executor.state import (
     State,
-    _patch_parallel_attempt,
     patch_parallel_worktrees,
     patch_state,
     resolve_state_file,
