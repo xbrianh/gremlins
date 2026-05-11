@@ -458,7 +458,7 @@ class State:
         return read_state_str(self.state_file, field)
 
     def set_stage(self, stage: str, sub_stage: object = None) -> None:
-        if self.parent_stage and sub_stage is None:
+        if self.parent_stage:
             set_stage(self.gr_id, self.parent_stage, sub_stage=stage)
         else:
             set_stage(self.gr_id, stage, sub_stage)

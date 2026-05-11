@@ -757,3 +757,22 @@ def test_parallel_child_set_stage_writes_parent_as_stage(tmp_path, state_root):
     ]
     # Should not raise — this is what gremlins resume does.
     run_stages(pipeline_stages, resume_from=data["stage"])
+
+
+def test_parallel_child_set_stage_with_sub_stage_payload_writes_parent_as_stage(tmp_path, state_root):
+    gr_id = "gr-parent-stage-pin-sub"
+    sf = _make_state(state_root, gr_id)
+
+    state = State(
+        client=FakeClaudeClient(),
+        session_dir=tmp_path,
+        gr_id=gr_id,
+        parent_stage="reviews",
+    )
+
+    # Simulate a stage that calls set_stage with a dict sub_stage (e.g. review_code.py).
+    state.set_stage("ghreview", {"model": "claude-opus"})
+
+    data = _read_state(sf)
+    assert data["stage"] == "reviews"
+    assert data["sub_stage"] == "ghreview"
