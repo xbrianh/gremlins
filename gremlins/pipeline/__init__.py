@@ -29,6 +29,21 @@ class Pipeline:
     default_client: Client | None = None
     base_ref: str = "current"
 
+    def uses_loop_handoff(self) -> bool:
+        first = self.stages[0] if self.stages else None
+        return (
+            first is not None
+            and first.type == "loop"
+            and any(b.type == "handoff" for b in (first.body or []))
+        )
+
+    def setup_kind(self) -> str:
+        from gremlins.executor.state import pipeline_uses_gh
+
+        if pipeline_uses_gh(self) or self.uses_loop_handoff():
+            return "worktree-detached"
+        return "worktree-branch"
+
     @classmethod
     def from_yaml(cls, path: pathlib.Path) -> Pipeline:
         importlib.import_module("gremlins.clients")
