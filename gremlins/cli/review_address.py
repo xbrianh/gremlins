@@ -15,9 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 def _parse_review_args(argv: list[str]) -> argparse.Namespace:
-    usage = (
-        "usage: gremlins review [--dir <path>] [--plan <path>] [-b <detail-model>]"
-    )
+    usage = "usage: gremlins review [--dir <path>] [--plan <path>] [-b <detail-model>]"
     parser = argparse.ArgumentParser(add_help=False, usage=usage)
     parser.add_argument("--dir", dest="dir", default=".")
     parser.add_argument("--plan", dest="plan", default=None)
