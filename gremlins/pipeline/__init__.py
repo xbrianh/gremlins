@@ -38,7 +38,7 @@ class Pipeline:
         )
 
     def setup_kind(self) -> str:
-        from gremlins.launcher import pipeline_uses_gh
+        from gremlins.executor.state import pipeline_uses_gh
 
         if pipeline_uses_gh(self) or self.uses_loop_handoff():
             return "worktree-detached"
