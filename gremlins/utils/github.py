@@ -1,9 +1,3 @@
-"""GitHub CLI helpers used by the gh orchestrator and gh stages.
-
-All functions that call ``gh`` or parse stream-json events for GitHub URLs
-live here so the stage modules stay focused on orchestration.
-"""
-
 from __future__ import annotations
 
 import json

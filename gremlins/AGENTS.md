@@ -13,7 +13,7 @@ review / address pipelines, the fleet manager
 - `runner.py` — `run_stages` sequencer (with `resume_from`) + SIGINT/SIGTERM handlers that reap `claude -p` children.
 - `state.py` — session-dir resolution, `set_stage` / `emit_bail` / `patch_state` / `check_bail`.
 - `git.py` — `in_git_repo`, `git_head`, branch / worktree helpers.
-- `gh_utils.py` — `gh` CLI wrappers and stream-json URL extractors used by the gh orchestrator.
+- `utils/github.py` — `gh` CLI wrappers and stream-json URL extractors used by the gh orchestrator.
 - `fleet/` — fleet manager package: status listing + `stop` / `rescue` / `land` / `close` / `rm` / `log` ops. See [`fleet/AGENTS.md`](fleet/AGENTS.md) for the per-module breakdown.
 - `clients/protocol.py` — `ClaudeClient` Protocol + `CompletedRun` dataclass.
 - `clients/stream.py` — `stream_events` + `_emit_event` (stream-json parser and stderr renderer).

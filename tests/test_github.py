@@ -1,12 +1,10 @@
-"""Tests for gremlins.gh_utils."""
-
 import json
 import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from gremlins.gh_utils import (
+from gremlins.utils.github import (
     GET_PR_CI_STATUS_TIMEOUT,
     get_pr_ci_status,
 )
