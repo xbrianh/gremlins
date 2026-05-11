@@ -56,7 +56,6 @@ def _pipeline_setup_kind(pipeline: Pipeline) -> str:
     return "worktree-branch"
 
 
-
 def _resolve_description_and_slug(
     instructions: str | None,
     plan: str | None,
