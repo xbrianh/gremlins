@@ -18,7 +18,6 @@ import secrets
 import shutil
 import subprocess
 import sys
-import tempfile
 from typing import Any, cast
 
 from gremlins import paths as _paths
@@ -85,48 +84,6 @@ def _resolve_description_and_slug(
 
     return "", False, "gremlin"
 
-
-def _stage_gremlins_overlay(project_root: str, state_dir: pathlib.Path) -> None:
-    src = pathlib.Path(project_root) / ".gremlins"
-    if src.is_dir():
-        shutil.copytree(src, state_dir / ".gremlins", dirs_exist_ok=True)
-
-
-def _setup_workdir(
-    setup_kind: str,
-    project_root: str,
-    base_ref_sha: str,
-    gr_id: str,
-    state_dir: pathlib.Path,
-) -> tuple[str, str, str, str]:
-    """Return (workdir, branch, worktree_base, setup_kind)."""
-    if not _git_mod.in_git_repo(cwd=project_root):
-        return _git_mod.setup_copy(project_root), "", "", "copy"
-
-    if setup_kind == "worktree-branch":
-        workdir, branch = _setup_named_worktree(project_root, gr_id, base_ref_sha)
-        _stage_gremlins_overlay(project_root, state_dir)
-        return workdir, branch, "", "worktree-branch"
-
-    # worktree-detached (gh, boss)
-    workdir = _git_mod.setup_detached_worktree(project_root, base_ref_sha or "HEAD")
-    _stage_gremlins_overlay(project_root, state_dir)
-    return workdir, "", base_ref_sha, "worktree"
-
-
-def _setup_named_worktree(
-    project_root: str, gr_id: str, base_ref_sha: str
-) -> tuple[str, str]:
-    workdir = tempfile.mkdtemp(prefix="aibg-localgremlin.")
-    os.rmdir(workdir)
-    branch = f"bg/local/{gr_id}"
-    r = proc.run(
-        ["git", "worktree", "add", "-b", branch, workdir, base_ref_sha or "HEAD"],
-        cwd=project_root,
-    )
-    if r.returncode != 0:
-        raise RuntimeError(f"git worktree add -b {branch!r} failed: {r.stderr.strip()}")
-    return workdir, branch
 
 
 def _build_spawn_env(gr_id: str) -> dict[str, str]:
@@ -316,7 +273,7 @@ def launch(
             if _loaded_pipeline is not None
             else "worktree-branch"
         )
-        workdir, branch, worktree_base, setup_kind = _setup_workdir(
+        workdir, branch, worktree_base, setup_kind = _git_mod.setup_workdir(
             _setup_kind_arg, project_root, base_ref_sha, gr_id, state_dir
         )
 

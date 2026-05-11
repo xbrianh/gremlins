@@ -886,16 +886,14 @@ def test_launch_gh_plan_issue_ref_not_snapshotted(lenv_with_gh):
 
 def test_launch_passes_base_ref_to_worktree_setup(lenv, monkeypatch):
     """launch(base_ref=<sha>) passes the sha to the worktree setup and persists it."""
-    import gremlins.launcher as _launcher_mod
-
     captured = {}
-    real_setup = _launcher_mod._setup_named_worktree
+    real_setup = git_mod.setup_named_worktree
 
     def fake_setup(project_root, gr_id, base_ref_sha):
         captured["base_ref_sha"] = base_ref_sha
         return real_setup(project_root, gr_id, base_ref_sha)
 
-    monkeypatch.setattr(_launcher_mod, "_setup_named_worktree", fake_setup)
+    monkeypatch.setattr(git_mod, "setup_named_worktree", fake_setup)
 
     launcher = _launcher()
     # Use the actual HEAD SHA so worktree add succeeds.
@@ -974,9 +972,7 @@ def test_pipeline_survives_worktree_pipeline_rename(lenv, monkeypatch):
 
 
 def test_setup_workdir_overlay_goes_to_state_dir(lenv):
-    """_stage_gremlins_overlay copies .gremlins to state_dir, not the worktree."""
-    from gremlins import launcher
-
+    """stage_gremlins_overlay copies .gremlins to state_dir, not the worktree."""
     overlay_src = lenv.repo / ".gremlins"
     overlay_src.mkdir(parents=True)
     (overlay_src / "custom-local.yaml").write_text(
@@ -987,7 +983,7 @@ def test_setup_workdir_overlay_goes_to_state_dir(lenv):
     state_dir = lenv.state_root / gr_id
     state_dir.mkdir(parents=True)
 
-    workdir, _branch, _wt_base, _kind = launcher._setup_workdir(
+    workdir, _branch, _wt_base, _kind = git_mod.setup_workdir(
         "local", str(lenv.repo), "HEAD", gr_id, state_dir
     )
 

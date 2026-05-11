@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import pathlib
 import shutil
 import tempfile
 
@@ -376,3 +377,45 @@ def remove_worktree(project_root: str, workdir: str) -> None:
         proc.run_quiet(["git", "worktree", "prune"], cwd=project_root)
     except Exception:
         pass
+
+
+def stage_gremlins_overlay(project_root: str, state_dir: os.PathLike[str]) -> None:
+    src = pathlib.Path(project_root) / ".gremlins"
+    if src.is_dir():
+        shutil.copytree(src, pathlib.Path(state_dir) / ".gremlins", dirs_exist_ok=True)
+
+
+def setup_named_worktree(
+    project_root: str, gr_id: str, base_ref_sha: str
+) -> tuple[str, str]:
+    workdir = tempfile.mkdtemp(prefix="aibg-localgremlin.")
+    os.rmdir(workdir)
+    branch = f"bg/local/{gr_id}"
+    r = proc.run(
+        ["git", "worktree", "add", "-b", branch, workdir, base_ref_sha or "HEAD"],
+        cwd=project_root,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"git worktree add -b {branch!r} failed: {r.stderr.strip()}")
+    return workdir, branch
+
+
+def setup_workdir(
+    setup_kind: str,
+    project_root: str,
+    base_ref_sha: str,
+    gr_id: str,
+    state_dir: os.PathLike[str],
+) -> tuple[str, str, str, str]:
+    """Return (workdir, branch, worktree_base, setup_kind)."""
+    if not in_git_repo(cwd=project_root):
+        return setup_copy(project_root), "", "", "copy"
+
+    if setup_kind == "worktree-branch":
+        workdir, branch = setup_named_worktree(project_root, gr_id, base_ref_sha)
+        stage_gremlins_overlay(project_root, state_dir)
+        return workdir, branch, "", "worktree-branch"
+
+    workdir = setup_detached_worktree(project_root, base_ref_sha or "HEAD")
+    stage_gremlins_overlay(project_root, state_dir)
+    return workdir, "", base_ref_sha, "worktree"
