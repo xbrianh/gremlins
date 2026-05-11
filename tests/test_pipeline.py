@@ -299,12 +299,18 @@ def test_needs_gh_true_for_top_level_gh_stage() -> None:
 
 
 def test_needs_gh_true_for_gh_stage_in_loop_body() -> None:
-    loop = LoopStage("boss-loop", body=[_local_stage("plan"), _gh_stage()], max_iterations=3)
+    loop = LoopStage(
+        "boss-loop", body=[_local_stage("plan"), _gh_stage()], max_iterations=3
+    )
     assert _pipeline(loop).needs_gh()
 
 
 def test_needs_gh_false_for_local_stage_in_loop_body() -> None:
-    loop = LoopStage("boss-loop", body=[_local_stage("plan"), _local_stage("implement")], max_iterations=3)
+    loop = LoopStage(
+        "boss-loop",
+        body=[_local_stage("plan"), _local_stage("implement")],
+        max_iterations=3,
+    )
     assert not _pipeline(loop).needs_gh()
 
 
