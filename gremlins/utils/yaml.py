@@ -32,7 +32,7 @@ def load_bundled_prompt(name: str) -> str:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         raise PromptLoadError(f"bundled prompt not found: {name}") from None
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise PromptLoadError(f"could not read bundled prompt {name}: {exc}") from exc
     if not text.strip():
         raise PromptLoadError(f"bundled prompt is empty: {name}")
@@ -43,14 +43,10 @@ def render_bundled_prompt(name: str, **kwargs: Any) -> str:
     text = load_bundled_prompt(name)
     try:
         return text.format(**kwargs)
-    except KeyError as exc:
+    except (KeyError, ValueError) as exc:
         raise PromptLoadError(
-            f"missing placeholder {exc} in bundled prompt {name}"
+            f"render failed for bundled prompt {name}: {exc}"
         ) from exc
-
-
-def load_prompts(texts: list[str]) -> str:
-    return "\n\n".join(texts).rstrip()
 
 
 def dump_yaml_text(data: dict[str, Any]) -> str:

@@ -1,8 +1,8 @@
 # `gremlins/prompts/`
 
-Bundled prompt fragments composed by stages at runtime. Pipeline YAMLs
-list filenames in their `prompt:` field; the stage loads them via
-`load_prompts(paths)` and feeds the concatenated text to the agent.
+Bundled prompt fragments composed by stages at runtime. Stages load
+them via `load_bundled_prompt` / `render_bundled_prompt` from
+`gremlins.utils.yaml` and feed the concatenated text to the agent.
 
 ## Modules
 
