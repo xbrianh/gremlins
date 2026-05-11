@@ -15,33 +15,29 @@ class _TrackingClient(FakeClaudeClient):
         self.reap_calls += 1
 
 
+@pytest.fixture(autouse=True)
+def _restore_signals():
+    old = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+    yield
+    for s, h in old.items():
+        signal.signal(s, h)
+
+
 def test_install_signal_handlers_calls_reap_on_sigint():
     client = _TrackingClient()
-    old_sigint = signal.getsignal(signal.SIGINT)
-    old_sigterm = signal.getsignal(signal.SIGTERM)
-    try:
-        _install_signal_handlers([client])
-        handler = signal.getsignal(signal.SIGINT)
-        with pytest.raises(SystemExit) as exc_info:
-            handler(signal.SIGINT, None)
-        assert exc_info.value.code == 130
-        assert client.reap_calls == 1
-    finally:
-        signal.signal(signal.SIGINT, old_sigint)
-        signal.signal(signal.SIGTERM, old_sigterm)
+    _install_signal_handlers([client])
+    handler = signal.getsignal(signal.SIGINT)
+    with pytest.raises(SystemExit) as exc_info:
+        handler(signal.SIGINT, None)
+    assert exc_info.value.code == 130
+    assert client.reap_calls == 1
 
 
 def test_install_signal_handlers_calls_reap_on_sigterm():
     client = _TrackingClient()
-    old_sigint = signal.getsignal(signal.SIGINT)
-    old_sigterm = signal.getsignal(signal.SIGTERM)
-    try:
-        _install_signal_handlers([client])
-        handler = signal.getsignal(signal.SIGTERM)
-        with pytest.raises(SystemExit) as exc_info:
-            handler(signal.SIGTERM, None)
-        assert exc_info.value.code == 130
-        assert client.reap_calls == 1
-    finally:
-        signal.signal(signal.SIGINT, old_sigint)
-        signal.signal(signal.SIGTERM, old_sigterm)
+    _install_signal_handlers([client])
+    handler = signal.getsignal(signal.SIGTERM)
+    with pytest.raises(SystemExit) as exc_info:
+        handler(signal.SIGTERM, None)
+    assert exc_info.value.code == 130
+    assert client.reap_calls == 1

@@ -39,8 +39,8 @@ def _install_signal_handlers(clients: Sequence[Client]) -> None:
             try:
                 c.reap_all()
             except Exception:
-                pass
-        sys.exit(130)
+                pass  # best-effort; don't let a broken client block shutdown
+        sys.exit(130)  # 128 + SIGINT(2), conventional signal-interrupted exit
 
     signal.signal(signal.SIGINT, handler)
     signal.signal(signal.SIGTERM, handler)
