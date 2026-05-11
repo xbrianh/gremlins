@@ -14,6 +14,8 @@ def prompt_for_assistant_main(argv: list[str]) -> int:
     )
     p.parse_args(argv)
 
-    content = (BUNDLED_PROMPT_DIR / "assistant" / "setup.md").read_text(encoding="utf-8")
+    content = (BUNDLED_PROMPT_DIR / "assistant" / "setup.md").read_text(
+        encoding="utf-8"
+    )
     sys.stdout.write(content)
     return 0
