@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
@@ -39,7 +41,7 @@ def test_package_default():
     assert PACKAGE_DEFAULT.model == "sonnet"
 
 
-def _write(tmp_path, name, body):
+def _write(tmp_path: pathlib.Path, name: str, body: str) -> pathlib.Path:
     path = tmp_path / f"{name}.yaml"
     path.write_text(body)
     return path

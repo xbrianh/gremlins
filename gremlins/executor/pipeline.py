@@ -10,7 +10,7 @@ import shutil
 from collections.abc import Callable
 from typing import Any
 
-from gremlins.clients.client import Client
+from gremlins.clients.client import PACKAGE_DEFAULT, Client
 from gremlins.executor.state import State, resolve_state_file
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.loader import STAGE_TYPES
@@ -115,7 +115,7 @@ class Pipeline:
     ) -> list[tuple[str, Callable[[], None]]]:
         built: list[tuple[str, Callable[[], None]]] = []
         for e in stages:
-            resolved = self.test_client or e.client
+            resolved = self.test_client or e.client or PACKAGE_DEFAULT
             if e.model is None and e.client and e.client.model:
                 e.model = e.client.model
             stage_state = State(
