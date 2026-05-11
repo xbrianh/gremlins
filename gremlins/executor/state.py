@@ -31,7 +31,7 @@ _GH_STAGE_TYPES = frozenset(
     {
         "github-open-pull-request",
         "github-request-copilot-review",
-        "wait-copilot",
+        "github-wait-copilot",
         "github-wait-ci",
     }
 )

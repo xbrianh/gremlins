@@ -15,6 +15,6 @@ stages:
   - { name: open-pr,         type: github-open-pull-request }
   - { name: github-request-copilot-review, type: github-request-copilot-review }
   - { name: ghreview,        type: ghreview,        prompt: [code-style, gremlins:review_gh.md] }
-  - { name: wait-copilot,    type: wait-copilot }
+  - { name: github-wait-copilot, type: github-wait-copilot }
   - { name: ghaddress,       type: ghaddress,       prompt: [code-style, gremlins:address_gh.md, gremlins:bail_section.md] }
   - { name: ci-gate,         type: github-wait-ci,  prompt: [gremlins:ci_fix.md, gremlins:bail_section_fix.md] }

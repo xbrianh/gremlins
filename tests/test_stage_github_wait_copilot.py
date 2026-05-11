@@ -1,4 +1,4 @@
-"""Tests for gremlins.stages.wait_copilot."""
+"""Tests for gremlins.stages.github_wait_copilot."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
-from gremlins.stages.wait_copilot import WaitCopilot
+from gremlins.stages.github_wait_copilot import GitHubWaitCopilot
 
 
 def _make_stage(
@@ -18,9 +18,9 @@ def _make_stage(
     interval: int = 0,
     review_checker=None,
     gr_id=None,
-) -> tuple[WaitCopilot, RuntimeState]:
-    stage = WaitCopilot(
-        "wait-copilot",
+) -> tuple[GitHubWaitCopilot, RuntimeState]:
+    stage = GitHubWaitCopilot(
+        "github-wait-copilot",
         None,
         [],
         {},

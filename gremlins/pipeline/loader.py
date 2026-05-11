@@ -17,7 +17,7 @@ from gremlins.stages.review_code import ReviewCode
 from gremlins.stages.run_cmd import RunCmd
 from gremlins.stages.sequence import SequenceStage
 from gremlins.stages.verify import Verify
-from gremlins.stages.wait_copilot import WaitCopilot
+from gremlins.stages.github_wait_copilot import GitHubWaitCopilot
 
 STAGE_TYPES: dict[str, type[Stage]] = {
     "plan": Plan,
@@ -25,7 +25,7 @@ STAGE_TYPES: dict[str, type[Stage]] = {
     "verify": Verify,
     "github-open-pull-request": GitHubOpenPullRequest,
     "github-request-copilot-review": GitHubRequestCopilotReview,
-    "wait-copilot": WaitCopilot,
+    "github-wait-copilot": GitHubWaitCopilot,
     "github-wait-ci": GitHubWaitCI,
     "review-code": ReviewCode,
     "ghreview": ReviewCode,

@@ -14,11 +14,11 @@ from gremlins.utils.github import check_copilot_review
 logger = logging.getLogger(__name__)
 
 
-class WaitCopilot(Stage):
-    type = "wait-copilot"
+class GitHubWaitCopilot(Stage):
+    type = "github-wait-copilot"
 
     @classmethod
-    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> WaitCopilot:
+    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> GitHubWaitCopilot:
         from gremlins.pipeline.loader import get_client_from_dict
 
         stage = cls(d["name"], None, d.get("prompt") or [], d.get("options") or {})
