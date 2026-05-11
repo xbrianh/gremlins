@@ -11,7 +11,12 @@ from gremlins.utils.github import (
 )
 
 PR_URL = "https://github.com/owner/repo/pull/42"
-ISSUE = {"number": 42, "url": "https://github.com/owner/repo/issues/42", "body": "body", "title": "title"}
+ISSUE = {
+    "number": 42,
+    "url": "https://github.com/owner/repo/issues/42",
+    "body": "body",
+    "title": "title",
+}
 
 
 def test_fetch_issue_non_issue_ref_returns_none():
