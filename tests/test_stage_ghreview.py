@@ -31,7 +31,6 @@ def _make_stage(
         client=client,
         session_dir=tmp_path,
         gr_id=gr_id,
-        is_git=True,
         pipeline_data=_gh_pipeline(),
     )
     return stage, client, state

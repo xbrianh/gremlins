@@ -15,7 +15,7 @@ from gremlins.executor.state import State as RuntimeState
 from gremlins.stages.implement import Implement
 from gremlins.utils.git import DivergentHead, EmptyImpl, HeadAdvanced, PreImplState
 
-_TEMPLATE_LOCAL = "plan: {plan_text}{spec_block}{impl_commit_instr}"
+_TEMPLATE_LOCAL = "plan: {plan_text}{spec_block}"
 _TEMPLATE_GH = "{spec_block}{plan_source_label}{issue_body}{plan_location_note}"
 
 _FAKE_PRE = PreImplState(head="abc123")
@@ -25,7 +25,6 @@ def _make_state(
     tmp_path: pathlib.Path,
     *,
     plan_text: str = "do the thing",
-    is_git: bool = True,
     spec_text: str = "",
     prompts: list[str] | None = None,
     is_gh: bool = False,
@@ -37,7 +36,6 @@ def _make_state(
         client=client,
         session_dir=tmp_path,
         gr_id=None,
-        is_git=is_git,
         pipeline_data=pipeline_data,
     )
     (tmp_path / "plan.md").write_text(plan_text, encoding="utf-8")
@@ -46,39 +44,11 @@ def _make_state(
     return stage, state
 
 
-def test_local_calls_claude(tmp_path: pathlib.Path, monkeypatch) -> None:
-    monkeypatch.chdir(tmp_path)
-    stage, state = _make_state(
-        tmp_path,
-        is_git=False,
-        prompts=[_TEMPLATE_LOCAL],
-    )
-    sentinel = tmp_path / ".pre-impl"
-    sentinel.touch()
-    (tmp_path / "output.txt").write_text("new file")
-    with patch("gremlins.stages.implement.changes_outside_git", return_value=True):
-        stage.run(state)
-    assert len(state.client.calls) == 1
-    assert state.client.calls[0].label == "implement"
-
-
-def test_local_raises_when_no_changes(tmp_path: pathlib.Path, monkeypatch) -> None:
-    monkeypatch.chdir(tmp_path)
-    stage, state = _make_state(
-        tmp_path,
-        is_git=False,
-        prompts=[_TEMPLATE_LOCAL],
-    )
-    with patch("gremlins.stages.implement.changes_outside_git", return_value=False):
-        with pytest.raises(RuntimeError, match="no changes"):
-            stage.run(state)
-
-
 def test_local_git_succeeds_on_head_advanced(
     tmp_path: pathlib.Path, monkeypatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    stage, state = _make_state(tmp_path, is_git=True, prompts=[_TEMPLATE_LOCAL])
+    stage, state = _make_state(tmp_path, prompts=[_TEMPLATE_LOCAL])
     with (
         patch(
             "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
@@ -94,7 +64,7 @@ def test_local_git_succeeds_on_head_advanced(
 
 def test_local_git_raises_on_empty_impl(tmp_path: pathlib.Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
-    stage, state = _make_state(tmp_path, is_git=True, prompts=[_TEMPLATE_LOCAL])
+    stage, state = _make_state(tmp_path, prompts=[_TEMPLATE_LOCAL])
     with (
         patch(
             "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
@@ -175,7 +145,7 @@ def test_local_git_raises_on_divergent_head(
     tmp_path: pathlib.Path, monkeypatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    stage, state = _make_state(tmp_path, is_git=True, prompts=[_TEMPLATE_LOCAL])
+    stage, state = _make_state(tmp_path, prompts=[_TEMPLATE_LOCAL])
     with (
         patch(
             "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE

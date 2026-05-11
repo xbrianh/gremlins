@@ -108,19 +108,11 @@ class AddressCode(Stage):
         return {"text": text, "review_model": review_model}
 
     def results_to_local(self, inputs: dict[str, str], state: State) -> None:
-        address_commit_instr = ""
-        if state.is_git:
-            address_commit_instr = (
-                "After making all fixes, stage the changed files by name and "
-                "create a single git commit titled 'Address review feedback' whose "
-                "body references the review file. Do not push."
-            )
         template = "\n\n".join(self.prompts).rstrip()
         address_prompt = template.format(
             bail_command=self.bail_command(state),
             model=inputs["review_model"],
             text=inputs["text"],
-            address_commit_instr=address_commit_instr,
         )
         self.run_claude(
             address_prompt,

@@ -402,7 +402,6 @@ class State:
     pipeline_data: Pipeline | None = None
     repo: str = ""
     instructions: str = ""
-    is_git: bool = False
     test_client: Client | None = None
     # per-stage optional
     child_key: str | None = None

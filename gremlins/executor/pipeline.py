@@ -15,7 +15,6 @@ from gremlins.executor.state import State, resolve_state_file
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.loader import STAGE_TYPES
 from gremlins.stages.base import Stage
-from gremlins.utils.git import in_git_repo
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +91,6 @@ class Pipeline:
         self.args = args
         self.session_dir = session_dir
         self.gr_id = gr_id
-        self.is_git = in_git_repo()
         self.pipeline_data = pipeline_data
         self.repo = repo
         self.state_file = state_file
@@ -139,7 +137,6 @@ class Pipeline:
                 pipeline_data=self.pipeline_data,
                 repo=self.repo,
                 instructions=self.instructions,
-                is_git=self.is_git,
                 test_client=self.test_client,
             )
             built.append((e.name, stage_state.make_runner(e, scope=stages)))

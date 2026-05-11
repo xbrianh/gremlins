@@ -1,5 +1,6 @@
 import dataclasses
 import json
+import shutil
 
 import pytest
 from conftest import MINIMAL_EVENTS
@@ -34,13 +35,6 @@ def test_local_main_plan_mode(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.executor.run.resolve_session_dir",
         lambda gr_id=None: session_dir,
-    )
-    # tmp_path is not a git repo → is_git=False; monkeypatch for clarity.
-    monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: False)
-
-    # Fake that implement produced changes (FakeClaudeClient won't create files).
-    monkeypatch.setattr(
-        "gremlins.stages.implement.changes_outside_git", lambda s, d: True
     )
     client = _ReviewCreatingClient(
         fixtures={
@@ -143,11 +137,6 @@ def test_local_main_client_specifier_model(tmp_path, monkeypatch):
         "gremlins.executor.run.resolve_session_dir",
         lambda gr_id=None: session_dir,
     )
-    monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: False)
-
-    monkeypatch.setattr(
-        "gremlins.stages.implement.changes_outside_git", lambda s, d: True
-    )
     review_label = "review-code:gpt-4o"
     client = _ReviewCreatingClient(
         fixtures={
@@ -188,12 +177,6 @@ def test_local_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir)
         "gremlins.executor.run.resolve_session_dir",
         lambda gr_id=None: session_dir,
     )
-    monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: False)
-
-    monkeypatch.setattr(
-        "gremlins.stages.implement.changes_outside_git", lambda s, d: True
-    )
-
     client = _ReviewCreatingClient(
         fixtures={
             "implement": MINIMAL_EVENTS,
@@ -234,12 +217,6 @@ def test_local_main_env_file_vars_reach_verify(tmp_path, monkeypatch):
         "gremlins.executor.run.resolve_session_dir",
         lambda gr_id=None: session_dir,
     )
-    monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: False)
-
-    monkeypatch.setattr(
-        "gremlins.stages.implement.changes_outside_git", lambda s, d: True
-    )
-
     client = _ReviewCreatingClient(
         fixtures={
             "implement": MINIMAL_EVENTS,
@@ -275,12 +252,6 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
         "gremlins.executor.run.resolve_session_dir",
         lambda gr_id=None: session_dir,
     )
-    monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: False)
-
-    monkeypatch.setattr(
-        "gremlins.stages.implement.changes_outside_git", lambda s, d: True
-    )
-
     # Override Pipeline.from_yaml to inject default_client: copilot:gpt-5.4 and
     # re-fill stage clients so every stage inherits that model.
     from gremlins.pipeline import _fill_stage_clients
@@ -351,8 +322,6 @@ def test_local_stage_inputs_instructions_reach_plan(
         "gremlins.executor.run.resolve_session_dir",
         lambda gr_id=None: session_dir,
     )
-    monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: False)
-
     received: list[str] = []
 
     from gremlins.stages import plan as _plan_mod
@@ -381,3 +350,24 @@ def test_local_stage_inputs_instructions_reach_plan(
 
     assert result == 0
     assert received == ["instr from state"]
+
+
+def test_startup_fails_in_non_git_dir(tmp_path, monkeypatch, capsys):
+    """gremlins exits with a clear error when cwd is not a git repository."""
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("# Plan\nDo stuff.\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        shutil, "which", lambda n: f"/fake/{n}" if n in ("claude", "git") else None
+    )
+    monkeypatch.setattr(
+        "gremlins.executor.run._install_signal_handlers", lambda c: None
+    )
+    monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: False)
+    with pytest.raises(SystemExit):
+        run_pipeline(
+            _local_pipeline_path(tmp_path),
+            argv=["--plan", str(plan_file)],
+            client=FakeClaudeClient(fixtures={}),
+        )
+    assert "not inside a git worktree" in capsys.readouterr().err

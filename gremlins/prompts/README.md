@@ -15,9 +15,6 @@ escaped as `{{owner}}` in the template source.
 | `{verify_output}` | Captured stdout+stderr of the failed check/test run | `verify.py` | Multi-line |
 | `{failure_output}` | Captured CI check failure logs from the PR | `github_wait_ci.py` | Multi-line |
 | `{commands_section}` | Markdown-formatted list of commands that were run | `verify.py` | Single or multi-line |
-| `{commit_instr}` | Instruction fragment: whether to commit after fixing | `verify.py` | Empty string or a sentence |
-| `{address_commit_instr}` | Instruction fragment: whether to commit after addressing | `address_code.py` | Empty string or a sentence |
-| `{impl_commit_instr}` | Instruction fragment for committing during implementation | `implement.py` (local) | A period (`.`) or a loaded prompt fragment |
 | `{pr_url}` | Full GitHub PR URL | `ghreview.py`, `ghaddress.py` | e.g. `https://github.com/owner/repo/pull/N` |
 | `{issue_body}` | Full text of the GitHub issue body (the plan) | `implement.py` (gh) | Multi-line |
 | `{instructions}` | User-supplied task instructions | `plan.py`, `ghplan.py` | Multi-line |

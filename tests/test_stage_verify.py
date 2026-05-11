@@ -28,8 +28,6 @@ def _make_stage(
     max_attempts: int = 3,
     client: Any = None,
     fix_model: str = "sonnet",
-    is_git: bool = True,
-    commit_after_fix: bool = False,
 ) -> tuple[Verify, RuntimeState]:
     if cmds is None:
         cmds = ["true"]
@@ -38,7 +36,6 @@ def _make_stage(
     options = {
         "cmds": cmds if cmds is not None else [],
         "max_attempts": max_attempts,
-        "commit_after_fix": commit_after_fix,
     }
     stage = Verify(
         "verify", fix_model, [_VERIFY_PROMPT_PATH.read_text(encoding="utf-8")], options
@@ -48,7 +45,6 @@ def _make_stage(
         session_dir=tmp_path,
         gr_id=None,
         worktree=tmp_path,
-        is_git=is_git,
     )
     return stage, state
 
@@ -197,7 +193,7 @@ def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
     client = FakeClaudeClient(
         fixtures={"verify-fix-1": MINIMAL_EVENTS, "verify-fix-2": MINIMAL_EVENTS}
     )
-    options = {"cmds": ["false"], "max_attempts": 3, "commit_after_fix": False}
+    options = {"cmds": ["false"], "max_attempts": 3}
     stage = Verify(
         "verify", "sonnet", [_VERIFY_PROMPT_PATH.read_text(encoding="utf-8")], options
     )
@@ -206,7 +202,6 @@ def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
         session_dir=tmp_path,
         gr_id=gr_id,
         worktree=tmp_path,
-        is_git=True,
         attempt=attempt,
     )
 
@@ -219,28 +214,7 @@ def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
     assert data["class"] == "other"
 
 
-def test_is_git_false_skips_diff(tmp_path):
-    flag = tmp_path / "flag.txt"
-    flag.write_text("fail\n")
-    check_cmd = f"grep -q '^pass$' {flag}"
-
-    captured_prompts = []
-
-    class _FixingClient(FakeClaudeClient):
-        def run(self, prompt, *, label, **kwargs):
-            captured_prompts.append(prompt)
-            flag.write_text("pass\n")
-            return super().run(prompt, label=label, **kwargs)
-
-    client = _FixingClient(fixtures={"verify-fix-1": MINIMAL_EVENTS})
-    stage, state = _make_stage(tmp_path, cmds=[check_cmd], client=client, is_git=False)
-    stage.run(state)
-
-    assert len(state.client.calls) == 1
-    assert "```\n\n```" in captured_prompts[0]
-
-
-def test_commit_after_fix_true_in_prompt(tmp_path):
+def test_commit_instr_in_fix_prompt(tmp_path):
     flag = tmp_path / "flag.txt"
     flag.write_text("fail\n")
     check_cmd = f"grep -q '^pass$' {flag}"
@@ -251,9 +225,7 @@ def test_commit_after_fix_true_in_prompt(tmp_path):
             return super().run(prompt, label=label, **kwargs)
 
     client = _FixingClient(fixtures={"verify-fix-1": MINIMAL_EVENTS})
-    stage, state = _make_stage(
-        tmp_path, cmds=[check_cmd], client=client, commit_after_fix=True
-    )
+    stage, state = _make_stage(tmp_path, cmds=[check_cmd], client=client)
     stage.run(state)
 
     assert len(state.client.calls) == 1
@@ -273,7 +245,7 @@ def test_parallel_child_fix_prompt_uses_new_bail_command(tmp_path):
         _VERIFY_PROMPT_PATH.read_text(encoding="utf-8"),
         _bail_fix_path.read_text(encoding="utf-8"),
     ]
-    options = {"cmds": ["false"], "max_attempts": 2, "commit_after_fix": False}
+    options = {"cmds": ["false"], "max_attempts": 2}
     stage = Verify("verify", "sonnet", prompts, options)
     state = RuntimeState(
         client=client,
@@ -281,7 +253,6 @@ def test_parallel_child_fix_prompt_uses_new_bail_command(tmp_path):
         gr_id="gr-verify",
         child_key="verify-child",
         worktree=tmp_path,
-        is_git=True,
     )
 
     with pytest.raises(RuntimeError, match="exhausted 2 attempts"):

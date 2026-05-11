@@ -25,7 +25,6 @@ def _make_state(
         client=client,
         session_dir=tmp_path,
         gr_id=gr_id,
-        is_git=True,
         pipeline_data=_gh_pipeline(),
     )
 
@@ -90,7 +89,6 @@ def test_ghreview_parallel_child_uses_new_bail_command(
         session_dir=tmp_path,
         gr_id="gr-123",
         child_key="review-child",
-        is_git=True,
         pipeline_data=_gh_pipeline(),
     )
     stage.run(state)
@@ -151,7 +149,6 @@ def test_ghaddress_parallel_child_uses_new_bail_command(
         session_dir=tmp_path,
         gr_id="gr-123",
         child_key="address-child",
-        is_git=True,
         pipeline_data=_gh_pipeline(),
     )
     stage.run(state)
