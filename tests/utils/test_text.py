@@ -4,6 +4,7 @@ from gremlins.utils.text import read_markdown_title, slugify
 
 # slugify
 
+
 def test_slugify_basic():
     assert slugify("Hello World") == "hello-world"
 
@@ -55,6 +56,7 @@ def test_slugify_custom_max_len():
 
 
 # read_markdown_title
+
 
 def test_read_markdown_title_finds_h1(tmp_path: pathlib.Path) -> None:
     f = tmp_path / "doc.md"
