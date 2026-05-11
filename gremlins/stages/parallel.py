@@ -149,6 +149,7 @@ class ParallelStage(Stage):
                 client=state.test_client or child.client,
                 session_dir=child_dir,
                 child_key=child.name,
+                parent_stage=state.parent_stage or self.name,
             )
             child_runners.append(
                 (
@@ -161,7 +162,7 @@ class ParallelStage(Stage):
             child_runners,
             gr_id=gr_id,
             project_root=pathlib.Path.cwd(),
-            set_stage_fn=lambda n: set_stage(gr_id, n),
+            set_stage_fn=lambda n: set_stage(gr_id, self.name, sub_stage=n),
             parent_attempt=state.attempt,
         ):
             fn()
