@@ -20,11 +20,12 @@ import time
 
 import pytest
 
-import gremlins.state as state_mod
+import gremlins.executor.state as state_mod
 from gremlins.clients.fake import FakeClaudeClient
+from gremlins.executor.state import State
 from gremlins.runner import run_stages
-from gremlins.stages.base import RuntimeState
 from gremlins.stages.parallel import ParallelStage
+from gremlins.utils.state_file import locked_update as _state_locked_update
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -163,7 +164,7 @@ def test_patch_state_concurrent_no_lost_updates(state_root):
             sf = state_mod.resolve_state_file(gr_id)
             assert sf is not None
             for _ in range(5):
-                state_mod._locked_update(
+                _state_locked_update(
                     sf,
                     lambda data: data.update({"counter": data.get("counter", 0) + 1}),
                 )
@@ -190,8 +191,8 @@ def test_patch_state_concurrent_no_lost_updates(state_root):
 # ---------------------------------------------------------------------------
 
 
-def _make_simple_ctx(tmp_path: pathlib.Path, child_key: str) -> RuntimeState:
-    return RuntimeState(
+def _make_simple_ctx(tmp_path: pathlib.Path, child_key: str) -> State:
+    return State(
         client=FakeClaudeClient(),
         session_dir=tmp_path / child_key,
         gr_id=None,
@@ -295,19 +296,19 @@ def test_cancel_on_bail_skips_unstarted_children():
     def child_c() -> None:
         ran.append("c")
 
-    ctx_a = RuntimeState(
+    ctx_a = State(
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
         gr_id=None,
         child_key="a",
     )
-    ctx_b = RuntimeState(
+    ctx_b = State(
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
         gr_id=None,
         child_key="b",
     )
-    ctx_c = RuntimeState(
+    ctx_c = State(
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
         gr_id=None,
@@ -426,10 +427,10 @@ def test_worktree_lifecycle_fanout_creates_and_fanin_removes(tmp_path):
     repo.mkdir()
     _init_git_repo(repo)
 
-    ctx_a = RuntimeState(
+    ctx_a = State(
         client=FakeClaudeClient(), session_dir=tmp_path / "a", gr_id=None, child_key="a"
     )
-    ctx_b = RuntimeState(
+    ctx_b = State(
         client=FakeClaudeClient(), session_dir=tmp_path / "b", gr_id=None, child_key="b"
     )
 
@@ -499,8 +500,8 @@ def test_fanout_persists_worktrees_and_fresh_fanin_can_clean_up(tmp_path, state_
     repo.mkdir()
     _init_git_repo(repo)
 
-    def _make_ctx(name: str) -> RuntimeState:
-        return RuntimeState(
+    def _make_ctx(name: str) -> State:
+        return State(
             client=FakeClaudeClient(),
             session_dir=tmp_path / name,
             gr_id=gr_id,
@@ -561,8 +562,8 @@ def test_fanout_resume_tears_down_prior_worktrees(tmp_path, state_root):
     repo.mkdir()
     _init_git_repo(repo)
 
-    def _make_ctx(name: str) -> RuntimeState:
-        return RuntimeState(
+    def _make_ctx(name: str) -> State:
+        return State(
             client=FakeClaudeClient(),
             session_dir=tmp_path / name,
             gr_id=gr_id,
@@ -613,7 +614,7 @@ def test_fanout_resume_tears_down_prior_worktrees(tmp_path, state_root):
 
 
 def test_build_parallel_stages_returns_three_named_stages():
-    ctx = RuntimeState(
+    ctx = State(
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
         gr_id=None,
@@ -635,13 +636,13 @@ def test_build_parallel_stages_returns_three_named_stages():
 
 def test_parallel_all_children_complete_with_defaults():
     ran: list[str] = []
-    ctx_a = RuntimeState(
+    ctx_a = State(
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
         gr_id=None,
         child_key="a",
     )
-    ctx_b = RuntimeState(
+    ctx_b = State(
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
         gr_id=None,

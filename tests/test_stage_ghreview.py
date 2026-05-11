@@ -8,7 +8,7 @@ from conftest import MINIMAL_EVENTS
 from conftest import gh_pipeline as _gh_pipeline
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.stages.base import RuntimeState
+from gremlins.executor.state import State as RuntimeState
 from gremlins.stages.review_code import ReviewCode
 
 PR_URL = "https://github.com/owner/repo/pull/42"

@@ -3,7 +3,7 @@ import pathlib
 
 import pytest
 
-from gremlins.orchestrators.pipeline import Pipeline
+from gremlins.executor.pipeline import Pipeline
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.discovery import resolve_pipeline_name, resolve_pipeline_path
 from gremlins.stages.base import Stage

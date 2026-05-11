@@ -7,9 +7,9 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from gremlins.stages.base import RuntimeState, Stage
+from gremlins.executor.state import State
+from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
-from gremlins.state import check_bail, emit_bail, read_pr_url
 from gremlins.utils.git import head_sha
 from gremlins.utils.github import fetch_check_run_logs, get_pr_ci_status
 
@@ -60,30 +60,21 @@ def _wait_for_checks(
         time.sleep(poll_interval)
 
 
-def _bail_if_review_required(
-    gr_id: str | None, decision: str, child_key: str | None = None
-) -> None:
+def _bail_if_review_required(state: State, decision: str) -> None:
     if decision == "REVIEW_REQUIRED":
-        emit_bail(
-            gr_id,
-            "other",
-            "PR requires human review approval before merge",
-            child_key=child_key,
-        )
+        state.emit_bail("other", "PR requires human review approval before merge")
         raise _ReviewRequiredError("ci-gate: PR blocked by required human review")
 
 
 def _poll_until_done(
-    gr_id: str | None,
+    state: State,
     pr_url: str,
     timeout: int,
     interval: int,
     checks_getter: Callable[[], tuple[list[dict[str, Any]], str]] | None = None,
     required_sha: str = "",
     head_sha_getter: Callable[[], str] | None = None,
-    child_key: str | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
-    """Poll PR checks until all are complete or timeout."""
     deadline = time.time() + timeout
     review_decision = ""
     while True:
@@ -98,7 +89,7 @@ def _poll_until_done(
             review_decision = status["review_decision"]
             current_sha = status["head_sha"]
 
-        _bail_if_review_required(gr_id, review_decision, child_key=child_key)
+        _bail_if_review_required(state, review_decision)
 
         if required_sha and current_sha and current_sha != required_sha:
             if time.time() >= deadline:
@@ -173,16 +164,14 @@ class WaitCI(Stage):
         self.head_sha_getter = head_sha_getter
         self.fix_sha_getter = fix_sha_getter
 
-    def run(self, state: RuntimeState) -> None:
-        pr_url = self.pr_url or read_pr_url(state.gr_id)
+    def run(self, state: State) -> None:
+        pr_url = self.pr_url or state.read_pr_url()
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
         checks, review_decision = _wait_for_checks(
             pr_url, self.checks_getter, self.poll_interval, self.startup_grace_secs
         )
-        _bail_if_review_required(
-            state.gr_id, review_decision, child_key=state.child_key
-        )
+        _bail_if_review_required(state, review_decision)
 
         if not checks:
             logger.info(
@@ -207,14 +196,13 @@ class WaitCI(Stage):
                 )
                 try:
                     final_checks, review_decision = _poll_until_done(
-                        state.gr_id,
+                        state,
                         pr_url,
                         self.poll_timeout,
                         self.poll_interval,
                         self.checks_getter,
                         required_sha=fix_sha,
                         head_sha_getter=self.head_sha_getter,
-                        child_key=state.child_key,
                     )
                 except _ReviewRequiredError:
                     _review_bailed = True
@@ -247,11 +235,7 @@ class WaitCI(Stage):
                     raw_path=state.session_dir / f"stream-ci-fix-{attempt}.jsonl",
                 )
                 _agent_bailed = True
-                check_bail(
-                    state.gr_id,
-                    f"ci-fix-{attempt}",
-                    child_key=state.child_key,
-                )
+                state.check_bail(f"ci-fix-{attempt}")
                 _agent_bailed = False
 
                 fix_sha = (
@@ -261,20 +245,16 @@ class WaitCI(Stage):
                 )
 
             _exhausted = True
-            emit_bail(
-                state.gr_id,
+            state.emit_bail(
                 "other",
                 f"CI failed after {self.max_attempts} attempts",
-                child_key=state.child_key,
             )
             raise RuntimeError(f"ci-gate exhausted {self.max_attempts} attempts")
         except (SystemExit, Exception) as exc:
             if not _exhausted and not _agent_bailed and not _review_bailed:
-                emit_bail(
-                    state.gr_id,
+                state.emit_bail(
                     "other",
                     f"ci-gate failed: {exc}"[:200],
-                    child_key=state.child_key,
                 )
             raise
 

@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
-from gremlins.state import resolve_state_file
+from gremlins.executor.state import resolve_state_file
 
 if TYPE_CHECKING:
     from gremlins.pipeline import Pipeline

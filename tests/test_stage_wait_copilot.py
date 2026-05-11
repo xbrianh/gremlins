@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.stages.base import RuntimeState
+from gremlins.executor.state import State as RuntimeState
 from gremlins.stages.wait_copilot import WaitCopilot
 
 

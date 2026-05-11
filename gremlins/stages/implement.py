@@ -8,9 +8,9 @@ import os
 import pathlib
 from typing import Any
 
-from gremlins.stages.base import RuntimeState, Stage
+from gremlins.executor.state import State, pipeline_uses_gh, resolve_state_file
+from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
-from gremlins.state import patch_state, pipeline_uses_gh, resolve_state_file
 from gremlins.utils.git import (
     DivergentHead,
     EmptyImpl,
@@ -116,7 +116,7 @@ class Implement(Stage):
     ) -> None:
         super().__init__(name, model, prompts, options)
 
-    def run(self, state: RuntimeState) -> None:
+    def run(self, state: State) -> None:
         is_gh = bool(state.pipeline_data and pipeline_uses_gh(state.pipeline_data))
         spec_text = _read_spec(state.session_dir)
         if is_gh:
@@ -124,7 +124,7 @@ class Implement(Stage):
         else:
             self._run_local(state, spec_text)
 
-    def _run_local(self, state: RuntimeState, spec_text: str) -> None:
+    def _run_local(self, state: State, spec_text: str) -> None:
         cwd_arg = str(state.worktree) if state.worktree is not None else None
         pre = None
         pre_sentinel: pathlib.Path | None = None
@@ -171,7 +171,7 @@ class Implement(Stage):
             if not changes_outside_git(pre_sentinel, state.session_dir):
                 raise RuntimeError("implementation stage produced no changes; aborting")
 
-    def _run_gh(self, state: RuntimeState, spec_text: str) -> None:
+    def _run_gh(self, state: State, spec_text: str) -> None:
         state_file = resolve_state_file(state.gr_id)
         issue_num = ""
         if state_file and state_file.exists():
@@ -203,7 +203,7 @@ class Implement(Stage):
             encoding="utf-8",
         )
         if state.gr_id:
-            patch_state(state.gr_id, impl_pre_head=pre.head)
+            state.patch(impl_pre_head=pre.head)
 
         plan_text = (state.session_dir / "plan.md").read_text(encoding="utf-8")
         template = "\n\n".join(self.prompts).rstrip()

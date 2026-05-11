@@ -7,15 +7,9 @@ import pathlib
 from typing import Any
 
 from gremlins.clients.client import Client
-from gremlins.stages.base import RuntimeState, Stage
+from gremlins.executor.state import State, pipeline_uses_gh
+from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
-from gremlins.state import (
-    check_bail,
-    emit_bail,
-    pipeline_uses_gh,
-    read_pr_url,
-    set_stage,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -87,13 +81,13 @@ class ReviewCode(Stage):
         super().__init__(name, model, prompts, options)
         self.pr_url = pr_url
 
-    def run(self, state: RuntimeState) -> Any:
+    def run(self, state: State) -> Any:
         is_gh = bool(state.pipeline_data and pipeline_uses_gh(state.pipeline_data))
         if is_gh:
             return self.results_to_github(state)
         return self.results_to_local(state)
 
-    def results_to_local(self, state: RuntimeState) -> pathlib.Path:
+    def results_to_local(self, state: State) -> pathlib.Path:
         model = self.model or state.client.model
         if not model:
             raise ValueError(f"stage {self.name!r}: model must be set")
@@ -135,7 +129,7 @@ class ReviewCode(Stage):
             code_context = code_scope
 
         try:
-            set_stage(state.gr_id, self.name, {"model": f"running ({model})"})
+            state.set_stage(self.name, {"model": f"running ({model})"})
             _run_reviewer(
                 client=state.client,
                 model=model,
@@ -147,23 +141,21 @@ class ReviewCode(Stage):
                 raw_path=state.session_dir / f"stream-{self.name}-{model}.jsonl",
                 cwd=state.worktree,
             )
-            set_stage(state.gr_id, self.name, {"model": f"done ({model})"})
+            state.set_stage(self.name, {"model": f"done ({model})"})
             logger.info("code review (%s): %s", model, out_file)
             if not out_file.exists() or out_file.stat().st_size == 0:
                 raise RuntimeError(f"review {model} did not produce {out_file}")
         except (SystemExit, Exception) as exc:
-            emit_bail(
-                state.gr_id,
+            state.emit_bail(
                 "other",
                 f"{self.name} stage failed: {exc}"[:200],
-                child_key=state.child_key,
             )
             raise
 
         return out_file
 
-    def results_to_github(self, state: RuntimeState) -> None:
-        pr_url = self.pr_url or read_pr_url(state.gr_id)
+    def results_to_github(self, state: State) -> None:
+        pr_url = self.pr_url or state.read_pr_url()
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
         prompt = (
@@ -180,7 +172,7 @@ class ReviewCode(Stage):
             label="ghreview",
             raw_path=state.session_dir / "stream-ghreview.jsonl",
         )
-        check_bail(state.gr_id, "/ghreview", child_key=state.child_key)
+        state.check_bail("/ghreview")
 
 
 register_stage("review-code", ReviewCode)

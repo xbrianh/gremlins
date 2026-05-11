@@ -12,9 +12,9 @@ import sys
 from typing import Any
 
 from gremlins.errors import die
-from gremlins.stages.base import RuntimeState, Stage, StageInput
+from gremlins.executor.state import State, resolve_state_file
+from gremlins.stages.base import Stage, StageInput
 from gremlins.stages.registry import register_stage
-from gremlins.state import patch_state, resolve_state_file
 from gremlins.utils.github import extract_gh_url, get_repo, parse_issue_ref, view_issue
 
 logger = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ class Plan(Stage):
             ),
         ]
 
-    def run(self, state: RuntimeState) -> None:
+    def run(self, state: State) -> None:
         plan_val = getattr(state.args, "plan", None)
         if not self.prompts and not plan_val:
             die(
@@ -93,7 +93,7 @@ class Plan(Stage):
 
         self._run_agent(plan_md, state)
 
-    def _run_agent(self, plan_md: pathlib.Path, state: RuntimeState) -> None:
+    def _run_agent(self, plan_md: pathlib.Path, state: State) -> None:
         if state.repo:
             base_ref_name = state.base_ref_name
             plan_prompt = (
@@ -120,7 +120,7 @@ class Plan(Stage):
             )
             issue_num = issue_url.split("/")[-1]
             logger.info("issue: %s", issue_url)
-            patch_state(state.gr_id, issue_url=issue_url, issue_num=issue_num)
+            state.patch(issue_url=issue_url, issue_num=issue_num)
             issue_body = _fetch_issue_body(issue_num, state.repo)
             plan_md.write_text(issue_body, encoding="utf-8")
         else:
@@ -141,7 +141,7 @@ class Plan(Stage):
                 raise RuntimeError(f"plan stage did not produce {plan_md}{detail}")
 
     def _resolve_file_source(
-        self, path: str, plan_md: pathlib.Path, state: RuntimeState
+        self, path: str, plan_md: pathlib.Path, state: State
     ) -> None:
         src = pathlib.Path(path)
         if src.stat().st_size == 0:
@@ -208,11 +208,11 @@ class Plan(Stage):
         issue_num = issue_url.split("/")[-1]
         logger.info("issue: %s", issue_url)
         shutil.copyfile(src, plan_md)
-        patch_state(state.gr_id, issue_url=issue_url, issue_num=issue_num)
+        state.patch(issue_url=issue_url, issue_num=issue_num)
         self._update_description(plan_md, issue_title=issue_title, state=state)
 
     def _resolve_issue_source(
-        self, ref: str, plan_md: pathlib.Path, state: RuntimeState
+        self, ref: str, plan_md: pathlib.Path, state: State
     ) -> None:
         target_repo, issue_ref = parse_issue_ref(ref, state.repo or "")
         if issue_ref is None:
@@ -254,11 +254,11 @@ class Plan(Stage):
         logger.info(
             "[1/8] plan supplied via --plan (issue %s#%s)", target_repo, issue_ref
         )
-        patch_state(state.gr_id, issue_url=issue_url, issue_num=issue_num)
+        state.patch(issue_url=issue_url, issue_num=issue_num)
         self._update_description(plan_md, issue_title=issue_title, state=state)
 
     def _update_description(
-        self, plan_md: pathlib.Path, *, issue_title: str = "", state: RuntimeState
+        self, plan_md: pathlib.Path, *, issue_title: str = "", state: State
     ) -> None:
         state_file = resolve_state_file(state.gr_id)
         if state_file is None or not state_file.exists():
@@ -268,7 +268,7 @@ class Plan(Stage):
             if data.get("description_explicit"):
                 return
             if issue_title:
-                patch_state(state.gr_id, description=issue_title[:60])
+                state.patch(description=issue_title[:60])
                 return
             lines = plan_md.read_text(encoding="utf-8").splitlines()[:50]
             h1 = ""
@@ -278,7 +278,7 @@ class Plan(Stage):
                     h1 = m.group(1)[:60]
                     break
             if h1:
-                patch_state(state.gr_id, description=h1)
+                state.patch(description=h1)
         except Exception:
             pass
 

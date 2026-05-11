@@ -7,7 +7,7 @@ import pathlib
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.stages.base import RuntimeState
+from gremlins.executor.state import State as RuntimeState
 from gremlins.stages.sequence import SequenceStage
 
 

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from gremlins.stages.base import RuntimeState, Stage
+from gremlins.executor.state import State
+from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
-from gremlins.state import read_pr_num
 
 
 class RequestCopilot(Stage):
@@ -32,9 +32,9 @@ class RequestCopilot(Stage):
         super().__init__(name, model, prompts, options)
         self._pr_num = pr_num
 
-    def run(self, state: RuntimeState) -> None:
+    def run(self, state: State) -> None:
         repo = state.repo
-        pr_num = self._pr_num or read_pr_num(state.gr_id)
+        pr_num = self._pr_num or state.read_pr_num()
         if not pr_num:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
         r = self.run_subprocess(

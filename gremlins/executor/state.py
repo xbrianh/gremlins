@@ -1,18 +1,12 @@
-"""Stage and bail bookkeeping for gremlin state.json.
-
-``set_stage`` and ``emit_bail`` write state.json atomically in pure Python.
-Both are no-ops outside a gremlin context (no ``gr_id`` or missing
-state.json) and never raise — stage/bail bookkeeping must not break a
-running gremlin.
-"""
+"""Execution context and state.json I/O for gremlin pipelines."""
 
 from __future__ import annotations
 
+import argparse
+import dataclasses
 import datetime
-import fcntl
 import json
 import logging
-import os
 import pathlib
 import re
 import secrets
@@ -20,10 +14,13 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from gremlins import paths as _paths
+from gremlins.clients.client import Client
+from gremlins.utils.state_file import locked_update
 
 if TYPE_CHECKING:
     from gremlins.pipeline import Pipeline
     from gremlins.stages.base import Stage
+    from gremlins.utils.git import PreImplState
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +35,17 @@ _GH_STAGE_TYPES = frozenset(
     }
 )
 
+BAIL_CLASS_REVIEWER_REQUESTED_CHANGES = "reviewer_requested_changes"
+BAIL_CLASS_SECURITY = "security"
+BAIL_CLASS_SECRETS = "secrets"
+BAIL_CLASS_OTHER = "other"
+
+
+def validate_gr_id(gr_id: str) -> None:
+    """Raise ValueError if gr_id is not a safe, non-path-traversing identifier."""
+    if ".." in gr_id or not _GR_ID_RE.match(gr_id):
+        raise ValueError(f"gr_id contains illegal characters: {gr_id!r}")
+
 
 def _stages_use_gh(stages: list[Stage]) -> bool:
     return any(
@@ -49,34 +57,24 @@ def pipeline_uses_gh(pipeline: Pipeline) -> bool:
     return _stages_use_gh(pipeline.stages)
 
 
-def validate_gr_id(gr_id: str) -> None:
-    """Raise ValueError if gr_id is not a safe, non-path-traversing identifier."""
-    if ".." in gr_id or not _GR_ID_RE.match(gr_id):
-        raise ValueError(f"gr_id contains illegal characters: {gr_id!r}")
+def resolve_state_file(gr_id: str | None) -> pathlib.Path | None:
+    """Return path to state.json for gr_id, or None when gr_id is absent."""
+    if not gr_id:
+        return None
+    return _paths.state_root() / gr_id / "state.json"
 
 
-# The four bail-class strings written to state.json.bail_class. Byte-stable
-# across the migration — these strings appear in state.json files written by
-# the old code that the new code must continue to read.
-BAIL_CLASS_REVIEWER_REQUESTED_CHANGES = "reviewer_requested_changes"
-BAIL_CLASS_SECURITY = "security"
-BAIL_CLASS_SECRETS = "secrets"
-BAIL_CLASS_OTHER = "other"
-
-
-def _locked_update(sf: pathlib.Path, fn: Callable[[dict[str, Any]], None]) -> None:
-    """Acquire an exclusive lock on sf.lock, read sf, apply fn(data), write sf atomically.
-
-    Callers are responsible for the outer try/except — this may raise.
-    """
-    lock_path = sf.with_name(sf.name + ".lock")
-    with open(lock_path, "a") as lock_f:
-        fcntl.flock(lock_f, fcntl.LOCK_EX)
-        data = json.loads(sf.read_text(encoding="utf-8"))
-        fn(data)
-        tmp = sf.with_name(f"{sf.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
-        tmp.write_text(json.dumps(data), encoding="utf-8")
-        os.replace(tmp, sf)
+def resolve_session_dir(gr_id: str | None = None) -> pathlib.Path:
+    """Resolve the artifacts directory for the current run."""
+    state_root = _paths.state_root()
+    if gr_id:
+        session_dir = state_root / gr_id / "artifacts"
+    else:
+        ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        rand = secrets.token_hex(3)
+        session_dir = state_root / "direct" / f"{ts}-{rand}" / "artifacts"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    return session_dir
 
 
 def set_stage(
@@ -102,27 +100,6 @@ def set_stage(
         pass
 
 
-def resolve_session_dir(gr_id: str | None = None) -> pathlib.Path:
-    """Resolve the artifacts directory for the current run.
-
-    Under a gremlin (``gr_id`` set), nests under
-    ``$STATE_ROOT/<gr_id>/artifacts/`` so the launcher's state.json and the
-    pipeline artifacts share a parent. Direct invocations (no ``gr_id``) nest
-    under ``$STATE_ROOT/direct/<ts>-<rand>/artifacts/`` so they're visually
-    separated from real gremlins and can be pruned on a simpler age-based
-    heuristic.
-    """
-    state_root = _paths.state_root()
-    if gr_id:
-        session_dir = state_root / gr_id / "artifacts"
-    else:
-        ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        rand = secrets.token_hex(3)  # 6 hex chars
-        session_dir = state_root / "direct" / f"{ts}-{rand}" / "artifacts"
-    session_dir.mkdir(parents=True, exist_ok=True)
-    return session_dir
-
-
 def emit_bail(
     gr_id: str | None,
     bail_class: str,
@@ -130,14 +107,7 @@ def emit_bail(
     *,
     child_key: str | None = None,
 ) -> None:
-    """Write bail_class (and optional bail_detail) to state.json.
-
-    When ``child_key`` is set, writes into ``parallel_bails[child_key]``
-    instead of the top-level fields, isolating child bails from each other
-    and from the top-level bail slot.
-
-    No-op without gr_id, empty bail_class, or missing state.json.
-    """
+    """Write bail_class (and optional bail_detail) to state.json."""
     try:
         if not gr_id or not bail_class:
             return
@@ -159,7 +129,7 @@ def emit_bail(
                 shards[child_key] = shard
                 data["parallel_bails"] = shards
 
-            _locked_update(sf, _merge)
+            locked_update(sf, _merge)
     except Exception:
         pass
 
@@ -174,22 +144,10 @@ def read_state_str(state_file: pathlib.Path | None, field: str) -> str:
         return ""
 
 
-def resolve_state_file(gr_id: str | None) -> pathlib.Path | None:
-    """Return path to state.json for gr_id, or None when gr_id is absent."""
-    if not gr_id:
-        return None
-    state_root = _paths.state_root()
-    return state_root / gr_id / "state.json"
-
-
 def patch_state(
     gr_id: str | None, _delete: tuple[str, ...] = (), **fields: object
 ) -> None:
-    """Merge keyword fields into state.json atomically under an exclusive file lock.
-
-    No-op when gr_id is unset, when state.json doesn't exist, or when the
-    write fails — stage bookkeeping must not crash a running gremlin.
-    """
+    """Merge keyword fields into state.json atomically under an exclusive file lock."""
     sf = resolve_state_file(gr_id)
     if sf is None or not sf.exists():
         return
@@ -200,7 +158,7 @@ def patch_state(
                 data.pop(key, None)
             data.update(fields)
 
-        _locked_update(sf, _apply)
+        locked_update(sf, _apply)
     except Exception:
         pass
 
@@ -212,11 +170,7 @@ def patch_parallel_worktrees(
     base_head: str | None,
     paths: dict[str, str] | None,
 ) -> None:
-    """Set or clear ``parallel_worktrees[group_name]`` in state.json.
-
-    Pass ``None`` for both ``base_head`` and ``paths`` to remove the entry
-    for ``group_name``. No-op without ``gr_id`` or when state.json is missing.
-    """
+    """Set or clear ``parallel_worktrees[group_name]`` in state.json."""
     if not gr_id or not group_name:
         return
     sf = resolve_state_file(gr_id)
@@ -238,7 +192,7 @@ def patch_parallel_worktrees(
             else:
                 data.pop("parallel_worktrees", None)
 
-        _locked_update(sf, _apply)
+        locked_update(sf, _apply)
     except Exception:
         pass
 
@@ -273,7 +227,7 @@ def append_artifact(gr_id: str | None, artifact: dict[str, Any]) -> None:
             arts.append(artifact)
             data["artifacts"] = arts
 
-        _locked_update(sf, _apply)
+        locked_update(sf, _apply)
     except Exception:
         logger.warning("failed to append artifact", exc_info=True)
 
@@ -299,16 +253,10 @@ def last_artifact_branch(gr_id: str | None) -> str:
     return ""
 
 
-def landable_shape(
-    state: dict[str, Any],
-) -> str:
-    """Classify artifact shape for land dispatch.
-
-    Returns one of: 'empty', 'one_branch', 'many_branches', 'one_pr', 'many_prs'.
-    A pr artifact supersedes its associated branch artifact.
-    """
+def landable_shape(state: dict[str, Any]) -> str:
+    """Classify artifact shape for land dispatch."""
     artifacts = list(state.get("artifacts") or [])
-    branches: dict[str, bool] = {}  # name -> has_pr
+    branches: dict[str, bool] = {}
     prs: list[dict[str, Any]] = []
 
     for art in artifacts:
@@ -343,15 +291,7 @@ def check_bail(
     *,
     child_key: str | None = None,
 ) -> None:
-    """Raise RuntimeError if a bail_class was written to state.json by the
-    just-completed stage.
-
-    When ``child_key`` is set, checks ``parallel_bails[child_key]`` instead
-    of the top-level ``bail_class`` field, so parallel children don't see
-    each other's bails.
-
-    No-op without gr_id or when state.json is absent.
-    """
+    """Raise RuntimeError if a bail_class was written to state.json."""
     sf = resolve_state_file(gr_id)
     if sf is None or not sf.exists():
         return
@@ -376,3 +316,134 @@ def check_bail(
         raise
     except Exception:
         pass
+
+
+def _client_dict() -> dict[str, Client]:
+    return {}
+
+
+def _stage_list() -> list[Stage]:
+    return []
+
+
+def _read_state_json(sf: pathlib.Path | None) -> dict[str, Any]:
+    if sf is None or not sf.exists():
+        return {}
+    try:
+        return json.loads(sf.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def _read_impl_pre_state(
+    session_dir: pathlib.Path, sd: dict[str, Any]
+) -> PreImplState | None:
+    from gremlins.utils.git import PreImplState
+
+    sidecar = session_dir / ".impl-pre-state.json"
+    if sidecar.exists():
+        try:
+            data: dict[str, Any] = json.loads(sidecar.read_text(encoding="utf-8"))
+            head = data.get("head") or ""
+            if head:
+                return PreImplState(head=head)
+        except (json.JSONDecodeError, OSError):
+            pass
+    head = sd.get("impl_pre_head") or ""
+    if head:
+        return PreImplState(head=head)
+    return None
+
+
+@dataclasses.dataclass
+class State:
+    # required per-stage
+    client: Client
+    session_dir: pathlib.Path
+    # pipeline-wide (all have defaults so tests can omit them)
+    gr_id: str | None = None
+    state_file: pathlib.Path | None = None
+    args: argparse.Namespace = dataclasses.field(default_factory=argparse.Namespace)
+    pipeline_data: Pipeline | None = None
+    repo: str = ""
+    instructions: str = ""
+    stage_specs: dict[str, Client] = dataclasses.field(default_factory=_client_dict)
+    spec_clients: dict[str, Client] = dataclasses.field(default_factory=_client_dict)
+    is_git: bool = False
+    test_client: Client | None = None
+    # per-stage optional
+    child_key: str | None = None
+    worktree: pathlib.Path | None = None
+    current_scope: list[Stage] = dataclasses.field(default_factory=_stage_list)
+    # runtime-derived (populated from state.json before each stage run)
+    issue_url: str = ""
+    base_ref_name: str = ""
+    issue_num: str = ""
+    impl_pre_state: PreImplState | None = None
+
+    @property
+    def cwd(self) -> pathlib.Path:
+        return self.worktree if self.worktree is not None else pathlib.Path.cwd()
+
+    def get_client(self, spec: Client) -> Client:
+        if self.test_client is not None:
+            return self.test_client
+        return self.spec_clients.get(str(spec), spec)
+
+    def make_runner(
+        self,
+        entry: Stage,
+        scope: list[Stage] | None = None,
+    ) -> Callable[[], None]:
+        base_state = self
+        gr_id = self.gr_id
+        scope_list = list(scope) if scope is not None else []
+
+        def _run() -> None:
+            set_stage(gr_id, entry.name)
+            sf = (
+                base_state.state_file
+                if base_state.state_file is not None
+                else resolve_state_file(gr_id)
+            )
+            sd = _read_state_json(sf)
+            state = dataclasses.replace(
+                base_state,
+                current_scope=scope_list,
+                issue_url=sd.get("issue_url") or "",
+                base_ref_name=sd.get("base_ref_name") or "",
+                issue_num=sd.get("issue_num") or "",
+                impl_pre_state=_read_impl_pre_state(base_state.session_dir, sd),
+            )
+            entry.run(state)
+
+        return _run
+
+    # --- state.json I/O methods ---
+
+    def patch(self, _delete: tuple[str, ...] = (), **fields: object) -> None:
+        patch_state(self.gr_id, _delete=_delete, **fields)
+
+    def read_str(self, field: str) -> str:
+        return read_state_str(self.state_file, field)
+
+    def set_stage(self, stage: str, sub_stage: object = None) -> None:
+        set_stage(self.gr_id, stage, sub_stage)
+
+    def emit_bail(self, bail_class: str, bail_detail: str = "") -> None:
+        emit_bail(self.gr_id, bail_class, bail_detail, child_key=self.child_key)
+
+    def check_bail(self, label: str = "stage") -> None:
+        check_bail(self.gr_id, label, child_key=self.child_key)
+
+    def append_artifact(self, artifact: dict[str, Any]) -> None:
+        append_artifact(self.gr_id, artifact)
+
+    def read_pr_url(self) -> str:
+        return read_pr_url(self.gr_id)
+
+    def last_pr_branch(self) -> str:
+        return last_pr_branch(self.gr_id)
+
+    def read_pr_num(self) -> str:
+        return read_pr_num(self.gr_id)

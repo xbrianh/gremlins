@@ -12,12 +12,12 @@ from typing import Any, cast
 
 import gremlins.fleet.constants as _constants
 import gremlins.utils.git as _git
+from gremlins.executor.state import landable_shape, read_pr_url
 from gremlins.fleet.resolve import resolve_gremlin
 from gremlins.fleet.state import (
     liveness_of_state_file,
     load_state,
 )
-from gremlins.state import landable_shape, read_pr_url
 from gremlins.utils import proc
 
 

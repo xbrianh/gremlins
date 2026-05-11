@@ -5,7 +5,8 @@ from __future__ import annotations
 import subprocess
 from typing import Any
 
-from gremlins.stages.base import RuntimeState, Stage
+from gremlins.executor.state import State
+from gremlins.stages.base import Stage
 from gremlins.stages.loop import RunCmdFailed
 from gremlins.stages.registry import register_stage
 
@@ -21,7 +22,7 @@ class RunCmd(Stage):
         stage.client = get_client_from_dict(d)
         return stage
 
-    def run(self, state: RuntimeState) -> None:
+    def run(self, state: State) -> None:
         cmds = [c for c in self.options.get("cmds", []) if c.strip()]
         if not cmds:
             return

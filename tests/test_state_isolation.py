@@ -38,10 +38,10 @@ from conftest import REVIEW_LABELS as _REVIEW_LABELS
 from conftest import ReviewCreatingClient as _ReviewCreatingClient
 from conftest import common_local_patches as _common_patches
 
-import gremlins.state as state_mod
+import gremlins.executor.state as state_mod
 from gremlins.cli.review_address import address_main, review_main
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.orchestrators.run import run_pipeline
+from gremlins.executor.run import run_pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
 
 
@@ -145,10 +145,10 @@ def test_local_main_does_not_clobber_external_state(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.orchestrators.run.resolve_session_dir",
+        "gremlins.executor.run.resolve_session_dir",
         lambda gr_id=None: session_dir,
     )
-    monkeypatch.setattr("gremlins.orchestrators.run.in_git_repo", lambda: False)
+    monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: False)
     monkeypatch.setattr(
         "gremlins.stages.implement.changes_outside_git", lambda s, d: True
     )
@@ -180,9 +180,7 @@ def test_review_main_does_not_clobber_external_state(tmp_path, monkeypatch):
     review_dir.mkdir()
     monkeypatch.chdir(review_dir)
     _common_patches(monkeypatch)
-    monkeypatch.setattr(
-        "gremlins.orchestrators.review_address.in_git_repo", lambda: False
-    )
+    monkeypatch.setattr("gremlins.executor.review_address.in_git_repo", lambda: False)
     client = _ReviewCreatingClient(
         fixtures={lbl: MINIMAL_EVENTS for lbl in _REVIEW_LABELS}
     )
@@ -202,9 +200,7 @@ def test_address_main_does_not_clobber_external_state(tmp_path, monkeypatch):
     )
     monkeypatch.chdir(address_dir)
     _common_patches(monkeypatch)
-    monkeypatch.setattr(
-        "gremlins.orchestrators.review_address.in_git_repo", lambda: False
-    )
+    monkeypatch.setattr("gremlins.executor.review_address.in_git_repo", lambda: False)
     client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
     assert address_main(["--dir", str(address_dir)], client=client) == 0
     _assert_no_state_clobber(parent_state_file, original_content, parent_mtime)

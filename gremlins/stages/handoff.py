@@ -16,10 +16,10 @@ from collections.abc import Callable
 from typing import Any, TypeVar, cast
 
 from gremlins.clients.client import Client
-from gremlins.stages.base import RuntimeState, Stage
+from gremlins.executor.state import State
+from gremlins.stages.base import Stage
 from gremlins.stages.loop import RunCmdFailed
 from gremlins.stages.registry import register_stage
-from gremlins.state import emit_bail, set_stage
 from gremlins.utils import proc
 from gremlins.utils.yaml import load_bundled_prompt, render_bundled_prompt
 
@@ -420,9 +420,8 @@ class Handoff(Stage):
     def __init__(self, name: str) -> None:
         super().__init__(name, None, [], {})
 
-    def run(self, state: RuntimeState) -> None:
+    def run(self, state: State) -> None:
         session_dir = state.session_dir
-        gr_id = state.gr_id
         client = state.client
 
         boss_spec = session_dir / "boss-spec.md"
@@ -446,7 +445,7 @@ class Handoff(Stage):
             else str(plan_md)
         )
 
-        set_stage(gr_id, "handoff")
+        state.set_stage("handoff")
         exit_state, sig = self._run_handoff(
             handoff_n=handoff_n,
             current_plan=current_plan,
@@ -464,7 +463,7 @@ class Handoff(Stage):
         if exit_state == "bail":
             reason = sig.get("reason") or "(no reason given)"
             logger.info("handoff bailed: %s", reason)
-            emit_bail(gr_id, "other", f"handoff bail: {reason}"[:200])
+            state.emit_bail("other", f"handoff bail: {reason}"[:200])
             raise RuntimeError(f"chain halted by handoff: {reason}")
 
         # exit_state == "next-plan"
@@ -540,7 +539,7 @@ class Handoff(Stage):
         logger.info("handoff %d result: %s", handoff_n, exit_state)
         return exit_state, sig_data
 
-    def _resolve_base_ref(self, state: RuntimeState) -> str:
+    def _resolve_base_ref(self, state: State) -> str:
         r = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             capture_output=True,

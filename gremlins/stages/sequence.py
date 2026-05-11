@@ -1,6 +1,6 @@
 """SequenceStage: run body stages in order, propagating parent state fields.
 
-Each sub-stage's RuntimeState receives the parent's ``worktree``, ``child_key``,
+Each sub-stage's State receives the parent's ``worktree``, ``child_key``,
 and ``session_dir`` before its runner is invoked, so a SequenceStage used as a
 parallel child correctly inherits the shard-specific worktree and session
 directory and any bails route through ``parallel_bails[child_key]``.
@@ -12,7 +12,8 @@ import dataclasses
 from collections.abc import Callable
 from typing import Any, cast
 
-from gremlins.stages.base import RuntimeState, Stage
+from gremlins.executor.state import State
+from gremlins.stages.base import Stage
 from gremlins.stages.registry import register_stage
 
 
@@ -25,7 +26,7 @@ class SequenceStage(Stage):
         self,
         name: str,
         *,
-        body: list[tuple[RuntimeState, Callable[[], None]]] | None = None,
+        body: list[tuple[State, Callable[[], None]]] | None = None,
     ) -> None:
         super().__init__(name, None, [], {})
         self._pre_body = body
@@ -46,7 +47,7 @@ class SequenceStage(Stage):
         stage.client = get_client_from_dict(d)
         return stage
 
-    def run(self, state: RuntimeState) -> None:
+    def run(self, state: State) -> None:
         if self._pre_body is not None:
             for sub_state, runner in self._pre_body:
                 sub_state.worktree = state.worktree

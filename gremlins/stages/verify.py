@@ -7,10 +7,10 @@ import pathlib
 import subprocess
 from typing import Any
 
-from gremlins.stages.base import RuntimeState, Stage
+from gremlins.executor.state import State
+from gremlins.stages.base import Stage
 from gremlins.stages.loop import LoopExhausted, LoopStage, RunCmdFailed
 from gremlins.stages.registry import register_stage
-from gremlins.state import check_bail
 from gremlins.utils import git as _git_mod
 
 logger = logging.getLogger(__name__)
@@ -47,7 +47,7 @@ class Verify(Stage):
     ) -> None:
         super().__init__(name, model, prompts, options)
 
-    def run(self, state: RuntimeState) -> None:
+    def run(self, state: State) -> None:
         options = dict(self.options)
         if not state.repo:
             cmds_arg = getattr(state.args, "cmds", None)
@@ -119,7 +119,7 @@ class Verify(Stage):
                 label=f"verify-fix-{n}",
                 raw_path=state.session_dir / f"stream-verify-{n}.jsonl",
             )
-            check_bail(state.gr_id, f"verify-fix-{n}", child_key=state.child_key)
+            state.check_bail(f"verify-fix-{n}")
 
         loop = LoopStage.from_runners(
             [_run_cmd, _run_fix], name="verify", max_iterations=max_attempts

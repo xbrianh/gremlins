@@ -11,8 +11,8 @@ import pathlib
 import sys
 import traceback
 
+from gremlins.executor.state import validate_gr_id
 from gremlins.launcher import write_terminal_state
-from gremlins.state import validate_gr_id
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -29,7 +29,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(f"run_pipeline: {exc}\n")
         return 1
 
-    from gremlins.orchestrators.run import run_pipeline as _run_pipeline
+    from gremlins.executor.run import run_pipeline as _run_pipeline
 
     rc = 1
     try:

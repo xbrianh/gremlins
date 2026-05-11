@@ -13,7 +13,15 @@ import threading
 from collections.abc import Callable
 from typing import Any, cast
 
-from gremlins.stages.base import RuntimeState, Stage
+from gremlins.executor.state import (
+    State,
+    emit_bail,
+    patch_parallel_worktrees,
+    patch_state,
+    resolve_state_file,
+    set_stage,
+)
+from gremlins.stages.base import Stage
 from gremlins.stages.compound import CompoundStage
 from gremlins.stages.registry import register_stage
 from gremlins.utils import proc
@@ -110,7 +118,7 @@ class ParallelStage(CompoundStage):
 
     def build_runtime_stages(
         self,
-        child_runners: list[tuple[str, RuntimeState, Callable[[], None]]],
+        child_runners: list[tuple[str, State, Callable[[], None]]],
         *,
         gr_id: str | None = None,
         project_root: pathlib.Path | None = None,
@@ -128,14 +136,13 @@ class ParallelStage(CompoundStage):
             project_root=project_root or pathlib.Path.cwd(),
         )
 
-    def run(self, state: RuntimeState) -> None:
+    def run(self, state: State) -> None:
         from gremlins.stage_clients import require_stage_spec
-        from gremlins.state import set_stage
 
         gr_id = state.gr_id
         group_dir = state.session_dir / self.name
         group_dir.mkdir(parents=True, exist_ok=True)
-        child_runners: list[tuple[str, RuntimeState, Callable[[], None]]] = []
+        child_runners: list[tuple[str, State, Callable[[], None]]] = []
         for child in self.body:
             child_spec = require_stage_spec(state.stage_specs, child.name)
             if child.model is None:
@@ -166,7 +173,7 @@ class ParallelStage(CompoundStage):
 
 def _parallel_stages(
     group_name: str,
-    child_runners: list[tuple[str, RuntimeState, Callable[[], None]]],
+    child_runners: list[tuple[str, State, Callable[[], None]]],
     *,
     max_concurrent: int | None,
     set_stage_fn: Callable[[str], None],
@@ -190,8 +197,6 @@ def _parallel_stages(
 
     def _hydrate_from_state() -> None:
         nonlocal base_head
-        from gremlins.state import resolve_state_file
-
         if _worktree_paths:
             return
         sf = resolve_state_file(gr_id)
@@ -213,8 +218,6 @@ def _parallel_stages(
             )
 
     def _persist_state() -> None:
-        from gremlins.state import patch_parallel_worktrees
-
         patch_parallel_worktrees(
             gr_id,
             group_name,
@@ -223,8 +226,6 @@ def _parallel_stages(
         )
 
     def _clear_persisted_state() -> None:
-        from gremlins.state import patch_parallel_worktrees
-
         patch_parallel_worktrees(gr_id, group_name, base_head=None, paths=None)
 
     def _remove_worktrees(paths: list[pathlib.Path]) -> None:
@@ -330,8 +331,6 @@ def _parallel_stages(
             _teardown_worktrees()
 
     def _do_fan_in() -> None:
-        from gremlins.state import emit_bail, patch_state, resolve_state_file
-
         if _in_git_repo():
             proc.run_quiet(["git", "worktree", "prune"], cwd=str(project_root))
 

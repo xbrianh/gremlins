@@ -1,4 +1,4 @@
-"""Tests for gremlins.orchestrators.gh and supporting git helpers.
+"""Tests for gremlins.executor.run and supporting git helpers.
 
 Uses FakeClaudeClient throughout — no real claude subprocess or gh CLI calls
 (gh calls are monkeypatched at the subprocess.run level).
@@ -13,8 +13,8 @@ import subprocess
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.orchestrators.run import _parse_args as _parse_gh_args
-from gremlins.orchestrators.run import run_pipeline
+from gremlins.executor.run import _parse_args as _parse_gh_args
+from gremlins.executor.run import run_pipeline
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.utils.git import (
@@ -117,14 +117,14 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         shutil, "which", lambda n: f"/fake/{n}" if n in ("claude", "gh") else None
     )
     monkeypatch.setattr(
-        "gremlins.orchestrators.run.install_signal_handlers", lambda *c: None
+        "gremlins.executor.run.install_signal_handlers", lambda *c: None
     )
-    monkeypatch.setattr("gremlins.orchestrators.run.get_repo", lambda: "owner/repo")
+    monkeypatch.setattr("gremlins.executor.run.get_repo", lambda: "owner/repo")
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     monkeypatch.setattr(
-        "gremlins.orchestrators.run.resolve_session_dir", lambda gr_id=None: session_dir
+        "gremlins.executor.run.resolve_session_dir", lambda gr_id=None: session_dir
     )
 
     state_file = tmp_path / "state.json"
@@ -138,7 +138,7 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         initial.update(state_data)
     state_file.write_text(json.dumps(initial))
     monkeypatch.setattr(
-        "gremlins.orchestrators.run.resolve_state_file", lambda gr_id=None: state_file
+        "gremlins.executor.run.resolve_state_file", lambda gr_id=None: state_file
     )
     monkeypatch.setattr(
         "gremlins.stage_clients.resolve_state_file", lambda gr_id=None: state_file
@@ -146,7 +146,7 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
 
     # Stub out patch_state so tests don't write to real state files.
     monkeypatch.setattr(
-        "gremlins.orchestrators.run.patch_state", lambda gr_id=None, **kw: None
+        "gremlins.executor.run.patch_state", lambda gr_id=None, **kw: None
     )
 
     # gr_id=None makes patch_state a no-op; use a writing shim so the commit runner can read back the values.
@@ -157,9 +157,7 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         data["artifacts"] = arts
         state_file.write_text(json.dumps(data), encoding="utf-8")
 
-    monkeypatch.setattr(
-        "gremlins.stages.open_github_pr.append_artifact", _append_artifact
-    )
+    monkeypatch.setattr("gremlins.executor.state.append_artifact", _append_artifact)
 
     # Strip pipeline client keys so the injected client is used for every stage.
     _real_from_yaml = Pipeline.from_yaml
@@ -775,7 +773,7 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
         data.update(kw)
         state_file.write_text(json.dumps(data), encoding="utf-8")
 
-    monkeypatch.setattr("gremlins.orchestrators.run.patch_state", writing_patch_state)
+    monkeypatch.setattr("gremlins.executor.run.patch_state", writing_patch_state)
 
     monkeypatch.setattr(
         subprocess,
@@ -1081,7 +1079,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
         data.update(kw)
         state_file.write_text(json.dumps(data))
 
-    monkeypatch.setattr("gremlins.orchestrators.run.patch_state", writing_patch_state)
+    monkeypatch.setattr("gremlins.executor.run.patch_state", writing_patch_state)
 
     def fake_gh_run(cmd, *args, **kwargs):
         prog = cmd[0] if cmd else ""
@@ -1704,11 +1702,9 @@ def test_gh_main_state_client_tracks_effective_model(
     _patch_common(monkeypatch, tmp_path)
 
     # Restore the real patch_state so stage_clients is actually written
-    import gremlins.state as _state_mod
+    import gremlins.executor.state as _state_mod
 
-    monkeypatch.setattr(
-        "gremlins.orchestrators.run.patch_state", _state_mod.patch_state
-    )
+    monkeypatch.setattr("gremlins.executor.run.patch_state", _state_mod.patch_state)
 
     monkeypatch.setattr(
         subprocess, "run", _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n")
@@ -1892,17 +1888,17 @@ def _make_pipeline(*stages):
 
 
 def test_pipeline_uses_gh_detects_top_level_gh_stage() -> None:
+    from gremlins.executor.state import pipeline_uses_gh
     from gremlins.stages.open_github_pr import OpenGitHubPR
-    from gremlins.state import pipeline_uses_gh
 
     pipeline = _make_pipeline(OpenGitHubPR("open-pr", None, [], {}))
     assert pipeline_uses_gh(pipeline) is True
 
 
 def test_pipeline_uses_gh_false_for_local_stages() -> None:
+    from gremlins.executor.state import pipeline_uses_gh
     from gremlins.stages.implement import Implement
     from gremlins.stages.plan import Plan
-    from gremlins.state import pipeline_uses_gh
 
     pipeline = _make_pipeline(
         Plan("plan", None, [], {}),
@@ -1913,10 +1909,10 @@ def test_pipeline_uses_gh_false_for_local_stages() -> None:
 
 def test_pipeline_uses_gh_recurses_into_loop_body() -> None:
     """A loop containing gh-mode body stages is detected as gh."""
+    from gremlins.executor.state import pipeline_uses_gh
     from gremlins.stages.handoff import Handoff
     from gremlins.stages.loop import LoopStage
     from gremlins.stages.open_github_pr import OpenGitHubPR
-    from gremlins.state import pipeline_uses_gh
 
     gh_body = [
         Handoff("handoff"),
@@ -1928,11 +1924,11 @@ def test_pipeline_uses_gh_recurses_into_loop_body() -> None:
 
 def test_pipeline_uses_gh_false_for_local_loop_body() -> None:
     """A loop with only local-mode body stages is not detected as gh."""
+    from gremlins.executor.state import pipeline_uses_gh
     from gremlins.stages.handoff import Handoff
     from gremlins.stages.implement import Implement
     from gremlins.stages.loop import LoopStage
     from gremlins.stages.review_code import ReviewCode
-    from gremlins.state import pipeline_uses_gh
 
     local_body = [
         Handoff("handoff"),

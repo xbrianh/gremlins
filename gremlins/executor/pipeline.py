@@ -12,12 +12,12 @@ from typing import Any
 
 import gremlins.stages.all as _stages_all  # noqa: F401  # type: ignore[reportUnusedImport]
 from gremlins.clients.client import Client
+from gremlins.executor.state import State, resolve_state_file
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.runner import run_stages
 from gremlins.stage_clients import require_stage_spec
-from gremlins.stages.base import RuntimeState, Stage
+from gremlins.stages.base import Stage
 from gremlins.stages.registry import STAGE_REGISTRY
-from gremlins.state import resolve_state_file
 from gremlins.utils.git import in_git_repo
 
 logger = logging.getLogger(__name__)
@@ -130,7 +130,7 @@ class Pipeline:
             # is None) use the spec model rather than the live client's model.
             if e.model is None and stage_spec.model:
                 e.model = stage_spec.model
-            stage_state = RuntimeState(
+            stage_state = State(
                 client=resolved,
                 session_dir=self.session_dir,
                 gr_id=self.gr_id,
