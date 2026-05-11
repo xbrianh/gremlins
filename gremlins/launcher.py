@@ -676,7 +676,6 @@ def write_terminal_state(gr_id: str, exit_code: int) -> None:
     the worktree for gh-mode pipelines only. Best-effort throughout.
     """
     state_dir = _state_root() / gr_id
-    sf = state_dir / "state.json"
 
     # Touch finished marker first — the session-summary hook watches this.
     try:
@@ -687,12 +686,6 @@ def write_terminal_state(gr_id: str, exit_code: int) -> None:
     now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     status = "done" if exit_code == 0 else "stopped"
     try:
-        data = json.loads(sf.read_text(encoding="utf-8"))
-        data["status"] = status
-        data["ended_at"] = now_iso
-        data["exit_code"] = exit_code
-        tmp = sf.with_name(f"state.json.{os.getpid()}.{secrets.token_hex(4)}.tmp")
-        tmp.write_text(json.dumps(data), encoding="utf-8")
-        os.replace(tmp, sf)
+        patch_state(gr_id, status=status, ended_at=now_iso, exit_code=exit_code)
     except Exception:
         pass

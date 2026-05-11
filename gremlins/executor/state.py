@@ -160,7 +160,7 @@ def read_state_str(state_file: pathlib.Path | None, field: str) -> str:
 
 
 def write_state(state_dir: pathlib.Path, data: dict[str, Any]) -> None:
-    """Atomically write state.json (initial creation, no merge)."""
+    """Atomically overwrite state.json (no merge)."""
     sf = state_dir / "state.json"
     tmp = state_dir / f"state.json.{os.getpid()}.{secrets.token_hex(4)}.tmp"
     tmp.write_text(json.dumps(data), encoding="utf-8")
