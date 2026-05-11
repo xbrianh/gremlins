@@ -22,13 +22,12 @@ import sys
 import tempfile
 from typing import Any, cast
 
-import yaml
-
 from gremlins import git as _git_mod
 from gremlins import paths as _paths
 from gremlins.clients.client import PACKAGE_DEFAULT
 from gremlins.gh_utils import parse_issue_ref, view_issue
 from gremlins.pipeline import Pipeline
+from gremlins.utils.yaml import YamlLoadError
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.state import pipeline_uses_gh
 from gremlins.utils import proc
@@ -244,7 +243,7 @@ def _pipeline_default_client_spec(pipeline_path: str) -> str:
         return ""
     try:
         pipeline = Pipeline.from_yaml(pathlib.Path(pipeline_path))
-    except (FileNotFoundError, ValueError, yaml.YAMLError):
+    except (FileNotFoundError, ValueError, YamlLoadError):
         return ""
     return str(pipeline.default_client) if pipeline.default_client else ""
 
