@@ -5,9 +5,15 @@ from typing import Any, cast
 
 import yaml
 
+from gremlins.prompts import BUNDLED_PROMPT_DIR
+
 
 class YamlLoadError(Exception):
     """Raised when YAML can't be loaded or doesn't parse to a dict."""
+
+
+class PromptLoadError(Exception):
+    """Raised when a bundled prompt can't be loaded or rendered."""
 
 
 def load_yaml_file(path: pathlib.Path) -> dict[str, Any]:
@@ -18,6 +24,31 @@ def load_yaml_file(path: pathlib.Path) -> dict[str, Any]:
     except (OSError, UnicodeDecodeError) as exc:
         raise YamlLoadError(f"could not read {path}: {exc}") from exc
     return _parse(text, str(path))
+
+
+def load_bundled_prompt(name: str) -> str:
+    path = BUNDLED_PROMPT_DIR / name
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise PromptLoadError(f"bundled prompt not found: {name}") from None
+    except OSError as exc:
+        raise PromptLoadError(f"could not read bundled prompt {name}: {exc}") from exc
+    if not text.strip():
+        raise PromptLoadError(f"bundled prompt is empty: {name}")
+    return text
+
+
+def render_bundled_prompt(name: str, **kwargs: Any) -> str:
+    text = load_bundled_prompt(name)
+    try:
+        return text.format(**kwargs)
+    except KeyError as exc:
+        raise PromptLoadError(f"missing placeholder {exc} in bundled prompt {name}") from exc
+
+
+def load_prompts(texts: list[str]) -> str:
+    return "\n\n".join(texts).rstrip()
 
 
 def dump_yaml_text(data: dict[str, Any]) -> str:

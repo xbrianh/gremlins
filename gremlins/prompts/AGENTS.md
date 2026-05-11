@@ -6,13 +6,9 @@ list filenames in their `prompt:` field; the stage loads them via
 
 ## Modules
 
-- `loader.py` — `load_prompts(paths)`. Concatenates files with double
-  newlines, rstrips the result. Raises `FileNotFoundError` on a missing
-  path, `ValueError` on an empty file. Pure I/O; no formatting.
 - `__init__.py` — exposes `BUNDLED_PROMPT_DIR` (the absolute path to this
-  directory) and re-exports `load_prompts`. All bundled-prompt path
-  resolution goes through `BUNDLED_PROMPT_DIR` — don't duplicate the path
-  computation elsewhere.
+  directory). All bundled-prompt path resolution goes through
+  `BUNDLED_PROMPT_DIR` — don't duplicate the path computation elsewhere.
 - `README.md` — runtime placeholder reference. Every `{name}` token used
   in any fragment is documented there with its source stage. Update
   `README.md` when adding or removing a placeholder.
@@ -49,6 +45,9 @@ list filenames in their `prompt:` field; the stage loads them via
 - The placeholder set in `README.md` is the contract between stages and
   fragments. A stage that introduces a new `{name}` is responsible for
   adding it to the table; a fragment that uses an undocumented
-  placeholder will `KeyError` at format time.
-- `load_prompts` rejects empty files on purpose — silent empty prompts
-  produced confusing agent behavior in the past. Keep the check.
+  placeholder will raise `PromptLoadError` at format time.
+- `load_bundled_prompt` rejects empty files on purpose — silent empty
+  prompts produced confusing agent behavior in the past. Keep the check.
+- Stages load bundled prompts via `load_bundled_prompt` / `render_bundled_prompt`
+  from `gremlins.utils.yaml`. Direct `BUNDLED_PROMPT_DIR` access in stage
+  modules is not permitted.

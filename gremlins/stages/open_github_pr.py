@@ -7,17 +7,13 @@ from typing import Any
 
 from gremlins.clients.protocol import CompletedRun
 from gremlins.gh_utils import extract_gh_url
-from gremlins.prompts import BUNDLED_PROMPT_DIR
 from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import append_artifact, last_pr_branch
 from gremlins.utils import proc
+from gremlins.utils.yaml import render_bundled_prompt
 
 logger = logging.getLogger(__name__)
-
-
-def _load(name: str) -> str:
-    return (BUNDLED_PROMPT_DIR / name).read_text(encoding="utf-8")
 
 
 def _get_pr_branch(pr_url: str) -> str:
@@ -79,7 +75,7 @@ class OpenGitHubPR(Stage):
                 "Do NOT include any 'Closes #N' or 'Fixes #N' link in the PR body."
             )
 
-        base_prompt = _load("open_github_pr.md").format(base_ref=base_ref).rstrip()
+        base_prompt = render_bundled_prompt("open_github_pr.md", base_ref=base_ref).rstrip()
         prompt = f"{base_prompt} {closes_clause}"
 
         completed: CompletedRun = self.run_claude(
