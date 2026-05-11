@@ -179,8 +179,12 @@ def test_raises_on_divergent_head(tmp_path: pathlib.Path) -> None:
 
 def test_run_does_not_access_pipeline_data(tmp_path: pathlib.Path) -> None:
     stage, state = _make_state(tmp_path, prompts=[_TEMPLATE_LOCAL])
-    state.pipeline_data = None
+
+    def _raise(self: object) -> None:
+        raise AssertionError("pipeline_data accessed")
+
     with (
+        patch.object(type(state), "pipeline_data", property(_raise)),
         patch(
             "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
         ),
@@ -190,4 +194,3 @@ def test_run_does_not_access_pipeline_data(tmp_path: pathlib.Path) -> None:
         ),
     ):
         stage.run(state)
-    assert state.pipeline_data is None
