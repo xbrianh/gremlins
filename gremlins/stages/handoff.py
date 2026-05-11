@@ -19,9 +19,9 @@ from gremlins.clients.client import Client
 from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.loop import RunCmdFailed
 from gremlins.stages.registry import register_stage
-from gremlins.utils.yaml import load_bundled_prompt, render_bundled_prompt
 from gremlins.state import emit_bail, set_stage
 from gremlins.utils import proc
+from gremlins.utils.yaml import load_bundled_prompt, render_bundled_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -137,24 +137,22 @@ def build_prompt(
     log_body = git_log if git_log else "(no commits yet — branch just started)"
     spec_section = _load_spec_section(spec_text) if spec_text is not None else ""
     style_section = render_bundled_prompt(
-        "handoff_style_section.md", code_style=load_bundled_prompt("code_style.md").rstrip()
+        "handoff_style_section.md",
+        code_style=load_bundled_prompt("code_style.md").rstrip(),
     )
-    return (
-        render_bundled_prompt(
-            "handoff.md",
-            spec_section=spec_section,
-            style_section=style_section,
-            plan_text=plan_text,
-            branch=branch,
-            log_body=log_body,
-            diff_body=diff_body,
-            diff_trunc=diff_trunc,
-            out_path=out_path,
-            child_plan_path=child_plan_path,
-            signal_path=signal_path,
-        )
-        .rstrip()
-    )
+    return render_bundled_prompt(
+        "handoff.md",
+        spec_section=spec_section,
+        style_section=style_section,
+        plan_text=plan_text,
+        branch=branch,
+        log_body=log_body,
+        diff_body=diff_body,
+        diff_trunc=diff_trunc,
+        out_path=out_path,
+        child_plan_path=child_plan_path,
+        signal_path=signal_path,
+    ).rstrip()
 
 
 def build_sanitize_prompt(rolling_plan_text: str, out_path: pathlib.Path) -> str:

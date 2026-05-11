@@ -75,7 +75,9 @@ class OpenGitHubPR(Stage):
                 "Do NOT include any 'Closes #N' or 'Fixes #N' link in the PR body."
             )
 
-        base_prompt = render_bundled_prompt("open_github_pr.md", base_ref=base_ref).rstrip()
+        base_prompt = render_bundled_prompt(
+            "open_github_pr.md", base_ref=base_ref
+        ).rstrip()
         prompt = f"{base_prompt} {closes_clause}"
 
         completed: CompletedRun = self.run_claude(

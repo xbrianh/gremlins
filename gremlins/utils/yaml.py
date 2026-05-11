@@ -44,7 +44,9 @@ def render_bundled_prompt(name: str, **kwargs: Any) -> str:
     try:
         return text.format(**kwargs)
     except KeyError as exc:
-        raise PromptLoadError(f"missing placeholder {exc} in bundled prompt {name}") from exc
+        raise PromptLoadError(
+            f"missing placeholder {exc} in bundled prompt {name}"
+        ) from exc
 
 
 def load_prompts(texts: list[str]) -> str:
