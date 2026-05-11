@@ -7,8 +7,8 @@ import shutil
 
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
 from gremlins.errors import die
-from gremlins.logging_setup import configure_logging
 from gremlins.executor.review_address import run_address, run_review
+from gremlins.logging_setup import configure_logging
 from gremlins.runner import install_signal_handlers
 
 logger = logging.getLogger(__name__)

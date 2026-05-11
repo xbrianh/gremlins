@@ -11,6 +11,7 @@ import shutil
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
 from gremlins.env_file import load_env_file
 from gremlins.errors import die
+from gremlins.executor.pipeline import Pipeline
 from gremlins.executor.state import (
     patch_state,
     pipeline_uses_gh,
@@ -19,7 +20,6 @@ from gremlins.executor.state import (
     resolve_state_file,
 )
 from gremlins.logging_setup import configure_logging
-from gremlins.executor.pipeline import Pipeline
 from gremlins.pipeline import Pipeline as _Pipeline
 from gremlins.runner import install_signal_handlers
 from gremlins.stage_clients import (
