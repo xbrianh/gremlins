@@ -13,6 +13,16 @@ consume today — this repo is the upstream source.
 
 ---
 
+## Using gremlins with a coding assistant
+
+Paste the output of `gremlins prompt-for-assistant` into a fresh Claude Code session (or any compatible assistant) to configure it as a competent gremlins collaborator.
+
+The workflow: you discuss the work with the assistant, it captures discrete units as GitHub issues or plan files, launches gremlins in the background to implement them, and lands each finished gremlin before starting dependent work. You stay at the strategic level — deciding what to build and in what order — while gremlins handle the implementation cycle unattended. The assistant maintains a queue of running, pending, and blocked work and surfaces it on request.
+
+Run `gremlins prompt-for-assistant | pbcopy` to copy the prompt to your clipboard, then paste it as the first message in a new session.
+
+---
+
 ## Dev install
 
 ```sh
@@ -47,6 +57,7 @@ the dispatch table in [`gremlins/cli/__init__.py`](gremlins/cli/__init__.py).
 | `rm` | Delete a dead gremlin's state dir, worktree, and branch |
 | `close` | Mark a dead gremlin as closed |
 | `log` | Tail the gremlin's log file |
+| `prompt-for-assistant` | Print the assistant setup prompt to stdout (`gremlins prompt-for-assistant | pbcopy`) |
 
 `_run-pipeline` is an internal spawn boundary; not for direct use.
 
