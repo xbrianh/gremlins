@@ -33,7 +33,7 @@ sequencing logic of their own.
 - `request_copilot.py` — `run`. Requests Copilot review by adding
   `copilot-pull-request-reviewer` to the PR's reviewer list.
 - `verify.py` — `Verify(Stage)`. Constructs a `LoopStage` from two closures (`_run_cmd`, `_run_fix`) and delegates the retry loop to it. `_run_cmd` runs `cmds` joined with `&&` and raises `RunCmdFailed` on failure; `_run_fix` formats the fix prompt and invokes the agent. `LoopExhausted` from `LoopStage` is translated to `RuntimeError("verify stage exhausted N attempts")`. Takes `is_git` (controls diff capture) and `commit_after_fix` (controls commit instruction). Registers as stage type `"verify"`.
-- `wait_ci.py` — `run(ctx, WaitCiOptions)`. Gh pipeline (`ci-gate`). Polls PR CI checks via `gh_utils`; re-invokes agent to fix failures; bails on `REVIEW_REQUIRED` or attempt exhaustion. Registers as stage type `"wait-ci"`.
+- `wait_ci.py` — `run(ctx, WaitCiOptions)`. Gh pipeline (`ci-gate`). Polls PR CI checks via `utils.github`; re-invokes agent to fix failures; bails on `REVIEW_REQUIRED` or attempt exhaustion. Registers as stage type `"wait-ci"`.
 - `wait_copilot.py` — `run`. Polls until Copilot posts a non-PENDING review.
 
 ## Conventions
