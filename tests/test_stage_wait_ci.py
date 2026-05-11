@@ -170,6 +170,29 @@ def test_fix_on_failure_then_pass(tmp_path: pathlib.Path) -> None:
     assert client.calls[0].label == "ci-fix-1"
 
 
+def test_ci_fix_prompt_contains_pr_branch(
+    tmp_path: pathlib.Path, make_state_dir
+) -> None:
+    gr_id = "test-ci-fix-branch"
+    state_dir = make_state_dir(gr_id)
+    branch = "issue-42-my-feature"
+    (state_dir / "state.json").write_text(
+        json.dumps(
+            {"id": gr_id, "stage": "", "artifacts": [{"type": "pr", "branch": branch}]}
+        )
+    )
+    client = FakeClaudeClient(fixtures={"ci-fix-1": MINIMAL_EVENTS})
+    getter = _make_getter(
+        [([_FAILING_CHECK], ""), ([_FAILING_CHECK], ""), ([_PASSING_CHECK], "")]
+    )
+    stage, state = _make_stage(
+        client, tmp_path, gr_id=gr_id, poll_interval=0, checks_getter=getter
+    )
+    stage.run(state)
+    assert len(client.calls) == 1
+    assert branch in client.calls[0].prompt
+
+
 def test_exhausted_bails(tmp_path: pathlib.Path) -> None:
     client = FakeClaudeClient(
         fixtures={

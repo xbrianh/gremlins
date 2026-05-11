@@ -226,6 +226,7 @@ class WaitCI(Stage):
                 fix_prompt = template.format(
                     bail_command=self.bail_command(state),
                     failure_output=failure_output,
+                    pr_branch=state.last_pr_branch(),
                 )
                 self.run_claude(
                     fix_prompt,
