@@ -20,6 +20,42 @@ def get_repo() -> str:
     return r.stdout.strip()
 
 
+def current_repo() -> str:
+    """Return ``owner/name`` of the current repo, or '' on any error."""
+    try:
+        r = proc.run(
+            ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+            timeout=10,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return ""
+    if r.returncode != 0:
+        return ""
+    return r.stdout.strip()
+
+
+def fetch_issue(plan: str) -> dict[str, Any] | None:
+    """Resolve an issue-ref plan arg to its ``gh issue view`` JSON dict.
+
+    Returns ``None`` when ``plan`` doesn't parse as an issue ref or any gh
+    call fails.
+    """
+    try:
+        target_repo, issue_ref = parse_issue_ref(plan, "")
+    except Exception:
+        return None
+    if issue_ref is None:
+        return None
+    if not target_repo:
+        target_repo = current_repo()
+    if not target_repo:
+        return None
+    try:
+        return view_issue(issue_ref, target_repo)
+    except Exception:
+        return None
+
+
 def parse_issue_ref(plan_source: str, repo: str) -> tuple[str | None, str | None]:
     """Parse an issue reference string into ``(target_repo, issue_num)``.
 

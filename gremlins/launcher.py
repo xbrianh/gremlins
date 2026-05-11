@@ -28,7 +28,7 @@ from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.utils import git as _git_mod
 from gremlins.utils import proc
-from gremlins.utils.github import parse_issue_ref, view_issue
+from gremlins.utils.github import fetch_issue, parse_issue_ref
 from gremlins.utils.text import read_markdown_title, slugify
 from gremlins.utils.yaml import YamlLoadError
 
@@ -55,45 +55,6 @@ def _pipeline_setup_kind(pipeline: Pipeline) -> str:
         return "worktree-detached"
     return "worktree-branch"
 
-
-def _gh_current_repo() -> str:
-    """Return ``owner/name`` of the current repo via ``gh repo view``, or ''.
-
-    Best-effort: returns '' on any error so callers can fall back.
-    """
-    try:
-        r = proc.run(
-            ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-            timeout=10,
-        )
-    except (subprocess.SubprocessError, OSError):
-        return ""
-    if r.returncode != 0:
-        return ""
-    return r.stdout.strip()
-
-
-def _fetch_issue(plan: str) -> dict[str, Any] | None:
-    """Resolve an issue-ref --plan arg to its ``gh issue view`` JSON dict.
-
-    Returns ``None`` when ``plan`` doesn't parse as an issue ref or any gh call
-    fails. Single source of truth for issue lookups during launch — callers
-    should pass the result around rather than re-fetching.
-    """
-    try:
-        target_repo, issue_ref = parse_issue_ref(plan, "")
-    except Exception:
-        return None
-    if issue_ref is None:
-        return None
-    if not target_repo:
-        target_repo = _gh_current_repo()
-    if not target_repo:
-        return None
-    try:
-        return view_issue(issue_ref, target_repo)
-    except Exception:
-        return None
 
 
 def _resolve_description_and_slug(
@@ -127,7 +88,7 @@ def _resolve_description_and_slug(
         # meaningful slug. Best-effort: fall back to slug-from-ref on any error.
         title = issue_title
         if not title:
-            data = _fetch_issue(plan)
+            data = fetch_issue(plan)
             if data:
                 title = str(data.get("title") or "")
         if title:
@@ -361,7 +322,7 @@ def launch(
 
     issue_data: dict[str, Any] | None = None
     if plan and not os.path.isfile(plan):
-        issue_data = _fetch_issue(plan)
+        issue_data = fetch_issue(plan)
 
     desc, desc_explicit, slug = _resolve_description_and_slug(
         instructions,
