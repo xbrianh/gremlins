@@ -90,8 +90,7 @@ child's `state.json` to decide what to do — no `gh` calls, no git inspection.
 ### Operator recovery flows
 
 ```sh
-# Keep this child going (fix the issue, re-run from bail point):
-# Address the PR review manually, then:
+# Keep this child going: address the PR review manually, then:
 gremlins resume <child-id>
 gremlins rescue <boss-id>
 

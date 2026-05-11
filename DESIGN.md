@@ -28,7 +28,7 @@ Each stage is one of two kinds:
   receive a prompt assembled from pipeline-declared prompt files, run to
   completion, and produce an artifact on disk (a markdown file, a commit, a
   PR comment). Examples: `plan`, `implement`, `review-code`, `address-code`,
-  `ghreview`, `ghaddress`. Most agentic stages invoke the model exactly
+  `github-review-pull-request`, `github-address-pull-request-reviews`. Most agentic stages invoke the model exactly
   once; the two self-healing stages described in §2.2 are the exception.
 
 The orchestrator (`runner.run_stages`) is responsible for sequencing,
@@ -166,8 +166,8 @@ raise — is the pattern. The marker outlives the raise.
 
 `state.check_bail` is the read side. It raises `RuntimeError` if
 `state.json` already has a `bail_class` recorded. It is called at the
-*entry* of stages that follow a soft-failure point — `ghaddress` and
-`ghreview` call it before posting anything to GitHub, and the
+*entry* of stages that follow a soft-failure point — `github-address-pull-request-reviews` and
+`github-review-pull-request` call it before posting anything to GitHub, and the
 self-healing stages (§2.2) call it inside the retry loop after each
 fixer agent runs, so an agent that bails via `python -m gremlins.bail`
 halts the loop without the stage having to inspect agent output.
@@ -557,7 +557,7 @@ Before reaching for session caching we would:
    diffs.
 2. Trim that stage's prompt or split it. Prompt size is the cheapest
    variable to move.
-3. Drop non-critical stages to a smaller model. `ghaddress` and the
+3. Drop non-critical stages to a smaller model. `github-address-pull-request-reviews` and the
    chain-step `handoff` agent are good candidates; they're constrained
    tasks that don't need Sonnet's headroom.
 4. Only then consider structural changes to context flow.
