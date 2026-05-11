@@ -699,8 +699,8 @@ stages:
 
 def test_boss_yaml_loads() -> None:
     """boss.yaml loads with loop/handoff structure replacing the old chain stage."""
-    from gremlins.pipeline.discovery import resolve_pipeline_path
     from gremlins.pipeline import Pipeline
+    from gremlins.pipeline.discovery import resolve_pipeline_path
 
     pipeline = Pipeline.from_yaml(resolve_pipeline_path("boss", pathlib.Path.cwd()))
     names = [s.name for s in pipeline.stages]

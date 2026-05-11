@@ -13,8 +13,8 @@ from gremlins.clients.client import PACKAGE_DEFAULT, Client
 from gremlins.errors import die
 from gremlins.git import has_diff, has_dirty_worktree, in_git_repo, rev_exists
 from gremlins.logging_setup import configure_logging
-from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.pipeline import Pipeline
+from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.runner import install_signal_handlers
 from gremlins.stages.base import RuntimeState
 

@@ -12,7 +12,6 @@ import subprocess
 
 import pytest
 
-import gremlins.orchestrators.run as _run_mod
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.gh_utils import parse_issue_ref as _parse_issue_ref
 from gremlins.git import (
@@ -24,8 +23,8 @@ from gremlins.git import (
 )
 from gremlins.orchestrators.run import _parse_args as _parse_gh_args
 from gremlins.orchestrators.run import run_pipeline
-from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.pipeline import Pipeline
+from gremlins.pipeline.discovery import resolve_pipeline_path
 
 
 def _gh_pipeline_path(cwd):

@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
-from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.pipeline import Pipeline
+from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.stage_clients import (
     collect_stage_specs,
     require_stage_spec,

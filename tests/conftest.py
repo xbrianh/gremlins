@@ -11,7 +11,6 @@ os.environ.setdefault("GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME", "main")
 
 import pytest
 
-import gremlins.orchestrators.run as _run_mod
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.pipeline import Pipeline as _PipelineDef
 from gremlins.stages.open_github_pr import OpenGitHubPR
@@ -86,9 +85,7 @@ def common_local_patches(monkeypatch):
             _strip_clients(s)
         return dataclasses.replace(pipeline, default_client=None)
 
-    monkeypatch.setattr(
-        "gremlins.pipeline.Pipeline.from_yaml", _from_yaml_no_clients
-    )
+    monkeypatch.setattr("gremlins.pipeline.Pipeline.from_yaml", _from_yaml_no_clients)
 
 
 @pytest.fixture(autouse=True)

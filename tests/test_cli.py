@@ -338,9 +338,7 @@ def _make_fake_pipeline(stage_type: str = "plan"):
 
     stage = Plan("plan", None, [], {})
     stage.type = stage_type
-    return Pipeline(
-        name="local", path=pathlib.Path("/fake/local.yaml"), stages=[stage]
-    )
+    return Pipeline(name="local", path=pathlib.Path("/fake/local.yaml"), stages=[stage])
 
 
 def test_launch_unified_dispatch_calls_launch(tmp_path, monkeypatch):

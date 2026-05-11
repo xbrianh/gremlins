@@ -36,7 +36,9 @@ def _local(
 
 
 def test_pipeline_constructs_from_local_yaml(tmp_path: pathlib.Path) -> None:
-    pipeline_data = _PipelineData.from_yaml(resolve_pipeline_path("local", pathlib.Path.cwd()))
+    pipeline_data = _PipelineData.from_yaml(
+        resolve_pipeline_path("local", pathlib.Path.cwd())
+    )
     pipe = Pipeline(
         pipeline_data.stages,
         args=_args(),
@@ -58,7 +60,9 @@ def test_pipeline_constructs_from_local_yaml(tmp_path: pathlib.Path) -> None:
 
 
 def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
-    pipeline_data = _PipelineData.from_yaml(resolve_pipeline_path("gh", pathlib.Path.cwd()))
+    pipeline_data = _PipelineData.from_yaml(
+        resolve_pipeline_path("gh", pathlib.Path.cwd())
+    )
     pipe = Pipeline(
         pipeline_data.stages,
         args=_args(),
