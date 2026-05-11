@@ -224,7 +224,7 @@ def test_corrupt_bundled_yaml(tmp_path, capsys, monkeypatch):
     assert err.startswith("error:")
     assert err.count("\n") == 1
     assert "local.yaml" in err
-    assert "parse failed" in err
+    assert "YAML parse error" in err
     assert "line " in err
     assert "column " in err
     assert not (out_path / ".gremlins").exists()

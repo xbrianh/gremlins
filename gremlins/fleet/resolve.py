@@ -3,9 +3,8 @@
 import pathlib
 from typing import Any
 
-import yaml
-
 from gremlins.fleet.state import iter_state_files
+from gremlins.utils.yaml import YamlLoadError
 
 
 def stage_names_for_gremlin(state: dict[str, Any]) -> list[str]:
@@ -16,7 +15,7 @@ def stage_names_for_gremlin(state: dict[str, Any]) -> list[str]:
 
             pipeline = Pipeline.from_yaml(pathlib.Path(str(pipeline_path)))
             return [s.name for s in pipeline.stages]
-        except (FileNotFoundError, ValueError, yaml.YAMLError):
+        except (FileNotFoundError, ValueError, YamlLoadError):
             pass
     return []
 

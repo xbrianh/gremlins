@@ -3,11 +3,10 @@ from __future__ import annotations
 import pathlib
 from typing import Any, cast
 
-import yaml
-
 from gremlins.pipeline import BUNDLED_PROMPT_PREFIX
 from gremlins.pipeline.discovery import resolve_pipeline_name
 from gremlins.prompts import BUNDLED_PROMPT_DIR
+from gremlins.utils.yaml import load_yaml_file
 
 
 def expand_pipeline(
@@ -30,12 +29,7 @@ def _expand(
         cycle = " -> ".join(str(p) for p in chain + [resolved])
         raise ValueError(f"include cycle detected: {cycle}")
 
-    raw_text = yaml_path.read_text(encoding="utf-8")
-    parsed = yaml.safe_load(raw_text)
-    if not isinstance(parsed, dict):
-        raise ValueError(f"pipeline file must be a YAML mapping: {yaml_path}")
-
-    raw = cast(dict[str, Any], parsed)
+    raw = load_yaml_file(yaml_path)
     yaml_dir = yaml_path.parent
     prompt_dir = _resolve_prompt_dir(raw.get("prompt_dir"), yaml_dir)
     new_chain = chain + [resolved]

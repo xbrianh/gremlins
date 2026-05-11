@@ -25,8 +25,6 @@ import pathlib
 import sys
 from typing import Any
 
-import yaml
-
 from gremlins import paths as _paths
 from gremlins.fleet.cli import (
     ack_main,
@@ -48,6 +46,7 @@ from gremlins.pipeline.discovery import list_pipelines, resolve_pipeline_name
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import STAGE_REGISTRY
 from gremlins.state import validate_gr_id
+from gremlins.utils.yaml import YamlLoadError
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -166,7 +165,7 @@ def _launch_main(argv: list[str]) -> int:
 
     try:
         pipeline = Pipeline.from_yaml(pipeline_path)
-    except (ValueError, yaml.YAMLError, FileNotFoundError) as exc:
+    except (ValueError, YamlLoadError, FileNotFoundError) as exc:
         sys.stderr.write(
             f"error: pipeline '{name}' is invalid: {exc}\n  (file: {pipeline_path})\n"
         )

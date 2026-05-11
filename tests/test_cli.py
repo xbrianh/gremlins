@@ -6,11 +6,11 @@ import json
 import pathlib
 
 import pytest
-import yaml
 
 from gremlins.bail import bail_main
 from gremlins.cli import main
 from gremlins.run_pipeline import main as run_pipeline_main
+from gremlins.utils.yaml import YamlLoadError
 
 
 @pytest.fixture
@@ -403,7 +403,7 @@ def test_launch_unified_dispatch_unknown_name_with_help_exits_nonzero(
     "exc",
     [
         ValueError("duplicate stage name: 'verify'"),
-        yaml.YAMLError("mapping values are not allowed here"),
+        YamlLoadError("mapping values are not allowed here"),
         FileNotFoundError("prompt file not found: gremlins:missing.md"),
     ],
 )

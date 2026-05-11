@@ -8,8 +8,6 @@ import os
 import pathlib
 import shutil
 
-import yaml
-
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
 from gremlins.env_file import load_env_file
 from gremlins.errors import die
@@ -31,6 +29,7 @@ from gremlins.state import (
     resolve_session_dir,
     resolve_state_file,
 )
+from gremlins.utils.yaml import YamlLoadError
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +94,7 @@ def run_pipeline(
 
     try:
         pipeline = _Pipeline.from_yaml(pipeline_path)
-    except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
+    except (FileNotFoundError, ValueError, YamlLoadError) as exc:
         die(str(exc))
 
     is_gh = pipeline_uses_gh(pipeline)
