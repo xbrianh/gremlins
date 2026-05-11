@@ -8,10 +8,11 @@ from typing import Any, cast
 from gremlins.utils import proc
 
 
-def get_repo() -> str:
+def get_repo(*, timeout: float | None = 10) -> str:
     """Return the current repo's ``owner/name`` via ``gh repo view``."""
     r = proc.run(
         ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+        timeout=timeout,
     )
     if r.returncode != 0:
         raise RuntimeError(
@@ -23,23 +24,13 @@ def get_repo() -> str:
 def current_repo() -> str:
     """Return ``owner/name`` of the current repo, or '' on any error."""
     try:
-        r = proc.run(
-            ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-            timeout=10,
-        )
-    except (subprocess.SubprocessError, OSError):
+        return get_repo()
+    except (RuntimeError, subprocess.SubprocessError, OSError):
         return ""
-    if r.returncode != 0:
-        return ""
-    return r.stdout.strip()
 
 
 def fetch_issue(plan: str) -> dict[str, Any] | None:
-    """Resolve an issue-ref plan arg to its ``gh issue view`` JSON dict.
-
-    Returns ``None`` when ``plan`` doesn't parse as an issue ref or any gh
-    call fails.
-    """
+    """Resolve an issue-ref plan arg to its ``gh issue view`` JSON dict."""
     try:
         target_repo, issue_ref = parse_issue_ref(plan, "")
     except Exception:
