@@ -175,9 +175,7 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
             _strip_clients(s)
         return dataclasses.replace(pipeline, default_client=None)
 
-    monkeypatch.setattr(
-        "gremlins.pipeline.Pipeline.from_yaml", _from_yaml_no_clients
-    )
+    monkeypatch.setattr("gremlins.pipeline.Pipeline.from_yaml", _from_yaml_no_clients)
 
     # set_stage is a no-op in tests — gr_id is not passed to gh_main.
 
