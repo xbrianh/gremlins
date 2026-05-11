@@ -64,6 +64,14 @@ def _apply_client_override(stages: list[Stage], cli: Client) -> None:
             _apply_client_override(stage.body, cli)
 
 
+def _propagate_client_models(stages: list[Stage]) -> None:
+    for stage in stages:
+        if stage.model is None and stage.client is not None:
+            stage.model = stage.client.model
+        if stage.body:
+            _propagate_client_models(stage.body)
+
+
 def _unique_clients(stages: list[Stage]) -> list[Client]:
     seen: set[int] = set()
     result: list[Client] = []
@@ -128,6 +136,8 @@ def run_pipeline(
 
     if cli_spec:
         _apply_client_override(list(pipeline.stages), cli_spec)
+
+    _propagate_client_models(list(pipeline.stages))
 
     session_dir = resolve_session_dir(gr_id)
 
