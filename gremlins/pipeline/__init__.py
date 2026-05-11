@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import dataclasses
+import importlib
 import pathlib
 from typing import TYPE_CHECKING, Any, cast
 
 from gremlins.clients.client import Client
-from gremlins.stages.base import Stage
+
+if TYPE_CHECKING:
+    from gremlins.stages.base import Stage
 
 BUNDLED_PROMPT_PREFIX = "gremlins:"
 
@@ -20,10 +23,12 @@ class Pipeline:
 
     @classmethod
     def from_yaml(cls, path: pathlib.Path) -> Pipeline:
-        from gremlins.pipeline.loader import _ensure_registered, parse_stage
+        importlib.import_module("gremlins.stages.all")
+        importlib.import_module("gremlins.clients")
+
+        from gremlins.pipeline.loader import parse_stage
         from gremlins.pipeline.preprocess import expand_pipeline
 
-        _ensure_registered()
         path = path.resolve()
         if not path.exists():
             raise FileNotFoundError(f"pipeline file not found: {path}")

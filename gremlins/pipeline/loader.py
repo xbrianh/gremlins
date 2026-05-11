@@ -1,16 +1,10 @@
 from __future__ import annotations
 
-import importlib
 from typing import Any
 
 from gremlins.clients.client import Client
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import STAGE_REGISTRY
-
-
-def _ensure_registered() -> None:
-    importlib.import_module("gremlins.stages.all")
-    importlib.import_module("gremlins.clients")
 
 
 def get_client_from_yaml(d: dict[str, Any]) -> Client | None:
