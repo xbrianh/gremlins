@@ -115,7 +115,7 @@ stages:
 |---|---|
 | `name` | Pipeline display name; defaults to the file stem |
 | `default_client` | `provider:model` string used for stages without an explicit `client:` |
-| `prompt_dir` | Directory that bare-name `prompt:` paths resolve against, relative to the YAML file. Defaults to the YAML's directory. `gremlins init` injects `prompt_dir: ../prompts` into copied pipelines. |
+| `prompt_dir` | Directory that bare-name `prompt:` paths resolve against, relative to the YAML file. Defaults to the YAML's directory. |
 | `stages` | Ordered list of stage entries or parallel groups |
 
 **Per-stage keys:**
@@ -191,8 +191,7 @@ package vs which must be provided locally.
 
 By convention, project-local prompts live in `./.gremlins/prompts/` (a peer
 of `./.gremlins/pipelines/`, not nested under it) and pipelines set
-`prompt_dir: ../prompts`. `gremlins init` injects that line automatically
-when scaffolding pipelines into a project.
+`prompt_dir: ../prompts`.
 
 ### `options:` field
 
@@ -338,9 +337,7 @@ export PATH="$VIRTUAL_ENV/bin:$PATH"
 export TEST_DATABASE_URL=postgresql://localhost/mydb_test
 ```
 
-`gremlins init` writes `.gremlins/.gitignore` with `env` so the file is
-gitignored by default. Add it to your `~/.gitignore_global` or project
-`.gitignore` if you don't use `gremlins init`.
+Add `.gremlins/env` to your `~/.gitignore_global` or project `.gitignore`.
 
 ### Loader API
 

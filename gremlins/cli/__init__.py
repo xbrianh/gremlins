@@ -15,7 +15,6 @@ from gremlins.cli.fleet import (
     skip_main,
     stop_main,
 )
-from gremlins.cli.init import init_main
 from gremlins.cli.launch import launch_main
 from gremlins.cli.resume import resume_main
 
@@ -29,8 +28,6 @@ def main(argv: list[str] | None = None) -> int:
 
     if sub == "launch":
         return launch_main(rest)
-    if sub == "init":
-        return init_main(rest)
     if sub == "resume":
         return resume_main(rest)
     if sub == "stop":
