@@ -11,7 +11,7 @@ prompts:
 stages:
   - { name: plan,            type: plan,            prompt: [code-style, gremlins:plan_gh.md] }
   - { name: implement,       type: implement,       prompt: [code-style, gremlins:implement_gh.md] }
-  - { name: verify,          type: verify,          options: { cmds: ["make check", "make test"], commit_after_fix: false }, prompt: verify }
+  - { name: verify,          type: verify,          options: { cmds: ["make check", "make test"] }, prompt: verify }
   - { name: open-pr,         type: github-open-pull-request }
   - { name: github-request-copilot-review, type: github-request-copilot-review }
   - { name: ghreview,        type: ghreview,        prompt: [code-style, gremlins:review_gh.md] }
