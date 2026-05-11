@@ -1,23 +1,3 @@
-"""Top-level dispatch for ``python -m gremlins.cli``.
-
-User-facing subcommands:
-  launch    — launch a background gremlin (local|gh|boss)
-  init      — scaffold .gremlins/ with editable copies of bundled pipelines
-  review    — review-code stage only
-  address   — address-code stage only
-  resume    — re-spawn an existing gremlin from its recorded stage
-  ack       — record that a bailed child's work landed externally
-  skip      — abandon a bailed child's work
-  stop      — send SIGTERM to a running gremlin
-  rescue    — diagnose and resume a dead or stalled gremlin
-  land      — land a finished gremlin onto the current branch
-  rm        — delete a dead gremlin's state dir, worktree, and branch
-  close     — mark a dead gremlin as closed
-  log       — tail the gremlin's log file
-
-Bare invocation prints fleet status.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -26,74 +6,18 @@ import sys
 from typing import Any
 
 from gremlins import paths as _paths
-from gremlins.fleet.cli import (
-    ack_main,
-    close_main,
-    land_main,
-    log_main,
-    rescue_main,
-    rm_main,
-    skip_main,
-    stop_main,
-)
-from gremlins.fleet.cli import (
-    main as fleet_main,
-)
-from gremlins.launcher import launch, resume
-from gremlins.orchestrators.review_address import address_main, review_main
+from gremlins.launcher import launch
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import list_pipelines, resolve_pipeline_name
 from gremlins.stages.base import Stage
 from gremlins.stages.registry import STAGE_REGISTRY
-from gremlins.state import validate_gr_id
 from gremlins.utils.yaml import YamlLoadError
 
-
-def main(argv: list[str] | None = None) -> int:
-    if argv is None:
-        argv = sys.argv[1:]
-
-    sub = argv[0] if argv else ""
-    rest = argv[1:]
-
-    if sub == "launch":
-        return _launch_main(rest)
-    if sub == "init":
-        from gremlins.init import init_main
-
-        return init_main(rest)
-    if sub == "review":
-        return review_main(rest)
-    if sub == "address":
-        return address_main(rest)
-    if sub == "resume":
-        return _resume_main(rest)
-    if sub == "stop":
-        return stop_main(rest)
-    if sub == "rescue":
-        return rescue_main(rest)
-    if sub == "land":
-        return land_main(rest)
-    if sub == "rm":
-        return rm_main(rest)
-    if sub == "close":
-        return close_main(rest)
-    if sub == "log":
-        return log_main(rest)
-    if sub == "ack":
-        return ack_main(rest)
-    if sub == "skip":
-        return skip_main(rest)
-
-    # No subcommand or unknown first arg → fleet status (id-prefix drill-in works here)
-    return fleet_main(argv)
-
-
 _INFRA_ARGS = frozenset({"description", "parent_id", "print_id", "base_ref", "client"})
-
 _INFRA_FLAG_NAMES = frozenset(
     {"description", "parent", "print-id", "base-ref", "client"}
 )
+_LAUNCH_BRIEF = "usage: gremlins launch <name> [opts]\nLaunch a background gremlin by pipeline name. Run 'gremlins launch --list' to see available pipelines.\n"
 
 
 def _parse_bool(v: str) -> bool:
@@ -137,10 +61,7 @@ def build_launch_parser(
     return p
 
 
-_LAUNCH_BRIEF = "usage: gremlins launch <name> [opts]\nLaunch a background gremlin by pipeline name. Run 'gremlins launch --list' to see available pipelines.\n"
-
-
-def _launch_main(argv: list[str]) -> int:
+def launch_main(argv: list[str]) -> int:
     if "--list" in argv:
         for name, path in list_pipelines(pathlib.Path.cwd()):
             try:
@@ -216,26 +137,3 @@ def _self_background_main(
     else:
         sys.stderr.write(info)
     return 0
-
-
-def _resume_main(argv: list[str]) -> int:
-    p = argparse.ArgumentParser(
-        prog="gremlins resume",
-        description="Re-spawn an existing gremlin from its recorded stage.",
-    )
-    p.add_argument("gr_id")
-    args = p.parse_args(argv)
-
-    try:
-        validate_gr_id(args.gr_id)
-        resume(args.gr_id)
-    except (ValueError, RuntimeError) as exc:
-        sys.stderr.write(f"error: {exc}\n")
-        return 1
-
-    sys.stdout.write(f"resumed gremlin: {args.gr_id}\n")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

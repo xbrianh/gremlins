@@ -10,7 +10,8 @@ from typing import Any
 import pytest
 import yaml
 
-from gremlins.init import _bundled_pipeline_names, init_main
+from gremlins.cli.init import init_main
+from gremlins.init import bundled_pipeline_names as _bundled_pipeline_names
 
 
 def _iter_stage_prompts(

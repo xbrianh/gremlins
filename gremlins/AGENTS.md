@@ -7,7 +7,7 @@ review / address pipelines, the fleet manager
 
 ## Module layout
 
-- `cli.py` — top-level dispatch: `gremlins {launch,review,address,resume,stop,rescue,land,rm,close,log}`. `launch` accepts a pipeline file or skill name. Bare invocation prints fleet status.
+- `cli/` — subcommand entry points. `__init__.py` is the top-level dispatch; one file per subcommand group: `launch.py`, `resume.py`, `init.py`, `review_address.py`, `fleet.py`. Bare invocation prints fleet status.
 - `bail.py` — `python -m gremlins.bail <class> [detail]`. Writes bail marker to `state.json`.
 - `run_pipeline.py` — `python -m gremlins.run_pipeline <gr_id> <kind>`. Spawned by the launcher; wraps `cli.main` and writes terminal state on exit.
 - `runner.py` — `run_stages` sequencer (with `resume_from`) + SIGINT/SIGTERM handlers that reap `claude -p` children.
@@ -25,7 +25,7 @@ review / address pipelines, the fleet manager
 - `stages/all.py` — side-effect import; importing it causes every stage module to self-register into `STAGE_REGISTRY`. Called automatically by `Pipeline.from_yaml` via `_ensure_registered()`; no manual import needed.
 - `stages/base.py` — `Stage` Protocol + `StageContext` dataclass: shared `client`, `session_dir`, `gr_id` threaded into every stage.
 - `stages/` — per-stage bodies: `plan`, `implement`, `review_code`, `address_code`, `verify`, `test`, `commit_pr`, `ghreview`, `ghaddress`, `request_copilot`, `wait_copilot`, `wait_ci`, `handoff`.
-- `orchestrators/local.py` — `local_main`, `review_main`, `address_main`.
+- `orchestrators/review_address.py` — `run_review`, `run_address`. Library functions called by `cli/review_address.py`.
 - `orchestrators/gh.py` — `gh_main`. Drives the gh pipeline.
 - `orchestrators/boss.py` — `boss_main`. Runs the `Handoff` stage (in-process) and `gremlins {stop,land,rescue}` between child gremlins.
 - `prompts/` — externalized prompt templates (plan, implement, review lenses, etc).
@@ -37,11 +37,13 @@ review / address pipelines, the fleet manager
 | `launch local` | `orchestrators.local.local_main` |
 | `launch gh` | `orchestrators.gh.gh_main` |
 | `launch boss` | `orchestrators.boss.boss_main` |
-| `review` | `orchestrators.local.review_main` |
-| `address` | `orchestrators.local.address_main` |
-| `resume` | `cli._resume_main` |
-| `stop` / `rescue` / `land` / `rm` / `close` / `log` | `fleet.cli.*_main` |
-| (bare / id-prefix) | `fleet.main` |
+| `review` | `cli.review_address.review_main` |
+| `address` | `cli.review_address.address_main` |
+| `resume` | `cli.resume.resume_main` |
+| `init` | `cli.init.init_main` |
+| `launch` | `cli.launch.launch_main` |
+| `stop` / `rescue` / `land` / `rm` / `close` / `log` | `cli.fleet.*_main` |
+| (bare / id-prefix) | `cli.fleet.fleet_main` |
 
 ## Testability seam: `ClaudeClient`
 

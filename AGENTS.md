@@ -8,7 +8,7 @@ This file is the entry-point orientation for an agent working on this codebase. 
 
 ```
 gremlins/                    Python package — see gremlins/AGENTS.md
-  cli.py                     Subcommand dispatch
+  cli/                       Subcommand entry points — one file per subcommand group
   launcher.py                Sets up state dir + worktree, spawns pipeline
   run_pipeline.py            Subprocess entry that wraps cli.main with terminal-state bookkeeping
   state.py                   state.json read/write helpers, bail/stage bookkeeping
@@ -44,7 +44,7 @@ make check         # ruff lint + ruff format check + pyright
 
 ## Project-wide conventions
 
-- **No re-export facades.** Package `__init__.py` files do not import from submodules and re-publish via `__all__`. Imports name the defining submodule directly: `from gremlins.fleet.cli import main`, not `from gremlins.fleet import main`. The sole exceptions are `__init__.py` files that *define* something (e.g. `gremlins/clients/__init__.py` runs provider registrations on import; `gremlins/__init__.py` defines `PACKAGE_ROOT`).
+- **No re-export facades.** Package `__init__.py` files do not import from submodules and re-publish via `__all__`. Imports name the defining submodule directly: `from gremlins.cli.fleet import fleet_main`, not `from gremlins.cli import fleet_main`. The sole exceptions are `__init__.py` files that *define* something (e.g. `gremlins/clients/__init__.py` runs provider registrations on import; `gremlins/__init__.py` defines `PACKAGE_ROOT`).
 - **No backwards-compatibility shims.** No legacy aliases, no deprecation paths, no compat decorators. Replace at every call site.
 - **No inheritance.** Composition only. Single inheritance is almost always the wrong tool; multiple inheritance is never acceptable.
 - **Functional first.** Pure functions and plain data over classes. Reach for a class only when state must be kept.
@@ -68,7 +68,7 @@ These values are persisted to `state.json` and read by other writers (the fleet 
 | Add a new stage | `gremlins/stages/AGENTS.md` and an existing stage as a model |
 | Add a new client provider | `gremlins/clients/AGENTS.md` |
 | Add a new pipeline | YAMLs in `gremlins/pipelines/` (bundled) or `.gremlins/` (project) |
-| Trace a CLI subcommand | `gremlins/cli.py` dispatch table |
+| Trace a CLI subcommand | `gremlins/cli/` |
 | Understand fleet operations | `gremlins/fleet/AGENTS.md` |
 | Investigate a state-dir layout | `gremlins/state.py` resolves dirs; per-gremlin layout under `platformdirs.user_state_dir("claude-gremlins")/<gr_id>/` |
 | Find the design backlog | `plans/` (rough notes, not authoritative) |
