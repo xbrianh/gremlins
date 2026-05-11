@@ -39,20 +39,6 @@ def _state_root() -> pathlib.Path:
     return _paths.state_root()
 
 
-def pipeline_uses_loop_handoff(pipeline: Pipeline) -> bool:
-    first = pipeline.stages[0] if pipeline.stages else None
-    return (
-        first is not None
-        and first.type == "loop"
-        and any(b.type == "handoff" for b in (first.body or []))
-    )
-
-
-def _pipeline_setup_kind(pipeline: Pipeline) -> str:
-    if pipeline_uses_gh(pipeline) or pipeline_uses_loop_handoff(pipeline):
-        return "worktree-detached"
-    return "worktree-branch"
-
 
 def _resolve_description_and_slug(
     instructions: str | None,
@@ -327,7 +313,7 @@ def launch(
             (artifacts_dir / "plan.md").write_text(issue_data["body"], encoding="utf-8")
 
         _setup_kind_arg = (
-            _pipeline_setup_kind(_loaded_pipeline)
+            _loaded_pipeline.setup_kind()
             if _loaded_pipeline is not None
             else "worktree-branch"
         )
@@ -457,7 +443,7 @@ def resume(gr_id: str) -> None:
 
     if (
         _loaded_resume is not None
-        and pipeline_uses_loop_handoff(_loaded_resume)
+        and _loaded_resume.uses_loop_handoff()
         and stage not in ("review-chain", "address-chain")
     ):
         stage = "chain"
