@@ -8,16 +8,43 @@ from typing import Any, cast
 from gremlins.utils import proc
 
 
-def get_repo() -> str:
+def get_repo(*, timeout: float | None = 10) -> str:
     """Return the current repo's ``owner/name`` via ``gh repo view``."""
     r = proc.run(
         ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+        timeout=timeout,
     )
     if r.returncode != 0:
         raise RuntimeError(
             f"not in a gh-recognized repo: {r.stderr.strip() or r.stdout.strip()}"
         )
     return r.stdout.strip()
+
+
+def current_repo() -> str:
+    """Return ``owner/name`` of the current repo, or '' on any error."""
+    try:
+        return get_repo()
+    except (RuntimeError, subprocess.SubprocessError, OSError):
+        return ""
+
+
+def fetch_issue(plan: str) -> dict[str, Any] | None:
+    """Resolve an issue-ref plan arg to its ``gh issue view`` JSON dict."""
+    try:
+        target_repo, issue_ref = parse_issue_ref(plan, "")
+    except Exception:
+        return None
+    if issue_ref is None:
+        return None
+    if not target_repo:
+        target_repo = current_repo()
+    if not target_repo:
+        return None
+    try:
+        return view_issue(issue_ref, target_repo)
+    except Exception:
+        return None
 
 
 def parse_issue_ref(plan_source: str, repo: str) -> tuple[str | None, str | None]:

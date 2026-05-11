@@ -1114,7 +1114,7 @@ def test_launch_boss_plan_issue_ref_materializes_plan_md(lenv, monkeypatch):
     issue_body = "# My Plan\n\nDo the thing."
     monkeypatch.setattr(
         launcher,
-        "_fetch_issue",
+        "fetch_issue",
         lambda plan: {"title": "My Plan", "body": issue_body, "number": 317, "url": ""},
     )
 
@@ -1135,7 +1135,7 @@ def test_launch_plan_issue_ref_writes_issue_url_and_num(lenv, monkeypatch):
 
     monkeypatch.setattr(
         launcher,
-        "_fetch_issue",
+        "fetch_issue",
         lambda plan: {
             "title": "My Plan",
             "body": "# My Plan\n\nDo the thing.",
