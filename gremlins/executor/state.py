@@ -25,8 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 from gremlins import paths as _paths
 from gremlins.clients.client import Client
-from gremlins.clients.protocol import CompletedRun
-from gremlins.utils.state_file import _locked_update
+from gremlins.utils.state_file import locked_update
 
 if TYPE_CHECKING:
     from gremlins.pipeline import Pipeline
@@ -140,7 +139,7 @@ def emit_bail(
                 shards[child_key] = shard
                 data["parallel_bails"] = shards
 
-            _locked_update(sf, _merge)
+            locked_update(sf, _merge)
     except Exception:
         pass
 
@@ -169,7 +168,7 @@ def patch_state(
                 data.pop(key, None)
             data.update(fields)
 
-        _locked_update(sf, _apply)
+        locked_update(sf, _apply)
     except Exception:
         pass
 
@@ -203,7 +202,7 @@ def patch_parallel_worktrees(
             else:
                 data.pop("parallel_worktrees", None)
 
-        _locked_update(sf, _apply)
+        locked_update(sf, _apply)
     except Exception:
         pass
 
@@ -238,7 +237,7 @@ def append_artifact(gr_id: str | None, artifact: dict[str, Any]) -> None:
             arts.append(artifact)
             data["artifacts"] = arts
 
-        _locked_update(sf, _apply)
+        locked_update(sf, _apply)
     except Exception:
         logger.warning("failed to append artifact", exc_info=True)
 

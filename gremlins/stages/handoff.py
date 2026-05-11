@@ -422,7 +422,6 @@ class Handoff(Stage):
 
     def run(self, state: State) -> None:
         session_dir = state.session_dir
-        gr_id = state.gr_id
         client = state.client
 
         boss_spec = session_dir / "boss-spec.md"

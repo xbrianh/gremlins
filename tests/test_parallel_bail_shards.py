@@ -21,6 +21,7 @@ import time
 import pytest
 
 import gremlins.executor.state as state_mod
+from gremlins.utils.state_file import locked_update as _state_locked_update
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
 from gremlins.runner import run_stages
@@ -163,7 +164,7 @@ def test_patch_state_concurrent_no_lost_updates(state_root):
             sf = state_mod.resolve_state_file(gr_id)
             assert sf is not None
             for _ in range(5):
-                state_mod._locked_update(
+                _state_locked_update(
                     sf,
                     lambda data: data.update({"counter": data.get("counter", 0) + 1}),
                 )

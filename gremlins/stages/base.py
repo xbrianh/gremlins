@@ -3,7 +3,6 @@ from __future__ import annotations
 import pathlib
 import shlex
 import subprocess
-from collections.abc import Callable
 from typing import Any, NamedTuple, cast
 
 from gremlins.clients.client import Client

@@ -9,7 +9,7 @@ from collections.abc import Callable
 from typing import Any
 
 
-def _locked_update(sf: pathlib.Path, fn: Callable[[dict[str, Any]], None]) -> None:
+def locked_update(sf: pathlib.Path, fn: Callable[[dict[str, Any]], None]) -> None:
     """Acquire an exclusive lock on sf.lock, read sf, apply fn(data), write sf atomically."""
     lock_path = sf.with_name(sf.name + ".lock")
     with open(lock_path, "a") as lock_f:
