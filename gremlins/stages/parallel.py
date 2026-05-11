@@ -13,7 +13,14 @@ import threading
 from collections.abc import Callable
 from typing import Any, cast
 
-from gremlins.executor.state import State, emit_bail, patch_parallel_worktrees, patch_state, resolve_state_file, set_stage
+from gremlins.executor.state import (
+    State,
+    emit_bail,
+    patch_parallel_worktrees,
+    patch_state,
+    resolve_state_file,
+    set_stage,
+)
 from gremlins.stages.base import Stage
 from gremlins.stages.compound import CompoundStage
 from gremlins.stages.registry import register_stage

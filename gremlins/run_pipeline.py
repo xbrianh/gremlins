@@ -11,8 +11,8 @@ import pathlib
 import sys
 import traceback
 
-from gremlins.launcher import write_terminal_state
 from gremlins.executor.state import validate_gr_id
+from gremlins.launcher import write_terminal_state
 
 
 def main(argv: list[str] | None = None) -> int:

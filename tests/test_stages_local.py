@@ -6,11 +6,11 @@ import pytest
 from conftest import MINIMAL_EVENTS, ReviewCreatingClient
 
 from gremlins.clients.fake import FakeClaudeClient
+from gremlins.executor.state import State as RuntimeState
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.stages import implement, plan
 from gremlins.stages.address_code import AddressCode
-from gremlins.executor.state import State as RuntimeState
 from gremlins.stages.implement import _render_spec_block
 from gremlins.stages.parallel import ParallelStage
 from gremlins.stages.review_code import ReviewCode

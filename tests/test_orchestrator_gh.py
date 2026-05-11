@@ -157,9 +157,7 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         data["artifacts"] = arts
         state_file.write_text(json.dumps(data), encoding="utf-8")
 
-    monkeypatch.setattr(
-        "gremlins.executor.state.append_artifact", _append_artifact
-    )
+    monkeypatch.setattr("gremlins.executor.state.append_artifact", _append_artifact)
 
     # Strip pipeline client keys so the injected client is used for every stage.
     _real_from_yaml = Pipeline.from_yaml
@@ -1892,17 +1890,17 @@ def _make_pipeline(*stages):
 
 
 def test_pipeline_uses_gh_detects_top_level_gh_stage() -> None:
-    from gremlins.stages.open_github_pr import OpenGitHubPR
     from gremlins.executor.state import pipeline_uses_gh
+    from gremlins.stages.open_github_pr import OpenGitHubPR
 
     pipeline = _make_pipeline(OpenGitHubPR("open-pr", None, [], {}))
     assert pipeline_uses_gh(pipeline) is True
 
 
 def test_pipeline_uses_gh_false_for_local_stages() -> None:
+    from gremlins.executor.state import pipeline_uses_gh
     from gremlins.stages.implement import Implement
     from gremlins.stages.plan import Plan
-    from gremlins.executor.state import pipeline_uses_gh
 
     pipeline = _make_pipeline(
         Plan("plan", None, [], {}),
@@ -1913,10 +1911,10 @@ def test_pipeline_uses_gh_false_for_local_stages() -> None:
 
 def test_pipeline_uses_gh_recurses_into_loop_body() -> None:
     """A loop containing gh-mode body stages is detected as gh."""
+    from gremlins.executor.state import pipeline_uses_gh
     from gremlins.stages.handoff import Handoff
     from gremlins.stages.loop import LoopStage
     from gremlins.stages.open_github_pr import OpenGitHubPR
-    from gremlins.executor.state import pipeline_uses_gh
 
     gh_body = [
         Handoff("handoff"),
@@ -1928,11 +1926,11 @@ def test_pipeline_uses_gh_recurses_into_loop_body() -> None:
 
 def test_pipeline_uses_gh_false_for_local_loop_body() -> None:
     """A loop with only local-mode body stages is not detected as gh."""
+    from gremlins.executor.state import pipeline_uses_gh
     from gremlins.stages.handoff import Handoff
     from gremlins.stages.implement import Implement
     from gremlins.stages.loop import LoopStage
     from gremlins.stages.review_code import ReviewCode
-    from gremlins.executor.state import pipeline_uses_gh
 
     local_body = [
         Handoff("handoff"),

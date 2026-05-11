@@ -9,9 +9,9 @@ import gremlins.stages.address_code as address_code
 import gremlins.stages.review_code as review_code
 from gremlins.clients.client import Client
 from gremlins.errors import die
+from gremlins.executor.state import State
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
-from gremlins.executor.state import State
 from gremlins.utils.git import has_diff, has_dirty_worktree, in_git_repo, rev_exists
 
 logger = logging.getLogger(__name__)
@@ -37,9 +37,7 @@ def run_review(
     rc_entry = next((s for s in pipeline.stages if s.type == "review-code"), None)
     if rc_entry is None or not rc_entry.prompts[1:]:
         die("local pipeline has no review-code stage with a prompt")
-    state = State(
-        client=client, session_dir=session_dir, gr_id=None, is_git=is_git
-    )
+    state = State(client=client, session_dir=session_dir, gr_id=None, is_git=is_git)
     if plan_text:
         (session_dir / "plan.md").write_text(plan_text, encoding="utf-8")
     logger.info("reviewing code (model: %s)", detail)
@@ -57,9 +55,7 @@ def run_address(session_dir: pathlib.Path, address: str, client: Client) -> int:
     ac_entry = next((s for s in pipeline.stages if s.type == "address-code"), None)
     if ac_entry is None or not ac_entry.prompts:
         die("local pipeline has no address-code stage with a prompt")
-    state = State(
-        client=client, session_dir=session_dir, gr_id=None, is_git=is_git
-    )
+    state = State(client=client, session_dir=session_dir, gr_id=None, is_git=is_git)
     logger.info("addressing code reviews (model: %s)", address)
     stage = address_code.AddressCode(
         ac_entry.name, address, ac_entry.prompts, ac_entry.options

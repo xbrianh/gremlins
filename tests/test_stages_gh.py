@@ -6,8 +6,8 @@ from conftest import MINIMAL_EVENTS
 from conftest import gh_pipeline as _gh_pipeline
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.stages.address_code import AddressCode
 from gremlins.executor.state import State as RuntimeState
+from gremlins.stages.address_code import AddressCode
 from gremlins.stages.review_code import ReviewCode
 
 _BUNDLED_PROMPTS = (

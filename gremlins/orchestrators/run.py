@@ -11,6 +11,13 @@ import shutil
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
 from gremlins.env_file import load_env_file
 from gremlins.errors import die
+from gremlins.executor.state import (
+    patch_state,
+    pipeline_uses_gh,
+    read_pr_url,
+    resolve_session_dir,
+    resolve_state_file,
+)
 from gremlins.logging_setup import configure_logging
 from gremlins.orchestrators.pipeline import Pipeline
 from gremlins.pipeline import Pipeline as _Pipeline
@@ -19,13 +26,6 @@ from gremlins.stage_clients import (
     collect_stage_specs,
     load_stage_specs_from_state,
     validate_stage_specs,
-)
-from gremlins.executor.state import (
-    patch_state,
-    pipeline_uses_gh,
-    read_pr_url,
-    resolve_session_dir,
-    resolve_state_file,
 )
 from gremlins.utils.git import has_commits, has_dirty_worktree, in_git_repo
 from gremlins.utils.github import get_repo
