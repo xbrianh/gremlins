@@ -536,7 +536,7 @@ def _setup_bailed_gremlin(
     state = {
         "id": gr_id,
         "kind": "ghgremlin",
-        "stage": "ghreview",
+        "stage": "github-review-pull-request",
         "status": "bailed",
         "bail_reason": "reviewer_requested_changes",
         "exit_code": 2,

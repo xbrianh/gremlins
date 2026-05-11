@@ -12,8 +12,8 @@ sequencing logic of their own.
 - `handoff.py` — `Handoff(Stage)` plus the full handoff agent implementation (`run`, `build_prompt`, `collect_git_context`, `sanitize_rolling_plan`, etc.). `Handoff` runs the agent once per boss-loop iteration: returns normally on "chain-done" (loop exits via HEAD-stable), raises `RunCmdFailed` on "next-plan" (writes child plan to `plan.md`, loop continues), raises `RuntimeError` on "bail". Preserves the original boss spec in `boss-spec.md` and restores it to `plan.md` on "chain-done" so post-loop stages see the original spec. Stage type `"handoff"`.
 - `plan.py` — `Plan(Stage)`. Local pipeline only.
 - `implement.py` — `Implement(Stage)`. Dual-mode (`kind='local'` / `kind='gh'`). For gh: enforces the empty-implementation invariant, classifies the outcome (`HeadAdvanced` / `EmptyImpl` / `DivergentHead`), creates the impl-handoff branch, and returns an `ImplStageResult` with the pre-impl state and classified outcome.
-- `review_code.py` — `ReviewCode(Stage)`. Local pipeline only (single-detail-reviewer post-collapse). Also registered as `"ghreview"` type alias.
-- `address_code.py` — `AddressCode(Stage)`. Local pipeline only. Also registered as `"ghaddress"` type alias.
+- `review_code.py` — `ReviewCode(Stage)` (type `"review-code"`): local pipeline only (single-detail-reviewer post-collapse). `GitHubReviewPullRequest(Stage)` (type `"github-review-pull-request"`): posts a PR review to GitHub.
+- `address_code.py` — `AddressCode(Stage)` (type `"address-code"`): local pipeline only. `GitHubAddressPullRequestReviews(Stage)` (type `"github-address-pull-request-reviews"`): addresses PR review comments on GitHub.
 - `github_request_copilot_review.py` — `GitHubRequestCopilotReview(Stage)`. Requests Copilot review by adding `copilot-pull-request-reviewer` to the PR's reviewer list.
 - `verify.py` — `Verify(Stage)`. Constructs a `LoopStage` from two closures (`_run_cmd`, `_run_fix`) and delegates the retry loop to it. `_run_cmd` runs `cmds` joined with `&&` and raises `RunCmdFailed` on failure; `_run_fix` formats the fix prompt and invokes the agent. `LoopExhausted` from `LoopStage` is translated to `RuntimeError("verify stage exhausted N attempts")`.
 - `github_wait_ci.py` — `GitHubWaitCI(Stage)`. Gh pipeline (`ci-gate`). Polls PR CI checks via `utils.github`; re-invokes agent to fix failures; bails on `REVIEW_REQUIRED` or attempt exhaustion.
@@ -49,5 +49,5 @@ Any new `gremlins/stages/introspect.py` (planned for #258) must import only `ins
 
 - `implement.py` enforces the empty-implementation invariant: an empty
   impl in the gh pipeline raises `EmptyImpl` and the runner bails. This
-  is the firewall that keeps no-op runs out of `ghreview`.
+  is the firewall that keeps no-op runs out of `github-review-pull-request`.
   Don't soften it.

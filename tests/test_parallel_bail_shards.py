@@ -740,11 +740,11 @@ def test_parallel_child_set_stage_writes_parent_as_stage(tmp_path, state_root):
     )
 
     # Simulate what make_runner does at the start of a child stage transition.
-    state.set_stage("ghreview")
+    state.set_stage("github-review-pull-request")
 
     data = _read_state(sf)
     assert data["stage"] == "reviews"
-    assert data["sub_stage"] == "ghreview"
+    assert data["sub_stage"] == "github-review-pull-request"
 
     # The recorded stage must be a valid resume_from target in a pipeline that
     # has "reviews" as a top-level name.
@@ -753,7 +753,7 @@ def test_parallel_child_set_stage_writes_parent_as_stage(tmp_path, state_root):
         ("reviews-fanout", lambda: None),
         ("reviews", lambda: None),
         ("reviews-fanin", lambda: None),
-        ("ghaddress", lambda: None),
+        ("github-address-pull-request-reviews", lambda: None),
     ]
     # Should not raise — this is what gremlins resume does.
     run_stages(pipeline_stages, resume_from=data["stage"])
@@ -773,8 +773,8 @@ def test_parallel_child_set_stage_with_sub_stage_payload_writes_parent_as_stage(
     )
 
     # Simulate a stage that calls set_stage with a dict sub_stage (e.g. review_code.py).
-    state.set_stage("ghreview", {"model": "claude-opus"})
+    state.set_stage("github-review-pull-request", {"model": "claude-opus"})
 
     data = _read_state(sf)
     assert data["stage"] == "reviews"
-    assert data["sub_stage"] == "ghreview"
+    assert data["sub_stage"] == "github-review-pull-request"

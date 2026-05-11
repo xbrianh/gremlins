@@ -7,7 +7,7 @@ import pathlib
 from typing import Any
 
 from gremlins.clients.client import Client
-from gremlins.executor.state import State, pipeline_uses_gh
+from gremlins.executor.state import State
 from gremlins.stages.base import Stage
 
 logger = logging.getLogger(__name__)
@@ -62,31 +62,11 @@ class ReviewCode(Stage):
         from gremlins.pipeline.loader import get_client_from_dict
 
         prompts: list[str] = d.get("prompt") or []
-        if not prompts and d.get("type") == "ghreview":
-            raise ValueError(f"stage {d['name']!r}: 'prompt' is required for ghreview")
         stage = cls(d["name"], None, prompts, d.get("options") or {})
         stage.client = get_client_from_dict(d)
         return stage
 
-    def __init__(
-        self,
-        name: str,
-        model: str | None,
-        prompts: list[str],
-        options: dict[str, Any],
-        *,
-        pr_url: str = "",
-    ) -> None:
-        super().__init__(name, model, prompts, options)
-        self.pr_url = pr_url
-
-    def run(self, state: State) -> Any:
-        is_gh = bool(state.pipeline_data and pipeline_uses_gh(state.pipeline_data))
-        if is_gh:
-            return self.results_to_github(state)
-        return self.results_to_local(state)
-
-    def results_to_local(self, state: State) -> pathlib.Path:
+    def run(self, state: State) -> pathlib.Path:
         model = self.model or state.client.model
         if not model:
             raise ValueError(f"stage {self.name!r}: model must be set")
@@ -114,9 +94,7 @@ class ReviewCode(Stage):
             "Use `git diff HEAD~1 HEAD` and `git diff` to see the scope."
         )
         if plan_text:
-            code_context = (
-                f"The plan for this change is:\n\n{plan_text}\n\n{code_scope}"
-            )
+            code_context = f"The plan for this change is:\n\n{plan_text}\n\n{code_scope}"
         else:
             code_context = code_scope
 
@@ -146,7 +124,36 @@ class ReviewCode(Stage):
 
         return out_file
 
-    def results_to_github(self, state: State) -> None:
+
+class GitHubReviewPullRequest(Stage):
+    type = "github-review-pull-request"
+
+    @classmethod
+    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> GitHubReviewPullRequest:
+        from gremlins.pipeline.loader import get_client_from_dict
+
+        prompts: list[str] = d.get("prompt") or []
+        if not prompts:
+            raise ValueError(
+                f"stage {d['name']!r}: 'prompt' is required for github-review-pull-request"
+            )
+        stage = cls(d["name"], None, prompts, d.get("options") or {})
+        stage.client = get_client_from_dict(d)
+        return stage
+
+    def __init__(
+        self,
+        name: str,
+        model: str | None,
+        prompts: list[str],
+        options: dict[str, Any],
+        *,
+        pr_url: str = "",
+    ) -> None:
+        super().__init__(name, model, prompts, options)
+        self.pr_url = pr_url
+
+    def run(self, state: State) -> None:
         pr_url = self.pr_url or state.read_pr_url()
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
@@ -161,7 +168,7 @@ class ReviewCode(Stage):
         self.run_claude(
             prompt,
             state=state,
-            label="ghreview",
-            raw_path=state.session_dir / "stream-ghreview.jsonl",
+            label="github-review-pull-request",
+            raw_path=state.session_dir / "stream-github-review-pull-request.jsonl",
         )
-        state.check_bail("/ghreview")
+        state.check_bail("/github-review-pull-request")

@@ -374,9 +374,9 @@ def test_gh_pipeline_stage_names(tmp_path):
         "verify",
         "open-pr",
         "github-request-copilot-review",
-        "ghreview",
+        "github-review-pull-request",
         "github-wait-copilot",
-        "ghaddress",
+        "github-address-pull-request-reviews",
         "ci-gate",
     ]
 
@@ -426,7 +426,7 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
     )
 
     monkeypatch.setattr(
-        "gremlins.stages.review_code.ReviewCode.run",
+        "gremlins.stages.review_code.GitHubReviewPullRequest.run",
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
@@ -438,7 +438,7 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.AddressCode.run",
+        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
         lambda self, pipe: None,
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
@@ -478,7 +478,7 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
+        "gremlins.stages.review_code.GitHubReviewPullRequest.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
@@ -489,7 +489,7 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
+        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr(
@@ -530,7 +530,7 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
+        "gremlins.stages.review_code.GitHubReviewPullRequest.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
@@ -541,7 +541,7 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
+        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr(
@@ -586,7 +586,7 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
+        "gremlins.stages.review_code.GitHubReviewPullRequest.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
@@ -597,7 +597,7 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
+        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr(
@@ -643,7 +643,7 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
+        "gremlins.stages.review_code.GitHubReviewPullRequest.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
@@ -654,7 +654,7 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
+        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr(
@@ -707,7 +707,7 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Resumed Plan\nDo more stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
+        "gremlins.stages.review_code.GitHubReviewPullRequest.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
@@ -718,7 +718,7 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
+        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr(
@@ -746,8 +746,8 @@ def test_resume_from_implement(tmp_path, monkeypatch):
     assert "implement" in labels
 
 
-def test_resume_from_ghreview(tmp_path, monkeypatch):
-    """--resume-from ghreview skips earlier stages and calls ghreview."""
+def test_resume_from_github_review_pull_request(tmp_path, monkeypatch):
+    """--resume-from github-review-pull-request skips earlier stages and calls it."""
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
@@ -760,10 +760,10 @@ def test_resume_from_ghreview(tmp_path, monkeypatch):
     )
     state_file.write_text(json.dumps(data))
 
-    ghreview_called = []
+    gh_review_called = []
     monkeypatch.setattr(
-        "gremlins.stages.review_code.ReviewCode.run",
-        lambda self, pipe: ghreview_called.append(
+        "gremlins.stages.review_code.GitHubReviewPullRequest.run",
+        lambda self, pipe: gh_review_called.append(
             self.pr_url
             or next(
                 (
@@ -786,7 +786,8 @@ def test_resume_from_ghreview(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
+        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
+        lambda self, pipe: None,
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
@@ -797,14 +798,14 @@ def test_resume_from_ghreview(tmp_path, monkeypatch):
 
     result = run_pipeline(
         _gh_pipeline_path(tmp_path),
-        argv=["--plan", "#5", "--resume-from", "ghreview"],
+        argv=["--plan", "#5", "--resume-from", "github-review-pull-request"],
         client=client,
     )
     assert result == 0
 
     # No client.run calls (plan/implement/commit/open-pr all skipped)
     assert client.calls == []
-    assert ghreview_called == ["https://github.com/owner/repo/pull/200"]
+    assert gh_review_called == ["https://github.com/owner/repo/pull/200"]
 
 
 def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch):
@@ -846,7 +847,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
     monkeypatch.setattr(subprocess, "run", fake_gh_run)
 
     monkeypatch.setattr(
-        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
+        "gremlins.stages.review_code.GitHubReviewPullRequest.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
@@ -857,7 +858,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
+        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr(
@@ -966,10 +967,10 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
     state_file.write_text(json.dumps(data))
 
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
-    ghreview_called = []
+    gh_review_called = []
     monkeypatch.setattr(
-        "gremlins.stages.review_code.ReviewCode.run",
-        lambda self, pipe: ghreview_called.append(
+        "gremlins.stages.review_code.GitHubReviewPullRequest.run",
+        lambda self, pipe: gh_review_called.append(
             self.pr_url
             or next(
                 (
@@ -992,7 +993,7 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
+        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
@@ -1011,7 +1012,7 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
     assert "implement" not in labels, "implement must not run on open-pr resume"
     assert "github-open-pull-request" in labels
 
-    assert ghreview_called == ["https://github.com/owner/repo/pull/101"]
+    assert gh_review_called == ["https://github.com/owner/repo/pull/101"]
     # Verify GitHubOpenPullRequest wrote pr artifact to state.json
     state = json.loads(state_file.read_text())
     pr_artifacts = [a for a in state.get("artifacts", []) if a.get("type") == "pr"]
@@ -1039,14 +1040,14 @@ def test_github_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
+        "gremlins.stages.review_code.GitHubReviewPullRequest.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
+        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr(
@@ -1112,7 +1113,7 @@ def test_github_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
+        "gremlins.stages.review_code.GitHubReviewPullRequest.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
@@ -1123,7 +1124,7 @@ def test_github_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
+        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
 
@@ -1168,7 +1169,7 @@ def test_github_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
 
 
 def test_github_wait_ci_stage_ordering(tmp_path, monkeypatch):
-    """ci-gate runs after ghaddress and exactly once."""
+    """ci-gate runs after github-address-pull-request-reviews and exactly once."""
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
@@ -1187,8 +1188,8 @@ def test_github_wait_ci_stage_ordering(tmp_path, monkeypatch):
         lambda self, pipe: order.append("verify"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.review_code.ReviewCode.run",
-        lambda self, pipe: order.append("ghreview"),
+        "gremlins.stages.review_code.GitHubReviewPullRequest.run",
+        lambda self, pipe: order.append("github-review-pull-request"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
@@ -1199,8 +1200,8 @@ def test_github_wait_ci_stage_ordering(tmp_path, monkeypatch):
         lambda self, pipe: order.append("github-request-copilot-review"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.AddressCode.run",
-        lambda self, pipe: order.append("ghaddress"),
+        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
+        lambda self, pipe: order.append("github-address-pull-request-reviews"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
@@ -1222,7 +1223,7 @@ def test_github_wait_ci_stage_ordering(tmp_path, monkeypatch):
     assert result == 0
 
     assert order[0] == "verify", "verify must run before other tracked stages"
-    assert order[-2:] == ["ghaddress", "ci-gate"]
+    assert order[-2:] == ["github-address-pull-request-reviews", "ci-gate"]
     assert order.count("verify") == 1
     assert order.count("ci-gate") == 1
 
@@ -1245,8 +1246,8 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
     ci_stages = []
 
     monkeypatch.setattr(
-        "gremlins.stages.review_code.ReviewCode.run",
-        lambda self, pipe: earlier_called.append("ghreview"),
+        "gremlins.stages.review_code.GitHubReviewPullRequest.run",
+        lambda self, pipe: earlier_called.append("github-review-pull-request"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
@@ -1257,8 +1258,8 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
         lambda self, pipe: earlier_called.append("github-request-copilot-review"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.AddressCode.run",
-        lambda self, pipe: earlier_called.append("ghaddress"),
+        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
+        lambda self, pipe: earlier_called.append("github-address-pull-request-reviews"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
@@ -1305,7 +1306,7 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
+        "gremlins.stages.review_code.GitHubReviewPullRequest.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
@@ -1316,7 +1317,7 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
+        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
@@ -1385,8 +1386,8 @@ def test_resume_from_verify(tmp_path, monkeypatch):
         lambda self, pipe: verify_calls.append(self),
     )
     monkeypatch.setattr(
-        "gremlins.stages.review_code.ReviewCode.run",
-        lambda self, pipe: earlier_called.append("ghreview"),
+        "gremlins.stages.review_code.GitHubReviewPullRequest.run",
+        lambda self, pipe: earlier_called.append("github-review-pull-request"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
@@ -1397,7 +1398,7 @@ def test_resume_from_verify(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
+        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
@@ -1432,7 +1433,7 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir):
         subprocess, "run", _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n")
     )
     monkeypatch.setattr(
-        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
+        "gremlins.stages.review_code.GitHubReviewPullRequest.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
@@ -1443,7 +1444,7 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
+        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr(
@@ -1487,7 +1488,7 @@ def test_gh_main_state_client_tracks_effective_model(
         subprocess, "run", _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n")
     )
     monkeypatch.setattr(
-        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
+        "gremlins.stages.review_code.GitHubReviewPullRequest.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
@@ -1498,7 +1499,7 @@ def test_gh_main_state_client_tracks_effective_model(
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
+        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr(
@@ -1566,7 +1567,7 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
         subprocess, "run", _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n")
     )
     monkeypatch.setattr(
-        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
+        "gremlins.stages.review_code.GitHubReviewPullRequest.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
@@ -1577,7 +1578,7 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
+        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr(
@@ -1624,7 +1625,7 @@ def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
     monkeypatch.setattr(
-        "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
+        "gremlins.stages.review_code.GitHubReviewPullRequest.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
@@ -1635,7 +1636,7 @@ def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
+        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr(

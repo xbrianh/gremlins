@@ -7,7 +7,7 @@ import pathlib
 import re
 from typing import Any
 
-from gremlins.executor.state import State, pipeline_uses_gh
+from gremlins.executor.state import State
 from gremlins.stages.base import Stage
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -52,38 +52,20 @@ class AddressCode(Stage):
         from gremlins.pipeline.loader import get_client_from_dict
 
         prompts: list[str] = d.get("prompt") or []
-        if not prompts and d.get("type") == "ghaddress":
-            raise ValueError(f"stage {d['name']!r}: 'prompt' is required for ghaddress")
         stage = cls(d["name"], None, prompts, d.get("options") or {})
         stage.client = get_client_from_dict(d)
         return stage
 
-    def __init__(
-        self,
-        name: str,
-        model: str | None,
-        prompts: list[str],
-        options: dict[str, Any],
-        *,
-        pr_url: str = "",
-    ) -> None:
-        super().__init__(name, model, prompts, options)
-        self.pr_url = pr_url
-
     def run(self, state: State) -> None:
-        is_gh = bool(state.pipeline_data and pipeline_uses_gh(state.pipeline_data))
-        if is_gh:
-            self.results_to_github(state)
-        else:
-            try:
-                inputs = self._inputs_from_local(state)
-                self.results_to_local(inputs, state)
-            except (SystemExit, Exception) as exc:
-                state.write_bail_file(
-                    "other",
-                    f"address-code stage failed: {exc}"[:200],
-                )
-                raise
+        try:
+            inputs = self._inputs_from_local(state)
+            self._run_local(inputs, state)
+        except (SystemExit, Exception) as exc:
+            state.write_bail_file(
+                "other",
+                f"address-code stage failed: {exc}"[:200],
+            )
+            raise
 
     def _inputs_from_local(self, state: State) -> dict[str, str]:
         names, dirs = _review_stage_info(state)
@@ -107,7 +89,7 @@ class AddressCode(Stage):
         )
         return {"text": text, "review_model": review_model}
 
-    def results_to_local(self, inputs: dict[str, str], state: State) -> None:
+    def _run_local(self, inputs: dict[str, str], state: State) -> None:
         template = "\n\n".join(self.prompts).rstrip()
         address_prompt = template.format(
             bail_command=self.bail_command(state),
@@ -121,7 +103,38 @@ class AddressCode(Stage):
             raw_path=state.session_dir / "stream-address.jsonl",
         )
 
-    def results_to_github(self, state: State) -> None:
+
+class GitHubAddressPullRequestReviews(Stage):
+    type = "github-address-pull-request-reviews"
+
+    @classmethod
+    def with_dict(
+        cls, d: dict[str, Any], depth: int = 0
+    ) -> GitHubAddressPullRequestReviews:
+        from gremlins.pipeline.loader import get_client_from_dict
+
+        prompts: list[str] = d.get("prompt") or []
+        if not prompts:
+            raise ValueError(
+                f"stage {d['name']!r}: 'prompt' is required for github-address-pull-request-reviews"
+            )
+        stage = cls(d["name"], None, prompts, d.get("options") or {})
+        stage.client = get_client_from_dict(d)
+        return stage
+
+    def __init__(
+        self,
+        name: str,
+        model: str | None,
+        prompts: list[str],
+        options: dict[str, Any],
+        *,
+        pr_url: str = "",
+    ) -> None:
+        super().__init__(name, model, prompts, options)
+        self.pr_url = pr_url
+
+    def run(self, state: State) -> None:
         pr_url = self.pr_url or state.read_pr_url()
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
@@ -136,7 +149,8 @@ class AddressCode(Stage):
         self.run_claude(
             prompt,
             state=state,
-            label="ghaddress",
-            raw_path=state.session_dir / "stream-ghaddress.jsonl",
+            label="github-address-pull-request-reviews",
+            raw_path=state.session_dir
+            / "stream-github-address-pull-request-reviews.jsonl",
         )
-        state.check_bail("/ghaddress")
+        state.check_bail("/github-address-pull-request-reviews")

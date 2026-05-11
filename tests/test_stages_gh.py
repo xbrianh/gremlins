@@ -1,4 +1,4 @@
-"""Stage-level tests for the gh pipeline stages (ghreview, ghaddress)."""
+"""Stage-level tests for the gh pipeline stages (github-review-pull-request, github-address-pull-request-reviews)."""
 
 import pathlib
 
@@ -7,8 +7,8 @@ from conftest import gh_pipeline as _gh_pipeline
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
-from gremlins.stages.address_code import AddressCode
-from gremlins.stages.review_code import ReviewCode
+from gremlins.stages.address_code import GitHubAddressPullRequestReviews
+from gremlins.stages.review_code import GitHubReviewPullRequest
 
 _BUNDLED_PROMPTS = (
     pathlib.Path(__file__).resolve().parent.parent / "gremlins" / "prompts"
@@ -29,45 +29,51 @@ def _make_state(
     )
 
 
-def _make_ghreview(
+def _make_gh_review(
     client: FakeClaudeClient,
     tmp_path: pathlib.Path,
     *,
     gr_id: str | None = None,
     pr_url: str,
-) -> ReviewCode:
-    prompts = [(_BUNDLED_PROMPTS / "review_gh.md").read_text(encoding="utf-8")]
-    stage = ReviewCode("ghreview", "sonnet", prompts, {}, pr_url=pr_url)
+) -> GitHubReviewPullRequest:
+    prompts = [
+        (_BUNDLED_PROMPTS / "github_review_pull_request.md").read_text(
+            encoding="utf-8"
+        )
+    ]
+    stage = GitHubReviewPullRequest(
+        "github-review-pull-request", "sonnet", prompts, {}, pr_url=pr_url
+    )
     return stage
 
 
-def test_ghreview_prompt_includes_pr_url(tmp_path: pathlib.Path) -> None:
-    client = FakeClaudeClient(fixtures={"ghreview": MINIMAL_EVENTS})
+def test_gh_review_prompt_includes_pr_url(tmp_path: pathlib.Path) -> None:
+    client = FakeClaudeClient(fixtures={"github-review-pull-request": MINIMAL_EVENTS})
     state = _make_state(client, tmp_path)
-    stage = _make_ghreview(
+    stage = _make_gh_review(
         client, tmp_path, pr_url="https://github.com/owner/repo/pull/1"
     )
     stage.run(state)
     prompt = client.calls[0].prompt
     assert "https://github.com/owner/repo/pull/1" in prompt
-    assert not prompt.startswith("/ghreview")
-    assert "/ghreview" not in prompt
+    assert not prompt.startswith("/github-review-pull-request")
+    assert "/github-review-pull-request" not in prompt
 
 
-def test_ghreview_prompt_includes_bail_content(tmp_path: pathlib.Path) -> None:
-    client = FakeClaudeClient(fixtures={"ghreview": MINIMAL_EVENTS})
+def test_gh_review_prompt_includes_bail_content(tmp_path: pathlib.Path) -> None:
+    client = FakeClaudeClient(fixtures={"github-review-pull-request": MINIMAL_EVENTS})
     state = _make_state(client, tmp_path)
-    stage = _make_ghreview(
+    stage = _make_gh_review(
         client, tmp_path, pr_url="https://github.com/owner/repo/pull/1"
     )
     stage.run(state)
     assert "python -c" in client.calls[0].prompt
 
 
-def test_ghreview_bail_rubric(tmp_path: pathlib.Path) -> None:
-    client = FakeClaudeClient(fixtures={"ghreview": MINIMAL_EVENTS})
+def test_gh_review_bail_rubric(tmp_path: pathlib.Path) -> None:
+    client = FakeClaudeClient(fixtures={"github-review-pull-request": MINIMAL_EVENTS})
     state = _make_state(client, tmp_path)
-    stage = _make_ghreview(
+    stage = _make_gh_review(
         client, tmp_path, pr_url="https://github.com/owner/repo/pull/1"
     )
     stage.run(state)
@@ -77,11 +83,11 @@ def test_ghreview_bail_rubric(tmp_path: pathlib.Path) -> None:
     assert "anything a human should weigh in on" not in prompt
 
 
-def test_ghreview_parallel_child_uses_new_bail_command(
+def test_gh_review_parallel_child_uses_new_bail_command(
     tmp_path: pathlib.Path,
 ) -> None:
-    client = FakeClaudeClient(fixtures={"ghreview": MINIMAL_EVENTS})
-    stage = _make_ghreview(
+    client = FakeClaudeClient(fixtures={"github-review-pull-request": MINIMAL_EVENTS})
+    stage = _make_gh_review(
         client, tmp_path, pr_url="https://github.com/owner/repo/pull/1"
     )
     state = RuntimeState(
@@ -97,38 +103,46 @@ def test_ghreview_parallel_child_uses_new_bail_command(
     assert "gremlins.bail" not in client.calls[0].prompt
 
 
-def _make_ghaddress(
+def _make_gh_address(
     client: FakeClaudeClient,
     tmp_path: pathlib.Path,
     *,
     gr_id: str | None = None,
     pr_url: str,
-) -> AddressCode:
+) -> GitHubAddressPullRequestReviews:
     prompts = [
-        (_BUNDLED_PROMPTS / "address_gh.md").read_text(encoding="utf-8"),
+        (_BUNDLED_PROMPTS / "github_address_pull_request_reviews.md").read_text(
+            encoding="utf-8"
+        ),
         (_BUNDLED_PROMPTS / "bail_section.md").read_text(encoding="utf-8"),
     ]
-    stage = AddressCode("ghaddress", "sonnet", prompts, {}, pr_url=pr_url)
+    stage = GitHubAddressPullRequestReviews(
+        "github-address-pull-request-reviews", "sonnet", prompts, {}, pr_url=pr_url
+    )
     return stage
 
 
-def test_ghaddress_prompt_includes_pr_url(tmp_path: pathlib.Path) -> None:
-    client = FakeClaudeClient(fixtures={"ghaddress": MINIMAL_EVENTS})
+def test_gh_address_prompt_includes_pr_url(tmp_path: pathlib.Path) -> None:
+    client = FakeClaudeClient(
+        fixtures={"github-address-pull-request-reviews": MINIMAL_EVENTS}
+    )
     state = _make_state(client, tmp_path)
-    stage = _make_ghaddress(
+    stage = _make_gh_address(
         client, tmp_path, pr_url="https://github.com/owner/repo/pull/1"
     )
     stage.run(state)
     prompt = client.calls[0].prompt
     assert "https://github.com/owner/repo/pull/1" in prompt
-    assert not prompt.startswith("/ghaddress")
-    assert "/ghaddress" not in prompt
+    assert not prompt.startswith("/github-address-pull-request-reviews")
+    assert "/github-address-pull-request-reviews" not in prompt
 
 
-def test_ghaddress_prompt_includes_bail_content(tmp_path: pathlib.Path) -> None:
-    client = FakeClaudeClient(fixtures={"ghaddress": MINIMAL_EVENTS})
+def test_gh_address_prompt_includes_bail_content(tmp_path: pathlib.Path) -> None:
+    client = FakeClaudeClient(
+        fixtures={"github-address-pull-request-reviews": MINIMAL_EVENTS}
+    )
     state = _make_state(client, tmp_path)
-    stage = _make_ghaddress(
+    stage = _make_gh_address(
         client, tmp_path, pr_url="https://github.com/owner/repo/pull/1"
     )
     stage.run(state)
@@ -137,11 +151,13 @@ def test_ghaddress_prompt_includes_bail_content(tmp_path: pathlib.Path) -> None:
     )
 
 
-def test_ghaddress_parallel_child_uses_new_bail_command(
+def test_gh_address_parallel_child_uses_new_bail_command(
     tmp_path: pathlib.Path,
 ) -> None:
-    client = FakeClaudeClient(fixtures={"ghaddress": MINIMAL_EVENTS})
-    stage = _make_ghaddress(
+    client = FakeClaudeClient(
+        fixtures={"github-address-pull-request-reviews": MINIMAL_EVENTS}
+    )
+    stage = _make_gh_address(
         client, tmp_path, pr_url="https://github.com/owner/repo/pull/1"
     )
     state = RuntimeState(

@@ -315,10 +315,10 @@ def classify_stage(prompt: str) -> str:
         or "Rename the current branch" in prompt
     ):
         return "commit"
-    if "/ghreview " in prompt:
-        return "ghreview"
-    if "/ghaddress " in prompt:
-        return "ghaddress"
+    if "post the review directly to GitHub as a PR review" in prompt:
+        return "github-review-pull-request"
+    if "addressing review comments on a GitHub pull request" in prompt:
+        return "github-address-pull-request-reviews"
     if prompt.startswith("/ghplan") or "/ghplan" in prompt[:20]:
         return "ghplan"
     if "Create a detailed implementation plan" in prompt:
@@ -383,8 +383,8 @@ def main(argv):
         "commit": lambda p: (emit_minimal_stream(), 0)[1],
         "github-open-pull-request": handle_github_open_pull_request,
         "ghplan": handle_ghplan,
-        "ghreview": lambda p: (emit_minimal_stream(), 0)[1],
-        "ghaddress": lambda p: (emit_minimal_stream(), 0)[1],
+        "github-review-pull-request": lambda p: (emit_minimal_stream(), 0)[1],
+        "github-address-pull-request-reviews": lambda p: (emit_minimal_stream(), 0)[1],
         "rescue-diagnosis": handle_rescue_diagnosis,
     }
     h = handlers.get(stage)
