@@ -22,6 +22,7 @@ import tempfile
 from typing import Any, cast
 
 from gremlins import paths as _paths
+from gremlins.cli.pipeline_args import launch_client_label, resolve_pipeline
 from gremlins.clients.client import PACKAGE_DEFAULT
 from gremlins.executor.state import patch_state, pipeline_uses_gh, write_state
 from gremlins.pipeline import Pipeline
@@ -264,8 +265,6 @@ def launch(
         else:
             project_root = os.getcwd()
 
-    from gremlins.cli.pipeline_args import launch_client_label, resolve_pipeline
-
     resolved_pipeline_args, pipeline_path = resolve_pipeline(
         kind, pipeline_args, project_root
     )
@@ -428,8 +427,6 @@ def resume(gr_id: str) -> None:
     pipeline_args = cast(list[str], state.get("pipeline_args") or [])
     pipeline_path = str(state.get("pipeline_path") or "")
     project_root = str(state.get("project_root") or os.getcwd())
-    from gremlins.cli.pipeline_args import resolve_pipeline
-
     try:
         pipeline_args, pipeline_path = resolve_pipeline(
             kind, tuple(pipeline_args), project_root
@@ -495,7 +492,7 @@ def resume(gr_id: str) -> None:
         pid=None,
         pipeline_args=pipeline_args,
         pipeline_path=pipeline_path,
-        client=str(state.get("client") or "") or str(PACKAGE_DEFAULT),
+        client=str(state.get("client") or PACKAGE_DEFAULT),
     )
 
     # Append resume header to log
