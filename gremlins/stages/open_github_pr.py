@@ -35,8 +35,8 @@ class OpenGitHubPR(Stage):
     type = "open-github-pr"
 
     @classmethod
-    def from_yaml(cls, d: dict[str, Any], depth: int = 0) -> OpenGitHubPR:
-        from gremlins.pipeline.loader import get_client_from_yaml
+    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> OpenGitHubPR:
+        from gremlins.pipeline.loader import get_client_from_dict
 
         options: dict[str, Any] = d.get("options") or {}
         stage = cls(
@@ -46,7 +46,7 @@ class OpenGitHubPR(Stage):
             options,
             base_ref=options.get("base_ref") or None,
         )
-        stage.client = get_client_from_yaml(d)
+        stage.client = get_client_from_dict(d)
         return stage
 
     def __init__(

@@ -60,7 +60,7 @@ class ParallelStage(CompoundStage):
         return self._bail_policy
 
     @classmethod
-    def from_yaml(cls, d: dict[str, Any], depth: int = 0) -> ParallelStage:
+    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> ParallelStage:
         from gremlins.pipeline.loader import parse_stage
 
         if depth > 0:

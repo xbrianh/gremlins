@@ -31,8 +31,8 @@ class SequenceStage(Stage):
         self._pre_body = body
 
     @classmethod
-    def from_yaml(cls, d: dict[str, Any], depth: int = 0) -> SequenceStage:
-        from gremlins.pipeline.loader import get_client_from_yaml, parse_stage
+    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> SequenceStage:
+        from gremlins.pipeline.loader import get_client_from_dict, parse_stage
 
         raw_children: object = d.get("body") or []
         if not isinstance(raw_children, list):
@@ -43,7 +43,7 @@ class SequenceStage(Stage):
         ]
         stage = cls(d["name"])
         stage.body = children
-        stage.client = get_client_from_yaml(d)
+        stage.client = get_client_from_dict(d)
         return stage
 
     def run(self, state: RuntimeState) -> None:

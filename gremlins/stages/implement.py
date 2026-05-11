@@ -100,11 +100,11 @@ class Implement(Stage):
     type = "implement"
 
     @classmethod
-    def from_yaml(cls, d: dict[str, Any], depth: int = 0) -> Implement:
-        from gremlins.pipeline.loader import get_client_from_yaml
+    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> Implement:
+        from gremlins.pipeline.loader import get_client_from_dict
 
         stage = cls(d["name"], None, d.get("prompt") or [], d.get("options") or {})
-        stage.client = get_client_from_yaml(d)
+        stage.client = get_client_from_dict(d)
         return stage
 
     def __init__(
