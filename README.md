@@ -239,7 +239,6 @@ For `local` stages, model options (`plan_model`, `impl_model`, `address_model`,
 | `address-code` | Applies code-review findings |
 | `verify` | Runs check and test commands with an agent fix-loop |
 | `test` | Runs a single test command with an agent fix-loop |
-| `commit-pr` | Commits changes and opens a pull request |
 | `request-copilot` | Requests a Copilot review on the open PR |
 | `ghreview` | Runs the `/ghreview` skill against the open PR |
 | `wait-copilot` | Polls until Copilot posts its review |
