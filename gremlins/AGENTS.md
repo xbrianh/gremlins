@@ -25,7 +25,7 @@ review / address pipelines, the fleet manager
 - `stages/all.py` — side-effect import; importing it causes every stage module to self-register into `STAGE_REGISTRY`. Called automatically by `Pipeline.from_yaml` via `_ensure_registered()`; no manual import needed.
 - `stages/base.py` — `Stage` Protocol + `StageContext` dataclass: shared `client`, `session_dir`, `gr_id` threaded into every stage.
 - `stages/` — per-stage bodies: `plan`, `implement`, `review_code`, `address_code`, `verify`, `test`, `commit_pr`, `ghreview`, `ghaddress`, `request_copilot`, `wait_copilot`, `wait_ci`, `handoff`.
-- `orchestrators/local.py` — `local_main`, `review_main`, `address_main`.
+- `orchestrators/review_address.py` — `run_review`, `run_address`. Library functions called by `cli/review_address.py`.
 - `orchestrators/gh.py` — `gh_main`. Drives the gh pipeline.
 - `orchestrators/boss.py` — `boss_main`. Runs the `Handoff` stage (in-process) and `gremlins {stop,land,rescue}` between child gremlins.
 - `prompts/` — externalized prompt templates (plan, implement, review lenses, etc).

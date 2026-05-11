@@ -44,7 +44,7 @@ make check         # ruff lint + ruff format check + pyright
 
 ## Project-wide conventions
 
-- **No re-export facades.** Package `__init__.py` files do not import from submodules and re-publish via `__all__`. Imports name the defining submodule directly: `from gremlins.fleet.cli import main`, not `from gremlins.fleet import main`. The sole exceptions are `__init__.py` files that *define* something (e.g. `gremlins/clients/__init__.py` runs provider registrations on import; `gremlins/__init__.py` defines `PACKAGE_ROOT`).
+- **No re-export facades.** Package `__init__.py` files do not import from submodules and re-publish via `__all__`. Imports name the defining submodule directly: `from gremlins.cli.fleet import fleet_main`, not `from gremlins.cli import fleet_main`. The sole exceptions are `__init__.py` files that *define* something (e.g. `gremlins/clients/__init__.py` runs provider registrations on import; `gremlins/__init__.py` defines `PACKAGE_ROOT`).
 - **No backwards-compatibility shims.** No legacy aliases, no deprecation paths, no compat decorators. Replace at every call site.
 - **No inheritance.** Composition only. Single inheritance is almost always the wrong tool; multiple inheritance is never acceptable.
 - **Functional first.** Pure functions and plain data over classes. Reach for a class only when state must be kept.

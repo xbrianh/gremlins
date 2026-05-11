@@ -1,6 +1,6 @@
 # `gremlins/fleet/`
 
-Fleet manager package for background gremlins. Reads every gremlin state file under `gremlins.paths.state_root()`, applies the shared liveness classifier inline, and prints one scannable line per gremlin. Fleet ops (`ack`, `skip`, `stop`, `rescue`, `land`, `rm`, `close`, `log`) are exposed as top-level `gremlins` subcommands via `fleet/cli.py`.
+Fleet manager package for background gremlins. Reads every gremlin state file under `gremlins.paths.state_root()`, applies the shared liveness classifier inline, and prints one scannable line per gremlin. Fleet ops (`ack`, `skip`, `stop`, `rescue`, `land`, `rm`, `close`, `log`) are exposed as top-level `gremlins` subcommands via `gremlins/cli/fleet.py`.
 
 ## Module map
 
@@ -18,7 +18,6 @@ Fleet manager package for background gremlins. Reads every gremlin state file un
 | `close.py` | `do_close` |
 | `land.py` | All land helpers + `do_rm`, `do_land`, `expected_branch`, `_print_cost`, `_persist_land_cost`, `_resolve_landing_cwd`, `_fast_forward_main`, `_cleanup_gremlin` |
 | `views.py` | `collect_rows`, `do_list`, `do_recent`, `do_drill_in` |
-| `cli.py` | `parse_args`, `render_view`, `_main_impl`, `main`, `ack_main`, `skip_main`, `stop_main`, `rescue_main`, `land_main`, `rm_main`, `close_main`, `log_main` |
 | `session_summary.py` | SessionStart/UserPromptSubmit hook: filters gremlins by `project_root`, reports running + newly-finished, marks finished as `summarized`, prunes closed state dirs older than 14 days |
 | `__init__.py` | Package docstring only |
 
