@@ -1689,4 +1689,3 @@ def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
     plan_call = next(c for c in client.calls if c.label == "plan")
     assert "instr from state" in plan_call.prompt
     assert "instr from cli" not in plan_call.prompt
-
