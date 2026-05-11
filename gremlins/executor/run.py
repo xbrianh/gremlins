@@ -135,8 +135,11 @@ def run_pipeline(
     if shutil.which("claude") is None:
         die("claude CLI not found")
 
+    if shutil.which("git") is None:
+        die("git not found on PATH")
+
     if not in_git_repo():
-        die("gremlins requires a git repository; cwd is not in a git repo")
+        die(f"gremlins requires a git repository; {pathlib.Path.cwd()} is not inside a git worktree")
 
     try:
         pipeline = _Pipeline.from_yaml(pipeline_path)

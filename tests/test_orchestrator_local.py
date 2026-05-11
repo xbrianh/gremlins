@@ -358,7 +358,7 @@ def test_startup_fails_in_non_git_dir(tmp_path, monkeypatch, capsys):
     plan_file.write_text("# Plan\nDo stuff.\n")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
-        shutil, "which", lambda n: "/fake/claude" if n == "claude" else None
+        shutil, "which", lambda n: f"/fake/{n}" if n in ("claude", "git") else None
     )
     monkeypatch.setattr(
         "gremlins.executor.run._install_signal_handlers", lambda c: None
@@ -370,4 +370,4 @@ def test_startup_fails_in_non_git_dir(tmp_path, monkeypatch, capsys):
             argv=["--plan", str(plan_file)],
             client=FakeClaudeClient(fixtures={}),
         )
-    assert "not in a git repo" in capsys.readouterr().err
+    assert "not inside a git worktree" in capsys.readouterr().err

@@ -114,7 +114,7 @@ IMPL_EVENTS = [
 def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
     """Apply standard monkeypatches for gh_main smoke tests."""
     monkeypatch.setattr(
-        shutil, "which", lambda n: f"/fake/{n}" if n in ("claude", "gh") else None
+        shutil, "which", lambda n: f"/fake/{n}" if n in ("claude", "gh", "git") else None
     )
     monkeypatch.setattr(
         "gremlins.executor.run._install_signal_handlers", lambda c: None
