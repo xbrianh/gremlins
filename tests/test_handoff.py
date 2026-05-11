@@ -199,7 +199,6 @@ def _stub_happy_run(
         "collect_git_context",
         lambda base_ref, rev=None: ("test-branch", "log line", "diff body"),
     )
-    monkeypatch.setattr(handoff, "_load_handoff_style", lambda: "Keep it simple.")
 
     out_path = handoff.auto_name_out(plan_path)
     sig_path = out_path.parent / (out_path.stem + ".state.json")
@@ -294,7 +293,6 @@ def test_run_signal_file_not_written(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(
         handoff, "collect_git_context", lambda base_ref, rev=None: ("b", "", "")
     )
-    monkeypatch.setattr(handoff, "_load_handoff_style", lambda: "Keep it simple.")
     args = argparse.Namespace(
         plan=str(plan_path),
         spec=None,
