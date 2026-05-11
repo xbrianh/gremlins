@@ -208,9 +208,17 @@ def do_drill_in(target: str) -> None:
     # declined to proceed.
     _gr_id_for_bail = str(state.get("id") or "")
     _bail_file = _read_bail_info(_gr_id_for_bail) if _gr_id_for_bail else None
-    bail_class = (_bail_file.get("class") or "") if _bail_file else (state.get("bail_class") or "")
+    bail_class = (
+        (_bail_file.get("class") or "")
+        if _bail_file
+        else (state.get("bail_class") or "")
+    )
     bail_reason = state.get("bail_reason")
-    bail_detail = (_bail_file.get("detail") or "") if _bail_file else (state.get("bail_detail") or "")
+    bail_detail = (
+        (_bail_file.get("detail") or "")
+        if _bail_file
+        else (state.get("bail_detail") or "")
+    )
     if bail_class or bail_reason:
         print("  bail:")
         if bail_class:

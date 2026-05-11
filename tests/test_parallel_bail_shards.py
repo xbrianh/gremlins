@@ -374,7 +374,9 @@ def test_run_stages_resume_from_fanin_name(tmp_path, state_root):
     state_dir = sf.parent
     # Pre-populate parallel_attempts and bail file as children would have written.
     state_mod.patch_state(gr_id, parallel_attempts={"c": "attempt-c"})
-    (state_dir / "bail_attempt-c.json").write_text(json.dumps({"class": "other", "detail": ""}))
+    (state_dir / "bail_attempt-c.json").write_text(
+        json.dumps({"class": "other", "detail": ""})
+    )
 
     project_root = tmp_path / "nongit2"
     project_root.mkdir()

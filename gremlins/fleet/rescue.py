@@ -561,7 +561,11 @@ def do_rescue(target: str, headless: bool = False, from_boss: bool = False) -> b
 
     _gr_id_for_bail = str(state.get("id") or "")
     _bail_file_data = _read_bail_info(_gr_id_for_bail) if _gr_id_for_bail else None
-    bail_class = (_bail_file_data.get("class") or "") if _bail_file_data else (state.get("bail_class") or "")
+    bail_class = (
+        (_bail_file_data.get("class") or "")
+        if _bail_file_data
+        else (state.get("bail_class") or "")
+    )
 
     # Build a mutable report context so each terminal path can populate the
     # diagnosis/relaunch fields and the finally block emits a single Markdown

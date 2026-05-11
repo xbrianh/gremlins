@@ -189,6 +189,7 @@ def test_no_pr_opened_on_exhaustion(tmp_path, monkeypatch):
 
 def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
     import gremlins.executor.state as state_mod
+
     gr_id = "test-gr-id"
     state_dir = make_state_dir(gr_id)
     attempt = "verify-exhaustion-attempt"
@@ -201,7 +202,11 @@ def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
         "verify", "sonnet", [_VERIFY_PROMPT_PATH.read_text(encoding="utf-8")], options
     )
     state = RuntimeState(
-        client=client, session_dir=tmp_path, gr_id=gr_id, worktree=tmp_path, is_git=True,
+        client=client,
+        session_dir=tmp_path,
+        gr_id=gr_id,
+        worktree=tmp_path,
+        is_git=True,
         attempt=attempt,
     )
 

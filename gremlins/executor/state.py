@@ -330,10 +330,12 @@ def _patch_parallel_attempt(gr_id: str | None, child_key: str, attempt: str) -> 
     if sf is None or not sf.exists() or not attempt:
         return
     try:
+
         def _apply(data: dict[str, Any]) -> None:
             pa: dict[str, Any] = dict(data.get("parallel_attempts") or {})
             pa[child_key] = attempt
             data["parallel_attempts"] = pa
+
         locked_update(sf, _apply)
     except Exception:
         pass

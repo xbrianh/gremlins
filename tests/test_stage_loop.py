@@ -124,6 +124,7 @@ def test_loop_bail_propagates_immediately(tmp_path):
 
 def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
     import gremlins.executor.state as state_mod
+
     gr_id = "loop-test-gr"
     state_dir = make_state_dir(gr_id)
     attempt = "loop-test-attempt"

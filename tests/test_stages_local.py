@@ -423,6 +423,7 @@ def test_review_code_stage_writes_stage_to_state(tmp_path, make_state_dir):
 
 def test_address_code_stage_emits_bail_on_failure(tmp_path, make_state_dir):
     import gremlins.executor.state as state_mod
+
     gr_id = "test-gr-id"
     state_dir = make_state_dir(gr_id)
     attempt = "address-code-test"

@@ -132,9 +132,7 @@ def make_state_dir(test_state_root):
     def _factory(gr_id: str) -> pathlib.Path:
         state_dir = test_state_root / gr_id
         state_dir.mkdir(parents=True, exist_ok=True)
-        (state_dir / "state.json").write_text(
-            json.dumps({"id": gr_id, "stage": ""})
-        )
+        (state_dir / "state.json").write_text(json.dumps({"id": gr_id, "stage": ""}))
         return state_dir
 
     return _factory
