@@ -12,10 +12,10 @@ import sys
 from typing import Any
 
 from gremlins.errors import die
-from gremlins.utils.github import extract_gh_url, get_repo, parse_issue_ref, view_issue
 from gremlins.stages.base import RuntimeState, Stage, StageInput
 from gremlins.stages.registry import register_stage
 from gremlins.state import patch_state, resolve_state_file
+from gremlins.utils.github import extract_gh_url, get_repo, parse_issue_ref, view_issue
 
 logger = logging.getLogger(__name__)
 

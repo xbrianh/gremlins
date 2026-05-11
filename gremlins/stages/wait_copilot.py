@@ -7,10 +7,10 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from gremlins.utils.github import check_copilot_review
 from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import read_pr_num
+from gremlins.utils.github import check_copilot_review
 
 logger = logging.getLogger(__name__)
 
