@@ -17,4 +17,4 @@ stages:
   - { name: ghreview,        type: ghreview,        prompt: [code-style, gremlins:review_gh.md] }
   - { name: wait-copilot,    type: wait-copilot }
   - { name: ghaddress,       type: ghaddress,       prompt: [code-style, gremlins:address_gh.md, gremlins:bail_section.md] }
-  - { name: ci-gate,         type: wait-ci,         prompt: [gremlins:ci_fix.md, gremlins:bail_section_fix.md] }
+  - { name: ci-gate,         type: github-wait-ci,  prompt: [gremlins:ci_fix.md, gremlins:bail_section_fix.md] }

@@ -126,11 +126,11 @@ def _collect_failure_output(failed: list[dict[str, Any]]) -> str:
     return "\n\n".join(parts)
 
 
-class WaitCI(Stage):
-    type = "wait-ci"
+class GitHubWaitCI(Stage):
+    type = "github-wait-ci"
 
     @classmethod
-    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> WaitCI:
+    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> GitHubWaitCI:
         from gremlins.pipeline.loader import get_client_from_dict
 
         stage = cls(d["name"], None, d.get("prompt") or [], d.get("options") or {})
