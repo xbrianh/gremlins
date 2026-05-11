@@ -14,7 +14,7 @@ sequencing logic of their own.
 - `implement.py` — `Implement(Stage)`. Dual-mode (`kind='local'` / `kind='gh'`). For gh: enforces the empty-implementation invariant, classifies the outcome (`HeadAdvanced` / `EmptyImpl` / `DivergentHead`), creates the impl-handoff branch, and returns an `ImplStageResult` with the pre-impl state and classified outcome.
 - `review_code.py` — `ReviewCode(Stage)`. Local pipeline only (single-detail-reviewer post-collapse). Also registered as `"ghreview"` type alias.
 - `address_code.py` — `AddressCode(Stage)`. Local pipeline only. Also registered as `"ghaddress"` type alias.
-- `request_copilot.py` — `RequestCopilot(Stage)`. Requests Copilot review by adding `copilot-pull-request-reviewer` to the PR's reviewer list.
+- `github_request_copilot_review.py` — `GitHubRequestCopilotReview(Stage)`. Requests Copilot review by adding `copilot-pull-request-reviewer` to the PR's reviewer list.
 - `verify.py` — `Verify(Stage)`. Constructs a `LoopStage` from two closures (`_run_cmd`, `_run_fix`) and delegates the retry loop to it. `_run_cmd` runs `cmds` joined with `&&` and raises `RunCmdFailed` on failure; `_run_fix` formats the fix prompt and invokes the agent. `LoopExhausted` from `LoopStage` is translated to `RuntimeError("verify stage exhausted N attempts")`. Takes `is_git` (controls diff capture) and `commit_after_fix` (controls commit instruction).
 - `wait_ci.py` — `WaitCI(Stage)`. Gh pipeline (`ci-gate`). Polls PR CI checks via `utils.github`; re-invokes agent to fix failures; bails on `REVIEW_REQUIRED` or attempt exhaustion.
 - `wait_copilot.py` — `WaitCopilot(Stage)`. Polls until Copilot posts a non-PENDING review.

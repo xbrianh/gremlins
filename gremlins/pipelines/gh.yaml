@@ -13,7 +13,7 @@ stages:
   - { name: implement,       type: implement,       prompt: [code-style, gremlins:implement_gh.md] }
   - { name: verify,          type: verify,          options: { cmds: ["make check", "make test"], commit_after_fix: false }, prompt: verify }
   - { name: open-pr,         type: github-open-pull-request }
-  - { name: request-copilot, type: request-copilot }
+  - { name: github-request-copilot-review, type: github-request-copilot-review }
   - { name: ghreview,        type: ghreview,        prompt: [code-style, gremlins:review_gh.md] }
   - { name: wait-copilot,    type: wait-copilot }
   - { name: ghaddress,       type: ghaddress,       prompt: [code-style, gremlins:address_gh.md, gremlins:bail_section.md] }
