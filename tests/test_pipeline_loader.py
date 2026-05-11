@@ -44,7 +44,7 @@ stages:
     assert len(pipeline.stages) == 1
     assert pipeline.stages[0].name == "plan"
     assert pipeline.stages[0].type == "plan"
-    assert pipeline.stages[0].client is None
+    assert str(pipeline.stages[0].client) == "claude:sonnet"
     assert pipeline.stages[0].prompts == ["prompt content"]
 
 
@@ -66,8 +66,7 @@ stages:
 """,
     )
     pipeline = Pipeline.from_yaml(yaml_path)
-    assert pipeline.stages[0].client is None
-    assert pipeline.stages[1].client is not None
+    assert str(pipeline.stages[0].client) == "claude:sonnet"
     assert str(pipeline.stages[1].client) == "copilot:gpt-5.4"
 
 
@@ -466,8 +465,7 @@ stages:
 """,
     )
     pipeline = Pipeline.from_yaml(yaml_path)
-    # client is None at load time; resolution happens at run time
-    assert pipeline.stages[0].client is None
+    assert str(pipeline.stages[0].client) == "claude:sonnet"
 
 
 def test_client_spec_stage_override_wins(tmp_path: pathlib.Path) -> None:
@@ -486,7 +484,7 @@ stages:
     assert str(pipeline.stages[0].client) == "copilot:gpt-5.4"
 
 
-def test_client_spec_none_when_no_default_no_stage(tmp_path: pathlib.Path) -> None:
+def test_client_spec_falls_back_to_package_default(tmp_path: pathlib.Path) -> None:
     yaml_path = _write_yaml(
         tmp_path / "pipeline.yaml",
         """\
@@ -497,7 +495,9 @@ stages:
 """,
     )
     pipeline = Pipeline.from_yaml(yaml_path)
-    assert pipeline.stages[0].client is None
+    from gremlins.clients.client import PACKAGE_DEFAULT
+
+    assert pipeline.stages[0].client == PACKAGE_DEFAULT
 
 
 def test_client_spec_parallel_group_is_none(tmp_path: pathlib.Path) -> None:
@@ -514,9 +514,10 @@ stages:
 """,
     )
     pipeline = Pipeline.from_yaml(yaml_path)
+    # parallel groups never get a client assigned
     assert pipeline.stages[0].client is None
-    # child has no explicit client; resolution happens at run time
-    assert pipeline.stages[0].body[0].client is None
+    # children of a parallel group inherit the pipeline default
+    assert str(pipeline.stages[0].body[0].client) == "claude:sonnet"
 
 
 # ---- include: directive ---------------------------------------------------

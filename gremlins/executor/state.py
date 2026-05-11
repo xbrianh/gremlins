@@ -341,10 +341,6 @@ def _patch_parallel_attempt(gr_id: str | None, child_key: str, attempt: str) -> 
         pass
 
 
-def _client_dict() -> dict[str, Client]:
-    return {}
-
-
 def _stage_list() -> list[Stage]:
     return []
 
@@ -397,8 +393,6 @@ class State:
     pipeline_data: Pipeline | None = None
     repo: str = ""
     instructions: str = ""
-    stage_specs: dict[str, Client] = dataclasses.field(default_factory=_client_dict)
-    spec_clients: dict[str, Client] = dataclasses.field(default_factory=_client_dict)
     is_git: bool = False
     test_client: Client | None = None
     # per-stage optional
@@ -416,11 +410,6 @@ class State:
     @property
     def cwd(self) -> pathlib.Path:
         return self.worktree if self.worktree is not None else pathlib.Path.cwd()
-
-    def get_client(self, spec: Client) -> Client:
-        if self.test_client is not None:
-            return self.test_client
-        return self.spec_clients.get(str(spec), spec)
 
     def make_runner(
         self,

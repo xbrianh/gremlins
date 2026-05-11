@@ -281,7 +281,10 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
         "gremlins.stages.implement.changes_outside_git", lambda s, d: True
     )
 
-    # Override Pipeline.from_yaml to inject default_client without a live client instance.
+    # Override Pipeline.from_yaml to inject default_client: copilot:gpt-5.4 and
+    # re-fill stage clients so every stage inherits that model.
+    from gremlins.pipeline import _fill_stage_clients
+
     _real_from_yaml = Pipeline.from_yaml
 
     def _strip_clients(stage):
@@ -291,12 +294,11 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
 
     def _from_yaml_copilot_default(path):
         pipeline = _real_from_yaml(path)
+        new_default = Client("copilot", "gpt-5.4")
         for s in pipeline.stages:
             _strip_clients(s)
-        return dataclasses.replace(
-            pipeline,
-            default_client=Client("copilot", "gpt-5.4"),
-        )
+        _fill_stage_clients(pipeline.stages, new_default)
+        return dataclasses.replace(pipeline, default_client=new_default)
 
     monkeypatch.setattr(
         "gremlins.pipeline.Pipeline.from_yaml", _from_yaml_copilot_default
@@ -318,193 +320,6 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
     assert client.calls[0].model == "gpt-5.4"  # implement
     assert client.calls[1].label == review_label
     assert client.calls[1].model == "gpt-5.4"  # review
-
-
-def test_local_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
-    tmp_path, monkeypatch, make_state_dir
-):
-    gr_id = "resume-test-gr-id"
-    state_dir = make_state_dir(gr_id)
-
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    plan_file = tmp_path / "plan.md"
-    plan_file.write_text("# Plan\nDo stuff.\n")
-
-    stage_defs = [
-        ("plan", "plan"),
-        ("implement", "implement"),
-        ("review-code", "review-code"),
-        ("address-code", "address-code"),
-        ("verify", "verify"),
-    ]
-    original_stage_clients = {
-        "plan": "claude:claude-sonnet-4-6",
-        "implement": "claude:claude-haiku-4-5-20251001",
-        "review-code": "copilot:gpt-4o",
-        "address-code": "claude:claude-sonnet-4-6",
-        "verify": "claude:claude-opus-4-1",
-    }
-    mutated_stage_clients = {
-        stage_name: "claude:claude-opus-4-7" for stage_name, _ in stage_defs
-    }
-
-    pipeline_dir = tmp_path / ".gremlins"
-    pipeline_dir.mkdir(parents=True)
-    pipeline_path = pipeline_dir / "local.yaml"
-    style_path = pipeline_dir / "style.md"
-    style_path.write_text("Style content.\n", encoding="utf-8")
-    review_prompt_path = pipeline_dir / "review.md"
-    review_prompt_path.write_text("Review prompt content.\n", encoding="utf-8")
-    implement_prompt_path = pipeline_dir / "implement.md"
-    implement_prompt_path.write_text("Implement.\n", encoding="utf-8")
-    address_prompt_path = pipeline_dir / "address.md"
-    address_prompt_path.write_text("Address.\n", encoding="utf-8")
-
-    def write_pipeline(stage_clients: dict[str, str]) -> None:
-        lines = ["name: local", "prompt_dir: .", "", "stages:"]
-        for stage_name, stage_type in stage_defs:
-            extras = ""
-            if stage_type == "review-code":
-                extras = ", prompt: [style.md, review.md]"
-            elif stage_type == "implement":
-                extras = ", prompt: [implement.md]"
-            elif stage_type == "address-code":
-                extras = ", prompt: [address.md]"
-            lines.append(
-                "  - { name: "
-                f"{stage_name}, type: {stage_type}, client: "
-                f"{json.dumps(stage_clients[stage_name])}{extras} }}"
-            )
-        pipeline_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-    write_pipeline(original_stage_clients)
-
-    _real_from_yaml = Pipeline.from_yaml
-    monkeypatch.chdir(tmp_path)
-    _common_patches(monkeypatch)
-    monkeypatch.setattr("gremlins.pipeline.Pipeline.from_yaml", _real_from_yaml)
-    monkeypatch.setattr(
-        "gremlins.executor.run.resolve_session_dir",
-        lambda gr_id=None: session_dir,
-    )
-    monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: False)
-
-    monkeypatch.setattr(
-        "gremlins.stages.implement.changes_outside_git", lambda s, d: True
-    )
-    verify_models: list[str] = []
-    monkeypatch.setattr(
-        "gremlins.stages.verify.Verify.run",
-        lambda self, pipe: verify_models.append(self.model),
-    )
-
-    original_review_label = "review-code:gpt-4o"
-    mutated_review_label = "review-code:claude-opus-4-7"
-
-    launch_client = _ReviewCreatingClient(
-        fixtures={
-            "implement": MINIMAL_EVENTS,
-            original_review_label: MINIMAL_EVENTS,
-            mutated_review_label: MINIMAL_EVENTS,
-            "address-code": MINIMAL_EVENTS,
-        }
-    )
-
-    result = run_pipeline(
-        _local_pipeline_path(tmp_path),
-        argv=["--plan", str(plan_file)],
-        client=launch_client,
-        gr_id=gr_id,
-    )
-    assert result == 0
-
-    launch_state = json.loads((state_dir / "state.json").read_text(encoding="utf-8"))
-    assert launch_state.get("stage_clients") == original_stage_clients
-    assert verify_models == ["claude-opus-4-1"]
-
-    write_pipeline(mutated_stage_clients)
-    verify_models.clear()
-    resume_client = _ReviewCreatingClient(
-        fixtures={
-            "implement": MINIMAL_EVENTS,
-            original_review_label: MINIMAL_EVENTS,
-            mutated_review_label: MINIMAL_EVENTS,
-            "address-code": MINIMAL_EVENTS,
-        }
-    )
-
-    result = run_pipeline(
-        _local_pipeline_path(tmp_path),
-        argv=["--plan", str(plan_file), "--resume-from", "implement"],
-        client=resume_client,
-        gr_id=gr_id,
-    )
-    assert result == 0
-
-    called_models = {call.label: call.model for call in resume_client.calls}
-    assert called_models == {
-        "implement": "claude-haiku-4-5-20251001",
-        "review-code:gpt-4o": "gpt-4o",
-        "address-code": "claude-sonnet-4-6",
-    }
-    assert verify_models == ["claude-opus-4-1"]
-
-
-def test_local_main_resume_requires_persisted_stage_clients(
-    tmp_path, monkeypatch, make_state_dir, capsys
-):
-    gr_id = "resume-test-gr-id"
-    make_state_dir(gr_id)
-
-    plan_file = tmp_path / "plan.md"
-    plan_file.write_text("# Plan\nDo stuff.\n")
-
-    monkeypatch.chdir(tmp_path)
-    _common_patches(monkeypatch)
-
-    with pytest.raises(SystemExit):
-        run_pipeline(
-            _local_pipeline_path(tmp_path),
-            argv=["--plan", str(plan_file), "--resume-from", "implement"],
-            client=FakeClaudeClient(fixtures={}),
-            gr_id=gr_id,
-        )
-
-    assert "stage_clients not found" in capsys.readouterr().err
-
-
-def test_local_main_resume_requires_each_persisted_stage_client(
-    tmp_path, monkeypatch, make_state_dir, capsys
-):
-    gr_id = "resume-test-gr-id"
-    state_dir = make_state_dir(gr_id)
-
-    plan_file = tmp_path / "plan.md"
-    plan_file.write_text("# Plan\nDo stuff.\n")
-
-    state_file = state_dir / "state.json"
-    state = json.loads(state_file.read_text(encoding="utf-8"))
-    state["stage_clients"] = {
-        "plan": "claude:sonnet",
-        "implement": "claude:sonnet",
-        "address-code": "claude:sonnet",
-        "verify": "claude:sonnet",
-    }
-    state_file.write_text(json.dumps(state), encoding="utf-8")
-
-    monkeypatch.chdir(tmp_path)
-    _common_patches(monkeypatch)
-
-    with pytest.raises(SystemExit):
-        run_pipeline(
-            _local_pipeline_path(tmp_path),
-            argv=["--plan", str(plan_file), "--resume-from", "implement"],
-            client=FakeClaudeClient(fixtures={}),
-            gr_id=gr_id,
-        )
-
-    assert "stage_clients missing stage: 'review-code'" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------

@@ -260,23 +260,7 @@ def _launch_client_label(pipeline_args: list[str], pipeline_path: str) -> str:
 
 def _persisted_client_label(state: dict[str, Any]) -> str:
     client = str(state.get("client") or "")
-    if client:
-        return client
-
-    stage_clients = state.get("stage_clients")
-    if isinstance(stage_clients, dict):
-        stored_stage_clients = cast(dict[object, object], stage_clients)
-        stage = str(state.get("stage") or "")
-        if stage:
-            label = str(stored_stage_clients.get(stage) or "")
-            if label:
-                return label
-        for client_spec in stored_stage_clients.values():
-            label = str(client_spec or "")
-            if label:
-                return label
-
-    return str(PACKAGE_DEFAULT)
+    return client or str(PACKAGE_DEFAULT)
 
 
 def _delete_patch_state(

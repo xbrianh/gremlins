@@ -137,21 +137,16 @@ class ParallelStage(Stage):
         )
 
     def run(self, state: State) -> None:
-        from gremlins.stage_clients import require_stage_spec
-
         gr_id = state.gr_id
         group_dir = state.session_dir / self.name
         group_dir.mkdir(parents=True, exist_ok=True)
         child_runners: list[tuple[str, State, Callable[[], None]]] = []
         for child in self.body:
-            child_spec = require_stage_spec(state.stage_specs, child.name)
-            if child.model is None:
-                child.model = child_spec.model
             child_dir = group_dir / child.name
             child_dir.mkdir(parents=True, exist_ok=True)
             child_state = dataclasses.replace(
                 state,
-                client=state.get_client(child_spec),
+                client=state.test_client or child.client,
                 session_dir=child_dir,
                 child_key=child.name,
             )

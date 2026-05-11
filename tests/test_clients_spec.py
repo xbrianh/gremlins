@@ -1,18 +1,13 @@
-"""Tests for stage client resolution."""
+"""Tests for Client parsing and stage client resolution."""
 
 from __future__ import annotations
+
+import pathlib
 
 import pytest
 
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
 from gremlins.pipeline import Pipeline
-from gremlins.pipeline.discovery import resolve_pipeline_path
-from gremlins.stage_clients import (
-    collect_stage_specs,
-    require_stage_spec,
-    resolve_stage_client,
-    validate_stage_specs,
-)
 
 
 def test_parse_valid():
@@ -46,79 +41,10 @@ def test_package_default():
     assert PACKAGE_DEFAULT.model == "sonnet"
 
 
-def test_resolve_stage_wins():
-    stage = Client("claude", "opus")
-    cli = Client("copilot", "gpt-4o")
-    pipeline_default = Client("claude", "haiku")
-    assert resolve_stage_client(stage, cli, pipeline_default) is stage
-
-
-def test_resolve_cli_wins_over_pipeline():
-    cli = Client("copilot", "gpt-4o")
-    pipeline_default = Client("claude", "haiku")
-    assert resolve_stage_client(None, cli, pipeline_default) is cli
-
-
-def test_resolve_pipeline_default_wins_over_package():
-    pipeline_default = Client("claude", "haiku")
-    assert resolve_stage_client(None, None, pipeline_default) is pipeline_default
-
-
-def test_resolve_falls_back_to_package_default():
-    assert resolve_stage_client(None, None, None) is PACKAGE_DEFAULT
-
-
-def test_require_stage_spec_returns_present_stage():
-    spec = Client("claude", "opus")
-    assert require_stage_spec({"implement": spec}, "implement") is spec
-
-
-def test_require_stage_spec_missing_stage_raises():
-    with pytest.raises(ValueError, match=r"stage_clients missing stage: 'implement'"):
-        require_stage_spec({}, "implement")
-
-
-def test_validate_stage_specs_reports_all_missing_stages(tmp_path):
-    pipeline = Pipeline.from_yaml(resolve_pipeline_path("gh", tmp_path))
-
-    with pytest.raises(ValueError, match=r"stage_clients missing stages:"):
-        validate_stage_specs({"plan": Client("claude", "sonnet")}, pipeline)
-
-
-def _write(tmp_path, name, body):
+def _write(tmp_path: pathlib.Path, name: str, body: str) -> pathlib.Path:
     path = tmp_path / f"{name}.yaml"
     path.write_text(body)
     return path
-
-
-def test_collect_and_validate_descend_into_nested_compounds(tmp_path):
-    pipeline_path = _write(
-        tmp_path,
-        "nested",
-        """
-name: nested
-default_client: claude:sonnet
-stages:
-  - name: outer
-    type: loop
-    body:
-      - { name: leaf-a, type: plan }
-      - name: inner
-        parallel:
-          - { name: leaf-b, type: plan }
-          - { name: leaf-c, type: plan }
-""",
-    )
-    pipeline = Pipeline.from_yaml(pipeline_path)
-
-    specs = collect_stage_specs(pipeline, cli_spec=None)
-    assert {"outer", "leaf-a", "inner", "leaf-b", "leaf-c"} <= set(specs)
-
-    validate_stage_specs(specs, pipeline)
-
-    incomplete = {k: v for k, v in specs.items() if k not in {"leaf-b", "leaf-c"}}
-    with pytest.raises(ValueError, match=r"'leaf-b', 'leaf-c'"):
-        validate_stage_specs(incomplete, pipeline)
 
 
 def test_address_code_in_loop_finds_sibling_reviews(tmp_path, monkeypatch):

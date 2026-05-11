@@ -1,4 +1,3 @@
-import dataclasses
 import json
 import logging
 import os
@@ -67,25 +66,6 @@ def common_local_patches(monkeypatch):
     monkeypatch.setattr(
         "gremlins.executor.run.install_signal_handlers", lambda *c: None
     )
-
-    # Strip pipeline client keys so the injected client is used for every stage.
-    import gremlins.pipeline as _pipeline_mod
-
-    _real_from_yaml = _pipeline_mod.Pipeline.from_yaml
-
-    def _from_yaml_no_clients(path):
-        pipeline = _real_from_yaml(path)
-
-        def _strip_clients(stage):
-            stage.client = None
-            for child in stage.body:
-                _strip_clients(child)
-
-        for s in pipeline.stages:
-            _strip_clients(s)
-        return dataclasses.replace(pipeline, default_client=None)
-
-    monkeypatch.setattr("gremlins.pipeline.Pipeline.from_yaml", _from_yaml_no_clients)
 
 
 @pytest.fixture(autouse=True)

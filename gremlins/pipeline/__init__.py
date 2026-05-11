@@ -5,12 +5,20 @@ import importlib
 import pathlib
 from typing import TYPE_CHECKING, Any, cast
 
-from gremlins.clients.client import Client
+from gremlins.clients.client import PACKAGE_DEFAULT, Client
 
 if TYPE_CHECKING:
     from gremlins.stages.base import Stage
 
 BUNDLED_PROMPT_PREFIX = "gremlins:"
+
+
+def _fill_stage_clients(stages: list[Stage], default: Client) -> None:
+    for stage in stages:
+        if stage.type != "parallel":
+            stage.client = stage.client or default
+        if stage.body:
+            _fill_stage_clients(stage.body, default)
 
 
 @dataclasses.dataclass
@@ -55,6 +63,8 @@ class Pipeline:
         stages: list[Stage] = []
         for entry in cast(list[dict[str, Any]], raw.get("stages") or []):
             stages.append(parse_stage(entry))
+
+        _fill_stage_clients(stages, default_client or PACKAGE_DEFAULT)
 
         return cls(
             name=pipeline_name,

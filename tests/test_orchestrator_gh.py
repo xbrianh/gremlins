@@ -139,9 +139,6 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
     monkeypatch.setattr(
         "gremlins.executor.run.resolve_state_file", lambda gr_id=None: state_file
     )
-    monkeypatch.setattr(
-        "gremlins.stage_clients.resolve_state_file", lambda gr_id=None: state_file
-    )
 
     # Stub out patch_state so tests don't write to real state files.
     monkeypatch.setattr(
@@ -157,22 +154,6 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         state_file.write_text(json.dumps(data), encoding="utf-8")
 
     monkeypatch.setattr("gremlins.executor.state.append_artifact", _append_artifact)
-
-    # Strip pipeline client keys so the injected client is used for every stage.
-    _real_from_yaml = Pipeline.from_yaml
-
-    def _strip_clients(stage):
-        stage.client = None
-        for child in stage.body:
-            _strip_clients(child)
-
-    def _from_yaml_no_clients(path):
-        pipeline = _real_from_yaml(path)
-        for s in pipeline.stages:
-            _strip_clients(s)
-        return dataclasses.replace(pipeline, default_client=None)
-
-    monkeypatch.setattr("gremlins.pipeline.Pipeline.from_yaml", _from_yaml_no_clients)
 
     # set_stage is a no-op in tests — gr_id is not passed to gh_main.
 
@@ -686,257 +667,6 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
         f"{len(bad)} stage(s) ran on a non-gpt-4o model: "
         f"{[(c.label, c.model) for c in bad]}"
     )
-
-
-def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
-    tmp_path, monkeypatch
-):
-    """Resume must keep using persisted stage_clients after the pipeline changes."""
-    _init_git_repo(tmp_path)
-    monkeypatch.chdir(tmp_path)
-
-    gr_id = "resume-test-gr-id"
-
-    stage_defs = [
-        ("plan", "plan"),
-        ("implement", "implement"),
-        ("verify", "verify"),
-        ("open-pr", "open-github-pr"),
-        ("request-copilot", "request-copilot"),
-        ("ghreview", "ghreview"),
-        ("wait-copilot", "wait-copilot"),
-        ("ghaddress", "ghaddress"),
-        ("ci-gate", "wait-ci"),
-    ]
-    original_stage_clients = {
-        "plan": "claude:claude-sonnet-4-6",
-        "implement": "claude:claude-haiku-4-5-20251001",
-        "verify": "claude:claude-opus-4-1",
-        "open-pr": "copilot:gpt-4o",
-        "request-copilot": "claude:claude-sonnet-4-6",
-        "ghreview": "claude:claude-haiku-4-5-20251001",
-        "wait-copilot": "copilot:gpt-5",
-        "ghaddress": "claude:claude-sonnet-4-6",
-        "ci-gate": "claude:claude-opus-4-1",
-    }
-    mutated_stage_clients = {
-        stage_name: "claude:claude-opus-4-7" for stage_name, _ in stage_defs
-    }
-
-    pipeline_dir = tmp_path / ".gremlins"
-    pipeline_dir.mkdir(parents=True)
-    pipeline_path = pipeline_dir / "gh.yaml"
-    prompt_dir = tmp_path / ".gremlins" / "prompts"
-    prompt_dir.mkdir(parents=True)
-    ghreview_prompt = prompt_dir / "ghreview.md"
-    ghreview_prompt.write_text("Review.\n", encoding="utf-8")
-    ghaddress_prompt = prompt_dir / "ghaddress.md"
-    ghaddress_prompt.write_text("Address.\n", encoding="utf-8")
-    implement_prompt = prompt_dir / "implement.md"
-    implement_prompt.write_text("Implement.\n", encoding="utf-8")
-
-    def write_pipeline(stage_clients: dict[str, str]) -> None:
-        lines = ["name: gh", "prompt_dir: prompts", "", "stages:"]
-        for stage_name, stage_type in stage_defs:
-            fields = [
-                f"name: {stage_name}",
-                f"type: {stage_type}",
-                f"client: {json.dumps(stage_clients[stage_name])}",
-            ]
-            if stage_type == "ghreview":
-                fields.append(f"prompt: {json.dumps('ghreview.md')}")
-            elif stage_type == "ghaddress":
-                fields.append(f"prompt: {json.dumps('ghaddress.md')}")
-            elif stage_type == "implement":
-                fields.append(f"prompt: {json.dumps('implement.md')}")
-            lines.append("  - { " + ", ".join(fields) + " }")
-        pipeline_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-    write_pipeline(original_stage_clients)
-
-    _real_from_yaml = Pipeline.from_yaml
-    _, state_file = _patch_common(
-        monkeypatch,
-        tmp_path,
-        state_data={
-            "issue_url": "https://github.com/owner/repo/issues/42",
-            "issue_num": "42",
-        },
-    )
-    monkeypatch.setattr("gremlins.pipeline.Pipeline.from_yaml", _real_from_yaml)
-
-    def writing_patch_state(gr_id=None, _delete=(), **kw):
-        data = json.loads(state_file.read_text(encoding="utf-8"))
-        for key in _delete:
-            data.pop(key, None)
-        data.update(kw)
-        state_file.write_text(json.dumps(data), encoding="utf-8")
-
-    monkeypatch.setattr("gremlins.executor.run.patch_state", writing_patch_state)
-
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        _make_gh_subprocess(issue_body="# Resumed Plan\nDo more stuff.\n"),
-    )
-    verify_models: list[str] = []
-    ghreview_models: list[str] = []
-    ghaddress_models: list[str] = []
-    ci_models: list[str] = []
-    monkeypatch.setattr(
-        "gremlins.stages.review_code.ReviewCode.run",
-        lambda self, pipe: ghreview_models.append(self.model),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.request_copilot.RequestCopilot.run",
-        lambda self, pipe: None,
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.address_code.AddressCode.run",
-        lambda self, pipe: ghaddress_models.append(self.model),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.verify.Verify.run",
-        lambda self, pipe: verify_models.append(self.model),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.wait_ci.WaitCI.run",
-        lambda self, pipe: ci_models.append(self.model),
-    )
-
-    launch_client = _CommittingClient(
-        git_dir=tmp_path,
-        fixtures={
-            "implement": IMPL_EVENTS,
-            "commit": IMPL_EVENTS,
-            "open-github-pr": _pr_events(),
-        },
-    )
-
-    result = run_pipeline(
-        _gh_pipeline_path(tmp_path),
-        argv=["--plan", "#42"],
-        client=launch_client,
-        gr_id=gr_id,
-    )
-    assert result == 0
-
-    launch_state = json.loads(state_file.read_text(encoding="utf-8"))
-    assert launch_state.get("stage_clients") == original_stage_clients
-    assert verify_models == ["claude-opus-4-1"]
-    assert ghreview_models == ["claude-haiku-4-5-20251001"]
-    assert ghaddress_models == ["claude-sonnet-4-6"]
-    assert ci_models == ["claude-opus-4-1"]
-
-    write_pipeline(mutated_stage_clients)
-    verify_models.clear()
-    ghreview_models.clear()
-    ghaddress_models.clear()
-    ci_models.clear()
-    (tmp_path / "impl.txt").write_text("resume seed\n", encoding="utf-8")
-    subprocess.run(
-        ["git", "add", "impl.txt"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "commit", "-m", "prep resume"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-    )
-
-    resume_client = _CommittingClient(
-        git_dir=tmp_path,
-        fixtures={
-            "implement": IMPL_EVENTS,
-            "open-github-pr": _pr_events(),
-        },
-    )
-
-    result = run_pipeline(
-        _gh_pipeline_path(tmp_path),
-        argv=["--plan", "#42", "--resume-from", "implement"],
-        client=resume_client,
-        gr_id=gr_id,
-    )
-    assert result == 0
-
-    called_models = {call.label: call.model for call in resume_client.calls}
-    assert called_models == {
-        "implement": "claude-haiku-4-5-20251001",
-        "open-github-pr": "gpt-4o",
-    }
-    assert verify_models == ["claude-opus-4-1"]
-    assert ghreview_models == ["claude-haiku-4-5-20251001"]
-    assert ghaddress_models == ["claude-sonnet-4-6"]
-    assert ci_models == ["claude-opus-4-1"]
-
-
-def test_gh_main_resume_requires_persisted_stage_clients(tmp_path, monkeypatch, capsys):
-    _init_git_repo(tmp_path)
-    monkeypatch.chdir(tmp_path)
-
-    _patch_common(
-        monkeypatch,
-        tmp_path,
-        state_data={
-            "issue_url": "https://github.com/owner/repo/issues/42",
-            "issue_num": "42",
-        },
-    )
-    monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
-
-    with pytest.raises(SystemExit):
-        run_pipeline(
-            _gh_pipeline_path(tmp_path),
-            argv=["--plan", "#42", "--resume-from", "implement"],
-            client=FakeClaudeClient(fixtures={}),
-            gr_id="resume-test-gr-id",
-        )
-
-    assert "stage_clients not found" in capsys.readouterr().err
-
-
-def test_gh_main_resume_requires_each_persisted_stage_client(
-    tmp_path, monkeypatch, capsys
-):
-    _init_git_repo(tmp_path)
-    monkeypatch.chdir(tmp_path)
-
-    _, state_file = _patch_common(
-        monkeypatch,
-        tmp_path,
-        state_data={
-            "issue_url": "https://github.com/owner/repo/issues/42",
-            "issue_num": "42",
-            "stage_clients": {
-                "plan": "claude:sonnet",
-                "implement": "claude:sonnet",
-                "verify": "claude:sonnet",
-                "open-pr": "claude:sonnet",
-                "request-copilot": "claude:sonnet",
-                "wait-copilot": "claude:sonnet",
-                "ghaddress": "claude:sonnet",
-                "ci-gate": "claude:sonnet",
-            },
-        },
-    )
-    monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
-
-    with pytest.raises(SystemExit):
-        run_pipeline(
-            _gh_pipeline_path(tmp_path),
-            argv=["--plan", "#42", "--resume-from", "implement"],
-            client=FakeClaudeClient(fixtures={}),
-            gr_id="resume-test-gr-id",
-        )
-
-    assert "stage_clients missing stage: 'ghreview'" in capsys.readouterr().err
 
 
 def test_resume_from_implement(tmp_path, monkeypatch):
@@ -1700,7 +1430,6 @@ def test_gh_main_state_client_tracks_effective_model(
 
     _patch_common(monkeypatch, tmp_path)
 
-    # Restore the real patch_state so stage_clients is actually written
     import gremlins.executor.state as _state_mod
 
     monkeypatch.setattr("gremlins.executor.run.patch_state", _state_mod.patch_state)
@@ -1742,7 +1471,6 @@ def test_gh_main_state_client_tracks_effective_model(
 
     data = json.loads((state_dir / "state.json").read_text())
     assert "model" not in data
-    assert data.get("stage_clients", {}).get("implement") == "copilot:gpt-5.4"
 
 
 def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
@@ -1757,9 +1485,10 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
 
     session_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
-    # Override Pipeline.from_yaml (wins over _patch_common's version) to inject
-    # default_client without a live client instance.
+    # Override Pipeline.from_yaml to inject default_client: copilot:gpt-5.4 and
+    # re-fill stage clients so every stage inherits that model.
     from gremlins.clients.client import Client
+    from gremlins.pipeline import _fill_stage_clients
 
     _real_from_yaml = Pipeline.from_yaml
 
@@ -1770,12 +1499,11 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
 
     def _from_yaml_copilot_default(path):
         pipeline = _real_from_yaml(path)
+        new_default = Client("copilot", "gpt-5.4")
         for s in pipeline.stages:
             _strip_clients_2(s)
-        return dataclasses.replace(
-            pipeline,
-            default_client=Client("copilot", "gpt-5.4"),
-        )
+        _fill_stage_clients(pipeline.stages, new_default)
+        return dataclasses.replace(pipeline, default_client=new_default)
 
     monkeypatch.setattr(
         "gremlins.pipeline.Pipeline.from_yaml", _from_yaml_copilot_default

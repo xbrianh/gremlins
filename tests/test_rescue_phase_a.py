@@ -429,10 +429,7 @@ def test_write_rescue_report_uses_client_label_without_model(tmp_path):
                 "id": "victim-abcdef",
                 "kind": "localgremlin",
                 "stage": "implement",
-                "stage_clients": {
-                    "plan": "copilot:gpt-5.4",
-                    "implement": "claude:opus",
-                },
+                "client": "claude:opus",
             },
             "attempt_number": 1,
             "headless": False,

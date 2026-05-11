@@ -480,8 +480,8 @@ def test_resume_patches_state(lenv, monkeypatch):
     _wait_for_finished(state_dir, timeout=60)
 
 
-def test_resume_uses_persisted_stage_client_label(lenv, monkeypatch):
-    """resume() keeps the display label in sync with persisted stage_clients."""
+def test_resume_uses_persisted_client_label(lenv, monkeypatch):
+    """resume() propagates the persisted client field into the updated state."""
     old_pipeline = lenv.repo / "old.yaml"
     old_pipeline.write_text(
         """\
@@ -513,12 +513,9 @@ stages:
                 "stage": "implement",
                 "status": "stopped",
                 "exit_code": 1,
+                "client": "claude:opus",
                 "pipeline_args": ["--pipeline", str(old_pipeline)],
                 "pipeline_path": str(old_pipeline),
-                "stage_clients": {
-                    "plan": "copilot:gpt-5.4",
-                    "implement": "claude:opus",
-                },
             }
         ),
         encoding="utf-8",
