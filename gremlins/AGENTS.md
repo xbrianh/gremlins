@@ -7,7 +7,7 @@ review / address pipelines, the fleet manager
 
 ## Module layout
 
-- `cli/` — subcommand entry points. `__init__.py` is the top-level dispatch; one file per subcommand group: `launch.py`, `resume.py`, `init.py`, `review_address.py`, `fleet.py`. Bare invocation prints fleet status.
+- `cli/` — subcommand entry points. `__init__.py` is the top-level dispatch; one file per subcommand group: `launch.py`, `resume.py`, `init.py`, `fleet.py`. Bare invocation prints fleet status.
 - `bail.py` — `python -m gremlins.bail <class> [detail]`. Writes bail marker to `state.json`.
 - `run_pipeline.py` — `python -m gremlins.run_pipeline <gr_id> <kind>`. Spawned by the launcher; wraps `cli.main` and writes terminal state on exit.
 - `runner.py` — `run_stages` sequencer (with `resume_from`) + SIGINT/SIGTERM handlers that reap `claude -p` children.
@@ -26,7 +26,6 @@ review / address pipelines, the fleet manager
 - `stages/base.py` — `Stage` Protocol + `StageContext` dataclass: shared `client`, `session_dir`, `gr_id` threaded into every stage.
 - `stages/` — per-stage bodies: `plan`, `implement`, `review_code`, `address_code`, `verify`, `test`, `commit_pr`, `ghreview`, `ghaddress`, `request_copilot`, `wait_copilot`, `wait_ci`, `handoff`.
 - `executor/state.py` — `State` class: execution context + `state.json` I/O.
-- `executor/review_address.py` — `run_review`, `run_address`. Library functions called by `cli/review_address.py`.
 - `executor/run.py` — `run_main`. Drives the local pipeline.
 - `executor/pipeline.py` — `StageRunner`. Sequences stages for a pipeline run.
 - `prompts/` — externalized prompt templates (plan, implement, review lenses, etc).
@@ -36,8 +35,6 @@ review / address pipelines, the fleet manager
 | Subcommand | Module |
 |---|---|
 | `launch local` / `launch gh` / `launch boss` | `cli.launch.launch_main` → `executor.run.run_pipeline` |
-| `review` | `cli.review_address.review_main` |
-| `address` | `cli.review_address.address_main` |
 | `resume` | `cli.resume.resume_main` |
 | `init` | `cli.init.init_main` |
 | `launch` | `cli.launch.launch_main` |

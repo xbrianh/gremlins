@@ -40,8 +40,6 @@ the dispatch table in [`gremlins/cli/__init__.py`](gremlins/cli/__init__.py).
 | Subcommand | Purpose |
 |---|---|
 | `launch <name>` | Launch a background gremlin by pipeline name (`gremlins launch --list` to see available) |
-| `review` | review-code stage only |
-| `address` | address-code stage only |
 | `resume` | Re-spawn an existing gremlin from its recorded stage |
 | `stop` | Send SIGTERM to a running gremlin |
 | `rescue` | Diagnose and resume a dead or stalled gremlin |
