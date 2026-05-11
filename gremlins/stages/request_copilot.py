@@ -6,7 +6,6 @@ from typing import Any
 
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
-from gremlins.stages.registry import register_stage
 
 
 class RequestCopilot(Stage):
@@ -59,6 +58,3 @@ class RequestCopilot(Stage):
                 f"could not request Copilot review (is it enabled in repo settings?): "
                 f"exit {r.returncode}: {detail}"
             )
-
-
-register_stage("request-copilot", RequestCopilot)

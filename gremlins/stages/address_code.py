@@ -9,7 +9,6 @@ from typing import Any
 
 from gremlins.executor.state import State, pipeline_uses_gh
 from gremlins.stages.base import Stage
-from gremlins.stages.registry import register_stage
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -149,7 +148,3 @@ class AddressCode(Stage):
             raw_path=state.session_dir / "stream-ghaddress.jsonl",
         )
         state.check_bail("/ghaddress")
-
-
-register_stage("address-code", AddressCode)
-register_stage("ghaddress", AddressCode)

@@ -6,7 +6,6 @@ from typing import Any
 
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
-from gremlins.stages.registry import register_stage
 
 
 class CommitPR(Stage):
@@ -24,6 +23,3 @@ class CommitPR(Stage):
 
     def run(self, state: State) -> None:  # noqa: ARG002  # pragma: no cover
         raise NotImplementedError
-
-
-register_stage("commit-pr", CommitPR)

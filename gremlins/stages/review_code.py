@@ -9,7 +9,6 @@ from typing import Any
 from gremlins.clients.client import Client
 from gremlins.executor.state import State, pipeline_uses_gh
 from gremlins.stages.base import Stage
-from gremlins.stages.registry import register_stage
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +172,3 @@ class ReviewCode(Stage):
             raw_path=state.session_dir / "stream-ghreview.jsonl",
         )
         state.check_bail("/ghreview")
-
-
-register_stage("review-code", ReviewCode)
-register_stage("ghreview", ReviewCode)

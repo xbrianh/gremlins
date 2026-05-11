@@ -3,8 +3,42 @@ from __future__ import annotations
 from typing import Any
 
 from gremlins.clients.client import Client
+from gremlins.stages.address_code import AddressCode
 from gremlins.stages.base import Stage
-from gremlins.stages.registry import STAGE_REGISTRY
+from gremlins.stages.commit_pr import CommitPR
+from gremlins.stages.handoff import Handoff
+from gremlins.stages.implement import Implement
+from gremlins.stages.loop import LoopStage
+from gremlins.stages.open_github_pr import OpenGitHubPR
+from gremlins.stages.parallel import ParallelStage
+from gremlins.stages.plan import Plan
+from gremlins.stages.request_copilot import RequestCopilot
+from gremlins.stages.review_code import ReviewCode
+from gremlins.stages.run_cmd import RunCmd
+from gremlins.stages.sequence import SequenceStage
+from gremlins.stages.verify import Verify
+from gremlins.stages.wait_ci import WaitCI
+from gremlins.stages.wait_copilot import WaitCopilot
+
+STAGE_TYPES: dict[str, type[Stage]] = {
+    "plan": Plan,
+    "implement": Implement,
+    "verify": Verify,
+    "commit-pr": CommitPR,
+    "open-github-pr": OpenGitHubPR,
+    "request-copilot": RequestCopilot,
+    "wait-copilot": WaitCopilot,
+    "wait-ci": WaitCI,
+    "review-code": ReviewCode,
+    "ghreview": ReviewCode,
+    "address-code": AddressCode,
+    "ghaddress": AddressCode,
+    "handoff": Handoff,
+    "loop": LoopStage,
+    "parallel": ParallelStage,
+    "sequence": SequenceStage,
+    "run-cmd": RunCmd,
+}
 
 
 def get_client_from_dict(d: dict[str, Any]) -> Client | None:
@@ -20,8 +54,6 @@ def get_client_from_dict(d: dict[str, Any]) -> Client | None:
 
 def parse_stage(d: dict[str, Any], depth: int = 0) -> Stage:
     if "parallel" in d:
-        from gremlins.stages.parallel import ParallelStage
-
         return ParallelStage.with_dict(d, depth=depth)
 
     name = d.get("name")
@@ -34,6 +66,6 @@ def parse_stage(d: dict[str, Any], depth: int = 0) -> Stage:
     stage_type = d.get("type")
     if not isinstance(stage_type, str) or not stage_type:
         raise ValueError(f"stage {name!r}: must have a 'type' field")
-    if stage_type not in STAGE_REGISTRY:
+    if stage_type not in STAGE_TYPES:
         raise ValueError(f"stage {name!r}: unknown type {stage_type!r}")
-    return STAGE_REGISTRY[stage_type].with_dict(d, depth=depth)
+    return STAGE_TYPES[stage_type].with_dict(d, depth=depth)

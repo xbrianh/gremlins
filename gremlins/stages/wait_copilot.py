@@ -9,7 +9,6 @@ from typing import Any
 
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
-from gremlins.stages.registry import register_stage
 from gremlins.utils.github import check_copilot_review
 
 logger = logging.getLogger(__name__)
@@ -67,6 +66,3 @@ class WaitCopilot(Stage):
             if time.time() >= deadline:
                 raise RuntimeError(f"Copilot review timed out after {self.timeout}s")
             time.sleep(self.interval)
-
-
-register_stage("wait-copilot", WaitCopilot)

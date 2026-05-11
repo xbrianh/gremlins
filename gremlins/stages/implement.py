@@ -10,7 +10,6 @@ from typing import Any
 
 from gremlins.executor.state import State, pipeline_uses_gh, resolve_state_file
 from gremlins.stages.base import Stage
-from gremlins.stages.registry import register_stage
 from gremlins.utils.git import (
     DivergentHead,
     EmptyImpl,
@@ -232,6 +231,3 @@ class Implement(Stage):
             raise RuntimeError(
                 f"implement diverged from pre-impl HEAD {pre.head[:7]}; expected a fast-forward"
             )
-
-
-register_stage("implement", Implement)

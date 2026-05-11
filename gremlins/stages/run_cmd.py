@@ -8,7 +8,6 @@ from typing import Any
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
 from gremlins.stages.loop import RunCmdFailed
-from gremlins.stages.registry import register_stage
 
 
 class RunCmd(Stage):
@@ -39,6 +38,3 @@ class RunCmd(Stage):
             log_path = state.session_dir / "run-cmd.log"
             log_path.write_text(output, encoding="utf-8")
             raise RunCmdFailed(output)
-
-
-register_stage("run-cmd", RunCmd)

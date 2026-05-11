@@ -14,7 +14,6 @@ from typing import Any
 from gremlins.errors import die
 from gremlins.executor.state import State, resolve_state_file
 from gremlins.stages.base import Stage, StageInput
-from gremlins.stages.registry import register_stage
 from gremlins.utils.github import extract_gh_url, get_repo, parse_issue_ref, view_issue
 
 logger = logging.getLogger(__name__)
@@ -296,6 +295,3 @@ def _fetch_issue_body(issue_num: str, repo: str) -> str:
         sys.stderr.flush()
         sys.exit(1)
     return body
-
-
-register_stage("plan", Plan)

@@ -22,7 +22,6 @@ from gremlins.executor.state import (
     set_stage,
 )
 from gremlins.stages.base import Stage
-from gremlins.stages.registry import register_stage
 from gremlins.utils import proc
 
 logger = logging.getLogger(__name__)
@@ -400,6 +399,3 @@ def _parallel_stages(
         (group_name, _parallel),
         (fanin_name, _fan_in),
     ]
-
-
-register_stage("parallel", ParallelStage)

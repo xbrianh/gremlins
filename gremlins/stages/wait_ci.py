@@ -9,7 +9,6 @@ from typing import Any
 
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
-from gremlins.stages.registry import register_stage
 from gremlins.utils.git import head_sha
 from gremlins.utils.github import fetch_check_run_logs, get_pr_ci_status
 
@@ -257,6 +256,3 @@ class WaitCI(Stage):
                     f"ci-gate failed: {exc}"[:200],
                 )
             raise
-
-
-register_stage("wait-ci", WaitCI)

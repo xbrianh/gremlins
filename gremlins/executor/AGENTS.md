@@ -12,4 +12,4 @@ Internal pipeline execution package. Contains the unified entry point, the
   the pipeline YAML, wires clients, and delegates to `Pipeline.run()`.
   Called by `gremlins.run_pipeline` (the subprocess entry point).
 - `pipeline.py` — `Pipeline`: sequences stages with `resume_from` support;
-  resolves stage objects from `STAGE_REGISTRY` and client specs.
+  validates stage types against `STAGE_TYPES` from `pipeline/loader.py`.

@@ -9,7 +9,6 @@ from typing import Any, cast
 from gremlins.clients.protocol import CompletedRun
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
-from gremlins.stages.registry import register_stage
 from gremlins.utils import proc
 from gremlins.utils.github import extract_gh_url
 from gremlins.utils.yaml import render_bundled_prompt
@@ -129,6 +128,3 @@ class OpenGitHubPR(Stage):
         state.append_artifact({"type": "pr", "url": pr_url, "branch": branch})
         logger.info("PR: %s", pr_url)
         return pr_url
-
-
-register_stage("open-github-pr", OpenGitHubPR)

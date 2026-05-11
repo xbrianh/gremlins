@@ -10,7 +10,6 @@ from typing import Any
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
 from gremlins.stages.loop import LoopExhausted, LoopStage, RunCmdFailed
-from gremlins.stages.registry import register_stage
 from gremlins.utils import git as _git_mod
 
 logger = logging.getLogger(__name__)
@@ -128,6 +127,3 @@ class Verify(Stage):
             loop.run(state)
         except LoopExhausted:
             raise RuntimeError(f"verify stage exhausted {max_attempts} attempts")
-
-
-register_stage("verify", Verify)
