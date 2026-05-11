@@ -25,18 +25,17 @@ review / address pipelines, the fleet manager
 - `stages/all.py` — side-effect import; importing it causes every stage module to self-register into `STAGE_REGISTRY`. Called automatically by `Pipeline.from_yaml` via `_ensure_registered()`; no manual import needed.
 - `stages/base.py` — `Stage` Protocol + `StageContext` dataclass: shared `client`, `session_dir`, `gr_id` threaded into every stage.
 - `stages/` — per-stage bodies: `plan`, `implement`, `review_code`, `address_code`, `verify`, `test`, `commit_pr`, `ghreview`, `ghaddress`, `request_copilot`, `wait_copilot`, `wait_ci`, `handoff`.
-- `orchestrators/review_address.py` — `run_review`, `run_address`. Library functions called by `cli/review_address.py`.
-- `orchestrators/gh.py` — `gh_main`. Drives the gh pipeline.
-- `orchestrators/boss.py` — `boss_main`. Runs the `Handoff` stage (in-process) and `gremlins {stop,land,rescue}` between child gremlins.
+- `executor/state.py` — `State` class: execution context + `state.json` I/O.
+- `executor/review_address.py` — `run_review`, `run_address`. Library functions called by `cli/review_address.py`.
+- `executor/run.py` — `run_main`. Drives the local pipeline.
+- `executor/pipeline.py` — `StageRunner`. Sequences stages for a pipeline run.
 - `prompts/` — externalized prompt templates (plan, implement, review lenses, etc).
 
 ## Entry points
 
 | Subcommand | Module |
 |---|---|
-| `launch local` | `orchestrators.local.local_main` |
-| `launch gh` | `orchestrators.gh.gh_main` |
-| `launch boss` | `orchestrators.boss.boss_main` |
+| `launch local` / `launch gh` / `launch boss` | `cli.launch.launch_main` → `executor.run.run_pipeline` |
 | `review` | `cli.review_address.review_main` |
 | `address` | `cli.review_address.address_main` |
 | `resume` | `cli.resume.resume_main` |

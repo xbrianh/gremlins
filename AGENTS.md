@@ -19,7 +19,7 @@ gremlins/                    Python package — see gremlins/AGENTS.md
   pipelines/                 Bundled YAML pipelines (gh, local, boss)
   pipeline/                  YAML loader + discovery + schema
   prompts/                   Bundled prompt templates
-  orchestrators/             pipeline.py (StageRunner), run.py, review_address.py
+  executor/                  State class + pipeline.py (StageRunner), run.py, review_address.py
   fleet/                     Fleet manager (status, stop, rescue, land, close, log) — see gremlins/fleet/AGENTS.md
   utils/                     proc helpers etc.
 .gremlins/                   Project-overlay pipeline YAMLs (project-scoped, win over bundled)
