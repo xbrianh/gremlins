@@ -18,7 +18,6 @@ from gremlins.errors import die
 from gremlins.executor.pipeline import Pipeline
 from gremlins.executor.state import (
     patch_state,
-    pipeline_uses_gh,
     read_pr_url,
     resolve_session_dir,
     resolve_state_file,
@@ -148,7 +147,7 @@ def run_pipeline(
     except (FileNotFoundError, ValueError, YamlLoadError) as exc:
         die(str(exc))
 
-    is_gh = pipeline_uses_gh(pipeline)
+    is_gh = pipeline.needs_gh()
 
     repo = ""
     state_file = resolve_state_file(gr_id)

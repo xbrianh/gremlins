@@ -10,6 +10,7 @@ from gremlins.stages.base import Stage
 
 class GitHubRequestCopilotReview(Stage):
     type = "github-request-copilot-review"
+    needs_gh = True
 
     @classmethod
     def with_dict(cls, d: dict[str, Any], depth: int = 0) -> GitHubRequestCopilotReview:

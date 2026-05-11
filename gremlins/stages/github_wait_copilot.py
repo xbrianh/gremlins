@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 class GitHubWaitCopilot(Stage):
     type = "github-wait-copilot"
+    needs_gh = True
 
     @classmethod
     def with_dict(cls, d: dict[str, Any], depth: int = 0) -> GitHubWaitCopilot:  # noqa: ARG002

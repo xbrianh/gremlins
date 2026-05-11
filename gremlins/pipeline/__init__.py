@@ -21,6 +21,12 @@ def _fill_stage_clients(stages: list[Stage], default: Client) -> None:
             _fill_stage_clients(stage.body, default)
 
 
+def _stages_need_gh(stages: list[Stage]) -> bool:
+    return any(
+        s.needs_gh or (s.body and _stages_need_gh(s.body)) for s in stages
+    )
+
+
 @dataclasses.dataclass
 class Pipeline:
     name: str
@@ -37,10 +43,11 @@ class Pipeline:
             and any(b.type == "handoff" for b in (first.body or []))
         )
 
-    def setup_kind(self) -> str:
-        from gremlins.executor.state import pipeline_uses_gh
+    def needs_gh(self) -> bool:
+        return _stages_need_gh(self.stages)
 
-        if pipeline_uses_gh(self) or self.uses_loop_handoff():
+    def setup_kind(self) -> str:
+        if self.needs_gh() or self.uses_loop_handoff():
             return "worktree-detached"
         return "worktree-branch"
 

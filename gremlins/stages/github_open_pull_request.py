@@ -48,6 +48,7 @@ def _get_pr_branch(pr_url: str) -> str:
 
 class GitHubOpenPullRequest(Stage):
     type = "github-open-pull-request"
+    needs_gh = True
 
     @classmethod
     def with_dict(cls, d: dict[str, Any], depth: int = 0) -> GitHubOpenPullRequest:

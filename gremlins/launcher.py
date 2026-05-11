@@ -22,7 +22,7 @@ from typing import Any, cast
 
 from gremlins import paths as _paths
 from gremlins.clients.client import PACKAGE_DEFAULT
-from gremlins.executor.state import patch_state, pipeline_uses_gh, write_state
+from gremlins.executor.state import patch_state, write_state
 from gremlins.pipeline import Pipeline
 from gremlins.utils import git as _git_mod
 from gremlins.utils import proc
@@ -221,7 +221,7 @@ def launch(
 
     if (
         _loaded_pipeline is not None
-        and pipeline_uses_gh(_loaded_pipeline)
+        and _loaded_pipeline.needs_gh()
         and shutil.which("gh") is None
     ):
         raise RuntimeError("gh CLI not found on PATH (required for gh pipeline)")
@@ -231,7 +231,7 @@ def launch(
 
     _effective_base_ref = base_ref if base_ref is not None else _pipeline_base_ref
     if _git_mod.in_git_repo(cwd=project_root):
-        if _loaded_pipeline is not None and pipeline_uses_gh(_loaded_pipeline):
+        if _loaded_pipeline is not None and _loaded_pipeline.needs_gh():
             _branch = _effective_base_ref.removeprefix("origin/")
             if _branch and _branch not in ("current", "HEAD"):
                 try:
@@ -387,7 +387,7 @@ def resume(gr_id: str) -> None:
 
     if (
         _loaded_resume is not None
-        and pipeline_uses_gh(_loaded_resume)
+        and _loaded_resume.needs_gh()
         and shutil.which("gh") is None
     ):
         raise RuntimeError("gh CLI not found on PATH (required for gh pipeline)")

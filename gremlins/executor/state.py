@@ -26,15 +26,6 @@ logger = logging.getLogger(__name__)
 
 _GR_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
-_GH_STAGE_TYPES = frozenset(
-    {
-        "github-open-pull-request",
-        "github-request-copilot-review",
-        "github-wait-copilot",
-        "github-wait-ci",
-    }
-)
-
 BAIL_CLASS_REVIEWER_REQUESTED_CHANGES = "reviewer_requested_changes"
 BAIL_CLASS_SECURITY = "security"
 BAIL_CLASS_SECRETS = "secrets"
@@ -45,16 +36,6 @@ def validate_gr_id(gr_id: str) -> None:
     """Raise ValueError if gr_id is not a safe, non-path-traversing identifier."""
     if ".." in gr_id or not _GR_ID_RE.match(gr_id):
         raise ValueError(f"gr_id contains illegal characters: {gr_id!r}")
-
-
-def _stages_use_gh(stages: list[Stage]) -> bool:
-    return any(
-        s.type in _GH_STAGE_TYPES or (s.body and _stages_use_gh(s.body)) for s in stages
-    )
-
-
-def pipeline_uses_gh(pipeline: Pipeline) -> bool:
-    return _stages_use_gh(pipeline.stages)
 
 
 def resolve_state_file(gr_id: str | None) -> pathlib.Path | None:
