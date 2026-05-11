@@ -225,7 +225,9 @@ class WaitCI(Stage):
 
                 pr_branch = state.last_pr_branch()
                 if not pr_branch:
-                    state.write_bail_file("other", "ci-fix: pr_branch unknown, cannot push")
+                    state.write_bail_file(
+                        "other", "ci-fix: pr_branch unknown, cannot push"
+                    )
                     return
 
                 fix_prompt = template.format(

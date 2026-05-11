@@ -189,7 +189,12 @@ def test_ci_fix_prompt_contains_pr_branch(
         [([_FAILING_CHECK], ""), ([_FAILING_CHECK], ""), ([_PASSING_CHECK], "")]
     )
     stage, state = _make_stage(
-        client, tmp_path, gr_id=gr_id, poll_interval=0, checks_getter=getter, pr_branch=None
+        client,
+        tmp_path,
+        gr_id=gr_id,
+        poll_interval=0,
+        checks_getter=getter,
+        pr_branch=None,
     )
     stage.run(state)
     assert len(client.calls) == 1
@@ -373,14 +378,26 @@ def test_empty_pr_branch_bails(tmp_path: pathlib.Path, make_state_dir) -> None:
     # PR artifact with no branch — simulates open-pr appending without a known branch
     (state_dir / "state.json").write_text(
         json.dumps(
-            {"id": gr_id, "attempt": attempt, "artifacts": [{"type": "pr", "branch": ""}]}
+            {
+                "id": gr_id,
+                "attempt": attempt,
+                "artifacts": [{"type": "pr", "branch": ""}],
+            }
         )
     )
     state_mod.patch_state(gr_id, attempt=attempt)
     client = FakeClaudeClient(fixtures={})
-    getter = _make_getter([([_FAILING_CHECK], ""), ([_FAILING_CHECK], ""), ([_PASSING_CHECK], "")])
+    getter = _make_getter(
+        [([_FAILING_CHECK], ""), ([_FAILING_CHECK], ""), ([_PASSING_CHECK], "")]
+    )
     stage, state = _make_stage(
-        client, tmp_path, gr_id=gr_id, poll_interval=0, startup_grace_secs=0, checks_getter=getter, pr_branch=None
+        client,
+        tmp_path,
+        gr_id=gr_id,
+        poll_interval=0,
+        startup_grace_secs=0,
+        checks_getter=getter,
+        pr_branch=None,
     )
     state.attempt = attempt
     stage.run(state)
