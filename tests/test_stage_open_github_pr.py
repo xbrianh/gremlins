@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import pathlib
 from unittest.mock import patch
 
@@ -271,6 +272,55 @@ def test_last_pr_branch_takes_priority_over_base_ref(tmp_path: pathlib.Path) -> 
         stage.run(state)
     assert "gremlin/child-1" in prompts_seen[0]
     assert "feature-base" not in prompts_seen[0]
+
+
+def test_loop_iteration_gt1_adds_iter_suffix_instruction(
+    tmp_path: pathlib.Path,
+) -> None:
+    stage, state = _make_state(
+        tmp_path, gr_id="test-gr", issue_url="https://github.com/o/r/issues/431"
+    )
+    state = dataclasses.replace(state, loop_iteration=2)
+    prompts_seen: list[str] = []
+    with (
+        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
+        patch("gremlins.stages.open_github_pr._get_pr_branch", return_value=PR_BRANCH),
+        patch("gremlins.executor.state.append_artifact"),
+        patch.object(
+            stage,
+            "run_claude",
+            side_effect=lambda prompt, **kw: (
+                prompts_seen.append(prompt)
+                or type("R", (), {"events": [], "text_result": ""})()
+            ),
+        ),
+    ):
+        stage.run(state)
+    assert prompts_seen
+    assert "-iter2" in prompts_seen[0]
+
+
+def test_loop_iteration_1_no_iter_suffix(tmp_path: pathlib.Path) -> None:
+    stage, state = _make_state(
+        tmp_path, gr_id="test-gr", issue_url="https://github.com/o/r/issues/431"
+    )
+    prompts_seen: list[str] = []
+    with (
+        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
+        patch("gremlins.stages.open_github_pr._get_pr_branch", return_value=PR_BRANCH),
+        patch("gremlins.executor.state.append_artifact"),
+        patch.object(
+            stage,
+            "run_claude",
+            side_effect=lambda prompt, **kw: (
+                prompts_seen.append(prompt)
+                or type("R", (), {"events": [], "text_result": ""})()
+            ),
+        ),
+    ):
+        stage.run(state)
+    assert prompts_seen
+    assert "-iter" not in prompts_seen[0]
 
 
 def test_record_child_pr_appends_pr_artifact(tmp_path: pathlib.Path) -> None:

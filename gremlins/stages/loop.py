@@ -119,6 +119,7 @@ class LoopStage(Stage):
         exhausted = False
         try:
             for iteration in range(1, self._max_iterations + 1):
+                state.patch(loop_iteration=iteration)
                 if self._pr_stack:
                     _detach_to_pr_base(state)
                 head_before = _git.head_sha(state.cwd)
