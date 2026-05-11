@@ -21,7 +21,6 @@ from gremlins.utils.state_file import locked_update
 if TYPE_CHECKING:
     from gremlins.pipeline import Pipeline
     from gremlins.stages.base import Stage
-    from gremlins.utils.git import PreImplState
 
 logger = logging.getLogger(__name__)
 
@@ -370,26 +369,6 @@ def _read_state_json(sf: pathlib.Path | None) -> dict[str, Any]:
         return {}
 
 
-def _read_impl_pre_state(
-    session_dir: pathlib.Path, sd: dict[str, Any]
-) -> PreImplState | None:
-    from gremlins.utils.git import PreImplState
-
-    sidecar = session_dir / ".impl-pre-state.json"
-    if sidecar.exists():
-        try:
-            data: dict[str, Any] = json.loads(sidecar.read_text(encoding="utf-8"))
-            head = data.get("head") or ""
-            if head:
-                return PreImplState(head=head)
-        except (json.JSONDecodeError, OSError):
-            pass
-    head = sd.get("impl_pre_head") or ""
-    if head:
-        return PreImplState(head=head)
-    return None
-
-
 @dataclasses.dataclass
 class State:
     # required per-stage
@@ -414,7 +393,6 @@ class State:
     issue_num: str = ""
     loop_iteration: int = 1
     attempt: str = ""
-    impl_pre_state: PreImplState | None = None
 
     @property
     def cwd(self) -> pathlib.Path:
@@ -451,7 +429,6 @@ class State:
                 base_ref_name=sd.get("base_ref_name") or "",
                 issue_num=sd.get("issue_num") or "",
                 loop_iteration=_int_or(sd.get("loop_iteration"), 1),
-                impl_pre_state=_read_impl_pre_state(base_state.session_dir, sd),
             )
             entry.run(state)
 
