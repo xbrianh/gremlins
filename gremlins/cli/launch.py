@@ -10,6 +10,7 @@ from gremlins.launcher import launch
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import list_pipelines, resolve_pipeline_name
 from gremlins.stages.base import Stage
+from gremlins.pipeline.loader import STAGE_TYPES
 from gremlins.utils.yaml import YamlLoadError
 
 _INFRA_ARGS = frozenset({"description", "parent_id", "print_id", "base_ref", "client"})
@@ -90,8 +91,6 @@ def launch_main(argv: list[str]) -> int:
             f"error: pipeline '{name}' is invalid: {exc}\n  (file: {pipeline_path})\n"
         )
         return 1
-
-    from gremlins.pipeline.loader import STAGE_TYPES
 
     first = next((s for s in pipeline.stages if s.type != "parallel"), None)
     try:
