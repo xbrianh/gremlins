@@ -170,7 +170,7 @@ def test_log_file_captures_output(tmp_path):
 
 
 def test_no_pr_opened_on_exhaustion(tmp_path, monkeypatch):
-    """Stage raises before commit-pr could open a PR."""
+    """Stage raises when all fix attempts are exhausted."""
     monkeypatch.delenv("GR_ID", raising=False)
 
     client = FakeClaudeClient(

@@ -28,6 +28,3 @@ escaped as `{{owner}}` in the template source.
 | `{spec_block}` | Rendered overarching chain spec block | `implement.py` | Multi-line; empty string when no spec |
 | `{plan_source_label}` | Human-readable label for where the plan came from | `implement.py` (gh) | e.g. `"from the GitHub issue"` or `"below"` |
 | `{plan_location_note}` | Sentence about where the plan lives | `implement.py` (gh) | Appended to the implement preamble |
-| `{handoff_branch}` | Name of the impl-handoff branch | `commit_pr.py` | e.g. `gremlin-impl-handoff-abc123` |
-| `{commit_count}` | Number of commits above the base ref | `commit_pr.py` | Integer as string |
-| `{pre_head}` | Base ref (SHA or branch) before implementation | `commit_pr.py` | Used as the range base in `git log` |

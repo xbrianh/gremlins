@@ -14,7 +14,6 @@ sequencing logic of their own.
 - `implement.py` — `Implement(Stage)`. Dual-mode (`kind='local'` / `kind='gh'`). For gh: enforces the empty-implementation invariant, classifies the outcome (`HeadAdvanced` / `EmptyImpl` / `DivergentHead`), creates the impl-handoff branch, and returns an `ImplStageResult` with the pre-impl state and classified outcome.
 - `review_code.py` — `ReviewCode(Stage)`. Local pipeline only (single-detail-reviewer post-collapse). Also registered as `"ghreview"` type alias.
 - `address_code.py` — `AddressCode(Stage)`. Local pipeline only. Also registered as `"ghaddress"` type alias.
-- `commit_pr.py` — `CommitPR(Stage)`. Gh pipeline. Opens a fresh claude session against the impl-handoff branch diff; no session_id dependency, so `--resume-from commit-pr` works cleanly.
 - `request_copilot.py` — `RequestCopilot(Stage)`. Requests Copilot review by adding `copilot-pull-request-reviewer` to the PR's reviewer list.
 - `verify.py` — `Verify(Stage)`. Constructs a `LoopStage` from two closures (`_run_cmd`, `_run_fix`) and delegates the retry loop to it. `_run_cmd` runs `cmds` joined with `&&` and raises `RunCmdFailed` on failure; `_run_fix` formats the fix prompt and invokes the agent. `LoopExhausted` from `LoopStage` is translated to `RuntimeError("verify stage exhausted N attempts")`. Takes `is_git` (controls diff capture) and `commit_after_fix` (controls commit instruction).
 - `wait_ci.py` — `WaitCI(Stage)`. Gh pipeline (`ci-gate`). Polls PR CI checks via `utils.github`; re-invokes agent to fix failures; bails on `REVIEW_REQUIRED` or attempt exhaustion.
@@ -35,8 +34,7 @@ sequencing logic of their own.
   from `..state` after the claude run. The runner inspects the bail and
   halts the pipeline.
 - Most stages return `None`. Stages that produce information the
-  orchestrator needs (`implement.py` → `ImplStageResult`,
-  `commit_pr.py` → PR URL string) return it; the orchestrator threads
+  orchestrator needs (`implement.py` → `ImplStageResult`) return it; the orchestrator threads
   it into later stages.
 - The `label=` argument passed to `client.run(...)` is the stream-event
   prefix and the `FakeClaudeClient` fixture key. Stages that re-enter the
@@ -51,8 +49,5 @@ Any new `gremlins/stages/introspect.py` (planned for #258) must import only `ins
 
 - `implement.py` enforces the empty-implementation invariant: an empty
   impl in the gh pipeline raises `EmptyImpl` and the runner bails. This
-  is the firewall that keeps no-op runs out of `commit-pr` / `ghreview`.
+  is the firewall that keeps no-op runs out of `ghreview`.
   Don't soften it.
-- `commit_pr.py` selects its action clause based on the `ImplOutcome`
-  classification from the implement stage. The shape (`HeadAdvanced`)
-  maps to a single prompt in `../prompts/` — keep them aligned.

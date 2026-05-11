@@ -16,7 +16,7 @@ prompt_dir: ../prompts            # directory bare-name `prompt:` paths resolve 
 
 stages:
   - name: <stage-name>
-    type: <stage-type>          # plan | implement | verify | review-code | address-code | commit-pr | ghreview | ghaddress | wait-ci | …
+    type: <stage-type>          # plan | implement | verify | review-code | address-code | ghreview | ghaddress | wait-ci | …
     client: <alias>             # omit for stages that don't call Claude
     prompt: [gremlins:foo.md, foo.md]   # `gremlins:NAME` -> bundled package prompts; bare NAME -> prompt_dir
     options:                    # stage-specific knobs
