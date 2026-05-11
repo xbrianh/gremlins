@@ -4,7 +4,6 @@ import argparse
 import logging
 import pathlib
 import shutil
-import sys
 
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
 from gremlins.errors import die

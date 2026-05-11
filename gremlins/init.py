@@ -8,13 +8,13 @@ import sys
 from typing import Any, cast
 
 from gremlins import PACKAGE_ROOT
-from gremlins.utils.yaml import YamlLoadError, dump_yaml_text, load_yaml_file
+from gremlins.utils.yaml import dump_yaml_text, load_yaml_file
 
 _PIPELINES_DIR = PACKAGE_ROOT / "pipelines"
 _PROMPTS_DIR = PACKAGE_ROOT / "prompts"
 
 
-def _bundled_pipeline_names() -> list[str]:
+def bundled_pipeline_names() -> list[str]:
     return sorted(p.stem for p in _PIPELINES_DIR.glob("*.yaml"))
 
 
@@ -26,13 +26,6 @@ def _strip_bundled_prefix(name: str) -> str:
 
 
 def _rewrite_prompts_to_bare(stages: list[Any], named_keys: set[str]) -> None:
-    """Strip the `gremlins:` prefix on every `prompt:` entry in-place.
-
-    After init, scaffolded YAMLs reference editable local copies under
-    `.gremlins/prompts/`, so bundled-prefixed names become bare names that
-    resolve against `prompt_dir`. Named-entry references (keys in `named_keys`)
-    are left unchanged.
-    """
     for stage in stages:
         if not isinstance(stage, dict):
             continue
@@ -55,7 +48,6 @@ def _rewrite_prompts_to_bare(stages: list[Any], named_keys: set[str]) -> None:
 
 
 def _rewrite_named_prompts_to_bare(named_prompts: dict[str, Any]) -> None:
-    """Strip `gremlins:` prefix from values in the top-level prompts: mapping."""
     for key in named_prompts:
         val = named_prompts[key]
         if isinstance(val, str):
@@ -69,11 +61,6 @@ def _rewrite_named_prompts_to_bare(named_prompts: dict[str, Any]) -> None:
 def _collect_prompt_subpaths(
     stages: list[Any], named_prompts: dict[str, Any] | None = None
 ) -> list[str]:
-    """Return unique subpaths for all prompt files.
-
-    Collects from the named prompts mapping (if any) and from stage `prompt:`
-    fields, skipping stage items that are named-entry references.
-    """
     seen: set[str] = set()
     result: list[str] = []
 
@@ -114,7 +101,7 @@ def _collect_prompt_subpaths(
     return result
 
 
-def _validate_selection(selected: list[str], bundled: list[str]) -> int | None:
+def validate_selection(selected: list[str], bundled: list[str]) -> int | None:
     unknown = [n for n in selected if n not in bundled]
     if not unknown:
         return None
@@ -125,11 +112,11 @@ def _validate_selection(selected: list[str], bundled: list[str]) -> int | None:
     return 1
 
 
-def _tmp_path(dst: pathlib.Path) -> pathlib.Path:
+def tmp_path(dst: pathlib.Path) -> pathlib.Path:
     return dst.with_suffix(dst.suffix + f".tmp.{os.getpid()}")
 
 
-def _build_plan(
+def build_plan(
     selected: list[str], base: pathlib.Path
 ) -> list[tuple[pathlib.Path, bytes]]:
     dot_gremlins = base / ".gremlins"
@@ -164,13 +151,12 @@ def _build_plan(
         plan.append((dst, content.encode("utf-8")))
 
     plan.append((base / "AGENTS.md", (_PIPELINES_DIR / "AGENTS.md").read_bytes()))
-
     plan.append((dot_gremlins / ".gitignore", b"env\n"))
 
     return plan
 
 
-def _check_conflicts(plan: list[tuple[pathlib.Path, bytes]], force: bool) -> int | None:
+def check_conflicts(plan: list[tuple[pathlib.Path, bytes]], force: bool) -> int | None:
     if force:
         return None
     conflicts = [dst for dst, _ in plan if dst.exists()]
@@ -181,25 +167,25 @@ def _check_conflicts(plan: list[tuple[pathlib.Path, bytes]], force: bool) -> int
     return 1
 
 
-def _stage_writes(plan: list[tuple[pathlib.Path, bytes]]) -> list[pathlib.Path]:
+def stage_writes(plan: list[tuple[pathlib.Path, bytes]]) -> list[pathlib.Path]:
     staged: list[pathlib.Path] = []
     for dst, data in plan:
         dst.parent.mkdir(parents=True, exist_ok=True)
-        tmp = _tmp_path(dst)
-        tmp.write_bytes(data)
-        staged.append(tmp)
+        t = tmp_path(dst)
+        t.write_bytes(data)
+        staged.append(t)
     return staged
 
 
-def _commit_writes(
+def commit_writes(
     staged: list[pathlib.Path], plan: list[tuple[pathlib.Path, bytes]]
 ) -> None:
-    for tmp, (dst, _) in zip(staged, plan):
-        tmp.replace(dst)
+    for t, (dst, _) in zip(staged, plan):
+        t.replace(dst)
         sys.stdout.write(f"{dst}\n")
 
 
-def _cleanup_tmp(paths: list[pathlib.Path]) -> None:
+def cleanup_tmp(paths: list[pathlib.Path]) -> None:
     for p in paths:
         try:
             p.unlink()
