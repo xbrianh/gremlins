@@ -75,7 +75,17 @@ class OpenGitHubPR(Stage):
         base_prompt = render_bundled_prompt(
             "open_github_pr.md", base_ref=base_ref
         ).rstrip()
-        prompt = f"{base_prompt} {closes_clause}"
+
+        n = state.loop_iteration
+        iter_clause = (
+            f" This is loop iteration {n}; append '-iter{n}' to the branch slug"
+            f" to avoid colliding with a prior iteration's branch"
+            f" (e.g. 'issue-431-some-slug-iter{n}')."
+            if n > 1
+            else ""
+        )
+
+        prompt = f"{base_prompt} {closes_clause}{iter_clause}"
 
         completed: CompletedRun = self.run_claude(
             prompt,

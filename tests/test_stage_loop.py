@@ -301,3 +301,31 @@ def test_pr_stack_false_skips_detach(tmp_path, make_state_dir, monkeypatch):
     loop.run(_loop_state_with_gr(tmp_path, gr_id))
 
     assert git_calls == []
+
+
+# ---------------------------------------------------------------------------
+# loop_iteration written to state.json
+# ---------------------------------------------------------------------------
+
+
+def test_loop_patches_loop_iteration_to_state(tmp_path, make_state_dir):
+    gr_id = "iter-patch-test"
+    state_dir = make_state_dir(gr_id)
+    seen_iterations: list[int] = []
+
+    def runner() -> None:
+        data = json.loads((state_dir / "state.json").read_text())
+        seen_iterations.append(int(data.get("loop_iteration") or 0))
+        raise RunCmdFailed("keep going")
+
+    loop_state = RuntimeState(
+        client=_fake_client(),
+        session_dir=tmp_path,
+        gr_id=gr_id,
+        worktree=tmp_path,
+    )
+    loop = LoopStage.from_runners([runner], max_iterations=3)
+    with pytest.raises(LoopExhausted):
+        loop.run(loop_state)
+
+    assert seen_iterations == [1, 2, 3]
