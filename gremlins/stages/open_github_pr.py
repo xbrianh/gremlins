@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+import re
+from typing import Any, cast
 
 from gremlins.clients.protocol import CompletedRun
 from gremlins.executor.state import State
@@ -14,6 +15,26 @@ from gremlins.utils.github import extract_gh_url
 from gremlins.utils.yaml import render_bundled_prompt
 
 logger = logging.getLogger(__name__)
+
+
+def extract_pr_branch_from_events(events: list[dict[str, Any]]) -> str:
+    """Extract the --head branch name from the last gh pr create Bash tool call."""
+    for evt in reversed(events):
+        if evt.get("type") != "assistant":
+            continue
+        msg = cast(dict[str, Any], evt.get("message") or {})
+        for item in cast(list[Any], msg.get("content") or []):
+            c = cast(dict[str, Any], item)
+            if c.get("type") != "tool_use" or c.get("name") != "Bash":
+                continue
+            inp = cast(dict[str, Any], c.get("input") or {})
+            cmd = str(inp.get("command") or "")
+            if "gh pr create" not in cmd:
+                continue
+            m = re.search(r"--head\s+(\S+)", cmd)
+            if m:
+                return m.group(1).strip("\"'")
+    return ""
 
 
 def _get_pr_branch(pr_url: str) -> str:
@@ -95,14 +116,17 @@ class OpenGitHubPR(Stage):
             capture_events=True,
         )
 
+        events = completed.events or []
         pr_url = extract_gh_url(
-            completed.events or [],
+            events,
             url_pattern=r"https://github\.com/[^ )]+/pull/[0-9]+",
             cmd_pattern=r"gh pr create",
             label="PR",
             text_result=completed.text_result,
         )
-        branch = _get_pr_branch(pr_url)
+        branch = extract_pr_branch_from_events(events) or _get_pr_branch(pr_url)
+        if not branch:
+            logger.warning("open-pr: could not determine PR branch for %s", pr_url)
         state.append_artifact({"type": "pr", "url": pr_url, "branch": branch})
         logger.info("PR: %s", pr_url)
         return pr_url
