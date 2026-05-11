@@ -240,9 +240,9 @@ For `local` stages, model options (`plan_model`, `impl_model`, `address_model`,
 | `verify` | Runs check and test commands with an agent fix-loop |
 | `test` | Runs a single test command with an agent fix-loop |
 | `request-copilot` | Requests a Copilot review on the open PR |
-| `ghreview` | Runs the `/ghreview` skill against the open PR |
+| `github-review-pull-request` | Runs the `/ghreview` skill against the open PR |
 | `github-wait-copilot` | Polls until Copilot posts its review |
-| `ghaddress` | Runs the `/ghaddress` skill to address PR review comments |
+| `github-address-pull-request-reviews` | Runs the `/ghaddress` skill to address PR review comments |
 | `wait-ci` | Polls PR CI checks until they pass or exhaust attempts |
 
 ### Parallel groups

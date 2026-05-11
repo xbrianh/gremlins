@@ -1,4 +1,4 @@
-"""Tests for ReviewCode.results_to_github (formerly gremlins.stages.ghreview)."""
+"""Tests for GitHubReviewPullRequest.run."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from conftest import gh_pipeline as _gh_pipeline
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
-from gremlins.stages.review_code import ReviewCode
+from gremlins.stages.review_code import GitHubReviewPullRequest
 
 PR_URL = "https://github.com/owner/repo/pull/42"
 
@@ -20,13 +20,15 @@ def _make_stage(
     gr_id: str | None = None,
     pr_url: str = PR_URL,
     style_content: str | None = None,
-) -> tuple[ReviewCode, FakeClaudeClient, RuntimeState]:
+) -> tuple[GitHubReviewPullRequest, FakeClaudeClient, RuntimeState]:
     prompt_text = "Review PR {pr_url}."
     prompts = (
         [style_content, prompt_text] if style_content is not None else [prompt_text]
     )
-    stage = ReviewCode("ghreview", "sonnet", prompts, {}, pr_url=pr_url)
-    client = FakeClaudeClient(fixtures={"ghreview": MINIMAL_EVENTS})
+    stage = GitHubReviewPullRequest(
+        "github-review-pull-request", "sonnet", prompts, {}, pr_url=pr_url
+    )
+    client = FakeClaudeClient(fixtures={"github-review-pull-request": MINIMAL_EVENTS})
     state = RuntimeState(
         client=client,
         session_dir=tmp_path,
@@ -42,7 +44,7 @@ def test_run_calls_claude_with_pr_url(tmp_path: pathlib.Path) -> None:
     assert len(client.calls) == 1
     call = client.calls[0]
     assert PR_URL in call.prompt
-    assert call.label == "ghreview"
+    assert call.label == "github-review-pull-request"
 
 
 def test_run_includes_style_from_prompt_paths(tmp_path: pathlib.Path) -> None:
@@ -55,4 +57,4 @@ def test_run_writes_raw_path(tmp_path: pathlib.Path) -> None:
     stage, client, state = _make_stage(tmp_path)
     stage.run(state)
     call = client.calls[0]
-    assert call.raw_path == tmp_path / "stream-ghreview.jsonl"
+    assert call.raw_path == tmp_path / "stream-github-review-pull-request.jsonl"

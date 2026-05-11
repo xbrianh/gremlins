@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from gremlins.clients.client import Client
-from gremlins.stages.address_code import AddressCode
+from gremlins.stages.address_code import AddressCode, GitHubAddressPullRequestReviews
 from gremlins.stages.base import Stage
 from gremlins.stages.github_open_pull_request import GitHubOpenPullRequest
 from gremlins.stages.github_request_copilot_review import GitHubRequestCopilotReview
@@ -14,7 +14,7 @@ from gremlins.stages.implement import Implement
 from gremlins.stages.loop import LoopStage
 from gremlins.stages.parallel import ParallelStage
 from gremlins.stages.plan import Plan
-from gremlins.stages.review_code import ReviewCode
+from gremlins.stages.review_code import GitHubReviewPullRequest, ReviewCode
 from gremlins.stages.run_cmd import RunCmd
 from gremlins.stages.sequence import SequenceStage
 from gremlins.stages.verify import Verify
@@ -28,9 +28,9 @@ STAGE_TYPES: dict[str, type[Stage]] = {
     "github-wait-copilot": GitHubWaitCopilot,
     "github-wait-ci": GitHubWaitCI,
     "review-code": ReviewCode,
-    "ghreview": ReviewCode,
+    "github-review-pull-request": GitHubReviewPullRequest,
     "address-code": AddressCode,
-    "ghaddress": AddressCode,
+    "github-address-pull-request-reviews": GitHubAddressPullRequestReviews,
     "handoff": Handoff,
     "loop": LoopStage,
     "parallel": ParallelStage,
