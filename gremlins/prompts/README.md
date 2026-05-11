@@ -13,7 +13,7 @@ escaped as `{{owner}}` in the template source.
 | `{plan_text}` | Full text of the implementation plan | `implement.py` (local) | Multi-line; may be empty when spec drives the work |
 | `{diff_text}` | `git diff` of uncommitted changes | `verify.py` | Multi-line; empty on clean worktree |
 | `{verify_output}` | Captured stdout+stderr of the failed check/test run | `verify.py` | Multi-line |
-| `{failure_output}` | Captured CI check failure logs from the PR | `wait_ci.py` | Multi-line |
+| `{failure_output}` | Captured CI check failure logs from the PR | `github_wait_ci.py` | Multi-line |
 | `{commands_section}` | Markdown-formatted list of commands that were run | `verify.py` | Single or multi-line |
 | `{commit_instr}` | Instruction fragment: whether to commit after fixing | `verify.py` | Empty string or a sentence |
 | `{address_commit_instr}` | Instruction fragment: whether to commit after addressing | `address_code.py` | Empty string or a sentence |

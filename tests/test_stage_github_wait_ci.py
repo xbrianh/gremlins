@@ -1,4 +1,4 @@
-"""Tests for gremlins.stages.wait_ci."""
+"""Tests for gremlins.stages.github_wait_ci."""
 
 import json
 import pathlib
@@ -9,7 +9,7 @@ from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
-from gremlins.stages.wait_ci import WaitCI
+from gremlins.stages.github_wait_ci import GitHubWaitCI
 
 PR_URL = "https://github.com/owner/repo/pull/42"
 
@@ -53,9 +53,9 @@ def _make_stage(
     model: str = "sonnet",
     pr_branch: str | None = "test-pr-branch",
     **kwargs: Any,
-) -> tuple[WaitCI, RuntimeState]:
+) -> tuple[GitHubWaitCI, RuntimeState]:
     prompts = [_CI_PROMPT_PATH.read_text(encoding="utf-8")]
-    stage = WaitCI("wait-ci", model, prompts, {}, pr_url=PR_URL, **kwargs)
+    stage = GitHubWaitCI("github-wait-ci", model, prompts, {}, pr_url=PR_URL, **kwargs)
     state = RuntimeState(client=client, session_dir=tmp_path, gr_id=gr_id)
     if pr_branch is not None:
         state.last_pr_branch = lambda: pr_branch  # type: ignore[method-assign]
@@ -355,7 +355,7 @@ def test_review_required_emits_bail_to_state(
 
     gr_id = "test-gr-id"
     state_dir = make_state_dir(gr_id)
-    attempt = "wait-ci-test"
+    attempt = "github-wait-ci-test"
     state_mod.patch_state(gr_id, attempt=attempt)
     client = FakeClaudeClient(fixtures={})
     getter = _make_getter([([], "REVIEW_REQUIRED")])
@@ -374,7 +374,7 @@ def test_empty_pr_branch_bails(tmp_path: pathlib.Path, make_state_dir) -> None:
 
     gr_id = "test-empty-branch"
     state_dir = make_state_dir(gr_id)
-    attempt = "wait-ci-test"
+    attempt = "github-wait-ci-test"
     # PR artifact with no branch — simulates open-pr appending without a known branch
     (state_dir / "state.json").write_text(
         json.dumps(

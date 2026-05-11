@@ -440,7 +440,9 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
         lambda self, pipe: None,
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
-    monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+    )
 
     client = _CommittingClient(
         git_dir=tmp_path,
@@ -487,7 +489,9 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
         "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
-    monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+    )
 
     client = _CommittingClient(
         git_dir=tmp_path,
@@ -536,7 +540,9 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
         "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
-    monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+    )
 
     client = _CommittingClient(
         git_dir=tmp_path,
@@ -589,7 +595,9 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
         "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
-    monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+    )
 
     client = _CommittingClient(
         git_dir=tmp_path,
@@ -643,7 +651,9 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
         "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
-    monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+    )
 
     client = _CommittingClient(
         git_dir=tmp_path,
@@ -704,7 +714,9 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
-    monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+    )
 
     client = _CommittingClient(
         git_dir=tmp_path,
@@ -768,7 +780,9 @@ def test_resume_from_ghreview(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
-    monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+    )
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
 
     client = FakeClaudeClient(fixtures={})
@@ -837,7 +851,9 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
         "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
-    monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+    )
 
     # Each fixture carries a distinct non-zero cost so a regression that drops
     # any one stage shows up as the total being short by exactly that amount.
@@ -968,7 +984,9 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
-    monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+    )
 
     client = FakeClaudeClient(fixtures={"github-open-pull-request": _pr_events()})
 
@@ -1021,7 +1039,9 @@ def test_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
         "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
-    monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+    )
 
     captured_stage = {}
 
@@ -1068,8 +1088,8 @@ def test_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
-    """WaitCI receives model and session_dir; pr_url is written to state by GitHubOpenPullRequest."""
+def test_github_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
+    """GitHubWaitCI receives model and session_dir; pr_url is written to state by GitHubOpenPullRequest."""
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
@@ -1097,11 +1117,13 @@ def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
 
     captured_stage = {}
 
-    def record_wait_ci(self, state):
+    def record_github_wait_ci(self, state):
         captured_stage["stage"] = self
         captured_stage["state"] = state
 
-    monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", record_wait_ci)
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", record_github_wait_ci
+    )
 
     client = _CommittingClient(
         git_dir=tmp_path,
@@ -1124,7 +1146,7 @@ def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
     stage = captured_stage["stage"]
     assert stage.model == "claude-opus-4-7"
     assert captured_stage["state"].session_dir == session_dir
-    # pr artifact written to state.json by GitHubOpenPullRequest; read from state in WaitCI.run()
+    # pr artifact written to state.json by GitHubOpenPullRequest; read from state in GitHubWaitCI.run()
     state = json.loads(state_file.read_text())
     pr_artifacts = [a for a in state.get("artifacts", []) if a.get("type") == "pr"]
     assert (
@@ -1133,7 +1155,7 @@ def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
     )
 
 
-def test_wait_ci_stage_ordering(tmp_path, monkeypatch):
+def test_github_wait_ci_stage_ordering(tmp_path, monkeypatch):
     """ci-gate runs after ghaddress and exactly once."""
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
@@ -1169,7 +1191,7 @@ def test_wait_ci_stage_ordering(tmp_path, monkeypatch):
         lambda self, pipe: order.append("ghaddress"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.wait_ci.WaitCI.run",
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
         lambda self, pipe: order.append("ci-gate"),
     )
 
@@ -1194,7 +1216,7 @@ def test_wait_ci_stage_ordering(tmp_path, monkeypatch):
 
 
 def test_resume_from_ci_gate(tmp_path, monkeypatch):
-    """--resume-from ci-gate skips all earlier stages and calls only WaitCI.run."""
+    """--resume-from ci-gate skips all earlier stages and calls only GitHubWaitCI.run."""
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
@@ -1227,7 +1249,7 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
         lambda self, pipe: earlier_called.append("ghaddress"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.wait_ci.WaitCI.run",
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
         lambda self, pipe: ci_stages.append(self),
     )
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
@@ -1244,7 +1266,7 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
     assert client.calls == [], "no client stages should run on ci-gate resume"
     assert earlier_called == [], "earlier stages must be skipped"
     assert len(ci_stages) == 1
-    # pr artifact is read from state.json inside WaitCI.run(); verify it's pre-populated
+    # pr artifact is read from state.json inside GitHubWaitCI.run(); verify it's pre-populated
     state = json.loads(state_file.read_text())
     pr_artifacts = [a for a in state.get("artifacts", []) if a.get("type") == "pr"]
     assert (
@@ -1283,7 +1305,9 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
-    monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+    )
 
     captured_stage = {}
 
@@ -1362,7 +1386,9 @@ def test_resume_from_verify(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
-    monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+    )
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
 
     client = FakeClaudeClient(fixtures={"github-open-pull-request": _pr_events()})
@@ -1406,7 +1432,9 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir):
         "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
-    monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+    )
 
     client = _CommittingClient(
         git_dir=tmp_path,
@@ -1458,7 +1486,9 @@ def test_gh_main_state_client_tracks_effective_model(
         "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
-    monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+    )
 
     client = _CommittingClient(
         git_dir=tmp_path,
@@ -1534,7 +1564,9 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
         "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
-    monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+    )
 
     client = _CommittingClient(
         git_dir=tmp_path,
@@ -1589,7 +1621,9 @@ def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
         "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
-    monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+    )
 
     client = _CommittingClient(
         git_dir=tmp_path,

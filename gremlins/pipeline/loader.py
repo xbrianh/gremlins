@@ -7,6 +7,7 @@ from gremlins.stages.address_code import AddressCode
 from gremlins.stages.base import Stage
 from gremlins.stages.github_open_pull_request import GitHubOpenPullRequest
 from gremlins.stages.github_request_copilot_review import GitHubRequestCopilotReview
+from gremlins.stages.github_wait_ci import GitHubWaitCI
 from gremlins.stages.handoff import Handoff
 from gremlins.stages.implement import Implement
 from gremlins.stages.loop import LoopStage
@@ -16,7 +17,6 @@ from gremlins.stages.review_code import ReviewCode
 from gremlins.stages.run_cmd import RunCmd
 from gremlins.stages.sequence import SequenceStage
 from gremlins.stages.verify import Verify
-from gremlins.stages.wait_ci import WaitCI
 from gremlins.stages.wait_copilot import WaitCopilot
 
 STAGE_TYPES: dict[str, type[Stage]] = {
@@ -26,7 +26,7 @@ STAGE_TYPES: dict[str, type[Stage]] = {
     "github-open-pull-request": GitHubOpenPullRequest,
     "github-request-copilot-review": GitHubRequestCopilotReview,
     "wait-copilot": WaitCopilot,
-    "wait-ci": WaitCI,
+    "github-wait-ci": GitHubWaitCI,
     "review-code": ReviewCode,
     "ghreview": ReviewCode,
     "address-code": AddressCode,
