@@ -25,12 +25,10 @@ from gremlins import paths as _paths
 from gremlins.clients.client import PACKAGE_DEFAULT
 from gremlins.executor.state import patch_state, pipeline_uses_gh, write_state
 from gremlins.pipeline import Pipeline
-from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.utils import git as _git_mod
 from gremlins.utils import proc
 from gremlins.utils.github import fetch_issue, parse_issue_ref
 from gremlins.utils.text import read_markdown_title, slugify
-from gremlins.utils.yaml import YamlLoadError
 
 
 class GremlinAlreadyRunning(RuntimeError):
@@ -102,78 +100,6 @@ def _resolve_description_and_slug(
 
     return "", False, "gremlin"
 
-
-def _resolve_pipeline(
-    kind: str, pipeline_args: tuple[str, ...], project_root: str
-) -> tuple[list[str], str]:
-    args = list(pipeline_args)
-    pipeline_val: str | None = None
-    filtered: list[str] = []
-    i = 0
-    while i < len(args):
-        if args[i] == "--pipeline":
-            if i + 1 < len(args):
-                pipeline_val = args[i + 1]
-                i += 2
-            else:
-                i += 1  # drop dangling flag
-        elif args[i].startswith("--pipeline="):
-            pipeline_val = args[i][len("--pipeline=") :]
-            i += 1
-        else:
-            filtered.append(args[i])
-            i += 1
-    name = pipeline_val or kind
-    resolved = str(resolve_pipeline_path(name, pathlib.Path(project_root)))
-    return filtered, resolved
-
-
-def _extract_client_spec(pipeline_args: list[str]) -> str:
-    return _extract_arg_value(pipeline_args, "--client")
-
-
-def _extract_arg_value(args: list[str], flag: str) -> str:
-    value = ""
-    i = 0
-    while i < len(args):
-        arg = args[i]
-        if arg == flag:
-            if i + 1 < len(args):
-                value = args[i + 1]
-                i += 2
-                continue
-            i += 1
-            continue
-        prefix = f"{flag}="
-        if arg.startswith(prefix):
-            value = arg[len(prefix) :]
-        i += 1
-    return value
-
-
-def _pipeline_default_client_spec(pipeline_path: str) -> str:
-    if not pipeline_path:
-        return ""
-    try:
-        pipeline = Pipeline.from_yaml(pathlib.Path(pipeline_path))
-    except (FileNotFoundError, ValueError, YamlLoadError):
-        return ""
-    return str(pipeline.default_client) if pipeline.default_client else ""
-
-
-def _launch_client_label(pipeline_args: list[str], pipeline_path: str) -> str:
-    client_spec_str = _extract_client_spec(pipeline_args)
-    if client_spec_str:
-        return client_spec_str
-    pipeline_default_str = _pipeline_default_client_spec(pipeline_path)
-    if pipeline_default_str:
-        return pipeline_default_str
-    return str(PACKAGE_DEFAULT)
-
-
-def _persisted_client_label(state: dict[str, Any]) -> str:
-    client = str(state.get("client") or "")
-    return client or str(PACKAGE_DEFAULT)
 
 
 def _stage_gremlins_overlay(project_root: str, state_dir: pathlib.Path) -> None:
@@ -339,7 +265,9 @@ def launch(
         else:
             project_root = os.getcwd()
 
-    resolved_pipeline_args, pipeline_path = _resolve_pipeline(
+    from gremlins.cli.pipeline_args import launch_client_label, resolve_pipeline
+
+    resolved_pipeline_args, pipeline_path = resolve_pipeline(
         kind, pipeline_args, project_root
     )
 
@@ -423,7 +351,7 @@ def launch(
             "description_explicit": desc_explicit,
             "parent_id": parent_id or "",
             "pipeline_args": stored_pipeline_args,
-            "client": _launch_client_label(stored_pipeline_args, pipeline_path),
+            "client": launch_client_label(stored_pipeline_args, _loaded_pipeline),
             "pipeline_path": pipeline_path,
             "stage": "starting",
             "pid": None,
@@ -501,8 +429,10 @@ def resume(gr_id: str) -> None:
     pipeline_args = cast(list[str], state.get("pipeline_args") or [])
     pipeline_path = str(state.get("pipeline_path") or "")
     project_root = str(state.get("project_root") or os.getcwd())
+    from gremlins.cli.pipeline_args import resolve_pipeline
+
     try:
-        pipeline_args, pipeline_path = _resolve_pipeline(
+        pipeline_args, pipeline_path = resolve_pipeline(
             kind, tuple(pipeline_args), project_root
         )
     except FileNotFoundError:
@@ -566,7 +496,7 @@ def resume(gr_id: str) -> None:
         pid=None,
         pipeline_args=pipeline_args,
         pipeline_path=pipeline_path,
-        client=_persisted_client_label(state),
+        client=str(state.get("client") or "") or str(PACKAGE_DEFAULT),
     )
 
     # Append resume header to log
