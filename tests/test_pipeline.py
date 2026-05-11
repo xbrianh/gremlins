@@ -85,7 +85,7 @@ def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
     assert "ghreview" in STAGE_TYPES
     assert "ghaddress" in STAGE_TYPES
     assert "github-wait-ci" in STAGE_TYPES
-    assert "wait-copilot" in STAGE_TYPES
+    assert "github-wait-copilot" in STAGE_TYPES
 
 
 # ---------------------------------------------------------------------------
@@ -279,7 +279,7 @@ def test_stage_builders_registry_covers_all_known_types() -> None:
         "github-open-pull-request",
         "github-request-copilot-review",
         "ghreview",
-        "wait-copilot",
+        "github-wait-copilot",
         "ghaddress",
         "github-wait-ci",
         "review-code",

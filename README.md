@@ -241,7 +241,7 @@ For `local` stages, model options (`plan_model`, `impl_model`, `address_model`,
 | `test` | Runs a single test command with an agent fix-loop |
 | `request-copilot` | Requests a Copilot review on the open PR |
 | `ghreview` | Runs the `/ghreview` skill against the open PR |
-| `wait-copilot` | Polls until Copilot posts its review |
+| `github-wait-copilot` | Polls until Copilot posts its review |
 | `ghaddress` | Runs the `/ghaddress` skill to address PR review comments |
 | `wait-ci` | Polls PR CI checks until they pass or exhaust attempts |
 
