@@ -11,6 +11,7 @@ from typing import Any, cast
 
 import gremlins.fleet.constants as _constants
 from gremlins.clients.stream import stream_events
+from gremlins.executor.state import read_bail_info as _read_bail_info
 from gremlins.fleet.constants import (
     EXCLUDED_BAIL_CLASSES,
     HEADLESS_DIAGNOSIS_TIMEOUT_SECS,
@@ -558,7 +559,13 @@ def do_rescue(target: str, headless: bool = False, from_boss: bool = False) -> b
     except (ValueError, TypeError):
         rescue_count = 0
 
-    bail_class = state.get("bail_class") or ""
+    _gr_id_for_bail = str(state.get("id") or "")
+    _bail_file_data = _read_bail_info(_gr_id_for_bail) if _gr_id_for_bail else None
+    bail_class = (
+        (_bail_file_data.get("class") or "")
+        if _bail_file_data
+        else (state.get("bail_class") or "")
+    )
 
     # Build a mutable report context so each terminal path can populate the
     # diagnosis/relaunch fields and the finally block emits a single Markdown
@@ -591,7 +598,8 @@ def do_rescue(target: str, headless: bool = False, from_boss: bool = False) -> b
             if bail_class in EXCLUDED_BAIL_CLASSES and not from_boss:
                 reason = f"excluded_class:{bail_class}"
                 detail: str = str(
-                    state.get("bail_detail")
+                    (_bail_file_data.get("detail") if _bail_file_data else None)
+                    or state.get("bail_detail")
                     or f"upstream stage bailed with bail_class={bail_class}"
                 )
                 _write_bail(sf, wdir, reason, detail)

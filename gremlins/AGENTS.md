@@ -8,10 +8,9 @@ review / address pipelines, the fleet manager
 ## Module layout
 
 - `cli/` — subcommand entry points. `__init__.py` is the top-level dispatch; one file per subcommand group: `launch.py`, `resume.py`, `init.py`, `fleet.py`. Bare invocation prints fleet status.
-- `bail.py` — `python -m gremlins.bail <class> [detail]`. Writes bail marker to `state.json`.
 - `run_pipeline.py` — `python -m gremlins.run_pipeline <gr_id> <kind>`. Spawned by the launcher; wraps `cli.main` and writes terminal state on exit.
 - `runner.py` — `run_stages` sequencer (with `resume_from`) + SIGINT/SIGTERM handlers that reap `claude -p` children.
-- `state.py` — session-dir resolution, `set_stage` / `emit_bail` / `patch_state` / `check_bail`.
+- `state.py` — session-dir resolution, `set_stage` / `write_bail_file` / `patch_state` / `check_bail`.
 - `utils/git.py` — `in_git_repo`, `head_sha`, branch / worktree helpers.
 - `utils/github.py` — `gh` CLI wrappers and stream-json URL extractors used by the gh orchestrator.
 - `fleet/` — fleet manager package: status listing + `stop` / `rescue` / `land` / `close` / `rm` / `log` ops. See [`fleet/AGENTS.md`](fleet/AGENTS.md) for the per-module breakdown.
@@ -113,9 +112,10 @@ silently re-handoffs and spawns a near-duplicate child.
 
 ## Stage and bail bookkeeping
 
-`state.set_stage` and `state.emit_bail` write to `state.json` atomically
-in pure Python via `patch_state`. Both helpers no-op without `GR_ID` and
-never raise — stage / bail bookkeeping must not crash a running gremlin.
+`state.set_stage` writes stage info to `state.json` atomically via `patch_state`.
+`state.write_bail_file` writes `bail_{attempt}.json` to the state dir; `check_bail`
+checks for its existence. Both helpers no-op without `GR_ID` and never raise —
+stage / bail bookkeeping must not crash a running gremlin.
 
 ## Tests
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import dataclasses
-import json
 import logging
 from collections.abc import Callable
 from typing import Any, cast
@@ -145,7 +144,7 @@ class LoopStage(Stage):
                     break
 
             exhausted = True
-            state.emit_bail(
+            state.write_bail_file(
                 "other",
                 f"loop exhausted {self._max_iterations} iterations",
             )
@@ -153,8 +152,8 @@ class LoopStage(Stage):
         except LoopExhausted:
             raise
         except (SystemExit, Exception) as exc:
-            if not exhausted and not _bail_already_set(state.gr_id, state.child_key):
-                state.emit_bail(
+            if not exhausted and not _bail_file_exists(state.gr_id, state.attempt):
+                state.write_bail_file(
                     "other",
                     f"loop stage failed: {exc}"[:200],
                 )
@@ -169,16 +168,8 @@ def _detach_to_pr_base(state: State) -> None:
     _git.git_detach_to_branch(branch, cwd=state.cwd)
 
 
-def _bail_already_set(gr_id: str | None, child_key: str | None) -> bool:
+def _bail_file_exists(gr_id: str | None, attempt: str) -> bool:
     sf = resolve_state_file(gr_id)
-    if sf is None or not sf.exists():
+    if sf is None or not sf.exists() or not attempt:
         return False
-    try:
-        data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
-        if child_key is not None:
-            pb: dict[str, Any] = data.get("parallel_bails") or {}
-            shard: dict[str, Any] = pb.get(child_key) or {}
-            return bool(shard.get("bail_class"))
-        return bool(data.get("bail_class"))
-    except Exception:
-        return False
+    return (sf.parent / f"bail_{attempt}.json").exists()

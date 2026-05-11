@@ -61,7 +61,7 @@ def _wait_for_checks(
 
 def _bail_if_review_required(state: State, decision: str) -> None:
     if decision == "REVIEW_REQUIRED":
-        state.emit_bail("other", "PR requires human review approval before merge")
+        state.write_bail_file("other", "PR requires human review approval before merge")
         raise _ReviewRequiredError("ci-gate: PR blocked by required human review")
 
 
@@ -244,14 +244,14 @@ class WaitCI(Stage):
                 )
 
             _exhausted = True
-            state.emit_bail(
+            state.write_bail_file(
                 "other",
                 f"CI failed after {self.max_attempts} attempts",
             )
             raise RuntimeError(f"ci-gate exhausted {self.max_attempts} attempts")
         except (SystemExit, Exception) as exc:
             if not _exhausted and not _agent_bailed and not _review_bailed:
-                state.emit_bail(
+                state.write_bail_file(
                     "other",
                     f"ci-gate failed: {exc}"[:200],
                 )

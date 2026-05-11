@@ -89,9 +89,12 @@ class SubprocessClaudeClient:
         argv: list[str],
         prompt: str,
         cwd: pathlib.Path | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> subprocess.Popen[bytes]:
         env = os.environ.copy()
         env["GREMLIN_SKIP_SUMMARY"] = "1"
+        if extra_env:
+            env.update(extra_env)
         # Default bufsize (-1) gives a BufferedReader with 8 KiB reads, so
         # readline() scans for '\n' in-buffer instead of doing one os.read()
         # per byte. Streaming latency is preserved and throughput on large
@@ -177,6 +180,7 @@ class SubprocessClaudeClient:
         max_retries: int = 2,
         cwd: pathlib.Path | None = None,
         idle_timeout: float | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> CompletedRun:
         if max_retries < 0:
             raise ValueError(f"max_retries must be >= 0, got {max_retries}")
@@ -186,7 +190,7 @@ class SubprocessClaudeClient:
         prefix = f"[{label}] " if label else ""
         active_prompt = prompt
         for attempt in range(max_retries + 1):
-            p = self._spawn(argv, active_prompt, cwd=cwd)
+            p = self._spawn(argv, active_prompt, cwd=cwd, extra_env=extra_env)
             try:
                 result = self._consume(
                     p, prefix, raw_path, capture_events, idle_timeout

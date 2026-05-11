@@ -79,7 +79,7 @@ class AddressCode(Stage):
                 inputs = self._inputs_from_local(state)
                 self.results_to_local(inputs, state)
             except (SystemExit, Exception) as exc:
-                state.emit_bail(
+                state.write_bail_file(
                     "other",
                     f"address-code stage failed: {exc}"[:200],
                 )

@@ -251,53 +251,37 @@ def test_set_stage_noop_when_state_json_missing(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# emit_bail direct tests
+# write_bail_file direct tests
 # ---------------------------------------------------------------------------
 
 
-def test_emit_bail_writes_bail_class(tmp_path, monkeypatch):
-    """emit_bail writes bail_class to state.json."""
-    gr_id = "gr-bail-write-test"
+def test_write_bail_file_creates_bail_file(tmp_path, monkeypatch):
+    gr_id = "gr-wbf-write"
     state_root, sf = _make_state_dir(tmp_path, gr_id)
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
 
-    state_mod.emit_bail(gr_id, "other", "something went wrong")
+    state_mod.write_bail_file(gr_id, "stage-abc123", "other", "something went wrong")
 
-    data = json.loads(sf.read_text())
-    assert data["bail_class"] == "other"
-    assert data["bail_detail"] == "something went wrong"
-
-
-def test_emit_bail_removes_bail_detail_when_empty(tmp_path, monkeypatch):
-    """Calling emit_bail without detail removes a previously written bail_detail key."""
-    gr_id = "gr-bail-del-test"
-    state_root, sf = _make_state_dir(tmp_path, gr_id)
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
-
-    state_mod.emit_bail(gr_id, "other", "detail")
-    assert "bail_detail" in json.loads(sf.read_text())
-
-    state_mod.emit_bail(gr_id, "other")
-    data = json.loads(sf.read_text())
-    assert data["bail_class"] == "other"
-    assert "bail_detail" not in data
+    bail_file = state_root / gr_id / "bail_stage-abc123.json"
+    assert bail_file.exists()
+    data = json.loads(bail_file.read_text())
+    assert data["class"] == "other"
+    assert data["detail"] == "something went wrong"
 
 
-def test_emit_bail_noop_when_gr_id_unset(tmp_path, monkeypatch):
-    """emit_bail is a no-op when GR_ID is absent."""
-    gr_id = "gr-bail-noop-test"
+def test_write_bail_file_noop_when_gr_id_none(tmp_path, monkeypatch):
+    gr_id = "gr-wbf-noop"
     state_root, sf = _make_state_dir(tmp_path, gr_id)
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
     mtime_before = sf.stat().st_mtime_ns
-    state_mod.emit_bail(None, "other")
+    state_mod.write_bail_file(None, "some-attempt", "other")
     assert sf.stat().st_mtime_ns == mtime_before
 
 
-def test_emit_bail_noop_when_bail_class_empty(tmp_path, monkeypatch):
-    """emit_bail is a no-op when bail_class is empty."""
-    gr_id = "gr-bail-empty-test"
+def test_write_bail_file_noop_when_attempt_empty(tmp_path, monkeypatch):
+    gr_id = "gr-wbf-empty-attempt"
     state_root, sf = _make_state_dir(tmp_path, gr_id)
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
-    mtime_before = sf.stat().st_mtime_ns
-    state_mod.emit_bail(gr_id, "")
-    assert sf.stat().st_mtime_ns == mtime_before
+    state_mod.write_bail_file(gr_id, "", "other")
+    bail_files = list((state_root / gr_id).glob("bail_*.json"))
+    assert not bail_files

@@ -62,7 +62,7 @@ def test_ghreview_prompt_includes_bail_content(tmp_path: pathlib.Path) -> None:
         client, tmp_path, pr_url="https://github.com/owner/repo/pull/1"
     )
     stage.run(state)
-    assert "python -m gremlins.bail" in client.calls[0].prompt
+    assert "python -c" in client.calls[0].prompt
 
 
 def test_ghreview_bail_rubric(tmp_path: pathlib.Path) -> None:
@@ -78,7 +78,7 @@ def test_ghreview_bail_rubric(tmp_path: pathlib.Path) -> None:
     assert "anything a human should weigh in on" not in prompt
 
 
-def test_ghreview_parallel_child_uses_child_key_bail_command(
+def test_ghreview_parallel_child_uses_new_bail_command(
     tmp_path: pathlib.Path,
 ) -> None:
     client = FakeClaudeClient(fixtures={"ghreview": MINIMAL_EVENTS})
@@ -94,7 +94,9 @@ def test_ghreview_parallel_child_uses_child_key_bail_command(
         pipeline_data=_gh_pipeline(),
     )
     stage.run(state)
-    assert "python -m gremlins.bail --child-key review-child" in client.calls[0].prompt
+    assert "python -c" in client.calls[0].prompt
+    assert "GREMLIN_STATE_DIR" in client.calls[0].prompt
+    assert "gremlins.bail" not in client.calls[0].prompt
 
 
 def _make_ghaddress(
@@ -137,7 +139,7 @@ def test_ghaddress_prompt_includes_bail_content(tmp_path: pathlib.Path) -> None:
     )
 
 
-def test_ghaddress_parallel_child_uses_child_key_bail_command(
+def test_ghaddress_parallel_child_uses_new_bail_command(
     tmp_path: pathlib.Path,
 ) -> None:
     client = FakeClaudeClient(fixtures={"ghaddress": MINIMAL_EVENTS})
@@ -153,4 +155,6 @@ def test_ghaddress_parallel_child_uses_child_key_bail_command(
         pipeline_data=_gh_pipeline(),
     )
     stage.run(state)
-    assert "python -m gremlins.bail --child-key address-child" in client.calls[0].prompt
+    assert "python -c" in client.calls[0].prompt
+    assert "GREMLIN_STATE_DIR" in client.calls[0].prompt
+    assert "gremlins.bail" not in client.calls[0].prompt

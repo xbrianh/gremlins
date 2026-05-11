@@ -145,7 +145,7 @@ class ReviewCode(Stage):
             if not out_file.exists() or out_file.stat().st_size == 0:
                 raise RuntimeError(f"review {model} did not produce {out_file}")
         except (SystemExit, Exception) as exc:
-            state.emit_bail(
+            state.write_bail_file(
                 "other",
                 f"{self.name} stage failed: {exc}"[:200],
             )

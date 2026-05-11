@@ -422,15 +422,22 @@ def test_review_code_stage_writes_stage_to_state(tmp_path, make_state_dir):
 
 
 def test_address_code_stage_emits_bail_on_failure(tmp_path, make_state_dir):
+    import gremlins.executor.state as state_mod
+
     gr_id = "test-gr-id"
     state_dir = make_state_dir(gr_id)
+    attempt = "address-code-test"
+    state_mod.patch_state(gr_id, attempt=attempt)
     client = FakeClaudeClient(fixtures={})
     stage = _make_address_code_stage(client, tmp_path, gr_id=gr_id)
     state = _make_state(client, tmp_path, gr_id=gr_id)
+    state.attempt = attempt
     with pytest.raises(FileNotFoundError):
         stage.run(state)
-    data = json.loads((state_dir / "state.json").read_text())
-    assert data.get("bail_class") == "other"
+    bail_file = state_dir / f"bail_{attempt}.json"
+    assert bail_file.exists()
+    data = json.loads(bail_file.read_text())
+    assert data["class"] == "other"
 
 
 def test_address_code_finds_review_files_in_parallel_subdirs(tmp_path):

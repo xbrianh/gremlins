@@ -188,8 +188,12 @@ def test_no_pr_opened_on_exhaustion(tmp_path, monkeypatch):
 
 
 def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
+    import gremlins.executor.state as state_mod
+
     gr_id = "test-gr-id"
     state_dir = make_state_dir(gr_id)
+    attempt = "verify-exhaustion-attempt"
+    state_mod.patch_state(gr_id, attempt=attempt)
     client = FakeClaudeClient(
         fixtures={"verify-fix-1": MINIMAL_EVENTS, "verify-fix-2": MINIMAL_EVENTS}
     )
@@ -198,14 +202,21 @@ def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
         "verify", "sonnet", [_VERIFY_PROMPT_PATH.read_text(encoding="utf-8")], options
     )
     state = RuntimeState(
-        client=client, session_dir=tmp_path, gr_id=gr_id, worktree=tmp_path, is_git=True
+        client=client,
+        session_dir=tmp_path,
+        gr_id=gr_id,
+        worktree=tmp_path,
+        is_git=True,
+        attempt=attempt,
     )
 
     with pytest.raises(RuntimeError, match="exhausted"):
         stage.run(state)
 
-    data = json.loads((state_dir / "state.json").read_text())
-    assert data.get("bail_class") == "other"
+    bail_file = state_dir / f"bail_{attempt}.json"
+    assert bail_file.exists()
+    data = json.loads(bail_file.read_text())
+    assert data["class"] == "other"
 
 
 def test_is_git_false_skips_diff(tmp_path):
@@ -250,7 +261,7 @@ def test_commit_after_fix_true_in_prompt(tmp_path):
     assert "stage the changed files" in state.client.calls[0].prompt
 
 
-def test_parallel_child_fix_prompt_uses_child_key_bail_command(tmp_path):
+def test_parallel_child_fix_prompt_uses_new_bail_command(tmp_path):
     client = FakeClaudeClient(fixtures={"verify-fix-1": MINIMAL_EVENTS})
     _bail_fix_path = (
         pathlib.Path(__file__).resolve().parent.parent
@@ -276,7 +287,6 @@ def test_parallel_child_fix_prompt_uses_child_key_bail_command(tmp_path):
     with pytest.raises(RuntimeError, match="exhausted 2 attempts"):
         stage.run(state)
 
-    assert (
-        "python -m gremlins.bail --child-key verify-child"
-        in state.client.calls[0].prompt
-    )
+    assert "python -c" in state.client.calls[0].prompt
+    assert "gremlins.bail" not in state.client.calls[0].prompt
+    assert "GREMLIN_STATE_DIR" in state.client.calls[0].prompt

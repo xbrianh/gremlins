@@ -30,9 +30,9 @@ sequencing logic of their own.
   Bundled internal prompts are loaded via `load_bundled_prompt` / `render_bundled_prompt`
   from `gremlins.utils.yaml`. Bundled prompt files live under `gremlins/prompts/`. See
   `gremlins/prompts/README.md` for the runtime placeholder inventory.
-- Stages that should respect a bail marker (set by the agent via
-  `python -m gremlins.bail`) call `check_bail(<phase-name>)` from
-  `..state` after the claude run. The runner inspects the bail and
+- Stages that should respect a bail marker (written by the agent as
+  `bail_$GREMLIN_ATTEMPT.json` in `$GREMLIN_STATE_DIR`) call `check_bail(<phase-name>)`
+  from `..state` after the claude run. The runner inspects the bail and
   halts the pipeline.
 - Most stages return `None`. Stages that produce information the
   orchestrator needs (`implement.py` → `ImplStageResult`,

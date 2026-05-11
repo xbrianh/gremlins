@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+import gremlins.executor.state as state_mod
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
 from gremlins.stages.handoff import Handoff
@@ -50,7 +51,7 @@ def _write_plan(tmp_path: pathlib.Path, text: str = "# Plan\n\nDo stuff.\n") -> 
 
 def _write_state(state_dir: pathlib.Path, gr_id: str, **extra: Any) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
-    data: dict[str, Any] = {"id": gr_id, "stage": "", "bail_class": ""}
+    data: dict[str, Any] = {"id": gr_id, "stage": ""}
     data.update(extra)
     (state_dir / "state.json").write_text(json.dumps(data), encoding="utf-8")
 
@@ -149,8 +150,10 @@ def test_next_plan_writes_plan_and_raises(tmp_path, monkeypatch, test_state_root
 
 def test_bail_emits_bail_and_raises(tmp_path, monkeypatch, test_state_root):
     gr_id = "boss-handoff-bail-aabb12"
+    attempt = "handoff-test-attempt"
     state_dir = test_state_root / gr_id
     _write_state(state_dir, gr_id)
+    state_mod.patch_state(gr_id, attempt=attempt)
     _write_plan(tmp_path)
 
     def fake_handoff_run(client: Any, args: argparse.Namespace) -> int:
@@ -161,13 +164,16 @@ def test_bail_emits_bail_and_raises(tmp_path, monkeypatch, test_state_root):
     monkeypatch.setenv("GR_ID", gr_id)
 
     h, state = _make_handoff(tmp_path, gr_id=gr_id)
+    state.attempt = attempt  # simulate what make_runner() would set
     monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
 
     with pytest.raises(RuntimeError, match="chain halted by handoff"):
         h.run(state)
 
-    state_data = _read_state(state_dir)
-    assert state_data.get("bail_class") == "other"
+    bail_file = state_dir / f"bail_{attempt}.json"
+    assert bail_file.exists()
+    bail_data = json.loads(bail_file.read_text())
+    assert bail_data["class"] == "other"
 
 
 # ---------------------------------------------------------------------------
