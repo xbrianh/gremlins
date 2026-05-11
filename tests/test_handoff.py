@@ -175,6 +175,25 @@ def test_build_prompt_omits_spec_section_by_default(tmp_path):
     assert "Overarching goal" not in p
 
 
+def test_build_prompt_no_trailing_newline(tmp_path):
+    out_p, child_p, sig_p = _prompt_paths(tmp_path)
+    p = handoff.build_prompt(
+        plan_text="plan",
+        branch="b",
+        git_log="log",
+        git_diff="diff",
+        out_path=out_p,
+        child_plan_path=child_p,
+        signal_path=sig_p,
+    )
+    assert not p.endswith("\n")
+
+
+def test_build_sanitize_prompt_no_trailing_newline(tmp_path):
+    p = handoff.build_sanitize_prompt("# Plan\n- [ ] thing\n", tmp_path / "out.md")
+    assert not p.endswith("\n")
+
+
 # ---------------------------------------------------------------------------
 # run — signal parsing (next-plan / chain-done / bail)
 # ---------------------------------------------------------------------------

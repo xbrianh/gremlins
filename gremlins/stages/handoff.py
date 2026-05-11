@@ -116,6 +116,18 @@ def collect_git_context(
     return branch, git_log, git_diff
 
 
+def _load_spec_section(spec_text: str) -> str:
+    spec_body = spec_text[:50000]
+    spec_trunc = (
+        f"\n(spec truncated to 50000 chars; {len(spec_text)} chars total)"
+        if len(spec_text) > 50000
+        else ""
+    )
+    return _load("handoff_spec_section.md").format(
+        spec_body=spec_body, spec_trunc=spec_trunc
+    )
+
+
 def build_prompt(
     plan_text: str,
     branch: str,
@@ -148,25 +160,13 @@ def build_prompt(
         out_path=out_path,
         child_plan_path=child_plan_path,
         signal_path=signal_path,
-    )
-
-
-def _load_spec_section(spec_text: str) -> str:
-    spec_body = spec_text[:50000]
-    spec_trunc = (
-        f"\n(spec truncated to 50000 chars; {len(spec_text)} chars total)"
-        if len(spec_text) > 50000
-        else ""
-    )
-    return _load("handoff_spec_section.md").format(
-        spec_body=spec_body, spec_trunc=spec_trunc
-    )
+    ).rstrip()
 
 
 def build_sanitize_prompt(rolling_plan_text: str, out_path: pathlib.Path) -> str:
     return _load("handoff_sanitize.md").format(
         rolling_plan_text=rolling_plan_text, out_path=out_path
-    )
+    ).rstrip()
 
 
 def _restore_rolling_plan(
