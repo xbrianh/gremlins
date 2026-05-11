@@ -17,14 +17,13 @@ sequence is described in a YAML pipeline (`gremlins/pipelines/local.yaml`,
 
 A typical pipeline looks like this:
 
-    plan → implement → review-code → address-code → verify → commit-pr → ...
+    plan → implement → review-code → address-code → verify → open-github-pr → ...
 
 Each stage is one of two kinds:
 
 - **Deterministic stages** are plain Python. They run shell commands, talk to
   `gh`, manage worktrees, parse JSON, wait on CI. They do not invoke a model.
-  Examples: `verify`, `request-copilot`, `wait-copilot`, `wait-ci`,
-  `commit-pr` (the mechanics; the message-writing is delegated).
+  Examples: `verify`, `request-copilot`, `wait-copilot`, `wait-ci`.
 - **Agentic stages** invoke `claude -p` via an injected `ClaudeClient`. They
   receive a prompt assembled from pipeline-declared prompt files, run to
   completion, and produce an artifact on disk (a markdown file, a commit, a
@@ -558,9 +557,9 @@ Before reaching for session caching we would:
    diffs.
 2. Trim that stage's prompt or split it. Prompt size is the cheapest
    variable to move.
-3. Drop non-critical stages to a smaller model. `commit-pr`,
-   `ghaddress`, and the chain-step `handoff` agent are good candidates;
-   they're constrained tasks that don't need Sonnet's headroom.
+3. Drop non-critical stages to a smaller model. `ghaddress` and the
+   chain-step `handoff` agent are good candidates; they're constrained
+   tasks that don't need Sonnet's headroom.
 4. Only then consider structural changes to context flow.
 
 The discipline is: cost work follows measurement, not intuition.

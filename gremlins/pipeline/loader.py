@@ -5,7 +5,6 @@ from typing import Any
 from gremlins.clients.client import Client
 from gremlins.stages.address_code import AddressCode
 from gremlins.stages.base import Stage
-from gremlins.stages.commit_pr import CommitPR
 from gremlins.stages.handoff import Handoff
 from gremlins.stages.implement import Implement
 from gremlins.stages.loop import LoopStage
@@ -24,7 +23,6 @@ STAGE_TYPES: dict[str, type[Stage]] = {
     "plan": Plan,
     "implement": Implement,
     "verify": Verify,
-    "commit-pr": CommitPR,
     "open-github-pr": OpenGitHubPR,
     "request-copilot": RequestCopilot,
     "wait-copilot": WaitCopilot,
