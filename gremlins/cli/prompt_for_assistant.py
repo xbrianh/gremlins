@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import argparse
-import importlib.resources
 import sys
+
+from gremlins.prompts import BUNDLED_PROMPT_DIR
 
 
 def prompt_for_assistant_main(argv: list[str]) -> int:
@@ -13,10 +14,6 @@ def prompt_for_assistant_main(argv: list[str]) -> int:
     )
     p.parse_args(argv)
 
-    content = (
-        importlib.resources.files("gremlins.prompts.assistant")
-        .joinpath("setup.md")
-        .read_text(encoding="utf-8")
-    )
+    content = (BUNDLED_PROMPT_DIR / "assistant" / "setup.md").read_text(encoding="utf-8")
     sys.stdout.write(content)
     return 0

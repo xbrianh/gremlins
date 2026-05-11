@@ -76,7 +76,7 @@ Maintain a queue with three buckets: running, pending, blocked-by-dependency.
 When a gremlin stalls or shows as dead:
 
 1. Read its log: `gremlins log <id>`
-2. Read its state: `~/.local/state/claude-gremlins/<id>/state.json`
+2. Read its state: `state.json` inside the gremlin's state directory (see "Where gremlin state lives" above)
 3. Decide:
    - **`gremlins rescue <id>`** — when you need the full diagnosis agent to figure out what went wrong
    - **`gremlins resume <id>`** — when the fix is already known (e.g., you patched the underlying issue externally) and you want to skip re-diagnosis
