@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import pathlib
 from typing import Any
 
-from gremlins.executor.state import State, pipeline_uses_gh, resolve_state_file
+from gremlins.executor.state import State
 from gremlins.stages.base import Stage
 from gremlins.utils.git import (
     DivergentHead,
@@ -81,52 +80,10 @@ class Implement(Stage):
         super().__init__(name, model, prompts, options)
 
     def run(self, state: State) -> None:
-        is_gh = bool(state.pipeline_data and pipeline_uses_gh(state.pipeline_data))
         spec_text = _read_spec(state.session_dir)
-        if is_gh:
-            self._run_gh(state, spec_text)
-        else:
-            self._run_local(state, spec_text)
-
-    def _run_local(self, state: State, spec_text: str) -> None:
-        cwd_arg = str(state.worktree) if state.worktree is not None else None
-        pre = record_pre_impl_state(cwd=cwd_arg)
         plan_text = (state.session_dir / "plan.md").read_text(encoding="utf-8")
-        template = "\n\n".join(self.prompts).rstrip()
-        prompt = template.format(
-            spec_block=_render_spec_block(spec_text),
-            plan_text=plan_text,
-        )
-        self.run_claude(
-            prompt,
-            state=state,
-            label="implement",
-            raw_path=state.session_dir / "stream-implement.jsonl",
-            idle_timeout=IMPLEMENT_IDLE_TIMEOUT,
-        )
-        outcome = classify_impl_outcome(pre, cwd=cwd_arg)
-        if isinstance(outcome, EmptyImpl):
-            raise RuntimeError(
-                "implement produced no committed work; the agent must commit before returning"
-            )
-        if isinstance(outcome, DivergentHead):
-            raise RuntimeError(
-                f"implement diverged from pre-impl HEAD {pre.head[:7]}; expected a fast-forward"
-            )
 
-    def _run_gh(self, state: State, spec_text: str) -> None:
-        state_file = resolve_state_file(state.gr_id)
-        issue_num = ""
-        if state_file and state_file.exists():
-            try:
-                issue_num = (
-                    json.loads(state_file.read_text(encoding="utf-8")).get("issue_num")
-                    or ""
-                )
-            except (OSError, ValueError, KeyError):
-                pass
-
-        if issue_num:
+        if state.issue_num:
             plan_source_label = "from the GitHub issue"
             plan_location_note = (
                 "The plan lives in the GitHub issue and reviews go to PR comments; "
@@ -139,21 +96,14 @@ class Implement(Stage):
                 "should be product code."
             )
 
-        impl_cwd = str(state.worktree) if state.worktree is not None else None
-        pre = record_pre_impl_state(cwd=impl_cwd)
-        (state.session_dir / ".impl-pre-state.json").write_text(
-            json.dumps({"head": pre.head}),
-            encoding="utf-8",
-        )
-        if state.gr_id:
-            state.patch(impl_pre_head=pre.head)
+        cwd_arg = str(state.worktree) if state.worktree is not None else None
+        pre = record_pre_impl_state(cwd=cwd_arg)
 
-        plan_text = (state.session_dir / "plan.md").read_text(encoding="utf-8")
         template = "\n\n".join(self.prompts).rstrip()
         prompt = template.format(
             spec_block=_render_spec_block(spec_text),
+            plan_text=plan_text,
             plan_source_label=plan_source_label,
-            issue_body=plan_text,
             plan_location_note=plan_location_note,
         )
 
@@ -166,7 +116,7 @@ class Implement(Stage):
             idle_timeout=IMPLEMENT_IDLE_TIMEOUT,
         )
 
-        outcome = classify_impl_outcome(pre, cwd=impl_cwd)
+        outcome = classify_impl_outcome(pre, cwd=cwd_arg)
         if isinstance(outcome, EmptyImpl):
             raise RuntimeError(
                 "implement produced no committed work; the agent must commit before returning"

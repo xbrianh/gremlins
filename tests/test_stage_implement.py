@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import pathlib
 from unittest.mock import patch
 
 import pytest
 from conftest import MINIMAL_EVENTS
-from conftest import gh_pipeline as _gh_pipeline
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
@@ -16,7 +14,7 @@ from gremlins.stages.implement import Implement
 from gremlins.utils.git import DivergentHead, EmptyImpl, HeadAdvanced, PreImplState
 
 _TEMPLATE_LOCAL = "plan: {plan_text}{spec_block}"
-_TEMPLATE_GH = "{spec_block}{plan_source_label}{issue_body}{plan_location_note}"
+_TEMPLATE_GH = "{spec_block}{plan_source_label}{plan_text}{plan_location_note}"
 
 _FAKE_PRE = PreImplState(head="abc123")
 
@@ -27,16 +25,15 @@ def _make_state(
     plan_text: str = "do the thing",
     spec_text: str = "",
     prompts: list[str] | None = None,
-    is_gh: bool = False,
+    issue_num: str = "",
 ) -> tuple[Implement, RuntimeState]:
     stage = Implement("implement", "sonnet", prompts or [], {})
     client = FakeClaudeClient(fixtures={"implement": MINIMAL_EVENTS})
-    pipeline_data = _gh_pipeline() if is_gh else None
     state = RuntimeState(
         client=client,
         session_dir=tmp_path,
         gr_id=None,
-        pipeline_data=pipeline_data,
+        issue_num=issue_num,
     )
     (tmp_path / "plan.md").write_text(plan_text, encoding="utf-8")
     if spec_text:
@@ -78,9 +75,9 @@ def test_local_git_raises_on_empty_impl(tmp_path: pathlib.Path, monkeypatch) -> 
         stage.run(state)
 
 
-def test_gh_calls_claude_with_issue_body(tmp_path: pathlib.Path) -> None:
+def test_gh_calls_claude_with_plan_text(tmp_path: pathlib.Path) -> None:
     stage, state = _make_state(
-        tmp_path, plan_text="issue body here", prompts=[_TEMPLATE_GH], is_gh=True
+        tmp_path, plan_text="issue body here", prompts=[_TEMPLATE_GH]
     )
     with (
         patch(
@@ -98,16 +95,9 @@ def test_gh_calls_claude_with_issue_body(tmp_path: pathlib.Path) -> None:
     assert "issue body here" in call.prompt
 
 
-def test_gh_plan_source_label_with_issue_num(
-    tmp_path: pathlib.Path, monkeypatch
-) -> None:
-    state_file = tmp_path / "state.json"
-    state_file.write_text(json.dumps({"issue_num": "99"}), encoding="utf-8")
-    monkeypatch.setattr(
-        "gremlins.stages.implement.resolve_state_file", lambda gr_id=None: state_file
-    )
+def test_gh_plan_source_label_with_issue_num(tmp_path: pathlib.Path) -> None:
     stage, state = _make_state(
-        tmp_path, plan_text="body", prompts=[_TEMPLATE_GH], is_gh=True
+        tmp_path, plan_text="body", prompts=[_TEMPLATE_GH], issue_num="99"
     )
     with (
         patch(
@@ -124,9 +114,7 @@ def test_gh_plan_source_label_with_issue_num(
 
 
 def test_gh_plan_source_label_without_issue_num(tmp_path: pathlib.Path) -> None:
-    stage, state = _make_state(
-        tmp_path, plan_text="body", prompts=[_TEMPLATE_GH], is_gh=True
-    )
+    stage, state = _make_state(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH])
     with (
         patch(
             "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
@@ -159,10 +147,8 @@ def test_local_git_raises_on_divergent_head(
         stage.run(state)
 
 
-def test_gh_raises_on_empty_impl(tmp_path: pathlib.Path) -> None:
-    stage, state = _make_state(
-        tmp_path, plan_text="body", prompts=[_TEMPLATE_GH], is_gh=True
-    )
+def test_raises_on_empty_impl(tmp_path: pathlib.Path) -> None:
+    stage, state = _make_state(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH])
     with (
         patch(
             "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
@@ -176,10 +162,8 @@ def test_gh_raises_on_empty_impl(tmp_path: pathlib.Path) -> None:
         stage.run(state)
 
 
-def test_gh_raises_on_divergent_head(tmp_path: pathlib.Path) -> None:
-    stage, state = _make_state(
-        tmp_path, plan_text="body", prompts=[_TEMPLATE_GH], is_gh=True
-    )
+def test_raises_on_divergent_head(tmp_path: pathlib.Path) -> None:
+    stage, state = _make_state(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH])
     with (
         patch(
             "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
@@ -191,3 +175,19 @@ def test_gh_raises_on_divergent_head(tmp_path: pathlib.Path) -> None:
         pytest.raises(RuntimeError, match="diverged"),
     ):
         stage.run(state)
+
+
+def test_run_does_not_access_pipeline_data(tmp_path: pathlib.Path) -> None:
+    stage, state = _make_state(tmp_path, prompts=[_TEMPLATE_LOCAL])
+    state.pipeline_data = None
+    with (
+        patch(
+            "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
+        ),
+        patch(
+            "gremlins.stages.implement.classify_impl_outcome",
+            return_value=HeadAdvanced(commit_count=1),
+        ),
+    ):
+        stage.run(state)
+    assert state.pipeline_data is None
