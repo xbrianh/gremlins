@@ -51,11 +51,14 @@ def _make_stage(
     *,
     gr_id: Any = None,
     model: str = "sonnet",
+    pr_branch: str | None = "test-pr-branch",
     **kwargs: Any,
 ) -> tuple[WaitCI, RuntimeState]:
     prompts = [_CI_PROMPT_PATH.read_text(encoding="utf-8")]
     stage = WaitCI("wait-ci", model, prompts, {}, pr_url=PR_URL, **kwargs)
     state = RuntimeState(client=client, session_dir=tmp_path, gr_id=gr_id)
+    if pr_branch is not None:
+        state.last_pr_branch = lambda: pr_branch  # type: ignore[method-assign]
     return stage, state
 
 
@@ -168,6 +171,34 @@ def test_fix_on_failure_then_pass(tmp_path: pathlib.Path) -> None:
     stage.run(state)
     assert len(client.calls) == 1
     assert client.calls[0].label == "ci-fix-1"
+
+
+def test_ci_fix_prompt_contains_pr_branch(
+    tmp_path: pathlib.Path, make_state_dir
+) -> None:
+    gr_id = "test-ci-fix-branch"
+    state_dir = make_state_dir(gr_id)
+    branch = "issue-42-my-feature"
+    (state_dir / "state.json").write_text(
+        json.dumps(
+            {"id": gr_id, "stage": "", "artifacts": [{"type": "pr", "branch": branch}]}
+        )
+    )
+    client = FakeClaudeClient(fixtures={"ci-fix-1": MINIMAL_EVENTS})
+    getter = _make_getter(
+        [([_FAILING_CHECK], ""), ([_FAILING_CHECK], ""), ([_PASSING_CHECK], "")]
+    )
+    stage, state = _make_stage(
+        client,
+        tmp_path,
+        gr_id=gr_id,
+        poll_interval=0,
+        checks_getter=getter,
+        pr_branch=None,
+    )
+    stage.run(state)
+    assert len(client.calls) == 1
+    assert branch in client.calls[0].prompt
 
 
 def test_exhausted_bails(tmp_path: pathlib.Path) -> None:
@@ -336,6 +367,45 @@ def test_review_required_emits_bail_to_state(
     assert bail_file.exists()
     data = json.loads(bail_file.read_text())
     assert data["class"] == "other"
+
+
+def test_empty_pr_branch_bails(tmp_path: pathlib.Path, make_state_dir) -> None:
+    import gremlins.executor.state as state_mod
+
+    gr_id = "test-empty-branch"
+    state_dir = make_state_dir(gr_id)
+    attempt = "wait-ci-test"
+    # PR artifact with no branch — simulates open-pr appending without a known branch
+    (state_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "id": gr_id,
+                "attempt": attempt,
+                "artifacts": [{"type": "pr", "branch": ""}],
+            }
+        )
+    )
+    state_mod.patch_state(gr_id, attempt=attempt)
+    client = FakeClaudeClient(fixtures={})
+    getter = _make_getter(
+        [([_FAILING_CHECK], ""), ([_FAILING_CHECK], ""), ([_PASSING_CHECK], "")]
+    )
+    stage, state = _make_stage(
+        client,
+        tmp_path,
+        gr_id=gr_id,
+        poll_interval=0,
+        startup_grace_secs=0,
+        checks_getter=getter,
+        pr_branch=None,
+    )
+    state.attempt = attempt
+    stage.run(state)
+    bail_file = state_dir / f"bail_{attempt}.json"
+    assert bail_file.exists()
+    data = json.loads(bail_file.read_text())
+    assert data["class"] == "other"
+    assert client.calls == []
 
 
 def test_check_bail_raises_from_state(tmp_path: pathlib.Path, make_state_dir) -> None:

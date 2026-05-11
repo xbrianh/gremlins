@@ -223,9 +223,17 @@ class WaitCI(Stage):
                 log_file = state.session_dir / f"ci-attempt-{attempt}.log"
                 log_file.write_text(failure_output, encoding="utf-8")
 
+                pr_branch = state.last_pr_branch()
+                if not pr_branch:
+                    state.write_bail_file(
+                        "other", "ci-fix: pr_branch unknown, cannot push"
+                    )
+                    return
+
                 fix_prompt = template.format(
                     bail_command=self.bail_command(state),
                     failure_output=failure_output,
+                    pr_branch=pr_branch,
                 )
                 self.run_claude(
                     fix_prompt,
