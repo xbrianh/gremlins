@@ -432,7 +432,7 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
         lambda self, pipe: "APPROVED",
     )
     monkeypatch.setattr(
-        "gremlins.stages.request_copilot.RequestCopilot.run",
+        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
@@ -480,7 +480,7 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
-        "gremlins.stages.request_copilot.RequestCopilot.run",
+        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
@@ -529,7 +529,7 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
-        "gremlins.stages.request_copilot.RequestCopilot.run",
+        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
@@ -582,7 +582,7 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
-        "gremlins.stages.request_copilot.RequestCopilot.run",
+        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
@@ -636,7 +636,7 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
-        "gremlins.stages.request_copilot.RequestCopilot.run",
+        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
@@ -697,7 +697,7 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
-        "gremlins.stages.request_copilot.RequestCopilot.run",
+        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
@@ -762,7 +762,7 @@ def test_resume_from_ghreview(tmp_path, monkeypatch):
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
-        "gremlins.stages.request_copilot.RequestCopilot.run",
+        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
@@ -830,7 +830,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
-        "gremlins.stages.request_copilot.RequestCopilot.run",
+        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
@@ -962,7 +962,7 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
-        "gremlins.stages.request_copilot.RequestCopilot.run",
+        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
@@ -1014,7 +1014,7 @@ def test_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
         "gremlins.stages.review_code.ReviewCode.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
-        "gremlins.stages.request_copilot.RequestCopilot.run",
+        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
@@ -1087,7 +1087,7 @@ def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
-        "gremlins.stages.request_copilot.RequestCopilot.run",
+        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
@@ -1161,8 +1161,8 @@ def test_wait_ci_stage_ordering(tmp_path, monkeypatch):
         lambda self, pipe: order.append("wait-copilot") or "APPROVED",
     )
     monkeypatch.setattr(
-        "gremlins.stages.request_copilot.RequestCopilot.run",
-        lambda self, pipe: order.append("request-copilot"),
+        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
+        lambda self, pipe: order.append("github-request-copilot-review"),
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.AddressCode.run",
@@ -1219,7 +1219,7 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
         lambda self, pipe: earlier_called.append("wait-copilot") or "APPROVED",
     )
     monkeypatch.setattr(
-        "gremlins.stages.request_copilot.RequestCopilot.run",
+        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
         lambda self, pipe: earlier_called.append("request-copilot"),
     )
     monkeypatch.setattr(
@@ -1277,7 +1277,7 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
-        "gremlins.stages.request_copilot.RequestCopilot.run",
+        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
@@ -1356,7 +1356,7 @@ def test_resume_from_verify(tmp_path, monkeypatch):
         lambda self, pipe: "APPROVED",
     )
     monkeypatch.setattr(
-        "gremlins.stages.request_copilot.RequestCopilot.run",
+        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
         lambda self, pipe: None,
     )
     monkeypatch.setattr(
@@ -1399,7 +1399,7 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir):
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
-        "gremlins.stages.request_copilot.RequestCopilot.run", lambda self, pipe: None
+        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
@@ -1450,7 +1450,7 @@ def test_gh_main_state_client_tracks_effective_model(
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
-        "gremlins.stages.request_copilot.RequestCopilot.run", lambda self, pipe: None
+        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
@@ -1525,7 +1525,7 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
-        "gremlins.stages.request_copilot.RequestCopilot.run", lambda self, pipe: None
+        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None
@@ -1579,7 +1579,7 @@ def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
         "gremlins.stages.wait_copilot.WaitCopilot.run", lambda self, pipe: "APPROVED"
     )
     monkeypatch.setattr(
-        "gremlins.stages.request_copilot.RequestCopilot.run", lambda self, pipe: None
+        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run", lambda self, pipe: None
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.AddressCode.run", lambda self, pipe: None

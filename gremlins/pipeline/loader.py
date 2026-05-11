@@ -11,7 +11,7 @@ from gremlins.stages.implement import Implement
 from gremlins.stages.loop import LoopStage
 from gremlins.stages.parallel import ParallelStage
 from gremlins.stages.plan import Plan
-from gremlins.stages.request_copilot import RequestCopilot
+from gremlins.stages.github_request_copilot_review import GitHubRequestCopilotReview
 from gremlins.stages.review_code import ReviewCode
 from gremlins.stages.run_cmd import RunCmd
 from gremlins.stages.sequence import SequenceStage
@@ -24,7 +24,7 @@ STAGE_TYPES: dict[str, type[Stage]] = {
     "implement": Implement,
     "verify": Verify,
     "github-open-pull-request": GitHubOpenPullRequest,
-    "request-copilot": RequestCopilot,
+    "github-request-copilot-review": GitHubRequestCopilotReview,
     "wait-copilot": WaitCopilot,
     "wait-ci": WaitCI,
     "review-code": ReviewCode,

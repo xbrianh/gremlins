@@ -1,4 +1,4 @@
-"""Request-copilot stage: adds copilot-pull-request-reviewer to a PR."""
+"""GitHub request-copilot-review stage: adds copilot-pull-request-reviewer to a PR."""
 
 from __future__ import annotations
 
@@ -8,11 +8,11 @@ from gremlins.executor.state import State
 from gremlins.stages.base import Stage
 
 
-class RequestCopilot(Stage):
-    type = "request-copilot"
+class GitHubRequestCopilotReview(Stage):
+    type = "github-request-copilot-review"
 
     @classmethod
-    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> RequestCopilot:
+    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> GitHubRequestCopilotReview:
         from gremlins.pipeline.loader import get_client_from_dict
 
         stage = cls(d["name"], None, d.get("prompt") or [], d.get("options") or {})
