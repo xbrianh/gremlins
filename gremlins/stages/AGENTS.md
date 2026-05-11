@@ -6,12 +6,10 @@ sequencing logic of their own.
 
 ## Modules
 
-- `registry.py` — `STAGE_REGISTRY` and `CLIENT_FACTORIES` dicts + `register_stage` / `register_client_factory`. All stage type lookups go through here.
 - `loop.py` — `LoopStage(Stage)`. Iterates pre-built body runner callables until HEAD is stable or `max_iterations` is exhausted. Body runners are called in order; `RunCmdFailed` is caught and noted (subsequent runners still execute so a fix agent can act), except on the final iteration where fix runners are skipped and the stage bails. `LoopStage.from_runners([...], max_iterations=N)` constructs from closures without needing a YAML body. Also exports `RunCmdFailed` (sentinel raised by command-check runners) and `LoopExhausted` (raised on exhaustion so callers can translate the message).
-- `run_cmd.py` — `RunCmd(Stage)`. Runs `options["cmds"]` joined with `&&`; writes output to `run-cmd.log` and raises `RunCmdFailed` on non-zero exit. Registers as stage type `"run-cmd"`.
+- `run_cmd.py` — `RunCmd(Stage)`. Runs `options["cmds"]` joined with `&&`; writes output to `run-cmd.log` and raises `RunCmdFailed` on non-zero exit. Stage type `"run-cmd"`.
 - `parallel.py` — `ParallelStage(Stage)`. Constructed by the orchestrator with pre-built child runners; call `build_runtime_stages()` to get the three `(name, fn)` pairs (`<group>-fanout`, `<group>`, `<group>-fanin`) that implement fan-out/fan-in execution.
-- `all.py` — importing triggers side-effect registration of all stage modules. `pipeline.py` imports it automatically via `_ensure_registered()`; no manual import needed.
-- `handoff.py` — `Handoff(Stage)` plus the full handoff agent implementation (`run`, `build_prompt`, `collect_git_context`, `sanitize_rolling_plan`, etc.). `Handoff` runs the agent once per boss-loop iteration: returns normally on "chain-done" (loop exits via HEAD-stable), raises `RunCmdFailed` on "next-plan" (writes child plan to `plan.md`, loop continues), raises `RuntimeError` on "bail". Preserves the original boss spec in `boss-spec.md` and restores it to `plan.md` on "chain-done" so post-loop stages see the original spec. Registers as stage type `"handoff"`.
+- `handoff.py` — `Handoff(Stage)` plus the full handoff agent implementation (`run`, `build_prompt`, `collect_git_context`, `sanitize_rolling_plan`, etc.). `Handoff` runs the agent once per boss-loop iteration: returns normally on "chain-done" (loop exits via HEAD-stable), raises `RunCmdFailed` on "next-plan" (writes child plan to `plan.md`, loop continues), raises `RuntimeError` on "bail". Preserves the original boss spec in `boss-spec.md` and restores it to `plan.md` on "chain-done" so post-loop stages see the original spec. Stage type `"handoff"`.
 - `plan.py` — `run(ctx, PlanOptions)`. Local pipeline only.
 - `implement.py` — `run(ctx, ImplementOptions)`. Dual-mode (`kind='local'` /
   `kind='gh'`). For gh: enforces the empty-implementation invariant,
@@ -36,7 +34,6 @@ sequencing logic of their own.
 
 ## Conventions
 
-- Stages registered via `register_stage` receive `(ctx: StageContext, options: XxxOptions)` as positional args.
 - Stage modules expose `run(ctx: StageContext, options: XxxOptions)` as the orchestrator entry point. Orchestrators call `module.run(ctx, options)` directly.
 - Every stage that talks to `claude` takes `client: ClaudeClient` and
   calls `client.run(...)`. **Never spawn `claude -p` directly** — that

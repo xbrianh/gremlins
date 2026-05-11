@@ -10,7 +10,6 @@ from typing import Any, cast
 
 from gremlins.executor.state import State, resolve_state_file
 from gremlins.stages.base import Stage
-from gremlins.stages.registry import register_stage
 from gremlins.utils import git as _git
 
 logger = logging.getLogger(__name__)
@@ -185,4 +184,3 @@ def _bail_already_set(gr_id: str | None, child_key: str | None) -> bool:
         return False
 
 
-register_stage("loop", LoopStage)

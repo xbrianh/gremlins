@@ -10,14 +10,13 @@ import shutil
 from collections.abc import Callable
 from typing import Any
 
-import gremlins.stages.all as _stages_all  # noqa: F401  # type: ignore[reportUnusedImport]
 from gremlins.clients.client import Client
 from gremlins.executor.state import State, resolve_state_file
 from gremlins.pipeline import Pipeline as _PipelineData
+from gremlins.pipeline.loader import STAGE_TYPES
 from gremlins.runner import run_stages
 from gremlins.stage_clients import require_stage_spec
 from gremlins.stages.base import Stage
-from gremlins.stages.registry import STAGE_REGISTRY
 from gremlins.utils.git import in_git_repo
 
 logger = logging.getLogger(__name__)
@@ -70,12 +69,12 @@ class Pipeline:
     ) -> None:
         unknown: list[str] = []
         for s in stages:
-            if s.type not in STAGE_REGISTRY:
+            if s.type not in STAGE_TYPES:
                 unknown.append(s.type)
             elif s.type == "parallel":
-                unknown.extend(c.type for c in s.body if c.type not in STAGE_REGISTRY)
+                unknown.extend(c.type for c in s.body if c.type not in STAGE_TYPES)
             elif s.type == "loop":
-                unknown.extend(c.type for c in s.body if c.type not in STAGE_REGISTRY)
+                unknown.extend(c.type for c in s.body if c.type not in STAGE_TYPES)
         if unknown:
             raise ValueError(f"Pipeline does not support stage type(s): {unknown}")
         self.stages = _expand_stage_entries(stages)

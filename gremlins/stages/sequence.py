@@ -14,7 +14,6 @@ from typing import Any, cast
 
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
-from gremlins.stages.registry import register_stage
 
 
 class SequenceStage(Stage):
@@ -65,4 +64,3 @@ class SequenceStage(Stage):
                 child_state.make_runner(child, scope=self.body)()
 
 
-register_stage("sequence", SequenceStage)

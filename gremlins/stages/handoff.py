@@ -19,7 +19,6 @@ from gremlins.clients.client import Client
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
 from gremlins.stages.loop import RunCmdFailed
-from gremlins.stages.registry import register_stage
 from gremlins.utils import proc
 from gremlins.utils.yaml import load_bundled_prompt, render_bundled_prompt
 
@@ -560,4 +559,3 @@ class Handoff(Stage):
         return 1 + max(indices, default=0)
 
 
-register_stage("handoff", Handoff)

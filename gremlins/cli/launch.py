@@ -9,8 +9,8 @@ from gremlins import paths as _paths
 from gremlins.launcher import launch
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import list_pipelines, resolve_pipeline_name
+from gremlins.pipeline.loader import STAGE_TYPES
 from gremlins.stages.base import Stage
-from gremlins.stages.registry import STAGE_REGISTRY
 from gremlins.utils.yaml import YamlLoadError
 
 _INFRA_ARGS = frozenset({"description", "parent_id", "print_id", "base_ref", "client"})
@@ -94,7 +94,7 @@ def launch_main(argv: list[str]) -> int:
 
     first = next((s for s in pipeline.stages if s.type != "parallel"), None)
     try:
-        stage_cls = STAGE_REGISTRY[first.type] if first is not None else Stage
+        stage_cls = STAGE_TYPES[first.type] if first is not None else Stage
         parser = build_launch_parser(name, stage_cls)
     except (KeyError, TypeError):
         parser = build_launch_parser(name, Stage)

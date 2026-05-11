@@ -349,7 +349,7 @@ def test_launch_unified_dispatch_calls_launch(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.cli.launch.Pipeline.from_yaml", lambda path: _make_fake_pipeline()
     )
-    monkeypatch.setattr("gremlins.cli.launch.STAGE_REGISTRY", {"plan": _FakePlanStage})
+    monkeypatch.setattr("gremlins.cli.launch.STAGE_TYPES", {"plan": _FakePlanStage})
     launched = []
     monkeypatch.setattr(
         "gremlins.cli.launch.launch",
@@ -442,7 +442,7 @@ def test_launch_unified_dispatch_help_for_resolved_pipeline(monkeypatch, capsys)
     monkeypatch.setattr(
         "gremlins.cli.launch.Pipeline.from_yaml", lambda path: _make_fake_pipeline()
     )
-    monkeypatch.setattr("gremlins.cli.launch.STAGE_REGISTRY", {"plan": _FakePlanStage})
+    monkeypatch.setattr("gremlins.cli.launch.STAGE_TYPES", {"plan": _FakePlanStage})
     rc = main(["launch", "local", "--help"])
     assert rc == 0
     out = capsys.readouterr().out

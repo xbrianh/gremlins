@@ -19,10 +19,8 @@ review / address pipelines, the fleet manager
 - `clients/stream.py` — `stream_events` + `_emit_event` (stream-json parser and stderr renderer).
 - `clients/claude.py` — `SubprocessClaudeClient` (production subprocess runner).
 - `clients/fake.py` — `FakeClaudeClient` recording test double; replays canned stream-json from fixtures keyed by `label`.
-- `pipeline/` — `Pipeline` dataclass + `Pipeline.from_yaml(path)` classmethod; `resolve_pipeline_path`; supports parallel stage groups; resolves stage types against `STAGE_REGISTRY` (auto-populated via `stages/all.py`).
+- `pipeline/` — `Pipeline` dataclass + `Pipeline.from_yaml(path)` classmethod; `resolve_pipeline_path`; supports parallel stage groups. `pipeline/loader.py` holds `STAGE_TYPES`, the explicit dispatch table mapping type-name strings to Stage classes.
 - `pipelines/` — bundled YAML pipeline files (`local.yaml`, `gh.yaml`); lookup target for `resolve_pipeline_path`.
-- `stages/registry.py` — `STAGE_REGISTRY` and `CLIENT_FACTORIES` dicts + `register_stage` / `register_client_factory` functions.
-- `stages/all.py` — side-effect import; importing it causes every stage module to self-register into `STAGE_REGISTRY`. Called automatically by `Pipeline.from_yaml` via `_ensure_registered()`; no manual import needed.
 - `stages/base.py` — `Stage` Protocol + `StageContext` dataclass: shared `client`, `session_dir`, `gr_id` threaded into every stage.
 - `stages/` — per-stage bodies: `plan`, `implement`, `review_code`, `address_code`, `verify`, `test`, `commit_pr`, `ghreview`, `ghaddress`, `request_copilot`, `wait_copilot`, `wait_ci`, `handoff`.
 - `executor/state.py` — `State` class: execution context + `state.json` I/O.

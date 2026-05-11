@@ -23,7 +23,6 @@ class Pipeline:
 
     @classmethod
     def from_yaml(cls, path: pathlib.Path) -> Pipeline:
-        importlib.import_module("gremlins.stages.all")
         importlib.import_module("gremlins.clients")
 
         from gremlins.pipeline.loader import parse_stage
