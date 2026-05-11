@@ -85,7 +85,6 @@ def _resolve_description_and_slug(
     return "", False, "gremlin"
 
 
-
 def _build_spawn_env(gr_id: str) -> dict[str, str]:
     env = os.environ.copy()
     pkg_root = str(pathlib.Path(__file__).resolve().parent.parent)
