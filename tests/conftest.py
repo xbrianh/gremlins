@@ -64,7 +64,7 @@ def common_local_patches(monkeypatch):
         shutil, "which", lambda n: "/fake/claude" if n == "claude" else None
     )
     monkeypatch.setattr(
-        "gremlins.executor.run.install_signal_handlers", lambda *c: None
+        "gremlins.executor.run._install_signal_handlers", lambda c: None
     )
 
 

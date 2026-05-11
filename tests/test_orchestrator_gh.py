@@ -117,7 +117,7 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         shutil, "which", lambda n: f"/fake/{n}" if n in ("claude", "gh") else None
     )
     monkeypatch.setattr(
-        "gremlins.executor.run.install_signal_handlers", lambda *c: None
+        "gremlins.executor.run._install_signal_handlers", lambda c: None
     )
     monkeypatch.setattr("gremlins.executor.run.get_repo", lambda: "owner/repo")
 

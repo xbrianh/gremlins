@@ -25,10 +25,9 @@ CLAUDE_FLAGS_BASE = [
 class SubprocessClaudeClient:
     """Production ClaudeClient: spawns ``claude -p`` subprocesses.
 
-    Owns the live-children list so ``reap_all()`` (called from the SIGINT/
-    SIGTERM handlers installed by ``runner.install_signal_handlers``) can
-    terminate every concurrently-running ``claude -p`` before the orchestrator
-    exits.
+    Owns the live-children list so ``reap_all()`` (called from the executor's
+    SIGINT/SIGTERM handlers) can terminate every concurrently-running
+    ``claude -p`` before the orchestrator exits.
     """
 
     def __init__(self) -> None:
