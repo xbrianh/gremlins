@@ -16,12 +16,12 @@ from collections.abc import Callable
 from typing import Any, TypeVar, cast
 
 from gremlins.clients.client import Client
-from gremlins.prompts import BUNDLED_PROMPT_DIR
 from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.loop import RunCmdFailed
 from gremlins.stages.registry import register_stage
 from gremlins.state import emit_bail, set_stage
 from gremlins.utils import proc
+from gremlins.utils.yaml import load_bundled_prompt, render_bundled_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -52,16 +52,6 @@ def with_reap_after(client: Client, timeout: int | None, fn: Callable[[], T]) ->
         return fn()
     finally:
         timer.cancel()
-
-
-def _load(name: str) -> str:
-    path = BUNDLED_PROMPT_DIR / name
-    if not path.exists():
-        raise RuntimeError(f"error loading prompt: prompt file not found: {path}")
-    text = path.read_text(encoding="utf-8")
-    if not text.strip():
-        raise RuntimeError(f"error loading prompt: prompt file is empty: {path}")
-    return text
 
 
 def auto_name_out(plan_path: pathlib.Path) -> pathlib.Path:
@@ -123,8 +113,8 @@ def _load_spec_section(spec_text: str) -> str:
         if len(spec_text) > 50000
         else ""
     )
-    return _load("handoff_spec_section.md").format(
-        spec_body=spec_body, spec_trunc=spec_trunc
+    return render_bundled_prompt(
+        "handoff_spec_section.md", spec_body=spec_body, spec_trunc=spec_trunc
     )
 
 
@@ -146,33 +136,29 @@ def build_prompt(
     )
     log_body = git_log if git_log else "(no commits yet — branch just started)"
     spec_section = _load_spec_section(spec_text) if spec_text is not None else ""
-    style_section = _load("handoff_style_section.md").format(
-        code_style=_load("code_style.md").rstrip()
+    style_section = render_bundled_prompt(
+        "handoff_style_section.md",
+        code_style=load_bundled_prompt("code_style.md").rstrip(),
     )
-    return (
-        _load("handoff.md")
-        .format(
-            spec_section=spec_section,
-            style_section=style_section,
-            plan_text=plan_text,
-            branch=branch,
-            log_body=log_body,
-            diff_body=diff_body,
-            diff_trunc=diff_trunc,
-            out_path=out_path,
-            child_plan_path=child_plan_path,
-            signal_path=signal_path,
-        )
-        .rstrip()
-    )
+    return render_bundled_prompt(
+        "handoff.md",
+        spec_section=spec_section,
+        style_section=style_section,
+        plan_text=plan_text,
+        branch=branch,
+        log_body=log_body,
+        diff_body=diff_body,
+        diff_trunc=diff_trunc,
+        out_path=out_path,
+        child_plan_path=child_plan_path,
+        signal_path=signal_path,
+    ).rstrip()
 
 
 def build_sanitize_prompt(rolling_plan_text: str, out_path: pathlib.Path) -> str:
-    return (
-        _load("handoff_sanitize.md")
-        .format(rolling_plan_text=rolling_plan_text, out_path=out_path)
-        .rstrip()
-    )
+    return render_bundled_prompt(
+        "handoff_sanitize.md", rolling_plan_text=rolling_plan_text, out_path=out_path
+    ).rstrip()
 
 
 def _restore_rolling_plan(
