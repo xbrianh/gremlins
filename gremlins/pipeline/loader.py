@@ -7,7 +7,7 @@ from gremlins.stages.base import Stage
 from gremlins.stages.registry import STAGE_REGISTRY
 
 
-def get_client_from_yaml(d: dict[str, Any]) -> Client | None:
+def get_client_from_dict(d: dict[str, Any]) -> Client | None:
     raw = d.get("client")
     if raw is None:
         return None
@@ -22,7 +22,7 @@ def parse_stage(d: dict[str, Any], depth: int = 0) -> Stage:
     if "parallel" in d:
         from gremlins.stages.parallel import ParallelStage
 
-        return ParallelStage.from_yaml(d, depth=depth)
+        return ParallelStage.with_dict(d, depth=depth)
 
     name = d.get("name")
     if not isinstance(name, str) or not name:
@@ -36,4 +36,4 @@ def parse_stage(d: dict[str, Any], depth: int = 0) -> Stage:
         raise ValueError(f"stage {name!r}: must have a 'type' field")
     if stage_type not in STAGE_REGISTRY:
         raise ValueError(f"stage {name!r}: unknown type {stage_type!r}")
-    return STAGE_REGISTRY[stage_type].from_yaml(d, depth=depth)
+    return STAGE_REGISTRY[stage_type].with_dict(d, depth=depth)

@@ -174,7 +174,7 @@ class Stage:
         return cast(subprocess.CompletedProcess[Any], subprocess.run(argv, **kw))
 
     @classmethod
-    def from_yaml(cls, d: dict[str, Any], depth: int = 0) -> Stage:
+    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> Stage:
         raise NotImplementedError
 
     @classmethod
