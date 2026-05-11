@@ -135,6 +135,9 @@ def run_pipeline(
     if shutil.which("claude") is None:
         die("claude CLI not found")
 
+    if not in_git_repo():
+        die("gremlins requires a git repository; cwd is not in a git repo")
+
     try:
         pipeline = _Pipeline.from_yaml(pipeline_path)
     except (FileNotFoundError, ValueError, YamlLoadError) as exc:
@@ -205,30 +208,10 @@ def run_pipeline(
             if not plan_file.exists() or plan_file.stat().st_size == 0:
                 die(f"--resume-from {args.resume_from} requires existing {plan_file}")
         if start_idx >= _type_idx("review-code"):
-            is_git = in_git_repo()
-            if is_git:
-                if not has_dirty_worktree() and not has_commits():
-                    die(
-                        f"--resume-from {args.resume_from} requires implementation changes in the worktree"
-                    )
-            else:
-                has_files = False
-                for dirpath, dirnames, filenames in os.walk("."):
-                    dirnames[:] = [d for d in dirnames if d != ".git"]
-                    try:
-                        sd_res = session_dir.resolve()
-                        if pathlib.Path(dirpath).resolve() == sd_res:
-                            dirnames[:] = []
-                            continue
-                    except Exception:
-                        pass
-                    if filenames:
-                        has_files = True
-                        break
-                if not has_files:
-                    die(
-                        f"--resume-from {args.resume_from} requires implementation changes in the worktree"
-                    )
+            if not has_dirty_worktree() and not has_commits():
+                die(
+                    f"--resume-from {args.resume_from} requires implementation changes in the worktree"
+                )
 
     _install_signal_handlers(_signal_clients)
     pipe.run()
