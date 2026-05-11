@@ -13,7 +13,7 @@ import subprocess
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.gh_utils import parse_issue_ref as _parse_issue_ref
+from gremlins.utils.github import parse_issue_ref as _parse_issue_ref
 from gremlins.git import (
     DivergentHead,
     EmptyImpl,

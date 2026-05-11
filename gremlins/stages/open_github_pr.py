@@ -6,7 +6,7 @@ import logging
 from typing import Any
 
 from gremlins.clients.protocol import CompletedRun
-from gremlins.gh_utils import extract_gh_url
+from gremlins.utils.github import extract_gh_url
 from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.registry import register_stage
 from gremlins.state import append_artifact, last_pr_branch

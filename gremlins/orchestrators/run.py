@@ -11,7 +11,7 @@ import shutil
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
 from gremlins.env_file import load_env_file
 from gremlins.errors import die
-from gremlins.gh_utils import get_repo
+from gremlins.utils.github import get_repo
 from gremlins.git import has_commits, has_dirty_worktree, in_git_repo
 from gremlins.logging_setup import configure_logging
 from gremlins.orchestrators.pipeline import Pipeline

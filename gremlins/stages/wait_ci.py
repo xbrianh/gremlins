@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from gremlins.gh_utils import fetch_check_run_logs, get_pr_ci_status
+from gremlins.utils.github import fetch_check_run_logs, get_pr_ci_status
 from gremlins.git import head_sha
 from gremlins.stages.base import RuntimeState, Stage
 from gremlins.stages.registry import register_stage
