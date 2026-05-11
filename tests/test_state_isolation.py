@@ -39,7 +39,6 @@ from conftest import ReviewCreatingClient as _ReviewCreatingClient
 from conftest import common_local_patches as _common_patches
 
 import gremlins.executor.state as state_mod
-from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.run import run_pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
 
