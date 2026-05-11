@@ -22,7 +22,6 @@ import tempfile
 from typing import Any, cast
 
 from gremlins import paths as _paths
-from gremlins.cli.pipeline_args import launch_client_label, resolve_pipeline
 from gremlins.clients.client import PACKAGE_DEFAULT
 from gremlins.executor.state import patch_state, pipeline_uses_gh, write_state
 from gremlins.pipeline import Pipeline
@@ -212,6 +211,8 @@ def launch(
     Synchronous through spawn; does not wait for the pipeline to finish.
     Raises ValueError on bad arguments, RuntimeError on infrastructure failure.
     """
+    from gremlins.cli.pipeline_args import launch_client_label, resolve_pipeline
+
     stage_inputs = {} if stage_inputs is None else dict(stage_inputs)
     instructions: str | None = stage_inputs.get("instructions")
     if plan is None:
@@ -401,6 +402,8 @@ def resume(gr_id: str) -> None:
         state = json.loads(sf.read_text(encoding="utf-8"))
     except Exception as exc:
         raise RuntimeError(f"could not read state.json: {exc}") from exc
+
+    from gremlins.cli.pipeline_args import resolve_pipeline
 
     kind = state.get("kind", "")
     workdir = state.get("workdir", "")
