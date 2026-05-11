@@ -94,7 +94,9 @@ class ReviewCode(Stage):
             "Use `git diff HEAD~1 HEAD` and `git diff` to see the scope."
         )
         if plan_text:
-            code_context = f"The plan for this change is:\n\n{plan_text}\n\n{code_scope}"
+            code_context = (
+                f"The plan for this change is:\n\n{plan_text}\n\n{code_scope}"
+            )
         else:
             code_context = code_scope
 

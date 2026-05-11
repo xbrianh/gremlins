@@ -60,6 +60,5 @@ def test_run_writes_raw_path(tmp_path: pathlib.Path) -> None:
     stage.run(state)
     call = client.calls[0]
     assert (
-        call.raw_path
-        == tmp_path / "stream-github-address-pull-request-reviews.jsonl"
+        call.raw_path == tmp_path / "stream-github-address-pull-request-reviews.jsonl"
     )

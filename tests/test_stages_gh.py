@@ -37,9 +37,7 @@ def _make_gh_review(
     pr_url: str,
 ) -> GitHubReviewPullRequest:
     prompts = [
-        (_BUNDLED_PROMPTS / "github_review_pull_request.md").read_text(
-            encoding="utf-8"
-        )
+        (_BUNDLED_PROMPTS / "github_review_pull_request.md").read_text(encoding="utf-8")
     ]
     stage = GitHubReviewPullRequest(
         "github-review-pull-request", "sonnet", prompts, {}, pr_url=pr_url
