@@ -22,7 +22,6 @@ from gremlins.executor.state import (
     set_stage,
 )
 from gremlins.stages.base import Stage
-from gremlins.stages.compound import CompoundStage
 from gremlins.stages.registry import register_stage
 from gremlins.utils import proc
 
@@ -35,7 +34,7 @@ def _noop_set_stage(_n: str) -> None:
     pass
 
 
-class ParallelStage(CompoundStage):
+class ParallelStage(Stage):
     """Fan-out/fan-in execution of a parallel pipeline block."""
 
     type = "parallel"
@@ -49,7 +48,7 @@ class ParallelStage(CompoundStage):
         cancel_on_bail: bool = False,
         bail_policy: str = "any",
     ) -> None:
-        super().__init__(name)
+        super().__init__(name, None, [], {})
         self._max_concurrent = max_concurrent
         self._cancel_on_bail = cancel_on_bail
         self._bail_policy = bail_policy
