@@ -2,7 +2,6 @@ import pathlib
 
 from gremlins.utils.text import read_markdown_title, slugify
 
-
 # slugify
 
 def test_slugify_basic():
