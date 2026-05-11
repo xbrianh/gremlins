@@ -1704,9 +1704,7 @@ def test_gh_main_state_client_tracks_effective_model(
     # Restore the real patch_state so stage_clients is actually written
     import gremlins.executor.state as _state_mod
 
-    monkeypatch.setattr(
-        "gremlins.executor.run.patch_state", _state_mod.patch_state
-    )
+    monkeypatch.setattr("gremlins.executor.run.patch_state", _state_mod.patch_state)
 
     monkeypatch.setattr(
         subprocess, "run", _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n")

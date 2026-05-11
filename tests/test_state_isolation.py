@@ -180,9 +180,7 @@ def test_review_main_does_not_clobber_external_state(tmp_path, monkeypatch):
     review_dir.mkdir()
     monkeypatch.chdir(review_dir)
     _common_patches(monkeypatch)
-    monkeypatch.setattr(
-        "gremlins.executor.review_address.in_git_repo", lambda: False
-    )
+    monkeypatch.setattr("gremlins.executor.review_address.in_git_repo", lambda: False)
     client = _ReviewCreatingClient(
         fixtures={lbl: MINIMAL_EVENTS for lbl in _REVIEW_LABELS}
     )
@@ -202,9 +200,7 @@ def test_address_main_does_not_clobber_external_state(tmp_path, monkeypatch):
     )
     monkeypatch.chdir(address_dir)
     _common_patches(monkeypatch)
-    monkeypatch.setattr(
-        "gremlins.executor.review_address.in_git_repo", lambda: False
-    )
+    monkeypatch.setattr("gremlins.executor.review_address.in_git_repo", lambda: False)
     client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
     assert address_main(["--dir", str(address_dir)], client=client) == 0
     _assert_no_state_clobber(parent_state_file, original_content, parent_mtime)
