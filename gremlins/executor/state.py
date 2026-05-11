@@ -1,14 +1,4 @@
-"""Gremlin execution context and state.json I/O.
-
-State is the single per-invocation object passed to every Stage.run().  It
-carries both the runtime execution context (client, session_dir, etc.) and
-the state.json I/O methods (patch, emit_bail, check_bail, etc.).
-
-Module-level helpers (validate_gr_id, pipeline_uses_gh, landable_shape, and
-the raw free-function forms of every I/O primitive) remain importable directly
-from this module so non-stage callers (bail.py, fleet/, cli/) that have a gr_id
-but no State instance can call them without constructing a full State.
-"""
+"""Execution context and state.json I/O for gremlin pipelines."""
 
 from __future__ import annotations
 

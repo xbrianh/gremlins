@@ -1,4 +1,4 @@
-"""Tests for gremlins.orchestrators.gh and supporting git helpers.
+"""Tests for gremlins.executor.run and supporting git helpers.
 
 Uses FakeClaudeClient throughout — no real claude subprocess or gh CLI calls
 (gh calls are monkeypatched at the subprocess.run level).
@@ -13,8 +13,8 @@ import subprocess
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.orchestrators.run import _parse_args as _parse_gh_args
-from gremlins.orchestrators.run import run_pipeline
+from gremlins.executor.run import _parse_args as _parse_gh_args
+from gremlins.executor.run import run_pipeline
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.utils.git import (
@@ -117,14 +117,14 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         shutil, "which", lambda n: f"/fake/{n}" if n in ("claude", "gh") else None
     )
     monkeypatch.setattr(
-        "gremlins.orchestrators.run.install_signal_handlers", lambda *c: None
+        "gremlins.executor.run.install_signal_handlers", lambda *c: None
     )
-    monkeypatch.setattr("gremlins.orchestrators.run.get_repo", lambda: "owner/repo")
+    monkeypatch.setattr("gremlins.executor.run.get_repo", lambda: "owner/repo")
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     monkeypatch.setattr(
-        "gremlins.orchestrators.run.resolve_session_dir", lambda gr_id=None: session_dir
+        "gremlins.executor.run.resolve_session_dir", lambda gr_id=None: session_dir
     )
 
     state_file = tmp_path / "state.json"
@@ -138,7 +138,7 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         initial.update(state_data)
     state_file.write_text(json.dumps(initial))
     monkeypatch.setattr(
-        "gremlins.orchestrators.run.resolve_state_file", lambda gr_id=None: state_file
+        "gremlins.executor.run.resolve_state_file", lambda gr_id=None: state_file
     )
     monkeypatch.setattr(
         "gremlins.stage_clients.resolve_state_file", lambda gr_id=None: state_file
@@ -146,7 +146,7 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
 
     # Stub out patch_state so tests don't write to real state files.
     monkeypatch.setattr(
-        "gremlins.orchestrators.run.patch_state", lambda gr_id=None, **kw: None
+        "gremlins.executor.run.patch_state", lambda gr_id=None, **kw: None
     )
 
     # gr_id=None makes patch_state a no-op; use a writing shim so the commit runner can read back the values.
@@ -773,7 +773,7 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
         data.update(kw)
         state_file.write_text(json.dumps(data), encoding="utf-8")
 
-    monkeypatch.setattr("gremlins.orchestrators.run.patch_state", writing_patch_state)
+    monkeypatch.setattr("gremlins.executor.run.patch_state", writing_patch_state)
 
     monkeypatch.setattr(
         subprocess,
@@ -1079,7 +1079,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
         data.update(kw)
         state_file.write_text(json.dumps(data))
 
-    monkeypatch.setattr("gremlins.orchestrators.run.patch_state", writing_patch_state)
+    monkeypatch.setattr("gremlins.executor.run.patch_state", writing_patch_state)
 
     def fake_gh_run(cmd, *args, **kwargs):
         prog = cmd[0] if cmd else ""
@@ -1705,7 +1705,7 @@ def test_gh_main_state_client_tracks_effective_model(
     import gremlins.executor.state as _state_mod
 
     monkeypatch.setattr(
-        "gremlins.orchestrators.run.patch_state", _state_mod.patch_state
+        "gremlins.executor.run.patch_state", _state_mod.patch_state
     )
 
     monkeypatch.setattr(

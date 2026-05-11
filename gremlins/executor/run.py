@@ -19,7 +19,7 @@ from gremlins.executor.state import (
     resolve_state_file,
 )
 from gremlins.logging_setup import configure_logging
-from gremlins.orchestrators.pipeline import Pipeline
+from gremlins.executor.pipeline import Pipeline
 from gremlins.pipeline import Pipeline as _Pipeline
 from gremlins.runner import install_signal_handlers
 from gremlins.stage_clients import (

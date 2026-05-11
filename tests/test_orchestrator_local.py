@@ -10,7 +10,7 @@ from conftest import common_local_patches as _common_patches
 from gremlins.cli.review_address import address_main, review_main
 from gremlins.clients.client import Client
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.orchestrators.run import run_pipeline
+from gremlins.executor.run import run_pipeline
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
 
@@ -33,11 +33,11 @@ def test_local_main_plan_mode(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.orchestrators.run.resolve_session_dir",
+        "gremlins.executor.run.resolve_session_dir",
         lambda gr_id=None: session_dir,
     )
     # tmp_path is not a git repo → is_git=False; monkeypatch for clarity.
-    monkeypatch.setattr("gremlins.orchestrators.run.in_git_repo", lambda: False)
+    monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: False)
 
     # Fake that implement produced changes (FakeClaudeClient won't create files).
     monkeypatch.setattr(
@@ -73,12 +73,12 @@ def test_local_main_resume_from_review_code_requires_git_changes(
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.orchestrators.run.resolve_session_dir",
+        "gremlins.executor.run.resolve_session_dir",
         lambda gr_id=None: session_dir,
     )
-    monkeypatch.setattr("gremlins.orchestrators.run.in_git_repo", lambda: True)
-    monkeypatch.setattr("gremlins.orchestrators.run.has_dirty_worktree", lambda: False)
-    monkeypatch.setattr("gremlins.orchestrators.run.has_commits", lambda: False)
+    monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: True)
+    monkeypatch.setattr("gremlins.executor.run.has_dirty_worktree", lambda: False)
+    monkeypatch.setattr("gremlins.executor.run.has_commits", lambda: False)
 
     with pytest.raises(SystemExit):
         run_pipeline(
@@ -104,12 +104,12 @@ def test_local_main_resume_from_review_code_allows_existing_git_changes(
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.orchestrators.run.resolve_session_dir",
+        "gremlins.executor.run.resolve_session_dir",
         lambda gr_id=None: session_dir,
     )
-    monkeypatch.setattr("gremlins.orchestrators.run.in_git_repo", lambda: True)
-    monkeypatch.setattr("gremlins.orchestrators.run.has_dirty_worktree", lambda: False)
-    monkeypatch.setattr("gremlins.orchestrators.run.has_commits", lambda: True)
+    monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: True)
+    monkeypatch.setattr("gremlins.executor.run.has_dirty_worktree", lambda: False)
+    monkeypatch.setattr("gremlins.executor.run.has_commits", lambda: True)
 
     client = _ReviewCreatingClient(
         fixtures={
@@ -139,7 +139,7 @@ def test_local_main_resume_from_review_code_allows_existing_git_changes(
 def test_review_main_calls_client(tmp_path, monkeypatch):
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.orchestrators.review_address.in_git_repo", lambda: False
+        "gremlins.executor.review_address.in_git_repo", lambda: False
     )
 
     client = _ReviewCreatingClient(
@@ -156,16 +156,16 @@ def test_review_main_requires_commit_diff_or_dirty_worktree(
 ):
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.orchestrators.review_address.in_git_repo", lambda: True
+        "gremlins.executor.review_address.in_git_repo", lambda: True
     )
     monkeypatch.setattr(
-        "gremlins.orchestrators.review_address.rev_exists", lambda rev: True
+        "gremlins.executor.review_address.rev_exists", lambda rev: True
     )
     monkeypatch.setattr(
-        "gremlins.orchestrators.review_address.has_diff", lambda base, head: False
+        "gremlins.executor.review_address.has_diff", lambda base, head: False
     )
     monkeypatch.setattr(
-        "gremlins.orchestrators.review_address.has_dirty_worktree", lambda: False
+        "gremlins.executor.review_address.has_dirty_worktree", lambda: False
     )
 
     with pytest.raises(SystemExit):
@@ -180,16 +180,16 @@ def test_review_main_requires_commit_diff_or_dirty_worktree(
 def test_review_main_allows_dirty_worktree_without_commit_diff(tmp_path, monkeypatch):
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.orchestrators.review_address.in_git_repo", lambda: True
+        "gremlins.executor.review_address.in_git_repo", lambda: True
     )
     monkeypatch.setattr(
-        "gremlins.orchestrators.review_address.rev_exists", lambda rev: True
+        "gremlins.executor.review_address.rev_exists", lambda rev: True
     )
     monkeypatch.setattr(
-        "gremlins.orchestrators.review_address.has_diff", lambda base, head: False
+        "gremlins.executor.review_address.has_diff", lambda base, head: False
     )
     monkeypatch.setattr(
-        "gremlins.orchestrators.review_address.has_dirty_worktree", lambda: True
+        "gremlins.executor.review_address.has_dirty_worktree", lambda: True
     )
 
     client = _ReviewCreatingClient(
@@ -214,7 +214,7 @@ def test_address_main_calls_client(tmp_path, monkeypatch):
 
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.orchestrators.review_address.in_git_repo", lambda: False
+        "gremlins.executor.review_address.in_git_repo", lambda: False
     )
 
     client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
@@ -236,10 +236,10 @@ def test_local_main_client_specifier_model(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.orchestrators.run.resolve_session_dir",
+        "gremlins.executor.run.resolve_session_dir",
         lambda gr_id=None: session_dir,
     )
-    monkeypatch.setattr("gremlins.orchestrators.run.in_git_repo", lambda: False)
+    monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: False)
 
     monkeypatch.setattr(
         "gremlins.stages.implement.changes_outside_git", lambda s, d: True
@@ -281,10 +281,10 @@ def test_local_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir)
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.orchestrators.run.resolve_session_dir",
+        "gremlins.executor.run.resolve_session_dir",
         lambda gr_id=None: session_dir,
     )
-    monkeypatch.setattr("gremlins.orchestrators.run.in_git_repo", lambda: False)
+    monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: False)
 
     monkeypatch.setattr(
         "gremlins.stages.implement.changes_outside_git", lambda s, d: True
@@ -327,10 +327,10 @@ def test_local_main_env_file_vars_reach_verify(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.orchestrators.run.resolve_session_dir",
+        "gremlins.executor.run.resolve_session_dir",
         lambda gr_id=None: session_dir,
     )
-    monkeypatch.setattr("gremlins.orchestrators.run.in_git_repo", lambda: False)
+    monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: False)
 
     monkeypatch.setattr(
         "gremlins.stages.implement.changes_outside_git", lambda s, d: True
@@ -368,10 +368,10 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.orchestrators.run.resolve_session_dir",
+        "gremlins.executor.run.resolve_session_dir",
         lambda gr_id=None: session_dir,
     )
-    monkeypatch.setattr("gremlins.orchestrators.run.in_git_repo", lambda: False)
+    monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: False)
 
     monkeypatch.setattr(
         "gremlins.stages.implement.changes_outside_git", lambda s, d: True
@@ -481,10 +481,10 @@ def test_local_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
     _common_patches(monkeypatch)
     monkeypatch.setattr("gremlins.pipeline.Pipeline.from_yaml", _real_from_yaml)
     monkeypatch.setattr(
-        "gremlins.orchestrators.run.resolve_session_dir",
+        "gremlins.executor.run.resolve_session_dir",
         lambda gr_id=None: session_dir,
     )
-    monkeypatch.setattr("gremlins.orchestrators.run.in_git_repo", lambda: False)
+    monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: False)
 
     monkeypatch.setattr(
         "gremlins.stages.implement.changes_outside_git", lambda s, d: True
@@ -629,10 +629,10 @@ def test_local_stage_inputs_instructions_reach_plan(
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.orchestrators.run.resolve_session_dir",
+        "gremlins.executor.run.resolve_session_dir",
         lambda gr_id=None: session_dir,
     )
-    monkeypatch.setattr("gremlins.orchestrators.run.in_git_repo", lambda: False)
+    monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: False)
 
     received: list[str] = []
 

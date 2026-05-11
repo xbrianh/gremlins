@@ -29,7 +29,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(f"run_pipeline: {exc}\n")
         return 1
 
-    from gremlins.orchestrators.run import run_pipeline as _run_pipeline
+    from gremlins.executor.run import run_pipeline as _run_pipeline
 
     rc = 1
     try:
