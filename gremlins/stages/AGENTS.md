@@ -10,31 +10,19 @@ sequencing logic of their own.
 - `run_cmd.py` — `RunCmd(Stage)`. Runs `options["cmds"]` joined with `&&`; writes output to `run-cmd.log` and raises `RunCmdFailed` on non-zero exit. Stage type `"run-cmd"`.
 - `parallel.py` — `ParallelStage(Stage)`. Constructed by the orchestrator with pre-built child runners; call `build_runtime_stages()` to get the three `(name, fn)` pairs (`<group>-fanout`, `<group>`, `<group>-fanin`) that implement fan-out/fan-in execution.
 - `handoff.py` — `Handoff(Stage)` plus the full handoff agent implementation (`run`, `build_prompt`, `collect_git_context`, `sanitize_rolling_plan`, etc.). `Handoff` runs the agent once per boss-loop iteration: returns normally on "chain-done" (loop exits via HEAD-stable), raises `RunCmdFailed` on "next-plan" (writes child plan to `plan.md`, loop continues), raises `RuntimeError` on "bail". Preserves the original boss spec in `boss-spec.md` and restores it to `plan.md` on "chain-done" so post-loop stages see the original spec. Stage type `"handoff"`.
-- `plan.py` — `run(ctx, PlanOptions)`. Local pipeline only.
-- `implement.py` — `run(ctx, ImplementOptions)`. Dual-mode (`kind='local'` /
-  `kind='gh'`). For gh: enforces the empty-implementation invariant,
-  classifies the outcome (`HeadAdvanced` / `EmptyImpl` /
-  `DivergentHead`), creates the impl-handoff branch, and returns an
-  `ImplStageResult` with the pre-impl state and classified outcome.
-- `review_code.py` — `run(ctx, ReviewCodeOptions)`. Local pipeline only
-  (single-detail-reviewer post-collapse).
-- `address_code.py` — `run(ctx, AddressCodeOptions)`. Local pipeline only.
-- `commit_pr.py` — `run(ctx, CommitPrOptions)`. Gh pipeline. Opens a fresh
-  claude session against the impl-handoff branch diff; no session_id
-  dependency, so `--resume-from commit-pr` works cleanly.
-- `ghreview.py` — `run(ctx, GhreviewOptions)`. Thin wrapper around `/ghreview
-  <pr_url>` plus a `check_bail` call.
-- `ghaddress.py` — `run(ctx, GhaddressOptions)`. Thin wrapper around `/ghaddress
-  <pr_url>`.
-- `request_copilot.py` — `run`. Requests Copilot review by adding
-  `copilot-pull-request-reviewer` to the PR's reviewer list.
-- `verify.py` — `Verify(Stage)`. Constructs a `LoopStage` from two closures (`_run_cmd`, `_run_fix`) and delegates the retry loop to it. `_run_cmd` runs `cmds` joined with `&&` and raises `RunCmdFailed` on failure; `_run_fix` formats the fix prompt and invokes the agent. `LoopExhausted` from `LoopStage` is translated to `RuntimeError("verify stage exhausted N attempts")`. Takes `is_git` (controls diff capture) and `commit_after_fix` (controls commit instruction). Registers as stage type `"verify"`.
-- `wait_ci.py` — `run(ctx, WaitCiOptions)`. Gh pipeline (`ci-gate`). Polls PR CI checks via `utils.github`; re-invokes agent to fix failures; bails on `REVIEW_REQUIRED` or attempt exhaustion. Registers as stage type `"wait-ci"`.
-- `wait_copilot.py` — `run`. Polls until Copilot posts a non-PENDING review.
+- `plan.py` — `Plan(Stage)`. Local pipeline only.
+- `implement.py` — `Implement(Stage)`. Dual-mode (`kind='local'` / `kind='gh'`). For gh: enforces the empty-implementation invariant, classifies the outcome (`HeadAdvanced` / `EmptyImpl` / `DivergentHead`), creates the impl-handoff branch, and returns an `ImplStageResult` with the pre-impl state and classified outcome.
+- `review_code.py` — `ReviewCode(Stage)`. Local pipeline only (single-detail-reviewer post-collapse). Also registered as `"ghreview"` type alias.
+- `address_code.py` — `AddressCode(Stage)`. Local pipeline only. Also registered as `"ghaddress"` type alias.
+- `commit_pr.py` — `CommitPR(Stage)`. Gh pipeline. Opens a fresh claude session against the impl-handoff branch diff; no session_id dependency, so `--resume-from commit-pr` works cleanly.
+- `request_copilot.py` — `RequestCopilot(Stage)`. Requests Copilot review by adding `copilot-pull-request-reviewer` to the PR's reviewer list.
+- `verify.py` — `Verify(Stage)`. Constructs a `LoopStage` from two closures (`_run_cmd`, `_run_fix`) and delegates the retry loop to it. `_run_cmd` runs `cmds` joined with `&&` and raises `RunCmdFailed` on failure; `_run_fix` formats the fix prompt and invokes the agent. `LoopExhausted` from `LoopStage` is translated to `RuntimeError("verify stage exhausted N attempts")`. Takes `is_git` (controls diff capture) and `commit_after_fix` (controls commit instruction).
+- `wait_ci.py` — `WaitCI(Stage)`. Gh pipeline (`ci-gate`). Polls PR CI checks via `utils.github`; re-invokes agent to fix failures; bails on `REVIEW_REQUIRED` or attempt exhaustion.
+- `wait_copilot.py` — `WaitCopilot(Stage)`. Polls until Copilot posts a non-PENDING review.
 
 ## Conventions
 
-- Stage modules expose `run(ctx: StageContext, options: XxxOptions)` as the orchestrator entry point. Orchestrators call `module.run(ctx, options)` directly.
+- YAML stage entries are dispatched via `STAGE_TYPES` in `gremlins/pipeline/loader.py`. Each type string maps to a `Stage` subclass; `parse_stage` calls `StageCls.with_dict(d)` to construct the instance and the executor calls `stage.run(state)` to execute it.
 - Every stage that talks to `claude` takes `client: ClaudeClient` and
   calls `client.run(...)`. **Never spawn `claude -p` directly** — that
   bypasses the test seam in `../clients/protocol.py`.
