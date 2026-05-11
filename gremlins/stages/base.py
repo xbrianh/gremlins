@@ -20,6 +20,7 @@ class StageInput(NamedTuple):
 
 class Stage:
     type: str = ""
+    needs_gh: bool = False
 
     def __init__(
         self, name: str, model: str | None, prompts: list[str], options: dict[str, Any]

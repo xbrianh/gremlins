@@ -8,6 +8,8 @@ from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.discovery import resolve_pipeline_name, resolve_pipeline_path
 from gremlins.pipeline.loader import STAGE_TYPES
 from gremlins.stages.base import Stage
+from gremlins.stages.github_wait_copilot import GitHubWaitCopilot
+from gremlins.stages.loop import LoopStage
 from gremlins.stages.parallel import ParallelStage
 from gremlins.stages.plan import Plan
 
@@ -269,6 +271,47 @@ def test_parallel_expansion_in_constructor(tmp_path: pathlib.Path) -> None:
     assert "review-a" not in stage_names
     by_name = {s.name: s for s in pipe.stages}
     assert by_name["reviews"].type == "parallel"
+
+
+# ---------------------------------------------------------------------------
+# Pipeline.needs_gh tests
+# ---------------------------------------------------------------------------
+
+
+def _gh_stage(name: str = "gh-wait") -> GitHubWaitCopilot:
+    return GitHubWaitCopilot(name, None, [], {})
+
+
+def _local_stage(name: str = "plan") -> Plan:
+    return Plan(name, None, [], {})
+
+
+def _pipeline(*stages: Stage) -> _PipelineData:
+    return _PipelineData(name="test", path=pathlib.Path("."), stages=list(stages))
+
+
+def test_needs_gh_false_for_local_only_pipeline() -> None:
+    assert not _pipeline(_local_stage("plan"), _local_stage("implement")).needs_gh()
+
+
+def test_needs_gh_true_for_top_level_gh_stage() -> None:
+    assert _pipeline(_local_stage("plan"), _gh_stage()).needs_gh()
+
+
+def test_needs_gh_true_for_gh_stage_in_loop_body() -> None:
+    loop = LoopStage(
+        "boss-loop", body=[_local_stage("plan"), _gh_stage()], max_iterations=3
+    )
+    assert _pipeline(loop).needs_gh()
+
+
+def test_needs_gh_false_for_local_stage_in_loop_body() -> None:
+    loop = LoopStage(
+        "boss-loop",
+        body=[_local_stage("plan"), _local_stage("implement")],
+        max_iterations=3,
+    )
+    assert not _pipeline(loop).needs_gh()
 
 
 def test_stage_builders_registry_covers_all_known_types() -> None:

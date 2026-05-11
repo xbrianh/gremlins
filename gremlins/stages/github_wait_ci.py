@@ -128,6 +128,7 @@ def _collect_failure_output(failed: list[dict[str, Any]]) -> str:
 
 class GitHubWaitCI(Stage):
     type = "github-wait-ci"
+    needs_gh = True
 
     @classmethod
     def with_dict(cls, d: dict[str, Any], depth: int = 0) -> GitHubWaitCI:

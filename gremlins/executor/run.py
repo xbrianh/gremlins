@@ -18,7 +18,6 @@ from gremlins.errors import die
 from gremlins.executor.pipeline import Pipeline
 from gremlins.executor.state import (
     patch_state,
-    pipeline_uses_gh,
     read_pr_url,
     resolve_session_dir,
     resolve_state_file,
@@ -148,12 +147,12 @@ def run_pipeline(
     except (FileNotFoundError, ValueError, YamlLoadError) as exc:
         die(str(exc))
 
-    is_gh = pipeline_uses_gh(pipeline)
+    gh = pipeline.needs_gh()
 
     repo = ""
     state_file = resolve_state_file(gr_id)
 
-    if is_gh:
+    if gh:
         if shutil.which("gh") is None:
             die("gh CLI not found")
         repo = get_repo()
@@ -173,7 +172,7 @@ def run_pipeline(
     # For local pipelines, pre-copy the plan file so stages that resume past
     # the plan stage can find plan.md. For gh pipelines, the plan stage itself
     # handles plan_source (may be a file path or an issue ref).
-    if not is_gh and args.plan and not plan_file.exists():
+    if not gh and args.plan and not plan_file.exists():
         src = pathlib.Path(args.plan)
         if src.is_file():
             shutil.copyfile(src, plan_file)
@@ -188,14 +187,14 @@ def run_pipeline(
             gr_id=gr_id,
             pipeline_data=pipeline,
             repo=repo,
-            state_file=state_file if is_gh else None,
+            state_file=state_file if gh else None,
             test_client=client,
         )
         pipe.validate_resume_target()
     except ValueError as exc:
         die(str(exc))
 
-    if not is_gh and args.resume_from:
+    if not gh and args.resume_from:
         _expanded_stage_names = [s.name for s in pipe.stages]
 
         def _type_idx(stage_type: str) -> int:
@@ -227,7 +226,7 @@ def run_pipeline(
     if total_cost > 0:
         patch_state(gr_id, total_cost_usd=total_cost)
 
-    if is_gh:
+    if gh:
         logger.info("done. PR: %s", read_pr_url(gr_id) or "(unknown)")
     else:
         logger.info("done. session artifacts in: %s", session_dir)
