@@ -1,4 +1,4 @@
-"""Tests for gremlins.stages.open_github_pr."""
+"""Tests for gremlins.stages.github_open_pull_request."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
-from gremlins.stages.open_github_pr import OpenGitHubPR
+from gremlins.stages.github_open_pull_request import GitHubOpenPullRequest
 
 PR_URL = "https://github.com/owner/repo/pull/42"
 PR_BRANCH = "issue-42-add-feature"
@@ -21,9 +21,9 @@ def _make_state(
     *,
     gr_id: str | None = None,
     issue_url: str = "https://github.com/owner/repo/issues/42",
-) -> tuple[OpenGitHubPR, RuntimeState]:
-    stage = OpenGitHubPR("open-pr", "sonnet", [], {})
-    client = FakeClaudeClient(fixtures={"open-github-pr": MINIMAL_EVENTS})
+) -> tuple[GitHubOpenPullRequest, RuntimeState]:
+    stage = GitHubOpenPullRequest("open-pr", "sonnet", [], {})
+    client = FakeClaudeClient(fixtures={"github-open-pull-request": MINIMAL_EVENTS})
     state = RuntimeState(
         client=client,
         session_dir=tmp_path,
@@ -36,14 +36,14 @@ def _make_state(
 def test_run_calls_claude_with_push_prompt(tmp_path: pathlib.Path) -> None:
     stage, state = _make_state(tmp_path, gr_id="test-gr")
     with (
-        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
-        patch("gremlins.stages.open_github_pr._get_pr_branch", return_value=PR_BRANCH),
+        patch("gremlins.stages.github_open_pull_request.extract_gh_url", return_value=PR_URL),
+        patch("gremlins.stages.github_open_pull_request._get_pr_branch", return_value=PR_BRANCH),
         patch("gremlins.executor.state.append_artifact"),
     ):
         stage.run(state)
     assert len(state.client.calls) == 1
     call = state.client.calls[0]
-    assert call.label == "open-github-pr"
+    assert call.label == "github-open-pull-request"
     assert "push" in call.prompt.lower()
 
 
@@ -52,8 +52,8 @@ def test_issue_num_adds_closes_clause(tmp_path: pathlib.Path) -> None:
         tmp_path, gr_id="test-gr", issue_url="https://github.com/o/r/issues/42"
     )
     with (
-        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
-        patch("gremlins.stages.open_github_pr._get_pr_branch", return_value=PR_BRANCH),
+        patch("gremlins.stages.github_open_pull_request.extract_gh_url", return_value=PR_URL),
+        patch("gremlins.stages.github_open_pull_request._get_pr_branch", return_value=PR_BRANCH),
         patch("gremlins.executor.state.append_artifact"),
     ):
         stage.run(state)
@@ -63,8 +63,8 @@ def test_issue_num_adds_closes_clause(tmp_path: pathlib.Path) -> None:
 def test_no_issue_url_skips_closes(tmp_path: pathlib.Path) -> None:
     stage, state = _make_state(tmp_path, gr_id="test-gr", issue_url="")
     with (
-        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
-        patch("gremlins.stages.open_github_pr._get_pr_branch", return_value=PR_BRANCH),
+        patch("gremlins.stages.github_open_pull_request.extract_gh_url", return_value=PR_URL),
+        patch("gremlins.stages.github_open_pull_request._get_pr_branch", return_value=PR_BRANCH),
         patch("gremlins.executor.state.append_artifact"),
     ):
         stage.run(state)
@@ -74,8 +74,8 @@ def test_no_issue_url_skips_closes(tmp_path: pathlib.Path) -> None:
 def test_run_returns_pr_url(tmp_path: pathlib.Path) -> None:
     stage, state = _make_state(tmp_path, gr_id="test-gr")
     with (
-        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
-        patch("gremlins.stages.open_github_pr._get_pr_branch", return_value=PR_BRANCH),
+        patch("gremlins.stages.github_open_pull_request.extract_gh_url", return_value=PR_URL),
+        patch("gremlins.stages.github_open_pull_request._get_pr_branch", return_value=PR_BRANCH),
         patch("gremlins.executor.state.append_artifact"),
     ):
         result = stage.run(state)
@@ -85,20 +85,20 @@ def test_run_returns_pr_url(tmp_path: pathlib.Path) -> None:
 def test_run_writes_raw_path(tmp_path: pathlib.Path) -> None:
     stage, state = _make_state(tmp_path, gr_id="test-gr")
     with (
-        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
-        patch("gremlins.stages.open_github_pr._get_pr_branch", return_value=PR_BRANCH),
+        patch("gremlins.stages.github_open_pull_request.extract_gh_url", return_value=PR_URL),
+        patch("gremlins.stages.github_open_pull_request._get_pr_branch", return_value=PR_BRANCH),
         patch("gremlins.executor.state.append_artifact"),
     ):
         stage.run(state)
-    assert state.client.calls[0].raw_path == tmp_path / "stream-open-github-pr.jsonl"
+    assert state.client.calls[0].raw_path == tmp_path / "stream-github-open-pull-request.jsonl"
 
 
 def test_run_records_pr_artifact(tmp_path: pathlib.Path) -> None:
     stage, state = _make_state(tmp_path, gr_id="test-gr")
     artifact_calls: list[tuple] = []
     with (
-        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
-        patch("gremlins.stages.open_github_pr._get_pr_branch", return_value=PR_BRANCH),
+        patch("gremlins.stages.github_open_pull_request.extract_gh_url", return_value=PR_URL),
+        patch("gremlins.stages.github_open_pull_request._get_pr_branch", return_value=PR_BRANCH),
         patch(
             "gremlins.executor.state.append_artifact",
             side_effect=lambda gr_id, artifact: artifact_calls.append(
@@ -124,9 +124,9 @@ def _make_state_with_gr(
     *,
     base_ref_name: str = "",
     issue_url: str = "",
-) -> tuple[OpenGitHubPR, RuntimeState]:
-    stage = OpenGitHubPR("open-pr", "sonnet", [], {})
-    client = FakeClaudeClient(fixtures={"open-github-pr": MINIMAL_EVENTS})
+) -> tuple[GitHubOpenPullRequest, RuntimeState]:
+    stage = GitHubOpenPullRequest("open-pr", "sonnet", [], {})
+    client = FakeClaudeClient(fixtures={"github-open-pull-request": MINIMAL_EVENTS})
     state = RuntimeState(
         client=client,
         session_dir=tmp_path,
@@ -146,8 +146,8 @@ def test_stacked_pr_uses_prior_pr_branch(tmp_path: pathlib.Path) -> None:
             "gremlins.executor.state.last_pr_branch",
             return_value="gremlin/abc-child-1",
         ),
-        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
-        patch("gremlins.stages.open_github_pr._get_pr_branch", return_value=PR_BRANCH),
+        patch("gremlins.stages.github_open_pull_request.extract_gh_url", return_value=PR_URL),
+        patch("gremlins.stages.github_open_pull_request._get_pr_branch", return_value=PR_BRANCH),
         patch("gremlins.executor.state.append_artifact"),
         patch.object(
             stage,
@@ -173,8 +173,8 @@ def test_single_pr_without_prior_pr_branch_uses_base_ref_name(
     prompts_seen: list[str] = []
     with (
         patch("gremlins.executor.state.last_pr_branch", return_value=""),
-        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
-        patch("gremlins.stages.open_github_pr._get_pr_branch", return_value=PR_BRANCH),
+        patch("gremlins.stages.github_open_pull_request.extract_gh_url", return_value=PR_URL),
+        patch("gremlins.stages.github_open_pull_request._get_pr_branch", return_value=PR_BRANCH),
         patch("gremlins.executor.state.append_artifact"),
         patch.object(
             stage,
@@ -195,8 +195,8 @@ def test_first_child_uses_base_ref_name(tmp_path: pathlib.Path) -> None:
     stage, state = _make_state_with_gr(tmp_path, base_ref_name="main")
     prompts_seen: list[str] = []
     with (
-        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
-        patch("gremlins.stages.open_github_pr._get_pr_branch", return_value=PR_BRANCH),
+        patch("gremlins.stages.github_open_pull_request.extract_gh_url", return_value=PR_URL),
+        patch("gremlins.stages.github_open_pull_request._get_pr_branch", return_value=PR_BRANCH),
         patch("gremlins.executor.state.append_artifact"),
         patch.object(
             stage,
@@ -214,8 +214,8 @@ def test_first_child_uses_base_ref_name(tmp_path: pathlib.Path) -> None:
 
 def test_explicit_base_ref_used_when_no_prior_pr(tmp_path: pathlib.Path) -> None:
     """Stage-level base_ref is used when there is no prior PR artifact branch."""
-    stage = OpenGitHubPR("open-pr", "sonnet", [], {}, base_ref="feature-base")
-    client = FakeClaudeClient(fixtures={"open-github-pr": MINIMAL_EVENTS})
+    stage = GitHubOpenPullRequest("open-pr", "sonnet", [], {}, base_ref="feature-base")
+    client = FakeClaudeClient(fixtures={"github-open-pull-request": MINIMAL_EVENTS})
     state = RuntimeState(
         client=client,
         session_dir=tmp_path,
@@ -225,8 +225,8 @@ def test_explicit_base_ref_used_when_no_prior_pr(tmp_path: pathlib.Path) -> None
     prompts_seen: list[str] = []
     with (
         patch("gremlins.executor.state.last_pr_branch", return_value=None),
-        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
-        patch("gremlins.stages.open_github_pr._get_pr_branch", return_value=PR_BRANCH),
+        patch("gremlins.stages.github_open_pull_request.extract_gh_url", return_value=PR_URL),
+        patch("gremlins.stages.github_open_pull_request._get_pr_branch", return_value=PR_BRANCH),
         patch("gremlins.executor.state.append_artifact"),
         patch.object(
             stage,
@@ -243,8 +243,8 @@ def test_explicit_base_ref_used_when_no_prior_pr(tmp_path: pathlib.Path) -> None
 
 def test_last_pr_branch_takes_priority_over_base_ref(tmp_path: pathlib.Path) -> None:
     """last_pr_branch takes priority over stage-level base_ref when stacking."""
-    stage = OpenGitHubPR("open-pr", "sonnet", [], {}, base_ref="feature-base")
-    client = FakeClaudeClient(fixtures={"open-github-pr": MINIMAL_EVENTS})
+    stage = GitHubOpenPullRequest("open-pr", "sonnet", [], {}, base_ref="feature-base")
+    client = FakeClaudeClient(fixtures={"github-open-pull-request": MINIMAL_EVENTS})
     state = RuntimeState(
         client=client,
         session_dir=tmp_path,
@@ -257,8 +257,8 @@ def test_last_pr_branch_takes_priority_over_base_ref(tmp_path: pathlib.Path) -> 
             "gremlins.executor.state.last_pr_branch",
             return_value="gremlin/child-1",
         ),
-        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
-        patch("gremlins.stages.open_github_pr._get_pr_branch", return_value=PR_BRANCH),
+        patch("gremlins.stages.github_open_pull_request.extract_gh_url", return_value=PR_URL),
+        patch("gremlins.stages.github_open_pull_request._get_pr_branch", return_value=PR_BRANCH),
         patch("gremlins.executor.state.append_artifact"),
         patch.object(
             stage,
@@ -283,8 +283,8 @@ def test_loop_iteration_gt1_adds_iter_suffix_instruction(
     state = dataclasses.replace(state, loop_iteration=2)
     prompts_seen: list[str] = []
     with (
-        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
-        patch("gremlins.stages.open_github_pr._get_pr_branch", return_value=PR_BRANCH),
+        patch("gremlins.stages.github_open_pull_request.extract_gh_url", return_value=PR_URL),
+        patch("gremlins.stages.github_open_pull_request._get_pr_branch", return_value=PR_BRANCH),
         patch("gremlins.executor.state.append_artifact"),
         patch.object(
             stage,
@@ -306,8 +306,8 @@ def test_loop_iteration_1_no_iter_suffix(tmp_path: pathlib.Path) -> None:
     )
     prompts_seen: list[str] = []
     with (
-        patch("gremlins.stages.open_github_pr.extract_gh_url", return_value=PR_URL),
-        patch("gremlins.stages.open_github_pr._get_pr_branch", return_value=PR_BRANCH),
+        patch("gremlins.stages.github_open_pull_request.extract_gh_url", return_value=PR_URL),
+        patch("gremlins.stages.github_open_pull_request._get_pr_branch", return_value=PR_BRANCH),
         patch("gremlins.executor.state.append_artifact"),
         patch.object(
             stage,
@@ -329,11 +329,11 @@ def test_record_child_pr_appends_pr_artifact(tmp_path: pathlib.Path) -> None:
     artifact_calls: list[tuple] = []
     with (
         patch(
-            "gremlins.stages.open_github_pr.extract_gh_url",
+            "gremlins.stages.github_open_pull_request.extract_gh_url",
             return_value="https://github.com/owner/repo/pull/314",
         ),
         patch(
-            "gremlins.stages.open_github_pr._get_pr_branch",
+            "gremlins.stages.github_open_pull_request._get_pr_branch",
             return_value="issue-42-some-slug",
         ),
         patch(

@@ -8,7 +8,7 @@ from gremlins.stages.base import Stage
 from gremlins.stages.handoff import Handoff
 from gremlins.stages.implement import Implement
 from gremlins.stages.loop import LoopStage
-from gremlins.stages.open_github_pr import OpenGitHubPR
+from gremlins.stages.github_open_pull_request import GitHubOpenPullRequest
 from gremlins.stages.parallel import ParallelStage
 from gremlins.stages.plan import Plan
 from gremlins.stages.request_copilot import RequestCopilot
@@ -23,7 +23,7 @@ STAGE_TYPES: dict[str, type[Stage]] = {
     "plan": Plan,
     "implement": Implement,
     "verify": Verify,
-    "open-github-pr": OpenGitHubPR,
+    "github-open-pull-request": GitHubOpenPullRequest,
     "request-copilot": RequestCopilot,
     "wait-copilot": WaitCopilot,
     "wait-ci": WaitCI,

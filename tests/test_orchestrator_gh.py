@@ -201,7 +201,7 @@ def _make_gh_subprocess(
         # gh pr diff
         if sub == "pr" and "diff" in cmd:
             return subprocess.CompletedProcess(cmd, 0, stdout=pr_diff, stderr="")
-        # gh pr view (open_github_pr._get_pr_branch)
+        # gh pr view (github_open_pull_request._get_pr_branch)
         if sub == "pr" and "view" in cmd and "--json" in cmd:
             return subprocess.CompletedProcess(
                 cmd, 0, stdout="issue-42-impl-slug\n", stderr=""
@@ -446,7 +446,7 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
         git_dir=tmp_path,
         fixtures={
             "implement": IMPL_EVENTS,
-            "open-github-pr": _pr_events(),
+            "github-open-pull-request": _pr_events(),
         },
     )
 
@@ -495,7 +495,7 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
             "plan": _issue_events(),
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "open-github-pr": _pr_events(),
+            "github-open-pull-request": _pr_events(),
         },
     )
 
@@ -543,7 +543,7 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
         fixtures={
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "open-github-pr": _pr_events(),
+            "github-open-pull-request": _pr_events(),
         },
     )
 
@@ -596,7 +596,7 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
         fixtures={
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "open-github-pr": _pr_events(),
+            "github-open-pull-request": _pr_events(),
         },
     )
 
@@ -650,7 +650,7 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
         fixtures={
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "open-github-pr": _pr_events(),
+            "github-open-pull-request": _pr_events(),
         },
     )
 
@@ -711,7 +711,7 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         fixtures={
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "open-github-pr": _pr_events(),
+            "github-open-pull-request": _pr_events(),
         },
     )
 
@@ -855,7 +855,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
             {"type": "system", "subtype": "init"},
             {"type": "result", "subtype": "success", "total_cost_usd": 0.07},
         ],
-        "open-github-pr": [
+        "github-open-pull-request": [
             {"type": "system", "subtype": "init"},
             {
                 "type": "assistant",
@@ -898,7 +898,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
     labels = [c.label for c in client.calls]
     assert "plan-title" in labels
     assert "implement" in labels
-    assert "open-github-pr" in labels
+    assert "github-open-pull-request" in labels
 
     # Read on-disk state.json — verifies both the accumulation and the persistence step.
     state = json.loads(state_file.read_text())
@@ -918,7 +918,7 @@ def test_parse_resume_from_open_pr(capsys):
 
 
 def test_resume_from_open_pr(tmp_path, monkeypatch):
-    """--resume-from open-pr skips plan/implement and runs open-github-pr onward."""
+    """--resume-from open-pr skips plan/implement and runs github-open-pull-request onward."""
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
@@ -970,7 +970,7 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
 
-    client = FakeClaudeClient(fixtures={"open-github-pr": _pr_events()})
+    client = FakeClaudeClient(fixtures={"github-open-pull-request": _pr_events()})
 
     result = run_pipeline(
         _gh_pipeline_path(tmp_path),
@@ -981,10 +981,10 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
 
     labels = [c.label for c in client.calls]
     assert "implement" not in labels, "implement must not run on open-pr resume"
-    assert "open-github-pr" in labels
+    assert "github-open-pull-request" in labels
 
     assert ghreview_called == ["https://github.com/owner/repo/pull/101"]
-    # Verify OpenGitHubPR wrote pr artifact to state.json
+    # Verify GitHubOpenPullRequest wrote pr artifact to state.json
     state = json.loads(state_file.read_text())
     pr_artifacts = [a for a in state.get("artifacts", []) if a.get("type") == "pr"]
     assert (
@@ -999,7 +999,7 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
 
 
 def test_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
-    """WaitCopilot receives repo and session_dir; pr_url is written to state by OpenGitHubPR."""
+    """WaitCopilot receives repo and session_dir; pr_url is written to state by GitHubOpenPullRequest."""
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
@@ -1039,7 +1039,7 @@ def test_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
         fixtures={
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "open-github-pr": _pr_events("https://github.com/owner/repo/pull/77"),
+            "github-open-pull-request": _pr_events("https://github.com/owner/repo/pull/77"),
         },
     )
 
@@ -1052,7 +1052,7 @@ def test_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
 
     assert captured_stage["state"].repo == "owner/repo"
     assert captured_stage["state"].session_dir == session_dir
-    # pr artifact written to state.json by OpenGitHubPR; pr_num derived from it in run()
+    # pr artifact written to state.json by GitHubOpenPullRequest; pr_num derived from it in run()
     state = json.loads(state_file.read_text())
     pr_artifacts = [a for a in state.get("artifacts", []) if a.get("type") == "pr"]
     assert (
@@ -1067,7 +1067,7 @@ def test_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
 
 
 def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
-    """WaitCI receives model and session_dir; pr_url is written to state by OpenGitHubPR."""
+    """WaitCI receives model and session_dir; pr_url is written to state by GitHubOpenPullRequest."""
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
@@ -1106,7 +1106,7 @@ def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
         fixtures={
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "open-github-pr": _pr_events("https://github.com/owner/repo/pull/77"),
+            "github-open-pull-request": _pr_events("https://github.com/owner/repo/pull/77"),
         },
     )
 
@@ -1120,7 +1120,7 @@ def test_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
     stage = captured_stage["stage"]
     assert stage.model == "claude-opus-4-7"
     assert captured_stage["state"].session_dir == session_dir
-    # pr artifact written to state.json by OpenGitHubPR; read from state in WaitCI.run()
+    # pr artifact written to state.json by GitHubOpenPullRequest; read from state in WaitCI.run()
     state = json.loads(state_file.read_text())
     pr_artifacts = [a for a in state.get("artifacts", []) if a.get("type") == "pr"]
     assert (
@@ -1174,7 +1174,7 @@ def test_wait_ci_stage_ordering(tmp_path, monkeypatch):
         fixtures={
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "open-github-pr": _pr_events(),
+            "github-open-pull-request": _pr_events(),
         },
     )
 
@@ -1294,7 +1294,7 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
         fixtures={
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "open-github-pr": _pr_events("https://github.com/owner/repo/pull/77"),
+            "github-open-pull-request": _pr_events("https://github.com/owner/repo/pull/77"),
         },
     )
 
@@ -1359,7 +1359,7 @@ def test_resume_from_verify(tmp_path, monkeypatch):
     monkeypatch.setattr("gremlins.stages.wait_ci.WaitCI.run", lambda self, pipe: None)
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
 
-    client = FakeClaudeClient(fixtures={"open-github-pr": _pr_events()})
+    client = FakeClaudeClient(fixtures={"github-open-pull-request": _pr_events()})
 
     result = run_pipeline(
         _gh_pipeline_path(tmp_path),
@@ -1406,7 +1406,7 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir):
         fixtures={
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "open-github-pr": _pr_events(),
+            "github-open-pull-request": _pr_events(),
         },
     )
 
@@ -1457,7 +1457,7 @@ def test_gh_main_state_client_tracks_effective_model(
         fixtures={
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "open-github-pr": _pr_events(),
+            "github-open-pull-request": _pr_events(),
         },
     )
 
@@ -1532,7 +1532,7 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
         fixtures={
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "open-github-pr": _pr_events(),
+            "github-open-pull-request": _pr_events(),
         },
     )
 
@@ -1587,7 +1587,7 @@ def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
             "plan": _issue_events(),
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "open-github-pr": _pr_events(),
+            "github-open-pull-request": _pr_events(),
         },
     )
 
@@ -1616,9 +1616,9 @@ def _make_pipeline(*stages):
 
 def test_pipeline_uses_gh_detects_top_level_gh_stage() -> None:
     from gremlins.executor.state import pipeline_uses_gh
-    from gremlins.stages.open_github_pr import OpenGitHubPR
+    from gremlins.stages.github_open_pull_request import GitHubOpenPullRequest
 
-    pipeline = _make_pipeline(OpenGitHubPR("open-pr", None, [], {}))
+    pipeline = _make_pipeline(GitHubOpenPullRequest("open-pr", None, [], {}))
     assert pipeline_uses_gh(pipeline) is True
 
 
@@ -1639,11 +1639,11 @@ def test_pipeline_uses_gh_recurses_into_loop_body() -> None:
     from gremlins.executor.state import pipeline_uses_gh
     from gremlins.stages.handoff import Handoff
     from gremlins.stages.loop import LoopStage
-    from gremlins.stages.open_github_pr import OpenGitHubPR
+    from gremlins.stages.github_open_pull_request import GitHubOpenPullRequest
 
     gh_body = [
         Handoff("handoff"),
-        OpenGitHubPR("open-pr", None, [], {}),
+        GitHubOpenPullRequest("open-pr", None, [], {}),
     ]
     loop = LoopStage("chain", body=gh_body, max_iterations=3)
     assert pipeline_uses_gh(_make_pipeline(loop)) is True

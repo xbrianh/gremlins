@@ -1,4 +1,4 @@
-"""Open-GitHub-PR stage for the gh pipeline."""
+"""GitHub-Open-Pull-Request stage for the gh pipeline."""
 
 from __future__ import annotations
 
@@ -46,11 +46,11 @@ def _get_pr_branch(pr_url: str) -> str:
     return r.stdout.strip()
 
 
-class OpenGitHubPR(Stage):
-    type = "open-github-pr"
+class GitHubOpenPullRequest(Stage):
+    type = "github-open-pull-request"
 
     @classmethod
-    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> OpenGitHubPR:
+    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> GitHubOpenPullRequest:
         from gremlins.pipeline.loader import get_client_from_dict
 
         options: dict[str, Any] = d.get("options") or {}
@@ -92,7 +92,7 @@ class OpenGitHubPR(Stage):
             )
 
         base_prompt = render_bundled_prompt(
-            "open_github_pr.md", base_ref=base_ref
+            "github_open_pull_request.md", base_ref=base_ref
         ).rstrip()
 
         n = state.loop_iteration
@@ -109,8 +109,8 @@ class OpenGitHubPR(Stage):
         completed: CompletedRun = self.run_claude(
             prompt,
             state=state,
-            label="open-github-pr",
-            raw_path=state.session_dir / "stream-open-github-pr.jsonl",
+            label="github-open-pull-request",
+            raw_path=state.session_dir / "stream-github-open-pull-request.jsonl",
             capture_events=True,
         )
 
