@@ -357,8 +357,12 @@ def test_startup_fails_in_non_git_dir(tmp_path, monkeypatch, capsys):
     plan_file = tmp_path / "plan.md"
     plan_file.write_text("# Plan\nDo stuff.\n")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(shutil, "which", lambda n: "/fake/claude" if n == "claude" else None)
-    monkeypatch.setattr("gremlins.executor.run._install_signal_handlers", lambda c: None)
+    monkeypatch.setattr(
+        shutil, "which", lambda n: "/fake/claude" if n == "claude" else None
+    )
+    monkeypatch.setattr(
+        "gremlins.executor.run._install_signal_handlers", lambda c: None
+    )
     monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: False)
     with pytest.raises(SystemExit):
         run_pipeline(
