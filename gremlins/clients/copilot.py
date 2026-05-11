@@ -67,7 +67,9 @@ class SubprocessCopilotClient:
         return 0.0
 
     def _build_argv(self, model: str | None, prompt: str) -> list[str]:
-        cmd = ["copilot", "--allow-all-tools"]
+        # --allow-all is required: --allow-all-tools alone doesn't grant file-path
+        # or URL access, so the agent falls back to chatting instead of editing files.
+        cmd = ["copilot", "--allow-all"]
         if model is not None:
             cmd += ["--model", model]
         cmd += ["-p", prompt]
