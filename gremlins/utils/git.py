@@ -342,9 +342,7 @@ def setup_detached_worktree(project_root: str, base_ref: str) -> str:
     """Add a detached worktree at base_ref. Returns the worktree path."""
     workdir = tempfile.mkdtemp(prefix="aibg-gremlin.")
     os.rmdir(workdir)
-    _run_git(
-        ["worktree", "add", "--detach", workdir, base_ref], cwd=project_root
-    )
+    _run_git(["worktree", "add", "--detach", workdir, base_ref], cwd=project_root)
     return workdir
 
 
