@@ -6,7 +6,7 @@ from typing import Any, cast
 import yaml
 
 from gremlins.pipeline.discovery import resolve_pipeline_name
-from gremlins.pipeline.schema import BUNDLED_PROMPT_PREFIX
+from gremlins.pipeline import BUNDLED_PROMPT_PREFIX
 from gremlins.prompts import BUNDLED_PROMPT_DIR
 
 

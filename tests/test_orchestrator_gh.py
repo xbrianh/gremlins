@@ -25,7 +25,7 @@ from gremlins.git import (
 from gremlins.orchestrators.run import _parse_args as _parse_gh_args
 from gremlins.orchestrators.run import run_pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
-from gremlins.pipeline.loader import load_pipeline
+from gremlins.pipeline import Pipeline
 
 
 def _gh_pipeline_path(cwd):
@@ -163,7 +163,7 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
     )
 
     # Strip pipeline client keys so the injected client is used for every stage.
-    _real_load_pipeline = _run_mod.load_pipeline
+    _real_from_yaml = Pipeline.from_yaml
 
     def _strip_clients(stage):
         stage.client = None
@@ -171,13 +171,13 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
             _strip_clients(child)
 
     def _load_pipeline_no_clients(path):
-        pipeline = _real_load_pipeline(path)
+        pipeline = _real_from_yaml(path)
         for s in pipeline.stages:
             _strip_clients(s)
         return dataclasses.replace(pipeline, default_client=None)
 
     monkeypatch.setattr(
-        "gremlins.orchestrators.run.load_pipeline", _load_pipeline_no_clients
+        "gremlins.pipeline.Pipeline.from_yaml", _load_pipeline_no_clients
     )
 
     # set_stage is a no-op in tests — gr_id is not passed to gh_main.
@@ -389,7 +389,7 @@ def test_parse_issue_ref_invalid():
 
 
 def test_gh_pipeline_stage_names(tmp_path):
-    pipeline = load_pipeline(resolve_pipeline_path("gh", tmp_path))
+    pipeline = Pipeline.from_yaml(resolve_pipeline_path("gh", tmp_path))
     names = [s.name for s in pipeline.stages]
     assert names == [
         "plan",
@@ -760,6 +760,7 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
 
     write_pipeline(original_stage_clients)
 
+    _real_from_yaml = Pipeline.from_yaml
     _, state_file = _patch_common(
         monkeypatch,
         tmp_path,
@@ -768,7 +769,7 @@ def test_gh_main_resume_prefers_persisted_stage_clients_over_edited_pipeline(
             "issue_num": "42",
         },
     )
-    monkeypatch.setattr("gremlins.orchestrators.run.load_pipeline", load_pipeline)
+    monkeypatch.setattr("gremlins.pipeline.Pipeline.from_yaml", _real_from_yaml)
 
     def writing_patch_state(gr_id=None, _delete=(), **kw):
         data = json.loads(state_file.read_text(encoding="utf-8"))
@@ -1768,7 +1769,7 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
     # default_client without a live client instance.
     from gremlins.clients.client import Client
 
-    _real_load_pipeline = _run_mod.load_pipeline
+    _real_from_yaml = Pipeline.from_yaml
 
     def _strip_clients_2(stage):
         stage.client = None
@@ -1776,7 +1777,7 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
             _strip_clients_2(child)
 
     def _load_pipeline_copilot_default(path):
-        pipeline = _real_load_pipeline(path)
+        pipeline = _real_from_yaml(path)
         for s in pipeline.stages:
             _strip_clients_2(s)
         return dataclasses.replace(
@@ -1785,7 +1786,7 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(
-        "gremlins.orchestrators.run.load_pipeline", _load_pipeline_copilot_default
+        "gremlins.pipeline.Pipeline.from_yaml", _load_pipeline_copilot_default
     )
 
     monkeypatch.setattr(
@@ -1888,9 +1889,9 @@ def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
 def _make_pipeline(*stages):
     import pathlib
 
-    from gremlins.schema import PipelineDef
+    from gremlins.pipeline import Pipeline
 
-    return PipelineDef(name="test", path=pathlib.Path("test.yaml"), stages=list(stages))
+    return Pipeline(name="test", path=pathlib.Path("test.yaml"), stages=list(stages))
 
 
 def test_pipeline_uses_gh_detects_top_level_gh_stage() -> None:

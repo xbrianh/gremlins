@@ -6,7 +6,7 @@ import pytest
 
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
 from gremlins.pipeline.discovery import resolve_pipeline_path
-from gremlins.pipeline.loader import load_pipeline
+from gremlins.pipeline import Pipeline
 from gremlins.stage_clients import (
     collect_stage_specs,
     require_stage_spec,
@@ -79,7 +79,7 @@ def test_require_stage_spec_missing_stage_raises():
 
 
 def test_validate_stage_specs_reports_all_missing_stages(tmp_path):
-    pipeline = load_pipeline(resolve_pipeline_path("gh", tmp_path))
+    pipeline = Pipeline.from_yaml(resolve_pipeline_path("gh", tmp_path))
 
     with pytest.raises(ValueError, match=r"stage_clients missing stages:"):
         validate_stage_specs({"plan": Client("claude", "sonnet")}, pipeline)
@@ -109,7 +109,7 @@ stages:
           - { name: leaf-c, type: plan }
 """,
     )
-    pipeline = load_pipeline(pipeline_path)
+    pipeline = Pipeline.from_yaml(pipeline_path)
 
     specs = collect_stage_specs(pipeline, cli_spec=None)
     assert {"outer", "leaf-a", "inner", "leaf-b", "leaf-c"} <= set(specs)
@@ -143,7 +143,7 @@ stages:
       - { name: address-code, type: address-code }
 """,
     )
-    pipeline = load_pipeline(pipeline_path)
+    pipeline = Pipeline.from_yaml(pipeline_path)
     chain_entry = next(s for s in pipeline.stages if s.name == "chain")
     address_entry = next(s for s in chain_entry.body if s.name == "address-code")
 

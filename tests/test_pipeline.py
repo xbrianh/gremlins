@@ -4,9 +4,8 @@ import pathlib
 import pytest
 
 from gremlins.orchestrators.pipeline import Pipeline
+from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.discovery import resolve_pipeline_name, resolve_pipeline_path
-from gremlins.pipeline.loader import load_pipeline
-from gremlins.schema import PipelineDef as _PipelineData
 from gremlins.stages.base import Stage
 from gremlins.stages.parallel import ParallelStage
 from gremlins.stages.plan import Plan
@@ -37,7 +36,7 @@ def _local(
 
 
 def test_pipeline_constructs_from_local_yaml(tmp_path: pathlib.Path) -> None:
-    pipeline_data = load_pipeline(resolve_pipeline_path("local", pathlib.Path.cwd()))
+    pipeline_data = _PipelineData.from_yaml(resolve_pipeline_path("local", pathlib.Path.cwd()))
     pipe = Pipeline(
         pipeline_data.stages,
         args=_args(),
@@ -59,7 +58,7 @@ def test_pipeline_constructs_from_local_yaml(tmp_path: pathlib.Path) -> None:
 
 
 def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
-    pipeline_data = load_pipeline(resolve_pipeline_path("gh", pathlib.Path.cwd()))
+    pipeline_data = _PipelineData.from_yaml(resolve_pipeline_path("gh", pathlib.Path.cwd()))
     pipe = Pipeline(
         pipeline_data.stages,
         args=_args(),

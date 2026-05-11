@@ -6,7 +6,7 @@ import pathlib
 
 import pytest
 
-from gremlins.pipeline.loader import load_pipeline
+from gremlins.pipeline import Pipeline
 
 
 def _write_yaml(path: pathlib.Path, content: str) -> pathlib.Path:
@@ -37,7 +37,7 @@ stages:
     prompt: {prompt.name}
 """,
     )
-    pipeline = load_pipeline(yaml_path)
+    pipeline = Pipeline.from_yaml(yaml_path)
     assert pipeline.name == "test-pipe"
     assert pipeline.default_client is not None
     assert str(pipeline.default_client) == "claude:sonnet"
@@ -65,7 +65,7 @@ stages:
     client: copilot:gpt-5.4
 """,
     )
-    pipeline = load_pipeline(yaml_path)
+    pipeline = Pipeline.from_yaml(yaml_path)
     assert pipeline.stages[0].client is None
     assert pipeline.stages[1].client is not None
     assert str(pipeline.stages[1].client) == "copilot:gpt-5.4"
@@ -84,7 +84,7 @@ stages:
 """,
     )
     with pytest.raises(ValueError, match="unknown type"):
-        load_pipeline(tmp_path / "pipeline.yaml")
+        Pipeline.from_yaml(tmp_path / "pipeline.yaml")
 
 
 def test_unknown_provider_raises(tmp_path: pathlib.Path) -> None:
@@ -98,7 +98,7 @@ stages:
 """,
     )
     with pytest.raises(ValueError, match="unknown provider"):
-        load_pipeline(tmp_path / "pipeline.yaml")
+        Pipeline.from_yaml(tmp_path / "pipeline.yaml")
 
 
 def test_invalid_client_format_raises(tmp_path: pathlib.Path) -> None:
@@ -113,7 +113,7 @@ stages:
 """,
     )
     with pytest.raises(ValueError):
-        load_pipeline(tmp_path / "pipeline.yaml")
+        Pipeline.from_yaml(tmp_path / "pipeline.yaml")
 
 
 def test_missing_prompt_file_raises(tmp_path: pathlib.Path) -> None:
@@ -126,7 +126,7 @@ stages:
 """,
     )
     with pytest.raises(FileNotFoundError):
-        load_pipeline(tmp_path / "pipeline.yaml")
+        Pipeline.from_yaml(tmp_path / "pipeline.yaml")
 
 
 # ---- gremlins: prefix for bundled prompts ---------------------------------
@@ -144,7 +144,7 @@ stages:
     prompt: [gremlins:code_style.md]
 """,
     )
-    pipeline = load_pipeline(tmp_path / "pipeline.yaml")
+    pipeline = Pipeline.from_yaml(tmp_path / "pipeline.yaml")
     assert len(pipeline.stages[0].prompts) == 1
     assert pipeline.stages[0].prompts[0].strip()  # non-empty content
 
@@ -163,7 +163,7 @@ stages:
 """,
     )
     with pytest.raises(FileNotFoundError):
-        load_pipeline(tmp_path / "pipeline.yaml")
+        Pipeline.from_yaml(tmp_path / "pipeline.yaml")
 
 
 def test_mixed_bundled_and_local_prompts(tmp_path: pathlib.Path) -> None:
@@ -180,7 +180,7 @@ stages:
     prompt: [gremlins:code_style.md, {local.name}]
 """,
     )
-    pipeline = load_pipeline(tmp_path / "pipeline.yaml")
+    pipeline = Pipeline.from_yaml(tmp_path / "pipeline.yaml")
     assert len(pipeline.stages[0].prompts) == 2
     assert pipeline.stages[0].prompts[1] == "prompt content"
 
@@ -198,7 +198,7 @@ stages:
 """,
     )
     with pytest.raises(ValueError, match="missing a name"):
-        load_pipeline(tmp_path / "pipeline.yaml")
+        Pipeline.from_yaml(tmp_path / "pipeline.yaml")
 
 
 # ---- named prompts (top-level prompts: mapping) ----------------------------
@@ -219,7 +219,7 @@ stages:
     prompt: base
 """,
     )
-    pipeline = load_pipeline(tmp_path / "pipeline.yaml")
+    pipeline = Pipeline.from_yaml(tmp_path / "pipeline.yaml")
     assert pipeline.stages[0].prompts == ["prompt content"]
 
 
@@ -239,7 +239,7 @@ stages:
     prompt: combo
 """,
     )
-    pipeline = load_pipeline(tmp_path / "pipeline.yaml")
+    pipeline = Pipeline.from_yaml(tmp_path / "pipeline.yaml")
     assert pipeline.stages[0].prompts == ["prompt content", "other content"]
 
 
@@ -259,7 +259,7 @@ stages:
     prompt: [base, extra.md]
 """,
     )
-    pipeline = load_pipeline(tmp_path / "pipeline.yaml")
+    pipeline = Pipeline.from_yaml(tmp_path / "pipeline.yaml")
     assert pipeline.stages[0].prompts == ["prompt content", "extra content"]
 
 
@@ -278,7 +278,7 @@ stages:
     prompt: [local-base, gremlins:code_style.md]
 """,
     )
-    pipeline = load_pipeline(tmp_path / "pipeline.yaml")
+    pipeline = Pipeline.from_yaml(tmp_path / "pipeline.yaml")
     assert len(pipeline.stages[0].prompts) == 2
     assert pipeline.stages[0].prompts[0] == "prompt content"
     assert pipeline.stages[0].prompts[1].strip()
@@ -302,7 +302,7 @@ stages:
     prompt: shared
 """,
     )
-    pipeline = load_pipeline(tmp_path / "pipeline.yaml")
+    pipeline = Pipeline.from_yaml(tmp_path / "pipeline.yaml")
     assert pipeline.stages[0].prompts == ["prompt content"]
     assert pipeline.stages[1].prompts == ["prompt content"]
 
@@ -320,7 +320,7 @@ stages:
     prompt: style
 """,
     )
-    pipeline = load_pipeline(tmp_path / "pipeline.yaml")
+    pipeline = Pipeline.from_yaml(tmp_path / "pipeline.yaml")
     assert len(pipeline.stages[0].prompts) == 1
     assert pipeline.stages[0].prompts[0].strip()
 
@@ -345,7 +345,7 @@ stages:
         prompt: shared
 """,
     )
-    pipeline = load_pipeline(tmp_path / "pipeline.yaml")
+    pipeline = Pipeline.from_yaml(tmp_path / "pipeline.yaml")
     assert pipeline.stages[0].body[0].prompts == ["prompt content"]
     assert pipeline.stages[0].body[1].prompts == ["prompt content"]
 
@@ -367,7 +367,7 @@ stages:
     prompt: [a.md, b.md]
 """,
     )
-    pipeline = load_pipeline(tmp_path / "pipeline.yaml")
+    pipeline = Pipeline.from_yaml(tmp_path / "pipeline.yaml")
     assert pipeline.stages[0].prompts == ["prompt content", "prompt content"]
 
 
@@ -384,7 +384,7 @@ stages:
   - {name: test-post, type: verify}
 """,
     )
-    pipeline = load_pipeline(tmp_path / "pipeline.yaml")
+    pipeline = Pipeline.from_yaml(tmp_path / "pipeline.yaml")
     assert len(pipeline.stages) == 2
     assert pipeline.stages[0].name == "test-pre"
     assert pipeline.stages[1].name == "test-post"
@@ -408,7 +408,7 @@ stages:
 """,
     )
     with pytest.raises(ValueError, match="duplicate child name"):
-        load_pipeline(tmp_path / "pipeline.yaml")
+        Pipeline.from_yaml(tmp_path / "pipeline.yaml")
 
 
 def test_nested_parallel_raises(tmp_path: pathlib.Path) -> None:
@@ -425,7 +425,7 @@ stages:
 """,
     )
     with pytest.raises(ValueError, match="nested parallel"):
-        load_pipeline(tmp_path / "pipeline.yaml")
+        Pipeline.from_yaml(tmp_path / "pipeline.yaml")
 
 
 def test_parallel_inside_loop_body_is_allowed(tmp_path: pathlib.Path) -> None:
@@ -443,7 +443,7 @@ stages:
           - {name: leaf-b, type: verify}
 """,
     )
-    pipeline = load_pipeline(yaml_path)
+    pipeline = Pipeline.from_yaml(yaml_path)
     outer = pipeline.stages[0]
     assert outer.type == "loop"
     inner = outer.body[0]
@@ -465,7 +465,7 @@ stages:
     type: implement
 """,
     )
-    pipeline = load_pipeline(yaml_path)
+    pipeline = Pipeline.from_yaml(yaml_path)
     # client is None at load time; resolution happens at run time
     assert pipeline.stages[0].client is None
 
@@ -482,7 +482,7 @@ stages:
     client: copilot:gpt-5.4
 """,
     )
-    pipeline = load_pipeline(yaml_path)
+    pipeline = Pipeline.from_yaml(yaml_path)
     assert str(pipeline.stages[0].client) == "copilot:gpt-5.4"
 
 
@@ -496,7 +496,7 @@ stages:
     type: implement
 """,
     )
-    pipeline = load_pipeline(yaml_path)
+    pipeline = Pipeline.from_yaml(yaml_path)
     assert pipeline.stages[0].client is None
 
 
@@ -513,7 +513,7 @@ stages:
         type: verify
 """,
     )
-    pipeline = load_pipeline(yaml_path)
+    pipeline = Pipeline.from_yaml(yaml_path)
     assert pipeline.stages[0].client is None
     # child has no explicit client; resolution happens at run time
     assert pipeline.stages[0].body[0].client is None
@@ -532,7 +532,7 @@ stages:
   - { include: local }
 """,
     )
-    pipeline = load_pipeline(yaml_path)
+    pipeline = Pipeline.from_yaml(yaml_path)
     stage_types = [s.type for s in pipeline.stages]
     assert "plan" in stage_types
     assert "implement" in stage_types
@@ -549,7 +549,7 @@ stages:
 """,
     )
     with pytest.raises(FileNotFoundError, match="no-such-pipeline"):
-        load_pipeline(yaml_path)
+        Pipeline.from_yaml(yaml_path)
 
 
 def test_loop_body_with_include_expands(tmp_path: pathlib.Path) -> None:
@@ -566,7 +566,7 @@ stages:
       - { include: local }
 """,
     )
-    pipeline = load_pipeline(yaml_path)
+    pipeline = Pipeline.from_yaml(yaml_path)
     assert len(pipeline.stages) == 1
     loop = pipeline.stages[0]
     assert loop.type == "loop"
@@ -605,7 +605,7 @@ stages:
       - {include: sub}
 """,
     )
-    pipeline = load_pipeline(yaml_path)
+    pipeline = Pipeline.from_yaml(yaml_path)
     group = pipeline.stages[0]
     assert group.type == "parallel"
     assert len(group.body) == 2
@@ -642,7 +642,7 @@ stages:
 """,
     )
     with pytest.raises(ValueError, match="expanded to 0 stages"):
-        load_pipeline(yaml_path)
+        Pipeline.from_yaml(yaml_path)
 
 
 def test_parallel_include_single_stage_no_sequence_wrap(
@@ -669,7 +669,7 @@ stages:
       - {include: single}
 """,
     )
-    pipeline = load_pipeline(yaml_path)
+    pipeline = Pipeline.from_yaml(yaml_path)
     group = pipeline.stages[0]
     child = group.body[0]
     assert child.name == "only"
@@ -690,7 +690,7 @@ stages:
       - {name: step-b, type: verify}
 """,
     )
-    pipeline = load_pipeline(yaml_path)
+    pipeline = Pipeline.from_yaml(yaml_path)
     assert len(pipeline.stages) == 1
     seq = pipeline.stages[0]
     assert seq.type == "sequence"
@@ -700,9 +700,9 @@ stages:
 def test_boss_yaml_loads() -> None:
     """boss.yaml loads with loop/handoff structure replacing the old chain stage."""
     from gremlins.pipeline.discovery import resolve_pipeline_path
-    from gremlins.pipeline.loader import load_pipeline
+    from gremlins.pipeline import Pipeline
 
-    pipeline = load_pipeline(resolve_pipeline_path("boss", pathlib.Path.cwd()))
+    pipeline = Pipeline.from_yaml(resolve_pipeline_path("boss", pathlib.Path.cwd()))
     names = [s.name for s in pipeline.stages]
     assert names == ["chain", "review-chain", "address-chain"]
     chain_entry = pipeline.stages[0]

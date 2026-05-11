@@ -8,7 +8,7 @@ from gremlins.clients.client import PACKAGE_DEFAULT, Client
 from gremlins.state import resolve_state_file
 
 if TYPE_CHECKING:
-    from gremlins.schema import PipelineDef
+    from gremlins.pipeline import Pipeline
     from gremlins.stages.base import Stage
 
 
@@ -21,7 +21,7 @@ def resolve_stage_client(
 
 
 def collect_stage_specs(
-    pipeline: PipelineDef,
+    pipeline: Pipeline,
     cli_spec: Client | None,
 ) -> dict[str, Client]:
     specs: dict[str, Client] = {}
@@ -56,7 +56,7 @@ def _format_missing_stage_specs(names: Sequence[str]) -> str:
     return f"stage_clients missing stage{suffix}: {missing}"
 
 
-def validate_stage_specs(stage_specs: dict[str, Client], pipeline: PipelineDef) -> None:
+def validate_stage_specs(stage_specs: dict[str, Client], pipeline: Pipeline) -> None:
     expected_stage_names: set[str] = set()
 
     def _walk(entries: list[Stage]) -> None:
