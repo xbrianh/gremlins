@@ -101,7 +101,6 @@ def _resolve_description_and_slug(
     return "", False, "gremlin"
 
 
-
 def _stage_gremlins_overlay(project_root: str, state_dir: pathlib.Path) -> None:
     src = pathlib.Path(project_root) / ".gremlins"
     if src.is_dir():

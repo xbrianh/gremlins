@@ -573,6 +573,7 @@ def test_resume_keeps_resume_flag_for_pipeline_gremlin(lenv, monkeypatch):
     launcher.resume(gr_id)
 
     from gremlins.pipeline.discovery import resolve_pipeline_path
+
     expected_pipeline = str(resolve_pipeline_path("local", lenv.repo))
     assert captured["subcommand"] == expected_pipeline
     assert captured["spawn_args"] == [
@@ -626,6 +627,7 @@ def test_resume_bossgremlin_resumes_at_chain_stage(lenv, monkeypatch):
     launcher.resume(gr_id)
 
     from gremlins.pipeline.discovery import resolve_pipeline_path
+
     expected_pipeline = str(resolve_pipeline_path("boss", lenv.repo))
     assert captured["subcommand"] == expected_pipeline
     spawn_args = captured["spawn_args"]

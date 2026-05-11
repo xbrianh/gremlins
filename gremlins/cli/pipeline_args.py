@@ -22,7 +22,7 @@ def resolve_pipeline(
             else:
                 i += 1
         elif args[i].startswith("--pipeline="):
-            pipeline_val = args[i][len("--pipeline="):]
+            pipeline_val = args[i][len("--pipeline=") :]
             i += 1
         else:
             filtered.append(args[i])
@@ -46,7 +46,7 @@ def extract_arg_value(args: list[str], flag: str) -> str:
             continue
         prefix = f"{flag}="
         if arg.startswith(prefix):
-            value = arg[len(prefix):]
+            value = arg[len(prefix) :]
         i += 1
     return value
 
