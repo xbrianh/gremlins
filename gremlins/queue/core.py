@@ -62,7 +62,7 @@ def _cmd_description(cmd: str) -> str:
         if t == "--description" and i + 1 < len(tokens):
             return tokens[i + 1]
         if t.startswith("--description="):
-            return t[len("--description="):]
+            return t[len("--description=") :]
     return ""
 
 
