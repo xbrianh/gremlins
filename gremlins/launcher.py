@@ -211,7 +211,11 @@ def launch(
                 except (OSError, ValueError):
                     pass
                 _pid = _st.get("pid")
-                if _st.get("status") == "running" and _pid is not None and int(_pid) > 0:
+                if (
+                    _st.get("status") == "running"
+                    and _pid is not None
+                    and int(_pid) > 0
+                ):
                     try:
                         os.kill(int(_pid), 0)
                     except (ProcessLookupError, ValueError):
