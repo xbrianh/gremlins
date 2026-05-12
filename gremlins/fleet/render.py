@@ -17,7 +17,6 @@ class FleetRow:
     started_at: str
     kind: str
     sid: str
-    boss: str
     stage: str
     liveness: str
     live_full: str
@@ -72,16 +71,12 @@ def build_row(
         desc_trim = desc[:60]
     age = humanize_age(started_at)
     sid = display_id(gr_id)
-    parent_id = state.get("parent_id") or ""
-    boss_disp = display_id(parent_id)[:20] if parent_id else ""
-
     client = state.get("client") or "—"
 
     return FleetRow(
         started_at=str(started_at),
         kind=pipeline_name,
         sid=sid,
-        boss=boss_disp,
         stage=stage_trim,
         liveness=live_trim,
         live_full=live,
@@ -97,21 +92,6 @@ def build_row(
 
 def print_table(rows: list[FleetRow]) -> None:
     """Print header + rows using the fixed format string."""
-    print(
-        FMT
-        % ("KIND", "ID", "STAGE", "LIVENESS", "AGE", "BOSS", "CLIENT", "DESCRIPTION")
-    )
+    print(FMT % ("KIND", "ID", "STAGE", "LIVENESS", "AGE", "CLIENT", "DESCRIPTION"))
     for r in rows:
-        print(
-            FMT
-            % (
-                r.kind,
-                r.sid,
-                r.stage,
-                r.liveness,
-                r.age,
-                r.boss,
-                r.client,
-                r.desc,
-            )
-        )
+        print(FMT % (r.kind, r.sid, r.stage, r.liveness, r.age, r.client, r.desc))

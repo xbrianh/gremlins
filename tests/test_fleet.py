@@ -1102,6 +1102,31 @@ def test_squash_land_failure_preserves_untracked_files(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# print_table — header and row shape
+# ---------------------------------------------------------------------------
+
+
+def test_print_table_header_and_row_shape(capsys):
+    state = {
+        "kind": "localgremlin",
+        "stage": "implement",
+        "started_at": "",
+        "client": "claude",
+    }
+    row = _render.build_row("gr-test-aabb12", "/sf", "/wdir", state, "running")
+    _render.print_table([row])
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 2
+    header = out[0]
+    for col in ("KIND", "ID", "STAGE", "LIVENESS", "AGE", "CLIENT", "DESCRIPTION"):
+        assert col in header
+    data_row = out[1]
+    assert "localgremlin" in data_row
+    assert "running" in data_row
+    assert "claude" in data_row
+
+
+# ---------------------------------------------------------------------------
 # Misc small-surface helpers
 # ---------------------------------------------------------------------------
 
