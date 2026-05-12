@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import shlex
 import sys
+from typing import Callable
 
 from gremlins.queue.core import add, clear, land, list_queue, requeue, run
 
@@ -62,13 +63,13 @@ def _land(_argv: list[str]) -> int:
     return land()
 
 
-_DISPATCH = {
-    "add": _add,
-    "list": _list,
-    "run": _run,
-    "requeue": _requeue,
-    "clear": _clear,
-    "land": _land,
+_DISPATCH: dict[str, tuple[str, Callable[[list[str]], int]]] = {
+    "add": ("Add a command to the queue.", _add),
+    "list": ("List queued items.", _list),
+    "run": ("Run the next item in the queue.", _run),
+    "requeue": ("Move failed items back to pending.", _requeue),
+    "clear": ("Remove items from the queue.", _clear),
+    "land": ("Land all done gremlins in the queue.", _land),
 }
 
 
@@ -78,12 +79,8 @@ def _build_queue_parser() -> argparse.ArgumentParser:
         description="Manage the gremlin launch queue.",
     )
     subs = p.add_subparsers(title="subcommands", metavar="subcommand")
-    subs.add_parser("add", help="Add a command to the queue.")
-    subs.add_parser("list", help="List queued items.")
-    subs.add_parser("run", help="Run the next item in the queue.")
-    subs.add_parser("requeue", help="Move failed items back to pending.")
-    subs.add_parser("clear", help="Remove items from the queue.")
-    subs.add_parser("land", help="Land all done gremlins in the queue.")
+    for name, (help_text, _) in _DISPATCH.items():
+        subs.add_parser(name, help=help_text)
     return p
 
 
@@ -92,8 +89,9 @@ def queue_main(argv: list[str]) -> int:
     if sub in ("-h", "--help") or not sub:
         _build_queue_parser().print_help()
         return 0 if sub in ("-h", "--help") else 1
-    handler = _DISPATCH.get(sub)
-    if handler is None:
+    entry = _DISPATCH.get(sub)
+    if entry is None:
         _build_queue_parser().print_help(sys.stderr)
         return 1
+    _, handler = entry
     return handler(argv[1:])

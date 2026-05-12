@@ -8,6 +8,7 @@ import pathlib
 import pytest
 
 import gremlins.executor.state as state_mod
+import gremlins.cli as cli_mod
 from gremlins.cli import main
 from gremlins.run_pipeline import main as run_pipeline_main
 from gremlins.utils.yaml_io import YamlLoadError
@@ -197,7 +198,7 @@ def test_run_pipeline_forwards_gr_id_to_orchestrator(
 
 def test_stop_dispatches_to_stop_main(tmp_path, monkeypatch):
     called = []
-    monkeypatch.setattr("gremlins.cli.stop_main", lambda argv: called.append(argv) or 0)
+    monkeypatch.setitem(cli_mod._DISPATCH, "stop", ("", lambda argv: called.append(argv) or 0))
     rc = main(["stop", "abc123"])
     assert rc == 0
     assert called == [["abc123"]]
@@ -205,9 +206,7 @@ def test_stop_dispatches_to_stop_main(tmp_path, monkeypatch):
 
 def test_rescue_dispatches_to_rescue_main(tmp_path, monkeypatch):
     called = []
-    monkeypatch.setattr(
-        "gremlins.cli.rescue_main", lambda argv: called.append(argv) or 0
-    )
+    monkeypatch.setitem(cli_mod._DISPATCH, "rescue", ("", lambda argv: called.append(argv) or 0))
     rc = main(["rescue", "--headless", "abc123"])
     assert rc == 0
     assert called == [["--headless", "abc123"]]
@@ -215,7 +214,7 @@ def test_rescue_dispatches_to_rescue_main(tmp_path, monkeypatch):
 
 def test_land_dispatches_to_land_main(tmp_path, monkeypatch):
     called = []
-    monkeypatch.setattr("gremlins.cli.land_main", lambda argv: called.append(argv) or 0)
+    monkeypatch.setitem(cli_mod._DISPATCH, "land", ("", lambda argv: called.append(argv) or 0))
     rc = main(["land", "abc123"])
     assert rc == 0
     assert called == [["abc123"]]
