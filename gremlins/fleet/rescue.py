@@ -519,7 +519,9 @@ def do_rescue(target: str, headless: bool = False, from_boss: bool = False) -> b
 
     if live == "dead:host-terminated":
         project_root_check: str = str(state.get("project_root") or "")
-        print(f"gremlin {gremlin_id}: worktree is gone (host likely terminated externally)")
+        print(
+            f"gremlin {gremlin_id}: worktree is gone (host likely terminated externally)"
+        )
         if not project_root_check or not os.path.isdir(project_root_check):
             detail = (
                 f"project_root {project_root_check!r} is also gone — "
@@ -548,7 +550,9 @@ def do_rescue(target: str, headless: bool = False, from_boss: bool = False) -> b
         rescue_count = 0
 
     _gremlin_id_for_bail = str(state.get("id") or "")
-    _bail_file_data = _read_bail_info(_gremlin_id_for_bail) if _gremlin_id_for_bail else None
+    _bail_file_data = (
+        _read_bail_info(_gremlin_id_for_bail) if _gremlin_id_for_bail else None
+    )
     bail_class = (
         (_bail_file_data.get("class") or "")
         if _bail_file_data

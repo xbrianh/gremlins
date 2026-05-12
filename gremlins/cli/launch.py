@@ -140,7 +140,9 @@ def _self_background_main(
     if args.print_id_only:
         sys.stdout.write(gremlin_id + "\n")
     else:
-        info = f"gremlin id:  {gremlin_id}\nlog:         {log_path}\nstate file:  {sf}\n"
+        info = (
+            f"gremlin id:  {gremlin_id}\nlog:         {log_path}\nstate file:  {sf}\n"
+        )
         sys.stderr.write(info)
         if args.print_id:
             sys.stdout.write(gremlin_id + "\n")

@@ -19,7 +19,9 @@ def do_close(target: str) -> bool:
 
     live = liveness_of_state_file(sf, state)
     if live == "running" or live.startswith("stalled:"):
-        print(f"gremlin {gremlin_id} is still live ({live}) — use 'stop' first, then close")
+        print(
+            f"gremlin {gremlin_id} is still live ({live}) — use 'stop' first, then close"
+        )
         return False
 
     closed_marker = os.path.join(wdir, "closed")

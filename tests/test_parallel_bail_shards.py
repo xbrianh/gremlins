@@ -443,10 +443,16 @@ def test_worktree_lifecycle_fanout_creates_and_fanin_removes(tmp_path):
     _init_git_repo(repo)
 
     ctx_a = State(
-        client=FakeClaudeClient(), session_dir=tmp_path / "a", gremlin_id=None, child_key="a"
+        client=FakeClaudeClient(),
+        session_dir=tmp_path / "a",
+        gremlin_id=None,
+        child_key="a",
     )
     ctx_b = State(
-        client=FakeClaudeClient(), session_dir=tmp_path / "b", gremlin_id=None, child_key="b"
+        client=FakeClaudeClient(),
+        session_dir=tmp_path / "b",
+        gremlin_id=None,
+        child_key="b",
     )
 
     stages = _make_parallel_stages(

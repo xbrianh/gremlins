@@ -145,7 +145,11 @@ def test_run_launch_cmd_dirty_state(q, monkeypatch):
     )
     monkeypatch.setattr(
         "gremlins.queue.core._poll_terminal",
-        lambda gremlin_id: {"exit_code": 0, "status": "bailed", "bail_class": "security"},
+        lambda gremlin_id: {
+            "exit_code": 0,
+            "status": "bailed",
+            "bail_class": "security",
+        },
     )
     core.add("gremlins launch local")
     rc = core.run()

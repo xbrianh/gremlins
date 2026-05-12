@@ -182,7 +182,9 @@ class _FakeProc:
 def test_launch_returns_gremlin_id(lenv):
     """launch() returns a well-formed GR_ID string."""
     launcher = _launcher()
-    gremlin_id = launcher.launch("local", stage_inputs={"instructions": "test instructions"})
+    gremlin_id = launcher.launch(
+        "local", stage_inputs={"instructions": "test instructions"}
+    )
     assert gremlin_id, "expected a non-empty GR_ID"
     assert re.match(r"^[a-z0-9-]+-[0-9a-f]{6}$", gremlin_id), (
         f"GR_ID has unexpected shape: {gremlin_id!r}"
@@ -563,7 +565,9 @@ def test_resume_keeps_resume_flag_for_pipeline_gremlin(lenv, monkeypatch):
     class _Proc:
         pid = 12345
 
-    def fake_spawn(state_dir, workdir, spawn_gremlin_id, subcommand, spawn_args, **kwargs):
+    def fake_spawn(
+        state_dir, workdir, spawn_gremlin_id, subcommand, spawn_args, **kwargs
+    ):
         captured["subcommand"] = subcommand
         captured["spawn_args"] = list(spawn_args)
         return _Proc()
@@ -617,7 +621,9 @@ def test_resume_bossgremlin_resumes_at_chain_stage(lenv, monkeypatch):
     class _Proc:
         pid = 12345
 
-    def fake_spawn(state_dir, workdir, spawn_gremlin_id, subcommand, spawn_args, **kwargs):
+    def fake_spawn(
+        state_dir, workdir, spawn_gremlin_id, subcommand, spawn_args, **kwargs
+    ):
         captured["subcommand"] = subcommand
         captured["spawn_args"] = list(spawn_args)
         return _Proc()

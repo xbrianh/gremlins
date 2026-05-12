@@ -1483,7 +1483,10 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir):
     )
 
     result = run_pipeline(
-        _gh_pipeline_path(tmp_path), argv=["--plan", "#42"], gremlin_id=gremlin_id, client=client
+        _gh_pipeline_path(tmp_path),
+        argv=["--plan", "#42"],
+        gremlin_id=gremlin_id,
+        client=client,
     )
     assert result == 0
 

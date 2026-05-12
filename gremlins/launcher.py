@@ -366,7 +366,9 @@ def resume(gremlin_id: str) -> None:
             pass  # process is gone
 
     if (state_dir / "finished").is_file() and exit_code == 0:
-        raise RuntimeError(f"gremlin {gremlin_id} finished successfully — nothing to resume")
+        raise RuntimeError(
+            f"gremlin {gremlin_id} finished successfully — nothing to resume"
+        )
 
     pipeline_args = cast(list[str], state.get("pipeline_args") or [])
     pipeline_path = str(state.get("pipeline_path") or "")

@@ -255,7 +255,9 @@ def test_write_bail_file_creates_bail_file(tmp_path, monkeypatch):
     state_root, sf = _make_state_dir(tmp_path, gremlin_id)
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
 
-    state_mod.write_bail_file(gremlin_id, "stage-abc123", "other", "something went wrong")
+    state_mod.write_bail_file(
+        gremlin_id, "stage-abc123", "other", "something went wrong"
+    )
 
     bail_file = state_root / gremlin_id / "bail_stage-abc123.json"
     assert bail_file.exists()

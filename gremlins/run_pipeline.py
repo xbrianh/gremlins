@@ -19,7 +19,9 @@ def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
     if len(argv) < 2:
-        sys.stderr.write("run_pipeline: usage: <gremlin_id> <pipeline_path> [args...]\n")
+        sys.stderr.write(
+            "run_pipeline: usage: <gremlin_id> <pipeline_path> [args...]\n"
+        )
         return 1
 
     gremlin_id, pipeline_arg, *args = argv

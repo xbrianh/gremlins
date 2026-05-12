@@ -72,7 +72,9 @@ def set_stage(
             return
         now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         if sub_stage is not None:
-            patch_state(gremlin_id, stage=stage, stage_updated_at=now, sub_stage=sub_stage)
+            patch_state(
+                gremlin_id, stage=stage, stage_updated_at=now, sub_stage=sub_stage
+            )
         else:
             patch_state(
                 gremlin_id, _delete=("sub_stage",), stage=stage, stage_updated_at=now
@@ -313,7 +315,9 @@ def check_bail(
         pass
 
 
-def _patch_parallel_attempt(gremlin_id: str | None, child_key: str, attempt: str) -> None:
+def _patch_parallel_attempt(
+    gremlin_id: str | None, child_key: str, attempt: str
+) -> None:
     """Write parallel_attempts[child_key] = attempt into state.json."""
     sf = resolve_state_file(gremlin_id)
     if sf is None or not sf.exists() or not attempt:

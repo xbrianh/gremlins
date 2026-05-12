@@ -181,7 +181,11 @@ def test_ci_fix_prompt_contains_pr_branch(
     branch = "issue-42-my-feature"
     (state_dir / "state.json").write_text(
         json.dumps(
-            {"id": gremlin_id, "stage": "", "artifacts": [{"type": "pr", "branch": branch}]}
+            {
+                "id": gremlin_id,
+                "stage": "",
+                "artifacts": [{"type": "pr", "branch": branch}],
+            }
         )
     )
     client = FakeClaudeClient(fixtures={"ci-fix-1": MINIMAL_EVENTS})
@@ -359,7 +363,9 @@ def test_review_required_emits_bail_to_state(
     state_mod.patch_state(gremlin_id, attempt=attempt)
     client = FakeClaudeClient(fixtures={})
     getter = _make_getter([([], "REVIEW_REQUIRED")])
-    stage, state = _make_stage(client, tmp_path, gremlin_id=gremlin_id, checks_getter=getter)
+    stage, state = _make_stage(
+        client, tmp_path, gremlin_id=gremlin_id, checks_getter=getter
+    )
     state.attempt = attempt
     with pytest.raises(RuntimeError):
         stage.run(state)
