@@ -126,6 +126,37 @@ Each item is a `.cmd` file. Once a gremlin id is captured from the command's out
 
 ---
 
+### Streaming queue events for reactive workflows
+
+`gremlins queue run` emits progress lines as it works through `pending/`. The vocabulary you can rely on:
+
+- `queue: running <item>` — stdout — runner picked up an item
+- `queue: waiting for gremlin <id>` — stdout — gremlin launched, waiting for it to terminate
+- `queue: done <item>` — stdout — item completed cleanly, moved to `done/`
+- `queue: failed <item>` — stderr — item bailed; runner halted
+
+**React to events as they arrive, don't poll.** The right pattern is: spawn the runner, attach a line-by-line consumer to its stdout **and stderr**, and act on each event. Your assistant environment almost certainly has a primitive for "stream stdout from a long-running process and react to each line" — use that. In Claude Code it's the `Monitor` tool; other tools have analogues.
+
+**Concrete example — land each gremlin as it finishes:**
+
+```
+# spawn: gremlins queue run
+# for each stdout line:
+#   if line matches "queue: done <item>":
+#     parse id from item name (format: <counter>-<slug>.<id>)
+#     run: gremlins land <id>
+```
+
+**Anti-pattern to avoid:**
+
+```sh
+while true; do gremlins queue list; sleep N; done
+```
+
+This wastes work, lags behind events, and misses the exact moment each item changes state. The stream is always more accurate and cheaper.
+
+---
+
 ### Queue and parallelism rules
 
 - Captured units (issues, plan files) are the primary output of a session. Product code is written by gremlins, not inline.
