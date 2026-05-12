@@ -55,7 +55,6 @@ def test_address_code_in_loop_finds_sibling_reviews(tmp_path, monkeypatch):
         tmp_path,
         "boss",
         """
-name: boss
 default_client: claude:sonnet
 stages:
   - { name: review-chain, type: review-code }

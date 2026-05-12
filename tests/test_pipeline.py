@@ -181,11 +181,24 @@ def test_pipeline_rejects_unknown_stage_type(tmp_path: pathlib.Path) -> None:
 # ---------------------------------------------------------------------------
 
 _SAMPLE_YAML = """\
-name: sample
 stages:
   - name: plan
     type: plan
 """
+
+
+def test_pipeline_name_from_stem(tmp_path: pathlib.Path) -> None:
+    yaml_path = tmp_path / "mypipe.yaml"
+    yaml_path.write_text(_SAMPLE_YAML, encoding="utf-8")
+    pipeline = _PipelineData.from_yaml(yaml_path)
+    assert pipeline.name == "mypipe"
+
+
+def test_pipeline_name_ignores_yaml_name_field(tmp_path: pathlib.Path) -> None:
+    yaml_path = tmp_path / "mypipe.yaml"
+    yaml_path.write_text("name: something-else\n" + _SAMPLE_YAML, encoding="utf-8")
+    pipeline = _PipelineData.from_yaml(yaml_path)
+    assert pipeline.name == "mypipe"
 
 
 def _make_overlay(tmp_path: pathlib.Path, name: str) -> pathlib.Path:

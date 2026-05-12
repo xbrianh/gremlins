@@ -28,7 +28,6 @@ def test_valid_pipeline_parses(tmp_path: pathlib.Path) -> None:
     yaml_path = _write_yaml(
         tmp_path / "pipeline.yaml",
         f"""\
-name: test-pipe
 default_client: claude:sonnet
 prompt_dir: .
 stages:
@@ -38,7 +37,7 @@ stages:
 """,
     )
     pipeline = Pipeline.from_yaml(yaml_path)
-    assert pipeline.name == "test-pipe"
+    assert pipeline.name == "pipeline"
     assert pipeline.default_client is not None
     assert str(pipeline.default_client) == "claude:sonnet"
     assert len(pipeline.stages) == 1
