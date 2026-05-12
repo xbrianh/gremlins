@@ -205,21 +205,21 @@ def launch(
         if _existing.is_dir():
             _sf = _existing / "state.json"
             if _sf.is_file():
+                _st: dict[str, Any] = {}
                 try:
                     _st = json.loads(_sf.read_text(encoding="utf-8"))
-                    _pid = _st.get("pid")
-                    if _st.get("status") == "running" and _pid is not None:
-                        try:
-                            os.kill(int(_pid), 0)
-                            raise GremlinAlreadyRunning(
-                                f"gremlin {gr_id!r} is already running (pid {_pid})"
-                            )
-                        except (OSError, ValueError):
-                            pass
-                except GremlinAlreadyRunning:
-                    raise
-                except Exception:
+                except (OSError, ValueError):
                     pass
+                _pid = _st.get("pid")
+                if _st.get("status") == "running" and _pid is not None:
+                    try:
+                        os.kill(int(_pid), 0)
+                    except (ProcessLookupError, ValueError):
+                        pass
+                    else:
+                        raise GremlinAlreadyRunning(
+                            f"gremlin {gr_id!r} is already running (pid {_pid})"
+                        )
     else:
         rand_hex = secrets.token_hex(3)
         gr_id = f"{slug}-{rand_hex}"

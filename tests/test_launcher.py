@@ -23,6 +23,7 @@ import pytest
 from fixtures.shell_env import install_fake_bin
 
 import gremlins.utils.git as git_mod
+from gremlins.launcher import GremlinAlreadyRunning
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 FIXTURES_DIR = pathlib.Path(__file__).resolve().parent / "fixtures"
@@ -1216,8 +1217,6 @@ def test_launch_explicit_gr_id_already_running(lenv, monkeypatch):
         json.dumps({"id": gr_id, "status": "running", "pid": os.getpid()}),
         encoding="utf-8",
     )
-    from gremlins.launcher import GremlinAlreadyRunning
-
     with pytest.raises(GremlinAlreadyRunning):
         launcher.launch(
             "local",
@@ -1225,3 +1224,24 @@ def test_launch_explicit_gr_id_already_running(lenv, monkeypatch):
             gr_id=gr_id,
             project_root=str(lenv.repo),
         )
+
+
+def test_launch_explicit_gr_id_stale_dir_allowed(lenv, monkeypatch):
+    """launch(gr_id=...) succeeds when the state dir exists but the process is not running."""
+    launcher = _launcher()
+    state_root = _gremlins_state_root(lenv)
+    gr_id = "my-fixed-id"
+    state_dir = state_root / gr_id
+    state_dir.mkdir(parents=True)
+    (state_dir / "state.json").write_text(
+        json.dumps({"id": gr_id, "status": "running", "pid": 0}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(launcher, "_spawn_pipeline", lambda *a, **kw: _FakeProc())
+    result = launcher.launch(
+        "local",
+        stage_inputs={"instructions": "stale dir test"},
+        gr_id=gr_id,
+        project_root=str(lenv.repo),
+    )
+    assert result == gr_id

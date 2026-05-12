@@ -51,7 +51,12 @@ def build_launch_parser(
 ) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog=f"gremlins launch {pipeline_name}")
     p.add_argument("--description", default=None)
-    p.add_argument("--gremlin-id", default=None)
+    p.add_argument(
+        "--gremlin-id",
+        default=None,
+        metavar="ID",
+        help="Use a specific gremlin id (must match [a-z0-9-]+). Raises if a live gremlin with this id already exists.",
+    )
     p.add_argument("--parent", dest="parent_id", default=None)
     p.add_argument("--print-id", action="store_true")
     p.add_argument(
