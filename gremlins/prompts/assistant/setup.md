@@ -119,7 +119,7 @@ Each item is a `.cmd` file. Once a gremlin id is captured from the command's out
 **Morning-after workflow:**
 
 1. `gremlins queue list` — survey what finished and what failed
-2. If all done: `gremlins queue land` → `gremlins queue clear --done`
+2. If all done: `gremlins queue land` (removes each entry on success)
 3. If some failed: fix the root cause, then `gremlins queue requeue` to push all failed items back to pending and re-run
 
 **What the queue does not do:** no retries, no dependency tracking between items, no daemonization (run it under `nohup` / `launchd` / `screen` yourself), no concurrency.
