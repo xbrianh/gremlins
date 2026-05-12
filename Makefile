@@ -9,11 +9,11 @@ format:
 	ruff format --check .
 
 typecheck:
-	pyright
+	PYTHONPATH='' pyright
 
 test: $(TEST_FILES)
 
 $(TEST_FILES):
-	pytest $@ || { code=$$?; [ $$code -eq 5 ] && exit 0 || exit $$code; }
+	PYTHONPATH='' pytest $@ || { code=$$?; [ $$code -eq 5 ] && exit 0 || exit $$code; }
 
 check: lint format typecheck
