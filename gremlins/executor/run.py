@@ -185,7 +185,9 @@ def run_pipeline(
     setup_kind = str(state_json.get("setup_kind") or "worktree-branch")
 
     stage_inputs: dict[str, Any] = dict(state_json.get("stage_inputs") or {})
-    instructions: str = str(stage_inputs.get("instructions") or " ".join(args.instructions or []))
+    instructions: str = str(
+        stage_inputs.get("instructions") or " ".join(args.instructions or [])
+    )
 
     logger.info("session: %s", session_dir)
 

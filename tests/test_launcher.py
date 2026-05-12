@@ -233,7 +233,9 @@ def test_launch_writes_worktree(lenv):
     )
     state = _read_state(state_dir)
     workdir = pathlib.Path(state["workdir"])
-    assert workdir.is_dir(), f"worktree should exist after initialize_runtime: {workdir}"
+    assert workdir.is_dir(), (
+        f"worktree should exist after initialize_runtime: {workdir}"
+    )
     r = subprocess.run(
         ["git", "-C", str(lenv.repo), "worktree", "list"],
         capture_output=True,
