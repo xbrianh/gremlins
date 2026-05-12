@@ -198,7 +198,10 @@ def run() -> int:
 
             if not _ID_RE.match(gr_id):
                 _move_item(item, root / "failed")
-                print(f"queue: failed {item.stem} (invalid gremlin id: {gr_id!r})", file=sys.stderr)
+                print(
+                    f"queue: failed {item.stem} (invalid gremlin id: {gr_id!r})",
+                    file=sys.stderr,
+                )
                 return 1
 
             base_stem = _strip_id(item.stem)
