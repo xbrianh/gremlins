@@ -240,14 +240,12 @@ def clear(
     root = queue_root()
     if purge:
         for sub in _SUBDIRS:
-            for p in (root / sub).glob("*.cmd"):
-                gr_id = _parse_id(p)
-                if sub == "running" and gr_id:
-                    subprocess.run(["gremlins", "stop", gr_id])
-                p.unlink()
-                log = p.with_suffix(".log")
-                if log.exists():
-                    log.unlink()
+            if sub == "running":
+                for p in (root / sub).glob("*.cmd"):
+                    gr_id = _parse_id(p)
+                    if gr_id:
+                        subprocess.run(["gremlins", "stop", gr_id])
+            _delete_dir_contents(root, sub)
         return 0
 
     if failed_only:

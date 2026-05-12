@@ -248,10 +248,14 @@ def test_clear_done_only(q):
 def test_clear_pending_only(q):
     for sub in ("pending", "running", "done", "failed"):
         (q / sub / "0000-x.cmd").write_text("echo x")
+    (q / "pending" / "0000-x.log").write_text("log")
+    (q / "running" / "0000-x.log").write_text("log")
     core.clear(pending_only=True)
     assert not list((q / "pending").glob("*.cmd"))
+    assert not list((q / "pending").glob("*.log"))
     for sub in ("running", "done", "failed"):
         assert list((q / sub).glob("*.cmd"))
+    assert (q / "running" / "0000-x.log").exists()
 
 
 def test_clear_purge_empties_all(q):
