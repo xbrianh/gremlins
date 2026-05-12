@@ -115,7 +115,7 @@ def lenv(tmp_path, monkeypatch):
     bin_dir = tmp_path / "bin"
     install_fake_bin(bin_dir, "claude", FAKE_CLAUDE)
 
-    state_root = pathlib.Path(platformdirs.user_state_dir("claude-gremlins"))
+    state_root = pathlib.Path(platformdirs.user_state_dir("gremlins"))
     state_root.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
 

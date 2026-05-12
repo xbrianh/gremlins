@@ -70,7 +70,7 @@ These values are persisted to `state.json` and read by other writers (the fleet 
 | Add a new pipeline | YAMLs in `gremlins/pipelines/` (bundled) or `.gremlins/` (project) |
 | Trace a CLI subcommand | `gremlins/cli/` |
 | Understand fleet operations | `gremlins/fleet/AGENTS.md` |
-| Investigate a state-dir layout | `gremlins/state.py` resolves dirs; per-gremlin layout under `platformdirs.user_state_dir("claude-gremlins")/<gr_id>/` |
+| Investigate a state-dir layout | `gremlins/state.py` resolves dirs; per-gremlin layout under `platformdirs.user_state_dir("gremlins")/<gr_id>/` |
 | Find the design backlog | `plans/` (rough notes, not authoritative) |
 | Find open work | GitHub issues, `gh issue list --repo xbrianh/gremlins` |
 

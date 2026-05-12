@@ -111,7 +111,7 @@ def _invoke(
 
 
 def test_no_gremlins_empty_state_root(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "claude-gremlins"
+    state_root = tmp_path / "gremlins"
     state_root.mkdir()
     rc, out, err = _invoke("SessionStart", "/proj", state_root, monkeypatch, capsys)
     assert rc == 0
@@ -120,7 +120,7 @@ def test_no_gremlins_empty_state_root(tmp_path, monkeypatch, capsys):
 
 
 def test_running_gremlin_shown_at_session_start(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "claude-gremlins"
+    state_root = tmp_path / "gremlins"
     project_root = "/myproject"
     _make_state(
         state_root, "gr-abc123", project_root, pid=os.getpid(), stage="implement"
@@ -136,7 +136,7 @@ def test_running_gremlin_shown_at_session_start(tmp_path, monkeypatch, capsys):
 
 
 def test_running_gremlin_not_shown_at_user_prompt_submit(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "claude-gremlins"
+    state_root = tmp_path / "gremlins"
     project_root = "/myproject"
     _make_state(
         state_root, "gr-abc123", project_root, pid=os.getpid(), stage="implement"
@@ -151,7 +151,7 @@ def test_running_gremlin_not_shown_at_user_prompt_submit(tmp_path, monkeypatch, 
 
 
 def test_newly_finished_gremlin_shown_at_session_start(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "claude-gremlins"
+    state_root = tmp_path / "gremlins"
     project_root = "/myproject"
     wdir = _make_state(
         state_root,
@@ -174,7 +174,7 @@ def test_newly_finished_gremlin_shown_at_session_start(tmp_path, monkeypatch, ca
 def test_newly_finished_gremlin_shown_at_user_prompt_submit(
     tmp_path, monkeypatch, capsys
 ):
-    state_root = tmp_path / "claude-gremlins"
+    state_root = tmp_path / "gremlins"
     project_root = "/myproject"
     wdir = _make_state(
         state_root,
@@ -197,7 +197,7 @@ def test_already_summarized_gremlin_not_re_announced(tmp_path, monkeypatch, caps
     # "finished since last check" block again. It may still appear in the
     # running block (as finished) because the bash running-block filter
     # only checks status=="running", not the summarized marker.
-    state_root = tmp_path / "claude-gremlins"
+    state_root = tmp_path / "gremlins"
     project_root = "/myproject"
     _make_state(
         state_root,
@@ -218,7 +218,7 @@ def test_closed_gremlin_not_in_finished_block(tmp_path, monkeypatch, capsys):
     # A gremlin with the closed marker must not appear in the finished block.
     # (The closed marker only gates the finished-block listing; the running-block
     # filter only checks status=="running" and doesn't consult closed.)
-    state_root = tmp_path / "claude-gremlins"
+    state_root = tmp_path / "gremlins"
     project_root = "/myproject"
     # Use status="dead" so the gremlin does not trigger the running-block filter
     # either, making it fully absent from the output.
@@ -240,7 +240,7 @@ def test_closed_gremlin_not_in_finished_block(tmp_path, monkeypatch, capsys):
 
 
 def test_stalled_gremlin_shown_as_stalled(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "claude-gremlins"
+    state_root = tmp_path / "gremlins"
     project_root = "/myproject"
     wdir = _make_state(
         state_root,
@@ -264,7 +264,7 @@ def test_stalled_gremlin_shown_as_stalled(tmp_path, monkeypatch, capsys):
 
 
 def test_crashed_gremlin_shown_as_crashed(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "claude-gremlins"
+    state_root = tmp_path / "gremlins"
     project_root = "/myproject"
     # Use a PID that definitely doesn't exist.
     _make_state(
@@ -284,7 +284,7 @@ def test_crashed_gremlin_shown_as_crashed(tmp_path, monkeypatch, capsys):
 
 
 def test_skip_summary_env_short_circuits(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "claude-gremlins"
+    state_root = tmp_path / "gremlins"
     project_root = "/myproject"
     _make_state(state_root, "gr-skip01", project_root, finished=True)
 
@@ -302,7 +302,7 @@ def test_skip_summary_env_short_circuits(tmp_path, monkeypatch, capsys):
 
 
 def test_project_root_mismatch_filtered_out(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "claude-gremlins"
+    state_root = tmp_path / "gremlins"
     _make_state(state_root, "gr-other1", "/other-project", finished=True)
 
     rc, out, err = _invoke(
@@ -314,7 +314,7 @@ def test_project_root_mismatch_filtered_out(tmp_path, monkeypatch, capsys):
 
 
 def test_prune_removes_closed_state_dir_older_than_14_days(tmp_path):
-    state_root = tmp_path / "claude-gremlins"
+    state_root = tmp_path / "gremlins"
     state_root.mkdir()
     old_wdir = state_root / "gr-old-closed"
     old_wdir.mkdir()
@@ -330,7 +330,7 @@ def test_prune_removes_closed_state_dir_older_than_14_days(tmp_path):
 
 
 def test_prune_keeps_closed_state_dir_younger_than_14_days(tmp_path):
-    state_root = tmp_path / "claude-gremlins"
+    state_root = tmp_path / "gremlins"
     state_root.mkdir()
     new_wdir = state_root / "gr-new-closed"
     new_wdir.mkdir()
@@ -343,7 +343,7 @@ def test_prune_keeps_closed_state_dir_younger_than_14_days(tmp_path):
 
 
 def test_prune_removes_old_direct_dirs(tmp_path):
-    state_root = tmp_path / "claude-gremlins"
+    state_root = tmp_path / "gremlins"
     state_root.mkdir()
     direct = state_root / "direct"
     direct.mkdir()
@@ -358,7 +358,7 @@ def test_prune_removes_old_direct_dirs(tmp_path):
 
 
 def test_stdout_is_valid_json_with_hook_event_name(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "claude-gremlins"
+    state_root = tmp_path / "gremlins"
     project_root = "/myproject"
     _make_state(state_root, "gr-json01", project_root, finished=True)
 
@@ -373,7 +373,7 @@ def test_stdout_is_valid_json_with_hook_event_name(tmp_path, monkeypatch, capsys
 
 
 def test_exit_code_shown_in_finished_block(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "claude-gremlins"
+    state_root = tmp_path / "gremlins"
     project_root = "/myproject"
     _make_state(
         state_root,
@@ -392,7 +392,7 @@ def test_exit_code_shown_in_finished_block(tmp_path, monkeypatch, capsys):
 
 
 def test_description_shown_in_summary(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "claude-gremlins"
+    state_root = tmp_path / "gremlins"
     project_root = "/myproject"
     _make_state(
         state_root,

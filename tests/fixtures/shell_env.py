@@ -129,7 +129,7 @@ def setup_shell_env(
     old_home = os.environ.get("HOME")
     os.environ["HOME"] = str(home)
     try:
-        state_root = pathlib.Path(platformdirs.user_state_dir("claude-gremlins"))
+        state_root = pathlib.Path(platformdirs.user_state_dir("gremlins"))
     finally:
         if old_home is None:
             os.environ.pop("HOME", None)
