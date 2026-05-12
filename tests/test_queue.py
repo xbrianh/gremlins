@@ -284,6 +284,21 @@ def test_land_success(q, monkeypatch):
     assert "gr-land02" in ids
 
 
+def test_land_removes_files_after_success(q, monkeypatch):
+    monkeypatch.setattr(
+        "gremlins.queue.core.subprocess.run",
+        lambda cmd, **kw: MagicMock(returncode=0),
+    )
+    p = q / "done" / "0000-local.gr-land01.cmd"
+    log = q / "done" / "0000-local.gr-land01.log"
+    p.write_text("gremlins launch local")
+    log.write_text("output")
+    core.land()
+    assert not p.exists()
+    assert not log.exists()
+    assert not list((q / "done").glob("*.cmd"))
+
+
 def test_land_halts_on_failure(q, monkeypatch):
     call_count = [0]
 
@@ -315,6 +330,64 @@ def test_land_skips_non_launch_items(q, monkeypatch):
 # ---------------------------------------------------------------------------
 # CLI dispatch
 # ---------------------------------------------------------------------------
+
+
+def test_run_launch_invalid_gr_id(q, monkeypatch):
+    monkeypatch.setattr(
+        "gremlins.queue.core._run_launch",
+        lambda cmd, log_path: ("bad id!!!", True),
+    )
+    core.add("gremlins launch local")
+    rc = core.run()
+    assert rc == 1
+    failed = list((q / "failed").glob("*.cmd"))
+    assert len(failed) == 1
+
+
+def test_run_launch_poll_timeout(q, monkeypatch):
+    fake_id = "gr-timeout1"
+    monkeypatch.setattr(
+        "gremlins.queue.core._run_launch",
+        lambda cmd, log_path: (fake_id, True),
+    )
+    monkeypatch.setattr(
+        "gremlins.queue.core._poll_terminal",
+        lambda gr_id: (_ for _ in ()).throw(TimeoutError("timed out")),
+    )
+    core.add("gremlins launch local")
+    rc = core.run()
+    assert rc == 1
+    failed = list((q / "failed").glob("*.cmd"))
+    assert len(failed) == 1
+
+
+def test_run_launch_requeued_no_double_id(q, monkeypatch):
+    """Item requeued from done/ should not accumulate two gremlin ids."""
+    old_id = "gr-old001"
+    new_id = "gr-new001"
+    monkeypatch.setattr(
+        "gremlins.queue.core._run_launch",
+        lambda cmd, log_path: (new_id, True),
+    )
+    monkeypatch.setattr(
+        "gremlins.queue.core._poll_terminal",
+        lambda gr_id: {"exit_code": 0, "status": "done"},
+    )
+    (q / "done" / f"0000-local.{old_id}.cmd").write_text("gremlins launch local")
+    core.requeue(include_done=True)
+    rc = core.run()
+    assert rc == 0
+    done = list((q / "done").glob("*.cmd"))
+    assert len(done) == 1
+    assert old_id not in done[0].name
+    assert new_id in done[0].name
+
+
+def test_cli_queue_clear_flags_mutually_exclusive(tmp_path, monkeypatch):
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    import pytest
+    with pytest.raises(SystemExit):
+        main(["queue", "clear", "--failed", "--done"])
 
 
 def test_cli_queue_add_dispatches(tmp_path, monkeypatch, capsys):

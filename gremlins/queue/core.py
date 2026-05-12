@@ -12,6 +12,7 @@ from pathlib import Path
 _TERMINAL_STATUSES = frozenset({"done", "dead", "bailed"})
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]+$")
 _SUBDIRS = ("pending", "running", "done", "failed")
+_POLL_TIMEOUT = 4 * 3600  # 4 hours; a gremlin silent longer than this is assumed dead
 
 
 def queue_root() -> Path:
@@ -23,11 +24,14 @@ def queue_root() -> Path:
     return root
 
 
-def _counter(root: Path) -> int:
-    total = 0
+def _next_counter(root: Path) -> int:
+    nums = []
     for sub in _SUBDIRS:
-        total += len(list((root / sub).glob("*.cmd")))
-    return total
+        for p in (root / sub).glob("*.cmd"):
+            m = re.match(r"^(\d+)-", p.name)
+            if m:
+                nums.append(int(m.group(1)))
+    return max(nums) + 1 if nums else 0
 
 
 def _slugify(text: str) -> str:
@@ -48,6 +52,13 @@ def _parse_id(path: Path) -> str | None:
         return None
     candidate = parts[-1]
     return candidate if _ID_RE.match(candidate) else None
+
+
+def _strip_id(stem: str) -> str:
+    parts = stem.split(".")
+    if len(parts) >= 2 and _ID_RE.match(parts[-1]):
+        return ".".join(parts[:-1])
+    return stem
 
 
 def _is_launch(cmd: str) -> bool:
@@ -71,7 +82,13 @@ def _poll_terminal(gr_id: str) -> dict[str, object]:
     from gremlins.paths import state_root
 
     state_file = state_root() / gr_id / "state.json"
+    deadline = time.time() + _POLL_TIMEOUT
     while True:
+        if time.time() > deadline:
+            raise TimeoutError(
+                f"gremlin {gr_id} did not reach terminal status within"
+                f" {_POLL_TIMEOUT // 3600}h"
+            )
         try:
             data = json.loads(state_file.read_text())
             if data.get("status") in _TERMINAL_STATUSES:
@@ -106,7 +123,7 @@ def add(command: str) -> str:
     root = queue_root()
     tokens = command.split()
     slug = _slugify(_first_non_flag(tokens))
-    counter = _counter(root)
+    counter = _next_counter(root)
     name = f"{counter:04d}-{slug}.cmd"
     (root / "pending" / name).write_text(command)
     return name
@@ -157,7 +174,16 @@ def run() -> int:
                 print(f"queue: failed {item.stem}", file=sys.stderr)
                 return 1
 
-            new_stem = item.stem + "." + gr_id
+            if not _ID_RE.match(gr_id):
+                _move_item(item, root / "failed")
+                print(
+                    f"queue: failed {item.stem} (invalid gremlin id: {gr_id!r})",
+                    file=sys.stderr,
+                )
+                return 1
+
+            base_stem = _strip_id(item.stem)
+            new_stem = base_stem + "." + gr_id
             new_item = item.parent / (new_stem + ".cmd")
             item.rename(new_item)
             if log_path.exists():
@@ -167,7 +193,12 @@ def run() -> int:
             item = new_item
 
             print(f"queue: waiting for gremlin {gr_id}", file=sys.stderr)
-            state = _poll_terminal(gr_id)
+            try:
+                state = _poll_terminal(gr_id)
+            except TimeoutError as e:
+                _move_item(item, root / "failed")
+                print(f"queue: failed {item.stem}: {e}", file=sys.stderr)
+                return 1
             clean = state.get("exit_code") == 0 and "bail_class" not in state
         else:
             clean = _run_plain(cmd, log_path)
@@ -238,6 +269,10 @@ def land() -> int:
         if result.returncode != 0:
             print(f"queue land: failed on {gr_id}", file=sys.stderr)
             return 1
+        p.unlink()
+        log = p.with_suffix(".log")
+        if log.exists():
+            log.unlink()
         landed += 1
     print(f"queue land: landed {landed}, skipped {skipped}", file=sys.stderr)
     return 0

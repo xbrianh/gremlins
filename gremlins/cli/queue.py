@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import shlex
 import sys
 
 from gremlins.queue.core import add, clear, land, list_queue, requeue, run
@@ -12,10 +13,7 @@ def _add(argv: list[str]) -> int:
     if not argv:
         print("usage: gremlins queue add <command>", file=sys.stderr)
         return 1
-    if len(argv) == 1:
-        command = argv[0]
-    else:
-        command = " ".join(argv)
+    command = shlex.join(argv)
     name = add(command)
     print(f"queued: {name}")
     return 0
@@ -38,11 +36,10 @@ def _requeue(argv: list[str]) -> int:
 
 def _clear(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="gremlins queue clear")
-    parser.add_argument(
-        "--failed", action="store_true", help="Clear only failed items."
-    )
-    parser.add_argument("--done", action="store_true", help="Clear only done items.")
-    parser.add_argument(
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument("--failed", action="store_true", help="Clear only failed items.")
+    scope.add_argument("--done", action="store_true", help="Clear only done items.")
+    scope.add_argument(
         "--purge",
         action="store_true",
         help="Empty all 4 dirs and stop running gremlins.",
