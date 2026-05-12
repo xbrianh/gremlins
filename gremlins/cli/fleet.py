@@ -126,12 +126,18 @@ def rescue_main(argv: list[str]) -> int:
         description="Diagnose and resume a dead or stalled gremlin.",
     )
     p.add_argument("id_prefix", metavar="id-prefix")
-    p.add_argument("--headless", action="store_true", help="Run end-to-end with no TTY.")
+    p.add_argument(
+        "--headless", action="store_true", help="Run end-to-end with no TTY."
+    )
     p.add_argument("--from-boss", action="store_true", help="Called from a boss chain.")
     args = p.parse_args(argv)
     if _no_state_root():
         return 0
-    return 0 if do_rescue(args.id_prefix, headless=args.headless, from_boss=args.from_boss) else 1
+    return (
+        0
+        if do_rescue(args.id_prefix, headless=args.headless, from_boss=args.from_boss)
+        else 1
+    )
 
 
 def rm_main(argv: list[str]) -> int:
@@ -177,15 +183,27 @@ def land_main(argv: list[str]) -> int:
     )
     p.add_argument("id_prefix", metavar="id-prefix")
     mode = p.add_mutually_exclusive_group()
-    mode.add_argument("--squash", action="store_true", help="Collapse commits into one.")
-    mode.add_argument("--ff", action="store_true", help="Fast-forward (fails if diverged).")
-    p.add_argument("--force", action="store_true", help="Skip merge and clean up a closed gh PR.")
-    p.add_argument("--into", metavar="DIR", default="", help="Target directory for the merge.")
+    mode.add_argument(
+        "--squash", action="store_true", help="Collapse commits into one."
+    )
+    mode.add_argument(
+        "--ff", action="store_true", help="Fast-forward (fails if diverged)."
+    )
+    p.add_argument(
+        "--force", action="store_true", help="Skip merge and clean up a closed gh PR."
+    )
+    p.add_argument(
+        "--into", metavar="DIR", default="", help="Target directory for the merge."
+    )
     args = p.parse_args(argv)
     if _no_state_root():
         return 0
     land_mode = "squash" if args.squash else ("ff" if args.ff else None)
-    return 0 if do_land(args.id_prefix, force=args.force, mode=land_mode, into_dir=args.into) else 1
+    return (
+        0
+        if do_land(args.id_prefix, force=args.force, mode=land_mode, into_dir=args.into)
+        else 1
+    )
 
 
 def ack_main(argv: list[str]) -> int:
