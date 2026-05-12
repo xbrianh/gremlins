@@ -7,8 +7,6 @@ This project uses [gremlins](https://github.com/amorphous-industries/gremlins) f
 Each YAML file defines a named pipeline. Key fields:
 
 ```yaml
-name: <pipeline-name>
-
 clients:
   <alias>: { provider: claude, model: sonnet }   # model: sonnet | opus | haiku
 

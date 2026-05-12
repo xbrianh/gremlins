@@ -61,7 +61,7 @@ class Pipeline:
             raise FileNotFoundError(f"pipeline file not found: {path}")
 
         raw = expand_pipeline(path)
-        pipeline_name = str(raw.get("name") or path.stem)
+        pipeline_name = path.stem
 
         default_client: Client | None = None
         default_client_raw = raw.get("default_client")

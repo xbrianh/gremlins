@@ -1,5 +1,3 @@
-name: local
-
 default_client: claude:sonnet
 
 base_ref: current

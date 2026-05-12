@@ -15,7 +15,7 @@ def test_hit_bundled(tmp_path: pathlib.Path) -> None:
 def test_hit_project_local(tmp_path: pathlib.Path) -> None:
     pipelines_dir = tmp_path / ".gremlins"
     pipelines_dir.mkdir(parents=True)
-    (pipelines_dir / "mypipe.yaml").write_text("name: mypipe\nstages: []\n")
+    (pipelines_dir / "mypipe.yaml").write_text("stages: []\n")
     result = resolve_pipeline_name("mypipe", tmp_path)
     assert result == (pipelines_dir / "mypipe.yaml").resolve()
 
@@ -25,7 +25,7 @@ def test_project_shadows_bundled(tmp_path: pathlib.Path) -> None:
     pipelines_dir = tmp_path / ".gremlins"
     pipelines_dir.mkdir(parents=True)
     shadow = pipelines_dir / f"{bundled_name}.yaml"
-    shadow.write_text("name: shadow\nstages: []\n")
+    shadow.write_text("stages: []\n")
     result = resolve_pipeline_name(bundled_name, tmp_path)
     assert result == shadow.resolve()
 
@@ -33,7 +33,7 @@ def test_project_shadows_bundled(tmp_path: pathlib.Path) -> None:
 def test_miss_raises_with_suggestions(tmp_path: pathlib.Path) -> None:
     pipelines_dir = tmp_path / ".gremlins"
     pipelines_dir.mkdir(parents=True)
-    (pipelines_dir / "alpha.yaml").write_text("name: alpha\nstages: []\n")
+    (pipelines_dir / "alpha.yaml").write_text("stages: []\n")
     with pytest.raises(FileNotFoundError) as exc_info:
         resolve_pipeline_name("nonexistent", tmp_path)
     msg = str(exc_info.value)
