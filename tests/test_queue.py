@@ -405,6 +405,7 @@ def test_cli_queue_add_single_quoted_command_stored_verbatim(tmp_path, monkeypat
     cmd = "gremlins launch gh-terse --plan '#1' --description 'hi'"
     main(["queue", "add", cmd])
     import gremlins.queue.core as core
+
     pending = list((core.queue_root() / "pending").glob("*.cmd"))
     assert len(pending) == 1
     assert pending[0].read_text() == cmd
