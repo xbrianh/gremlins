@@ -9,7 +9,6 @@ import sys
 import time
 from pathlib import Path
 
-
 _TERMINAL_STATUSES = frozenset({"done", "dead", "bailed"})
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]+$")
 _SUBDIRS = ("pending", "running", "done", "failed")
@@ -68,7 +67,7 @@ def _move_item(cmd_path: Path, dst_dir: Path) -> Path:
     return dst
 
 
-def _poll_terminal(gr_id: str) -> dict:
+def _poll_terminal(gr_id: str) -> dict[str, object]:
     from gremlins.paths import state_root
 
     state_file = state_root() / gr_id / "state.json"
@@ -193,7 +192,9 @@ def requeue(include_done: bool = False) -> int:
     return 0
 
 
-def clear(failed_only: bool = False, done_only: bool = False, purge: bool = False) -> int:
+def clear(
+    failed_only: bool = False, done_only: bool = False, purge: bool = False
+) -> int:
     root = queue_root()
     if purge:
         for sub in _SUBDIRS:

@@ -38,9 +38,15 @@ def _requeue(argv: list[str]) -> int:
 
 def _clear(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="gremlins queue clear")
-    parser.add_argument("--failed", action="store_true", help="Clear only failed items.")
+    parser.add_argument(
+        "--failed", action="store_true", help="Clear only failed items."
+    )
     parser.add_argument("--done", action="store_true", help="Clear only done items.")
-    parser.add_argument("--purge", action="store_true", help="Empty all 4 dirs and stop running gremlins.")
+    parser.add_argument(
+        "--purge",
+        action="store_true",
+        help="Empty all 4 dirs and stop running gremlins.",
+    )
     args = parser.parse_args(argv)
     return clear(failed_only=args.failed, done_only=args.done, purge=args.purge)
 
@@ -64,6 +70,8 @@ def queue_main(argv: list[str]) -> int:
     rest = argv[1:]
     handler = _DISPATCH.get(sub)
     if handler is None:
-        print(f"usage: gremlins queue <add|list|run|requeue|clear|land>", file=sys.stderr)
+        print(
+            "usage: gremlins queue <add|list|run|requeue|clear|land>", file=sys.stderr
+        )
         return 1
     return handler(rest)

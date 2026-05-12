@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-import json
-import pathlib
-import subprocess
 from unittest.mock import MagicMock
 
 import pytest
 
 import gremlins.queue.core as core
 from gremlins.cli import main
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
