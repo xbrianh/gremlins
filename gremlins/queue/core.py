@@ -1,0 +1,242 @@
+"""Queue business logic for sequential gremlin dispatch."""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+_TERMINAL_STATUSES = frozenset({"done", "dead", "bailed"})
+_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]+$")
+_SUBDIRS = ("pending", "running", "done", "failed")
+
+
+def queue_root() -> Path:
+    from gremlins.paths import state_root
+
+    root = state_root() / "queues" / "default"
+    for sub in _SUBDIRS:
+        (root / sub).mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _counter(root: Path) -> int:
+    total = 0
+    for sub in _SUBDIRS:
+        total += len(list((root / sub).glob("*.cmd")))
+    return total
+
+
+def _slugify(text: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return slug[:24]
+
+
+def _first_non_flag(tokens: list[str]) -> str:
+    for t in tokens:
+        if not t.startswith("-"):
+            return t
+    return "item"
+
+
+def _parse_id(path: Path) -> str | None:
+    parts = path.stem.split(".")
+    if len(parts) < 2:
+        return None
+    candidate = parts[-1]
+    return candidate if _ID_RE.match(candidate) else None
+
+
+def _is_launch(cmd: str) -> bool:
+    tokens = cmd.split()
+    for i, t in enumerate(tokens):
+        if t == "gremlins" and i + 1 < len(tokens) and tokens[i + 1] == "launch":
+            return True
+    return False
+
+
+def _move_item(cmd_path: Path, dst_dir: Path) -> Path:
+    dst = dst_dir / cmd_path.name
+    cmd_path.rename(dst)
+    log = cmd_path.with_suffix(".log")
+    if log.exists():
+        log.rename(dst_dir / log.name)
+    return dst
+
+
+def _poll_terminal(gr_id: str) -> dict:
+    from gremlins.paths import state_root
+
+    state_file = state_root() / gr_id / "state.json"
+    while True:
+        try:
+            data = json.loads(state_file.read_text())
+            if data.get("status") in _TERMINAL_STATUSES:
+                return data
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+        time.sleep(2)
+
+
+def _run_launch(cmd: str, log_path: Path) -> tuple[str | None, bool]:
+    full_cmd = cmd + " --print-id-only"
+    with open(log_path, "w") as log_f:
+        proc = subprocess.run(
+            full_cmd,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=log_f,
+        )
+        stdout = proc.stdout.decode().strip()
+        log_f.write(stdout + "\n")
+    ok = proc.returncode == 0 and bool(stdout)
+    return (stdout if stdout else None, ok)
+
+
+def _run_plain(cmd: str, log_path: Path) -> bool:
+    with open(log_path, "w") as log_f:
+        proc = subprocess.run(cmd, shell=True, stdout=log_f, stderr=subprocess.STDOUT)
+    return proc.returncode == 0
+
+
+def add(command: str) -> str:
+    root = queue_root()
+    tokens = command.split()
+    slug = _slugify(_first_non_flag(tokens))
+    counter = _counter(root)
+    name = f"{counter:04d}-{slug}.cmd"
+    (root / "pending" / name).write_text(command)
+    return name
+
+
+def list_queue() -> int:
+    root = queue_root()
+    found = False
+    for sub in _SUBDIRS:
+        for p in sorted((root / sub).glob("*.cmd")):
+            found = True
+            gr_id = _parse_id(p)
+            id_str = f" [{gr_id}]" if gr_id else ""
+            print(f"{sub:8s}  {p.stem}{id_str}")
+    if not found:
+        print("(queue is empty)")
+    return 0
+
+
+def run() -> int:
+    root = queue_root()
+    running = sorted((root / "running").glob("*.cmd"))
+    if running:
+        names = ", ".join(p.name for p in running)
+        print(
+            f"queue: error: running/ has stale items: {names}\n"
+            "hint: move or remove them manually before running the queue.",
+            file=sys.stderr,
+        )
+        return 1
+
+    while True:
+        pending = sorted((root / "pending").glob("*.cmd"))
+        if not pending:
+            return 0
+
+        src = pending[0]
+        cmd = src.read_text().strip()
+        item = _move_item(src, root / "running")
+        log_path = item.with_suffix(".log")
+
+        print(f"queue: running {item.stem}", file=sys.stderr)
+
+        if _is_launch(cmd):
+            gr_id, proc_ok = _run_launch(cmd, log_path)
+            if not proc_ok or gr_id is None:
+                _move_item(item, root / "failed")
+                print(f"queue: failed {item.stem}", file=sys.stderr)
+                return 1
+
+            new_stem = item.stem + "." + gr_id
+            new_item = item.parent / (new_stem + ".cmd")
+            item.rename(new_item)
+            if log_path.exists():
+                new_log = item.parent / (new_stem + ".log")
+                log_path.rename(new_log)
+                log_path = new_log
+            item = new_item
+
+            print(f"queue: waiting for gremlin {gr_id}", file=sys.stderr)
+            state = _poll_terminal(gr_id)
+            clean = state.get("exit_code") == 0 and "bail_class" not in state
+        else:
+            clean = _run_plain(cmd, log_path)
+
+        if clean:
+            _move_item(item, root / "done")
+            print(f"queue: done {item.stem}", file=sys.stderr)
+        else:
+            _move_item(item, root / "failed")
+            print(f"queue: failed {item.stem}", file=sys.stderr)
+            return 1
+
+
+def requeue(include_done: bool = False) -> int:
+    root = queue_root()
+    buckets = ["failed"]
+    if include_done:
+        buckets.append("done")
+    for sub in buckets:
+        for p in sorted((root / sub).glob("*.cmd")):
+            _move_item(p, root / "pending")
+    return 0
+
+
+def clear(failed_only: bool = False, done_only: bool = False, purge: bool = False) -> int:
+    root = queue_root()
+    if purge:
+        for sub in _SUBDIRS:
+            for p in (root / sub).glob("*.cmd"):
+                gr_id = _parse_id(p)
+                if sub == "running" and gr_id:
+                    subprocess.run(["gremlins", "stop", gr_id])
+                p.unlink()
+                log = p.with_suffix(".log")
+                if log.exists():
+                    log.unlink()
+        return 0
+
+    buckets: list[str] = []
+    if failed_only:
+        buckets = ["failed"]
+    elif done_only:
+        buckets = ["done"]
+    else:
+        buckets = ["done", "failed"]
+
+    for sub in buckets:
+        for p in (root / sub).glob("*.cmd"):
+            p.unlink()
+            log = p.with_suffix(".log")
+            if log.exists():
+                log.unlink()
+    return 0
+
+
+def land() -> int:
+    root = queue_root()
+    landed = 0
+    skipped = 0
+    for p in sorted((root / "done").glob("*.cmd")):
+        gr_id = _parse_id(p)
+        if gr_id is None:
+            skipped += 1
+            continue
+        result = subprocess.run(["gremlins", "land", gr_id])
+        if result.returncode != 0:
+            print(f"queue land: failed on {gr_id}", file=sys.stderr)
+            return 1
+        landed += 1
+    print(f"queue land: landed {landed}, skipped {skipped}", file=sys.stderr)
+    return 0
