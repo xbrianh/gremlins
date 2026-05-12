@@ -269,7 +269,7 @@ def _clear_item(root: Path, stem: str) -> int:
     sub, p = matches[0]
     if sub == "running":
         print(
-            f"item {stem!r} is running; use 'queue clear --purge' to stop running gremlins",
+            f"item {stem!r} is running; use 'gremlins queue clear --purge' to stop running gremlins",
             file=sys.stderr,
         )
         return 1
@@ -290,6 +290,9 @@ def clear(
 ) -> int:
     root = queue_root()
     if item is not None:
+        if any([failed_only, done_only, pending_only, purge]):
+            print("--item is mutually exclusive with --failed, --done, --pending, --purge", file=sys.stderr)
+            return 1
         return _clear_item(root, item)
     if purge:
         for sub in _SUBDIRS:
