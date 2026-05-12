@@ -25,7 +25,7 @@ def queue_root() -> Path:
 
 
 def _next_counter(root: Path) -> int:
-    nums = []
+    nums: list[int] = []
     for sub in _SUBDIRS:
         for p in (root / sub).glob("*.cmd"):
             m = re.match(r"^(\d+)-", p.name)
