@@ -98,7 +98,7 @@ class Gremlin:
             elif s.type == "loop":
                 unknown.extend(c.type for c in s.body if c.type not in STAGE_TYPES)
         if unknown:
-            raise ValueError(f"Pipeline does not support stage type(s): {unknown}")
+            raise ValueError(f"Gremlin does not support stage type(s): {unknown}")
 
         self.stages = _expand_stage_entries(stages)
         self.state_dir = state_dir
@@ -128,43 +128,50 @@ class Gremlin:
             self.instructions or "", encoding="utf-8"
         )
 
-        if self.worktree_dir is None and self.project_root and self.gr_id:
-            workdir, branch, worktree_base, actual_setup_kind = _git_mod.setup_workdir(
-                self.setup_kind,
-                self.project_root,
-                self.base_ref_sha,
-                self.gr_id,
-                self.state_dir,
-            )
-            self.worktree_dir = pathlib.Path(workdir)
-            patch_state(
-                self.gr_id,
-                workdir=workdir,
-                worktree_base=worktree_base,
-                setup_kind=actual_setup_kind,
-            )
-            if actual_setup_kind == "worktree-branch" and branch:
-                append_artifact(self.gr_id, {"type": "branch", "name": branch})
+        worktree_created: str | None = None
+        try:
+            if self.worktree_dir is None and self.project_root and self.gr_id:
+                workdir, branch, worktree_base, actual_setup_kind = _git_mod.setup_workdir(
+                    self.setup_kind,
+                    self.project_root,
+                    self.base_ref_sha,
+                    self.gr_id,
+                    self.state_dir,
+                )
+                worktree_created = workdir
+                self.worktree_dir = pathlib.Path(workdir)
+                patch_state(
+                    self.gr_id,
+                    workdir=workdir,
+                    worktree_base=worktree_base,
+                    setup_kind=actual_setup_kind,
+                )
+                if actual_setup_kind == "worktree-branch" and branch:
+                    append_artifact(self.gr_id, {"type": "branch", "name": branch})
 
-        if self.spec:
-            spec_file = self.session_dir / "spec.md"
-            if not spec_file.exists():
-                spec_src = pathlib.Path(self.spec)
-                if not spec_src.is_file():
-                    raise ValueError(f"--spec: file not found: {self.spec}")
-                if spec_src.stat().st_size == 0:
-                    raise ValueError(f"--spec: file is empty: {self.spec}")
-                shutil.copyfile(spec_src, spec_file)
+            if self.spec:
+                spec_file = self.session_dir / "spec.md"
+                if not spec_file.exists():
+                    spec_src = pathlib.Path(self.spec)
+                    if not spec_src.is_file():
+                        raise ValueError(f"--spec: file not found: {self.spec}")
+                    if spec_src.stat().st_size == 0:
+                        raise ValueError(f"--spec: file is empty: {self.spec}")
+                    shutil.copyfile(spec_src, spec_file)
 
-        if self.plan and not self.pipeline_data.needs_gh():
-            plan_file = self.session_dir / "plan.md"
-            if not plan_file.exists():
-                src = pathlib.Path(self.plan)
-                if src.is_file():
-                    shutil.copyfile(src, plan_file)
+            if self.plan and not self.pipeline_data.needs_gh():
+                plan_file = self.session_dir / "plan.md"
+                if not plan_file.exists():
+                    src = pathlib.Path(self.plan)
+                    if src.is_file():
+                        shutil.copyfile(src, plan_file)
 
-        if self.worktree_dir is not None:
-            os.chdir(self.worktree_dir)
+            if self.worktree_dir is not None:
+                os.chdir(self.worktree_dir)
+        except Exception:
+            if worktree_created and not self._initialized:
+                _git_mod.remove_worktree(self.project_root, worktree_created)
+            raise
 
         self._initialized = True
 

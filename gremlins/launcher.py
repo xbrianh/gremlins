@@ -99,7 +99,7 @@ def _build_spawn_env(gr_id: str) -> dict[str, str]:
 
 def _spawn_pipeline(
     state_dir: pathlib.Path,
-    workdir: str,
+    cwd: str,
     gr_id: str,
     pipeline_path: str,
     pipeline_args: list[str],
@@ -123,7 +123,7 @@ def _spawn_pipeline(
     try:
         proc = subprocess.Popen(
             cmd,
-            cwd=workdir,
+            cwd=cwd,
             stdin=subprocess.DEVNULL,
             stdout=log_fh,
             stderr=log_fh,
@@ -147,8 +147,9 @@ def launch(
     pipeline_args: tuple[str, ...] = (),
     spec_path: str | None = None,
 ) -> str:
-    """Set up state dir + worktree, spawn the pipeline detached, return gremlin id.
+    """Set up state dir, spawn the pipeline detached, return gremlin id.
 
+    Worktree setup is deferred to the child process via Gremlin.initialize_runtime().
     Synchronous through spawn; does not wait for the pipeline to finish.
     Raises ValueError on bad arguments, RuntimeError on infrastructure failure.
     """
@@ -337,7 +338,7 @@ def resume(gr_id: str) -> None:
     old_pid = state.get("pid")
     exit_code = state.get("exit_code")
 
-    if not workdir or not os.path.isdir(workdir):
+    if workdir and not os.path.isdir(workdir):
         raise RuntimeError(f"worktree missing: {workdir}")
 
     if status == "running" and old_pid is not None:

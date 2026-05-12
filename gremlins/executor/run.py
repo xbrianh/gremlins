@@ -109,10 +109,7 @@ def _read_state_json(gr_id: str | None) -> dict[str, Any]:
     sf = resolve_state_file(gr_id)
     if sf is None or not sf.exists():
         return {}
-    try:
-        return json.loads(sf.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    return json.loads(sf.read_text(encoding="utf-8"))
 
 
 def run_pipeline(
