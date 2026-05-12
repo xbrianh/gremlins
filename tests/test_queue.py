@@ -247,7 +247,7 @@ def test_clear_done_only(q):
 
 def test_clear_pending_only(q):
     for sub in ("pending", "running", "done", "failed"):
-        (q / sub / f"0000-x.cmd").write_text("echo x")
+        (q / sub / "0000-x.cmd").write_text("echo x")
     core.clear(pending_only=True)
     assert not list((q / "pending").glob("*.cmd"))
     for sub in ("running", "done", "failed"):
