@@ -7,8 +7,8 @@ import pathlib
 
 import pytest
 
-import gremlins.executor.state as state_mod
 import gremlins.cli as cli_mod
+import gremlins.executor.state as state_mod
 from gremlins.cli import main
 from gremlins.run_pipeline import main as run_pipeline_main
 from gremlins.utils.yaml_io import YamlLoadError

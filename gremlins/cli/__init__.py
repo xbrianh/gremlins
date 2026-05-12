@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Callable
+from collections.abc import Callable
 
 from gremlins.cli.fleet import (
     ack_main,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import shlex
 import sys
-from typing import Callable
+from collections.abc import Callable
 
 from gremlins.queue.core import add, clear, land, list_queue, requeue, run
 
