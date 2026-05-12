@@ -1,9 +1,8 @@
-import argparse
 import pathlib
 
 import pytest
 
-from gremlins.executor.pipeline import Pipeline
+from gremlins.executor.gremlin import Gremlin
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.discovery import resolve_pipeline_name, resolve_pipeline_path
 from gremlins.pipeline.loader import STAGE_TYPES
@@ -14,10 +13,6 @@ from gremlins.stages.parallel import ParallelStage
 from gremlins.stages.plan import Plan
 
 
-def _args(**kwargs: object) -> argparse.Namespace:
-    return argparse.Namespace(**kwargs)
-
-
 def _pipeline_data(stages: list[Stage] | None = None) -> _PipelineData:
     return _PipelineData(name="test", path=pathlib.Path("."), stages=stages or [])
 
@@ -25,15 +20,16 @@ def _pipeline_data(stages: list[Stage] | None = None) -> _PipelineData:
 def _local(
     stages: list[Stage],
     *,
-    args: argparse.Namespace,
+    resume_from: str | None = None,
     tmp_path: pathlib.Path,
-) -> Pipeline:
-    return Pipeline(
+) -> Gremlin:
+    return Gremlin(
         stages,
-        args=args,
+        state_dir=tmp_path,
         session_dir=tmp_path,
         gr_id=None,
         pipeline_data=_pipeline_data(stages),
+        resume_from=resume_from,
     )
 
 
@@ -41,17 +37,17 @@ def test_pipeline_constructs_from_local_yaml(tmp_path: pathlib.Path) -> None:
     pipeline_data = _PipelineData.from_yaml(
         resolve_pipeline_path("local", pathlib.Path.cwd())
     )
-    pipe = Pipeline(
+    gremlin = Gremlin(
         pipeline_data.stages,
-        args=_args(),
+        state_dir=tmp_path,
         session_dir=tmp_path,
         gr_id=None,
         pipeline_data=pipeline_data,
     )
 
-    assert len(pipe.stages) > 0
-    assert all(isinstance(s, Stage) for s in pipe.stages)
-    stage_types = [s.type for s in pipe.stages]
+    assert len(gremlin.stages) > 0
+    assert all(isinstance(s, Stage) for s in gremlin.stages)
+    stage_types = [s.type for s in gremlin.stages]
     assert "plan" in stage_types
     assert "implement" in stage_types
     assert "plan" in STAGE_TYPES
@@ -65,9 +61,9 @@ def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
     pipeline_data = _PipelineData.from_yaml(
         resolve_pipeline_path("gh", pathlib.Path.cwd())
     )
-    pipe = Pipeline(
+    gremlin = Gremlin(
         pipeline_data.stages,
-        args=_args(),
+        state_dir=tmp_path,
         session_dir=tmp_path,
         gr_id=None,
         pipeline_data=pipeline_data,
@@ -75,9 +71,9 @@ def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
         state_file=None,
     )
 
-    assert len(pipe.stages) > 0
-    assert all(isinstance(s, Stage) for s in pipe.stages)
-    stage_types = [s.type for s in pipe.stages]
+    assert len(gremlin.stages) > 0
+    assert all(isinstance(s, Stage) for s in gremlin.stages)
+    stage_types = [s.type for s in gremlin.stages]
     assert "plan" in stage_types
     assert "implement" in stage_types
     assert "plan" in STAGE_TYPES
@@ -105,79 +101,79 @@ def _make_parallel_stage(name: str, children: list[str]) -> ParallelStage:
 
 
 def test_validate_resume_target_no_resume_from(tmp_path: pathlib.Path) -> None:
-    pipe = _local(
+    gremlin = _local(
         _make_stages("plan", "implement"),
-        args=_args(resume_from=None),
+        resume_from=None,
         tmp_path=tmp_path,
     )
-    pipe.validate_resume_target()  # should not raise
+    gremlin.validate_resume_target()  # should not raise
 
 
 def test_validate_resume_target_valid_name(tmp_path: pathlib.Path) -> None:
-    pipe = _local(
+    gremlin = _local(
         _make_stages("plan", "implement"),
-        args=_args(resume_from="implement"),
+        resume_from="implement",
         tmp_path=tmp_path,
     )
-    pipe.validate_resume_target()  # should not raise
+    gremlin.validate_resume_target()  # should not raise
 
 
 def test_validate_resume_target_invalid_name(tmp_path: pathlib.Path) -> None:
-    pipe = _local(
+    gremlin = _local(
         _make_stages("plan", "implement"),
-        args=_args(resume_from="bogus"),
+        resume_from="bogus",
         tmp_path=tmp_path,
     )
     with pytest.raises(ValueError, match="bogus"):
-        pipe.validate_resume_target()
+        gremlin.validate_resume_target()
 
 
 def test_validate_resume_target_parallel_group_name(tmp_path: pathlib.Path) -> None:
-    pipe = _local(
+    gremlin = _local(
         [_make_parallel_stage("reviews", ["review-a", "review-b"])],
-        args=_args(resume_from="reviews"),
+        resume_from="reviews",
         tmp_path=tmp_path,
     )
-    pipe.validate_resume_target()  # "reviews" is a valid expanded name
+    gremlin.validate_resume_target()  # "reviews" is a valid expanded name
 
 
 def test_validate_resume_target_parallel_fanout_rejected(
     tmp_path: pathlib.Path,
 ) -> None:
-    pipe = _local(
+    gremlin = _local(
         [_make_parallel_stage("reviews", ["review-a", "review-b"])],
-        args=_args(resume_from="reviews-fanout"),
+        resume_from="reviews-fanout",
         tmp_path=tmp_path,
     )
     with pytest.raises(ValueError, match="reviews-fanout"):
-        pipe.validate_resume_target()  # fanout is internal, not a resume target
+        gremlin.validate_resume_target()  # fanout is internal, not a resume target
 
 
 def test_validate_resume_target_parallel_fanin_rejected(tmp_path: pathlib.Path) -> None:
-    pipe = _local(
+    gremlin = _local(
         [_make_parallel_stage("reviews", ["review-a", "review-b"])],
-        args=_args(resume_from="reviews-fanin"),
+        resume_from="reviews-fanin",
         tmp_path=tmp_path,
     )
     with pytest.raises(ValueError, match="reviews-fanin"):
-        pipe.validate_resume_target()  # fanin is internal, not a resume target
+        gremlin.validate_resume_target()  # fanin is internal, not a resume target
 
 
 def test_validate_resume_target_child_name_rejected(tmp_path: pathlib.Path) -> None:
-    pipe = _local(
+    gremlin = _local(
         [_make_parallel_stage("reviews", ["review-a", "review-b"])],
-        args=_args(resume_from="review-a"),
+        resume_from="review-a",
         tmp_path=tmp_path,
     )
     with pytest.raises(ValueError, match="review-a"):
-        pipe.validate_resume_target()
+        gremlin.validate_resume_target()
 
 
 def test_pipeline_rejects_unknown_stage_type(tmp_path: pathlib.Path) -> None:
     s = Plan("s", None, [], {})
     s.type = "nonexistent"
     with pytest.raises(ValueError, match="nonexistent"):
-        _local([s], args=_args(), tmp_path=tmp_path)
+        _local([s], tmp_path=tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -264,17 +260,17 @@ def test_resolve_pipeline_path_no_overlay_env_falls_through(
 def test_parallel_expansion_in_constructor(tmp_path: pathlib.Path) -> None:
     parallel = _make_parallel_stage("reviews", ["review-a", "review-b"])
     plan_entry = Plan("plan", None, [], {})
-    pipe = _local([plan_entry, parallel], args=_args(), tmp_path=tmp_path)
+    gremlin = _local([plan_entry, parallel], tmp_path=tmp_path)
 
-    stage_names = [s.name for s in pipe.stages]
+    stage_names = [s.name for s in gremlin.stages]
     assert "reviews" in stage_names
     assert "review-a" not in stage_names
-    by_name = {s.name: s for s in pipe.stages}
+    by_name = {s.name: s for s in gremlin.stages}
     assert by_name["reviews"].type == "parallel"
 
 
 # ---------------------------------------------------------------------------
-# Pipeline.needs_gh tests
+# Gremlin.needs_gh tests (via pipeline_data)
 # ---------------------------------------------------------------------------
 
 
@@ -331,3 +327,9 @@ def test_stage_builders_registry_covers_all_known_types() -> None:
         "parallel",
     }
     assert expected <= set(STAGE_TYPES)
+
+
+def test_run_raises_without_initialize_runtime(tmp_path: pathlib.Path) -> None:
+    gremlin = _local(_make_stages("plan"), tmp_path=tmp_path)
+    with pytest.raises(RuntimeError, match="initialize_runtime"):
+        gremlin.run()
