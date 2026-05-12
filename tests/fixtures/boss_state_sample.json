@@ -3,7 +3,7 @@
   "chain_kind": "gh",
   "chain_base_ref": "b06a4ad98aace7ce62740cbe2dbb50c89ce41a73",
   "target_branch": "main",
-  "current_plan": "/tmp/claude-gremlins/extract-pipeline-package-via-phased-d04390/handoff-005.md",
+  "current_plan": "/tmp/gremlins/extract-pipeline-package-via-phased-d04390/handoff-005.md",
   "handoff_count": 5,
   "current_child_id": "migrate-bossgremlin-into-pipeline-48ab50",
   "children": [
@@ -29,10 +29,10 @@
       "timestamp": "2026-04-26T19:54:57Z",
       "n": 1,
       "plan_in": "/tmp/issue80-spec.md",
-      "plan_out": "/tmp/claude-gremlins/extract-pipeline-package-via-phased-d04390/handoff-001.md",
-      "signal_file": "/tmp/claude-gremlins/extract-pipeline-package-via-phased-d04390/handoff-001.state.json",
+      "plan_out": "/tmp/gremlins/extract-pipeline-package-via-phased-d04390/handoff-001.md",
+      "signal_file": "/tmp/gremlins/extract-pipeline-package-via-phased-d04390/handoff-001.state.json",
       "exit_state": "next-plan",
-      "child_plan": "/tmp/claude-gremlins/extract-pipeline-package-via-phased-d04390/handoff-001-child.md",
+      "child_plan": "/tmp/gremlins/extract-pipeline-package-via-phased-d04390/handoff-001-child.md",
       "bail_reason": null,
       "operator_followups": [
         "After Phase 1 lands: run scripts/sync.sh push --dry-run to confirm pipeline/ doesn't trip DELETE_THRESHOLD"
@@ -41,11 +41,11 @@
     {
       "timestamp": "2026-04-26T21:08:13Z",
       "n": 2,
-      "plan_in": "/tmp/claude-gremlins/extract-pipeline-package-via-phased-d04390/handoff-001.md",
-      "plan_out": "/tmp/claude-gremlins/extract-pipeline-package-via-phased-d04390/handoff-002.md",
-      "signal_file": "/tmp/claude-gremlins/extract-pipeline-package-via-phased-d04390/handoff-002.state.json",
+      "plan_in": "/tmp/gremlins/extract-pipeline-package-via-phased-d04390/handoff-001.md",
+      "plan_out": "/tmp/gremlins/extract-pipeline-package-via-phased-d04390/handoff-002.md",
+      "signal_file": "/tmp/gremlins/extract-pipeline-package-via-phased-d04390/handoff-002.state.json",
       "exit_state": "next-plan",
-      "child_plan": "/tmp/claude-gremlins/extract-pipeline-package-via-phased-d04390/handoff-002-child.md",
+      "child_plan": "/tmp/gremlins/extract-pipeline-package-via-phased-d04390/handoff-002-child.md",
       "bail_reason": null,
       "operator_followups": [
         "After Phase 1 lands: Run scripts/sync.sh push --dry-run to confirm the new pipeline/ dir doesn't trip DELETE_THRESHOLD"
@@ -54,11 +54,11 @@
     {
       "timestamp": "2026-04-26T21:37:38Z",
       "n": 3,
-      "plan_in": "/tmp/claude-gremlins/extract-pipeline-package-via-phased-d04390/handoff-002.md",
-      "plan_out": "/tmp/claude-gremlins/extract-pipeline-package-via-phased-d04390/handoff-003.md",
-      "signal_file": "/tmp/claude-gremlins/extract-pipeline-package-via-phased-d04390/handoff-003.state.json",
+      "plan_in": "/tmp/gremlins/extract-pipeline-package-via-phased-d04390/handoff-002.md",
+      "plan_out": "/tmp/gremlins/extract-pipeline-package-via-phased-d04390/handoff-003.md",
+      "signal_file": "/tmp/gremlins/extract-pipeline-package-via-phased-d04390/handoff-003.state.json",
       "exit_state": "next-plan",
-      "child_plan": "/tmp/claude-gremlins/extract-pipeline-package-via-phased-d04390/handoff-003-child.md",
+      "child_plan": "/tmp/gremlins/extract-pipeline-package-via-phased-d04390/handoff-003-child.md",
       "bail_reason": null,
       "operator_followups": [
         "After Phase 1 lands: Run scripts/sync.sh push --dry-run to confirm the new pipeline/ dir doesn't trip DELETE_THRESHOLD"
@@ -67,11 +67,11 @@
     {
       "timestamp": "2026-04-26T22:23:55Z",
       "n": 4,
-      "plan_in": "/tmp/claude-gremlins/extract-pipeline-package-via-phased-d04390/handoff-003.md",
-      "plan_out": "/tmp/claude-gremlins/extract-pipeline-package-via-phased-d04390/handoff-004.md",
-      "signal_file": "/tmp/claude-gremlins/extract-pipeline-package-via-phased-d04390/handoff-004.state.json",
+      "plan_in": "/tmp/gremlins/extract-pipeline-package-via-phased-d04390/handoff-003.md",
+      "plan_out": "/tmp/gremlins/extract-pipeline-package-via-phased-d04390/handoff-004.md",
+      "signal_file": "/tmp/gremlins/extract-pipeline-package-via-phased-d04390/handoff-004.state.json",
       "exit_state": "next-plan",
-      "child_plan": "/tmp/claude-gremlins/extract-pipeline-package-via-phased-d04390/handoff-004-child.md",
+      "child_plan": "/tmp/gremlins/extract-pipeline-package-via-phased-d04390/handoff-004-child.md",
       "bail_reason": null,
       "operator_followups": [
         "After Phase 1 lands (pending): Run scripts/sync.sh push --dry-run"
@@ -80,11 +80,11 @@
     {
       "timestamp": "2026-04-27T00:20:20Z",
       "n": 5,
-      "plan_in": "/tmp/claude-gremlins/extract-pipeline-package-via-phased-d04390/handoff-004.md",
-      "plan_out": "/tmp/claude-gremlins/extract-pipeline-package-via-phased-d04390/handoff-005.md",
-      "signal_file": "/tmp/claude-gremlins/extract-pipeline-package-via-phased-d04390/handoff-005.state.json",
+      "plan_in": "/tmp/gremlins/extract-pipeline-package-via-phased-d04390/handoff-004.md",
+      "plan_out": "/tmp/gremlins/extract-pipeline-package-via-phased-d04390/handoff-005.md",
+      "signal_file": "/tmp/gremlins/extract-pipeline-package-via-phased-d04390/handoff-005.state.json",
       "exit_state": "next-plan",
-      "child_plan": "/tmp/claude-gremlins/extract-pipeline-package-via-phased-d04390/handoff-005-child.md",
+      "child_plan": "/tmp/gremlins/extract-pipeline-package-via-phased-d04390/handoff-005-child.md",
       "bail_reason": null,
       "operator_followups": [
         "After Phase 4 lands: Confirm /gremlins rescue <boss-id> works against an in-flight chain",

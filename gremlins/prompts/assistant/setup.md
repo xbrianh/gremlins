@@ -28,10 +28,10 @@ If you have the `fewer-permission-prompts` skill available in this session, run 
 
 ### Where gremlin state lives
 
-Each gremlin writes its state under `platformdirs.user_state_dir("claude-gremlins")`:
+Each gremlin writes its state under `platformdirs.user_state_dir("gremlins")`:
 
-- Linux: `~/.local/state/claude-gremlins/<id>/`
-- macOS: `~/Library/Application Support/claude-gremlins/<id>/`
+- Linux: `~/.local/state/gremlins/<id>/`
+- macOS: `~/Library/Application Support/gremlins/<id>/`
 
 Each directory contains `state.json`, a log file, and other artifacts produced by the pipeline stages. Do not edit files under this path — gremlins own their worktrees and state files.
 

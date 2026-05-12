@@ -9,6 +9,6 @@ import platformdirs
 
 def state_root() -> pathlib.Path:
     """Return the per-user gremlins state directory."""
-    path = pathlib.Path(platformdirs.user_state_dir("claude-gremlins"))
+    path = pathlib.Path(platformdirs.user_state_dir("gremlins"))
     path.mkdir(parents=True, exist_ok=True)
     return path
