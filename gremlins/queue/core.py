@@ -187,18 +187,18 @@ def run() -> int:
         item = _move_item(src, root / "running")
         log_path = item.with_suffix(".log")
 
-        print(f"queue: running {item.stem}")
+        print(f"queue: running {item.stem}", flush=True)
 
         if _is_launch(cmd):
             gr_id, proc_ok = _run_launch(cmd, log_path)
             if not proc_ok or gr_id is None:
                 _move_item(item, root / "failed")
-                print(f"queue: failed {item.stem}")
+                print(f"queue: failed {item.stem}", file=sys.stderr)
                 return 1
 
             if not _ID_RE.match(gr_id):
                 _move_item(item, root / "failed")
-                print(f"queue: failed {item.stem} (invalid gremlin id: {gr_id!r})")
+                print(f"queue: failed {item.stem} (invalid gremlin id: {gr_id!r})", file=sys.stderr)
                 return 1
 
             base_stem = _strip_id(item.stem)
@@ -211,12 +211,12 @@ def run() -> int:
                 log_path = new_log
             item = new_item
 
-            print(f"queue: waiting for gremlin {gr_id}")
+            print(f"queue: waiting for gremlin {gr_id}", flush=True)
             try:
                 state = _poll_terminal(gr_id)
             except TimeoutError as e:
                 _move_item(item, root / "failed")
-                print(f"queue: failed {item.stem}: {e}")
+                print(f"queue: failed {item.stem}: {e}", file=sys.stderr)
                 return 1
             clean = state.get("exit_code") == 0 and "bail_class" not in state
         else:
@@ -224,10 +224,10 @@ def run() -> int:
 
         if clean:
             _move_item(item, root / "done")
-            print(f"queue: done {item.stem}")
+            print(f"queue: done {item.stem}", flush=True)
         else:
             _move_item(item, root / "failed")
-            print(f"queue: failed {item.stem}")
+            print(f"queue: failed {item.stem}", file=sys.stderr)
             return 1
 
 
@@ -292,12 +292,12 @@ def land() -> int:
             continue
         result = subprocess.run(["gremlins", "land", gr_id])
         if result.returncode != 0:
-            print(f"queue land: failed on {gr_id}")
+            print(f"queue land: failed on {gr_id}", file=sys.stderr)
             return 1
         p.unlink()
         log = p.with_suffix(".log")
         if log.exists():
             log.unlink()
         landed += 1
-    print(f"queue land: landed {landed}, skipped {skipped}")
+    print(f"queue land: landed {landed}, skipped {skipped}", flush=True)
     return 0
