@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import pathlib
 
-import platformdirs
-
 
 def state_root() -> pathlib.Path:
     """Return the per-user gremlins state directory."""
+    import platformdirs
+
     path = pathlib.Path(platformdirs.user_state_dir("gremlins"))
     path.mkdir(parents=True, exist_ok=True)
     return path
