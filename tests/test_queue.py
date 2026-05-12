@@ -58,6 +58,23 @@ def test_run_refuses_stale_running(q, capsys):
     assert "stale" in capsys.readouterr().err
 
 
+def test_run_progress_events_on_stdout(q, capsys):
+    core.add("true")
+    core.run()
+    captured = capsys.readouterr()
+    assert "queue: running" in captured.out
+    assert "queue: done" in captured.out
+    assert captured.err == ""
+
+
+def test_run_stale_error_on_stderr(q, capsys):
+    (q / "running" / "0000-item.cmd").write_text("echo hi")
+    core.run()
+    captured = capsys.readouterr()
+    assert "queue: error" in captured.err
+    assert "queue: error" not in captured.out
+
+
 # ---------------------------------------------------------------------------
 # run — plain commands
 # ---------------------------------------------------------------------------
