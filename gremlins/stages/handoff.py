@@ -20,7 +20,7 @@ from gremlins.executor.state import State
 from gremlins.stages.base import Stage
 from gremlins.stages.loop import RunCmdFailed
 from gremlins.utils import proc
-from gremlins.utils.yaml import load_bundled_prompt, render_bundled_prompt
+from gremlins.utils.yaml_io import load_bundled_prompt, render_bundled_prompt
 
 logger = logging.getLogger(__name__)
 

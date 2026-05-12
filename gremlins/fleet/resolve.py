@@ -4,7 +4,7 @@ import pathlib
 from typing import Any
 
 from gremlins.fleet.state import iter_state_files
-from gremlins.utils.yaml import YamlLoadError
+from gremlins.utils.yaml_io import YamlLoadError
 
 
 def stage_names_for_gremlin(state: dict[str, Any]) -> list[str]:

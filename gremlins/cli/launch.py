@@ -11,7 +11,7 @@ from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import list_pipelines, resolve_pipeline_name
 from gremlins.pipeline.loader import STAGE_TYPES
 from gremlins.stages.base import Stage
-from gremlins.utils.yaml import YamlLoadError
+from gremlins.utils.yaml_io import YamlLoadError
 
 _INFRA_ARGS = frozenset(
     {"description", "parent_id", "print_id", "print_id_only", "base_ref", "client"}

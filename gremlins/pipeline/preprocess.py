@@ -6,7 +6,7 @@ from typing import Any, cast
 from gremlins.pipeline import BUNDLED_PROMPT_PREFIX
 from gremlins.pipeline.discovery import resolve_pipeline_name
 from gremlins.prompts import BUNDLED_PROMPT_DIR
-from gremlins.utils.yaml import load_yaml_file
+from gremlins.utils.yaml_io import load_yaml_file
 
 
 def expand_pipeline(
