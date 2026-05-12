@@ -20,38 +20,8 @@ from gremlins.fleet.views import do_drill_in, do_list, do_recent
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        prog="gremlins.sh",
+        prog="gremlins",
         description="On-demand status of background gremlins.",
-        epilog=(
-            "Subcommands (positional, before flags):\n"
-            "\n"
-            "  Launch:\n"
-            "  launch local  Full local pipeline: plan → implement → review-code → address-code\n"
-            "  launch gh     GitHub issue-driven pipeline\n"
-            "  launch boss   Chained serial workflow\n"
-            "  review        Review-code stage only (no launch)\n"
-            "  address       Address-code stage only (no launch)\n"
-            "  resume <id>   Re-spawn an existing gremlin from its recorded stage\n"
-            "\n"
-            "  Lifecycle:\n"
-            "  stop <id>     Send SIGTERM to a running gremlin and wait for it to exit.\n"
-            "  rescue <id>   Diagnose and resume a dead or stalled gremlin inline.\n"
-            "                Pass --headless to run end-to-end with no TTY: refuses\n"
-            "                excluded bail classes, caps at 3 attempts, writes a\n"
-            "                bail_reason to state.json on bail.\n"
-            "  land <id>     Land a finished gremlin onto the current branch, then clean up.\n"
-            "                Default mode: localgremlin → --squash, bossgremlin → --ff.\n"
-            "                gh → merges the PR (mode flags not applicable).\n"
-            "                --squash: collapse all commits above the merge base into one.\n"
-            "                --ff:     fast-forward the current branch (hard fail if diverged).\n"
-            "                --squash and --ff are mutually exclusive.\n"
-            "                Preserves the state directory — use 'rm' for full cleanup.\n"
-            "                Pass --force to skip merge and clean up a closed gh PR.\n"
-            "  rm <id>       Delete a dead/finished gremlin's state directory, worktree, and branch.\n"
-            "  close <id>    Mark a dead/finished gremlin as closed (hides it from the default view).\n"
-            "  log <id>      Tail the gremlin's log file (`tail -F`). Ctrl-C exits.\n"
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
         add_help=True,
     )
     parser.add_argument(
@@ -131,136 +101,133 @@ def render_view(args: argparse.Namespace, here_root: str | None) -> None:
         do_list(args, here_root=here_root)
 
 
-def stop_main(argv: list[str]) -> int:
-    if not argv:
-        print("usage: gremlins stop <id-prefix>")
-        return 1
-    target = argv[0]
+def _no_state_root() -> bool:
     if not os.path.isdir(_constants.STATE_ROOT):
         print("No gremlins have been launched on this machine.")
+        return True
+    return False
+
+
+def stop_main(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(
+        prog="gremlins stop",
+        description="Send SIGTERM to a running gremlin and wait for it to exit.",
+    )
+    p.add_argument("id_prefix", metavar="id-prefix")
+    args = p.parse_args(argv)
+    if _no_state_root():
         return 0
-    return 0 if do_stop(target) else 1
+    return 0 if do_stop(args.id_prefix) else 1
 
 
 def rescue_main(argv: list[str]) -> int:
-    if not argv:
-        print("usage: gremlins rescue [--headless] [--from-boss] <id-prefix>")
-        return 1
-    headless = "--headless" in argv
-    from_boss = "--from-boss" in argv
-    target = next((a for a in argv if not a.startswith("-")), None)
-    if target is None:
-        print("usage: gremlins rescue [--headless] [--from-boss] <id-prefix>")
-        return 1
-    if not os.path.isdir(_constants.STATE_ROOT):
-        print("No gremlins have been launched on this machine.")
+    p = argparse.ArgumentParser(
+        prog="gremlins rescue",
+        description="Diagnose and resume a dead or stalled gremlin.",
+    )
+    p.add_argument("id_prefix", metavar="id-prefix")
+    p.add_argument(
+        "--headless", action="store_true", help="Run end-to-end with no TTY."
+    )
+    p.add_argument("--from-boss", action="store_true", help="Called from a boss chain.")
+    args = p.parse_args(argv)
+    if _no_state_root():
         return 0
-    return 0 if do_rescue(target, headless=headless, from_boss=from_boss) else 1
+    return (
+        0
+        if do_rescue(args.id_prefix, headless=args.headless, from_boss=args.from_boss)
+        else 1
+    )
 
 
 def rm_main(argv: list[str]) -> int:
-    if not argv:
-        print("usage: gremlins rm <id-prefix>")
-        return 1
-    target = next((a for a in argv if not a.startswith("-")), None)
-    if target is None:
-        print("usage: gremlins rm <id-prefix>")
-        return 1
-    if not os.path.isdir(_constants.STATE_ROOT):
-        print("No gremlins have been launched on this machine.")
+    p = argparse.ArgumentParser(
+        prog="gremlins rm",
+        description="Delete a gremlin's state directory, worktree, and branch.",
+    )
+    p.add_argument("id_prefix", metavar="id-prefix")
+    args = p.parse_args(argv)
+    if _no_state_root():
         return 0
-    return 0 if do_rm(target) else 1
+    return 0 if do_rm(args.id_prefix) else 1
 
 
 def close_main(argv: list[str]) -> int:
-    if not argv:
-        print("usage: gremlins close <id-prefix>")
-        return 1
-    target = next((a for a in argv if not a.startswith("-")), None)
-    if target is None:
-        print("usage: gremlins close <id-prefix>")
-        return 1
-    if not os.path.isdir(_constants.STATE_ROOT):
-        print("No gremlins have been launched on this machine.")
+    p = argparse.ArgumentParser(
+        prog="gremlins close",
+        description="Mark a gremlin as closed (hidden from default view).",
+    )
+    p.add_argument("id_prefix", metavar="id-prefix")
+    args = p.parse_args(argv)
+    if _no_state_root():
         return 0
-    return 0 if do_close(target) else 1
+    return 0 if do_close(args.id_prefix) else 1
 
 
 def log_main(argv: list[str]) -> int:
-    if not argv:
-        print("usage: gremlins log <id-prefix>")
-        return 1
-    target = next((a for a in argv if not a.startswith("-")), None)
-    if target is None:
-        print("usage: gremlins log <id-prefix>")
-        return 1
-    if not os.path.isdir(_constants.STATE_ROOT):
-        print("No gremlins have been launched on this machine.")
+    p = argparse.ArgumentParser(
+        prog="gremlins log",
+        description="Tail the gremlin's log file (tail -F). Ctrl-C exits.",
+    )
+    p.add_argument("id_prefix", metavar="id-prefix")
+    args = p.parse_args(argv)
+    if _no_state_root():
         return 0
-    return 0 if do_log(target) else 1
+    return 0 if do_log(args.id_prefix) else 1
 
 
 def land_main(argv: list[str]) -> int:
-    if not argv:
-        print(
-            "usage: gremlins land [--squash|--ff] [--force] [--into <dir>] <id-prefix>"
-        )
-        return 1
-    exclude: set[str] = set()
-    into_dir = ""
-    if "--into" in argv:
-        into_idx = list(argv).index("--into")
-        if into_idx + 1 < len(argv):
-            into_dir = argv[into_idx + 1]
-            exclude.add(into_dir)
-        else:
-            print("error: --into requires a directory argument")
-            return 1
-    target = next((a for a in argv if not a.startswith("-") and a not in exclude), None)
-    if target is None:
-        print(
-            "usage: gremlins land [--squash|--ff] [--force] [--into <dir>] <id-prefix>"
-        )
-        return 1
-    if not os.path.isdir(_constants.STATE_ROOT):
-        print("No gremlins have been launched on this machine.")
+    p = argparse.ArgumentParser(
+        prog="gremlins land",
+        description="Land a finished gremlin onto the current branch, then clean up.",
+    )
+    p.add_argument("id_prefix", metavar="id-prefix")
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--squash", action="store_true", help="Collapse commits into one."
+    )
+    mode.add_argument(
+        "--ff", action="store_true", help="Fast-forward (fails if diverged)."
+    )
+    p.add_argument(
+        "--force", action="store_true", help="Skip merge and clean up a closed gh PR."
+    )
+    p.add_argument(
+        "--into", metavar="DIR", default="", help="Target directory for the merge."
+    )
+    args = p.parse_args(argv)
+    if _no_state_root():
         return 0
-    force = "--force" in argv
-    squash_flag = "--squash" in argv
-    ff_flag = "--ff" in argv
-    if squash_flag and ff_flag:
-        print("error: --squash and --ff are mutually exclusive")
-        return 1
-    mode = "squash" if squash_flag else ("ff" if ff_flag else None)
-    return 0 if do_land(target, force=force, mode=mode, into_dir=into_dir) else 1
+    land_mode = "squash" if args.squash else ("ff" if args.ff else None)
+    return (
+        0
+        if do_land(args.id_prefix, force=args.force, mode=land_mode, into_dir=args.into)
+        else 1
+    )
 
 
 def ack_main(argv: list[str]) -> int:
-    if not argv:
-        print("usage: gremlins ack <id-prefix>")
-        return 1
-    target = next((a for a in argv if not a.startswith("-")), None)
-    if target is None:
-        print("usage: gremlins ack <id-prefix>")
-        return 1
-    if not os.path.isdir(_constants.STATE_ROOT):
-        print("No gremlins have been launched on this machine.")
+    p = argparse.ArgumentParser(
+        prog="gremlins ack",
+        description="Acknowledge a gremlin waiting for human input.",
+    )
+    p.add_argument("id_prefix", metavar="id-prefix")
+    args = p.parse_args(argv)
+    if _no_state_root():
         return 0
-    return 0 if do_ack(target) else 1
+    return 0 if do_ack(args.id_prefix) else 1
 
 
 def skip_main(argv: list[str]) -> int:
-    if not argv:
-        print("usage: gremlins skip <id-prefix>")
-        return 1
-    target = next((a for a in argv if not a.startswith("-")), None)
-    if target is None:
-        print("usage: gremlins skip <id-prefix>")
-        return 1
-    if not os.path.isdir(_constants.STATE_ROOT):
-        print("No gremlins have been launched on this machine.")
+    p = argparse.ArgumentParser(
+        prog="gremlins skip",
+        description="Skip a gremlin waiting for human input.",
+    )
+    p.add_argument("id_prefix", metavar="id-prefix")
+    args = p.parse_args(argv)
+    if _no_state_root():
         return 0
-    return 0 if do_skip(target) else 1
+    return 0 if do_skip(args.id_prefix) else 1
 
 
 def _main_impl(argv: list[str] | None = None) -> int:
