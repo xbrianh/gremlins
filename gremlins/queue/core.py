@@ -291,7 +291,10 @@ def clear(
     root = queue_root()
     if item is not None:
         if any([failed_only, done_only, pending_only, purge]):
-            print("--item is mutually exclusive with --failed, --done, --pending, --purge", file=sys.stderr)
+            print(
+                "--item is mutually exclusive with --failed, --done, --pending, --purge",
+                file=sys.stderr,
+            )
             return 1
         return _clear_item(root, item)
     if purge:
