@@ -43,7 +43,7 @@ def _slugify(text: str) -> str:
 def _slug_token(tokens: list[str]) -> str:
     try:
         idx = tokens.index("launch")
-        rest = tokens[idx + 1:]
+        rest = tokens[idx + 1 :]
     except ValueError:
         rest = tokens
     for t in rest:
