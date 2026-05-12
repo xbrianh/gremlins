@@ -4,7 +4,7 @@ This project uses [gremlins](https://github.com/amorphous-industries/gremlins) f
 
 ## `.gremlins/pipelines/*.yaml`
 
-Each YAML file defines a named pipeline. Key fields:
+Each YAML file defines a pipeline. The pipeline's name is the filename stem (e.g. `my-pipeline.yaml` → `my-pipeline`). Key fields:
 
 ```yaml
 clients:
