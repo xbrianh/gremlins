@@ -27,13 +27,19 @@ _DISPATCH: dict[str, tuple[str, Callable[[list[str]], int]]] = {
     "resume": ("Re-spawn an existing gremlin from its recorded stage.", resume_main),
     "stop": ("Send SIGTERM to a running gremlin and wait for it to exit.", stop_main),
     "rescue": ("Diagnose and resume a dead or stalled gremlin.", rescue_main),
-    "land": ("Land a finished gremlin onto the current branch, then clean up.", land_main),
+    "land": (
+        "Land a finished gremlin onto the current branch, then clean up.",
+        land_main,
+    ),
     "rm": ("Delete a gremlin's state directory, worktree, and branch.", rm_main),
     "close": ("Mark a gremlin as closed (hidden from default view).", close_main),
     "log": ("Tail the gremlin's log file (tail -F). Ctrl-C exits.", log_main),
     "ack": ("Acknowledge a gremlin waiting for human input.", ack_main),
     "skip": ("Skip a gremlin waiting for human input.", skip_main),
-    "prompt-for-assistant": ("Print the assistant setup prompt to stdout.", prompt_for_assistant_main),
+    "prompt-for-assistant": (
+        "Print the assistant setup prompt to stdout.",
+        prompt_for_assistant_main,
+    ),
     "queue": ("Manage the gremlin launch queue.", queue_main),
 }
 

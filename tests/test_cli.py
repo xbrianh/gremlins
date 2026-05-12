@@ -198,7 +198,9 @@ def test_run_pipeline_forwards_gr_id_to_orchestrator(
 
 def test_stop_dispatches_to_stop_main(tmp_path, monkeypatch):
     called = []
-    monkeypatch.setitem(cli_mod._DISPATCH, "stop", ("", lambda argv: called.append(argv) or 0))
+    monkeypatch.setitem(
+        cli_mod._DISPATCH, "stop", ("", lambda argv: called.append(argv) or 0)
+    )
     rc = main(["stop", "abc123"])
     assert rc == 0
     assert called == [["abc123"]]
@@ -206,7 +208,9 @@ def test_stop_dispatches_to_stop_main(tmp_path, monkeypatch):
 
 def test_rescue_dispatches_to_rescue_main(tmp_path, monkeypatch):
     called = []
-    monkeypatch.setitem(cli_mod._DISPATCH, "rescue", ("", lambda argv: called.append(argv) or 0))
+    monkeypatch.setitem(
+        cli_mod._DISPATCH, "rescue", ("", lambda argv: called.append(argv) or 0)
+    )
     rc = main(["rescue", "--headless", "abc123"])
     assert rc == 0
     assert called == [["--headless", "abc123"]]
@@ -214,7 +218,9 @@ def test_rescue_dispatches_to_rescue_main(tmp_path, monkeypatch):
 
 def test_land_dispatches_to_land_main(tmp_path, monkeypatch):
     called = []
-    monkeypatch.setitem(cli_mod._DISPATCH, "land", ("", lambda argv: called.append(argv) or 0))
+    monkeypatch.setitem(
+        cli_mod._DISPATCH, "land", ("", lambda argv: called.append(argv) or 0)
+    )
     rc = main(["land", "abc123"])
     assert rc == 0
     assert called == [["abc123"]]
