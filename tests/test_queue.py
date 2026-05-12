@@ -161,6 +161,29 @@ def test_run_ctrl_c_leaves_item_in_running(q, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# slug derivation
+# ---------------------------------------------------------------------------
+
+
+def test_slug_token_launch_returns_pipeline_name():
+    tokens = "gremlins launch gh-terse --description X --plan #1".split()
+    assert core._slug_token(tokens) == "gh-terse"
+
+
+def test_slug_token_non_launch_returns_first_token():
+    assert core._slug_token("echo hello".split()) == "echo"
+
+
+def test_slug_token_launch_no_pipeline_falls_back():
+    assert core._slug_token("gremlins launch --flag".split()) == "item"
+
+
+def test_add_launch_uses_pipeline_name_as_slug(q):
+    name = core.add("gremlins launch gh-terse --description 'do something'")
+    assert name.startswith("0000-gh-terse")
+
+
+# ---------------------------------------------------------------------------
 # list_queue
 # ---------------------------------------------------------------------------
 
@@ -186,6 +209,21 @@ def test_list_shows_gremlin_id(q, capsys):
     core.list_queue()
     out = capsys.readouterr().out
     assert "[gr-testid1]" in out
+
+
+def test_list_shows_description(q, capsys):
+    (q / "pending" / "0001-gh-terse.cmd").write_text(
+        "gremlins launch gh-terse --description 'auto-generate CLI help'"
+    )
+    core.list_queue()
+    assert "auto-generate CLI help" in capsys.readouterr().out
+
+
+def test_list_no_crash_without_description(q, capsys):
+    (q / "pending" / "0001-gh-terse.cmd").write_text("gremlins launch gh-terse")
+    core.list_queue()
+    out = capsys.readouterr().out
+    assert "gh-terse" in out
 
 
 # ---------------------------------------------------------------------------

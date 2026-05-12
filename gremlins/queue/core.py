@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -39,11 +40,27 @@ def _slugify(text: str) -> str:
     return slug[:24]
 
 
-def _first_non_flag(tokens: list[str]) -> str:
-    for t in tokens:
+def _slug_token(tokens: list[str]) -> str:
+    try:
+        idx = tokens.index("launch")
+        rest = tokens[idx + 1:]
+    except ValueError:
+        rest = tokens
+    for t in rest:
         if not t.startswith("-"):
             return t
     return "item"
+
+
+def _cmd_description(cmd: str) -> str:
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        return ""
+    for i, t in enumerate(tokens):
+        if t == "--description" and i + 1 < len(tokens):
+            return tokens[i + 1]
+    return ""
 
 
 def _parse_id(path: Path) -> str | None:
@@ -122,7 +139,7 @@ def _run_plain(cmd: str, log_path: Path) -> bool:
 def add(command: str) -> str:
     root = queue_root()
     tokens = command.split()
-    slug = _slugify(_first_non_flag(tokens))
+    slug = _slugify(_slug_token(tokens))
     counter = _next_counter(root)
     name = f"{counter:04d}-{slug}.cmd"
     (root / "pending" / name).write_text(command)
@@ -137,7 +154,9 @@ def list_queue() -> int:
             found = True
             gr_id = _parse_id(p)
             id_str = f" [{gr_id}]" if gr_id else ""
-            print(f"{sub:8s}  {p.stem}{id_str}")
+            desc = _cmd_description(p.read_text().strip())
+            desc_str = f"  {desc}" if desc else ""
+            print(f"{sub:8s}  {p.stem}{id_str}{desc_str}")
     if not found:
         print("(queue is empty)")
     return 0
