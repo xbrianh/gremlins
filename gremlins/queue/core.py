@@ -187,7 +187,7 @@ def run() -> int:
         item = _move_item(src, root / "running")
         log_path = item.with_suffix(".log")
 
-        print(f"queue: running {item.stem}", file=sys.stderr)
+        print(f"queue: running {item.stem}", flush=True)
 
         if _is_launch(cmd):
             gr_id, proc_ok = _run_launch(cmd, log_path)
@@ -214,7 +214,7 @@ def run() -> int:
                 log_path = new_log
             item = new_item
 
-            print(f"queue: waiting for gremlin {gr_id}", file=sys.stderr)
+            print(f"queue: waiting for gremlin {gr_id}", flush=True)
             try:
                 state = _poll_terminal(gr_id)
             except TimeoutError as e:
@@ -227,7 +227,7 @@ def run() -> int:
 
         if clean:
             _move_item(item, root / "done")
-            print(f"queue: done {item.stem}", file=sys.stderr)
+            print(f"queue: done {item.stem}", flush=True)
         else:
             _move_item(item, root / "failed")
             print(f"queue: failed {item.stem}", file=sys.stderr)
@@ -302,5 +302,5 @@ def land() -> int:
         if log.exists():
             log.unlink()
         landed += 1
-    print(f"queue land: landed {landed}, skipped {skipped}", file=sys.stderr)
+    print(f"queue land: landed {landed}, skipped {skipped}", flush=True)
     return 0
