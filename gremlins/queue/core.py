@@ -8,6 +8,7 @@ import shlex
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 _TERMINAL_STATUSES = frozenset({"done", "dead", "bailed"})
@@ -23,16 +24,6 @@ def queue_root() -> Path:
     for sub in _SUBDIRS:
         (root / sub).mkdir(parents=True, exist_ok=True)
     return root
-
-
-def _next_counter(root: Path) -> int:
-    nums: list[int] = []
-    for sub in _SUBDIRS:
-        for p in (root / sub).glob("*.cmd"):
-            m = re.match(r"^(\d+)-", p.name)
-            if m:
-                nums.append(int(m.group(1)))
-    return max(nums) + 1 if nums else 0
 
 
 def _slugify(text: str) -> str:
@@ -143,10 +134,14 @@ def add(command: str) -> str:
     root = queue_root()
     tokens = command.split()
     slug = _slugify(_slug_token(tokens))
-    counter = _next_counter(root)
-    name = f"{counter:04d}-{slug}.cmd"
-    (root / "pending" / name).write_text(command)
-    return name
+    while True:
+        name = f"{datetime.now().strftime('%Y%m%dT%H%M%S_%f')}-{slug}.cmd"
+        try:
+            with (root / "pending" / name).open("x") as f:
+                f.write(command)
+            return name
+        except FileExistsError:
+            continue
 
 
 def list_queue() -> int:
