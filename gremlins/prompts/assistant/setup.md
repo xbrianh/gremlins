@@ -15,8 +15,8 @@ Before doing anything else, tell the user about the following setup so they can 
 - `gremlins queue add <cmd…>` — append a command to the default queue
 - `gremlins queue list` — show all items (pending / running / done / failed) with ids where captured
 - `gremlins queue run` — execute the queue serially in the foreground, halting on first failure
-- `gremlins queue requeue <counter>` — move a failed item back to pending after fixing root cause
-- `gremlins queue clear` — remove items; `--failed` or `--done` to target a subset; `--purge` to wipe all
+- `gremlins queue requeue [--done]` — move all failed items back to pending; `--done` also requeues done items
+- `gremlins queue clear` — remove done + failed items; `--failed` clears only failed, `--done` clears only done, `--purge` stops running gremlins and wipes all
 - `gremlins queue land` — land all done items in lex order, halting on first failure
 
 Run `gremlins <sub> --help` for full flag details on any subcommand.
@@ -100,8 +100,8 @@ The `gremlins queue` subsystem lets you tee up unrelated `gremlins launch` invoc
 
 - `pending/` — not yet started, executed in lexicographic order
 - `running/` — the one currently in flight
-- `done/` — exited 0
-- `failed/` — exited non-zero
+- `done/` — completed cleanly (exit 0; for gremlins: exit 0 and no bail marker)
+- `failed/` — dirty exit, timeout, bail, or invalid gremlin id
 
 Each item is a `.cmd` file. Once a gremlin id is captured from the command's output, the file is renamed to `<counter>-<slug>.<id>.cmd` so `queue list` can surface the id.
 
@@ -110,8 +110,8 @@ Each item is a `.cmd` file. Once a gremlin id is captured from the command's out
 - `queue add <cmd…>` — append a command to pending
 - `queue list` — show all items across all buckets, with ids where captured
 - `queue run` — run pending items one at a time in the foreground, halting on first dirty exit
-- `queue requeue <counter>` — push a failed item back to pending after fixing the root cause
-- `queue clear` — remove items; `--failed` keeps only failed, `--done` keeps only done, `--purge` removes everything
+- `queue requeue [--done]` — move all failed items back to pending; `--done` also requeues done items
+- `queue clear` — remove done + failed items; `--failed` clears only failed, `--done` clears only done, `--purge` stops running gremlins and wipes all
 - `queue land` — land all done items in lex order; halts on first failure; idempotent because `gremlins land` is
 
 **Any shell command is valid.** A `.cmd` file can be any shell command, not just `gremlins launch`. The runner uses the subprocess exit code when no gremlin id is captured.
@@ -120,7 +120,7 @@ Each item is a `.cmd` file. Once a gremlin id is captured from the command's out
 
 1. `gremlins queue list` — survey what finished and what failed
 2. If all done: `gremlins queue land` → `gremlins queue clear --done`
-3. If some failed: fix the root cause, then `gremlins queue requeue <counter>` to push failed items back to pending and re-run
+3. If some failed: fix the root cause, then `gremlins queue requeue` to push all failed items back to pending and re-run
 
 **What the queue does not do:** no retries, no dependency tracking between items, no daemonization (run it under `nohup` / `launchd` / `screen` yourself), no concurrency.
 
