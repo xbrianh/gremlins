@@ -40,7 +40,7 @@ def build_launch_parser(
     p.add_argument(
         "--print-id-only",
         action="store_true",
-        help="Print only the gremlin id on stdout; suppress the launch banner",
+        help="Print only the gremlin id on stdout; suppress the launch banner. Supersedes --print-id.",
     )
     p.add_argument("--base-ref", default=None)
     p.add_argument("--client", default=None)
