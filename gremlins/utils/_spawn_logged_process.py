@@ -4,7 +4,7 @@ import pathlib
 import subprocess
 
 
-def _spawn_logged_process(
+def spawn_logged_process(
     cmd: list[str],
     cwd: str,
     env: dict[str, str],
