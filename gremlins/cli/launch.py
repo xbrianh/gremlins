@@ -14,10 +14,26 @@ from gremlins.stages.base import Stage
 from gremlins.utils.yaml_io import YamlLoadError
 
 _INFRA_ARGS = frozenset(
-    {"description", "parent_id", "print_id", "print_id_only", "base_ref", "client", "gremlin_id"}
+    {
+        "description",
+        "parent_id",
+        "print_id",
+        "print_id_only",
+        "base_ref",
+        "client",
+        "gremlin_id",
+    }
 )
 _INFRA_FLAG_NAMES = frozenset(
-    {"description", "parent", "print-id", "print-id-only", "base-ref", "client", "gremlin-id"}
+    {
+        "description",
+        "parent",
+        "print-id",
+        "print-id-only",
+        "base-ref",
+        "client",
+        "gremlin-id",
+    }
 )
 _LAUNCH_BRIEF = "usage: gremlins launch <name> [opts]\nLaunch a background gremlin by pipeline name. Run 'gremlins launch --list' to see available pipelines.\n"
 
