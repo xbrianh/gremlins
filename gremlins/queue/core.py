@@ -134,10 +134,14 @@ def add(command: str) -> str:
     root = queue_root()
     tokens = command.split()
     slug = _slugify(_slug_token(tokens))
-    prefix = datetime.now().strftime("%Y%m%dT%H%M%S_%f")
-    name = f"{prefix}-{slug}.cmd"
-    (root / "pending" / name).write_text(command)
-    return name
+    while True:
+        name = f"{datetime.now().strftime('%Y%m%dT%H%M%S_%f')}-{slug}.cmd"
+        try:
+            with (root / "pending" / name).open("x") as f:
+                f.write(command)
+            return name
+        except FileExistsError:
+            continue
 
 
 def list_queue() -> int:

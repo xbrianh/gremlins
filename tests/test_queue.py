@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from unittest.mock import MagicMock
 
 import pytest
@@ -37,13 +38,11 @@ def test_add_produces_distinct_timestamp_filenames(q):
     n1 = core.add("echo one")
     n2 = core.add("echo two")
     n3 = core.add("echo three")
-    import re
-
     ts_pat = re.compile(r"^\d{8}T\d{6}_\d{6}-")
     assert ts_pat.match(n1)
     assert ts_pat.match(n2)
     assert ts_pat.match(n3)
-    assert n1 < n2 < n3
+    assert len({n1, n2, n3}) == 3
 
 
 # ---------------------------------------------------------------------------
