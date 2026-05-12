@@ -26,7 +26,6 @@ def queue_root() -> Path:
     return root
 
 
-
 def _slugify(text: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
     return slug[:24]

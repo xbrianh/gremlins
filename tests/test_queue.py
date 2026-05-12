@@ -38,6 +38,7 @@ def test_add_produces_distinct_timestamp_filenames(q):
     n2 = core.add("echo two")
     n3 = core.add("echo three")
     import re
+
     ts_pat = re.compile(r"^\d{8}T\d{6}_\d{6}-")
     assert ts_pat.match(n1)
     assert ts_pat.match(n2)
