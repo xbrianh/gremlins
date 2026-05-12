@@ -13,7 +13,9 @@ from gremlins.pipeline.loader import STAGE_TYPES
 from gremlins.stages.base import Stage
 from gremlins.utils.yaml import YamlLoadError
 
-_INFRA_ARGS = frozenset({"description", "parent_id", "print_id", "print_id_only", "base_ref", "client"})
+_INFRA_ARGS = frozenset(
+    {"description", "parent_id", "print_id", "print_id_only", "base_ref", "client"}
+)
 _INFRA_FLAG_NAMES = frozenset(
     {"description", "parent", "print-id", "print-id-only", "base-ref", "client"}
 )
@@ -35,7 +37,11 @@ def build_launch_parser(
     p.add_argument("--description", default=None)
     p.add_argument("--parent", dest="parent_id", default=None)
     p.add_argument("--print-id", action="store_true")
-    p.add_argument("--print-id-only", action="store_true", help="Print only the gremlin id on stdout; suppress the launch banner")
+    p.add_argument(
+        "--print-id-only",
+        action="store_true",
+        help="Print only the gremlin id on stdout; suppress the launch banner",
+    )
     p.add_argument("--base-ref", default=None)
     p.add_argument("--client", default=None)
     for si in stage_cls.orchestration_args():
