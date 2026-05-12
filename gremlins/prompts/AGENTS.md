@@ -2,7 +2,7 @@
 
 Bundled prompt fragments composed by stages at runtime. Stages load
 them via `load_bundled_prompt` / `render_bundled_prompt` from
-`gremlins.utils.yaml` and feed the concatenated text to the agent.
+`gremlins.utils.yaml_io` and feed the concatenated text to the agent.
 
 ## Modules
 
@@ -49,5 +49,5 @@ them via `load_bundled_prompt` / `render_bundled_prompt` from
 - `load_bundled_prompt` rejects empty files on purpose — silent empty
   prompts produced confusing agent behavior in the past. Keep the check.
 - Stages load bundled prompts via `load_bundled_prompt` / `render_bundled_prompt`
-  from `gremlins.utils.yaml`. Direct `BUNDLED_PROMPT_DIR` access in stage
+  from `gremlins.utils.yaml_io`. Direct `BUNDLED_PROMPT_DIR` access in stage
   modules is not permitted.

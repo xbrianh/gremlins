@@ -3,6 +3,8 @@ from __future__ import annotations
 import pathlib
 from typing import Any, cast
 
+import yaml
+
 from gremlins.prompts import BUNDLED_PROMPT_DIR
 
 
@@ -48,14 +50,10 @@ def render_bundled_prompt(name: str, **kwargs: Any) -> str:
 
 
 def dump_yaml_text(data: dict[str, Any]) -> str:
-    import yaml
-
     return yaml.safe_dump(data, default_flow_style=False, sort_keys=False)
 
 
 def _parse(source: str | bytes, label: str) -> dict[str, Any]:
-    import yaml
-
     try:
         parsed = yaml.safe_load(source)
     except yaml.YAMLError as exc:

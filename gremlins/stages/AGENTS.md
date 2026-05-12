@@ -27,7 +27,7 @@ sequencing logic of their own.
   bypasses the test seam in `../clients/protocol.py`.
 - Prompt-based claude stages join `self.prompts` (already-loaded text list) with `"\n\n"`.
   Bundled internal prompts are loaded via `load_bundled_prompt` / `render_bundled_prompt`
-  from `gremlins.utils.yaml`. Bundled prompt files live under `gremlins/prompts/`. See
+  from `gremlins.utils.yaml_io`. Bundled prompt files live under `gremlins/prompts/`. See
   `gremlins/prompts/README.md` for the runtime placeholder inventory.
 - Stages that should respect a bail marker (written by the agent as
   `bail_$GREMLIN_ATTEMPT.json` in `$GREMLIN_STATE_DIR`) call `check_bail(<phase-name>)`

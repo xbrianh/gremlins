@@ -11,7 +11,7 @@ from gremlins.executor.state import State
 from gremlins.stages.base import Stage
 from gremlins.utils import proc
 from gremlins.utils.github import extract_gh_url
-from gremlins.utils.yaml import render_bundled_prompt
+from gremlins.utils.yaml_io import render_bundled_prompt
 
 logger = logging.getLogger(__name__)
 

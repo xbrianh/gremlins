@@ -89,10 +89,7 @@ def _build_spawn_env(gr_id: str) -> dict[str, str]:
     env = os.environ.copy()
     pkg_root = str(pathlib.Path(__file__).resolve().parent.parent)
     existing_pp = env.get("PYTHONPATH", "")
-    # Include sys.path so the subprocess finds installed deps (e.g. platformdirs)
-    # even when callers (like test fixtures) have stripped PYTHONPATH.
-    inherited = os.pathsep.join(p for p in sys.path if p and p != pkg_root)
-    parts = [p for p in [pkg_root, existing_pp, inherited] if p]
+    parts = [p for p in [pkg_root, existing_pp] if p]
     env["PYTHONPATH"] = os.pathsep.join(parts)
     env["PYTHONSAFEPATH"] = "1"
     env["GR_ID"] = gr_id

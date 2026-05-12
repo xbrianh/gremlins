@@ -27,7 +27,7 @@ from gremlins.pipeline import Pipeline as _Pipeline
 from gremlins.stages.base import Stage
 from gremlins.utils.git import has_commits, has_dirty_worktree, in_git_repo
 from gremlins.utils.github import get_repo
-from gremlins.utils.yaml import YamlLoadError
+from gremlins.utils.yaml_io import YamlLoadError
 
 logger = logging.getLogger(__name__)
 
