@@ -13,9 +13,11 @@ from gremlins.pipeline.loader import STAGE_TYPES
 from gremlins.stages.base import Stage
 from gremlins.utils.yaml import YamlLoadError
 
-_INFRA_ARGS = frozenset({"description", "parent_id", "print_id", "base_ref", "client"})
+_INFRA_ARGS = frozenset(
+    {"description", "parent_id", "print_id", "print_id_only", "base_ref", "client"}
+)
 _INFRA_FLAG_NAMES = frozenset(
-    {"description", "parent", "print-id", "base-ref", "client"}
+    {"description", "parent", "print-id", "print-id-only", "base-ref", "client"}
 )
 _LAUNCH_BRIEF = "usage: gremlins launch <name> [opts]\nLaunch a background gremlin by pipeline name. Run 'gremlins launch --list' to see available pipelines.\n"
 
@@ -35,6 +37,11 @@ def build_launch_parser(
     p.add_argument("--description", default=None)
     p.add_argument("--parent", dest="parent_id", default=None)
     p.add_argument("--print-id", action="store_true")
+    p.add_argument(
+        "--print-id-only",
+        action="store_true",
+        help="Print only the gremlin id on stdout; suppress the launch banner. Supersedes --print-id.",
+    )
     p.add_argument("--base-ref", default=None)
     p.add_argument("--client", default=None)
     for si in stage_cls.orchestration_args():
@@ -130,10 +137,11 @@ def _self_background_main(
     log_path = state_dir / "log"
     sf = state_dir / "state.json"
 
-    info = f"gremlin id:  {gr_id}\nlog:         {log_path}\nstate file:  {sf}\n"
-    if args.print_id:
-        sys.stderr.write(info)
+    if args.print_id_only:
         sys.stdout.write(gr_id + "\n")
     else:
+        info = f"gremlin id:  {gr_id}\nlog:         {log_path}\nstate file:  {sf}\n"
         sys.stderr.write(info)
+        if args.print_id:
+            sys.stdout.write(gr_id + "\n")
     return 0
