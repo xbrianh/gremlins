@@ -253,13 +253,44 @@ def _delete_dir_contents(root: Path, sub: str) -> None:
             log.unlink()
 
 
+def _clear_item(root: Path, stem: str) -> int:
+    matches = [(sub, root / sub / (stem + ".cmd")) for sub in _SUBDIRS]
+    matches = [(sub, p) for sub, p in matches if p.exists()]
+
+    if not matches:
+        print(f"no such item: {stem}", file=sys.stderr)
+        return 1
+
+    if len(matches) > 1:
+        locs = ", ".join(sub for sub, _ in matches)
+        print(f"item {stem!r} found in multiple directories: {locs}", file=sys.stderr)
+        return 1
+
+    sub, p = matches[0]
+    if sub == "running":
+        print(
+            f"item {stem!r} is running; use 'queue clear --purge' to stop running gremlins",
+            file=sys.stderr,
+        )
+        return 1
+
+    p.unlink()
+    log = p.with_suffix(".log")
+    if log.exists():
+        log.unlink()
+    return 0
+
+
 def clear(
     failed_only: bool = False,
     done_only: bool = False,
     pending_only: bool = False,
     purge: bool = False,
+    item: str | None = None,
 ) -> int:
     root = queue_root()
+    if item is not None:
+        return _clear_item(root, item)
     if purge:
         for sub in _SUBDIRS:
             if sub == "running":

@@ -47,12 +47,14 @@ def _clear(argv: list[str]) -> int:
         action="store_true",
         help="Empty all 4 dirs and stop running gremlins.",
     )
+    scope.add_argument("--item", metavar="STEM", help="Remove a single item by stem.")
     args = parser.parse_args(argv)
     return clear(
         failed_only=args.failed,
         done_only=args.done,
         pending_only=args.pending,
         purge=args.purge,
+        item=args.item,
     )
 
 
