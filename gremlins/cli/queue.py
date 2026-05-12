@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import shlex
 import sys
 
 from gremlins.queue.core import add, clear, land, list_queue, requeue, run
@@ -12,7 +13,7 @@ def _add(argv: list[str]) -> int:
     if not argv:
         print("usage: gremlins queue add <command>", file=sys.stderr)
         return 1
-    command = " ".join(argv)
+    command = argv[0] if len(argv) == 1 else shlex.join(argv)
     name = add(command)
     print(f"queued: {name}")
     return 0

@@ -404,11 +404,18 @@ def test_cli_queue_add_single_quoted_command_stored_verbatim(tmp_path, monkeypat
     monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
     cmd = "gremlins launch gh-terse --plan '#1' --description 'hi'"
     main(["queue", "add", cmd])
-    import gremlins.queue.core as core
-
     pending = list((core.queue_root() / "pending").glob("*.cmd"))
     assert len(pending) == 1
     assert pending[0].read_text() == cmd
+
+
+def test_cli_queue_add_multi_argv_shell_metacharacters_quoted(tmp_path, monkeypatch):
+    """Multi-element argv with shell metacharacters must be shell-quoted."""
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    main(["queue", "add", "gremlins", "launch", "--plan", "#1"])
+    pending = list((core.queue_root() / "pending").glob("*.cmd"))
+    assert len(pending) == 1
+    assert pending[0].read_text() == "gremlins launch --plan '#1'"
 
 
 def test_cli_queue_list_dispatches(tmp_path, monkeypatch, capsys):
