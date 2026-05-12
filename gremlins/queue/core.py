@@ -245,36 +245,42 @@ def requeue(include_done: bool = False) -> int:
     return 0
 
 
+def _delete_dir_contents(root: Path, sub: str) -> None:
+    for p in (root / sub).glob("*.cmd"):
+        p.unlink()
+        log = p.with_suffix(".log")
+        if log.exists():
+            log.unlink()
+
+
 def clear(
-    failed_only: bool = False, done_only: bool = False, purge: bool = False
+    failed_only: bool = False,
+    done_only: bool = False,
+    pending_only: bool = False,
+    purge: bool = False,
 ) -> int:
     root = queue_root()
     if purge:
         for sub in _SUBDIRS:
-            for p in (root / sub).glob("*.cmd"):
-                gr_id = _parse_id(p)
-                if sub == "running" and gr_id:
-                    subprocess.run(["gremlins", "stop", gr_id])
-                p.unlink()
-                log = p.with_suffix(".log")
-                if log.exists():
-                    log.unlink()
+            if sub == "running":
+                for p in (root / sub).glob("*.cmd"):
+                    gr_id = _parse_id(p)
+                    if gr_id:
+                        subprocess.run(["gremlins", "stop", gr_id])
+            _delete_dir_contents(root, sub)
         return 0
 
-    buckets: list[str] = []
     if failed_only:
         buckets = ["failed"]
     elif done_only:
         buckets = ["done"]
+    elif pending_only:
+        buckets = ["pending"]
     else:
         buckets = ["done", "failed"]
 
     for sub in buckets:
-        for p in (root / sub).glob("*.cmd"):
-            p.unlink()
-            log = p.with_suffix(".log")
-            if log.exists():
-                log.unlink()
+        _delete_dir_contents(root, sub)
     return 0
 
 
