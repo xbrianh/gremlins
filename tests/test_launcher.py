@@ -1170,3 +1170,58 @@ def test_launch_plan_issue_ref_writes_issue_url_and_num(lenv, monkeypatch):
 
     assert state["issue_url"] == "https://github.com/owner/repo/issues/378"
     assert state["issue_num"] == "378"
+
+
+# ---------------------------------------------------------------------------
+# --gremlin-id explicit id
+# ---------------------------------------------------------------------------
+
+
+def test_launch_explicit_gr_id(lenv, monkeypatch):
+    """launch(gr_id=...) uses the supplied id verbatim."""
+    launcher = _launcher()
+    monkeypatch.setattr(launcher, "_spawn_pipeline", lambda *a, **kw: _FakeProc())
+    gr_id = launcher.launch(
+        "local",
+        stage_inputs={"instructions": "explicit id test"},
+        gr_id="my-explicit-id",
+        project_root=str(lenv.repo),
+    )
+    assert gr_id == "my-explicit-id"
+    state = _read_state(_gremlins_state_root(lenv) / "my-explicit-id")
+    assert state["id"] == "my-explicit-id"
+
+
+def test_launch_invalid_gr_id_rejected(lenv, monkeypatch):
+    """launch(gr_id=...) raises ValueError for ids that fail validate_gr_id."""
+    launcher = _launcher()
+    monkeypatch.setattr(launcher, "_spawn_pipeline", lambda *a, **kw: _FakeProc())
+    with pytest.raises(ValueError, match="illegal characters"):
+        launcher.launch(
+            "local",
+            stage_inputs={"instructions": "bad id test"},
+            gr_id="bad id with spaces",
+            project_root=str(lenv.repo),
+        )
+
+
+def test_launch_explicit_gr_id_already_running(lenv, monkeypatch):
+    """launch(gr_id=...) raises GremlinAlreadyRunning when the id has a live process."""
+    launcher = _launcher()
+    state_root = _gremlins_state_root(lenv)
+    gr_id = "my-fixed-id"
+    state_dir = state_root / gr_id
+    state_dir.mkdir(parents=True)
+    (state_dir / "state.json").write_text(
+        json.dumps({"id": gr_id, "status": "running", "pid": os.getpid()}),
+        encoding="utf-8",
+    )
+    from gremlins.launcher import GremlinAlreadyRunning
+
+    with pytest.raises(GremlinAlreadyRunning):
+        launcher.launch(
+            "local",
+            stage_inputs={"instructions": "collision test"},
+            gr_id=gr_id,
+            project_root=str(lenv.repo),
+        )
