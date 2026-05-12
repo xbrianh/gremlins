@@ -174,6 +174,10 @@ def test_slug_token_non_launch_returns_first_token():
     assert core._slug_token("echo hello".split()) == "echo"
 
 
+def test_slug_token_non_gremlins_launch_word_returns_first_token():
+    assert core._slug_token("echo launch foo".split()) == "echo"
+
+
 def test_slug_token_launch_no_pipeline_falls_back():
     assert core._slug_token("gremlins launch --flag".split()) == "item"
 

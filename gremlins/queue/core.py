@@ -41,10 +41,11 @@ def _slugify(text: str) -> str:
 
 
 def _slug_token(tokens: list[str]) -> str:
-    try:
-        idx = tokens.index("launch")
-        rest = tokens[idx + 1 :]
-    except ValueError:
+    for i, t in enumerate(tokens):
+        if t == "gremlins" and i + 1 < len(tokens) and tokens[i + 1] == "launch":
+            rest = tokens[i + 2 :]
+            break
+    else:
         rest = tokens
     for t in rest:
         if not t.startswith("-"):
@@ -60,6 +61,8 @@ def _cmd_description(cmd: str) -> str:
     for i, t in enumerate(tokens):
         if t == "--description" and i + 1 < len(tokens):
             return tokens[i + 1]
+        if t.startswith("--description="):
+            return t[len("--description="):]
     return ""
 
 
