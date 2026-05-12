@@ -12,6 +12,12 @@ Before doing anything else, tell the user about the following setup so they can 
 - `gremlins rescue <id>` — diagnose and resume a dead or stalled gremlin (runs a full diagnosis agent first)
 - `gremlins rm <id>` — delete a dead gremlin's state dir, worktree, and branch
 - `gremlins stop <id>` — send SIGTERM to a running gremlin
+- `gremlins queue add <cmd…>` — append a command to the default queue
+- `gremlins queue list` — show all items (pending / running / done / failed) with ids where captured
+- `gremlins queue run` — execute the queue serially in the foreground, halting on first failure
+- `gremlins queue requeue <counter>` — move a failed item back to pending after fixing root cause
+- `gremlins queue clear` — remove items; `--failed` or `--done` to target a subset; `--purge` to wipe all
+- `gremlins queue land` — land all done items in lex order, halting on first failure
 
 Run `gremlins <sub> --help` for full flag details on any subcommand.
 
@@ -83,6 +89,40 @@ When a gremlin stalls or shows as dead:
    - **File a capture and skip** — when the work can't proceed and the right move is to record a new unit describing the failure and move on
 
 Do not edit files inside the gremlin's state directory or worktree directly.
+
+---
+
+### The overnight queue
+
+The `gremlins queue` subsystem lets you tee up unrelated `gremlins launch` invocations to run serially — useful for dispatching several independent tasks before walking away for the night. Items in the queue are unrelated by contract; if work has dependencies between items, use a `boss` chain instead.
+
+**State layout** — items live under `state_root() / "queues" / "default" /`:
+
+- `pending/` — not yet started, executed in lexicographic order
+- `running/` — the one currently in flight
+- `done/` — exited 0
+- `failed/` — exited non-zero
+
+Each item is a `.cmd` file. Once a gremlin id is captured from the command's output, the file is renamed to `<counter>-<slug>.<id>.cmd` so `queue list` can surface the id.
+
+**The verbs:**
+
+- `queue add <cmd…>` — append a command to pending
+- `queue list` — show all items across all buckets, with ids where captured
+- `queue run` — run pending items one at a time in the foreground, halting on first dirty exit
+- `queue requeue <counter>` — push a failed item back to pending after fixing the root cause
+- `queue clear` — remove items; `--failed` keeps only failed, `--done` keeps only done, `--purge` removes everything
+- `queue land` — land all done items in lex order; halts on first failure; idempotent because `gremlins land` is
+
+**Any shell command is valid.** A `.cmd` file can be any shell command, not just `gremlins launch`. The runner uses the subprocess exit code when no gremlin id is captured.
+
+**Morning-after workflow:**
+
+1. `gremlins queue list` — survey what finished and what failed
+2. If all done: `gremlins queue land` → `gremlins queue clear --done`
+3. If some failed: fix the root cause, then `gremlins queue requeue <counter>` to push failed items back to pending and re-run
+
+**What the queue does not do:** no retries, no dependency tracking between items, no daemonization (run it under `nohup` / `launchd` / `screen` yourself), no concurrency.
 
 ---
 
