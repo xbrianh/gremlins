@@ -223,8 +223,19 @@ def requeue(include_done: bool = False) -> int:
     return 0
 
 
+def _delete_dir_contents(root: Path, sub: str) -> None:
+    for p in (root / sub).glob("*.cmd"):
+        p.unlink()
+        log = p.with_suffix(".log")
+        if log.exists():
+            log.unlink()
+
+
 def clear(
-    failed_only: bool = False, done_only: bool = False, purge: bool = False
+    failed_only: bool = False,
+    done_only: bool = False,
+    pending_only: bool = False,
+    purge: bool = False,
 ) -> int:
     root = queue_root()
     if purge:
@@ -239,20 +250,17 @@ def clear(
                     log.unlink()
         return 0
 
-    buckets: list[str] = []
     if failed_only:
         buckets = ["failed"]
     elif done_only:
         buckets = ["done"]
+    elif pending_only:
+        buckets = ["pending"]
     else:
         buckets = ["done", "failed"]
 
     for sub in buckets:
-        for p in (root / sub).glob("*.cmd"):
-            p.unlink()
-            log = p.with_suffix(".log")
-            if log.exists():
-                log.unlink()
+        _delete_dir_contents(root, sub)
     return 0
 
 

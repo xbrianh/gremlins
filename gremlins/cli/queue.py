@@ -40,12 +40,20 @@ def _clear(argv: list[str]) -> int:
     scope.add_argument("--failed", action="store_true", help="Clear only failed items.")
     scope.add_argument("--done", action="store_true", help="Clear only done items.")
     scope.add_argument(
+        "--pending", action="store_true", help="Clear only pending items."
+    )
+    scope.add_argument(
         "--purge",
         action="store_true",
         help="Empty all 4 dirs and stop running gremlins.",
     )
     args = parser.parse_args(argv)
-    return clear(failed_only=args.failed, done_only=args.done, purge=args.purge)
+    return clear(
+        failed_only=args.failed,
+        done_only=args.done,
+        pending_only=args.pending,
+        purge=args.purge,
+    )
 
 
 def _land(_argv: list[str]) -> int:
