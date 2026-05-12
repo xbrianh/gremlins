@@ -463,6 +463,70 @@ def test_run_launch_requeued_no_double_id(q, monkeypatch):
     assert new_id in done[0].name
 
 
+# ---------------------------------------------------------------------------
+# clear --item
+# ---------------------------------------------------------------------------
+
+
+def test_clear_item_pending(q):
+    (q / "pending" / "0001-gh-terse.cmd").write_text("echo x")
+    (q / "pending" / "0001-gh-terse.log").write_text("log")
+    rc = core.clear(item="0001-gh-terse")
+    assert rc == 0
+    assert not (q / "pending" / "0001-gh-terse.cmd").exists()
+    assert not (q / "pending" / "0001-gh-terse.log").exists()
+
+
+def test_clear_item_done(q):
+    (q / "done" / "0002-alpha.cmd").write_text("echo x")
+    rc = core.clear(item="0002-alpha")
+    assert rc == 0
+    assert not (q / "done" / "0002-alpha.cmd").exists()
+
+
+def test_clear_item_failed(q):
+    (q / "failed" / "0003-beta.cmd").write_text("echo x")
+    rc = core.clear(item="0003-beta")
+    assert rc == 0
+    assert not (q / "failed" / "0003-beta.cmd").exists()
+
+
+def test_clear_item_running_refused(q, capsys):
+    (q / "running" / "0004-live.cmd").write_text("echo x")
+    rc = core.clear(item="0004-live")
+    assert rc == 1
+    assert "running" in capsys.readouterr().err
+
+
+def test_clear_item_not_found(q, capsys):
+    rc = core.clear(item="9999-ghost")
+    assert rc == 1
+    assert "no such item: 9999-ghost" in capsys.readouterr().err
+
+
+def test_clear_item_multi_match(q, capsys):
+    (q / "pending" / "0005-dup.cmd").write_text("echo x")
+    (q / "failed" / "0005-dup.cmd").write_text("echo x")
+    rc = core.clear(item="0005-dup")
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "multiple" in err
+    assert "pending" in err
+    assert "failed" in err
+
+
+def test_clear_item_mutex_with_pending(tmp_path, monkeypatch):
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    with pytest.raises(SystemExit):
+        main(["queue", "clear", "--item", "foo", "--pending"])
+
+
+def test_clear_item_mutex_with_purge(tmp_path, monkeypatch):
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    with pytest.raises(SystemExit):
+        main(["queue", "clear", "--item", "foo", "--purge"])
+
+
 def test_cli_queue_clear_flags_mutually_exclusive(tmp_path, monkeypatch):
     monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
     import pytest
