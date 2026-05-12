@@ -126,7 +126,7 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     monkeypatch.setattr(
-        "gremlins.executor.run.resolve_session_dir", lambda gr_id=None: session_dir
+        "gremlins.executor.run.resolve_session_dir", lambda gremlin_id=None: session_dir
     )
 
     state_file = tmp_path / "state.json"
@@ -139,16 +139,16 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         initial.update(state_data)
     state_file.write_text(json.dumps(initial))
     monkeypatch.setattr(
-        "gremlins.executor.run.resolve_state_file", lambda gr_id=None: state_file
+        "gremlins.executor.run.resolve_state_file", lambda gremlin_id=None: state_file
     )
 
     # Stub out patch_state so tests don't write to real state files.
     monkeypatch.setattr(
-        "gremlins.executor.run.patch_state", lambda gr_id=None, **kw: None
+        "gremlins.executor.run.patch_state", lambda gremlin_id=None, **kw: None
     )
 
-    # gr_id=None makes patch_state a no-op; use a writing shim so the commit runner can read back the values.
-    def _append_artifact(gr_id=None, artifact=None):
+    # gremlin_id=None makes patch_state a no-op; use a writing shim so the commit runner can read back the values.
+    def _append_artifact(gremlin_id=None, artifact=None):
         data = json.loads(state_file.read_text(encoding="utf-8"))
         arts = list(data.get("artifacts") or [])
         arts.append(artifact)
@@ -157,7 +157,7 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
 
     monkeypatch.setattr("gremlins.executor.state.append_artifact", _append_artifact)
 
-    # set_stage is a no-op in tests — gr_id is not passed to gh_main.
+    # set_stage is a no-op in tests — gremlin_id is not passed to gh_main.
 
     return session_dir, state_file
 
@@ -834,7 +834,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
     session_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
     # Override patch_state so it actually writes fields to state_file instead of no-op.
-    def writing_patch_state(gr_id=None, _delete=(), **kw):
+    def writing_patch_state(gremlin_id=None, _delete=(), **kw):
         data = json.loads(state_file.read_text())
         for key in _delete:
             data.pop(key, None)
@@ -1440,12 +1440,12 @@ def test_resume_from_verify(tmp_path, monkeypatch):
 
 
 def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir):
-    """gr_id threads into set_stage and writes to the isolated state root."""
+    """gremlin_id threads into set_stage and writes to the isolated state root."""
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    gr_id = "test-gr-id"
-    state_dir = make_state_dir(gr_id)
+    gremlin_id = "test-gr-id"
+    state_dir = make_state_dir(gremlin_id)
 
     _patch_common(monkeypatch, tmp_path)
 
@@ -1483,7 +1483,7 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir):
     )
 
     result = run_pipeline(
-        _gh_pipeline_path(tmp_path), argv=["--plan", "#42"], gr_id=gr_id, client=client
+        _gh_pipeline_path(tmp_path), argv=["--plan", "#42"], gremlin_id=gremlin_id, client=client
     )
     assert result == 0
 
@@ -1497,8 +1497,8 @@ def test_gh_main_state_client_tracks_effective_model(
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    gr_id = "test-gr-id"
-    state_dir = make_state_dir(gr_id)
+    gremlin_id = "test-gr-id"
+    state_dir = make_state_dir(gremlin_id)
 
     _patch_common(monkeypatch, tmp_path)
 
@@ -1542,7 +1542,7 @@ def test_gh_main_state_client_tracks_effective_model(
     result = run_pipeline(
         _gh_pipeline_path(tmp_path),
         argv=["--plan", "#42", "--client", "copilot:gpt-5.4"],
-        gr_id=gr_id,
+        gremlin_id=gremlin_id,
         client=client,
     )
     assert result == 0

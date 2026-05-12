@@ -4,8 +4,8 @@ Public API:
     launch(kind, *, stage_inputs=None, plan=None, description=None,
            parent_id=None, project_root=None, base_ref="HEAD",
            pipeline_args=()) -> str
-    resume(gr_id) -> None
-    write_terminal_state(gr_id, exit_code) -> None
+    resume(gremlin_id) -> None
+    write_terminal_state(gremlin_id, exit_code) -> None
 """
 
 from __future__ import annotations
@@ -85,22 +85,22 @@ def _resolve_description_and_slug(
     return "", False, "gremlin"
 
 
-def _build_spawn_env(gr_id: str) -> dict[str, str]:
+def _build_spawn_env(gremlin_id: str) -> dict[str, str]:
     env = os.environ.copy()
     pkg_root = str(pathlib.Path(__file__).resolve().parent.parent)
     existing_pp = env.get("PYTHONPATH", "")
     parts = [p for p in [pkg_root, existing_pp] if p]
     env["PYTHONPATH"] = os.pathsep.join(parts)
     env["PYTHONSAFEPATH"] = "1"
-    env["GR_ID"] = gr_id
-    env["GREMLINS_OVERLAY_DIR"] = str(_state_root() / gr_id / ".gremlins")
+    env["GR_ID"] = gremlin_id
+    env["GREMLINS_OVERLAY_DIR"] = str(_state_root() / gremlin_id / ".gremlins")
     return env
 
 
 def _spawn_pipeline(
     state_dir: pathlib.Path,
     workdir: str,
-    gr_id: str,
+    gremlin_id: str,
     pipeline_path: str,
     pipeline_args: list[str],
     log_mode: str = "w",
@@ -113,11 +113,11 @@ def _spawn_pipeline(
         sys.executable,
         "-m",
         "gremlins.run_pipeline",
-        gr_id,
+        gremlin_id,
         pipeline_path,
         *pipeline_args,
     ]
-    env = _build_spawn_env(gr_id)
+    env = _build_spawn_env(gremlin_id)
     log_path = state_dir / "log"
     log_fh = open(log_path, log_mode)
     try:
@@ -198,7 +198,7 @@ def launch(
         issue_title=str((issue_data or {}).get("title") or ""),
     )
     rand_hex = secrets.token_hex(3)
-    gr_id = f"{slug}-{rand_hex}"
+    gremlin_id = f"{slug}-{rand_hex}"
 
     if project_root is None:
         r = proc.run(["git", "rev-parse", "--show-toplevel"])
@@ -226,7 +226,7 @@ def launch(
     ):
         raise RuntimeError("gh CLI not found on PATH (required for gh pipeline)")
 
-    state_dir = _state_root() / gr_id
+    state_dir = _state_root() / gremlin_id
     state_dir.mkdir(parents=True, exist_ok=True)
 
     _effective_base_ref = base_ref if base_ref is not None else _pipeline_base_ref
@@ -273,12 +273,12 @@ def launch(
             else "worktree-branch"
         )
         workdir, branch, worktree_base, setup_kind = _git_mod.setup_workdir(
-            _setup_kind_arg, project_root, base_ref_sha, gr_id, state_dir
+            _setup_kind_arg, project_root, base_ref_sha, gremlin_id, state_dir
         )
 
         now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         state = {
-            "id": gr_id,
+            "id": gremlin_id,
             "kind": kind,
             "project_root": project_root,
             "workdir": workdir,
@@ -306,14 +306,14 @@ def launch(
         if setup_kind == "worktree-branch" and branch:
             from gremlins.executor.state import append_artifact
 
-            append_artifact(gr_id, {"type": "branch", "name": branch})
+            append_artifact(gremlin_id, {"type": "branch", "name": branch})
 
         # Build args for the spawned _run-pipeline process
         spawn_args = list(stored_pipeline_args)
         if instructions:
             spawn_args.append(instructions)
 
-        p = _spawn_pipeline(state_dir, workdir, gr_id, pipeline_path, spawn_args)
+        p = _spawn_pipeline(state_dir, workdir, gremlin_id, pipeline_path, spawn_args)
     except Exception:
         shutil.rmtree(state_dir, ignore_errors=True)
         if workdir:
@@ -324,17 +324,17 @@ def launch(
         raise
 
     (state_dir / "pid").write_text(str(p.pid), encoding="utf-8")
-    patch_state(gr_id, pid=p.pid)
+    patch_state(gremlin_id, pid=p.pid)
 
-    return gr_id
+    return gremlin_id
 
 
-def resume(gr_id: str) -> None:
+def resume(gremlin_id: str) -> None:
     """Re-spawn the pipeline for an existing gremlin from its recorded stage.
 
     Raises RuntimeError on precondition violations or spawn failure.
     """
-    state_dir = _state_root() / gr_id
+    state_dir = _state_root() / gremlin_id
     sf = state_dir / "state.json"
     if not state_dir.is_dir() or not sf.is_file():
         raise RuntimeError(f"no state at {state_dir}")
@@ -360,13 +360,13 @@ def resume(gr_id: str) -> None:
         try:
             os.kill(int(old_pid), 0)
             raise GremlinAlreadyRunning(
-                f"gremlin {gr_id} is still running (pid {old_pid}) — stop it first"
+                f"gremlin {gremlin_id} is still running (pid {old_pid}) — stop it first"
             )
         except (OSError, ValueError):
             pass  # process is gone
 
     if (state_dir / "finished").is_file() and exit_code == 0:
-        raise RuntimeError(f"gremlin {gr_id} finished successfully — nothing to resume")
+        raise RuntimeError(f"gremlin {gremlin_id} finished successfully — nothing to resume")
 
     pipeline_args = cast(list[str], state.get("pipeline_args") or [])
     pipeline_path = str(state.get("pipeline_path") or "")
@@ -418,7 +418,7 @@ def resume(gr_id: str) -> None:
         pass
 
     patch_state(
-        gr_id,
+        gremlin_id,
         _delete=(
             "exit_code",
             "ended_at",
@@ -462,24 +462,24 @@ def resume(gr_id: str) -> None:
     proc = _spawn_pipeline(
         state_dir,
         workdir,
-        gr_id,
+        gremlin_id,
         pipeline_path,
         spawn_args,
         log_mode="a",
     )
 
     (state_dir / "pid").write_text(str(proc.pid), encoding="utf-8")
-    patch_state(gr_id, pid=proc.pid)
+    patch_state(gremlin_id, pid=proc.pid)
 
 
-def write_terminal_state(gr_id: str, exit_code: int) -> None:
+def write_terminal_state(gremlin_id: str, exit_code: int) -> None:
     """Record terminal outcome for a finished pipeline run.
 
     Called by the _run-pipeline subcommand's finally block. Mirrors finish.sh:
     touches the finished marker, patches state.json, and on success removes
     the worktree for gh-mode pipelines only. Best-effort throughout.
     """
-    state_dir = _state_root() / gr_id
+    state_dir = _state_root() / gremlin_id
 
     # Touch finished marker first — the session-summary hook watches this.
     try:
@@ -490,6 +490,6 @@ def write_terminal_state(gr_id: str, exit_code: int) -> None:
     now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     status = "done" if exit_code == 0 else "stopped"
     try:
-        patch_state(gr_id, status=status, ended_at=now_iso, exit_code=exit_code)
+        patch_state(gremlin_id, status=status, ended_at=now_iso, exit_code=exit_code)
     except Exception:
         pass

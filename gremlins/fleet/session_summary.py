@@ -120,7 +120,7 @@ def _collect_gremlins(
         if state.get("project_root") != project_root:
             continue
 
-        gr_id = state.get("id") or name
+        gremlin_id = state.get("id") or name
         kind = state.get("kind") or ""
         gr_status = state.get("status") or ""
         pid = state.get("pid")
@@ -142,7 +142,7 @@ def _collect_gremlins(
             exit_code_str = "" if exit_code is None else str(exit_code)
             finished.append(
                 {
-                    "id": gr_id,
+                    "id": gremlin_id,
                     "kind": kind,
                     "status": gr_status,
                     "exit_code": exit_code_str,
@@ -158,7 +158,7 @@ def _collect_gremlins(
             live = liveness_of_state_file(sf, state=state)
             running.append(
                 {
-                    "id": gr_id,
+                    "id": gremlin_id,
                     "kind": kind,
                     "live": live,
                     "stage": stage,

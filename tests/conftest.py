@@ -89,7 +89,7 @@ def _restore_root_logger():
 
 
 @pytest.fixture(autouse=True)
-def _isolate_gr_id(monkeypatch):
+def _isolate_gremlin_id(monkeypatch):
     # If the test process inherits GR_ID from a parent gremlin (e.g. an
     # implement stage running `python -m pytest`), gremlins.state.set_stage
     # would shell out to set-stage.sh against the parent's state.json and
@@ -114,15 +114,15 @@ def test_state_root(tmp_path, monkeypatch):
 
 @pytest.fixture
 def make_state_dir(test_state_root):
-    """Fixture factory: create a minimal state.json for gr_id under the state root.
+    """Fixture factory: create a minimal state.json for gremlin_id under the state root.
 
-    Returns a callable: make_state_dir(gr_id) -> state_dir_path
+    Returns a callable: make_state_dir(gremlin_id) -> state_dir_path
     """
 
-    def _factory(gr_id: str) -> pathlib.Path:
-        state_dir = test_state_root / gr_id
+    def _factory(gremlin_id: str) -> pathlib.Path:
+        state_dir = test_state_root / gremlin_id
         state_dir.mkdir(parents=True, exist_ok=True)
-        (state_dir / "state.json").write_text(json.dumps({"id": gr_id, "stage": ""}))
+        (state_dir / "state.json").write_text(json.dumps({"id": gremlin_id, "stage": ""}))
         return state_dir
 
     return _factory

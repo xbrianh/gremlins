@@ -32,24 +32,24 @@ BAIL_CLASS_SECRETS = "secrets"
 BAIL_CLASS_OTHER = "other"
 
 
-def validate_gr_id(gr_id: str) -> None:
-    """Raise ValueError if gr_id is not a safe, non-path-traversing identifier."""
-    if ".." in gr_id or not _GR_ID_RE.match(gr_id):
-        raise ValueError(f"gr_id contains illegal characters: {gr_id!r}")
+def validate_gremlin_id(gremlin_id: str) -> None:
+    """Raise ValueError if gremlin_id is not a safe, non-path-traversing identifier."""
+    if ".." in gremlin_id or not _GR_ID_RE.match(gremlin_id):
+        raise ValueError(f"gremlin_id contains illegal characters: {gremlin_id!r}")
 
 
-def resolve_state_file(gr_id: str | None) -> pathlib.Path | None:
-    """Return path to state.json for gr_id, or None when gr_id is absent."""
-    if not gr_id:
+def resolve_state_file(gremlin_id: str | None) -> pathlib.Path | None:
+    """Return path to state.json for gremlin_id, or None when gremlin_id is absent."""
+    if not gremlin_id:
         return None
-    return _paths.state_root() / gr_id / "state.json"
+    return _paths.state_root() / gremlin_id / "state.json"
 
 
-def resolve_session_dir(gr_id: str | None = None) -> pathlib.Path:
+def resolve_session_dir(gremlin_id: str | None = None) -> pathlib.Path:
     """Resolve the artifacts directory for the current run."""
     state_root = _paths.state_root()
-    if gr_id:
-        session_dir = state_root / gr_id / "artifacts"
+    if gremlin_id:
+        session_dir = state_root / gremlin_id / "artifacts"
     else:
         ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         rand = secrets.token_hex(3)
@@ -59,36 +59,36 @@ def resolve_session_dir(gr_id: str | None = None) -> pathlib.Path:
 
 
 def set_stage(
-    gr_id: str | None,
+    gremlin_id: str | None,
     stage: str,
     sub_stage: object = None,
 ) -> None:
     """Write stage and optional sub-stage to state.json."""
     try:
-        if not stage or not gr_id:
+        if not stage or not gremlin_id:
             return
-        sf = resolve_state_file(gr_id)
+        sf = resolve_state_file(gremlin_id)
         if sf is None or not sf.exists():
             return
         now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         if sub_stage is not None:
-            patch_state(gr_id, stage=stage, stage_updated_at=now, sub_stage=sub_stage)
+            patch_state(gremlin_id, stage=stage, stage_updated_at=now, sub_stage=sub_stage)
         else:
             patch_state(
-                gr_id, _delete=("sub_stage",), stage=stage, stage_updated_at=now
+                gremlin_id, _delete=("sub_stage",), stage=stage, stage_updated_at=now
             )
     except Exception:
         pass
 
 
 def write_bail_file(
-    gr_id: str | None,
+    gremlin_id: str | None,
     attempt: str,
     bail_class: str,
     bail_detail: str = "",
 ) -> None:
-    """Write bail_{attempt}.json atomically to state dir. No-op if attempt or gr_id empty."""
-    sf = resolve_state_file(gr_id)
+    """Write bail_{attempt}.json atomically to state dir. No-op if attempt or gremlin_id empty."""
+    sf = resolve_state_file(gremlin_id)
     if sf is None or not sf.exists() or not attempt or not bail_class:
         return
     try:
@@ -111,9 +111,9 @@ def write_bail_file(
         pass
 
 
-def read_bail_info(gr_id: str | None) -> dict[str, str] | None:
+def read_bail_info(gremlin_id: str | None) -> dict[str, str] | None:
     """Return bail file contents for current attempt, or None if no bail."""
-    sf = resolve_state_file(gr_id)
+    sf = resolve_state_file(gremlin_id)
     if sf is None or not sf.exists():
         return None
     try:
@@ -148,10 +148,10 @@ def write_state(state_dir: pathlib.Path, data: dict[str, Any]) -> None:
 
 
 def patch_state(
-    gr_id: str | None, _delete: tuple[str, ...] = (), **fields: object
+    gremlin_id: str | None, _delete: tuple[str, ...] = (), **fields: object
 ) -> None:
     """Merge keyword fields into state.json atomically under an exclusive file lock."""
-    sf = resolve_state_file(gr_id)
+    sf = resolve_state_file(gremlin_id)
     if sf is None or not sf.exists():
         return
     try:
@@ -167,16 +167,16 @@ def patch_state(
 
 
 def patch_parallel_worktrees(
-    gr_id: str | None,
+    gremlin_id: str | None,
     group_name: str,
     *,
     base_head: str | None,
     paths: dict[str, str] | None,
 ) -> None:
     """Set or clear ``parallel_worktrees[group_name]`` in state.json."""
-    if not gr_id or not group_name:
+    if not gremlin_id or not group_name:
         return
-    sf = resolve_state_file(gr_id)
+    sf = resolve_state_file(gremlin_id)
     if sf is None or not sf.exists():
         return
     try:
@@ -200,27 +200,27 @@ def patch_parallel_worktrees(
         pass
 
 
-def read_pr_url(gr_id: str | None) -> str:
-    for art in reversed(read_artifacts(gr_id)):
+def read_pr_url(gremlin_id: str | None) -> str:
+    for art in reversed(read_artifacts(gremlin_id)):
         if art.get("type") == "pr":
             return str(art.get("url") or "")
     return ""
 
 
-def last_pr_branch(gr_id: str | None) -> str:
-    for art in reversed(read_artifacts(gr_id)):
+def last_pr_branch(gremlin_id: str | None) -> str:
+    for art in reversed(read_artifacts(gremlin_id)):
         if art.get("type") == "pr":
             return str(art.get("branch") or "")
     return ""
 
 
-def read_pr_num(gr_id: str | None) -> str:
-    url = read_pr_url(gr_id)
+def read_pr_num(gremlin_id: str | None) -> str:
+    url = read_pr_url(gremlin_id)
     return url.split("/")[-1] if url else ""
 
 
-def append_artifact(gr_id: str | None, artifact: dict[str, Any]) -> None:
-    sf = resolve_state_file(gr_id)
+def append_artifact(gremlin_id: str | None, artifact: dict[str, Any]) -> None:
+    sf = resolve_state_file(gremlin_id)
     if sf is None or not sf.exists():
         return
     try:
@@ -235,8 +235,8 @@ def append_artifact(gr_id: str | None, artifact: dict[str, Any]) -> None:
         logger.warning("failed to append artifact", exc_info=True)
 
 
-def read_artifacts(gr_id: str | None) -> list[dict[str, Any]]:
-    sf = resolve_state_file(gr_id)
+def read_artifacts(gremlin_id: str | None) -> list[dict[str, Any]]:
+    sf = resolve_state_file(gremlin_id)
     if sf is None or not sf.exists():
         return []
     try:
@@ -247,8 +247,8 @@ def read_artifacts(gr_id: str | None) -> list[dict[str, Any]]:
         return []
 
 
-def last_artifact_branch(gr_id: str | None) -> str:
-    for art in reversed(read_artifacts(gr_id)):
+def last_artifact_branch(gremlin_id: str | None) -> str:
+    for art in reversed(read_artifacts(gremlin_id)):
         if art.get("type") == "branch":
             return str(art.get("name") or "")
         if art.get("type") == "pr":
@@ -289,13 +289,13 @@ def landable_shape(state: dict[str, Any]) -> str:
 
 
 def check_bail(
-    gr_id: str | None,
+    gremlin_id: str | None,
     label: str = "stage",
     *,
     child_key: str | None = None,
 ) -> None:
     """Raise RuntimeError if bail_{attempt}.json exists in state dir."""
-    sf = resolve_state_file(gr_id)
+    sf = resolve_state_file(gremlin_id)
     if sf is None or not sf.exists():
         return
     try:
@@ -313,9 +313,9 @@ def check_bail(
         pass
 
 
-def _patch_parallel_attempt(gr_id: str | None, child_key: str, attempt: str) -> None:
+def _patch_parallel_attempt(gremlin_id: str | None, child_key: str, attempt: str) -> None:
     """Write parallel_attempts[child_key] = attempt into state.json."""
-    sf = resolve_state_file(gr_id)
+    sf = resolve_state_file(gremlin_id)
     if sf is None or not sf.exists() or not attempt:
         return
     try:
@@ -356,7 +356,7 @@ class State:
     client: Client
     session_dir: pathlib.Path
     # pipeline-wide (all have defaults so tests can omit them)
-    gr_id: str | None = None
+    gremlin_id: str | None = None
     state_file: pathlib.Path | None = None
     args: argparse.Namespace = dataclasses.field(default_factory=argparse.Namespace)
     pipeline_data: Pipeline | None = None
@@ -385,21 +385,21 @@ class State:
         scope: list[Stage] | None = None,
     ) -> Callable[[], None]:
         base_state = self
-        gr_id = self.gr_id
-        attempt = f"{entry.name}-{secrets.token_hex(4)}" if gr_id else ""
+        gremlin_id = self.gremlin_id
+        attempt = f"{entry.name}-{secrets.token_hex(4)}" if gremlin_id else ""
         scope_list = list(scope) if scope is not None else []
 
         def _run() -> None:
             base_state.set_stage(entry.name)
             if attempt:
                 if base_state.child_key:
-                    _patch_parallel_attempt(gr_id, base_state.child_key, attempt)
+                    _patch_parallel_attempt(gremlin_id, base_state.child_key, attempt)
                 else:
-                    patch_state(gr_id, attempt=attempt)
+                    patch_state(gremlin_id, attempt=attempt)
             sf = (
                 base_state.state_file
                 if base_state.state_file is not None
-                else resolve_state_file(gr_id)
+                else resolve_state_file(gremlin_id)
             )
             sd = _read_state_json(sf)
             state: State = dataclasses.replace(
@@ -418,31 +418,31 @@ class State:
     # --- state.json I/O methods ---
 
     def patch(self, _delete: tuple[str, ...] = (), **fields: object) -> None:
-        patch_state(self.gr_id, _delete=_delete, **fields)
+        patch_state(self.gremlin_id, _delete=_delete, **fields)
 
     def read_str(self, field: str) -> str:
         return read_state_str(self.state_file, field)
 
     def set_stage(self, stage: str, sub_stage: object = None) -> None:
         if self.parent_stage:
-            set_stage(self.gr_id, self.parent_stage, sub_stage=stage)
+            set_stage(self.gremlin_id, self.parent_stage, sub_stage=stage)
         else:
-            set_stage(self.gr_id, stage, sub_stage)
+            set_stage(self.gremlin_id, stage, sub_stage)
 
     def write_bail_file(self, bail_class: str, bail_detail: str = "") -> None:
-        write_bail_file(self.gr_id, self.attempt, bail_class, bail_detail)
+        write_bail_file(self.gremlin_id, self.attempt, bail_class, bail_detail)
 
     def check_bail(self, label: str = "stage") -> None:
-        check_bail(self.gr_id, label, child_key=self.child_key)
+        check_bail(self.gremlin_id, label, child_key=self.child_key)
 
     def append_artifact(self, artifact: dict[str, Any]) -> None:
-        append_artifact(self.gr_id, artifact)
+        append_artifact(self.gremlin_id, artifact)
 
     def read_pr_url(self) -> str:
-        return read_pr_url(self.gr_id)
+        return read_pr_url(self.gremlin_id)
 
     def last_pr_branch(self) -> str:
-        return last_pr_branch(self.gr_id)
+        return last_pr_branch(self.gremlin_id)
 
     def read_pr_num(self) -> str:
-        return read_pr_num(self.gr_id)
+        return read_pr_num(self.gremlin_id)

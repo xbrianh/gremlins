@@ -49,16 +49,16 @@ from gremlins.launcher import GremlinAlreadyRunning
 
 
 def _make_failed_gremlin(
-    state_root: pathlib.Path, workdir: pathlib.Path, gr_id: str = "victim-abcdef"
+    state_root: pathlib.Path, workdir: pathlib.Path, gremlin_id: str = "victim-abcdef"
 ) -> pathlib.Path:
     """Create the on-disk shape of a gremlin that crashed and is awaiting rescue.
 
     Returns the state dir path.
     """
-    state_dir = state_root / gr_id
+    state_dir = state_root / gremlin_id
     state_dir.mkdir(parents=True)
     state = {
-        "id": gr_id,
+        "id": gremlin_id,
         "kind": "localgremlin",
         "stage": "implement",
         "status": "stopped",
@@ -193,7 +193,7 @@ def test_rescue_fixed_verdict_invokes_launcher_resume(tmp_path, monkeypatch):
 
     resume_calls = []
 
-    monkeypatch.setattr(rescue_mod, "_resume", lambda gr_id: resume_calls.append(gr_id))
+    monkeypatch.setattr(rescue_mod, "_resume", lambda gremlin_id: resume_calls.append(gremlin_id))
 
     sh.env["FAKE_CLAUDE_RESCUE_VERDICT"] = "fixed"
     sh.env["FAKE_CLAUDE_RESCUE_SUMMARY"] = "edited state.json"
@@ -220,9 +220,9 @@ def test_rescue_already_running_returns_true_no_bail(tmp_path, monkeypatch):
         lambda *a, **kw: ("fixed", "state looks good"),
     )
 
-    def _raise_already_running(gr_id: str) -> None:
+    def _raise_already_running(gremlin_id: str) -> None:
         raise GremlinAlreadyRunning(
-            f"gremlin {gr_id} is still running (pid 99999) — stop it first"
+            f"gremlin {gremlin_id} is still running (pid 99999) — stop it first"
         )
 
     monkeypatch.setattr(rescue_mod, "_resume", _raise_already_running)

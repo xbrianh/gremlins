@@ -19,7 +19,7 @@ PR_BRANCH = "issue-42-add-feature"
 def _make_state(
     tmp_path: pathlib.Path,
     *,
-    gr_id: str | None = None,
+    gremlin_id: str | None = None,
     issue_url: str = "https://github.com/owner/repo/issues/42",
 ) -> tuple[GitHubOpenPullRequest, RuntimeState]:
     stage = GitHubOpenPullRequest("open-pr", "sonnet", [], {})
@@ -27,14 +27,14 @@ def _make_state(
     state = RuntimeState(
         client=client,
         session_dir=tmp_path,
-        gr_id=gr_id,
+        gremlin_id=gremlin_id,
         issue_url=issue_url,
     )
     return stage, state
 
 
 def test_run_calls_claude_with_push_prompt(tmp_path: pathlib.Path) -> None:
-    stage, state = _make_state(tmp_path, gr_id="test-gr")
+    stage, state = _make_state(tmp_path, gremlin_id="test-gr")
     with (
         patch(
             "gremlins.stages.github_open_pull_request.extract_gh_url",
@@ -55,7 +55,7 @@ def test_run_calls_claude_with_push_prompt(tmp_path: pathlib.Path) -> None:
 
 def test_issue_num_adds_closes_clause(tmp_path: pathlib.Path) -> None:
     stage, state = _make_state(
-        tmp_path, gr_id="test-gr", issue_url="https://github.com/o/r/issues/42"
+        tmp_path, gremlin_id="test-gr", issue_url="https://github.com/o/r/issues/42"
     )
     with (
         patch(
@@ -73,7 +73,7 @@ def test_issue_num_adds_closes_clause(tmp_path: pathlib.Path) -> None:
 
 
 def test_no_issue_url_skips_closes(tmp_path: pathlib.Path) -> None:
-    stage, state = _make_state(tmp_path, gr_id="test-gr", issue_url="")
+    stage, state = _make_state(tmp_path, gremlin_id="test-gr", issue_url="")
     with (
         patch(
             "gremlins.stages.github_open_pull_request.extract_gh_url",
@@ -90,7 +90,7 @@ def test_no_issue_url_skips_closes(tmp_path: pathlib.Path) -> None:
 
 
 def test_run_returns_pr_url(tmp_path: pathlib.Path) -> None:
-    stage, state = _make_state(tmp_path, gr_id="test-gr")
+    stage, state = _make_state(tmp_path, gremlin_id="test-gr")
     with (
         patch(
             "gremlins.stages.github_open_pull_request.extract_gh_url",
@@ -107,7 +107,7 @@ def test_run_returns_pr_url(tmp_path: pathlib.Path) -> None:
 
 
 def test_run_writes_raw_path(tmp_path: pathlib.Path) -> None:
-    stage, state = _make_state(tmp_path, gr_id="test-gr")
+    stage, state = _make_state(tmp_path, gremlin_id="test-gr")
     with (
         patch(
             "gremlins.stages.github_open_pull_request.extract_gh_url",
@@ -127,7 +127,7 @@ def test_run_writes_raw_path(tmp_path: pathlib.Path) -> None:
 
 
 def test_run_records_pr_artifact(tmp_path: pathlib.Path) -> None:
-    stage, state = _make_state(tmp_path, gr_id="test-gr")
+    stage, state = _make_state(tmp_path, gremlin_id="test-gr")
     artifact_calls: list[tuple] = []
     with (
         patch(
@@ -140,8 +140,8 @@ def test_run_records_pr_artifact(tmp_path: pathlib.Path) -> None:
         ),
         patch(
             "gremlins.executor.state.append_artifact",
-            side_effect=lambda gr_id, artifact: artifact_calls.append(
-                (gr_id, artifact)
+            side_effect=lambda gremlin_id, artifact: artifact_calls.append(
+                (gremlin_id, artifact)
             ),
         ),
     ):
@@ -159,7 +159,7 @@ def test_run_records_pr_artifact(tmp_path: pathlib.Path) -> None:
 
 def _make_state_with_gr(
     tmp_path: pathlib.Path,
-    gr_id: str = "test-gr",
+    gremlin_id: str = "test-gr",
     *,
     base_ref_name: str = "",
     issue_url: str = "",
@@ -169,7 +169,7 @@ def _make_state_with_gr(
     state = RuntimeState(
         client=client,
         session_dir=tmp_path,
-        gr_id=gr_id,
+        gremlin_id=gremlin_id,
         base_ref_name=base_ref_name,
         issue_url=issue_url,
     )
@@ -276,7 +276,7 @@ def test_explicit_base_ref_used_when_no_prior_pr(tmp_path: pathlib.Path) -> None
     state = RuntimeState(
         client=client,
         session_dir=tmp_path,
-        gr_id="test-gr",
+        gremlin_id="test-gr",
         base_ref_name="main",
     )
     prompts_seen: list[str] = []
@@ -311,7 +311,7 @@ def test_last_pr_branch_takes_priority_over_base_ref(tmp_path: pathlib.Path) -> 
     state = RuntimeState(
         client=client,
         session_dir=tmp_path,
-        gr_id="test-gr",
+        gremlin_id="test-gr",
         base_ref_name="main",
     )
     prompts_seen: list[str] = []
@@ -347,7 +347,7 @@ def test_loop_iteration_gt1_adds_iter_suffix_instruction(
     tmp_path: pathlib.Path,
 ) -> None:
     stage, state = _make_state(
-        tmp_path, gr_id="test-gr", issue_url="https://github.com/o/r/issues/431"
+        tmp_path, gremlin_id="test-gr", issue_url="https://github.com/o/r/issues/431"
     )
     state = dataclasses.replace(state, loop_iteration=2)
     prompts_seen: list[str] = []
@@ -377,7 +377,7 @@ def test_loop_iteration_gt1_adds_iter_suffix_instruction(
 
 def test_loop_iteration_1_no_iter_suffix(tmp_path: pathlib.Path) -> None:
     stage, state = _make_state(
-        tmp_path, gr_id="test-gr", issue_url="https://github.com/o/r/issues/431"
+        tmp_path, gremlin_id="test-gr", issue_url="https://github.com/o/r/issues/431"
     )
     prompts_seen: list[str] = []
     with (
@@ -419,15 +419,15 @@ def test_record_child_pr_appends_pr_artifact(tmp_path: pathlib.Path) -> None:
         ),
         patch(
             "gremlins.executor.state.append_artifact",
-            side_effect=lambda gr_id, artifact: artifact_calls.append(
-                (gr_id, artifact)
+            side_effect=lambda gremlin_id, artifact: artifact_calls.append(
+                (gremlin_id, artifact)
             ),
         ),
     ):
         stage.run(state)
     assert artifact_calls, "append_artifact should be called with PR info"
-    gr_id, artifact = artifact_calls[0]
-    assert gr_id == "test-gr"
+    gremlin_id, artifact = artifact_calls[0]
+    assert gremlin_id == "test-gr"
     assert artifact["type"] == "pr"
     assert artifact["url"] == "https://github.com/owner/repo/pull/314"
     assert artifact["branch"] == "issue-42-some-slug"

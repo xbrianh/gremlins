@@ -15,7 +15,7 @@ def _state() -> RuntimeState:
     return RuntimeState(
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
-        gr_id=None,
+        gremlin_id=None,
     )
 
 

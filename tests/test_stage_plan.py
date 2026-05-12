@@ -13,7 +13,7 @@ from gremlins.stages.plan import Plan
 
 
 def _state(session_dir: pathlib.Path, client: FakeClaudeClient) -> RuntimeState:
-    return RuntimeState(client=client, session_dir=session_dir, gr_id=None)
+    return RuntimeState(client=client, session_dir=session_dir, gremlin_id=None)
 
 
 def test_plan_source_file_local(tmp_path: pathlib.Path) -> None:

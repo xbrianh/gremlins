@@ -39,11 +39,11 @@ def humanize_age(started_at: str) -> str:
     return f"{diff // 86400}d"
 
 
-def display_id(gr_id: str) -> str:
+def display_id(gremlin_id: str) -> str:
     """Compact old-format IDs to their trailing rand6 hex; pass new-format through."""
-    if re.match(r"^[0-9]{8}-[0-9]{6}-[0-9]+-([a-f0-9]{6}|xxxxxx)$", gr_id):
-        return gr_id.rsplit("-", 1)[-1]
-    return gr_id
+    if re.match(r"^[0-9]{8}-[0-9]{6}-[0-9]+-([a-f0-9]{6}|xxxxxx)$", gremlin_id):
+        return gremlin_id.rsplit("-", 1)[-1]
+    return gremlin_id
 
 
 def render_sub_stage(sub: str | dict[str, object] | None) -> str:
@@ -151,7 +151,7 @@ def liveness_of_state_file(sf: str, state: dict[str, object] | None = None) -> s
 
 
 def iter_state_files() -> Iterator[tuple[str, str, str]]:
-    """Yield (gr_id, state_file_path, wdir) for every gremlin in STATE_ROOT."""
+    """Yield (gremlin_id, state_file_path, wdir) for every gremlin in STATE_ROOT."""
     if not os.path.isdir(_constants.STATE_ROOT):
         return
     try:

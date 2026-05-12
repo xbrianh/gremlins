@@ -98,15 +98,15 @@ def _move_item(cmd_path: Path, dst_dir: Path) -> Path:
     return dst
 
 
-def _poll_terminal(gr_id: str) -> dict[str, object]:
+def _poll_terminal(gremlin_id: str) -> dict[str, object]:
     from gremlins.paths import state_root
 
-    state_file = state_root() / gr_id / "state.json"
+    state_file = state_root() / gremlin_id / "state.json"
     deadline = time.time() + _POLL_TIMEOUT
     while True:
         if time.time() > deadline:
             raise TimeoutError(
-                f"gremlin {gr_id} did not reach terminal status within"
+                f"gremlin {gremlin_id} did not reach terminal status within"
                 f" {_POLL_TIMEOUT // 3600}h"
             )
         try:
@@ -155,8 +155,8 @@ def list_queue() -> int:
     for sub in _SUBDIRS:
         for p in sorted((root / sub).glob("*.cmd")):
             found = True
-            gr_id = _parse_id(p)
-            id_str = f" [{gr_id}]" if gr_id else ""
+            gremlin_id = _parse_id(p)
+            id_str = f" [{gremlin_id}]" if gremlin_id else ""
             desc = _cmd_description(p.read_text().strip())
             desc_str = f"  {desc}" if desc else ""
             print(f"{sub:8s}  {p.stem}{id_str}{desc_str}")
@@ -190,22 +190,22 @@ def run() -> int:
         print(f"queue: running {item.stem}", flush=True)
 
         if _is_launch(cmd):
-            gr_id, proc_ok = _run_launch(cmd, log_path)
-            if not proc_ok or gr_id is None:
+            gremlin_id, proc_ok = _run_launch(cmd, log_path)
+            if not proc_ok or gremlin_id is None:
                 _move_item(item, root / "failed")
                 print(f"queue: failed {item.stem}", file=sys.stderr)
                 return 1
 
-            if not _ID_RE.match(gr_id):
+            if not _ID_RE.match(gremlin_id):
                 _move_item(item, root / "failed")
                 print(
-                    f"queue: failed {item.stem} (invalid gremlin id: {gr_id!r})",
+                    f"queue: failed {item.stem} (invalid gremlin id: {gremlin_id!r})",
                     file=sys.stderr,
                 )
                 return 1
 
             base_stem = _strip_id(item.stem)
-            new_stem = base_stem + "." + gr_id
+            new_stem = base_stem + "." + gremlin_id
             new_item = item.parent / (new_stem + ".cmd")
             item.rename(new_item)
             if log_path.exists():
@@ -214,9 +214,9 @@ def run() -> int:
                 log_path = new_log
             item = new_item
 
-            print(f"queue: waiting for gremlin {gr_id}", flush=True)
+            print(f"queue: waiting for gremlin {gremlin_id}", flush=True)
             try:
-                state = _poll_terminal(gr_id)
+                state = _poll_terminal(gremlin_id)
             except TimeoutError as e:
                 _move_item(item, root / "failed")
                 print(f"queue: failed {item.stem}: {e}", file=sys.stderr)
@@ -301,9 +301,9 @@ def clear(
         for sub in _SUBDIRS:
             if sub == "running":
                 for p in (root / sub).glob("*.cmd"):
-                    gr_id = _parse_id(p)
-                    if gr_id:
-                        subprocess.run(["gremlins", "stop", gr_id])
+                    gremlin_id = _parse_id(p)
+                    if gremlin_id:
+                        subprocess.run(["gremlins", "stop", gremlin_id])
             _delete_dir_contents(root, sub)
         return 0
 
@@ -326,13 +326,13 @@ def land() -> int:
     landed = 0
     skipped = 0
     for p in sorted((root / "done").glob("*.cmd")):
-        gr_id = _parse_id(p)
-        if gr_id is None:
+        gremlin_id = _parse_id(p)
+        if gremlin_id is None:
             skipped += 1
             continue
-        result = subprocess.run(["gremlins", "land", gr_id])
+        result = subprocess.run(["gremlins", "land", gremlin_id])
         if result.returncode != 0:
-            print(f"queue land: failed on {gr_id}", file=sys.stderr)
+            print(f"queue land: failed on {gremlin_id}", file=sys.stderr)
             return 1
         p.unlink()
         log = p.with_suffix(".log")

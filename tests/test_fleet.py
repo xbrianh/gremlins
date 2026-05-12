@@ -41,16 +41,16 @@ def _write_state(
 
 
 def _setup_dead_gremlin(
-    tmp_path, monkeypatch, gr_id="test-id-aabb12", **state_overrides
+    tmp_path, monkeypatch, gremlin_id="test-id-aabb12", **state_overrides
 ):
     """Build a state-root with a single dead gremlin, monkeypatch STATE_ROOT."""
     state_root = tmp_path / "state-root"
     state_root.mkdir()
-    gr_dir = state_root / gr_id
+    gr_dir = state_root / gremlin_id
     workdir = tmp_path / "workdir"
     workdir.mkdir()
     state = {
-        "id": gr_id,
+        "id": gremlin_id,
         "kind": "localgremlin",
         "stage": "review-code",
         "status": "dead",
@@ -526,15 +526,15 @@ def test_close_not_found(tmp_path, monkeypatch, capsys):
 
 
 def _setup_bailed_gremlin(
-    tmp_path, monkeypatch, gr_id="test-id-aabb12", **state_overrides
+    tmp_path, monkeypatch, gremlin_id="test-id-aabb12", **state_overrides
 ):
     state_root = tmp_path / "state-root"
     state_root.mkdir()
-    gr_dir = state_root / gr_id
+    gr_dir = state_root / gremlin_id
     workdir = tmp_path / "workdir"
     workdir.mkdir()
     state = {
-        "id": gr_id,
+        "id": gremlin_id,
         "kind": "ghgremlin",
         "stage": "github-review-pull-request",
         "status": "bailed",
@@ -653,8 +653,8 @@ def test_land_local_squash_lands_branch_and_deletes_it(tmp_path, monkeypatch, ca
 
     state_root = tmp_path / "state-root"
     state_root.mkdir()
-    gr_id = "test-id-aabb12"
-    gr_dir = state_root / gr_id
+    gremlin_id = "test-id-aabb12"
+    gr_dir = state_root / gremlin_id
     artifacts_dir = gr_dir / "artifacts"
     artifacts_dir.mkdir(parents=True)
     (artifacts_dir / "plan.md").write_text(
@@ -663,7 +663,7 @@ def test_land_local_squash_lands_branch_and_deletes_it(tmp_path, monkeypatch, ca
     workdir = tmp_path / "workdir"  # not actually a worktree; a stand-in
     workdir.mkdir()
     state = {
-        "id": gr_id,
+        "id": gremlin_id,
         "kind": "localgremlin",
         "status": "dead",
         "exit_code": 0,
@@ -687,7 +687,7 @@ def test_land_local_squash_lands_branch_and_deletes_it(tmp_path, monkeypatch, ca
     monkeypatch.chdir(project_root)
 
     ok = _land._land_local(
-        gr_id, str(gr_dir / "state.json"), str(gr_dir), state, mode="squash"
+        gremlin_id, str(gr_dir / "state.json"), str(gr_dir), state, mode="squash"
     )
     assert ok is True
 
@@ -742,8 +742,8 @@ def test_land_local_squash_folds_commit_synthesis_cost_into_total(
 
     state_root = tmp_path / "state-root"
     state_root.mkdir()
-    gr_id = "test-id-cost12"
-    gr_dir = state_root / gr_id
+    gremlin_id = "test-id-cost12"
+    gr_dir = state_root / gremlin_id
     artifacts_dir = gr_dir / "artifacts"
     artifacts_dir.mkdir(parents=True)
     (artifacts_dir / "plan.md").write_text(
@@ -752,7 +752,7 @@ def test_land_local_squash_folds_commit_synthesis_cost_into_total(
     workdir = tmp_path / "workdir"
     workdir.mkdir()
     state = {
-        "id": gr_id,
+        "id": gremlin_id,
         "kind": "localgremlin",
         "status": "dead",
         "exit_code": 0,
@@ -772,7 +772,7 @@ def test_land_local_squash_folds_commit_synthesis_cost_into_total(
     )
     monkeypatch.chdir(project_root)
 
-    ok = _land._land_local(gr_id, sf_path, str(gr_dir), state, mode="squash")
+    ok = _land._land_local(gremlin_id, sf_path, str(gr_dir), state, mode="squash")
     assert ok is True
 
     persisted = json.loads(pathlib.Path(sf_path).read_text())
@@ -832,8 +832,8 @@ def test_land_local_into_dir_lands_in_worktree(tmp_path, monkeypatch, capsys):
     project_root.mkdir()
     _init_git_repo(project_root)
 
-    gr_id = "land-into-wt-12345678"
-    branch = f"bg/local/{gr_id}"
+    gremlin_id = "land-into-wt-12345678"
+    branch = f"bg/local/{gremlin_id}"
 
     # Create feature branch with a commit.
     subprocess.run(
@@ -869,7 +869,7 @@ def test_land_local_into_dir_lands_in_worktree(tmp_path, monkeypatch, capsys):
     )
 
     state_root = tmp_path / "state-root"
-    gr_dir = state_root / gr_id
+    gr_dir = state_root / gremlin_id
     artifacts_dir = gr_dir / "artifacts"
     artifacts_dir.mkdir(parents=True)
     (artifacts_dir / "plan.md").write_text(
@@ -878,7 +878,7 @@ def test_land_local_into_dir_lands_in_worktree(tmp_path, monkeypatch, capsys):
     workdir = tmp_path / "child_worktree"
     workdir.mkdir()
     state = {
-        "id": gr_id,
+        "id": gremlin_id,
         "kind": "localgremlin",
         "status": "dead",
         "exit_code": 0,
@@ -900,7 +900,7 @@ def test_land_local_into_dir_lands_in_worktree(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(into_dir)
 
     ok = _land._land_local(
-        gr_id, sf, str(gr_dir), state, mode="squash", into_dir=str(into_dir)
+        gremlin_id, sf, str(gr_dir), state, mode="squash", into_dir=str(into_dir)
     )
     assert ok is True
 
@@ -941,8 +941,8 @@ def test_land_proceeds_with_untracked_files_present(tmp_path, monkeypatch, capsy
 
     state_root = tmp_path / "state-root"
     state_root.mkdir()
-    gr_id = "test-id-untr12"
-    gr_dir = state_root / gr_id
+    gremlin_id = "test-id-untr12"
+    gr_dir = state_root / gremlin_id
     artifacts_dir = gr_dir / "artifacts"
     artifacts_dir.mkdir(parents=True)
     (artifacts_dir / "plan.md").write_text(
@@ -951,7 +951,7 @@ def test_land_proceeds_with_untracked_files_present(tmp_path, monkeypatch, capsy
     workdir = tmp_path / "workdir"
     workdir.mkdir()
     state = {
-        "id": gr_id,
+        "id": gremlin_id,
         "kind": "localgremlin",
         "status": "dead",
         "exit_code": 0,
@@ -971,7 +971,7 @@ def test_land_proceeds_with_untracked_files_present(tmp_path, monkeypatch, capsy
     monkeypatch.chdir(project_root)
 
     ok = _land._land_local(
-        gr_id, str(gr_dir / "state.json"), str(gr_dir), state, mode="squash"
+        gremlin_id, str(gr_dir / "state.json"), str(gr_dir), state, mode="squash"
     )
     assert ok is True
     # Untracked file must still be present after land.
@@ -1010,13 +1010,13 @@ def test_land_refuses_with_tracked_modifications(tmp_path, monkeypatch, capsys):
 
     state_root = tmp_path / "state-root"
     state_root.mkdir()
-    gr_id = "test-id-dirty1"
-    gr_dir = state_root / gr_id
+    gremlin_id = "test-id-dirty1"
+    gr_dir = state_root / gremlin_id
     (gr_dir / "artifacts").mkdir(parents=True)
     workdir = tmp_path / "workdir"
     workdir.mkdir()
     state = {
-        "id": gr_id,
+        "id": gremlin_id,
         "kind": "localgremlin",
         "status": "dead",
         "exit_code": 0,
@@ -1031,7 +1031,7 @@ def test_land_refuses_with_tracked_modifications(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(project_root)
 
     ok = _land._land_local(
-        gr_id, str(gr_dir / "state.json"), str(gr_dir), state, mode="squash"
+        gremlin_id, str(gr_dir / "state.json"), str(gr_dir), state, mode="squash"
     )
     assert ok is False
     assert "working tree is not clean" in capsys.readouterr().out
@@ -1071,14 +1071,14 @@ def test_squash_land_failure_preserves_untracked_files(tmp_path, monkeypatch):
 
     state_root = tmp_path / "state-root"
     state_root.mkdir()
-    gr_id = "test-id-conf12"
-    gr_dir = state_root / gr_id
+    gremlin_id = "test-id-conf12"
+    gr_dir = state_root / gremlin_id
     artifacts_dir = gr_dir / "artifacts"
     artifacts_dir.mkdir(parents=True)
     workdir = tmp_path / "workdir"
     workdir.mkdir()
     state = {
-        "id": gr_id,
+        "id": gremlin_id,
         "kind": "localgremlin",
         "status": "dead",
         "exit_code": 0,
@@ -1095,7 +1095,7 @@ def test_squash_land_failure_preserves_untracked_files(tmp_path, monkeypatch):
     # The merge will fail (untracked file would be overwritten), but the
     # pre-existing untracked file must survive — git clean -fd must not run.
     ok = _land._land_local(
-        gr_id, str(gr_dir / "state.json"), str(gr_dir), state, mode="squash"
+        gremlin_id, str(gr_dir / "state.json"), str(gr_dir), state, mode="squash"
     )
     assert ok is False
     assert (project_root / "conflict.txt").read_text() == "pre-existing untracked\n"
@@ -1218,12 +1218,12 @@ def test_rescue_host_terminated_project_root_gone_bails_headless(
     """When project_root is also missing, headless rescue should bail with host_terminated_unrecoverable."""
     state_root = tmp_path / "state-root"
     state_root.mkdir()
-    gr_id = "test-id-htbb12"
-    gr_dir = state_root / gr_id
+    gremlin_id = "test-id-htbb12"
+    gr_dir = state_root / gremlin_id
     workdir = tmp_path / "workdir"
     # workdir is NOT created — simulates host teardown
     state = {
-        "id": gr_id,
+        "id": gremlin_id,
         "kind": "localgremlin",
         "stage": "implement",
         "status": "running",
@@ -1235,7 +1235,7 @@ def test_rescue_host_terminated_project_root_gone_bails_headless(
     _write_state(gr_dir, state)
     monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
 
-    ok = _rescue.do_rescue(gr_id, headless=True)
+    ok = _rescue.do_rescue(gremlin_id, headless=True)
     assert ok is False
     new = json.loads((gr_dir / "state.json").read_text())
     assert new["bail_reason"] == "host_terminated_unrecoverable"
@@ -1250,14 +1250,14 @@ def test_rescue_host_terminated_worktree_recreation_failure_bails_headless(
     """When worktree recreation fails, headless rescue should bail with host_terminated_unrecoverable."""
     state_root = tmp_path / "state-root"
     state_root.mkdir()
-    gr_id = "test-id-htcc12"
-    gr_dir = state_root / gr_id
+    gremlin_id = "test-id-htcc12"
+    gr_dir = state_root / gremlin_id
     project_root = tmp_path / "project"
     project_root.mkdir()
     workdir = tmp_path / "workdir"
     # workdir NOT created
     state = {
-        "id": gr_id,
+        "id": gremlin_id,
         "kind": "localgremlin",
         "stage": "implement",
         "status": "running",
@@ -1272,7 +1272,7 @@ def test_rescue_host_terminated_worktree_recreation_failure_bails_headless(
         _rescue, "_recreate_worktree", lambda s: (False, "git not a repo")
     )
 
-    ok = _rescue.do_rescue(gr_id, headless=True)
+    ok = _rescue.do_rescue(gremlin_id, headless=True)
     assert ok is False
     new = json.loads((gr_dir / "state.json").read_text())
     assert new["bail_reason"] == "host_terminated_unrecoverable"
@@ -1285,14 +1285,14 @@ def test_rescue_host_terminated_recreates_worktree_and_proceeds(
     """When worktree recreation succeeds, rescue continues to the diagnosis step."""
     state_root = tmp_path / "state-root"
     state_root.mkdir()
-    gr_id = "test-id-htdd12"
-    gr_dir = state_root / gr_id
+    gremlin_id = "test-id-htdd12"
+    gr_dir = state_root / gremlin_id
     project_root = tmp_path / "project"
     project_root.mkdir()
     workdir = tmp_path / "workdir"
     # workdir NOT created initially
     state = {
-        "id": gr_id,
+        "id": gremlin_id,
         "kind": "localgremlin",
         "stage": "implement",
         "status": "running",
@@ -1315,7 +1315,7 @@ def test_rescue_host_terminated_recreates_worktree_and_proceeds(
         lambda *a, **kw: ("structural", "fake structural"),
     )
 
-    ok = _rescue.do_rescue(gr_id, headless=True)
+    ok = _rescue.do_rescue(gremlin_id, headless=True)
     assert ok is False  # structural bail, not host-terminated
     new = json.loads((gr_dir / "state.json").read_text())
     # Should have bailed with "structural", not "host_terminated_unrecoverable"
@@ -1371,14 +1371,14 @@ def test_rescue_host_terminated_recreates_worktree_and_proceeds(
 def test_do_land_dispatches_to_correct_helper(
     label, state, artifacts, expected_land_fn, tmp_path, monkeypatch, capsys
 ):
-    gr_id = "test-dispatch-id"
+    gremlin_id = "test-dispatch-id"
     state_root = tmp_path / "state-root"
     state_root.mkdir()
-    gr_dir = state_root / gr_id
+    gr_dir = state_root / gremlin_id
     workdir = tmp_path / "workdir"
     workdir.mkdir()
     full_state = {
-        "id": gr_id,
+        "id": gremlin_id,
         "status": "dead",
         "exit_code": 0,
         "workdir": str(workdir),
@@ -1390,15 +1390,15 @@ def test_do_land_dispatches_to_correct_helper(
 
     called = []
 
-    def fake_land_local(gr_id, sf, wdir, state, mode, **kw):
+    def fake_land_local(gremlin_id, sf, wdir, state, mode, **kw):
         called.append("_land_local")
         return True
 
-    def fake_land_boss(gr_id, sf, wdir, state, mode):
+    def fake_land_boss(gremlin_id, sf, wdir, state, mode):
         called.append("_land_boss")
         return True
 
-    def fake_land_gh(gr_id, wdir, state, force):
+    def fake_land_gh(gremlin_id, wdir, state, force):
         called.append("_land_gh")
         return True
 
@@ -1406,21 +1406,21 @@ def test_do_land_dispatches_to_correct_helper(
     monkeypatch.setattr(_land_mod, "_land_boss", fake_land_boss)
     monkeypatch.setattr(_land_mod, "_land_gh", fake_land_gh)
 
-    ok = _land_mod.do_land(gr_id)
+    ok = _land_mod.do_land(gremlin_id)
     assert ok is True
     assert called == [expected_land_fn], f"expected {expected_land_fn}, got {called}"
 
 
 def test_do_land_one_branch_routes_to_local(tmp_path, monkeypatch):
     """A gremlin with one branch artifact dispatches to _land_local."""
-    gr_id = "custard-pipeline-id"
+    gremlin_id = "custard-pipeline-id"
     state_root = tmp_path / "state-root"
     state_root.mkdir()
-    gr_dir = state_root / gr_id
+    gr_dir = state_root / gremlin_id
     workdir = tmp_path / "workdir"
     workdir.mkdir()
     state = {
-        "id": gr_id,
+        "id": gremlin_id,
         "kind": "custard",
         "status": "dead",
         "exit_code": 0,
@@ -1443,7 +1443,7 @@ def test_do_land_one_branch_routes_to_local(tmp_path, monkeypatch):
         _land_mod, "_land_gh", lambda *a, **kw: called.append("_land_gh") or True
     )
 
-    ok = _land_mod.do_land(gr_id)
+    ok = _land_mod.do_land(gremlin_id)
     assert ok is True
     assert called == ["_land_local"]
 
@@ -1453,16 +1453,16 @@ def test_land_gh_removes_worktree_before_gh_merge(tmp_path, monkeypatch):
     import types
 
     pr_url = "https://github.com/o/r/pull/42"
-    gr_id = "gh-land-order-test12"
+    gremlin_id = "gh-land-order-test12"
 
     state_root = tmp_path / "state-root"
     state_root.mkdir()
-    gr_dir = state_root / gr_id
+    gr_dir = state_root / gremlin_id
     gr_dir.mkdir(parents=True)
     workdir = tmp_path / "workdir"
     workdir.mkdir()
     state = {
-        "id": gr_id,
+        "id": gremlin_id,
         "kind": "ghgremlin",
         "status": "dead",
         "exit_code": 0,
@@ -1473,7 +1473,7 @@ def test_land_gh_removes_worktree_before_gh_merge(tmp_path, monkeypatch):
     (gr_dir / "state.json").write_text(json.dumps(state))
 
     monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
-    monkeypatch.setattr(_land, "read_pr_url", lambda gr_id: pr_url)
+    monkeypatch.setattr(_land, "read_pr_url", lambda gremlin_id: pr_url)
     monkeypatch.setattr(_land, "_resolve_landing_cwd", lambda s: str(tmp_path))
 
     call_order: list[str] = []
@@ -1500,7 +1500,7 @@ def test_land_gh_removes_worktree_before_gh_merge(tmp_path, monkeypatch):
     monkeypatch.setattr(_land, "_fast_forward_main", lambda cwd: None)
     monkeypatch.setattr(_land, "_finalize_cleanup", lambda *a, **kw: None)
 
-    ok = _land._land_gh(gr_id, str(gr_dir), state)
+    ok = _land._land_gh(gremlin_id, str(gr_dir), state)
     assert ok is True
     assert call_order.index("_remove_worktree") < call_order.index("gh_merge")
 

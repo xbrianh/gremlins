@@ -28,8 +28,8 @@ def test_local_yaml_loads_and_validates(tmp_path):
     assert names == ["plan", "implement", "review-code", "address-code", "verify"]
 
 
-def _make_state(client, session_dir, *, gr_id=None):
-    return RuntimeState(client=client, session_dir=session_dir, gr_id=gr_id)
+def _make_state(client, session_dir, *, gremlin_id=None):
+    return RuntimeState(client=client, session_dir=session_dir, gremlin_id=gremlin_id)
 
 
 def _init_git_repo(path: pathlib.Path) -> None:
@@ -280,7 +280,7 @@ def _make_review_code_stage(
     session_dir,
     *,
     model: str = "sonnet",
-    gr_id=None,
+    gremlin_id=None,
 ) -> ReviewCode:
     stage = ReviewCode(
         "review-code",
@@ -303,7 +303,7 @@ def _make_address_code_stage(
     session_dir,
     *,
     model: str = "sonnet",
-    gr_id=None,
+    gremlin_id=None,
 ) -> AddressCode:
     stage = AddressCode(
         "address-code",
@@ -365,7 +365,7 @@ def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
     state = RuntimeState(
         client=client,
         session_dir=tmp_path,
-        gr_id=None,
+        gremlin_id=None,
         worktree=worktree,
     )
     stage.run(state)
@@ -408,11 +408,11 @@ def test_address_code_stage_includes_style_from_prompts(tmp_path):
 
 
 def test_review_code_stage_writes_stage_to_state(tmp_path, make_state_dir):
-    gr_id = "test-gr-id"
-    state_dir = make_state_dir(gr_id)
+    gremlin_id = "test-gr-id"
+    state_dir = make_state_dir(gremlin_id)
     client = ReviewCreatingClient(fixtures={"review-code:sonnet": MINIMAL_EVENTS})
-    stage = _make_review_code_stage(client, tmp_path, gr_id=gr_id)
-    state = _make_state(client, tmp_path, gr_id=gr_id)
+    stage = _make_review_code_stage(client, tmp_path, gremlin_id=gremlin_id)
+    state = _make_state(client, tmp_path, gremlin_id=gremlin_id)
     stage.run(state)
     data = json.loads((state_dir / "state.json").read_text())
     assert data.get("stage") == "review-code"
@@ -421,13 +421,13 @@ def test_review_code_stage_writes_stage_to_state(tmp_path, make_state_dir):
 def test_address_code_stage_emits_bail_on_failure(tmp_path, make_state_dir):
     import gremlins.executor.state as state_mod
 
-    gr_id = "test-gr-id"
-    state_dir = make_state_dir(gr_id)
+    gremlin_id = "test-gr-id"
+    state_dir = make_state_dir(gremlin_id)
     attempt = "address-code-test"
-    state_mod.patch_state(gr_id, attempt=attempt)
+    state_mod.patch_state(gremlin_id, attempt=attempt)
     client = FakeClaudeClient(fixtures={})
-    stage = _make_address_code_stage(client, tmp_path, gr_id=gr_id)
-    state = _make_state(client, tmp_path, gr_id=gr_id)
+    stage = _make_address_code_stage(client, tmp_path, gremlin_id=gremlin_id)
+    state = _make_state(client, tmp_path, gremlin_id=gremlin_id)
     state.attempt = attempt
     with pytest.raises(FileNotFoundError):
         stage.run(state)
@@ -466,7 +466,7 @@ def test_address_code_finds_review_files_in_parallel_subdirs(tmp_path):
     state = RuntimeState(
         client=client,
         session_dir=tmp_path,
-        gr_id=None,
+        gremlin_id=None,
         current_scope=[parallel_stage],
     )
     stage.run(state)

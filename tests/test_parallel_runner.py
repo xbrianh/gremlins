@@ -28,7 +28,7 @@ def _make_ctx(child_key: str) -> State:
     return State(
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
-        gr_id=None,
+        gremlin_id=None,
         child_key=child_key,
     )
 
@@ -41,7 +41,7 @@ def _make_parallel_stages(
     set_stage_fn=None,
     cancel_on_bail: bool = False,
     bail_policy: str = "any",
-    gr_id=None,
+    gremlin_id=None,
     project_root: pathlib.Path | None = None,
 ) -> list:
     if set_stage_fn is None:
@@ -59,7 +59,7 @@ def _make_parallel_stages(
         bail_policy=bail_policy,
     ).build_runtime_stages(
         child_runners,
-        gr_id=gr_id,
+        gremlin_id=gremlin_id,
         project_root=project_root,
         set_stage_fn=set_stage_fn,
     )
@@ -340,10 +340,10 @@ def test_parallel_sequence_child_worktree_flows() -> None:
     observed: list[pathlib.Path | None] = []
 
     sub_ctx_a = State(
-        client=FakeClaudeClient(), session_dir=pathlib.Path("/tmp"), gr_id=None
+        client=FakeClaudeClient(), session_dir=pathlib.Path("/tmp"), gremlin_id=None
     )
     sub_ctx_b = State(
-        client=FakeClaudeClient(), session_dir=pathlib.Path("/tmp"), gr_id=None
+        client=FakeClaudeClient(), session_dir=pathlib.Path("/tmp"), gremlin_id=None
     )
 
     def capture_a() -> None:
@@ -355,7 +355,7 @@ def test_parallel_sequence_child_worktree_flows() -> None:
     seq_ctx = State(
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
-        gr_id=None,
+        gremlin_id=None,
         child_key="seq",
     )
     seq_stage = SequenceStage(

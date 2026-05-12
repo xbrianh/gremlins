@@ -21,11 +21,11 @@ def stage_names_for_gremlin(state: dict[str, Any]) -> list[str]:
 
 
 def resolve_gremlin(target: str) -> tuple[str, str, str] | None:
-    """Resolve id prefix to a single (gr_id, sf, wdir) or print error and return None."""
+    """Resolve id prefix to a single (gremlin_id, sf, wdir) or print error and return None."""
     matches: list[tuple[str, str, str]] = []
-    for gr_id, sf, wdir in iter_state_files():
-        if target in gr_id:
-            matches.append((gr_id, sf, wdir))
+    for gremlin_id, sf, wdir in iter_state_files():
+        if target in gremlin_id:
+            matches.append((gremlin_id, sf, wdir))
     if not matches:
         print(f"no gremlin matched: {target}")
         return None
@@ -33,7 +33,7 @@ def resolve_gremlin(target: str) -> tuple[str, str, str] | None:
         print(
             f"ambiguous id '{target}' matched {len(matches)} gremlins — use a longer prefix:"
         )
-        for gr_id, _, _ in matches:
-            print(f"  {gr_id}")
+        for gremlin_id, _, _ in matches:
+            print(f"  {gremlin_id}")
         return None
     return matches[0]

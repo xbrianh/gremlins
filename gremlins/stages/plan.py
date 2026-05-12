@@ -259,7 +259,7 @@ class Plan(Stage):
     def _update_description(
         self, plan_md: pathlib.Path, *, issue_title: str = "", state: State
     ) -> None:
-        state_file = resolve_state_file(state.gr_id)
+        state_file = resolve_state_file(state.gremlin_id)
         if state_file is None or not state_file.exists():
             return
         try:

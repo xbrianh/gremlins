@@ -239,7 +239,7 @@ the stages together, defeat resumption, and bloat the prompt.
 
 ### 3.4 Across-gremlin context isolation
 
-Different gremlins share nothing. Different `gr_id`s have different
+Different gremlins share nothing. Different `gremlin_id`s have different
 worktrees, different `state.json` files, different log directories. A boss
 chain coordinates child gremlins by reading their `state.json` files, not
 by sharing context with them. This is what lets a boss recover from a child
@@ -434,11 +434,11 @@ the previous PR's branch. No per-pipeline configuration is required.
 **The mechanism.** `GitHubOpenPullRequest.run` resolves the PR base ref with this
 fallback chain:
 
-    last_pr_branch(gr_id)  →  stage base_ref option  →  state.json base_ref_name  →  "main"
+    last_pr_branch(gremlin_id)  →  stage base_ref option  →  state.json base_ref_name  →  "main"
 
 `last_pr_branch` walks the artifact list in reverse and returns the `branch`
 field of the most recent `pr`-type artifact. Because all loop iterations share
-one `gr_id` and one `state.json`, every iteration after the first finds the
+one `gremlin_id` and one `state.json`, every iteration after the first finds the
 previous iteration's PR branch at the head of the artifact list.
 
 **The invariant.** `github_open_pull_request.py` raises if `impl_materialized_branch`
@@ -452,9 +452,9 @@ produces a stack of PRs by default. PR #1 targets `main` (or
 PR #2's branch, and so on. The artifact list is the authoritative record.
 
 **The escape hatch.** Stacking is a consequence of loop iterations sharing
-one `gr_id`. To produce side-by-side PRs based on a fixed ref, launch each
+one `gremlin_id`. To produce side-by-side PRs based on a fixed ref, launch each
 iteration as an independent gremlin rather than as loop iterations in a
-single run — each gets its own `gr_id` and an empty artifact list, so
+single run — each gets its own `gremlin_id` and an empty artifact list, so
 `last_pr_branch` returns nothing and the PR targets `main` (or whatever
 `base_ref_name` is in that gremlin's state).
 

@@ -36,15 +36,15 @@ def collect_rows(
     """
     now = time.time()
     rows: list[FleetRow] = []
-    for gr_id, sf, wdir in iter_state_files():
+    for gremlin_id, sf, wdir in iter_state_files():
         if not include_closed and os.path.isfile(os.path.join(wdir, "closed")):
             continue
 
         state = load_state(sf)
         if not state:
             continue
-        gr_id_from_state: str = str(state.get("id") or gr_id)
-        if not gr_id_from_state:
+        gremlin_id_from_state: str = str(state.get("id") or gremlin_id)
+        if not gremlin_id_from_state:
             continue
 
         live = liveness_of_state_file(sf, state)
@@ -78,7 +78,7 @@ def collect_rows(
             if not matched_live:
                 continue
 
-        row = build_row(gr_id_from_state, sf, wdir, state, live)
+        row = build_row(gremlin_id_from_state, sf, wdir, state, live)
         rows.append(row)
 
     rows.sort(key=lambda r: r.started_at)
@@ -160,9 +160,9 @@ def do_recent(args: argparse.Namespace, here_root: str | None = None) -> None:
 def do_drill_in(target: str) -> None:
     """Print every field of a uniquely-matched gremlin in a labeled block."""
     matches: list[tuple[str, str, str]] = []
-    for gr_id, sf, wdir in iter_state_files():
-        if target in gr_id:
-            matches.append((gr_id, sf, wdir))
+    for gremlin_id, sf, wdir in iter_state_files():
+        if target in gremlin_id:
+            matches.append((gremlin_id, sf, wdir))
 
     if not matches:
         print(f"no gremlin matched: {target}")
@@ -171,14 +171,14 @@ def do_drill_in(target: str) -> None:
         print(
             f"ambiguous id '{target}' matched {len(matches)} gremlins — use a longer prefix:"
         )
-        for gr_id, _, _ in matches:
-            print(f"  {gr_id}")
+        for gremlin_id, _, _ in matches:
+            print(f"  {gremlin_id}")
         return
 
-    gr_id, sf, wdir = matches[0]
+    gremlin_id, sf, wdir = matches[0]
     state = load_state(sf)
     if not state:
-        print(f"error: could not read state for {gr_id}")
+        print(f"error: could not read state for {gremlin_id}")
         return
 
     live = liveness_of_state_file(sf)
@@ -193,7 +193,7 @@ def do_drill_in(target: str) -> None:
             "%Y-%m-%d %H:%M:%S %Z"
         )
 
-    print(f"gremlin: {gr_id}")
+    print(f"gremlin: {gremlin_id}")
     print(f"  liveness : {live}")
     print(
         f"  closed   : {'yes' if os.path.isfile(os.path.join(wdir, 'closed')) else 'no'}"
@@ -206,8 +206,8 @@ def do_drill_in(target: str) -> None:
     # immediately visible. bail_class is upstream-set by review/address
     # stages; bail_reason/bail_detail are headless-rescue-set when it
     # declined to proceed.
-    _gr_id_for_bail = str(state.get("id") or "")
-    _bail_file = _read_bail_info(_gr_id_for_bail) if _gr_id_for_bail else None
+    _gremlin_id_for_bail = str(state.get("id") or "")
+    _bail_file = _read_bail_info(_gremlin_id_for_bail) if _gremlin_id_for_bail else None
     bail_class = (
         (_bail_file.get("class") or "")
         if _bail_file

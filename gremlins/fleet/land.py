@@ -21,7 +21,7 @@ from gremlins.fleet.state import (
 from gremlins.utils import proc
 
 
-def expected_branch(state: dict[str, Any], gr_id: str):
+def expected_branch(state: dict[str, Any], gremlin_id: str):
     """Return the durable branch name for a gremlin, or None if there isn't one."""
     artifacts = list(state.get("artifacts") or [])
     for art in reversed(artifacts):
@@ -156,7 +156,7 @@ def _remove_worktree(wdir: str, state: dict[str, Any], cwd: str | None) -> None:
 
 
 def _finalize_cleanup(
-    gr_id: str,
+    gremlin_id: str,
     wdir: str,
     state: dict[str, Any],
     cwd: str | None,
@@ -166,7 +166,7 @@ def _finalize_cleanup(
 ) -> None:
     """Optionally delete the gremlin branch and state directory."""
     if delete_branch:
-        branch = expected_branch(state, gr_id)
+        branch = expected_branch(state, gremlin_id)
         if branch:
             try:
                 _git.delete_branch(branch, force=True, cwd=cwd)
@@ -184,7 +184,7 @@ def _finalize_cleanup(
 
 
 def _cleanup_gremlin(
-    gr_id: str,
+    gremlin_id: str,
     wdir: str,
     state: dict[str, Any],
     cwd: str | None,
@@ -211,7 +211,7 @@ def _cleanup_gremlin(
 
     _remove_worktree(wdir, state, cwd)
     _finalize_cleanup(
-        gr_id,
+        gremlin_id,
         wdir,
         state,
         cwd,
@@ -226,27 +226,27 @@ def do_rm(target: str) -> bool:
     if match is None:
         return False
 
-    gr_id, sf, wdir = match
+    gremlin_id, sf, wdir = match
     state = load_state(sf)
     if not state:
-        print(f"error: could not read state for {gr_id}")
+        print(f"error: could not read state for {gremlin_id}")
         return False
 
     live = liveness_of_state_file(sf, state)
 
     if not live:
-        print(f"error: could not determine liveness for {gr_id}")
+        print(f"error: could not determine liveness for {gremlin_id}")
         return False
 
     if live == "running" or live.startswith("stalled:"):
-        print(f"gremlin {gr_id} is still live ({live}) — use 'stop' first, then rm")
+        print(f"gremlin {gremlin_id} is still live ({live}) — use 'stop' first, then rm")
         return False
 
     project_root = str(state.get("project_root") or "")
     cwd_for_git = project_root if project_root and os.path.isdir(project_root) else None
 
     if not _cleanup_gremlin(
-        gr_id,
+        gremlin_id,
         wdir,
         cast(dict[str, Any], state),
         cwd_for_git,
@@ -255,7 +255,7 @@ def do_rm(target: str) -> bool:
     ):
         return False
 
-    print(f"rm: gremlin {gr_id} cleaned up")
+    print(f"rm: gremlin {gremlin_id} cleaned up")
     return True
 
 
@@ -507,7 +507,7 @@ def _preflight_land(state: dict[str, Any], cwd: str | None) -> tuple[str, bool]:
 
 
 def _squash_land(
-    gr_id: str,
+    gremlin_id: str,
     sf: str,
     wdir: str,
     state: dict[str, Any],
@@ -532,7 +532,7 @@ def _squash_land(
     if commit_count < 1:
         print(f"{current} is already up to date with {source_label}.")
         _cleanup_gremlin(
-            gr_id,
+            gremlin_id,
             wdir,
             state,
             cwd,
@@ -573,13 +573,13 @@ def _squash_land(
     _persist_land_cost(sf, state, land_cost)
     _print_cost(state)
     _cleanup_gremlin(
-        gr_id, wdir, state, cwd, delete_branch=delete_branch, remove_state_dir=False
+        gremlin_id, wdir, state, cwd, delete_branch=delete_branch, remove_state_dir=False
     )
     return True
 
 
 def _ff_land(
-    gr_id: str,
+    gremlin_id: str,
     wdir: str,
     state: dict[str, Any],
     cwd: str | None,
@@ -604,7 +604,7 @@ def _ff_land(
     if commit_count < 1:
         print(f"{current} is already up to date with {source_label}.")
         _cleanup_gremlin(
-            gr_id,
+            gremlin_id,
             wdir,
             state,
             cwd,
@@ -624,25 +624,25 @@ def _ff_land(
     print(f"Landed {source_label} onto {current}.")
     _print_cost(state)
     _cleanup_gremlin(
-        gr_id, wdir, state, cwd, delete_branch=delete_branch, remove_state_dir=False
+        gremlin_id, wdir, state, cwd, delete_branch=delete_branch, remove_state_dir=False
     )
     return True
 
 
 def _land_local(
-    gr_id: str, sf: str, wdir: str, state: dict[str, Any], mode: str, into_dir: str = ""
+    gremlin_id: str, sf: str, wdir: str, state: dict[str, Any], mode: str, into_dir: str = ""
 ) -> bool:
     """Land a local gremlin branch (mode: 'squash' or 'ff'). If into_dir is given, land there instead of project_root."""
     setup_kind = state.get("setup_kind", "")
     if setup_kind != "worktree-branch":
         print(
-            f"gremlin {gr_id} has setup_kind={setup_kind!r} — only worktree-branch gremlins support local landing"
+            f"gremlin {gremlin_id} has setup_kind={setup_kind!r} — only worktree-branch gremlins support local landing"
         )
         return False
 
-    branch = expected_branch(state, gr_id)
+    branch = expected_branch(state, gremlin_id)
     if not branch:
-        print(f"error: no branch artifact in state for {gr_id}")
+        print(f"error: no branch artifact in state for {gremlin_id}")
         return False
 
     project_root = state.get("project_root") or ""
@@ -671,22 +671,22 @@ def _land_local(
 
     if mode == "squash":
         return _squash_land(
-            gr_id, sf, wdir, state, cwd, branch, branch, current, delete_branch=True
+            gremlin_id, sf, wdir, state, cwd, branch, branch, current, delete_branch=True
         )
     return _ff_land(
-        gr_id, wdir, state, cwd, branch, branch, current, delete_branch=True
+        gremlin_id, wdir, state, cwd, branch, branch, current, delete_branch=True
     )
 
 
 def _land_boss(
-    gr_id: str, sf: str, wdir: str, state: dict[str, Any], mode: str
+    gremlin_id: str, sf: str, wdir: str, state: dict[str, Any], mode: str
 ) -> bool:
     """Land a boss gremlin's chain of squash commits onto the current branch."""
     workdir = state.get("workdir") or ""
     if not workdir or not os.path.isdir(workdir):
         print(
             f"error: boss worktree missing ({workdir!r}) — cannot resolve chain HEAD. "
-            f"Its commits are likely unreachable; use 'gremlins rm {gr_id}' to clean up."
+            f"Its commits are likely unreachable; use 'gremlins rm {gremlin_id}' to clean up."
         )
         return False
 
@@ -702,21 +702,21 @@ def _land_boss(
     if not ok:
         return False
 
-    label = f"boss {gr_id} ({boss_head[:12]})"
+    label = f"boss {gremlin_id} ({boss_head[:12]})"
     if mode == "squash":
         return _squash_land(
-            gr_id, sf, wdir, state, cwd, boss_head, label, current, delete_branch=False
+            gremlin_id, sf, wdir, state, cwd, boss_head, label, current, delete_branch=False
         )
     return _ff_land(
-        gr_id, wdir, state, cwd, boss_head, label, current, delete_branch=False
+        gremlin_id, wdir, state, cwd, boss_head, label, current, delete_branch=False
     )
 
 
-def _land_gh(gr_id: str, wdir: str, state: dict[str, Any], force: bool = False) -> bool:
+def _land_gh(gremlin_id: str, wdir: str, state: dict[str, Any], force: bool = False) -> bool:
     """Merge a gh gremlin's PR and clean up."""
-    pr_url = read_pr_url(gr_id)
+    pr_url = read_pr_url(gremlin_id)
     if not pr_url:
-        print(f"error: no pr_url recorded for {gr_id}")
+        print(f"error: no pr_url recorded for {gremlin_id}")
         return False
 
     project_root = _resolve_landing_cwd(state)
@@ -754,7 +754,7 @@ def _land_gh(gr_id: str, wdir: str, state: dict[str, Any], force: bool = False) 
         _fast_forward_main(cwd)
         _remove_worktree(wdir, state, cwd)
         _finalize_cleanup(
-            gr_id, wdir, state, cwd, delete_branch=False, remove_state_dir=False
+            gremlin_id, wdir, state, cwd, delete_branch=False, remove_state_dir=False
         )
         return True
 
@@ -765,7 +765,7 @@ def _land_gh(gr_id: str, wdir: str, state: dict[str, Any], force: bool = False) 
             )
             _remove_worktree(wdir, state, cwd)
             _finalize_cleanup(
-                gr_id, wdir, state, cwd, delete_branch=False, remove_state_dir=False
+                gremlin_id, wdir, state, cwd, delete_branch=False, remove_state_dir=False
             )
             return True
         print(f"PR is closed (not merged): {pr_url}")
@@ -847,7 +847,7 @@ def _land_gh(gr_id: str, wdir: str, state: dict[str, Any], force: bool = False) 
 
     _fast_forward_main(cwd)
     _finalize_cleanup(
-        gr_id, wdir, state, cwd, delete_branch=False, remove_state_dir=False
+        gremlin_id, wdir, state, cwd, delete_branch=False, remove_state_dir=False
     )
     return True
 
@@ -859,15 +859,15 @@ def do_land(
     if match is None:
         return False
 
-    gr_id, sf, wdir = match
+    gremlin_id, sf, wdir = match
     state = load_state(sf)
     if not state:
-        print(f"error: could not read state for {gr_id}")
+        print(f"error: could not read state for {gremlin_id}")
         return False
 
     live = liveness_of_state_file(sf, state)
     if live == "running" or live.startswith("stalled:"):
-        print(f"gremlin {gr_id} is still live ({live}) — use 'stop' first, then land")
+        print(f"gremlin {gremlin_id} is still live ({live}) — use 'stop' first, then land")
         return False
 
     shape = landable_shape(state)
@@ -885,19 +885,19 @@ def do_land(
                 "error: --squash/--ff are not applicable to gh gremlins (merged via PR)"
             )
             return False
-        return _land_gh(gr_id, wdir, state, force=force)
+        return _land_gh(gremlin_id, wdir, state, force=force)
 
     if shape == "one_branch":
         if live != "finished":
-            print(f"gremlin {gr_id} is not finished (liveness: {live})")
+            print(f"gremlin {gremlin_id} is not finished (liveness: {live})")
             return False
-        return _land_local(gr_id, sf, wdir, state, mode or "squash", into_dir=into_dir)
+        return _land_local(gremlin_id, sf, wdir, state, mode or "squash", into_dir=into_dir)
 
     # shape == "empty": only boss gremlins (worktree-detached) have commits to land
     if state.get("setup_kind") != "worktree-detached":
-        print(f"error: gremlin {gr_id} has no branch or PR artifacts to land")
+        print(f"error: gremlin {gremlin_id} has no branch or PR artifacts to land")
         return False
     if live != "finished":
-        print(f"gremlin {gr_id} is not finished (liveness: {live})")
+        print(f"gremlin {gremlin_id} is not finished (liveness: {live})")
         return False
-    return _land_boss(gr_id, sf, wdir, state, mode or "ff")
+    return _land_boss(gremlin_id, sf, wdir, state, mode or "ff")

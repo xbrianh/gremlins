@@ -127,7 +127,7 @@ def test_run_launch_cmd_success(q, monkeypatch):
     )
     monkeypatch.setattr(
         "gremlins.queue.core._poll_terminal",
-        lambda gr_id: {"exit_code": 0, "status": "done"},
+        lambda gremlin_id: {"exit_code": 0, "status": "done"},
     )
     core.add("gremlins launch local")
     rc = core.run()
@@ -145,7 +145,7 @@ def test_run_launch_cmd_dirty_state(q, monkeypatch):
     )
     monkeypatch.setattr(
         "gremlins.queue.core._poll_terminal",
-        lambda gr_id: {"exit_code": 0, "status": "bailed", "bail_class": "security"},
+        lambda gremlin_id: {"exit_code": 0, "status": "bailed", "bail_class": "security"},
     )
     core.add("gremlins launch local")
     rc = core.run()
@@ -174,7 +174,7 @@ def test_run_ctrl_c_leaves_item_in_running(q, monkeypatch):
     )
     monkeypatch.setattr(
         "gremlins.queue.core._poll_terminal",
-        lambda gr_id: (_ for _ in ()).throw(KeyboardInterrupt()),
+        lambda gremlin_id: (_ for _ in ()).throw(KeyboardInterrupt()),
     )
     core.add("gremlins launch local")
     try:
@@ -412,7 +412,7 @@ def test_land_skips_non_launch_items(q, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_run_launch_invalid_gr_id(q, monkeypatch):
+def test_run_launch_invalid_gremlin_id(q, monkeypatch):
     monkeypatch.setattr(
         "gremlins.queue.core._run_launch",
         lambda cmd, log_path: ("bad id!!!", True),
@@ -432,7 +432,7 @@ def test_run_launch_poll_timeout(q, monkeypatch):
     )
     monkeypatch.setattr(
         "gremlins.queue.core._poll_terminal",
-        lambda gr_id: (_ for _ in ()).throw(TimeoutError("timed out")),
+        lambda gremlin_id: (_ for _ in ()).throw(TimeoutError("timed out")),
     )
     core.add("gremlins launch local")
     rc = core.run()
@@ -451,7 +451,7 @@ def test_run_launch_requeued_no_double_id(q, monkeypatch):
     )
     monkeypatch.setattr(
         "gremlins.queue.core._poll_terminal",
-        lambda gr_id: {"exit_code": 0, "status": "done"},
+        lambda gremlin_id: {"exit_code": 0, "status": "done"},
     )
     (q / "done" / f"0000-local.{old_id}.cmd").write_text("gremlins launch local")
     core.requeue(include_done=True)

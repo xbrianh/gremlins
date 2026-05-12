@@ -24,13 +24,13 @@ class FleetRow:
     client: str
     desc: str
     project_root: str
-    gr_id: str
+    gremlin_id: str
     wdir: str
     closed: bool
 
 
 def build_row(
-    gr_id: str, _sf: str, wdir: str, state: dict[str, Any], live: str
+    gremlin_id: str, _sf: str, wdir: str, state: dict[str, Any], live: str
 ) -> FleetRow:
     """Return a FleetRow with all display fields resolved."""
     pipeline_path = str(state.get("pipeline_path") or "")
@@ -70,7 +70,7 @@ def build_row(
     else:
         desc_trim = desc[:60]
     age = humanize_age(started_at)
-    sid = display_id(gr_id)
+    sid = display_id(gremlin_id)
     client = state.get("client") or "—"
 
     return FleetRow(
@@ -84,7 +84,7 @@ def build_row(
         client=str(client),
         desc=str(desc_trim),
         project_root=str(pr),
-        gr_id=gr_id,
+        gremlin_id=gremlin_id,
         wdir=wdir,
         closed=closed,
     )

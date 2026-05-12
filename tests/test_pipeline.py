@@ -32,7 +32,7 @@ def _local(
         stages,
         args=args,
         session_dir=tmp_path,
-        gr_id=None,
+        gremlin_id=None,
         pipeline_data=_pipeline_data(stages),
     )
 
@@ -45,7 +45,7 @@ def test_pipeline_constructs_from_local_yaml(tmp_path: pathlib.Path) -> None:
         pipeline_data.stages,
         args=_args(),
         session_dir=tmp_path,
-        gr_id=None,
+        gremlin_id=None,
         pipeline_data=pipeline_data,
     )
 
@@ -69,7 +69,7 @@ def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
         pipeline_data.stages,
         args=_args(),
         session_dir=tmp_path,
-        gr_id=None,
+        gremlin_id=None,
         pipeline_data=pipeline_data,
         repo="",
         state_file=None,

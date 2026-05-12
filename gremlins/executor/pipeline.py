@@ -71,7 +71,7 @@ class Pipeline:
         *,
         args: argparse.Namespace,
         session_dir: pathlib.Path,
-        gr_id: str | None,
+        gremlin_id: str | None,
         pipeline_data: _PipelineData,
         repo: str = "",
         state_file: pathlib.Path | None = None,
@@ -90,13 +90,13 @@ class Pipeline:
         self.stages = _expand_stage_entries(stages)
         self.args = args
         self.session_dir = session_dir
-        self.gr_id = gr_id
+        self.gremlin_id = gremlin_id
         self.pipeline_data = pipeline_data
         self.repo = repo
         self.state_file = state_file
         self.test_client = test_client
 
-        sf = state_file if state_file is not None else resolve_state_file(gr_id)
+        sf = state_file if state_file is not None else resolve_state_file(gremlin_id)
         self.instructions: str = read_stage_inputs(sf).get("instructions") or " ".join(
             getattr(args, "instructions", None) or []
         )
@@ -131,7 +131,7 @@ class Pipeline:
             stage_state = State(
                 client=resolved,
                 session_dir=self.session_dir,
-                gr_id=self.gr_id,
+                gremlin_id=self.gremlin_id,
                 state_file=self.state_file,
                 args=self.args,
                 pipeline_data=self.pipeline_data,

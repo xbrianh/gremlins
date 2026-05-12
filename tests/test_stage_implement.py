@@ -32,7 +32,7 @@ def _make_state(
     state = RuntimeState(
         client=client,
         session_dir=tmp_path,
-        gr_id=None,
+        gremlin_id=None,
         issue_num=issue_num,
     )
     (tmp_path / "plan.md").write_text(plan_text, encoding="utf-8")

@@ -20,7 +20,7 @@ def _make_stage(
     state = RuntimeState(
         client=FakeClaudeClient(fixtures={}),
         session_dir=tmp_path,
-        gr_id=None,
+        gremlin_id=None,
         repo=repo,
     )
     return stage, state

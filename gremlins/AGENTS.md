@@ -8,7 +8,7 @@ review / address pipelines, the fleet manager
 ## Module layout
 
 - `cli/` — subcommand entry points. `__init__.py` is the top-level dispatch; one file per subcommand group: `launch.py`, `resume.py`, `fleet.py`. Bare invocation prints fleet status.
-- `run_pipeline.py` — `python -m gremlins.run_pipeline <gr_id> <kind>`. Spawned by the launcher; wraps `cli.main` and writes terminal state on exit.
+- `run_pipeline.py` — `python -m gremlins.run_pipeline <gremlin_id> <kind>`. Spawned by the launcher; wraps `cli.main` and writes terminal state on exit.
 - `runner.py` — `run_stages` sequencer (with `resume_from`) + SIGINT/SIGTERM handlers that reap `claude -p` children.
 - `state.py` — session-dir resolution, `set_stage` / `write_bail_file` / `patch_state` / `check_bail`.
 - `utils/git.py` — `in_git_repo`, `head_sha`, branch / worktree helpers.
@@ -20,7 +20,7 @@ review / address pipelines, the fleet manager
 - `clients/fake.py` — `FakeClaudeClient` recording test double; replays canned stream-json from fixtures keyed by `label`.
 - `pipeline/` — `Pipeline` dataclass + `Pipeline.from_yaml(path)` classmethod; `resolve_pipeline_path`; supports parallel stage groups. `pipeline/loader.py` holds `STAGE_TYPES`, the explicit dispatch table mapping type-name strings to Stage classes.
 - `pipelines/` — bundled YAML pipeline files (`local.yaml`, `gh.yaml`); lookup target for `resolve_pipeline_path`.
-- `stages/base.py` — `Stage` Protocol + `StageContext` dataclass: shared `client`, `session_dir`, `gr_id` threaded into every stage.
+- `stages/base.py` — `Stage` Protocol + `StageContext` dataclass: shared `client`, `session_dir`, `gremlin_id` threaded into every stage.
 - `stages/` — per-stage bodies: `plan`, `implement`, `review_code`, `address_code`, `verify`, `test`, `github_request_copilot_review`, `github_wait_copilot`, `github_wait_ci`, `handoff`.
 - `executor/state.py` — `State` class: execution context + `state.json` I/O.
 - `executor/run.py` — `run_main`. Drives the local pipeline.

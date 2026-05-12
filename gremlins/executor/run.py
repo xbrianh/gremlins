@@ -107,7 +107,7 @@ def run_pipeline(
     pipeline_path: pathlib.Path,
     *,
     argv: list[str],
-    gr_id: str | None = None,
+    gremlin_id: str | None = None,
     client: Client | None = None,
 ) -> int:
     """Load pipeline YAML, build Pipeline, run. Sole internal pipeline entry point."""
@@ -150,7 +150,7 @@ def run_pipeline(
     gh = pipeline.needs_gh()
 
     repo = ""
-    state_file = resolve_state_file(gr_id)
+    state_file = resolve_state_file(gremlin_id)
 
     if gh:
         if shutil.which("gh") is None:
@@ -162,7 +162,7 @@ def run_pipeline(
 
     _propagate_client_models(list(pipeline.stages))
 
-    session_dir = resolve_session_dir(gr_id)
+    session_dir = resolve_session_dir(gremlin_id)
 
     _stage_clients = _unique_clients(list(pipeline.stages))
     _signal_clients = [client] if client is not None else _stage_clients
@@ -184,7 +184,7 @@ def run_pipeline(
             pipeline.stages,
             args=args,
             session_dir=session_dir,
-            gr_id=gr_id,
+            gremlin_id=gremlin_id,
             pipeline_data=pipeline,
             repo=repo,
             state_file=state_file if gh else None,
@@ -224,10 +224,10 @@ def run_pipeline(
     for c in [client] if client else _stage_clients:
         total_cost += getattr(c, "total_cost_usd", 0.0) or 0.0
     if total_cost > 0:
-        patch_state(gr_id, total_cost_usd=total_cost)
+        patch_state(gremlin_id, total_cost_usd=total_cost)
 
     if gh:
-        logger.info("done. PR: %s", read_pr_url(gr_id) or "(unknown)")
+        logger.info("done. PR: %s", read_pr_url(gremlin_id) or "(unknown)")
     else:
         logger.info("done. session artifacts in: %s", session_dir)
     if total_cost > 0:

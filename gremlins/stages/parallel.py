@@ -118,7 +118,7 @@ class ParallelStage(Stage):
         self,
         child_runners: list[tuple[str, State, Callable[[], None]]],
         *,
-        gr_id: str | None = None,
+        gremlin_id: str | None = None,
         project_root: pathlib.Path | None = None,
         set_stage_fn: Callable[[str], None] | None = None,
         parent_attempt: str = "",
@@ -131,13 +131,13 @@ class ParallelStage(Stage):
             set_stage_fn=set_stage_fn or _noop_set_stage,
             cancel_on_bail=self._cancel_on_bail,
             bail_policy=self._bail_policy,
-            gr_id=gr_id,
+            gremlin_id=gremlin_id,
             project_root=project_root or pathlib.Path.cwd(),
             parent_attempt=parent_attempt,
         )
 
     def run(self, state: State) -> None:
-        gr_id = state.gr_id
+        gremlin_id = state.gremlin_id
         group_dir = state.session_dir / self.name
         group_dir.mkdir(parents=True, exist_ok=True)
         child_runners: list[tuple[str, State, Callable[[], None]]] = []
@@ -160,9 +160,9 @@ class ParallelStage(Stage):
             )
         for _, fn in self.build_runtime_stages(
             child_runners,
-            gr_id=gr_id,
+            gremlin_id=gremlin_id,
             project_root=pathlib.Path.cwd(),
-            set_stage_fn=lambda n: set_stage(gr_id, self.name, sub_stage=n),
+            set_stage_fn=lambda n: set_stage(gremlin_id, self.name, sub_stage=n),
             parent_attempt=state.attempt,
         ):
             fn()
@@ -176,7 +176,7 @@ def _parallel_stages(
     set_stage_fn: Callable[[str], None],
     cancel_on_bail: bool,
     bail_policy: str,
-    gr_id: str | None,
+    gremlin_id: str | None,
     project_root: pathlib.Path,
     parent_attempt: str = "",
 ) -> list[_Stage]:
@@ -197,7 +197,7 @@ def _parallel_stages(
         nonlocal base_head
         if _worktree_paths:
             return
-        sf = resolve_state_file(gr_id)
+        sf = resolve_state_file(gremlin_id)
         if sf is None or not sf.exists():
             return
         try:
@@ -217,14 +217,14 @@ def _parallel_stages(
 
     def _persist_state() -> None:
         patch_parallel_worktrees(
-            gr_id,
+            gremlin_id,
             group_name,
             base_head=base_head,
             paths={k: str(v) for k, v in _worktree_paths.items()},
         )
 
     def _clear_persisted_state() -> None:
-        patch_parallel_worktrees(gr_id, group_name, base_head=None, paths=None)
+        patch_parallel_worktrees(gremlin_id, group_name, base_head=None, paths=None)
 
     def _remove_worktrees(paths: list[pathlib.Path]) -> None:
         if not _in_git_repo():
@@ -352,7 +352,7 @@ def _parallel_stages(
                         "(fan-in merge for mutating parallel is not yet implemented)"
                     )
 
-        sf = resolve_state_file(gr_id)
+        sf = resolve_state_file(gremlin_id)
         bailed: list[str] = []
         should_bail = False
         if sf is not None and sf.exists():
@@ -386,13 +386,13 @@ def _parallel_stages(
 
                 if should_bail and first_bail:
                     write_bail_file(
-                        gr_id,
+                        gremlin_id,
                         parent_attempt,
                         first_bail.get("class") or "other",
                         first_bail.get("detail") or "",
                     )
 
-                patch_state(gr_id, _delete=("parallel_attempts",))
+                patch_state(gremlin_id, _delete=("parallel_attempts",))
             except RuntimeError:
                 raise
             except Exception as exc:

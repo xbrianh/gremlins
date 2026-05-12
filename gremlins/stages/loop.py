@@ -149,7 +149,7 @@ class LoopStage(Stage):
         except LoopExhausted:
             raise
         except (SystemExit, Exception) as exc:
-            if not exhausted and not _bail_file_exists(state.gr_id, state.attempt):
+            if not exhausted and not _bail_file_exists(state.gremlin_id, state.attempt):
                 state.write_bail_file(
                     "other",
                     f"loop stage failed: {exc}"[:200],
@@ -165,8 +165,8 @@ def _detach_to_pr_base(state: State) -> None:
     _git.git_detach_to_branch(branch, cwd=state.cwd)
 
 
-def _bail_file_exists(gr_id: str | None, attempt: str) -> bool:
-    sf = resolve_state_file(gr_id)
+def _bail_file_exists(gremlin_id: str | None, attempt: str) -> bool:
+    sf = resolve_state_file(gremlin_id)
     if sf is None or not sf.exists() or not attempt:
         return False
     return (sf.parent / f"bail_{attempt}.json").exists()

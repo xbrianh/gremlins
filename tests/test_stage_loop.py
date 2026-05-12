@@ -22,7 +22,7 @@ def _loop_state(tmp_path: Any) -> RuntimeState:
     return RuntimeState(
         client=_fake_client(),
         session_dir=tmp_path,
-        gr_id=None,
+        gremlin_id=None,
         worktree=tmp_path,
     )
 
@@ -125,10 +125,10 @@ def test_loop_bail_propagates_immediately(tmp_path):
 def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
     import gremlins.executor.state as state_mod
 
-    gr_id = "loop-test-gr"
-    state_dir = make_state_dir(gr_id)
+    gremlin_id = "loop-test-gr"
+    state_dir = make_state_dir(gremlin_id)
     attempt = "loop-test-attempt"
-    state_mod.patch_state(gr_id, attempt=attempt)
+    state_mod.patch_state(gremlin_id, attempt=attempt)
 
     def check() -> None:
         raise RunCmdFailed("fail")
@@ -139,7 +139,7 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
     loop_state = RuntimeState(
         client=_fake_client(),
         session_dir=tmp_path,
-        gr_id=gr_id,
+        gremlin_id=gremlin_id,
         worktree=tmp_path,
         attempt=attempt,
     )
@@ -163,7 +163,7 @@ def _run_cmd_stage(tmp_path: Any, cmds: list[str]) -> tuple[RunCmd, RuntimeState
     state = RuntimeState(
         client=_fake_client(),
         session_dir=tmp_path,
-        gr_id=None,
+        gremlin_id=None,
         worktree=tmp_path,
     )
     return stage, state
@@ -206,22 +206,22 @@ def test_run_cmd_output_in_exception(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _loop_state_with_gr(tmp_path: Any, gr_id: str) -> RuntimeState:
+def _loop_state_with_gr(tmp_path: Any, gremlin_id: str) -> RuntimeState:
     return RuntimeState(
         client=_fake_client(),
         session_dir=tmp_path,
-        gr_id=gr_id,
+        gremlin_id=gremlin_id,
         worktree=tmp_path,
     )
 
 
 def test_pr_stack_detaches_to_prior_pr_branch(tmp_path, make_state_dir, monkeypatch):
-    gr_id = "pr-stack-test"
-    state_dir = make_state_dir(gr_id)
+    gremlin_id = "pr-stack-test"
+    state_dir = make_state_dir(gremlin_id)
     (state_dir / "state.json").write_text(
         json.dumps(
             {
-                "id": gr_id,
+                "id": gremlin_id,
                 "stage": "",
                 "bail_class": "",
                 "artifacts": [
@@ -247,14 +247,14 @@ def test_pr_stack_detaches_to_prior_pr_branch(tmp_path, make_state_dir, monkeypa
     loop = LoopStage(
         "test", body_runners=[lambda: None], max_iterations=1, pr_stack=True
     )
-    loop.run(_loop_state_with_gr(tmp_path, gr_id))
+    loop.run(_loop_state_with_gr(tmp_path, gremlin_id))
 
     assert detach_calls == ["feat-abc"]
 
 
 def test_pr_stack_skipped_when_no_prior_pr(tmp_path, make_state_dir, monkeypatch):
-    gr_id = "pr-stack-noop-test"
-    make_state_dir(gr_id)
+    gremlin_id = "pr-stack-noop-test"
+    make_state_dir(gremlin_id)
 
     git_calls: list[str] = []
     from gremlins.stages import loop as _loop_mod
@@ -268,18 +268,18 @@ def test_pr_stack_skipped_when_no_prior_pr(tmp_path, make_state_dir, monkeypatch
     loop = LoopStage(
         "test", body_runners=[lambda: None], max_iterations=1, pr_stack=True
     )
-    loop.run(_loop_state_with_gr(tmp_path, gr_id))
+    loop.run(_loop_state_with_gr(tmp_path, gremlin_id))
 
     assert git_calls == []
 
 
 def test_pr_stack_false_skips_detach(tmp_path, make_state_dir, monkeypatch):
-    gr_id = "pr-stack-disabled"
-    state_dir = make_state_dir(gr_id)
+    gremlin_id = "pr-stack-disabled"
+    state_dir = make_state_dir(gremlin_id)
     (state_dir / "state.json").write_text(
         json.dumps(
             {
-                "id": gr_id,
+                "id": gremlin_id,
                 "stage": "",
                 "bail_class": "",
                 "artifacts": [
@@ -305,7 +305,7 @@ def test_pr_stack_false_skips_detach(tmp_path, make_state_dir, monkeypatch):
     loop = LoopStage(
         "test", body_runners=[lambda: None], max_iterations=1, pr_stack=False
     )
-    loop.run(_loop_state_with_gr(tmp_path, gr_id))
+    loop.run(_loop_state_with_gr(tmp_path, gremlin_id))
 
     assert git_calls == []
 
@@ -316,8 +316,8 @@ def test_pr_stack_false_skips_detach(tmp_path, make_state_dir, monkeypatch):
 
 
 def test_loop_patches_loop_iteration_to_state(tmp_path, make_state_dir):
-    gr_id = "iter-patch-test"
-    state_dir = make_state_dir(gr_id)
+    gremlin_id = "iter-patch-test"
+    state_dir = make_state_dir(gremlin_id)
     seen_iterations: list[int] = []
 
     def runner() -> None:
@@ -328,7 +328,7 @@ def test_loop_patches_loop_iteration_to_state(tmp_path, make_state_dir):
     loop_state = RuntimeState(
         client=_fake_client(),
         session_dir=tmp_path,
-        gr_id=gr_id,
+        gremlin_id=gremlin_id,
         worktree=tmp_path,
     )
     loop = LoopStage.from_runners([runner], max_iterations=3)
@@ -340,8 +340,8 @@ def test_loop_patches_loop_iteration_to_state(tmp_path, make_state_dir):
 
 def test_pr_stack_iter2_detaches_to_iter1_branch(tmp_path, make_state_dir, monkeypatch):
     """Detach fires at start of iter2 using the artifact written during iter1."""
-    gr_id = "pr-stack-two-iter"
-    make_state_dir(gr_id)
+    gremlin_id = "pr-stack-two-iter"
+    make_state_dir(gremlin_id)
 
     detach_calls: list[str] = []
     from gremlins.stages import loop as _loop_mod
@@ -361,7 +361,7 @@ def test_pr_stack_iter2_detaches_to_iter1_branch(tmp_path, make_state_dir, monke
             from gremlins.executor.state import append_artifact
 
             append_artifact(
-                gr_id,
+                gremlin_id,
                 {
                     "type": "pr",
                     "url": "https://github.com/x/r/pull/1",
@@ -371,6 +371,6 @@ def test_pr_stack_iter2_detaches_to_iter1_branch(tmp_path, make_state_dir, monke
             raise RunCmdFailed("next-plan")
 
     loop = LoopStage("test", body_runners=[runner], max_iterations=2, pr_stack=True)
-    loop.run(_loop_state_with_gr(tmp_path, gr_id))
+    loop.run(_loop_state_with_gr(tmp_path, gremlin_id))
 
     assert detach_calls == ["feat-iter1"]

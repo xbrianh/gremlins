@@ -43,7 +43,7 @@ def _make_stage(
     state = RuntimeState(
         client=client,
         session_dir=tmp_path,
-        gr_id=None,
+        gremlin_id=None,
         worktree=tmp_path,
     )
     return stage, state
@@ -186,10 +186,10 @@ def test_no_pr_opened_on_exhaustion(tmp_path, monkeypatch):
 def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
     import gremlins.executor.state as state_mod
 
-    gr_id = "test-gr-id"
-    state_dir = make_state_dir(gr_id)
+    gremlin_id = "test-gr-id"
+    state_dir = make_state_dir(gremlin_id)
     attempt = "verify-exhaustion-attempt"
-    state_mod.patch_state(gr_id, attempt=attempt)
+    state_mod.patch_state(gremlin_id, attempt=attempt)
     client = FakeClaudeClient(
         fixtures={"verify-fix-1": MINIMAL_EVENTS, "verify-fix-2": MINIMAL_EVENTS}
     )
@@ -200,7 +200,7 @@ def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
     state = RuntimeState(
         client=client,
         session_dir=tmp_path,
-        gr_id=gr_id,
+        gremlin_id=gremlin_id,
         worktree=tmp_path,
         attempt=attempt,
     )
@@ -250,7 +250,7 @@ def test_parallel_child_fix_prompt_uses_new_bail_command(tmp_path):
     state = RuntimeState(
         client=client,
         session_dir=tmp_path,
-        gr_id="gr-verify",
+        gremlin_id="gr-verify",
         child_key="verify-child",
         worktree=tmp_path,
     )

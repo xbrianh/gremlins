@@ -34,7 +34,7 @@ def test_local_main_plan_mode(tmp_path, monkeypatch):
     _common_patches(monkeypatch)
     monkeypatch.setattr(
         "gremlins.executor.run.resolve_session_dir",
-        lambda gr_id=None: session_dir,
+        lambda gremlin_id=None: session_dir,
     )
     client = _ReviewCreatingClient(
         fixtures={
@@ -67,7 +67,7 @@ def test_local_main_resume_from_review_code_requires_git_changes(
     _common_patches(monkeypatch)
     monkeypatch.setattr(
         "gremlins.executor.run.resolve_session_dir",
-        lambda gr_id=None: session_dir,
+        lambda gremlin_id=None: session_dir,
     )
     monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: True)
     monkeypatch.setattr("gremlins.executor.run.has_dirty_worktree", lambda: False)
@@ -98,7 +98,7 @@ def test_local_main_resume_from_review_code_allows_existing_git_changes(
     _common_patches(monkeypatch)
     monkeypatch.setattr(
         "gremlins.executor.run.resolve_session_dir",
-        lambda gr_id=None: session_dir,
+        lambda gremlin_id=None: session_dir,
     )
     monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: True)
     monkeypatch.setattr("gremlins.executor.run.has_dirty_worktree", lambda: False)
@@ -135,7 +135,7 @@ def test_local_main_client_specifier_model(tmp_path, monkeypatch):
     _common_patches(monkeypatch)
     monkeypatch.setattr(
         "gremlins.executor.run.resolve_session_dir",
-        lambda gr_id=None: session_dir,
+        lambda gremlin_id=None: session_dir,
     )
     review_label = "review-code:gpt-4o"
     client = _ReviewCreatingClient(
@@ -163,8 +163,8 @@ def test_local_pipeline_stage_names(tmp_path):
 
 
 def test_local_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir):
-    gr_id = "test-gr-id"
-    state_dir = make_state_dir(gr_id)
+    gremlin_id = "test-gr-id"
+    state_dir = make_state_dir(gremlin_id)
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -175,7 +175,7 @@ def test_local_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
         "gremlins.executor.run.resolve_session_dir",
-        lambda gr_id=None: session_dir,
+        lambda gremlin_id=None: session_dir,
     )
     client = _ReviewCreatingClient(
         fixtures={
@@ -189,7 +189,7 @@ def test_local_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir)
         _local_pipeline_path(tmp_path),
         argv=["--plan", str(plan_file)],
         client=client,
-        gr_id=gr_id,
+        gremlin_id=gremlin_id,
     )
     assert result == 0
 
@@ -215,7 +215,7 @@ def test_local_main_env_file_vars_reach_verify(tmp_path, monkeypatch):
     _common_patches(monkeypatch)
     monkeypatch.setattr(
         "gremlins.executor.run.resolve_session_dir",
-        lambda gr_id=None: session_dir,
+        lambda gremlin_id=None: session_dir,
     )
     client = _ReviewCreatingClient(
         fixtures={
@@ -250,7 +250,7 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
     _common_patches(monkeypatch)
     monkeypatch.setattr(
         "gremlins.executor.run.resolve_session_dir",
-        lambda gr_id=None: session_dir,
+        lambda gremlin_id=None: session_dir,
     )
     # Override Pipeline.from_yaml to inject default_client: copilot:gpt-5.4 and
     # re-fill stage clients so every stage inherits that model.
@@ -303,8 +303,8 @@ def test_local_stage_inputs_instructions_reach_plan(
 ):
     """stage_inputs["instructions"] from state.json is passed to plan.Plan, and
     takes precedence over the CLI positional argument."""
-    gr_id = "test-si-local"
-    state_dir = make_state_dir(gr_id)
+    gremlin_id = "test-si-local"
+    state_dir = make_state_dir(gremlin_id)
 
     sf = state_dir / "state.json"
     state = json.loads(sf.read_text())
@@ -320,7 +320,7 @@ def test_local_stage_inputs_instructions_reach_plan(
     _common_patches(monkeypatch)
     monkeypatch.setattr(
         "gremlins.executor.run.resolve_session_dir",
-        lambda gr_id=None: session_dir,
+        lambda gremlin_id=None: session_dir,
     )
     received: list[str] = []
 
@@ -345,7 +345,7 @@ def test_local_stage_inputs_instructions_reach_plan(
         _local_pipeline_path(tmp_path),
         argv=["instr from cli"],
         client=FakeClaudeClient(fixtures={}),
-        gr_id=gr_id,
+        gremlin_id=gremlin_id,
     )
 
     assert result == 0

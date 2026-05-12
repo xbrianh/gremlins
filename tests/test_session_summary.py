@@ -24,7 +24,7 @@ from gremlins.fleet.session_summary import (
 
 def _make_state(
     state_root: pathlib.Path,
-    gr_id: str,
+    gremlin_id: str,
     project_root: str,
     *,
     status: str = "running",
@@ -38,10 +38,10 @@ def _make_state(
     closed: bool = False,
     log_text: str = "log line\n",
 ) -> pathlib.Path:
-    wdir = state_root / gr_id
+    wdir = state_root / gremlin_id
     wdir.mkdir(parents=True, exist_ok=True)
     state = {
-        "id": gr_id,
+        "id": gremlin_id,
         "kind": kind,
         "status": status,
         "stage": stage,
