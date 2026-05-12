@@ -22,7 +22,7 @@ from typing import Any, cast
 
 from gremlins import paths as _paths
 from gremlins.clients.client import PACKAGE_DEFAULT
-from gremlins.executor.state import patch_state, write_state
+from gremlins.executor.state import patch_state, validate_gr_id, write_state
 from gremlins.pipeline import Pipeline
 from gremlins.utils import git as _git_mod
 from gremlins.utils import proc
@@ -146,6 +146,7 @@ def launch(
     base_ref: str | None = None,
     pipeline_args: tuple[str, ...] = (),
     spec_path: str | None = None,
+    gr_id: str | None = None,
 ) -> str:
     """Set up state dir, spawn the pipeline detached, return gremlin id.
 
@@ -198,8 +199,34 @@ def launch(
         description,
         issue_title=str((issue_data or {}).get("title") or ""),
     )
-    rand_hex = secrets.token_hex(3)
-    gr_id = f"{slug}-{rand_hex}"
+    if gr_id is not None:
+        validate_gr_id(gr_id)
+        _existing = _state_root() / gr_id
+        if _existing.is_dir():
+            _sf = _existing / "state.json"
+            if _sf.is_file():
+                _st: dict[str, Any] = {}
+                try:
+                    _st = json.loads(_sf.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    pass
+                _pid = _st.get("pid")
+                if (
+                    _st.get("status") == "running"
+                    and _pid is not None
+                    and int(_pid) > 0
+                ):
+                    try:
+                        os.kill(int(_pid), 0)
+                    except (ProcessLookupError, ValueError):
+                        pass
+                    else:
+                        raise GremlinAlreadyRunning(
+                            f"gremlin {gr_id!r} is already running (pid {_pid})"
+                        )
+    else:
+        rand_hex = secrets.token_hex(3)
+        gr_id = f"{slug}-{rand_hex}"
 
     if project_root is None:
         r = proc.run(["git", "rev-parse", "--show-toplevel"])
