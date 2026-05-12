@@ -5,7 +5,6 @@ Public API:
            parent_id=None, project_root=None, base_ref="HEAD",
            pipeline_args=()) -> str
     resume(gr_id) -> None
-    write_terminal_state(gr_id, exit_code) -> None
 """
 
 from __future__ import annotations
@@ -16,7 +15,6 @@ import os
 import pathlib
 import secrets
 import shutil
-import subprocess
 import sys
 from typing import Any, cast
 
@@ -26,6 +24,7 @@ from gremlins.executor.state import patch_state, validate_gr_id, write_state
 from gremlins.pipeline import Pipeline
 from gremlins.utils import git as _git_mod
 from gremlins.utils import proc
+from gremlins.utils._spawn_logged_process import _spawn_logged_process
 from gremlins.utils.github import fetch_issue, parse_issue_ref
 from gremlins.utils.text import read_markdown_title, slugify
 
@@ -96,43 +95,6 @@ def _build_spawn_env(gr_id: str) -> dict[str, str]:
     env["GREMLINS_OVERLAY_DIR"] = str(_state_root() / gr_id / ".gremlins")
     return env
 
-
-def _spawn_pipeline(
-    state_dir: pathlib.Path,
-    cwd: str,
-    gr_id: str,
-    pipeline_path: str,
-    pipeline_args: list[str],
-    log_mode: str = "w",
-) -> subprocess.Popen[bytes]:
-    """Spawn the pipeline detached. Returns the Popen object (already running).
-
-    log_mode: "w" (truncate, default for first launch) or "a" (append, for resumes).
-    """
-    cmd = [
-        sys.executable,
-        "-m",
-        "gremlins.run_pipeline",
-        gr_id,
-        pipeline_path,
-        *pipeline_args,
-    ]
-    env = _build_spawn_env(gr_id)
-    log_path = state_dir / "log"
-    log_fh = open(log_path, log_mode)
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=cwd,
-            stdin=subprocess.DEVNULL,
-            stdout=log_fh,
-            stderr=log_fh,
-            start_new_session=True,
-            env=env,
-        )
-    finally:
-        log_fh.close()
-    return proc
 
 
 def launch(
@@ -330,7 +292,8 @@ def launch(
         if instructions:
             spawn_args.append(instructions)
 
-        p = _spawn_pipeline(state_dir, project_root, gr_id, pipeline_path, spawn_args)
+        cmd = [sys.executable, "-m", "gremlins.run_pipeline", gr_id, pipeline_path, *spawn_args]
+        p = _spawn_logged_process(cmd, project_root, _build_spawn_env(gr_id), state_dir / "log")
     except Exception:
         shutil.rmtree(state_dir, ignore_errors=True)
         raise
@@ -471,37 +434,10 @@ def resume(gr_id: str) -> None:
         if instructions:
             spawn_args.append(instructions)
 
-    proc = _spawn_pipeline(
-        state_dir,
-        project_root,
-        gr_id,
-        pipeline_path,
-        spawn_args,
-        log_mode="a",
-    )
+    cmd = [sys.executable, "-m", "gremlins.run_pipeline", gr_id, pipeline_path, *spawn_args]
+    p = _spawn_logged_process(cmd, project_root, _build_spawn_env(gr_id), state_dir / "log", "a")
 
-    (state_dir / "pid").write_text(str(proc.pid), encoding="utf-8")
-    patch_state(gr_id, pid=proc.pid)
+    (state_dir / "pid").write_text(str(p.pid), encoding="utf-8")
+    patch_state(gr_id, pid=p.pid)
 
 
-def write_terminal_state(gr_id: str, exit_code: int) -> None:
-    """Record terminal outcome for a finished pipeline run.
-
-    Called by the _run-pipeline subcommand's finally block. Mirrors finish.sh:
-    touches the finished marker, patches state.json, and on success removes
-    the worktree for gh-mode pipelines only. Best-effort throughout.
-    """
-    state_dir = _state_root() / gr_id
-
-    # Touch finished marker first — the session-summary hook watches this.
-    try:
-        (state_dir / "finished").touch()
-    except OSError:
-        pass
-
-    now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    status = "done" if exit_code == 0 else "stopped"
-    try:
-        patch_state(gr_id, status=status, ended_at=now_iso, exit_code=exit_code)
-    except Exception:
-        pass

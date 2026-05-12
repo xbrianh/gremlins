@@ -446,3 +446,18 @@ class State:
 
     def read_pr_num(self) -> str:
         return read_pr_num(self.gr_id)
+
+
+def write_terminal_state(gr_id: str, exit_code: int) -> None:
+    """Record terminal outcome for a finished pipeline run."""
+    state_dir = _paths.state_root() / gr_id
+    try:
+        (state_dir / "finished").touch()
+    except OSError:
+        pass
+    now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    status = "done" if exit_code == 0 else "stopped"
+    try:
+        patch_state(gr_id, status=status, ended_at=now_iso, exit_code=exit_code)
+    except Exception:
+        pass
