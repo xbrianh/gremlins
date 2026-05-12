@@ -194,7 +194,7 @@ def test_launch_returns_gr_id(lenv):
 
 
 def test_launch_creates_state_layout(lenv):
-    """launch() creates state dir with all required files and state.json fields."""
+    """launch() creates state dir; initialize_runtime() fills in worktree and files."""
     launcher = _launcher()
     gr_id = launcher.launch(
         "local",
@@ -204,6 +204,11 @@ def test_launch_creates_state_layout(lenv):
     assert state_dir.is_dir()
     sf = state_dir / "state.json"
     assert sf.exists()
+
+    assert _wait_for_finished(state_dir, timeout=60), (
+        f"pipeline did not finish; log:\n{(state_dir / 'log').read_text(errors='replace')[-2000:]}"
+    )
+
     assert (state_dir / "instructions.txt").exists()
     assert (state_dir / "instructions.txt").read_text(
         encoding="utf-8"
@@ -219,13 +224,18 @@ def test_launch_creates_state_layout(lenv):
 
 
 def test_launch_writes_worktree(lenv):
-    """localgremlin creates a named-branch worktree immediately after launch."""
+    """localgremlin creates a named-branch worktree via initialize_runtime()."""
     launcher = _launcher()
     gr_id = launcher.launch("local", stage_inputs={"instructions": "test"})
     state_dir = _gremlins_state_root(lenv) / gr_id
+    assert _wait_for_finished(state_dir, timeout=60), (
+        f"pipeline did not finish; log:\n{(state_dir / 'log').read_text(errors='replace')[-2000:]}"
+    )
     state = _read_state(state_dir)
     workdir = pathlib.Path(state["workdir"])
-    assert workdir.is_dir(), f"worktree should exist right after launch: {workdir}"
+    assert workdir.is_dir(), (
+        f"worktree should exist after initialize_runtime: {workdir}"
+    )
     r = subprocess.run(
         ["git", "-C", str(lenv.repo), "worktree", "list"],
         capture_output=True,
@@ -846,6 +856,10 @@ def test_launch_ghgremlin_state_layout(lenv_with_gh):
     state_dir = _gremlins_state_root(lenv) / gr_id
     assert state_dir.is_dir()
 
+    assert _wait_for_finished(state_dir, timeout=120), (
+        f"pipeline did not finish; log:\n{(state_dir / 'log').read_text(errors='replace')[-2000:]}"
+    )
+
     state = _read_state(state_dir)
     assert state["id"] == gr_id
     assert state["kind"] == "gh"
@@ -884,19 +898,9 @@ def test_launch_gh_plan_issue_ref_not_snapshotted(lenv_with_gh):
 # ---------------------------------------------------------------------------
 
 
-def test_launch_passes_base_ref_to_worktree_setup(lenv, monkeypatch):
+def test_launch_passes_base_ref_to_worktree_setup(lenv):
     """launch(base_ref=<sha>) passes the sha to the worktree setup and persists it."""
-    captured = {}
-    real_setup = git_mod.setup_named_worktree
-
-    def fake_setup(project_root, gr_id, base_ref_sha):
-        captured["base_ref_sha"] = base_ref_sha
-        return real_setup(project_root, gr_id, base_ref_sha)
-
-    monkeypatch.setattr(git_mod, "setup_named_worktree", fake_setup)
-
     launcher = _launcher()
-    # Use the actual HEAD SHA so worktree add succeeds.
     r = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         capture_output=True,
@@ -914,8 +918,21 @@ def test_launch_passes_base_ref_to_worktree_setup(lenv, monkeypatch):
         f"pipeline did not finish; log:\n{(state_dir / 'log').read_text(errors='replace')[-2000:]}"
     )
 
-    assert captured.get("base_ref_sha") == head_sha, (
-        f"expected base_ref_sha={head_sha!r}, got {captured.get('base_ref_sha')!r}"
+    state = _read_state(state_dir)
+    assert state.get("base_ref_sha") == head_sha, (
+        f"expected base_ref_sha={head_sha!r}, got {state.get('base_ref_sha')!r}"
+    )
+    workdir = state.get("workdir", "")
+    assert workdir, "workdir should be set after initialize_runtime"
+    branch_base = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        cwd=workdir,
+        check=True,
+    ).stdout.strip()
+    assert branch_base == head_sha, (
+        f"worktree branch should be based on {head_sha!r}, got {branch_base!r}"
     )
 
 

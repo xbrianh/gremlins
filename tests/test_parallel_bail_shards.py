@@ -22,7 +22,7 @@ import pytest
 
 import gremlins.executor.state as state_mod
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.pipeline import run_stages
+from gremlins.executor.gremlin import run_stages
 from gremlins.executor.state import State
 from gremlins.stages.parallel import ParallelStage
 from gremlins.utils.state_file import locked_update as _state_locked_update

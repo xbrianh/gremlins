@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import pathlib
@@ -11,11 +12,12 @@ import signal
 import sys
 import types
 from collections.abc import Sequence
+from typing import Any
 
 from gremlins.clients.client import Client
 from gremlins.env_file import load_env_file
 from gremlins.errors import die
-from gremlins.executor.pipeline import Pipeline
+from gremlins.executor.gremlin import Gremlin
 from gremlins.executor.state import (
     patch_state,
     read_pr_url,
@@ -103,6 +105,13 @@ def _unique_clients(stages: list[Stage]) -> list[Client]:
     return result
 
 
+def _read_state_json(gr_id: str | None) -> dict[str, Any]:
+    sf = resolve_state_file(gr_id)
+    if sf is None or not sf.exists():
+        return {}
+    return json.loads(sf.read_text(encoding="utf-8"))
+
+
 def run_pipeline(
     pipeline_path: pathlib.Path,
     *,
@@ -110,7 +119,7 @@ def run_pipeline(
     gr_id: str | None = None,
     client: Client | None = None,
 ) -> int:
-    """Load pipeline YAML, build Pipeline, run. Sole internal pipeline entry point."""
+    """Load pipeline YAML, build Gremlin, run. Sole internal pipeline entry point."""
     configure_logging()
     args = _parse_args(argv)
 
@@ -120,9 +129,6 @@ def run_pipeline(
             cli_spec = Client.parse(args.client)
         except ValueError as exc:
             die(str(exc))
-
-    if os.environ.get("GREMLINS_TEST_NOOP_PIPELINE"):
-        return 0
 
     env_file = pathlib.Path(".gremlins/env")
     if env_file.is_file():
@@ -163,45 +169,65 @@ def run_pipeline(
     _propagate_client_models(list(pipeline.stages))
 
     session_dir = resolve_session_dir(gr_id)
+    state_dir = session_dir.parent
 
     _stage_clients = _unique_clients(list(pipeline.stages))
     _signal_clients = [client] if client is not None else _stage_clients
 
-    plan_file = session_dir / "plan.md"
+    state_json = _read_state_json(gr_id)
+    _workdir = str(state_json.get("workdir") or "")
+    worktree_dir = pathlib.Path(_workdir) if _workdir else None
+    project_root = str(state_json.get("project_root") or "")
+    base_ref_sha = str(state_json.get("base_ref_sha") or "")
+    setup_kind = str(state_json.get("setup_kind") or "worktree-branch")
 
-    # For local pipelines, pre-copy the plan file so stages that resume past
-    # the plan stage can find plan.md. For gh pipelines, the plan stage itself
-    # handles plan_source (may be a file path or an issue ref).
-    if not gh and args.plan and not plan_file.exists():
-        src = pathlib.Path(args.plan)
-        if src.is_file():
-            shutil.copyfile(src, plan_file)
+    stage_inputs: dict[str, Any] = dict(state_json.get("stage_inputs") or {})
+    instructions: str = str(
+        stage_inputs.get("instructions") or " ".join(args.instructions or [])
+    )
 
     logger.info("session: %s", session_dir)
 
     try:
-        pipe = Pipeline(
+        gremlin = Gremlin(
             pipeline.stages,
-            args=args,
+            state_dir=state_dir,
             session_dir=session_dir,
             gr_id=gr_id,
             pipeline_data=pipeline,
+            worktree_dir=worktree_dir,
+            resume_from=args.resume_from,
+            instructions=instructions,
+            spec=args.spec,
+            plan=args.plan,
+            cmds=args.cmds,
+            test_max_attempts=args.test_max_attempts,
             repo=repo,
             state_file=state_file if gh else None,
             test_client=client,
+            project_root=project_root,
+            base_ref_sha=base_ref_sha,
+            setup_kind=setup_kind,
         )
-        pipe.validate_resume_target()
+        gremlin.validate_resume_target()
     except ValueError as exc:
         die(str(exc))
 
+    gremlin.initialize_runtime()
+
+    if os.environ.get("GREMLINS_TEST_NOOP_PIPELINE"):
+        return 0
+
+    plan_file = session_dir / "plan.md"
+
     if not gh and args.resume_from:
-        _expanded_stage_names = [s.name for s in pipe.stages]
+        _expanded_stage_names = [s.name for s in gremlin.stages]
 
         def _type_idx(stage_type: str) -> int:
-            for i, s in enumerate(pipe.stages):
+            for i, s in enumerate(gremlin.stages):
                 if s.type == stage_type:
                     return i
-            return len(pipe.stages)
+            return len(gremlin.stages)
 
         start_idx = (
             _expanded_stage_names.index(args.resume_from)
@@ -218,7 +244,7 @@ def run_pipeline(
                 )
 
     _install_signal_handlers(_signal_clients)
-    pipe.run()
+    gremlin.run()
 
     total_cost = 0.0
     for c in [client] if client else _stage_clients:

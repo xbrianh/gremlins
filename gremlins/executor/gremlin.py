@@ -1,0 +1,222 @@
+"""Gremlin: pipeline orchestrator."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import pathlib
+import shutil
+from collections.abc import Callable
+from typing import Any
+
+from gremlins.clients.client import PACKAGE_DEFAULT, Client
+from gremlins.executor.state import State, append_artifact, patch_state
+from gremlins.pipeline import Pipeline as _PipelineData
+from gremlins.pipeline.loader import STAGE_TYPES
+from gremlins.stages.base import Stage
+from gremlins.utils import git as _git_mod
+
+logger = logging.getLogger(__name__)
+
+
+def read_stage_inputs(sf: pathlib.Path | None) -> dict[str, Any]:
+    if sf is None or not sf.exists():
+        return {}
+    try:
+        data = json.loads(sf.read_text(encoding="utf-8"))
+        return data.get("stage_inputs") or {}
+    except Exception:
+        return {}
+
+
+def _expand_stage_entries(raw_stages: list[Stage]) -> list[Stage]:
+    top_level_names = {e.name for e in raw_stages}
+    child_names: set[str] = set()
+    seen: set[str] = set()
+    result: list[Stage] = []
+
+    for entry in raw_stages:
+        if entry.type == "parallel":
+            for child in entry.body:
+                if child.name in child_names or child.name in top_level_names:
+                    raise ValueError(f"duplicate child stage name {child.name!r}")
+                child_names.add(child.name)
+        if entry.name in seen:
+            raise ValueError(f"pipeline has duplicate stage name {entry.name!r}")
+        seen.add(entry.name)
+        result.append(entry)
+
+    return result
+
+
+def run_stages(
+    stages: list[tuple[str, Callable[[], None]]], *, resume_from: str | None = None
+) -> None:
+    start_idx = 0
+    if resume_from is not None:
+        names = [name for name, _ in stages]
+        if resume_from not in names:
+            raise ValueError(
+                f"resume_from {resume_from!r} is not a valid stage; valid: {names}"
+            )
+        start_idx = names.index(resume_from)
+    for _, fn in stages[start_idx:]:
+        fn()
+
+
+class Gremlin:
+    def __init__(
+        self,
+        stages: list[Stage],
+        *,
+        state_dir: pathlib.Path,
+        session_dir: pathlib.Path,
+        gr_id: str | None,
+        pipeline_data: _PipelineData,
+        worktree_dir: pathlib.Path | None = None,
+        resume_from: str | None = None,
+        instructions: str = "",
+        spec: str | None = None,
+        plan: str | None = None,
+        cmds: list[str] | None = None,
+        test_max_attempts: int = 3,
+        repo: str = "",
+        state_file: pathlib.Path | None = None,
+        test_client: Client | None = None,
+        project_root: str = "",
+        base_ref_sha: str = "",
+        setup_kind: str = "worktree-branch",
+    ) -> None:
+        unknown: list[str] = []
+        for s in stages:
+            if s.type not in STAGE_TYPES:
+                unknown.append(s.type)
+            elif s.type == "parallel":
+                unknown.extend(c.type for c in s.body if c.type not in STAGE_TYPES)
+            elif s.type == "loop":
+                unknown.extend(c.type for c in s.body if c.type not in STAGE_TYPES)
+        if unknown:
+            raise ValueError(f"Gremlin does not support stage type(s): {unknown}")
+
+        self.stages = _expand_stage_entries(stages)
+        self.state_dir = state_dir
+        self.session_dir = session_dir
+        self.gr_id = gr_id
+        self.pipeline_data = pipeline_data
+        self.worktree_dir = worktree_dir
+        self.resume_from = resume_from
+        self.instructions = instructions
+        self.spec = spec
+        self.plan = plan
+        self.cmds = cmds
+        self.test_max_attempts = test_max_attempts
+        self.repo = repo
+        self.state_file = state_file
+        self.test_client = test_client
+        self.project_root = project_root
+        self.base_ref_sha = base_ref_sha
+        self.setup_kind = setup_kind
+        self._initialized = False
+
+    def initialize_runtime(self) -> None:
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.session_dir.mkdir(parents=True, exist_ok=True)
+
+        (self.state_dir / "instructions.txt").write_text(
+            self.instructions or "", encoding="utf-8"
+        )
+
+        worktree_created: str | None = None
+        try:
+            if self.worktree_dir is None and self.project_root and self.gr_id:
+                workdir, branch, worktree_base, actual_setup_kind = (
+                    _git_mod.setup_workdir(
+                        self.setup_kind,
+                        self.project_root,
+                        self.base_ref_sha,
+                        self.gr_id,
+                        self.state_dir,
+                    )
+                )
+                worktree_created = workdir
+                self.worktree_dir = pathlib.Path(workdir)
+                patch_state(
+                    self.gr_id,
+                    workdir=workdir,
+                    worktree_base=worktree_base,
+                    setup_kind=actual_setup_kind,
+                )
+                if actual_setup_kind == "worktree-branch" and branch:
+                    append_artifact(self.gr_id, {"type": "branch", "name": branch})
+
+            if self.spec:
+                spec_file = self.session_dir / "spec.md"
+                if not spec_file.exists():
+                    spec_src = pathlib.Path(self.spec)
+                    if not spec_src.is_file():
+                        raise ValueError(f"--spec: file not found: {self.spec}")
+                    if spec_src.stat().st_size == 0:
+                        raise ValueError(f"--spec: file is empty: {self.spec}")
+                    shutil.copyfile(spec_src, spec_file)
+
+            if self.plan and not self.pipeline_data.needs_gh():
+                plan_file = self.session_dir / "plan.md"
+                if not plan_file.exists():
+                    src = pathlib.Path(self.plan)
+                    if src.is_file():
+                        shutil.copyfile(src, plan_file)
+
+            if self.worktree_dir is not None:
+                os.chdir(self.worktree_dir)
+        except Exception:
+            if worktree_created and not self._initialized:
+                _git_mod.remove_worktree(self.project_root, worktree_created)
+            raise
+
+        self._initialized = True
+
+    def validate_resume_target(self) -> None:
+        if not self.resume_from:
+            return
+        valid_names = [entry.name for entry in self.stages]
+        if self.resume_from not in valid_names:
+            raise ValueError(
+                f"--resume-from {self.resume_from!r} is not a valid stage; "
+                f"valid: {valid_names}"
+            )
+
+    def _collect_stages(
+        self, stages: list[Stage]
+    ) -> list[tuple[str, Callable[[], None]]]:
+        args = argparse.Namespace(
+            plan=self.plan,
+            cmds=self.cmds,
+            test_max_attempts=self.test_max_attempts,
+            resume_from=self.resume_from,
+            spec=self.spec,
+            instructions=[self.instructions] if self.instructions else [],
+        )
+        built: list[tuple[str, Callable[[], None]]] = []
+        for e in stages:
+            resolved = self.test_client or e.client or PACKAGE_DEFAULT
+            stage_state = State(
+                client=resolved,
+                session_dir=self.session_dir,
+                gr_id=self.gr_id,
+                state_file=self.state_file,
+                args=args,
+                pipeline_data=self.pipeline_data,
+                repo=self.repo,
+                instructions=self.instructions,
+                test_client=self.test_client,
+            )
+            built.append((e.name, stage_state.make_runner(e, scope=stages)))
+        return built
+
+    def run(self) -> None:
+        if not self._initialized:
+            raise RuntimeError("call initialize_runtime() before run()")
+        built = self._collect_stages(self.stages)
+        run_stages(built, resume_from=self.resume_from)

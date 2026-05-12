@@ -99,7 +99,7 @@ def _build_spawn_env(gr_id: str) -> dict[str, str]:
 
 def _spawn_pipeline(
     state_dir: pathlib.Path,
-    workdir: str,
+    cwd: str,
     gr_id: str,
     pipeline_path: str,
     pipeline_args: list[str],
@@ -123,7 +123,7 @@ def _spawn_pipeline(
     try:
         proc = subprocess.Popen(
             cmd,
-            cwd=workdir,
+            cwd=cwd,
             stdin=subprocess.DEVNULL,
             stdout=log_fh,
             stderr=log_fh,
@@ -147,8 +147,9 @@ def launch(
     pipeline_args: tuple[str, ...] = (),
     spec_path: str | None = None,
 ) -> str:
-    """Set up state dir + worktree, spawn the pipeline detached, return gremlin id.
+    """Set up state dir, spawn the pipeline detached, return gremlin id.
 
+    Worktree setup is deferred to the child process via Gremlin.initialize_runtime().
     Synchronous through spawn; does not wait for the pipeline to finish.
     Raises ValueError on bad arguments, RuntimeError on infrastructure failure.
     """
@@ -249,7 +250,6 @@ def launch(
     else:
         base_ref_name, base_ref_sha = _effective_base_ref, ""
 
-    workdir = None
     try:
         # pipeline_args for state.json: includes --plan and --spec when set
         stored_pipeline_args = list(resolved_pipeline_args)
@@ -258,9 +258,7 @@ def launch(
         if plan and "--plan" not in stored_pipeline_args:
             stored_pipeline_args = ["--plan", plan] + stored_pipeline_args
 
-        # Persist full instructions to sidecar (state.json truncates to 200 chars)
         instr_raw = instructions or ""
-        (state_dir / "instructions.txt").write_text(instr_raw, encoding="utf-8")
 
         if issue_data and issue_data.get("body"):
             artifacts_dir = state_dir / "artifacts"
@@ -272,18 +270,15 @@ def launch(
             if _loaded_pipeline is not None
             else "worktree-branch"
         )
-        workdir, branch, worktree_base, setup_kind = _git_mod.setup_workdir(
-            _setup_kind_arg, project_root, base_ref_sha, gr_id, state_dir
-        )
 
         now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         state = {
             "id": gr_id,
             "kind": kind,
             "project_root": project_root,
-            "workdir": workdir,
-            "setup_kind": setup_kind,
-            "worktree_base": worktree_base,
+            "workdir": "",
+            "setup_kind": _setup_kind_arg,
+            "worktree_base": "",
             "status": "running",
             "started_at": now_iso,
             "instructions": instr_raw[:200],
@@ -303,24 +298,14 @@ def launch(
         }
         write_state(state_dir, state)
 
-        if setup_kind == "worktree-branch" and branch:
-            from gremlins.executor.state import append_artifact
-
-            append_artifact(gr_id, {"type": "branch", "name": branch})
-
         # Build args for the spawned _run-pipeline process
         spawn_args = list(stored_pipeline_args)
         if instructions:
             spawn_args.append(instructions)
 
-        p = _spawn_pipeline(state_dir, workdir, gr_id, pipeline_path, spawn_args)
+        p = _spawn_pipeline(state_dir, project_root, gr_id, pipeline_path, spawn_args)
     except Exception:
         shutil.rmtree(state_dir, ignore_errors=True)
-        if workdir:
-            try:
-                _git_mod.remove_worktree(project_root, workdir)
-            except Exception:
-                pass
         raise
 
     (state_dir / "pid").write_text(str(p.pid), encoding="utf-8")
@@ -353,7 +338,7 @@ def resume(gr_id: str) -> None:
     old_pid = state.get("pid")
     exit_code = state.get("exit_code")
 
-    if not workdir or not os.path.isdir(workdir):
+    if workdir and not os.path.isdir(workdir):
         raise RuntimeError(f"worktree missing: {workdir}")
 
     if status == "running" and old_pid is not None:
@@ -461,7 +446,7 @@ def resume(gr_id: str) -> None:
 
     proc = _spawn_pipeline(
         state_dir,
-        workdir,
+        project_root,
         gr_id,
         pipeline_path,
         spawn_args,
