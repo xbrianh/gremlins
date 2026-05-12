@@ -72,13 +72,28 @@ _DISPATCH = {
 }
 
 
+def _build_queue_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="gremlins queue",
+        description="Manage the gremlin launch queue.",
+    )
+    subs = p.add_subparsers(title="subcommands", metavar="subcommand")
+    subs.add_parser("add", help="Add a command to the queue.")
+    subs.add_parser("list", help="List queued items.")
+    subs.add_parser("run", help="Run the next item in the queue.")
+    subs.add_parser("requeue", help="Move failed items back to pending.")
+    subs.add_parser("clear", help="Remove items from the queue.")
+    subs.add_parser("land", help="Land all done gremlins in the queue.")
+    return p
+
+
 def queue_main(argv: list[str]) -> int:
     sub = argv[0] if argv else ""
-    rest = argv[1:]
+    if sub in ("-h", "--help") or not sub:
+        _build_queue_parser().print_help()
+        return 0 if sub in ("-h", "--help") else 1
     handler = _DISPATCH.get(sub)
     if handler is None:
-        print(
-            "usage: gremlins queue <add|list|run|requeue|clear|land>", file=sys.stderr
-        )
+        _build_queue_parser().print_help(sys.stderr)
         return 1
-    return handler(rest)
+    return handler(argv[1:])
