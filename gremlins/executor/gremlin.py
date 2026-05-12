@@ -131,12 +131,14 @@ class Gremlin:
         worktree_created: str | None = None
         try:
             if self.worktree_dir is None and self.project_root and self.gr_id:
-                workdir, branch, worktree_base, actual_setup_kind = _git_mod.setup_workdir(
-                    self.setup_kind,
-                    self.project_root,
-                    self.base_ref_sha,
-                    self.gr_id,
-                    self.state_dir,
+                workdir, branch, worktree_base, actual_setup_kind = (
+                    _git_mod.setup_workdir(
+                        self.setup_kind,
+                        self.project_root,
+                        self.base_ref_sha,
+                        self.gr_id,
+                        self.state_dir,
+                    )
                 )
                 worktree_created = workdir
                 self.worktree_dir = pathlib.Path(workdir)
