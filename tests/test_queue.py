@@ -33,13 +33,16 @@ def test_add_creates_pending_file(q):
     assert (q / "pending" / name).read_text() == "echo hello"
 
 
-def test_add_counter_increments(q):
+def test_add_produces_distinct_timestamp_filenames(q):
     n1 = core.add("echo one")
     n2 = core.add("echo two")
     n3 = core.add("echo three")
-    assert n1.startswith("0000-")
-    assert n2.startswith("0001-")
-    assert n3.startswith("0002-")
+    import re
+    ts_pat = re.compile(r"^\d{8}T\d{6}_\d{6}-")
+    assert ts_pat.match(n1)
+    assert ts_pat.match(n2)
+    assert ts_pat.match(n3)
+    assert n1 < n2 < n3
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +114,7 @@ def test_run_second_item_stays_pending_after_failure(q):
     pending = list((q / "pending").glob("*.cmd"))
     assert len(pending) == 1
     # second item's slug is derived from "echo" (first token), not "second"
-    assert pending[0].name.startswith("0001-")
+    assert "-echo.cmd" in pending[0].name
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +212,7 @@ def test_slug_token_launch_no_pipeline_falls_back():
 
 def test_add_launch_uses_pipeline_name_as_slug(q):
     name = core.add("gremlins launch gh-terse --description 'do something'")
-    assert name.startswith("0000-gh-terse")
+    assert "-gh-terse" in name
 
 
 # ---------------------------------------------------------------------------

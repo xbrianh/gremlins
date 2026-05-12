@@ -103,7 +103,7 @@ The `gremlins queue` subsystem lets you tee up unrelated `gremlins launch` invoc
 - `done/` — completed cleanly (exit 0; for gremlins: exit 0 and no bail marker)
 - `failed/` — dirty exit, timeout, bail, or invalid gremlin id
 
-Each item is a `.cmd` file. Once a gremlin id is captured from the command's output, the file is renamed to `<counter>-<slug>.<id>.cmd` so `queue list` can surface the id.
+Each item is a `.cmd` file. Once a gremlin id is captured from the command's output, the file is renamed to `<timestamp>-<slug>.<id>.cmd` so `queue list` can surface the id.
 
 **The verbs:**
 
