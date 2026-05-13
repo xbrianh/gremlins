@@ -14,14 +14,17 @@ def watch_render(interval: int, render: Callable[[], object]) -> int:
     def _handle_sigint(_signum: int, _frame: types.FrameType | None) -> None:
         stop[0] = True
 
-    signal.signal(signal.SIGINT, _handle_sigint)
+    old_handler = signal.signal(signal.SIGINT, _handle_sigint)
 
-    while not stop[0]:
-        sys.stdout.write("\033[2J\033[H")
-        sys.stdout.flush()
-        render()
-        for _ in range(interval * 10):
-            if stop[0]:
-                break
-            time.sleep(0.1)
+    try:
+        while not stop[0]:
+            sys.stdout.write("\033[2J\033[H")
+            sys.stdout.flush()
+            render()
+            for _ in range(interval * 10):
+                if stop[0]:
+                    break
+                time.sleep(0.1)
+    finally:
+        signal.signal(signal.SIGINT, old_handler)
     return 0

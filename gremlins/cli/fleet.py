@@ -256,8 +256,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
 
     # --watch loop.
     if args.watch is not None:
-        watch_render(args.watch, lambda: render_view(args, here_root))
-        sys.exit(0)
+        sys.exit(watch_render(args.watch, lambda: render_view(args, here_root)))
 
     # Default: single render.
     render_view(args, here_root)
