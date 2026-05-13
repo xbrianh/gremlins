@@ -121,7 +121,12 @@ class Gremlin:
         self._initialized = False
 
     def initialize_runtime(self) -> None:
-        State.create(self.state_dir, self.gr_id, instructions=self.instructions or "")
+        State.setup_dirs(
+            self.state_dir,
+            self.session_dir,
+            self.gr_id,
+            instructions=self.instructions or "",
+        )
 
         worktree_created: str | None = None
         try:
