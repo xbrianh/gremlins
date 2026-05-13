@@ -37,7 +37,7 @@ def pipeline_yaml(tmp_path):
     return p
 
 
-def test_gremlin_run_in_process(project_dir, pipeline_yaml, test_state_root, tmp_path):
+def test_gremlin_run_in_process(project_dir, pipeline_yaml, test_state_root):
     gr_id = "smoke-abc123"
     sd = test_state_root / gr_id
 
@@ -50,23 +50,20 @@ def test_gremlin_run_in_process(project_dir, pipeline_yaml, test_state_root, tmp
     )
 
     saved_cwd = os.getcwd()
+    worktree = None
+    rc = 1
     try:
         gremlin.initialize_runtime()
+        worktree = gremlin.worktree_dir
         gremlin.run()
+        rc = 0
     finally:
         os.chdir(saved_cwd)
-
-    worktree = gremlin.worktree_dir
-    try:
-        assert sd.is_dir()
-        assert worktree is not None and worktree.is_dir()
-
-        State.load(gr_id).write_terminal_state(0)
-
-        data = json.loads((sd / "state.json").read_text())
-        assert data.get("status") == "done"
-        assert data.get("stage") == "smoke"
-    finally:
-        # setup_copy creates a temp dir outside tmp_path; clean it up
-        if worktree:
+        State.load(gr_id).write_terminal_state(rc)
+        if worktree and worktree.is_dir():
             shutil.rmtree(worktree, ignore_errors=True)
+
+    assert sd.is_dir()
+    data = json.loads((sd / "state.json").read_text())
+    assert data.get("status") == "done"
+    assert data.get("stage") == "smoke"
