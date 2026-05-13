@@ -135,6 +135,7 @@ class State:
     child_key: str | None = None
     parent_stage: str = ""
     worktree: pathlib.Path | None = None
+    worktree_parent: pathlib.Path | None = None
     current_scope: list[Stage] = dataclasses.field(default_factory=_stage_list)
     # runtime-derived (populated from state.json before each stage run)
     issue_url: str = ""

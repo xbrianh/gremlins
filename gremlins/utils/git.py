@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import pathlib
+import secrets
 import shutil
 import tempfile
 
@@ -338,10 +339,19 @@ def git_detach_to_branch(
     checkout_detach(f"origin/{branch}", cwd=cwd)
 
 
-def setup_detached_worktree(project_root: str, base_ref: str) -> str:
+def setup_detached_worktree(
+    project_root: str,
+    base_ref: str,
+    *,
+    worktree_parent: pathlib.Path | None = None,
+) -> str:
     """Add a detached worktree at base_ref. Returns the worktree path."""
-    workdir = tempfile.mkdtemp(prefix="aibg-gremlin.")
-    os.rmdir(workdir)
+    if worktree_parent is not None:
+        worktree_parent.mkdir(parents=True, exist_ok=True)
+        workdir = str(worktree_parent / f"aibg-gremlin.{secrets.token_hex(6)}")
+    else:
+        workdir = tempfile.mkdtemp(prefix="aibg-gremlin.")
+        os.rmdir(workdir)
     _run_git(["worktree", "add", "--detach", workdir, base_ref], cwd=project_root)
     return workdir
 
@@ -377,10 +387,18 @@ def stage_gremlins_overlay(project_root: str, state_dir: os.PathLike[str]) -> No
 
 
 def setup_named_worktree(
-    project_root: str, gr_id: str, base_ref_sha: str
+    project_root: str,
+    gr_id: str,
+    base_ref_sha: str,
+    *,
+    worktree_parent: pathlib.Path | None = None,
 ) -> tuple[str, str]:
-    workdir = tempfile.mkdtemp(prefix="aibg-localgremlin.")
-    os.rmdir(workdir)
+    if worktree_parent is not None:
+        worktree_parent.mkdir(parents=True, exist_ok=True)
+        workdir = str(worktree_parent / gr_id)
+    else:
+        workdir = tempfile.mkdtemp(prefix="aibg-localgremlin.")
+        os.rmdir(workdir)
     branch = f"bg/local/{gr_id}"
     _run_git(
         ["worktree", "add", "-b", branch, workdir, base_ref_sha or "HEAD"],
@@ -395,18 +413,24 @@ def setup_workdir(
     base_ref_sha: str,
     gr_id: str,
     state_dir: os.PathLike[str],
+    *,
+    worktree_parent: pathlib.Path | None = None,
 ) -> tuple[str, str, str, str]:
     if not in_git_repo(cwd=project_root):
         return setup_copy(project_root), "", "", "copy"
 
     if setup_kind == "worktree-branch":
-        workdir, branch = setup_named_worktree(project_root, gr_id, base_ref_sha)
+        workdir, branch = setup_named_worktree(
+            project_root, gr_id, base_ref_sha, worktree_parent=worktree_parent
+        )
         stage_gremlins_overlay(project_root, state_dir)
         return workdir, branch, "", "worktree-branch"
 
     if setup_kind not in ("worktree", "worktree-detached", "local"):
         raise ValueError(f"unknown setup_kind: {setup_kind!r}")
 
-    workdir = setup_detached_worktree(project_root, base_ref_sha or "HEAD")
+    workdir = setup_detached_worktree(
+        project_root, base_ref_sha or "HEAD", worktree_parent=worktree_parent
+    )
     stage_gremlins_overlay(project_root, state_dir)
     return workdir, "", base_ref_sha, "worktree"

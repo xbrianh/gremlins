@@ -116,6 +116,7 @@ class ParallelStage(Stage):
         *,
         gr_id: str | None = None,
         project_root: pathlib.Path | None = None,
+        worktree_parent: pathlib.Path | None = None,
         set_stage_fn: Callable[[str], None] | None = None,
         parent_attempt: str = "",
     ) -> list[_Stage]:
@@ -129,6 +130,7 @@ class ParallelStage(Stage):
             bail_policy=self._bail_policy,
             gr_id=gr_id,
             project_root=project_root or pathlib.Path.cwd(),
+            worktree_parent=worktree_parent,
             parent_attempt=parent_attempt,
         )
 
@@ -159,6 +161,7 @@ class ParallelStage(Stage):
             child_runners,
             gr_id=gr_id,
             project_root=pathlib.Path.cwd(),
+            worktree_parent=state.worktree_parent,
             set_stage_fn=lambda n: State.load(gr_id).set_stage(self.name, sub_stage=n),
             parent_attempt=state.attempt,
         ):
@@ -175,6 +178,7 @@ def _parallel_stages(
     bail_policy: str,
     gr_id: str | None,
     project_root: pathlib.Path,
+    worktree_parent: pathlib.Path | None = None,
     parent_attempt: str = "",
 ) -> list[_Stage]:
     fanout_name = f"{group_name}-fanout"
@@ -262,10 +266,16 @@ def _parallel_stages(
 
         try:
             for child_key, child_state, _ in child_runners:
-                wt_dir = str(
-                    pathlib.Path(tempfile.gettempdir())
-                    / f"aibg-parallel-{group_name}-{secrets.token_hex(8)}"
-                )
+                if worktree_parent is not None:
+                    worktree_parent.mkdir(parents=True, exist_ok=True)
+                    wt_dir = str(
+                        worktree_parent / f"aibg-parallel-{group_name}-{secrets.token_hex(8)}"
+                    )
+                else:
+                    wt_dir = str(
+                        pathlib.Path(tempfile.gettempdir())
+                        / f"aibg-parallel-{group_name}-{secrets.token_hex(8)}"
+                    )
                 r2 = proc.run(
                     ["git", "worktree", "add", "--detach", wt_dir, "HEAD"],
                     cwd=str(project_root),
