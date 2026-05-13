@@ -12,7 +12,7 @@ import sys
 from typing import Any
 
 from gremlins.errors import die
-from gremlins.executor.state import State, resolve_state_file
+from gremlins.executor.state import State
 from gremlins.stages.base import Stage, StageInput
 from gremlins.utils.github import extract_gh_url, get_repo, parse_issue_ref, view_issue
 
@@ -70,7 +70,6 @@ class Plan(Stage):
         ]
 
     def run(self, state: State) -> None:
-        assert state.session_dir is not None
         plan_val = getattr(state.args, "plan", None)
         if not self.prompts and not plan_val:
             die(
@@ -79,7 +78,7 @@ class Plan(Stage):
         plan_md = state.session_dir / "plan.md"
 
         if plan_md.exists() and plan_md.stat().st_size > 0:
-            label = f" (issue #{state.issue_num})" if state.issue_num else ""
+            label = f" (issue #{state.data.issue_num})" if state.data.issue_num else ""
             logger.info("[1/8] plan resumed from snapshot: %s%s", plan_md, label)
             return
 
@@ -94,9 +93,8 @@ class Plan(Stage):
         self._run_agent(plan_md, state)
 
     def _run_agent(self, plan_md: pathlib.Path, state: State) -> None:
-        assert state.session_dir is not None
         if state.repo:
-            base_ref_name = state.base_ref_name
+            base_ref_name = state.data.base_ref_name
             plan_prompt = (
                 "\n\n".join(self.prompts)
                 .rstrip()
@@ -121,7 +119,7 @@ class Plan(Stage):
             )
             issue_num = issue_url.split("/")[-1]
             logger.info("issue: %s", issue_url)
-            state.patch(issue_url=issue_url, issue_num=issue_num)
+            state.data.patch(issue_url=issue_url, issue_num=issue_num)
             issue_body = _fetch_issue_body(issue_num, state.repo)
             plan_md.write_text(issue_body, encoding="utf-8")
         else:
@@ -144,7 +142,6 @@ class Plan(Stage):
     def _resolve_file_source(
         self, path: str, plan_md: pathlib.Path, state: State
     ) -> None:
-        assert state.session_dir is not None
         src = pathlib.Path(path)
         if src.stat().st_size == 0:
             sys.stderr.write(f"error: --plan: file is empty: {path}\n")
@@ -210,7 +207,7 @@ class Plan(Stage):
         issue_num = issue_url.split("/")[-1]
         logger.info("issue: %s", issue_url)
         shutil.copyfile(src, plan_md)
-        state.patch(issue_url=issue_url, issue_num=issue_num)
+        state.data.patch(issue_url=issue_url, issue_num=issue_num)
         self._update_description(plan_md, issue_title=issue_title, state=state)
 
     def _resolve_issue_source(
@@ -256,21 +253,20 @@ class Plan(Stage):
         logger.info(
             "[1/8] plan supplied via --plan (issue %s#%s)", target_repo, issue_ref
         )
-        state.patch(issue_url=issue_url, issue_num=issue_num)
+        state.data.patch(issue_url=issue_url, issue_num=issue_num)
         self._update_description(plan_md, issue_title=issue_title, state=state)
 
     def _update_description(
         self, plan_md: pathlib.Path, *, issue_title: str = "", state: State
     ) -> None:
-        state_file = resolve_state_file(state.gr_id)
-        if state_file is None or not state_file.exists():
+        if state.data.state_file is None or not state.data.state_file.exists():
             return
         try:
-            data = json.loads(state_file.read_text(encoding="utf-8"))
+            data = json.loads(state.data.state_file.read_text(encoding="utf-8"))
             if data.get("description_explicit"):
                 return
             if issue_title:
-                state.patch(description=issue_title[:60])
+                state.data.patch(description=issue_title[:60])
                 return
             lines = plan_md.read_text(encoding="utf-8").splitlines()[:50]
             h1 = ""
@@ -280,7 +276,7 @@ class Plan(Stage):
                     h1 = m.group(1)[:60]
                     break
             if h1:
-                state.patch(description=h1)
+                state.data.patch(description=h1)
         except Exception:
             pass
 

@@ -80,11 +80,10 @@ class Implement(Stage):
         super().__init__(name, model, prompts, options)
 
     def run(self, state: State) -> None:
-        assert state.session_dir is not None
         spec_text = _read_spec(state.session_dir)
         plan_text = (state.session_dir / "plan.md").read_text(encoding="utf-8")
 
-        if state.issue_num:
+        if state.data.issue_num:
             plan_source_label = "from the GitHub issue"
             plan_location_note = (
                 "The plan lives in the GitHub issue and reviews go to PR comments; "

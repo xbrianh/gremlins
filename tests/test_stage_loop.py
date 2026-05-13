@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from gremlins.executor.state import State as RuntimeState
+from gremlins.executor.state import StateData
 from gremlins.stages.loop import LoopExhausted, LoopStage, RunCmdFailed
 from gremlins.stages.run_cmd import RunCmd
 
@@ -20,9 +21,9 @@ def _fake_client() -> Any:
 
 def _loop_state(tmp_path: Any) -> RuntimeState:
     return RuntimeState(
+        data=StateData(),
         client=_fake_client(),
         session_dir=tmp_path,
-        gr_id=None,
         worktree=tmp_path,
     )
 
@@ -137,11 +138,10 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
         pass
 
     loop_state = RuntimeState(
+        data=StateData(gr_id=gr_id, attempt=attempt),
         client=_fake_client(),
         session_dir=tmp_path,
-        gr_id=gr_id,
         worktree=tmp_path,
-        attempt=attempt,
     )
     loop = LoopStage.from_runners([check, fix], max_iterations=2)
     with pytest.raises(LoopExhausted):
@@ -161,9 +161,9 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
 def _run_cmd_stage(tmp_path: Any, cmds: list[str]) -> tuple[RunCmd, RuntimeState]:
     stage = RunCmd("run-cmd", None, [], {"cmds": cmds})
     state = RuntimeState(
+        data=StateData(),
         client=_fake_client(),
         session_dir=tmp_path,
-        gr_id=None,
         worktree=tmp_path,
     )
     return stage, state
@@ -208,9 +208,9 @@ def test_run_cmd_output_in_exception(tmp_path):
 
 def _loop_state_with_gr(tmp_path: Any, gr_id: str) -> RuntimeState:
     return RuntimeState(
+        data=StateData(gr_id=gr_id),
         client=_fake_client(),
         session_dir=tmp_path,
-        gr_id=gr_id,
         worktree=tmp_path,
     )
 
@@ -326,9 +326,9 @@ def test_loop_patches_loop_iteration_to_state(tmp_path, make_state_dir):
         raise RunCmdFailed("keep going")
 
     loop_state = RuntimeState(
+        data=StateData(gr_id=gr_id),
         client=_fake_client(),
         session_dir=tmp_path,
-        gr_id=gr_id,
         worktree=tmp_path,
     )
     loop = LoopStage.from_runners([runner], max_iterations=3)

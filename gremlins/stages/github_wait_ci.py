@@ -61,7 +61,11 @@ def _wait_for_checks(
 
 def _bail_if_review_required(state: State, decision: str) -> None:
     if decision == "REVIEW_REQUIRED":
-        state.write_bail_file("other", "PR requires human review approval before merge")
+        state.data.write_bail_file(
+            "other",
+            "PR requires human review approval before merge",
+            attempt=state.data.attempt,
+        )
         raise _ReviewRequiredError("ci-gate: PR blocked by required human review")
 
 
@@ -165,8 +169,7 @@ class GitHubWaitCI(Stage):
         self.fix_sha_getter = fix_sha_getter
 
     def run(self, state: State) -> None:
-        assert state.session_dir is not None
-        pr_url = self.pr_url or state.read_pr_url()
+        pr_url = self.pr_url or state.data.read_pr_url()
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
         checks, review_decision = _wait_for_checks(
@@ -225,10 +228,12 @@ class GitHubWaitCI(Stage):
                 log_file = state.session_dir / f"ci-attempt-{attempt}.log"
                 log_file.write_text(failure_output, encoding="utf-8")
 
-                pr_branch = state.last_pr_branch()
+                pr_branch = state.data.last_pr_branch()
                 if not pr_branch:
-                    state.write_bail_file(
-                        "other", "ci-fix: pr_branch unknown, cannot push"
+                    state.data.write_bail_file(
+                        "other",
+                        "ci-fix: pr_branch unknown, cannot push",
+                        attempt=state.data.attempt,
                     )
                     return
 
@@ -244,7 +249,7 @@ class GitHubWaitCI(Stage):
                     raw_path=state.session_dir / f"stream-ci-fix-{attempt}.jsonl",
                 )
                 _agent_bailed = True
-                state.check_bail(f"ci-fix-{attempt}")
+                state.data.check_bail(f"ci-fix-{attempt}", child_key=state.child_key)
                 _agent_bailed = False
 
                 fix_sha = (
@@ -254,15 +259,17 @@ class GitHubWaitCI(Stage):
                 )
 
             _exhausted = True
-            state.write_bail_file(
+            state.data.write_bail_file(
                 "other",
                 f"CI failed after {self.max_attempts} attempts",
+                attempt=state.data.attempt,
             )
             raise RuntimeError(f"ci-gate exhausted {self.max_attempts} attempts")
         except (SystemExit, Exception) as exc:
             if not _exhausted and not _agent_bailed and not _review_bailed:
-                state.write_bail_file(
+                state.data.write_bail_file(
                     "other",
                     f"ci-gate failed: {exc}"[:200],
+                    attempt=state.data.attempt,
                 )
             raise

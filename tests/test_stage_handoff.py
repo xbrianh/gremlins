@@ -12,6 +12,7 @@ import pytest
 import gremlins.executor.state as state_mod
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
+from gremlins.executor.state import StateData
 from gremlins.stages.handoff import Handoff
 from gremlins.stages.loop import RunCmdFailed
 
@@ -27,9 +28,9 @@ def _make_state(
     client: FakeClaudeClient | None = None,
 ) -> RuntimeState:
     return RuntimeState(
+        data=StateData(gr_id=gr_id),
         client=client or FakeClaudeClient(),
         session_dir=tmp_path,
-        gr_id=gr_id,
     )
 
 
@@ -164,7 +165,7 @@ def test_bail_emits_bail_and_raises(tmp_path, monkeypatch, test_state_root):
     monkeypatch.setenv("GR_ID", gr_id)
 
     h, state = _make_handoff(tmp_path, gr_id=gr_id)
-    state.attempt = attempt  # simulate what make_runner() would set
+    state.data.attempt = attempt  # simulate what make_runner() would set
     monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
 
     with pytest.raises(RuntimeError, match="chain halted by handoff"):
@@ -285,7 +286,7 @@ def test_base_ref_from_state(tmp_path, monkeypatch, test_state_root):
     monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
 
     h, state = _make_handoff(tmp_path, gr_id=gr_id)
-    state.base_ref_name = "deadbeef1234"
+    state.data.base_ref_name = "deadbeef1234"
     # Do NOT monkeypatch _resolve_base_ref — state has base_ref_name, fallback must not run
     h.run(state)
 

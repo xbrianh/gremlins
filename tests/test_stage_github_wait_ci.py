@@ -9,6 +9,7 @@ from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
+from gremlins.executor.state import StateData
 from gremlins.stages.github_wait_ci import GitHubWaitCI
 
 PR_URL = "https://github.com/owner/repo/pull/42"
@@ -56,9 +57,11 @@ def _make_stage(
 ) -> tuple[GitHubWaitCI, RuntimeState]:
     prompts = [_CI_PROMPT_PATH.read_text(encoding="utf-8")]
     stage = GitHubWaitCI("github-wait-ci", model, prompts, {}, pr_url=PR_URL, **kwargs)
-    state = RuntimeState(client=client, session_dir=tmp_path, gr_id=gr_id)
+    state = RuntimeState(
+        data=StateData(gr_id=gr_id), client=client, session_dir=tmp_path
+    )
     if pr_branch is not None:
-        state.last_pr_branch = lambda: pr_branch  # type: ignore[method-assign]
+        state.data.last_pr_branch = lambda: pr_branch  # type: ignore[method-assign]
     return stage, state
 
 
@@ -360,7 +363,7 @@ def test_review_required_emits_bail_to_state(
     client = FakeClaudeClient(fixtures={})
     getter = _make_getter([([], "REVIEW_REQUIRED")])
     stage, state = _make_stage(client, tmp_path, gr_id=gr_id, checks_getter=getter)
-    state.attempt = attempt
+    state.data.attempt = attempt
     with pytest.raises(RuntimeError):
         stage.run(state)
     bail_file = state_dir / f"bail_{attempt}.json"
@@ -399,7 +402,7 @@ def test_empty_pr_branch_bails(tmp_path: pathlib.Path, make_state_dir) -> None:
         checks_getter=getter,
         pr_branch=None,
     )
-    state.attempt = attempt
+    state.data.attempt = attempt
     stage.run(state)
     bail_file = state_dir / f"bail_{attempt}.json"
     assert bail_file.exists()
@@ -428,6 +431,6 @@ def test_check_bail_raises_from_state(tmp_path: pathlib.Path, make_state_dir) ->
         startup_grace_secs=0,
         checks_getter=getter,
     )
-    state.attempt = attempt
+    state.data.attempt = attempt
     with pytest.raises(RuntimeError, match="bailed"):
         stage.run(state)

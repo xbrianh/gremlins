@@ -191,9 +191,9 @@ def test_patch_state_concurrent_no_lost_updates(state_root):
 
 def _make_simple_ctx(tmp_path: pathlib.Path, child_key: str) -> State:
     return State(
+        data=StateData(),
         client=FakeClaudeClient(),
         session_dir=tmp_path / child_key,
-        gr_id=None,
         child_key=child_key,
     )
 
@@ -310,21 +310,21 @@ def test_cancel_on_bail_skips_unstarted_children():
         ran.append("c")
 
     ctx_a = State(
+        data=StateData(),
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
-        gr_id=None,
         child_key="a",
     )
     ctx_b = State(
+        data=StateData(),
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
-        gr_id=None,
         child_key="b",
     )
     ctx_c = State(
+        data=StateData(),
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
-        gr_id=None,
         child_key="c",
     )
 
@@ -445,10 +445,16 @@ def test_worktree_lifecycle_fanout_creates_and_fanin_removes(tmp_path):
     _init_git_repo(repo)
 
     ctx_a = State(
-        client=FakeClaudeClient(), session_dir=tmp_path / "a", gr_id=None, child_key="a"
+        data=StateData(),
+        client=FakeClaudeClient(),
+        session_dir=tmp_path / "a",
+        child_key="a",
     )
     ctx_b = State(
-        client=FakeClaudeClient(), session_dir=tmp_path / "b", gr_id=None, child_key="b"
+        data=StateData(),
+        client=FakeClaudeClient(),
+        session_dir=tmp_path / "b",
+        child_key="b",
     )
 
     stages = _make_parallel_stages(
@@ -519,9 +525,9 @@ def test_fanout_persists_worktrees_and_fresh_fanin_can_clean_up(tmp_path, state_
 
     def _make_ctx(name: str) -> State:
         return State(
+            data=StateData(gr_id=gr_id),
             client=FakeClaudeClient(),
             session_dir=tmp_path / name,
-            gr_id=gr_id,
             child_key=name,
         )
 
@@ -581,9 +587,9 @@ def test_fanout_resume_tears_down_prior_worktrees(tmp_path, state_root):
 
     def _make_ctx(name: str) -> State:
         return State(
+            data=StateData(gr_id=gr_id),
             client=FakeClaudeClient(),
             session_dir=tmp_path / name,
-            gr_id=gr_id,
             child_key=name,
         )
 
@@ -632,9 +638,9 @@ def test_fanout_resume_tears_down_prior_worktrees(tmp_path, state_root):
 
 def test_build_parallel_stages_returns_three_named_stages():
     ctx = State(
+        data=StateData(),
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
-        gr_id=None,
         child_key="r1",
     )
     stages = _make_parallel_stages(
@@ -654,15 +660,15 @@ def test_build_parallel_stages_returns_three_named_stages():
 def test_parallel_all_children_complete_with_defaults():
     ran: list[str] = []
     ctx_a = State(
+        data=StateData(),
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
-        gr_id=None,
         child_key="a",
     )
     ctx_b = State(
+        data=StateData(),
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
-        gr_id=None,
         child_key="b",
     )
 
@@ -735,14 +741,14 @@ def test_parallel_child_set_stage_writes_parent_as_stage(tmp_path, state_root):
     sf = _make_state(state_root, gr_id)
 
     state = State(
+        data=StateData(gr_id=gr_id),
         client=FakeClaudeClient(),
         session_dir=tmp_path,
-        gr_id=gr_id,
         parent_stage="reviews",
     )
 
     # Simulate what make_runner does at the start of a child stage transition.
-    state.set_stage("github-review-pull-request")
+    state.data.set_stage("github-review-pull-request", parent_stage=state.parent_stage)
 
     data = _read_state(sf)
     assert data["stage"] == "reviews"
@@ -768,14 +774,18 @@ def test_parallel_child_set_stage_with_sub_stage_payload_writes_parent_as_stage(
     sf = _make_state(state_root, gr_id)
 
     state = State(
+        data=StateData(gr_id=gr_id),
         client=FakeClaudeClient(),
         session_dir=tmp_path,
-        gr_id=gr_id,
         parent_stage="reviews",
     )
 
     # Simulate a stage that calls set_stage with a dict sub_stage (e.g. review_code.py).
-    state.set_stage("github-review-pull-request", {"model": "claude-opus"})
+    state.data.set_stage(
+        "github-review-pull-request",
+        {"model": "claude-opus"},
+        parent_stage=state.parent_stage,
+    )
 
     data = _read_state(sf)
     assert data["stage"] == "reviews"

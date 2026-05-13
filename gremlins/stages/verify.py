@@ -45,7 +45,6 @@ class Verify(Stage):
         super().__init__(name, model, prompts, options)
 
     def run(self, state: State) -> None:
-        assert state.session_dir is not None
         session_dir = state.session_dir
         options = dict(self.options)
         if not state.repo:
@@ -105,7 +104,7 @@ class Verify(Stage):
                 label=f"verify-fix-{n}",
                 raw_path=session_dir / f"stream-verify-{n}.jsonl",
             )
-            state.check_bail(f"verify-fix-{n}")
+            state.data.check_bail(f"verify-fix-{n}", child_key=state.child_key)
 
         loop = LoopStage.from_runners(
             [_run_cmd, _run_fix], name="verify", max_iterations=max_attempts

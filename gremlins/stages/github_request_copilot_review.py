@@ -34,7 +34,7 @@ class GitHubRequestCopilotReview(Stage):
 
     def run(self, state: State) -> None:
         repo = state.repo
-        pr_num = self._pr_num or state.read_pr_num()
+        pr_num = self._pr_num or state.data.read_pr_num()
         if not pr_num:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
         r = self.run_subprocess(

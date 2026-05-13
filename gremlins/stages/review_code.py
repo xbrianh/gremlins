@@ -67,8 +67,6 @@ class ReviewCode(Stage):
         return stage
 
     def run(self, state: State) -> pathlib.Path:
-        assert state.client is not None
-        assert state.session_dir is not None
         model = self.model or state.client.model
         if not model:
             raise ValueError(f"stage {self.name!r}: model must be set")
@@ -103,7 +101,11 @@ class ReviewCode(Stage):
             code_context = code_scope
 
         try:
-            state.set_stage(self.name, {"model": f"running ({model})"})
+            state.data.set_stage(
+                self.name,
+                {"model": f"running ({model})"},
+                parent_stage=state.parent_stage,
+            )
             _run_reviewer(
                 client=state.client,
                 model=model,
@@ -115,14 +117,17 @@ class ReviewCode(Stage):
                 raw_path=state.session_dir / f"stream-{self.name}-{model}.jsonl",
                 cwd=state.worktree,
             )
-            state.set_stage(self.name, {"model": f"done ({model})"})
+            state.data.set_stage(
+                self.name, {"model": f"done ({model})"}, parent_stage=state.parent_stage
+            )
             logger.info("code review (%s): %s", model, out_file)
             if not out_file.exists() or out_file.stat().st_size == 0:
                 raise RuntimeError(f"review {model} did not produce {out_file}")
         except (SystemExit, Exception) as exc:
-            state.write_bail_file(
+            state.data.write_bail_file(
                 "other",
                 f"{self.name} stage failed: {exc}"[:200],
+                attempt=state.data.attempt,
             )
             raise
 
@@ -158,8 +163,7 @@ class GitHubReviewPullRequest(Stage):
         self.pr_url = pr_url
 
     def run(self, state: State) -> None:
-        assert state.session_dir is not None
-        pr_url = self.pr_url or state.read_pr_url()
+        pr_url = self.pr_url or state.data.read_pr_url()
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
         prompt = (
@@ -176,4 +180,4 @@ class GitHubReviewPullRequest(Stage):
             label="github-review-pull-request",
             raw_path=state.session_dir / "stream-github-review-pull-request.jsonl",
         )
-        state.check_bail("/github-review-pull-request")
+        state.data.check_bail("/github-review-pull-request", child_key=state.child_key)

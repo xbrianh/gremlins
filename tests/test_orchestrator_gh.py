@@ -151,7 +151,7 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         state_file.write_text(json.dumps(data), encoding="utf-8")
 
     monkeypatch.setattr(
-        "gremlins.executor.state.State.append_artifact", _append_artifact
+        "gremlins.executor.state.StateData.append_artifact", _append_artifact
     )
 
     return session_dir, state_file
@@ -1494,10 +1494,6 @@ def test_gh_main_state_client_tracks_effective_model(
     state_dir = make_state_dir(gr_id)
 
     _patch_common(monkeypatch, tmp_path)
-
-    from gremlins.executor.state import State as _State
-
-    monkeypatch.setattr("gremlins.executor.state.State.patch", _State.patch)
 
     monkeypatch.setattr(
         subprocess, "run", _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n")

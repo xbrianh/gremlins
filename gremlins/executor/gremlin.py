@@ -222,10 +222,9 @@ class Gremlin:
         for e in stages:
             resolved = self.test_client or e.client or PACKAGE_DEFAULT
             stage_state = State(
+                data=StateData(gr_id=self.gr_id, state_file=self.state_file),
                 client=resolved,
                 session_dir=self.session_dir,
-                gr_id=self.gr_id,
-                state_file=self.state_file,
                 args=args,
                 pipeline_data=self.pipeline_data,
                 repo=self.repo,

@@ -9,6 +9,7 @@ from conftest import gh_pipeline as _gh_pipeline
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
+from gremlins.executor.state import StateData
 from gremlins.stages.address_code import GitHubAddressPullRequestReviews
 
 PR_URL = "https://github.com/owner/repo/pull/99"
@@ -32,9 +33,9 @@ def _make_stage(
         fixtures={"github-address-pull-request-reviews": MINIMAL_EVENTS}
     )
     state = RuntimeState(
+        data=StateData(gr_id=gr_id),
         client=client,
         session_dir=tmp_path,
-        gr_id=gr_id,
         pipeline_data=_gh_pipeline(),
     )
     return stage, client, state
