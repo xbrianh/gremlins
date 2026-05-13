@@ -264,10 +264,12 @@ def _parallel_stages(
         r = proc.run(["git", "rev-parse", "HEAD"], cwd=str(project_root))
         base_head = r.stdout.strip() if r.returncode == 0 else ""
 
+        if worktree_parent is not None:
+            worktree_parent.mkdir(parents=True, exist_ok=True)
+
         try:
             for child_key, child_state, _ in child_runners:
                 if worktree_parent is not None:
-                    worktree_parent.mkdir(parents=True, exist_ok=True)
                     wt_dir = str(
                         worktree_parent
                         / f"aibg-parallel-{group_name}-{secrets.token_hex(8)}"
