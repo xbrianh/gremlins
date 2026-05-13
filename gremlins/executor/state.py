@@ -415,9 +415,12 @@ class State:
                     )
                 else:
                     base_state.data.patch(attempt=attempt)
+            loaded = StateData.load(gr_id)
+            if attempt:
+                loaded = dataclasses.replace(loaded, attempt=attempt)
             state = dataclasses.replace(
                 base_state,
-                data=StateData.load(gr_id),
+                data=loaded,
                 current_scope=scope_list,
             )
             entry.run(state)
