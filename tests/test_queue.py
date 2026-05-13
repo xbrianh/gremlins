@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from unittest.mock import MagicMock
 
@@ -194,8 +195,6 @@ def test_run_launch_nonzero_exit_fails_fast(q, monkeypatch):
 
 def test_poll_terminal_recognizes_stopped(tmp_path, monkeypatch):
     """_poll_terminal must return immediately when state.json has status=stopped."""
-    import json
-
     gremlin_id = "gr-stop01"
     state_dir = tmp_path / "state" / gremlin_id
     state_dir.mkdir(parents=True)
@@ -203,7 +202,7 @@ def test_poll_terminal_recognizes_stopped(tmp_path, monkeypatch):
     (state_dir / "state.json").write_text(json.dumps(state_data))
 
     monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
-    monkeypatch.setattr("gremlins.queue.core.time.sleep", lambda _: None)
+    monkeypatch.setattr("gremlins.queue.core._POLL_TIMEOUT", 1)
 
     result = core._poll_terminal(gremlin_id)
     assert result["status"] == "stopped"
