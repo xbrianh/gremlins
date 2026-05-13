@@ -3,7 +3,7 @@ requires = ["hatchling>=1.18.0"]
 build-backend = "hatchling.build"
 
 [project]
-name = "wf-gremlins"
+name = "gremlins-ai"
 version = "0.1.0"
 description = "Background plan/implement/review/address pipelines for Claude Code"
 readme = "README.md"
