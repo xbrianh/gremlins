@@ -8,6 +8,7 @@ import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
+from gremlins.executor.state import StateData
 from gremlins.stages.github_request_copilot_review import GitHubRequestCopilotReview
 
 
@@ -18,9 +19,9 @@ def _make_stage(
         "github-request-copilot-review", None, [], {}, pr_num=pr_num
     )
     state = RuntimeState(
+        data=StateData(),
         client=FakeClaudeClient(fixtures={}),
         session_dir=tmp_path,
-        gr_id=None,
         repo=repo,
     )
     return stage, state

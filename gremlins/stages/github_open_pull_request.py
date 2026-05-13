@@ -80,7 +80,10 @@ class GitHubOpenPullRequest(Stage):
     def run(self, state: State) -> str:
         issue_url = state.data.issue_url
         base_ref = (
-            state.data.last_pr_branch() or self.base_ref or state.data.base_ref_name or "main"
+            state.data.last_pr_branch()
+            or self.base_ref
+            or state.data.base_ref_name
+            or "main"
         )
 
         issue_num = issue_url.split("/")[-1] if issue_url else ""

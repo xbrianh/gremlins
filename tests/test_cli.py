@@ -166,7 +166,7 @@ def test_run_pipeline_rejects_invalid_gr_id(tmp_path, monkeypatch, bad_id):
 def test_run_pipeline_valid_id_proceeds(tmp_path, monkeypatch):
     monkeypatch.setattr("gremlins.executor.run.run_pipeline", lambda *a, **kw: 0)
     monkeypatch.setattr(
-        "gremlins.executor.state.State.write_terminal_state",
+        "gremlins.executor.state.StateData.write_terminal_state",
         lambda self, exit_code: None,
     )
     with pytest.raises(SystemExit):
@@ -187,7 +187,7 @@ def test_run_pipeline_forwards_gr_id_to_orchestrator(
 
     monkeypatch.setattr("gremlins.executor.run.run_pipeline", fake_run_pipeline)
     monkeypatch.setattr(
-        "gremlins.executor.state.State.write_terminal_state",
+        "gremlins.executor.state.StateData.write_terminal_state",
         lambda self, exit_code: None,
     )
 

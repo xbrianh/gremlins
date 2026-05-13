@@ -150,7 +150,9 @@ class LoopStage(Stage):
         except LoopExhausted:
             raise
         except (SystemExit, Exception) as exc:
-            if not exhausted and not _bail_file_exists(state.data.gr_id, state.data.attempt):
+            if not exhausted and not _bail_file_exists(
+                state.data.gr_id, state.data.attempt
+            ):
                 state.data.write_bail_file(
                     "other",
                     f"loop stage failed: {exc}"[:200],

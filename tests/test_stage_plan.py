@@ -9,11 +9,12 @@ import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
+from gremlins.executor.state import StateData
 from gremlins.stages.plan import Plan
 
 
 def _state(session_dir: pathlib.Path, client: FakeClaudeClient) -> RuntimeState:
-    return RuntimeState(client=client, session_dir=session_dir, gr_id=None)
+    return RuntimeState(data=StateData(), client=client, session_dir=session_dir)
 
 
 def test_plan_source_file_local(tmp_path: pathlib.Path) -> None:
@@ -182,7 +183,7 @@ def test_resolve_issue_source_empty_repo_writes_url(
     _issue_source_mocks(monkeypatch, pr_repo="owner/repo")
     captured: dict[str, object] = {}
     monkeypatch.setattr(
-        "gremlins.executor.state.State.patch",
+        "gremlins.executor.state.StateData.patch",
         lambda self, _delete=(), **kw: captured.update(kw),
     )
     stage = Plan("plan", None, [], {})
@@ -202,7 +203,7 @@ def test_resolve_issue_source_matching_repo_writes_url(
     _issue_source_mocks(monkeypatch, pr_repo="owner/repo")
     captured: dict[str, object] = {}
     monkeypatch.setattr(
-        "gremlins.executor.state.State.patch",
+        "gremlins.executor.state.StateData.patch",
         lambda self, _delete=(), **kw: captured.update(kw),
     )
     stage = Plan("plan", None, [], {})
@@ -222,7 +223,7 @@ def test_resolve_issue_source_cross_repo_clears_url(
     _issue_source_mocks(monkeypatch, pr_repo="owner/a")
     captured: dict[str, object] = {}
     monkeypatch.setattr(
-        "gremlins.executor.state.State.patch",
+        "gremlins.executor.state.StateData.patch",
         lambda self, _delete=(), **kw: captured.update(kw),
     )
     stage = Plan("plan", None, [], {})

@@ -7,6 +7,7 @@ from conftest import gh_pipeline as _gh_pipeline
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
+from gremlins.executor.state import StateData
 from gremlins.stages.address_code import GitHubAddressPullRequestReviews
 from gremlins.stages.review_code import GitHubReviewPullRequest
 
@@ -22,9 +23,9 @@ def _make_state(
     gr_id: str | None = None,
 ) -> RuntimeState:
     return RuntimeState(
+        data=StateData(gr_id=gr_id),
         client=client,
         session_dir=tmp_path,
-        gr_id=gr_id,
         pipeline_data=_gh_pipeline(),
     )
 
@@ -89,9 +90,9 @@ def test_gh_review_parallel_child_uses_new_bail_command(
         client, tmp_path, pr_url="https://github.com/owner/repo/pull/1"
     )
     state = RuntimeState(
+        data=StateData(gr_id="gr-123"),
         client=client,
         session_dir=tmp_path,
-        gr_id="gr-123",
         child_key="review-child",
         pipeline_data=_gh_pipeline(),
     )
@@ -159,9 +160,9 @@ def test_gh_address_parallel_child_uses_new_bail_command(
         client, tmp_path, pr_url="https://github.com/owner/repo/pull/1"
     )
     state = RuntimeState(
+        data=StateData(gr_id="gr-123"),
         client=client,
         session_dir=tmp_path,
-        gr_id="gr-123",
         child_key="address-child",
         pipeline_data=_gh_pipeline(),
     )

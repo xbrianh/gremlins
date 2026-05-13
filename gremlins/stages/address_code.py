@@ -154,4 +154,6 @@ class GitHubAddressPullRequestReviews(Stage):
             raw_path=state.session_dir
             / "stream-github-address-pull-request-reviews.jsonl",
         )
-        state.data.check_bail("/github-address-pull-request-reviews", child_key=state.child_key)
+        state.data.check_bail(
+            "/github-address-pull-request-reviews", child_key=state.child_key
+        )

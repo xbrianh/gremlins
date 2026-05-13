@@ -61,7 +61,11 @@ def _wait_for_checks(
 
 def _bail_if_review_required(state: State, decision: str) -> None:
     if decision == "REVIEW_REQUIRED":
-        state.data.write_bail_file("other", "PR requires human review approval before merge", attempt=state.data.attempt)
+        state.data.write_bail_file(
+            "other",
+            "PR requires human review approval before merge",
+            attempt=state.data.attempt,
+        )
         raise _ReviewRequiredError("ci-gate: PR blocked by required human review")
 
 
@@ -227,7 +231,8 @@ class GitHubWaitCI(Stage):
                 pr_branch = state.data.last_pr_branch()
                 if not pr_branch:
                     state.data.write_bail_file(
-                        "other", "ci-fix: pr_branch unknown, cannot push",
+                        "other",
+                        "ci-fix: pr_branch unknown, cannot push",
                         attempt=state.data.attempt,
                     )
                     return

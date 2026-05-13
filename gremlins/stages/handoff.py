@@ -462,7 +462,9 @@ class Handoff(Stage):
         if exit_state == "bail":
             reason = sig.get("reason") or "(no reason given)"
             logger.info("handoff bailed: %s", reason)
-            state.data.write_bail_file("other", f"handoff bail: {reason}"[:200], attempt=state.data.attempt)
+            state.data.write_bail_file(
+                "other", f"handoff bail: {reason}"[:200], attempt=state.data.attempt
+            )
             raise RuntimeError(f"chain halted by handoff: {reason}")
 
         # exit_state == "next-plan"

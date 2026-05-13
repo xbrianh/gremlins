@@ -8,14 +8,15 @@ import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
+from gremlins.executor.state import StateData
 from gremlins.stages.sequence import SequenceStage
 
 
 def _state() -> RuntimeState:
     return RuntimeState(
+        data=StateData(),
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
-        gr_id=None,
     )
 
 

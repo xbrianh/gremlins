@@ -10,6 +10,7 @@ from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
+from gremlins.executor.state import StateData
 from gremlins.stages.implement import Implement
 from gremlins.utils.git import DivergentHead, EmptyImpl, HeadAdvanced, PreImplState
 
@@ -30,10 +31,9 @@ def _make_state(
     stage = Implement("implement", "sonnet", prompts or [], {})
     client = FakeClaudeClient(fixtures={"implement": MINIMAL_EVENTS})
     state = RuntimeState(
+        data=StateData(issue_num=issue_num),
         client=client,
         session_dir=tmp_path,
-        gr_id=None,
-        issue_num=issue_num,
     )
     (tmp_path / "plan.md").write_text(plan_text, encoding="utf-8")
     if spec_text:

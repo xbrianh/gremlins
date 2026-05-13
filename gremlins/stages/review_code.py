@@ -101,7 +101,11 @@ class ReviewCode(Stage):
             code_context = code_scope
 
         try:
-            state.data.set_stage(self.name, {"model": f"running ({model})"}, parent_stage=state.parent_stage)
+            state.data.set_stage(
+                self.name,
+                {"model": f"running ({model})"},
+                parent_stage=state.parent_stage,
+            )
             _run_reviewer(
                 client=state.client,
                 model=model,
@@ -113,7 +117,9 @@ class ReviewCode(Stage):
                 raw_path=state.session_dir / f"stream-{self.name}-{model}.jsonl",
                 cwd=state.worktree,
             )
-            state.data.set_stage(self.name, {"model": f"done ({model})"}, parent_stage=state.parent_stage)
+            state.data.set_stage(
+                self.name, {"model": f"done ({model})"}, parent_stage=state.parent_stage
+            )
             logger.info("code review (%s): %s", model, out_file)
             if not out_file.exists() or out_file.stat().st_size == 0:
                 raise RuntimeError(f"review {model} did not produce {out_file}")

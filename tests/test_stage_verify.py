@@ -11,6 +11,7 @@ from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
+from gremlins.executor.state import StateData
 from gremlins.stages.verify import Verify
 
 _VERIFY_PROMPT_PATH = (
@@ -41,9 +42,9 @@ def _make_stage(
         "verify", fix_model, [_VERIFY_PROMPT_PATH.read_text(encoding="utf-8")], options
     )
     state = RuntimeState(
+        data=StateData(),
         client=client,
         session_dir=tmp_path,
-        gr_id=None,
         worktree=tmp_path,
     )
     return stage, state
@@ -198,11 +199,10 @@ def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
         "verify", "sonnet", [_VERIFY_PROMPT_PATH.read_text(encoding="utf-8")], options
     )
     state = RuntimeState(
+        data=StateData(gr_id=gr_id, attempt=attempt),
         client=client,
         session_dir=tmp_path,
-        gr_id=gr_id,
         worktree=tmp_path,
-        attempt=attempt,
     )
 
     with pytest.raises(RuntimeError, match="exhausted"):
@@ -248,9 +248,9 @@ def test_parallel_child_fix_prompt_uses_new_bail_command(tmp_path):
     options = {"cmds": ["false"], "max_attempts": 2}
     stage = Verify("verify", "sonnet", prompts, options)
     state = RuntimeState(
+        data=StateData(gr_id="gr-verify"),
         client=client,
         session_dir=tmp_path,
-        gr_id="gr-verify",
         child_key="verify-child",
         worktree=tmp_path,
     )
