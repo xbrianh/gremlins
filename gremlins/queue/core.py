@@ -11,7 +11,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-_TERMINAL_STATUSES = frozenset({"done", "dead", "bailed"})
+_TERMINAL_STATUSES = frozenset({"done", "dead", "bailed", "stopped"})
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]+$")
 _SUBDIRS = ("pending", "running", "done", "failed")
 _POLL_TIMEOUT = 4 * 3600  # 4 hours; a gremlin silent longer than this is assumed dead
