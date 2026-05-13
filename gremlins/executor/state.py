@@ -102,14 +102,6 @@ def _stage_list() -> list[Stage]:
     return []
 
 
-def _str_list() -> list[str]:
-    return []
-
-
-def _str_any_dict() -> dict[str, Any]:
-    return {}
-
-
 def _int_or(value: Any, default: int) -> int:
     try:
         return int(value)
@@ -147,12 +139,12 @@ class StateData:
     description: str = ""
     description_explicit: bool = False
     parent_id: str = ""
-    pipeline_args: list[str] = dataclasses.field(default_factory=_str_list)
+    pipeline_args: list[str] = dataclasses.field(default_factory=list[str])
     client: str = ""
     pipeline_path: str = ""
     stage: str = ""
     pid: int | None = None
-    stage_inputs: dict[str, Any] = dataclasses.field(default_factory=_str_any_dict)
+    stage_inputs: dict[str, Any] = dataclasses.field(default_factory=dict[str, Any])
 
     @classmethod
     def load(cls, gr_id: str | None) -> StateData:
@@ -187,8 +179,12 @@ class StateData:
         )
 
     def persist(self, state_dir: pathlib.Path) -> None:
+        if not self.gr_id:
+            raise ValueError("cannot persist StateData with no gr_id")
         data: dict[str, Any] = {
             "id": self.gr_id,
+            "loop_iteration": self.loop_iteration,
+            "attempt": self.attempt,
             "kind": self.kind,
             "project_root": self.project_root,
             "workdir": self.workdir,
