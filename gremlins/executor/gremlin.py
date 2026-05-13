@@ -273,11 +273,15 @@ class Gremlin:
         if client_label:
             _apply_client_override(list(pipeline.stages), Client.parse(client_label))
         _propagate_client_models(list(pipeline.stages))
-        _instructions = instructions or str((stage_inputs or {}).get("instructions") or "")
+        _instructions = instructions or str(
+            (stage_inputs or {}).get("instructions") or ""
+        )
         return cls(
             pipeline.stages,
             state_dir=state_dir,
-            session_dir=session_dir if session_dir is not None else state_dir / "artifacts",
+            session_dir=session_dir
+            if session_dir is not None
+            else state_dir / "artifacts",
             gr_id=gr_id,
             pipeline_data=pipeline,
             worktree_dir=worktree_dir,

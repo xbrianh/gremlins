@@ -217,10 +217,16 @@ def launch(
     except (FileNotFoundError, OSError, ValueError):
         pass
 
-    if _loaded_pipeline is not None and _loaded_pipeline.needs_gh() and shutil.which("gh") is None:
+    if (
+        _loaded_pipeline is not None
+        and _loaded_pipeline.needs_gh()
+        and shutil.which("gh") is None
+    ):
         raise RuntimeError("gh CLI not found on PATH (required for gh pipeline)")
 
-    _pipeline_base_ref = _loaded_pipeline.base_ref if _loaded_pipeline is not None else "current"
+    _pipeline_base_ref = (
+        _loaded_pipeline.base_ref if _loaded_pipeline is not None else "current"
+    )
     _effective_base_ref = base_ref if base_ref is not None else _pipeline_base_ref
     if _git_mod.in_git_repo(cwd=project_root):
         if _loaded_pipeline is not None and _loaded_pipeline.needs_gh():
