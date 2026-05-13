@@ -23,6 +23,7 @@ from gremlins import paths as _paths
 from gremlins.clients.client import PACKAGE_DEFAULT
 from gremlins.executor.gremlin import Gremlin as _Gremlin
 from gremlins.executor.state import StateData, validate_gremlin_id
+from gremlins.pipeline.discovery import list_pipelines
 from gremlins.utils import git as _git_mod
 from gremlins.utils import proc
 from gremlins.utils.github import fetch_issue, parse_issue_ref
@@ -154,9 +155,18 @@ def _validate_plan_args(
     return plan, spec_path
 
 
-def _resolve_gremlin_id(slug: str, gremlin_id: str | None) -> str:
+def _reject_pipeline_collision(gremlin_id: str, project_root: str) -> None:
+    pipeline_names = {name for name, _ in list_pipelines(pathlib.Path(project_root))}
+    if gremlin_id in pipeline_names:
+        raise ValueError(
+            f"--gremlin-id {gremlin_id!r} shadows the name of a pipeline. Pick a different id."
+        )
+
+
+def _resolve_gremlin_id(slug: str, gremlin_id: str | None, project_root: str) -> str:
     if gremlin_id is not None:
         validate_gremlin_id(gremlin_id)
+        _reject_pipeline_collision(gremlin_id, project_root)
         _existing = _state_root() / gremlin_id
         if _existing.is_dir():
             _sf = _existing / "state.json"
@@ -241,14 +251,14 @@ def _resolve_inputs(
         issue_title=str((issue_data or {}).get("title") or ""),
     )
 
-    resolved_gremlin_id = _resolve_gremlin_id(slug, gremlin_id)
-
     if project_root is None:
         r = proc.run(["git", "rev-parse", "--show-toplevel"])
         if r.returncode == 0 and r.stdout.strip():
             project_root = r.stdout.strip()
         else:
             project_root = os.getcwd()
+
+    resolved_gremlin_id = _resolve_gremlin_id(slug, gremlin_id, project_root)
 
     resolved_pipeline_args, pipeline_path = resolve_pipeline(
         kind, pipeline_args, project_root

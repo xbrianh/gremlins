@@ -1217,6 +1217,19 @@ def test_launch_invalid_gremlin_id_rejected(lenv, monkeypatch):
         )
 
 
+def test_launch_gremlin_id_pipeline_name_rejected(lenv, monkeypatch):
+    """launch(gremlin_id=...) raises ValueError when id matches a pipeline name."""
+    launcher = _launcher()
+    monkeypatch.setattr(launcher, "_spawn_logged_process", lambda *a, **kw: _FakeProc())
+    with pytest.raises(ValueError, match="shadows the name of a pipeline"):
+        launcher.launch(
+            "local",
+            stage_inputs={"instructions": "pipeline collision test"},
+            gremlin_id="local",
+            project_root=str(lenv.repo),
+        )
+
+
 def test_launch_explicit_gremlin_id_already_running(lenv, monkeypatch):
     """launch(gremlin_id=...) raises GremlinAlreadyRunning when the id has a live process."""
     launcher = _launcher()
