@@ -24,11 +24,9 @@ from gremlins.executor.state import (
     resolve_state_file,
 )
 from gremlins.logging_setup import configure_logging
-from gremlins.pipeline import Pipeline as _Pipeline
 from gremlins.stages.base import Stage
 from gremlins.utils.git import has_commits, has_dirty_worktree, in_git_repo
 from gremlins.utils.github import get_repo
-from gremlins.utils.yaml_io import YamlLoadError
 
 logger = logging.getLogger(__name__)
 
@@ -73,21 +71,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
-def _apply_client_override(stages: list[Stage], cli: Client) -> None:
-    for stage in stages:
-        stage.client = cli
-        if stage.body:
-            _apply_client_override(stage.body, cli)
-
-
-def _propagate_client_models(stages: list[Stage]) -> None:
-    for stage in stages:
-        if stage.model is None and stage.client is not None:
-            stage.model = stage.client.model
-        if stage.body:
-            _propagate_client_models(stage.body)
-
-
 def _unique_clients(stages: list[Stage]) -> list[Client]:
     seen: set[int] = set()
     result: list[Client] = []
@@ -122,13 +105,6 @@ def run_pipeline(
     configure_logging()
     args = _parse_args(argv)
 
-    cli_spec: Client | None = None
-    if args.client:
-        try:
-            cli_spec = Client.parse(args.client)
-        except ValueError as exc:
-            die(str(exc))
-
     env_file = pathlib.Path(".gremlins/env")
     if env_file.is_file():
         try:
@@ -147,70 +123,57 @@ def run_pipeline(
             f"gremlins requires a git repository; {pathlib.Path.cwd()} is not inside a git worktree"
         )
 
-    try:
-        pipeline = _Pipeline.from_yaml(pipeline_path)
-    except (FileNotFoundError, ValueError, YamlLoadError) as exc:
-        die(str(exc))
-
-    gh = pipeline.needs_gh()
-
-    repo = ""
-    state_file = resolve_state_file(gr_id)
-
-    if gh:
-        if shutil.which("gh") is None:
-            die("gh CLI not found")
-        repo = get_repo()
-
-    if cli_spec:
-        _apply_client_override(list(pipeline.stages), cli_spec)
-
-    _propagate_client_models(list(pipeline.stages))
-
-    session_dir = resolve_session_dir(gr_id)
-    state_dir = session_dir.parent
-
-    _stage_clients = _unique_clients(list(pipeline.stages))
-    _signal_clients = [client] if client is not None else _stage_clients
-
     state_json = _read_state_json(gr_id)
     _workdir = str(state_json.get("workdir") or "")
     worktree_dir = pathlib.Path(_workdir) if _workdir else None
     project_root = str(state_json.get("project_root") or "")
     base_ref_sha = str(state_json.get("base_ref_sha") or "")
     setup_kind = str(state_json.get("setup_kind") or "worktree-branch")
-
     stage_inputs: dict[str, Any] = dict(state_json.get("stage_inputs") or {})
     instructions: str = str(
         stage_inputs.get("instructions") or " ".join(args.instructions or [])
     )
 
-    logger.info("session: %s", session_dir)
+    session_dir = resolve_session_dir(gr_id)
+    state_dir = session_dir.parent
 
     try:
-        gremlin = Gremlin(
-            pipeline.stages,
+        gremlin = Gremlin.build(
+            gr_id=gr_id,
             state_dir=state_dir,
             session_dir=session_dir,
-            gr_id=gr_id,
-            pipeline_data=pipeline,
-            worktree_dir=worktree_dir,
-            resume_from=args.resume_from,
+            worktree_parent=pathlib.Path(project_root)
+            if project_root
+            else pathlib.Path.cwd(),
+            pipeline_ref=str(pipeline_path),
             instructions=instructions,
+            resume_from=args.resume_from,
             spec=args.spec,
             plan=args.plan,
             cmds=args.cmds,
             test_max_attempts=args.test_max_attempts,
-            repo=repo,
-            state_file=state_file if gh else None,
-            test_client=client,
+            worktree_dir=worktree_dir,
             project_root=project_root,
             base_ref_sha=base_ref_sha,
             setup_kind=setup_kind,
+            client_label=args.client or "",
+            test_client=client,
         )
         gremlin.validate_resume_target()
     except ValueError as exc:
         die(str(exc))
+
+    gh = gremlin.pipeline_data.needs_gh()
+    if gh:
+        if shutil.which("gh") is None:
+            die("gh CLI not found")
+        gremlin.repo = get_repo()
+        gremlin.state_file = resolve_state_file(gr_id)
+
+    _stage_clients = _unique_clients(gremlin.stages)
+    _signal_clients = [client] if client is not None else _stage_clients
+
+    logger.info("session: %s", session_dir)
 
     gremlin.initialize_runtime()
 

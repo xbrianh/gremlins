@@ -20,8 +20,8 @@ from typing import Any, cast
 
 from gremlins import paths as _paths
 from gremlins.clients.client import PACKAGE_DEFAULT
+from gremlins.executor.gremlin import Gremlin as _Gremlin
 from gremlins.executor.state import State, validate_gr_id, write_state
-from gremlins.pipeline import Pipeline
 from gremlins.utils import git as _git_mod
 from gremlins.utils import proc
 from gremlins.utils.github import fetch_issue, parse_issue_ref
@@ -202,12 +202,18 @@ def launch(
         kind, pipeline_args, project_root
     )
 
-    _pipeline_base_ref = "current"
+    state_dir = _state_root() / gr_id
+
     _loaded_pipeline = None
     try:
-        _loaded_pipeline = Pipeline.from_yaml(pathlib.Path(pipeline_path))
-        _pipeline_base_ref = _loaded_pipeline.base_ref
-    except (FileNotFoundError, OSError):
+        _gremlin = _Gremlin.build(
+            gr_id=gr_id,
+            state_dir=state_dir,
+            worktree_parent=pathlib.Path(project_root),
+            pipeline_ref=pipeline_path,
+        )
+        _loaded_pipeline = _gremlin.pipeline_data
+    except (FileNotFoundError, OSError, ValueError):
         pass
 
     if (
@@ -217,9 +223,9 @@ def launch(
     ):
         raise RuntimeError("gh CLI not found on PATH (required for gh pipeline)")
 
-    state_dir = _state_root() / gr_id
-    state_dir.mkdir(parents=True, exist_ok=True)
-
+    _pipeline_base_ref = (
+        _loaded_pipeline.base_ref if _loaded_pipeline is not None else "current"
+    )
     _effective_base_ref = base_ref if base_ref is not None else _pipeline_base_ref
     if _git_mod.in_git_repo(cwd=project_root):
         if _loaded_pipeline is not None and _loaded_pipeline.needs_gh():
@@ -241,6 +247,7 @@ def launch(
         base_ref_name, base_ref_sha = _effective_base_ref, ""
 
     try:
+        state_dir.mkdir(parents=True, exist_ok=True)
         # pipeline_args for state.json: includes --plan and --spec when set
         stored_pipeline_args = list(resolved_pipeline_args)
         if spec_path and "--spec" not in stored_pipeline_args:
@@ -366,8 +373,14 @@ def resume(gr_id: str) -> None:
     _loaded_resume = None
     if pipeline_path:
         try:
-            _loaded_resume = Pipeline.from_yaml(pathlib.Path(pipeline_path))
-        except (FileNotFoundError, OSError):
+            _gremlin_resume = _Gremlin.build(
+                gr_id=gr_id,
+                state_dir=state_dir,
+                worktree_parent=pathlib.Path(project_root),
+                pipeline_ref=pipeline_path,
+            )
+            _loaded_resume = _gremlin_resume.pipeline_data
+        except (FileNotFoundError, OSError, ValueError):
             pass
 
     if (
