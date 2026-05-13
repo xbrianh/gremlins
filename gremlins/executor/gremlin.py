@@ -12,7 +12,7 @@ from collections.abc import Callable
 from typing import Any
 
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
-from gremlins.executor.state import State, append_artifact, patch_state
+from gremlins.executor.state import State
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.loader import STAGE_TYPES
 from gremlins.stages.base import Stage
@@ -142,14 +142,15 @@ class Gremlin:
                 )
                 worktree_created = workdir
                 self.worktree_dir = pathlib.Path(workdir)
-                patch_state(
-                    self.gr_id,
+                State.load(self.gr_id).patch(
                     workdir=workdir,
                     worktree_base=worktree_base,
                     setup_kind=actual_setup_kind,
                 )
                 if actual_setup_kind == "worktree-branch" and branch:
-                    append_artifact(self.gr_id, {"type": "branch", "name": branch})
+                    State.load(self.gr_id).append_artifact(
+                        {"type": "branch", "name": branch}
+                    )
 
             if self.spec:
                 spec_file = self.session_dir / "spec.md"

@@ -19,8 +19,7 @@ from gremlins.env_file import load_env_file
 from gremlins.errors import die
 from gremlins.executor.gremlin import Gremlin
 from gremlins.executor.state import (
-    patch_state,
-    read_pr_url,
+    State,
     resolve_session_dir,
     resolve_state_file,
 )
@@ -250,10 +249,10 @@ def run_pipeline(
     for c in [client] if client else _stage_clients:
         total_cost += getattr(c, "total_cost_usd", 0.0) or 0.0
     if total_cost > 0:
-        patch_state(gr_id, total_cost_usd=total_cost)
+        State.load(gr_id).patch(total_cost_usd=total_cost)
 
     if gh:
-        logger.info("done. PR: %s", read_pr_url(gr_id) or "(unknown)")
+        logger.info("done. PR: %s", State.load(gr_id).read_pr_url() or "(unknown)")
     else:
         logger.info("done. session artifacts in: %s", session_dir)
     if total_cost > 0:
