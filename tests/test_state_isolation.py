@@ -39,7 +39,7 @@ from conftest import ReviewCreatingClient as _ReviewCreatingClient
 from conftest import common_local_patches as _common_patches
 
 from gremlins.executor.run import run_pipeline
-from gremlins.executor.state import State
+from gremlins.executor.state import StateData
 from gremlins.pipeline.discovery import resolve_pipeline_path
 
 
@@ -185,7 +185,7 @@ def test_set_stage_noop_when_gr_id_unset(tmp_path, monkeypatch):
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
     # GR_ID is already unset via autouse fixture
     mtime_before = sf.stat().st_mtime_ns
-    State.load(None).set_stage("running")
+    StateData.load(None).set_stage("running")
     assert sf.stat().st_mtime_ns == mtime_before
 
 
@@ -195,7 +195,7 @@ def test_set_stage_writes_stage_and_timestamp(tmp_path, monkeypatch):
     state_root, sf = _make_state_dir(tmp_path, gr_id)
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
 
-    State.load(gr_id).set_stage("review-code")
+    StateData.load(gr_id).set_stage("review-code")
 
     data = json.loads(sf.read_text())
     assert data["stage"] == "review-code"
@@ -212,7 +212,7 @@ def test_set_stage_with_sub_stage(tmp_path, monkeypatch):
     state_root, sf = _make_state_dir(tmp_path, gr_id)
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
 
-    State.load(gr_id).set_stage("implement", sub_stage={"attempt": 2})
+    StateData.load(gr_id).set_stage("implement", sub_stage={"attempt": 2})
 
     data = json.loads(sf.read_text())
     assert data["stage"] == "implement"
@@ -225,10 +225,10 @@ def test_set_stage_removes_sub_stage_when_none(tmp_path, monkeypatch):
     state_root, sf = _make_state_dir(tmp_path, gr_id)
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
 
-    State.load(gr_id).set_stage("implement", sub_stage={"k": 1})
+    StateData.load(gr_id).set_stage("implement", sub_stage={"k": 1})
     assert "sub_stage" in json.loads(sf.read_text())
 
-    State.load(gr_id).set_stage("review-code")
+    StateData.load(gr_id).set_stage("review-code")
     data = json.loads(sf.read_text())
     assert data["stage"] == "review-code"
     assert "sub_stage" not in data
@@ -242,7 +242,7 @@ def test_set_stage_noop_when_state_json_missing(tmp_path, monkeypatch):
     state_dir.mkdir(parents=True)
     # No state.json written
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
-    State.load(gr_id).set_stage("running")  # must not raise
+    StateData.load(gr_id).set_stage("running")  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -255,7 +255,7 @@ def test_write_bail_file_creates_bail_file(tmp_path, monkeypatch):
     state_root, sf = _make_state_dir(tmp_path, gr_id)
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
 
-    State.load(gr_id).write_bail_file(
+    StateData.load(gr_id).write_bail_file(
         "other", "something went wrong", attempt="stage-abc123"
     )
 
@@ -271,7 +271,7 @@ def test_write_bail_file_noop_when_gr_id_none(tmp_path, monkeypatch):
     state_root, sf = _make_state_dir(tmp_path, gr_id)
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
     mtime_before = sf.stat().st_mtime_ns
-    State.load(None).write_bail_file("other", attempt="some-attempt")
+    StateData.load(None).write_bail_file("other", attempt="some-attempt")
     assert sf.stat().st_mtime_ns == mtime_before
 
 
@@ -279,6 +279,6 @@ def test_write_bail_file_noop_when_attempt_empty(tmp_path, monkeypatch):
     gr_id = "gr-wbf-empty-attempt"
     state_root, sf = _make_state_dir(tmp_path, gr_id)
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
-    State.load(gr_id).write_bail_file("other", attempt="")
+    StateData.load(gr_id).write_bail_file("other", attempt="")
     bail_files = list((state_root / gr_id).glob("bail_*.json"))
     assert not bail_files

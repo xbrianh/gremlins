@@ -189,7 +189,7 @@ def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
     gr_id = "test-gr-id"
     state_dir = make_state_dir(gr_id)
     attempt = "verify-exhaustion-attempt"
-    state_mod.State.load(gr_id).patch(attempt=attempt)
+    state_mod.StateData.load(gr_id).patch(attempt=attempt)
     client = FakeClaudeClient(
         fixtures={"verify-fix-1": MINIMAL_EVENTS, "verify-fix-2": MINIMAL_EVENTS}
     )

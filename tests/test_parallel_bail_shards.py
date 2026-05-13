@@ -23,7 +23,7 @@ import pytest
 import gremlins.executor.state as state_mod
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.gremlin import run_stages
-from gremlins.executor.state import State
+from gremlins.executor.state import State, StateData
 from gremlins.stages.parallel import ParallelStage
 from gremlins.utils.state_file import locked_update as _state_locked_update
 
@@ -99,9 +99,11 @@ def test_write_bail_file_no_child_key_writes_bail_file(state_root):
     gr_id = "gr-bail-file-a"
     sf = _make_state(state_root, gr_id)
     state_dir = sf.parent
-    State.load(gr_id).patch(attempt="stage-abc")
+    StateData.load(gr_id).patch(attempt="stage-abc")
 
-    State.load(gr_id).write_bail_file("other", "child A bailed", attempt="stage-abc")
+    StateData.load(gr_id).write_bail_file(
+        "other", "child A bailed", attempt="stage-abc"
+    )
 
     bail_path = state_dir / "bail_stage-abc.json"
     assert bail_path.exists()
@@ -114,33 +116,33 @@ def test_check_bail_reads_attempt_from_state_json(state_root):
     gr_id = "gr-check-attempt"
     sf = _make_state(state_root, gr_id)
     state_dir = sf.parent
-    State.load(gr_id).patch(attempt="my-attempt-abc")
+    StateData.load(gr_id).patch(attempt="my-attempt-abc")
 
     # No bail file yet → no raise
-    State.load(gr_id).check_bail("test")
+    StateData.load(gr_id).check_bail("test")
 
     # Write bail file → raises
     (state_dir / "bail_my-attempt-abc.json").write_text(json.dumps({"class": "other"}))
     with pytest.raises(RuntimeError, match="bailed"):
-        State.load(gr_id).check_bail("test")
+        StateData.load(gr_id).check_bail("test")
 
 
 def test_check_bail_child_key_reads_parallel_attempts(state_root):
     gr_id = "gr-parallel-attempt"
     sf = _make_state(state_root, gr_id)
     state_dir = sf.parent
-    State.load(gr_id)._patch_parallel_attempt("child-a", "attempt-a")
+    StateData.load(gr_id).patch_parallel_attempt("child-a", "attempt-a")
 
     # No bail file yet
-    State.load(gr_id).check_bail("test", child_key="child-a")
+    StateData.load(gr_id).check_bail("test", child_key="child-a")
 
     # Write bail for child-a
     (state_dir / "bail_attempt-a.json").write_text(json.dumps({"class": "other"}))
     with pytest.raises(RuntimeError, match="bailed"):
-        State.load(gr_id).check_bail("test", child_key="child-a")
+        StateData.load(gr_id).check_bail("test", child_key="child-a")
 
     # child-b has no bail
-    State.load(gr_id).check_bail("test", child_key="child-b")
+    StateData.load(gr_id).check_bail("test", child_key="child-b")
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +218,7 @@ def _build_fanin_test(
             (state_dir / f"bail_{attempt}.json").write_text(
                 json.dumps({"class": bc, "detail": ""})
             )
-    State.load(gr_id).patch(parallel_attempts=parallel_attempts)
+    StateData.load(gr_id).patch(parallel_attempts=parallel_attempts)
 
     child_keys = list(shards.keys())
     children = [(k, _make_simple_ctx(tmp_path, k), lambda: None) for k in child_keys]
@@ -373,7 +375,7 @@ def test_run_stages_resume_from_fanin_name(tmp_path, state_root):
     sf = _make_state(state_root, gr_id)
     state_dir = sf.parent
     # Pre-populate parallel_attempts and bail file as children would have written.
-    state_mod.State.load(gr_id).patch(parallel_attempts={"c": "attempt-c"})
+    state_mod.StateData.load(gr_id).patch(parallel_attempts={"c": "attempt-c"})
     (state_dir / "bail_attempt-c.json").write_text(
         json.dumps({"class": "other", "detail": ""})
     )

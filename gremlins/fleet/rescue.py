@@ -11,7 +11,7 @@ from typing import Any, cast
 
 import gremlins.fleet.constants as _constants
 from gremlins.clients.stream import stream_events
-from gremlins.executor.state import State
+from gremlins.executor.state import StateData
 from gremlins.fleet.constants import (
     EXCLUDED_BAIL_CLASSES,
     HEADLESS_DIAGNOSIS_TIMEOUT_SECS,
@@ -442,7 +442,7 @@ def _recreate_worktree(state: dict[str, Any]) -> tuple[bool, str]:
     """
     workdir = state.get("workdir") or ""
     gr_id_val = str(state.get("id") or "")
-    branch = State.load(gr_id_val).last_artifact_branch()
+    branch = StateData.load(gr_id_val).last_artifact_branch()
     worktree_base = state.get("worktree_base") or ""
     project_root = state.get("project_root") or ""
 
@@ -547,7 +547,7 @@ def do_rescue(target: str, headless: bool = False, from_boss: bool = False) -> b
 
     _gr_id_for_bail = str(state.get("id") or "")
     _bail_file_data = (
-        State.load(_gr_id_for_bail).read_bail_info() if _gr_id_for_bail else None
+        StateData.load(_gr_id_for_bail).read_bail_info() if _gr_id_for_bail else None
     )
     bail_class = (
         (_bail_file_data.get("class") or "")

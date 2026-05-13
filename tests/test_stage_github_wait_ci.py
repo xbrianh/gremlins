@@ -356,7 +356,7 @@ def test_review_required_emits_bail_to_state(
     gr_id = "test-gr-id"
     state_dir = make_state_dir(gr_id)
     attempt = "github-wait-ci-test"
-    state_mod.State.load(gr_id).patch(attempt=attempt)
+    state_mod.StateData.load(gr_id).patch(attempt=attempt)
     client = FakeClaudeClient(fixtures={})
     getter = _make_getter([([], "REVIEW_REQUIRED")])
     stage, state = _make_stage(client, tmp_path, gr_id=gr_id, checks_getter=getter)
@@ -385,7 +385,7 @@ def test_empty_pr_branch_bails(tmp_path: pathlib.Path, make_state_dir) -> None:
             }
         )
     )
-    state_mod.State.load(gr_id).patch(attempt=attempt)
+    state_mod.StateData.load(gr_id).patch(attempt=attempt)
     client = FakeClaudeClient(fixtures={})
     getter = _make_getter(
         [([_FAILING_CHECK], ""), ([_FAILING_CHECK], ""), ([_PASSING_CHECK], "")]
