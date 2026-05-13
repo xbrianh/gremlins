@@ -9,7 +9,11 @@ import sys
 
 import pytest
 
-from gremlins.clients.claude import StreamTimeoutError, SubprocessClaudeClient
+from gremlins.clients.claude import (
+    STREAM_IDLE_BACKOFF,
+    StreamTimeoutError,
+    SubprocessClaudeClient,
+)
 
 TESTS_DIR = pathlib.Path(__file__).resolve().parent
 
@@ -237,3 +241,29 @@ if stdin_out:
         "original", label="test", on_timeout_prompt="retry-prompt", max_retries=2
     )
     assert stdin_out.read_text(encoding="utf-8") == "retry-prompt"
+
+
+def test_backoff_schedule_matches_stream_idle_backoff(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    _install_timeout_stub(bin_dir)
+    count_file = tmp_path / "count.txt"
+    count_file.write_text("0")
+
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("STUB_COUNT_FILE", str(count_file))
+    monkeypatch.setenv("STUB_FAIL_TIMES", "99")
+
+    sleep_calls: list[float] = []
+    monkeypatch.setattr("time.sleep", sleep_calls.append)
+
+    client = SubprocessClaudeClient()
+    with pytest.raises(StreamTimeoutError):
+        client.run("hello", label="test", max_retries=3)
+
+    assert sleep_calls == list(STREAM_IDLE_BACKOFF)
+
+
+def test_max_retries_exceeds_schedule_raises_value_error(tmp_path, monkeypatch):
+    client = SubprocessClaudeClient()
+    with pytest.raises(ValueError, match="max_retries"):
+        client.run("hello", label="test", max_retries=len(STREAM_IDLE_BACKOFF) + 1)
