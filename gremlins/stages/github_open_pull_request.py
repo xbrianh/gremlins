@@ -78,10 +78,9 @@ class GitHubOpenPullRequest(Stage):
         self.base_ref = base_ref
 
     def run(self, state: State) -> str:
-        assert state.session_dir is not None
-        issue_url = state.issue_url
+        issue_url = state.data.issue_url
         base_ref = (
-            state.last_pr_branch() or self.base_ref or state.base_ref_name or "main"
+            state.data.last_pr_branch() or self.base_ref or state.data.base_ref_name or "main"
         )
 
         issue_num = issue_url.split("/")[-1] if issue_url else ""
@@ -97,7 +96,7 @@ class GitHubOpenPullRequest(Stage):
             "github_open_pull_request.md", base_ref=base_ref
         ).rstrip()
 
-        n = state.loop_iteration
+        n = state.data.loop_iteration
         iter_clause = (
             f" This is loop iteration {n}; append '-iter{n}' to the branch slug"
             f" to avoid colliding with a prior iteration's branch"
@@ -127,6 +126,6 @@ class GitHubOpenPullRequest(Stage):
         branch = extract_pr_branch_from_events(events) or _get_pr_branch(pr_url)
         if not branch:
             logger.warning("open-pr: could not determine PR branch for %s", pr_url)
-        state.append_artifact({"type": "pr", "url": pr_url, "branch": branch})
+        state.data.append_artifact({"type": "pr", "url": pr_url, "branch": branch})
         logger.info("PR: %s", pr_url)
         return pr_url

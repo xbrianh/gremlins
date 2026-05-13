@@ -41,12 +41,11 @@ class Stage:
         raw_path: pathlib.Path | None = None,
         **kw: Any,
     ) -> CompletedRun:
-        assert state.client is not None
         model = self.model or state.client.model
         extra_env: dict[str, str] = {}
-        if state.attempt and state.state_file is not None:
-            extra_env["GREMLIN_ATTEMPT"] = state.attempt
-            extra_env["GREMLIN_STATE_DIR"] = str(state.state_file.parent)
+        if state.data.attempt and state.data.state_file is not None:
+            extra_env["GREMLIN_ATTEMPT"] = state.data.attempt
+            extra_env["GREMLIN_STATE_DIR"] = str(state.data.state_file.parent)
         return state.client.run(
             prompt,
             label=label,

@@ -16,7 +16,6 @@ MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 def _review_stage_info(
     state: State,
 ) -> tuple[list[str], dict[str, pathlib.Path]]:
-    assert state.session_dir is not None
     names: list[str] = []
     dirs: dict[str, pathlib.Path] = {}
     scope = state.current_scope or (
@@ -62,14 +61,14 @@ class AddressCode(Stage):
             inputs = self._inputs_from_local(state)
             self._run_local(inputs, state)
         except (SystemExit, Exception) as exc:
-            state.write_bail_file(
+            state.data.write_bail_file(
                 "other",
                 f"address-code stage failed: {exc}"[:200],
+                attempt=state.data.attempt,
             )
             raise
 
     def _inputs_from_local(self, state: State) -> dict[str, str]:
-        assert state.session_dir is not None
         names, dirs = _review_stage_info(state)
         if not names:
             names = ["review-code"]
@@ -92,7 +91,6 @@ class AddressCode(Stage):
         return {"text": text, "review_model": review_model}
 
     def _run_local(self, inputs: dict[str, str], state: State) -> None:
-        assert state.session_dir is not None
         template = "\n\n".join(self.prompts).rstrip()
         address_prompt = template.format(
             bail_command=self.bail_command(state),
@@ -138,8 +136,7 @@ class GitHubAddressPullRequestReviews(Stage):
         self.pr_url = pr_url
 
     def run(self, state: State) -> None:
-        assert state.session_dir is not None
-        pr_url = self.pr_url or state.read_pr_url()
+        pr_url = self.pr_url or state.data.read_pr_url()
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
         prompt = (
@@ -157,4 +154,4 @@ class GitHubAddressPullRequestReviews(Stage):
             raw_path=state.session_dir
             / "stream-github-address-pull-request-reviews.jsonl",
         )
-        state.check_bail("/github-address-pull-request-reviews")
+        state.data.check_bail("/github-address-pull-request-reviews", child_key=state.child_key)

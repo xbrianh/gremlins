@@ -114,7 +114,7 @@ class LoopStage(Stage):
         exhausted = False
         try:
             for iteration in range(1, self._max_iterations + 1):
-                state.patch(loop_iteration=iteration)
+                state.data.patch(loop_iteration=iteration)
                 if self._pr_stack:
                     _detach_to_pr_base(state)
                 head_before = _git.head_sha(state.cwd)
@@ -141,24 +141,26 @@ class LoopStage(Stage):
                     break
 
             exhausted = True
-            state.write_bail_file(
+            state.data.write_bail_file(
                 "other",
                 f"loop exhausted {self._max_iterations} iterations",
+                attempt=state.data.attempt,
             )
             raise LoopExhausted(f"loop exhausted {self._max_iterations} iterations")
         except LoopExhausted:
             raise
         except (SystemExit, Exception) as exc:
-            if not exhausted and not _bail_file_exists(state.gr_id, state.attempt):
-                state.write_bail_file(
+            if not exhausted and not _bail_file_exists(state.data.gr_id, state.data.attempt):
+                state.data.write_bail_file(
                     "other",
                     f"loop stage failed: {exc}"[:200],
+                    attempt=state.data.attempt,
                 )
             raise
 
 
 def _detach_to_pr_base(state: State) -> None:
-    branch = state.last_pr_branch()
+    branch = state.data.last_pr_branch()
     if not branch:
         return
     logger.info("detaching worktree to previous PR branch: %s", branch)

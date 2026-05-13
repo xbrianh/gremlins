@@ -420,8 +420,6 @@ class Handoff(Stage):
         super().__init__(name, None, [], {})
 
     def run(self, state: State) -> None:
-        assert state.session_dir is not None
-        assert state.client is not None
         session_dir = state.session_dir
         client = state.client
 
@@ -434,7 +432,7 @@ class Handoff(Stage):
         if not boss_spec.exists():
             shutil.copyfile(plan_md, boss_spec)
 
-        base_ref = state.base_ref_name or self._resolve_base_ref(state)
+        base_ref = state.data.base_ref_name or self._resolve_base_ref(state)
         handoff_n = self._next_handoff_index(session_dir)
 
         prev_rolling = (
@@ -446,7 +444,7 @@ class Handoff(Stage):
             else str(plan_md)
         )
 
-        state.set_stage("handoff")
+        state.data.set_stage("handoff", parent_stage=state.parent_stage)
         exit_state, sig = self._run_handoff(
             handoff_n=handoff_n,
             current_plan=current_plan,
@@ -464,7 +462,7 @@ class Handoff(Stage):
         if exit_state == "bail":
             reason = sig.get("reason") or "(no reason given)"
             logger.info("handoff bailed: %s", reason)
-            state.write_bail_file("other", f"handoff bail: {reason}"[:200])
+            state.data.write_bail_file("other", f"handoff bail: {reason}"[:200], attempt=state.data.attempt)
             raise RuntimeError(f"chain halted by handoff: {reason}")
 
         # exit_state == "next-plan"

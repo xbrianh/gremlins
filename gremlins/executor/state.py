@@ -122,10 +122,25 @@ def _read_state_json(sf: pathlib.Path | None) -> dict[str, Any]:
 class StateData:
     gr_id: str | None = None
     state_file: pathlib.Path | None = None
+    issue_url: str = ""
+    base_ref_name: str = ""
+    issue_num: str = ""
+    loop_iteration: int = 1
+    attempt: str = ""
 
     @classmethod
     def load(cls, gr_id: str | None) -> StateData:
-        return cls(gr_id=gr_id, state_file=resolve_state_file(gr_id))
+        sf = resolve_state_file(gr_id)
+        sd = _read_state_json(sf)
+        return cls(
+            gr_id=gr_id,
+            state_file=sf,
+            issue_url=sd.get("issue_url") or "",
+            base_ref_name=sd.get("base_ref_name") or "",
+            issue_num=sd.get("issue_num") or "",
+            loop_iteration=_int_or(sd.get("loop_iteration"), 1),
+            attempt=sd.get("attempt") or "",
+        )
 
     def patch(self, _delete: tuple[str, ...] = (), **fields: object) -> None:
         sf = self.state_file or resolve_state_file(self.gr_id)
@@ -348,34 +363,19 @@ class StateData:
 
 @dataclasses.dataclass
 class State:
-    # required per-stage (optional so callers can create lightweight instances)
-    client: Client | None = None
-    session_dir: pathlib.Path | None = None
-    # pipeline-wide (all have defaults so tests can omit them)
-    gr_id: str | None = None
-    state_file: pathlib.Path | None = None
+    data: StateData
+    client: Client
+    session_dir: pathlib.Path
+    test_client: Client | None = None
     args: argparse.Namespace = dataclasses.field(default_factory=argparse.Namespace)
     pipeline_data: Pipeline | None = None
     repo: str = ""
     instructions: str = ""
-    test_client: Client | None = None
-    # per-stage optional
+    current_scope: list[Stage] = dataclasses.field(default_factory=_stage_list)
     child_key: str | None = None
     parent_stage: str = ""
     worktree: pathlib.Path | None = None
     worktree_parent: pathlib.Path | None = None
-    current_scope: list[Stage] = dataclasses.field(default_factory=_stage_list)
-    # runtime-derived (populated from state.json before each stage run)
-    issue_url: str = ""
-    base_ref_name: str = ""
-    issue_num: str = ""
-    loop_iteration: int = 1
-    attempt: str = ""
-    # state.json I/O delegate — built in __post_init__, not a constructor arg
-    data: StateData = dataclasses.field(init=False, repr=False, compare=False)
-
-    def __post_init__(self) -> None:
-        self.data = StateData(gr_id=self.gr_id, state_file=self.state_file)
 
     @staticmethod
     def setup_dirs(
@@ -402,94 +402,22 @@ class State:
         scope: list[Stage] | None = None,
     ) -> Callable[[], None]:
         base_state = self
-        gr_id = self.gr_id
+        gr_id = self.data.gr_id
         attempt = f"{entry.name}-{secrets.token_hex(4)}" if gr_id else ""
         scope_list = list(scope) if scope is not None else []
 
         def _run() -> None:
-            base_state.set_stage(entry.name)
+            base_state.data.set_stage(entry.name, parent_stage=base_state.parent_stage)
             if attempt:
                 if base_state.child_key:
-                    base_state.patch_parallel_attempt(base_state.child_key, attempt)
+                    base_state.data.patch_parallel_attempt(base_state.child_key, attempt)
                 else:
-                    base_state.patch(attempt=attempt)
-            sf = (
-                base_state.state_file
-                if base_state.state_file is not None
-                else resolve_state_file(gr_id)
-            )
-            sd = _read_state_json(sf)
-            state: State = dataclasses.replace(
+                    base_state.data.patch(attempt=attempt)
+            state = dataclasses.replace(
                 base_state,
+                data=StateData.load(gr_id),
                 current_scope=scope_list,
-                attempt=attempt,
-                issue_url=sd.get("issue_url") or "",
-                base_ref_name=sd.get("base_ref_name") or "",
-                issue_num=sd.get("issue_num") or "",
-                loop_iteration=_int_or(sd.get("loop_iteration"), 1),
             )
             entry.run(state)
 
         return _run
-
-    # --- state.json I/O pass-throughs ---
-
-    def patch(self, _delete: tuple[str, ...] = (), **fields: object) -> None:
-        self.data.patch(_delete=_delete, **fields)
-
-    def read_str(self, field: str) -> str:
-        return self.data.read_str(field)
-
-    def set_stage(self, stage: str, sub_stage: object = None) -> None:
-        self.data.set_stage(stage, sub_stage, parent_stage=self.parent_stage)
-
-    def write_bail_file(
-        self, bail_class: str, bail_detail: str = "", *, attempt: str | None = None
-    ) -> None:
-        self.data.write_bail_file(
-            bail_class,
-            bail_detail,
-            attempt=attempt if attempt is not None else self.attempt,
-        )
-
-    def check_bail(self, label: str = "stage", *, child_key: str | None = None) -> None:
-        self.data.check_bail(
-            label,
-            child_key=child_key if child_key is not None else self.child_key,
-        )
-
-    def append_artifact(self, artifact: dict[str, Any]) -> None:
-        self.data.append_artifact(artifact)
-
-    def read_bail_info(self) -> dict[str, str] | None:
-        return self.data.read_bail_info()
-
-    def read_artifacts(self) -> list[dict[str, Any]]:
-        return self.data.read_artifacts()
-
-    def read_pr_url(self) -> str:
-        return self.data.read_pr_url()
-
-    def last_pr_branch(self) -> str:
-        return self.data.last_pr_branch()
-
-    def read_pr_num(self) -> str:
-        return self.data.read_pr_num()
-
-    def last_artifact_branch(self) -> str:
-        return self.data.last_artifact_branch()
-
-    def patch_parallel_worktrees(
-        self,
-        group_name: str,
-        *,
-        base_head: str | None,
-        paths: dict[str, str] | None,
-    ) -> None:
-        self.data.patch_parallel_worktrees(group_name, base_head=base_head, paths=paths)
-
-    def patch_parallel_attempt(self, child_key: str, attempt: str) -> None:
-        self.data.patch_parallel_attempt(child_key, attempt)
-
-    def write_terminal_state(self, exit_code: int) -> None:
-        self.data.write_terminal_state(exit_code)

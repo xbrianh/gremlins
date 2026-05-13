@@ -136,8 +136,7 @@ class ParallelStage(Stage):
         )
 
     def run(self, state: State) -> None:
-        assert state.session_dir is not None
-        gr_id = state.gr_id
+        gr_id = state.data.gr_id
         group_dir = state.session_dir / self.name
         group_dir.mkdir(parents=True, exist_ok=True)
         child_runners: list[tuple[str, State, Callable[[], None]]] = []
@@ -166,7 +165,7 @@ class ParallelStage(Stage):
             set_stage_fn=lambda n: StateData.load(gr_id).set_stage(
                 self.name, sub_stage=n
             ),
-            parent_attempt=state.attempt,
+            parent_attempt=state.data.attempt,
         ):
             fn()
 

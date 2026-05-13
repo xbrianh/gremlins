@@ -22,7 +22,6 @@ class RunCmd(Stage):
         return stage
 
     def run(self, state: State) -> None:
-        assert state.session_dir is not None
         cmds = [c for c in self.options.get("cmds", []) if c.strip()]
         if not cmds:
             return
