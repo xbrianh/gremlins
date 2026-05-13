@@ -382,7 +382,7 @@ class State:
         gr_id: str | None,
         *,
         instructions: str = "",
-    ) -> "State":
+    ) -> State:
         session_dir = state_dir / "artifacts"
         state_dir.mkdir(parents=True, exist_ok=True)
         session_dir.mkdir(parents=True, exist_ok=True)
