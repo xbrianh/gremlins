@@ -263,7 +263,7 @@ def test_backoff_schedule_matches_stream_idle_backoff(tmp_path, monkeypatch):
     assert sleep_calls == list(STREAM_IDLE_BACKOFF)
 
 
-def test_max_retries_exceeds_schedule_raises_value_error(tmp_path, monkeypatch):
+def test_max_retries_exceeds_schedule_raises_value_error():
     client = SubprocessClaudeClient()
     with pytest.raises(ValueError, match="max_retries"):
         client.run("hello", label="test", max_retries=len(STREAM_IDLE_BACKOFF) + 1)
