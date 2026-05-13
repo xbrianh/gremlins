@@ -269,7 +269,8 @@ def _parallel_stages(
                 if worktree_parent is not None:
                     worktree_parent.mkdir(parents=True, exist_ok=True)
                     wt_dir = str(
-                        worktree_parent / f"aibg-parallel-{group_name}-{secrets.token_hex(8)}"
+                        worktree_parent
+                        / f"aibg-parallel-{group_name}-{secrets.token_hex(8)}"
                     )
                 else:
                     wt_dir = str(
