@@ -120,8 +120,6 @@ def _read_state_json(sf: pathlib.Path | None) -> dict[str, Any]:
 
 @dataclasses.dataclass
 class StateData:
-    """state.json I/O for a gremlin run. Owns all persistence operations."""
-
     gr_id: str | None = None
     state_file: pathlib.Path | None = None
 
@@ -145,7 +143,7 @@ class StateData:
             pass
 
     def read_str(self, field: str) -> str:
-        sf = self.state_file
+        sf = self.state_file or resolve_state_file(self.gr_id)
         if sf is None or not sf.exists():
             return ""
         try:
@@ -412,7 +410,7 @@ class State:
             base_state.set_stage(entry.name)
             if attempt:
                 if base_state.child_key:
-                    base_state._patch_parallel_attempt(base_state.child_key, attempt)
+                    base_state.patch_parallel_attempt(base_state.child_key, attempt)
                 else:
                     base_state.patch(attempt=attempt)
             sf = (
@@ -490,7 +488,7 @@ class State:
     ) -> None:
         self.data.patch_parallel_worktrees(group_name, base_head=base_head, paths=paths)
 
-    def _patch_parallel_attempt(self, child_key: str, attempt: str) -> None:
+    def patch_parallel_attempt(self, child_key: str, attempt: str) -> None:
         self.data.patch_parallel_attempt(child_key, attempt)
 
     def write_terminal_state(self, exit_code: int) -> None:
