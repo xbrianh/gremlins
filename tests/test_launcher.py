@@ -535,7 +535,9 @@ stages:
     class _Proc:
         pid = 12345
 
-    monkeypatch.setattr(launcher, "_spawn_pipeline", lambda *args, **kwargs: _Proc())
+    monkeypatch.setattr(
+        launcher, "_spawn_logged_process", lambda *args, **kwargs: _Proc()
+    )
 
     launcher.resume(gr_id)
 
@@ -574,12 +576,13 @@ def test_resume_keeps_resume_flag_for_pipeline_gremlin(lenv, monkeypatch):
     class _Proc:
         pid = 12345
 
-    def fake_spawn(state_dir, workdir, spawn_gr_id, subcommand, spawn_args, **kwargs):
-        captured["subcommand"] = subcommand
-        captured["spawn_args"] = list(spawn_args)
+    # cmd layout: [sys.executable, "-m", "gremlins.run_pipeline", gr_id, pipeline_path, *spawn_args]
+    def fake_spawn(cmd, cwd, env, log_path, log_mode="w"):
+        captured["subcommand"] = cmd[4]
+        captured["spawn_args"] = list(cmd[5:])
         return _Proc()
 
-    monkeypatch.setattr(launcher, "_spawn_pipeline", fake_spawn)
+    monkeypatch.setattr(launcher, "_spawn_logged_process", fake_spawn)
 
     launcher.resume(gr_id)
 
@@ -628,12 +631,13 @@ def test_resume_bossgremlin_resumes_at_chain_stage(lenv, monkeypatch):
     class _Proc:
         pid = 12345
 
-    def fake_spawn(state_dir, workdir, spawn_gr_id, subcommand, spawn_args, **kwargs):
-        captured["subcommand"] = subcommand
-        captured["spawn_args"] = list(spawn_args)
+    # cmd layout: [sys.executable, "-m", "gremlins.run_pipeline", gr_id, pipeline_path, *spawn_args]
+    def fake_spawn(cmd, cwd, env, log_path, log_mode="w"):
+        captured["subcommand"] = cmd[4]
+        captured["spawn_args"] = list(cmd[5:])
         return _Proc()
 
-    monkeypatch.setattr(launcher, "_spawn_pipeline", fake_spawn)
+    monkeypatch.setattr(launcher, "_spawn_logged_process", fake_spawn)
 
     launcher.resume(gr_id)
 
@@ -739,12 +743,13 @@ def test_run_pipeline_writes_terminal_state_on_failure(lenv, monkeypatch):
 
 def test_write_terminal_state_preserves_worktree_for_gh(lenv, monkeypatch, tmp_path):
     """On success, worktree is NOT removed for gh-mode pipelines (only explicit close/land removes it)."""
+    from gremlins.executor.state import write_terminal_state
+
     removed = []
     monkeypatch.setattr(
         "gremlins.utils.git.remove_worktree", lambda root, wd: removed.append(wd)
     )
 
-    launcher = _launcher()
     state_dir = lenv.state_root / "test-gr-id-abc123"
     state_dir.mkdir(parents=True, exist_ok=True)
     fake_workdir = tmp_path / "workdir"
@@ -755,19 +760,20 @@ def test_write_terminal_state_preserves_worktree_for_gh(lenv, monkeypatch, tmp_p
     }
     (state_dir / "state.json").write_text(json.dumps(state_json), encoding="utf-8")
 
-    launcher.write_terminal_state("test-gr-id-abc123", exit_code=0)
+    write_terminal_state("test-gr-id-abc123", exit_code=0)
 
     assert removed == [], "worktree must not be removed on exit"
 
 
 def test_write_terminal_state_preserves_worktree_for_local(lenv, monkeypatch, tmp_path):
     """On success, worktree is NOT removed for local-mode pipelines."""
+    from gremlins.executor.state import write_terminal_state
+
     removed = []
     monkeypatch.setattr(
         "gremlins.utils.git.remove_worktree", lambda root, wd: removed.append(wd)
     )
 
-    launcher = _launcher()
     state_dir = lenv.state_root / "test-gr-id-def456"
     state_dir.mkdir(parents=True, exist_ok=True)
     fake_workdir = tmp_path / "workdir"
@@ -779,19 +785,20 @@ def test_write_terminal_state_preserves_worktree_for_local(lenv, monkeypatch, tm
     }
     (state_dir / "state.json").write_text(json.dumps(state_json), encoding="utf-8")
 
-    launcher.write_terminal_state("test-gr-id-def456", exit_code=0)
+    write_terminal_state("test-gr-id-def456", exit_code=0)
 
     assert removed == [], "worktree must not be removed for local-mode pipelines"
 
 
 def test_write_terminal_state_preserves_worktree_for_boss(lenv, monkeypatch, tmp_path):
     """On success, worktree is NOT removed for boss-mode pipelines."""
+    from gremlins.executor.state import write_terminal_state
+
     removed = []
     monkeypatch.setattr(
         "gremlins.utils.git.remove_worktree", lambda root, wd: removed.append(wd)
     )
 
-    launcher = _launcher()
     state_dir = lenv.state_root / "test-gr-id-ghi789"
     state_dir.mkdir(parents=True, exist_ok=True)
     fake_workdir = tmp_path / "workdir"
@@ -803,7 +810,7 @@ def test_write_terminal_state_preserves_worktree_for_boss(lenv, monkeypatch, tmp
     }
     (state_dir / "state.json").write_text(json.dumps(state_json), encoding="utf-8")
 
-    launcher.write_terminal_state("test-gr-id-ghi789", exit_code=0)
+    write_terminal_state("test-gr-id-ghi789", exit_code=0)
 
     assert removed == [], "worktree must not be removed on exit"
 
@@ -1112,7 +1119,9 @@ def test_stage_inputs_survives_resume(lenv, monkeypatch):
     class _Proc:
         pid = 99999
 
-    monkeypatch.setattr(launcher, "_spawn_pipeline", lambda *args, **kwargs: _Proc())
+    monkeypatch.setattr(
+        launcher, "_spawn_logged_process", lambda *args, **kwargs: _Proc()
+    )
 
     launcher.resume(gr_id)
 
@@ -1137,7 +1146,7 @@ def test_launch_boss_plan_issue_ref_materializes_plan_md(lenv, monkeypatch):
     )
 
     monkeypatch.setattr(
-        launcher, "_spawn_pipeline", lambda *args, **kwargs: _FakeProc()
+        launcher, "_spawn_logged_process", lambda *args, **kwargs: _FakeProc()
     )
 
     gr_id = launcher.launch("boss", plan="#317", project_root=str(lenv.repo))
@@ -1163,7 +1172,7 @@ def test_launch_plan_issue_ref_writes_issue_url_and_num(lenv, monkeypatch):
     )
 
     monkeypatch.setattr(
-        launcher, "_spawn_pipeline", lambda *args, **kwargs: _FakeProc()
+        launcher, "_spawn_logged_process", lambda *args, **kwargs: _FakeProc()
     )
 
     gr_id = launcher.launch("boss", plan="#378", project_root=str(lenv.repo))
@@ -1181,7 +1190,7 @@ def test_launch_plan_issue_ref_writes_issue_url_and_num(lenv, monkeypatch):
 def test_launch_explicit_gr_id(lenv, monkeypatch):
     """launch(gr_id=...) uses the supplied id verbatim."""
     launcher = _launcher()
-    monkeypatch.setattr(launcher, "_spawn_pipeline", lambda *a, **kw: _FakeProc())
+    monkeypatch.setattr(launcher, "_spawn_logged_process", lambda *a, **kw: _FakeProc())
     gr_id = launcher.launch(
         "local",
         stage_inputs={"instructions": "explicit id test"},
@@ -1196,7 +1205,7 @@ def test_launch_explicit_gr_id(lenv, monkeypatch):
 def test_launch_invalid_gr_id_rejected(lenv, monkeypatch):
     """launch(gr_id=...) raises ValueError for ids that fail validate_gr_id."""
     launcher = _launcher()
-    monkeypatch.setattr(launcher, "_spawn_pipeline", lambda *a, **kw: _FakeProc())
+    monkeypatch.setattr(launcher, "_spawn_logged_process", lambda *a, **kw: _FakeProc())
     with pytest.raises(ValueError, match="illegal characters"):
         launcher.launch(
             "local",
@@ -1237,7 +1246,7 @@ def test_launch_explicit_gr_id_stale_dir_allowed(lenv, monkeypatch):
         json.dumps({"id": gr_id, "status": "running", "pid": 0}),
         encoding="utf-8",
     )
-    monkeypatch.setattr(launcher, "_spawn_pipeline", lambda *a, **kw: _FakeProc())
+    monkeypatch.setattr(launcher, "_spawn_logged_process", lambda *a, **kw: _FakeProc())
     result = launcher.launch(
         "local",
         stage_inputs={"instructions": "stale dir test"},
