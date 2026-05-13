@@ -9,7 +9,7 @@ import shutil
 import pytest
 
 from gremlins.executor.gremlin import Gremlin
-from gremlins.executor.state import State
+from gremlins.executor.state import StateData
 
 TRIVIAL_PIPELINE = """\
 stages:
@@ -59,7 +59,7 @@ def test_gremlin_run_in_process(project_dir, pipeline_yaml, test_state_root):
         rc = 0
     finally:
         os.chdir(saved_cwd)
-        State.load(gr_id).write_terminal_state(rc)
+        StateData.load(gr_id).write_terminal_state(rc)
         if worktree and worktree.is_dir():
             shutil.rmtree(worktree, ignore_errors=True)
 

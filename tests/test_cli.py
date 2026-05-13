@@ -68,7 +68,7 @@ def test_write_bail_file_creates_file(state_root, monkeypatch):
     sf = state_dir / "state.json"
     sf.write_text(json.dumps({"id": gr_id}))
 
-    state_mod.State.load(gr_id).write_bail_file(
+    state_mod.StateData.load(gr_id).write_bail_file(
         "other", "reason", attempt="test-attempt"
     )
 
@@ -86,8 +86,10 @@ def test_write_bail_file_idempotent(state_root, monkeypatch):
     sf = state_dir / "state.json"
     sf.write_text(json.dumps({"id": gr_id}))
 
-    state_mod.State.load(gr_id).write_bail_file("other", "first", attempt="attempt-1")
-    state_mod.State.load(gr_id).write_bail_file(
+    state_mod.StateData.load(gr_id).write_bail_file(
+        "other", "first", attempt="attempt-1"
+    )
+    state_mod.StateData.load(gr_id).write_bail_file(
         "security", "second", attempt="attempt-1"
     )
 
@@ -101,7 +103,7 @@ def test_write_bail_file_noop_without_attempt(state_root, monkeypatch):
     state_dir.mkdir(parents=True)
     (state_dir / "state.json").write_text(json.dumps({"id": gr_id}))
 
-    state_mod.State.load(gr_id).write_bail_file("other", "reason", attempt="")
+    state_mod.StateData.load(gr_id).write_bail_file("other", "reason", attempt="")
     bail_files = list(state_dir.glob("bail_*.json"))
     assert not bail_files
 
@@ -115,7 +117,7 @@ def test_check_bail_detects_bail_file(state_root, monkeypatch):
     (state_dir / "bail_my-attempt.json").write_text(json.dumps({"class": "other"}))
 
     with pytest.raises(RuntimeError, match="bailed"):
-        state_mod.State.load(gr_id).check_bail("test")
+        state_mod.StateData.load(gr_id).check_bail("test")
 
 
 def test_check_bail_no_bail_file(state_root, monkeypatch):
@@ -124,7 +126,7 @@ def test_check_bail_no_bail_file(state_root, monkeypatch):
     state_dir.mkdir(parents=True)
     sf = state_dir / "state.json"
     sf.write_text(json.dumps({"id": gr_id, "attempt": "my-attempt"}))
-    state_mod.State.load(gr_id).check_bail("test")  # should not raise
+    state_mod.StateData.load(gr_id).check_bail("test")  # should not raise
 
 
 def test_check_bail_stale_attempt_not_detected(state_root, monkeypatch):
@@ -134,7 +136,7 @@ def test_check_bail_stale_attempt_not_detected(state_root, monkeypatch):
     sf = state_dir / "state.json"
     sf.write_text(json.dumps({"id": gr_id, "attempt": "current-attempt"}))
     (state_dir / "bail_old-attempt.json").write_text(json.dumps({"class": "other"}))
-    state_mod.State.load(gr_id).check_bail("test")  # stale bail should not raise
+    state_mod.StateData.load(gr_id).check_bail("test")  # stale bail should not raise
 
 
 # ---------------------------------------------------------------------------
@@ -177,10 +179,10 @@ def test_run_pipeline_forwards_gr_id_to_orchestrator(
     gr_id = "test-pipeline-gr"
     state_dir = make_state_dir(gr_id)
 
-    from gremlins.executor.state import State
+    from gremlins.executor.state import StateData
 
     def fake_run_pipeline(pipeline_path, *, argv, gr_id=None, client=None):
-        State.load(gr_id).set_stage("implement")
+        StateData.load(gr_id).set_stage("implement")
         return 0
 
     monkeypatch.setattr("gremlins.executor.run.run_pipeline", fake_run_pipeline)

@@ -21,7 +21,7 @@ from typing import Any, cast
 from gremlins import paths as _paths
 from gremlins.clients.client import PACKAGE_DEFAULT
 from gremlins.executor.gremlin import Gremlin as _Gremlin
-from gremlins.executor.state import State, validate_gr_id, write_state
+from gremlins.executor.state import StateData, validate_gr_id, write_state
 from gremlins.utils import git as _git_mod
 from gremlins.utils import proc
 from gremlins.utils.github import fetch_issue, parse_issue_ref
@@ -316,7 +316,7 @@ def launch(
         raise
 
     (state_dir / "pid").write_text(str(p.pid), encoding="utf-8")
-    State.load(gr_id).patch(pid=p.pid)
+    StateData.load(gr_id).patch(pid=p.pid)
 
     return gr_id
 
@@ -415,7 +415,7 @@ def resume(gr_id: str) -> None:
     except (ValueError, TypeError):
         pass
 
-    State.load(gr_id).patch(
+    StateData.load(gr_id).patch(
         _delete=(
             "exit_code",
             "ended_at",
@@ -469,4 +469,4 @@ def resume(gr_id: str) -> None:
     )
 
     (state_dir / "pid").write_text(str(p.pid), encoding="utf-8")
-    State.load(gr_id).patch(pid=p.pid)
+    StateData.load(gr_id).patch(pid=p.pid)

@@ -15,6 +15,7 @@ from typing import Any, cast
 
 from gremlins.executor.state import (
     State,
+    StateData,
     resolve_state_file,
 )
 from gremlins.stages.base import Stage
@@ -162,7 +163,9 @@ class ParallelStage(Stage):
             gr_id=gr_id,
             project_root=pathlib.Path.cwd(),
             worktree_parent=state.worktree_parent,
-            set_stage_fn=lambda n: State.load(gr_id).set_stage(self.name, sub_stage=n),
+            set_stage_fn=lambda n: StateData.load(gr_id).set_stage(
+                self.name, sub_stage=n
+            ),
             parent_attempt=state.attempt,
         ):
             fn()
@@ -217,14 +220,14 @@ def _parallel_stages(
             )
 
     def _persist_state() -> None:
-        State.load(gr_id).patch_parallel_worktrees(
+        StateData.load(gr_id).patch_parallel_worktrees(
             group_name,
             base_head=base_head,
             paths={k: str(v) for k, v in _worktree_paths.items()},
         )
 
     def _clear_persisted_state() -> None:
-        State.load(gr_id).patch_parallel_worktrees(
+        StateData.load(gr_id).patch_parallel_worktrees(
             group_name, base_head=None, paths=None
         )
 
@@ -396,13 +399,13 @@ def _parallel_stages(
                     should_bail = bool(bailed) and len(bailed) == len(child_runners)
 
                 if should_bail and first_bail:
-                    State.load(gr_id).write_bail_file(
+                    StateData.load(gr_id).write_bail_file(
                         first_bail.get("class") or "other",
                         first_bail.get("detail") or "",
                         attempt=parent_attempt,
                     )
 
-                State.load(gr_id).patch(_delete=("parallel_attempts",))
+                StateData.load(gr_id).patch(_delete=("parallel_attempts",))
             except RuntimeError:
                 raise
             except Exception as exc:

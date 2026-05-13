@@ -836,7 +836,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
         data.update(kw)
         state_file.write_text(json.dumps(data))
 
-    monkeypatch.setattr("gremlins.executor.state.State.patch", writing_patch_state)
+    monkeypatch.setattr("gremlins.executor.state.StateData.patch", writing_patch_state)
 
     def fake_gh_run(cmd, *args, **kwargs):
         prog = cmd[0] if cmd else ""

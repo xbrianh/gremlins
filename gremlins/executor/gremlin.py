@@ -12,7 +12,7 @@ from collections.abc import Callable
 from typing import Any
 
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
-from gremlins.executor.state import State
+from gremlins.executor.state import State, StateData
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.pipeline.loader import STAGE_TYPES
@@ -162,7 +162,7 @@ class Gremlin:
                 )
                 worktree_created = workdir
                 self.worktree_dir = pathlib.Path(workdir)
-                st = State.load(self.gr_id)
+                st = StateData.load(self.gr_id)
                 st.patch(
                     workdir=workdir,
                     worktree_base=worktree_base,

@@ -6,7 +6,7 @@ import json
 import os
 import time
 
-from gremlins.executor.state import State
+from gremlins.executor.state import StateData
 from gremlins.fleet.duration import parse_duration
 from gremlins.fleet.render import FleetRow, build_row, print_table
 from gremlins.fleet.state import (
@@ -208,7 +208,7 @@ def do_drill_in(target: str) -> None:
     # declined to proceed.
     _gr_id_for_bail = str(state.get("id") or "")
     _bail_file = (
-        State.load(_gr_id_for_bail).read_bail_info() if _gr_id_for_bail else None
+        StateData.load(_gr_id_for_bail).read_bail_info() if _gr_id_for_bail else None
     )
     bail_class = (
         (_bail_file.get("class") or "")
