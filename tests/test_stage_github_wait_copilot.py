@@ -21,7 +21,7 @@ def _make_stage(
     timeout: int = 600,
     interval: int = 0,
     review_checker: Callable[[], str | None] | None = None,
-    gr_id: str | None = None,
+    gremlin_id: str | None = None,
 ) -> tuple[GitHubWaitCopilot, RuntimeState]:
     stage = GitHubWaitCopilot(
         "github-wait-copilot",
@@ -34,7 +34,7 @@ def _make_stage(
         review_checker=review_checker,
     )
     state = RuntimeState(
-        data=StateData(gr_id=gr_id),
+        data=StateData(gremlin_id=gremlin_id),
         client=FakeClaudeClient(fixtures={}),
         session_dir=tmp_path,
         repo=repo,

@@ -14,10 +14,10 @@ def do_log(target: str) -> bool:
     if match is None:
         return False
 
-    gr_id, _, wdir = match
+    gremlin_id, _, wdir = match
     log_path = os.path.join(wdir, "log")
     if not os.path.isfile(log_path):
-        sys.stderr.write(f"error: no log file for gremlin {gr_id} at {log_path}\n")
+        sys.stderr.write(f"error: no log file for gremlin {gremlin_id} at {log_path}\n")
         return False
 
     # Print the path to stderr so it survives even if the operator is piping

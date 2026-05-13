@@ -388,18 +388,18 @@ def stage_gremlins_overlay(project_root: str, state_dir: os.PathLike[str]) -> No
 
 def setup_named_worktree(
     project_root: str,
-    gr_id: str,
+    gremlin_id: str,
     base_ref_sha: str,
     *,
     worktree_parent: pathlib.Path | None = None,
 ) -> tuple[str, str]:
     if worktree_parent is not None:
         worktree_parent.mkdir(parents=True, exist_ok=True)
-        workdir = str(worktree_parent / gr_id)
+        workdir = str(worktree_parent / gremlin_id)
     else:
         workdir = tempfile.mkdtemp(prefix="aibg-localgremlin.")
         os.rmdir(workdir)
-    branch = f"bg/local/{gr_id}"
+    branch = f"bg/local/{gremlin_id}"
     _run_git(
         ["worktree", "add", "-b", branch, workdir, base_ref_sha or "HEAD"],
         cwd=project_root,
@@ -411,7 +411,7 @@ def setup_workdir(
     setup_kind: str,
     project_root: str,
     base_ref_sha: str,
-    gr_id: str,
+    gremlin_id: str,
     state_dir: os.PathLike[str],
     *,
     worktree_parent: pathlib.Path | None = None,
@@ -421,7 +421,7 @@ def setup_workdir(
 
     if setup_kind == "worktree-branch":
         workdir, branch = setup_named_worktree(
-            project_root, gr_id, base_ref_sha, worktree_parent=worktree_parent
+            project_root, gremlin_id, base_ref_sha, worktree_parent=worktree_parent
         )
         stage_gremlins_overlay(project_root, state_dir)
         return workdir, branch, "", "worktree-branch"

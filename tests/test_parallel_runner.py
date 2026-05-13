@@ -41,7 +41,7 @@ def _make_parallel_stages(
     set_stage_fn=None,
     cancel_on_bail: bool = False,
     bail_policy: str = "any",
-    gr_id=None,
+    gremlin_id=None,
     project_root: pathlib.Path | None = None,
 ) -> list:
     if set_stage_fn is None:
@@ -59,7 +59,7 @@ def _make_parallel_stages(
         bail_policy=bail_policy,
     ).build_runtime_stages(
         child_runners,
-        gr_id=gr_id,
+        gremlin_id=gremlin_id,
         project_root=project_root,
         set_stage_fn=set_stage_fn,
     )

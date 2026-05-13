@@ -87,8 +87,8 @@ def _unique_clients(stages: list[Stage]) -> list[Client]:
     return result
 
 
-def _read_state_json(gr_id: str | None) -> dict[str, Any]:
-    sf = resolve_state_file(gr_id)
+def _read_state_json(gremlin_id: str | None) -> dict[str, Any]:
+    sf = resolve_state_file(gremlin_id)
     if sf is None or not sf.exists():
         return {}
     return json.loads(sf.read_text(encoding="utf-8"))
@@ -98,7 +98,7 @@ def run_pipeline(
     pipeline_path: pathlib.Path,
     *,
     argv: list[str],
-    gr_id: str | None = None,
+    gremlin_id: str | None = None,
     client: Client | None = None,
 ) -> int:
     """Load pipeline YAML, build Gremlin, run. Sole internal pipeline entry point."""
@@ -123,7 +123,7 @@ def run_pipeline(
             f"gremlins requires a git repository; {pathlib.Path.cwd()} is not inside a git worktree"
         )
 
-    state_json = _read_state_json(gr_id)
+    state_json = _read_state_json(gremlin_id)
     _workdir = str(state_json.get("workdir") or "")
     worktree_dir = pathlib.Path(_workdir) if _workdir else None
     project_root = str(state_json.get("project_root") or "")
@@ -134,12 +134,12 @@ def run_pipeline(
         stage_inputs.get("instructions") or " ".join(args.instructions or [])
     )
 
-    session_dir = resolve_session_dir(gr_id)
+    session_dir = resolve_session_dir(gremlin_id)
     state_dir = session_dir.parent
 
     try:
         gremlin = Gremlin.build(
-            gr_id=gr_id,
+            gremlin_id=gremlin_id,
             state_dir=state_dir,
             session_dir=session_dir,
             project_dir=pathlib.Path(project_root)
@@ -168,7 +168,7 @@ def run_pipeline(
         if shutil.which("gh") is None:
             die("gh CLI not found")
         gremlin.repo = get_repo()
-        gremlin.state_file = resolve_state_file(gr_id)
+        gremlin.state_file = resolve_state_file(gremlin_id)
 
     _stage_clients = _unique_clients(gremlin.stages)
     _signal_clients = [client] if client is not None else _stage_clients
@@ -212,10 +212,12 @@ def run_pipeline(
     for c in [client] if client else _stage_clients:
         total_cost += getattr(c, "total_cost_usd", 0.0) or 0.0
     if total_cost > 0:
-        StateData.load(gr_id).patch(total_cost_usd=total_cost)
+        StateData.load(gremlin_id).patch(total_cost_usd=total_cost)
 
     if gh:
-        logger.info("done. PR: %s", StateData.load(gr_id).read_pr_url() or "(unknown)")
+        logger.info(
+            "done. PR: %s", StateData.load(gremlin_id).read_pr_url() or "(unknown)"
+        )
     else:
         logger.info("done. session artifacts in: %s", session_dir)
     if total_cost > 0:

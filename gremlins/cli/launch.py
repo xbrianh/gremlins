@@ -142,29 +142,31 @@ def _self_background_main(
 ) -> int:
     pipeline_args = ("--client", args.client) if args.client else ()
     try:
-        gr_id = launch(
+        gremlin_id = launch(
             pipeline_name,
             stage_inputs=stage_inputs,
             description=args.description,
             parent_id=args.parent_id,
             base_ref=args.base_ref,
             pipeline_args=pipeline_args,
-            gr_id=args.gremlin_id,
+            gremlin_id=args.gremlin_id,
         )
     except (ValueError, RuntimeError) as exc:
         sys.stderr.write(f"error: {exc}\n")
         return 1
 
     state_root = _paths.state_root()
-    state_dir = state_root / gr_id
+    state_dir = state_root / gremlin_id
     log_path = state_dir / "log"
     sf = state_dir / "state.json"
 
     if args.print_id_only:
-        sys.stdout.write(gr_id + "\n")
+        sys.stdout.write(gremlin_id + "\n")
     else:
-        info = f"gremlin id:  {gr_id}\nlog:         {log_path}\nstate file:  {sf}\n"
+        info = (
+            f"gremlin id:  {gremlin_id}\nlog:         {log_path}\nstate file:  {sf}\n"
+        )
         sys.stderr.write(info)
         if args.print_id:
-            sys.stdout.write(gr_id + "\n")
+            sys.stdout.write(gremlin_id + "\n")
     return 0

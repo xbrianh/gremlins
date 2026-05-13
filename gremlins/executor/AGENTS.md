@@ -6,7 +6,7 @@ Internal pipeline execution package.
 
 - `state.py` — `State` class: execution context + `state.json` I/O
   (`resolve_session_dir`, `resolve_state_file`, `patch_state`,
-  `read_pr_url`, `validate_gr_id`).
+  `read_pr_url`, `validate_gremlin_id`).
 - `run.py` — `run_pipeline`: unified pipeline entry point. Parses argv, loads
   the pipeline YAML, wires clients, and delegates to `Gremlin`.
   Called by `gremlins.run_pipeline` (the subprocess entry point).
@@ -17,7 +17,7 @@ Internal pipeline execution package.
 ## Layering
 
 The launcher (`gremlins/launcher.py`) does the minimum work required to fork a
-detached child: picks a `gr_id`, derives the state-dir path, writes a
+detached child: picks a `gremlin_id`, derives the state-dir path, writes a
 preliminary `state.json`, and redirects logging. It does **not** create the
 git worktree.
 

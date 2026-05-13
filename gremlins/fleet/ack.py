@@ -21,16 +21,16 @@ def _set_external_outcome(target: str, outcome: str) -> bool:
     if match is None:
         return False
 
-    gr_id, sf, _wdir = match
+    gremlin_id, sf, _wdir = match
     state = load_state(sf)
     if not state:
-        print(f"error: could not read state for {gr_id}", file=sys.stderr)
+        print(f"error: could not read state for {gremlin_id}", file=sys.stderr)
         return False
 
     status = state.get("status")
     if status != "bailed":
         print(
-            f"error: {gr_id} is not bailed (status={status!r})"
+            f"error: {gremlin_id} is not bailed (status={status!r})"
             " — ack/skip only apply to bailed gremlins",
             file=sys.stderr,
         )
@@ -40,5 +40,5 @@ def _set_external_outcome(target: str, outcome: str) -> bool:
         print(f"error: could not write to {sf}", file=sys.stderr)
         return False
 
-    print(f"{gr_id}: external_outcome={outcome!r}")
+    print(f"{gremlin_id}: external_outcome={outcome!r}")
     return True

@@ -260,7 +260,7 @@ def write_rescue_report(wdir: str, report: dict[str, Any]) -> None:
         ts = datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%S_%fZ")
         path = os.path.join(wdir, f"rescue-{ts}-{os.getpid()}.md")
         state: dict[str, Any] = report.get("state") or {}
-        gr_id = state.get("id") or os.path.basename(wdir)
+        gremlin_id = state.get("id") or os.path.basename(wdir)
         kind = state.get("kind") or ""
         description = state.get("description") or ""
         stage = state.get("stage") or ""
@@ -294,7 +294,7 @@ def write_rescue_report(wdir: str, report: dict[str, Any]) -> None:
             "",
             "## Gremlin Context",
             "",
-            f"- ID: {gr_id}",
+            f"- ID: {gremlin_id}",
             f"- Kind: {kind or '(unknown)'}",
             f"- Description: {description or '(none)'}",
             f"- Failed stage: {stage or '(unknown)'}",
@@ -441,8 +441,8 @@ def _recreate_worktree(state: dict[str, Any]) -> tuple[bool, str]:
     Returns (success: bool, detail: str).
     """
     workdir = state.get("workdir") or ""
-    gr_id_val = str(state.get("id") or "")
-    branch = StateData.load(gr_id_val).last_artifact_branch()
+    gremlin_id_val = str(state.get("id") or "")
+    branch = StateData.load(gremlin_id_val).last_artifact_branch()
     worktree_base = state.get("worktree_base") or ""
     project_root = state.get("project_root") or ""
 
@@ -483,23 +483,23 @@ def do_rescue(target: str, headless: bool = False, from_boss: bool = False) -> b
     if match is None:
         return False
 
-    gr_id, sf, wdir = match
+    gremlin_id, sf, wdir = match
     state = load_state(sf)
     if not state:
-        print(f"error: could not read state for {gr_id}")
+        print(f"error: could not read state for {gremlin_id}")
         return False
 
     live = liveness_of_state_file(sf, state)
 
     if live == "running":
-        print(f"gremlin {gr_id} is still running — use 'stop' first, then rescue")
+        print(f"gremlin {gremlin_id} is still running — use 'stop' first, then rescue")
         return False
     if live == "finished":
-        print(f"gremlin {gr_id} finished successfully — nothing to rescue")
+        print(f"gremlin {gremlin_id} finished successfully — nothing to rescue")
         return False
     if live.startswith("stalled:"):
         print(
-            f"gremlin {gr_id} is stalled but its process is still alive — stopping it first..."
+            f"gremlin {gremlin_id} is stalled but its process is still alive — stopping it first..."
         )
         if not do_stop(target):
             print("error: could not stop the stalled gremlin — aborting rescue")
@@ -512,12 +512,14 @@ def do_rescue(target: str, headless: bool = False, from_boss: bool = False) -> b
 
     workdir = state.get("workdir")
     if not workdir:
-        print(f"error: no workdir recorded in state for {gr_id} — cannot rescue")
+        print(f"error: no workdir recorded in state for {gremlin_id} — cannot rescue")
         return False
 
     if live == "dead:host-terminated":
         project_root_check: str = str(state.get("project_root") or "")
-        print(f"gremlin {gr_id}: worktree is gone (host likely terminated externally)")
+        print(
+            f"gremlin {gremlin_id}: worktree is gone (host likely terminated externally)"
+        )
         if not project_root_check or not os.path.isdir(project_root_check):
             detail = (
                 f"project_root {project_root_check!r} is also gone — "
@@ -532,7 +534,7 @@ def do_rescue(target: str, headless: bool = False, from_boss: bool = False) -> b
         if not recreated:
             msg = f"worktree recreation failed: {detail}"
             print(f"  {msg}")
-            print(f"  use 'gremlins rm {gr_id}' to clean up")
+            print(f"  use 'gremlins rm {gremlin_id}' to clean up")
             if headless:
                 _write_bail(sf, wdir, "host_terminated_unrecoverable", msg)
             return False
@@ -545,9 +547,11 @@ def do_rescue(target: str, headless: bool = False, from_boss: bool = False) -> b
     except (ValueError, TypeError):
         rescue_count = 0
 
-    _gr_id_for_bail = str(state.get("id") or "")
+    _gremlin_id_for_bail = str(state.get("id") or "")
     _bail_file_data = (
-        StateData.load(_gr_id_for_bail).read_bail_info() if _gr_id_for_bail else None
+        StateData.load(_gremlin_id_for_bail).read_bail_info()
+        if _gremlin_id_for_bail
+        else None
     )
     bail_class = (
         (_bail_file_data.get("class") or "")
@@ -691,7 +695,7 @@ def do_rescue(target: str, headless: bool = False, from_boss: bool = False) -> b
 
             prompt = build_rescue_prompt(state, log_tail, sf, scratch_log, marker_path)
 
-            print(f"Rescuing gremlin {gr_id} (stage: {stage}, liveness: {live})")
+            print(f"Rescuing gremlin {gremlin_id} (stage: {stage}, liveness: {live})")
             print(f"Gremlin workdir: {workdir}")
             print(f"Agent scratch dir: {scratch_dir}")
 
@@ -896,10 +900,10 @@ def do_rescue(target: str, headless: bool = False, from_boss: bool = False) -> b
         # Relaunch step: call the Python launcher's resume() to re-spawn the
         # pipeline under the same GR_ID with --resume-from <stage>.
         print()
-        print(f"Relaunch step: resuming gremlin {gr_id} in the background...")
+        print(f"Relaunch step: resuming gremlin {gremlin_id} in the background...")
         report["relaunch_attempted"] = True
         try:
-            _resume(gr_id)
+            _resume(gremlin_id)
         except GremlinAlreadyRunning as exc:
             detail = str(exc)
             # The gremlin is already running — skip relaunch regardless of how it got there.

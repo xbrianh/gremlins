@@ -32,24 +32,24 @@ BAIL_CLASS_SECRETS = "secrets"
 BAIL_CLASS_OTHER = "other"
 
 
-def validate_gr_id(gr_id: str) -> None:
-    """Raise ValueError if gr_id is not a safe, non-path-traversing identifier."""
-    if ".." in gr_id or not _GR_ID_RE.match(gr_id):
-        raise ValueError(f"gr_id contains illegal characters: {gr_id!r}")
+def validate_gremlin_id(gremlin_id: str) -> None:
+    """Raise ValueError if gremlin_id is not a safe, non-path-traversing identifier."""
+    if ".." in gremlin_id or not _GR_ID_RE.match(gremlin_id):
+        raise ValueError(f"gremlin_id contains illegal characters: {gremlin_id!r}")
 
 
-def resolve_state_file(gr_id: str | None) -> pathlib.Path | None:
-    """Return path to state.json for gr_id, or None when gr_id is absent."""
-    if not gr_id:
+def resolve_state_file(gremlin_id: str | None) -> pathlib.Path | None:
+    """Return path to state.json for gremlin_id, or None when gremlin_id is absent."""
+    if not gremlin_id:
         return None
-    return _paths.state_root() / gr_id / "state.json"
+    return _paths.state_root() / gremlin_id / "state.json"
 
 
-def resolve_session_dir(gr_id: str | None = None) -> pathlib.Path:
+def resolve_session_dir(gremlin_id: str | None = None) -> pathlib.Path:
     """Resolve the artifacts directory for the current run."""
     state_root = _paths.state_root()
-    if gr_id:
-        session_dir = state_root / gr_id / "artifacts"
+    if gremlin_id:
+        session_dir = state_root / gremlin_id / "artifacts"
     else:
         ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         rand = secrets.token_hex(3)
@@ -120,7 +120,7 @@ def _read_state_json(sf: pathlib.Path | None) -> dict[str, Any]:
 
 @dataclasses.dataclass
 class StateData:
-    gr_id: str | None = None
+    gremlin_id: str | None = None
     state_file: pathlib.Path | None = None
     issue_url: str = ""
     base_ref_name: str = ""
@@ -147,11 +147,11 @@ class StateData:
     stage_inputs: dict[str, Any] = dataclasses.field(default_factory=dict[str, Any])
 
     @classmethod
-    def load(cls, gr_id: str | None) -> StateData:
-        sf = resolve_state_file(gr_id)
+    def load(cls, gremlin_id: str | None) -> StateData:
+        sf = resolve_state_file(gremlin_id)
         sd = _read_state_json(sf)
         return cls(
-            gr_id=gr_id,
+            gremlin_id=gremlin_id,
             state_file=sf,
             issue_url=sd.get("issue_url") or "",
             base_ref_name=sd.get("base_ref_name") or "",
@@ -179,10 +179,10 @@ class StateData:
         )
 
     def persist(self, state_dir: pathlib.Path) -> None:
-        if not self.gr_id:
-            raise ValueError("cannot persist StateData with no gr_id")
+        if not self.gremlin_id:
+            raise ValueError("cannot persist StateData with no gremlin_id")
         data: dict[str, Any] = {
-            "id": self.gr_id,
+            "id": self.gremlin_id,
             "loop_iteration": self.loop_iteration,
             "attempt": self.attempt,
             "kind": self.kind,
@@ -211,7 +211,7 @@ class StateData:
         self.state_file = state_dir / "state.json"
 
     def patch(self, _delete: tuple[str, ...] = (), **fields: object) -> None:
-        sf = self.state_file or resolve_state_file(self.gr_id)
+        sf = self.state_file or resolve_state_file(self.gremlin_id)
         if sf is None or not sf.exists():
             return
         try:
@@ -226,7 +226,7 @@ class StateData:
             pass
 
     def read_str(self, field: str) -> str:
-        sf = self.state_file or resolve_state_file(self.gr_id)
+        sf = self.state_file or resolve_state_file(self.gremlin_id)
         if sf is None or not sf.exists():
             return ""
         try:
@@ -240,7 +240,7 @@ class StateData:
         try:
             target_stage = parent_stage if parent_stage else stage
             target_sub = stage if parent_stage else sub_stage
-            if not target_stage or not self.gr_id:
+            if not target_stage or not self.gremlin_id:
                 return
             now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
             if target_sub is not None:
@@ -257,7 +257,7 @@ class StateData:
     def write_bail_file(
         self, bail_class: str, bail_detail: str = "", *, attempt: str = ""
     ) -> None:
-        sf = self.state_file or resolve_state_file(self.gr_id)
+        sf = self.state_file or resolve_state_file(self.gremlin_id)
         if sf is None or not sf.exists() or not attempt or not bail_class:
             return
         try:
@@ -280,7 +280,7 @@ class StateData:
             pass
 
     def check_bail(self, label: str = "stage", *, child_key: str | None = None) -> None:
-        sf = self.state_file or resolve_state_file(self.gr_id)
+        sf = self.state_file or resolve_state_file(self.gremlin_id)
         if sf is None or not sf.exists():
             return
         try:
@@ -298,7 +298,7 @@ class StateData:
             pass
 
     def append_artifact(self, artifact: dict[str, Any]) -> None:
-        sf = self.state_file or resolve_state_file(self.gr_id)
+        sf = self.state_file or resolve_state_file(self.gremlin_id)
         if sf is None or not sf.exists():
             return
         try:
@@ -313,7 +313,7 @@ class StateData:
             logger.warning("failed to append artifact", exc_info=True)
 
     def read_bail_info(self) -> dict[str, str] | None:
-        sf = self.state_file or resolve_state_file(self.gr_id)
+        sf = self.state_file or resolve_state_file(self.gremlin_id)
         if sf is None or not sf.exists():
             return None
         try:
@@ -329,7 +329,7 @@ class StateData:
             return None
 
     def read_artifacts(self) -> list[dict[str, Any]]:
-        sf = self.state_file or resolve_state_file(self.gr_id)
+        sf = self.state_file or resolve_state_file(self.gremlin_id)
         if sf is None or not sf.exists():
             return []
         try:
@@ -370,9 +370,9 @@ class StateData:
         base_head: str | None,
         paths: dict[str, str] | None,
     ) -> None:
-        if not self.gr_id or not group_name:
+        if not self.gremlin_id or not group_name:
             return
-        sf = self.state_file or resolve_state_file(self.gr_id)
+        sf = self.state_file or resolve_state_file(self.gremlin_id)
         if sf is None or not sf.exists():
             return
         try:
@@ -396,7 +396,7 @@ class StateData:
             pass
 
     def patch_parallel_attempt(self, child_key: str, attempt: str) -> None:
-        sf = self.state_file or resolve_state_file(self.gr_id)
+        sf = self.state_file or resolve_state_file(self.gremlin_id)
         if sf is None or not sf.exists() or not attempt:
             return
         try:
@@ -411,9 +411,9 @@ class StateData:
             pass
 
     def write_terminal_state(self, exit_code: int) -> None:
-        if not self.gr_id:
+        if not self.gremlin_id:
             return
-        sf = self.state_file or resolve_state_file(self.gr_id)
+        sf = self.state_file or resolve_state_file(self.gremlin_id)
         if sf is None:
             return
         state_dir = sf.parent
@@ -449,7 +449,7 @@ class State:
     def setup_dirs(
         state_dir: pathlib.Path,
         session_dir: pathlib.Path,
-        gr_id: str | None,
+        gremlin_id: str | None,
         *,
         instructions: str = "",
     ) -> None:
@@ -457,8 +457,8 @@ class State:
         session_dir.mkdir(parents=True, exist_ok=True)
         (state_dir / "instructions.txt").write_text(instructions, encoding="utf-8")
         sf = state_dir / "state.json"
-        if gr_id and not sf.exists():
-            write_state(state_dir, {"id": gr_id})
+        if gremlin_id and not sf.exists():
+            write_state(state_dir, {"id": gremlin_id})
 
     @property
     def cwd(self) -> pathlib.Path:
@@ -470,8 +470,8 @@ class State:
         scope: list[Stage] | None = None,
     ) -> Callable[[], None]:
         base_state = self
-        gr_id = self.data.gr_id
-        attempt = f"{entry.name}-{secrets.token_hex(4)}" if gr_id else ""
+        gremlin_id = self.data.gremlin_id
+        attempt = f"{entry.name}-{secrets.token_hex(4)}" if gremlin_id else ""
         scope_list = list(scope) if scope is not None else []
 
         def _run() -> None:
@@ -483,7 +483,7 @@ class State:
                     )
                 else:
                     base_state.data.patch(attempt=attempt)
-            loaded = StateData.load(gr_id)
+            loaded = StateData.load(gremlin_id)
             if attempt:
                 loaded = dataclasses.replace(loaded, attempt=attempt)
             state = dataclasses.replace(

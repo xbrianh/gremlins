@@ -20,10 +20,10 @@ def _make_state(
     client: FakeClaudeClient,
     tmp_path: pathlib.Path,
     *,
-    gr_id: str | None = None,
+    gremlin_id: str | None = None,
 ) -> RuntimeState:
     return RuntimeState(
-        data=StateData(gr_id=gr_id),
+        data=StateData(gremlin_id=gremlin_id),
         client=client,
         session_dir=tmp_path,
         pipeline_data=_gh_pipeline(),
@@ -34,7 +34,7 @@ def _make_gh_review(
     client: FakeClaudeClient,
     tmp_path: pathlib.Path,
     *,
-    gr_id: str | None = None,
+    gremlin_id: str | None = None,
     pr_url: str,
 ) -> GitHubReviewPullRequest:
     prompts = [
@@ -90,7 +90,7 @@ def test_gh_review_parallel_child_uses_new_bail_command(
         client, tmp_path, pr_url="https://github.com/owner/repo/pull/1"
     )
     state = RuntimeState(
-        data=StateData(gr_id="gr-123"),
+        data=StateData(gremlin_id="gr-123"),
         client=client,
         session_dir=tmp_path,
         child_key="review-child",
@@ -106,7 +106,7 @@ def _make_gh_address(
     client: FakeClaudeClient,
     tmp_path: pathlib.Path,
     *,
-    gr_id: str | None = None,
+    gremlin_id: str | None = None,
     pr_url: str,
 ) -> GitHubAddressPullRequestReviews:
     prompts = [
@@ -160,7 +160,7 @@ def test_gh_address_parallel_child_uses_new_bail_command(
         client, tmp_path, pr_url="https://github.com/owner/repo/pull/1"
     )
     state = RuntimeState(
-        data=StateData(gr_id="gr-123"),
+        data=StateData(gremlin_id="gr-123"),
         client=client,
         session_dir=tmp_path,
         child_key="address-child",

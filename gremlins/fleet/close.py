@@ -11,20 +11,22 @@ def do_close(target: str) -> bool:
     if match is None:
         return False
 
-    gr_id, sf, wdir = match
+    gremlin_id, sf, wdir = match
     state = load_state(sf)
     if not state:
-        print(f"error: could not read state for {gr_id}")
+        print(f"error: could not read state for {gremlin_id}")
         return False
 
     live = liveness_of_state_file(sf, state)
     if live == "running" or live.startswith("stalled:"):
-        print(f"gremlin {gr_id} is still live ({live}) — use 'stop' first, then close")
+        print(
+            f"gremlin {gremlin_id} is still live ({live}) — use 'stop' first, then close"
+        )
         return False
 
     closed_marker = os.path.join(wdir, "closed")
     if os.path.isfile(closed_marker):
-        print(f"gremlin {gr_id} already closed")
+        print(f"gremlin {gremlin_id} already closed")
         return True
 
     try:
@@ -34,5 +36,5 @@ def do_close(target: str) -> bool:
         print(f"error: could not write closed marker: {e}")
         return False
 
-    print(f"closed {gr_id} ({live})")
+    print(f"closed {gremlin_id} ({live})")
     return True

@@ -4,7 +4,7 @@ Public API:
     launch(kind, *, stage_inputs=None, plan=None, description=None,
            parent_id=None, project_root=None, base_ref="HEAD",
            pipeline_args=()) -> str
-    resume(gr_id) -> None
+    resume(gremlin_id) -> None
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from typing import Any, cast
 from gremlins import paths as _paths
 from gremlins.clients.client import PACKAGE_DEFAULT
 from gremlins.executor.gremlin import Gremlin as _Gremlin
-from gremlins.executor.state import StateData, validate_gr_id
+from gremlins.executor.state import StateData, validate_gremlin_id
 from gremlins.utils import git as _git_mod
 from gremlins.utils import proc
 from gremlins.utils.github import fetch_issue, parse_issue_ref
@@ -87,21 +87,21 @@ def _resolve_description_and_slug(
     return "", False, "gremlin"
 
 
-def _build_spawn_env(gr_id: str) -> dict[str, str]:
+def _build_spawn_env(gremlin_id: str) -> dict[str, str]:
     env = os.environ.copy()
     pkg_root = str(pathlib.Path(__file__).resolve().parent.parent)
     existing_pp = env.get("PYTHONPATH", "")
     parts = [p for p in [pkg_root, existing_pp] if p]
     env["PYTHONPATH"] = os.pathsep.join(parts)
     env["PYTHONSAFEPATH"] = "1"
-    env["GR_ID"] = gr_id
-    env["GREMLINS_OVERLAY_DIR"] = str(_state_root() / gr_id / ".gremlins")
+    env["GR_ID"] = gremlin_id
+    env["GREMLINS_OVERLAY_DIR"] = str(_state_root() / gremlin_id / ".gremlins")
     return env
 
 
 @dataclasses.dataclass
 class _Inputs:
-    gr_id: str
+    gremlin_id: str
     kind: str
     plan: str | None
     instructions: str
@@ -154,10 +154,10 @@ def _validate_plan_args(
     return plan, spec_path
 
 
-def _resolve_gr_id(slug: str, gr_id: str | None) -> str:
-    if gr_id is not None:
-        validate_gr_id(gr_id)
-        _existing = _state_root() / gr_id
+def _resolve_gremlin_id(slug: str, gremlin_id: str | None) -> str:
+    if gremlin_id is not None:
+        validate_gremlin_id(gremlin_id)
+        _existing = _state_root() / gremlin_id
         if _existing.is_dir():
             _sf = _existing / "state.json"
             if _sf.is_file():
@@ -178,9 +178,9 @@ def _resolve_gr_id(slug: str, gr_id: str | None) -> str:
                         pass
                     else:
                         raise GremlinAlreadyRunning(
-                            f"gremlin {gr_id!r} is already running (pid {_pid})"
+                            f"gremlin {gremlin_id!r} is already running (pid {_pid})"
                         )
-        return gr_id
+        return gremlin_id
     return f"{slug}-{secrets.token_hex(3)}"
 
 
@@ -220,7 +220,7 @@ def _resolve_inputs(
     base_ref: str | None,
     pipeline_args: tuple[str, ...],
     spec_path: str | None,
-    gr_id: str | None,
+    gremlin_id: str | None,
 ) -> _Inputs:
     from gremlins.cli.pipeline_args import launch_client_label, resolve_pipeline
 
@@ -241,7 +241,7 @@ def _resolve_inputs(
         issue_title=str((issue_data or {}).get("title") or ""),
     )
 
-    resolved_gr_id = _resolve_gr_id(slug, gr_id)
+    resolved_gremlin_id = _resolve_gremlin_id(slug, gremlin_id)
 
     if project_root is None:
         r = proc.run(["git", "rev-parse", "--show-toplevel"])
@@ -254,11 +254,11 @@ def _resolve_inputs(
         kind, pipeline_args, project_root
     )
 
-    state_dir = _state_root() / resolved_gr_id
+    state_dir = _state_root() / resolved_gremlin_id
     loaded_pipeline = None
     try:
         _gremlin = _Gremlin.build(
-            gr_id=resolved_gr_id,
+            gremlin_id=resolved_gremlin_id,
             state_dir=state_dir,
             project_dir=pathlib.Path(project_root),
             pipeline_ref=pipeline_path,
@@ -292,7 +292,7 @@ def _resolve_inputs(
     )
 
     return _Inputs(
-        gr_id=resolved_gr_id,
+        gremlin_id=resolved_gremlin_id,
         kind=kind,
         plan=plan,
         instructions=instructions or "",
@@ -327,7 +327,7 @@ def _initial_state_data(inputs: _Inputs) -> StateData:
     issue_url = str(inputs.issue_data.get("url", "")) if inputs.issue_data else ""
     issue_num = str(inputs.issue_data.get("number", "")) if inputs.issue_data else ""
     return StateData(
-        gr_id=inputs.gr_id,
+        gremlin_id=inputs.gremlin_id,
         kind=inputs.kind,
         project_root=inputs.project_root,
         workdir="",
@@ -352,7 +352,7 @@ def _initial_state_data(inputs: _Inputs) -> StateData:
     )
 
 
-def _spawn(gr_id: str, inputs: _Inputs, state_dir: pathlib.Path) -> Any:
+def _spawn(gremlin_id: str, inputs: _Inputs, state_dir: pathlib.Path) -> Any:
     spawn_args = list(inputs.pipeline_args)
     if inputs.instructions:
         spawn_args.append(inputs.instructions)
@@ -360,12 +360,12 @@ def _spawn(gr_id: str, inputs: _Inputs, state_dir: pathlib.Path) -> Any:
         sys.executable,
         "-m",
         "gremlins.run_pipeline",
-        gr_id,
+        gremlin_id,
         inputs.pipeline_path,
         *spawn_args,
     ]
     return _spawn_logged_process(
-        cmd, inputs.project_root, _build_spawn_env(gr_id), state_dir / "log"
+        cmd, inputs.project_root, _build_spawn_env(gremlin_id), state_dir / "log"
     )
 
 
@@ -380,7 +380,7 @@ def launch(
     base_ref: str | None = None,
     pipeline_args: tuple[str, ...] = (),
     spec_path: str | None = None,
-    gr_id: str | None = None,
+    gremlin_id: str | None = None,
 ) -> str:
     """Set up state dir, spawn the pipeline detached, return gremlin id.
 
@@ -398,30 +398,30 @@ def launch(
         base_ref,
         pipeline_args,
         spec_path,
-        gr_id,
+        gremlin_id,
     )
-    state_dir = _state_root() / inputs.gr_id
+    state_dir = _state_root() / inputs.gremlin_id
     try:
         _prepare_state_dir(state_dir, inputs)
         sd = _initial_state_data(inputs)
         sd.persist(state_dir)
-        p = _spawn(inputs.gr_id, inputs, state_dir)
+        p = _spawn(inputs.gremlin_id, inputs, state_dir)
     except Exception:
         shutil.rmtree(state_dir, ignore_errors=True)
         raise
 
     (state_dir / "pid").write_text(str(p.pid), encoding="utf-8")
-    StateData.load(inputs.gr_id).patch(pid=p.pid)
+    StateData.load(inputs.gremlin_id).patch(pid=p.pid)
 
-    return inputs.gr_id
+    return inputs.gremlin_id
 
 
-def resume(gr_id: str) -> None:
+def resume(gremlin_id: str) -> None:
     """Re-spawn the pipeline for an existing gremlin from its recorded stage.
 
     Raises RuntimeError on precondition violations or spawn failure.
     """
-    state_dir = _state_root() / gr_id
+    state_dir = _state_root() / gremlin_id
     sf = state_dir / "state.json"
     if not state_dir.is_dir() or not sf.is_file():
         raise RuntimeError(f"no state at {state_dir}")
@@ -447,13 +447,15 @@ def resume(gr_id: str) -> None:
         try:
             os.kill(int(old_pid), 0)
             raise GremlinAlreadyRunning(
-                f"gremlin {gr_id} is still running (pid {old_pid}) — stop it first"
+                f"gremlin {gremlin_id} is still running (pid {old_pid}) — stop it first"
             )
         except (OSError, ValueError):
             pass  # process is gone
 
     if (state_dir / "finished").is_file() and exit_code == 0:
-        raise RuntimeError(f"gremlin {gr_id} finished successfully — nothing to resume")
+        raise RuntimeError(
+            f"gremlin {gremlin_id} finished successfully — nothing to resume"
+        )
 
     pipeline_args = cast(list[str], state.get("pipeline_args") or [])
     pipeline_path = str(state.get("pipeline_path") or "")
@@ -469,7 +471,7 @@ def resume(gr_id: str) -> None:
     if pipeline_path:
         try:
             _gremlin_resume = _Gremlin.build(
-                gr_id=gr_id,
+                gremlin_id=gremlin_id,
                 state_dir=state_dir,
                 project_dir=pathlib.Path(project_root),
                 pipeline_ref=pipeline_path,
@@ -510,7 +512,7 @@ def resume(gr_id: str) -> None:
     except (ValueError, TypeError):
         pass
 
-    StateData.load(gr_id).patch(
+    StateData.load(gremlin_id).patch(
         _delete=(
             "exit_code",
             "ended_at",
@@ -555,13 +557,13 @@ def resume(gr_id: str) -> None:
         sys.executable,
         "-m",
         "gremlins.run_pipeline",
-        gr_id,
+        gremlin_id,
         pipeline_path,
         *spawn_args,
     ]
     p = _spawn_logged_process(
-        cmd, project_root, _build_spawn_env(gr_id), state_dir / "log", log_mode="a"
+        cmd, project_root, _build_spawn_env(gremlin_id), state_dir / "log", log_mode="a"
     )
 
     (state_dir / "pid").write_text(str(p.pid), encoding="utf-8")
-    StateData.load(gr_id).patch(pid=p.pid)
+    StateData.load(gremlin_id).patch(pid=p.pid)
