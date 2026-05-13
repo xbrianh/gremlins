@@ -14,11 +14,27 @@ from typing import Any
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
 from gremlins.executor.state import State
 from gremlins.pipeline import Pipeline as _PipelineData
+from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.pipeline.loader import STAGE_TYPES
 from gremlins.stages.base import Stage
 from gremlins.utils import git as _git_mod
 
 logger = logging.getLogger(__name__)
+
+
+def _apply_client_override(stages: list[Stage], cli: Client) -> None:
+    for stage in stages:
+        stage.client = cli
+        if stage.body:
+            _apply_client_override(stage.body, cli)
+
+
+def _propagate_client_models(stages: list[Stage]) -> None:
+    for stage in stages:
+        if stage.model is None and stage.client is not None:
+            stage.model = stage.client.model
+        if stage.body:
+            _propagate_client_models(stage.body)
 
 
 def read_stage_inputs(sf: pathlib.Path | None) -> dict[str, Any]:
@@ -220,3 +236,61 @@ class Gremlin:
             raise RuntimeError("call initialize_runtime() before run()")
         built = self._collect_stages(self.stages)
         run_stages(built, resume_from=self.resume_from)
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        gr_id: str | None,
+        state_dir: pathlib.Path,
+        worktree_parent: pathlib.Path,
+        pipeline_ref: str,
+        session_dir: pathlib.Path | None = None,
+        instructions: str = "",
+        stage_inputs: dict[str, Any] | None = None,
+        resume_from: str | None = None,
+        plan: str | None = None,
+        spec: str | None = None,
+        cmds: list[str] | None = None,
+        test_max_attempts: int = 3,
+        repo: str = "",
+        state_file: pathlib.Path | None = None,
+        test_client: Client | None = None,
+        project_root: str = "",
+        base_ref_sha: str = "",
+        setup_kind: str = "worktree-branch",
+        worktree_dir: pathlib.Path | None = None,
+        client_label: str = "",
+    ) -> "Gremlin":
+        """Resolve pipeline_ref, load pipeline, and return a constructed Gremlin.
+
+        pipeline_ref may be a pipeline name ("boss") or an absolute/relative path.
+        worktree_parent is the project root used for local pipeline discovery.
+        session_dir defaults to state_dir / "artifacts" when not provided.
+        """
+        pipeline_path = resolve_pipeline_path(pipeline_ref, worktree_parent)
+        pipeline = _PipelineData.from_yaml(pipeline_path)
+        if client_label:
+            _apply_client_override(list(pipeline.stages), Client.parse(client_label))
+        _propagate_client_models(list(pipeline.stages))
+        _instructions = instructions or str((stage_inputs or {}).get("instructions") or "")
+        return cls(
+            pipeline.stages,
+            state_dir=state_dir,
+            session_dir=session_dir if session_dir is not None else state_dir / "artifacts",
+            gr_id=gr_id,
+            pipeline_data=pipeline,
+            worktree_dir=worktree_dir,
+            resume_from=resume_from,
+            instructions=_instructions,
+            spec=spec,
+            plan=plan,
+            cmds=cmds,
+            test_max_attempts=test_max_attempts,
+            repo=repo,
+            state_file=state_file,
+            test_client=test_client,
+            project_root=project_root,
+            base_ref_sha=base_ref_sha,
+            setup_kind=setup_kind,
+        )
