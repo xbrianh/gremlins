@@ -206,7 +206,7 @@ class State:
     # --- state.json I/O methods ---
 
     def patch(self, _delete: tuple[str, ...] = (), **fields: object) -> None:
-        sf = resolve_state_file(self.gr_id)
+        sf = self.state_file or resolve_state_file(self.gr_id)
         if sf is None or not sf.exists():
             return
         try:
@@ -235,13 +235,6 @@ class State:
             target_sub = stage if self.parent_stage else sub_stage
             if not target_stage or not self.gr_id:
                 return
-            sf = (
-                self.state_file
-                if self.state_file is not None
-                else resolve_state_file(self.gr_id)
-            )
-            if sf is None or not sf.exists():
-                return
             now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
             if target_sub is not None:
                 self.patch(
@@ -258,7 +251,7 @@ class State:
         self, bail_class: str, bail_detail: str = "", *, attempt: str | None = None
     ) -> None:
         actual_attempt = attempt if attempt is not None else self.attempt
-        sf = resolve_state_file(self.gr_id)
+        sf = self.state_file or resolve_state_file(self.gr_id)
         if sf is None or not sf.exists() or not actual_attempt or not bail_class:
             return
         try:
@@ -282,7 +275,7 @@ class State:
 
     def check_bail(self, label: str = "stage", *, child_key: str | None = None) -> None:
         actual_key = child_key if child_key is not None else self.child_key
-        sf = resolve_state_file(self.gr_id)
+        sf = self.state_file or resolve_state_file(self.gr_id)
         if sf is None or not sf.exists():
             return
         try:
@@ -300,7 +293,7 @@ class State:
             pass
 
     def append_artifact(self, artifact: dict[str, Any]) -> None:
-        sf = resolve_state_file(self.gr_id)
+        sf = self.state_file or resolve_state_file(self.gr_id)
         if sf is None or not sf.exists():
             return
         try:
@@ -315,7 +308,7 @@ class State:
             logger.warning("failed to append artifact", exc_info=True)
 
     def read_bail_info(self) -> dict[str, str] | None:
-        sf = resolve_state_file(self.gr_id)
+        sf = self.state_file or resolve_state_file(self.gr_id)
         if sf is None or not sf.exists():
             return None
         try:
@@ -331,7 +324,7 @@ class State:
             return None
 
     def read_artifacts(self) -> list[dict[str, Any]]:
-        sf = resolve_state_file(self.gr_id)
+        sf = self.state_file or resolve_state_file(self.gr_id)
         if sf is None or not sf.exists():
             return []
         try:
@@ -374,7 +367,7 @@ class State:
     ) -> None:
         if not self.gr_id or not group_name:
             return
-        sf = resolve_state_file(self.gr_id)
+        sf = self.state_file or resolve_state_file(self.gr_id)
         if sf is None or not sf.exists():
             return
         try:
@@ -398,7 +391,7 @@ class State:
             pass
 
     def _patch_parallel_attempt(self, child_key: str, attempt: str) -> None:
-        sf = resolve_state_file(self.gr_id)
+        sf = self.state_file or resolve_state_file(self.gr_id)
         if sf is None or not sf.exists() or not attempt:
             return
         try:
@@ -415,7 +408,10 @@ class State:
     def write_terminal_state(self, exit_code: int) -> None:
         if not self.gr_id:
             return
-        state_dir = _paths.state_root() / self.gr_id
+        sf = self.state_file or resolve_state_file(self.gr_id)
+        if sf is None:
+            return
+        state_dir = sf.parent
         try:
             (state_dir / "finished").touch()
         except OSError:

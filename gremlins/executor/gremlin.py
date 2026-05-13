@@ -142,15 +142,14 @@ class Gremlin:
                 )
                 worktree_created = workdir
                 self.worktree_dir = pathlib.Path(workdir)
-                State.load(self.gr_id).patch(
+                st = State.load(self.gr_id)
+                st.patch(
                     workdir=workdir,
                     worktree_base=worktree_base,
                     setup_kind=actual_setup_kind,
                 )
                 if actual_setup_kind == "worktree-branch" and branch:
-                    State.load(self.gr_id).append_artifact(
-                        {"type": "branch", "name": branch}
-                    )
+                    st.append_artifact({"type": "branch", "name": branch})
 
             if self.spec:
                 spec_file = self.session_dir / "spec.md"

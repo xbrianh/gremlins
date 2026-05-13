@@ -1434,15 +1434,13 @@ def test_resume_from_verify(tmp_path, monkeypatch):
     assert len(verify_calls) == 1
 
 
-def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir):
-    """gr_id threads into set_stage and writes to the isolated state root."""
+def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch):
+    """set_stage writes the stage name to the state file threaded through State."""
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
     gr_id = "test-gr-id"
-    state_dir = make_state_dir(gr_id)
-
-    _patch_common(monkeypatch, tmp_path)
+    _session_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
     monkeypatch.setattr(
         subprocess, "run", _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n")
@@ -1482,7 +1480,7 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir):
     )
     assert result == 0
 
-    data = json.loads((state_dir / "state.json").read_text())
+    data = json.loads(state_file.read_text())
     assert data.get("stage") == "ci-gate"
 
 
