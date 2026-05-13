@@ -15,7 +15,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from gremlins import paths as _paths
-from gremlins.clients.client import Client
+from gremlins.clients.client import PACKAGE_DEFAULT, Client
 from gremlins.utils.state_file import locked_update
 
 if TYPE_CHECKING:
@@ -374,6 +374,28 @@ class State:
     issue_num: str = ""
     loop_iteration: int = 1
     attempt: str = ""
+
+    @classmethod
+    def create(
+        cls,
+        state_dir: pathlib.Path,
+        gr_id: str | None,
+        *,
+        instructions: str = "",
+    ) -> "State":
+        session_dir = state_dir / "artifacts"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / "instructions.txt").write_text(instructions, encoding="utf-8")
+        sf = state_dir / "state.json"
+        if gr_id and not sf.exists():
+            write_state(state_dir, {"id": gr_id})
+        return cls(
+            client=PACKAGE_DEFAULT,
+            session_dir=session_dir,
+            gr_id=gr_id,
+            state_file=sf if gr_id else None,
+        )
 
     @property
     def cwd(self) -> pathlib.Path:
