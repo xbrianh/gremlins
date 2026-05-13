@@ -155,18 +155,18 @@ def _validate_plan_args(
     return plan, spec_path
 
 
-def _reject_pipeline_collision(gremlin_id: str, project_root: str) -> None:
-    pipeline_names = {name for name, _ in list_pipelines(pathlib.Path(project_root))}
+def _reject_pipeline_collision(gremlin_id: str) -> None:
+    pipeline_names = {name for name, _ in list_pipelines(pathlib.Path.cwd())}
     if gremlin_id in pipeline_names:
         raise ValueError(
             f"--gremlin-id {gremlin_id!r} shadows the name of a pipeline. Pick a different id."
         )
 
 
-def _resolve_gremlin_id(slug: str, gremlin_id: str | None, project_root: str) -> str:
+def _resolve_gremlin_id(slug: str, gremlin_id: str | None) -> str:
     if gremlin_id is not None:
         validate_gremlin_id(gremlin_id)
-        _reject_pipeline_collision(gremlin_id, project_root)
+        _reject_pipeline_collision(gremlin_id)
         _existing = _state_root() / gremlin_id
         if _existing.is_dir():
             _sf = _existing / "state.json"
@@ -258,7 +258,7 @@ def _resolve_inputs(
         else:
             project_root = os.getcwd()
 
-    resolved_gremlin_id = _resolve_gremlin_id(slug, gremlin_id, project_root)
+    resolved_gremlin_id = _resolve_gremlin_id(slug, gremlin_id)
 
     resolved_pipeline_args, pipeline_path = resolve_pipeline(
         kind, pipeline_args, project_root
