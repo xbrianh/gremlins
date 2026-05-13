@@ -15,11 +15,7 @@ from typing import Any, cast
 
 from gremlins.executor.state import (
     State,
-    patch_parallel_worktrees,
-    patch_state,
     resolve_state_file,
-    set_stage,
-    write_bail_file,
 )
 from gremlins.stages.base import Stage
 from gremlins.utils import proc
@@ -137,6 +133,7 @@ class ParallelStage(Stage):
         )
 
     def run(self, state: State) -> None:
+        assert state.session_dir is not None
         gr_id = state.gr_id
         group_dir = state.session_dir / self.name
         group_dir.mkdir(parents=True, exist_ok=True)
@@ -162,7 +159,7 @@ class ParallelStage(Stage):
             child_runners,
             gr_id=gr_id,
             project_root=pathlib.Path.cwd(),
-            set_stage_fn=lambda n: set_stage(gr_id, self.name, sub_stage=n),
+            set_stage_fn=lambda n: State.load(gr_id).set_stage(self.name, sub_stage=n),
             parent_attempt=state.attempt,
         ):
             fn()
@@ -216,15 +213,16 @@ def _parallel_stages(
             )
 
     def _persist_state() -> None:
-        patch_parallel_worktrees(
-            gr_id,
+        State.load(gr_id).patch_parallel_worktrees(
             group_name,
             base_head=base_head,
             paths={k: str(v) for k, v in _worktree_paths.items()},
         )
 
     def _clear_persisted_state() -> None:
-        patch_parallel_worktrees(gr_id, group_name, base_head=None, paths=None)
+        State.load(gr_id).patch_parallel_worktrees(
+            group_name, base_head=None, paths=None
+        )
 
     def _remove_worktrees(paths: list[pathlib.Path]) -> None:
         if not _in_git_repo():
@@ -385,14 +383,13 @@ def _parallel_stages(
                     should_bail = bool(bailed) and len(bailed) == len(child_runners)
 
                 if should_bail and first_bail:
-                    write_bail_file(
-                        gr_id,
-                        parent_attempt,
+                    State.load(gr_id).write_bail_file(
                         first_bail.get("class") or "other",
                         first_bail.get("detail") or "",
+                        attempt=parent_attempt,
                     )
 
-                patch_state(gr_id, _delete=("parallel_attempts",))
+                State.load(gr_id).patch(_delete=("parallel_attempts",))
             except RuntimeError:
                 raise
             except Exception as exc:

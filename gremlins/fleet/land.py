@@ -12,7 +12,7 @@ from typing import Any, cast
 
 import gremlins.fleet.constants as _constants
 import gremlins.utils.git as _git
-from gremlins.executor.state import landable_shape, read_pr_url
+from gremlins.executor.state import State, landable_shape
 from gremlins.fleet.resolve import resolve_gremlin
 from gremlins.fleet.state import (
     liveness_of_state_file,
@@ -714,7 +714,7 @@ def _land_boss(
 
 def _land_gh(gr_id: str, wdir: str, state: dict[str, Any], force: bool = False) -> bool:
     """Merge a gh gremlin's PR and clean up."""
-    pr_url = read_pr_url(gr_id)
+    pr_url = State.load(gr_id).read_pr_url()
     if not pr_url:
         print(f"error: no pr_url recorded for {gr_id}")
         return False

@@ -45,6 +45,8 @@ class Verify(Stage):
         super().__init__(name, model, prompts, options)
 
     def run(self, state: State) -> None:
+        assert state.session_dir is not None
+        session_dir = state.session_dir
         options = dict(self.options)
         if not state.repo:
             cmds_arg = getattr(state.args, "cmds", None)
@@ -69,7 +71,7 @@ class Verify(Stage):
         def _run_cmd() -> None:
             attempt[0] += 1
             n = attempt[0]
-            log_file = state.session_dir / f"verify-attempt-{n}.log"
+            log_file = session_dir / f"verify-attempt-{n}.log"
             result = subprocess.run(
                 combined_cmd,
                 shell=True,
@@ -101,7 +103,7 @@ class Verify(Stage):
                 fix_prompt,
                 state=state,
                 label=f"verify-fix-{n}",
-                raw_path=state.session_dir / f"stream-verify-{n}.jsonl",
+                raw_path=session_dir / f"stream-verify-{n}.jsonl",
             )
             state.check_bail(f"verify-fix-{n}")
 

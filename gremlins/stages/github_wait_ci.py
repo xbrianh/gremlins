@@ -165,6 +165,7 @@ class GitHubWaitCI(Stage):
         self.fix_sha_getter = fix_sha_getter
 
     def run(self, state: State) -> None:
+        assert state.session_dir is not None
         pr_url = self.pr_url or state.read_pr_url()
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
