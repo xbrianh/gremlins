@@ -420,6 +420,8 @@ class Handoff(Stage):
         super().__init__(name, None, [], {})
 
     def run(self, state: State) -> None:
+        assert state.session_dir is not None
+        assert state.client is not None
         session_dir = state.session_dir
         client = state.client
 

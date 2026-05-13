@@ -70,6 +70,7 @@ class Plan(Stage):
         ]
 
     def run(self, state: State) -> None:
+        assert state.session_dir is not None
         plan_val = getattr(state.args, "plan", None)
         if not self.prompts and not plan_val:
             die(
@@ -93,6 +94,7 @@ class Plan(Stage):
         self._run_agent(plan_md, state)
 
     def _run_agent(self, plan_md: pathlib.Path, state: State) -> None:
+        assert state.session_dir is not None
         if state.repo:
             base_ref_name = state.base_ref_name
             plan_prompt = (
@@ -142,6 +144,7 @@ class Plan(Stage):
     def _resolve_file_source(
         self, path: str, plan_md: pathlib.Path, state: State
     ) -> None:
+        assert state.session_dir is not None
         src = pathlib.Path(path)
         if src.stat().st_size == 0:
             sys.stderr.write(f"error: --plan: file is empty: {path}\n")

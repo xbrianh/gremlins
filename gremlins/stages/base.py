@@ -41,6 +41,7 @@ class Stage:
         raw_path: pathlib.Path | None = None,
         **kw: Any,
     ) -> CompletedRun:
+        assert state.client is not None
         model = self.model or state.client.model
         extra_env: dict[str, str] = {}
         if state.attempt and state.state_file is not None:

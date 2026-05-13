@@ -16,6 +16,7 @@ MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 def _review_stage_info(
     state: State,
 ) -> tuple[list[str], dict[str, pathlib.Path]]:
+    assert state.session_dir is not None
     names: list[str] = []
     dirs: dict[str, pathlib.Path] = {}
     scope = state.current_scope or (
@@ -68,6 +69,7 @@ class AddressCode(Stage):
             raise
 
     def _inputs_from_local(self, state: State) -> dict[str, str]:
+        assert state.session_dir is not None
         names, dirs = _review_stage_info(state)
         if not names:
             names = ["review-code"]
@@ -90,6 +92,7 @@ class AddressCode(Stage):
         return {"text": text, "review_model": review_model}
 
     def _run_local(self, inputs: dict[str, str], state: State) -> None:
+        assert state.session_dir is not None
         template = "\n\n".join(self.prompts).rstrip()
         address_prompt = template.format(
             bail_command=self.bail_command(state),
@@ -135,6 +138,7 @@ class GitHubAddressPullRequestReviews(Stage):
         self.pr_url = pr_url
 
     def run(self, state: State) -> None:
+        assert state.session_dir is not None
         pr_url = self.pr_url or state.read_pr_url()
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")

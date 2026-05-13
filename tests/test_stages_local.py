@@ -424,7 +424,7 @@ def test_address_code_stage_emits_bail_on_failure(tmp_path, make_state_dir):
     gr_id = "test-gr-id"
     state_dir = make_state_dir(gr_id)
     attempt = "address-code-test"
-    state_mod.patch_state(gr_id, attempt=attempt)
+    state_mod.State.load(gr_id).patch(attempt=attempt)
     client = FakeClaudeClient(fixtures={})
     stage = _make_address_code_stage(client, tmp_path, gr_id=gr_id)
     state = _make_state(client, tmp_path, gr_id=gr_id)

@@ -58,202 +58,12 @@ def resolve_session_dir(gr_id: str | None = None) -> pathlib.Path:
     return session_dir
 
 
-def set_stage(
-    gr_id: str | None,
-    stage: str,
-    sub_stage: object = None,
-) -> None:
-    """Write stage and optional sub-stage to state.json."""
-    try:
-        if not stage or not gr_id:
-            return
-        sf = resolve_state_file(gr_id)
-        if sf is None or not sf.exists():
-            return
-        now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        if sub_stage is not None:
-            patch_state(gr_id, stage=stage, stage_updated_at=now, sub_stage=sub_stage)
-        else:
-            patch_state(
-                gr_id, _delete=("sub_stage",), stage=stage, stage_updated_at=now
-            )
-    except Exception:
-        pass
-
-
-def write_bail_file(
-    gr_id: str | None,
-    attempt: str,
-    bail_class: str,
-    bail_detail: str = "",
-) -> None:
-    """Write bail_{attempt}.json atomically to state dir. No-op if attempt or gr_id empty."""
-    sf = resolve_state_file(gr_id)
-    if sf is None or not sf.exists() or not attempt or not bail_class:
-        return
-    try:
-        state_dir = sf.parent
-        bail_path = state_dir / f"bail_{attempt}.json"
-        if bail_path.exists():
-            return  # idempotent
-        payload = json.dumps(
-            {
-                "class": bail_class,
-                "detail": bail_detail,
-                "ts": datetime.datetime.now(datetime.UTC).isoformat(),
-            },
-            ensure_ascii=False,
-        )
-        tmp = state_dir / f".bail_{attempt}_{secrets.token_hex(4)}.tmp"
-        tmp.write_text(payload, encoding="utf-8")
-        tmp.rename(bail_path)
-    except Exception:
-        pass
-
-
-def read_bail_info(gr_id: str | None) -> dict[str, str] | None:
-    """Return bail file contents for current attempt, or None if no bail."""
-    sf = resolve_state_file(gr_id)
-    if sf is None or not sf.exists():
-        return None
-    try:
-        data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
-        attempt = data.get("attempt") or ""
-        if not attempt:
-            return None
-        bail_path = sf.parent / f"bail_{attempt}.json"
-        if not bail_path.exists():
-            return None
-        return dict(json.loads(bail_path.read_text(encoding="utf-8")))
-    except Exception:
-        return None
-
-
-def read_state_str(state_file: pathlib.Path | None, field: str) -> str:
-    """Return a string field from state.json, or '' on missing file or error."""
-    if state_file is None or not state_file.exists():
-        return ""
-    try:
-        return json.loads(state_file.read_text(encoding="utf-8")).get(field) or ""
-    except Exception:
-        return ""
-
-
 def write_state(state_dir: pathlib.Path, data: dict[str, Any]) -> None:
     """Atomically overwrite state.json (no merge)."""
     sf = state_dir / "state.json"
     tmp = state_dir / f"state.json.{os.getpid()}.{secrets.token_hex(4)}.tmp"
     tmp.write_text(json.dumps(data), encoding="utf-8")
     os.replace(tmp, sf)
-
-
-def patch_state(
-    gr_id: str | None, _delete: tuple[str, ...] = (), **fields: object
-) -> None:
-    """Merge keyword fields into state.json atomically under an exclusive file lock."""
-    sf = resolve_state_file(gr_id)
-    if sf is None or not sf.exists():
-        return
-    try:
-
-        def _apply(data: dict[str, Any]) -> None:
-            for key in _delete:
-                data.pop(key, None)
-            data.update(fields)
-
-        locked_update(sf, _apply)
-    except Exception:
-        pass
-
-
-def patch_parallel_worktrees(
-    gr_id: str | None,
-    group_name: str,
-    *,
-    base_head: str | None,
-    paths: dict[str, str] | None,
-) -> None:
-    """Set or clear ``parallel_worktrees[group_name]`` in state.json."""
-    if not gr_id or not group_name:
-        return
-    sf = resolve_state_file(gr_id)
-    if sf is None or not sf.exists():
-        return
-    try:
-
-        def _apply(data: dict[str, Any]) -> None:
-            groups: dict[str, Any] = dict(data.get("parallel_worktrees") or {})
-            if base_head is None and paths is None:
-                groups.pop(group_name, None)
-            else:
-                groups[group_name] = {
-                    "base_head": base_head or "",
-                    "paths": dict(paths or {}),
-                }
-            if groups:
-                data["parallel_worktrees"] = groups
-            else:
-                data.pop("parallel_worktrees", None)
-
-        locked_update(sf, _apply)
-    except Exception:
-        pass
-
-
-def read_pr_url(gr_id: str | None) -> str:
-    for art in reversed(read_artifacts(gr_id)):
-        if art.get("type") == "pr":
-            return str(art.get("url") or "")
-    return ""
-
-
-def last_pr_branch(gr_id: str | None) -> str:
-    for art in reversed(read_artifacts(gr_id)):
-        if art.get("type") == "pr":
-            return str(art.get("branch") or "")
-    return ""
-
-
-def read_pr_num(gr_id: str | None) -> str:
-    url = read_pr_url(gr_id)
-    return url.split("/")[-1] if url else ""
-
-
-def append_artifact(gr_id: str | None, artifact: dict[str, Any]) -> None:
-    sf = resolve_state_file(gr_id)
-    if sf is None or not sf.exists():
-        return
-    try:
-
-        def _apply(data: dict[str, Any]) -> None:
-            arts: list[Any] = list(data.get("artifacts") or [])
-            arts.append(artifact)
-            data["artifacts"] = arts
-
-        locked_update(sf, _apply)
-    except Exception:
-        logger.warning("failed to append artifact", exc_info=True)
-
-
-def read_artifacts(gr_id: str | None) -> list[dict[str, Any]]:
-    sf = resolve_state_file(gr_id)
-    if sf is None or not sf.exists():
-        return []
-    try:
-        data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
-        artifacts: list[Any] = data.get("artifacts") or []
-        return [a for a in artifacts if isinstance(a, dict)]
-    except (json.JSONDecodeError, OSError):
-        return []
-
-
-def last_artifact_branch(gr_id: str | None) -> str:
-    for art in reversed(read_artifacts(gr_id)):
-        if art.get("type") == "branch":
-            return str(art.get("name") or "")
-        if art.get("type") == "pr":
-            return str(art.get("branch") or "")
-    return ""
 
 
 def landable_shape(state: dict[str, Any]) -> str:
@@ -288,48 +98,6 @@ def landable_shape(state: dict[str, Any]) -> str:
     return "many_prs"
 
 
-def check_bail(
-    gr_id: str | None,
-    label: str = "stage",
-    *,
-    child_key: str | None = None,
-) -> None:
-    """Raise RuntimeError if bail_{attempt}.json exists in state dir."""
-    sf = resolve_state_file(gr_id)
-    if sf is None or not sf.exists():
-        return
-    try:
-        data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
-        if child_key is None:
-            attempt = data.get("attempt") or ""
-        else:
-            pa: dict[str, Any] = data.get("parallel_attempts") or {}
-            attempt: str = pa.get(child_key) or ""
-        if attempt and (sf.parent / f"bail_{attempt}.json").exists():
-            raise RuntimeError(f"{label} bailed (see bail_{attempt}.json)")
-    except RuntimeError:
-        raise
-    except Exception:
-        pass
-
-
-def _patch_parallel_attempt(gr_id: str | None, child_key: str, attempt: str) -> None:
-    """Write parallel_attempts[child_key] = attempt into state.json."""
-    sf = resolve_state_file(gr_id)
-    if sf is None or not sf.exists() or not attempt:
-        return
-    try:
-
-        def _apply(data: dict[str, Any]) -> None:
-            pa: dict[str, Any] = dict(data.get("parallel_attempts") or {})
-            pa[child_key] = attempt
-            data["parallel_attempts"] = pa
-
-        locked_update(sf, _apply)
-    except Exception:
-        pass
-
-
 def _stage_list() -> list[Stage]:
     return []
 
@@ -352,9 +120,9 @@ def _read_state_json(sf: pathlib.Path | None) -> dict[str, Any]:
 
 @dataclasses.dataclass
 class State:
-    # required per-stage
-    client: Client
-    session_dir: pathlib.Path
+    # required per-stage (optional so State.load() can create lightweight instances)
+    client: Client | None = None
+    session_dir: pathlib.Path | None = None
     # pipeline-wide (all have defaults so tests can omit them)
     gr_id: str | None = None
     state_file: pathlib.Path | None = None
@@ -375,6 +143,11 @@ class State:
     loop_iteration: int = 1
     attempt: str = ""
 
+    @classmethod
+    def load(cls, gr_id: str | None) -> State:
+        sf = resolve_state_file(gr_id)
+        return cls(gr_id=gr_id, state_file=sf)
+
     @staticmethod
     def setup_dirs(
         state_dir: pathlib.Path,
@@ -388,7 +161,6 @@ class State:
         (state_dir / "instructions.txt").write_text(instructions, encoding="utf-8")
         sf = state_dir / "state.json"
         if gr_id and not sf.exists():
-            # bootstraps state.json when called outside the launcher
             write_state(state_dir, {"id": gr_id})
 
     @property
@@ -409,9 +181,9 @@ class State:
             base_state.set_stage(entry.name)
             if attempt:
                 if base_state.child_key:
-                    _patch_parallel_attempt(gr_id, base_state.child_key, attempt)
+                    base_state._patch_parallel_attempt(base_state.child_key, attempt)
                 else:
-                    patch_state(gr_id, attempt=attempt)
+                    base_state.patch(attempt=attempt)
             sf = (
                 base_state.state_file
                 if base_state.state_file is not None
@@ -434,46 +206,219 @@ class State:
     # --- state.json I/O methods ---
 
     def patch(self, _delete: tuple[str, ...] = (), **fields: object) -> None:
-        patch_state(self.gr_id, _delete=_delete, **fields)
+        sf = self.state_file or resolve_state_file(self.gr_id)
+        if sf is None or not sf.exists():
+            return
+        try:
+
+            def _apply(data: dict[str, Any]) -> None:
+                for key in _delete:
+                    data.pop(key, None)
+                data.update(fields)
+
+            locked_update(sf, _apply)
+        except Exception:
+            pass
 
     def read_str(self, field: str) -> str:
-        return read_state_str(self.state_file, field)
+        sf = self.state_file
+        if sf is None or not sf.exists():
+            return ""
+        try:
+            return json.loads(sf.read_text(encoding="utf-8")).get(field) or ""
+        except Exception:
+            return ""
 
     def set_stage(self, stage: str, sub_stage: object = None) -> None:
-        if self.parent_stage:
-            set_stage(self.gr_id, self.parent_stage, sub_stage=stage)
-        else:
-            set_stage(self.gr_id, stage, sub_stage)
+        try:
+            target_stage = self.parent_stage if self.parent_stage else stage
+            target_sub = stage if self.parent_stage else sub_stage
+            if not target_stage or not self.gr_id:
+                return
+            now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if target_sub is not None:
+                self.patch(
+                    stage=target_stage, stage_updated_at=now, sub_stage=target_sub
+                )
+            else:
+                self.patch(
+                    _delete=("sub_stage",), stage=target_stage, stage_updated_at=now
+                )
+        except Exception:
+            pass
 
-    def write_bail_file(self, bail_class: str, bail_detail: str = "") -> None:
-        write_bail_file(self.gr_id, self.attempt, bail_class, bail_detail)
+    def write_bail_file(
+        self, bail_class: str, bail_detail: str = "", *, attempt: str | None = None
+    ) -> None:
+        actual_attempt = attempt if attempt is not None else self.attempt
+        sf = self.state_file or resolve_state_file(self.gr_id)
+        if sf is None or not sf.exists() or not actual_attempt or not bail_class:
+            return
+        try:
+            state_dir = sf.parent
+            bail_path = state_dir / f"bail_{actual_attempt}.json"
+            if bail_path.exists():
+                return
+            payload = json.dumps(
+                {
+                    "class": bail_class,
+                    "detail": bail_detail,
+                    "ts": datetime.datetime.now(datetime.UTC).isoformat(),
+                },
+                ensure_ascii=False,
+            )
+            tmp = state_dir / f".bail_{actual_attempt}_{secrets.token_hex(4)}.tmp"
+            tmp.write_text(payload, encoding="utf-8")
+            tmp.rename(bail_path)
+        except Exception:
+            pass
 
-    def check_bail(self, label: str = "stage") -> None:
-        check_bail(self.gr_id, label, child_key=self.child_key)
+    def check_bail(self, label: str = "stage", *, child_key: str | None = None) -> None:
+        actual_key = child_key if child_key is not None else self.child_key
+        sf = self.state_file or resolve_state_file(self.gr_id)
+        if sf is None or not sf.exists():
+            return
+        try:
+            data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
+            if actual_key is None:
+                attempt = data.get("attempt") or ""
+            else:
+                pa: dict[str, Any] = data.get("parallel_attempts") or {}
+                attempt: str = pa.get(actual_key) or ""
+            if attempt and (sf.parent / f"bail_{attempt}.json").exists():
+                raise RuntimeError(f"{label} bailed (see bail_{attempt}.json)")
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
 
     def append_artifact(self, artifact: dict[str, Any]) -> None:
-        append_artifact(self.gr_id, artifact)
+        sf = self.state_file or resolve_state_file(self.gr_id)
+        if sf is None or not sf.exists():
+            return
+        try:
+
+            def _apply(data: dict[str, Any]) -> None:
+                arts: list[Any] = list(data.get("artifacts") or [])
+                arts.append(artifact)
+                data["artifacts"] = arts
+
+            locked_update(sf, _apply)
+        except Exception:
+            logger.warning("failed to append artifact", exc_info=True)
+
+    def read_bail_info(self) -> dict[str, str] | None:
+        sf = self.state_file or resolve_state_file(self.gr_id)
+        if sf is None or not sf.exists():
+            return None
+        try:
+            data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
+            attempt = data.get("attempt") or ""
+            if not attempt:
+                return None
+            bail_path = sf.parent / f"bail_{attempt}.json"
+            if not bail_path.exists():
+                return None
+            return dict(json.loads(bail_path.read_text(encoding="utf-8")))
+        except Exception:
+            return None
+
+    def read_artifacts(self) -> list[dict[str, Any]]:
+        sf = self.state_file or resolve_state_file(self.gr_id)
+        if sf is None or not sf.exists():
+            return []
+        try:
+            data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
+            artifacts: list[Any] = data.get("artifacts") or []
+            return [a for a in artifacts if isinstance(a, dict)]
+        except (json.JSONDecodeError, OSError):
+            return []
 
     def read_pr_url(self) -> str:
-        return read_pr_url(self.gr_id)
+        for art in reversed(self.read_artifacts()):
+            if art.get("type") == "pr":
+                return str(art.get("url") or "")
+        return ""
 
     def last_pr_branch(self) -> str:
-        return last_pr_branch(self.gr_id)
+        for art in reversed(self.read_artifacts()):
+            if art.get("type") == "pr":
+                return str(art.get("branch") or "")
+        return ""
 
     def read_pr_num(self) -> str:
-        return read_pr_num(self.gr_id)
+        url = self.read_pr_url()
+        return url.split("/")[-1] if url else ""
 
+    def last_artifact_branch(self) -> str:
+        for art in reversed(self.read_artifacts()):
+            if art.get("type") == "branch":
+                return str(art.get("name") or "")
+            if art.get("type") == "pr":
+                return str(art.get("branch") or "")
+        return ""
 
-def write_terminal_state(gr_id: str, exit_code: int) -> None:
-    """Record terminal outcome for a finished pipeline run."""
-    state_dir = _paths.state_root() / gr_id
-    try:
-        (state_dir / "finished").touch()
-    except OSError:
-        pass
-    now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    status = "done" if exit_code == 0 else "stopped"
-    try:
-        patch_state(gr_id, status=status, ended_at=now_iso, exit_code=exit_code)
-    except Exception:
-        pass
+    def patch_parallel_worktrees(
+        self,
+        group_name: str,
+        *,
+        base_head: str | None,
+        paths: dict[str, str] | None,
+    ) -> None:
+        if not self.gr_id or not group_name:
+            return
+        sf = self.state_file or resolve_state_file(self.gr_id)
+        if sf is None or not sf.exists():
+            return
+        try:
+
+            def _apply(data: dict[str, Any]) -> None:
+                groups: dict[str, Any] = dict(data.get("parallel_worktrees") or {})
+                if base_head is None and paths is None:
+                    groups.pop(group_name, None)
+                else:
+                    groups[group_name] = {
+                        "base_head": base_head or "",
+                        "paths": dict(paths or {}),
+                    }
+                if groups:
+                    data["parallel_worktrees"] = groups
+                else:
+                    data.pop("parallel_worktrees", None)
+
+            locked_update(sf, _apply)
+        except Exception:
+            pass
+
+    def _patch_parallel_attempt(self, child_key: str, attempt: str) -> None:
+        sf = self.state_file or resolve_state_file(self.gr_id)
+        if sf is None or not sf.exists() or not attempt:
+            return
+        try:
+
+            def _apply(data: dict[str, Any]) -> None:
+                pa: dict[str, Any] = dict(data.get("parallel_attempts") or {})
+                pa[child_key] = attempt
+                data["parallel_attempts"] = pa
+
+            locked_update(sf, _apply)
+        except Exception:
+            pass
+
+    def write_terminal_state(self, exit_code: int) -> None:
+        if not self.gr_id:
+            return
+        sf = self.state_file or resolve_state_file(self.gr_id)
+        if sf is None:
+            return
+        state_dir = sf.parent
+        try:
+            (state_dir / "finished").touch()
+        except OSError:
+            pass
+        now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        status = "done" if exit_code == 0 else "stopped"
+        try:
+            self.patch(status=status, ended_at=now_iso, exit_code=exit_code)
+        except Exception:
+            pass

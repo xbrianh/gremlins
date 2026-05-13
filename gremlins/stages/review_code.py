@@ -67,6 +67,8 @@ class ReviewCode(Stage):
         return stage
 
     def run(self, state: State) -> pathlib.Path:
+        assert state.client is not None
+        assert state.session_dir is not None
         model = self.model or state.client.model
         if not model:
             raise ValueError(f"stage {self.name!r}: model must be set")
@@ -156,6 +158,7 @@ class GitHubReviewPullRequest(Stage):
         self.pr_url = pr_url
 
     def run(self, state: State) -> None:
+        assert state.session_dir is not None
         pr_url = self.pr_url or state.read_pr_url()
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")

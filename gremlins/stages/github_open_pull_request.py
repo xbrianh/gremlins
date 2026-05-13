@@ -78,6 +78,7 @@ class GitHubOpenPullRequest(Stage):
         self.base_ref = base_ref
 
     def run(self, state: State) -> str:
+        assert state.session_dir is not None
         issue_url = state.issue_url
         base_ref = (
             state.last_pr_branch() or self.base_ref or state.base_ref_name or "main"
