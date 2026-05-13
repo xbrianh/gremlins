@@ -24,7 +24,7 @@ from gremlins.executor.state import patch_state, validate_gr_id, write_state
 from gremlins.pipeline import Pipeline
 from gremlins.utils import git as _git_mod
 from gremlins.utils import proc
-from gremlins.utils._spawn_logged_process import (
+from gremlins.utils.spawn_logged_process import (
     spawn_logged_process as _spawn_logged_process,
 )
 from gremlins.utils.github import fetch_issue, parse_issue_ref
@@ -453,7 +453,7 @@ def resume(gr_id: str) -> None:
         *spawn_args,
     ]
     p = _spawn_logged_process(
-        cmd, project_root, _build_spawn_env(gr_id), state_dir / "log", "a"
+        cmd, project_root, _build_spawn_env(gr_id), state_dir / "log", log_mode="a"
     )
 
     (state_dir / "pid").write_text(str(p.pid), encoding="utf-8")

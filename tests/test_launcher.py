@@ -535,7 +535,9 @@ stages:
     class _Proc:
         pid = 12345
 
-    monkeypatch.setattr(launcher, "_spawn_logged_process", lambda *args, **kwargs: _Proc())
+    monkeypatch.setattr(
+        launcher, "_spawn_logged_process", lambda *args, **kwargs: _Proc()
+    )
 
     launcher.resume(gr_id)
 
@@ -574,6 +576,7 @@ def test_resume_keeps_resume_flag_for_pipeline_gremlin(lenv, monkeypatch):
     class _Proc:
         pid = 12345
 
+    # cmd layout: [sys.executable, "-m", "gremlins.run_pipeline", gr_id, pipeline_path, *spawn_args]
     def fake_spawn(cmd, cwd, env, log_path, log_mode="w"):
         captured["subcommand"] = cmd[4]
         captured["spawn_args"] = list(cmd[5:])
@@ -628,6 +631,7 @@ def test_resume_bossgremlin_resumes_at_chain_stage(lenv, monkeypatch):
     class _Proc:
         pid = 12345
 
+    # cmd layout: [sys.executable, "-m", "gremlins.run_pipeline", gr_id, pipeline_path, *spawn_args]
     def fake_spawn(cmd, cwd, env, log_path, log_mode="w"):
         captured["subcommand"] = cmd[4]
         captured["spawn_args"] = list(cmd[5:])
@@ -1115,7 +1119,9 @@ def test_stage_inputs_survives_resume(lenv, monkeypatch):
     class _Proc:
         pid = 99999
 
-    monkeypatch.setattr(launcher, "_spawn_logged_process", lambda *args, **kwargs: _Proc())
+    monkeypatch.setattr(
+        launcher, "_spawn_logged_process", lambda *args, **kwargs: _Proc()
+    )
 
     launcher.resume(gr_id)
 
