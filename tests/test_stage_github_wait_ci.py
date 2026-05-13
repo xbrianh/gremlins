@@ -50,7 +50,7 @@ def _make_stage(
     client: Any,
     tmp_path: Any,
     *,
-    gr_id: Any = None,
+    gremlin_id: Any = None,
     model: str = "sonnet",
     pr_branch: str | None = "test-pr-branch",
     **kwargs: Any,
@@ -58,7 +58,7 @@ def _make_stage(
     prompts = [_CI_PROMPT_PATH.read_text(encoding="utf-8")]
     stage = GitHubWaitCI("github-wait-ci", model, prompts, {}, pr_url=PR_URL, **kwargs)
     state = RuntimeState(
-        data=StateData(gr_id=gr_id), client=client, session_dir=tmp_path
+        data=StateData(gremlin_id=gremlin_id), client=client, session_dir=tmp_path
     )
     if pr_branch is not None:
         state.data.last_pr_branch = lambda: pr_branch  # type: ignore[method-assign]
@@ -179,12 +179,16 @@ def test_fix_on_failure_then_pass(tmp_path: pathlib.Path) -> None:
 def test_ci_fix_prompt_contains_pr_branch(
     tmp_path: pathlib.Path, make_state_dir
 ) -> None:
-    gr_id = "test-ci-fix-branch"
-    state_dir = make_state_dir(gr_id)
+    gremlin_id = "test-ci-fix-branch"
+    state_dir = make_state_dir(gremlin_id)
     branch = "issue-42-my-feature"
     (state_dir / "state.json").write_text(
         json.dumps(
-            {"id": gr_id, "stage": "", "artifacts": [{"type": "pr", "branch": branch}]}
+            {
+                "id": gremlin_id,
+                "stage": "",
+                "artifacts": [{"type": "pr", "branch": branch}],
+            }
         )
     )
     client = FakeClaudeClient(fixtures={"ci-fix-1": MINIMAL_EVENTS})
@@ -194,7 +198,7 @@ def test_ci_fix_prompt_contains_pr_branch(
     stage, state = _make_stage(
         client,
         tmp_path,
-        gr_id=gr_id,
+        gremlin_id=gremlin_id,
         poll_interval=0,
         checks_getter=getter,
         pr_branch=None,
@@ -356,13 +360,15 @@ def test_review_required_emits_bail_to_state(
 ) -> None:
     import gremlins.executor.state as state_mod
 
-    gr_id = "test-gr-id"
-    state_dir = make_state_dir(gr_id)
+    gremlin_id = "test-gr-id"
+    state_dir = make_state_dir(gremlin_id)
     attempt = "github-wait-ci-test"
-    state_mod.StateData.load(gr_id).patch(attempt=attempt)
+    state_mod.StateData.load(gremlin_id).patch(attempt=attempt)
     client = FakeClaudeClient(fixtures={})
     getter = _make_getter([([], "REVIEW_REQUIRED")])
-    stage, state = _make_stage(client, tmp_path, gr_id=gr_id, checks_getter=getter)
+    stage, state = _make_stage(
+        client, tmp_path, gremlin_id=gremlin_id, checks_getter=getter
+    )
     state.data.attempt = attempt
     with pytest.raises(RuntimeError):
         stage.run(state)
@@ -375,20 +381,20 @@ def test_review_required_emits_bail_to_state(
 def test_empty_pr_branch_bails(tmp_path: pathlib.Path, make_state_dir) -> None:
     import gremlins.executor.state as state_mod
 
-    gr_id = "test-empty-branch"
-    state_dir = make_state_dir(gr_id)
+    gremlin_id = "test-empty-branch"
+    state_dir = make_state_dir(gremlin_id)
     attempt = "github-wait-ci-test"
     # PR artifact with no branch — simulates open-pr appending without a known branch
     (state_dir / "state.json").write_text(
         json.dumps(
             {
-                "id": gr_id,
+                "id": gremlin_id,
                 "attempt": attempt,
                 "artifacts": [{"type": "pr", "branch": ""}],
             }
         )
     )
-    state_mod.StateData.load(gr_id).patch(attempt=attempt)
+    state_mod.StateData.load(gremlin_id).patch(attempt=attempt)
     client = FakeClaudeClient(fixtures={})
     getter = _make_getter(
         [([_FAILING_CHECK], ""), ([_FAILING_CHECK], ""), ([_PASSING_CHECK], "")]
@@ -396,7 +402,7 @@ def test_empty_pr_branch_bails(tmp_path: pathlib.Path, make_state_dir) -> None:
     stage, state = _make_stage(
         client,
         tmp_path,
-        gr_id=gr_id,
+        gremlin_id=gremlin_id,
         poll_interval=0,
         startup_grace_secs=0,
         checks_getter=getter,
@@ -412,11 +418,11 @@ def test_empty_pr_branch_bails(tmp_path: pathlib.Path, make_state_dir) -> None:
 
 
 def test_check_bail_raises_from_state(tmp_path: pathlib.Path, make_state_dir) -> None:
-    gr_id = "test-gr-id"
-    state_dir = make_state_dir(gr_id)
+    gremlin_id = "test-gr-id"
+    state_dir = make_state_dir(gremlin_id)
     attempt = "ci-fix-test-attempt"
     sf = state_dir / "state.json"
-    sf.write_text(json.dumps({"id": gr_id, "attempt": attempt}))
+    sf.write_text(json.dumps({"id": gremlin_id, "attempt": attempt}))
     # Write bail file as the agent would have
     (state_dir / f"bail_{attempt}.json").write_text(json.dumps({"class": "other"}))
 
@@ -425,7 +431,7 @@ def test_check_bail_raises_from_state(tmp_path: pathlib.Path, make_state_dir) ->
     stage, state = _make_stage(
         client,
         tmp_path,
-        gr_id=gr_id,
+        gremlin_id=gremlin_id,
         poll_interval=0,
         poll_timeout=0,
         startup_grace_secs=0,

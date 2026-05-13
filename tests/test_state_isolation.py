@@ -1,25 +1,25 @@
-"""Regression tests for the GR_ID-leakage bug captured on PR #140.
+"""Regression tests for the GREMLIN_ID-leakage bug captured on PR #140.
 
-When `pytest` runs as a subprocess of an implement-stage gremlin, GR_ID is
+When `pytest` runs as a subprocess of an implement-stage gremlin, GREMLIN_ID is
 inherited. Without isolation, gremlins.state.set_stage would write the
 parent gremlin's state.json and corrupt its `stage` and `sub_stage` fields
 — observable in `/gremlins --watch` and dangerous for any rescue-flow logic
 that branches on `stage`.
 
-The fix is the autouse `_isolate_gr_id` fixture in conftest.py, which
-delenv's GR_ID before every test. These tests verify both layers:
+The fix is the autouse `_isolate_gremlin_id` fixture in conftest.py, which
+delenv's GREMLIN_ID before every test. These tests verify both layers:
 
-- test_autouse_isolate_gr_id_unsets_gr_id_under_inherited_env: spawns a
-  pytest subprocess with GR_ID set in its environment and asserts the
+- test_autouse_isolate_gremlin_id_unsets_gremlin_id_under_inherited_env: spawns a
+  pytest subprocess with GREMLIN_ID set in its environment and asserts the
   autouse fixture removes it inside the test body. Without the subprocess
   hop, this test would pass trivially in any clean CI environment (no
-  GR_ID inherited) regardless of whether the autouse fixture was present.
+  GREMLIN_ID inherited) regardless of whether the autouse fixture was present.
 - test_*_does_not_clobber_external_state: per-orchestrator end-to-end
   checks that running each entry point does not modify a pre-staged parent
   gremlin's state.json. Each orchestrator is exercised in its own test so a
   regression message names the offender.
 
-Coverage envelope: with GR_ID unset (the post-fix invariant), set_stage
+Coverage envelope: with GREMLIN_ID unset (the post-fix invariant), set_stage
 early-returns before touching state.json, so these tests verify that guard
 plus the autouse fixture's delenv. The orchestrator tests also verify
 on-disk contents directly — no fake executables or subprocess interception
@@ -43,21 +43,21 @@ from gremlins.executor.state import StateData
 from gremlins.pipeline.discovery import resolve_pipeline_path
 
 
-def test_autouse_isolate_gr_id_unsets_gr_id_under_inherited_env(tmp_path):
-    # Spawn a pytest subprocess with GR_ID set in env. The autouse fixture
+def test_autouse_isolate_gremlin_id_unsets_gremlin_id_under_inherited_env(tmp_path):
+    # Spawn a pytest subprocess with GREMLIN_ID set in env. The autouse fixture
     # must remove it inside the inner test body. Without the subprocess hop
     # this would pass trivially in any environment that doesn't already
-    # have GR_ID set, so removing the autouse fixture wouldn't trip the
+    # have GREMLIN_ID set, so removing the autouse fixture wouldn't trip the
     # regression.
     #
-    # Place a conftest.py next to the inner test that imports the real
-    # autouse fixture from gremlins.tests.conftest so we are exercising
-    # the actual fixture under test, not a re-implementation.
+    # Place a conftest.py next to the inner test that loads the real autouse
+    # fixture from tests/conftest.py via importlib (keyed by GREMLINS_TESTS_DIR)
+    # so we are exercising the actual fixture under test, not a re-implementation.
     inner_conftest = tmp_path / "conftest.py"
     inner_conftest.write_text(
         textwrap.dedent("""
-        # Re-export the autouse _isolate_gr_id fixture from the real
-        # gremlins.tests.conftest so the inner pytest run picks it up.
+        # Load the autouse _isolate_gremlin_id fixture from the real
+        # tests/conftest.py via a file-path import (GREMLINS_TESTS_DIR).
         # importlib avoids the name collision pytest sees when this
         # conftest.py tries to `from conftest import ...`.
         import importlib.util as _u, os, pathlib as _p
@@ -65,7 +65,7 @@ def test_autouse_isolate_gr_id_unsets_gr_id_under_inherited_env(tmp_path):
         _spec = _u.spec_from_file_location("gremlins_tests_conftest", _src)
         _mod = _u.module_from_spec(_spec)
         _spec.loader.exec_module(_mod)
-        _isolate_gr_id = _mod._isolate_gr_id
+        _isolate_gremlin_id = _mod._isolate_gremlin_id
     """)
     )
     test_file = tmp_path / "test_inner.py"
@@ -73,17 +73,17 @@ def test_autouse_isolate_gr_id_unsets_gr_id_under_inherited_env(tmp_path):
         textwrap.dedent("""
         import os
 
-        def test_gr_id_unset_inside_pytest():
-            assert os.environ.get("GR_ID") is None, (
-                "autouse _isolate_gr_id fixture failed to remove inherited "
-                f"GR_ID={os.environ.get('GR_ID')!r}"
+        def test_gremlin_id_unset_inside_pytest():
+            assert os.environ.get("GREMLIN_ID") is None, (
+                "autouse _isolate_gremlin_id fixture failed to remove inherited "
+                f"GREMLIN_ID={os.environ.get('GREMLIN_ID')!r}"
             )
     """)
     )
     tests_dir = pathlib.Path(__file__).resolve().parent
     repo_root = tests_dir.parent
     env = dict(os.environ)
-    env["GR_ID"] = "fake-parent-gremlin-deadbeef"
+    env["GREMLIN_ID"] = "fake-parent-gremlin-deadbeef"
     env["GREMLINS_TESTS_DIR"] = str(tests_dir)
     env["PYTHONPATH"] = str(repo_root) + os.pathsep + str(tests_dir)
     result = subprocess.run(
@@ -102,7 +102,7 @@ def test_autouse_isolate_gr_id_unsets_gr_id_under_inherited_env(tmp_path):
         cwd=str(tmp_path),
     )
     assert result.returncode == 0, (
-        f"inner pytest failed (autouse fixture not isolating GR_ID?):\n"
+        f"inner pytest failed (autouse fixture not isolating GREMLIN_ID?):\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
 
@@ -120,8 +120,8 @@ def _stage_parent_state(tmp_path, monkeypatch):
     parent_state_file.write_text(original_content)
     parent_mtime = parent_state_file.stat().st_mtime_ns
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
-    # GR_ID intentionally NOT set — the autouse _isolate_gr_id fixture in
-    # conftest.py has removed it. set_stage no-ops because GR_ID is empty.
+    # GREMLIN_ID intentionally NOT set — the autouse _isolate_gremlin_id fixture in
+    # conftest.py has removed it. set_stage no-ops because gremlin_id is None.
     return parent_state_file, original_content, parent_mtime
 
 
@@ -144,7 +144,7 @@ def test_local_main_does_not_clobber_external_state(tmp_path, monkeypatch):
     _common_patches(monkeypatch)
     monkeypatch.setattr(
         "gremlins.executor.run.resolve_session_dir",
-        lambda gr_id=None: session_dir,
+        lambda gremlin_id=None: session_dir,
     )
     client = _ReviewCreatingClient(
         fixtures={
@@ -169,21 +169,21 @@ def test_local_main_does_not_clobber_external_state(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _make_state_dir(tmp_path, gr_id):
+def _make_state_dir(tmp_path, gremlin_id):
     """Create state dir with a minimal state.json and return the file path."""
     state_root = tmp_path / "state"
-    state_dir = state_root / gr_id
+    state_dir = state_root / gremlin_id
     state_dir.mkdir(parents=True)
     sf = state_dir / "state.json"
-    sf.write_text(json.dumps({"id": gr_id, "stage": "implement"}))
+    sf.write_text(json.dumps({"id": gremlin_id, "stage": "implement"}))
     return state_root, sf
 
 
-def test_set_stage_noop_when_gr_id_unset(tmp_path, monkeypatch):
-    """set_stage is a no-op when GR_ID is absent (autouse already clears it)."""
+def test_set_stage_noop_when_gremlin_id_unset(tmp_path, monkeypatch):
+    """set_stage is a no-op when gremlin_id is None (autouse already clears GREMLIN_ID)."""
     state_root, sf = _make_state_dir(tmp_path, "gr-noop-test")
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
-    # GR_ID is already unset via autouse fixture
+    # GREMLIN_ID is already unset via autouse fixture
     mtime_before = sf.stat().st_mtime_ns
     StateData.load(None).set_stage("running")
     assert sf.stat().st_mtime_ns == mtime_before
@@ -191,11 +191,11 @@ def test_set_stage_noop_when_gr_id_unset(tmp_path, monkeypatch):
 
 def test_set_stage_writes_stage_and_timestamp(tmp_path, monkeypatch):
     """set_stage writes stage and stage_updated_at to state.json."""
-    gr_id = "gr-stage-write-test"
-    state_root, sf = _make_state_dir(tmp_path, gr_id)
+    gremlin_id = "gr-stage-write-test"
+    state_root, sf = _make_state_dir(tmp_path, gremlin_id)
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
 
-    StateData.load(gr_id).set_stage("review-code")
+    StateData.load(gremlin_id).set_stage("review-code")
 
     data = json.loads(sf.read_text())
     assert data["stage"] == "review-code"
@@ -208,11 +208,11 @@ def test_set_stage_writes_stage_and_timestamp(tmp_path, monkeypatch):
 
 def test_set_stage_with_sub_stage(tmp_path, monkeypatch):
     """set_stage with sub_stage writes the sub_stage key."""
-    gr_id = "gr-substage-test"
-    state_root, sf = _make_state_dir(tmp_path, gr_id)
+    gremlin_id = "gr-substage-test"
+    state_root, sf = _make_state_dir(tmp_path, gremlin_id)
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
 
-    StateData.load(gr_id).set_stage("implement", sub_stage={"attempt": 2})
+    StateData.load(gremlin_id).set_stage("implement", sub_stage={"attempt": 2})
 
     data = json.loads(sf.read_text())
     assert data["stage"] == "implement"
@@ -221,14 +221,14 @@ def test_set_stage_with_sub_stage(tmp_path, monkeypatch):
 
 def test_set_stage_removes_sub_stage_when_none(tmp_path, monkeypatch):
     """Calling set_stage without sub_stage removes a previously written sub_stage key."""
-    gr_id = "gr-substage-del-test"
-    state_root, sf = _make_state_dir(tmp_path, gr_id)
+    gremlin_id = "gr-substage-del-test"
+    state_root, sf = _make_state_dir(tmp_path, gremlin_id)
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
 
-    StateData.load(gr_id).set_stage("implement", sub_stage={"k": 1})
+    StateData.load(gremlin_id).set_stage("implement", sub_stage={"k": 1})
     assert "sub_stage" in json.loads(sf.read_text())
 
-    StateData.load(gr_id).set_stage("review-code")
+    StateData.load(gremlin_id).set_stage("review-code")
     data = json.loads(sf.read_text())
     assert data["stage"] == "review-code"
     assert "sub_stage" not in data
@@ -236,13 +236,13 @@ def test_set_stage_removes_sub_stage_when_none(tmp_path, monkeypatch):
 
 def test_set_stage_noop_when_state_json_missing(tmp_path, monkeypatch):
     """set_stage is a no-op when state.json doesn't exist (no crash)."""
-    gr_id = "gr-missing-state-test"
+    gremlin_id = "gr-missing-state-test"
     state_root = tmp_path / "state"
-    state_dir = state_root / gr_id
+    state_dir = state_root / gremlin_id
     state_dir.mkdir(parents=True)
     # No state.json written
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
-    StateData.load(gr_id).set_stage("running")  # must not raise
+    StateData.load(gremlin_id).set_stage("running")  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -251,24 +251,24 @@ def test_set_stage_noop_when_state_json_missing(tmp_path, monkeypatch):
 
 
 def test_write_bail_file_creates_bail_file(tmp_path, monkeypatch):
-    gr_id = "gr-wbf-write"
-    state_root, sf = _make_state_dir(tmp_path, gr_id)
+    gremlin_id = "gr-wbf-write"
+    state_root, sf = _make_state_dir(tmp_path, gremlin_id)
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
 
-    StateData.load(gr_id).write_bail_file(
+    StateData.load(gremlin_id).write_bail_file(
         "other", "something went wrong", attempt="stage-abc123"
     )
 
-    bail_file = state_root / gr_id / "bail_stage-abc123.json"
+    bail_file = state_root / gremlin_id / "bail_stage-abc123.json"
     assert bail_file.exists()
     data = json.loads(bail_file.read_text())
     assert data["class"] == "other"
     assert data["detail"] == "something went wrong"
 
 
-def test_write_bail_file_noop_when_gr_id_none(tmp_path, monkeypatch):
-    gr_id = "gr-wbf-noop"
-    state_root, sf = _make_state_dir(tmp_path, gr_id)
+def test_write_bail_file_noop_when_gremlin_id_none(tmp_path, monkeypatch):
+    gremlin_id = "gr-wbf-noop"
+    state_root, sf = _make_state_dir(tmp_path, gremlin_id)
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
     mtime_before = sf.stat().st_mtime_ns
     StateData.load(None).write_bail_file("other", attempt="some-attempt")
@@ -276,9 +276,9 @@ def test_write_bail_file_noop_when_gr_id_none(tmp_path, monkeypatch):
 
 
 def test_write_bail_file_noop_when_attempt_empty(tmp_path, monkeypatch):
-    gr_id = "gr-wbf-empty-attempt"
-    state_root, sf = _make_state_dir(tmp_path, gr_id)
+    gremlin_id = "gr-wbf-empty-attempt"
+    state_root, sf = _make_state_dir(tmp_path, gremlin_id)
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
-    StateData.load(gr_id).write_bail_file("other", attempt="")
-    bail_files = list((state_root / gr_id).glob("bail_*.json"))
+    StateData.load(gremlin_id).write_bail_file("other", attempt="")
+    bail_files = list((state_root / gremlin_id).glob("bail_*.json"))
     assert not bail_files

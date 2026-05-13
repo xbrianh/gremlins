@@ -24,11 +24,11 @@ from gremlins.stages.loop import RunCmdFailed
 def _make_state(
     tmp_path: pathlib.Path,
     *,
-    gr_id: str | None = None,
+    gremlin_id: str | None = None,
     client: FakeClaudeClient | None = None,
 ) -> RuntimeState:
     return RuntimeState(
-        data=StateData(gr_id=gr_id),
+        data=StateData(gremlin_id=gremlin_id),
         client=client or FakeClaudeClient(),
         session_dir=tmp_path,
     )
@@ -37,12 +37,12 @@ def _make_state(
 def _make_handoff(
     tmp_path: pathlib.Path,
     *,
-    gr_id: str | None = None,
+    gremlin_id: str | None = None,
     client: FakeClaudeClient | None = None,
 ) -> tuple[Handoff, RuntimeState]:
     fake_client = client or FakeClaudeClient()
     h = Handoff("handoff")
-    state = _make_state(tmp_path, gr_id=gr_id, client=fake_client)
+    state = _make_state(tmp_path, gremlin_id=gremlin_id, client=fake_client)
     return h, state
 
 
@@ -50,9 +50,9 @@ def _write_plan(tmp_path: pathlib.Path, text: str = "# Plan\n\nDo stuff.\n") -> 
     (tmp_path / "plan.md").write_text(text, encoding="utf-8")
 
 
-def _write_state(state_dir: pathlib.Path, gr_id: str, **extra: Any) -> None:
+def _write_state(state_dir: pathlib.Path, gremlin_id: str, **extra: Any) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
-    data: dict[str, Any] = {"id": gr_id, "stage": ""}
+    data: dict[str, Any] = {"id": gremlin_id, "stage": ""}
     data.update(extra)
     (state_dir / "state.json").write_text(json.dumps(data), encoding="utf-8")
 
@@ -85,9 +85,9 @@ def _make_signal_file(
 
 
 def test_chain_done_immediately(tmp_path, monkeypatch, test_state_root):
-    gr_id = "boss-handoff-done-aabb12"
-    state_dir = test_state_root / gr_id
-    _write_state(state_dir, gr_id)
+    gremlin_id = "boss-handoff-done-aabb12"
+    state_dir = test_state_root / gremlin_id
+    _write_state(state_dir, gremlin_id)
     _write_plan(tmp_path)
 
     calls: list[str] = []
@@ -99,9 +99,9 @@ def test_chain_done_immediately(tmp_path, monkeypatch, test_state_root):
         return 0
 
     monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
-    monkeypatch.setenv("GR_ID", gr_id)
+    monkeypatch.setenv("GREMLIN_ID", gremlin_id)
 
-    h, state = _make_handoff(tmp_path, gr_id=gr_id)
+    h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
     monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
     h.run(state)
 
@@ -117,9 +117,9 @@ def test_chain_done_immediately(tmp_path, monkeypatch, test_state_root):
 
 
 def test_next_plan_writes_plan_and_raises(tmp_path, monkeypatch, test_state_root):
-    gr_id = "boss-handoff-nextplan-aabb12"
-    state_dir = test_state_root / gr_id
-    _write_state(state_dir, gr_id)
+    gremlin_id = "boss-handoff-nextplan-aabb12"
+    state_dir = test_state_root / gremlin_id
+    _write_state(state_dir, gremlin_id)
     _write_plan(tmp_path)
 
     child_plan = tmp_path / "child-001.md"
@@ -133,9 +133,9 @@ def test_next_plan_writes_plan_and_raises(tmp_path, monkeypatch, test_state_root
         return 0
 
     monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
-    monkeypatch.setenv("GR_ID", gr_id)
+    monkeypatch.setenv("GREMLIN_ID", gremlin_id)
 
-    h, state = _make_handoff(tmp_path, gr_id=gr_id)
+    h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
     monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
 
     with pytest.raises(RunCmdFailed, match="next-plan"):
@@ -150,11 +150,11 @@ def test_next_plan_writes_plan_and_raises(tmp_path, monkeypatch, test_state_root
 
 
 def test_bail_emits_bail_and_raises(tmp_path, monkeypatch, test_state_root):
-    gr_id = "boss-handoff-bail-aabb12"
+    gremlin_id = "boss-handoff-bail-aabb12"
     attempt = "handoff-test-attempt"
-    state_dir = test_state_root / gr_id
-    _write_state(state_dir, gr_id)
-    state_mod.StateData.load(gr_id).patch(attempt=attempt)
+    state_dir = test_state_root / gremlin_id
+    _write_state(state_dir, gremlin_id)
+    state_mod.StateData.load(gremlin_id).patch(attempt=attempt)
     _write_plan(tmp_path)
 
     def fake_handoff_run(client: Any, args: argparse.Namespace) -> int:
@@ -162,9 +162,9 @@ def test_bail_emits_bail_and_raises(tmp_path, monkeypatch, test_state_root):
         return 0
 
     monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
-    monkeypatch.setenv("GR_ID", gr_id)
+    monkeypatch.setenv("GREMLIN_ID", gremlin_id)
 
-    h, state = _make_handoff(tmp_path, gr_id=gr_id)
+    h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
     state.data.attempt = attempt  # simulate what make_runner() would set
     monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
 
@@ -183,9 +183,9 @@ def test_bail_emits_bail_and_raises(tmp_path, monkeypatch, test_state_root):
 
 
 def test_handoff_index_first_iteration(tmp_path, monkeypatch, test_state_root):
-    gr_id = "boss-handoff-persist-aabb12"
-    state_dir = test_state_root / gr_id
-    _write_state(state_dir, gr_id)
+    gremlin_id = "boss-handoff-persist-aabb12"
+    state_dir = test_state_root / gremlin_id
+    _write_state(state_dir, gremlin_id)
     _write_plan(tmp_path)
 
     calls: list[int] = []
@@ -197,9 +197,9 @@ def test_handoff_index_first_iteration(tmp_path, monkeypatch, test_state_root):
         return 0
 
     monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
-    monkeypatch.setenv("GR_ID", gr_id)
+    monkeypatch.setenv("GREMLIN_ID", gremlin_id)
 
-    h, state = _make_handoff(tmp_path, gr_id=gr_id)
+    h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
     monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
     h.run(state)
 
@@ -214,15 +214,15 @@ def test_handoff_index_first_iteration(tmp_path, monkeypatch, test_state_root):
 
 
 def test_handoff_nonzero_exit_raises(tmp_path, monkeypatch, test_state_root):
-    gr_id = "boss-handoff-hfail-aabb12"
-    state_dir = test_state_root / gr_id
-    _write_state(state_dir, gr_id)
+    gremlin_id = "boss-handoff-hfail-aabb12"
+    state_dir = test_state_root / gremlin_id
+    _write_state(state_dir, gremlin_id)
     _write_plan(tmp_path)
 
     monkeypatch.setattr("gremlins.stages.handoff.run", lambda *a, **kw: 1)
-    monkeypatch.setenv("GR_ID", gr_id)
+    monkeypatch.setenv("GREMLIN_ID", gremlin_id)
 
-    h, state = _make_handoff(tmp_path, gr_id=gr_id)
+    h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
     monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
 
     with pytest.raises(RuntimeError, match="handoff agent exited 1"):
@@ -235,9 +235,9 @@ def test_handoff_nonzero_exit_raises(tmp_path, monkeypatch, test_state_root):
 
 
 def test_resume_continues_from_file_index(tmp_path, monkeypatch, test_state_root):
-    gr_id = "boss-handoff-resume-aabb12"
-    state_dir = test_state_root / gr_id
-    _write_state(state_dir, gr_id)
+    gremlin_id = "boss-handoff-resume-aabb12"
+    state_dir = test_state_root / gremlin_id
+    _write_state(state_dir, gremlin_id)
     _write_plan(tmp_path)
     (tmp_path / "boss-spec.md").write_text("# Boss Spec\n", encoding="utf-8")
     # Simulate having already run one handoff (creates handoff-001.state.json and handoff-001.md)
@@ -254,9 +254,9 @@ def test_resume_continues_from_file_index(tmp_path, monkeypatch, test_state_root
         return 0
 
     monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
-    monkeypatch.setenv("GR_ID", gr_id)
+    monkeypatch.setenv("GREMLIN_ID", gremlin_id)
 
-    h, state = _make_handoff(tmp_path, gr_id=gr_id)
+    h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
     monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
     h.run(state)
 
@@ -272,7 +272,7 @@ def test_resume_continues_from_file_index(tmp_path, monkeypatch, test_state_root
 
 
 def test_base_ref_from_state(tmp_path, monkeypatch, test_state_root):
-    gr_id = "boss-handoff-baseref-aabb12"
+    gremlin_id = "boss-handoff-baseref-aabb12"
     _write_plan(tmp_path)
 
     captured_base: list[str] = []
@@ -285,7 +285,7 @@ def test_base_ref_from_state(tmp_path, monkeypatch, test_state_root):
 
     monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
 
-    h, state = _make_handoff(tmp_path, gr_id=gr_id)
+    h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
     state.data.base_ref_name = "deadbeef1234"
     # Do NOT monkeypatch _resolve_base_ref — state has base_ref_name, fallback must not run
     h.run(state)

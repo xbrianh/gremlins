@@ -90,7 +90,7 @@ class Gremlin:
         *,
         state_dir: pathlib.Path,
         session_dir: pathlib.Path,
-        gr_id: str | None,
+        gremlin_id: str | None,
         pipeline_data: _PipelineData,
         worktree_dir: pathlib.Path | None = None,
         worktree_parent: pathlib.Path | None = None,
@@ -121,7 +121,7 @@ class Gremlin:
         self.stages = _expand_stage_entries(stages)
         self.state_dir = state_dir
         self.session_dir = session_dir
-        self.gr_id = gr_id
+        self.gremlin_id = gremlin_id
         self.pipeline_data = pipeline_data
         self.worktree_dir = worktree_dir
         self.worktree_parent = worktree_parent
@@ -143,26 +143,26 @@ class Gremlin:
         State.setup_dirs(
             self.state_dir,
             self.session_dir,
-            self.gr_id,
+            self.gremlin_id,
             instructions=self.instructions or "",
         )
 
         worktree_created: str | None = None
         try:
-            if self.worktree_dir is None and self.project_root and self.gr_id:
+            if self.worktree_dir is None and self.project_root and self.gremlin_id:
                 workdir, branch, worktree_base, actual_setup_kind = (
                     _git_mod.setup_workdir(
                         self.setup_kind,
                         self.project_root,
                         self.base_ref_sha,
-                        self.gr_id,
+                        self.gremlin_id,
                         self.state_dir,
                         worktree_parent=self.worktree_parent,
                     )
                 )
                 worktree_created = workdir
                 self.worktree_dir = pathlib.Path(workdir)
-                st = StateData.load(self.gr_id)
+                st = StateData.load(self.gremlin_id)
                 st.patch(
                     workdir=workdir,
                     worktree_base=worktree_base,
@@ -222,7 +222,7 @@ class Gremlin:
         for e in stages:
             resolved = self.test_client or e.client or PACKAGE_DEFAULT
             stage_state = State(
-                data=StateData(gr_id=self.gr_id, state_file=self.state_file),
+                data=StateData(gremlin_id=self.gremlin_id, state_file=self.state_file),
                 client=resolved,
                 session_dir=self.session_dir,
                 args=args,
@@ -245,7 +245,7 @@ class Gremlin:
     def build(
         cls,
         *,
-        gr_id: str | None,
+        gremlin_id: str | None,
         state_dir: pathlib.Path,
         project_dir: pathlib.Path,
         pipeline_ref: str,
@@ -278,7 +278,7 @@ class Gremlin:
             session_dir=session_dir
             if session_dir is not None
             else state_dir / "artifacts",
-            gr_id=gr_id,
+            gremlin_id=gremlin_id,
             pipeline_data=pipeline,
             worktree_dir=worktree_dir,
             worktree_parent=worktree_parent,

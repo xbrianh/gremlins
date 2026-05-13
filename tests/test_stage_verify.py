@@ -102,7 +102,7 @@ def test_fix_then_green(tmp_path):
 
 
 def test_attempts_exhausted_raises(tmp_path, monkeypatch):
-    monkeypatch.delenv("GR_ID", raising=False)
+    monkeypatch.delenv("GREMLIN_ID", raising=False)
 
     client = FakeClaudeClient(
         fixtures={
@@ -134,7 +134,7 @@ def test_exhaustion_with_max_1(tmp_path):
 
 
 def test_both_cmds_in_fix_prompt(tmp_path, monkeypatch):
-    monkeypatch.delenv("GR_ID", raising=False)
+    monkeypatch.delenv("GREMLIN_ID", raising=False)
 
     client = FakeClaudeClient(
         fixtures={
@@ -168,7 +168,7 @@ def test_log_file_captures_output(tmp_path):
 
 def test_no_pr_opened_on_exhaustion(tmp_path, monkeypatch):
     """Stage raises when all fix attempts are exhausted."""
-    monkeypatch.delenv("GR_ID", raising=False)
+    monkeypatch.delenv("GREMLIN_ID", raising=False)
 
     client = FakeClaudeClient(
         fixtures={
@@ -187,10 +187,10 @@ def test_no_pr_opened_on_exhaustion(tmp_path, monkeypatch):
 def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
     import gremlins.executor.state as state_mod
 
-    gr_id = "test-gr-id"
-    state_dir = make_state_dir(gr_id)
+    gremlin_id = "test-gr-id"
+    state_dir = make_state_dir(gremlin_id)
     attempt = "verify-exhaustion-attempt"
-    state_mod.StateData.load(gr_id).patch(attempt=attempt)
+    state_mod.StateData.load(gremlin_id).patch(attempt=attempt)
     client = FakeClaudeClient(
         fixtures={"verify-fix-1": MINIMAL_EVENTS, "verify-fix-2": MINIMAL_EVENTS}
     )
@@ -199,7 +199,7 @@ def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
         "verify", "sonnet", [_VERIFY_PROMPT_PATH.read_text(encoding="utf-8")], options
     )
     state = RuntimeState(
-        data=StateData(gr_id=gr_id, attempt=attempt),
+        data=StateData(gremlin_id=gremlin_id, attempt=attempt),
         client=client,
         session_dir=tmp_path,
         worktree=tmp_path,
@@ -248,7 +248,7 @@ def test_parallel_child_fix_prompt_uses_new_bail_command(tmp_path):
     options = {"cmds": ["false"], "max_attempts": 2}
     stage = Verify("verify", "sonnet", prompts, options)
     state = RuntimeState(
-        data=StateData(gr_id="gr-verify"),
+        data=StateData(gremlin_id="gr-verify"),
         client=client,
         session_dir=tmp_path,
         child_key="verify-child",

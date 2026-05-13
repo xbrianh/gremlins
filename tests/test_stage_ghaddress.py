@@ -18,7 +18,7 @@ PR_URL = "https://github.com/owner/repo/pull/99"
 def _make_stage(
     tmp_path: pathlib.Path,
     *,
-    gr_id: str | None = None,
+    gremlin_id: str | None = None,
     pr_url: str = PR_URL,
     style_content: str | None = None,
 ) -> tuple[GitHubAddressPullRequestReviews, FakeClaudeClient, RuntimeState]:
@@ -33,7 +33,7 @@ def _make_stage(
         fixtures={"github-address-pull-request-reviews": MINIMAL_EVENTS}
     )
     state = RuntimeState(
-        data=StateData(gr_id=gr_id),
+        data=StateData(gremlin_id=gremlin_id),
         client=client,
         session_dir=tmp_path,
         pipeline_data=_gh_pipeline(),

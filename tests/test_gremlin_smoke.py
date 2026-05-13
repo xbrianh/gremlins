@@ -38,11 +38,11 @@ def pipeline_yaml(tmp_path):
 
 
 def test_gremlin_run_in_process(project_dir, pipeline_yaml, test_state_root):
-    gr_id = "smoke-abc123"
-    sd = test_state_root / gr_id
+    gremlin_id = "smoke-abc123"
+    sd = test_state_root / gremlin_id
 
     gremlin = Gremlin.build(
-        gr_id=gr_id,
+        gremlin_id=gremlin_id,
         state_dir=sd,
         project_dir=project_dir,
         pipeline_ref=str(pipeline_yaml),
@@ -59,7 +59,7 @@ def test_gremlin_run_in_process(project_dir, pipeline_yaml, test_state_root):
         rc = 0
     finally:
         os.chdir(saved_cwd)
-        StateData.load(gr_id).write_terminal_state(rc)
+        StateData.load(gremlin_id).write_terminal_state(rc)
         if worktree and worktree.is_dir():
             shutil.rmtree(worktree, ignore_errors=True)
 

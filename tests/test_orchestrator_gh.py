@@ -126,7 +126,7 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     monkeypatch.setattr(
-        "gremlins.executor.run.resolve_session_dir", lambda gr_id=None: session_dir
+        "gremlins.executor.run.resolve_session_dir", lambda gremlin_id=None: session_dir
     )
 
     state_file = tmp_path / "state.json"
@@ -139,7 +139,7 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         initial.update(state_data)
     state_file.write_text(json.dumps(initial))
     monkeypatch.setattr(
-        "gremlins.executor.run.resolve_state_file", lambda gr_id=None: state_file
+        "gremlins.executor.run.resolve_state_file", lambda gremlin_id=None: state_file
     )
 
     # Use a writing shim so the commit runner can read back artifact values.
@@ -1439,7 +1439,7 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    gr_id = "test-gr-id"
+    gremlin_id = "test-gr-id"
     _session_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
     monkeypatch.setattr(
@@ -1476,7 +1476,10 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch):
     )
 
     result = run_pipeline(
-        _gh_pipeline_path(tmp_path), argv=["--plan", "#42"], gr_id=gr_id, client=client
+        _gh_pipeline_path(tmp_path),
+        argv=["--plan", "#42"],
+        gremlin_id=gremlin_id,
+        client=client,
     )
     assert result == 0
 
@@ -1490,8 +1493,8 @@ def test_gh_main_state_client_tracks_effective_model(
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    gr_id = "test-gr-id"
-    state_dir = make_state_dir(gr_id)
+    gremlin_id = "test-gr-id"
+    state_dir = make_state_dir(gremlin_id)
 
     _patch_common(monkeypatch, tmp_path)
 
@@ -1531,7 +1534,7 @@ def test_gh_main_state_client_tracks_effective_model(
     result = run_pipeline(
         _gh_pipeline_path(tmp_path),
         argv=["--plan", "#42", "--client", "copilot:gpt-5.4"],
-        gr_id=gr_id,
+        gremlin_id=gremlin_id,
         client=client,
     )
     assert result == 0

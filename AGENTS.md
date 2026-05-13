@@ -74,7 +74,7 @@ These values are persisted to `state.json` and read by other writers (the fleet 
 | Add a new pipeline | YAMLs in `gremlins/pipelines/` (bundled) or `.gremlins/` (project) |
 | Trace a CLI subcommand | `gremlins/cli/` |
 | Understand fleet operations | `gremlins/fleet/AGENTS.md` |
-| Investigate a state-dir layout | `gremlins/state.py` resolves dirs; per-gremlin layout under `platformdirs.user_state_dir("gremlins")/<gr_id>/` |
+| Investigate a state-dir layout | `gremlins/state.py` resolves dirs; per-gremlin layout under `platformdirs.user_state_dir("gremlins")/<gremlin_id>/` |
 | Find the design backlog | `plans/` (rough notes, not authoritative) |
 | Find open work | GitHub issues, `gh issue list --repo xbrianh/gremlins` |
 
@@ -86,4 +86,4 @@ Stages that invoke `claude` go through an injected `Client` (in `gremlins/client
 
 ## State and bail bookkeeping
 
-`state.set_stage` and `state.emit_bail` write to `state.json` atomically in pure Python via `patch_state`. Both helpers no-op without `GR_ID` and never raise — stage / bail bookkeeping must not crash a running gremlin.
+`state.set_stage` and `state.emit_bail` write to `state.json` atomically in pure Python via `patch_state`. Both helpers no-op without `GREMLIN_ID` and never raise — stage / bail bookkeeping must not crash a running gremlin.

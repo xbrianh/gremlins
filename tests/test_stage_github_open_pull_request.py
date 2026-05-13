@@ -20,13 +20,13 @@ PR_BRANCH = "issue-42-add-feature"
 def _make_state(
     tmp_path: pathlib.Path,
     *,
-    gr_id: str | None = None,
+    gremlin_id: str | None = None,
     issue_url: str = "https://github.com/owner/repo/issues/42",
 ) -> tuple[GitHubOpenPullRequest, RuntimeState]:
     stage = GitHubOpenPullRequest("open-pr", "sonnet", [], {})
     client = FakeClaudeClient(fixtures={"github-open-pull-request": MINIMAL_EVENTS})
     state = RuntimeState(
-        data=StateData(gr_id=gr_id, issue_url=issue_url),
+        data=StateData(gremlin_id=gremlin_id, issue_url=issue_url),
         client=client,
         session_dir=tmp_path,
     )
@@ -34,7 +34,7 @@ def _make_state(
 
 
 def test_run_calls_claude_with_push_prompt(tmp_path: pathlib.Path) -> None:
-    stage, state = _make_state(tmp_path, gr_id="test-gr")
+    stage, state = _make_state(tmp_path, gremlin_id="test-gr")
     with (
         patch(
             "gremlins.stages.github_open_pull_request.extract_gh_url",
@@ -55,7 +55,7 @@ def test_run_calls_claude_with_push_prompt(tmp_path: pathlib.Path) -> None:
 
 def test_issue_num_adds_closes_clause(tmp_path: pathlib.Path) -> None:
     stage, state = _make_state(
-        tmp_path, gr_id="test-gr", issue_url="https://github.com/o/r/issues/42"
+        tmp_path, gremlin_id="test-gr", issue_url="https://github.com/o/r/issues/42"
     )
     with (
         patch(
@@ -73,7 +73,7 @@ def test_issue_num_adds_closes_clause(tmp_path: pathlib.Path) -> None:
 
 
 def test_no_issue_url_skips_closes(tmp_path: pathlib.Path) -> None:
-    stage, state = _make_state(tmp_path, gr_id="test-gr", issue_url="")
+    stage, state = _make_state(tmp_path, gremlin_id="test-gr", issue_url="")
     with (
         patch(
             "gremlins.stages.github_open_pull_request.extract_gh_url",
@@ -90,7 +90,7 @@ def test_no_issue_url_skips_closes(tmp_path: pathlib.Path) -> None:
 
 
 def test_run_returns_pr_url(tmp_path: pathlib.Path) -> None:
-    stage, state = _make_state(tmp_path, gr_id="test-gr")
+    stage, state = _make_state(tmp_path, gremlin_id="test-gr")
     with (
         patch(
             "gremlins.stages.github_open_pull_request.extract_gh_url",
@@ -107,7 +107,7 @@ def test_run_returns_pr_url(tmp_path: pathlib.Path) -> None:
 
 
 def test_run_writes_raw_path(tmp_path: pathlib.Path) -> None:
-    stage, state = _make_state(tmp_path, gr_id="test-gr")
+    stage, state = _make_state(tmp_path, gremlin_id="test-gr")
     with (
         patch(
             "gremlins.stages.github_open_pull_request.extract_gh_url",
@@ -127,7 +127,7 @@ def test_run_writes_raw_path(tmp_path: pathlib.Path) -> None:
 
 
 def test_run_records_pr_artifact(tmp_path: pathlib.Path) -> None:
-    stage, state = _make_state(tmp_path, gr_id="test-gr")
+    stage, state = _make_state(tmp_path, gremlin_id="test-gr")
     artifact_calls: list[tuple] = []
     with (
         patch(
@@ -157,7 +157,7 @@ def test_run_records_pr_artifact(tmp_path: pathlib.Path) -> None:
 
 def _make_state_with_gr(
     tmp_path: pathlib.Path,
-    gr_id: str = "test-gr",
+    gremlin_id: str = "test-gr",
     *,
     base_ref_name: str = "",
     issue_url: str = "",
@@ -165,7 +165,9 @@ def _make_state_with_gr(
     stage = GitHubOpenPullRequest("open-pr", "sonnet", [], {})
     client = FakeClaudeClient(fixtures={"github-open-pull-request": MINIMAL_EVENTS})
     state = RuntimeState(
-        data=StateData(gr_id=gr_id, base_ref_name=base_ref_name, issue_url=issue_url),
+        data=StateData(
+            gremlin_id=gremlin_id, base_ref_name=base_ref_name, issue_url=issue_url
+        ),
         client=client,
         session_dir=tmp_path,
     )
@@ -270,7 +272,7 @@ def test_explicit_base_ref_used_when_no_prior_pr(tmp_path: pathlib.Path) -> None
     stage = GitHubOpenPullRequest("open-pr", "sonnet", [], {}, base_ref="feature-base")
     client = FakeClaudeClient(fixtures={"github-open-pull-request": MINIMAL_EVENTS})
     state = RuntimeState(
-        data=StateData(gr_id="test-gr", base_ref_name="main"),
+        data=StateData(gremlin_id="test-gr", base_ref_name="main"),
         client=client,
         session_dir=tmp_path,
     )
@@ -304,7 +306,7 @@ def test_last_pr_branch_takes_priority_over_base_ref(tmp_path: pathlib.Path) -> 
     stage = GitHubOpenPullRequest("open-pr", "sonnet", [], {}, base_ref="feature-base")
     client = FakeClaudeClient(fixtures={"github-open-pull-request": MINIMAL_EVENTS})
     state = RuntimeState(
-        data=StateData(gr_id="test-gr", base_ref_name="main"),
+        data=StateData(gremlin_id="test-gr", base_ref_name="main"),
         client=client,
         session_dir=tmp_path,
     )
@@ -341,7 +343,7 @@ def test_loop_iteration_gt1_adds_iter_suffix_instruction(
     tmp_path: pathlib.Path,
 ) -> None:
     stage, state = _make_state(
-        tmp_path, gr_id="test-gr", issue_url="https://github.com/o/r/issues/431"
+        tmp_path, gremlin_id="test-gr", issue_url="https://github.com/o/r/issues/431"
     )
     state = dataclasses.replace(
         state, data=dataclasses.replace(state.data, loop_iteration=2)
@@ -373,7 +375,7 @@ def test_loop_iteration_gt1_adds_iter_suffix_instruction(
 
 def test_loop_iteration_1_no_iter_suffix(tmp_path: pathlib.Path) -> None:
     stage, state = _make_state(
-        tmp_path, gr_id="test-gr", issue_url="https://github.com/o/r/issues/431"
+        tmp_path, gremlin_id="test-gr", issue_url="https://github.com/o/r/issues/431"
     )
     prompts_seen: list[str] = []
     with (
