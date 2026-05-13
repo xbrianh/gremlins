@@ -146,17 +146,20 @@ def add(command: str) -> str:
 
 def list_queue() -> int:
     root = queue_root()
-    found = False
+    entries: list[tuple[Path, str]] = []
     for sub in _SUBDIRS:
-        for p in sorted((root / sub).glob("*.cmd")):
-            found = True
-            gremlin_id = _parse_id(p)
-            id_str = f" [{gremlin_id}]" if gremlin_id else ""
-            desc = _cmd_description(p.read_text().strip())
-            desc_str = f"  {desc}" if desc else ""
-            print(f"{sub:8s}  {p.stem}{id_str}{desc_str}")
-    if not found:
+        for p in (root / sub).glob("*.cmd"):
+            entries.append((p, sub))
+    if not entries:
         print("(queue is empty)")
+        return 0
+    entries.sort(key=lambda e: e[0].name, reverse=True)
+    for p, sub in entries:
+        gremlin_id = _parse_id(p)
+        id_str = f" [{gremlin_id}]" if gremlin_id else ""
+        desc = _cmd_description(p.read_text().strip())
+        desc_str = f"  {desc}" if desc else ""
+        print(f"{sub:8s}  {p.stem}{id_str}{desc_str}")
     return 0
 
 
