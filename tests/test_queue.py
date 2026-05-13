@@ -245,8 +245,8 @@ def test_list_reverse_chronological_order(q, capsys):
     (q / "done" / "0002-first.cmd").write_text("echo a")
     (q / "failed" / "0000-third.cmd").write_text("echo c")
     core.list_queue()
-    lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
-    stems = [l.split()[1] for l in lines]
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+    stems = [line.split()[1] for line in lines]
     assert stems == ["0002-first", "0001-second", "0000-third"]
 
 
