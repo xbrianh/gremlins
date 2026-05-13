@@ -12,7 +12,7 @@ import pathlib
 import re
 import secrets
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from gremlins import paths as _paths
 from gremlins.clients.client import Client
@@ -102,6 +102,14 @@ def _stage_list() -> list[Stage]:
     return []
 
 
+def _str_list() -> list[str]:
+    return []
+
+
+def _str_any_dict() -> dict[str, Any]:
+    return {}
+
+
 def _int_or(value: Any, default: int) -> int:
     try:
         return int(value)
@@ -127,6 +135,24 @@ class StateData:
     issue_num: str = ""
     loop_iteration: int = 1
     attempt: str = ""
+    base_ref_sha: str = ""
+    kind: str = ""
+    project_root: str = ""
+    workdir: str = ""
+    setup_kind: str = ""
+    worktree_base: str = ""
+    status: str = ""
+    started_at: str = ""
+    instructions: str = ""
+    description: str = ""
+    description_explicit: bool = False
+    parent_id: str = ""
+    pipeline_args: list[str] = dataclasses.field(default_factory=_str_list)
+    client: str = ""
+    pipeline_path: str = ""
+    stage: str = ""
+    pid: int | None = None
+    stage_inputs: dict[str, Any] = dataclasses.field(default_factory=_str_any_dict)
 
     @classmethod
     def load(cls, gr_id: str | None) -> StateData:
@@ -140,7 +166,53 @@ class StateData:
             issue_num=sd.get("issue_num") or "",
             loop_iteration=_int_or(sd.get("loop_iteration"), 1),
             attempt=sd.get("attempt") or "",
+            base_ref_sha=sd.get("base_ref_sha") or "",
+            kind=sd.get("kind") or "",
+            project_root=sd.get("project_root") or "",
+            workdir=sd.get("workdir") or "",
+            setup_kind=sd.get("setup_kind") or "",
+            worktree_base=sd.get("worktree_base") or "",
+            status=sd.get("status") or "",
+            started_at=sd.get("started_at") or "",
+            instructions=sd.get("instructions") or "",
+            description=sd.get("description") or "",
+            description_explicit=bool(sd.get("description_explicit")),
+            parent_id=sd.get("parent_id") or "",
+            pipeline_args=list(cast(list[str], sd.get("pipeline_args") or [])),
+            client=sd.get("client") or "",
+            pipeline_path=sd.get("pipeline_path") or "",
+            stage=sd.get("stage") or "",
+            pid=sd.get("pid"),
+            stage_inputs=dict(cast(dict[str, Any], sd.get("stage_inputs") or {})),
         )
+
+    def persist(self, state_dir: pathlib.Path) -> None:
+        data: dict[str, Any] = {
+            "id": self.gr_id,
+            "kind": self.kind,
+            "project_root": self.project_root,
+            "workdir": self.workdir,
+            "setup_kind": self.setup_kind,
+            "worktree_base": self.worktree_base,
+            "status": self.status,
+            "started_at": self.started_at,
+            "instructions": self.instructions,
+            "description": self.description,
+            "description_explicit": self.description_explicit,
+            "parent_id": self.parent_id,
+            "pipeline_args": self.pipeline_args,
+            "client": self.client,
+            "pipeline_path": self.pipeline_path,
+            "stage": self.stage,
+            "pid": self.pid,
+            "stage_inputs": self.stage_inputs,
+            "base_ref_name": self.base_ref_name,
+            "base_ref_sha": self.base_ref_sha,
+            "issue_url": self.issue_url,
+            "issue_num": self.issue_num,
+        }
+        write_state(state_dir, data)
+        self.state_file = state_dir / "state.json"
 
     def patch(self, _delete: tuple[str, ...] = (), **fields: object) -> None:
         sf = self.state_file or resolve_state_file(self.gr_id)

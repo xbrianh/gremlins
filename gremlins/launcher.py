@@ -9,6 +9,7 @@ Public API:
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import json
 import os
@@ -21,7 +22,7 @@ from typing import Any, cast
 from gremlins import paths as _paths
 from gremlins.clients.client import PACKAGE_DEFAULT
 from gremlins.executor.gremlin import Gremlin as _Gremlin
-from gremlins.executor.state import StateData, validate_gr_id, write_state
+from gremlins.executor.state import StateData, validate_gr_id
 from gremlins.utils import git as _git_mod
 from gremlins.utils import proc
 from gremlins.utils.github import fetch_issue, parse_issue_ref
@@ -98,31 +99,31 @@ def _build_spawn_env(gr_id: str) -> dict[str, str]:
     return env
 
 
-def launch(
-    kind: str,
-    *,
-    stage_inputs: dict[str, Any] | None = None,
-    plan: str | None = None,
-    description: str | None = None,
-    parent_id: str | None = None,
-    project_root: str | None = None,
-    base_ref: str | None = None,
-    pipeline_args: tuple[str, ...] = (),
-    spec_path: str | None = None,
-    gr_id: str | None = None,
-) -> str:
-    """Set up state dir, spawn the pipeline detached, return gremlin id.
+@dataclasses.dataclass
+class _Inputs:
+    gr_id: str
+    kind: str
+    plan: str | None
+    instructions: str
+    description: str
+    description_explicit: bool
+    parent_id: str
+    project_root: str
+    pipeline_path: str
+    pipeline_args: list[str]
+    client_label: str
+    setup_kind: str
+    base_ref_name: str
+    base_ref_sha: str
+    stage_inputs: dict[str, Any]
+    issue_data: dict[str, Any] | None
 
-    Worktree setup is deferred to the child process via Gremlin.initialize_runtime().
-    Synchronous through spawn; does not wait for the pipeline to finish.
-    Raises ValueError on bad arguments, RuntimeError on infrastructure failure.
-    """
-    from gremlins.cli.pipeline_args import launch_client_label, resolve_pipeline
 
-    stage_inputs = {} if stage_inputs is None else dict(stage_inputs)
-    instructions: str | None = stage_inputs.get("instructions")
-    if plan is None:
-        plan = stage_inputs.pop("plan", None)
+def _validate_plan_args(
+    plan: str | None,
+    instructions: str | None,
+    spec_path: str | None,
+) -> tuple[str | None, str | None]:
     if plan and instructions:
         raise ValueError("--plan and instructions are mutually exclusive")
     if shutil.which("claude") is None:
@@ -131,7 +132,6 @@ def launch(
     if plan and os.path.isfile(plan) and os.path.getsize(plan) == 0:
         raise ValueError(f"--plan: file is empty: {plan}")
 
-    # Validate and normalize spec_path to absolute
     if spec_path is not None:
         if not os.path.isfile(spec_path):
             raise ValueError(f"--spec: file not found: {spec_path}")
@@ -139,7 +139,6 @@ def launch(
             raise ValueError(f"--spec: file is empty: {spec_path}")
         spec_path = str(pathlib.Path(spec_path).resolve())
 
-    # Normalize plan path to absolute
     if plan and os.path.isfile(plan):
         plan = str(pathlib.Path(plan).resolve())
 
@@ -152,16 +151,10 @@ def launch(
                 f"--plan: not a file or recognized issue ref (use #N or owner/repo#N): {plan}"
             )
 
-    issue_data: dict[str, Any] | None = None
-    if plan and not os.path.isfile(plan):
-        issue_data = fetch_issue(plan)
+    return plan, spec_path
 
-    desc, desc_explicit, slug = _resolve_description_and_slug(
-        instructions,
-        plan,
-        description,
-        issue_title=str((issue_data or {}).get("title") or ""),
-    )
+
+def _resolve_gr_id(slug: str, gr_id: str | None) -> str:
     if gr_id is not None:
         validate_gr_id(gr_id)
         _existing = _state_root() / gr_id
@@ -187,9 +180,68 @@ def launch(
                         raise GremlinAlreadyRunning(
                             f"gremlin {gr_id!r} is already running (pid {_pid})"
                         )
-    else:
-        rand_hex = secrets.token_hex(3)
-        gr_id = f"{slug}-{rand_hex}"
+        return gr_id
+    return f"{slug}-{secrets.token_hex(3)}"
+
+
+def _resolve_base_ref(
+    base_ref: str | None,
+    project_root: str,
+    loaded_pipeline: Any,
+) -> tuple[str, str]:
+    _pipeline_base_ref = (
+        loaded_pipeline.base_ref if loaded_pipeline is not None else "current"
+    )
+    effective_base_ref = base_ref if base_ref is not None else _pipeline_base_ref
+    if _git_mod.in_git_repo(cwd=project_root):
+        if loaded_pipeline is not None and loaded_pipeline.needs_gh():
+            _branch = effective_base_ref.removeprefix("origin/")
+            if _branch and _branch not in ("current", "HEAD"):
+                try:
+                    _git_mod.fetch_origin(_branch, cwd=project_root)
+                except _git_mod.GitError as exc:
+                    raise RuntimeError(
+                        f"git fetch origin {_branch} failed: {exc}"
+                    ) from exc
+        try:
+            return _git_mod.resolve_base_ref(effective_base_ref, cwd=project_root)
+        except _git_mod.GitError as exc:
+            raise RuntimeError(f"--base-ref: {exc}") from exc
+    return effective_base_ref, ""
+
+
+def _resolve_inputs(
+    kind: str,
+    stage_inputs: dict[str, Any],
+    plan: str | None,
+    description: str | None,
+    parent_id: str | None,
+    project_root: str | None,
+    base_ref: str | None,
+    pipeline_args: tuple[str, ...],
+    spec_path: str | None,
+    gr_id: str | None,
+) -> _Inputs:
+    from gremlins.cli.pipeline_args import launch_client_label, resolve_pipeline
+
+    instructions: str | None = stage_inputs.get("instructions")
+    if plan is None:
+        plan = stage_inputs.pop("plan", None)
+
+    plan, spec_path = _validate_plan_args(plan, instructions, spec_path)
+
+    issue_data: dict[str, Any] | None = None
+    if plan and not os.path.isfile(plan):
+        issue_data = fetch_issue(plan)
+
+    desc, desc_explicit, slug = _resolve_description_and_slug(
+        instructions,
+        plan,
+        description,
+        issue_title=str((issue_data or {}).get("title") or ""),
+    )
+
+    resolved_gr_id = _resolve_gr_id(slug, gr_id)
 
     if project_root is None:
         r = proc.run(["git", "rev-parse", "--show-toplevel"])
@@ -202,123 +254,166 @@ def launch(
         kind, pipeline_args, project_root
     )
 
-    state_dir = _state_root() / gr_id
-
-    _loaded_pipeline = None
+    state_dir = _state_root() / resolved_gr_id
+    loaded_pipeline = None
     try:
         _gremlin = _Gremlin.build(
-            gr_id=gr_id,
+            gr_id=resolved_gr_id,
             state_dir=state_dir,
             project_dir=pathlib.Path(project_root),
             pipeline_ref=pipeline_path,
         )
-        _loaded_pipeline = _gremlin.pipeline_data
+        loaded_pipeline = _gremlin.pipeline_data
     except (FileNotFoundError, OSError, ValueError):
         pass
 
     if (
-        _loaded_pipeline is not None
-        and _loaded_pipeline.needs_gh()
+        loaded_pipeline is not None
+        and loaded_pipeline.needs_gh()
         and shutil.which("gh") is None
     ):
         raise RuntimeError("gh CLI not found on PATH (required for gh pipeline)")
 
-    _pipeline_base_ref = (
-        _loaded_pipeline.base_ref if _loaded_pipeline is not None else "current"
+    base_ref_name, base_ref_sha = _resolve_base_ref(
+        base_ref, project_root, loaded_pipeline
     )
-    _effective_base_ref = base_ref if base_ref is not None else _pipeline_base_ref
-    if _git_mod.in_git_repo(cwd=project_root):
-        if _loaded_pipeline is not None and _loaded_pipeline.needs_gh():
-            _branch = _effective_base_ref.removeprefix("origin/")
-            if _branch and _branch not in ("current", "HEAD"):
-                try:
-                    _git_mod.fetch_origin(_branch, cwd=project_root)
-                except _git_mod.GitError as exc:
-                    raise RuntimeError(
-                        f"git fetch origin {_branch} failed: {exc}"
-                    ) from exc
-        try:
-            base_ref_name, base_ref_sha = _git_mod.resolve_base_ref(
-                _effective_base_ref, cwd=project_root
-            )
-        except _git_mod.GitError as exc:
-            raise RuntimeError(f"--base-ref: {exc}") from exc
-    else:
-        base_ref_name, base_ref_sha = _effective_base_ref, ""
 
+    stored_args = list(resolved_pipeline_args)
+    if spec_path and "--spec" not in stored_args:
+        stored_args = ["--spec", spec_path] + stored_args
+    if plan and "--plan" not in stored_args:
+        stored_args = ["--plan", plan] + stored_args
+
+    client_label = launch_client_label(stored_args, loaded_pipeline)
+    setup_kind = (
+        loaded_pipeline.setup_kind()
+        if loaded_pipeline is not None
+        else "worktree-branch"
+    )
+
+    return _Inputs(
+        gr_id=resolved_gr_id,
+        kind=kind,
+        plan=plan,
+        instructions=instructions or "",
+        description=desc,
+        description_explicit=desc_explicit,
+        parent_id=parent_id or "",
+        project_root=project_root,
+        pipeline_path=pipeline_path,
+        pipeline_args=stored_args,
+        client_label=client_label,
+        setup_kind=setup_kind,
+        base_ref_name=base_ref_name,
+        base_ref_sha=base_ref_sha,
+        stage_inputs=stage_inputs,
+        issue_data=issue_data,
+    )
+
+
+def _prepare_state_dir(state_dir: pathlib.Path, inputs: _Inputs) -> None:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "instructions.txt").write_text(inputs.instructions, encoding="utf-8")
+    if inputs.issue_data and inputs.issue_data.get("body"):
+        artifacts_dir = state_dir / "artifacts"
+        artifacts_dir.mkdir(exist_ok=True)
+        (artifacts_dir / "plan.md").write_text(
+            inputs.issue_data["body"], encoding="utf-8"
+        )
+
+
+def _initial_state_data(inputs: _Inputs) -> StateData:
+    now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    issue_url = str(inputs.issue_data.get("url", "")) if inputs.issue_data else ""
+    issue_num = str(inputs.issue_data.get("number", "")) if inputs.issue_data else ""
+    return StateData(
+        gr_id=inputs.gr_id,
+        kind=inputs.kind,
+        project_root=inputs.project_root,
+        workdir="",
+        setup_kind=inputs.setup_kind,
+        worktree_base="",
+        status="running",
+        started_at=now_iso,
+        instructions=inputs.instructions[:200],
+        description=inputs.description,
+        description_explicit=inputs.description_explicit,
+        parent_id=inputs.parent_id,
+        pipeline_args=inputs.pipeline_args,
+        client=inputs.client_label,
+        pipeline_path=inputs.pipeline_path,
+        stage="starting",
+        pid=None,
+        stage_inputs=inputs.stage_inputs,
+        base_ref_name=inputs.base_ref_name,
+        base_ref_sha=inputs.base_ref_sha,
+        issue_url=issue_url,
+        issue_num=issue_num,
+    )
+
+
+def _spawn(gr_id: str, inputs: _Inputs, state_dir: pathlib.Path) -> Any:
+    spawn_args = list(inputs.pipeline_args)
+    if inputs.instructions:
+        spawn_args.append(inputs.instructions)
+    cmd = [
+        sys.executable,
+        "-m",
+        "gremlins.run_pipeline",
+        gr_id,
+        inputs.pipeline_path,
+        *spawn_args,
+    ]
+    return _spawn_logged_process(
+        cmd, inputs.project_root, _build_spawn_env(gr_id), state_dir / "log"
+    )
+
+
+def launch(
+    kind: str,
+    *,
+    stage_inputs: dict[str, Any] | None = None,
+    plan: str | None = None,
+    description: str | None = None,
+    parent_id: str | None = None,
+    project_root: str | None = None,
+    base_ref: str | None = None,
+    pipeline_args: tuple[str, ...] = (),
+    spec_path: str | None = None,
+    gr_id: str | None = None,
+) -> str:
+    """Set up state dir, spawn the pipeline detached, return gremlin id.
+
+    Worktree setup is deferred to the child process via Gremlin.initialize_runtime().
+    Synchronous through spawn; does not wait for the pipeline to finish.
+    Raises ValueError on bad arguments, RuntimeError on infrastructure failure.
+    """
+    inputs = _resolve_inputs(
+        kind,
+        {} if stage_inputs is None else dict(stage_inputs),
+        plan,
+        description,
+        parent_id,
+        project_root,
+        base_ref,
+        pipeline_args,
+        spec_path,
+        gr_id,
+    )
+    state_dir = _state_root() / inputs.gr_id
     try:
-        state_dir.mkdir(parents=True, exist_ok=True)
-        # pipeline_args for state.json: includes --plan and --spec when set
-        stored_pipeline_args = list(resolved_pipeline_args)
-        if spec_path and "--spec" not in stored_pipeline_args:
-            stored_pipeline_args = ["--spec", spec_path] + stored_pipeline_args
-        if plan and "--plan" not in stored_pipeline_args:
-            stored_pipeline_args = ["--plan", plan] + stored_pipeline_args
-
-        instr_raw = instructions or ""
-
-        if issue_data and issue_data.get("body"):
-            artifacts_dir = state_dir / "artifacts"
-            artifacts_dir.mkdir(exist_ok=True)
-            (artifacts_dir / "plan.md").write_text(issue_data["body"], encoding="utf-8")
-
-        _setup_kind_arg = (
-            _loaded_pipeline.setup_kind()
-            if _loaded_pipeline is not None
-            else "worktree-branch"
-        )
-
-        now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        state = {
-            "id": gr_id,
-            "kind": kind,
-            "project_root": project_root,
-            "workdir": "",
-            "setup_kind": _setup_kind_arg,
-            "worktree_base": "",
-            "status": "running",
-            "started_at": now_iso,
-            "instructions": instr_raw[:200],
-            "description": desc,
-            "description_explicit": desc_explicit,
-            "parent_id": parent_id or "",
-            "pipeline_args": stored_pipeline_args,
-            "client": launch_client_label(stored_pipeline_args, _loaded_pipeline),
-            "pipeline_path": pipeline_path,
-            "stage": "starting",
-            "pid": None,
-            "stage_inputs": stage_inputs,
-            "base_ref_name": base_ref_name,
-            "base_ref_sha": base_ref_sha,
-            "issue_url": str(issue_data.get("url", "")) if issue_data else "",
-            "issue_num": str(issue_data.get("number", "")) if issue_data else "",
-        }
-        write_state(state_dir, state)
-
-        # Build args for the spawned _run-pipeline process
-        spawn_args = list(stored_pipeline_args)
-        if instructions:
-            spawn_args.append(instructions)
-
-        cmd = [
-            sys.executable,
-            "-m",
-            "gremlins.run_pipeline",
-            gr_id,
-            pipeline_path,
-            *spawn_args,
-        ]
-        p = _spawn_logged_process(
-            cmd, project_root, _build_spawn_env(gr_id), state_dir / "log"
-        )
+        _prepare_state_dir(state_dir, inputs)
+        sd = _initial_state_data(inputs)
+        sd.persist(state_dir)
+        p = _spawn(inputs.gr_id, inputs, state_dir)
     except Exception:
         shutil.rmtree(state_dir, ignore_errors=True)
         raise
 
     (state_dir / "pid").write_text(str(p.pid), encoding="utf-8")
-    StateData.load(gr_id).patch(pid=p.pid)
+    StateData.load(inputs.gr_id).patch(pid=p.pid)
 
-    return gr_id
+    return inputs.gr_id
 
 
 def resume(gr_id: str) -> None:
