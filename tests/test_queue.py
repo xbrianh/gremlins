@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from unittest.mock import MagicMock
 
@@ -171,6 +172,41 @@ def test_run_launch_cmd_proc_failure(q, monkeypatch):
     assert rc == 1
     failed = list((q / "failed").glob("*.cmd"))
     assert len(failed) == 1
+
+
+def test_run_launch_nonzero_exit_fails_fast(q, monkeypatch):
+    """Gremlin that exits non-zero (status=stopped) must surface queue: failed promptly."""
+    fake_id = "gr-fail01"
+    monkeypatch.setattr(
+        "gremlins.queue.core._run_launch",
+        lambda cmd, log_path: (fake_id, True),
+    )
+    monkeypatch.setattr(
+        "gremlins.queue.core._poll_terminal",
+        lambda gremlin_id: {"exit_code": 1, "status": "stopped"},
+    )
+    core.add("gremlins launch local")
+    rc = core.run()
+    assert rc == 1
+    failed = list((q / "failed").glob("*.cmd"))
+    assert len(failed) == 1
+    assert fake_id in failed[0].name
+
+
+def test_poll_terminal_recognizes_stopped(tmp_path, monkeypatch):
+    """_poll_terminal must return immediately when state.json has status=stopped."""
+    gremlin_id = "gr-stop01"
+    state_dir = tmp_path / "state" / gremlin_id
+    state_dir.mkdir(parents=True)
+    state_data = {"status": "stopped", "exit_code": 1}
+    (state_dir / "state.json").write_text(json.dumps(state_data))
+
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    monkeypatch.setattr("gremlins.queue.core._POLL_TIMEOUT", 1)
+
+    result = core._poll_terminal(gremlin_id)
+    assert result["status"] == "stopped"
+    assert result["exit_code"] == 1
 
 
 def test_run_ctrl_c_leaves_item_in_running(q, monkeypatch):
