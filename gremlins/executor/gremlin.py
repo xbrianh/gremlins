@@ -271,7 +271,9 @@ class Gremlin:
         return cls(
             pipeline.stages,
             state_dir=state_dir,
-            session_dir=session_dir if session_dir is not None else state_dir / "artifacts",
+            session_dir=session_dir
+            if session_dir is not None
+            else state_dir / "artifacts",
             gr_id=gr_id,
             pipeline_data=pipeline,
             worktree_dir=worktree_dir,
