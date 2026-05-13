@@ -1,15 +1,17 @@
 # gremlins
 
-Background orchestration pipelines for Claude Code. Given a goal or GitHub issue,
-a gremlin runs the full plan → implement → review-code → address-code cycle
-unattended, writing artifacts to the per-user state directory resolved by
-`platformdirs.user_state_dir("gremlins")` and optionally
-opening a pull request. A fleet manager tracks running, stalled, and finished
-gremlins and provides stop / rescue / land / close operations.
+Background coding-agent pipelines that plan, implement, review, and land work
+end-to-end. Given a goal or GitHub issue, a gremlin runs the full
+plan → implement → review-code → address-code cycle unattended, writing
+artifacts to the per-user state directory resolved by
+`platformdirs.user_state_dir("gremlins")` and optionally opening a pull
+request. A fleet manager tracks running, stalled, and finished gremlins and
+provides stop / rescue / land / close operations.
 
-**Status:** pre-1.0, not published to PyPI. The copy at `~/.claude/gremlins/`
-is still what Claude Code skills (`/localgremlin`, `/ghgremlin`, `/bossgremlin`)
-consume today — this repo is the upstream source.
+**Status: brand-new and a bit janky.** This is a fresh project, actively
+shaped by daily use. Expect rough edges — stream timeouts, the occasional
+merge conflict from parallel gremlins, a few stages still finding their
+final shape. Bug reports, ideas, and PRs are all welcome.
 
 ---
 
@@ -18,8 +20,6 @@ consume today — this repo is the upstream source.
 Paste the output of `gremlins prompt-for-assistant` into a fresh Claude Code session (or any compatible assistant) to configure it as a competent gremlins collaborator.
 
 The workflow: you discuss the work with the assistant, it captures discrete units as GitHub issues or plan files, launches gremlins in the background to implement them, and lands each finished gremlin before starting dependent work. You stay at the strategic level — deciding what to build and in what order — while gremlins handle the implementation cycle unattended. The assistant maintains a queue of running, pending, and blocked work and surfaces it on request.
-
-Run `gremlins prompt-for-assistant | pbcopy` to copy the prompt to your clipboard, then paste it as the first message in a new session.
 
 ---
 
@@ -57,7 +57,7 @@ the dispatch table in [`gremlins/cli/__init__.py`](gremlins/cli/__init__.py).
 | `rm` | Delete a dead gremlin's state dir, worktree, and branch |
 | `close` | Mark a dead gremlin as closed |
 | `log` | Tail the gremlin's log file |
-| `prompt-for-assistant` | Print the assistant setup prompt to stdout (`gremlins prompt-for-assistant | pbcopy`) |
+| `prompt-for-assistant` | Print the assistant setup prompt to stdout |
 
 `_run-pipeline` is an internal spawn boundary; not for direct use.
 

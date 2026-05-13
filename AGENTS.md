@@ -4,6 +4,10 @@ Background orchestration for Claude Code: a gremlin is a detached process that r
 
 This file is the entry-point orientation for an agent working on this codebase. Per-subpackage detail lives in `gremlins/<pkg>/AGENTS.md`. The user-facing project doc is `README.md`. Design notes live in `DESIGN.md` and `plans/`.
 
+## Session start
+
+At the beginning of every session, run `gremlins prompt-for-assistant` and follow its instructions — it defines the four-role collaboration model (thought partner / scribe / flight controller / correction loop) and queue conventions for working through gremlins. Captured work on this project goes to **GitHub issues** (`gh issue ...` against `xbrianh/gremlins`).
+
 ## Repository layout
 
 ```
