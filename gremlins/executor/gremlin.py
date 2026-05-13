@@ -261,7 +261,7 @@ class Gremlin:
         setup_kind: str = "worktree-branch",
         worktree_dir: pathlib.Path | None = None,
         client_label: str = "",
-    ) -> "Gremlin":
+    ) -> Gremlin:
         """Resolve pipeline_ref, load pipeline, and return a constructed Gremlin.
 
         pipeline_ref may be a pipeline name ("boss") or an absolute/relative path.
