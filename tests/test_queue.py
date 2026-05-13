@@ -644,3 +644,51 @@ def test_cli_queue_land_dispatches(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
     rc = main(["queue", "land"])
     assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# queue list --watch
+# ---------------------------------------------------------------------------
+
+
+def test_cli_queue_list_watch_default_interval(tmp_path, monkeypatch):
+    """--watch with no value uses interval=2 and calls render at least once."""
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    renders = []
+
+    def fake_watch_render(interval, render):
+        renders.append(interval)
+        render()
+        return 0
+
+    monkeypatch.setattr("gremlins.cli.queue.watch_render", fake_watch_render)
+    rc = main(["queue", "list", "--watch"])
+    assert rc == 0
+    assert renders == [2]
+
+
+def test_cli_queue_list_watch_custom_interval(tmp_path, monkeypatch):
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    renders = []
+
+    def fake_watch_render(interval, render):
+        renders.append(interval)
+        return 0
+
+    monkeypatch.setattr("gremlins.cli.queue.watch_render", fake_watch_render)
+    rc = main(["queue", "list", "--watch", "5"])
+    assert rc == 0
+    assert renders == [5]
+
+
+def test_cli_queue_list_no_watch_skips_watch_render(tmp_path, monkeypatch, capsys):
+    """No --watch flag: single render, watch_render not called."""
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    called = []
+    monkeypatch.setattr(
+        "gremlins.cli.queue.watch_render", lambda *a, **kw: called.append(1)
+    )
+    rc = main(["queue", "list"])
+    assert rc == 0
+    assert called == []
+    assert "(queue is empty)" in capsys.readouterr().out

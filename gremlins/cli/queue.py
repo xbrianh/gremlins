@@ -8,6 +8,7 @@ import sys
 from collections.abc import Callable
 
 from gremlins.queue.core import add, clear, land, list_queue, requeue, run
+from gremlins.utils.watch import watch_render
 
 
 def _add(argv: list[str]) -> int:
@@ -20,7 +21,19 @@ def _add(argv: list[str]) -> int:
     return 0
 
 
-def _list(_argv: list[str]) -> int:
+def _list(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="gremlins queue list")
+    parser.add_argument(
+        "--watch",
+        nargs="?",
+        const=2,
+        type=int,
+        metavar="SEC",
+        help="Refresh every SEC seconds (default 2).",
+    )
+    args = parser.parse_args(argv)
+    if args.watch is not None:
+        return watch_render(args.watch, list_queue)
     return list_queue()
 
 

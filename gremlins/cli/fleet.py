@@ -2,10 +2,7 @@
 
 import argparse
 import os
-import signal
 import sys
-import time
-import types
 
 import gremlins.fleet.constants as _constants
 from gremlins.fleet.ack import do_ack, do_skip
@@ -16,6 +13,7 @@ from gremlins.fleet.rescue import do_rescue
 from gremlins.fleet.state import git_toplevel
 from gremlins.fleet.stop import do_stop
 from gremlins.fleet.views import do_drill_in, do_list, do_recent
+from gremlins.utils.watch import watch_render
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -258,22 +256,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
 
     # --watch loop.
     if args.watch is not None:
-        interval = max(1, args.watch)
-        stop = [False]
-
-        def _handle_sigint(_signum: int, _frame: types.FrameType | None) -> None:
-            stop[0] = True
-
-        signal.signal(signal.SIGINT, _handle_sigint)
-
-        while not stop[0]:
-            sys.stdout.write("\033[2J\033[H")
-            sys.stdout.flush()
-            render_view(args, here_root)
-            for _ in range(interval * 10):
-                if stop[0]:
-                    break
-                time.sleep(0.1)
+        watch_render(args.watch, lambda: render_view(args, here_root))
         sys.exit(0)
 
     # Default: single render.
