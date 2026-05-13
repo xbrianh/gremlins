@@ -209,7 +209,7 @@ def launch(
         _gremlin = _Gremlin.build(
             gr_id=gr_id,
             state_dir=state_dir,
-            worktree_parent=pathlib.Path(project_root),
+            project_dir=pathlib.Path(project_root),
             pipeline_ref=pipeline_path,
         )
         _loaded_pipeline = _gremlin.pipeline_data
@@ -376,7 +376,7 @@ def resume(gr_id: str) -> None:
             _gremlin_resume = _Gremlin.build(
                 gr_id=gr_id,
                 state_dir=state_dir,
-                worktree_parent=pathlib.Path(project_root),
+                project_dir=pathlib.Path(project_root),
                 pipeline_ref=pipeline_path,
             )
             _loaded_resume = _gremlin_resume.pipeline_data

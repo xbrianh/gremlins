@@ -93,6 +93,7 @@ class Gremlin:
         gr_id: str | None,
         pipeline_data: _PipelineData,
         worktree_dir: pathlib.Path | None = None,
+        worktree_parent: pathlib.Path | None = None,
         resume_from: str | None = None,
         instructions: str = "",
         spec: str | None = None,
@@ -123,6 +124,7 @@ class Gremlin:
         self.gr_id = gr_id
         self.pipeline_data = pipeline_data
         self.worktree_dir = worktree_dir
+        self.worktree_parent = worktree_parent
         self.resume_from = resume_from
         self.instructions = instructions
         self.spec = spec
@@ -155,6 +157,7 @@ class Gremlin:
                         self.base_ref_sha,
                         self.gr_id,
                         self.state_dir,
+                        worktree_parent=self.worktree_parent,
                     )
                 )
                 worktree_created = workdir
@@ -228,6 +231,7 @@ class Gremlin:
                 repo=self.repo,
                 instructions=self.instructions,
                 test_client=self.test_client,
+                worktree_parent=self.worktree_parent,
             )
             built.append((e.name, stage_state.make_runner(e, scope=stages)))
         return built
@@ -244,9 +248,10 @@ class Gremlin:
         *,
         gr_id: str | None,
         state_dir: pathlib.Path,
-        worktree_parent: pathlib.Path,
+        project_dir: pathlib.Path,
         pipeline_ref: str,
         session_dir: pathlib.Path | None = None,
+        worktree_parent: pathlib.Path | None = None,
         instructions: str = "",
         resume_from: str | None = None,
         plan: str | None = None,
@@ -261,7 +266,7 @@ class Gremlin:
         client_label: str = "",
     ) -> Gremlin:
         try:
-            pipeline_path = resolve_pipeline_path(pipeline_ref, worktree_parent)
+            pipeline_path = resolve_pipeline_path(pipeline_ref, project_dir)
             pipeline = _PipelineData.from_yaml(pipeline_path)
         except (FileNotFoundError, _YamlLoadError) as exc:
             raise ValueError(str(exc)) from exc
@@ -277,6 +282,7 @@ class Gremlin:
             gr_id=gr_id,
             pipeline_data=pipeline,
             worktree_dir=worktree_dir,
+            worktree_parent=worktree_parent,
             resume_from=resume_from,
             instructions=instructions,
             spec=spec,

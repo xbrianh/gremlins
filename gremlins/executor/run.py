@@ -142,7 +142,7 @@ def run_pipeline(
             gr_id=gr_id,
             state_dir=state_dir,
             session_dir=session_dir,
-            worktree_parent=pathlib.Path(project_root)
+            project_dir=pathlib.Path(project_root)
             if project_root
             else pathlib.Path.cwd(),
             pipeline_ref=str(pipeline_path),
