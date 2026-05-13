@@ -375,6 +375,22 @@ class State:
     loop_iteration: int = 1
     attempt: str = ""
 
+    @staticmethod
+    def setup_dirs(
+        state_dir: pathlib.Path,
+        session_dir: pathlib.Path,
+        gr_id: str | None,
+        *,
+        instructions: str = "",
+    ) -> None:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / "instructions.txt").write_text(instructions, encoding="utf-8")
+        sf = state_dir / "state.json"
+        if gr_id and not sf.exists():
+            # bootstraps state.json when called outside the launcher
+            write_state(state_dir, {"id": gr_id})
+
     @property
     def cwd(self) -> pathlib.Path:
         return self.worktree if self.worktree is not None else pathlib.Path.cwd()

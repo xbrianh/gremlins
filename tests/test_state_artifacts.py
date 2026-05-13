@@ -5,6 +5,50 @@ import pathlib
 
 import gremlins.executor.state as state_mod
 
+# ---------------------------------------------------------------------------
+# State.setup_dirs
+# ---------------------------------------------------------------------------
+
+
+def test_setup_dirs_creates_directories(tmp_path):
+    state_dir = tmp_path / "state" / "gr-1"
+    session_dir = state_dir / "artifacts"
+    state_mod.State.setup_dirs(state_dir, session_dir, gr_id=None)
+    assert state_dir.is_dir()
+    assert session_dir.is_dir()
+
+
+def test_setup_dirs_writes_instructions(tmp_path):
+    state_dir = tmp_path / "state" / "gr-1"
+    session_dir = state_dir / "artifacts"
+    state_mod.State.setup_dirs(state_dir, session_dir, gr_id=None, instructions="do x")
+    assert (state_dir / "instructions.txt").read_text() == "do x"
+
+
+def test_setup_dirs_no_gr_id_skips_state_json(tmp_path):
+    state_dir = tmp_path / "state" / "gr-1"
+    session_dir = state_dir / "artifacts"
+    state_mod.State.setup_dirs(state_dir, session_dir, gr_id=None)
+    assert not (state_dir / "state.json").exists()
+
+
+def test_setup_dirs_with_gr_id_bootstraps_state_json(tmp_path):
+    state_dir = tmp_path / "state" / "gr-2"
+    session_dir = state_dir / "artifacts"
+    state_mod.State.setup_dirs(state_dir, session_dir, gr_id="gr-2")
+    data = json.loads((state_dir / "state.json").read_text())
+    assert data["id"] == "gr-2"
+
+
+def test_setup_dirs_with_gr_id_does_not_overwrite_existing_state_json(tmp_path):
+    state_dir = tmp_path / "state" / "gr-3"
+    session_dir = state_dir / "artifacts"
+    state_dir.mkdir(parents=True)
+    existing = {"id": "gr-3", "stage": "implement", "extra": True}
+    (state_dir / "state.json").write_text(json.dumps(existing))
+    state_mod.State.setup_dirs(state_dir, session_dir, gr_id="gr-3")
+    assert json.loads((state_dir / "state.json").read_text()) == existing
+
 
 def _make_state_dir(
     tmp_path: pathlib.Path, gr_id: str
