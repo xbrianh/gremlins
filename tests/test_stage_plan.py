@@ -182,8 +182,8 @@ def test_resolve_issue_source_empty_repo_writes_url(
     _issue_source_mocks(monkeypatch, pr_repo="owner/repo")
     captured: dict[str, object] = {}
     monkeypatch.setattr(
-        "gremlins.executor.state.patch_state",
-        lambda _id, **kw: captured.update(kw),
+        "gremlins.executor.state.State.patch",
+        lambda self, _delete=(), **kw: captured.update(kw),
     )
     stage = Plan("plan", None, [], {})
     client = FakeClaudeClient(fixtures={})
@@ -202,8 +202,8 @@ def test_resolve_issue_source_matching_repo_writes_url(
     _issue_source_mocks(monkeypatch, pr_repo="owner/repo")
     captured: dict[str, object] = {}
     monkeypatch.setattr(
-        "gremlins.executor.state.patch_state",
-        lambda _id, **kw: captured.update(kw),
+        "gremlins.executor.state.State.patch",
+        lambda self, _delete=(), **kw: captured.update(kw),
     )
     stage = Plan("plan", None, [], {})
     client = FakeClaudeClient(fixtures={})
@@ -222,8 +222,8 @@ def test_resolve_issue_source_cross_repo_clears_url(
     _issue_source_mocks(monkeypatch, pr_repo="owner/a")
     captured: dict[str, object] = {}
     monkeypatch.setattr(
-        "gremlins.executor.state.patch_state",
-        lambda _id, **kw: captured.update(kw),
+        "gremlins.executor.state.State.patch",
+        lambda self, _delete=(), **kw: captured.update(kw),
     )
     stage = Plan("plan", None, [], {})
     client = FakeClaudeClient(fixtures={})

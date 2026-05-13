@@ -68,7 +68,9 @@ def test_write_bail_file_creates_file(state_root, monkeypatch):
     sf = state_dir / "state.json"
     sf.write_text(json.dumps({"id": gr_id}))
 
-    state_mod.write_bail_file(gr_id, "test-attempt", "other", "reason")
+    state_mod.State.load(gr_id).write_bail_file(
+        "other", "reason", attempt="test-attempt"
+    )
 
     bail_path = state_dir / "bail_test-attempt.json"
     assert bail_path.exists()
@@ -84,8 +86,10 @@ def test_write_bail_file_idempotent(state_root, monkeypatch):
     sf = state_dir / "state.json"
     sf.write_text(json.dumps({"id": gr_id}))
 
-    state_mod.write_bail_file(gr_id, "attempt-1", "other", "first")
-    state_mod.write_bail_file(gr_id, "attempt-1", "security", "second")
+    state_mod.State.load(gr_id).write_bail_file("other", "first", attempt="attempt-1")
+    state_mod.State.load(gr_id).write_bail_file(
+        "security", "second", attempt="attempt-1"
+    )
 
     data = json.loads((state_dir / "bail_attempt-1.json").read_text())
     assert data["class"] == "other"  # not overwritten
@@ -97,7 +101,7 @@ def test_write_bail_file_noop_without_attempt(state_root, monkeypatch):
     state_dir.mkdir(parents=True)
     (state_dir / "state.json").write_text(json.dumps({"id": gr_id}))
 
-    state_mod.write_bail_file(gr_id, "", "other", "reason")
+    state_mod.State.load(gr_id).write_bail_file("other", "reason", attempt="")
     bail_files = list(state_dir.glob("bail_*.json"))
     assert not bail_files
 
@@ -111,7 +115,7 @@ def test_check_bail_detects_bail_file(state_root, monkeypatch):
     (state_dir / "bail_my-attempt.json").write_text(json.dumps({"class": "other"}))
 
     with pytest.raises(RuntimeError, match="bailed"):
-        state_mod.check_bail(gr_id, "test")
+        state_mod.State.load(gr_id).check_bail("test")
 
 
 def test_check_bail_no_bail_file(state_root, monkeypatch):
@@ -120,7 +124,7 @@ def test_check_bail_no_bail_file(state_root, monkeypatch):
     state_dir.mkdir(parents=True)
     sf = state_dir / "state.json"
     sf.write_text(json.dumps({"id": gr_id, "attempt": "my-attempt"}))
-    state_mod.check_bail(gr_id, "test")  # should not raise
+    state_mod.State.load(gr_id).check_bail("test")  # should not raise
 
 
 def test_check_bail_stale_attempt_not_detected(state_root, monkeypatch):
@@ -130,7 +134,7 @@ def test_check_bail_stale_attempt_not_detected(state_root, monkeypatch):
     sf = state_dir / "state.json"
     sf.write_text(json.dumps({"id": gr_id, "attempt": "current-attempt"}))
     (state_dir / "bail_old-attempt.json").write_text(json.dumps({"class": "other"}))
-    state_mod.check_bail(gr_id, "test")  # stale bail should not raise
+    state_mod.State.load(gr_id).check_bail("test")  # stale bail should not raise
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +164,8 @@ def test_run_pipeline_rejects_invalid_gr_id(tmp_path, monkeypatch, bad_id):
 def test_run_pipeline_valid_id_proceeds(tmp_path, monkeypatch):
     monkeypatch.setattr("gremlins.executor.run.run_pipeline", lambda *a, **kw: 0)
     monkeypatch.setattr(
-        "gremlins.run_pipeline.write_terminal_state", lambda gr_id, exit_code: None
+        "gremlins.executor.state.State.write_terminal_state",
+        lambda self, exit_code: None,
     )
     with pytest.raises(SystemExit):
         run_pipeline_main(["valid-gremlin-abc123", "/fake/pipeline.yaml"])
@@ -172,15 +177,16 @@ def test_run_pipeline_forwards_gr_id_to_orchestrator(
     gr_id = "test-pipeline-gr"
     state_dir = make_state_dir(gr_id)
 
-    from gremlins.executor.state import set_stage
+    from gremlins.executor.state import State
 
     def fake_run_pipeline(pipeline_path, *, argv, gr_id=None, client=None):
-        set_stage(gr_id, "implement")
+        State.load(gr_id).set_stage("implement")
         return 0
 
     monkeypatch.setattr("gremlins.executor.run.run_pipeline", fake_run_pipeline)
     monkeypatch.setattr(
-        "gremlins.run_pipeline.write_terminal_state", lambda gr_id, exit_code: None
+        "gremlins.executor.state.State.write_terminal_state",
+        lambda self, exit_code: None,
     )
 
     with pytest.raises(SystemExit) as exc_info:

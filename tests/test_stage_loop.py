@@ -128,7 +128,7 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
     gr_id = "loop-test-gr"
     state_dir = make_state_dir(gr_id)
     attempt = "loop-test-attempt"
-    state_mod.patch_state(gr_id, attempt=attempt)
+    state_mod.State.load(gr_id).patch(attempt=attempt)
 
     def check() -> None:
         raise RunCmdFailed("fail")
@@ -358,10 +358,9 @@ def test_pr_stack_iter2_detaches_to_iter1_branch(tmp_path, make_state_dir, monke
         nonlocal count
         count += 1
         if count == 1:
-            from gremlins.executor.state import append_artifact
+            from gremlins.executor.state import State
 
-            append_artifact(
-                gr_id,
+            State.load(gr_id).append_artifact(
                 {
                     "type": "pr",
                     "url": "https://github.com/x/r/pull/1",

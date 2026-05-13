@@ -44,7 +44,7 @@ def test_run_calls_claude_with_push_prompt(tmp_path: pathlib.Path) -> None:
             "gremlins.stages.github_open_pull_request._get_pr_branch",
             return_value=PR_BRANCH,
         ),
-        patch("gremlins.executor.state.append_artifact"),
+        patch("gremlins.executor.state.State.append_artifact"),
     ):
         stage.run(state)
     assert len(state.client.calls) == 1
@@ -66,7 +66,7 @@ def test_issue_num_adds_closes_clause(tmp_path: pathlib.Path) -> None:
             "gremlins.stages.github_open_pull_request._get_pr_branch",
             return_value=PR_BRANCH,
         ),
-        patch("gremlins.executor.state.append_artifact"),
+        patch("gremlins.executor.state.State.append_artifact"),
     ):
         stage.run(state)
     assert "Closes #42" in state.client.calls[0].prompt
@@ -83,7 +83,7 @@ def test_no_issue_url_skips_closes(tmp_path: pathlib.Path) -> None:
             "gremlins.stages.github_open_pull_request._get_pr_branch",
             return_value=PR_BRANCH,
         ),
-        patch("gremlins.executor.state.append_artifact"),
+        patch("gremlins.executor.state.State.append_artifact"),
     ):
         stage.run(state)
     assert "Include 'Closes" not in state.client.calls[0].prompt
@@ -100,7 +100,7 @@ def test_run_returns_pr_url(tmp_path: pathlib.Path) -> None:
             "gremlins.stages.github_open_pull_request._get_pr_branch",
             return_value=PR_BRANCH,
         ),
-        patch("gremlins.executor.state.append_artifact"),
+        patch("gremlins.executor.state.State.append_artifact"),
     ):
         result = stage.run(state)
     assert result == PR_URL
@@ -117,7 +117,7 @@ def test_run_writes_raw_path(tmp_path: pathlib.Path) -> None:
             "gremlins.stages.github_open_pull_request._get_pr_branch",
             return_value=PR_BRANCH,
         ),
-        patch("gremlins.executor.state.append_artifact"),
+        patch("gremlins.executor.state.State.append_artifact"),
     ):
         stage.run(state)
     assert (
@@ -139,17 +139,15 @@ def test_run_records_pr_artifact(tmp_path: pathlib.Path) -> None:
             return_value=PR_BRANCH,
         ),
         patch(
-            "gremlins.executor.state.append_artifact",
-            side_effect=lambda gr_id, artifact: artifact_calls.append(
-                (gr_id, artifact)
-            ),
+            "gremlins.executor.state.State.append_artifact",
+            side_effect=lambda artifact: artifact_calls.append(artifact),
         ),
     ):
         stage.run(state)
     assert len(artifact_calls) == 1
-    assert artifact_calls[0][1]["type"] == "pr"
-    assert artifact_calls[0][1]["url"] == PR_URL
-    assert artifact_calls[0][1]["branch"] == PR_BRANCH
+    assert artifact_calls[0]["type"] == "pr"
+    assert artifact_calls[0]["url"] == PR_URL
+    assert artifact_calls[0]["branch"] == PR_BRANCH
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +180,7 @@ def test_stacked_pr_uses_prior_pr_branch(tmp_path: pathlib.Path) -> None:
     prompts_seen: list[str] = []
     with (
         patch(
-            "gremlins.executor.state.last_pr_branch",
+            "gremlins.executor.state.State.last_pr_branch",
             return_value="gremlin/abc-child-1",
         ),
         patch(
@@ -193,7 +191,7 @@ def test_stacked_pr_uses_prior_pr_branch(tmp_path: pathlib.Path) -> None:
             "gremlins.stages.github_open_pull_request._get_pr_branch",
             return_value=PR_BRANCH,
         ),
-        patch("gremlins.executor.state.append_artifact"),
+        patch("gremlins.executor.state.State.append_artifact"),
         patch.object(
             stage,
             "run_claude",
@@ -217,7 +215,7 @@ def test_single_pr_without_prior_pr_branch_uses_base_ref_name(
     stage, state = _make_state_with_gr(tmp_path, base_ref_name="main")
     prompts_seen: list[str] = []
     with (
-        patch("gremlins.executor.state.last_pr_branch", return_value=""),
+        patch("gremlins.executor.state.State.last_pr_branch", return_value=""),
         patch(
             "gremlins.stages.github_open_pull_request.extract_gh_url",
             return_value=PR_URL,
@@ -226,7 +224,7 @@ def test_single_pr_without_prior_pr_branch_uses_base_ref_name(
             "gremlins.stages.github_open_pull_request._get_pr_branch",
             return_value=PR_BRANCH,
         ),
-        patch("gremlins.executor.state.append_artifact"),
+        patch("gremlins.executor.state.State.append_artifact"),
         patch.object(
             stage,
             "run_claude",
@@ -254,7 +252,7 @@ def test_first_child_uses_base_ref_name(tmp_path: pathlib.Path) -> None:
             "gremlins.stages.github_open_pull_request._get_pr_branch",
             return_value=PR_BRANCH,
         ),
-        patch("gremlins.executor.state.append_artifact"),
+        patch("gremlins.executor.state.State.append_artifact"),
         patch.object(
             stage,
             "run_claude",
@@ -281,7 +279,7 @@ def test_explicit_base_ref_used_when_no_prior_pr(tmp_path: pathlib.Path) -> None
     )
     prompts_seen: list[str] = []
     with (
-        patch("gremlins.executor.state.last_pr_branch", return_value=None),
+        patch("gremlins.executor.state.State.last_pr_branch", return_value=None),
         patch(
             "gremlins.stages.github_open_pull_request.extract_gh_url",
             return_value=PR_URL,
@@ -290,7 +288,7 @@ def test_explicit_base_ref_used_when_no_prior_pr(tmp_path: pathlib.Path) -> None
             "gremlins.stages.github_open_pull_request._get_pr_branch",
             return_value=PR_BRANCH,
         ),
-        patch("gremlins.executor.state.append_artifact"),
+        patch("gremlins.executor.state.State.append_artifact"),
         patch.object(
             stage,
             "run_claude",
@@ -317,7 +315,7 @@ def test_last_pr_branch_takes_priority_over_base_ref(tmp_path: pathlib.Path) -> 
     prompts_seen: list[str] = []
     with (
         patch(
-            "gremlins.executor.state.last_pr_branch",
+            "gremlins.executor.state.State.last_pr_branch",
             return_value="gremlin/child-1",
         ),
         patch(
@@ -328,7 +326,7 @@ def test_last_pr_branch_takes_priority_over_base_ref(tmp_path: pathlib.Path) -> 
             "gremlins.stages.github_open_pull_request._get_pr_branch",
             return_value=PR_BRANCH,
         ),
-        patch("gremlins.executor.state.append_artifact"),
+        patch("gremlins.executor.state.State.append_artifact"),
         patch.object(
             stage,
             "run_claude",
@@ -360,7 +358,7 @@ def test_loop_iteration_gt1_adds_iter_suffix_instruction(
             "gremlins.stages.github_open_pull_request._get_pr_branch",
             return_value=PR_BRANCH,
         ),
-        patch("gremlins.executor.state.append_artifact"),
+        patch("gremlins.executor.state.State.append_artifact"),
         patch.object(
             stage,
             "run_claude",
@@ -389,7 +387,7 @@ def test_loop_iteration_1_no_iter_suffix(tmp_path: pathlib.Path) -> None:
             "gremlins.stages.github_open_pull_request._get_pr_branch",
             return_value=PR_BRANCH,
         ),
-        patch("gremlins.executor.state.append_artifact"),
+        patch("gremlins.executor.state.State.append_artifact"),
         patch.object(
             stage,
             "run_claude",
@@ -418,16 +416,13 @@ def test_record_child_pr_appends_pr_artifact(tmp_path: pathlib.Path) -> None:
             return_value="issue-42-some-slug",
         ),
         patch(
-            "gremlins.executor.state.append_artifact",
-            side_effect=lambda gr_id, artifact: artifact_calls.append(
-                (gr_id, artifact)
-            ),
+            "gremlins.executor.state.State.append_artifact",
+            side_effect=lambda artifact: artifact_calls.append(artifact),
         ),
     ):
         stage.run(state)
     assert artifact_calls, "append_artifact should be called with PR info"
-    gr_id, artifact = artifact_calls[0]
-    assert gr_id == "test-gr"
+    artifact = artifact_calls[0]
     assert artifact["type"] == "pr"
     assert artifact["url"] == "https://github.com/owner/repo/pull/314"
     assert artifact["branch"] == "issue-42-some-slug"

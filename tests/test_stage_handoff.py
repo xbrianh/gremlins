@@ -153,7 +153,7 @@ def test_bail_emits_bail_and_raises(tmp_path, monkeypatch, test_state_root):
     attempt = "handoff-test-attempt"
     state_dir = test_state_root / gr_id
     _write_state(state_dir, gr_id)
-    state_mod.patch_state(gr_id, attempt=attempt)
+    state_mod.State.load(gr_id).patch(attempt=attempt)
     _write_plan(tmp_path)
 
     def fake_handoff_run(client: Any, args: argparse.Namespace) -> int:

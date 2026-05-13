@@ -743,7 +743,7 @@ def test_run_pipeline_writes_terminal_state_on_failure(lenv, monkeypatch):
 
 def test_write_terminal_state_preserves_worktree_for_gh(lenv, monkeypatch, tmp_path):
     """On success, worktree is NOT removed for gh-mode pipelines (only explicit close/land removes it)."""
-    from gremlins.executor.state import write_terminal_state
+    from gremlins.executor.state import State
 
     removed = []
     monkeypatch.setattr(
@@ -760,14 +760,14 @@ def test_write_terminal_state_preserves_worktree_for_gh(lenv, monkeypatch, tmp_p
     }
     (state_dir / "state.json").write_text(json.dumps(state_json), encoding="utf-8")
 
-    write_terminal_state("test-gr-id-abc123", exit_code=0)
+    State.load("test-gr-id-abc123").write_terminal_state(0)
 
     assert removed == [], "worktree must not be removed on exit"
 
 
 def test_write_terminal_state_preserves_worktree_for_local(lenv, monkeypatch, tmp_path):
     """On success, worktree is NOT removed for local-mode pipelines."""
-    from gremlins.executor.state import write_terminal_state
+    from gremlins.executor.state import State
 
     removed = []
     monkeypatch.setattr(
@@ -785,14 +785,14 @@ def test_write_terminal_state_preserves_worktree_for_local(lenv, monkeypatch, tm
     }
     (state_dir / "state.json").write_text(json.dumps(state_json), encoding="utf-8")
 
-    write_terminal_state("test-gr-id-def456", exit_code=0)
+    State.load("test-gr-id-def456").write_terminal_state(0)
 
     assert removed == [], "worktree must not be removed for local-mode pipelines"
 
 
 def test_write_terminal_state_preserves_worktree_for_boss(lenv, monkeypatch, tmp_path):
     """On success, worktree is NOT removed for boss-mode pipelines."""
-    from gremlins.executor.state import write_terminal_state
+    from gremlins.executor.state import State
 
     removed = []
     monkeypatch.setattr(
@@ -810,7 +810,7 @@ def test_write_terminal_state_preserves_worktree_for_boss(lenv, monkeypatch, tmp
     }
     (state_dir / "state.json").write_text(json.dumps(state_json), encoding="utf-8")
 
-    write_terminal_state("test-gr-id-ghi789", exit_code=0)
+    State.load("test-gr-id-ghi789").write_terminal_state(0)
 
     assert removed == [], "worktree must not be removed on exit"
 

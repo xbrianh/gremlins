@@ -142,22 +142,17 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         "gremlins.executor.run.resolve_state_file", lambda gr_id=None: state_file
     )
 
-    # Stub out patch_state so tests don't write to real state files.
-    monkeypatch.setattr(
-        "gremlins.executor.run.patch_state", lambda gr_id=None, **kw: None
-    )
-
-    # gr_id=None makes patch_state a no-op; use a writing shim so the commit runner can read back the values.
-    def _append_artifact(gr_id=None, artifact=None):
+    # Use a writing shim so the commit runner can read back artifact values.
+    def _append_artifact(self, artifact):
         data = json.loads(state_file.read_text(encoding="utf-8"))
         arts = list(data.get("artifacts") or [])
         arts.append(artifact)
         data["artifacts"] = arts
         state_file.write_text(json.dumps(data), encoding="utf-8")
 
-    monkeypatch.setattr("gremlins.executor.state.append_artifact", _append_artifact)
-
-    # set_stage is a no-op in tests — gr_id is not passed to gh_main.
+    monkeypatch.setattr(
+        "gremlins.executor.state.State.append_artifact", _append_artifact
+    )
 
     return session_dir, state_file
 
@@ -833,15 +828,15 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
 
     session_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
-    # Override patch_state so it actually writes fields to state_file instead of no-op.
-    def writing_patch_state(gr_id=None, _delete=(), **kw):
+    # Override State.patch so it actually writes fields to state_file instead of no-op.
+    def writing_patch_state(self, _delete=(), **kw):
         data = json.loads(state_file.read_text())
         for key in _delete:
             data.pop(key, None)
         data.update(kw)
         state_file.write_text(json.dumps(data))
 
-    monkeypatch.setattr("gremlins.executor.run.patch_state", writing_patch_state)
+    monkeypatch.setattr("gremlins.executor.state.State.patch", writing_patch_state)
 
     def fake_gh_run(cmd, *args, **kwargs):
         prog = cmd[0] if cmd else ""
@@ -1502,9 +1497,9 @@ def test_gh_main_state_client_tracks_effective_model(
 
     _patch_common(monkeypatch, tmp_path)
 
-    import gremlins.executor.state as _state_mod
+    from gremlins.executor.state import State as _State
 
-    monkeypatch.setattr("gremlins.executor.run.patch_state", _state_mod.patch_state)
+    monkeypatch.setattr("gremlins.executor.state.State.patch", _State.patch)
 
     monkeypatch.setattr(
         subprocess, "run", _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n")
