@@ -203,7 +203,6 @@ def launch(
     )
 
     state_dir = _state_root() / gr_id
-    state_dir.mkdir(parents=True, exist_ok=True)
 
     _loaded_pipeline = None
     try:
@@ -248,6 +247,7 @@ def launch(
         base_ref_name, base_ref_sha = _effective_base_ref, ""
 
     try:
+        state_dir.mkdir(parents=True, exist_ok=True)
         # pipeline_args for state.json: includes --plan and --spec when set
         stored_pipeline_args = list(resolved_pipeline_args)
         if spec_path and "--spec" not in stored_pipeline_args:
