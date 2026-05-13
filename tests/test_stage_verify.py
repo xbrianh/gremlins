@@ -102,7 +102,7 @@ def test_fix_then_green(tmp_path):
 
 
 def test_attempts_exhausted_raises(tmp_path, monkeypatch):
-    monkeypatch.delenv("GR_ID", raising=False)
+    monkeypatch.delenv("GREMLIN_ID", raising=False)
 
     client = FakeClaudeClient(
         fixtures={
@@ -134,7 +134,7 @@ def test_exhaustion_with_max_1(tmp_path):
 
 
 def test_both_cmds_in_fix_prompt(tmp_path, monkeypatch):
-    monkeypatch.delenv("GR_ID", raising=False)
+    monkeypatch.delenv("GREMLIN_ID", raising=False)
 
     client = FakeClaudeClient(
         fixtures={
@@ -168,7 +168,7 @@ def test_log_file_captures_output(tmp_path):
 
 def test_no_pr_opened_on_exhaustion(tmp_path, monkeypatch):
     """Stage raises when all fix attempts are exhausted."""
-    monkeypatch.delenv("GR_ID", raising=False)
+    monkeypatch.delenv("GREMLIN_ID", raising=False)
 
     client = FakeClaudeClient(
         fixtures={

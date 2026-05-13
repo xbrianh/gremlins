@@ -36,7 +36,7 @@ MINIMAL_EVENTS = [
 ]
 
 # Label the detail reviewer emits (default sonnet model). Shared so the
-# orchestrator smoke tests and the GR_ID-isolation regression tests stay
+# orchestrator smoke tests and the GREMLIN_ID-isolation regression tests stay
 # in sync if the label scheme changes.
 REVIEW_LABELS = {
     "review-code:sonnet",
@@ -90,13 +90,13 @@ def _restore_root_logger():
 
 @pytest.fixture(autouse=True)
 def _isolate_gremlin_id(monkeypatch):
-    # If the test process inherits GR_ID from a parent gremlin (e.g. an
+    # If the test process inherits GREMLIN_ID from a parent gremlin (e.g. an
     # implement stage running `python -m pytest`), gremlins.state.set_stage
     # would shell out to set-stage.sh against the parent's state.json and
     # corrupt its `stage` / `sub_stage` fields. Default-deny here; tests that
-    # genuinely need GR_ID set it explicitly via monkeypatch.setenv, which
+    # genuinely need GREMLIN_ID set it explicitly via monkeypatch.setenv, which
     # overrides this delenv.
-    monkeypatch.delenv("GR_ID", raising=False)
+    monkeypatch.delenv("GREMLIN_ID", raising=False)
 
 
 @pytest.fixture(autouse=True)

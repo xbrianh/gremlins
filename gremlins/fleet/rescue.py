@@ -898,7 +898,7 @@ def do_rescue(target: str, headless: bool = False, from_boss: bool = False) -> b
                 shutil.rmtree(scratch_dir, ignore_errors=True)
 
         # Relaunch step: call the Python launcher's resume() to re-spawn the
-        # pipeline under the same GR_ID with --resume-from <stage>.
+        # pipeline under the same GREMLIN_ID with --resume-from <stage>.
         print()
         print(f"Relaunch step: resuming gremlin {gremlin_id} in the background...")
         report["relaunch_attempted"] = True

@@ -129,7 +129,7 @@ def lenv(tmp_path, monkeypatch):
     old_path = os.environ.get("PATH", "")
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{old_path}")
     monkeypatch.delenv("PYTHONPATH", raising=False)
-    monkeypatch.delenv("GR_ID", raising=False)
+    monkeypatch.delenv("GREMLIN_ID", raising=False)
     monkeypatch.delenv("GREMLINS_OVERLAY_DIR", raising=False)
     monkeypatch.chdir(repo)
 
@@ -181,14 +181,14 @@ class _FakeProc:
 
 
 def test_launch_returns_gremlin_id(lenv):
-    """launch() returns a well-formed GR_ID string."""
+    """launch() returns a well-formed GREMLIN_ID string."""
     launcher = _launcher()
     gremlin_id = launcher.launch(
         "local", stage_inputs={"instructions": "test instructions"}
     )
-    assert gremlin_id, "expected a non-empty GR_ID"
+    assert gremlin_id, "expected a non-empty GREMLIN_ID"
     assert re.match(r"^[a-z0-9-]+-[0-9a-f]{6}$", gremlin_id), (
-        f"GR_ID has unexpected shape: {gremlin_id!r}"
+        f"GREMLIN_ID has unexpected shape: {gremlin_id!r}"
     )
     state_dir = _gremlins_state_root(lenv) / gremlin_id
     assert _wait_for_finished(state_dir, timeout=60), (
@@ -436,13 +436,13 @@ def test_launch_spawned_process_detached(lenv):
 
 
 def test_launch_concurrent_no_collision(lenv):
-    """Concurrent launches produce distinct GR_IDs."""
+    """Concurrent launches produce distinct GREMLIN_IDs."""
     launcher = _launcher()
     ids = [
         launcher.launch("local", stage_inputs={"instructions": f"concurrent {i}"})
         for i in range(5)
     ]
-    assert len(set(ids)) == len(ids), f"GR_ID collision among: {ids}"
+    assert len(set(ids)) == len(ids), f"GREMLIN_ID collision among: {ids}"
 
 
 def test_launch_explicit_project_root(lenv):

@@ -1,25 +1,25 @@
-"""Regression tests for the GR_ID-leakage bug captured on PR #140.
+"""Regression tests for the GREMLIN_ID-leakage bug captured on PR #140.
 
-When `pytest` runs as a subprocess of an implement-stage gremlin, GR_ID is
+When `pytest` runs as a subprocess of an implement-stage gremlin, GREMLIN_ID is
 inherited. Without isolation, gremlins.state.set_stage would write the
 parent gremlin's state.json and corrupt its `stage` and `sub_stage` fields
 — observable in `/gremlins --watch` and dangerous for any rescue-flow logic
 that branches on `stage`.
 
 The fix is the autouse `_isolate_gremlin_id` fixture in conftest.py, which
-delenv's GR_ID before every test. These tests verify both layers:
+delenv's GREMLIN_ID before every test. These tests verify both layers:
 
 - test_autouse_isolate_gremlin_id_unsets_gremlin_id_under_inherited_env: spawns a
-  pytest subprocess with GR_ID set in its environment and asserts the
+  pytest subprocess with GREMLIN_ID set in its environment and asserts the
   autouse fixture removes it inside the test body. Without the subprocess
   hop, this test would pass trivially in any clean CI environment (no
-  GR_ID inherited) regardless of whether the autouse fixture was present.
+  GREMLIN_ID inherited) regardless of whether the autouse fixture was present.
 - test_*_does_not_clobber_external_state: per-orchestrator end-to-end
   checks that running each entry point does not modify a pre-staged parent
   gremlin's state.json. Each orchestrator is exercised in its own test so a
   regression message names the offender.
 
-Coverage envelope: with GR_ID unset (the post-fix invariant), set_stage
+Coverage envelope: with GREMLIN_ID unset (the post-fix invariant), set_stage
 early-returns before touching state.json, so these tests verify that guard
 plus the autouse fixture's delenv. The orchestrator tests also verify
 on-disk contents directly — no fake executables or subprocess interception
@@ -44,20 +44,20 @@ from gremlins.pipeline.discovery import resolve_pipeline_path
 
 
 def test_autouse_isolate_gremlin_id_unsets_gremlin_id_under_inherited_env(tmp_path):
-    # Spawn a pytest subprocess with GR_ID set in env. The autouse fixture
+    # Spawn a pytest subprocess with GREMLIN_ID set in env. The autouse fixture
     # must remove it inside the inner test body. Without the subprocess hop
     # this would pass trivially in any environment that doesn't already
-    # have GR_ID set, so removing the autouse fixture wouldn't trip the
+    # have GREMLIN_ID set, so removing the autouse fixture wouldn't trip the
     # regression.
     #
-    # Place a conftest.py next to the inner test that imports the real
-    # autouse fixture from gremlins.tests.conftest so we are exercising
-    # the actual fixture under test, not a re-implementation.
+    # Place a conftest.py next to the inner test that loads the real autouse
+    # fixture from tests/conftest.py via importlib (keyed by GREMLINS_TESTS_DIR)
+    # so we are exercising the actual fixture under test, not a re-implementation.
     inner_conftest = tmp_path / "conftest.py"
     inner_conftest.write_text(
         textwrap.dedent("""
-        # Re-export the autouse _isolate_gremlin_id fixture from the real
-        # gremlins.tests.conftest so the inner pytest run picks it up.
+        # Load the autouse _isolate_gremlin_id fixture from the real
+        # tests/conftest.py via a file-path import (GREMLINS_TESTS_DIR).
         # importlib avoids the name collision pytest sees when this
         # conftest.py tries to `from conftest import ...`.
         import importlib.util as _u, os, pathlib as _p
@@ -74,16 +74,16 @@ def test_autouse_isolate_gremlin_id_unsets_gremlin_id_under_inherited_env(tmp_pa
         import os
 
         def test_gremlin_id_unset_inside_pytest():
-            assert os.environ.get("GR_ID") is None, (
+            assert os.environ.get("GREMLIN_ID") is None, (
                 "autouse _isolate_gremlin_id fixture failed to remove inherited "
-                f"GR_ID={os.environ.get('GR_ID')!r}"
+                f"GREMLIN_ID={os.environ.get('GREMLIN_ID')!r}"
             )
     """)
     )
     tests_dir = pathlib.Path(__file__).resolve().parent
     repo_root = tests_dir.parent
     env = dict(os.environ)
-    env["GR_ID"] = "fake-parent-gremlin-deadbeef"
+    env["GREMLIN_ID"] = "fake-parent-gremlin-deadbeef"
     env["GREMLINS_TESTS_DIR"] = str(tests_dir)
     env["PYTHONPATH"] = str(repo_root) + os.pathsep + str(tests_dir)
     result = subprocess.run(
@@ -102,7 +102,7 @@ def test_autouse_isolate_gremlin_id_unsets_gremlin_id_under_inherited_env(tmp_pa
         cwd=str(tmp_path),
     )
     assert result.returncode == 0, (
-        f"inner pytest failed (autouse fixture not isolating GR_ID?):\n"
+        f"inner pytest failed (autouse fixture not isolating GREMLIN_ID?):\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
 
@@ -120,8 +120,8 @@ def _stage_parent_state(tmp_path, monkeypatch):
     parent_state_file.write_text(original_content)
     parent_mtime = parent_state_file.stat().st_mtime_ns
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
-    # GR_ID intentionally NOT set — the autouse _isolate_gremlin_id fixture in
-    # conftest.py has removed it. set_stage no-ops because GR_ID is empty.
+    # GREMLIN_ID intentionally NOT set — the autouse _isolate_gremlin_id fixture in
+    # conftest.py has removed it. set_stage no-ops because gremlin_id is None.
     return parent_state_file, original_content, parent_mtime
 
 
@@ -180,10 +180,10 @@ def _make_state_dir(tmp_path, gremlin_id):
 
 
 def test_set_stage_noop_when_gremlin_id_unset(tmp_path, monkeypatch):
-    """set_stage is a no-op when GR_ID is absent (autouse already clears it)."""
+    """set_stage is a no-op when gremlin_id is None (autouse already clears GREMLIN_ID)."""
     state_root, sf = _make_state_dir(tmp_path, "gr-noop-test")
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
-    # GR_ID is already unset via autouse fixture
+    # GREMLIN_ID is already unset via autouse fixture
     mtime_before = sf.stat().st_mtime_ns
     StateData.load(None).set_stage("running")
     assert sf.stat().st_mtime_ns == mtime_before

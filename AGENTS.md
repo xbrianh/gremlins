@@ -86,4 +86,4 @@ Stages that invoke `claude` go through an injected `Client` (in `gremlins/client
 
 ## State and bail bookkeeping
 
-`state.set_stage` and `state.emit_bail` write to `state.json` atomically in pure Python via `patch_state`. Both helpers no-op without `GR_ID` and never raise — stage / bail bookkeeping must not crash a running gremlin.
+`state.set_stage` and `state.emit_bail` write to `state.json` atomically in pure Python via `patch_state`. Both helpers no-op without `GREMLIN_ID` and never raise — stage / bail bookkeeping must not crash a running gremlin.

@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_GR_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_GREMLIN_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 BAIL_CLASS_REVIEWER_REQUESTED_CHANGES = "reviewer_requested_changes"
 BAIL_CLASS_SECURITY = "security"
@@ -34,7 +34,7 @@ BAIL_CLASS_OTHER = "other"
 
 def validate_gremlin_id(gremlin_id: str) -> None:
     """Raise ValueError if gremlin_id is not a safe, non-path-traversing identifier."""
-    if ".." in gremlin_id or not _GR_ID_RE.match(gremlin_id):
+    if ".." in gremlin_id or not _GREMLIN_ID_RE.match(gremlin_id):
         raise ValueError(f"gremlin_id contains illegal characters: {gremlin_id!r}")
 
 

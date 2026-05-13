@@ -99,7 +99,7 @@ def test_chain_done_immediately(tmp_path, monkeypatch, test_state_root):
         return 0
 
     monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
-    monkeypatch.setenv("GR_ID", gremlin_id)
+    monkeypatch.setenv("GREMLIN_ID", gremlin_id)
 
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
     monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
@@ -133,7 +133,7 @@ def test_next_plan_writes_plan_and_raises(tmp_path, monkeypatch, test_state_root
         return 0
 
     monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
-    monkeypatch.setenv("GR_ID", gremlin_id)
+    monkeypatch.setenv("GREMLIN_ID", gremlin_id)
 
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
     monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
@@ -162,7 +162,7 @@ def test_bail_emits_bail_and_raises(tmp_path, monkeypatch, test_state_root):
         return 0
 
     monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
-    monkeypatch.setenv("GR_ID", gremlin_id)
+    monkeypatch.setenv("GREMLIN_ID", gremlin_id)
 
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
     state.data.attempt = attempt  # simulate what make_runner() would set
@@ -197,7 +197,7 @@ def test_handoff_index_first_iteration(tmp_path, monkeypatch, test_state_root):
         return 0
 
     monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
-    monkeypatch.setenv("GR_ID", gremlin_id)
+    monkeypatch.setenv("GREMLIN_ID", gremlin_id)
 
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
     monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
@@ -220,7 +220,7 @@ def test_handoff_nonzero_exit_raises(tmp_path, monkeypatch, test_state_root):
     _write_plan(tmp_path)
 
     monkeypatch.setattr("gremlins.stages.handoff.run", lambda *a, **kw: 1)
-    monkeypatch.setenv("GR_ID", gremlin_id)
+    monkeypatch.setenv("GREMLIN_ID", gremlin_id)
 
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
     monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
@@ -254,7 +254,7 @@ def test_resume_continues_from_file_index(tmp_path, monkeypatch, test_state_root
         return 0
 
     monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
-    monkeypatch.setenv("GR_ID", gremlin_id)
+    monkeypatch.setenv("GREMLIN_ID", gremlin_id)
 
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
     monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
