@@ -4,8 +4,6 @@ import asyncio
 import json
 from unittest.mock import MagicMock
 
-import pytest
-
 from gremlins.clients.tools import _grep_invoke
 
 
