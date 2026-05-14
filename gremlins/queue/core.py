@@ -163,6 +163,26 @@ def list_queue() -> int:
     return 0
 
 
+def list_queue_json() -> int:
+    root = queue_root()
+    items: list[dict[str, object]] = []
+    for sub in _SUBDIRS:
+        for p in (root / sub).glob("*.cmd"):
+            cmd = p.read_text().strip()
+            items.append(
+                {
+                    "bucket": sub,
+                    "stem": p.stem,
+                    "gremlin_id": _parse_id(p),
+                    "description": _cmd_description(cmd),
+                    "cmd": cmd,
+                }
+            )
+    items.sort(key=lambda d: str(d["stem"]), reverse=True)
+    print(json.dumps(items, indent=2))
+    return 0
+
+
 def run() -> int:
     root = queue_root()
     running = sorted((root / "running").glob("*.cmd"))

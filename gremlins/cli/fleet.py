@@ -12,7 +12,13 @@ from gremlins.fleet.log import do_log
 from gremlins.fleet.rescue import do_rescue
 from gremlins.fleet.state import git_toplevel
 from gremlins.fleet.stop import do_stop
-from gremlins.fleet.views import do_drill_in, do_list, do_recent
+from gremlins.fleet.views import (
+    do_drill_in,
+    do_drill_in_json,
+    do_list,
+    do_list_json,
+    do_recent,
+)
 from gremlins.utils.watch import watch_render
 
 
@@ -81,6 +87,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON instead of human-formatted output. Mutually exclusive with --watch.",
+    )
     return parser.parse_args(argv)
 
 
@@ -93,7 +104,9 @@ def render_view(args: argparse.Namespace, here_root: str | None) -> None:
         )
         return
 
-    if args.recent is not None:
+    if args.json:
+        do_list_json(args, here_root=here_root)
+    elif args.recent is not None:
         do_recent(args, here_root=here_root)
     else:
         do_list(args, here_root=here_root)
@@ -239,6 +252,11 @@ def _main_impl(argv: list[str] | None = None) -> int:
         print("error: --watch cannot be combined with a positional id argument")
         sys.exit(0)
 
+    # --json and --watch are mutually exclusive.
+    if args.json and args.watch is not None:
+        print("error: --json cannot be combined with --watch", file=sys.stderr)
+        sys.exit(1)
+
     # Early exit if state root doesn't exist.
     if not os.path.isdir(_constants.STATE_ROOT):
         print("No gremlins have been launched on this machine.")
@@ -251,7 +269,10 @@ def _main_impl(argv: list[str] | None = None) -> int:
 
     # Drill-in positional argument (no --watch).
     if args.id_prefix is not None:
-        do_drill_in(args.id_prefix)
+        if args.json:
+            do_drill_in_json(args.id_prefix)
+        else:
+            do_drill_in(args.id_prefix)
         sys.exit(0)
 
     # --watch loop.

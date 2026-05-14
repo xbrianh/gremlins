@@ -7,7 +7,15 @@ import shlex
 import sys
 from collections.abc import Callable
 
-from gremlins.queue.core import add, clear, land, list_queue, requeue, run
+from gremlins.queue.core import (
+    add,
+    clear,
+    land,
+    list_queue,
+    list_queue_json,
+    requeue,
+    run,
+)
 from gremlins.utils.watch import watch_render
 
 
@@ -29,9 +37,19 @@ def _list(argv: list[str]) -> int:
         const=2,
         type=int,
         metavar="SEC",
-        help="Refresh every SEC seconds (default 2).",
+        help="Refresh every SEC seconds (default 2). Mutually exclusive with --json.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON instead of human-formatted output. Mutually exclusive with --watch.",
     )
     args = parser.parse_args(argv)
+    if args.json and args.watch is not None:
+        print("error: --json cannot be combined with --watch", file=sys.stderr)
+        return 1
+    if args.json:
+        return list_queue_json()
     if args.watch is not None:
         return watch_render(args.watch, list_queue)
     return list_queue()

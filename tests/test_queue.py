@@ -692,3 +692,64 @@ def test_cli_queue_list_no_watch_skips_watch_render(tmp_path, monkeypatch, capsy
     assert rc == 0
     assert called == []
     assert "(queue is empty)" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# queue list --json
+# ---------------------------------------------------------------------------
+
+
+def test_list_queue_json_empty(q, capsys):
+    rc = core.list_queue_json()
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert json.loads(out) == []
+
+
+def test_list_queue_json_shape(q, capsys):
+    (q / "pending" / "0001-gh-terse.cmd").write_text(
+        "gremlins launch gh-terse --description 'do the thing'"
+    )
+    (q / "done" / "0002-local.gr-abc123.cmd").write_text("gremlins launch local")
+    rc = core.list_queue_json()
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    assert isinstance(data, list)
+    assert len(data) == 2
+    stems = {d["stem"] for d in data}
+    assert "0001-gh-terse" in stems
+    assert "0002-local.gr-abc123" in stems
+    done_item = next(d for d in data if d["stem"] == "0002-local.gr-abc123")
+    assert done_item["bucket"] == "done"
+    assert done_item["gremlin_id"] == "gr-abc123"
+    pending_item = next(d for d in data if d["stem"] == "0001-gh-terse")
+    assert pending_item["bucket"] == "pending"
+    assert pending_item["description"] == "do the thing"
+    assert pending_item["gremlin_id"] is None
+
+
+def test_list_queue_json_all_fields_present(q, capsys):
+    (q / "pending" / "0001-echo.cmd").write_text("echo hello")
+    core.list_queue_json()
+    data = json.loads(capsys.readouterr().out)
+    item = data[0]
+    for field in ("bucket", "stem", "gremlin_id", "description", "cmd"):
+        assert field in item
+
+
+def test_cli_queue_list_json_flag(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    root = core.queue_root()
+    (root / "pending" / "0001-item.cmd").write_text("echo hi")
+    rc = main(["queue", "list", "--json"])
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    assert isinstance(data, list)
+    assert data[0]["bucket"] == "pending"
+
+
+def test_cli_queue_list_json_watch_mutually_exclusive(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    rc = main(["queue", "list", "--json", "--watch"])
+    assert rc == 1
+    assert "json" in capsys.readouterr().err.lower() or rc == 1
