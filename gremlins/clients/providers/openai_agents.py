@@ -75,6 +75,7 @@ class OpenAIAgentsClient:
         max_retries: int = 2,
         cwd: pathlib.Path | None = None,
         idle_timeout: float | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> CompletedRun:
         effective_model = model or self._model
         agent = Agent(
@@ -83,7 +84,10 @@ class OpenAIAgentsClient:
             tools=GREMLINS_TOOLS,
             model=effective_model,
         )
-        ctx: dict[str, str | None] = {"cwd": str(cwd) if cwd is not None else None}
+        ctx: dict[str, object] = {
+            "cwd": str(cwd) if cwd is not None else None,
+            "extra_env": extra_env,
+        }
         if self._provider is not None:
             run_config = RunConfig(tracing_disabled=True, model_provider=self._provider)
         else:
