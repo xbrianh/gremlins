@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agents import Usage
+from agents.tool_context import ToolContext
 
 from gremlins.clients.protocol import CompletedRun
 from gremlins.clients.providers.openai_agents import (
@@ -15,7 +18,7 @@ from gremlins.clients.providers.openai_agents import (
     make_openai_client,
     make_xai_client,
 )
-from gremlins.clients.tools import GREMLINS_TOOLS
+from gremlins.clients.tools import GREMLINS_TOOLS, _bash_invoke
 
 
 def test_openai_client_constructs() -> None:
@@ -110,3 +113,45 @@ def test_xai_integration_run() -> None:
     result = client.run("Reply with the single word: done", label="integration-test")
     assert result.exit_code == 0
     assert result.text_result
+
+
+def _make_tool_ctx(context: dict[str, Any]) -> ToolContext[Any]:
+    return ToolContext(
+        context=context,
+        tool_name="Bash",
+        tool_call_id="call_1",
+        tool_arguments='{"command": "echo hi"}',
+    )
+
+
+def test_bash_invoke_passes_extra_env_to_subprocess() -> None:
+    fake_proc = MagicMock()
+    fake_proc.communicate = AsyncMock(return_value=(b"hi\n", None))
+    fake_proc.returncode = 0
+
+    ctx = _make_tool_ctx({"extra_env": {"MY_TOKEN": "abc123"}})
+    args_json = json.dumps({"command": "echo hi"})
+
+    with patch("asyncio.create_subprocess_shell", return_value=fake_proc) as mock_spawn:
+        asyncio.run(_bash_invoke(ctx, args_json))
+
+    _call_kwargs = mock_spawn.call_args.kwargs
+    assert "env" in _call_kwargs
+    env = _call_kwargs["env"]
+    assert env["MY_TOKEN"] == "abc123"
+    assert "PATH" in env  # inherited from os.environ
+
+
+def test_bash_invoke_no_extra_env_passes_none() -> None:
+    fake_proc = MagicMock()
+    fake_proc.communicate = AsyncMock(return_value=(b"hi\n", None))
+    fake_proc.returncode = 0
+
+    ctx = _make_tool_ctx({})
+    args_json = json.dumps({"command": "echo hi"})
+
+    with patch("asyncio.create_subprocess_shell", return_value=fake_proc) as mock_spawn:
+        asyncio.run(_bash_invoke(ctx, args_json))
+
+    _call_kwargs = mock_spawn.call_args.kwargs
+    assert _call_kwargs.get("env") is None

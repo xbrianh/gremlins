@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import pathlib
 from typing import Any, cast
 
@@ -12,8 +13,13 @@ from agents.tool_context import ToolContext
 
 
 def _cwd(ctx: ToolContext[Any]) -> str | None:
-    c = cast("dict[str, str | None]", ctx.context)
-    return c.get("cwd")
+    c = cast("dict[str, object]", ctx.context)
+    return cast("str | None", c.get("cwd"))
+
+
+def _extra_env(ctx: ToolContext[Any]) -> dict[str, str] | None:
+    c = cast("dict[str, object]", ctx.context)
+    return cast("dict[str, str] | None", c.get("extra_env"))
 
 
 def _resolve(file_path: str, cwd: str | None) -> pathlib.Path:
@@ -56,11 +62,14 @@ async def _edit_invoke(ctx: ToolContext[Any], args_json: str) -> str:
 
 async def _bash_invoke(ctx: ToolContext[Any], args_json: str) -> str:
     args: dict[str, Any] = json.loads(args_json)
+    extra = _extra_env(ctx)
+    env = {**os.environ, **extra} if extra else None
     proc = await asyncio.create_subprocess_shell(
         args["command"],
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         cwd=_cwd(ctx),
+        env=env,
     )
     try:
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
