@@ -15,7 +15,9 @@ def _ctx(cwd: str | None = None) -> MagicMock:
 
 def test_grep_match(tmp_path):
     (tmp_path / "a.py").write_text("hello world\nno match here\nhello again\n")
-    result = asyncio.run(_grep_invoke(_ctx(str(tmp_path)), json.dumps({"pattern": "hello"})))
+    result = asyncio.run(
+        _grep_invoke(_ctx(str(tmp_path)), json.dumps({"pattern": "hello"}))
+    )
     assert "a.py:1:hello world" in result
     assert "a.py:3:hello again" in result
     assert "no match" not in result
@@ -43,7 +45,9 @@ def test_grep_bad_regex(tmp_path):
 
 def test_grep_no_matches(tmp_path):
     (tmp_path / "f.txt").write_text("nothing interesting\n")
-    result = asyncio.run(_grep_invoke(_ctx(str(tmp_path)), json.dumps({"pattern": "xyz123"})))
+    result = asyncio.run(
+        _grep_invoke(_ctx(str(tmp_path)), json.dumps({"pattern": "xyz123"}))
+    )
     assert result == "(no matches)"
 
 

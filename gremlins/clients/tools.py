@@ -145,7 +145,9 @@ async def _grep_invoke(ctx: ToolContext[Any], args_json: str) -> str:
                 return f"Error: {e}"
     else:
         for root, dirs, files in os.walk(base):
-            dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d not in _SKIP_DIRS)
+            dirs[:] = sorted(
+                d for d in dirs if not d.startswith(".") and d not in _SKIP_DIRS
+            )
             for name in sorted(files):
                 if truncated:
                     break
