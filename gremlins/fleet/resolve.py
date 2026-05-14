@@ -30,10 +30,7 @@ def collect_gremlin_matches(
 
 
 def resolve_gremlin(target: str) -> tuple[str, str, str] | None:
-    """Resolve id substring to a single (gremlin_id, sf, wdir) or print error and return None.
-
-    An exact id match always wins over substring matches.
-    """
+    """Resolve id substring to a single (gremlin_id, sf, wdir) or print error and return None."""
     matches, exact = collect_gremlin_matches(target)
     if not matches:
         print(f"no gremlin matched: {target}")
