@@ -1544,6 +1544,10 @@ def test_rescue_prompt_uses_pipeline_name():
         ("dead:host-terminated", {"state": "dead", "reason": "host-terminated"}),
         ("dead:unknown", {"state": "dead", "reason": "unknown"}),
         (
+            "dead:crashed (pid 123 gone)",
+            {"state": "dead", "reason": "crashed", "detail": "(pid 123 gone)"},
+        ),
+        (
             "stalled:no log update 5m",
             {"state": "stalled", "detail": "no log update 5m"},
         ),
@@ -1710,3 +1714,80 @@ def test_do_drill_in_json_includes_log_path(tmp_path, monkeypatch, capsys):
     obj = json.loads(out)
     assert obj["log_path"] is not None
     assert obj["log_path"].endswith("log")
+
+
+# ---------------------------------------------------------------------------
+# fleet CLI --json flag routing
+# ---------------------------------------------------------------------------
+
+import pytest
+from gremlins.cli.fleet import _main_impl
+
+
+def test_cli_fleet_json_no_state_root(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(tmp_path / "nonexistent"))
+    with pytest.raises(SystemExit) as exc:
+        _main_impl(["--json"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert json.loads(out) == []
+
+
+def test_cli_fleet_json_drill_in_no_state_root(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(tmp_path / "nonexistent"))
+    with pytest.raises(SystemExit) as exc:
+        _main_impl(["gr-abc", "--json"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    obj = json.loads(out)
+    assert "error" in obj
+
+
+def test_cli_fleet_json_list(tmp_path, monkeypatch, capsys):
+    state_root = tmp_path / "state-root"
+    state_root.mkdir()
+    gr_dir = state_root / "test-cli-json01"
+    _write_state(
+        gr_dir,
+        {
+            "id": "test-cli-json01",
+            "kind": "localgremlin",
+            "stage": "implement",
+            "status": "running",
+            "pid": os.getpid(),
+            "started_at": "2024-01-01T00:00:00Z",
+        },
+        log_text="recent",
+    )
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+    with pytest.raises(SystemExit) as exc:
+        _main_impl(["--json"])
+    assert exc.value.code == 0
+    data = json.loads(capsys.readouterr().out)
+    assert isinstance(data, list)
+    assert data[0]["id"] == "test-cli-json01"
+
+
+def test_cli_fleet_json_drill_in(tmp_path, monkeypatch, capsys):
+    state_root = tmp_path / "state-root"
+    state_root.mkdir()
+    gr_dir = state_root / "test-cli-drill01"
+    _write_state(
+        gr_dir,
+        {
+            "id": "test-cli-drill01",
+            "kind": "localgremlin",
+            "stage": "implement",
+            "status": "dead",
+            "exit_code": 0,
+            "started_at": "2024-01-01T00:00:00Z",
+        },
+        finished=True,
+    )
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+    with pytest.raises(SystemExit) as exc:
+        _main_impl(["test-cli-drill01", "--json"])
+    assert exc.value.code == 0
+    obj = json.loads(capsys.readouterr().out)
+    assert obj["id"] == "test-cli-drill01"
+    assert isinstance(obj["liveness"], dict)

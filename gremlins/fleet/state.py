@@ -167,6 +167,8 @@ def parse_liveness(live: str) -> dict[str, object]:
                 pass
         if rest.startswith("bailed:"):
             return {"state": "dead", "reason": "bailed", "bail_reason": rest[7:]}
+        if rest.startswith("crashed "):
+            return {"state": "dead", "reason": "crashed", "detail": rest[8:]}
         return {"state": "dead", "reason": rest}
     return {"state": live}
 

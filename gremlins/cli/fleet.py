@@ -1,6 +1,7 @@
 """Argument parsing and main entry point."""
 
 import argparse
+import json
 import os
 import sys
 
@@ -259,7 +260,11 @@ def _main_impl(argv: list[str] | None = None) -> int:
 
     # Early exit if state root doesn't exist.
     if not os.path.isdir(_constants.STATE_ROOT):
-        print("No gremlins have been launched on this machine.")
+        if args.json:
+            empty: object = [] if args.id_prefix is None else {"error": "no gremlins state root"}
+            print(json.dumps(empty))
+        else:
+            print("No gremlins have been launched on this machine.")
         sys.exit(0)
 
     # Resolve --here once.

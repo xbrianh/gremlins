@@ -752,4 +752,4 @@ def test_cli_queue_list_json_watch_mutually_exclusive(tmp_path, monkeypatch, cap
     monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
     rc = main(["queue", "list", "--json", "--watch"])
     assert rc == 1
-    assert "json" in capsys.readouterr().err.lower() or rc == 1
+    assert "json" in capsys.readouterr().err.lower()

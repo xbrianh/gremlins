@@ -4,6 +4,7 @@ import argparse
 import datetime
 import json
 import os
+import sys
 import time
 from collections.abc import Iterator
 
@@ -312,7 +313,7 @@ def do_list_json(args: argparse.Namespace, here_root: str | None = None) -> None
             try:
                 since_secs = parse_duration(args.since)
             except ValueError as e:
-                print(f"error: {e}", file=__import__("sys").stderr)
+                print(f"error: {e}", file=sys.stderr)
                 return
         include_closed = False
 
@@ -358,7 +359,7 @@ def do_drill_in_json(target: str) -> None:
         print(json.dumps({"error": f"could not read state for {gremlin_id}"}))
         return
 
-    live = liveness_of_state_file(sf)
+    live = liveness_of_state_file(sf, state)
     started_at = str(state.get("started_at") or "")
     epoch = iso_to_epoch(started_at)
     age_seconds: float | None = (time.time() - epoch) if epoch is not None else None
