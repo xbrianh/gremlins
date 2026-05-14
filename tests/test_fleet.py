@@ -1721,6 +1721,7 @@ def test_do_drill_in_json_includes_log_path(tmp_path, monkeypatch, capsys):
 # fleet CLI --json flag routing
 # ---------------------------------------------------------------------------
 
+
 def test_cli_fleet_json_no_state_root(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(_constants, "STATE_ROOT", str(tmp_path / "nonexistent"))
     with pytest.raises(SystemExit) as exc:
