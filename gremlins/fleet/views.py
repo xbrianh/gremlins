@@ -11,6 +11,7 @@ from collections.abc import Iterator
 from gremlins.executor.state import StateData
 from gremlins.fleet.duration import parse_duration
 from gremlins.fleet.render import FleetRow, build_row, print_table
+from gremlins.fleet.resolve import collect_gremlin_matches, resolve_gremlin
 from gremlins.fleet.state import (
     humanize_age,
     iso_to_epoch,
@@ -155,23 +156,11 @@ def do_recent(args: argparse.Namespace, here_root: str | None = None) -> None:
 
 def do_drill_in(target: str) -> None:
     """Print every field of a uniquely-matched gremlin in a labeled block."""
-    matches: list[tuple[str, str, str]] = []
-    for gremlin_id, sf, wdir in iter_state_files():
-        if target in gremlin_id:
-            matches.append((gremlin_id, sf, wdir))
-
-    if not matches:
-        print(f"no gremlin matched: {target}")
-        return
-    if len(matches) > 1:
-        print(
-            f"ambiguous id '{target}' matched {len(matches)} gremlins — use a longer prefix:"
-        )
-        for gremlin_id, _, _ in matches:
-            print(f"  {gremlin_id}")
+    resolved = resolve_gremlin(target)
+    if resolved is None:
         return
 
-    gremlin_id, sf, wdir = matches[0]
+    gremlin_id, sf, wdir = resolved
     state = load_state(sf)
     if not state:
         print(f"error: could not read state for {gremlin_id}")
@@ -334,15 +323,14 @@ def do_list_json(args: argparse.Namespace, here_root: str | None = None) -> None
 
 
 def do_drill_in_json(target: str) -> None:
-    matches: list[tuple[str, str, str]] = []
-    for gremlin_id, sf, wdir in iter_state_files():
-        if target in gremlin_id:
-            matches.append((gremlin_id, sf, wdir))
+    matches, exact = collect_gremlin_matches(target)
 
     if not matches:
         print(json.dumps({"error": f"no gremlin matched: {target}"}))
         return
-    if len(matches) > 1:
+    if exact is not None:
+        resolved = exact
+    elif len(matches) > 1:
         print(
             json.dumps(
                 {
@@ -352,8 +340,10 @@ def do_drill_in_json(target: str) -> None:
             )
         )
         return
+    else:
+        resolved = matches[0]
 
-    gremlin_id, sf, wdir = matches[0]
+    gremlin_id, sf, wdir = resolved
     state = load_state(sf)
     if not state:
         print(json.dumps({"error": f"could not read state for {gremlin_id}"}))
