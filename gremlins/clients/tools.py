@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import json
 import os
 import pathlib
+import re
 from typing import Any, cast
 
 from agents import FunctionTool, Tool
@@ -94,22 +96,72 @@ async def _write_invoke(ctx: ToolContext[Any], args_json: str) -> str:
     return "OK"
 
 
+_GREP_MAX_LINES = 2000
+_SKIP_DIRS = {"__pycache__", "node_modules"}
+
+
 async def _grep_invoke(ctx: ToolContext[Any], args_json: str) -> str:
     args: dict[str, Any] = json.loads(args_json)
-    cmd = ["rg", "--color=never", "-n", args["pattern"]]
-    if "glob" in args and args["glob"]:
-        cmd += ["--glob", args["glob"]]
-    cmd.append(args.get("path", "."))
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        cwd=_cwd(ctx),
-    )
-    stdout, _ = await proc.communicate()
-    if proc.returncode not in (0, 1):
-        return stdout.decode(errors="replace") or f"[rg exit {proc.returncode}]"
-    return stdout.decode(errors="replace") or "(no matches)"
+    try:
+        pattern = re.compile(args["pattern"])
+    except re.error as e:
+        return f"Error: invalid regex: {e}"
+
+    base = _resolve(args.get("path", "."), _cwd(ctx))
+    if not base.exists():
+        return f"Error: path does not exist: {base}"
+
+    glob_filter: str | None = args.get("glob") or None
+    matches: list[str] = []
+    truncated = False
+
+    def _scan_dir_file(file_path: pathlib.Path) -> None:
+        nonlocal truncated
+        try:
+            if b"\x00" in file_path.read_bytes()[:8192]:
+                return
+            with file_path.open(encoding="utf-8", errors="replace") as f:
+                for lineno, line in enumerate(f, 1):
+                    if pattern.search(line):
+                        matches.append(f"{file_path}:{lineno}:{line.rstrip()}")
+                        if len(matches) >= _GREP_MAX_LINES:
+                            truncated = True
+                            return
+        except OSError:
+            pass
+
+    if base.is_file():
+        if glob_filter is None or fnmatch.fnmatch(base.name, glob_filter):
+            try:
+                if b"\x00" not in base.read_bytes()[:8192]:
+                    with base.open(encoding="utf-8", errors="replace") as f:
+                        for lineno, line in enumerate(f, 1):
+                            if pattern.search(line):
+                                matches.append(f"{base}:{lineno}:{line.rstrip()}")
+                                if len(matches) >= _GREP_MAX_LINES:
+                                    truncated = True
+                                    break
+            except OSError as e:
+                return f"Error: {e}"
+    else:
+        for root, dirs, files in os.walk(base):
+            dirs[:] = sorted(
+                d for d in dirs if not d.startswith(".") and d not in _SKIP_DIRS
+            )
+            for name in sorted(files):
+                if truncated:
+                    break
+                if glob_filter is None or fnmatch.fnmatch(name, glob_filter):
+                    _scan_dir_file(pathlib.Path(root) / name)
+            if truncated:
+                break
+
+    if not matches:
+        return "(no matches)"
+    result = "\n".join(matches)
+    if truncated:
+        result += f"\n[truncated at {_GREP_MAX_LINES} matches]"
+    return result
 
 
 async def _glob_invoke(ctx: ToolContext[Any], args_json: str) -> str:
@@ -189,7 +241,7 @@ GREMLINS_TOOLS: list[Tool] = [
     ),
     FunctionTool(
         name="Grep",
-        description="Search file contents with ripgrep.",
+        description="Search file contents using a regex pattern.",
         params_json_schema={
             "type": "object",
             "properties": {
