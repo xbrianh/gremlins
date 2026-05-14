@@ -37,7 +37,7 @@ jobs:
           tmp=$(mktemp "${RUNNER_TEMP}/stamp.XXXXXX")
           sed "s/^version = \"0.0.0\"$/version = \"${VERSION}\"/" pyproject.toml > "$tmp"
           mv "$tmp" pyproject.toml
-          grep '^version' pyproject.toml
+          grep "^version = \"${VERSION}\"" pyproject.toml || { echo "::error::Version stamp failed"; exit 1; }
 
       - name: Build
         run: |
