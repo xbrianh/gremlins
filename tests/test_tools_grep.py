@@ -41,7 +41,9 @@ def test_grep_glob_filter(tmp_path):
 
 
 def test_grep_bad_regex(tmp_path):
-    result = _run(_grep_invoke(_ctx(str(tmp_path)), json.dumps({"pattern": "[invalid"})))
+    result = _run(
+        _grep_invoke(_ctx(str(tmp_path)), json.dumps({"pattern": "[invalid"}))
+    )
     assert result.startswith("Error: invalid regex")
 
 
