@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gremlins-ai"
-version = "0.1.1"
+version = "0.0.0"
 description = "Background coding-agent pipelines that plan, implement, review, and land work end-to-end"
 readme = "README.md"
 requires-python = ">=3.11"
