@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import json
 import os
 import pathlib
+import re
 from typing import Any, cast
 
 from agents import FunctionTool, Tool
@@ -94,22 +96,50 @@ async def _write_invoke(ctx: ToolContext[Any], args_json: str) -> str:
     return "OK"
 
 
+_GREP_MAX_LINES = 2000
+
+
 async def _grep_invoke(ctx: ToolContext[Any], args_json: str) -> str:
     args: dict[str, Any] = json.loads(args_json)
-    cmd = ["rg", "--color=never", "-n", args["pattern"]]
-    if "glob" in args and args["glob"]:
-        cmd += ["--glob", args["glob"]]
-    cmd.append(args.get("path", "."))
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        cwd=_cwd(ctx),
-    )
-    stdout, _ = await proc.communicate()
-    if proc.returncode not in (0, 1):
-        return stdout.decode(errors="replace") or f"[rg exit {proc.returncode}]"
-    return stdout.decode(errors="replace") or "(no matches)"
+    try:
+        pattern = re.compile(args["pattern"])
+    except re.error as e:
+        return f"Error: invalid regex: {e}"
+
+    base = _resolve(args.get("path", "."), _cwd(ctx))
+    glob_filter: str | None = args.get("glob") or None
+
+    candidates: list[pathlib.Path] = []
+    if base.is_file():
+        candidates = [base]
+    else:
+        for root, _, files in os.walk(base):
+            for name in files:
+                if glob_filter is None or fnmatch.fnmatch(name, glob_filter):
+                    candidates.append(pathlib.Path(root) / name)
+
+    matches: list[str] = []
+    truncated = False
+    for file_path in sorted(candidates):
+        if truncated:
+            break
+        try:
+            text = file_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if pattern.search(line):
+                matches.append(f"{file_path}:{lineno}:{line}")
+                if len(matches) >= _GREP_MAX_LINES:
+                    truncated = True
+                    break
+
+    if not matches:
+        return "(no matches)"
+    result = "\n".join(matches)
+    if truncated:
+        result += f"\n[truncated at {_GREP_MAX_LINES} matches]"
+    return result
 
 
 async def _glob_invoke(ctx: ToolContext[Any], args_json: str) -> str:
@@ -189,7 +219,7 @@ GREMLINS_TOOLS: list[Tool] = [
     ),
     FunctionTool(
         name="Grep",
-        description="Search file contents with ripgrep.",
+        description="Search file contents using a regex pattern.",
         params_json_schema={
             "type": "object",
             "properties": {
