@@ -4,8 +4,8 @@ Before doing anything else, tell the user about the following setup so they can 
 
 ### CLI subcommands you will use
 
-- `gremlins launch <name>` — launch a background gremlin; `gremlins launch --list` to see available pipelines
-- `gremlins <id>` — show status of a specific gremlin (fleet status when no args)
+- `gremlins launch <name>` — launch a background gremlin; `gremlins launch --list` to see available pipelines; `--gremlin-id <id>` to assign the id up front
+- `gremlins [<id>] [--json]` — fleet status (no args) or a single gremlin (`<id>`); `--json` for structured output
 - `gremlins log <id>` — tail a gremlin's log file
 - `gremlins land <id>` — land a finished gremlin onto the current branch
 - `gremlins resume <id>` — re-spawn a gremlin from its last recorded stage (skips re-diagnosis)
@@ -13,7 +13,7 @@ Before doing anything else, tell the user about the following setup so they can 
 - `gremlins rm <id>` — delete a dead gremlin's state dir, worktree, and branch
 - `gremlins stop <id>` — send SIGTERM to a running gremlin
 - `gremlins queue add <cmd…>` — append a command to the default queue
-- `gremlins queue list` — show all items (pending / running / done / failed) with ids where captured
+- `gremlins queue list [--json | --watch [SEC]]` — show all items (newest first) with bucket and ids where captured; `--json` for structured output; `--watch` for auto-refresh
 - `gremlins queue run` — execute the queue serially in the foreground, halting on first failure
 - `gremlins queue requeue [--done]` — move all failed items back to pending; `--done` also requeues done items
 - `gremlins queue clear` — remove done + failed items; `--failed` clears only failed, `--done` clears only done, `--purge` stops running gremlins and wipes all
@@ -72,7 +72,7 @@ Launch gremlins via `gremlins launch <pipeline>`. Choose the pipeline by running
 
 Maintain a queue with three buckets: running, pending, blocked-by-dependency.
 
-- Run `gremlins` (no args) to get fleet status; run `gremlins <id>` for a single gremlin.
+- Run `gremlins` (no args) or `gremlins --json` to get fleet status; `gremlins <id>` or `gremlins <id> --json` for a single gremlin. Prefer `--json` when reading state programmatically.
 - Use scheduled wakeups to poll long-running gremlins — don't poll in a tight loop.
 - Launch independent work in parallel. Serialize work that touches overlapping files or depends on a previous gremlin's output.
 - When a gremlin finishes, land it via `gremlins land <id>` before launching dependent work, so subsequent gremlins start from current code.
@@ -82,7 +82,7 @@ Maintain a queue with three buckets: running, pending, blocked-by-dependency.
 When a gremlin stalls or shows as dead:
 
 1. Read its log: `gremlins log <id>`
-2. Read its state: `state.json` inside the gremlin's state directory (see "Where gremlin state lives" above)
+2. Read its state: `gremlins <id> --json` or `state.json` inside the gremlin's state directory (see "Where gremlin state lives" above)
 3. Decide:
    - **`gremlins rescue <id>`** — when you need the full diagnosis agent to figure out what went wrong
    - **`gremlins resume <id>`** — when the fix is already known (e.g., you patched the underlying issue externally) and you want to skip re-diagnosis
@@ -94,7 +94,18 @@ Do not edit files inside the gremlin's state directory or worktree directly.
 
 ### The overnight queue
 
-The `gremlins queue` subsystem lets you tee up unrelated `gremlins launch` invocations to run serially — useful for dispatching several independent tasks before walking away for the night. Items in the queue are unrelated by contract; if work has dependencies between items, use a `boss` chain instead.
+The `gremlins queue` subsystem lets you tee up `gremlins launch` invocations to run serially — useful for dispatching tasks before walking away for the night.
+
+**Interleaved `land` pattern** — use `--gremlin-id` to assign an id up front, then interleave `land` commands so each item lands before the next one launches:
+
+```
+gremlins queue add gremlins launch gh-terse --plan '#123' --gremlin-id my-feature
+gremlins queue add gremlins land my-feature
+gremlins queue add gremlins launch gh-terse --plan '#124' --gremlin-id follow-up
+gremlins queue add gremlins land follow-up
+```
+
+This serializes dependent work through the queue without a `boss` pipeline. Use a `boss` chain when the dependency is more complex or when you want a supervisor agent coordinating stages.
 
 **State layout** — items live under `state_root() / "queues" / "default" /`:
 
@@ -108,7 +119,7 @@ Each item is a `.cmd` file. Once a gremlin id is captured from the command's out
 **The verbs:**
 
 - `queue add <cmd…>` — append a command to pending
-- `queue list` — show all items across all buckets, with ids where captured
+- `queue list [--json | --watch [SEC]]` — show all items sorted newest-first, with bucket and ids where captured; `--json` for structured output; `--watch` auto-refreshes
 - `queue run` — run pending items one at a time in the foreground, halting on first dirty exit
 - `queue requeue [--done]` — move all failed items back to pending; `--done` also requeues done items
 - `queue clear` — remove done + failed items; `--failed` clears only failed, `--done` clears only done, `--purge` stops running gremlins and wipes all
@@ -118,7 +129,7 @@ Each item is a `.cmd` file. Once a gremlin id is captured from the command's out
 
 **Morning-after workflow:**
 
-1. `gremlins queue list` — survey what finished and what failed
+1. `gremlins queue list [--json]` — survey what finished and what failed
 2. If all done: `gremlins queue land` (removes each entry on success)
 3. If some failed: fix the root cause, then `gremlins queue requeue` to push all failed items back to pending and re-run
 
@@ -143,17 +154,11 @@ Each item is a `.cmd` file. Once a gremlin id is captured from the command's out
 # spawn: gremlins queue run
 # for each stdout line:
 #   if line matches "queue: done <item>":
-#     parse id from item name (format: <counter>-<slug>.<id>)
+#     parse id from item name (format: <timestamp>-<slug>.<id>)
 #     run: gremlins land <id>
 ```
 
-**Anti-pattern to avoid:**
-
-```sh
-while true; do gremlins queue list; sleep N; done
-```
-
-This wastes work, lags behind events, and misses the exact moment each item changes state. The stream is always more accurate and cheaper.
+**Anti-pattern to avoid:** polling `queue list` in a shell loop. Use `gremlins queue list --watch [SEC]` for a live-refreshing view, or attach to the `queue run` event stream for reactive automation.
 
 ---
 
