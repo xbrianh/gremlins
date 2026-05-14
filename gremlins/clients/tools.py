@@ -97,6 +97,7 @@ async def _write_invoke(ctx: ToolContext[Any], args_json: str) -> str:
 
 
 _GREP_MAX_LINES = 2000
+_SKIP_DIRS = {"__pycache__", "node_modules"}
 
 
 async def _grep_invoke(ctx: ToolContext[Any], args_json: str) -> str:
@@ -107,32 +108,51 @@ async def _grep_invoke(ctx: ToolContext[Any], args_json: str) -> str:
         return f"Error: invalid regex: {e}"
 
     base = _resolve(args.get("path", "."), _cwd(ctx))
+    if not base.exists():
+        return f"Error: path does not exist: {base}"
+
     glob_filter: str | None = args.get("glob") or None
-
-    candidates: list[pathlib.Path] = []
-    if base.is_file():
-        candidates = [base]
-    else:
-        for root, _, files in os.walk(base):
-            for name in files:
-                if glob_filter is None or fnmatch.fnmatch(name, glob_filter):
-                    candidates.append(pathlib.Path(root) / name)
-
     matches: list[str] = []
     truncated = False
-    for file_path in sorted(candidates):
-        if truncated:
-            break
+
+    def _scan_dir_file(file_path: pathlib.Path) -> None:
+        nonlocal truncated
         try:
-            text = file_path.read_text(encoding="utf-8", errors="replace")
+            if b"\x00" in file_path.read_bytes()[:8192]:
+                return
+            with file_path.open(encoding="utf-8", errors="replace") as f:
+                for lineno, line in enumerate(f, 1):
+                    if pattern.search(line):
+                        matches.append(f"{file_path}:{lineno}:{line.rstrip()}")
+                        if len(matches) >= _GREP_MAX_LINES:
+                            truncated = True
+                            return
         except OSError:
-            continue
-        for lineno, line in enumerate(text.splitlines(), 1):
-            if pattern.search(line):
-                matches.append(f"{file_path}:{lineno}:{line}")
-                if len(matches) >= _GREP_MAX_LINES:
-                    truncated = True
+            pass
+
+    if base.is_file():
+        if glob_filter is None or fnmatch.fnmatch(base.name, glob_filter):
+            try:
+                if b"\x00" not in base.read_bytes()[:8192]:
+                    with base.open(encoding="utf-8", errors="replace") as f:
+                        for lineno, line in enumerate(f, 1):
+                            if pattern.search(line):
+                                matches.append(f"{base}:{lineno}:{line.rstrip()}")
+                                if len(matches) >= _GREP_MAX_LINES:
+                                    truncated = True
+                                    break
+            except OSError as e:
+                return f"Error: {e}"
+    else:
+        for root, dirs, files in os.walk(base):
+            dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d not in _SKIP_DIRS)
+            for name in sorted(files):
+                if truncated:
                     break
+                if glob_filter is None or fnmatch.fnmatch(name, glob_filter):
+                    _scan_dir_file(pathlib.Path(root) / name)
+            if truncated:
+                break
 
     if not matches:
         return "(no matches)"
