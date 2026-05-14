@@ -5,7 +5,7 @@ Before doing anything else, tell the user about the following setup so they can 
 ### CLI subcommands you will use
 
 - `gremlins launch <name>` — launch a background gremlin; `gremlins launch --list` to see available pipelines; `--gremlin-id <id>` to assign the id up front
-- `gremlins [--json]` — fleet status (no args) or drill into a single gremlin with `gremlins <id>`; `--json` for structured output
+- `gremlins [<id>] [--json]` — fleet status (no args) or a single gremlin (`<id>`); `--json` for structured output
 - `gremlins log <id>` — tail a gremlin's log file
 - `gremlins land <id>` — land a finished gremlin onto the current branch
 - `gremlins resume <id>` — re-spawn a gremlin from its last recorded stage (skips re-diagnosis)
@@ -13,7 +13,7 @@ Before doing anything else, tell the user about the following setup so they can 
 - `gremlins rm <id>` — delete a dead gremlin's state dir, worktree, and branch
 - `gremlins stop <id>` — send SIGTERM to a running gremlin
 - `gremlins queue add <cmd…>` — append a command to the default queue
-- `gremlins queue list [--json] [--watch [SEC]]` — show all items (newest first) with bucket and ids where captured; `--json` for structured output; `--watch` for auto-refresh
+- `gremlins queue list [--json | --watch [SEC]]` — show all items (newest first) with bucket and ids where captured; `--json` for structured output; `--watch` for auto-refresh
 - `gremlins queue run` — execute the queue serially in the foreground, halting on first failure
 - `gremlins queue requeue [--done]` — move all failed items back to pending; `--done` also requeues done items
 - `gremlins queue clear` — remove done + failed items; `--failed` clears only failed, `--done` clears only done, `--purge` stops running gremlins and wipes all
@@ -119,7 +119,7 @@ Each item is a `.cmd` file. Once a gremlin id is captured from the command's out
 **The verbs:**
 
 - `queue add <cmd…>` — append a command to pending
-- `queue list [--json] [--watch [SEC]]` — show all items sorted newest-first, with bucket and ids where captured; `--json` for structured output; `--watch` auto-refreshes
+- `queue list [--json | --watch [SEC]]` — show all items sorted newest-first, with bucket and ids where captured; `--json` for structured output; `--watch` auto-refreshes
 - `queue run` — run pending items one at a time in the foreground, halting on first dirty exit
 - `queue requeue [--done]` — move all failed items back to pending; `--done` also requeues done items
 - `queue clear` — remove done + failed items; `--failed` clears only failed, `--done` clears only done, `--purge` stops running gremlins and wipes all
@@ -154,7 +154,7 @@ Each item is a `.cmd` file. Once a gremlin id is captured from the command's out
 # spawn: gremlins queue run
 # for each stdout line:
 #   if line matches "queue: done <item>":
-#     parse id from item name (format: <counter>-<slug>.<id>)
+#     parse id from item name (format: <timestamp>-<slug>.<id>)
 #     run: gremlins land <id>
 ```
 
