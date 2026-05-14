@@ -150,6 +150,29 @@ def liveness_of_state_file(sf: str, state: dict[str, object] | None = None) -> s
     return f"dead:{gr_status or 'unknown'}"
 
 
+def parse_liveness(live: str) -> dict[str, object]:
+    """Convert a liveness string to a structured dict for JSON output."""
+    if live in ("running", "finished", "waiting", ""):
+        return {"state": live or "unknown"}
+    if live.startswith("waiting (") and live.endswith(")"):
+        return {"state": "waiting", "duration": live[9:-1]}
+    if live.startswith("stalled:"):
+        return {"state": "stalled", "detail": live[8:]}
+    if live.startswith("dead:"):
+        rest = live[5:]
+        if rest.startswith("exit "):
+            try:
+                return {"state": "dead", "reason": "exit", "exit_code": int(rest[5:])}
+            except ValueError:
+                pass
+        if rest.startswith("bailed:"):
+            return {"state": "dead", "reason": "bailed", "bail_reason": rest[7:]}
+        if rest.startswith("crashed "):
+            return {"state": "dead", "reason": "crashed", "detail": rest[8:]}
+        return {"state": "dead", "reason": rest}
+    return {"state": live}
+
+
 def iter_state_files() -> Iterator[tuple[str, str, str]]:
     """Yield (gremlin_id, state_file_path, wdir) for every gremlin in STATE_ROOT."""
     if not os.path.isdir(_constants.STATE_ROOT):

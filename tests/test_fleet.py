@@ -17,6 +17,8 @@ import gremlins.fleet.render as _render
 import gremlins.fleet.rescue as _rescue
 import gremlins.fleet.rescue as _rescue_mod
 import gremlins.fleet.state as _state
+import gremlins.fleet.views as _views
+from gremlins.cli.fleet import _main_impl
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1521,3 +1523,269 @@ def test_rescue_prompt_uses_pipeline_name():
     prompt = _rescue_mod.build_rescue_prompt(state, "log", "/sf", "/log", "/marker")
     assert "boss" in prompt
     assert "custard" not in prompt.split("Pipeline:")[1].split("\n")[0]
+
+
+# ---------------------------------------------------------------------------
+# parse_liveness — structured liveness conversion
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "live,expected",
+    [
+        ("running", {"state": "running"}),
+        ("finished", {"state": "finished"}),
+        ("waiting", {"state": "waiting"}),
+        ("waiting (3m12s)", {"state": "waiting", "duration": "3m12s"}),
+        ("dead:exit 2", {"state": "dead", "reason": "exit", "exit_code": 2}),
+        (
+            "dead:bailed:structural",
+            {"state": "dead", "reason": "bailed", "bail_reason": "structural"},
+        ),
+        ("dead:host-terminated", {"state": "dead", "reason": "host-terminated"}),
+        ("dead:unknown", {"state": "dead", "reason": "unknown"}),
+        (
+            "dead:crashed (pid 123 gone)",
+            {"state": "dead", "reason": "crashed", "detail": "(pid 123 gone)"},
+        ),
+        (
+            "stalled:no log update 5m",
+            {"state": "stalled", "detail": "no log update 5m"},
+        ),
+        ("", {"state": "unknown"}),
+    ],
+)
+def test_parse_liveness(live, expected):
+    assert _state.parse_liveness(live) == expected
+
+
+# ---------------------------------------------------------------------------
+# do_list_json — fleet list as JSON
+# ---------------------------------------------------------------------------
+
+
+def _make_args(**kwargs):
+    """Build a minimal argparse.Namespace for do_list_json / do_list."""
+    defaults = dict(
+        running=False,
+        dead=False,
+        stalled=False,
+        pipeline=None,
+        since=None,
+        recent=None,
+        json=False,
+    )
+    defaults.update(kwargs)
+    import argparse
+
+    return argparse.Namespace(**defaults)
+
+
+def test_do_list_json_emits_json_array(tmp_path, monkeypatch, capsys):
+    state_root = tmp_path / "state-root"
+    state_root.mkdir()
+    gr_dir = state_root / "test-id-json01"
+    _write_state(
+        gr_dir,
+        {
+            "id": "test-id-json01",
+            "kind": "localgremlin",
+            "stage": "implement",
+            "status": "running",
+            "pid": os.getpid(),
+            "client": "claude",
+            "description": "test task",
+            "started_at": "2024-01-01T00:00:00Z",
+        },
+        log_text="recent",
+    )
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+    _views.do_list_json(_make_args(), here_root=None)
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert isinstance(data, list)
+    assert len(data) == 1
+    item = data[0]
+    assert item["id"] == "test-id-json01"
+    assert item["kind"] == "localgremlin"
+    assert item["stage"] == "implement"
+    assert item["client"] == "claude"
+    assert item["description"] == "test task"
+    assert isinstance(item["liveness"], dict)
+    assert item["liveness"]["state"] == "running"
+    assert item["age_seconds"] is not None
+
+
+def test_do_list_json_dead_liveness_structured(tmp_path, monkeypatch, capsys):
+    state_root = tmp_path / "state-root"
+    state_root.mkdir()
+    gr_dir = state_root / "test-id-dead01"
+    _write_state(
+        gr_dir,
+        {
+            "id": "test-id-dead01",
+            "kind": "localgremlin",
+            "stage": "implement",
+            "status": "dead",
+            "exit_code": 1,
+            "started_at": "2024-01-01T00:00:00Z",
+        },
+        finished=True,
+    )
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+    _views.do_list_json(_make_args(), here_root=None)
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert data[0]["liveness"] == {"state": "dead", "reason": "exit", "exit_code": 1}
+
+
+def test_do_list_json_empty_fleet(tmp_path, monkeypatch, capsys):
+    state_root = tmp_path / "state-root"
+    state_root.mkdir()
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+    _views.do_list_json(_make_args(), here_root=None)
+    out = capsys.readouterr().out
+    assert json.loads(out) == []
+
+
+# ---------------------------------------------------------------------------
+# do_drill_in_json — single-gremlin JSON drill-in
+# ---------------------------------------------------------------------------
+
+
+def test_do_drill_in_json_emits_json_object(tmp_path, monkeypatch, capsys):
+    state_root = tmp_path / "state-root"
+    state_root.mkdir()
+    gr_dir = state_root / "test-id-drill1"
+    _write_state(
+        gr_dir,
+        {
+            "id": "test-id-drill1",
+            "kind": "localgremlin",
+            "stage": "implement",
+            "status": "dead",
+            "exit_code": 2,
+            "started_at": "2024-01-01T00:00:00Z",
+        },
+        finished=True,
+    )
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+    _views.do_drill_in_json("test-id-drill1")
+    out = capsys.readouterr().out
+    obj = json.loads(out)
+    assert obj["id"] == "test-id-drill1"
+    assert obj["liveness"] == {"state": "dead", "reason": "exit", "exit_code": 2}
+    assert obj["closed"] is False
+    assert "state" in obj
+    assert obj["state"]["kind"] == "localgremlin"
+    assert obj["artifact_paths"] == []
+    assert obj["rescue_reports"] == []
+
+
+def test_do_drill_in_json_no_match(tmp_path, monkeypatch, capsys):
+    state_root = tmp_path / "state-root"
+    state_root.mkdir()
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+    _views.do_drill_in_json("nonexistent")
+    out = capsys.readouterr().out
+    obj = json.loads(out)
+    assert "error" in obj
+    assert "no gremlin matched" in obj["error"]
+
+
+def test_do_drill_in_json_includes_log_path(tmp_path, monkeypatch, capsys):
+    state_root = tmp_path / "state-root"
+    state_root.mkdir()
+    gr_dir = state_root / "test-id-log001"
+    _write_state(
+        gr_dir,
+        {
+            "id": "test-id-log001",
+            "kind": "localgremlin",
+            "stage": "implement",
+            "status": "dead",
+            "exit_code": 0,
+        },
+        finished=True,
+        log_text="some output",
+    )
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+    _views.do_drill_in_json("test-id-log001")
+    out = capsys.readouterr().out
+    obj = json.loads(out)
+    assert obj["log_path"] is not None
+    assert obj["log_path"].endswith("log")
+
+
+# ---------------------------------------------------------------------------
+# fleet CLI --json flag routing
+# ---------------------------------------------------------------------------
+
+
+def test_cli_fleet_json_no_state_root(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(tmp_path / "nonexistent"))
+    with pytest.raises(SystemExit) as exc:
+        _main_impl(["--json"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert json.loads(out) == []
+
+
+def test_cli_fleet_json_drill_in_no_state_root(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(tmp_path / "nonexistent"))
+    with pytest.raises(SystemExit) as exc:
+        _main_impl(["gr-abc", "--json"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    obj = json.loads(out)
+    assert "error" in obj
+
+
+def test_cli_fleet_json_list(tmp_path, monkeypatch, capsys):
+    state_root = tmp_path / "state-root"
+    state_root.mkdir()
+    gr_dir = state_root / "test-cli-json01"
+    _write_state(
+        gr_dir,
+        {
+            "id": "test-cli-json01",
+            "kind": "localgremlin",
+            "stage": "implement",
+            "status": "running",
+            "pid": os.getpid(),
+            "started_at": "2024-01-01T00:00:00Z",
+        },
+        log_text="recent",
+    )
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+    with pytest.raises(SystemExit) as exc:
+        _main_impl(["--json"])
+    assert exc.value.code == 0
+    data = json.loads(capsys.readouterr().out)
+    assert isinstance(data, list)
+    assert data[0]["id"] == "test-cli-json01"
+
+
+def test_cli_fleet_json_drill_in(tmp_path, monkeypatch, capsys):
+    state_root = tmp_path / "state-root"
+    state_root.mkdir()
+    gr_dir = state_root / "test-cli-drill01"
+    _write_state(
+        gr_dir,
+        {
+            "id": "test-cli-drill01",
+            "kind": "localgremlin",
+            "stage": "implement",
+            "status": "dead",
+            "exit_code": 0,
+            "started_at": "2024-01-01T00:00:00Z",
+        },
+        finished=True,
+    )
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+    with pytest.raises(SystemExit) as exc:
+        _main_impl(["test-cli-drill01", "--json"])
+    assert exc.value.code == 0
+    obj = json.loads(capsys.readouterr().out)
+    assert obj["id"] == "test-cli-drill01"
+    assert isinstance(obj["liveness"], dict)

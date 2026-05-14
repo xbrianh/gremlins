@@ -4,7 +4,9 @@ import argparse
 import datetime
 import json
 import os
+import sys
 import time
+from collections.abc import Iterator
 
 from gremlins.executor.state import StateData
 from gremlins.fleet.duration import parse_duration
@@ -15,46 +17,30 @@ from gremlins.fleet.state import (
     iter_state_files,
     liveness_of_state_file,
     load_state,
+    parse_liveness,
 )
 
 
-def collect_rows(
+def _iter_filtered_gremlins(
     here_root: str | None = None,
     pipeline_filter: str | None = None,
     since_secs: float | None = None,
     liveness_filter: set[str] | None = None,
     include_closed: bool = False,
-) -> list[FleetRow]:
-    """
-    Collect and return a list of FleetRows, sorted by started_at ascending.
-
-    here_root         — if set, restrict to gremlins with this project_root.
-    pipeline_filter   — if set, restrict to gremlins whose pipeline name contains this substring.
-    since_secs        — if set, restrict to gremlins started within this many seconds.
-    liveness_filter   — if set, a set of prefixes ('running', 'dead', 'stalled').
-    include_closed    — if True, include closed gremlins (for drill-in / --recent).
-    """
+) -> Iterator[tuple[str, str, str, dict[str, object], str]]:
     now = time.time()
-    rows: list[FleetRow] = []
     for gremlin_id, sf, wdir in iter_state_files():
         if not include_closed and os.path.isfile(os.path.join(wdir, "closed")):
             continue
-
         state = load_state(sf)
         if not state:
             continue
-        gremlin_id_from_state: str = str(state.get("id") or gremlin_id)
-        if not gremlin_id_from_state:
+        gremlin_id = str(state.get("id") or gremlin_id)
+        if not gremlin_id:
             continue
-
         live = liveness_of_state_file(sf, state)
-
-        # --here filter
-        if here_root is not None:
-            if state.get("project_root", "") != here_root:
-                continue
-
-        # --pipeline filter
+        if here_root is not None and state.get("project_root", "") != here_root:
+            continue
         if pipeline_filter is not None:
             pipeline_path = str(state.get("pipeline_path") or "")
             pipeline_name = (
@@ -64,23 +50,33 @@ def collect_rows(
             )
             if pipeline_filter not in pipeline_name:
                 continue
-
-        # --since filter
         if since_secs is not None:
             started_at: str = str(state.get("started_at") or "")
             epoch = iso_to_epoch(started_at)
             if epoch is None or (now - epoch) > since_secs:
                 continue
+        if liveness_filter and not any(live.startswith(p) for p in liveness_filter):
+            continue
+        yield gremlin_id, sf, wdir, state, live
 
-        # liveness filter
-        if liveness_filter:
-            matched_live = any(live.startswith(prefix) for prefix in liveness_filter)
-            if not matched_live:
-                continue
 
-        row = build_row(gremlin_id_from_state, sf, wdir, state, live)
-        rows.append(row)
-
+def collect_rows(
+    here_root: str | None = None,
+    pipeline_filter: str | None = None,
+    since_secs: float | None = None,
+    liveness_filter: set[str] | None = None,
+    include_closed: bool = False,
+) -> list[FleetRow]:
+    rows = [
+        build_row(gid, sf, wdir, state, live)
+        for gid, sf, wdir, state, live in _iter_filtered_gremlins(
+            here_root=here_root,
+            pipeline_filter=pipeline_filter,
+            since_secs=since_secs,
+            liveness_filter=liveness_filter,
+            include_closed=include_closed,
+        )
+    ]
     rows.sort(key=lambda r: r.started_at)
     return rows
 
@@ -268,3 +264,153 @@ def do_drill_in(target: str) -> None:
             print(f"      {fpath}")
     if not has_log and not artifact_paths and not rescue_reports:
         print("    (no log, artifacts, or rescue reports)")
+
+
+def _gremlin_to_json(
+    gremlin_id: str, wdir: str, state: dict[str, object], live: str
+) -> dict[str, object]:
+    started_at = str(state.get("started_at") or "")
+    epoch = iso_to_epoch(started_at)
+    age_seconds: float | None = (time.time() - epoch) if epoch is not None else None
+    pipeline_path = str(state.get("pipeline_path") or "")
+    kind = (
+        os.path.basename(pipeline_path).replace(".yaml", "")
+        if pipeline_path
+        else str(state.get("kind") or "unknown")
+    )
+    return {
+        "id": gremlin_id,
+        "kind": kind,
+        "stage": str(state.get("stage") or ""),
+        "sub_stage": state.get("sub_stage"),
+        "liveness": parse_liveness(live),
+        "age_seconds": age_seconds,
+        "client": str(state.get("client") or ""),
+        "description": str(state.get("description") or state.get("instructions") or ""),
+        "started_at": started_at,
+        "project_root": str(state.get("project_root") or ""),
+        "closed": os.path.isfile(os.path.join(wdir, "closed")),
+    }
+
+
+def do_list_json(args: argparse.Namespace, here_root: str | None = None) -> None:
+    if args.recent is not None:
+        since_secs: float | None = args.recent * 3600
+        liveness_filter: set[str] | None = {"dead:", "finished"}
+        include_closed = True
+    else:
+        liveness_filter = None
+        if args.running or args.dead or args.stalled:
+            liveness_filter = set()
+            if args.running:
+                liveness_filter |= {"running", "waiting"}
+            if args.dead:
+                liveness_filter |= {"dead:", "finished"}
+            if args.stalled:
+                liveness_filter.add("stalled:")
+        since_secs = None
+        if args.since:
+            try:
+                since_secs = parse_duration(args.since)
+            except ValueError as e:
+                print(f"error: {e}", file=sys.stderr)
+                return
+        include_closed = False
+
+    items = sorted(
+        (
+            _gremlin_to_json(gid, wdir, state, live)
+            for gid, _sf, wdir, state, live in _iter_filtered_gremlins(
+                here_root=here_root,
+                pipeline_filter=args.pipeline,
+                since_secs=since_secs,
+                liveness_filter=liveness_filter,
+                include_closed=include_closed,
+            )
+        ),
+        key=lambda d: str(d.get("started_at") or ""),
+    )
+    print(json.dumps(items, indent=2))
+
+
+def do_drill_in_json(target: str) -> None:
+    matches: list[tuple[str, str, str]] = []
+    for gremlin_id, sf, wdir in iter_state_files():
+        if target in gremlin_id:
+            matches.append((gremlin_id, sf, wdir))
+
+    if not matches:
+        print(json.dumps({"error": f"no gremlin matched: {target}"}))
+        return
+    if len(matches) > 1:
+        print(
+            json.dumps(
+                {
+                    "error": f"ambiguous id '{target}' matched {len(matches)} gremlins",
+                    "matches": [m[0] for m in matches],
+                }
+            )
+        )
+        return
+
+    gremlin_id, sf, wdir = matches[0]
+    state = load_state(sf)
+    if not state:
+        print(json.dumps({"error": f"could not read state for {gremlin_id}"}))
+        return
+
+    live = liveness_of_state_file(sf, state)
+    started_at = str(state.get("started_at") or "")
+    epoch = iso_to_epoch(started_at)
+    age_seconds: float | None = (time.time() - epoch) if epoch is not None else None
+
+    gremlin_id_for_bail = str(state.get("id") or "")
+    bail_file = (
+        StateData.load(gremlin_id_for_bail).read_bail_info()
+        if gremlin_id_for_bail
+        else None
+    )
+    bail_class = (
+        (bail_file.get("class") or "") if bail_file else (state.get("bail_class") or "")
+    )
+    bail_reason = state.get("bail_reason")
+    bail_detail = (
+        (bail_file.get("detail") or "")
+        if bail_file
+        else (state.get("bail_detail") or "")
+    )
+
+    log_path = os.path.join(wdir, "log")
+    artifacts_dir = os.path.join(wdir, "artifacts")
+    artifact_paths: list[str] = []
+    if os.path.isdir(artifacts_dir):
+        for fname in sorted(os.listdir(artifacts_dir)):
+            fpath = os.path.join(artifacts_dir, fname)
+            if os.path.isfile(fpath):
+                artifact_paths.append(fpath)
+    rescue_reports: list[str] = []
+    try:
+        for fname in sorted(os.listdir(wdir)):
+            if fname.startswith("rescue-") and fname.endswith(".md"):
+                fpath = os.path.join(wdir, fname)
+                if os.path.isfile(fpath):
+                    rescue_reports.append(fpath)
+    except OSError:
+        pass
+
+    obj: dict[str, object] = {
+        "id": gremlin_id,
+        "liveness": parse_liveness(live),
+        "closed": os.path.isfile(os.path.join(wdir, "closed")),
+        "age_seconds": age_seconds,
+        "started_at": started_at,
+        "bail_class": bail_class or None,
+        "bail_reason": bail_reason or None,
+        "bail_detail": bail_detail or None,
+        "state_dir": wdir,
+        "log_path": log_path if os.path.isfile(log_path) else None,
+        "artifact_paths": artifact_paths,
+        "rescue_reports": rescue_reports,
+        "state": state,
+    }
+    print(json.dumps(obj, indent=2))

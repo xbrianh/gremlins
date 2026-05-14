@@ -17,9 +17,43 @@ Fleet manager package for background gremlins. Reads every gremlin state file un
 | `log.py` | `do_log` |
 | `close.py` | `do_close` |
 | `land.py` | All land helpers + `do_rm`, `do_land`, `expected_branch`, `_print_cost`, `_persist_land_cost`, `_resolve_landing_cwd`, `_fast_forward_main`, `_cleanup_gremlin` |
-| `views.py` | `collect_rows`, `do_list`, `do_recent`, `do_drill_in` |
+| `views.py` | `collect_rows`, `do_list`, `do_recent`, `do_drill_in`, `do_list_json`, `do_drill_in_json` |
 | `session_summary.py` | SessionStart/UserPromptSubmit hook: filters gremlins by `project_root`, reports running + newly-finished, marks finished as `summarized`, prunes closed state dirs older than 14 days |
 | `__init__.py` | Package docstring only |
+
+## JSON output contract (`--json`)
+
+`gremlins --json` emits a JSON array; `gremlins <id> --json` emits one JSON object. Both are stdout-only — no decorative text when `--json` is active.
+
+### Fleet list (`gremlins --json`)
+Each array element:
+```json
+{
+  "id": "string",
+  "kind": "string",
+  "stage": "string",
+  "sub_stage": "string | object | null",
+  "liveness": { "state": "running | waiting | finished | dead | stalled", ... },
+  "age_seconds": 123.4,
+  "client": "string",
+  "description": "string",
+  "started_at": "ISO-8601 string",
+  "project_root": "string",
+  "closed": false
+}
+```
+
+### `liveness` object shapes
+| `state` | additional fields |
+|---|---|
+| `running` | — |
+| `waiting` | `duration?: "3m12s"` |
+| `finished` | — |
+| `dead` | `reason: "exit" \| "bailed" \| "host-terminated" \| "crashed" \| ...`, plus `exit_code?: int` or `bail_reason?: string` |
+| `stalled` | `detail: string` |
+
+### Drill-in (`gremlins <id> --json`)
+Top-level fields: `id`, `liveness`, `closed`, `age_seconds`, `started_at`, `bail_class`, `bail_reason`, `bail_detail`, `state_dir`, `log_path`, `artifact_paths`, `rescue_reports`, `state` (full state.json object).
 
 ## Monkeypatch design
 
