@@ -236,7 +236,9 @@ class OpenAIAgentsClient:
                         f"{prefix}stream transient-error, retries exhausted, failing\n"
                     )
                     raise
-                time.sleep(_retry_backoff(attempt, max_retries, prefix, "transient-error"))
+                time.sleep(
+                    _retry_backoff(attempt, max_retries, prefix, "transient-error")
+                )
                 continue
             return result
         raise RuntimeError("unreachable")
