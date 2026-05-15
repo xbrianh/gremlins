@@ -1,12 +1,27 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import pathlib
+import sys
+import threading
+import time
+from typing import Any
 
 from agents import Agent, RunConfig, Runner, Usage
+from agents.items import (
+    MessageOutputItem,
+    ReasoningItem,
+    ToolCallItem,
+    ToolCallOutputItem,
+)
 from agents.models.openai_provider import OpenAIProvider
+from agents.result import RunResultStreaming
+from agents.stream_events import RunItemStreamEvent
 
 from gremlins.clients.protocol import CompletedRun
+from gremlins.clients.stream import STREAM_IDLE_TIMEOUT, trunc
 from gremlins.clients.tools import GREMLINS_TOOLS
 
 # USD per 1M tokens: (input, output)
@@ -19,8 +34,7 @@ _PRICING: dict[str, tuple[float, float]] = {
     "gpt-4.1-mini": (0.40, 1.60),
     "gpt-4.1-nano": (0.10, 0.40),
     "gpt-4-turbo": (10.00, 30.00),
-    # o1/o3: Usage.output_tokens from openai-agents SDK bundles reasoning tokens in;
-    # these prices cover the blended output rate (reasoning tokens billed at same rate).
+    # o1/o3: Usage.output_tokens bundles reasoning tokens; prices cover blended rate.
     "o1": (15.00, 60.00),
     "o1-mini": (1.10, 4.40),
     "o3": (10.00, 40.00),
@@ -35,6 +49,12 @@ _PRICING: dict[str, tuple[float, float]] = {
 }
 _DEFAULT_PRICING = (2.50, 10.00)
 
+STREAM_IDLE_BACKOFF = (60, 300, 600)
+
+
+class StreamTimeoutError(RuntimeError):
+    pass
+
 
 def _compute_cost(model: str, usage: Usage) -> float:
     input_price, output_price = _PRICING.get(model, _DEFAULT_PRICING)
@@ -43,9 +63,55 @@ def _compute_cost(model: str, usage: Usage) -> float:
     ) / 1_000_000
 
 
-class OpenAIAgentsClient:
-    """ClaudeClient implementation backed by the openai-agents SDK."""
+def _key_arg(args_json: str) -> str:
+    try:
+        inp: dict[str, Any] = json.loads(args_json)
+    except Exception:
+        return ""
+    for k in ("file_path", "command", "pattern", "url", "output_file"):
+        if inp.get(k):
+            return str(inp[k])
+    return ""
 
+
+def _message_text(item: MessageOutputItem) -> str:
+    content = getattr(item.raw_item, "content", []) or []
+    parts: list[str] = []
+    for c in content:
+        txt = getattr(c, "text", None)
+        if txt:
+            parts.append(str(txt))
+    return " ".join(parts)
+
+
+def _reasoning_text(item: ReasoningItem) -> str:
+    summary = getattr(item.raw_item, "summary", []) or []
+    parts: list[str] = []
+    for s in summary:
+        txt = getattr(s, "text", None)
+        if txt:
+            parts.append(str(txt))
+    return " ".join(parts)
+
+
+def _raw_dict(event: Any) -> dict[str, Any]:
+    d: dict[str, Any] = {"type": getattr(event, "type", "unknown")}
+    item = getattr(event, "item", None)
+    if item is not None:
+        d["item_type"] = getattr(item, "type", None)
+        raw_item = getattr(item, "raw_item", None)
+        if raw_item is not None:
+            if hasattr(raw_item, "model_dump"):
+                try:
+                    d["raw_item"] = raw_item.model_dump()
+                except Exception:
+                    d["raw_item"] = str(raw_item)
+            else:
+                d["raw_item"] = str(raw_item)
+    return d
+
+
+class OpenAIAgentsClient:
     def __init__(
         self,
         model: str | None,
@@ -62,6 +128,29 @@ class OpenAIAgentsClient:
             if base_url or api_key
             else None
         )
+        # RLock so signal handlers on the main thread don't deadlock
+        self._lock = threading.RLock()
+        self._active_runs: list[RunResultStreaming] = []
+
+    def _track(self, run: RunResultStreaming) -> None:
+        with self._lock:
+            self._active_runs.append(run)
+
+    def _untrack(self, run: RunResultStreaming) -> None:
+        with self._lock:
+            try:
+                self._active_runs.remove(run)
+            except ValueError:
+                pass
+
+    def reap_all(self) -> None:
+        with self._lock:
+            runs = list(self._active_runs)
+        for run in runs:
+            try:
+                run.cancel()
+            except Exception:
+                pass
 
     def run(
         self,
@@ -77,7 +166,10 @@ class OpenAIAgentsClient:
         idle_timeout: float | None = None,
         extra_env: dict[str, str] | None = None,
     ) -> CompletedRun:
+        if idle_timeout is None:
+            idle_timeout = STREAM_IDLE_TIMEOUT
         effective_model = model or self._model
+        prefix = f"[{label}] " if label else ""
         agent = Agent(
             name=f"gremlins-{label}",
             instructions="You are a software engineering assistant.",
@@ -88,19 +180,203 @@ class OpenAIAgentsClient:
             "cwd": str(cwd) if cwd is not None else None,
             "extra_env": extra_env,
         }
-        if self._provider is not None:
-            run_config = RunConfig(tracing_disabled=True, model_provider=self._provider)
-        else:
-            run_config = RunConfig(tracing_disabled=True)
-        result = Runner.run_sync(agent, prompt, context=ctx, run_config=run_config)
-        usage = result.context_wrapper.usage
-        cost = _compute_cost(effective_model, usage)
-        self._total_cost_usd += cost
-        text = str(result.final_output) if result.final_output is not None else None
-        return CompletedRun(exit_code=0, text_result=text, cost_usd=cost)
+        run_config = (
+            RunConfig(tracing_disabled=True, model_provider=self._provider)
+            if self._provider is not None
+            else RunConfig(tracing_disabled=True)
+        )
+        active_prompt = prompt
+        for attempt in range(max_retries + 1):
+            try:
+                result = asyncio.run(
+                    self._run_streamed(
+                        agent,
+                        active_prompt,
+                        ctx,
+                        run_config,
+                        prefix=prefix,
+                        model=effective_model,
+                        raw_path=raw_path,
+                        capture_events=capture_events,
+                        cwd=cwd,
+                        idle_timeout=idle_timeout,
+                    )
+                )
+            except StreamTimeoutError:
+                if attempt == max_retries:
+                    raise
+                wait = STREAM_IDLE_BACKOFF[min(attempt, len(STREAM_IDLE_BACKOFF) - 1)]
+                sys.stderr.write(
+                    f"{prefix}stream idle timeout, retrying in {wait}s"
+                    f" ({attempt + 1}/{max_retries})...\n"
+                )
+                time.sleep(wait)
+                if on_timeout_prompt is not None:
+                    active_prompt = on_timeout_prompt
+                continue
+            return result
+        raise RuntimeError("unreachable")
 
-    def reap_all(self) -> None:
-        pass
+    async def _run_streamed(
+        self,
+        agent: Agent,
+        prompt: str,
+        ctx: dict[str, object],
+        run_config: RunConfig,
+        *,
+        prefix: str,
+        model: str,
+        raw_path: pathlib.Path | None,
+        capture_events: bool,
+        cwd: pathlib.Path | None,
+        idle_timeout: float,
+    ) -> CompletedRun:
+        run = Runner.run_streamed(agent, prompt, context=ctx, run_config=run_config)
+        self._track(run)
+
+        sys.stderr.write(f"{prefix}init model={model} cwd={str(cwd) if cwd else '?'}\n")
+        sys.stderr.flush()
+
+        raw = open(raw_path, "ab") if raw_path is not None else None
+        captured: list[dict[str, Any]] | None = [] if capture_events else None
+        turns = 0
+        timed_out = False
+
+        event_queue: asyncio.Queue[Any] = asyncio.Queue()
+
+        async def _stream_to_queue() -> None:
+            try:
+                async for event in run.stream_events():
+                    await event_queue.put(event)
+            except Exception as exc:
+                sys.stderr.write(f"{prefix}stream error: {exc}\n")
+            finally:
+                await event_queue.put(None)
+
+        stream_task = asyncio.create_task(_stream_to_queue())
+
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(
+                        event_queue.get(), timeout=idle_timeout
+                    )
+                except TimeoutError:
+                    timed_out = True
+                    run.cancel()
+                    stream_task.cancel()
+                    try:
+                        await stream_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    break
+
+                if event is None:
+                    break
+
+                if raw is not None:
+                    try:
+                        raw.write((json.dumps(_raw_dict(event)) + "\n").encode())
+                        raw.flush()
+                    except Exception:
+                        pass
+
+                if not isinstance(event, RunItemStreamEvent):
+                    continue
+
+                item = event.item
+
+                if isinstance(item, MessageOutputItem):
+                    text = _message_text(item)
+                    sys.stderr.write(f"{prefix}text: {trunc(text)}\n")
+                    if captured is not None:
+                        captured.append(
+                            {
+                                "type": "assistant",
+                                "message": {
+                                    "content": [{"type": "text", "text": text}]
+                                },
+                            }
+                        )
+
+                elif isinstance(item, ReasoningItem):
+                    sys.stderr.write(f"{prefix}think: {trunc(_reasoning_text(item))}\n")
+
+                elif isinstance(item, ToolCallItem):
+                    name = item.tool_name or "?"
+                    args_json = getattr(item.raw_item, "arguments", "") or ""
+                    call_id = item.call_id or ""
+                    sys.stderr.write(
+                        f"{prefix}tool: {name} {trunc(_key_arg(args_json))}\n"
+                    )
+                    if captured is not None:
+                        try:
+                            inp: dict[str, Any] = json.loads(args_json)
+                        except Exception:
+                            inp = {}
+                        captured.append(
+                            {
+                                "type": "assistant",
+                                "message": {
+                                    "content": [
+                                        {
+                                            "type": "tool_use",
+                                            "id": call_id,
+                                            "name": name,
+                                            "input": inp,
+                                        }
+                                    ]
+                                },
+                            }
+                        )
+
+                elif isinstance(item, ToolCallOutputItem):
+                    output = str(item.output) if item.output is not None else ""
+                    call_id = item.call_id or ""
+                    sys.stderr.write(f"{prefix}result: {trunc(output)}\n")
+                    if captured is not None:
+                        captured.append(
+                            {
+                                "type": "user",
+                                "message": {
+                                    "content": [
+                                        {
+                                            "type": "tool_result",
+                                            "tool_use_id": call_id,
+                                            "content": output,
+                                        }
+                                    ]
+                                },
+                            }
+                        )
+                    turns += 1
+
+                sys.stderr.flush()
+
+        finally:
+            self._untrack(run)
+            if raw is not None:
+                raw.close()
+
+        try:
+            usage = run.context_wrapper.usage
+            cost = _compute_cost(model, usage)
+        except Exception:
+            cost = 0.0
+        with self._lock:
+            self._total_cost_usd += cost
+
+        suffix = " (timeout)" if timed_out else ""
+        sys.stderr.write(f"{prefix}final: turns={turns} cost={cost:.6f}{suffix}\n")
+        sys.stderr.flush()
+
+        if timed_out:
+            raise StreamTimeoutError("openai-agents stream idle timeout")
+
+        text = str(run.final_output) if run.final_output is not None else None
+        return CompletedRun(
+            exit_code=0, text_result=text, events=captured, cost_usd=cost
+        )
 
     @property
     def total_cost_usd(self) -> float:

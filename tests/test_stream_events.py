@@ -8,8 +8,8 @@ import time
 from gremlins.clients.stream import (
     _HANDLERS,
     _emit_event,
-    _trunc,
     stream_events,
+    trunc,
 )
 
 
@@ -18,19 +18,19 @@ def _bio(*evts):
 
 
 def test_trunc_truncates():
-    assert _trunc("a" * 201) == "a" * 200 + "..."
+    assert trunc("a" * 201) == "a" * 200 + "..."
 
 
 def test_trunc_newlines():
-    assert _trunc("a\nb") == "a b"
+    assert trunc("a\nb") == "a b"
 
 
 def test_trunc_non_string():
-    assert _trunc(42) == "42"
+    assert trunc(42) == "42"
 
 
 def test_trunc_none():
-    assert _trunc(None) == ""
+    assert trunc(None) == ""
 
 
 def test_init_event_renders(capsys):
