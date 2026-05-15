@@ -20,10 +20,15 @@ directly — the protocol is the seam tests swap out.
   response.
 - `fake.py` — `FakeClaudeClient`, the recording test double. Looks up
   scripted responses by `label=` passed into `client.run(...)`.
-- `stream.py` — `stream_events` reader plus the `STREAM_IDLE_TIMEOUT`
-  constant. Parses the `--output-format stream-json` line stream into the
-  formatted log lines stages emit (`text:` / `think:` / `tool:` / `result:`
-  / `final:`). Used by both subprocess clients.
+- `config.py` — cross-backend retry/timeout constants (`STREAM_IDLE_TIMEOUT`,
+  `STREAM_IDLE_BACKOFF`) and `validate_max_retries`. The single source of
+  truth for retry policy; both `claude.py` and `providers/openai_agents.py`
+  import from here.
+- `stream.py` — `stream_events` reader and `trunc` helper. Parses the
+  `--output-format stream-json` line stream into the formatted log lines
+  stages emit (`text:` / `think:` / `tool:` / `result:` / `final:`).
+  `stream_events` is used by `claude.py` and `fleet/rescue.py`; `trunc`
+  is used by `providers/openai_agents.py`.
 - `resolve.py` — `ClientSpec` (`provider:model`), the package default
   (`claude:sonnet`), and the helpers (`collect_stage_specs`,
   `resolve_stage_client`, `require_stage_spec`,
@@ -58,10 +63,10 @@ directly — the protocol is the seam tests swap out.
 
 ## Load-bearing invariants
 
-- `STREAM_IDLE_TIMEOUT` in `stream.py` bounds how long a subprocess client
-  will wait between stream events before raising `StreamTimeoutError`. The
-  retry loop in `claude.py` depends on this — don't remove it without
-  updating the retry logic.
+- `STREAM_IDLE_TIMEOUT` and `STREAM_IDLE_BACKOFF` in `config.py` are the
+  single source of truth for retry/timeout policy across all backends. Both
+  `claude.py` and `providers/openai_agents.py` import and use
+  `validate_max_retries` from there; overrun semantics must stay uniform.
 - `ClientSpec.parse` enforces `provider:model` shape and rejects unknown
   providers by consulting `CLIENT_FACTORIES`. Adding a provider means
   registering it in `__init__.py`; otherwise YAMLs that name it fail at
