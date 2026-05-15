@@ -21,6 +21,14 @@ def kill_quietly(p: subprocess.Popen[bytes]) -> None:
     p.kill()
 
 
+def terminate_and_kill(p: subprocess.Popen[bytes], timeout: float) -> None:
+    terminate_quietly(p)
+    wait_quietly(p, timeout)
+    if p.poll() is None:
+        kill_quietly(p)
+        wait_quietly(p, timeout)
+
+
 def reap_processes(procs: list[subprocess.Popen[bytes]]) -> None:
     for p in procs:
         terminate_quietly(p)

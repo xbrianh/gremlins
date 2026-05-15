@@ -6,6 +6,7 @@ import pathlib
 import subprocess
 import sys
 import threading
+from collections.abc import Iterator
 
 from gremlins.clients.config import (
     STREAM_IDLE_BACKOFF,
@@ -16,10 +17,8 @@ from gremlins.clients.config import (
 from gremlins.clients.protocol import CompletedRun
 from gremlins.clients.stream import stream_events
 from gremlins.clients.subprocess_utils import (
-    kill_quietly,
     reap_processes,
-    terminate_quietly,
-    wait_quietly,
+    terminate_and_kill,
 )
 from gremlins.utils.decorators import swallow
 
@@ -61,7 +60,7 @@ class SubprocessClaudeClient:
             self._children.remove(p)
 
     @contextlib.contextmanager
-    def _tracked(self, p: subprocess.Popen[bytes]):  # type: ignore[return]
+    def _tracked(self, p: subprocess.Popen[bytes]) -> Iterator[subprocess.Popen[bytes]]:
         self._track(p)
         try:
             yield p
@@ -137,10 +136,7 @@ class SubprocessClaudeClient:
                 with self._lock:
                     self._total_cost_usd += cost_usd
             if timed_out:
-                terminate_quietly(p)
-                wait_quietly(p, 5.0)
-                kill_quietly(p)
-                wait_quietly(p, 5.0)
+                terminate_and_kill(p, 5.0)
                 p.stdout.close()
                 raise StreamTimeoutError("claude -p stream idle timeout")
             p.stdout.close()
