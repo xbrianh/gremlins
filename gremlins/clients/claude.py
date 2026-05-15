@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import pathlib
 import subprocess
 import sys
 import threading
-import time
 
 from gremlins.clients.config import (
     STREAM_IDLE_BACKOFF,
@@ -15,6 +15,12 @@ from gremlins.clients.config import (
 )
 from gremlins.clients.protocol import CompletedRun
 from gremlins.clients.stream import stream_events
+from gremlins.clients.subprocess_utils import (
+    kill_quietly,
+    reap_processes,
+    terminate_quietly,
+    wait_quietly,
+)
 from gremlins.utils.decorators import swallow
 
 
@@ -54,27 +60,19 @@ class SubprocessClaudeClient:
         with self._lock:
             self._children.remove(p)
 
+    @contextlib.contextmanager
+    def _tracked(self, p: subprocess.Popen[bytes]):  # type: ignore[return]
+        self._track(p)
+        try:
+            yield p
+        except Exception:
+            self._untrack(p)
+            raise
+
     def reap_all(self) -> None:
         with self._lock:
             procs = list(self._children)
-        for p in procs:
-            try:
-                p.terminate()
-            except Exception:
-                pass
-        deadline = time.time() + 2.0
-        for p in procs:
-            remaining = max(0.0, deadline - time.time())
-            try:
-                p.wait(timeout=remaining)
-            except Exception:
-                pass
-        for p in procs:
-            if p.poll() is None:
-                try:
-                    p.kill()
-                except Exception:
-                    pass
+        reap_processes(procs)
 
     @property
     def total_cost_usd(self) -> float:
@@ -112,14 +110,10 @@ class SubprocessClaudeClient:
             env=env,
             cwd=str(cwd) if cwd is not None else None,
         )
-        self._track(p)
-        try:
+        with self._tracked(p):
             assert p.stdin is not None
             p.stdin.write(prompt.encode())
             p.stdin.close()
-        except Exception:
-            self._untrack(p)
-            raise
         return p
 
     def _consume(
@@ -143,21 +137,10 @@ class SubprocessClaudeClient:
                 with self._lock:
                     self._total_cost_usd += cost_usd
             if timed_out:
-                try:
-                    p.terminate()
-                except OSError:
-                    pass
-                try:
-                    p.wait(timeout=5.0)
-                except subprocess.TimeoutExpired:
-                    try:
-                        p.kill()
-                    except OSError:
-                        pass
-                    try:
-                        p.wait(timeout=5.0)
-                    except subprocess.TimeoutExpired:
-                        pass
+                terminate_quietly(p)
+                wait_quietly(p, 5.0)
+                kill_quietly(p)
+                wait_quietly(p, 5.0)
                 p.stdout.close()
                 raise StreamTimeoutError("claude -p stream idle timeout")
             p.stdout.close()

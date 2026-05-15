@@ -5,9 +5,9 @@ import pathlib
 import re
 import subprocess
 import threading
-import time
 
 from gremlins.clients.protocol import CompletedRun
+from gremlins.clients.subprocess_utils import reap_processes
 from gremlins.utils.decorators import swallow
 
 # Copilot appends a stats footer like "⏺ Cost: $0.01 | Duration: 3.2s | ..."
@@ -42,24 +42,7 @@ class SubprocessCopilotClient:
     def reap_all(self) -> None:
         with self._lock:
             procs = list(self._children)
-        for p in procs:
-            try:
-                p.terminate()
-            except Exception:
-                pass
-        deadline = time.time() + 2.0
-        for p in procs:
-            remaining = max(0.0, deadline - time.time())
-            try:
-                p.wait(timeout=remaining)
-            except Exception:
-                pass
-        for p in procs:
-            if p.poll() is None:
-                try:
-                    p.kill()
-                except Exception:
-                    pass
+        reap_processes(procs)
 
     @property
     def total_cost_usd(self) -> float:
