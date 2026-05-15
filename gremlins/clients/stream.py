@@ -11,7 +11,7 @@ from typing import IO, Any, cast
 STREAM_IDLE_TIMEOUT = 120
 
 
-def _trunc(s: object, n: int = 200) -> str:
+def trunc(s: object, n: int = 200) -> str:
     if s is None:
         return ""
     if not isinstance(s, str):
@@ -21,11 +21,11 @@ def _trunc(s: object, n: int = 200) -> str:
 
 
 def _fmt_text(c: dict[str, Any]) -> str:
-    return f"text: {_trunc(c.get('text', ''))}"
+    return f"text: {trunc(c.get('text', ''))}"
 
 
 def _fmt_thinking(c: dict[str, Any]) -> str:
-    return f"think: {_trunc(c.get('thinking') or '')}"
+    return f"think: {trunc(c.get('thinking') or '')}"
 
 
 def _fmt_tool_use(c: dict[str, Any]) -> str:
@@ -35,7 +35,7 @@ def _fmt_tool_use(c: dict[str, Any]) -> str:
         if inp.get(k):
             arg = str(inp[k])
             break
-    return f"tool: {c.get('name', '?')} {_trunc(arg)}"
+    return f"tool: {c.get('name', '?')} {trunc(arg)}"
 
 
 _CONTENT_FMT = {"text": _fmt_text, "thinking": _fmt_thinking, "tool_use": _fmt_tool_use}
@@ -80,7 +80,7 @@ def _emit_user(prefix: str, evt: dict[str, Any]) -> None:
             continue
         err = " ERROR" if c.get("is_error") is True else ""
         sys.stderr.write(
-            f"{prefix}result{err}: {_trunc(_tool_result_body(c.get('content')))}\n"
+            f"{prefix}result{err}: {trunc(_tool_result_body(c.get('content')))}\n"
         )
 
 
