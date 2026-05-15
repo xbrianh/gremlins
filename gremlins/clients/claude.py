@@ -7,15 +7,18 @@ import sys
 import threading
 import time
 
+from gremlins.clients.config import (
+    STREAM_IDLE_BACKOFF,
+    STREAM_IDLE_TIMEOUT,
+    validate_max_retries,
+)
 from gremlins.clients.protocol import CompletedRun
-from gremlins.clients.stream import STREAM_IDLE_TIMEOUT, stream_events
+from gremlins.clients.stream import stream_events
 
 
 class StreamTimeoutError(RuntimeError):
     pass
 
-
-STREAM_IDLE_BACKOFF = (60, 300, 600)
 
 CLAUDE_FLAGS_BASE = [
     "--permission-mode",
@@ -183,12 +186,7 @@ class SubprocessClaudeClient:
         idle_timeout: float | None = None,
         extra_env: dict[str, str] | None = None,
     ) -> CompletedRun:
-        if max_retries < 0:
-            raise ValueError(f"max_retries must be >= 0, got {max_retries}")
-        if max_retries > len(STREAM_IDLE_BACKOFF):
-            raise ValueError(
-                f"max_retries={max_retries} exceeds backoff schedule length {len(STREAM_IDLE_BACKOFF)}"
-            )
+        validate_max_retries(max_retries)
         if idle_timeout is None:
             idle_timeout = STREAM_IDLE_TIMEOUT
         argv = self._build_argv(model)

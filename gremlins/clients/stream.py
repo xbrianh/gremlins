@@ -8,7 +8,7 @@ import threading
 from collections.abc import Callable
 from typing import IO, Any, cast
 
-STREAM_IDLE_TIMEOUT = 120
+from gremlins.clients.config import STREAM_IDLE_TIMEOUT
 
 
 def trunc(s: object, n: int = 200) -> str:

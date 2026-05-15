@@ -20,8 +20,13 @@ from agents.models.openai_provider import OpenAIProvider
 from agents.result import RunResultStreaming
 from agents.stream_events import RunItemStreamEvent
 
+from gremlins.clients.config import (
+    STREAM_IDLE_BACKOFF,
+    STREAM_IDLE_TIMEOUT,
+    validate_max_retries,
+)
 from gremlins.clients.protocol import CompletedRun
-from gremlins.clients.stream import STREAM_IDLE_TIMEOUT, trunc
+from gremlins.clients.stream import trunc
 from gremlins.clients.tools import GREMLINS_TOOLS
 
 # USD per 1M tokens: (input, output)
@@ -48,8 +53,6 @@ _PRICING: dict[str, tuple[float, float]] = {
     "grok-4": (3.00, 15.00),
 }
 _DEFAULT_PRICING = (2.50, 10.00)
-
-STREAM_IDLE_BACKOFF = (60, 300, 600)
 
 
 class StreamTimeoutError(RuntimeError):
@@ -166,6 +169,7 @@ class OpenAIAgentsClient:
         idle_timeout: float | None = None,
         extra_env: dict[str, str] | None = None,
     ) -> CompletedRun:
+        validate_max_retries(max_retries)
         if idle_timeout is None:
             idle_timeout = STREAM_IDLE_TIMEOUT
         effective_model = model or self._model
@@ -205,7 +209,7 @@ class OpenAIAgentsClient:
             except StreamTimeoutError:
                 if attempt == max_retries:
                     raise
-                wait = STREAM_IDLE_BACKOFF[min(attempt, len(STREAM_IDLE_BACKOFF) - 1)]
+                wait = STREAM_IDLE_BACKOFF[attempt]
                 sys.stderr.write(
                     f"{prefix}stream idle timeout, retrying in {wait}s"
                     f" ({attempt + 1}/{max_retries})...\n"
