@@ -82,7 +82,7 @@ def test_openai_client_raises_on_overrun() -> None:
         "Bad Gateway",
         "Gateway Timeout",
         "The server is overloaded",
-        "529 overloaded",
+        "HTTP error 529",
     ],
 )
 def test_is_transient_stream_error_transient(message: str) -> None:

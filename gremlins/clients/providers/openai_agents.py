@@ -64,6 +64,14 @@ class StreamTerminalError(RuntimeError):
     pass
 
 
+def _retry_backoff(attempt: int, max_retries: int, prefix: str, label: str) -> float:
+    wait = STREAM_IDLE_BACKOFF[attempt]
+    sys.stderr.write(
+        f"{prefix}stream {label}, retrying in {wait}s ({attempt + 1}/{max_retries})...\n"
+    )
+    return wait
+
+
 def _compute_cost(model: str, usage: Usage) -> float:
     input_price, output_price = _PRICING.get(model, _DEFAULT_PRICING)
     return (
@@ -214,28 +222,21 @@ class OpenAIAgentsClient:
             except StreamTimeoutError:
                 if attempt == max_retries:
                     raise
-                wait = STREAM_IDLE_BACKOFF[attempt]
-                sys.stderr.write(
-                    f"{prefix}stream idle timeout, retrying in {wait}s"
-                    f" ({attempt + 1}/{max_retries})...\n"
-                )
-                time.sleep(wait)
+                time.sleep(_retry_backoff(attempt, max_retries, prefix, "idle timeout"))
                 if on_timeout_prompt is not None:
                     active_prompt = on_timeout_prompt
                 continue
             except StreamTerminalError as exc:
                 msg = str(exc)
-                if attempt == max_retries or not is_transient_stream_error(msg):
+                if not is_transient_stream_error(msg):
                     sys.stderr.write(f"{prefix}stream permanent-error, failing\n")
                     raise
-                wait = STREAM_IDLE_BACKOFF[attempt]
-                sys.stderr.write(
-                    f"{prefix}stream transient-error, retrying in {wait}s"
-                    f" ({attempt + 1}/{max_retries})...\n"
-                )
-                time.sleep(wait)
-                if on_timeout_prompt is not None:
-                    active_prompt = on_timeout_prompt
+                if attempt == max_retries:
+                    sys.stderr.write(
+                        f"{prefix}stream transient-error, retries exhausted, failing\n"
+                    )
+                    raise
+                time.sleep(_retry_backoff(attempt, max_retries, prefix, "transient-error"))
                 continue
             return result
         raise RuntimeError("unreachable")
@@ -275,6 +276,10 @@ class OpenAIAgentsClient:
             except Exception as exc:
                 sys.stderr.write(f"{prefix}stream error: {exc}\n")
                 stream_error.append(exc)
+                try:
+                    run.cancel()
+                except Exception:
+                    pass
             finally:
                 await event_queue.put(None)
 
@@ -403,7 +408,7 @@ class OpenAIAgentsClient:
         if timed_out:
             raise StreamTimeoutError("openai-agents stream idle timeout")
         if stream_error:
-            raise StreamTerminalError(str(stream_error[0]))
+            raise StreamTerminalError(str(stream_error[0])) from stream_error[0]
 
         text = str(run.final_output) if run.final_output is not None else None
         return CompletedRun(

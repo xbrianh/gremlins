@@ -16,7 +16,7 @@ _TRANSIENT_SUBSTRINGS = (
     "bad gateway",
     "gateway timeout",
     "overloaded",
-    "529",
+    " 529",
 )
 
 
