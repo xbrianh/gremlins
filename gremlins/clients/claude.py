@@ -14,6 +14,7 @@ from gremlins.clients.config import (
 )
 from gremlins.clients.protocol import CompletedRun
 from gremlins.clients.stream import stream_events
+from gremlins.utils.decorators import swallow
 
 
 class StreamTimeoutError(RuntimeError):
@@ -47,12 +48,10 @@ class SubprocessClaudeClient:
         with self._lock:
             self._children.append(p)
 
+    @swallow(ValueError)
     def _untrack(self, p: subprocess.Popen[bytes]) -> None:
         with self._lock:
-            try:
-                self._children.remove(p)
-            except ValueError:
-                pass
+            self._children.remove(p)
 
     def reap_all(self) -> None:
         with self._lock:
