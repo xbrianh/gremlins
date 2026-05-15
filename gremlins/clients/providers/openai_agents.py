@@ -29,6 +29,7 @@ from gremlins.clients.config import (
 from gremlins.clients.protocol import CompletedRun
 from gremlins.clients.stream import trunc
 from gremlins.clients.tools import GREMLINS_TOOLS
+from gremlins.utils.decorators import default_on_exception, swallow
 
 # USD per 1M tokens: (input, output)
 _PRICING: dict[str, tuple[float, float]] = {
@@ -79,15 +80,22 @@ def _compute_cost(model: str, usage: Usage) -> float:
     ) / 1_000_000
 
 
+@default_on_exception({})
+def _parse_args_json(args_json: str) -> dict[str, Any]:
+    return json.loads(args_json)
+
+
 def _key_arg(args_json: str) -> str:
-    try:
-        inp: dict[str, Any] = json.loads(args_json)
-    except Exception:
-        return ""
+    inp = _parse_args_json(args_json)
     for k in ("file_path", "command", "pattern", "url", "output_file"):
         if inp.get(k):
             return str(inp[k])
     return ""
+
+
+@default_on_exception(0.0)
+def _compute_run_cost(model: str, run: RunResultStreaming) -> float:
+    return _compute_cost(model, run.context_wrapper.usage)
 
 
 def _message_text(item: MessageOutputItem) -> str:
@@ -152,12 +160,10 @@ class OpenAIAgentsClient:
         with self._lock:
             self._active_runs.append(run)
 
+    @swallow(ValueError)
     def _untrack(self, run: RunResultStreaming) -> None:
         with self._lock:
-            try:
-                self._active_runs.remove(run)
-            except ValueError:
-                pass
+            self._active_runs.remove(run)
 
     def reap_all(self) -> None:
         with self._lock:
@@ -342,10 +348,6 @@ class OpenAIAgentsClient:
                         f"{prefix}tool: {name} {trunc(_key_arg(args_json))}\n"
                     )
                     if captured is not None:
-                        try:
-                            inp: dict[str, Any] = json.loads(args_json)
-                        except Exception:
-                            inp = {}
                         captured.append(
                             {
                                 "type": "assistant",
@@ -355,7 +357,7 @@ class OpenAIAgentsClient:
                                             "type": "tool_use",
                                             "id": call_id,
                                             "name": name,
-                                            "input": inp,
+                                            "input": _parse_args_json(args_json),
                                         }
                                     ]
                                 },
@@ -390,11 +392,7 @@ class OpenAIAgentsClient:
             if raw is not None:
                 raw.close()
 
-        try:
-            usage = run.context_wrapper.usage
-            cost = _compute_cost(model, usage)
-        except Exception:
-            cost = 0.0
+        cost = _compute_run_cost(model, run)
         with self._lock:
             self._total_cost_usd += cost
 

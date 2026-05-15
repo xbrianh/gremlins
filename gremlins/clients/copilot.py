@@ -8,6 +8,7 @@ import threading
 import time
 
 from gremlins.clients.protocol import CompletedRun
+from gremlins.utils.decorators import swallow
 
 # Copilot appends a stats footer like "⏺ Cost: $0.01 | Duration: 3.2s | ..."
 # after the response text. Strip it so text_result contains only the response.
@@ -33,12 +34,10 @@ class SubprocessCopilotClient:
         with self._lock:
             self._children.append(p)
 
+    @swallow(ValueError)
     def _untrack(self, p: subprocess.Popen[bytes]) -> None:
         with self._lock:
-            try:
-                self._children.remove(p)
-            except ValueError:
-                pass
+            self._children.remove(p)
 
     def reap_all(self) -> None:
         with self._lock:
