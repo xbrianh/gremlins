@@ -60,7 +60,9 @@ class SubprocessClaudeClient:
             self._children.remove(p)
 
     @contextlib.contextmanager
-    def _tracked(self, p: subprocess.Popen[bytes]) -> Generator[subprocess.Popen[bytes], None, None]:
+    def _tracked(
+        self, p: subprocess.Popen[bytes]
+    ) -> Generator[subprocess.Popen[bytes], None, None]:
         self._track(p)
         try:
             yield p
