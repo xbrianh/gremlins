@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import asyncio as _asyncio
+import unittest.mock
+
 import pytest
 
 from gremlins.clients.config import (
     STREAM_IDLE_BACKOFF,
     STREAM_IDLE_TIMEOUT,
     is_transient_stream_error,
+    retry,
     validate_max_retries,
 )
 
@@ -101,3 +105,141 @@ def test_is_transient_stream_error_transient(message: str) -> None:
 )
 def test_is_transient_stream_error_permanent(message: str) -> None:
     assert not is_transient_stream_error(message)
+
+
+# ---------------------------------------------------------------------------
+# retry decorator
+# ---------------------------------------------------------------------------
+
+
+def test_retry_succeeds_on_first_try() -> None:
+    calls = [0]
+
+    @retry(ValueError, backoff=(1.0,))
+    def fn():
+        calls[0] += 1
+        return "ok"
+
+    with unittest.mock.patch("time.sleep"):
+        assert fn() == "ok"
+    assert calls[0] == 1
+
+
+def test_retry_then_success() -> None:
+    calls = [0]
+
+    @retry(ValueError, backoff=(0.0, 0.0))
+    def fn():
+        calls[0] += 1
+        if calls[0] < 2:
+            raise ValueError("boom")
+        return "ok"
+
+    with unittest.mock.patch("time.sleep"):
+        assert fn() == "ok"
+    assert calls[0] == 2
+
+
+def test_retry_unlisted_exception_propagates_immediately() -> None:
+    calls = [0]
+
+    @retry(ValueError, backoff=(0.0,))
+    def fn():
+        calls[0] += 1
+        raise TypeError("wrong type")
+
+    with pytest.raises(TypeError):
+        with unittest.mock.patch("time.sleep"):
+            fn()
+    assert calls[0] == 1
+
+
+def test_retry_classify_false_no_retry() -> None:
+    calls = [0]
+
+    @retry(ValueError, backoff=(0.0,), classify=lambda e: False)
+    def fn():
+        calls[0] += 1
+        raise ValueError("not retryable")
+
+    with pytest.raises(ValueError):
+        with unittest.mock.patch("time.sleep"):
+            fn()
+    assert calls[0] == 1
+
+
+def test_retry_on_retry_callback_args() -> None:
+    received: list[tuple] = []
+
+    @retry(
+        ValueError, backoff=(5.0,), on_retry=lambda a, e, w: received.append((a, e, w))
+    )
+    def fn():
+        raise ValueError("x")
+
+    with pytest.raises(ValueError):
+        with unittest.mock.patch("time.sleep"):
+            fn()
+    assert len(received) == 1
+    attempt, exc, wait = received[0]
+    assert attempt == 0
+    assert isinstance(exc, ValueError)
+    assert wait == 5.0
+
+
+def test_retry_exhausted_propagates_last_exception() -> None:
+    @retry(ValueError, backoff=(0.0, 0.0))
+    def fn():
+        raise ValueError("final")
+
+    with pytest.raises(ValueError, match="final"):
+        with unittest.mock.patch("time.sleep"):
+            fn()
+
+
+def test_retry_async_works() -> None:
+    calls = [0]
+
+    @retry(ValueError, backoff=(0.0,))
+    async def fn():
+        calls[0] += 1
+        if calls[0] < 2:
+            raise ValueError("async boom")
+        return "async ok"
+
+    result = _asyncio.run(fn())
+    assert result == "async ok"
+    assert calls[0] == 2
+
+
+def test_retry_async_classify_false_no_retry() -> None:
+    calls = [0]
+
+    @retry(ValueError, backoff=(0.0,), classify=lambda e: False)
+    async def fn():
+        calls[0] += 1
+        raise ValueError("not retryable")
+
+    with pytest.raises(ValueError, match="not retryable"):
+        _asyncio.run(fn())
+    assert calls[0] == 1
+
+
+def test_retry_async_on_retry_callback_args() -> None:
+    received: list[tuple[int, BaseException, float]] = []
+
+    @retry(
+        ValueError,
+        backoff=(0.0,),
+        on_retry=lambda a, e, w: received.append((a, e, w)),
+    )
+    async def fn():
+        raise ValueError("async x")
+
+    with pytest.raises(ValueError):
+        _asyncio.run(fn())
+    assert len(received) == 1
+    attempt, exc, wait = received[0]
+    assert attempt == 0
+    assert isinstance(exc, ValueError)
+    assert wait == 0.0
