@@ -151,7 +151,7 @@ def test_streamed_run_produces_completed_run(monkeypatch: Any) -> None:
     assert client.total_cost_usd == result.cost_usd
 
 
-def test_streamed_run_log_lines(monkeypatch: Any, capsys: Any) -> None:
+def test_streamed_run_log_lines(monkeypatch: Any, capsys: Any, tmp_path: Any) -> None:
     usage = _make_usage(10, 10)
     tool_item = _make_tool_call_item("Bash", {"command": "ls /tmp"}, "c2")
     out_item = _make_tool_output_item("a.py\nb.py", "c2")
@@ -162,10 +162,10 @@ def test_streamed_run_log_lines(monkeypatch: Any, capsys: Any) -> None:
     monkeypatch.setattr("agents.run.Runner.run_streamed", lambda *a, **kw: fake_run)
 
     client = OpenAIAgentsClient("gpt-4o")
-    client.run("ls", label="mylabel")
+    client.run("ls", label="mylabel", cwd=tmp_path)
 
     err = capsys.readouterr().err
-    assert "[mylabel] init model=gpt-4o" in err
+    assert f"[mylabel] init model=gpt-4o cwd={tmp_path}" in err
     assert "[mylabel] tool: Bash ls /tmp" in err
     assert "[mylabel] result: a.py b.py" in err
     assert "[mylabel] final: turns=1 cost=" in err
