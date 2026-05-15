@@ -6,7 +6,7 @@ import pathlib
 import subprocess
 import sys
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator
 
 from gremlins.clients.config import (
     STREAM_IDLE_BACKOFF,
@@ -60,7 +60,7 @@ class SubprocessClaudeClient:
             self._children.remove(p)
 
     @contextlib.contextmanager
-    def _tracked(self, p: subprocess.Popen[bytes]) -> Iterator[subprocess.Popen[bytes]]:
+    def _tracked(self, p: subprocess.Popen[bytes]) -> Generator[subprocess.Popen[bytes], None, None]:
         self._track(p)
         try:
             yield p
