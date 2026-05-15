@@ -18,6 +18,7 @@ from agents.tool_context import ToolContext
 from gremlins.clients.protocol import CompletedRun
 from gremlins.clients.providers.openai_agents import (
     OpenAIAgentsClient,
+    StreamTerminalError,
     StreamTimeoutError,
     _key_arg,
     make_openai_client,
@@ -365,6 +366,90 @@ def test_bash_invoke_passes_extra_env_to_subprocess() -> None:
     env = _call_kwargs["env"]
     assert env["MY_TOKEN"] == "abc123"
     assert "PATH" in env  # inherited from os.environ
+
+
+def _make_erroring_run(error_message: str, usage: Usage) -> MagicMock:
+    """Fake run whose stream raises an exception (simulating a terminal error event)."""
+
+    async def _error_stream() -> Any:
+        raise RuntimeError(error_message)
+        yield  # make it an async generator
+
+    ctx_wrapper = MagicMock()
+    ctx_wrapper.usage = usage
+
+    run = MagicMock()
+    run.stream_events.return_value = _error_stream()
+    run.final_output = None
+    run.context_wrapper = ctx_wrapper
+    run.cancel = MagicMock()
+    return run
+
+
+def test_terminal_stream_error_transient_retries_and_succeeds(monkeypatch: Any) -> None:
+    usage = _make_usage(50, 25)
+    error_msg = "The model is currently at capacity. Please try again."
+    success_usage = _make_usage(100, 50)
+    msg_item = _make_message_item("done")
+
+    call_count = [0]
+
+    def _fake_run_streamed(*a: Any, **kw: Any) -> Any:
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return _make_erroring_run(error_msg, usage)
+        return _make_run_result_streaming(
+            "done", success_usage, [_make_run_item_event(msg_item)]
+        )
+
+    monkeypatch.setattr("agents.run.Runner.run_streamed", _fake_run_streamed)
+    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    client = OpenAIAgentsClient("gpt-4o")
+    result = client.run("do something", label="t", max_retries=2)
+
+    assert call_count[0] == 2
+    assert result.text_result == "done"
+    # cost from both attempts (failed + successful) must be recorded
+    assert client.total_cost_usd > result.cost_usd  # type: ignore[operator]
+
+
+def test_terminal_stream_error_permanent_fails_immediately(monkeypatch: Any) -> None:
+    usage = _make_usage(20, 10)
+    error_msg = "Invalid API key provided"
+
+    call_count = [0]
+
+    def _fake_run_streamed(*a: Any, **kw: Any) -> Any:
+        call_count[0] += 1
+        return _make_erroring_run(error_msg, usage)
+
+    monkeypatch.setattr("agents.run.Runner.run_streamed", _fake_run_streamed)
+    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    client = OpenAIAgentsClient("gpt-4o")
+    with pytest.raises(StreamTerminalError):
+        client.run("do something", label="t", max_retries=2)
+
+    assert call_count[0] == 1
+
+
+def test_terminal_stream_error_cost_is_recorded(monkeypatch: Any) -> None:
+    usage = _make_usage(100, 50)
+    error_msg = "The model is currently at capacity. Please try again."
+    # always error so we exhaust retries
+    monkeypatch.setattr(
+        "agents.run.Runner.run_streamed",
+        lambda *a, **kw: _make_erroring_run(error_msg, usage),
+    )
+    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    client = OpenAIAgentsClient("gpt-4o")
+    with pytest.raises(StreamTerminalError):
+        client.run("do something", label="t", max_retries=1)
+
+    # two attempts (original + 1 retry), both accrued cost
+    assert client.total_cost_usd > 0
 
 
 def test_bash_invoke_no_extra_env_passes_none() -> None:

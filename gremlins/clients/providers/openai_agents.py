@@ -23,6 +23,7 @@ from agents.stream_events import RunItemStreamEvent
 from gremlins.clients.config import (
     STREAM_IDLE_BACKOFF,
     STREAM_IDLE_TIMEOUT,
+    is_transient_stream_error,
     validate_max_retries,
 )
 from gremlins.clients.protocol import CompletedRun
@@ -56,6 +57,10 @@ _DEFAULT_PRICING = (2.50, 10.00)
 
 
 class StreamTimeoutError(RuntimeError):
+    pass
+
+
+class StreamTerminalError(RuntimeError):
     pass
 
 
@@ -218,6 +223,20 @@ class OpenAIAgentsClient:
                 if on_timeout_prompt is not None:
                     active_prompt = on_timeout_prompt
                 continue
+            except StreamTerminalError as exc:
+                msg = str(exc)
+                if attempt == max_retries or not is_transient_stream_error(msg):
+                    sys.stderr.write(f"{prefix}stream permanent-error, failing\n")
+                    raise
+                wait = STREAM_IDLE_BACKOFF[attempt]
+                sys.stderr.write(
+                    f"{prefix}stream transient-error, retrying in {wait}s"
+                    f" ({attempt + 1}/{max_retries})...\n"
+                )
+                time.sleep(wait)
+                if on_timeout_prompt is not None:
+                    active_prompt = on_timeout_prompt
+                continue
             return result
         raise RuntimeError("unreachable")
 
@@ -245,6 +264,7 @@ class OpenAIAgentsClient:
         captured: list[dict[str, Any]] | None = [] if capture_events else None
         turns = 0
         timed_out = False
+        stream_error: list[Exception] = []
 
         event_queue: asyncio.Queue[Any] = asyncio.Queue()
 
@@ -254,6 +274,7 @@ class OpenAIAgentsClient:
                     await event_queue.put(event)
             except Exception as exc:
                 sys.stderr.write(f"{prefix}stream error: {exc}\n")
+                stream_error.append(exc)
             finally:
                 await event_queue.put(None)
 
@@ -370,12 +391,19 @@ class OpenAIAgentsClient:
         with self._lock:
             self._total_cost_usd += cost
 
-        suffix = " (timeout)" if timed_out else ""
+        if timed_out:
+            suffix = " (timeout)"
+        elif stream_error:
+            suffix = " (stream-error)"
+        else:
+            suffix = ""
         sys.stderr.write(f"{prefix}final: turns={turns} cost={cost:.6f}{suffix}\n")
         sys.stderr.flush()
 
         if timed_out:
             raise StreamTimeoutError("openai-agents stream idle timeout")
+        if stream_error:
+            raise StreamTerminalError(str(stream_error[0]))
 
         text = str(run.final_output) if run.final_output is not None else None
         return CompletedRun(

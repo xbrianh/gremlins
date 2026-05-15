@@ -5,6 +5,7 @@ import pytest
 from gremlins.clients.config import (
     STREAM_IDLE_BACKOFF,
     STREAM_IDLE_TIMEOUT,
+    is_transient_stream_error,
     validate_max_retries,
 )
 
@@ -61,3 +62,42 @@ def test_openai_client_raises_on_overrun() -> None:
     client = OpenAIAgentsClient("gpt-4o")
     with pytest.raises(ValueError, match="max_retries"):
         client.run("x", label="t", max_retries=len(STREAM_IDLE_BACKOFF) + 1)
+
+
+# ---------------------------------------------------------------------------
+# is_transient_stream_error classifier
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "The model is currently at capacity due to high demand. Please try again in a few minutes.",
+        "rate limit exceeded",
+        "Rate_Limit reached for the model",
+        "Too Many Requests",
+        "try again later",
+        "Internal Server Error",
+        "Service Unavailable",
+        "Bad Gateway",
+        "Gateway Timeout",
+        "The server is overloaded",
+        "529 overloaded",
+    ],
+)
+def test_is_transient_stream_error_transient(message: str) -> None:
+    assert is_transient_stream_error(message)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Invalid API key provided",
+        "Incorrect API key",
+        "You exceeded your current quota",
+        "Bad request: unknown model",
+        "content_policy_violation: your request was rejected",
+    ],
+)
+def test_is_transient_stream_error_permanent(message: str) -> None:
+    assert not is_transient_stream_error(message)
