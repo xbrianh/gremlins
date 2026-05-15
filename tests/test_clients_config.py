@@ -81,12 +81,14 @@ def test_openai_client_raises_on_overrun() -> None:
         "Rate_Limit reached for the model",
         "Too Many Requests",
         "try again later",
+        "please retry your request",
         "Internal Server Error",
         "Service Unavailable",
         "Bad Gateway",
         "Gateway Timeout",
         "The server is overloaded",
         "HTTP error 529",
+        "Responses stream ended with terminal event `error`. message=Request abc-123 timed out in queue, abort..",
     ],
 )
 def test_is_transient_stream_error_transient(message: str) -> None:

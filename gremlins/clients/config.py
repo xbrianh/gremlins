@@ -21,11 +21,13 @@ _TRANSIENT_SUBSTRINGS = (
     "rate_limit",
     "too many requests",
     "try again",
+    "please retry",
     "server error",
     "service unavailable",
     "bad gateway",
     "gateway timeout",
     "overloaded",
+    "timed out in queue",
     " 529",
 )
 
