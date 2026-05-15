@@ -24,10 +24,11 @@ directly — the protocol is the seam tests swap out.
   `STREAM_IDLE_BACKOFF`) and `validate_max_retries`. The single source of
   truth for retry policy; both `claude.py` and `providers/openai_agents.py`
   import from here.
-- `stream.py` — `stream_events` reader. Parses the `--output-format
-  stream-json` line stream into the formatted log lines stages emit (`text:`
-  / `think:` / `tool:` / `result:` / `final:`). Used by both subprocess
-  clients.
+- `stream.py` — `stream_events` reader and `trunc` helper. Parses the
+  `--output-format stream-json` line stream into the formatted log lines
+  stages emit (`text:` / `think:` / `tool:` / `result:` / `final:`).
+  `stream_events` is used by `claude.py` and `fleet/rescue.py`; `trunc`
+  is used by `providers/openai_agents.py`.
 - `resolve.py` — `ClientSpec` (`provider:model`), the package default
   (`claude:sonnet`), and the helpers (`collect_stage_specs`,
   `resolve_stage_client`, `require_stage_spec`,

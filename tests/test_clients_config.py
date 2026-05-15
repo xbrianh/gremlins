@@ -1,5 +1,3 @@
-"""Tests for gremlins/clients/config.py."""
-
 from __future__ import annotations
 
 import pytest
@@ -20,7 +18,7 @@ def test_stream_idle_backoff_shape() -> None:
     assert isinstance(STREAM_IDLE_BACKOFF, tuple)
     assert len(STREAM_IDLE_BACKOFF) > 0
     assert all(v > 0 for v in STREAM_IDLE_BACKOFF)
-    assert list(STREAM_IDLE_BACKOFF) == sorted(STREAM_IDLE_BACKOFF)
+    assert all(STREAM_IDLE_BACKOFF[i] < STREAM_IDLE_BACKOFF[i + 1] for i in range(len(STREAM_IDLE_BACKOFF) - 1))
 
 
 def test_validate_max_retries_accepts_zero() -> None:
