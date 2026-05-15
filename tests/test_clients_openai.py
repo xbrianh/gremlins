@@ -151,7 +151,9 @@ def test_streamed_run_produces_completed_run(monkeypatch: Any) -> None:
     assert client.total_cost_usd == result.cost_usd
 
 
-def test_streamed_run_log_lines(monkeypatch: Any, capsys: Any, tmp_path: pathlib.Path) -> None:
+def test_streamed_run_log_lines(
+    monkeypatch: Any, capsys: Any, tmp_path: pathlib.Path
+) -> None:
     usage = _make_usage(10, 10)
     tool_item = _make_tool_call_item("Bash", {"command": "ls /tmp"}, "c2")
     out_item = _make_tool_output_item("a.py\nb.py", "c2")
