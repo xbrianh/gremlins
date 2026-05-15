@@ -236,7 +236,7 @@ def test_capture_events_tool_call_shape(monkeypatch: Any) -> None:
     assert "github.com" in result_content["content"]
 
 
-def test_reap_all_cancels_active_run(monkeypatch: Any) -> None:
+def test_idle_timeout_calls_run_cancel(monkeypatch: Any) -> None:
     usage = _make_usage()
     cancel_called: list[bool] = []
 

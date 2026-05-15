@@ -17,19 +17,19 @@ def _bio(*evts):
     return io.BytesIO(b"".join(json.dumps(e).encode() + b"\n" for e in evts))
 
 
-def testtrunctruncates():
+def test_trunc_truncates():
     assert trunc("a" * 201) == "a" * 200 + "..."
 
 
-def testtrunc_newlines():
+def test_trunc_newlines():
     assert trunc("a\nb") == "a b"
 
 
-def testtrunc_non_string():
+def test_trunc_non_string():
     assert trunc(42) == "42"
 
 
-def testtrunc_none():
+def test_trunc_none():
     assert trunc(None) == ""
 
 

@@ -248,8 +248,8 @@ class OpenAIAgentsClient:
             try:
                 async for event in run.stream_events():
                     await event_queue.put(event)
-            except Exception:
-                pass
+            except Exception as exc:
+                sys.stderr.write(f"{prefix}stream error: {exc}\n")
             finally:
                 await event_queue.put(None)
 
@@ -265,6 +265,10 @@ class OpenAIAgentsClient:
                     timed_out = True
                     run.cancel()
                     stream_task.cancel()
+                    try:
+                        await stream_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
                     break
 
                 if event is None:
@@ -354,19 +358,22 @@ class OpenAIAgentsClient:
             if raw is not None:
                 raw.close()
 
-        if timed_out:
-            raise StreamTimeoutError("openai-agents stream idle timeout")
-
-        usage = run.context_wrapper.usage
-        cost = _compute_cost(model, usage)
+        try:
+            usage = run.context_wrapper.usage
+            cost = _compute_cost(model, usage)
+        except Exception:
+            cost = 0.0
         with self._lock:
             self._total_cost_usd += cost
 
-        text = str(run.final_output) if run.final_output is not None else None
-
-        sys.stderr.write(f"{prefix}final: turns={turns} cost={cost:.6f}\n")
+        suffix = " (timeout)" if timed_out else ""
+        sys.stderr.write(f"{prefix}final: turns={turns} cost={cost:.6f}{suffix}\n")
         sys.stderr.flush()
 
+        if timed_out:
+            raise StreamTimeoutError("openai-agents stream idle timeout")
+
+        text = str(run.final_output) if run.final_output is not None else None
         return CompletedRun(
             exit_code=0, text_result=text, events=captured, cost_usd=cost
         )
