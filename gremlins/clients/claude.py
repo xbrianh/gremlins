@@ -10,6 +10,7 @@ import time
 from gremlins.clients.config import (
     STREAM_IDLE_BACKOFF,
     STREAM_IDLE_TIMEOUT,
+    retry,
     validate_max_retries,
 )
 from gremlins.clients.protocol import CompletedRun
@@ -190,28 +191,28 @@ class SubprocessClaudeClient:
             idle_timeout = STREAM_IDLE_TIMEOUT
         argv = self._build_argv(model)
         prefix = f"[{label}] " if label else ""
-        active_prompt = prompt
-        for attempt in range(max_retries + 1):
-            p = self._spawn(argv, active_prompt, cwd=cwd, extra_env=extra_env)
-            try:
-                result = self._consume(
-                    p, prefix, raw_path, capture_events, idle_timeout
-                )
-            except StreamTimeoutError:
-                if attempt == max_retries:
-                    raise
-                wait = STREAM_IDLE_BACKOFF[attempt]
-                sys.stderr.write(
-                    f"{prefix}stream idle timeout, retrying in {wait}s"
-                    f" ({attempt + 1}/{max_retries})...\n"
-                )
-                time.sleep(wait)
-                if on_timeout_prompt is not None:
-                    active_prompt = on_timeout_prompt
-                continue
-            if result.exit_code != 0:
-                raise RuntimeError(
-                    f"claude -p (model={model}, label={label}) exited {result.exit_code}"
-                )
-            return result
-        raise RuntimeError("unreachable")
+        active_prompt = [prompt]
+
+        def _on_retry(attempt: int, exc: BaseException, wait: float) -> None:
+            sys.stderr.write(
+                f"{prefix}stream idle timeout, retrying in {wait}s"
+                f" ({attempt + 1}/{max_retries})...\n"
+            )
+            if on_timeout_prompt is not None:
+                active_prompt[0] = on_timeout_prompt
+
+        @retry(
+            StreamTimeoutError,
+            backoff=STREAM_IDLE_BACKOFF[:max_retries],
+            on_retry=_on_retry,
+        )
+        def _run_once() -> CompletedRun:
+            p = self._spawn(argv, active_prompt[0], cwd=cwd, extra_env=extra_env)
+            return self._consume(p, prefix, raw_path, capture_events, idle_timeout)
+
+        result = _run_once()
+        if result.exit_code != 0:
+            raise RuntimeError(
+                f"claude -p (model={model}, label={label}) exited {result.exit_code}"
+            )
+        return result

@@ -6,7 +6,6 @@ import os
 import pathlib
 import sys
 import threading
-import time
 from typing import Any
 
 from agents import Agent, RunConfig, Runner, Usage
@@ -24,6 +23,7 @@ from gremlins.clients.config import (
     STREAM_IDLE_BACKOFF,
     STREAM_IDLE_TIMEOUT,
     is_transient_stream_error,
+    retry,
     validate_max_retries,
 )
 from gremlins.clients.protocol import CompletedRun
@@ -63,14 +63,6 @@ class StreamTimeoutError(RuntimeError):
 
 class StreamTerminalError(RuntimeError):
     pass
-
-
-def _retry_backoff(attempt: int, max_retries: int, prefix: str, label: str) -> float:
-    wait = STREAM_IDLE_BACKOFF[attempt]
-    sys.stderr.write(
-        f"{prefix}stream {label}, retrying in {wait}s ({attempt + 1}/{max_retries})...\n"
-    )
-    return wait
 
 
 def _compute_cost(model: str, usage: Usage) -> float:
@@ -208,46 +200,50 @@ class OpenAIAgentsClient:
             if self._provider is not None
             else RunConfig(tracing_disabled=True)
         )
-        active_prompt = prompt
-        for attempt in range(max_retries + 1):
-            try:
-                result = asyncio.run(
-                    self._run_streamed(
-                        agent,
-                        active_prompt,
-                        ctx,
-                        run_config,
-                        prefix=prefix,
-                        model=effective_model,
-                        raw_path=raw_path,
-                        capture_events=capture_events,
-                        cwd=cwd,
-                        idle_timeout=idle_timeout,
-                    )
+        active_prompt = [prompt]
+
+        def _on_retry(attempt: int, exc: BaseException, wait: float) -> None:
+            label_str = (
+                "idle timeout"
+                if isinstance(exc, StreamTimeoutError)
+                else "transient-error"
+            )
+            sys.stderr.write(
+                f"{prefix}stream {label_str}, retrying in {wait}s"
+                f" ({attempt + 1}/{max_retries})...\n"
+            )
+            if isinstance(exc, StreamTimeoutError) and on_timeout_prompt is not None:
+                active_prompt[0] = on_timeout_prompt
+
+        def _should_retry(exc: BaseException) -> bool:
+            return isinstance(exc, StreamTimeoutError) or is_transient_stream_error(
+                str(exc)
+            )
+
+        @retry(
+            StreamTimeoutError,
+            StreamTerminalError,
+            backoff=STREAM_IDLE_BACKOFF[:max_retries],
+            classify=_should_retry,
+            on_retry=_on_retry,
+        )
+        def _run_once() -> CompletedRun:
+            return asyncio.run(
+                self._run_streamed(
+                    agent,
+                    active_prompt[0],
+                    ctx,
+                    run_config,
+                    prefix=prefix,
+                    model=effective_model,
+                    raw_path=raw_path,
+                    capture_events=capture_events,
+                    cwd=cwd,
+                    idle_timeout=idle_timeout,
                 )
-            except StreamTimeoutError:
-                if attempt == max_retries:
-                    raise
-                time.sleep(_retry_backoff(attempt, max_retries, prefix, "idle timeout"))
-                if on_timeout_prompt is not None:
-                    active_prompt = on_timeout_prompt
-                continue
-            except StreamTerminalError as exc:
-                msg = str(exc)
-                if not is_transient_stream_error(msg):
-                    sys.stderr.write(f"{prefix}stream permanent-error, failing\n")
-                    raise
-                if attempt == max_retries:
-                    sys.stderr.write(
-                        f"{prefix}stream transient-error, retries exhausted, failing\n"
-                    )
-                    raise
-                time.sleep(
-                    _retry_backoff(attempt, max_retries, prefix, "transient-error")
-                )
-                continue
-            return result
-        raise RuntimeError("unreachable")
+            )
+
+        return _run_once()
 
     async def _run_streamed(
         self,
