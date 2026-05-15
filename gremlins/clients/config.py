@@ -51,6 +51,14 @@ def retry(
     classify: Callable[[BaseException], bool] | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     def decorator(fn: Callable[P, R]) -> Callable[P, R]:
+        def _guard(attempt: int, exc: BaseException) -> float:
+            if attempt == len(backoff) or (classify is not None and not classify(exc)):
+                raise exc
+            wait = backoff[attempt]
+            if on_retry is not None:
+                on_retry(attempt, exc, wait)
+            return wait
+
         if inspect.iscoroutinefunction(fn):
 
             @functools.wraps(fn)
@@ -59,14 +67,8 @@ def retry(
                     try:
                         return await fn(*args, **kwargs)  # type: ignore[misc]
                     except exc_types as exc:
-                        if attempt == len(backoff) or (
-                            classify is not None and not classify(exc)
-                        ):
-                            raise
-                        wait = backoff[attempt]
-                        if on_retry is not None:
-                            on_retry(attempt, exc, wait)
-                        await asyncio.sleep(wait)
+                        await asyncio.sleep(_guard(attempt, exc))
+                raise AssertionError("unreachable")
 
             return _async  # type: ignore[return-value]
 
@@ -76,14 +78,7 @@ def retry(
                 try:
                     return fn(*args, **kwargs)
                 except exc_types as exc:
-                    if attempt == len(backoff) or (
-                        classify is not None and not classify(exc)
-                    ):
-                        raise
-                    wait = backoff[attempt]
-                    if on_retry is not None:
-                        on_retry(attempt, exc, wait)
-                    time.sleep(wait)
+                    time.sleep(_guard(attempt, exc))
             raise AssertionError("unreachable")
 
         return _sync

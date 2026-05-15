@@ -210,3 +210,36 @@ def test_retry_async_works() -> None:
     result = _asyncio.run(fn())
     assert result == "async ok"
     assert calls[0] == 2
+
+
+def test_retry_async_classify_false_no_retry() -> None:
+    calls = [0]
+
+    @retry(ValueError, backoff=(0.0,), classify=lambda e: False)
+    async def fn():
+        calls[0] += 1
+        raise ValueError("not retryable")
+
+    with pytest.raises(ValueError, match="not retryable"):
+        _asyncio.run(fn())
+    assert calls[0] == 1
+
+
+def test_retry_async_on_retry_callback_args() -> None:
+    received: list[tuple[int, BaseException, float]] = []
+
+    @retry(
+        ValueError,
+        backoff=(0.0,),
+        on_retry=lambda a, e, w: received.append((a, e, w)),
+    )
+    async def fn():
+        raise ValueError("async x")
+
+    with pytest.raises(ValueError):
+        _asyncio.run(fn())
+    assert len(received) == 1
+    attempt, exc, wait = received[0]
+    assert attempt == 0
+    assert isinstance(exc, ValueError)
+    assert wait == 0.0

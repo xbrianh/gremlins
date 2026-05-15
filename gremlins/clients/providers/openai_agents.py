@@ -200,9 +200,10 @@ class OpenAIAgentsClient:
             if self._provider is not None
             else RunConfig(tracing_disabled=True)
         )
-        active_prompt = [prompt]
+        active_prompt = prompt
 
         def _on_retry(attempt: int, exc: BaseException, wait: float) -> None:
+            nonlocal active_prompt
             label_str = (
                 "idle timeout"
                 if isinstance(exc, StreamTimeoutError)
@@ -213,7 +214,7 @@ class OpenAIAgentsClient:
                 f" ({attempt + 1}/{max_retries})...\n"
             )
             if isinstance(exc, StreamTimeoutError) and on_timeout_prompt is not None:
-                active_prompt[0] = on_timeout_prompt
+                active_prompt = on_timeout_prompt
 
         def _should_retry(exc: BaseException) -> bool:
             return isinstance(exc, StreamTimeoutError) or is_transient_stream_error(
@@ -231,7 +232,7 @@ class OpenAIAgentsClient:
             return asyncio.run(
                 self._run_streamed(
                     agent,
-                    active_prompt[0],
+                    active_prompt,
                     ctx,
                     run_config,
                     prefix=prefix,
@@ -243,7 +244,14 @@ class OpenAIAgentsClient:
                 )
             )
 
-        return _run_once()
+        try:
+            return _run_once()
+        except StreamTerminalError as exc:
+            if is_transient_stream_error(str(exc)):
+                sys.stderr.write(f"{prefix}stream transient-error, retries exhausted, failing\n")
+            else:
+                sys.stderr.write(f"{prefix}stream permanent-error, failing\n")
+            raise
 
     async def _run_streamed(
         self,

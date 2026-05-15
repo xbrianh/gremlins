@@ -191,15 +191,16 @@ class SubprocessClaudeClient:
             idle_timeout = STREAM_IDLE_TIMEOUT
         argv = self._build_argv(model)
         prefix = f"[{label}] " if label else ""
-        active_prompt = [prompt]
+        active_prompt = prompt
 
-        def _on_retry(attempt: int, exc: BaseException, wait: float) -> None:
+        def _on_retry(attempt: int, _exc: BaseException, wait: float) -> None:
+            nonlocal active_prompt
             sys.stderr.write(
                 f"{prefix}stream idle timeout, retrying in {wait}s"
                 f" ({attempt + 1}/{max_retries})...\n"
             )
             if on_timeout_prompt is not None:
-                active_prompt[0] = on_timeout_prompt
+                active_prompt = on_timeout_prompt
 
         @retry(
             StreamTimeoutError,
@@ -207,7 +208,7 @@ class SubprocessClaudeClient:
             on_retry=_on_retry,
         )
         def _run_once() -> CompletedRun:
-            p = self._spawn(argv, active_prompt[0], cwd=cwd, extra_env=extra_env)
+            p = self._spawn(argv, active_prompt, cwd=cwd, extra_env=extra_env)
             return self._consume(p, prefix, raw_path, capture_events, idle_timeout)
 
         result = _run_once()
