@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import functools
 import inspect
 from collections.abc import Callable
@@ -52,7 +53,7 @@ def default_on_exception(
                 try:
                     return await fn(*args, **kwargs)  # type: ignore[misc]
                 except resolved:
-                    return default
+                    return copy.copy(default)
 
             return _async  # type: ignore[return-value]
 
@@ -61,7 +62,7 @@ def default_on_exception(
             try:
                 return fn(*args, **kwargs)
             except resolved:
-                return default
+                return copy.copy(default)
 
         return _sync
 

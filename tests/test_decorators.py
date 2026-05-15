@@ -133,3 +133,13 @@ def test_default_preserves_metadata():
 
     assert my_func.__name__ == "my_func"
     assert my_func.__doc__ == "my doc"
+
+
+def test_default_mutable_default_is_copied_each_call():
+    @default_on_exception({})
+    def boom():
+        raise RuntimeError
+
+    a = boom()
+    b = boom()
+    assert a is not b
