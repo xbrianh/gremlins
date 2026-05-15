@@ -248,7 +248,9 @@ class OpenAIAgentsClient:
             return _run_once()
         except StreamTerminalError as exc:
             if is_transient_stream_error(str(exc)):
-                sys.stderr.write(f"{prefix}stream transient-error, retries exhausted, failing\n")
+                sys.stderr.write(
+                    f"{prefix}stream transient-error, retries exhausted, failing\n"
+                )
             else:
                 sys.stderr.write(f"{prefix}stream permanent-error, failing\n")
             raise
