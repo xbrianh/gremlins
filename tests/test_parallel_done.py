@@ -173,7 +173,7 @@ def test_parallel_done_cleared_after_full_success(state_root):
 
 
 def test_bail_aggregation_unaffected_by_done_tracking(state_root):
-    """Bailed children are not in parallel_done; fan-in still raises."""
+    """Fan-in detects bail via parallel_attempts even when bailed child is in parallel_done."""
     gremlin_id = "gr-done-bail"
     sf = _make_state(state_root, gremlin_id)
 

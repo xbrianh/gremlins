@@ -338,22 +338,7 @@ def _parallel_stages(
                 if cancel_event is not None:
                     cancel_event.set()
                 raise
-            attempt = ""
-            sf2 = resolve_state_file(gremlin_id)
-            if sf2 is not None and sf2.exists():
-                try:
-                    pa: dict[str, str] = (
-                        json.loads(sf2.read_text(encoding="utf-8")).get(
-                            "parallel_attempts"
-                        )
-                        or {}
-                    )
-                    attempt = pa.get(child_key) or ""
-                except Exception:
-                    pass
-            StateData.load(gremlin_id).patch_parallel_done(
-                group_name, child_key, attempt
-            )
+            StateData.load(gremlin_id).patch_parallel_done(group_name, child_key)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             futs = [pool.submit(_run_child, k, fn) for k, _, fn in active]
@@ -436,7 +421,8 @@ def _parallel_stages(
                     )
 
                 StateData.load(gremlin_id).patch(_delete=("parallel_attempts",))
-                StateData.load(gremlin_id).patch_parallel_done(group_name)
+                if not should_bail:
+                    StateData.load(gremlin_id).patch_parallel_done(group_name)
             except RuntimeError:
                 raise
             except Exception as exc:

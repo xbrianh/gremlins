@@ -399,7 +399,6 @@ class StateData:
         self,
         group_name: str,
         child_key: str | None = None,
-        attempt: str = "",
     ) -> None:
         """Mark child done (child_key given) or clear the group (child_key=None)."""
         if not self.gremlin_id or not group_name:
@@ -415,7 +414,7 @@ class StateData:
                     groups.pop(group_name, None)
                 else:
                     group: dict[str, str] = dict(groups.get(group_name) or {})
-                    group[child_key] = attempt
+                    group[child_key] = "1"
                     groups[group_name] = group
                 if groups:
                     data["parallel_done"] = groups
