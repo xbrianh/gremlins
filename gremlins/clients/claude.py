@@ -129,7 +129,7 @@ class SubprocessClaudeClient:
         try:
             stdout = cast(IO[bytes], p.stdout)
             cost_usd, result_text, events, timed_out = stream_events(
-                p.stdout,
+                stdout,
                 prefix=prefix,
                 raw_path=raw_path,
                 capture=capture_events,
@@ -140,9 +140,9 @@ class SubprocessClaudeClient:
                     self._total_cost_usd += cost_usd
             if timed_out:
                 terminate_and_kill(p, 5.0)
-                p.stdout.close()
+                stdout.close()
                 raise StreamTimeoutError("claude -p stream idle timeout")
-            p.stdout.close()
+            stdout.close()
             rc = p.wait()
         finally:
             self._untrack(p)
