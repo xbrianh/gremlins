@@ -395,6 +395,36 @@ class StateData:
         except Exception:
             pass
 
+    def patch_parallel_done(
+        self,
+        group_name: str,
+        child_key: str | None = None,
+    ) -> None:
+        """Mark child done (child_key given) or clear the group (child_key=None)."""
+        if not self.gremlin_id or not group_name:
+            return
+        sf = self.state_file or resolve_state_file(self.gremlin_id)
+        if sf is None or not sf.exists():
+            return
+        try:
+
+            def _apply(data: dict[str, Any]) -> None:
+                groups: dict[str, Any] = dict(data.get("parallel_done") or {})
+                if child_key is None:
+                    groups.pop(group_name, None)
+                else:
+                    group: dict[str, str] = dict(groups.get(group_name) or {})
+                    group[child_key] = "1"
+                    groups[group_name] = group
+                if groups:
+                    data["parallel_done"] = groups
+                else:
+                    data.pop("parallel_done", None)
+
+            locked_update(sf, _apply)
+        except Exception:
+            pass
+
     def patch_parallel_attempt(self, child_key: str, attempt: str) -> None:
         sf = self.state_file or resolve_state_file(self.gremlin_id)
         if sf is None or not sf.exists() or not attempt:
