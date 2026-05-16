@@ -223,9 +223,12 @@ def test_exhausted_bails(tmp_path: pathlib.Path) -> None:
             ([_FAILING_CHECK], ""),
         ]
     )
+    from gremlins.stages.outcome import Bail
+
     stage, state = _make_stage(client, tmp_path, poll_interval=0, checks_getter=getter)
-    with pytest.raises(RuntimeError, match="ci-gate exhausted 3 attempts"):
-        stage.run(state)
+    outcome = stage.run(state)
+    assert isinstance(outcome, Bail)
+    assert "CI failed after 3 attempts" in outcome.reason
     fix_labels = [c.label for c in client.calls]
     assert fix_labels == ["ci-fix-1", "ci-fix-2"]
 

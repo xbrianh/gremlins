@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import pytest
-
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData
 from gremlins.stages.loop import LoopStage

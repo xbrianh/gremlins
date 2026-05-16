@@ -43,12 +43,16 @@ def _make_stage(
 
 
 def test_returns_review_state_immediately(tmp_path: pathlib.Path) -> None:
+    from gremlins.stages.outcome import Done
+
     stage, state = _make_stage(tmp_path, review_checker=lambda: "APPROVED")
     result = stage.run(state)
-    assert result == "APPROVED"
+    assert result == Done()
 
 
 def test_polls_until_review_arrives(tmp_path: pathlib.Path) -> None:
+    from gremlins.stages.outcome import Done
+
     call_count = [0]
 
     def checker() -> str | None:
@@ -57,7 +61,7 @@ def test_polls_until_review_arrives(tmp_path: pathlib.Path) -> None:
 
     stage, state = _make_stage(tmp_path, review_checker=checker)
     result = stage.run(state)
-    assert result == "CHANGES_REQUESTED"
+    assert result == Done()
     assert call_count[0] == 3
 
 

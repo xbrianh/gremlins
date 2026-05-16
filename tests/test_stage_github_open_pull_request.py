@@ -89,7 +89,9 @@ def test_no_issue_url_skips_closes(tmp_path: pathlib.Path) -> None:
     assert "Include 'Closes" not in state.client.calls[0].prompt
 
 
-def test_run_returns_pr_url(tmp_path: pathlib.Path) -> None:
+def test_run_returns_done(tmp_path: pathlib.Path) -> None:
+    from gremlins.stages.outcome import Done
+
     stage, state = _make_state(tmp_path, gremlin_id="test-gr")
     with (
         patch(
@@ -103,7 +105,7 @@ def test_run_returns_pr_url(tmp_path: pathlib.Path) -> None:
         patch("gremlins.executor.state.StateData.append_artifact"),
     ):
         result = stage.run(state)
-    assert result == PR_URL
+    assert result == Done()
 
 
 def test_run_writes_raw_path(tmp_path: pathlib.Path) -> None:
