@@ -67,7 +67,9 @@ class Verify(Stage):
             outcome = cmd_stage.run(state)
             n = cmd_stage.n
             if isinstance(outcome, NeedsFix):
-                logger.info("verify attempt %d: failed (exit %s)", n, outcome.returncode)
+                logger.info(
+                    "verify attempt %d: failed (exit %s)", n, outcome.returncode
+                )
             else:
                 logger.info("verify attempt %d: green", n)
             return outcome
