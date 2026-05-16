@@ -9,7 +9,8 @@ import pytest
 
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData
-from gremlins.stages.loop import LoopExhausted, LoopStage, RunCmdFailed
+from gremlins.stages.loop import LoopStage
+from gremlins.stages.outcome import Bail, Done, NeedsFix
 from gremlins.stages.run_cmd import RunCmd
 
 
@@ -36,26 +37,30 @@ def _loop_state(tmp_path: Any) -> RuntimeState:
 def test_loop_head_stable_exits_cleanly(tmp_path):
     calls: list[str] = []
 
-    def runner() -> None:
+    def runner() -> Done:
         calls.append("run")
+        return Done()
 
     loop = LoopStage.from_runners([runner], max_iterations=3)
-    loop.run(_loop_state(tmp_path))
+    outcome = loop.run(_loop_state(tmp_path))
 
+    assert outcome == Done()
     assert calls == ["run"]
 
 
 def test_loop_cmd_failure_then_fix_then_green(tmp_path):
-    """RunCmdFailed on iter 1 allows fix runner; clean on iter 2."""
+    """NeedsFix on iter 1 allows fix runner; clean on iter 2."""
     state = {"attempt": 0, "fixed": False}
 
-    def check() -> None:
+    def check() -> Done | NeedsFix:
         state["attempt"] += 1
         if not state["fixed"]:
-            raise RunCmdFailed("commands failed")
+            return NeedsFix("commands failed")
+        return Done()
 
-    def fix() -> None:
+    def fix() -> Done:
         state["fixed"] = True
+        return Done()
 
     loop = LoopStage.from_runners([check, fix], max_iterations=3)
     loop.run(_loop_state(tmp_path))
@@ -68,11 +73,12 @@ def test_loop_fix_skipped_on_success(tmp_path):
     """Fix runner must not execute when the check runner succeeds."""
     fix_calls: list[int] = []
 
-    def check() -> None:
-        pass  # always succeeds
+    def check() -> Done:
+        return Done()
 
-    def fix() -> None:
+    def fix() -> Done:
         fix_calls.append(1)
+        return Done()
 
     loop = LoopStage.from_runners([check, fix], max_iterations=3)
     loop.run(_loop_state(tmp_path))
@@ -80,16 +86,17 @@ def test_loop_fix_skipped_on_success(tmp_path):
     assert fix_calls == []
 
 
-def test_loop_exhausted_raises_loop_exhausted(tmp_path):
-    def check() -> None:
-        raise RunCmdFailed("always fails")
+def test_loop_exhausted_returns_bail(tmp_path):
+    def check() -> NeedsFix:
+        return NeedsFix("always fails")
 
-    def fix() -> None:
-        pass
+    def fix() -> Done:
+        return Done()
 
     loop = LoopStage.from_runners([check, fix], max_iterations=3)
-    with pytest.raises(LoopExhausted):
-        loop.run(_loop_state(tmp_path))
+    outcome = loop.run(_loop_state(tmp_path))
+
+    assert isinstance(outcome, Bail)
 
 
 def test_loop_fix_skipped_on_final_iteration(tmp_path):
@@ -97,30 +104,33 @@ def test_loop_fix_skipped_on_final_iteration(tmp_path):
     fix_calls: list[int] = []
     attempt = [0]
 
-    def check() -> None:
+    def check() -> NeedsFix:
         attempt[0] += 1
-        raise RunCmdFailed("fail")
+        return NeedsFix("fail")
 
-    def fix() -> None:
+    def fix() -> Done:
         fix_calls.append(attempt[0])
+        return Done()
 
     loop = LoopStage.from_runners([check, fix], max_iterations=3)
-    with pytest.raises(LoopExhausted):
-        loop.run(_loop_state(tmp_path))
+    outcome = loop.run(_loop_state(tmp_path))
 
+    assert isinstance(outcome, Bail)
     # fix ran for iterations 1 and 2, NOT 3
     assert fix_calls == [1, 2]
 
 
 def test_loop_bail_propagates_immediately(tmp_path):
-    """A RuntimeError (bail) from a body runner propagates without wrapping."""
+    """Bail returned from a body runner propagates without continuing."""
 
-    def bail_runner() -> None:
-        raise RuntimeError("stage bailed: bail_class=other")
+    def bail_runner() -> Bail:
+        return Bail("stage bailed: bail_class=other")
 
     loop = LoopStage.from_runners([bail_runner], max_iterations=3)
-    with pytest.raises(RuntimeError, match="stage bailed"):
-        loop.run(_loop_state(tmp_path))
+    outcome = loop.run(_loop_state(tmp_path))
+
+    assert isinstance(outcome, Bail)
+    assert "bail_class=other" in outcome.reason
 
 
 def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
@@ -131,11 +141,11 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
     attempt = "loop-test-attempt"
     state_mod.StateData.load(gremlin_id).patch(attempt=attempt)
 
-    def check() -> None:
-        raise RunCmdFailed("fail")
+    def check() -> NeedsFix:
+        return NeedsFix("fail")
 
-    def fix() -> None:
-        pass
+    def fix() -> Done:
+        return Done()
 
     loop_state = RuntimeState(
         data=StateData(gremlin_id=gremlin_id, attempt=attempt),
@@ -144,9 +154,9 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
         worktree=tmp_path,
     )
     loop = LoopStage.from_runners([check, fix], max_iterations=2)
-    with pytest.raises(LoopExhausted):
-        loop.run(loop_state)
+    outcome = loop.run(loop_state)
 
+    assert isinstance(outcome, Bail)
     bail_file = state_dir / f"bail_{attempt}.json"
     assert bail_file.exists()
     data = json.loads(bail_file.read_text())
@@ -171,34 +181,36 @@ def _run_cmd_stage(tmp_path: Any, cmds: list[str]) -> tuple[RunCmd, RuntimeState
 
 def test_run_cmd_success(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, ["true"])
-    stage.run(state)  # must not raise
+    outcome = stage.run(state)
+    assert outcome == Done()
 
 
-def test_run_cmd_failure_raises_run_cmd_failed(tmp_path):
+def test_run_cmd_failure_returns_needs_fix(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, ["false"])
-    with pytest.raises(RunCmdFailed):
-        stage.run(state)
+    outcome = stage.run(state)
+    assert isinstance(outcome, NeedsFix)
 
 
 def test_run_cmd_failure_writes_log(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, ["echo boom >&2; false"])
-    with pytest.raises(RunCmdFailed):
-        stage.run(state)
+    outcome = stage.run(state)
+    assert isinstance(outcome, NeedsFix)
     log = tmp_path / "run-cmd.log"
     assert log.exists()
 
 
 def test_run_cmd_empty_cmds_is_noop(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, [])
-    stage.run(state)  # must not raise, no log written
+    outcome = stage.run(state)
+    assert outcome == Done()
     assert not (tmp_path / "run-cmd.log").exists()
 
 
-def test_run_cmd_output_in_exception(tmp_path):
+def test_run_cmd_output_in_needs_fix(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, ["echo hello_output; false"])
-    with pytest.raises(RunCmdFailed) as exc_info:
-        stage.run(state)
-    assert "hello_output" in str(exc_info.value)
+    outcome = stage.run(state)
+    assert isinstance(outcome, NeedsFix)
+    assert "hello_output" in outcome.detail
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +257,7 @@ def test_pr_stack_detaches_to_prior_pr_branch(tmp_path, make_state_dir, monkeypa
     )
 
     loop = LoopStage(
-        "test", body_runners=[lambda: None], max_iterations=1, pr_stack=True
+        "test", body_runners=[lambda: Done()], max_iterations=1, pr_stack=True
     )
     loop.run(_loop_state_with_gr(tmp_path, gremlin_id))
 
@@ -266,7 +278,7 @@ def test_pr_stack_skipped_when_no_prior_pr(tmp_path, make_state_dir, monkeypatch
     )
 
     loop = LoopStage(
-        "test", body_runners=[lambda: None], max_iterations=1, pr_stack=True
+        "test", body_runners=[lambda: Done()], max_iterations=1, pr_stack=True
     )
     loop.run(_loop_state_with_gr(tmp_path, gremlin_id))
 
@@ -303,7 +315,7 @@ def test_pr_stack_false_skips_detach(tmp_path, make_state_dir, monkeypatch):
     )
 
     loop = LoopStage(
-        "test", body_runners=[lambda: None], max_iterations=1, pr_stack=False
+        "test", body_runners=[lambda: Done()], max_iterations=1, pr_stack=False
     )
     loop.run(_loop_state_with_gr(tmp_path, gremlin_id))
 
@@ -320,10 +332,10 @@ def test_loop_patches_loop_iteration_to_state(tmp_path, make_state_dir):
     state_dir = make_state_dir(gremlin_id)
     seen_iterations: list[int] = []
 
-    def runner() -> None:
+    def runner() -> NeedsFix:
         data = json.loads((state_dir / "state.json").read_text())
         seen_iterations.append(int(data.get("loop_iteration") or 0))
-        raise RunCmdFailed("keep going")
+        return NeedsFix("keep going")
 
     loop_state = RuntimeState(
         data=StateData(gremlin_id=gremlin_id),
@@ -332,9 +344,9 @@ def test_loop_patches_loop_iteration_to_state(tmp_path, make_state_dir):
         worktree=tmp_path,
     )
     loop = LoopStage.from_runners([runner], max_iterations=3)
-    with pytest.raises(LoopExhausted):
-        loop.run(loop_state)
+    outcome = loop.run(loop_state)
 
+    assert isinstance(outcome, Bail)
     assert seen_iterations == [1, 2, 3]
 
 
@@ -354,7 +366,7 @@ def test_pr_stack_iter2_detaches_to_iter1_branch(tmp_path, make_state_dir, monke
 
     count = 0
 
-    def runner() -> None:
+    def runner() -> Done | NeedsFix:
         nonlocal count
         count += 1
         if count == 1:
@@ -367,7 +379,8 @@ def test_pr_stack_iter2_detaches_to_iter1_branch(tmp_path, make_state_dir, monke
                     "branch": "feat-iter1",
                 },
             )
-            raise RunCmdFailed("next-plan")
+            return NeedsFix("next-plan")
+        return Done()
 
     loop = LoopStage("test", body_runners=[runner], max_iterations=2, pr_stack=True)
     loop.run(_loop_state_with_gr(tmp_path, gremlin_id))

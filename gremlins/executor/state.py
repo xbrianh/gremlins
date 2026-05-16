@@ -498,13 +498,13 @@ class State:
         self,
         entry: Stage,
         scope: list[Stage] | None = None,
-    ) -> Callable[[], None]:
+    ) -> Callable[[], Any]:
         base_state = self
         gremlin_id = self.data.gremlin_id
         attempt = f"{entry.name}-{secrets.token_hex(4)}" if gremlin_id else ""
         scope_list = list(scope) if scope is not None else []
 
-        def _run() -> None:
+        def _run() -> Any:
             base_state.data.set_stage(entry.name, parent_stage=base_state.parent_stage)
             if attempt:
                 if base_state.child_key:
@@ -521,6 +521,6 @@ class State:
                 data=loaded,
                 current_scope=scope_list,
             )
-            entry.run(state)
+            return entry.run(state)
 
         return _run

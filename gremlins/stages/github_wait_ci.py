@@ -9,6 +9,7 @@ from typing import Any
 
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
+from gremlins.stages.outcome import Bail, Done, Outcome
 from gremlins.utils.git import head_sha
 from gremlins.utils.github import fetch_check_run_logs, get_pr_ci_status
 
@@ -168,7 +169,7 @@ class GitHubWaitCI(Stage):
         self.head_sha_getter = head_sha_getter
         self.fix_sha_getter = fix_sha_getter
 
-    def run(self, state: State) -> None:
+    def run(self, state: State) -> Outcome:
         pr_url = self.pr_url or state.data.read_pr_url()
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
@@ -182,11 +183,10 @@ class GitHubWaitCI(Stage):
                 "ci-gate: PR has no check-runs after %ds, skipping",
                 self.startup_grace_secs,
             )
-            return
+            return Done()
 
         template = "\n\n".join(self.prompts).rstrip()
 
-        _exhausted = False
         _agent_bailed = False
         _review_bailed = False
         fix_sha = ""
@@ -215,7 +215,7 @@ class GitHubWaitCI(Stage):
 
                 if not failed:
                     logger.info("ci-gate: all checks passed on attempt %d", attempt)
-                    return
+                    return Done()
 
                 logger.info(
                     "ci-gate: %d check(s) failed on attempt %d", len(failed), attempt
@@ -235,7 +235,7 @@ class GitHubWaitCI(Stage):
                         "ci-fix: pr_branch unknown, cannot push",
                         attempt=state.data.attempt,
                     )
-                    return
+                    return Bail("ci-fix: pr_branch unknown, cannot push")
 
                 fix_prompt = template.format(
                     bail_command=self.bail_command(state),
@@ -258,15 +258,14 @@ class GitHubWaitCI(Stage):
                     else head_sha(cwd=state.cwd)
                 )
 
-            _exhausted = True
             state.data.write_bail_file(
                 "other",
                 f"CI failed after {self.max_attempts} attempts",
                 attempt=state.data.attempt,
             )
-            raise RuntimeError(f"ci-gate exhausted {self.max_attempts} attempts")
+            return Bail(f"CI failed after {self.max_attempts} attempts")
         except (SystemExit, Exception) as exc:
-            if not _exhausted and not _agent_bailed and not _review_bailed:
+            if not _agent_bailed and not _review_bailed:
                 state.data.write_bail_file(
                     "other",
                     f"ci-gate failed: {exc}"[:200],

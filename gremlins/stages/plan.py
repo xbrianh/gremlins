@@ -14,6 +14,7 @@ from typing import Any
 from gremlins.errors import die
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage, StageInput
+from gremlins.stages.outcome import Done, Outcome
 from gremlins.utils.github import extract_gh_url, get_repo, parse_issue_ref, view_issue
 
 logger = logging.getLogger(__name__)
@@ -69,7 +70,7 @@ class Plan(Stage):
             ),
         ]
 
-    def run(self, state: State) -> None:
+    def run(self, state: State) -> Outcome:
         plan_val = getattr(state.args, "plan", None)
         if not self.prompts and not plan_val:
             die(
@@ -80,7 +81,7 @@ class Plan(Stage):
         if plan_md.exists() and plan_md.stat().st_size > 0:
             label = f" (issue #{state.data.issue_num})" if state.data.issue_num else ""
             logger.info("[1/8] plan resumed from snapshot: %s%s", plan_md, label)
-            return
+            return Done()
 
         if plan_val:
             src = pathlib.Path(plan_val)
@@ -88,9 +89,10 @@ class Plan(Stage):
                 self._resolve_file_source(plan_val, plan_md, state)
             else:
                 self._resolve_issue_source(plan_val, plan_md, state)
-            return
+            return Done()
 
         self._run_agent(plan_md, state)
+        return Done()
 
     def _run_agent(self, plan_md: pathlib.Path, state: State) -> None:
         if state.repo:

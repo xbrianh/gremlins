@@ -9,6 +9,7 @@ from typing import Any
 
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
+from gremlins.stages.outcome import Done, Outcome
 from gremlins.utils.github import check_copilot_review
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,7 @@ class GitHubWaitCopilot(Stage):
         self.interval = interval
         self.review_checker = review_checker
 
-    def run(self, state: State) -> str:
+    def run(self, state: State) -> Outcome:
         repo = state.repo
         pr_num = self.pr_num or state.data.read_pr_num()
         if not pr_num:
@@ -63,7 +64,7 @@ class GitHubWaitCopilot(Stage):
             result = review_checker()
             if result:
                 logger.info("Copilot review: %s", result)
-                return result
+                return Done()
             if time.time() >= deadline:
                 raise RuntimeError(f"Copilot review timed out after {self.timeout}s")
             time.sleep(self.interval)

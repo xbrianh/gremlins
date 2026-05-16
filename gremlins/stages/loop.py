@@ -9,34 +9,21 @@ from typing import Any, cast
 
 from gremlins.executor.state import State, resolve_state_file
 from gremlins.stages.base import Stage
+from gremlins.stages.outcome import Bail, Done, NeedsFix, Outcome
 from gremlins.utils import git as _git
 
 logger = logging.getLogger(__name__)
-
-
-class RunCmdFailed(Exception):
-    """Raised to signal a failure that triggers the loop's body continuation.
-
-    In verify: raised by RunCmd / _run_cmd when a check command exits non-zero,
-    causing the fix runner to execute.  In handoff: raised when the handoff
-    agent returns "next-plan", signalling the child pipeline runners to proceed.
-    On a clean iteration (no RunCmdFailed), subsequent body runners are skipped.
-    """
-
-
-class LoopExhausted(RuntimeError):
-    """Raised by LoopStage when max_iterations is reached without head-stable."""
 
 
 class LoopStage(Stage):
     """Iterate body runners until HEAD is stable or max_iterations is reached.
 
     body_runners are called in order each iteration.  Subsequent runners only
-    execute when a preceding runner raised RunCmdFailed — on a clean iteration
+    execute when a preceding runner returned NeedsFix — on a clean iteration
     all remaining runners are skipped.  Fix runners are also skipped on the
     final iteration even after a failure, so the stage bails without retrying.
 
-    Termination: after an iteration where no RunCmdFailed was raised, if
+    Termination: after an iteration where no NeedsFix was returned, if
     HEAD is unchanged (head-stable) the loop exits cleanly.  If HEAD
     advanced, the loop continues (or exits on the final iteration).
 
@@ -53,7 +40,7 @@ class LoopStage(Stage):
         name: str,
         *,
         body: list[Stage] | None = None,
-        body_runners: list[Callable[[], None]] | None = None,
+        body_runners: list[Callable[[], Outcome]] | None = None,
         max_iterations: int,
         pr_stack: bool = False,
     ) -> None:
@@ -66,7 +53,7 @@ class LoopStage(Stage):
     @classmethod
     def from_runners(
         cls,
-        runners: list[Callable[[], None]],
+        runners: list[Callable[[], Outcome]],
         *,
         name: str = "loop",
         max_iterations: int,
@@ -96,22 +83,22 @@ class LoopStage(Stage):
         stage.client = get_client_from_dict(d)
         return stage
 
-    def _build_runners(self, state: State) -> list[Callable[[], None]]:
-        result: list[Callable[[], None]] = []
+    def _build_runners(self, state: State) -> list[Callable[[], Outcome]]:
+        result: list[Callable[[], Outcome]] = []
         for child in self.body:
             child_state = dataclasses.replace(
                 state, client=state.test_client or child.client
             )
-            result.append(child_state.make_runner(child, scope=self.body))
+            runner = child_state.make_runner(child, scope=self.body)
+            result.append(cast(Callable[[], Outcome], runner))
         return result
 
-    def run(self, state: State) -> None:
+    def run(self, state: State) -> Outcome:
         runners = (
             self._body_runners
             if self._body_runners is not None
             else self._build_runners(state)
         )
-        exhausted = False
         try:
             for iteration in range(1, self._max_iterations + 1):
                 state.data.patch(loop_iteration=iteration)
@@ -123,36 +110,32 @@ class LoopStage(Stage):
                 for i, runner in enumerate(runners):
                     if i > 0 and (not had_failure or iteration == self._max_iterations):
                         continue
-                    try:
-                        runner()
-                    except RunCmdFailed:
+                    outcome = runner()
+                    if isinstance(outcome, Bail):
+                        return outcome
+                    if isinstance(outcome, NeedsFix):
                         had_failure = True
 
                 if not had_failure:
                     head_after = _git.head_sha(state.cwd)
                     if head_after == head_before:
-                        return  # head-stable termination
+                        return Done()
                     logger.info(
                         "loop iteration %d: HEAD advanced, continuing", iteration
                     )
                     if iteration == self._max_iterations:
-                        return  # checks passed; accept even if HEAD advanced
+                        return Done()
                 elif iteration == self._max_iterations:
                     break
 
-            exhausted = True
             state.data.write_bail_file(
                 "other",
                 f"loop exhausted {self._max_iterations} iterations",
                 attempt=state.data.attempt,
             )
-            raise LoopExhausted(f"loop exhausted {self._max_iterations} iterations")
-        except LoopExhausted:
-            raise
+            return Bail(f"loop exhausted {self._max_iterations} iterations")
         except (SystemExit, Exception) as exc:
-            if not exhausted and not _bail_file_exists(
-                state.data.gremlin_id, state.data.attempt
-            ):
+            if not _bail_file_exists(state.data.gremlin_id, state.data.attempt):
                 state.data.write_bail_file(
                     "other",
                     f"loop stage failed: {exc}"[:200],

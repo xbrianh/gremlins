@@ -14,7 +14,7 @@ from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData
 from gremlins.stages.handoff import Handoff
-from gremlins.stages.loop import RunCmdFailed
+from gremlins.stages.outcome import Bail, NeedsFix
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -138,9 +138,9 @@ def test_next_plan_writes_plan_and_raises(tmp_path, monkeypatch, test_state_root
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
     monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
 
-    with pytest.raises(RunCmdFailed, match="next-plan"):
-        h.run(state)
-
+    outcome = h.run(state)
+    assert isinstance(outcome, NeedsFix)
+    assert "next-plan" in outcome.detail
     assert (tmp_path / "plan.md").read_text(encoding="utf-8") == "# Child Plan\n"
 
 
@@ -168,8 +168,9 @@ def test_bail_emits_bail_and_raises(tmp_path, monkeypatch, test_state_root):
     state.data.attempt = attempt  # simulate what make_runner() would set
     monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
 
-    with pytest.raises(RuntimeError, match="chain halted by handoff"):
-        h.run(state)
+    outcome = h.run(state)
+    assert isinstance(outcome, Bail)
+    assert "chain halted by handoff" in outcome.reason
 
     bail_file = state_dir / f"bail_{attempt}.json"
     assert bail_file.exists()

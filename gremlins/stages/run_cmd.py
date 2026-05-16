@@ -1,4 +1,4 @@
-"""RunCmd stage — run a list of shell commands; raise RunCmdFailed on non-zero exit."""
+"""RunCmd stage — run a list of shell commands; return NeedsFix on non-zero exit."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import Any
 
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
-from gremlins.stages.loop import RunCmdFailed
+from gremlins.stages.outcome import Done, NeedsFix, Outcome
 
 
 class RunCmd(Stage):
@@ -21,10 +21,10 @@ class RunCmd(Stage):
         stage.client = get_client_from_dict(d)
         return stage
 
-    def run(self, state: State) -> None:
+    def run(self, state: State) -> Outcome:
         cmds = [c for c in self.options.get("cmds", []) if c.strip()]
         if not cmds:
-            return
+            return Done()
         combined = " && ".join(cmds)
         result = subprocess.run(
             combined,
@@ -37,4 +37,5 @@ class RunCmd(Stage):
             output = result.stdout + result.stderr
             log_path = state.session_dir / "run-cmd.log"
             log_path.write_text(output, encoding="utf-8")
-            raise RunCmdFailed(output)
+            return NeedsFix(output)
+        return Done()

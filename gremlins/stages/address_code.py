@@ -9,6 +9,7 @@ from typing import Any
 
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
+from gremlins.stages.outcome import Done, Outcome
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -56,7 +57,7 @@ class AddressCode(Stage):
         stage.client = get_client_from_dict(d)
         return stage
 
-    def run(self, state: State) -> None:
+    def run(self, state: State) -> Outcome:
         try:
             inputs = self._inputs_from_local(state)
             self._run_local(inputs, state)
@@ -67,6 +68,7 @@ class AddressCode(Stage):
                 attempt=state.data.attempt,
             )
             raise
+        return Done()
 
     def _inputs_from_local(self, state: State) -> dict[str, str]:
         names, dirs = _review_stage_info(state)
@@ -135,7 +137,7 @@ class GitHubAddressPullRequestReviews(Stage):
         super().__init__(name, model, prompts, options)
         self.pr_url = pr_url
 
-    def run(self, state: State) -> None:
+    def run(self, state: State) -> Outcome:
         pr_url = self.pr_url or state.data.read_pr_url()
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
@@ -157,3 +159,4 @@ class GitHubAddressPullRequestReviews(Stage):
         state.data.check_bail(
             "/github-address-pull-request-reviews", child_key=state.child_key
         )
+        return Done()

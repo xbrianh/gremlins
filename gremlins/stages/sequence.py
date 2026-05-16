@@ -14,6 +14,7 @@ from typing import Any, cast
 
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
+from gremlins.stages.outcome import Done, Outcome
 
 
 class SequenceStage(Stage):
@@ -46,7 +47,7 @@ class SequenceStage(Stage):
         stage.client = get_client_from_dict(d)
         return stage
 
-    def run(self, state: State) -> None:
+    def run(self, state: State) -> Outcome:
         if self._pre_body is not None:
             for sub_state, runner in self._pre_body:
                 sub_state.worktree = state.worktree
@@ -59,3 +60,4 @@ class SequenceStage(Stage):
                     state, client=state.test_client or child.client
                 )
                 child_state.make_runner(child, scope=self.body)()
+        return Done()
