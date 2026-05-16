@@ -7,7 +7,7 @@ import pathlib
 import shutil
 import subprocess
 import tempfile
-from typing import Any, cast
+from typing import IO, Any, cast
 
 import gremlins.fleet.constants as _constants
 from gremlins.clients.stream import stream_events
@@ -789,9 +789,9 @@ def do_rescue(target: str, headless: bool = False, from_boss: bool = False) -> b
                         stdin=subprocess.PIPE,
                         stdout=subprocess.PIPE,
                     )
-                    assert p.stdin is not None
-                    p.stdin.write(prompt.encode())
-                    p.stdin.close()
+                    stdin = cast(IO[bytes], p.stdin)
+                    stdin.write(prompt.encode())
+                    stdin.close()
                 except FileNotFoundError:
                     print("error: 'claude' CLI not found in PATH")
                     _write_bail(
