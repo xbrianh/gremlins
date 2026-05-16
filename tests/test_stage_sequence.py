@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import pathlib
 
 import pytest
@@ -10,7 +11,7 @@ from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData
 from gremlins.stages.base import Stage
-from gremlins.stages.outcome import Done, Outcome
+from gremlins.stages.outcome import Bail, Done, Outcome
 from gremlins.stages.sequence import SequenceStage
 
 
@@ -99,3 +100,79 @@ def test_sequence_propagates_session_dir() -> None:
     stage.run(_state(session_dir=shard_dir))
     assert child.received is not None
     assert child.received.session_dir == shard_dir
+
+
+@pytest.fixture
+def state_root(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
+    root = tmp_path / "state"
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: root)
+    return root
+
+
+def _stateful(state_root: pathlib.Path, gremlin_id: str) -> RuntimeState:
+    state_dir = state_root / gremlin_id
+    state_dir.mkdir(parents=True)
+    sf = state_dir / "state.json"
+    sf.write_text(json.dumps({"id": gremlin_id}), encoding="utf-8")
+    return RuntimeState(
+        data=StateData(gremlin_id=gremlin_id, state_file=sf),
+        client=FakeClaudeClient(),
+        session_dir=state_dir,
+    )
+
+
+def test_sequence_resume_skips_completed_children(state_root: pathlib.Path) -> None:
+    ran: list[str] = []
+    fail = {"b": True}
+
+    class _TrackedStage(Stage):
+        def __init__(self, label: str) -> None:
+            super().__init__(label, None, [], {})
+
+        def run(self, s: RuntimeState) -> Outcome:  # type: ignore[override]
+            ran.append(self.name)
+            if self.name == "b" and fail["b"]:
+                raise Bail("b failed")
+            return Done()
+
+    state = _stateful(state_root, "gr-seq-resume")
+    seq = SequenceStage(
+        "seq", body=[_TrackedStage("a"), _TrackedStage("b"), _TrackedStage("c")]
+    )
+
+    with pytest.raises(Bail, match="b failed"):
+        seq.run(state)
+    assert ran == ["a", "b"]
+
+    ran.clear()
+    fail["b"] = False
+
+    seq.run(state)
+    assert ran == ["b", "c"]
+
+
+def test_sibling_sequences_done_sets_are_independent(state_root: pathlib.Path) -> None:
+    ran: list[str] = []
+
+    class _LogStage(Stage):
+        def __init__(self, label: str) -> None:
+            super().__init__(label, None, [], {})
+
+        def run(self, s: RuntimeState) -> Outcome:  # type: ignore[override]
+            ran.append(self.name)
+            return Done()
+
+    state = _stateful(state_root, "gr-seq-siblings")
+    seq1 = SequenceStage("seq1", body=[_LogStage("a")])
+    seq2 = SequenceStage("seq2", body=[_LogStage("a")])
+    seq1.path = "pipeline/seq1"
+    seq2.path = "pipeline/seq2"
+
+    # Mark "a" done in seq1's slot only.
+    state.mark_done("pipeline/seq1", "a")
+
+    seq1.run(state)
+    seq2.run(state)
+
+    # seq1/a was skipped; seq2/a was not.
+    assert ran == ["a"]  # only seq2's "a"

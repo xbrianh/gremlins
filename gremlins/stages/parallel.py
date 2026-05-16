@@ -137,6 +137,7 @@ class ParallelStage(Stage):
             project_root=project_root or pathlib.Path.cwd(),
             worktree_parent=worktree_parent,
             parent_attempt=parent_attempt,
+            stage_path=self.path or self.name,
         )
 
     def run(self, state: State) -> Outcome:
@@ -179,6 +180,7 @@ def _parallel_stages(
     project_root: pathlib.Path,
     worktree_parent: pathlib.Path | None = None,
     parent_attempt: str = "",
+    stage_path: str = "",
 ) -> list[_Stage]:
     fanout_name = f"{group_name}-fanout"
     fanin_name = f"{group_name}-fanin"
@@ -254,7 +256,7 @@ def _parallel_stages(
         _worktree_paths.clear()
         base_head = ""
         _clear_persisted_state()
-        StateData.load(gremlin_id).patch_parallel_done(group_name)
+        StateData.load(gremlin_id).clear_done(stage_path)
 
         if not _in_git_repo():
             return
@@ -304,16 +306,7 @@ def _parallel_stages(
 
         _hydrate_from_state()
 
-        done: set[str] = set()
-        sf = resolve_state_file(gremlin_id)
-        if sf is not None and sf.exists():
-            try:
-                raw = json.loads(sf.read_text(encoding="utf-8"))
-                done_map: dict[str, Any] = raw.get("parallel_done") or {}
-                done_group: dict[str, Any] = done_map.get(group_name) or {}
-                done = set(done_group.keys())
-            except Exception:
-                pass
+        done = StateData.load(gremlin_id).done_for(stage_path)
 
         active = [(k, s, fn) for k, s, fn in child_runners if k not in done]
         if not active:
@@ -353,7 +346,7 @@ def _parallel_stages(
                 if cancel_event is not None:
                     cancel_event.set()
                 raise
-            StateData.load(gremlin_id).patch_parallel_done(group_name, child_key)
+            StateData.load(gremlin_id).mark_done(stage_path, child_key)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             futs = [pool.submit(_run_child, k, fn) for k, _, fn in active]
@@ -437,7 +430,7 @@ def _parallel_stages(
 
                 StateData.load(gremlin_id).patch(_delete=("parallel_attempts",))
                 if not should_bail:
-                    StateData.load(gremlin_id).patch_parallel_done(group_name)
+                    StateData.load(gremlin_id).clear_done(stage_path)
             except RuntimeError:
                 raise
             except Exception as exc:

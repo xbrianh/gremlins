@@ -395,33 +395,55 @@ class StateData:
         except Exception:
             pass
 
-    def patch_parallel_done(
-        self,
-        group_name: str,
-        child_key: str | None = None,
-    ) -> None:
-        """Mark child done (child_key given) or clear the group (child_key=None)."""
-        if not self.gremlin_id or not group_name:
+    def done_for(self, path: str) -> set[str]:
+        sf = self.state_file or resolve_state_file(self.gremlin_id)
+        if sf is None or not sf.exists():
+            return set()
+        try:
+            data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
+            dc: dict[str, Any] = data.get("done_children") or {}
+            children: list[str] = list(dc.get(path) or [])
+            return set(children)
+        except Exception:
+            return set()
+
+    def mark_done(self, path: str, child_name: str) -> None:
+        if not self.gremlin_id or not path:
             return
         sf = self.state_file or resolve_state_file(self.gremlin_id)
         if sf is None or not sf.exists():
             return
         try:
 
-            def _apply(data: dict[str, Any]) -> None:
-                groups: dict[str, Any] = dict(data.get("parallel_done") or {})
-                if child_key is None:
-                    groups.pop(group_name, None)
-                else:
-                    group: dict[str, str] = dict(groups.get(group_name) or {})
-                    group[child_key] = "1"
-                    groups[group_name] = group
-                if groups:
-                    data["parallel_done"] = groups
-                else:
-                    data.pop("parallel_done", None)
+            def _mark(data: dict[str, Any]) -> None:
+                dc: dict[str, list[str]] = dict(data.get("done_children") or {})
+                existing = list(dc.get(path) or [])
+                if child_name not in existing:
+                    existing.append(child_name)
+                dc[path] = existing
+                data["done_children"] = dc
 
-            locked_update(sf, _apply)
+            locked_update(sf, _mark)
+        except Exception:
+            pass
+
+    def clear_done(self, path: str) -> None:
+        if not self.gremlin_id or not path:
+            return
+        sf = self.state_file or resolve_state_file(self.gremlin_id)
+        if sf is None or not sf.exists():
+            return
+        try:
+
+            def _clear(data: dict[str, Any]) -> None:
+                dc: dict[str, list[str]] = dict(data.get("done_children") or {})
+                dc.pop(path, None)
+                if dc:
+                    data["done_children"] = dc
+                else:
+                    data.pop("done_children", None)
+
+            locked_update(sf, _clear)
         except Exception:
             pass
 
@@ -493,6 +515,15 @@ class State:
     @property
     def cwd(self) -> pathlib.Path:
         return self.worktree if self.worktree is not None else pathlib.Path.cwd()
+
+    def done_for(self, path: str) -> set[str]:
+        return self.data.done_for(path)
+
+    def mark_done(self, path: str, child_name: str) -> None:
+        self.data.mark_done(path, child_name)
+
+    def clear_done(self, path: str) -> None:
+        self.data.clear_done(path)
 
     def make_runner(
         self,

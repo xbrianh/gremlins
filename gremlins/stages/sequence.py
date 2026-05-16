@@ -37,6 +37,10 @@ class SequenceStage(Stage):
         return stage
 
     def run(self, state: State) -> Outcome:
+        done = state.done_for(self.path or self.name)
         for child in self.body:
+            if child.name in done:
+                continue
             _child_state(state, child).make_runner(child, scope=self.body)()
+            state.mark_done(self.path or self.name, child.name)
         return Done()

@@ -83,8 +83,8 @@ def test_completed_child_skipped_on_resume(state_root):
         parallel_fn()
 
     state = _read_state(sf)
-    assert "a" in state.get("parallel_done", {}).get("grp", {})
-    assert "b" not in state.get("parallel_done", {}).get("grp", {})
+    assert "a" in state.get("done_children", {}).get("grp", [])
+    assert "b" not in state.get("done_children", {}).get("grp", [])
 
     ran.clear()
 
@@ -131,7 +131,7 @@ def test_both_children_present_in_done_after_second_run(state_root):
 
     assert ran == ["b"]
     state = _read_state(sf)
-    done = state.get("parallel_done", {}).get("grp", {})
+    done = state.get("done_children", {}).get("grp", [])
     assert "a" in done
     assert "b" in done
 
@@ -158,13 +158,13 @@ def test_parallel_done_cleared_after_full_success(state_root):
 
     parallel_fn()
 
-    # parallel_done present before fan-in.
-    assert "grp" in _read_state(sf).get("parallel_done", {})
+    # done_children present before fan-in.
+    assert "grp" in _read_state(sf).get("done_children", {})
 
     fanin_fn()
 
-    # parallel_done absent after successful fan-in.
-    assert "parallel_done" not in _read_state(sf)
+    # done_children absent after successful fan-in.
+    assert "done_children" not in _read_state(sf)
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +197,7 @@ def test_bail_aggregation_unaffected_by_done_tracking(state_root):
 
     # ok-child is done; bail-child ran but wrote a bail file.
     state = _read_state(sf)
-    assert "ok-child" in state.get("parallel_done", {}).get("grp", {})
+    assert "ok-child" in state.get("done_children", {}).get("grp", [])
 
     with pytest.raises(RuntimeError, match="bailed"):
         fanin_fn()
