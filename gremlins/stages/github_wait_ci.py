@@ -57,7 +57,7 @@ def _wait_for_checks(
         time.sleep(poll_interval)
 
 
-def _bail_if_review_required(state: State, decision: str) -> "Bail | None":
+def _bail_if_review_required(state: State, decision: str) -> Bail | None:
     if decision != "REVIEW_REQUIRED":
         return None
     state.data.write_bail_file(
