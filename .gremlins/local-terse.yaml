@@ -1,0 +1,14 @@
+default_client: xai:grok-4
+
+base_ref: current
+
+prompts:
+  code-style: gremlins:code_style.md
+  verify: [gremlins:verify_fix.md, gremlins:bail_section_fix.md]
+
+stages:
+  - { name: plan,         type: plan,         prompt: [code-style, gremlins:plan.md] }
+  - { name: implement,    type: implement,    prompt: [code-style, gremlins:implement_local.md] }
+  - { name: review-code,  type: review-code,  prompt: [code-style, gremlins:review/detail.md] }
+  - { name: address-code, type: address-code, prompt: [code-style, gremlins:address.md, gremlins:bail_section.md] }
+  - { name: verify,       type: verify,       prompt: verify }

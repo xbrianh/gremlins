@@ -8,5 +8,4 @@ dist/
 build/
 plans/
 .at_venv_config
-.gremlins/
 .claude/
