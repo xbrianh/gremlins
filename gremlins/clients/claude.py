@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Generator
+from typing import IO, cast
 
 from gremlins.clients.config import (
     STREAM_IDLE_BACKOFF,
@@ -112,9 +113,9 @@ class SubprocessClaudeClient:
             cwd=str(cwd) if cwd is not None else None,
         )
         with self._tracked(p):
-            assert p.stdin is not None
-            p.stdin.write(prompt.encode())
-            p.stdin.close()
+            stdin = cast(IO[bytes], p.stdin)
+            stdin.write(prompt.encode())
+            stdin.close()
         return p
 
     def _consume(
@@ -126,9 +127,9 @@ class SubprocessClaudeClient:
         idle_timeout: float = STREAM_IDLE_TIMEOUT,
     ) -> CompletedRun:
         try:
-            assert p.stdout is not None
+            stdout = cast(IO[bytes], p.stdout)
             cost_usd, result_text, events, timed_out = stream_events(
-                p.stdout,
+                stdout,
                 prefix=prefix,
                 raw_path=raw_path,
                 capture=capture_events,
@@ -139,9 +140,9 @@ class SubprocessClaudeClient:
                     self._total_cost_usd += cost_usd
             if timed_out:
                 terminate_and_kill(p, 5.0)
-                p.stdout.close()
+                stdout.close()
                 raise StreamTimeoutError("claude -p stream idle timeout")
-            p.stdout.close()
+            stdout.close()
             rc = p.wait()
         finally:
             self._untrack(p)
