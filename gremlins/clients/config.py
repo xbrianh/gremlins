@@ -12,6 +12,7 @@ R = TypeVar("R")
 
 STREAM_IDLE_TIMEOUT = 120
 STREAM_IDLE_BACKOFF = (60, 300, 600)
+OPENAI_AGENTS_MAX_TURNS = 100
 
 # Substrings that identify transient provider errors (capacity, rate-limit, 5xx).
 # Permanent errors (auth, bad request, content policy) won't match any of these.
