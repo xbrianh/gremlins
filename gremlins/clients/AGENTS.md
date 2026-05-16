@@ -6,9 +6,8 @@ the `Client` class is the seam tests swap out.
 
 ## Modules
 
-- `protocol.py` — `Client` Protocol and the `CompletedRun` dataclass. The
-  single contract every backend implements; stages depend on this, not on a
-  concrete class.
+- `protocol.py` — `CompletedRun` dataclass. The return type for all backend
+  `run(...)` calls.
 - `client.py` — `Client` class: parses `provider:model` specifiers
   (`Client.parse`), dispatches to the registered factory, and provides a sync
   `run(...)` wrapper around the backend impl. Also defines `PACKAGE_DEFAULT`
@@ -45,10 +44,11 @@ the `Client` class is the seam tests swap out.
 
 ## Conventions
 
-- New backends implement the `Client` Protocol from `protocol.py` and register
-  a factory via `register_client_factory(provider, factory)` in this package's
-  `__init__.py`. The factory takes a model string (or `None`) and returns a
-  client instance.
+- New backends implement the duck-typed interface expected by `Client` in
+  `client.py` (`run(...)`, `reap_all()`, `total_cost_usd`) and register a
+  factory via `register_client_factory(provider, factory)` in this package's
+  `__init__.py`. The factory takes a model string and returns a backend
+  instance.
 - Registered providers: `claude` → `SubprocessClaudeClient`; `copilot` →
   `SubprocessCopilotClient`; `openai` and `xai` → `OpenAIAgentsClient` in
   `providers/openai_agents.py` (both share the same backend, keyed by
