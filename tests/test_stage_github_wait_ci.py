@@ -395,7 +395,9 @@ def test_review_required_emits_bail_to_state(
     assert data["class"] == "other"
 
 
-def test_empty_pr_branch_bails(tmp_path: pathlib.Path, make_state_dir: Callable[[str], pathlib.Path]) -> None:
+def test_empty_pr_branch_bails(
+    tmp_path: pathlib.Path, make_state_dir: Callable[[str], pathlib.Path]
+) -> None:
     import gremlins.executor.state as state_mod
 
     gremlin_id = "test-empty-branch"
@@ -434,7 +436,9 @@ def test_empty_pr_branch_bails(tmp_path: pathlib.Path, make_state_dir: Callable[
     assert client.calls == []
 
 
-def test_check_bail_raises_from_state(tmp_path: pathlib.Path, make_state_dir: Callable[[str], pathlib.Path]) -> None:
+def test_check_bail_raises_from_state(
+    tmp_path: pathlib.Path, make_state_dir: Callable[[str], pathlib.Path]
+) -> None:
     gremlin_id = "test-gr-id"
     state_dir = make_state_dir(gremlin_id)
     attempt = "ci-fix-test-attempt"

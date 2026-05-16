@@ -122,7 +122,9 @@ class LoopStage(Stage):
                 if self._pr_stack:
                     _detach_to_pr_base(state)
                 head_before = _git.head_sha(state.cwd)
-                had_failure, bail = _dispatch_runners(runners, iteration, self._max_iterations)
+                had_failure, bail = _dispatch_runners(
+                    runners, iteration, self._max_iterations
+                )
                 if bail is not None:
                     return bail
 

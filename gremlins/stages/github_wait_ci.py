@@ -19,7 +19,6 @@ _FAILING_CONCLUSIONS = frozenset({"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED"})
 _PENDING_STATES = frozenset({"EXPECTED", "PENDING"})
 
 
-
 def _is_done(check: dict[str, Any]) -> bool:
     if check.get("__typename") == "StatusContext":
         return check.get("state") not in _PENDING_STATES
@@ -258,7 +257,9 @@ class GitHubWaitCI(Stage):
         template = "\n\n".join(self.prompts).rstrip()
         fix_sha = ""
         for attempt in range(1, self.max_attempts + 1):
-            outcome, fix_sha = self._run_ci_attempt(state, attempt, pr_url, template, fix_sha)
+            outcome, fix_sha = self._run_ci_attempt(
+                state, attempt, pr_url, template, fix_sha
+            )
             if outcome is not None:
                 return outcome
 
