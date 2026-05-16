@@ -1,35 +1,25 @@
-"""SequenceStage: run body stages in order, propagating parent state fields.
-
-Each sub-stage's State receives the parent's ``worktree``, ``child_key``,
-and ``session_dir`` before its runner is invoked, so a SequenceStage used as a
-parallel child correctly inherits the shard-specific worktree and session
-directory and any bails route through ``parallel_bails[child_key]``.
-"""
+"""SequenceStage: run body stages in order, inheriting parent state."""
 
 from __future__ import annotations
 
-import dataclasses
-from collections.abc import Callable
 from typing import Any, cast
 
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
+from gremlins.stages.composite import child_state as _child_state
 from gremlins.stages.outcome import Done, Outcome
 
 
 class SequenceStage(Stage):
-    """Run body runners sequentially, propagating worktree/child_key/session_dir."""
+    """Run body stages sequentially using child state derived from parent."""
 
     type = "sequence"
 
-    def __init__(
-        self,
-        name: str,
-        *,
-        body: list[tuple[State, Callable[[], Any]]] | None = None,
-    ) -> None:
+    def __init__(self, name: str, *, body: list[Stage] | None = None) -> None:
         super().__init__(name, None, [], {})
-        self._pre_body = body
+        self.body = body or []
+        for c in self.body:
+            c.path = f"{name}/{c.name}"
 
     @classmethod
     def with_dict(cls, d: dict[str, Any], depth: int = 0) -> SequenceStage:
@@ -42,22 +32,11 @@ class SequenceStage(Stage):
             parse_stage(child_d, depth=depth)
             for child_d in cast(list[dict[str, Any]], raw_children)
         ]
-        stage = cls(d["name"])
-        stage.body = children
+        stage = cls(d["name"], body=children)
         stage.client = get_client_from_dict(d)
         return stage
 
     def run(self, state: State) -> Outcome:
-        if self._pre_body is not None:
-            for sub_state, runner in self._pre_body:
-                sub_state.worktree = state.worktree
-                sub_state.child_key = state.child_key
-                sub_state.session_dir = state.session_dir
-                runner()
-        else:
-            for child in self.body:
-                child_state = dataclasses.replace(
-                    state, client=state.test_client or child.client
-                )
-                child_state.make_runner(child, scope=self.body)()
+        for child in self.body:
+            _child_state(state, child).make_runner(child, scope=self.body)()
         return Done()

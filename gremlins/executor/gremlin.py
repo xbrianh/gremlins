@@ -119,6 +119,9 @@ class Gremlin:
             raise ValueError(f"Gremlin does not support stage type(s): {unknown}")
 
         self.stages = _expand_stage_entries(stages)
+        for s in self.stages:
+            if not s.path:
+                s.path = s.name
         self.state_dir = state_dir
         self.session_dir = session_dir
         self.gremlin_id = gremlin_id
