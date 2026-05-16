@@ -1,14 +1,17 @@
 # `gremlins/clients/`
 
-Agent backends behind the `ClaudeClient` Protocol. Stages talk to one of
-these via `client.run(...)` and never spawn `claude -p` (or `copilot -p`)
-directly — the protocol is the seam tests swap out.
+Agent backends behind the `Client` protocol. Stages talk to one of these via
+`client.run(...)` and never spawn `claude -p` (or `copilot -p`) directly —
+the `Client` class is the seam tests swap out.
 
 ## Modules
 
-- `protocol.py` — `ClaudeClient` Protocol and the `CompletedRun` dataclass.
-  The single contract every backend implements; stages depend on this, not
-  on a concrete class.
+- `protocol.py` — `CompletedRun` dataclass. The return type for all backend
+  `run(...)` calls.
+- `client.py` — `Client` class: parses `provider:model` specifiers
+  (`Client.parse`), dispatches to the registered factory, and provides a sync
+  `run(...)` wrapper around the backend impl. Also defines `PACKAGE_DEFAULT`
+  (`claude:sonnet`).
 - `claude.py` — `SubprocessClaudeClient`, the production backend. Spawns
   `claude -p ... --output-format stream-json` and consumes events via
   `stream.stream_events`. Owns its child list so `reap_all()` (called from
@@ -29,15 +32,9 @@ directly — the protocol is the seam tests swap out.
   stages emit (`text:` / `think:` / `tool:` / `result:` / `final:`).
   `stream_events` is used by `claude.py` and `fleet/rescue.py`; `trunc`
   is used by `providers/openai_agents.py`.
-- `resolve.py` — `ClientSpec` (`provider:model`), the package default
-  (`claude:sonnet`), and the helpers (`collect_stage_specs`,
-  `resolve_stage_client`, `require_stage_spec`,
-  `load_stage_specs_from_state`, `validate_stage_specs`) that decide which
-  client each stage gets and persist that decision to `state.json`.
-- `__init__.py` — registers the `claude`, `copilot`, and `openai` factories
-  with `gremlins.stages.registry.CLIENT_FACTORIES` at import time and exposes
-  `to_client(spec)` for the orchestrator. Importing the package is what
-  wires the providers up.
+- `__init__.py` — registers the `claude`, `copilot`, `openai`, and `xai`
+  factories with `CLIENT_FACTORIES` at import time. Importing the package is
+  what wires the providers up.
 - `tools.py` — `GREMLINS_TOOLS`, the list of `openai-agents` `FunctionTool`
   objects (Read, Edit, Bash, Write, Grep, Glob) that back the OpenAI
   provider's agent loop.
@@ -47,10 +44,15 @@ directly — the protocol is the seam tests swap out.
 
 ## Conventions
 
-- New backends implement the `ClaudeClient` Protocol from `protocol.py` and
-  register a factory via `register_client_factory(provider, factory)` in
-  this package's `__init__.py`. The factory takes a model string (or
-  `None`) and returns a client instance.
+- New backends implement the duck-typed interface expected by `Client` in
+  `client.py` (`run(...)`, `reap_all()`, `total_cost_usd`) and register a
+  factory via `register_client_factory(provider, factory)` in this package's
+  `__init__.py`. The factory takes a model string and returns a backend
+  instance.
+- Registered providers: `claude` → `SubprocessClaudeClient`; `copilot` →
+  `SubprocessCopilotClient`; `openai` and `xai` → `OpenAIAgentsClient` in
+  `providers/openai_agents.py` (both share the same backend, keyed by
+  provider).
 - The `label=` kwarg on `run(...)` is the stream-event prefix in logs and
   the `FakeClaudeClient` lookup key. Stages that re-enter the same logical
   step within one process must use distinct labels per phase so the fake's
@@ -67,7 +69,7 @@ directly — the protocol is the seam tests swap out.
   single source of truth for retry/timeout policy across all backends. Both
   `claude.py` and `providers/openai_agents.py` import and use
   `validate_max_retries` from there; overrun semantics must stay uniform.
-- `ClientSpec.parse` enforces `provider:model` shape and rejects unknown
-  providers by consulting `CLIENT_FACTORIES`. Adding a provider means
-  registering it in `__init__.py`; otherwise YAMLs that name it fail at
-  parse time, which is the desired behavior.
+- `Client.parse` enforces `provider:model` shape and rejects unknown providers
+  by consulting `CLIENT_FACTORIES`. Adding a provider means registering it in
+  `__init__.py`; otherwise specifiers that name it fail at parse time, which
+  is the desired behavior.
