@@ -15,6 +15,7 @@ from agents.items import MessageOutputItem, ToolCallItem, ToolCallOutputItem
 from agents.stream_events import RunItemStreamEvent
 from agents.tool_context import ToolContext
 
+from gremlins.clients.config import OPENAI_AGENTS_MAX_TURNS
 from gremlins.clients.protocol import CompletedRun
 from gremlins.clients.providers.openai_agents import (
     OpenAIAgentsClient,
@@ -450,6 +451,24 @@ def test_terminal_stream_error_cost_is_recorded(monkeypatch: Any) -> None:
 
     # two attempts (original + 1 retry), both accrued cost
     assert client.total_cost_usd > 0
+
+
+def test_run_streamed_passes_max_turns(monkeypatch: Any) -> None:
+    usage = _make_usage()
+    fake_run = _make_run_result_streaming("done", usage, [])
+    captured_kwargs: list[dict[str, Any]] = []
+
+    def _fake_run_streamed(*a: Any, **kw: Any) -> Any:
+        captured_kwargs.append(kw)
+        return fake_run
+
+    monkeypatch.setattr("agents.run.Runner.run_streamed", _fake_run_streamed)
+
+    client = OpenAIAgentsClient("gpt-4o")
+    client.run("do something", label="t")
+
+    assert captured_kwargs, "Runner.run_streamed was not called"
+    assert captured_kwargs[0].get("max_turns") == OPENAI_AGENTS_MAX_TURNS
 
 
 def test_bash_invoke_no_extra_env_passes_none() -> None:

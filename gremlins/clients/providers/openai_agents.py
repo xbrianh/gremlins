@@ -20,6 +20,7 @@ from agents.result import RunResultStreaming
 from agents.stream_events import RunItemStreamEvent
 
 from gremlins.clients.config import (
+    OPENAI_AGENTS_MAX_TURNS,
     STREAM_IDLE_BACKOFF,
     STREAM_IDLE_TIMEOUT,
     is_transient_stream_error,
@@ -269,7 +270,13 @@ class OpenAIAgentsClient:
         cwd: pathlib.Path | None,
         idle_timeout: float,
     ) -> CompletedRun:
-        run = Runner.run_streamed(agent, prompt, context=ctx, run_config=run_config)
+        run = Runner.run_streamed(
+            agent,
+            prompt,
+            context=ctx,
+            run_config=run_config,
+            max_turns=OPENAI_AGENTS_MAX_TURNS,
+        )
         self._track(run)
 
         sys.stderr.write(f"{prefix}init model={model} cwd={str(cwd) if cwd else '?'}\n")
