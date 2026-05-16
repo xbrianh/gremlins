@@ -95,7 +95,7 @@ class Verify(Stage):
             try:
                 state.data.check_bail(f"verify-fix-{n}", child_key=state.child_key)
             except RuntimeError as exc:
-                return Bail(str(exc))
+                raise Bail(str(exc)) from exc
             return Done()
 
         loop = LoopStage.from_runners(

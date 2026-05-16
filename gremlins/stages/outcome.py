@@ -14,9 +14,10 @@ class NeedsFix:
     returncode: int | None = None
 
 
-@dataclass(frozen=True)
-class Bail:
-    reason: str
+class Bail(Exception):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
-Outcome = Done | NeedsFix | Bail
+Outcome = Done | NeedsFix

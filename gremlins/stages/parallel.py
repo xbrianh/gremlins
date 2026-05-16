@@ -19,7 +19,7 @@ from gremlins.executor.state import (
     resolve_state_file,
 )
 from gremlins.stages.base import Stage
-from gremlins.stages.outcome import Done, Outcome
+from gremlins.stages.outcome import Bail, Done, Outcome
 from gremlins.utils import proc
 
 logger = logging.getLogger(__name__)
@@ -336,6 +336,24 @@ def _parallel_stages(
                 return
             try:
                 fn()
+            except Bail as b:
+                if cancel_event is not None:
+                    cancel_event.set()
+                sf = resolve_state_file(gremlin_id)
+                if sf is not None and sf.exists():
+                    try:
+                        pa: dict[str, Any] = (
+                            json.loads(sf.read_text(encoding="utf-8")).get(
+                                "parallel_attempts"
+                            )
+                            or {}
+                        )
+                        StateData.load(gremlin_id).write_bail_file(
+                            "other", b.reason, attempt=pa.get(child_key) or ""
+                        )
+                    except Exception:
+                        pass
+                return
             except Exception:
                 if cancel_event is not None:
                     cancel_event.set()

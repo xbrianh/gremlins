@@ -101,36 +101,28 @@ class ReviewCode(Stage):
         else:
             code_context = code_scope
 
-        try:
-            state.data.set_stage(
-                self.name,
-                {"model": f"running ({model})"},
-                parent_stage=state.parent_stage,
-            )
-            _run_reviewer(
-                client=state.client,
-                model=model,
-                out_file=out_file,
-                focus=focus,
-                context=code_context,
-                where_field="**File:** `path/to/file.ext:<line>`",
-                label=f"{self.name}:{model}",
-                raw_path=state.session_dir / f"stream-{self.name}-{model}.jsonl",
-                cwd=state.worktree,
-            )
-            state.data.set_stage(
-                self.name, {"model": f"done ({model})"}, parent_stage=state.parent_stage
-            )
-            logger.info("code review (%s): %s", model, out_file)
-            if not out_file.exists() or out_file.stat().st_size == 0:
-                raise RuntimeError(f"review {model} did not produce {out_file}")
-        except (SystemExit, Exception) as exc:
-            state.data.write_bail_file(
-                "other",
-                f"{self.name} stage failed: {exc}"[:200],
-                attempt=state.data.attempt,
-            )
-            raise
+        state.data.set_stage(
+            self.name,
+            {"model": f"running ({model})"},
+            parent_stage=state.parent_stage,
+        )
+        _run_reviewer(
+            client=state.client,
+            model=model,
+            out_file=out_file,
+            focus=focus,
+            context=code_context,
+            where_field="**File:** `path/to/file.ext:<line>`",
+            label=f"{self.name}:{model}",
+            raw_path=state.session_dir / f"stream-{self.name}-{model}.jsonl",
+            cwd=state.worktree,
+        )
+        state.data.set_stage(
+            self.name, {"model": f"done ({model})"}, parent_stage=state.parent_stage
+        )
+        logger.info("code review (%s): %s", model, out_file)
+        if not out_file.exists() or out_file.stat().st_size == 0:
+            raise RuntimeError(f"review {model} did not produce {out_file}")
 
         return Done()
 

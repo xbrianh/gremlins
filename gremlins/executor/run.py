@@ -25,6 +25,7 @@ from gremlins.executor.state import (
 )
 from gremlins.logging_setup import configure_logging
 from gremlins.stages.base import Stage
+from gremlins.stages.outcome import Bail
 from gremlins.utils.git import has_commits, has_dirty_worktree, in_git_repo
 from gremlins.utils.github import get_repo
 
@@ -206,7 +207,18 @@ def run_pipeline(
                 )
 
     _install_signal_handlers(_signal_clients)
-    gremlin.run()
+    try:
+        gremlin.run()
+    except Bail as b:
+        sd = StateData.load(gremlin_id)
+        sd.write_bail_file("other", b.reason, attempt=sd.attempt)
+        return 1
+    except Exception as exc:
+        sd = StateData.load(gremlin_id)
+        sd.write_bail_file(
+            "other", f"unexpected error: {exc}"[:200], attempt=sd.attempt
+        )
+        raise
 
     total_cost = 0.0
     for c in [client] if client else _stage_clients:

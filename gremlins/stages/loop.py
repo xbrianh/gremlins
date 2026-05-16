@@ -7,7 +7,7 @@ import logging
 from collections.abc import Callable
 from typing import Any, cast
 
-from gremlins.executor.state import State, resolve_state_file
+from gremlins.executor.state import State
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, NeedsFix, Outcome
 from gremlins.utils import git as _git
@@ -19,17 +19,15 @@ def _dispatch_runners(
     runners: list[Callable[[], Outcome]],
     iteration: int,
     max_iterations: int,
-) -> tuple[bool, Bail | None]:
+) -> bool:
     had_failure = False
     for i, runner in enumerate(runners):
         if i > 0 and (not had_failure or iteration == max_iterations):
             continue
         outcome = runner()
-        if isinstance(outcome, Bail):
-            return had_failure, outcome
         if isinstance(outcome, NeedsFix):
             had_failure = True
-    return had_failure, None
+    return had_failure
 
 
 class LoopStage(Stage):
@@ -116,44 +114,29 @@ class LoopStage(Stage):
             if self._body_runners is not None
             else self._build_runners(state)
         )
-        try:
-            for iteration in range(1, self._max_iterations + 1):
-                state.data.patch(loop_iteration=iteration)
-                if self._pr_stack:
-                    _detach_to_pr_base(state)
-                head_before = _git.head_sha(state.cwd)
-                had_failure, bail = _dispatch_runners(
-                    runners, iteration, self._max_iterations
-                )
-                if bail is not None:
-                    return bail
+        for iteration in range(1, self._max_iterations + 1):
+            state.data.patch(loop_iteration=iteration)
+            if self._pr_stack:
+                _detach_to_pr_base(state)
+            head_before = _git.head_sha(state.cwd)
+            had_failure = _dispatch_runners(runners, iteration, self._max_iterations)
 
-                if not had_failure:
-                    head_after = _git.head_sha(state.cwd)
-                    if head_after == head_before:
-                        return Done()
-                    logger.info(
-                        "loop iteration %d: HEAD advanced, continuing", iteration
-                    )
-                    if iteration == self._max_iterations:
-                        return Done()
-                elif iteration == self._max_iterations:
-                    break
+            if not had_failure:
+                head_after = _git.head_sha(state.cwd)
+                if head_after == head_before:
+                    return Done()
+                logger.info("loop iteration %d: HEAD advanced, continuing", iteration)
+                if iteration == self._max_iterations:
+                    return Done()
+            elif iteration == self._max_iterations:
+                break
 
-            state.data.write_bail_file(
-                "other",
-                f"loop exhausted {self._max_iterations} iterations",
-                attempt=state.data.attempt,
-            )
-            return Bail(f"loop exhausted {self._max_iterations} iterations")
-        except (SystemExit, Exception) as exc:
-            if not _bail_file_exists(state.data.gremlin_id, state.data.attempt):
-                state.data.write_bail_file(
-                    "other",
-                    f"loop stage failed: {exc}"[:200],
-                    attempt=state.data.attempt,
-                )
-            raise
+        state.data.write_bail_file(
+            "other",
+            f"loop exhausted {self._max_iterations} iterations",
+            attempt=state.data.attempt,
+        )
+        raise Bail(f"loop exhausted {self._max_iterations} iterations")
 
 
 def _detach_to_pr_base(state: State) -> None:
@@ -162,10 +145,3 @@ def _detach_to_pr_base(state: State) -> None:
         return
     logger.info("detaching worktree to previous PR branch: %s", branch)
     _git.git_detach_to_branch(branch, cwd=state.cwd)
-
-
-def _bail_file_exists(gremlin_id: str | None, attempt: str) -> bool:
-    sf = resolve_state_file(gremlin_id)
-    if sf is None or not sf.exists() or not attempt:
-        return False
-    return (sf.parent / f"bail_{attempt}.json").exists()
