@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData
 from gremlins.stages.cmd import Cmd
@@ -92,9 +94,8 @@ def test_loop_exhausted_returns_bail(tmp_path):
         return Done()
 
     loop = LoopStage.from_runners([check, fix], max_iterations=3)
-    outcome = loop.run(_loop_state(tmp_path))
-
-    assert isinstance(outcome, Bail)
+    with pytest.raises(Bail):
+        loop.run(_loop_state(tmp_path))
 
 
 def test_loop_fix_skipped_on_final_iteration(tmp_path):
@@ -111,24 +112,22 @@ def test_loop_fix_skipped_on_final_iteration(tmp_path):
         return Done()
 
     loop = LoopStage.from_runners([check, fix], max_iterations=3)
-    outcome = loop.run(_loop_state(tmp_path))
-
-    assert isinstance(outcome, Bail)
+    with pytest.raises(Bail):
+        loop.run(_loop_state(tmp_path))
     # fix ran for iterations 1 and 2, NOT 3
     assert fix_calls == [1, 2]
 
 
 def test_loop_bail_propagates_immediately(tmp_path):
-    """Bail returned from a body runner propagates without continuing."""
+    """Bail raised from a body runner propagates without continuing."""
 
-    def bail_runner() -> Bail:
-        return Bail("stage bailed: bail_class=other")
+    def bail_runner() -> Done:
+        raise Bail("stage bailed: bail_class=other")
 
     loop = LoopStage.from_runners([bail_runner], max_iterations=3)
-    outcome = loop.run(_loop_state(tmp_path))
-
-    assert isinstance(outcome, Bail)
-    assert "bail_class=other" in outcome.reason
+    with pytest.raises(Bail) as exc_info:
+        loop.run(_loop_state(tmp_path))
+    assert "bail_class=other" in exc_info.value.reason
 
 
 def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
@@ -152,9 +151,9 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
         worktree=tmp_path,
     )
     loop = LoopStage.from_runners([check, fix], max_iterations=2)
-    outcome = loop.run(loop_state)
+    with pytest.raises(Bail):
+        loop.run(loop_state)
 
-    assert isinstance(outcome, Bail)
     bail_file = state_dir / f"bail_{attempt}.json"
     assert bail_file.exists()
     data = json.loads(bail_file.read_text())
@@ -353,9 +352,9 @@ def test_loop_patches_loop_iteration_to_state(tmp_path, make_state_dir):
         worktree=tmp_path,
     )
     loop = LoopStage.from_runners([runner], max_iterations=3)
-    outcome = loop.run(loop_state)
+    with pytest.raises(Bail):
+        loop.run(loop_state)
 
-    assert isinstance(outcome, Bail)
     assert seen_iterations == [1, 2, 3]
 
 

@@ -421,23 +421,14 @@ def test_review_code_stage_writes_stage_to_state(tmp_path, make_state_dir):
     assert data.get("stage") == "review-code"
 
 
-def test_address_code_stage_emits_bail_on_failure(tmp_path, make_state_dir):
-    import gremlins.executor.state as state_mod
-
+def test_address_code_stage_raises_on_missing_review_files(tmp_path, make_state_dir):
     gremlin_id = "test-gr-id"
-    state_dir = make_state_dir(gremlin_id)
-    attempt = "address-code-test"
-    state_mod.StateData.load(gremlin_id).patch(attempt=attempt)
+    make_state_dir(gremlin_id)
     client = FakeClaudeClient(fixtures={})
     stage = _make_address_code_stage(client, tmp_path, gremlin_id=gremlin_id)
     state = _make_state(client, tmp_path, gremlin_id=gremlin_id)
-    state.data.attempt = attempt
     with pytest.raises(FileNotFoundError):
         stage.run(state)
-    bail_file = state_dir / f"bail_{attempt}.json"
-    assert bail_file.exists()
-    data = json.loads(bail_file.read_text())
-    assert data["class"] == "other"
 
 
 def test_address_code_finds_review_files_in_parallel_subdirs(tmp_path):

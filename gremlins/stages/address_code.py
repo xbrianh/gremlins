@@ -58,16 +58,8 @@ class AddressCode(Stage):
         return stage
 
     def run(self, state: State) -> Outcome:
-        try:
-            inputs = self._inputs_from_local(state)
-            self._run_local(inputs, state)
-        except (SystemExit, Exception) as exc:
-            state.data.write_bail_file(
-                "other",
-                f"address-code stage failed: {exc}"[:200],
-                attempt=state.data.attempt,
-            )
-            raise
+        inputs = self._inputs_from_local(state)
+        self._run_local(inputs, state)
         return Done()
 
     def _inputs_from_local(self, state: State) -> dict[str, str]:

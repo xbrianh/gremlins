@@ -14,7 +14,7 @@ from typing import Any, cast
 
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
-from gremlins.stages.outcome import Bail, Done, Outcome
+from gremlins.stages.outcome import Done, Outcome
 
 
 class SequenceStage(Stage):
@@ -53,15 +53,11 @@ class SequenceStage(Stage):
                 sub_state.worktree = state.worktree
                 sub_state.child_key = state.child_key
                 sub_state.session_dir = state.session_dir
-                outcome = runner()
-                if isinstance(outcome, Bail):
-                    return outcome
+                runner()
         else:
             for child in self.body:
                 child_state = dataclasses.replace(
                     state, client=state.test_client or child.client
                 )
-                outcome = child_state.make_runner(child, scope=self.body)()
-                if isinstance(outcome, Bail):
-                    return outcome
+                child_state.make_runner(child, scope=self.body)()
         return Done()

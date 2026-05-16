@@ -56,15 +56,15 @@ def _wait_for_checks(
         time.sleep(poll_interval)
 
 
-def _bail_if_review_required(state: State, decision: str) -> Bail | None:
+def _bail_if_review_required(state: State, decision: str) -> None:
     if decision != "REVIEW_REQUIRED":
-        return None
+        return
     state.data.write_bail_file(
         "other",
         "PR requires human review approval before merge",
         attempt=state.data.attempt,
     )
-    return Bail("ci-gate: PR blocked by required human review")
+    raise Bail("ci-gate: PR blocked by required human review")
 
 
 def _poll_until_done(
@@ -75,7 +75,7 @@ def _poll_until_done(
     checks_getter: Callable[[], tuple[list[dict[str, Any]], str]] | None = None,
     required_sha: str = "",
     head_sha_getter: Callable[[], str] | None = None,
-) -> tuple[list[dict[str, Any]], str] | Bail:
+) -> tuple[list[dict[str, Any]], str]:
     deadline = time.time() + timeout
     review_decision = ""
     while True:
@@ -90,13 +90,11 @@ def _poll_until_done(
             review_decision = status["review_decision"]
             current_sha = status["head_sha"]
 
-        bail = _bail_if_review_required(state, review_decision)
-        if bail is not None:
-            return bail
+        _bail_if_review_required(state, review_decision)
 
         if required_sha and current_sha and current_sha != required_sha:
             if time.time() >= deadline:
-                return Bail(
+                raise Bail(
                     f"ci-gate: timed out waiting for GitHub to reflect pushed SHA "
                     f"{required_sha[:8]} (still showing {current_sha[:8]}) after {timeout}s"
                 )
@@ -177,7 +175,7 @@ class GitHubWaitCI(Stage):
             self.max_attempts,
             self.poll_timeout,
         )
-        poll_result = _poll_until_done(
+        final_checks, _ = _poll_until_done(
             state,
             pr_url,
             self.poll_timeout,
@@ -186,9 +184,6 @@ class GitHubWaitCI(Stage):
             required_sha=fix_sha,
             head_sha_getter=self.head_sha_getter,
         )
-        if isinstance(poll_result, Bail):
-            return poll_result, fix_sha
-        final_checks, _ = poll_result
         failed = [c for c in final_checks if _is_failing(c)]
 
         if not failed:
@@ -211,7 +206,7 @@ class GitHubWaitCI(Stage):
                 "ci-fix: pr_branch unknown, cannot push",
                 attempt=state.data.attempt,
             )
-            return Bail("ci-fix: pr_branch unknown, cannot push"), ""
+            raise Bail("ci-fix: pr_branch unknown, cannot push")
 
         fix_prompt = template.format(
             bail_command=self.bail_command(state),
@@ -227,7 +222,7 @@ class GitHubWaitCI(Stage):
         try:
             state.data.check_bail(f"ci-fix-{attempt}", child_key=state.child_key)
         except RuntimeError as exc:
-            return Bail(str(exc)), ""
+            raise Bail(str(exc)) from exc
 
         new_fix_sha = (
             self.fix_sha_getter()
@@ -243,9 +238,7 @@ class GitHubWaitCI(Stage):
         checks, review_decision = _wait_for_checks(
             pr_url, self.checks_getter, self.poll_interval, self.startup_grace_secs
         )
-        bail = _bail_if_review_required(state, review_decision)
-        if bail is not None:
-            return bail
+        _bail_if_review_required(state, review_decision)
 
         if not checks:
             logger.info(
@@ -268,4 +261,4 @@ class GitHubWaitCI(Stage):
             f"CI failed after {self.max_attempts} attempts",
             attempt=state.data.attempt,
         )
-        return Bail(f"CI failed after {self.max_attempts} attempts")
+        raise Bail(f"CI failed after {self.max_attempts} attempts")

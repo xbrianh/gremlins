@@ -6,6 +6,7 @@ import json
 import pathlib
 from typing import Any
 
+import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
@@ -114,8 +115,8 @@ def test_attempts_exhausted_raises(tmp_path, monkeypatch):
         tmp_path, cmds=["false", "true"], max_attempts=3, client=client
     )
 
-    outcome = stage.run(state)
-    assert isinstance(outcome, Bail)
+    with pytest.raises(Bail):
+        stage.run(state)
 
     assert len(state.client.calls) == 2
     assert (tmp_path / "verify-attempt-1.log").exists()
@@ -126,8 +127,8 @@ def test_attempts_exhausted_raises(tmp_path, monkeypatch):
 def test_exhaustion_with_max_1(tmp_path):
     stage, state = _make_stage(tmp_path, cmds=["false"], max_attempts=1)
 
-    outcome = stage.run(state)
-    assert isinstance(outcome, Bail)
+    with pytest.raises(Bail):
+        stage.run(state)
 
     assert len(state.client.calls) == 0
     assert (tmp_path / "verify-attempt-1.log").exists()
@@ -149,8 +150,8 @@ def test_both_cmds_in_fix_prompt(tmp_path, monkeypatch):
         client=client,
     )
 
-    outcome = stage.run(state)
-    assert isinstance(outcome, Bail)
+    with pytest.raises(Bail):
+        stage.run(state)
 
     assert "false" in state.client.calls[0].prompt
     assert "make test" in state.client.calls[0].prompt
@@ -178,8 +179,8 @@ def test_no_pr_opened_on_exhaustion(tmp_path, monkeypatch):
     )
     stage, state = _make_stage(tmp_path, cmds=["false"], max_attempts=3, client=client)
 
-    outcome = stage.run(state)
-    assert isinstance(outcome, Bail)
+    with pytest.raises(Bail):
+        stage.run(state)
 
     assert len(state.client.calls) == 2
 
@@ -205,8 +206,8 @@ def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
         worktree=tmp_path,
     )
 
-    outcome = stage.run(state)
-    assert isinstance(outcome, Bail)
+    with pytest.raises(Bail):
+        stage.run(state)
 
     bail_file = state_dir / f"bail_{attempt}.json"
     assert bail_file.exists()
@@ -255,8 +256,8 @@ def test_parallel_child_fix_prompt_uses_new_bail_command(tmp_path):
         worktree=tmp_path,
     )
 
-    outcome = stage.run(state)
-    assert isinstance(outcome, Bail)
+    with pytest.raises(Bail):
+        stage.run(state)
 
     assert "python -c" in state.client.calls[0].prompt
     assert "gremlins.bail" not in state.client.calls[0].prompt

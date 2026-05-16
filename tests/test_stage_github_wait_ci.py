@@ -5,6 +5,7 @@ import pathlib
 from collections.abc import Callable
 from typing import Any
 
+import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
@@ -90,9 +91,9 @@ def test_review_required_no_checks_bails(tmp_path: pathlib.Path) -> None:
     client = FakeClaudeClient(fixtures={})
     getter = _make_getter([([], "REVIEW_REQUIRED")])
     stage, state = _make_stage(client, tmp_path, checks_getter=getter)
-    result = stage.run(state)
-    assert isinstance(result, Bail)
-    assert "PR blocked by required human review" in result.reason
+    with pytest.raises(Bail) as exc_info:
+        stage.run(state)
+    assert "PR blocked by required human review" in exc_info.value.reason
     assert client.calls == []
 
 
@@ -130,9 +131,9 @@ def test_review_required_bails(tmp_path: pathlib.Path) -> None:
     client = FakeClaudeClient(fixtures={})
     getter = _make_getter([([_PASSING_CHECK], "REVIEW_REQUIRED")])
     stage, state = _make_stage(client, tmp_path, checks_getter=getter)
-    result = stage.run(state)
-    assert isinstance(result, Bail)
-    assert "PR blocked by required human review" in result.reason
+    with pytest.raises(Bail) as exc_info:
+        stage.run(state)
+    assert "PR blocked by required human review" in exc_info.value.reason
     assert client.calls == []
 
 
@@ -148,9 +149,9 @@ def test_review_required_after_fix_bails(tmp_path: pathlib.Path) -> None:
         ]
     )
     stage, state = _make_stage(client, tmp_path, poll_interval=0, checks_getter=getter)
-    result = stage.run(state)
-    assert isinstance(result, Bail)
-    assert "PR blocked by required human review" in result.reason
+    with pytest.raises(Bail) as exc_info:
+        stage.run(state)
+    assert "PR blocked by required human review" in exc_info.value.reason
     assert len(client.calls) == 1
     assert client.calls[0].label == "ci-fix-1"
 
@@ -166,9 +167,9 @@ def test_review_required_while_pending_bails(tmp_path: pathlib.Path) -> None:
         ]
     )
     stage, state = _make_stage(client, tmp_path, poll_interval=0, checks_getter=getter)
-    result = stage.run(state)
-    assert isinstance(result, Bail)
-    assert "PR blocked by required human review" in result.reason
+    with pytest.raises(Bail) as exc_info:
+        stage.run(state)
+    assert "PR blocked by required human review" in exc_info.value.reason
     assert client.calls == []
 
 
@@ -238,9 +239,9 @@ def test_exhausted_bails(tmp_path: pathlib.Path) -> None:
     from gremlins.stages.outcome import Bail
 
     stage, state = _make_stage(client, tmp_path, poll_interval=0, checks_getter=getter)
-    outcome = stage.run(state)
-    assert isinstance(outcome, Bail)
-    assert "CI failed after 3 attempts" in outcome.reason
+    with pytest.raises(Bail) as exc_info:
+        stage.run(state)
+    assert "CI failed after 3 attempts" in exc_info.value.reason
     fix_labels = [c.label for c in client.calls]
     assert fix_labels == ["ci-fix-1", "ci-fix-2"]
 
@@ -387,8 +388,8 @@ def test_review_required_emits_bail_to_state(
     from gremlins.stages.outcome import Bail
 
     state.data.attempt = attempt
-    result = stage.run(state)
-    assert isinstance(result, Bail)
+    with pytest.raises(Bail):
+        stage.run(state)
     bail_file = state_dir / f"bail_{attempt}.json"
     assert bail_file.exists()
     data = json.loads(bail_file.read_text())
@@ -427,8 +428,11 @@ def test_empty_pr_branch_bails(
         checks_getter=getter,
         pr_branch=None,
     )
+    from gremlins.stages.outcome import Bail
+
     state.data.attempt = attempt
-    stage.run(state)
+    with pytest.raises(Bail):
+        stage.run(state)
     bail_file = state_dir / f"bail_{attempt}.json"
     assert bail_file.exists()
     data = json.loads(bail_file.read_text())
@@ -461,6 +465,6 @@ def test_check_bail_raises_from_state(
     from gremlins.stages.outcome import Bail
 
     state.data.attempt = attempt
-    result = stage.run(state)
-    assert isinstance(result, Bail)
-    assert "bailed" in result.reason
+    with pytest.raises(Bail) as exc_info:
+        stage.run(state)
+    assert "bailed" in exc_info.value.reason

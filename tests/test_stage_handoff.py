@@ -168,9 +168,9 @@ def test_bail_emits_bail_and_raises(tmp_path, monkeypatch, test_state_root):
     state.data.attempt = attempt  # simulate what make_runner() would set
     monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
 
-    outcome = h.run(state)
-    assert isinstance(outcome, Bail)
-    assert "chain halted by handoff" in outcome.reason
+    with pytest.raises(Bail) as exc_info:
+        h.run(state)
+    assert "chain halted by handoff" in exc_info.value.reason
 
     bail_file = state_dir / f"bail_{attempt}.json"
     assert bail_file.exists()

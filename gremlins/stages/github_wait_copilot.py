@@ -66,5 +66,5 @@ class GitHubWaitCopilot(Stage):
                 logger.info("Copilot review: %s", result)
                 return Done()
             if time.time() >= deadline:
-                return Bail(f"Copilot review timed out after {self.timeout}s")
+                raise Bail(f"Copilot review timed out after {self.timeout}s")
             time.sleep(self.interval)

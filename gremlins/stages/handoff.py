@@ -465,7 +465,7 @@ class Handoff(Stage):
             state.data.write_bail_file(
                 "other", f"handoff bail: {reason}"[:200], attempt=state.data.attempt
             )
-            return Bail(f"chain halted by handoff: {reason}")
+            raise Bail(f"chain halted by handoff: {reason}")
 
         # exit_state == "next-plan"
         child_plan_path = sig.get("child_plan") or ""

@@ -76,9 +76,9 @@ def test_timeout_bails(tmp_path: pathlib.Path) -> None:
     from gremlins.stages.outcome import Bail
 
     stage, state = _make_stage(tmp_path, timeout=0, review_checker=lambda: None)
-    result = stage.run(state)
-    assert isinstance(result, Bail)
-    assert "timed out" in result.reason
+    with pytest.raises(Bail) as exc_info:
+        stage.run(state)
+    assert "timed out" in exc_info.value.reason
 
 
 def test_no_pr_num_raises(tmp_path: pathlib.Path) -> None:
