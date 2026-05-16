@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import dataclasses
 import logging
 from collections.abc import Callable
 from typing import Any, cast
 
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
+from gremlins.stages.composite import child_state as _child_state
 from gremlins.stages.outcome import Bail, Done, NeedsFix, Outcome
 from gremlins.utils import git as _git
 
@@ -61,6 +61,8 @@ class LoopStage(Stage):
     ) -> None:
         super().__init__(name, None, [], {})
         self.body = body or []
+        for c in self.body:
+            c.path = f"{name}/{c.name}"
         self._body_runners = body_runners
         self._max_iterations = max_iterations
         self._pr_stack = pr_stack
@@ -101,10 +103,8 @@ class LoopStage(Stage):
     def _build_runners(self, state: State) -> list[Callable[[], Outcome]]:
         result: list[Callable[[], Outcome]] = []
         for child in self.body:
-            child_state = dataclasses.replace(
-                state, client=state.test_client or child.client
-            )
-            runner = child_state.make_runner(child, scope=self.body)
+            cs = _child_state(state, child)
+            runner = cs.make_runner(child, scope=self.body)
             result.append(cast(Callable[[], Outcome], runner))
         return result
 

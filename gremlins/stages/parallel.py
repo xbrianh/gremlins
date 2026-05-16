@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import concurrent.futures
-import dataclasses
 import json
 import logging
 import pathlib
@@ -19,6 +18,7 @@ from gremlins.executor.state import (
     resolve_state_file,
 )
 from gremlins.stages.base import Stage
+from gremlins.stages.composite import child_state as _child_state
 from gremlins.stages.outcome import Bail, Done, Outcome
 from gremlins.utils import proc
 
@@ -50,6 +50,8 @@ class ParallelStage(Stage):
         self._cancel_on_bail = cancel_on_bail
         self._bail_policy = bail_policy
         self.body = body
+        for c in self.body:
+            c.path = f"{name}/{c.name}"
 
     @property
     def max_concurrent(self) -> int | None:
@@ -142,21 +144,10 @@ class ParallelStage(Stage):
         group_dir.mkdir(parents=True, exist_ok=True)
         child_runners: list[tuple[str, State, Callable[[], None]]] = []
         for child in self.body:
-            child_dir = group_dir / child.name
-            child_dir.mkdir(parents=True, exist_ok=True)
-            child_state = dataclasses.replace(
-                state,
-                client=state.test_client or child.client,
-                session_dir=child_dir,
-                child_key=child.name,
-                parent_stage=state.parent_stage or self.name,
-            )
+            (group_dir / child.name).mkdir(parents=True, exist_ok=True)
+            cs = _child_state(state, child, fan_out=True)
             child_runners.append(
-                (
-                    child.name,
-                    child_state,
-                    child_state.make_runner(child, scope=self.body),
-                )
+                (child.name, cs, cs.make_runner(child, scope=self.body))
             )
         for _, fn in self.build_runtime_stages(
             child_runners,

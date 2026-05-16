@@ -9,89 +9,93 @@ import pytest
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData
+from gremlins.stages.base import Stage
+from gremlins.stages.outcome import Done, Outcome
 from gremlins.stages.sequence import SequenceStage
 
 
-def _state() -> RuntimeState:
-    return RuntimeState(
-        data=StateData(),
-        client=FakeClaudeClient(),
-        session_dir=pathlib.Path("/tmp"),
-    )
+def _state(**kw) -> RuntimeState:
+    kw.setdefault("session_dir", pathlib.Path("/tmp"))
+    return RuntimeState(data=StateData(), client=FakeClaudeClient(), **kw)
 
 
-def _make_sequence(
-    runners: list, parent_state: RuntimeState | None = None
-) -> tuple[SequenceStage, list, RuntimeState]:
-    body = [(_state(), fn) for fn in runners]
-    stage = SequenceStage("seq", body=body)
-    return stage, body, parent_state or _state()
+class _FakeStage(Stage):
+    """Minimal Stage that records the state it received and optionally raises."""
+
+    def __init__(self, name: str, *, raises: Exception | None = None) -> None:
+        super().__init__(name, None, [], {})
+        self.received: RuntimeState | None = None
+        self._raises = raises
+
+    def run(self, state: RuntimeState) -> Outcome:  # type: ignore[override]
+        self.received = state
+        if self._raises:
+            raise self._raises
+        return Done()
 
 
 def test_sequence_runs_body_in_order() -> None:
     log: list[str] = []
-    stage, _, parent_state = _make_sequence(
-        [lambda: log.append("a"), lambda: log.append("b"), lambda: log.append("c")]
-    )
-    stage.run(parent_state)
+
+    class _LogStage(Stage):
+        def __init__(self, label: str) -> None:
+            super().__init__(label, None, [], {})
+            self._label = label
+
+        def run(self, state: RuntimeState) -> Outcome:  # type: ignore[override]
+            log.append(self._label)
+            return Done()
+
+    stage = SequenceStage("seq", body=[_LogStage("a"), _LogStage("b"), _LogStage("c")])
+    stage.run(_state())
     assert log == ["a", "b", "c"]
 
 
 def test_sequence_stops_on_exception() -> None:
     log: list[str] = []
 
-    def fail() -> None:
-        raise RuntimeError("boom")
+    class _LogStage(Stage):
+        def __init__(self, label: str, *, fail: bool = False) -> None:
+            super().__init__(label, None, [], {})
+            self._label = label
+            self._fail = fail
 
-    stage, _, parent_state = _make_sequence(
-        [lambda: log.append("a"), fail, lambda: log.append("c")]
+        def run(self, state: RuntimeState) -> Outcome:  # type: ignore[override]
+            log.append(self._label)
+            if self._fail:
+                raise RuntimeError("boom")
+            return Done()
+
+    stage = SequenceStage(
+        "seq",
+        body=[_LogStage("a"), _LogStage("b", fail=True), _LogStage("c")],
     )
     with pytest.raises(RuntimeError, match="boom"):
-        stage.run(parent_state)
-    assert log == ["a"]
-    assert "c" not in log
+        stage.run(_state())
+    assert log == ["a", "b"]
 
 
 def test_sequence_propagates_worktree() -> None:
-    observed: list[pathlib.Path | None] = []
     wt = pathlib.Path("/tmp/fake-worktree")
-
-    parent_state = _state()
-    parent_state.worktree = wt
-
-    sub_state = _state()
-
-    def capture() -> None:
-        observed.append(sub_state.worktree)
-
-    stage = SequenceStage("seq", body=[(sub_state, capture)])
-    stage.run(parent_state)
-
-    assert observed == [wt]
+    child = _FakeStage("child")
+    stage = SequenceStage("seq", body=[child])
+    stage.run(_state(worktree=wt))
+    assert child.received is not None
+    assert child.received.worktree == wt
 
 
 def test_sequence_propagates_child_key() -> None:
-    parent_state = _state()
-    parent_state.child_key = "my-child"
-
-    sub_state = _state()
-
-    stage = SequenceStage("seq", body=[(sub_state, lambda: None)])
-    stage.run(parent_state)
-
-    assert sub_state.child_key == "my-child"
+    child = _FakeStage("child")
+    stage = SequenceStage("seq", body=[child])
+    stage.run(_state(child_key="my-child"))
+    assert child.received is not None
+    assert child.received.child_key == "my-child"
 
 
 def test_sequence_propagates_session_dir() -> None:
     shard_dir = pathlib.Path("/tmp/shard-session")
-
-    parent_state = _state()
-    parent_state.session_dir = shard_dir
-
-    sub_state = _state()
-    assert sub_state.session_dir != shard_dir
-
-    stage = SequenceStage("seq", body=[(sub_state, lambda: None)])
-    stage.run(parent_state)
-
-    assert sub_state.session_dir == shard_dir
+    child = _FakeStage("child")
+    stage = SequenceStage("seq", body=[child])
+    stage.run(_state(session_dir=shard_dir))
+    assert child.received is not None
+    assert child.received.session_dir == shard_dir

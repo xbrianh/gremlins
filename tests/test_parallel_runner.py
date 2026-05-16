@@ -335,31 +335,27 @@ def test_build_parallel_stages_names() -> None:
 
 def test_parallel_sequence_child_worktree_flows() -> None:
     """SequenceStage inside a parallel group sees the fanout worktree in all sub-stages."""
+    from gremlins.stages.base import Stage
+    from gremlins.stages.outcome import Done, Outcome
     from gremlins.stages.sequence import SequenceStage
 
     observed: list[pathlib.Path | None] = []
 
-    sub_ctx_a = State(
-        data=StateData(), client=FakeClaudeClient(), session_dir=pathlib.Path("/tmp")
-    )
-    sub_ctx_b = State(
-        data=StateData(), client=FakeClaudeClient(), session_dir=pathlib.Path("/tmp")
-    )
+    class _CaptureStage(Stage):
+        def __init__(self, name: str) -> None:
+            super().__init__(name, None, [], {})
 
-    def capture_a() -> None:
-        observed.append(sub_ctx_a.worktree)
+        def run(self, state: State) -> Outcome:  # type: ignore[override]
+            observed.append(state.worktree)
+            return Done()
 
-    def capture_b() -> None:
-        observed.append(sub_ctx_b.worktree)
+    seq_stage = SequenceStage("seq", body=[_CaptureStage("a"), _CaptureStage("b")])
 
     seq_ctx = State(
         data=StateData(),
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
         child_key="seq",
-    )
-    seq_stage = SequenceStage(
-        "seq", body=[(sub_ctx_a, capture_a), (sub_ctx_b, capture_b)]
     )
 
     def seq_runner() -> None:

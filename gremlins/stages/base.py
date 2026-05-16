@@ -32,6 +32,7 @@ class Stage:
         self.options = options
         self.client: Client | None = None
         self.body: list[Stage] = []
+        self.path: str = ""
 
     def run_claude(
         self,
