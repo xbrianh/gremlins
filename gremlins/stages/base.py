@@ -32,7 +32,17 @@ class Stage:
         self.options = options
         self.client: Client | None = None
         self.body: list[Stage] = []
-        self.path: str = ""
+        self._path: str = ""
+
+    @property
+    def path(self) -> str:
+        return self._path
+
+    @path.setter
+    def path(self, value: str) -> None:
+        self._path = value
+        for c in self.body:
+            c.path = f"{value}/{c.name}"
 
     def run_claude(
         self,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import dataclasses
 import json
 import logging
 import pathlib
@@ -142,10 +143,13 @@ class ParallelStage(Stage):
         gremlin_id = state.data.gremlin_id
         group_dir = state.session_dir / self.name
         group_dir.mkdir(parents=True, exist_ok=True)
+        group_state = dataclasses.replace(
+            state, session_dir=group_dir, parent_stage=state.parent_stage or self.name
+        )
         child_runners: list[tuple[str, State, Callable[[], None]]] = []
         for child in self.body:
             (group_dir / child.name).mkdir(parents=True, exist_ok=True)
-            cs = _child_state(state, child, fan_out=True)
+            cs = _child_state(group_state, child, fan_out=True)
             child_runners.append(
                 (child.name, cs, cs.make_runner(child, scope=self.body))
             )
