@@ -112,7 +112,7 @@ def test_chain_done_immediately(tmp_path, monkeypatch, test_state_root):
 
 
 # ---------------------------------------------------------------------------
-# next-plan: writes child plan to plan.md and raises RunCmdFailed
+# next-plan: writes child plan to plan.md and returns NeedsFix
 # ---------------------------------------------------------------------------
 
 

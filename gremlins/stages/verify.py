@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import logging
 import pathlib
-import subprocess
 from typing import Any
 
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
+from gremlins.stages.cmd import Cmd
 from gremlins.stages.loop import LoopStage
 from gremlins.stages.outcome import Bail, Done, NeedsFix, Outcome
 from gremlins.utils import git as _git_mod
@@ -36,15 +36,6 @@ class Verify(Stage):
         stage.client = get_client_from_dict(d)
         return stage
 
-    def __init__(
-        self,
-        name: str,
-        model: str | None,
-        prompts: list[str],
-        options: dict[str, Any],
-    ) -> None:
-        super().__init__(name, model, prompts, options)
-
     def run(self, state: State) -> Outcome:
         session_dir = state.session_dir
         options = dict(self.options)
@@ -63,41 +54,36 @@ class Verify(Stage):
             return Done()
 
         template = "\n\n".join(self.prompts).rstrip()
-        combined_cmd = " && ".join(cmds)
         commands_section = "**Commands run:**\n" + "\n".join(f"- `{c}`" for c in cmds)
-        attempt: list[int] = [0]
-        last_output: list[str | None] = [None]
+
+        cmd_stage = Cmd(
+            "verify-cmd",
+            None,
+            [],
+            {"cmds": cmds, "log_path": "verify-attempt-{n}.log"},
+        )
 
         def _run_cmd() -> Outcome:
-            attempt[0] += 1
-            n = attempt[0]
-            log_file = session_dir / f"verify-attempt-{n}.log"
-            result = subprocess.run(
-                combined_cmd,
-                shell=True,
-                cwd=state.cwd,
-                capture_output=True,
-                text=True,
-            )
-            output = result.stdout + result.stderr
-            log_file.write_text(output, encoding="utf-8")
-            if result.returncode != 0:
-                logger.info("verify attempt %d: failed (exit %d)", n, result.returncode)
-                last_output[0] = output
-                return NeedsFix(output)
-            logger.info("verify attempt %d: green", n)
-            last_output[0] = None
-            return Done()
+            outcome = cmd_stage.run(state)
+            n = cmd_stage.n
+            if isinstance(outcome, NeedsFix):
+                logger.info(
+                    "verify attempt %d: failed (exit %s)", n, outcome.returncode
+                )
+            else:
+                logger.info("verify attempt %d: green", n)
+            return outcome
 
         def _run_fix() -> Outcome:
-            if last_output[0] is None:
-                return Done()
-            n = attempt[0]
+            n = cmd_stage.n
+            log_text = (session_dir / f"verify-attempt-{n}.log").read_text(
+                encoding="utf-8"
+            )
             diff = _diff_text(state.cwd)
             fix_prompt = template.format(
                 bail_command=self.bail_command(state),
                 commands_section=commands_section,
-                verify_output=last_output[0],
+                verify_output=log_text,
                 diff_text=diff,
             )
             self.run_claude(

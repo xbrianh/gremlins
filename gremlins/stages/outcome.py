@@ -11,6 +11,7 @@ class Done:
 @dataclass(frozen=True)
 class NeedsFix:
     detail: str
+    returncode: int | None = None
 
 
 @dataclass(frozen=True)
