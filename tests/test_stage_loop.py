@@ -211,6 +211,17 @@ def test_run_cmd_output_in_needs_fix(tmp_path):
     assert "hello_output" in outcome.detail
 
 
+def test_run_cmd_log_path_interpolation(tmp_path):
+    stage = Cmd("cmd", None, [], {"cmds": ["true"], "log_path": "run-{n}.log"})
+    state = RuntimeState(
+        data=StateData(), client=_fake_client(), session_dir=tmp_path, worktree=tmp_path
+    )
+    stage.run(state)
+    assert (tmp_path / "run-1.log").exists()
+    stage.run(state)
+    assert (tmp_path / "run-2.log").exists()
+
+
 # ---------------------------------------------------------------------------
 # pr_stack: detach-to-prior-PR logic
 # ---------------------------------------------------------------------------

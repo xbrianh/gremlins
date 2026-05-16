@@ -44,7 +44,7 @@ class Cmd(Stage):
         output = result.stdout + result.stderr
         self._log_path(state).write_text(output, encoding="utf-8")
         if result.returncode != 0:
-            return NeedsFix(output)
+            return NeedsFix(output, result.returncode)
         return Done()
 
     def _log_path(self, state: State) -> pathlib.Path:
