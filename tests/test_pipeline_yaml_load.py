@@ -31,11 +31,25 @@ def test_local_pipeline_loads(path: pathlib.Path, expected_client: Client) -> No
         assert stage.client == expected_client
 
 
+_GH_TERSE_NO_COPILOT_STAGE_NAMES = [
+    "plan",
+    "implement",
+    "verify",
+    "open-pr",
+    "github-review-pull-request",
+    "github-address-pull-request-reviews",
+    "ci-gate",
+]
+
+
 def test_gh_terse_no_copilot_loads() -> None:
     pipeline = Pipeline.from_yaml(_GH_TERSE_NO_COPILOT)
     assert pipeline.name == "gh-terse-no-copilot"
+    assert pipeline.base_ref == "main"
     assert pipeline.default_client == Client("claude", "sonnet")
-    assert pipeline.stages[0].name == "plan"
+    assert [s.name for s in pipeline.stages] == _GH_TERSE_NO_COPILOT_STAGE_NAMES
+    for stage in pipeline.stages:
+        assert stage.client == Client("claude", "sonnet")
 
 
 def test_bad_default_client_rejected(tmp_path: pathlib.Path) -> None:
