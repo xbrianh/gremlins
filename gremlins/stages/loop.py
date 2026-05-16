@@ -15,6 +15,23 @@ from gremlins.utils import git as _git
 logger = logging.getLogger(__name__)
 
 
+def _dispatch_runners(
+    runners: list[Callable[[], Outcome]],
+    iteration: int,
+    max_iterations: int,
+) -> tuple[bool, Bail | None]:
+    had_failure = False
+    for i, runner in enumerate(runners):
+        if i > 0 and (not had_failure or iteration == max_iterations):
+            continue
+        outcome = runner()
+        if isinstance(outcome, Bail):
+            return had_failure, outcome
+        if isinstance(outcome, NeedsFix):
+            had_failure = True
+    return had_failure, None
+
+
 class LoopStage(Stage):
     """Iterate body runners until HEAD is stable or max_iterations is reached.
 
@@ -105,16 +122,9 @@ class LoopStage(Stage):
                 if self._pr_stack:
                     _detach_to_pr_base(state)
                 head_before = _git.head_sha(state.cwd)
-                had_failure = False
-
-                for i, runner in enumerate(runners):
-                    if i > 0 and (not had_failure or iteration == self._max_iterations):
-                        continue
-                    outcome = runner()
-                    if isinstance(outcome, Bail):
-                        return outcome
-                    if isinstance(outcome, NeedsFix):
-                        had_failure = True
+                had_failure, bail = _dispatch_runners(runners, iteration, self._max_iterations)
+                if bail is not None:
+                    return bail
 
                 if not had_failure:
                     head_after = _git.head_sha(state.cwd)

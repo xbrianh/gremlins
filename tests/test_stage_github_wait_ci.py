@@ -2,9 +2,9 @@
 
 import json
 import pathlib
+from collections.abc import Callable
 from typing import Any
 
-import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
@@ -85,11 +85,14 @@ def test_no_checks_skips(tmp_path: pathlib.Path) -> None:
 
 
 def test_review_required_no_checks_bails(tmp_path: pathlib.Path) -> None:
+    from gremlins.stages.outcome import Bail
+
     client = FakeClaudeClient(fixtures={})
     getter = _make_getter([([], "REVIEW_REQUIRED")])
     stage, state = _make_stage(client, tmp_path, checks_getter=getter)
-    with pytest.raises(RuntimeError, match="PR blocked by required human review"):
-        stage.run(state)
+    result = stage.run(state)
+    assert isinstance(result, Bail)
+    assert "PR blocked by required human review" in result.reason
     assert client.calls == []
 
 
@@ -122,15 +125,20 @@ def test_checks_pending_then_passing(tmp_path: pathlib.Path) -> None:
 
 
 def test_review_required_bails(tmp_path: pathlib.Path) -> None:
+    from gremlins.stages.outcome import Bail
+
     client = FakeClaudeClient(fixtures={})
     getter = _make_getter([([_PASSING_CHECK], "REVIEW_REQUIRED")])
     stage, state = _make_stage(client, tmp_path, checks_getter=getter)
-    with pytest.raises(RuntimeError, match="PR blocked by required human review"):
-        stage.run(state)
+    result = stage.run(state)
+    assert isinstance(result, Bail)
+    assert "PR blocked by required human review" in result.reason
     assert client.calls == []
 
 
 def test_review_required_after_fix_bails(tmp_path: pathlib.Path) -> None:
+    from gremlins.stages.outcome import Bail
+
     client = FakeClaudeClient(fixtures={"ci-fix-1": MINIMAL_EVENTS})
     getter = _make_getter(
         [
@@ -140,13 +148,16 @@ def test_review_required_after_fix_bails(tmp_path: pathlib.Path) -> None:
         ]
     )
     stage, state = _make_stage(client, tmp_path, poll_interval=0, checks_getter=getter)
-    with pytest.raises(RuntimeError, match="PR blocked by required human review"):
-        stage.run(state)
+    result = stage.run(state)
+    assert isinstance(result, Bail)
+    assert "PR blocked by required human review" in result.reason
     assert len(client.calls) == 1
     assert client.calls[0].label == "ci-fix-1"
 
 
 def test_review_required_while_pending_bails(tmp_path: pathlib.Path) -> None:
+    from gremlins.stages.outcome import Bail
+
     client = FakeClaudeClient(fixtures={})
     getter = _make_getter(
         [
@@ -155,8 +166,9 @@ def test_review_required_while_pending_bails(tmp_path: pathlib.Path) -> None:
         ]
     )
     stage, state = _make_stage(client, tmp_path, poll_interval=0, checks_getter=getter)
-    with pytest.raises(RuntimeError, match="PR blocked by required human review"):
-        stage.run(state)
+    result = stage.run(state)
+    assert isinstance(result, Bail)
+    assert "PR blocked by required human review" in result.reason
     assert client.calls == []
 
 
@@ -177,7 +189,7 @@ def test_fix_on_failure_then_pass(tmp_path: pathlib.Path) -> None:
 
 
 def test_ci_fix_prompt_contains_pr_branch(
-    tmp_path: pathlib.Path, make_state_dir
+    tmp_path: pathlib.Path, make_state_dir: Callable[[str], pathlib.Path]
 ) -> None:
     gremlin_id = "test-ci-fix-branch"
     state_dir = make_state_dir(gremlin_id)
@@ -359,7 +371,7 @@ def test_poll_empty_mid_run_continues_polling(tmp_path: pathlib.Path) -> None:
 
 
 def test_review_required_emits_bail_to_state(
-    tmp_path: pathlib.Path, make_state_dir
+    tmp_path: pathlib.Path, make_state_dir: Callable[[str], pathlib.Path]
 ) -> None:
     import gremlins.executor.state as state_mod
 
@@ -372,16 +384,18 @@ def test_review_required_emits_bail_to_state(
     stage, state = _make_stage(
         client, tmp_path, gremlin_id=gremlin_id, checks_getter=getter
     )
+    from gremlins.stages.outcome import Bail
+
     state.data.attempt = attempt
-    with pytest.raises(RuntimeError):
-        stage.run(state)
+    result = stage.run(state)
+    assert isinstance(result, Bail)
     bail_file = state_dir / f"bail_{attempt}.json"
     assert bail_file.exists()
     data = json.loads(bail_file.read_text())
     assert data["class"] == "other"
 
 
-def test_empty_pr_branch_bails(tmp_path: pathlib.Path, make_state_dir) -> None:
+def test_empty_pr_branch_bails(tmp_path: pathlib.Path, make_state_dir: Callable[[str], pathlib.Path]) -> None:
     import gremlins.executor.state as state_mod
 
     gremlin_id = "test-empty-branch"
@@ -420,7 +434,7 @@ def test_empty_pr_branch_bails(tmp_path: pathlib.Path, make_state_dir) -> None:
     assert client.calls == []
 
 
-def test_check_bail_raises_from_state(tmp_path: pathlib.Path, make_state_dir) -> None:
+def test_check_bail_raises_from_state(tmp_path: pathlib.Path, make_state_dir: Callable[[str], pathlib.Path]) -> None:
     gremlin_id = "test-gr-id"
     state_dir = make_state_dir(gremlin_id)
     attempt = "ci-fix-test-attempt"
@@ -440,6 +454,9 @@ def test_check_bail_raises_from_state(tmp_path: pathlib.Path, make_state_dir) ->
         startup_grace_secs=0,
         checks_getter=getter,
     )
+    from gremlins.stages.outcome import Bail
+
     state.data.attempt = attempt
-    with pytest.raises(RuntimeError, match="bailed"):
-        stage.run(state)
+    result = stage.run(state)
+    assert isinstance(result, Bail)
+    assert "bailed" in result.reason
