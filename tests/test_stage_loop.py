@@ -1,4 +1,4 @@
-"""Tests for LoopStage termination paths and RunCmd stage."""
+"""Tests for LoopStage termination paths and Cmd stage."""
 
 from __future__ import annotations
 
@@ -7,9 +7,9 @@ from typing import Any
 
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData
+from gremlins.stages.cmd import Cmd
 from gremlins.stages.loop import LoopStage
 from gremlins.stages.outcome import Bail, Done, NeedsFix
-from gremlins.stages.run_cmd import RunCmd
 
 
 def _fake_client() -> Any:
@@ -162,12 +162,12 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
 
 
 # ---------------------------------------------------------------------------
-# RunCmd stage
+# Cmd stage
 # ---------------------------------------------------------------------------
 
 
-def _run_cmd_stage(tmp_path: Any, cmds: list[str]) -> tuple[RunCmd, RuntimeState]:
-    stage = RunCmd("run-cmd", None, [], {"cmds": cmds})
+def _run_cmd_stage(tmp_path: Any, cmds: list[str]) -> tuple[Cmd, RuntimeState]:
+    stage = Cmd("cmd", None, [], {"cmds": cmds})
     state = RuntimeState(
         data=StateData(),
         client=_fake_client(),
@@ -193,7 +193,7 @@ def test_run_cmd_failure_writes_log(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, ["echo boom >&2; false"])
     outcome = stage.run(state)
     assert isinstance(outcome, NeedsFix)
-    log = tmp_path / "run-cmd.log"
+    log = tmp_path / "cmd.log"
     assert log.exists()
 
 
@@ -201,7 +201,7 @@ def test_run_cmd_empty_cmds_is_noop(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, [])
     outcome = stage.run(state)
     assert outcome == Done()
-    assert not (tmp_path / "run-cmd.log").exists()
+    assert not (tmp_path / "cmd.log").exists()
 
 
 def test_run_cmd_output_in_needs_fix(tmp_path):
