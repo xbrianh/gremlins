@@ -8,6 +8,7 @@ from typing import Any
 
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
+from gremlins.stages.outcome import Done, Outcome
 from gremlins.utils.git import (
     DivergentHead,
     EmptyImpl,
@@ -79,7 +80,7 @@ class Implement(Stage):
     ) -> None:
         super().__init__(name, model, prompts, options)
 
-    def run(self, state: State) -> None:
+    def run(self, state: State) -> Outcome:
         spec_text = _read_spec(state.session_dir)
         plan_text = (state.session_dir / "plan.md").read_text(encoding="utf-8")
 
@@ -125,3 +126,4 @@ class Implement(Stage):
             raise RuntimeError(
                 f"implement diverged from pre-impl HEAD {pre.head[:7]}; expected a fast-forward"
             )
+        return Done()

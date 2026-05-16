@@ -19,6 +19,7 @@ from gremlins.executor.state import (
     resolve_state_file,
 )
 from gremlins.stages.base import Stage
+from gremlins.stages.outcome import Done, Outcome
 from gremlins.utils import proc
 
 logger = logging.getLogger(__name__)
@@ -135,7 +136,7 @@ class ParallelStage(Stage):
             parent_attempt=parent_attempt,
         )
 
-    def run(self, state: State) -> None:
+    def run(self, state: State) -> Outcome:
         gremlin_id = state.data.gremlin_id
         group_dir = state.session_dir / self.name
         group_dir.mkdir(parents=True, exist_ok=True)
@@ -168,6 +169,7 @@ class ParallelStage(Stage):
             parent_attempt=state.data.attempt,
         ):
             fn()
+        return Done()
 
 
 def _parallel_stages(

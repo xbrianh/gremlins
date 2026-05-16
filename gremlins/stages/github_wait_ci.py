@@ -9,6 +9,7 @@ from typing import Any
 
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
+from gremlins.stages.outcome import Bail, Done, Outcome
 from gremlins.utils.git import head_sha
 from gremlins.utils.github import fetch_check_run_logs, get_pr_ci_status
 
@@ -16,10 +17,6 @@ logger = logging.getLogger(__name__)
 
 _FAILING_CONCLUSIONS = frozenset({"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED"})
 _PENDING_STATES = frozenset({"EXPECTED", "PENDING"})
-
-
-class _ReviewRequiredError(RuntimeError):
-    pass
 
 
 def _is_done(check: dict[str, Any]) -> bool:
@@ -59,14 +56,15 @@ def _wait_for_checks(
         time.sleep(poll_interval)
 
 
-def _bail_if_review_required(state: State, decision: str) -> None:
-    if decision == "REVIEW_REQUIRED":
-        state.data.write_bail_file(
-            "other",
-            "PR requires human review approval before merge",
-            attempt=state.data.attempt,
-        )
-        raise _ReviewRequiredError("ci-gate: PR blocked by required human review")
+def _bail_if_review_required(state: State, decision: str) -> Bail | None:
+    if decision != "REVIEW_REQUIRED":
+        return None
+    state.data.write_bail_file(
+        "other",
+        "PR requires human review approval before merge",
+        attempt=state.data.attempt,
+    )
+    return Bail("ci-gate: PR blocked by required human review")
 
 
 def _poll_until_done(
@@ -77,7 +75,7 @@ def _poll_until_done(
     checks_getter: Callable[[], tuple[list[dict[str, Any]], str]] | None = None,
     required_sha: str = "",
     head_sha_getter: Callable[[], str] | None = None,
-) -> tuple[list[dict[str, Any]], str]:
+) -> tuple[list[dict[str, Any]], str] | Bail:
     deadline = time.time() + timeout
     review_decision = ""
     while True:
@@ -92,11 +90,13 @@ def _poll_until_done(
             review_decision = status["review_decision"]
             current_sha = status["head_sha"]
 
-        _bail_if_review_required(state, review_decision)
+        bail = _bail_if_review_required(state, review_decision)
+        if bail is not None:
+            return bail
 
         if required_sha and current_sha and current_sha != required_sha:
             if time.time() >= deadline:
-                raise RuntimeError(
+                return Bail(
                     f"ci-gate: timed out waiting for GitHub to reflect pushed SHA "
                     f"{required_sha[:8]} (still showing {current_sha[:8]}) after {timeout}s"
                 )
@@ -168,108 +168,104 @@ class GitHubWaitCI(Stage):
         self.head_sha_getter = head_sha_getter
         self.fix_sha_getter = fix_sha_getter
 
-    def run(self, state: State) -> None:
+    def _run_ci_attempt(
+        self, state: State, attempt: int, pr_url: str, template: str, fix_sha: str
+    ) -> tuple[Outcome | None, str]:
+        logger.info(
+            "ci-gate: attempt %d/%d — polling (timeout %ds)",
+            attempt,
+            self.max_attempts,
+            self.poll_timeout,
+        )
+        poll_result = _poll_until_done(
+            state,
+            pr_url,
+            self.poll_timeout,
+            self.poll_interval,
+            self.checks_getter,
+            required_sha=fix_sha,
+            head_sha_getter=self.head_sha_getter,
+        )
+        if isinstance(poll_result, Bail):
+            return poll_result, fix_sha
+        final_checks, _ = poll_result
+        failed = [c for c in final_checks if _is_failing(c)]
+
+        if not failed:
+            logger.info("ci-gate: all checks passed on attempt %d", attempt)
+            return Done(), ""
+
+        logger.info("ci-gate: %d check(s) failed on attempt %d", len(failed), attempt)
+
+        if attempt == self.max_attempts:
+            return None, fix_sha
+
+        failure_output = _collect_failure_output(failed)
+        log_file = state.session_dir / f"ci-attempt-{attempt}.log"
+        log_file.write_text(failure_output, encoding="utf-8")
+
+        pr_branch = state.data.last_pr_branch()
+        if not pr_branch:
+            state.data.write_bail_file(
+                "other",
+                "ci-fix: pr_branch unknown, cannot push",
+                attempt=state.data.attempt,
+            )
+            return Bail("ci-fix: pr_branch unknown, cannot push"), ""
+
+        fix_prompt = template.format(
+            bail_command=self.bail_command(state),
+            failure_output=failure_output,
+            pr_branch=pr_branch,
+        )
+        self.run_claude(
+            fix_prompt,
+            state=state,
+            label=f"ci-fix-{attempt}",
+            raw_path=state.session_dir / f"stream-ci-fix-{attempt}.jsonl",
+        )
+        try:
+            state.data.check_bail(f"ci-fix-{attempt}", child_key=state.child_key)
+        except RuntimeError as exc:
+            return Bail(str(exc)), ""
+
+        new_fix_sha = (
+            self.fix_sha_getter()
+            if self.fix_sha_getter is not None
+            else head_sha(cwd=state.cwd)
+        )
+        return None, new_fix_sha
+
+    def run(self, state: State) -> Outcome:
         pr_url = self.pr_url or state.data.read_pr_url()
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
         checks, review_decision = _wait_for_checks(
             pr_url, self.checks_getter, self.poll_interval, self.startup_grace_secs
         )
-        _bail_if_review_required(state, review_decision)
+        bail = _bail_if_review_required(state, review_decision)
+        if bail is not None:
+            return bail
 
         if not checks:
             logger.info(
                 "ci-gate: PR has no check-runs after %ds, skipping",
                 self.startup_grace_secs,
             )
-            return
+            return Done()
 
         template = "\n\n".join(self.prompts).rstrip()
-
-        _exhausted = False
-        _agent_bailed = False
-        _review_bailed = False
         fix_sha = ""
-        try:
-            for attempt in range(1, self.max_attempts + 1):
-                logger.info(
-                    "ci-gate: attempt %d/%d — polling (timeout %ds)",
-                    attempt,
-                    self.max_attempts,
-                    self.poll_timeout,
-                )
-                try:
-                    final_checks, review_decision = _poll_until_done(
-                        state,
-                        pr_url,
-                        self.poll_timeout,
-                        self.poll_interval,
-                        self.checks_getter,
-                        required_sha=fix_sha,
-                        head_sha_getter=self.head_sha_getter,
-                    )
-                except _ReviewRequiredError:
-                    _review_bailed = True
-                    raise
-                failed = [c for c in final_checks if _is_failing(c)]
-
-                if not failed:
-                    logger.info("ci-gate: all checks passed on attempt %d", attempt)
-                    return
-
-                logger.info(
-                    "ci-gate: %d check(s) failed on attempt %d", len(failed), attempt
-                )
-
-                if attempt == self.max_attempts:
-                    break
-
-                failure_output = _collect_failure_output(failed)
-                log_file = state.session_dir / f"ci-attempt-{attempt}.log"
-                log_file.write_text(failure_output, encoding="utf-8")
-
-                pr_branch = state.data.last_pr_branch()
-                if not pr_branch:
-                    state.data.write_bail_file(
-                        "other",
-                        "ci-fix: pr_branch unknown, cannot push",
-                        attempt=state.data.attempt,
-                    )
-                    return
-
-                fix_prompt = template.format(
-                    bail_command=self.bail_command(state),
-                    failure_output=failure_output,
-                    pr_branch=pr_branch,
-                )
-                self.run_claude(
-                    fix_prompt,
-                    state=state,
-                    label=f"ci-fix-{attempt}",
-                    raw_path=state.session_dir / f"stream-ci-fix-{attempt}.jsonl",
-                )
-                _agent_bailed = True
-                state.data.check_bail(f"ci-fix-{attempt}", child_key=state.child_key)
-                _agent_bailed = False
-
-                fix_sha = (
-                    self.fix_sha_getter()
-                    if self.fix_sha_getter is not None
-                    else head_sha(cwd=state.cwd)
-                )
-
-            _exhausted = True
-            state.data.write_bail_file(
-                "other",
-                f"CI failed after {self.max_attempts} attempts",
-                attempt=state.data.attempt,
+        for attempt in range(1, self.max_attempts + 1):
+            outcome, fix_sha = self._run_ci_attempt(
+                state, attempt, pr_url, template, fix_sha
             )
-            raise RuntimeError(f"ci-gate exhausted {self.max_attempts} attempts")
-        except (SystemExit, Exception) as exc:
-            if not _exhausted and not _agent_bailed and not _review_bailed:
-                state.data.write_bail_file(
-                    "other",
-                    f"ci-gate failed: {exc}"[:200],
-                    attempt=state.data.attempt,
-                )
-            raise
+            if outcome is not None:
+                return outcome
+
+        state.data.write_bail_file(
+            "other",
+            f"CI failed after {self.max_attempts} attempts",
+            attempt=state.data.attempt,
+        )
+        return Bail(f"CI failed after {self.max_attempts} attempts")

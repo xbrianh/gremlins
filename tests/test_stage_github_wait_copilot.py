@@ -43,12 +43,23 @@ def _make_stage(
 
 
 def test_returns_review_state_immediately(tmp_path: pathlib.Path) -> None:
-    stage, state = _make_stage(tmp_path, review_checker=lambda: "APPROVED")
+    from gremlins.stages.outcome import Done
+
+    call_count = [0]
+
+    def checker() -> str | None:
+        call_count[0] += 1
+        return "APPROVED"
+
+    stage, state = _make_stage(tmp_path, review_checker=checker)
     result = stage.run(state)
-    assert result == "APPROVED"
+    assert result == Done()
+    assert call_count[0] == 1
 
 
 def test_polls_until_review_arrives(tmp_path: pathlib.Path) -> None:
+    from gremlins.stages.outcome import Done
+
     call_count = [0]
 
     def checker() -> str | None:
@@ -57,14 +68,17 @@ def test_polls_until_review_arrives(tmp_path: pathlib.Path) -> None:
 
     stage, state = _make_stage(tmp_path, review_checker=checker)
     result = stage.run(state)
-    assert result == "CHANGES_REQUESTED"
+    assert result == Done()
     assert call_count[0] == 3
 
 
-def test_timeout_raises(tmp_path: pathlib.Path) -> None:
+def test_timeout_bails(tmp_path: pathlib.Path) -> None:
+    from gremlins.stages.outcome import Bail
+
     stage, state = _make_stage(tmp_path, timeout=0, review_checker=lambda: None)
-    with pytest.raises(RuntimeError, match="timed out"):
-        stage.run(state)
+    result = stage.run(state)
+    assert isinstance(result, Bail)
+    assert "timed out" in result.reason
 
 
 def test_no_pr_num_raises(tmp_path: pathlib.Path) -> None:

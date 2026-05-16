@@ -9,7 +9,8 @@ from typing import Any
 
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
-from gremlins.stages.loop import LoopExhausted, LoopStage, RunCmdFailed
+from gremlins.stages.loop import LoopStage
+from gremlins.stages.outcome import Bail, Done, NeedsFix, Outcome
 from gremlins.utils import git as _git_mod
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,7 @@ class Verify(Stage):
     ) -> None:
         super().__init__(name, model, prompts, options)
 
-    def run(self, state: State) -> None:
+    def run(self, state: State) -> Outcome:
         session_dir = state.session_dir
         options = dict(self.options)
         if not state.repo:
@@ -59,7 +60,7 @@ class Verify(Stage):
 
         if not cmds:
             logger.info("verify: no cmds configured; skipping")
-            return
+            return Done()
 
         template = "\n\n".join(self.prompts).rstrip()
         combined_cmd = " && ".join(cmds)
@@ -67,7 +68,7 @@ class Verify(Stage):
         attempt: list[int] = [0]
         last_output: list[str | None] = [None]
 
-        def _run_cmd() -> None:
+        def _run_cmd() -> Outcome:
             attempt[0] += 1
             n = attempt[0]
             log_file = session_dir / f"verify-attempt-{n}.log"
@@ -83,13 +84,14 @@ class Verify(Stage):
             if result.returncode != 0:
                 logger.info("verify attempt %d: failed (exit %d)", n, result.returncode)
                 last_output[0] = output
-                raise RunCmdFailed(output)
+                return NeedsFix(output)
             logger.info("verify attempt %d: green", n)
             last_output[0] = None
+            return Done()
 
-        def _run_fix() -> None:
+        def _run_fix() -> Outcome:
             if last_output[0] is None:
-                return
+                return Done()
             n = attempt[0]
             diff = _diff_text(state.cwd)
             fix_prompt = template.format(
@@ -104,12 +106,13 @@ class Verify(Stage):
                 label=f"verify-fix-{n}",
                 raw_path=session_dir / f"stream-verify-{n}.jsonl",
             )
-            state.data.check_bail(f"verify-fix-{n}", child_key=state.child_key)
+            try:
+                state.data.check_bail(f"verify-fix-{n}", child_key=state.child_key)
+            except RuntimeError as exc:
+                return Bail(str(exc))
+            return Done()
 
         loop = LoopStage.from_runners(
             [_run_cmd, _run_fix], name="verify", max_iterations=max_attempts
         )
-        try:
-            loop.run(state)
-        except LoopExhausted:
-            raise RuntimeError(f"verify stage exhausted {max_attempts} attempts")
+        return loop.run(state)

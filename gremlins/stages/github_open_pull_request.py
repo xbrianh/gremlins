@@ -9,6 +9,7 @@ from typing import Any, cast
 from gremlins.clients.protocol import CompletedRun
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
+from gremlins.stages.outcome import Done, Outcome
 from gremlins.utils import proc
 from gremlins.utils.github import extract_gh_url
 from gremlins.utils.yaml_io import render_bundled_prompt
@@ -77,7 +78,7 @@ class GitHubOpenPullRequest(Stage):
         super().__init__(name, model, prompts, options)
         self.base_ref = base_ref
 
-    def run(self, state: State) -> str:
+    def run(self, state: State) -> Outcome:
         issue_url = state.data.issue_url
         base_ref = (
             state.data.last_pr_branch()
@@ -131,4 +132,4 @@ class GitHubOpenPullRequest(Stage):
             logger.warning("open-pr: could not determine PR branch for %s", pr_url)
         state.data.append_artifact({"type": "pr", "url": pr_url, "branch": branch})
         logger.info("PR: %s", pr_url)
-        return pr_url
+        return Done()

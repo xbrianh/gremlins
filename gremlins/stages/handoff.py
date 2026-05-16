@@ -18,7 +18,7 @@ from typing import Any, TypeVar, cast
 from gremlins.clients.client import Client
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
-from gremlins.stages.loop import RunCmdFailed
+from gremlins.stages.outcome import Bail, Done, NeedsFix, Outcome
 from gremlins.utils import proc
 from gremlins.utils.yaml_io import load_bundled_prompt, render_bundled_prompt
 
@@ -419,7 +419,7 @@ class Handoff(Stage):
     def __init__(self, name: str) -> None:
         super().__init__(name, None, [], {})
 
-    def run(self, state: State) -> None:
+    def run(self, state: State) -> Outcome:
         session_dir = state.session_dir
         client = state.client
 
@@ -457,7 +457,7 @@ class Handoff(Stage):
         if exit_state == "chain-done":
             logger.info("chain complete after %d handoff(s)", handoff_n)
             shutil.copyfile(boss_spec, plan_md)
-            return
+            return Done()
 
         if exit_state == "bail":
             reason = sig.get("reason") or "(no reason given)"
@@ -465,7 +465,7 @@ class Handoff(Stage):
             state.data.write_bail_file(
                 "other", f"handoff bail: {reason}"[:200], attempt=state.data.attempt
             )
-            raise RuntimeError(f"chain halted by handoff: {reason}")
+            return Bail(f"chain halted by handoff: {reason}")
 
         # exit_state == "next-plan"
         child_plan_path = sig.get("child_plan") or ""
@@ -474,7 +474,7 @@ class Handoff(Stage):
                 f"handoff returned next-plan but child_plan not found: {child_plan_path!r}"
             )
         shutil.copyfile(child_plan_path, plan_md)
-        raise RunCmdFailed(f"next-plan: handoff {handoff_n}")
+        return NeedsFix(f"next-plan: handoff {handoff_n}")
 
     def _run_handoff(
         self,

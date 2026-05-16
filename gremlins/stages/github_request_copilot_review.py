@@ -6,6 +6,7 @@ from typing import Any
 
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
+from gremlins.stages.outcome import Done, Outcome
 
 
 class GitHubRequestCopilotReview(Stage):
@@ -32,7 +33,7 @@ class GitHubRequestCopilotReview(Stage):
         super().__init__(name, model, prompts, options)
         self._pr_num = pr_num
 
-    def run(self, state: State) -> None:
+    def run(self, state: State) -> Outcome:
         repo = state.repo
         pr_num = self._pr_num or state.data.read_pr_num()
         if not pr_num:
@@ -59,3 +60,4 @@ class GitHubRequestCopilotReview(Stage):
                 f"could not request Copilot review (is it enabled in repo settings?): "
                 f"exit {r.returncode}: {detail}"
             )
+        return Done()

@@ -8,6 +8,7 @@ from typing import Any, NamedTuple, cast
 from gremlins.clients.client import Client
 from gremlins.clients.protocol import CompletedRun
 from gremlins.executor.state import State
+from gremlins.stages.outcome import Outcome
 
 
 class StageInput(NamedTuple):
@@ -80,5 +81,5 @@ class Stage:
     def orchestration_args(cls) -> list[StageInput]:
         return []
 
-    def run(self, state: State) -> Any:  # noqa: ARG002
+    def run(self, state: State) -> Outcome:  # noqa: ARG002
         raise NotImplementedError

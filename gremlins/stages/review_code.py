@@ -9,6 +9,7 @@ from typing import Any
 from gremlins.clients.client import Client
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
+from gremlins.stages.outcome import Done, Outcome
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +67,7 @@ class ReviewCode(Stage):
         stage.client = get_client_from_dict(d)
         return stage
 
-    def run(self, state: State) -> pathlib.Path:
+    def run(self, state: State) -> Outcome:
         model = self.model or state.client.model
         if not model:
             raise ValueError(f"stage {self.name!r}: model must be set")
@@ -131,7 +132,7 @@ class ReviewCode(Stage):
             )
             raise
 
-        return out_file
+        return Done()
 
 
 class GitHubReviewPullRequest(Stage):
@@ -162,7 +163,7 @@ class GitHubReviewPullRequest(Stage):
         super().__init__(name, model, prompts, options)
         self.pr_url = pr_url
 
-    def run(self, state: State) -> None:
+    def run(self, state: State) -> Outcome:
         pr_url = self.pr_url or state.data.read_pr_url()
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
@@ -181,3 +182,4 @@ class GitHubReviewPullRequest(Stage):
             raw_path=state.session_dir / "stream-github-review-pull-request.jsonl",
         )
         state.data.check_bail("/github-review-pull-request", child_key=state.child_key)
+        return Done()
