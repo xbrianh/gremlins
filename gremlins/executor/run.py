@@ -215,7 +215,9 @@ def run_pipeline(
         return 1
     except Exception as exc:
         sd = StateData.load(gremlin_id)
-        sd.write_bail_file("other", f"unexpected error: {exc}"[:200], attempt=sd.attempt)
+        sd.write_bail_file(
+            "other", f"unexpected error: {exc}"[:200], attempt=sd.attempt
+        )
         raise
 
     total_cost = 0.0

@@ -342,8 +342,15 @@ def _parallel_stages(
                 sf = resolve_state_file(gremlin_id)
                 if sf is not None and sf.exists():
                     try:
-                        pa: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8")).get("parallel_attempts") or {}
-                        StateData.load(gremlin_id).write_bail_file("other", b.reason, attempt=pa.get(child_key) or "")
+                        pa: dict[str, Any] = (
+                            json.loads(sf.read_text(encoding="utf-8")).get(
+                                "parallel_attempts"
+                            )
+                            or {}
+                        )
+                        StateData.load(gremlin_id).write_bail_file(
+                            "other", b.reason, attempt=pa.get(child_key) or ""
+                        )
                     except Exception:
                         pass
                 return
