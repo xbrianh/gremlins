@@ -23,9 +23,9 @@ from gremlins.executor.state import (
     resolve_session_dir,
     resolve_state_file,
 )
-from gremlins.stages.outcome import Bail
 from gremlins.logging_setup import configure_logging
 from gremlins.stages.base import Stage
+from gremlins.stages.outcome import Bail
 from gremlins.utils.git import has_commits, has_dirty_worktree, in_git_repo
 from gremlins.utils.github import get_repo
 

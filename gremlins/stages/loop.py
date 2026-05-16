@@ -125,9 +125,7 @@ class LoopStage(Stage):
                 head_after = _git.head_sha(state.cwd)
                 if head_after == head_before:
                     return Done()
-                logger.info(
-                    "loop iteration %d: HEAD advanced, continuing", iteration
-                )
+                logger.info("loop iteration %d: HEAD advanced, continuing", iteration)
                 if iteration == self._max_iterations:
                     return Done()
             elif iteration == self._max_iterations:
@@ -147,5 +145,3 @@ def _detach_to_pr_base(state: State) -> None:
         return
     logger.info("detaching worktree to previous PR branch: %s", branch)
     _git.git_detach_to_branch(branch, cwd=state.cwd)
-
-
