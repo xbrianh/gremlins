@@ -9,3 +9,4 @@ build/
 plans/
 .at_venv_config
 .claude/
+.gremlins/
