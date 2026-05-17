@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 from unittest.mock import MagicMock, patch
 
-from gremlins.cli.launch import _self_background_main  # type: ignore[reportPrivateUsage]
+from gremlins.cli.launch import (
+    _self_background_main,  # type: ignore[reportPrivateUsage]
+)
 
 
 def test_wait_blocks_and_returns_exit_code():
