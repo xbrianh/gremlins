@@ -363,6 +363,17 @@ def _initial_state_data(inputs: _Inputs) -> StateData:
     )
 
 
+def _persist_expanded_pipeline(state_dir: pathlib.Path, pipeline_path: str) -> str:
+    from gremlins.pipeline.preprocess import expand_pipeline
+    from gremlins.utils.yaml_io import dump_yaml_text
+
+    expanded = expand_pipeline(pathlib.Path(pipeline_path))
+    expanded["_expanded"] = True
+    dest = state_dir / "pipeline.yaml"
+    dest.write_text(dump_yaml_text(expanded), encoding="utf-8")
+    return str(dest)
+
+
 def _spawn(gremlin_id: str, inputs: _Inputs, state_dir: pathlib.Path) -> Any:
     spawn_args = list(inputs.pipeline_args)
     if inputs.instructions:
@@ -414,6 +425,9 @@ def launch(
     state_dir = _state_root() / inputs.gremlin_id
     try:
         _prepare_state_dir(state_dir, inputs)
+        inputs.pipeline_path = _persist_expanded_pipeline(
+            state_dir, inputs.pipeline_path
+        )
         sd = _initial_state_data(inputs)
         sd.persist(state_dir)
         p = _spawn(inputs.gremlin_id, inputs, state_dir)
@@ -477,6 +491,11 @@ def resume(gremlin_id: str) -> None:
         )
     except FileNotFoundError:
         pass
+
+    # Prefer the hermetic copy written at launch time.
+    _hermetic = state_dir / "pipeline.yaml"
+    if _hermetic.is_file():
+        pipeline_path = str(_hermetic)
 
     _loaded_resume = None
     if pipeline_path:

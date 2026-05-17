@@ -30,6 +30,8 @@ def _expand(
         raise ValueError(f"include cycle detected: {cycle}")
 
     raw = load_yaml_file(yaml_path)
+    if raw.get("_expanded"):
+        return raw
     yaml_dir = yaml_path.parent
     prompt_dir = _resolve_prompt_dir(raw.get("prompt_dir"), yaml_dir)
     new_chain = chain + [resolved]
