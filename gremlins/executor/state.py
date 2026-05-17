@@ -554,7 +554,9 @@ class State:
 
         def _run() -> Any:
             if record_stage:
-                base_state.data.set_stage(entry.name, parent_stage=base_state.parent_stage)
+                base_state.data.set_stage(
+                    entry.name, parent_stage=base_state.parent_stage
+                )
             if attempt:
                 if base_state.child_key:
                     base_state.data.patch_parallel_attempt(

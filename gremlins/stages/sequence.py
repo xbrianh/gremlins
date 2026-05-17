@@ -42,6 +42,8 @@ class SequenceStage(Stage):
         for child in self.body:
             if child.name in done:
                 continue
-            _child_state(state, child).make_runner(child, scope=self.body, record_stage=False)()
+            _child_state(state, child).make_runner(
+                child, scope=self.body, record_stage=False
+            )()
             state.mark_done(key, child.name)
         return Done()
