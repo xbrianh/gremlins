@@ -118,18 +118,6 @@ def test_run_second_item_stays_pending_after_failure(q):
     assert "-echo.cmd" in pending[0].name
 
 
-def test_run_preserves_embedded_id_in_done_filename(q):
-    core.add("gremlins launch gh-terse --gremlin-id my-feature")
-    # simulate queue run with a no-op command (add rewrites the cmd file)
-    pending = sorted((q / "pending").glob("*.cmd"))
-    assert len(pending) == 1
-    pending[0].write_text("true")  # replace with runnable cmd, keep filename
-    core.run()
-    done = list((q / "done").glob("*.cmd"))
-    assert len(done) == 1
-    assert ".my-feature.cmd" in done[0].name
-
-
 # ---------------------------------------------------------------------------
 # slug derivation
 # ---------------------------------------------------------------------------
@@ -157,22 +145,11 @@ def test_add_launch_uses_pipeline_name_as_slug(q):
     assert "-gh-terse" in name
 
 
-def test_add_embeds_gremlin_id_when_provided(q):
-    name = core.add("gremlins launch gh-terse --gremlin-id my-feature")
-    assert ".my-feature.cmd" in name
-    assert (q / "pending" / name).exists()
-
-
 def test_add_no_gremlin_id_omits_id_from_filename(q):
     name = core.add("gremlins launch gh-terse")
     assert name.endswith(".cmd")
     stem = name[: -len(".cmd")]
     assert "." not in stem
-
-
-def test_add_gremlin_id_equals_form(q):
-    name = core.add("gremlins launch gh-terse --gremlin-id=my-feature")
-    assert ".my-feature.cmd" in name
 
 
 # ---------------------------------------------------------------------------
@@ -318,69 +295,6 @@ def test_clear_purge_stops_running_gremlin(q, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# land
-# ---------------------------------------------------------------------------
-
-
-def test_land_success(q, monkeypatch):
-    calls = []
-    monkeypatch.setattr(
-        "gremlins.queue.core.subprocess.run",
-        lambda cmd, **kw: calls.append(cmd) or MagicMock(returncode=0),
-    )
-    (q / "done" / "0000-local.gr-land01.cmd").write_text("gremlins launch local")
-    (q / "done" / "0001-local.gr-land02.cmd").write_text("gremlins launch local")
-    rc = core.land()
-    assert rc == 0
-    ids = [c[-1] for c in calls]
-    assert "gr-land01" in ids
-    assert "gr-land02" in ids
-
-
-def test_land_removes_files_after_success(q, monkeypatch):
-    monkeypatch.setattr(
-        "gremlins.queue.core.subprocess.run",
-        lambda cmd, **kw: MagicMock(returncode=0),
-    )
-    p = q / "done" / "0000-local.gr-land01.cmd"
-    log = q / "done" / "0000-local.gr-land01.log"
-    p.write_text("gremlins launch local")
-    log.write_text("output")
-    core.land()
-    assert not p.exists()
-    assert not log.exists()
-    assert not list((q / "done").glob("*.cmd"))
-
-
-def test_land_halts_on_failure(q, monkeypatch):
-    call_count = [0]
-
-    def fake_run(cmd, **kw):
-        call_count[0] += 1
-        return MagicMock(returncode=1)
-
-    monkeypatch.setattr("gremlins.queue.core.subprocess.run", fake_run)
-    (q / "done" / "0000-local.gr-fail01.cmd").write_text("gremlins launch local")
-    (q / "done" / "0001-local.gr-fail02.cmd").write_text("gremlins launch local")
-    rc = core.land()
-    assert rc == 1
-    assert call_count[0] == 1
-
-
-def test_land_skips_non_launch_items(q, monkeypatch):
-    calls = []
-    monkeypatch.setattr(
-        "gremlins.queue.core.subprocess.run",
-        lambda cmd, **kw: calls.append(cmd) or MagicMock(returncode=0),
-    )
-    # No id in filename — should be skipped
-    (q / "done" / "0000-plain.cmd").write_text("echo hello")
-    rc = core.land()
-    assert rc == 0
-    assert calls == []
-
-
-# ---------------------------------------------------------------------------
 # CLI dispatch
 # ---------------------------------------------------------------------------
 
@@ -506,12 +420,6 @@ def test_cli_queue_requeue_dispatches(tmp_path, monkeypatch):
 def test_cli_queue_clear_dispatches(tmp_path, monkeypatch):
     monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
     rc = main(["queue", "clear"])
-    assert rc == 0
-
-
-def test_cli_queue_land_dispatches(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
-    rc = main(["queue", "land"])
     assert rc == 0
 
 

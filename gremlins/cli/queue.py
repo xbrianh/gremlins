@@ -11,7 +11,6 @@ from gremlins.queue.core import (
     SUBDIRS,
     add,
     clear,
-    land,
     list_queue,
     list_queue_json,
     requeue,
@@ -92,10 +91,6 @@ def _clear(argv: list[str]) -> int:
     )
 
 
-def _land(_argv: list[str]) -> int:
-    return land()
-
-
 def _set_state(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="gremlins queue set-state")
     parser.add_argument("state", choices=SUBDIRS, help="Target state.")
@@ -112,7 +107,6 @@ _DISPATCH: dict[str, tuple[str, Callable[[list[str]], int]]] = {
     "run": ("Run the next item in the queue.", _run),
     "requeue": ("Move failed items back to pending.", _requeue),
     "clear": ("Remove items from the queue.", _clear),
-    "land": ("Land all done gremlins in the queue.", _land),
     "set-state": ("Manually transition a queue item to a different state.", _set_state),
 }
 

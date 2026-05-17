@@ -54,21 +54,6 @@ def _cmd_description(cmd: str) -> str:
     return ""
 
 
-def _cmd_gremlin_id(cmd: str) -> str | None:
-    try:
-        tokens = shlex.split(cmd)
-    except ValueError:
-        return None
-    for i, t in enumerate(tokens):
-        if t == "--gremlin-id" and i + 1 < len(tokens):
-            candidate = tokens[i + 1]
-            return candidate if _ID_RE.match(candidate) else None
-        if t.startswith("--gremlin-id="):
-            candidate = t[len("--gremlin-id=") :]
-            return candidate if _ID_RE.match(candidate) else None
-    return None
-
-
 def _parse_id(path: Path) -> str | None:
     parts = path.stem.split(".")
     if len(parts) < 2:
@@ -86,33 +71,6 @@ def _move_item(cmd_path: Path, dst_dir: Path) -> Path:
     return dst
 
 
-def _extract_gremlin_id_from_log(log_path: Path) -> str | None:
-    try:
-        text = log_path.read_text()
-    except OSError:
-        return None
-    prefix = "gremlin id:  "
-    for line in text.splitlines():
-        if line.startswith(prefix):
-            candidate = line[len(prefix) :]
-            return candidate if _ID_RE.match(candidate) else None
-    return None
-
-
-def _maybe_embed_id(item: Path, log_path: Path) -> Path:
-    if _parse_id(item):
-        return item
-    gremlin_id = _extract_gremlin_id_from_log(log_path)
-    if not gremlin_id:
-        return item
-    new_stem = f"{item.stem}.{gremlin_id}"
-    new_item = item.parent / f"{new_stem}.cmd"
-    item.rename(new_item)
-    if log_path.exists():
-        log_path.rename(item.parent / f"{new_stem}.log")
-    return new_item
-
-
 def _run_plain(cmd: str, log_path: Path) -> bool:
     with open(log_path, "w") as log_f:
         proc = subprocess.run(cmd, shell=True, stdout=log_f, stderr=subprocess.STDOUT)
@@ -123,10 +81,8 @@ def add(command: str) -> str:
     root = queue_root()
     tokens = command.split()
     slug = _slugify(_slug_token(tokens))
-    gremlin_id = _cmd_gremlin_id(command)
-    id_part = f".{gremlin_id}" if gremlin_id else ""
     while True:
-        name = f"{datetime.now().strftime('%Y%m%dT%H%M%S_%f')}-{slug}{id_part}.cmd"
+        name = f"{datetime.now().strftime('%Y%m%dT%H%M%S_%f')}-{slug}.cmd"
         try:
             with (root / "pending" / name).open("x") as f:
                 f.write(command)
@@ -201,7 +157,6 @@ def run() -> int:
         clean = _run_plain(cmd, log_path)
 
         if clean:
-            item = _maybe_embed_id(item, log_path)
             _move_item(item, root / "done")
             print(f"queue: done {item.stem}", flush=True)
         else:
@@ -319,26 +274,4 @@ def set_state(item: str, state: str) -> int:
         print(f"item {item!r} is already in {state!r}", file=sys.stderr)
         return 1
     _move_item(cmd_path, root / state)
-    return 0
-
-
-def land() -> int:
-    root = queue_root()
-    landed = 0
-    skipped = 0
-    for p in sorted((root / "done").glob("*.cmd")):
-        gremlin_id = _parse_id(p)
-        if gremlin_id is None:
-            skipped += 1
-            continue
-        result = subprocess.run(["gremlins", "land", gremlin_id])
-        if result.returncode != 0:
-            print(f"queue land: failed on {gremlin_id}", file=sys.stderr)
-            return 1
-        p.unlink()
-        log = p.with_suffix(".log")
-        if log.exists():
-            log.unlink()
-        landed += 1
-    print(f"queue land: landed {landed}, skipped {skipped}", flush=True)
     return 0

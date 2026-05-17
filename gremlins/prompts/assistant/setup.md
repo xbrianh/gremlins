@@ -17,7 +17,6 @@ Before doing anything else, tell the user about the following setup so they can 
 - `gremlins queue run` — execute the queue serially in the foreground, halting on first failure
 - `gremlins queue requeue [--done]` — move all failed items back to pending; `--done` also requeues done items
 - `gremlins queue clear` — remove done + failed items; `--failed` clears only failed, `--done` clears only done, `--purge` stops running gremlins and wipes all
-- `gremlins queue land` — land all done items in lex order, halting on first failure
 
 Run `gremlins <sub> --help` for full flag details on any subcommand.
 
@@ -96,25 +95,25 @@ Do not edit files inside the gremlin's state directory or worktree directly.
 
 The `gremlins queue` subsystem lets you tee up `gremlins launch` invocations to run serially — useful for dispatching tasks before walking away for the night.
 
-**Interleaved `land` pattern** — use `--gremlin-id` to assign an id up front, then interleave `land` commands so each item lands before the next one launches:
+**Operator-supplies-id pattern** — give each launch a known id with `--gremlin-id`, then add a corresponding `gremlins land` so items land before the next one launches:
 
 ```
-gremlins queue add gremlins launch gh-terse --plan '#123' --gremlin-id my-feature
-gremlins queue add gremlins land my-feature
-gremlins queue add gremlins launch gh-terse --plan '#124' --gremlin-id follow-up
-gremlins queue add gremlins land follow-up
+gremlins queue add "gremlins launch gh-terse --plan '#123' --gremlin-id my-feature --wait"
+gremlins queue add "gremlins land my-feature"
+gremlins queue add "gremlins launch gh-terse --plan '#124' --gremlin-id follow-up --wait"
+gremlins queue add "gremlins land follow-up"
 ```
 
-This serializes dependent work through the queue without a `boss` pipeline. Use a `boss` chain when the dependency is more complex or when you want a supervisor agent coordinating stages.
+Both commands are self-contained. The queue runs them generically with no knowledge of gremlin ids. Use a `boss` chain when the dependency is more complex or when you want a supervisor agent coordinating stages.
 
 **State layout** — items live under `state_root() / "queues" / "default" /`:
 
 - `pending/` — not yet started, executed in lexicographic order
 - `running/` — the one currently in flight
 - `done/` — completed cleanly (exit 0; for gremlins: exit 0 and no bail marker)
-- `failed/` — dirty exit, timeout, bail, or invalid gremlin id
+- `failed/` — dirty exit, timeout, or bail
 
-Each item is a `.cmd` file named `<timestamp>-<slug>.cmd`. If the queued command includes `--gremlin-id <id>`, that id is embedded in the filename at queue time (`<timestamp>-<slug>.<id>.cmd`); otherwise the id is captured from the command's output when the item completes and the file is renamed then.
+Each item is a `.cmd` file named `<timestamp>-<slug>.cmd`.
 
 **The verbs:**
 
@@ -123,14 +122,13 @@ Each item is a `.cmd` file named `<timestamp>-<slug>.cmd`. If the queued command
 - `queue run` — run pending items one at a time in the foreground, halting on first dirty exit
 - `queue requeue [--done]` — move all failed items back to pending; `--done` also requeues done items
 - `queue clear` — remove done + failed items; `--failed` clears only failed, `--done` clears only done, `--purge` stops running gremlins and wipes all
-- `queue land` — land all done items in lex order; halts on first failure; idempotent because `gremlins land` is
 
 **Any shell command is valid.** A `.cmd` file can be any shell command, not just `gremlins launch`. The runner uses the subprocess exit code when no gremlin id is captured.
 
 **Morning-after workflow:**
 
 1. `gremlins queue list [--json]` — survey what finished and what failed
-2. If all done: `gremlins queue land` (removes each entry on success)
+2. If all done: review, then `gremlins land <id>` for each launch you want landed
 3. If some failed: fix the root cause, then `gremlins queue requeue` to push all failed items back to pending and re-run
 
 **What the queue does not do:** no retries, no dependency tracking between items, no daemonization (run it under `nohup` / `launchd` / `screen` yourself), no concurrency.
