@@ -336,18 +336,21 @@ def test_graft_missing_worktree_raises(lenv, monkeypatch):
 
 
 def test_graft_succeeds_without_branch(lenv, monkeypatch):
-    """Graft works when the gremlin has no recorded branch and the worktree exists."""
+    """Graft proceeds even when artifacts reference a deleted branch."""
     from gremlins import launcher
 
     gremlin_id = "graft-no-branch-test"
     state_dir = lenv.state_root / gremlin_id
 
-    # workdir exists (lenv.repo); no branch recorded; worktree_base differs
+    # worktree_base is deliberately bogus — mismatched value must not block resume
+    # when workdir exists.  The branch artifact also names a nonexistent branch to
+    # prove graft never consults last_artifact_branch().
     _make_state(
         state_dir,
         lenv.repo,
         workdir=str(lenv.repo),
         worktree_base="abc123deadbeef",
+        artifacts=[{"type": "branch", "name": "deleted-branch-nonexistent"}],
     )
     _write_hermetic(state_dir)
     _write_graft_pipeline(lenv.repo, "address", "address-code")
