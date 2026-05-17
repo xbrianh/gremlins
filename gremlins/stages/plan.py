@@ -247,7 +247,17 @@ def _post_file_as_github_issue(path: str, state: State) -> tuple[str, str]:
         sys.stderr.flush()
         sys.exit(1)
     r = subprocess.run(
-        ["gh", "issue", "create", "--repo", state.repo, "--title", issue_title, "--body-file", path],
+        [
+            "gh",
+            "issue",
+            "create",
+            "--repo",
+            state.repo,
+            "--title",
+            issue_title,
+            "--body-file",
+            path,
+        ],
         capture_output=True,
         text=True,
         check=False,
