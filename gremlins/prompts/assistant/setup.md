@@ -96,12 +96,14 @@ Do not edit files inside the gremlin's state directory or worktree directly.
 
 The `gremlins queue` subsystem lets you tee up `gremlins launch` invocations to run serially — useful for dispatching tasks before walking away for the night.
 
+**Use `--wait` when queueing launches.** The queue runner waits for each command to exit before starting the next. `gremlins launch` exits immediately after spawning, so without `--wait` the queue moves on before the gremlin finishes. Always add `--wait` when queuing a launch:
+
 **Interleaved `land` pattern** — use `--gremlin-id` to assign an id up front, then interleave `land` commands so each item lands before the next one launches:
 
 ```
-gremlins queue add gremlins launch gh-terse --plan '#123' --gremlin-id my-feature
+gremlins queue add gremlins launch gh-terse --plan '#123' --gremlin-id my-feature --wait
 gremlins queue add gremlins land my-feature
-gremlins queue add gremlins launch gh-terse --plan '#124' --gremlin-id follow-up
+gremlins queue add gremlins launch gh-terse --plan '#124' --gremlin-id follow-up --wait
 gremlins queue add gremlins land follow-up
 ```
 
@@ -111,10 +113,8 @@ This serializes dependent work through the queue without a `boss` pipeline. Use 
 
 - `pending/` — not yet started, executed in lexicographic order
 - `running/` — the one currently in flight
-- `done/` — completed cleanly (exit 0; for gremlins: exit 0 and no bail marker)
-- `failed/` — dirty exit, timeout, bail, or invalid gremlin id
-
-Each item is a `.cmd` file. Once a gremlin id is captured from the command's output, the file is renamed to `<timestamp>-<slug>.<id>.cmd` so `queue list` can surface the id.
+- `done/` — completed cleanly (exit 0)
+- `failed/` — dirty exit
 
 **The verbs:**
 
@@ -125,7 +125,7 @@ Each item is a `.cmd` file. Once a gremlin id is captured from the command's out
 - `queue clear` — remove done + failed items; `--failed` clears only failed, `--done` clears only done, `--purge` stops running gremlins and wipes all
 - `queue land` — land all done items in lex order; halts on first failure; idempotent because `gremlins land` is
 
-**Any shell command is valid.** A `.cmd` file can be any shell command, not just `gremlins launch`. The runner uses the subprocess exit code when no gremlin id is captured.
+**Any shell command is valid.** A `.cmd` file can be any shell command, not just `gremlins launch`. The runner always uses the subprocess exit code to determine success or failure.
 
 **Morning-after workflow:**
 

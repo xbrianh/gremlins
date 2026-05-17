@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import pathlib
 import sys
+import time
 from typing import Any
 
 from gremlins import paths as _paths
@@ -22,6 +24,7 @@ _INFRA_ARGS = frozenset(
         "base_ref",
         "client",
         "gremlin_id",
+        "wait",
     }
 )
 _INFRA_FLAG_NAMES = frozenset(
@@ -33,8 +36,30 @@ _INFRA_FLAG_NAMES = frozenset(
         "base-ref",
         "client",
         "gremlin-id",
+        "wait",
     }
 )
+
+_TERMINAL_STATUSES = frozenset({"done", "dead", "bailed", "stopped"})
+_POLL_TIMEOUT = 4 * 3600  # 4 hours
+
+
+def _poll_terminal(state_file: pathlib.Path) -> dict[str, object]:
+    deadline = time.time() + _POLL_TIMEOUT
+    while True:
+        if time.time() > deadline:
+            raise TimeoutError(
+                f"gremlin did not reach terminal status within {_POLL_TIMEOUT // 3600}h"
+            )
+        try:
+            data = json.loads(state_file.read_text())
+            if data.get("status") in _TERMINAL_STATUSES:
+                return data
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+        time.sleep(2)
+
+
 _LAUNCH_BRIEF = "usage: gremlins launch <name> [opts]\nLaunch a background gremlin by pipeline name. Run 'gremlins launch --list' to see available pipelines.\n"
 
 
@@ -66,6 +91,11 @@ def build_launch_parser(
     )
     p.add_argument("--base-ref", default=None)
     p.add_argument("--client", default=None)
+    p.add_argument(
+        "--wait",
+        action="store_true",
+        help="Block until the gremlin reaches a terminal status; exit non-zero on failure.",
+    )
     for si in stage_cls.orchestration_args():
         flag = "--" + si.name.replace("_", "-")
         if flag.lstrip("-") in _INFRA_FLAG_NAMES:
@@ -169,4 +199,13 @@ def _self_background_main(
         sys.stderr.write(info)
         if args.print_id:
             sys.stdout.write(gremlin_id + "\n")
+
+    if args.wait:
+        try:
+            state = _poll_terminal(sf)
+        except TimeoutError as exc:
+            sys.stderr.write(f"error: {exc}\n")
+            return 1
+        return 0 if state.get("exit_code") == 0 and "bail_class" not in state else 1
+
     return 0
