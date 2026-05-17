@@ -18,8 +18,6 @@ from agents.items import (
 from agents.models.openai_provider import OpenAIProvider
 from agents.result import RunResultStreaming
 from agents.stream_events import RunItemStreamEvent
-from openai.types.shared import Reasoning
-
 from gremlins.clients.config import (
     OPENAI_AGENTS_MAX_TURNS,
     STREAM_IDLE_BACKOFF,
@@ -472,8 +470,5 @@ def make_xai_client(model: str | None) -> OpenAIAgentsClient:
         model or "grok-4",
         base_url="https://api.x.ai/v1",
         api_key=api_key,
-        model_settings=ModelSettings(
-            temperature=_DEFAULT_TEMPERATURE,
-            reasoning=Reasoning(effort="high"),
-        ),
+        model_settings=ModelSettings(temperature=_DEFAULT_TEMPERATURE),
     )
