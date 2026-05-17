@@ -246,4 +246,3 @@ stages:
     assert captured["pipeline_path"] == str(hermetic_yaml)
     resumed_stages = yaml.safe_load(hermetic_yaml.read_text(encoding="utf-8"))["stages"]
     assert [s["name"] for s in resumed_stages] == ["plan"]
-
