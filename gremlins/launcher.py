@@ -573,7 +573,11 @@ def _load_pipeline_and_check_gh(
         except (FileNotFoundError, OSError, ValueError):
             pass
 
-    if pipeline_data is not None and pipeline_data.needs_gh() and shutil.which("gh") is None:
+    if (
+        pipeline_data is not None
+        and pipeline_data.needs_gh()
+        and shutil.which("gh") is None
+    ):
         raise RuntimeError("gh CLI not found on PATH (required for gh pipeline)")
 
     return pipeline_data
@@ -680,12 +684,20 @@ def _spawn_resume(
 def resume(gremlin_id: str, *, graft: str | None = None) -> None:
     state_dir, state = _load_resume_state(gremlin_id)
     _check_resume_preconditions(gremlin_id, state_dir, state, graft)
-    pipeline_args, pipeline_path, project_root = _resolve_resume_pipeline(state, state_dir)
-    pipeline_data = _load_pipeline_and_check_gh(gremlin_id, state_dir, project_root, pipeline_path)
+    pipeline_args, pipeline_path, project_root = _resolve_resume_pipeline(
+        state, state_dir
+    )
+    pipeline_data = _load_pipeline_and_check_gh(
+        gremlin_id, state_dir, project_root, pipeline_path
+    )
     stage = _determine_stage(state, pipeline_data)
     if graft is not None:
         stage = _append_graft(state_dir, graft, project_root)
-    _patch_state_for_resume(gremlin_id, state_dir, state, stage, pipeline_args, pipeline_path)
-    p = _spawn_resume(gremlin_id, state_dir, state, pipeline_path, pipeline_args, stage, project_root)
+    _patch_state_for_resume(
+        gremlin_id, state_dir, state, stage, pipeline_args, pipeline_path
+    )
+    p = _spawn_resume(
+        gremlin_id, state_dir, state, pipeline_path, pipeline_args, stage, project_root
+    )
     (state_dir / "pid").write_text(str(p.pid), encoding="utf-8")
     StateData.load(gremlin_id).patch(pid=p.pid)
