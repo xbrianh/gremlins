@@ -474,6 +474,6 @@ def make_xai_client(model: str | None) -> OpenAIAgentsClient:
         api_key=api_key,
         model_settings=ModelSettings(
             temperature=_DEFAULT_TEMPERATURE,
-            reasoning=Reasoning(effort="high"),
+            reasoning=Reasoning(effort="high", summary="auto"),
         ),
     )

@@ -354,6 +354,7 @@ def test_xai_client_model_settings(monkeypatch: Any) -> None:
     assert client._model_settings.temperature == 0.3
     assert client._model_settings.reasoning is not None
     assert client._model_settings.reasoning.effort == "high"
+    assert client._model_settings.reasoning.summary == "auto"
 
 
 def test_xai_client_missing_key(monkeypatch: Any) -> None:
