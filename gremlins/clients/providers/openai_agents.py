@@ -32,6 +32,7 @@ from gremlins.clients.protocol import CompletedRun
 from gremlins.clients.stream import trunc
 from gremlins.clients.tools import GREMLINS_TOOLS
 from gremlins.utils.decorators import default_on_exception, swallow
+from gremlins.utils.yaml_io import load_bundled_prompt
 
 # USD per 1M tokens: (input, output)
 _PRICING: dict[str, tuple[float, float]] = {
@@ -59,19 +60,7 @@ _PRICING: dict[str, tuple[float, float]] = {
 _DEFAULT_PRICING = (2.50, 10.00)
 _DEFAULT_TEMPERATURE = 0.3
 
-DEFAULT_INSTRUCTIONS = """\
-You are a software engineering assistant. Operational norms:
-
-- Before declaring work done, re-check the change's effect on surrounding code: \
-call sites, related functions, and consistency within the same file or scope.
-- When the failure output describes multiple issues, address every concrete one \
-you can identify. Partial progress is better than none.
-- When you change how a function is called or how a value is typed, audit other \
-callers and consumers in the same file or module for consistency.
-- Communicate concisely about what you did; do not narrate every step.
-- Bail (write the bail marker) only when you cannot identify any further concrete \
-action that would make progress.
-"""
+DEFAULT_INSTRUCTIONS = load_bundled_prompt("default_openai_agents_instructions.md")
 
 
 class StreamTimeoutError(RuntimeError):
