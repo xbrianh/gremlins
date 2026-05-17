@@ -368,7 +368,7 @@ def _persist_expanded_pipeline(state_dir: pathlib.Path, pipeline_path: str) -> s
     from gremlins.utils.yaml_io import dump_yaml_text
 
     expanded = expand_pipeline(pathlib.Path(pipeline_path))
-    expanded["_expanded"] = True
+    expanded["__gremlins_expanded__"] = True
     dest = state_dir / "pipeline.yaml"
     dest.write_text(dump_yaml_text(expanded), encoding="utf-8")
     return str(dest)

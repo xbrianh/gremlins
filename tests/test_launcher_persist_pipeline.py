@@ -3,12 +3,8 @@
 from __future__ import annotations
 
 import json
-import os
 import pathlib
-import subprocess
 
-import platformdirs
-import pytest
 import yaml
 
 from gremlins.pipeline import Pipeline
@@ -251,85 +247,3 @@ stages:
     resumed_stages = yaml.safe_load(hermetic_yaml.read_text(encoding="utf-8"))["stages"]
     assert [s["name"] for s in resumed_stages] == ["plan"]
 
-
-# ---------------------------------------------------------------------------
-# Shared fixtures
-# ---------------------------------------------------------------------------
-
-
-REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
-FIXTURES_DIR = pathlib.Path(__file__).resolve().parent / "fixtures"
-FAKE_CLAUDE = FIXTURES_DIR / "fake_claude.py"
-
-
-def _setup_claude_home(home: pathlib.Path) -> None:
-    claude_dir = home / ".claude"
-    claude_dir.mkdir(parents=True, exist_ok=True)
-    for name in ("gremlins", "agents"):
-        link = claude_dir / name
-        if not link.exists() and not link.is_symlink():
-            link.symlink_to(REPO_ROOT / name)
-
-
-def _init_git_repo(path: pathlib.Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True
-    )
-    subprocess.run(
-        ["git", "config", "user.email", "test@test.com"],
-        cwd=path,
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Test"],
-        cwd=path,
-        check=True,
-        capture_output=True,
-    )
-    (path / "README.md").write_text("init\n")
-    subprocess.run(
-        ["git", "add", "README.md"], cwd=path, check=True, capture_output=True
-    )
-    subprocess.run(
-        ["git", "commit", "-m", "init"], cwd=path, check=True, capture_output=True
-    )
-
-
-@pytest.fixture
-def lenv(tmp_path, monkeypatch):
-    from fixtures.shell_env import install_fake_bin
-
-    home = tmp_path / "home"
-    home.mkdir(parents=True, exist_ok=True)
-    _setup_claude_home(home)
-    monkeypatch.setenv("HOME", str(home))
-
-    bin_dir = tmp_path / "bin"
-    install_fake_bin(bin_dir, "claude", FAKE_CLAUDE)
-
-    state_root = pathlib.Path(platformdirs.user_state_dir("gremlins"))
-    state_root.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
-
-    repo = tmp_path / "repo"
-    _init_git_repo(repo)
-
-    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(tmp_path / "fake_claude.log"))
-    monkeypatch.setenv("GIT_OPTIONAL_LOCKS", "0")
-    monkeypatch.setenv("GREMLINS_TEST_NOOP_PIPELINE", "1")
-    old_path = os.environ.get("PATH", "")
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{old_path}")
-    monkeypatch.delenv("PYTHONPATH", raising=False)
-    monkeypatch.delenv("GREMLIN_ID", raising=False)
-    monkeypatch.delenv("GREMLINS_OVERLAY_DIR", raising=False)
-    monkeypatch.chdir(repo)
-
-    class _Env:
-        pass
-
-    e = _Env()
-    e.state_root = state_root
-    e.repo = repo
-    return e
