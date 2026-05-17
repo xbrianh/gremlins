@@ -18,6 +18,7 @@ class StageInput(NamedTuple):
 class Stage:
     type: str = ""
     needs_gh: bool = False
+    body: list[Stage] = []
 
     def __init__(self, name: str) -> None:
         self.name = name
