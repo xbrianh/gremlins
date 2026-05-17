@@ -7,7 +7,7 @@ import os
 import pathlib
 
 import pytest
-import yaml  # noqa: F401
+import yaml
 
 # ---------------------------------------------------------------------------
 # _next_graft_name — unit tests
@@ -39,6 +39,14 @@ def test_next_graft_name_mixed():
 
     stages = [{"name": "plan"}, {"name": "graft-1"}, {"name": "implement"}]
     assert _next_graft_name(stages) == "graft-2"
+
+
+def test_next_graft_name_noncontiguous():
+    from gremlins.launcher import _next_graft_name
+
+    # graft-2 present without graft-1 — must not return graft-2 (duplicate)
+    stages = [{"name": "graft-2"}, {"name": "graft-3"}]
+    assert _next_graft_name(stages) == "graft-4"
 
 
 # ---------------------------------------------------------------------------
@@ -197,13 +205,23 @@ def test_graft_on_finished_success_works(lenv, monkeypatch):
     _write_hermetic(state_dir)
     _write_graft_pipeline(lenv.repo, "address", "address")
 
-    monkeypatch.setattr(launcher, "_spawn_logged_process", lambda *a, **kw: _FakeProc())
+    captured: dict[str, object] = {}
+
+    def fake_spawn(cmd, cwd, env, log_path, log_mode="w"):
+        captured["cmd"] = cmd
+        return _FakeProc()
+
+    monkeypatch.setattr(launcher, "_spawn_logged_process", fake_spawn)
 
     launcher.resume(gremlin_id, graft="address")
 
     state = json.loads((state_dir / "state.json").read_text(encoding="utf-8"))
     assert state["status"] == "running"
     assert not (state_dir / "finished").exists()
+
+    cmd = list(captured["cmd"])
+    assert "--resume-from" in cmd
+    assert cmd[cmd.index("--resume-from") + 1] == "graft-1"
 
 
 def test_graft_appends_wrapped_stage(lenv, monkeypatch):
