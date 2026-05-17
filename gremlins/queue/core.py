@@ -230,11 +230,6 @@ def clear(
         return _clear_item(root, item)
     if purge:
         for sub in SUBDIRS:
-            if sub == "running":
-                for p in (root / sub).glob("*.cmd"):
-                    gremlin_id = _parse_id(p)
-                    if gremlin_id:
-                        subprocess.run(["gremlins", "stop", gremlin_id])
             _delete_dir_contents(root, sub)
         return 0
 

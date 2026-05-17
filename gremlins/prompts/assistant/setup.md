@@ -123,7 +123,7 @@ Each item is a `.cmd` file named `<timestamp>-<slug>.cmd`.
 - `queue requeue [--done]` — move all failed items back to pending; `--done` also requeues done items
 - `queue clear` — remove done + failed items; `--failed` clears only failed, `--done` clears only done, `--purge` stops running gremlins and wipes all
 
-**Any shell command is valid.** A `.cmd` file can be any shell command, not just `gremlins launch`. The runner uses the subprocess exit code when no gremlin id is captured.
+**Any shell command is valid.** A `.cmd` file can be any shell command, not just `gremlins launch`. The runner uses the subprocess exit code to decide done/failed.
 
 **Morning-after workflow:**
 

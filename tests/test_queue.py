@@ -283,15 +283,16 @@ def test_clear_purge_empties_all(q):
         assert not list((q / sub).glob("*.cmd"))
 
 
-def test_clear_purge_stops_running_gremlin(q, monkeypatch):
-    stopped = []
+def test_clear_purge_does_not_stop_gremlins(q, monkeypatch):
+    # purge just deletes files; there is no id in queue filenames to stop
+    stop_calls = []
     monkeypatch.setattr(
         "gremlins.queue.core.subprocess.run",
-        lambda cmd, **kw: stopped.append(cmd) or MagicMock(returncode=0),
+        lambda cmd, **kw: stop_calls.append(cmd) or MagicMock(returncode=0),
     )
-    (q / "running" / "0000-local.gr-run001.cmd").write_text("gremlins launch local")
+    (q / "running" / "0000-local.cmd").write_text("gremlins launch local")
     core.clear(purge=True)
-    assert any("gr-run001" in str(c) for c in stopped)
+    assert stop_calls == []
 
 
 # ---------------------------------------------------------------------------
