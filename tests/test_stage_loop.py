@@ -186,21 +186,19 @@ def test_max_iters_terminates_at_n(tmp_path):
 
 def test_custom_until_predicate(tmp_path):
     """Loop exits when custom predicate returns True."""
-    calls: list[int] = []
 
     def runner() -> Done:
         return Done()
 
-    # exit after iteration 2
+    # max_iters(2) fires at iteration 2 — no Bail raised
     loop = LoopStage(
         "loop",
         body_runners=[runner],
         max_iterations=5,
         until=max_iters(2),
     )
-    loop.run(_loop_state(tmp_path))
-    # max_iters(2) fires at iteration 2 — runner ran twice
-    assert True  # no Bail raised
+    result = loop.run(_loop_state(tmp_path))
+    assert result == Done()
 
 
 def test_on_iteration_start_called_each_iteration(tmp_path):
@@ -395,9 +393,7 @@ def test_no_on_iteration_start_skips_detach(tmp_path, make_state_dir, monkeypatc
         lambda branch, cwd=None: git_calls.append(branch),
     )
 
-    loop = LoopStage(
-        "test", body_runners=[lambda: Done()], max_iterations=1
-    )
+    loop = LoopStage("test", body_runners=[lambda: Done()], max_iterations=1)
     loop.run(_loop_state_with_gr(tmp_path, gremlin_id))
 
     assert git_calls == []

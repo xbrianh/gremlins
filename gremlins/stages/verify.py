@@ -96,9 +96,7 @@ class Verify(Stage):
             return Done()
 
         commands_section = "**Commands run:**\n" + "\n".join(f"- `{c}`" for c in cmds)
-        cmd_stage = Cmd(
-            "cmd", [], {"cmds": cmds, "log_path": "verify-attempt-{n}.log"}
-        )
+        cmd_stage = Cmd("cmd", [], {"cmds": cmds, "log_path": "verify-attempt-{n}.log"})
         fix_stage = VerifyFix("fix", self.prompts, commands_section)
         return LoopStage(
             "verify", body=[cmd_stage, fix_stage], max_iterations=max_attempts

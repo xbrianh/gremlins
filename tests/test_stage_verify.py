@@ -277,7 +277,11 @@ def test_verify_fix_reads_latest_log_and_runs_agent(tmp_path):
     (tmp_path / "verify-attempt-1.log").write_text("error output\n", encoding="utf-8")
     client = FakeClaudeClient(fixtures={"verify-fix-1": MINIMAL_EVENTS})
     state = _make_fix_state(tmp_path, client)
-    stage = VerifyFix("fix", ["fix: {verify_output} {commands_section} {bail_command} {diff_text}"], "cmds")
+    stage = VerifyFix(
+        "fix",
+        ["fix: {verify_output} {commands_section} {bail_command} {diff_text}"],
+        "cmds",
+    )
     outcome = stage.run(state)
     assert isinstance(outcome, Done)
     assert len(client.calls) == 1
@@ -298,7 +302,11 @@ def test_verify_fix_picks_highest_numbered_log(tmp_path):
     (tmp_path / "verify-attempt-2.log").write_text("latest error", encoding="utf-8")
     client = FakeClaudeClient(fixtures={"verify-fix-2": MINIMAL_EVENTS})
     state = _make_fix_state(tmp_path, client)
-    stage = VerifyFix("fix", ["fix: {verify_output} {commands_section} {bail_command} {diff_text}"], "cmds")
+    stage = VerifyFix(
+        "fix",
+        ["fix: {verify_output} {commands_section} {bail_command} {diff_text}"],
+        "cmds",
+    )
     stage.run(state)
     assert client.calls[0].label == "verify-fix-2"
     assert "latest error" in client.calls[0].prompt
