@@ -219,9 +219,7 @@ def _parallel_stages(
         )
 
     def _clear_persisted_state() -> None:
-        parent_data.patch_parallel_worktrees(
-            group_name, base_head=None, paths=None
-        )
+        parent_data.patch_parallel_worktrees(group_name, base_head=None, paths=None)
 
     def _remove_worktrees(paths: list[pathlib.Path]) -> None:
         if not _in_git_repo():

@@ -336,7 +336,6 @@ def test_cancel_on_bail_skips_unstarted_children():
         set_stage_fn=lambda _n: None,
         cancel_on_bail=True,
         bail_policy="any",
-
         project_root=pathlib.Path.cwd(),
     )
 
@@ -464,7 +463,6 @@ def test_worktree_lifecycle_fanout_creates_and_fanin_removes(tmp_path):
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",
-
         project_root=repo,
     )
 
@@ -650,7 +648,6 @@ def test_build_parallel_stages_returns_three_named_stages():
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",
-
         project_root=pathlib.Path.cwd(),
     )
     names = [n for n, _ in stages]
@@ -682,7 +679,6 @@ def test_parallel_all_children_complete_with_defaults():
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",
-
         project_root=pathlib.Path.cwd(),
     )
 
