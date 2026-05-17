@@ -18,6 +18,7 @@ from agents.tool_context import ToolContext
 from gremlins.clients.config import OPENAI_AGENTS_MAX_TURNS
 from gremlins.clients.protocol import CompletedRun
 from gremlins.clients.providers.openai_agents import (
+    DEFAULT_INSTRUCTIONS,
     OpenAIAgentsClient,
     StreamTerminalError,
     StreamTimeoutError,
@@ -31,6 +32,31 @@ from gremlins.clients.tools import GREMLINS_TOOLS, _bash_invoke
 def test_openai_client_constructs() -> None:
     client = OpenAIAgentsClient("gpt-4o")
     assert client.total_cost_usd == 0.0
+
+
+def test_default_instructions_are_substantive() -> None:
+    assert "re-check" in DEFAULT_INSTRUCTIONS
+    assert "bail marker" in DEFAULT_INSTRUCTIONS
+    assert "audit" in DEFAULT_INSTRUCTIONS
+
+
+def test_custom_instructions_passed_to_agent(monkeypatch: Any) -> None:
+    usage = _make_usage()
+    fake_run = _make_run_result_streaming("done", usage, [])
+    captured_agents: list[Any] = []
+
+    def _fake_run_streamed(agent: Any, *a: Any, **kw: Any) -> Any:
+        captured_agents.append(agent)
+        return fake_run
+
+    monkeypatch.setattr("agents.run.Runner.run_streamed", _fake_run_streamed)
+
+    custom = "Custom instructions here."
+    client = OpenAIAgentsClient("gpt-4o", instructions=custom)
+    client.run("do something", label="t")
+
+    assert captured_agents, "Runner.run_streamed was not called"
+    assert captured_agents[0].instructions == custom
 
 
 def test_gremlins_tools_nonempty() -> None:

@@ -32,6 +32,7 @@ from gremlins.clients.protocol import CompletedRun
 from gremlins.clients.stream import trunc
 from gremlins.clients.tools import GREMLINS_TOOLS
 from gremlins.utils.decorators import default_on_exception, swallow
+from gremlins.utils.yaml_io import load_bundled_prompt
 
 # USD per 1M tokens: (input, output)
 _PRICING: dict[str, tuple[float, float]] = {
@@ -58,6 +59,8 @@ _PRICING: dict[str, tuple[float, float]] = {
 }
 _DEFAULT_PRICING = (2.50, 10.00)
 _DEFAULT_TEMPERATURE = 0.3
+
+DEFAULT_INSTRUCTIONS = load_bundled_prompt("default_openai_agents_instructions.md")
 
 
 class StreamTimeoutError(RuntimeError):
@@ -138,12 +141,14 @@ class OpenAIAgentsClient:
         base_url: str | None = None,
         api_key: str | None = None,
         model_settings: ModelSettings | None = None,
+        instructions: str = DEFAULT_INSTRUCTIONS,
     ) -> None:
         self._model = model or "gpt-4o"
         self._total_cost_usd = 0.0
         self._base_url = base_url
         self._api_key = api_key
         self._model_settings = model_settings
+        self._instructions = instructions
         self._provider: OpenAIProvider | None = (
             OpenAIProvider(base_url=base_url, api_key=api_key)
             if base_url or api_key
@@ -192,7 +197,7 @@ class OpenAIAgentsClient:
         prefix = f"[{label}] " if label else ""
         agent = Agent(
             name=f"gremlins-{label}",
-            instructions="You are a software engineering assistant.",
+            instructions=self._instructions,
             tools=GREMLINS_TOOLS,
             model=effective_model,
             model_settings=self._model_settings
