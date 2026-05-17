@@ -107,7 +107,7 @@ class LoopStage(Stage):
         result: list[Callable[[], Outcome]] = []
         for child in self.body:
             cs = _child_state(state, child)
-            runner = cs.make_runner(child, scope=self.body)
+            runner = cs.make_runner(child, scope=self.body, record_stage=False)
             result.append(cast(Callable[[], Outcome], runner))
         return result
 

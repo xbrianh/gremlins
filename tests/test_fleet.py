@@ -252,6 +252,17 @@ def test_build_row_waiting_with_sub_stage():
     assert row.stage == "waiting:implement"
 
 
+def test_build_row_non_waiting_sub_stage_not_shown():
+    state = {
+        "kind": "localgremlin",
+        "stage": "verify",
+        "sub_stage": "cmd",
+        "started_at": "",
+    }
+    row = _render.build_row("g1", "/sf", "/wdir", state, "running")
+    assert row.stage == "verify"
+
+
 def test_build_row_client_from_state():
     state = {
         "kind": "localgremlin",
