@@ -79,7 +79,7 @@ def _extract_gremlin_id_from_log(log_path: Path) -> str | None:
     prefix = "gremlin id:  "
     for line in text.splitlines():
         if line.startswith(prefix):
-            candidate = line[len(prefix):]
+            candidate = line[len(prefix) :]
             return candidate if _ID_RE.match(candidate) else None
     return None
 
