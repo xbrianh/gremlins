@@ -54,6 +54,21 @@ def _cmd_description(cmd: str) -> str:
     return ""
 
 
+def _cmd_gremlin_id(cmd: str) -> str | None:
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        return None
+    for i, t in enumerate(tokens):
+        if t == "--gremlin-id" and i + 1 < len(tokens):
+            candidate = tokens[i + 1]
+            return candidate if _ID_RE.match(candidate) else None
+        if t.startswith("--gremlin-id="):
+            candidate = t[len("--gremlin-id=") :]
+            return candidate if _ID_RE.match(candidate) else None
+    return None
+
+
 def _parse_id(path: Path) -> str | None:
     parts = path.stem.split(".")
     if len(parts) < 2:
@@ -94,8 +109,10 @@ def add(command: str) -> str:
     root = queue_root()
     tokens = command.split()
     slug = _slugify(_slug_token(tokens))
+    gremlin_id = _cmd_gremlin_id(command)
+    id_part = f".{gremlin_id}" if gremlin_id else ""
     while True:
-        name = f"{datetime.now().strftime('%Y%m%dT%H%M%S_%f')}-{slug}.cmd"
+        name = f"{datetime.now().strftime('%Y%m%dT%H%M%S_%f')}-{slug}{id_part}.cmd"
         try:
             with (root / "pending" / name).open("x") as f:
                 f.write(command)
@@ -170,14 +187,15 @@ def run() -> int:
         clean = _run_plain(cmd, log_path)
 
         if clean:
-            gremlin_id = _extract_gremlin_id_from_log(log_path)
-            if gremlin_id:
-                new_stem = f"{item.stem}.{gremlin_id}"
-                new_item = item.parent / f"{new_stem}.cmd"
-                item.rename(new_item)
-                if log_path.exists():
-                    log_path.rename(item.parent / f"{new_stem}.log")
-                item = new_item
+            if not _parse_id(item):
+                gremlin_id = _extract_gremlin_id_from_log(log_path)
+                if gremlin_id:
+                    new_stem = f"{item.stem}.{gremlin_id}"
+                    new_item = item.parent / f"{new_stem}.cmd"
+                    item.rename(new_item)
+                    if log_path.exists():
+                        log_path.rename(item.parent / f"{new_stem}.log")
+                    item = new_item
             _move_item(item, root / "done")
             print(f"queue: done {item.stem}", flush=True)
         else:

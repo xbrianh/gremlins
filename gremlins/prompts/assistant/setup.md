@@ -114,7 +114,7 @@ This serializes dependent work through the queue without a `boss` pipeline. Use 
 - `done/` — completed cleanly (exit 0; for gremlins: exit 0 and no bail marker)
 - `failed/` — dirty exit, timeout, bail, or invalid gremlin id
 
-Each item is a `.cmd` file. Once a gremlin id is captured from the command's output, the file is renamed to `<timestamp>-<slug>.<id>.cmd` so `queue list` can surface the id.
+Each item is a `.cmd` file named `<timestamp>-<slug>.cmd`. If the queued command includes `--gremlin-id <id>`, that id is embedded in the filename at queue time (`<timestamp>-<slug>.<id>.cmd`); otherwise the id is captured from the command's output when the item completes and the file is renamed then.
 
 **The verbs:**
 

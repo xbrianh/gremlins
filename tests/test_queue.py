@@ -118,6 +118,18 @@ def test_run_second_item_stays_pending_after_failure(q):
     assert "-echo.cmd" in pending[0].name
 
 
+def test_run_preserves_embedded_id_in_done_filename(q):
+    core.add("gremlins launch gh-terse --gremlin-id my-feature")
+    # simulate queue run with a no-op command (add rewrites the cmd file)
+    pending = sorted((q / "pending").glob("*.cmd"))
+    assert len(pending) == 1
+    pending[0].write_text("true")  # replace with runnable cmd, keep filename
+    core.run()
+    done = list((q / "done").glob("*.cmd"))
+    assert len(done) == 1
+    assert ".my-feature.cmd" in done[0].name
+
+
 # ---------------------------------------------------------------------------
 # slug derivation
 # ---------------------------------------------------------------------------
@@ -143,6 +155,24 @@ def test_slug_token_launch_no_pipeline_falls_back():
 def test_add_launch_uses_pipeline_name_as_slug(q):
     name = core.add("gremlins launch gh-terse --description 'do something'")
     assert "-gh-terse" in name
+
+
+def test_add_embeds_gremlin_id_when_provided(q):
+    name = core.add("gremlins launch gh-terse --gremlin-id my-feature")
+    assert ".my-feature.cmd" in name
+    assert (q / "pending" / name).exists()
+
+
+def test_add_no_gremlin_id_omits_id_from_filename(q):
+    name = core.add("gremlins launch gh-terse")
+    assert name.endswith(".cmd")
+    stem = name[: -len(".cmd")]
+    assert "." not in stem
+
+
+def test_add_gremlin_id_equals_form(q):
+    name = core.add("gremlins launch gh-terse --gremlin-id=my-feature")
+    assert ".my-feature.cmd" in name
 
 
 # ---------------------------------------------------------------------------
