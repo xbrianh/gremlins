@@ -10,7 +10,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agents import Usage
+from agents import ModelSettings, Usage
 from agents.items import MessageOutputItem, ToolCallItem, ToolCallOutputItem
 from agents.stream_events import RunItemStreamEvent
 from agents.tool_context import ToolContext
@@ -292,6 +292,26 @@ def test_idle_timeout_raises_stream_timeout_error(monkeypatch: Any) -> None:
         client.run("slow", label="t", idle_timeout=0.05, max_retries=0)
 
 
+def test_model_settings_stored_and_passed_to_agent(monkeypatch: Any) -> None:
+    usage = _make_usage()
+    fake_run = _make_run_result_streaming("done", usage, [])
+    captured_agents: list[Any] = []
+
+    def _fake_run_streamed(agent: Any, *a: Any, **kw: Any) -> Any:
+        captured_agents.append(agent)
+        return fake_run
+
+    monkeypatch.setattr("agents.run.Runner.run_streamed", _fake_run_streamed)
+
+    settings = ModelSettings(temperature=0.5)
+    client = OpenAIAgentsClient("gpt-4o", model_settings=settings)
+    assert client._model_settings is settings
+    client.run("do something", label="t")
+
+    assert captured_agents, "Runner.run_streamed was not called"
+    assert captured_agents[0].model_settings.temperature == 0.5
+
+
 def test_xai_client_constructs(monkeypatch: Any) -> None:
     monkeypatch.setenv("XAI_API_KEY", "test-key")
     client = make_xai_client(None)
@@ -299,6 +319,15 @@ def test_xai_client_constructs(monkeypatch: Any) -> None:
     assert client._model == "grok-4"
     assert client.base_url == "https://api.x.ai/v1"
     assert client.api_key == "test-key"
+
+
+def test_xai_client_model_settings(monkeypatch: Any) -> None:
+    monkeypatch.setenv("XAI_API_KEY", "test-key")
+    client = make_xai_client(None)
+    assert client._model_settings is not None
+    assert client._model_settings.temperature == 0.3
+    assert client._model_settings.reasoning is not None
+    assert client._model_settings.reasoning.effort == "high"
 
 
 def test_xai_client_missing_key(monkeypatch: Any) -> None:
@@ -312,6 +341,13 @@ def test_openai_client_constructs_with_api_key(monkeypatch: Any) -> None:
     client = make_openai_client(None)
     assert isinstance(client, OpenAIAgentsClient)
     assert client.api_key == "sk-test"
+
+
+def test_openai_client_model_settings(monkeypatch: Any) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    client = make_openai_client(None)
+    assert client._model_settings is not None
+    assert client._model_settings.temperature == 0.3
 
 
 def test_openai_client_missing_key(monkeypatch: Any) -> None:

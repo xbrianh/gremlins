@@ -8,7 +8,7 @@ import sys
 import threading
 from typing import Any
 
-from agents import Agent, RunConfig, Runner, Usage
+from agents import Agent, ModelSettings, RunConfig, Runner, Usage
 from agents.items import (
     MessageOutputItem,
     ReasoningItem,
@@ -18,6 +18,7 @@ from agents.items import (
 from agents.models.openai_provider import OpenAIProvider
 from agents.result import RunResultStreaming
 from agents.stream_events import RunItemStreamEvent
+from openai.types.shared import Reasoning
 
 from gremlins.clients.config import (
     OPENAI_AGENTS_MAX_TURNS,
@@ -56,6 +57,7 @@ _PRICING: dict[str, tuple[float, float]] = {
     "grok-4": (3.00, 15.00),
 }
 _DEFAULT_PRICING = (2.50, 10.00)
+_DEFAULT_TEMPERATURE = 0.3
 
 
 class StreamTimeoutError(RuntimeError):
@@ -135,11 +137,13 @@ class OpenAIAgentsClient:
         *,
         base_url: str | None = None,
         api_key: str | None = None,
+        model_settings: ModelSettings | None = None,
     ) -> None:
         self._model = model or "gpt-4o"
         self._total_cost_usd = 0.0
         self._base_url = base_url
         self._api_key = api_key
+        self._model_settings = model_settings
         self._provider: OpenAIProvider | None = (
             OpenAIProvider(base_url=base_url, api_key=api_key)
             if base_url or api_key
@@ -191,6 +195,9 @@ class OpenAIAgentsClient:
             instructions="You are a software engineering assistant.",
             tools=GREMLINS_TOOLS,
             model=effective_model,
+            model_settings=self._model_settings
+            if self._model_settings is not None
+            else ModelSettings(),
         )
         ctx: dict[str, object] = {
             "cwd": str(cwd) if cwd is not None else None,
@@ -445,7 +452,11 @@ def make_openai_client(model: str | None) -> OpenAIAgentsClient:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY environment variable is not set")
-    return OpenAIAgentsClient(model, api_key=api_key)
+    return OpenAIAgentsClient(
+        model,
+        api_key=api_key,
+        model_settings=ModelSettings(temperature=_DEFAULT_TEMPERATURE),
+    )
 
 
 def make_xai_client(model: str | None) -> OpenAIAgentsClient:
@@ -456,4 +467,8 @@ def make_xai_client(model: str | None) -> OpenAIAgentsClient:
         model or "grok-4",
         base_url="https://api.x.ai/v1",
         api_key=api_key,
+        model_settings=ModelSettings(
+            temperature=_DEFAULT_TEMPERATURE,
+            reasoning=Reasoning(effort="high"),
+        ),
     )
