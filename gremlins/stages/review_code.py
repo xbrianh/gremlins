@@ -7,7 +7,7 @@ import pathlib
 from typing import Any
 
 from gremlins.executor.state import State
-from gremlins.stages.agent import run_agent
+from gremlins.stages.agent import bail_command, run_agent
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Done, Outcome
 
@@ -57,17 +57,13 @@ Do NOT make any code changes — only write the review file.
 class ReviewCode(Stage):
     type = "review-code"
 
-    @classmethod
-    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> ReviewCode:
-        from gremlins.pipeline.loader import get_client_from_dict
-
-        prompts: list[str] = d.get("prompt") or []
-        stage = cls(d["name"], None, prompts, d.get("options") or {})
-        stage.client = get_client_from_dict(d)
-        return stage
+    def __init__(self, name: str, prompts: list[str], options: dict[str, Any]) -> None:
+        super().__init__(name)
+        self.prompts = prompts
+        self.options = options
 
     def run(self, state: State) -> Outcome:
-        model = self.model or state.client.model
+        model = state.stage_model or state.client.model
         if not model:
             raise ValueError(f"stage {self.name!r}: model must be set")
         out_file = state.session_dir / f"{self.name}-{model}.md"
@@ -135,20 +131,21 @@ class GitHubReviewPullRequest(Stage):
             raise ValueError(
                 f"stage {d['name']!r}: 'prompt' is required for github-review-pull-request"
             )
-        stage = cls(d["name"], None, prompts, d.get("options") or {})
+        stage = cls(d["name"], prompts, d.get("options") or {})
         stage.client = get_client_from_dict(d)
         return stage
 
     def __init__(
         self,
         name: str,
-        model: str | None,
         prompts: list[str],
         options: dict[str, Any],
         *,
         pr_url: str = "",
     ) -> None:
-        super().__init__(name, model, prompts, options)
+        super().__init__(name)
+        self.prompts = prompts
+        self.options = options
         self.pr_url = pr_url
 
     def run(self, state: State) -> Outcome:
@@ -159,7 +156,7 @@ class GitHubReviewPullRequest(Stage):
             "\n\n".join(self.prompts)
             .rstrip()
             .format(
-                bail_command=self.bail_command(state),
+                bail_command=bail_command(state),
                 pr_url=pr_url,
             )
         )
@@ -167,7 +164,6 @@ class GitHubReviewPullRequest(Stage):
             state,
             prompt,
             label="github-review-pull-request",
-            model=self.model,
             raw_path=state.session_dir / "stream-github-review-pull-request.jsonl",
         )
         return Done()

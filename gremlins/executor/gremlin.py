@@ -26,16 +26,9 @@ logger = logging.getLogger(__name__)
 def _apply_client_override(stages: list[Stage], cli: Client) -> None:
     for stage in stages:
         stage.client = cli
-        if stage.body:
-            _apply_client_override(stage.body, cli)
-
-
-def _propagate_client_models(stages: list[Stage]) -> None:
-    for stage in stages:
-        if stage.model is None and stage.client is not None:
-            stage.model = stage.client.model
-        if stage.body:
-            _propagate_client_models(stage.body)
+        body = getattr(stage, "body", [])
+        if body:
+            _apply_client_override(body, cli)
 
 
 def read_stage_inputs(sf: pathlib.Path | None) -> dict[str, Any]:
@@ -223,10 +216,12 @@ class Gremlin:
         )
         built: list[tuple[str, Callable[[], None]]] = []
         for e in stages:
-            resolved = self.test_client or e.client or PACKAGE_DEFAULT
+            stage_client = e.client or PACKAGE_DEFAULT
+            resolved = self.test_client or stage_client
             stage_state = State(
                 data=StateData(gremlin_id=self.gremlin_id, state_file=self.state_file),
                 client=resolved,
+                stage_model=stage_client.model if self.test_client else "",
                 session_dir=self.session_dir,
                 args=args,
                 pipeline_data=self.pipeline_data,
@@ -274,7 +269,6 @@ class Gremlin:
             raise ValueError(str(exc)) from exc
         if client_label:
             _apply_client_override(list(pipeline.stages), Client.parse(client_label))
-        _propagate_client_models(list(pipeline.stages))
         return cls(
             pipeline.stages,
             state_dir=state_dir,

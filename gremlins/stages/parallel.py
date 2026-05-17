@@ -46,7 +46,7 @@ class ParallelStage(Stage):
         cancel_on_bail: bool = False,
         bail_policy: str = "any",
     ) -> None:
-        super().__init__(name, None, [], {})
+        super().__init__(name)
         self._max_concurrent = max_concurrent
         self._cancel_on_bail = cancel_on_bail
         self._bail_policy = bail_policy

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import shlex
 from typing import Any
 
 from gremlins.clients.protocol import CompletedRun
@@ -29,6 +30,17 @@ def _check_bail(state: State) -> None:
         raise Bail(_read_bail_detail(bail_path))
 
 
+def bail_command(state: State) -> str:
+    script = (
+        "import sys,json,os,pathlib; "
+        "d=pathlib.Path(os.environ['GREMLIN_STATE_DIR']); "
+        "a=os.environ['GREMLIN_ATTEMPT']; "
+        "p=d/f'bail_{a}.json'; "
+        "p.exists() or p.write_text(json.dumps({'class':sys.argv[1],'detail':sys.argv[2] if len(sys.argv)>2 else ''}))"
+    )
+    return f"python -c {shlex.quote(script)}"
+
+
 def run_agent(
     state: State,
     prompt: str,
@@ -44,10 +56,11 @@ def run_agent(
     if state.data.attempt and sf is not None:
         extra_env["GREMLIN_ATTEMPT"] = state.data.attempt
         extra_env["GREMLIN_STATE_DIR"] = str(sf.parent)
+    resolved_model = model or state.stage_model or state.client.model
     completed = state.client.run(
         prompt,
         label=label,
-        model=model or state.client.model,
+        model=resolved_model,
         raw_path=raw_path,
         cwd=state.worktree,
         extra_env=extra_env or None,

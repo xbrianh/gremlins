@@ -19,18 +19,9 @@ class GitHubWaitCopilot(Stage):
     type = "github-wait-copilot"
     needs_gh = True
 
-    @classmethod
-    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> GitHubWaitCopilot:  # noqa: ARG002
-        from gremlins.pipeline.loader import get_client_from_dict
-
-        stage = cls(d["name"], None, d.get("prompt") or [], d.get("options") or {})
-        stage.client = get_client_from_dict(d)
-        return stage
-
     def __init__(
         self,
         name: str,
-        model: str | None,
         prompts: list[str],
         options: dict[str, Any],
         *,
@@ -39,7 +30,9 @@ class GitHubWaitCopilot(Stage):
         interval: int = 20,
         review_checker: Callable[[], str | None] | None = None,
     ) -> None:
-        super().__init__(name, model, prompts, options)
+        super().__init__(name)
+        self.prompts = prompts
+        self.options = options
         self.pr_num = pr_num
         self.timeout = timeout
         self.interval = interval

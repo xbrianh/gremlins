@@ -14,19 +14,11 @@ from gremlins.stages.outcome import Done, NeedsFix, Outcome
 class Cmd(Stage):
     type = "cmd"
 
-    def __init__(
-        self, name: str, model: str | None, prompts: list[str], options: dict[str, Any]
-    ) -> None:
-        super().__init__(name, model, prompts, options)
+    def __init__(self, name: str, prompts: list[str], options: dict[str, Any]) -> None:
+        super().__init__(name)
+        self.prompts = prompts
+        self.options = options
         self.n: int = 0
-
-    @classmethod
-    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> Cmd:
-        from gremlins.pipeline.loader import get_client_from_dict
-
-        stage = cls(d["name"], None, d.get("prompt") or [], d.get("options") or {})
-        stage.client = get_client_from_dict(d)
-        return stage
 
     def run(self, state: State) -> Outcome:
         cmds = [c for c in self.options.get("cmds", []) if c.strip()]

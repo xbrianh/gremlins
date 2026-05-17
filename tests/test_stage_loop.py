@@ -166,7 +166,7 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
 
 
 def _run_cmd_stage(tmp_path: Any, cmds: list[str]) -> tuple[Cmd, RuntimeState]:
-    stage = Cmd("cmd", None, [], {"cmds": cmds})
+    stage = Cmd("cmd", [], {"cmds": cmds})
     state = RuntimeState(
         data=StateData(),
         client=_fake_client(),
@@ -211,7 +211,7 @@ def test_run_cmd_output_in_needs_fix(tmp_path):
 
 
 def test_run_cmd_log_path_interpolation(tmp_path):
-    stage = Cmd("cmd", None, [], {"cmds": ["true"], "log_path": "run-{n}.log"})
+    stage = Cmd("cmd", [], {"cmds": ["true"], "log_path": "run-{n}.log"})
     state = RuntimeState(
         data=StateData(), client=_fake_client(), session_dir=tmp_path, worktree=tmp_path
     )

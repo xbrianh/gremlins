@@ -17,12 +17,13 @@ def _fill_stage_clients(stages: list[Stage], default: Client) -> None:
     for stage in stages:
         if stage.type != "parallel":
             stage.client = stage.client or default
-        if stage.body:
-            _fill_stage_clients(stage.body, default)
+        body = getattr(stage, "body", [])
+        if body:
+            _fill_stage_clients(body, default)
 
 
 def _stages_need_gh(stages: list[Stage]) -> bool:
-    return any(s.needs_gh or (s.body and _stages_need_gh(s.body)) for s in stages)
+    return any(s.needs_gh or _stages_need_gh(getattr(s, "body", [])) for s in stages)
 
 
 @dataclasses.dataclass

@@ -487,6 +487,7 @@ class State:
     client: Client
     session_dir: pathlib.Path
     test_client: Client | None = None
+    stage_model: str = ""
     args: argparse.Namespace = dataclasses.field(default_factory=argparse.Namespace)
     pipeline_data: Pipeline | None = None
     repo: str = ""

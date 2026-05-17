@@ -1,0 +1,84 @@
+"""Tests for Stage base class defaults."""
+
+from __future__ import annotations
+
+import pathlib
+from typing import Any
+
+import pytest
+
+from gremlins.clients.fake import FakeClaudeClient
+from gremlins.executor.state import State, StateData
+from gremlins.pipeline import Pipeline
+from gremlins.stages.base import Stage
+from gremlins.stages.github_open_pull_request import GitHubOpenPullRequest
+from gremlins.stages.outcome import Done, Outcome
+
+_PIPELINE = Pipeline(
+    name="test",
+    path=pathlib.Path("."),
+    stages=[GitHubOpenPullRequest("github-open-pull-request", [], {})],
+)
+
+
+class _SimpleStage(Stage):
+    type = "simple"
+
+    def __init__(self, name: str, prompts: list[str], options: dict[str, Any]) -> None:
+        super().__init__(name)
+        self.prompts = prompts
+        self.options = options
+
+    def run(self, state: State) -> Outcome:
+        return Done()
+
+
+def test_stage_init_takes_only_name() -> None:
+    stage = Stage("my-stage")
+    assert stage.name == "my-stage"
+    assert stage.client is None
+    assert stage.path == ""
+
+
+def test_stage_run_raises_not_implemented() -> None:
+    stage = Stage("my-stage")
+    client = FakeClaudeClient(fixtures={})
+    state = State(
+        data=StateData(gremlin_id=None),
+        client=client,
+        session_dir=pathlib.Path("."),
+        pipeline_data=_PIPELINE,
+    )
+    with pytest.raises(NotImplementedError):
+        stage.run(state)
+
+
+def test_default_with_dict_constructs_subclass() -> None:
+    d = {"name": "my-simple", "prompt": ["do stuff"], "options": {"foo": "bar"}}
+    stage = _SimpleStage.with_dict(d)
+    assert isinstance(stage, _SimpleStage)
+    assert stage.name == "my-simple"
+    assert stage.prompts == ["do stuff"]
+    assert stage.options == {"foo": "bar"}
+
+
+def test_default_with_dict_sets_client() -> None:
+    d = {"name": "my-simple", "prompt": [], "options": {}}
+    stage = _SimpleStage.with_dict(d)
+    # No client key in dict — client is set to None or the default.
+    # get_client_from_dict returns None when no client key present.
+    assert stage.client is None
+
+
+def test_path_setter_propagates_to_body() -> None:
+    """path setter does not error on leaf stages (no body attribute)."""
+    stage = _SimpleStage("leaf", [], {})
+    stage.path = "parent/leaf"
+    assert stage.path == "parent/leaf"
+
+
+def test_deleted_helpers_not_on_stage() -> None:
+    stage = Stage("s")
+    assert not hasattr(stage, "run_claude")
+    assert not hasattr(stage, "bail_command")
+    assert not hasattr(stage, "run_subprocess")

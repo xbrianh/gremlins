@@ -29,7 +29,6 @@ def _make_stage(
     cmds: list[str] | None = None,
     max_attempts: int = 3,
     client: Any = None,
-    fix_model: str = "sonnet",
 ) -> tuple[Verify, RuntimeState]:
     if cmds is None:
         cmds = ["true"]
@@ -39,9 +38,7 @@ def _make_stage(
         "cmds": cmds if cmds is not None else [],
         "max_attempts": max_attempts,
     }
-    stage = Verify(
-        "verify", fix_model, [_VERIFY_PROMPT_PATH.read_text(encoding="utf-8")], options
-    )
+    stage = Verify("verify", [_VERIFY_PROMPT_PATH.read_text(encoding="utf-8")], options)
     state = RuntimeState(
         data=StateData(),
         client=client,
@@ -90,13 +87,11 @@ def test_fix_then_green(tmp_path):
         cmds=[check_cmd, "true"],
         max_attempts=3,
         client=client,
-        fix_model="haiku",
     )
     stage.run(state)
 
     assert len(state.client.calls) == 1
     assert state.client.calls[0].label == "verify-fix-1"
-    assert state.client.calls[0].model == "haiku"
     assert (tmp_path / "verify-attempt-1.log").exists()
     assert (tmp_path / "verify-attempt-2.log").exists()
     assert (tmp_path / "stream-verify-1.jsonl").exists()
@@ -196,9 +191,7 @@ def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
         fixtures={"verify-fix-1": MINIMAL_EVENTS, "verify-fix-2": MINIMAL_EVENTS}
     )
     options = {"cmds": ["false"], "max_attempts": 3}
-    stage = Verify(
-        "verify", "sonnet", [_VERIFY_PROMPT_PATH.read_text(encoding="utf-8")], options
-    )
+    stage = Verify("verify", [_VERIFY_PROMPT_PATH.read_text(encoding="utf-8")], options)
     state = RuntimeState(
         data=StateData(gremlin_id=gremlin_id, attempt=attempt),
         client=client,
@@ -247,7 +240,7 @@ def test_parallel_child_fix_prompt_uses_new_bail_command(tmp_path):
         _bail_fix_path.read_text(encoding="utf-8"),
     ]
     options = {"cmds": ["false"], "max_attempts": 2}
-    stage = Verify("verify", "sonnet", prompts, options)
+    stage = Verify("verify", prompts, options)
     state = RuntimeState(
         data=StateData(gremlin_id="gr-verify"),
         client=client,

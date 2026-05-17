@@ -41,7 +41,7 @@ def _make_gh_review(
         (_BUNDLED_PROMPTS / "github_review_pull_request.md").read_text(encoding="utf-8")
     ]
     stage = GitHubReviewPullRequest(
-        "github-review-pull-request", "sonnet", prompts, {}, pr_url=pr_url
+        "github-review-pull-request", prompts, {}, pr_url=pr_url
     )
     return stage
 
@@ -116,7 +116,7 @@ def _make_gh_address(
         (_BUNDLED_PROMPTS / "bail_section.md").read_text(encoding="utf-8"),
     ]
     stage = GitHubAddressPullRequestReviews(
-        "github-address-pull-request-reviews", "sonnet", prompts, {}, pr_url=pr_url
+        "github-address-pull-request-reviews", prompts, {}, pr_url=pr_url
     )
     return stage
 

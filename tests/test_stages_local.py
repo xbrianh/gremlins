@@ -143,7 +143,6 @@ def test_implement_renders_spec_block_when_present(tmp_path, monkeypatch):
     (session_dir / "spec.md").write_text("overall spec body", encoding="utf-8")
     stage = implement.Implement(
         "implement",
-        "sonnet",
         [(_BUNDLED_PROMPTS / "implement_local.md").read_text(encoding="utf-8")],
         {},
     )
@@ -185,7 +184,6 @@ def test_implement_omits_spec_block_when_absent(tmp_path, monkeypatch):
     (session_dir / "plan.md").write_text("task 1: do something", encoding="utf-8")
     stage = implement.Implement(
         "implement",
-        "sonnet",
         [(_BUNDLED_PROMPTS / "implement_local.md").read_text(encoding="utf-8")],
         {},
     )
@@ -206,7 +204,6 @@ def test_plan_stage_raises_when_file_absent(tmp_path):
     session_dir.mkdir()
     stage = plan.Plan(
         "plan",
-        "sonnet",
         [(_BUNDLED_PROMPTS / "plan.md").read_text(encoding="utf-8")],
         {},
     )
@@ -216,7 +213,6 @@ def test_plan_stage_raises_when_file_absent(tmp_path):
         stage.run(state)
     assert len(client.calls) == 1
     assert client.calls[0].label == "plan"
-    assert client.calls[0].model == "sonnet"
 
 
 def test_plan_stage_succeeds_when_file_exists(tmp_path):
@@ -232,7 +228,6 @@ def test_plan_stage_succeeds_when_file_exists(tmp_path):
     client = _WritingClient(fixtures={"plan": MINIMAL_EVENTS})
     stage = plan.Plan(
         "plan",
-        "haiku",
         [(_BUNDLED_PROMPTS / "plan.md").read_text(encoding="utf-8")],
         {},
     )
@@ -241,7 +236,6 @@ def test_plan_stage_succeeds_when_file_exists(tmp_path):
     stage.run(state)
     assert plan_file.exists()
     assert client.calls[0].label == "plan"
-    assert client.calls[0].model == "haiku"
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +256,6 @@ def test_implement_stage_raises_on_empty_diff(tmp_path, monkeypatch):
     (session_dir / "plan.md").write_text("# Plan\nDo stuff.\n", encoding="utf-8")
     stage = implement.Implement(
         "implement",
-        "sonnet",
         [(_BUNDLED_PROMPTS / "implement_local.md").read_text(encoding="utf-8")],
         {},
     )
@@ -287,7 +280,6 @@ def _make_review_code_stage(
 ) -> ReviewCode:
     stage = ReviewCode(
         "review-code",
-        model,
         [
             (_BUNDLED_PROMPTS / "code_style.md").read_text(encoding="utf-8"),
             (_BUNDLED_PROMPTS / "review" / "detail.md").read_text(encoding="utf-8"),
@@ -310,7 +302,6 @@ def _make_address_code_stage(
 ) -> AddressCode:
     stage = AddressCode(
         "address-code",
-        model,
         [(_BUNDLED_PROMPTS / "address.md").read_text(encoding="utf-8")],
         {},
     )
@@ -329,7 +320,6 @@ def test_address_code_stage_calls_client_with_review_content(tmp_path):
     assert len(client.calls) == 1
     call = client.calls[0]
     assert call.label == "address-code"
-    assert call.model == "sonnet"
     assert "Detail Review" in call.prompt
 
 
@@ -344,7 +334,6 @@ def test_plan_stage_includes_style_from_prompts(tmp_path):
     session_dir.mkdir()
     stage = plan.Plan(
         "plan",
-        "sonnet",
         [
             "Be good.",
             (_BUNDLED_PROMPTS / "plan.md").read_text(encoding="utf-8"),
@@ -361,7 +350,7 @@ def test_plan_stage_includes_style_from_prompts(tmp_path):
 def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
     """When state.worktree is set (parallel child), client.run gets cwd=worktree
     so claude -p reads/writes the isolated worktree, not the parent process cwd."""
-    client = ReviewCreatingClient(fixtures={"review-code:sonnet": MINIMAL_EVENTS})
+    client = ReviewCreatingClient(fixtures={"review-code:fake": MINIMAL_EVENTS})
     worktree = tmp_path / "wt"
     worktree.mkdir()
     stage = _make_review_code_stage(client, tmp_path)
@@ -376,10 +365,9 @@ def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
 
 
 def test_review_code_stage_includes_style_from_prompts(tmp_path):
-    client = ReviewCreatingClient(fixtures={"review-code:sonnet": MINIMAL_EVENTS})
+    client = ReviewCreatingClient(fixtures={"review-code:fake": MINIMAL_EVENTS})
     stage = ReviewCode(
         "review-code",
-        "sonnet",
         [
             "Be good.",
             (_BUNDLED_PROMPTS / "review" / "detail.md").read_text(encoding="utf-8"),
@@ -398,7 +386,6 @@ def test_address_code_stage_includes_style_from_prompts(tmp_path):
     client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
     stage = AddressCode(
         "address-code",
-        "sonnet",
         [
             "Be good.",
             (_BUNDLED_PROMPTS / "address.md").read_text(encoding="utf-8"),
@@ -413,7 +400,7 @@ def test_address_code_stage_includes_style_from_prompts(tmp_path):
 def test_review_code_stage_writes_stage_to_state(tmp_path, make_state_dir):
     gremlin_id = "test-gr-id"
     state_dir = make_state_dir(gremlin_id)
-    client = ReviewCreatingClient(fixtures={"review-code:sonnet": MINIMAL_EVENTS})
+    client = ReviewCreatingClient(fixtures={"review-code:fake": MINIMAL_EVENTS})
     stage = _make_review_code_stage(client, tmp_path, gremlin_id=gremlin_id)
     state = _make_state(client, tmp_path, gremlin_id=gremlin_id)
     stage.run(state)
@@ -446,15 +433,14 @@ def test_address_code_finds_review_files_in_parallel_subdirs(tmp_path):
     client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
     stage = AddressCode(
         "address-code",
-        "sonnet",
         [(_BUNDLED_PROMPTS / "address.md").read_text(encoding="utf-8")],
         {},
     )
     parallel_stage = ParallelStage(
         "reviews",
         [
-            _ReviewCode("review-code", None, [], {}),
-            _ReviewCode("review-code-fidelity", None, [], {}),
+            _ReviewCode("review-code", [], {}),
+            _ReviewCode("review-code-fidelity", [], {}),
         ],
     )
     state = RuntimeState(

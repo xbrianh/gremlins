@@ -52,12 +52,11 @@ def _make_stage(
     tmp_path: Any,
     *,
     gremlin_id: Any = None,
-    model: str = "sonnet",
     pr_branch: str | None = "test-pr-branch",
     **kwargs: Any,
 ) -> tuple[GitHubWaitCI, RuntimeState]:
     prompts = [_CI_PROMPT_PATH.read_text(encoding="utf-8")]
-    stage = GitHubWaitCI("github-wait-ci", model, prompts, {}, pr_url=PR_URL, **kwargs)
+    stage = GitHubWaitCI("github-wait-ci", prompts, {}, pr_url=PR_URL, **kwargs)
     state = RuntimeState(
         data=StateData(gremlin_id=gremlin_id), client=client, session_dir=tmp_path
     )

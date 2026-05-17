@@ -23,7 +23,7 @@ def _make_state(
     gremlin_id: str | None = None,
     issue_url: str = "https://github.com/owner/repo/issues/42",
 ) -> tuple[GitHubOpenPullRequest, RuntimeState]:
-    stage = GitHubOpenPullRequest("open-pr", "sonnet", [], {})
+    stage = GitHubOpenPullRequest("open-pr", [], {})
     client = FakeClaudeClient(fixtures={"github-open-pull-request": MINIMAL_EVENTS})
     state = RuntimeState(
         data=StateData(gremlin_id=gremlin_id, issue_url=issue_url),
@@ -164,7 +164,7 @@ def _make_state_with_gr(
     base_ref_name: str = "",
     issue_url: str = "",
 ) -> tuple[GitHubOpenPullRequest, RuntimeState]:
-    stage = GitHubOpenPullRequest("open-pr", "sonnet", [], {})
+    stage = GitHubOpenPullRequest("open-pr", [], {})
     client = FakeClaudeClient(fixtures={"github-open-pull-request": MINIMAL_EVENTS})
     state = RuntimeState(
         data=StateData(
@@ -268,7 +268,7 @@ def test_first_child_uses_base_ref_name(tmp_path: pathlib.Path) -> None:
 
 def test_explicit_base_ref_used_when_no_prior_pr(tmp_path: pathlib.Path) -> None:
     """Stage-level base_ref is used when there is no prior PR artifact branch."""
-    stage = GitHubOpenPullRequest("open-pr", "sonnet", [], {}, base_ref="feature-base")
+    stage = GitHubOpenPullRequest("open-pr", [], {}, base_ref="feature-base")
     client = FakeClaudeClient(fixtures={"github-open-pull-request": MINIMAL_EVENTS})
     state = RuntimeState(
         data=StateData(gremlin_id="test-gr", base_ref_name="main"),
@@ -301,7 +301,7 @@ def test_explicit_base_ref_used_when_no_prior_pr(tmp_path: pathlib.Path) -> None
 
 def test_last_pr_branch_takes_priority_over_base_ref(tmp_path: pathlib.Path) -> None:
     """last_pr_branch takes priority over stage-level base_ref when stacking."""
-    stage = GitHubOpenPullRequest("open-pr", "sonnet", [], {}, base_ref="feature-base")
+    stage = GitHubOpenPullRequest("open-pr", [], {}, base_ref="feature-base")
     client = FakeClaudeClient(fixtures={"github-open-pull-request": MINIMAL_EVENTS})
     state = RuntimeState(
         data=StateData(gremlin_id="test-gr", base_ref_name="main"),

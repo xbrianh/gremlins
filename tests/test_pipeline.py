@@ -92,11 +92,11 @@ def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
 
 
 def _make_stages(*names: str) -> list[Stage]:
-    return [Plan(n, None, [], {}) for n in names]
+    return [Plan(n, [], {}) for n in names]
 
 
 def _make_parallel_stage(name: str, children: list[str]) -> ParallelStage:
-    child_stages: list[Stage] = [Plan(c, None, [], {}) for c in children]
+    child_stages: list[Stage] = [Plan(c, [], {}) for c in children]
     return ParallelStage(name, child_stages)
 
 
@@ -170,7 +170,7 @@ def test_validate_resume_target_child_name_rejected(tmp_path: pathlib.Path) -> N
 
 
 def test_pipeline_rejects_unknown_stage_type(tmp_path: pathlib.Path) -> None:
-    s = Plan("s", None, [], {})
+    s = Plan("s", [], {})
     s.type = "nonexistent"
     with pytest.raises(ValueError, match="nonexistent"):
         _local([s], tmp_path=tmp_path)
@@ -272,7 +272,7 @@ def test_resolve_pipeline_path_no_overlay_env_falls_through(
 
 def test_parallel_expansion_in_constructor(tmp_path: pathlib.Path) -> None:
     parallel = _make_parallel_stage("reviews", ["review-a", "review-b"])
-    plan_entry = Plan("plan", None, [], {})
+    plan_entry = Plan("plan", [], {})
     gremlin = _local([plan_entry, parallel], tmp_path=tmp_path)
 
     stage_names = [s.name for s in gremlin.stages]
@@ -288,11 +288,11 @@ def test_parallel_expansion_in_constructor(tmp_path: pathlib.Path) -> None:
 
 
 def _gh_stage(name: str = "gh-wait") -> GitHubWaitCopilot:
-    return GitHubWaitCopilot(name, None, [], {})
+    return GitHubWaitCopilot(name, [], {})
 
 
 def _local_stage(name: str = "plan") -> Plan:
-    return Plan(name, None, [], {})
+    return Plan(name, [], {})
 
 
 def _pipeline(*stages: Stage) -> _PipelineData:

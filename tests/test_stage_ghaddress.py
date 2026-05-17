@@ -27,7 +27,7 @@ def _make_stage(
         [style_content, prompt_text] if style_content is not None else [prompt_text]
     )
     stage = GitHubAddressPullRequestReviews(
-        "github-address-pull-request-reviews", "sonnet", prompts, {}, pr_url=pr_url
+        "github-address-pull-request-reviews", prompts, {}, pr_url=pr_url
     )
     client = FakeClaudeClient(
         fixtures={"github-address-pull-request-reviews": MINIMAL_EVENTS}

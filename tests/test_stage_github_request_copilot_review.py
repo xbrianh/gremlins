@@ -16,7 +16,7 @@ def _make_stage(
     tmp_path, *, repo: str, pr_num: str
 ) -> tuple[GitHubRequestCopilotReview, RuntimeState]:
     stage = GitHubRequestCopilotReview(
-        "github-request-copilot-review", None, [], {}, pr_num=pr_num
+        "github-request-copilot-review", [], {}, pr_num=pr_num
     )
     state = RuntimeState(
         data=StateData(),
