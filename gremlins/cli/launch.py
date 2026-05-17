@@ -69,7 +69,7 @@ def build_launch_parser(
     p.add_argument(
         "--wait",
         action="store_true",
-        help="Block until the spawned gremlin exits; return its exit code.",
+        help="Block until the spawned gremlin exits; return its exit code. No timeout — a hung gremlin blocks indefinitely.",
     )
     p.add_argument("--base-ref", default=None)
     p.add_argument("--client", default=None)

@@ -439,7 +439,7 @@ def test_launch_concurrent_no_collision(lenv):
     """Concurrent launches produce distinct GREMLIN_IDs."""
     launcher = _launcher()
     ids = [
-        launcher.launch("local", stage_inputs={"instructions": f"concurrent {i}"})
+        launcher.launch("local", stage_inputs={"instructions": f"concurrent {i}"})[0]
         for i in range(5)
     ]
     assert len(set(ids)) == len(ids), f"GREMLIN_ID collision among: {ids}"

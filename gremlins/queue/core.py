@@ -71,6 +71,19 @@ def _move_item(cmd_path: Path, dst_dir: Path) -> Path:
     return dst
 
 
+def _extract_gremlin_id_from_log(log_path: Path) -> str | None:
+    try:
+        text = log_path.read_text()
+    except OSError:
+        return None
+    prefix = "gremlin id:  "
+    for line in text.splitlines():
+        if line.startswith(prefix):
+            candidate = line[len(prefix):]
+            return candidate if _ID_RE.match(candidate) else None
+    return None
+
+
 def _run_plain(cmd: str, log_path: Path) -> bool:
     with open(log_path, "w") as log_f:
         proc = subprocess.run(cmd, shell=True, stdout=log_f, stderr=subprocess.STDOUT)
@@ -157,6 +170,14 @@ def run() -> int:
         clean = _run_plain(cmd, log_path)
 
         if clean:
+            gremlin_id = _extract_gremlin_id_from_log(log_path)
+            if gremlin_id:
+                new_stem = f"{item.stem}.{gremlin_id}"
+                new_item = item.parent / f"{new_stem}.cmd"
+                item.rename(new_item)
+                if log_path.exists():
+                    log_path.rename(item.parent / f"{new_stem}.log")
+                item = new_item
             _move_item(item, root / "done")
             print(f"queue: done {item.stem}", flush=True)
         else:
