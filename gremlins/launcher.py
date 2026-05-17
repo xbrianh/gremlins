@@ -3,7 +3,7 @@
 Public API:
     launch(kind, *, stage_inputs=None, plan=None, description=None,
            parent_id=None, project_root=None, base_ref="HEAD",
-           pipeline_args=()) -> str
+           pipeline_args=()) -> tuple[str, subprocess.Popen[bytes]]
     resume(gremlin_id) -> None
 """
 
@@ -16,6 +16,7 @@ import os
 import pathlib
 import secrets
 import shutil
+import subprocess
 import sys
 from typing import Any, cast
 
@@ -391,8 +392,8 @@ def launch(
     pipeline_args: tuple[str, ...] = (),
     spec_path: str | None = None,
     gremlin_id: str | None = None,
-) -> str:
-    """Set up state dir, spawn the pipeline detached, return gremlin id.
+) -> tuple[str, subprocess.Popen[bytes]]:
+    """Set up state dir, spawn the pipeline detached, return gremlin id and process.
 
     Worktree setup is deferred to the child process via Gremlin.initialize_runtime().
     Synchronous through spawn; does not wait for the pipeline to finish.
@@ -423,7 +424,7 @@ def launch(
     (state_dir / "pid").write_text(str(p.pid), encoding="utf-8")
     StateData.load(inputs.gremlin_id).patch(pid=p.pid)
 
-    return inputs.gremlin_id
+    return inputs.gremlin_id, p
 
 
 def resume(gremlin_id: str) -> None:
