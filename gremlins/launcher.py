@@ -364,7 +364,7 @@ def _initial_state_data(inputs: _Inputs) -> StateData:
 
 
 def _next_graft_name(stages: list[dict[str, Any]]) -> str:
-    nums = []
+    nums: list[int] = []
     for s in stages:
         name = str(s.get("name", ""))
         if name.startswith("graft-"):
@@ -481,7 +481,7 @@ def launch(
     return inputs.gremlin_id, p
 
 
-def _load_resume_state(gremlin_id: str) -> tuple[pathlib.Path, dict]:
+def _load_resume_state(gremlin_id: str) -> tuple[pathlib.Path, dict[str, Any]]:
     state_dir = _state_root() / gremlin_id
     sf = state_dir / "state.json"
     if not state_dir.is_dir() or not sf.is_file():
@@ -494,7 +494,7 @@ def _load_resume_state(gremlin_id: str) -> tuple[pathlib.Path, dict]:
 
 
 def _check_resume_preconditions(
-    gremlin_id: str, state_dir: pathlib.Path, state: dict, graft: str | None
+    gremlin_id: str, state_dir: pathlib.Path, state: dict[str, Any], graft: str | None
 ) -> None:
     status = state.get("status", "")
     old_pid = state.get("pid")
@@ -534,7 +534,7 @@ def _check_resume_preconditions(
 
 
 def _resolve_resume_pipeline(
-    state: dict, state_dir: pathlib.Path
+    state: dict[str, Any], state_dir: pathlib.Path
 ) -> tuple[list[str], str, str]:
     from gremlins.cli.pipeline_args import resolve_pipeline
 
@@ -583,7 +583,7 @@ def _load_pipeline_and_check_gh(
     return pipeline_data
 
 
-def _determine_stage(state: dict, pipeline_data: Any) -> str:
+def _determine_stage(state: dict[str, Any], pipeline_data: Any) -> str:
     stage = str(state.get("stage", ""))
     if not stage or stage == "starting":
         stage = "plan"
@@ -599,7 +599,7 @@ def _determine_stage(state: dict, pipeline_data: Any) -> str:
 def _patch_state_for_resume(
     gremlin_id: str,
     state_dir: pathlib.Path,
-    state: dict,
+    state: dict[str, Any],
     stage: str,
     pipeline_args: list[str],
     pipeline_path: str,
@@ -649,7 +649,7 @@ def _patch_state_for_resume(
 def _spawn_resume(
     gremlin_id: str,
     state_dir: pathlib.Path,
-    state: dict,
+    state: dict[str, Any],
     pipeline_path: str,
     pipeline_args: list[str],
     stage: str,
