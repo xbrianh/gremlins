@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -312,10 +313,13 @@ def test_launch_unified_dispatch_calls_launch(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("gremlins.cli.launch.STAGE_TYPES", {"plan": _FakePlanStage})
     launched = []
-    monkeypatch.setattr(
-        "gremlins.cli.launch.launch",
-        lambda kind, **kw: launched.append((kind, kw)) or "gr-abc123",
-    )
+    fake_proc = MagicMock()
+
+    def _fake_launch(kind, **kw):
+        launched.append((kind, kw))
+        return "gr-abc123", fake_proc
+
+    monkeypatch.setattr("gremlins.cli.launch.launch", _fake_launch)
     monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
 
     rc = main(["launch", "local", "--instructions", "fix the bug"])

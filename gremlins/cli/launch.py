@@ -22,6 +22,7 @@ _INFRA_ARGS = frozenset(
         "base_ref",
         "client",
         "gremlin_id",
+        "wait",
     }
 )
 _INFRA_FLAG_NAMES = frozenset(
@@ -33,6 +34,7 @@ _INFRA_FLAG_NAMES = frozenset(
         "base-ref",
         "client",
         "gremlin-id",
+        "wait",
     }
 )
 _LAUNCH_BRIEF = "usage: gremlins launch <name> [opts]\nLaunch a background gremlin by pipeline name. Run 'gremlins launch --list' to see available pipelines.\n"
@@ -63,6 +65,11 @@ def build_launch_parser(
         "--print-id-only",
         action="store_true",
         help="Print only the gremlin id on stdout; suppress the launch banner. Supersedes --print-id.",
+    )
+    p.add_argument(
+        "--wait",
+        action="store_true",
+        help="Block until the spawned gremlin exits; return its exit code. No timeout — a hung gremlin blocks indefinitely.",
     )
     p.add_argument("--base-ref", default=None)
     p.add_argument("--client", default=None)
@@ -142,7 +149,7 @@ def _self_background_main(
 ) -> int:
     pipeline_args = ("--client", args.client) if args.client else ()
     try:
-        gremlin_id = launch(
+        gremlin_id, proc = launch(
             pipeline_name,
             stage_inputs=stage_inputs,
             description=args.description,
@@ -169,4 +176,6 @@ def _self_background_main(
         sys.stderr.write(info)
         if args.print_id:
             sys.stdout.write(gremlin_id + "\n")
+    if args.wait:
+        return proc.wait()
     return 0

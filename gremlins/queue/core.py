@@ -7,14 +7,11 @@ import re
 import shlex
 import subprocess
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 
-_TERMINAL_STATUSES = frozenset({"done", "dead", "bailed", "stopped"})
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]+$")
 _SUBDIRS = ("pending", "running", "done", "failed")
-_POLL_TIMEOUT = 4 * 3600  # 4 hours; a gremlin silent longer than this is assumed dead
 
 
 def queue_root() -> Path:
@@ -65,21 +62,6 @@ def _parse_id(path: Path) -> str | None:
     return candidate if _ID_RE.match(candidate) else None
 
 
-def _strip_id(stem: str) -> str:
-    parts = stem.split(".")
-    if len(parts) >= 2 and _ID_RE.match(parts[-1]):
-        return ".".join(parts[:-1])
-    return stem
-
-
-def _is_launch(cmd: str) -> bool:
-    tokens = cmd.split()
-    for i, t in enumerate(tokens):
-        if t == "gremlins" and i + 1 < len(tokens) and tokens[i + 1] == "launch":
-            return True
-    return False
-
-
 def _move_item(cmd_path: Path, dst_dir: Path) -> Path:
     dst = dst_dir / cmd_path.name
     cmd_path.rename(dst)
@@ -89,39 +71,17 @@ def _move_item(cmd_path: Path, dst_dir: Path) -> Path:
     return dst
 
 
-def _poll_terminal(gremlin_id: str) -> dict[str, object]:
-    from gremlins.paths import state_root
-
-    state_file = state_root() / gremlin_id / "state.json"
-    deadline = time.time() + _POLL_TIMEOUT
-    while True:
-        if time.time() > deadline:
-            raise TimeoutError(
-                f"gremlin {gremlin_id} did not reach terminal status within"
-                f" {_POLL_TIMEOUT // 3600}h"
-            )
-        try:
-            data = json.loads(state_file.read_text())
-            if data.get("status") in _TERMINAL_STATUSES:
-                return data
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
-        time.sleep(2)
-
-
-def _run_launch(cmd: str, log_path: Path) -> tuple[str | None, bool]:
-    full_cmd = cmd + " --print-id-only"
-    with open(log_path, "w") as log_f:
-        proc = subprocess.run(
-            full_cmd,
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=log_f,
-        )
-        stdout = proc.stdout.decode().strip()
-        log_f.write(stdout + "\n")
-    ok = proc.returncode == 0 and bool(stdout)
-    return (stdout if stdout else None, ok)
+def _extract_gremlin_id_from_log(log_path: Path) -> str | None:
+    try:
+        text = log_path.read_text()
+    except OSError:
+        return None
+    prefix = "gremlin id:  "
+    for line in text.splitlines():
+        if line.startswith(prefix):
+            candidate = line[len(prefix) :]
+            return candidate if _ID_RE.match(candidate) else None
+    return None
 
 
 def _run_plain(cmd: str, log_path: Path) -> bool:
@@ -207,43 +167,17 @@ def run() -> int:
 
         print(f"queue: running {item.stem}", flush=True)
 
-        if _is_launch(cmd):
-            gremlin_id, proc_ok = _run_launch(cmd, log_path)
-            if not proc_ok or gremlin_id is None:
-                _move_item(item, root / "failed")
-                print(f"queue: failed {item.stem}", file=sys.stderr)
-                return 1
-
-            if not _ID_RE.match(gremlin_id):
-                _move_item(item, root / "failed")
-                print(
-                    f"queue: failed {item.stem} (invalid gremlin id: {gremlin_id!r})",
-                    file=sys.stderr,
-                )
-                return 1
-
-            base_stem = _strip_id(item.stem)
-            new_stem = base_stem + "." + gremlin_id
-            new_item = item.parent / (new_stem + ".cmd")
-            item.rename(new_item)
-            if log_path.exists():
-                new_log = item.parent / (new_stem + ".log")
-                log_path.rename(new_log)
-                log_path = new_log
-            item = new_item
-
-            print(f"queue: waiting for gremlin {gremlin_id}", flush=True)
-            try:
-                state = _poll_terminal(gremlin_id)
-            except TimeoutError as e:
-                _move_item(item, root / "failed")
-                print(f"queue: failed {item.stem}: {e}", file=sys.stderr)
-                return 1
-            clean = state.get("exit_code") == 0 and "bail_class" not in state
-        else:
-            clean = _run_plain(cmd, log_path)
+        clean = _run_plain(cmd, log_path)
 
         if clean:
+            gremlin_id = _extract_gremlin_id_from_log(log_path)
+            if gremlin_id:
+                new_stem = f"{item.stem}.{gremlin_id}"
+                new_item = item.parent / f"{new_stem}.cmd"
+                item.rename(new_item)
+                if log_path.exists():
+                    log_path.rename(item.parent / f"{new_stem}.log")
+                item = new_item
             _move_item(item, root / "done")
             print(f"queue: done {item.stem}", flush=True)
         else:
