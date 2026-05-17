@@ -628,6 +628,15 @@ def test_set_state_same_state_returns_nonzero(q, capsys):
     assert "already" in capsys.readouterr().err
 
 
+def test_set_state_multi_match_returns_nonzero(q, capsys):
+    (q / "pending" / "0001-item.cmd").write_text("echo x")
+    (q / "failed" / "0001-item.cmd").write_text("echo x")
+    rc = core.set_state("0001-item", "done")
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "pending" in err and "failed" in err
+
+
 @pytest.mark.parametrize("state", ["pending", "running", "done", "failed"])
 def test_set_state_all_four_destinations(q, state):
     src = "pending" if state != "pending" else "failed"

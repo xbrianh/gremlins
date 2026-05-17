@@ -11,14 +11,14 @@ from datetime import datetime
 from pathlib import Path
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]+$")
-_SUBDIRS = ("pending", "running", "done", "failed")
+SUBDIRS = ("pending", "running", "done", "failed")
 
 
 def queue_root() -> Path:
     from gremlins.paths import state_root
 
     root = state_root() / "queues" / "default"
-    for sub in _SUBDIRS:
+    for sub in SUBDIRS:
         (root / sub).mkdir(parents=True, exist_ok=True)
     return root
 
@@ -107,7 +107,7 @@ def add(command: str) -> str:
 def list_queue() -> int:
     root = queue_root()
     entries: list[tuple[Path, str]] = []
-    for sub in _SUBDIRS:
+    for sub in SUBDIRS:
         for p in (root / sub).glob("*.cmd"):
             entries.append((p, sub))
     if not entries:
@@ -126,7 +126,7 @@ def list_queue() -> int:
 def list_queue_json() -> int:
     root = queue_root()
     items: list[dict[str, object]] = []
-    for sub in _SUBDIRS:
+    for sub in SUBDIRS:
         for p in (root / sub).glob("*.cmd"):
             cmd = p.read_text().strip()
             items.append(
@@ -206,7 +206,7 @@ def _delete_dir_contents(root: Path, sub: str) -> None:
 
 
 def _clear_item(root: Path, stem: str) -> int:
-    matches = [(sub, root / sub / (stem + ".cmd")) for sub in _SUBDIRS]
+    matches = [(sub, root / sub / (stem + ".cmd")) for sub in SUBDIRS]
     matches = [(sub, p) for sub, p in matches if p.exists()]
 
     if not matches:
@@ -250,7 +250,7 @@ def clear(
             return 1
         return _clear_item(root, item)
     if purge:
-        for sub in _SUBDIRS:
+        for sub in SUBDIRS:
             if sub == "running":
                 for p in (root / sub).glob("*.cmd"):
                     gremlin_id = _parse_id(p)
@@ -274,14 +274,14 @@ def clear(
 
 
 def set_state(item: str, state: str) -> int:
-    if state not in _SUBDIRS:
+    if state not in SUBDIRS:
         print(
-            f"invalid state: {state!r}; must be one of: {', '.join(_SUBDIRS)}",
+            f"invalid state: {state!r}; must be one of: {', '.join(SUBDIRS)}",
             file=sys.stderr,
         )
         return 1
     root = queue_root()
-    matches = [(sub, root / sub / (item + ".cmd")) for sub in _SUBDIRS]
+    matches = [(sub, root / sub / (item + ".cmd")) for sub in SUBDIRS]
     matches = [(sub, p) for sub, p in matches if p.exists()]
     if not matches:
         print(f"no such item: {item}", file=sys.stderr)

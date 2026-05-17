@@ -8,6 +8,7 @@ import sys
 from collections.abc import Callable
 
 from gremlins.queue.core import (
+    SUBDIRS,
     add,
     clear,
     land,
@@ -95,12 +96,9 @@ def _land(_argv: list[str]) -> int:
     return land()
 
 
-_STATES = ["pending", "running", "done", "failed"]
-
-
 def _set_state(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="gremlins queue set-state")
-    parser.add_argument("state", choices=_STATES, help="Target state.")
+    parser.add_argument("state", choices=SUBDIRS, help="Target state.")
     parser.add_argument(
         "--item", metavar="STEM", required=True, help="Queue item stem."
     )
