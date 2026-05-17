@@ -195,7 +195,9 @@ class OpenAIAgentsClient:
             instructions="You are a software engineering assistant.",
             tools=GREMLINS_TOOLS,
             model=effective_model,
-            model_settings=self._model_settings if self._model_settings is not None else ModelSettings(),
+            model_settings=self._model_settings
+            if self._model_settings is not None
+            else ModelSettings(),
         )
         ctx: dict[str, object] = {
             "cwd": str(cwd) if cwd is not None else None,
