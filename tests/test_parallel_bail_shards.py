@@ -64,9 +64,8 @@ def _make_parallel_stages(
     set_stage_fn=None,
     cancel_on_bail: bool = False,
     bail_policy: str = "any",
-    gremlin_id=None,
+    parent_data: StateData | None = None,
     project_root: pathlib.Path | None = None,
-    parent_attempt: str = "",
 ) -> list:
     if set_stage_fn is None:
 
@@ -83,10 +82,9 @@ def _make_parallel_stages(
         bail_policy=bail_policy,
     ).build_runtime_stages(
         child_runners,
-        gremlin_id=gremlin_id,
+        parent_data=parent_data,
         project_root=project_root,
         set_stage_fn=set_stage_fn,
-        parent_attempt=parent_attempt,
     )
 
 
@@ -218,7 +216,9 @@ def _build_fanin_test(
             (state_dir / f"bail_{attempt}.json").write_text(
                 json.dumps({"class": bc, "detail": ""})
             )
-    StateData.load(gremlin_id).patch(parallel_attempts=parallel_attempts)
+    StateData.load(gremlin_id).patch(
+        parallel_attempts=parallel_attempts, attempt=parent_attempt
+    )
 
     child_keys = list(shards.keys())
     children = [(k, _make_simple_ctx(tmp_path, k), lambda: None) for k in child_keys]
@@ -234,9 +234,8 @@ def _build_fanin_test(
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy=bail_policy,
-        gremlin_id=gremlin_id,
+        parent_data=StateData.load(gremlin_id),
         project_root=project_root,
-        parent_attempt=parent_attempt,
     )
     return sf, stages
 
@@ -337,7 +336,7 @@ def test_cancel_on_bail_skips_unstarted_children():
         set_stage_fn=lambda _n: None,
         cancel_on_bail=True,
         bail_policy="any",
-        gremlin_id=None,
+
         project_root=pathlib.Path.cwd(),
     )
 
@@ -375,7 +374,9 @@ def test_run_stages_resume_from_fanin_name(tmp_path, state_root):
     sf = _make_state(state_root, gremlin_id)
     state_dir = sf.parent
     # Pre-populate parallel_attempts and bail file as children would have written.
-    state_mod.StateData.load(gremlin_id).patch(parallel_attempts={"c": "attempt-c"})
+    state_mod.StateData.load(gremlin_id).patch(
+        parallel_attempts={"c": "attempt-c"}, attempt="fanin-resume-parent"
+    )
     (state_dir / "bail_attempt-c.json").write_text(
         json.dumps({"class": "other", "detail": ""})
     )
@@ -391,9 +392,8 @@ def test_run_stages_resume_from_fanin_name(tmp_path, state_root):
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",
-        gremlin_id=gremlin_id,
+        parent_data=state_mod.StateData.load(gremlin_id),
         project_root=project_root,
-        parent_attempt="fanin-resume-parent",
     )
 
     # The three stage names should be reviews-fanout, reviews, reviews-fanin.
@@ -464,7 +464,7 @@ def test_worktree_lifecycle_fanout_creates_and_fanin_removes(tmp_path):
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",
-        gremlin_id=None,
+
         project_root=repo,
     )
 
@@ -540,7 +540,7 @@ def test_fanout_persists_worktrees_and_fresh_fanin_can_clean_up(tmp_path, state_
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",
-        gremlin_id=gremlin_id,
+        parent_data=StateData.load(gremlin_id),
         project_root=repo,
     )
     stages_run1[0][1]()  # fan-out only
@@ -564,7 +564,7 @@ def test_fanout_persists_worktrees_and_fresh_fanin_can_clean_up(tmp_path, state_
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",
-        gremlin_id=gremlin_id,
+        parent_data=StateData.load(gremlin_id),
         project_root=repo,
     )
     stages_run2[2][1]()  # fan-in
@@ -600,7 +600,7 @@ def test_fanout_resume_tears_down_prior_worktrees(tmp_path, state_root):
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",
-        gremlin_id=gremlin_id,
+        parent_data=StateData.load(gremlin_id),
         project_root=repo,
     )
     stages_run1[0][1]()  # fan-out
@@ -620,7 +620,7 @@ def test_fanout_resume_tears_down_prior_worktrees(tmp_path, state_root):
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",
-        gremlin_id=gremlin_id,
+        parent_data=StateData.load(gremlin_id),
         project_root=repo,
     )
     stages_run2[0][1]()  # fan-out again
@@ -650,7 +650,7 @@ def test_build_parallel_stages_returns_three_named_stages():
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",
-        gremlin_id=None,
+
         project_root=pathlib.Path.cwd(),
     )
     names = [n for n, _ in stages]
@@ -682,7 +682,7 @@ def test_parallel_all_children_complete_with_defaults():
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",
-        gremlin_id=None,
+
         project_root=pathlib.Path.cwd(),
     )
 

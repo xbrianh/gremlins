@@ -119,11 +119,10 @@ class ParallelStage(Stage):
         self,
         child_runners: list[tuple[str, State, Callable[[], None]]],
         *,
-        gremlin_id: str | None = None,
+        parent_data: StateData | None = None,
         project_root: pathlib.Path | None = None,
         worktree_parent: pathlib.Path | None = None,
         set_stage_fn: Callable[[str], None] | None = None,
-        parent_attempt: str = "",
     ) -> list[_Stage]:
         """Return the three runtime stages for this parallel block."""
         return _parallel_stages(
@@ -133,15 +132,13 @@ class ParallelStage(Stage):
             set_stage_fn=set_stage_fn or _noop_set_stage,
             cancel_on_bail=self._cancel_on_bail,
             bail_policy=self._bail_policy,
-            gremlin_id=gremlin_id,
+            parent_data=parent_data or StateData(),
             project_root=project_root or pathlib.Path.cwd(),
             worktree_parent=worktree_parent,
-            parent_attempt=parent_attempt,
             stage_path=self.path or self.name,
         )
 
     def run(self, state: State) -> Outcome:
-        gremlin_id = state.data.gremlin_id
         group_dir = state.session_dir / self.name
         group_dir.mkdir(parents=True, exist_ok=True)
         group_state = dataclasses.replace(
@@ -156,11 +153,10 @@ class ParallelStage(Stage):
             )
         for _, fn in self.build_runtime_stages(
             child_runners,
-            gremlin_id=gremlin_id,
+            parent_data=state.data,
             project_root=pathlib.Path.cwd(),
             worktree_parent=state.worktree_parent,
-            set_stage_fn=lambda n: state.record_stage_progress(self.name, n),
-            parent_attempt=state.data.attempt,
+            set_stage_fn=lambda n: state.record_stage_progress(self.name, sub_stage=n),
         ):
             fn()
         return Done()
@@ -174,12 +170,12 @@ def _parallel_stages(
     set_stage_fn: Callable[[str], None],
     cancel_on_bail: bool,
     bail_policy: str,
-    gremlin_id: str | None,
+    parent_data: StateData,
     project_root: pathlib.Path,
     worktree_parent: pathlib.Path | None = None,
-    parent_attempt: str = "",
     stage_path: str = "",
 ) -> list[_Stage]:
+    gremlin_id = parent_data.gremlin_id
     fanout_name = f"{group_name}-fanout"
     fanin_name = f"{group_name}-fanin"
 
@@ -216,14 +212,14 @@ def _parallel_stages(
             )
 
     def _persist_state() -> None:
-        StateData.load(gremlin_id).patch_parallel_worktrees(
+        parent_data.patch_parallel_worktrees(
             group_name,
             base_head=base_head,
             paths={k: str(v) for k, v in _worktree_paths.items()},
         )
 
     def _clear_persisted_state() -> None:
-        StateData.load(gremlin_id).patch_parallel_worktrees(
+        parent_data.patch_parallel_worktrees(
             group_name, base_head=None, paths=None
         )
 
@@ -254,7 +250,7 @@ def _parallel_stages(
         _worktree_paths.clear()
         base_head = ""
         _clear_persisted_state()
-        StateData.load(gremlin_id).clear_done(stage_path)
+        parent_data.clear_done(stage_path)
 
         if not _in_git_repo():
             return
@@ -304,7 +300,7 @@ def _parallel_stages(
 
         _hydrate_from_state()
 
-        done = StateData.load(gremlin_id).done_for(stage_path)
+        done = parent_data.done_for(stage_path)
 
         active = [(k, s, fn) for k, s, fn in child_runners if k not in done]
         if not active:
@@ -334,7 +330,7 @@ def _parallel_stages(
                             )
                             or {}
                         )
-                        StateData.load(gremlin_id).write_bail_file(
+                        parent_data.write_bail_file(
                             "other", b.reason, attempt=pa.get(child_key) or ""
                         )
                     except Exception:
@@ -344,7 +340,7 @@ def _parallel_stages(
                 if cancel_event is not None:
                     cancel_event.set()
                 raise
-            StateData.load(gremlin_id).mark_done(stage_path, child_key)
+            parent_data.mark_done(stage_path, child_key)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             futs = [pool.submit(_run_child, k, fn) for k, _, fn in active]
@@ -430,14 +426,14 @@ def _parallel_stages(
             should_bail = bool(bailed) and len(bailed) == len(child_runners)
 
         if should_bail and first_bail:
-            StateData.load(gremlin_id).write_bail_file(
+            parent_data.write_bail_file(
                 first_bail.get("class") or "other",
                 first_bail.get("detail") or "",
-                attempt=parent_attempt,
+                attempt=parent_data.attempt,
             )
-        StateData.load(gremlin_id).patch(_delete=("parallel_attempts",))
+        parent_data.patch(_delete=("parallel_attempts",))
         if not should_bail:
-            StateData.load(gremlin_id).clear_done(stage_path)
+            parent_data.clear_done(stage_path)
         if should_bail:
             raise RuntimeError(
                 f"parallel group {group_name!r} bailed "

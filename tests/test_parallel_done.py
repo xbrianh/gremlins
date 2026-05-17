@@ -43,7 +43,7 @@ def _ctx(gremlin_id: str, sf: pathlib.Path, child_key: str) -> State:
 def _build_stages(group: str, runners: list, gremlin_id: str) -> list:
     return ParallelStage(group, []).build_runtime_stages(
         runners,
-        gremlin_id=gremlin_id,
+        parent_data=StateData.load(gremlin_id),
         project_root=pathlib.Path.cwd(),
     )
 

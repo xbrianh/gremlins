@@ -532,9 +532,9 @@ class State:
         self.data.append_artifact(artifact)
 
     def record_stage_progress(
-        self, name: str, info: object = None, *, parent_stage: str = ""
+        self, name: str, sub_stage: object = None, *, parent_stage: str = ""
     ) -> None:
-        self.data.set_stage(name, info, parent_stage=parent_stage)
+        self.data.set_stage(name, sub_stage, parent_stage=parent_stage)
 
     def record_state_field(self, **fields: Any) -> None:
         self.data.patch(**fields)
