@@ -1282,7 +1282,7 @@ def test_rescue_host_terminated_worktree_recreation_failure_bails_headless(
     _write_state(gr_dir, state)
     monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     monkeypatch.setattr(
-        _rescue, "_recreate_worktree", lambda s: (False, "git not a repo")
+        _rescue, "recreate_worktree", lambda s: (False, "git not a repo")
     )
 
     ok = _rescue.do_rescue(gremlin_id, headless=True)
@@ -1321,7 +1321,7 @@ def test_rescue_host_terminated_recreates_worktree_and_proceeds(
         workdir.mkdir(exist_ok=True)
         return True, "recreated from branch 'bg/local/test-id-htdd12'"
 
-    monkeypatch.setattr(_rescue, "_recreate_worktree", fake_recreate)
+    monkeypatch.setattr(_rescue, "recreate_worktree", fake_recreate)
     monkeypatch.setattr(
         _rescue,
         "_run_headless_diagnosis",

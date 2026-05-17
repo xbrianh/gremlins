@@ -433,7 +433,7 @@ def _run_headless_diagnosis(workdir: str, prompt: str, marker_path: str):
     return _read_rescue_marker(marker_path)
 
 
-def _recreate_worktree(state: dict[str, Any]) -> tuple[bool, str]:
+def recreate_worktree(state: dict[str, Any]) -> tuple[bool, str]:
     """Attempt to recreate a missing worktree from the gremlin's branch or base ref.
 
     Tries the named branch first (preserves in-progress commits for localgremlin),
@@ -530,7 +530,7 @@ def do_rescue(target: str, headless: bool = False, from_boss: bool = False) -> b
                 _write_bail(sf, wdir, "host_terminated_unrecoverable", detail)
             return False
         print(f"  attempting to recreate worktree at {workdir}...")
-        recreated, detail = _recreate_worktree(state)
+        recreated, detail = recreate_worktree(state)
         if not recreated:
             msg = f"worktree recreation failed: {detail}"
             print(f"  {msg}")
