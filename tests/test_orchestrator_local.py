@@ -260,7 +260,7 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
 
     def _strip_clients(stage):
         stage.client = None
-        for child in stage.body:
+        for child in getattr(stage, "body", []):
             _strip_clients(child)
 
     def _from_yaml_copilot_default(path):

@@ -27,7 +27,7 @@ def _make_stage(
         [style_content, prompt_text] if style_content is not None else [prompt_text]
     )
     stage = GitHubReviewPullRequest(
-        "github-review-pull-request", "sonnet", prompts, {}, pr_url=pr_url
+        "github-review-pull-request", prompts, {}, pr_url=pr_url
     )
     client = FakeClaudeClient(fixtures={"github-review-pull-request": MINIMAL_EVENTS})
     state = RuntimeState(

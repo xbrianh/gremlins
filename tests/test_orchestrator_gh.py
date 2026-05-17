@@ -1169,7 +1169,7 @@ def test_github_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
     assert result == 0
 
     stage = captured_stage["stage"]
-    assert stage.model == "claude-opus-4-7"
+    assert stage.client.model == "claude-opus-4-7"
     assert captured_stage["state"].session_dir == session_dir
     # pr artifact written to state.json by GitHubOpenPullRequest; read from state in GitHubWaitCI.run()
     state = json.loads(state_file.read_text())
@@ -1364,7 +1364,7 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
     assert result == 0
 
     stage = captured_stage["stage"]
-    assert stage.model == "claude-opus-4-7"
+    assert stage.client.model == "claude-opus-4-7"
     assert stage.options.get("cmds") == ["make check", "make test"]
     assert captured_stage["state"].session_dir == session_dir
 
@@ -1564,7 +1564,7 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
 
     def _strip_clients_2(stage):
         stage.client = None
-        for child in stage.body:
+        for child in getattr(stage, "body", []):
             _strip_clients_2(child)
 
     def _from_yaml_copilot_default(path):

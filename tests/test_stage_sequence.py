@@ -24,7 +24,7 @@ class _FakeStage(Stage):
     """Minimal Stage that records the state it received and optionally raises."""
 
     def __init__(self, name: str, *, raises: Exception | None = None) -> None:
-        super().__init__(name, None, [], {})
+        super().__init__(name)
         self.received: RuntimeState | None = None
         self._raises = raises
 
@@ -40,7 +40,7 @@ def test_sequence_runs_body_in_order() -> None:
 
     class _LogStage(Stage):
         def __init__(self, label: str) -> None:
-            super().__init__(label, None, [], {})
+            super().__init__(label)
             self._label = label
 
         def run(self, state: RuntimeState) -> Outcome:  # type: ignore[override]
@@ -57,7 +57,7 @@ def test_sequence_stops_on_exception() -> None:
 
     class _LogStage(Stage):
         def __init__(self, label: str, *, fail: bool = False) -> None:
-            super().__init__(label, None, [], {})
+            super().__init__(label)
             self._label = label
             self._fail = fail
 
@@ -127,7 +127,7 @@ def test_sequence_resume_skips_completed_children(state_root: pathlib.Path) -> N
 
     class _TrackedStage(Stage):
         def __init__(self, label: str) -> None:
-            super().__init__(label, None, [], {})
+            super().__init__(label)
 
         def run(self, s: RuntimeState) -> Outcome:  # type: ignore[override]
             ran.append(self.name)
@@ -156,7 +156,7 @@ def test_sibling_sequences_done_sets_are_independent(state_root: pathlib.Path) -
 
     class _LogStage(Stage):
         def __init__(self, label: str) -> None:
-            super().__init__(label, None, [], {})
+            super().__init__(label)
 
         def run(self, s: RuntimeState) -> Outcome:  # type: ignore[override]
             ran.append(self.name)

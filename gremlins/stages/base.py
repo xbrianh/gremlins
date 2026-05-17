@@ -18,6 +18,9 @@ class StageInput(NamedTuple):
 class Stage:
     type: str = ""
     needs_gh: bool = False
+    # Declared for type-checking; only composite stages (Parallel, Loop, Sequence)
+    # set this in their __init__. Use getattr(stage, "body", []) to access safely.
+    body: list[Stage]
 
     def __init__(self, name: str) -> None:
         self.name = name
@@ -37,7 +40,8 @@ class Stage:
     @classmethod
     def with_dict(cls, d: dict[str, Any], depth: int = 0) -> Stage:
         from gremlins.pipeline.loader import get_client_from_dict
-        stage = cls(d["name"], d.get("prompt") or [], d.get("options") or {})
+
+        stage = cls(d["name"], d.get("prompt") or [], d.get("options") or {})  # type: ignore[call-arg]
         stage.client = get_client_from_dict(d)
         return stage
 

@@ -25,7 +25,6 @@ def _make_stage(
 ) -> tuple[GitHubWaitCopilot, RuntimeState]:
     stage = GitHubWaitCopilot(
         "github-wait-copilot",
-        None,
         [],
         {},
         pr_num=pr_num,

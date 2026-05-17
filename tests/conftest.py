@@ -22,7 +22,7 @@ def gh_pipeline() -> Pipeline:
     return Pipeline(
         name="test",
         path=pathlib.Path("."),
-        stages=[GitHubOpenPullRequest("github-open-pull-request", None, [], {})],
+        stages=[GitHubOpenPullRequest("github-open-pull-request", [], {})],
     )
 
 
@@ -56,6 +56,9 @@ class ReviewCreatingClient(FakeClaudeClient):
             out = pathlib.Path(m.group(1))
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text("# Review\n\n## Findings\nNone.\n")
+            # Ensure there's a fixture for whatever model-qualified label we get.
+            if label not in self._fixtures:
+                self._fixtures[label] = MINIMAL_EVENTS
         return super().run(prompt, label=label, **kwargs)
 
 

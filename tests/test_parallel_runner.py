@@ -343,7 +343,7 @@ def test_parallel_sequence_child_worktree_flows() -> None:
 
     class _CaptureStage(Stage):
         def __init__(self, name: str) -> None:
-            super().__init__(name, None, [], {})
+            super().__init__(name)
 
         def run(self, state: State) -> Outcome:  # type: ignore[override]
             observed.append(state.worktree)

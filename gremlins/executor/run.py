@@ -80,8 +80,9 @@ def _unique_clients(stages: list[Stage]) -> list[Client]:
         if c is not None and id(c) not in seen:
             seen.add(id(c))
             result.append(c)
-        if stage.body:
-            for bc in _unique_clients(stage.body):
+        body = getattr(stage, "body", [])
+        if body:
+            for bc in _unique_clients(body):
                 if id(bc) not in seen:
                     seen.add(id(bc))
                     result.append(bc)

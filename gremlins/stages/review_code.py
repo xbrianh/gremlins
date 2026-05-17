@@ -63,7 +63,7 @@ class ReviewCode(Stage):
         self.options = options
 
     def run(self, state: State) -> Outcome:
-        model = state.client.model
+        model = state.stage_model or state.client.model
         if not model:
             raise ValueError(f"stage {self.name!r}: model must be set")
         out_file = state.session_dir / f"{self.name}-{model}.md"

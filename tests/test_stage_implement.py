@@ -28,7 +28,7 @@ def _make_state(
     prompts: list[str] | None = None,
     issue_num: str = "",
 ) -> tuple[Implement, RuntimeState]:
-    stage = Implement("implement", "sonnet", prompts or [], {})
+    stage = Implement("implement", prompts or [], {})
     client = FakeClaudeClient(fixtures={"implement": MINIMAL_EVENTS})
     state = RuntimeState(
         data=StateData(issue_num=issue_num),
