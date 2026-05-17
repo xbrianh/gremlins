@@ -194,17 +194,16 @@ def test_stacked_pr_uses_prior_pr_branch(tmp_path: pathlib.Path) -> None:
             return_value=PR_BRANCH,
         ),
         patch("gremlins.executor.state.StateData.append_artifact"),
-        patch.object(
-            stage,
-            "run_claude",
-            side_effect=lambda prompt, **kw: (
+        patch(
+            "gremlins.stages.github_open_pull_request.run_agent",
+            side_effect=lambda state, prompt, **kw: (
                 prompts_seen.append(prompt)
                 or type("R", (), {"events": [], "text_result": ""})()
             ),
         ),
     ):
         stage.run(state)
-    assert prompts_seen, "run_claude should have been called"
+    assert prompts_seen, "run_agent should have been called"
     assert "gremlin/abc-child-1" in prompts_seen[0], (
         "PR prompt should target previous child branch, not main"
     )
@@ -227,17 +226,16 @@ def test_single_pr_without_prior_pr_branch_uses_base_ref_name(
             return_value=PR_BRANCH,
         ),
         patch("gremlins.executor.state.StateData.append_artifact"),
-        patch.object(
-            stage,
-            "run_claude",
-            side_effect=lambda prompt, **kw: (
+        patch(
+            "gremlins.stages.github_open_pull_request.run_agent",
+            side_effect=lambda state, prompt, **kw: (
                 prompts_seen.append(prompt)
                 or type("R", (), {"events": [], "text_result": ""})()
             ),
         ),
     ):
         stage.run(state)
-    assert prompts_seen, "run_claude should have been called"
+    assert prompts_seen, "run_agent should have been called"
     assert "main" in prompts_seen[0]
 
 
@@ -255,17 +253,16 @@ def test_first_child_uses_base_ref_name(tmp_path: pathlib.Path) -> None:
             return_value=PR_BRANCH,
         ),
         patch("gremlins.executor.state.StateData.append_artifact"),
-        patch.object(
-            stage,
-            "run_claude",
-            side_effect=lambda prompt, **kw: (
+        patch(
+            "gremlins.stages.github_open_pull_request.run_agent",
+            side_effect=lambda state, prompt, **kw: (
                 prompts_seen.append(prompt)
                 or type("R", (), {"events": [], "text_result": ""})()
             ),
         ),
     ):
         stage.run(state)
-    assert prompts_seen, "run_claude should have been called"
+    assert prompts_seen, "run_agent should have been called"
     assert "main" in prompts_seen[0]
 
 
@@ -290,10 +287,9 @@ def test_explicit_base_ref_used_when_no_prior_pr(tmp_path: pathlib.Path) -> None
             return_value=PR_BRANCH,
         ),
         patch("gremlins.executor.state.StateData.append_artifact"),
-        patch.object(
-            stage,
-            "run_claude",
-            side_effect=lambda prompt, **kw: (
+        patch(
+            "gremlins.stages.github_open_pull_request.run_agent",
+            side_effect=lambda state, prompt, **kw: (
                 prompts_seen.append(prompt)
                 or type("R", (), {"events": [], "text_result": ""})()
             ),
@@ -327,10 +323,9 @@ def test_last_pr_branch_takes_priority_over_base_ref(tmp_path: pathlib.Path) -> 
             return_value=PR_BRANCH,
         ),
         patch("gremlins.executor.state.StateData.append_artifact"),
-        patch.object(
-            stage,
-            "run_claude",
-            side_effect=lambda prompt, **kw: (
+        patch(
+            "gremlins.stages.github_open_pull_request.run_agent",
+            side_effect=lambda state, prompt, **kw: (
                 prompts_seen.append(prompt)
                 or type("R", (), {"events": [], "text_result": ""})()
             ),
@@ -361,10 +356,9 @@ def test_loop_iteration_gt1_adds_iter_suffix_instruction(
             return_value=PR_BRANCH,
         ),
         patch("gremlins.executor.state.StateData.append_artifact"),
-        patch.object(
-            stage,
-            "run_claude",
-            side_effect=lambda prompt, **kw: (
+        patch(
+            "gremlins.stages.github_open_pull_request.run_agent",
+            side_effect=lambda state, prompt, **kw: (
                 prompts_seen.append(prompt)
                 or type("R", (), {"events": [], "text_result": ""})()
             ),
@@ -390,10 +384,9 @@ def test_loop_iteration_1_no_iter_suffix(tmp_path: pathlib.Path) -> None:
             return_value=PR_BRANCH,
         ),
         patch("gremlins.executor.state.StateData.append_artifact"),
-        patch.object(
-            stage,
-            "run_claude",
-            side_effect=lambda prompt, **kw: (
+        patch(
+            "gremlins.stages.github_open_pull_request.run_agent",
+            side_effect=lambda state, prompt, **kw: (
                 prompts_seen.append(prompt)
                 or type("R", (), {"events": [], "text_result": ""})()
             ),
