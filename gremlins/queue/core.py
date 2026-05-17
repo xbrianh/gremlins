@@ -10,7 +10,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]+$")
+_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 SUBDIRS = ("pending", "running", "done", "failed")
 
 
@@ -97,6 +97,20 @@ def _extract_gremlin_id_from_log(log_path: Path) -> str | None:
             candidate = line[len(prefix) :]
             return candidate if _ID_RE.match(candidate) else None
     return None
+
+
+def _maybe_embed_id(item: Path, log_path: Path) -> Path:
+    if _parse_id(item):
+        return item
+    gremlin_id = _extract_gremlin_id_from_log(log_path)
+    if not gremlin_id:
+        return item
+    new_stem = f"{item.stem}.{gremlin_id}"
+    new_item = item.parent / f"{new_stem}.cmd"
+    item.rename(new_item)
+    if log_path.exists():
+        log_path.rename(item.parent / f"{new_stem}.log")
+    return new_item
 
 
 def _run_plain(cmd: str, log_path: Path) -> bool:
@@ -187,15 +201,7 @@ def run() -> int:
         clean = _run_plain(cmd, log_path)
 
         if clean:
-            if not _parse_id(item):
-                gremlin_id = _extract_gremlin_id_from_log(log_path)
-                if gremlin_id:
-                    new_stem = f"{item.stem}.{gremlin_id}"
-                    new_item = item.parent / f"{new_stem}.cmd"
-                    item.rename(new_item)
-                    if log_path.exists():
-                        log_path.rename(item.parent / f"{new_stem}.log")
-                    item = new_item
+            item = _maybe_embed_id(item, log_path)
             _move_item(item, root / "done")
             print(f"queue: done {item.stem}", flush=True)
         else:
