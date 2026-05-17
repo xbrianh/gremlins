@@ -395,15 +395,18 @@ def _parallel_stages(
             first_bail: dict[str, str] = {}
             for key, _, _ in child_runners:
                 child_attempt = parallel_attempts.get(key) or ""
-                if child_attempt and (sf.parent / f"bail_{child_attempt}.json").exists():
+                if (
+                    child_attempt
+                    and (sf.parent / f"bail_{child_attempt}.json").exists()
+                ):
                     bailed.append(key)
                     if not first_bail:
                         try:
                             first_bail = dict(
                                 json.loads(
-                                    (sf.parent / f"bail_{child_attempt}.json").read_text(
-                                        encoding="utf-8"
-                                    )
+                                    (
+                                        sf.parent / f"bail_{child_attempt}.json"
+                                    ).read_text(encoding="utf-8")
                                 )
                             )
                         except Exception:
