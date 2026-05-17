@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import pathlib
-import re
 from typing import Any
 
 from gremlins.executor.state import State
@@ -27,19 +26,8 @@ def _diff_text(cwd: pathlib.Path) -> str:
         return ""
 
 
-def _latest_verify_log(session_dir: pathlib.Path) -> tuple[pathlib.Path, int] | None:
-    best: tuple[int, pathlib.Path] | None = None
-    for p in session_dir.glob("verify-attempt-*.log"):
-        m = re.fullmatch(r"verify-attempt-(\d+)\.log", p.name)
-        if m:
-            n = int(m.group(1))
-            if best is None or n > best[0]:
-                best = (n, p)
-    return (best[1], best[0]) if best else None
-
-
 class VerifyFix(Stage):
-    """Reads the latest verify-attempt-N.log and runs the fix agent."""
+    """Reads the verify-attempt-N.log for the current loop iteration and runs the fix agent."""
 
     type = "verify-fix"
 
@@ -49,10 +37,10 @@ class VerifyFix(Stage):
         self._commands_section = commands_section
 
     def run(self, state: State) -> Outcome:
-        result = _latest_verify_log(state.session_dir)
-        if result is None:
+        n = state.data.loop_iteration
+        log_path = state.session_dir / f"verify-attempt-{n}.log"
+        if not log_path.exists():
             return Done()
-        log_path, n = result
         log_text = log_path.read_text(encoding="utf-8")
         diff = _diff_text(state.cwd)
         template = "\n\n".join(self.prompts).rstrip()

@@ -297,11 +297,13 @@ def test_verify_fix_returns_done_with_no_log(tmp_path):
     assert len(state.client.calls) == 0
 
 
-def test_verify_fix_picks_highest_numbered_log(tmp_path):
-    (tmp_path / "verify-attempt-1.log").write_text("old", encoding="utf-8")
-    (tmp_path / "verify-attempt-2.log").write_text("latest error", encoding="utf-8")
+def test_verify_fix_uses_loop_iteration(tmp_path):
+    # Stale log from a previous run; current iteration is 2.
+    (tmp_path / "verify-attempt-3.log").write_text("stale", encoding="utf-8")
+    (tmp_path / "verify-attempt-2.log").write_text("current error", encoding="utf-8")
     client = FakeClaudeClient(fixtures={"verify-fix-2": MINIMAL_EVENTS})
     state = _make_fix_state(tmp_path, client)
+    state.data.loop_iteration = 2
     stage = VerifyFix(
         "fix",
         ["fix: {verify_output} {commands_section} {bail_command} {diff_text}"],
@@ -309,4 +311,4 @@ def test_verify_fix_picks_highest_numbered_log(tmp_path):
     )
     stage.run(state)
     assert client.calls[0].label == "verify-fix-2"
-    assert "latest error" in client.calls[0].prompt
+    assert "current error" in client.calls[0].prompt

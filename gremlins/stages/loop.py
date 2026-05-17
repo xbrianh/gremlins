@@ -127,7 +127,7 @@ class LoopStage(Stage):
             if not had_failure:
                 if self._until(state, iteration, head_before):
                     return Done()
-                logger.info("loop iteration %d: HEAD advanced, continuing", iteration)
+                logger.info("loop iteration %d: continuing", iteration)
                 if iteration == self._max_iterations:
                     return Done()
             elif iteration == self._max_iterations:
