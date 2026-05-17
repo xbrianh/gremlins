@@ -13,6 +13,7 @@ from typing import Any
 
 from gremlins.errors import die
 from gremlins.executor.state import State
+from gremlins.stages.agent import run_agent
 from gremlins.stages.base import Stage, StageInput
 from gremlins.stages.outcome import Done, Outcome
 from gremlins.utils.github import extract_gh_url, get_repo, parse_issue_ref, view_issue
@@ -105,10 +106,11 @@ class Plan(Stage):
                     instructions=_fmt_escape(state.instructions),
                 )
             )
-            completed = self.run_claude(
+            completed = run_agent(
+                state,
                 plan_prompt,
-                state=state,
                 label="plan",
+                model=self.model,
                 raw_path=state.session_dir / "ghplan-out.jsonl",
                 capture_events=True,
             )
@@ -130,10 +132,11 @@ class Plan(Stage):
                 plan_file=plan_md,
                 instructions=state.instructions,
             )
-            completed = self.run_claude(
+            completed = run_agent(
+                state,
                 prompt,
-                state=state,
                 label="plan",
+                model=self.model,
                 raw_path=state.session_dir / "stream-plan.jsonl",
             )
             if not plan_md.exists() or plan_md.stat().st_size == 0:
@@ -163,10 +166,11 @@ class Plan(Stage):
             "summarizing the spec below. Output ONLY the title, nothing else."
             f"\n\n{issue_body}"
         )
-        completed = self.run_claude(
+        completed = run_agent(
+            state,
             title_prompt,
-            state=state,
             label="plan-title",
+            model=self.model,
             raw_path=state.session_dir / "plan-title.jsonl",
         )
         parts = (completed.text_result or "").strip().splitlines()

@@ -7,10 +7,11 @@ import pathlib
 from typing import Any
 
 from gremlins.executor.state import State
+from gremlins.stages.agent import run_agent
 from gremlins.stages.base import Stage
 from gremlins.stages.cmd import Cmd
 from gremlins.stages.loop import LoopStage
-from gremlins.stages.outcome import Bail, Done, NeedsFix, Outcome
+from gremlins.stages.outcome import Done, NeedsFix, Outcome
 from gremlins.utils import git as _git_mod
 
 logger = logging.getLogger(__name__)
@@ -86,16 +87,13 @@ class Verify(Stage):
                 verify_output=log_text,
                 diff_text=diff,
             )
-            self.run_claude(
+            run_agent(
+                state,
                 fix_prompt,
-                state=state,
                 label=f"verify-fix-{n}",
+                model=self.model,
                 raw_path=session_dir / f"stream-verify-{n}.jsonl",
             )
-            try:
-                state.data.check_bail(f"verify-fix-{n}", child_key=state.child_key)
-            except RuntimeError as exc:
-                raise Bail(str(exc)) from exc
             return Done()
 
         loop = LoopStage.from_runners(

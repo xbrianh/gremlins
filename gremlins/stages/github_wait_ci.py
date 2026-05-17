@@ -8,6 +8,7 @@ from collections.abc import Callable
 from typing import Any
 
 from gremlins.executor.state import State
+from gremlins.stages.agent import run_agent
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, Outcome
 from gremlins.utils.git import head_sha
@@ -213,16 +214,13 @@ class GitHubWaitCI(Stage):
             failure_output=failure_output,
             pr_branch=pr_branch,
         )
-        self.run_claude(
+        run_agent(
+            state,
             fix_prompt,
-            state=state,
             label=f"ci-fix-{attempt}",
+            model=self.model,
             raw_path=state.session_dir / f"stream-ci-fix-{attempt}.jsonl",
         )
-        try:
-            state.data.check_bail(f"ci-fix-{attempt}", child_key=state.child_key)
-        except RuntimeError as exc:
-            raise Bail(str(exc)) from exc
 
         new_fix_sha = (
             self.fix_sha_getter()

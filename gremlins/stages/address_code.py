@@ -8,6 +8,7 @@ import re
 from typing import Any
 
 from gremlins.executor.state import State
+from gremlins.stages.agent import run_agent
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Done, Outcome
 
@@ -91,10 +92,11 @@ class AddressCode(Stage):
             model=inputs["review_model"],
             text=inputs["text"],
         )
-        self.run_claude(
+        run_agent(
+            state,
             address_prompt,
-            state=state,
             label="address-code",
+            model=self.model,
             raw_path=state.session_dir / "stream-address.jsonl",
         )
 
@@ -141,14 +143,12 @@ class GitHubAddressPullRequestReviews(Stage):
                 pr_url=pr_url,
             )
         )
-        self.run_claude(
+        run_agent(
+            state,
             prompt,
-            state=state,
             label="github-address-pull-request-reviews",
+            model=self.model,
             raw_path=state.session_dir
             / "stream-github-address-pull-request-reviews.jsonl",
-        )
-        state.data.check_bail(
-            "/github-address-pull-request-reviews", child_key=state.child_key
         )
         return Done()

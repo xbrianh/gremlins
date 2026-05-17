@@ -7,6 +7,7 @@ import pathlib
 from typing import Any
 
 from gremlins.executor.state import State
+from gremlins.stages.agent import run_agent
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Done, Outcome
 from gremlins.utils.git import (
@@ -108,10 +109,11 @@ class Implement(Stage):
             plan_location_note=plan_location_note,
         )
 
-        self.run_claude(
+        run_agent(
+            state,
             prompt,
-            state=state,
             label="implement",
+            model=self.model,
             raw_path=state.session_dir / "stream-implement.jsonl",
             capture_events=True,
             idle_timeout=IMPLEMENT_IDLE_TIMEOUT,
