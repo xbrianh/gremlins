@@ -9,10 +9,24 @@ from typing import Any
 
 from gremlins.executor.state import State
 from gremlins.stages.agent import bail_command, run_agent
-from gremlins.stages.base import Stage
-from gremlins.stages.outcome import Done, Outcome
+from gremlins.stages.base import Stage, StageInput
+from gremlins.stages.outcome import Bail, Done, Outcome
+from gremlins.utils.github import resolve_pr_artifact
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _seed_pr_artifact(state: State) -> None:
+    if state.data.read_pr_url():
+        return
+    pr_ref = getattr(state.args, "pr", None)
+    if not pr_ref:
+        return
+    try:
+        artifact = resolve_pr_artifact(pr_ref, state.repo)
+    except RuntimeError as e:
+        raise Bail(f"--pr: {e}") from e
+    state.data.append_artifact(artifact)
 
 
 def _review_stage_info(
@@ -100,6 +114,18 @@ class GitHubAddressPullRequestReviews(Stage):
     type = "github-address-pull-request-reviews"
 
     @classmethod
+    def orchestration_args(cls) -> list[StageInput]:
+        return [
+            StageInput(
+                "pr",
+                str,
+                required=False,
+                default=None,
+                help="PR number (e.g. '650') or full URL to act on",
+            ),
+        ]
+
+    @classmethod
     def with_dict(
         cls, d: dict[str, Any], depth: int = 0
     ) -> GitHubAddressPullRequestReviews:
@@ -128,6 +154,7 @@ class GitHubAddressPullRequestReviews(Stage):
         self.pr_url = pr_url
 
     def run(self, state: State) -> Outcome:
+        _seed_pr_artifact(state)
         pr_url = self.pr_url or state.data.read_pr_url()
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")

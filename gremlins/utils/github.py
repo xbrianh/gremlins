@@ -47,6 +47,65 @@ def fetch_issue(plan: str) -> dict[str, Any] | None:
         return None
 
 
+def parse_pr_ref(ref: str, repo: str) -> tuple[str, str]:
+    """Parse a PR reference into (target_repo, pr_num).
+
+    Recognized shapes:
+      '123' or '#123'               → (repo, "123")
+      'owner/name#123'              → ("owner/name", "123")
+      'https://github.com/…/pull/N' → (owner/name, "N")
+
+    Returns ("", "") for unrecognized inputs.
+    """
+    m = re.match(
+        r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([0-9]+)", ref
+    )
+    if m:
+        return m.group(1), m.group(2)
+    m = re.match(r"^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([0-9]+)$", ref)
+    if m:
+        return m.group(1), m.group(2)
+    m = re.match(r"^#?([0-9]+)$", ref)
+    if m:
+        return repo, m.group(1)
+    return "", ""
+
+
+_VIEW_PR_TIMEOUT = 30
+
+
+def view_pr_head_branch(pr_url: str) -> str:
+    """Fetch the head branch name for a PR. Raises RuntimeError on gh failure."""
+    try:
+        r = proc.run(
+            ["gh", "pr", "view", pr_url, "--json", "headRefName", "-q", ".headRefName"],
+            timeout=_VIEW_PR_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"timed out after {_VIEW_PR_TIMEOUT}s fetching head branch for {pr_url!r}"
+        ) from exc
+    if r.returncode != 0:
+        raise RuntimeError(f"could not view PR {pr_url!r}: {r.stderr.strip()}")
+    branch = r.stdout.strip()
+    if not branch:
+        raise RuntimeError(f"gh pr view returned empty headRefName for {pr_url!r}")
+    return branch
+
+
+def resolve_pr_artifact(pr_ref: str, repo: str) -> dict[str, Any]:
+    """Resolve a PR reference to an artifact dict with type, url, and branch.
+
+    Raises RuntimeError on invalid ref or gh failure.
+    """
+    target_repo, pr_num = parse_pr_ref(pr_ref, repo)
+    if not target_repo or not pr_num:
+        raise RuntimeError(f"unrecognized PR reference: {pr_ref!r}")
+    pr_url = f"https://github.com/{target_repo}/pull/{pr_num}"
+    branch = view_pr_head_branch(pr_url)
+    return {"type": "pr", "url": pr_url, "branch": branch}
+
+
 def parse_issue_ref(plan_source: str, repo: str) -> tuple[str | None, str | None]:
     """Parse an issue reference string into ``(target_repo, issue_num)``.
 

@@ -9,10 +9,14 @@ from typing import Any
 
 from gremlins.executor.state import State
 from gremlins.stages.agent import bail_command, run_agent
-from gremlins.stages.base import Stage
+from gremlins.stages.base import Stage, StageInput
 from gremlins.stages.outcome import Bail, Done, Outcome
 from gremlins.utils.git import head_sha
-from gremlins.utils.github import fetch_check_run_logs, get_pr_ci_status
+from gremlins.utils.github import (
+    fetch_check_run_logs,
+    get_pr_ci_status,
+    resolve_pr_artifact,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -125,9 +129,34 @@ def _collect_failure_output(failed: list[dict[str, Any]]) -> str:
     return "\n\n".join(parts)
 
 
+def _seed_pr_artifact(state: State) -> None:
+    if state.data.read_pr_url():
+        return
+    pr_ref = getattr(state.args, "pr", None)
+    if not pr_ref:
+        return
+    try:
+        artifact = resolve_pr_artifact(pr_ref, state.repo)
+    except RuntimeError as e:
+        raise Bail(f"--pr: {e}") from e
+    state.data.append_artifact(artifact)
+
+
 class GitHubWaitCI(Stage):
     type = "github-wait-ci"
     needs_gh = True
+
+    @classmethod
+    def orchestration_args(cls) -> list[StageInput]:
+        return [
+            StageInput(
+                "pr",
+                str,
+                required=False,
+                default=None,
+                help="PR number (e.g. '650') or full URL to act on",
+            ),
+        ]
 
     def __init__(
         self,
@@ -214,6 +243,7 @@ class GitHubWaitCI(Stage):
         return None, new_fix_sha
 
     def run(self, state: State) -> Outcome:
+        _seed_pr_artifact(state)
         pr_url = self.pr_url or state.data.read_pr_url()
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
