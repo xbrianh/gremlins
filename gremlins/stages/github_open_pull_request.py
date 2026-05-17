@@ -8,6 +8,7 @@ from typing import Any, cast
 
 from gremlins.clients.protocol import CompletedRun
 from gremlins.executor.state import State
+from gremlins.stages.agent import run_agent
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Done, Outcome
 from gremlins.utils import proc
@@ -111,10 +112,11 @@ class GitHubOpenPullRequest(Stage):
 
         prompt = f"{base_prompt} {closes_clause}{iter_clause}"
 
-        completed: CompletedRun = self.run_claude(
+        completed: CompletedRun = run_agent(
+            state,
             prompt,
-            state=state,
             label="github-open-pull-request",
+            model=self.model,
             raw_path=state.session_dir / "stream-github-open-pull-request.jsonl",
             capture_events=True,
         )

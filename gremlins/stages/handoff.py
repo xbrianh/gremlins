@@ -17,6 +17,7 @@ from typing import Any, TypeVar, cast
 
 from gremlins.clients.client import Client
 from gremlins.executor.state import State
+from gremlins.stages.agent import run_agent
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, NeedsFix, Outcome
 from gremlins.utils import proc
@@ -266,7 +267,12 @@ def _parse_client_spec(client_arg: str) -> Client:
         raise RuntimeError(str(exc)) from exc
 
 
-def run(client: Client, args: argparse.Namespace) -> int:
+def run(
+    client: Client,
+    args: argparse.Namespace,
+    *,
+    run_fn: Callable[[str], None] | None = None,
+) -> int:
     plan_path = pathlib.Path(args.plan).resolve()
     if not plan_path.exists():
         sys.stderr.write(f"error: --plan does not exist: {plan_path}\n")
@@ -334,11 +340,16 @@ def run(client: Client, args: argparse.Namespace) -> int:
         return 1
     logger.info("running handoff agent (client: %s)", client_spec)
     try:
-        with_reap_after(
-            client,
-            args.timeout,
-            lambda: client.run(prompt, label="handoff", model=client_spec.model),
-        )
+        if run_fn is not None:
+            run_fn(prompt)
+        else:
+            with_reap_after(
+                client,
+                args.timeout,
+                lambda: client.run(prompt, label="handoff", model=client_spec.model),
+            )
+    except Bail:
+        raise
     except Exception as exc:
         sys.stderr.write(f"error: handoff agent failed: {exc}\n")
         return 1
@@ -452,6 +463,7 @@ class Handoff(Stage):
             base_ref=base_ref,
             session_dir=session_dir,
             client=client,
+            state=state,
         )
 
         if exit_state == "chain-done":
@@ -485,6 +497,7 @@ class Handoff(Stage):
         base_ref: str,
         session_dir: pathlib.Path,
         client: Any,
+        state: State,
     ) -> tuple[str, dict[str, Any]]:
         out_path = session_dir / f"handoff-{handoff_n:03d}.md"
         signal_path = session_dir / f"handoff-{handoff_n:03d}.state.json"
@@ -503,6 +516,13 @@ class Handoff(Stage):
             base_ref[:12] if len(base_ref) >= 12 else base_ref,
         )
 
+        def _run_fn(prompt: str) -> None:
+            with_reap_after(
+                state.client,
+                HANDOFF_TIMEOUT,
+                lambda: run_agent(state, prompt, label="handoff", model=self.model),
+            )
+
         args = argparse.Namespace(
             plan=current_plan,
             spec=original_plan if forward_spec else None,
@@ -513,7 +533,7 @@ class Handoff(Stage):
             rev=None,
         )
 
-        rc = run(client, args)
+        rc = run(client, args, run_fn=_run_fn)
         if rc != 0:
             raise RuntimeError(f"handoff agent exited {rc}")
 

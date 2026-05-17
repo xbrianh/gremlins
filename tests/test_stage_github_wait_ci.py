@@ -449,7 +449,9 @@ def test_check_bail_raises_from_state(
     sf = state_dir / "state.json"
     sf.write_text(json.dumps({"id": gremlin_id, "attempt": attempt}))
     # Write bail file as the agent would have
-    (state_dir / f"bail_{attempt}.json").write_text(json.dumps({"class": "other"}))
+    (state_dir / f"bail_{attempt}.json").write_text(
+        json.dumps({"class": "other", "detail": "ci bailed"})
+    )
 
     client = FakeClaudeClient(fixtures={"ci-fix-1": MINIMAL_EVENTS})
     getter = _make_getter([([_FAILING_CHECK], ""), ([_FAILING_CHECK], "")])
@@ -467,4 +469,4 @@ def test_check_bail_raises_from_state(
     state.data.attempt = attempt
     with pytest.raises(Bail) as exc_info:
         stage.run(state)
-    assert "bailed" in exc_info.value.reason
+    assert "ci bailed" in exc_info.value.reason

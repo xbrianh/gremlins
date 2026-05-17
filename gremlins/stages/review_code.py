@@ -6,8 +6,8 @@ import logging
 import pathlib
 from typing import Any
 
-from gremlins.clients.client import Client
 from gremlins.executor.state import State
+from gremlins.stages.agent import run_agent
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Done, Outcome
 
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 def _run_reviewer(
     *,
-    client: Client,
+    state: State,
     model: str,
     out_file: pathlib.Path,
     focus: str,
@@ -24,7 +24,6 @@ def _run_reviewer(
     where_field: str,
     label: str,
     raw_path: pathlib.Path,
-    cwd: pathlib.Path | None = None,
 ) -> None:
     prompt = f"""Read surrounding code as needed — don't review in isolation.
 
@@ -52,7 +51,7 @@ Do NOT make any code changes — only write the review file.
 {focus}
 
 `{out_file}` is the canonical and required location for your review output in every case, including any short-circuit one-liner the prompt tells you to emit. Do not emit the verdict only to chat; write it to `{out_file}` and then stop."""
-    client.run(prompt, label=label, model=model, raw_path=raw_path, cwd=cwd)
+    run_agent(state, prompt, label=label, model=model, raw_path=raw_path)
 
 
 class ReviewCode(Stage):
@@ -107,7 +106,7 @@ class ReviewCode(Stage):
             parent_stage=state.parent_stage,
         )
         _run_reviewer(
-            client=state.client,
+            state=state,
             model=model,
             out_file=out_file,
             focus=focus,
@@ -115,7 +114,6 @@ class ReviewCode(Stage):
             where_field="**File:** `path/to/file.ext:<line>`",
             label=f"{self.name}:{model}",
             raw_path=state.session_dir / f"stream-{self.name}-{model}.jsonl",
-            cwd=state.worktree,
         )
         state.data.set_stage(
             self.name, {"model": f"done ({model})"}, parent_stage=state.parent_stage
@@ -167,11 +165,11 @@ class GitHubReviewPullRequest(Stage):
                 pr_url=pr_url,
             )
         )
-        self.run_claude(
+        run_agent(
+            state,
             prompt,
-            state=state,
             label="github-review-pull-request",
+            model=self.model,
             raw_path=state.session_dir / "stream-github-review-pull-request.jsonl",
         )
-        state.data.check_bail("/github-review-pull-request", child_key=state.child_key)
         return Done()
