@@ -137,6 +137,7 @@ class ParallelStage(Stage):
             project_root=project_root or pathlib.Path.cwd(),
             worktree_parent=worktree_parent,
             parent_attempt=parent_attempt,
+            stage_path=self.path or self.name,
         )
 
     def run(self, state: State) -> Outcome:
@@ -179,6 +180,7 @@ def _parallel_stages(
     project_root: pathlib.Path,
     worktree_parent: pathlib.Path | None = None,
     parent_attempt: str = "",
+    stage_path: str = "",
 ) -> list[_Stage]:
     fanout_name = f"{group_name}-fanout"
     fanin_name = f"{group_name}-fanin"
@@ -254,7 +256,7 @@ def _parallel_stages(
         _worktree_paths.clear()
         base_head = ""
         _clear_persisted_state()
-        StateData.load(gremlin_id).patch_parallel_done(group_name)
+        StateData.load(gremlin_id).clear_done(stage_path)
 
         if not _in_git_repo():
             return
@@ -304,16 +306,7 @@ def _parallel_stages(
 
         _hydrate_from_state()
 
-        done: set[str] = set()
-        sf = resolve_state_file(gremlin_id)
-        if sf is not None and sf.exists():
-            try:
-                raw = json.loads(sf.read_text(encoding="utf-8"))
-                done_map: dict[str, Any] = raw.get("parallel_done") or {}
-                done_group: dict[str, Any] = done_map.get(group_name) or {}
-                done = set(done_group.keys())
-            except Exception:
-                pass
+        done = StateData.load(gremlin_id).done_for(stage_path)
 
         active = [(k, s, fn) for k, s, fn in child_runners if k not in done]
         if not active:
@@ -353,7 +346,7 @@ def _parallel_stages(
                 if cancel_event is not None:
                     cancel_event.set()
                 raise
-            StateData.load(gremlin_id).patch_parallel_done(group_name, child_key)
+            StateData.load(gremlin_id).mark_done(stage_path, child_key)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             futs = [pool.submit(_run_child, k, fn) for k, _, fn in active]
@@ -372,77 +365,81 @@ def _parallel_stages(
         finally:
             _teardown_worktrees()
 
+    def _validate_no_mutations() -> None:
+        for child_key, _, _ in child_runners:
+            wt = _worktree_paths.get(child_key)
+            if wt is None or not wt.is_dir():
+                continue
+            r = proc.run(["git", "rev-parse", "HEAD"], cwd=str(wt))
+            child_head = r.stdout.strip() if r.returncode == 0 else ""
+            if child_head and child_head != base_head:
+                raise NotImplementedError(
+                    f"parallel child {child_key!r} mutated its worktree "
+                    "(fan-in merge for mutating parallel is not yet implemented)"
+                )
+            status_r = proc.run(["git", "status", "--porcelain"], cwd=str(wt))
+            if status_r.stdout.strip():
+                raise NotImplementedError(
+                    f"parallel child {child_key!r} has uncommitted changes "
+                    "(fan-in merge for mutating parallel is not yet implemented)"
+                )
+
+    def _collect_bails() -> tuple[list[str], dict[str, str]]:
+        sf = resolve_state_file(gremlin_id)
+        if sf is None or not sf.exists():
+            return [], {}
+        try:
+            data = json.loads(sf.read_text(encoding="utf-8"))
+            parallel_attempts: dict[str, str] = data.get("parallel_attempts") or {}
+            bailed: list[str] = []
+            first_bail: dict[str, str] = {}
+            for key, _, _ in child_runners:
+                child_attempt = parallel_attempts.get(key) or ""
+                if (
+                    child_attempt
+                    and (sf.parent / f"bail_{child_attempt}.json").exists()
+                ):
+                    bailed.append(key)
+                    if not first_bail:
+                        try:
+                            first_bail = dict(
+                                json.loads(
+                                    (
+                                        sf.parent / f"bail_{child_attempt}.json"
+                                    ).read_text(encoding="utf-8")
+                                )
+                            )
+                        except Exception:
+                            first_bail = {"class": "other"}
+            return bailed, first_bail
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            logger.warning("fan-in bail aggregation failed: %s", exc)
+            return [], {}
+
     def _do_fan_in() -> None:
         if _in_git_repo():
             proc.run_quiet(["git", "worktree", "prune"], cwd=str(project_root))
+        if _in_git_repo() and base_head:
+            _validate_no_mutations()
 
-        base = base_head
-        if _in_git_repo() and base:
-            for child_key, _, _ in child_runners:
-                wt = _worktree_paths.get(child_key)
-                if wt is None or not wt.is_dir():
-                    continue
-                r = proc.run(["git", "rev-parse", "HEAD"], cwd=str(wt))
-                child_head = r.stdout.strip() if r.returncode == 0 else ""
-                if child_head and child_head != base:
-                    raise NotImplementedError(
-                        f"parallel child {child_key!r} mutated its worktree "
-                        "(fan-in merge for mutating parallel is not yet implemented)"
-                    )
-                status_r = proc.run(["git", "status", "--porcelain"], cwd=str(wt))
-                if status_r.stdout.strip():
-                    raise NotImplementedError(
-                        f"parallel child {child_key!r} has uncommitted changes "
-                        "(fan-in merge for mutating parallel is not yet implemented)"
-                    )
+        bailed, first_bail = _collect_bails()
 
-        sf = resolve_state_file(gremlin_id)
-        bailed: list[str] = []
-        should_bail = False
-        if sf is not None and sf.exists():
-            try:
-                data = json.loads(sf.read_text(encoding="utf-8"))
-                parallel_attempts: dict[str, str] = data.get("parallel_attempts") or {}
-                first_bail: dict[str, str] = {}
-                for key, _, _ in child_runners:
-                    child_attempt = parallel_attempts.get(key) or ""
-                    if (
-                        child_attempt
-                        and (sf.parent / f"bail_{child_attempt}.json").exists()
-                    ):
-                        bailed.append(key)
-                        if not first_bail:
-                            try:
-                                first_bail = dict(
-                                    json.loads(
-                                        (
-                                            sf.parent / f"bail_{child_attempt}.json"
-                                        ).read_text(encoding="utf-8")
-                                    )
-                                )
-                            except Exception:
-                                first_bail = {"class": "other"}
+        if bail_policy == "any":
+            should_bail = bool(bailed)
+        else:  # "all"
+            should_bail = bool(bailed) and len(bailed) == len(child_runners)
 
-                if bail_policy == "any":
-                    should_bail = bool(bailed)
-                elif bail_policy == "all":
-                    should_bail = bool(bailed) and len(bailed) == len(child_runners)
-
-                if should_bail and first_bail:
-                    StateData.load(gremlin_id).write_bail_file(
-                        first_bail.get("class") or "other",
-                        first_bail.get("detail") or "",
-                        attempt=parent_attempt,
-                    )
-
-                StateData.load(gremlin_id).patch(_delete=("parallel_attempts",))
-                if not should_bail:
-                    StateData.load(gremlin_id).patch_parallel_done(group_name)
-            except RuntimeError:
-                raise
-            except Exception as exc:
-                logger.warning("fan-in bail aggregation failed: %s", exc)
-
+        if should_bail and first_bail:
+            StateData.load(gremlin_id).write_bail_file(
+                first_bail.get("class") or "other",
+                first_bail.get("detail") or "",
+                attempt=parent_attempt,
+            )
+        StateData.load(gremlin_id).patch(_delete=("parallel_attempts",))
+        if not should_bail:
+            StateData.load(gremlin_id).clear_done(stage_path)
         if should_bail:
             raise RuntimeError(
                 f"parallel group {group_name!r} bailed "
