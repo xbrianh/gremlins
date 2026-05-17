@@ -100,10 +100,8 @@ class ReviewCode(Stage):
         else:
             code_context = code_scope
 
-        state.data.set_stage(
-            self.name,
-            {"model": f"running ({model})"},
-            parent_stage=state.parent_stage,
+        state.record_stage_progress(
+            self.name, {"model": f"running ({model})"}, parent_stage=state.parent_stage
         )
         _run_reviewer(
             state=state,
@@ -115,7 +113,7 @@ class ReviewCode(Stage):
             label=f"{self.name}:{model}",
             raw_path=state.session_dir / f"stream-{self.name}-{model}.jsonl",
         )
-        state.data.set_stage(
+        state.record_stage_progress(
             self.name, {"model": f"done ({model})"}, parent_stage=state.parent_stage
         )
         logger.info("code review (%s): %s", model, out_file)

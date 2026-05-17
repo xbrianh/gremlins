@@ -159,9 +159,7 @@ class ParallelStage(Stage):
             gremlin_id=gremlin_id,
             project_root=pathlib.Path.cwd(),
             worktree_parent=state.worktree_parent,
-            set_stage_fn=lambda n: StateData.load(gremlin_id).set_stage(
-                self.name, sub_stage=n
-            ),
+            set_stage_fn=lambda n: state.record_stage_progress(self.name, n),
             parent_attempt=state.data.attempt,
         ):
             fn()

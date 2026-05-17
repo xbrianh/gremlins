@@ -123,7 +123,7 @@ class Plan(Stage):
             )
             issue_num = issue_url.split("/")[-1]
             logger.info("issue: %s", issue_url)
-            state.data.patch(issue_url=issue_url, issue_num=issue_num)
+            state.record_state_field(issue_url=issue_url, issue_num=issue_num)
             issue_body = _fetch_issue_body(issue_num, state.repo)
             plan_md.write_text(issue_body, encoding="utf-8")
         else:
@@ -213,7 +213,7 @@ class Plan(Stage):
         issue_num = issue_url.split("/")[-1]
         logger.info("issue: %s", issue_url)
         shutil.copyfile(src, plan_md)
-        state.data.patch(issue_url=issue_url, issue_num=issue_num)
+        state.record_state_field(issue_url=issue_url, issue_num=issue_num)
         self._update_description(plan_md, issue_title=issue_title, state=state)
 
     def _resolve_issue_source(
@@ -259,7 +259,7 @@ class Plan(Stage):
         logger.info(
             "[1/8] plan supplied via --plan (issue %s#%s)", target_repo, issue_ref
         )
-        state.data.patch(issue_url=issue_url, issue_num=issue_num)
+        state.record_state_field(issue_url=issue_url, issue_num=issue_num)
         self._update_description(plan_md, issue_title=issue_title, state=state)
 
     def _update_description(
@@ -272,7 +272,7 @@ class Plan(Stage):
             if data.get("description_explicit"):
                 return
             if issue_title:
-                state.data.patch(description=issue_title[:60])
+                state.record_state_field(description=issue_title[:60])
                 return
             lines = plan_md.read_text(encoding="utf-8").splitlines()[:50]
             h1 = ""
@@ -282,7 +282,7 @@ class Plan(Stage):
                     h1 = m.group(1)[:60]
                     break
             if h1:
-                state.data.patch(description=h1)
+                state.record_state_field(description=h1)
         except Exception:
             pass
 

@@ -115,7 +115,7 @@ class LoopStage(Stage):
             else self._build_runners(state)
         )
         for iteration in range(1, self._max_iterations + 1):
-            state.data.patch(loop_iteration=iteration)
+            state.record_state_field(loop_iteration=iteration)
             if self._pr_stack:
                 _detach_to_pr_base(state)
             head_before = _git.head_sha(state.cwd)
@@ -131,11 +131,7 @@ class LoopStage(Stage):
             elif iteration == self._max_iterations:
                 break
 
-        state.data.write_bail_file(
-            "other",
-            f"loop exhausted {self._max_iterations} iterations",
-            attempt=state.data.attempt,
-        )
+        state.record_bail(f"loop exhausted {self._max_iterations} iterations")
         raise Bail(f"loop exhausted {self._max_iterations} iterations")
 
 
