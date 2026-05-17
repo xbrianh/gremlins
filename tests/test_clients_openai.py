@@ -17,6 +17,8 @@ from agents.tool_context import ToolContext
 
 from gremlins.clients.config import OPENAI_AGENTS_MAX_TURNS
 from gremlins.clients.protocol import CompletedRun
+from agents import ModelSettings
+
 from gremlins.clients.providers.openai_agents import (
     OpenAIAgentsClient,
     StreamTerminalError,
@@ -292,6 +294,26 @@ def test_idle_timeout_raises_stream_timeout_error(monkeypatch: Any) -> None:
         client.run("slow", label="t", idle_timeout=0.05, max_retries=0)
 
 
+def test_model_settings_stored_and_passed_to_agent(monkeypatch: Any) -> None:
+    usage = _make_usage()
+    fake_run = _make_run_result_streaming("done", usage, [])
+    captured_agents: list[Any] = []
+
+    def _fake_run_streamed(agent: Any, *a: Any, **kw: Any) -> Any:
+        captured_agents.append(agent)
+        return fake_run
+
+    monkeypatch.setattr("agents.run.Runner.run_streamed", _fake_run_streamed)
+
+    settings = ModelSettings(temperature=0.5)
+    client = OpenAIAgentsClient("gpt-4o", model_settings=settings)
+    assert client._model_settings is settings
+    client.run("do something", label="t")
+
+    assert captured_agents, "Runner.run_streamed was not called"
+    assert captured_agents[0].model_settings.temperature == 0.5
+
+
 def test_xai_client_constructs(monkeypatch: Any) -> None:
     monkeypatch.setenv("XAI_API_KEY", "test-key")
     client = make_xai_client(None)
@@ -299,6 +321,15 @@ def test_xai_client_constructs(monkeypatch: Any) -> None:
     assert client._model == "grok-4"
     assert client.base_url == "https://api.x.ai/v1"
     assert client.api_key == "test-key"
+
+
+def test_xai_client_model_settings(monkeypatch: Any) -> None:
+    monkeypatch.setenv("XAI_API_KEY", "test-key")
+    client = make_xai_client(None)
+    assert client._model_settings is not None
+    assert client._model_settings.temperature == 0.3
+    assert client._model_settings.reasoning is not None
+    assert client._model_settings.reasoning.effort == "high"
 
 
 def test_xai_client_missing_key(monkeypatch: Any) -> None:
