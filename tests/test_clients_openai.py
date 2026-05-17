@@ -10,15 +10,13 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agents import Usage
+from agents import ModelSettings, Usage
 from agents.items import MessageOutputItem, ToolCallItem, ToolCallOutputItem
 from agents.stream_events import RunItemStreamEvent
 from agents.tool_context import ToolContext
 
 from gremlins.clients.config import OPENAI_AGENTS_MAX_TURNS
 from gremlins.clients.protocol import CompletedRun
-from agents import ModelSettings
-
 from gremlins.clients.providers.openai_agents import (
     OpenAIAgentsClient,
     StreamTerminalError,

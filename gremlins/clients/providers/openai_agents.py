@@ -9,7 +9,6 @@ import threading
 from typing import Any
 
 from agents import Agent, ModelSettings, RunConfig, Runner, Usage
-from openai.types.shared import Reasoning
 from agents.items import (
     MessageOutputItem,
     ReasoningItem,
@@ -19,6 +18,7 @@ from agents.items import (
 from agents.models.openai_provider import OpenAIProvider
 from agents.result import RunResultStreaming
 from agents.stream_events import RunItemStreamEvent
+from openai.types.shared import Reasoning
 
 from gremlins.clients.config import (
     OPENAI_AGENTS_MAX_TURNS,
