@@ -57,6 +57,7 @@ _PRICING: dict[str, tuple[float, float]] = {
     "grok-4": (3.00, 15.00),
 }
 _DEFAULT_PRICING = (2.50, 10.00)
+_DEFAULT_TEMPERATURE = 0.3
 
 
 class StreamTimeoutError(RuntimeError):
@@ -189,21 +190,13 @@ class OpenAIAgentsClient:
             idle_timeout = STREAM_IDLE_TIMEOUT
         effective_model = model or self._model
         prefix = f"[{label}] " if label else ""
-        if self._model_settings is not None:
-            agent = Agent(
-                name=f"gremlins-{label}",
-                instructions="You are a software engineering assistant.",
-                tools=GREMLINS_TOOLS,
-                model=effective_model,
-                model_settings=self._model_settings,
-            )
-        else:
-            agent = Agent(
-                name=f"gremlins-{label}",
-                instructions="You are a software engineering assistant.",
-                tools=GREMLINS_TOOLS,
-                model=effective_model,
-            )
+        agent = Agent(
+            name=f"gremlins-{label}",
+            instructions="You are a software engineering assistant.",
+            tools=GREMLINS_TOOLS,
+            model=effective_model,
+            model_settings=self._model_settings if self._model_settings is not None else ModelSettings(),
+        )
         ctx: dict[str, object] = {
             "cwd": str(cwd) if cwd is not None else None,
             "extra_env": extra_env,
@@ -460,7 +453,7 @@ def make_openai_client(model: str | None) -> OpenAIAgentsClient:
     return OpenAIAgentsClient(
         model,
         api_key=api_key,
-        model_settings=ModelSettings(temperature=0.3),
+        model_settings=ModelSettings(temperature=_DEFAULT_TEMPERATURE),
     )
 
 
@@ -473,7 +466,7 @@ def make_xai_client(model: str | None) -> OpenAIAgentsClient:
         base_url="https://api.x.ai/v1",
         api_key=api_key,
         model_settings=ModelSettings(
-            temperature=0.3,
+            temperature=_DEFAULT_TEMPERATURE,
             reasoning=Reasoning(effort="high"),
         ),
     )

@@ -343,6 +343,13 @@ def test_openai_client_constructs_with_api_key(monkeypatch: Any) -> None:
     assert client.api_key == "sk-test"
 
 
+def test_openai_client_model_settings(monkeypatch: Any) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    client = make_openai_client(None)
+    assert client._model_settings is not None
+    assert client._model_settings.temperature == 0.3
+
+
 def test_openai_client_missing_key(monkeypatch: Any) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     with pytest.raises(RuntimeError):
