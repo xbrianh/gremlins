@@ -253,7 +253,6 @@ def test_build_row_waiting_with_sub_stage():
 
 
 def test_build_row_non_waiting_sub_stage_not_shown():
-    # sub_stage is never shown for non-waiting stages — fleet view is outermost only
     state = {
         "kind": "localgremlin",
         "stage": "verify",
@@ -262,8 +261,6 @@ def test_build_row_non_waiting_sub_stage_not_shown():
     }
     row = _render.build_row("g1", "/sf", "/wdir", state, "running")
     assert row.stage == "verify"
-    assert "cmd" not in row.stage
-    assert "(" not in row.stage
 
 
 def test_build_row_client_from_state():
