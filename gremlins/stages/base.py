@@ -18,9 +18,6 @@ class StageInput(NamedTuple):
 class Stage:
     type: str = ""
     needs_gh: bool = False
-    # Declared for type-checking; only composite stages (Parallel, Loop, Sequence)
-    # set this in their __init__. Use getattr(stage, "body", []) to access safely.
-    body: list[Stage]
 
     def __init__(self, name: str) -> None:
         self.name = name

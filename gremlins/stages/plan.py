@@ -143,65 +143,14 @@ class Plan(Stage):
             sys.stderr.write(f"error: --plan: file is empty: {path}\n")
             sys.stderr.flush()
             sys.exit(1)
-        issue_body = src.read_text(encoding="utf-8")
-
         if not state.repo:
             shutil.copyfile(src, plan_md)
             return
-
         logger.info(
             "[1/8] plan supplied via --plan (file): %s — posting as GitHub issue", path
         )
-        title_prompt = (
-            "Produce a concise GitHub issue title (under 80 characters) "
-            "summarizing the spec below. Output ONLY the title, nothing else."
-            f"\n\n{issue_body}"
-        )
-        completed = run_agent(
-            state,
-            title_prompt,
-            label="plan-title",
-            raw_path=state.session_dir / "plan-title.jsonl",
-        )
-        parts = (completed.text_result or "").strip().splitlines()
-        issue_title = parts[0][:80] if parts else ""
-        if not issue_title:
-            sys.stderr.write("error: --plan: title agent returned empty output\n")
-            sys.stderr.flush()
-            sys.exit(1)
-        r = subprocess.run(
-            [
-                "gh",
-                "issue",
-                "create",
-                "--repo",
-                state.repo,
-                "--title",
-                issue_title,
-                "--body-file",
-                path,
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if r.returncode != 0:
-            sys.stderr.write(
-                f"error: --plan: failed to create GitHub issue: {r.stderr.strip()}\n"
-            )
-            sys.stderr.flush()
-            sys.exit(1)
-        create_out = r.stdout + r.stderr
-        m = re.search(r"https://github\.com/[^ )]+/issues/[0-9]+", create_out)
-        if not m:
-            sys.stderr.write(
-                f"error: --plan: could not extract issue URL from gh output: {create_out.strip()}\n"
-            )
-            sys.stderr.flush()
-            sys.exit(1)
-        issue_url = m.group(0)
+        issue_url, issue_title = _post_file_as_github_issue(path, state)
         issue_num = issue_url.split("/")[-1]
-        logger.info("issue: %s", issue_url)
         shutil.copyfile(src, plan_md)
         state.record_state_field(issue_url=issue_url, issue_num=issue_num)
         self._update_description(plan_md, issue_title=issue_title, state=state)
@@ -275,6 +224,51 @@ class Plan(Stage):
                 state.record_state_field(description=h1)
         except Exception:
             pass
+
+
+def _post_file_as_github_issue(path: str, state: State) -> tuple[str, str]:
+    """Post a local file as a GitHub issue. Returns (issue_url, issue_title)."""
+    issue_body = pathlib.Path(path).read_text(encoding="utf-8")
+    title_prompt = (
+        "Produce a concise GitHub issue title (under 80 characters) "
+        "summarizing the spec below. Output ONLY the title, nothing else."
+        f"\n\n{issue_body}"
+    )
+    completed = run_agent(
+        state,
+        title_prompt,
+        label="plan-title",
+        raw_path=state.session_dir / "plan-title.jsonl",
+    )
+    parts = (completed.text_result or "").strip().splitlines()
+    issue_title = parts[0][:80] if parts else ""
+    if not issue_title:
+        sys.stderr.write("error: --plan: title agent returned empty output\n")
+        sys.stderr.flush()
+        sys.exit(1)
+    r = subprocess.run(
+        ["gh", "issue", "create", "--repo", state.repo, "--title", issue_title, "--body-file", path],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if r.returncode != 0:
+        sys.stderr.write(
+            f"error: --plan: failed to create GitHub issue: {r.stderr.strip()}\n"
+        )
+        sys.stderr.flush()
+        sys.exit(1)
+    create_out = r.stdout + r.stderr
+    m = re.search(r"https://github\.com/[^ )]+/issues/[0-9]+", create_out)
+    if not m:
+        sys.stderr.write(
+            f"error: --plan: could not extract issue URL from gh output: {create_out.strip()}\n"
+        )
+        sys.stderr.flush()
+        sys.exit(1)
+    issue_url = m.group(0)
+    logger.info("issue: %s", issue_url)
+    return issue_url, issue_title
 
 
 def _fetch_issue_body(issue_num: str, repo: str) -> str:

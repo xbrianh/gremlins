@@ -95,3 +95,29 @@ def test_model_kwarg_forwarded(tmp_path):
     state = _make_state(tmp_path)
     run_agent(state, "hello", label="test-label", model="haiku")
     assert state.client.calls[0].model == "haiku"
+
+
+def test_stage_model_forwarded_when_set(tmp_path):
+    """state.stage_model is used as the model when no explicit model= is given."""
+    client = FakeClaudeClient(fixtures={"test-label": MINIMAL_EVENTS})
+    state = RuntimeState(
+        data=StateData(),
+        client=client,
+        session_dir=tmp_path,
+        stage_model="sonnet",
+    )
+    run_agent(state, "hello", label="test-label")
+    assert state.client.calls[0].model == "sonnet"
+
+
+def test_stage_model_overridden_by_kwarg(tmp_path):
+    """Explicit model= takes precedence over state.stage_model."""
+    client = FakeClaudeClient(fixtures={"test-label": MINIMAL_EVENTS})
+    state = RuntimeState(
+        data=StateData(),
+        client=client,
+        session_dir=tmp_path,
+        stage_model="sonnet",
+    )
+    run_agent(state, "hello", label="test-label", model="haiku")
+    assert state.client.calls[0].model == "haiku"

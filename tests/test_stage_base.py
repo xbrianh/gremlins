@@ -1,5 +1,7 @@
 """Tests for Stage base class defaults."""
 
+from __future__ import annotations
+
 import pathlib
 from typing import Any
 
@@ -73,3 +75,10 @@ def test_path_setter_propagates_to_body() -> None:
     stage = _SimpleStage("leaf", [], {})
     stage.path = "parent/leaf"
     assert stage.path == "parent/leaf"
+
+
+def test_deleted_helpers_not_on_stage() -> None:
+    stage = Stage("s")
+    assert not hasattr(stage, "run_claude")
+    assert not hasattr(stage, "bail_command")
+    assert not hasattr(stage, "run_subprocess")

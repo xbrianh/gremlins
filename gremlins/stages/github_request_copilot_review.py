@@ -46,6 +46,7 @@ class GitHubRequestCopilotReview(Stage):
             capture_output=True,
             text=True,
             check=False,
+            cwd=state.cwd,
         )
         if r.returncode != 0:
             detail = r.stderr.strip() or r.stdout.strip()

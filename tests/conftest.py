@@ -40,6 +40,7 @@ MINIMAL_EVENTS = [
 # in sync if the label scheme changes.
 REVIEW_LABELS = {
     "review-code:sonnet",
+    "review-code:fake",
 }
 
 
@@ -56,8 +57,11 @@ class ReviewCreatingClient(FakeClaudeClient):
             out = pathlib.Path(m.group(1))
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text("# Review\n\n## Findings\nNone.\n")
-            # Ensure there's a fixture for whatever model-qualified label we get.
             if label not in self._fixtures:
+                assert label in REVIEW_LABELS, (
+                    f"unexpected review-code label: {label!r}; "
+                    f"expected one of {sorted(REVIEW_LABELS)}"
+                )
                 self._fixtures[label] = MINIMAL_EVENTS
         return super().run(prompt, label=label, **kwargs)
 

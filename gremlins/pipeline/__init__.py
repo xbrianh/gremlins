@@ -23,13 +23,7 @@ def _fill_stage_clients(stages: list[Stage], default: Client) -> None:
 
 
 def _stages_need_gh(stages: list[Stage]) -> bool:
-    return any(
-        s.needs_gh
-        or (
-            _stages_need_gh(getattr(s, "body", [])) if getattr(s, "body", []) else False
-        )
-        for s in stages
-    )
+    return any(s.needs_gh or _stages_need_gh(getattr(s, "body", [])) for s in stages)
 
 
 @dataclasses.dataclass
