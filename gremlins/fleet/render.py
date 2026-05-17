@@ -49,8 +49,6 @@ def build_row(
     stage_disp = stage
     if stage == "waiting" and sub_disp:
         stage_disp = f"waiting:{sub_disp}"
-    elif sub_disp:
-        stage_disp = f"{stage} ({sub_disp})"
 
     rescue_count = state.get("rescue_count") or 0
     try:
