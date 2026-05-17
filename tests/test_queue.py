@@ -592,3 +592,61 @@ def test_cli_queue_list_json_watch_mutually_exclusive(tmp_path, monkeypatch, cap
     rc = main(["queue", "list", "--json", "--watch"])
     assert rc == 1
     assert "json" in capsys.readouterr().err.lower()
+
+
+# ---------------------------------------------------------------------------
+# set_state
+# ---------------------------------------------------------------------------
+
+
+def test_set_state_moves_cmd_to_target(q):
+    (q / "failed" / "0001-item.cmd").write_text("echo x")
+    rc = core.set_state("0001-item", "pending")
+    assert rc == 0
+    assert (q / "pending" / "0001-item.cmd").exists()
+    assert not (q / "failed" / "0001-item.cmd").exists()
+
+
+def test_set_state_moves_log_sidecar(q):
+    (q / "failed" / "0001-item.cmd").write_text("echo x")
+    (q / "failed" / "0001-item.log").write_text("log output")
+    core.set_state("0001-item", "running")
+    assert (q / "running" / "0001-item.log").exists()
+    assert not (q / "failed" / "0001-item.log").exists()
+
+
+def test_set_state_unknown_stem_returns_nonzero(q, capsys):
+    rc = core.set_state("9999-ghost", "pending")
+    assert rc == 1
+    assert "9999-ghost" in capsys.readouterr().err
+
+
+def test_set_state_same_state_returns_nonzero(q, capsys):
+    (q / "pending" / "0001-item.cmd").write_text("echo x")
+    rc = core.set_state("0001-item", "pending")
+    assert rc == 1
+    assert "already" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("state", ["pending", "running", "done", "failed"])
+def test_set_state_all_four_destinations(q, state):
+    src = "pending" if state != "pending" else "failed"
+    (q / src / "0001-item.cmd").write_text("echo x")
+    rc = core.set_state("0001-item", state)
+    assert rc == 0
+    assert (q / state / "0001-item.cmd").exists()
+
+
+def test_cli_queue_set_state_dispatches(tmp_path, monkeypatch):
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    root = core.queue_root()
+    (root / "failed" / "0001-item.cmd").write_text("echo x")
+    rc = main(["queue", "set-state", "pending", "--item", "0001-item"])
+    assert rc == 0
+    assert (root / "pending" / "0001-item.cmd").exists()
+
+
+def test_cli_queue_set_state_invalid_state(tmp_path, monkeypatch):
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    with pytest.raises(SystemExit):
+        main(["queue", "set-state", "bogus", "--item", "0001-item"])

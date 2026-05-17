@@ -273,6 +273,31 @@ def clear(
     return 0
 
 
+def set_state(item: str, state: str) -> int:
+    if state not in _SUBDIRS:
+        print(
+            f"invalid state: {state!r}; must be one of: {', '.join(_SUBDIRS)}",
+            file=sys.stderr,
+        )
+        return 1
+    root = queue_root()
+    matches = [(sub, root / sub / (item + ".cmd")) for sub in _SUBDIRS]
+    matches = [(sub, p) for sub, p in matches if p.exists()]
+    if not matches:
+        print(f"no such item: {item}", file=sys.stderr)
+        return 1
+    if len(matches) > 1:
+        locs = ", ".join(sub for sub, _ in matches)
+        print(f"item {item!r} found in multiple directories: {locs}", file=sys.stderr)
+        return 1
+    current, cmd_path = matches[0]
+    if current == state:
+        print(f"item {item!r} is already in {state!r}", file=sys.stderr)
+        return 1
+    _move_item(cmd_path, root / state)
+    return 0
+
+
 def land() -> int:
     root = queue_root()
     landed = 0
