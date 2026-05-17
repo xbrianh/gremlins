@@ -44,19 +44,24 @@ _TERMINAL_STATUSES = frozenset({"done", "dead", "bailed", "stopped"})
 _POLL_TIMEOUT = 4 * 3600  # 4 hours
 
 
+def _read_terminal_state(state_file: pathlib.Path) -> dict[str, object] | None:
+    try:
+        data = json.loads(state_file.read_text())
+        return data if data.get("status") in _TERMINAL_STATUSES else None
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
 def _poll_terminal(state_file: pathlib.Path) -> dict[str, object]:
     deadline = time.time() + _POLL_TIMEOUT
     while True:
         if time.time() > deadline:
             raise TimeoutError(
-                f"gremlin did not reach terminal status within {_POLL_TIMEOUT // 3600}h"
+                f"gremlin {state_file.parent.name!r} did not reach terminal status"
+                f" within {_POLL_TIMEOUT // 3600}h"
             )
-        try:
-            data = json.loads(state_file.read_text())
-            if data.get("status") in _TERMINAL_STATUSES:
-                return data
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
+        if (data := _read_terminal_state(state_file)) is not None:
+            return data
         time.sleep(2)
 
 

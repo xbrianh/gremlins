@@ -142,20 +142,18 @@ This serializes dependent work through the queue without a `boss` pipeline. Use 
 `gremlins queue run` emits progress lines as it works through `pending/`. The vocabulary you can rely on:
 
 - `queue: running <item>` — stdout — runner picked up an item
-- `queue: waiting for gremlin <id>` — stdout — gremlin launched, waiting for it to terminate
 - `queue: done <item>` — stdout — item completed cleanly, moved to `done/`
 - `queue: failed <item>` — stderr — item bailed; runner halted
 
 **React to events as they arrive, don't poll.** The right pattern is: spawn the runner, attach a line-by-line consumer to its stdout **and stderr**, and act on each event. Your assistant environment almost certainly has a primitive for "stream stdout from a long-running process and react to each line" — use that. In Claude Code it's the `Monitor` tool; other tools have analogues.
 
-**Concrete example — land each gremlin as it finishes:**
+**Concrete example — act on each item as it finishes:**
 
 ```
 # spawn: gremlins queue run
 # for each stdout line:
-#   if line matches "queue: done <item>":
-#     parse id from item name (format: <timestamp>-<slug>.<id>)
-#     run: gremlins land <id>
+#   if line matches "queue: done <item>": item completed cleanly
+#   if line matches "queue: failed <item>": item bailed; runner stopped
 ```
 
 **Anti-pattern to avoid:** polling `queue list` in a shell loop. Use `gremlins queue list --watch [SEC]` for a live-refreshing view, or attach to the `queue run` event stream for reactive automation.
