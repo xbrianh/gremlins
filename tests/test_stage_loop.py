@@ -167,8 +167,13 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
 
 def test_head_stable_returns_true_when_head_unchanged(tmp_path):
     state = _loop_state(tmp_path)
-    sha = "abc123"
-    assert head_stable(state, 1, sha) is True  # HEAD doesn't exist → both return ""
+    # tmp_path is not a git repo → head_sha returns ""; passing "" means stable
+    assert head_stable(state, 1, "") is True
+
+
+def test_head_stable_returns_false_when_head_changed(tmp_path):
+    state = _loop_state(tmp_path)
+    assert head_stable(state, 1, "old-sha-abc123") is False
 
 
 def test_max_iters_terminates_at_n(tmp_path):
