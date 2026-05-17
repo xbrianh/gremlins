@@ -363,6 +363,38 @@ def _initial_state_data(inputs: _Inputs) -> StateData:
     )
 
 
+def _next_graft_name(stages: list[dict[str, Any]]) -> str:
+    count = sum(1 for s in stages if str(s.get("name", "")).startswith("graft-"))
+    return f"graft-{count + 1}"
+
+
+def _append_graft(
+    state_dir: pathlib.Path, graft_pipeline_name: str, project_root: str
+) -> None:
+    from gremlins.pipeline.discovery import resolve_pipeline_name
+    from gremlins.pipeline.preprocess import expand_pipeline
+    from gremlins.utils.yaml_io import dump_yaml_text, load_yaml_file
+
+    hermetic = state_dir / "pipeline.yaml"
+    if not hermetic.is_file():
+        raise RuntimeError(f"no persisted pipeline.yaml in {state_dir} — cannot graft")
+
+    graft_path = resolve_pipeline_name(graft_pipeline_name, pathlib.Path(project_root))
+    expanded = expand_pipeline(graft_path, pathlib.Path(project_root))
+    graft_stages = list(expanded.get("stages") or [])
+    if not graft_stages:
+        raise RuntimeError(f"graft pipeline {graft_pipeline_name!r} has no stages")
+
+    current = load_yaml_file(hermetic)
+    top_stages: list[dict[str, Any]] = list(
+        cast(list[dict[str, Any]], current.get("stages") or [])
+    )
+    graft_name = _next_graft_name(top_stages)
+    top_stages.append({"name": graft_name, "type": "sequence", "body": graft_stages})
+    current["stages"] = top_stages
+    hermetic.write_text(dump_yaml_text(current), encoding="utf-8")
+
+
 def _persist_expanded_pipeline(state_dir: pathlib.Path, pipeline_path: str) -> str:
     from gremlins.pipeline.preprocess import expand_pipeline
     from gremlins.utils.yaml_io import dump_yaml_text
@@ -441,8 +473,11 @@ def launch(
     return inputs.gremlin_id, p
 
 
-def resume(gremlin_id: str) -> None:
+def resume(gremlin_id: str, *, graft: str | None = None) -> None:
     """Re-spawn the pipeline for an existing gremlin from its recorded stage.
+
+    When graft is given, appends that pipeline's stages (wrapped in a graft-N
+    sequence) to the persisted pipeline.yaml before resuming.
 
     Raises RuntimeError on precondition violations or spawn failure.
     """
@@ -465,9 +500,6 @@ def resume(gremlin_id: str) -> None:
     old_pid = state.get("pid")
     exit_code = state.get("exit_code")
 
-    if workdir and not os.path.isdir(workdir):
-        raise RuntimeError(f"worktree missing: {workdir}")
-
     if status == "running" and old_pid is not None:
         try:
             os.kill(int(old_pid), 0)
@@ -477,10 +509,22 @@ def resume(gremlin_id: str) -> None:
         except (OSError, ValueError):
             pass  # process is gone
 
-    if (state_dir / "finished").is_file() and exit_code == 0:
+    if graft is None and (state_dir / "finished").is_file() and exit_code == 0:
         raise RuntimeError(
             f"gremlin {gremlin_id} finished successfully — nothing to resume"
         )
+
+    if workdir and not os.path.isdir(workdir):
+        if graft is not None:
+            import gremlins.fleet.rescue as _rescue_mod
+
+            ok, detail = _rescue_mod.recreate_worktree(state)
+            if not ok:
+                raise RuntimeError(
+                    f"worktree missing and could not be recreated: {detail}"
+                )
+        else:
+            raise RuntimeError(f"worktree missing: {workdir}")
 
     pipeline_args = cast(list[str], state.get("pipeline_args") or [])
     pipeline_path = str(state.get("pipeline_path") or "")
@@ -496,6 +540,9 @@ def resume(gremlin_id: str) -> None:
     _hermetic = state_dir / "pipeline.yaml"
     if _hermetic.is_file():
         pipeline_path = str(_hermetic)
+
+    if graft is not None:
+        _append_graft(state_dir, graft, project_root)
 
     _loaded_resume = None
     if pipeline_path:
@@ -546,6 +593,7 @@ def resume(gremlin_id: str) -> None:
         _delete=(
             "exit_code",
             "ended_at",
+            "attempt",
             "sub_stage",
             "stage_updated_at",
             "bail_class",
