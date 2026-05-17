@@ -132,6 +132,6 @@ class GitHubOpenPullRequest(Stage):
         branch = extract_pr_branch_from_events(events) or _get_pr_branch(pr_url)
         if not branch:
             logger.warning("open-pr: could not determine PR branch for %s", pr_url)
-        state.data.append_artifact({"type": "pr", "url": pr_url, "branch": branch})
+        state.record_artifact({"type": "pr", "url": pr_url, "branch": branch})
         logger.info("PR: %s", pr_url)
         return Done()
