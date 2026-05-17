@@ -8,6 +8,7 @@ import sys
 from collections.abc import Callable
 
 from gremlins.queue.core import (
+    SUBDIRS,
     add,
     clear,
     land,
@@ -15,6 +16,7 @@ from gremlins.queue.core import (
     list_queue_json,
     requeue,
     run,
+    set_state,
 )
 from gremlins.utils.watch import watch_render
 
@@ -94,6 +96,16 @@ def _land(_argv: list[str]) -> int:
     return land()
 
 
+def _set_state(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="gremlins queue set-state")
+    parser.add_argument("state", choices=SUBDIRS, help="Target state.")
+    parser.add_argument(
+        "--item", metavar="STEM", required=True, help="Queue item stem."
+    )
+    args = parser.parse_args(argv)
+    return set_state(args.item, args.state)
+
+
 _DISPATCH: dict[str, tuple[str, Callable[[list[str]], int]]] = {
     "add": ("Add a command to the queue.", _add),
     "list": ("List queued items.", _list),
@@ -101,6 +113,7 @@ _DISPATCH: dict[str, tuple[str, Callable[[list[str]], int]]] = {
     "requeue": ("Move failed items back to pending.", _requeue),
     "clear": ("Remove items from the queue.", _clear),
     "land": ("Land all done gremlins in the queue.", _land),
+    "set-state": ("Manually transition a queue item to a different state.", _set_state),
 }
 
 
