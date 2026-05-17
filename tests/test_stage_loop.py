@@ -10,7 +10,7 @@ import pytest
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData
 from gremlins.stages.cmd import Cmd
-from gremlins.stages.loop import LoopStage
+from gremlins.stages.loop import LoopStage, detach_to_pr_base, head_stable, max_iters
 from gremlins.stages.outcome import Bail, Done, NeedsFix
 
 
@@ -41,7 +41,7 @@ def test_loop_head_stable_exits_cleanly(tmp_path):
         calls.append("run")
         return Done()
 
-    loop = LoopStage.from_runners([runner], max_iterations=3)
+    loop = LoopStage("loop", body_runners=[runner], max_iterations=3)
     outcome = loop.run(_loop_state(tmp_path))
 
     assert outcome == Done()
@@ -62,7 +62,7 @@ def test_loop_cmd_failure_then_fix_then_green(tmp_path):
         state["fixed"] = True
         return Done()
 
-    loop = LoopStage.from_runners([check, fix], max_iterations=3)
+    loop = LoopStage("loop", body_runners=[check, fix], max_iterations=3)
     loop.run(_loop_state(tmp_path))
 
     assert state["attempt"] == 2
@@ -80,7 +80,7 @@ def test_loop_fix_skipped_on_success(tmp_path):
         fix_calls.append(1)
         return Done()
 
-    loop = LoopStage.from_runners([check, fix], max_iterations=3)
+    loop = LoopStage("loop", body_runners=[check, fix], max_iterations=3)
     loop.run(_loop_state(tmp_path))
 
     assert fix_calls == []
@@ -93,7 +93,7 @@ def test_loop_exhausted_returns_bail(tmp_path):
     def fix() -> Done:
         return Done()
 
-    loop = LoopStage.from_runners([check, fix], max_iterations=3)
+    loop = LoopStage("loop", body_runners=[check, fix], max_iterations=3)
     with pytest.raises(Bail):
         loop.run(_loop_state(tmp_path))
 
@@ -111,7 +111,7 @@ def test_loop_fix_skipped_on_final_iteration(tmp_path):
         fix_calls.append(attempt[0])
         return Done()
 
-    loop = LoopStage.from_runners([check, fix], max_iterations=3)
+    loop = LoopStage("loop", body_runners=[check, fix], max_iterations=3)
     with pytest.raises(Bail):
         loop.run(_loop_state(tmp_path))
     # fix ran for iterations 1 and 2, NOT 3
@@ -124,7 +124,7 @@ def test_loop_bail_propagates_immediately(tmp_path):
     def bail_runner() -> Done:
         raise Bail("stage bailed: bail_class=other")
 
-    loop = LoopStage.from_runners([bail_runner], max_iterations=3)
+    loop = LoopStage("loop", body_runners=[bail_runner], max_iterations=3)
     with pytest.raises(Bail) as exc_info:
         loop.run(_loop_state(tmp_path))
     assert "bail_class=other" in exc_info.value.reason
@@ -150,7 +150,7 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
         session_dir=tmp_path,
         worktree=tmp_path,
     )
-    loop = LoopStage.from_runners([check, fix], max_iterations=2)
+    loop = LoopStage("loop", body_runners=[check, fix], max_iterations=2)
     with pytest.raises(Bail):
         loop.run(loop_state)
 
@@ -158,6 +158,71 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
     assert bail_file.exists()
     data = json.loads(bail_file.read_text())
     assert data["class"] == "other"
+
+
+# ---------------------------------------------------------------------------
+# Termination predicates
+# ---------------------------------------------------------------------------
+
+
+def test_head_stable_returns_true_when_head_unchanged(tmp_path):
+    state = _loop_state(tmp_path)
+    # tmp_path is not a git repo → head_sha returns ""; passing "" means stable
+    assert head_stable(state, 1, "") is True
+
+
+def test_head_stable_returns_false_when_head_changed(tmp_path):
+    state = _loop_state(tmp_path)
+    assert head_stable(state, 1, "old-sha-abc123") is False
+
+
+def test_max_iters_terminates_at_n(tmp_path):
+    state = _loop_state(tmp_path)
+    pred = max_iters(2)
+    assert not pred(state, 1, "")
+    assert pred(state, 2, "")
+    assert pred(state, 3, "")
+
+
+def test_custom_until_predicate(tmp_path):
+    """Loop exits when custom predicate returns True."""
+
+    def runner() -> Done:
+        return Done()
+
+    # max_iters(2) fires at iteration 2 — no Bail raised
+    loop = LoopStage(
+        "loop",
+        body_runners=[runner],
+        max_iterations=5,
+        until=max_iters(2),
+    )
+    result = loop.run(_loop_state(tmp_path))
+    assert result == Done()
+
+
+def test_on_iteration_start_called_each_iteration(tmp_path):
+    """on_iteration_start fires once per iteration."""
+    calls: list[int] = []
+    iter_counter = [0]
+
+    def on_start(state: RuntimeState) -> None:
+        calls.append(1)
+
+    def runner() -> Done | NeedsFix:
+        iter_counter[0] += 1
+        if iter_counter[0] < 2:
+            return NeedsFix("keep going")
+        return Done()
+
+    loop = LoopStage(
+        "loop",
+        body_runners=[runner],
+        max_iterations=3,
+        on_iteration_start=on_start,
+    )
+    loop.run(_loop_state(tmp_path))
+    assert len(calls) == 2  # fired for iteration 1 and 2
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +287,7 @@ def test_run_cmd_log_path_interpolation(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# pr_stack: detach-to-prior-PR logic
+# on_iteration_start: replaces pr_stack detach-to-prior-PR logic
 # ---------------------------------------------------------------------------
 
 
@@ -265,7 +330,10 @@ def test_pr_stack_detaches_to_prior_pr_branch(tmp_path, make_state_dir, monkeypa
     )
 
     loop = LoopStage(
-        "test", body_runners=[lambda: Done()], max_iterations=1, pr_stack=True
+        "test",
+        body_runners=[lambda: Done()],
+        max_iterations=1,
+        on_iteration_start=detach_to_pr_base,
     )
     loop.run(_loop_state_with_gr(tmp_path, gremlin_id))
 
@@ -286,14 +354,17 @@ def test_pr_stack_skipped_when_no_prior_pr(tmp_path, make_state_dir, monkeypatch
     )
 
     loop = LoopStage(
-        "test", body_runners=[lambda: Done()], max_iterations=1, pr_stack=True
+        "test",
+        body_runners=[lambda: Done()],
+        max_iterations=1,
+        on_iteration_start=detach_to_pr_base,
     )
     loop.run(_loop_state_with_gr(tmp_path, gremlin_id))
 
     assert git_calls == []
 
 
-def test_pr_stack_false_skips_detach(tmp_path, make_state_dir, monkeypatch):
+def test_no_on_iteration_start_skips_detach(tmp_path, make_state_dir, monkeypatch):
     gremlin_id = "pr-stack-disabled"
     state_dir = make_state_dir(gremlin_id)
     (state_dir / "state.json").write_text(
@@ -322,9 +393,7 @@ def test_pr_stack_false_skips_detach(tmp_path, make_state_dir, monkeypatch):
         lambda branch, cwd=None: git_calls.append(branch),
     )
 
-    loop = LoopStage(
-        "test", body_runners=[lambda: Done()], max_iterations=1, pr_stack=False
-    )
+    loop = LoopStage("test", body_runners=[lambda: Done()], max_iterations=1)
     loop.run(_loop_state_with_gr(tmp_path, gremlin_id))
 
     assert git_calls == []
@@ -351,7 +420,7 @@ def test_loop_patches_loop_iteration_to_state(tmp_path, make_state_dir):
         session_dir=tmp_path,
         worktree=tmp_path,
     )
-    loop = LoopStage.from_runners([runner], max_iterations=3)
+    loop = LoopStage("loop", body_runners=[runner], max_iterations=3)
     with pytest.raises(Bail):
         loop.run(loop_state)
 
@@ -390,7 +459,12 @@ def test_pr_stack_iter2_detaches_to_iter1_branch(tmp_path, make_state_dir, monke
             return NeedsFix("next-plan")
         return Done()
 
-    loop = LoopStage("test", body_runners=[runner], max_iterations=2, pr_stack=True)
+    loop = LoopStage(
+        "test",
+        body_runners=[runner],
+        max_iterations=2,
+        on_iteration_start=detach_to_pr_base,
+    )
     loop.run(_loop_state_with_gr(tmp_path, gremlin_id))
 
     assert detach_calls == ["feat-iter1"]

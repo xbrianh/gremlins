@@ -10,7 +10,7 @@ from gremlins.stages.base import Stage
 
 def child_state(parent: State, child: Stage, *, fan_out: bool = False) -> State:
     """Derive a child State from parent."""
-    client = parent.test_client or child.client
+    client = parent.test_client or child.client or parent.client
     stage_model = (
         child.client.model
         if child.client and parent.test_client

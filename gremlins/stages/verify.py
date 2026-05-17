@@ -11,7 +11,7 @@ from gremlins.stages.agent import bail_command, run_agent
 from gremlins.stages.base import Stage
 from gremlins.stages.cmd import Cmd
 from gremlins.stages.loop import LoopStage
-from gremlins.stages.outcome import Done, NeedsFix, Outcome
+from gremlins.stages.outcome import Done, Outcome
 from gremlins.utils import git as _git_mod
 
 logger = logging.getLogger(__name__)
@@ -26,6 +26,39 @@ def _diff_text(cwd: pathlib.Path) -> str:
         return ""
 
 
+class VerifyFix(Stage):
+    """Reads the verify-attempt-N.log for the current loop iteration and runs the fix agent."""
+
+    type = "verify-fix"
+
+    def __init__(self, name: str, prompts: list[str], commands_section: str) -> None:
+        super().__init__(name)
+        self.prompts = prompts
+        self._commands_section = commands_section
+
+    def run(self, state: State) -> Outcome:
+        n = state.data.loop_iteration
+        log_path = state.session_dir / f"verify-attempt-{n}.log"
+        if not log_path.exists():
+            return Done()
+        log_text = log_path.read_text(encoding="utf-8")
+        diff = _diff_text(state.cwd)
+        template = "\n\n".join(self.prompts).rstrip()
+        fix_prompt = template.format(
+            bail_command=bail_command(state),
+            commands_section=self._commands_section,
+            verify_output=log_text,
+            diff_text=diff,
+        )
+        run_agent(
+            state,
+            fix_prompt,
+            label=f"verify-fix-{n}",
+            raw_path=state.session_dir / f"stream-verify-{n}.jsonl",
+        )
+        return Done()
+
+
 class Verify(Stage):
     type = "verify"
 
@@ -35,7 +68,6 @@ class Verify(Stage):
         self.options = options
 
     def run(self, state: State) -> Outcome:
-        session_dir = state.session_dir
         options = dict(self.options)
         if not state.repo:
             cmds_arg = getattr(state.args, "cmds", None)
@@ -51,47 +83,9 @@ class Verify(Stage):
             logger.info("verify: no cmds configured; skipping")
             return Done()
 
-        template = "\n\n".join(self.prompts).rstrip()
         commands_section = "**Commands run:**\n" + "\n".join(f"- `{c}`" for c in cmds)
-
-        cmd_stage = Cmd(
-            "verify-cmd",
-            [],
-            {"cmds": cmds, "log_path": "verify-attempt-{n}.log"},
-        )
-
-        def _run_cmd() -> Outcome:
-            outcome = cmd_stage.run(state)
-            n = cmd_stage.n
-            if isinstance(outcome, NeedsFix):
-                logger.info(
-                    "verify attempt %d: failed (exit %s)", n, outcome.returncode
-                )
-            else:
-                logger.info("verify attempt %d: green", n)
-            return outcome
-
-        def _run_fix() -> Outcome:
-            n = cmd_stage.n
-            log_text = (session_dir / f"verify-attempt-{n}.log").read_text(
-                encoding="utf-8"
-            )
-            diff = _diff_text(state.cwd)
-            fix_prompt = template.format(
-                bail_command=bail_command(state),
-                commands_section=commands_section,
-                verify_output=log_text,
-                diff_text=diff,
-            )
-            run_agent(
-                state,
-                fix_prompt,
-                label=f"verify-fix-{n}",
-                raw_path=session_dir / f"stream-verify-{n}.jsonl",
-            )
-            return Done()
-
-        loop = LoopStage.from_runners(
-            [_run_cmd, _run_fix], name="verify", max_iterations=max_attempts
-        )
-        return loop.run(state)
+        cmd_stage = Cmd("cmd", [], {"cmds": cmds, "log_path": "verify-attempt-{n}.log"})
+        fix_stage = VerifyFix("fix", self.prompts, commands_section)
+        return LoopStage(
+            "verify", body=[cmd_stage, fix_stage], max_iterations=max_attempts
+        ).run(state)

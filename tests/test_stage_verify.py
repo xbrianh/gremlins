@@ -12,8 +12,8 @@ from conftest import MINIMAL_EVENTS
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData
-from gremlins.stages.outcome import Bail
-from gremlins.stages.verify import Verify
+from gremlins.stages.outcome import Bail, Done
+from gremlins.stages.verify import Verify, VerifyFix
 
 _VERIFY_PROMPT_PATH = (
     pathlib.Path(__file__).resolve().parent.parent
@@ -255,3 +255,60 @@ def test_parallel_child_fix_prompt_uses_new_bail_command(tmp_path):
     assert "python -c" in state.client.calls[0].prompt
     assert "gremlins.bail" not in state.client.calls[0].prompt
     assert "GREMLIN_STATE_DIR" in state.client.calls[0].prompt
+
+
+# ---------------------------------------------------------------------------
+# VerifyFix unit tests
+# ---------------------------------------------------------------------------
+
+
+def _make_fix_state(tmp_path: Any, client: Any = None) -> RuntimeState:
+    if client is None:
+        client = FakeClaudeClient(fixtures={"verify-fix-1": MINIMAL_EVENTS})
+    return RuntimeState(
+        data=StateData(),
+        client=client,
+        session_dir=tmp_path,
+        worktree=tmp_path,
+    )
+
+
+def test_verify_fix_reads_latest_log_and_runs_agent(tmp_path):
+    (tmp_path / "verify-attempt-1.log").write_text("error output\n", encoding="utf-8")
+    client = FakeClaudeClient(fixtures={"verify-fix-1": MINIMAL_EVENTS})
+    state = _make_fix_state(tmp_path, client)
+    stage = VerifyFix(
+        "fix",
+        ["fix: {verify_output} {commands_section} {bail_command} {diff_text}"],
+        "cmds",
+    )
+    outcome = stage.run(state)
+    assert isinstance(outcome, Done)
+    assert len(client.calls) == 1
+    assert client.calls[0].label == "verify-fix-1"
+    assert "error output" in client.calls[0].prompt
+
+
+def test_verify_fix_returns_done_with_no_log(tmp_path):
+    state = _make_fix_state(tmp_path)
+    stage = VerifyFix("fix", ["fix: {verify_output}"], "cmds")
+    outcome = stage.run(state)
+    assert isinstance(outcome, Done)
+    assert len(state.client.calls) == 0
+
+
+def test_verify_fix_uses_loop_iteration(tmp_path):
+    # Stale log from a previous run; current iteration is 2.
+    (tmp_path / "verify-attempt-3.log").write_text("stale", encoding="utf-8")
+    (tmp_path / "verify-attempt-2.log").write_text("current error", encoding="utf-8")
+    client = FakeClaudeClient(fixtures={"verify-fix-2": MINIMAL_EVENTS})
+    state = _make_fix_state(tmp_path, client)
+    state.data.loop_iteration = 2
+    stage = VerifyFix(
+        "fix",
+        ["fix: {verify_output} {commands_section} {bail_command} {diff_text}"],
+        "cmds",
+    )
+    stage.run(state)
+    assert client.calls[0].label == "verify-fix-2"
+    assert "current error" in client.calls[0].prompt
