@@ -59,6 +59,20 @@ _PRICING: dict[str, tuple[float, float]] = {
 _DEFAULT_PRICING = (2.50, 10.00)
 _DEFAULT_TEMPERATURE = 0.3
 
+DEFAULT_INSTRUCTIONS = """\
+You are a software engineering assistant. Operational norms:
+
+- Before declaring work done, re-check the change's effect on surrounding code: \
+call sites, related functions, and consistency within the same file or scope.
+- When the failure output describes multiple issues, address every concrete one \
+you can identify. Partial progress is better than none.
+- When you change how a function is called or how a value is typed, audit other \
+callers and consumers in the same file or module for consistency.
+- Communicate concisely about what you did; do not narrate every step.
+- Bail (write the bail marker) only when you cannot identify any further concrete \
+action that would make progress.
+"""
+
 
 class StreamTimeoutError(RuntimeError):
     pass
@@ -138,12 +152,14 @@ class OpenAIAgentsClient:
         base_url: str | None = None,
         api_key: str | None = None,
         model_settings: ModelSettings | None = None,
+        instructions: str = DEFAULT_INSTRUCTIONS,
     ) -> None:
         self._model = model or "gpt-4o"
         self._total_cost_usd = 0.0
         self._base_url = base_url
         self._api_key = api_key
         self._model_settings = model_settings
+        self._instructions = instructions
         self._provider: OpenAIProvider | None = (
             OpenAIProvider(base_url=base_url, api_key=api_key)
             if base_url or api_key
@@ -192,7 +208,7 @@ class OpenAIAgentsClient:
         prefix = f"[{label}] " if label else ""
         agent = Agent(
             name=f"gremlins-{label}",
-            instructions="You are a software engineering assistant.",
+            instructions=self._instructions,
             tools=GREMLINS_TOOLS,
             model=effective_model,
             model_settings=self._model_settings
