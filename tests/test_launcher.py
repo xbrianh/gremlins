@@ -19,11 +19,11 @@ import subprocess
 import time
 
 import pytest
+from conftest import _init_git_repo
 from fixtures.shell_env import install_fake_bin
 
 import gremlins.utils.git as git_mod
 from gremlins.launcher import GremlinAlreadyRunning
-from conftest import _init_git_repo
 
 FAKE_GH = pathlib.Path(__file__).resolve().parent / "fixtures" / "fake_gh.py"
 

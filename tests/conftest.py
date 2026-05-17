@@ -10,6 +10,11 @@ import sys
 import platformdirs
 import pytest
 
+from gremlins.clients.fake import FakeClaudeClient
+from gremlins.pipeline import Pipeline
+from gremlins.stages.github_open_pull_request import GitHubOpenPullRequest
+from gremlins.utils.git import HeadAdvanced, PreImplState
+
 os.environ.setdefault("GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME", "main")
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
@@ -112,11 +117,6 @@ def lenv(tmp_path, monkeypatch):
     e.fake_claude_log = tmp_path / "fake_claude.log"
     return e
 
-
-from gremlins.clients.fake import FakeClaudeClient
-from gremlins.pipeline import Pipeline
-from gremlins.stages.github_open_pull_request import GitHubOpenPullRequest
-from gremlins.utils.git import HeadAdvanced, PreImplState
 
 TESTS_DIR = pathlib.Path(__file__).resolve().parent
 
