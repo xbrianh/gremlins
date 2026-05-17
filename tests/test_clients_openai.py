@@ -35,7 +35,9 @@ def test_openai_client_constructs() -> None:
 
 
 def test_default_instructions_are_substantive() -> None:
-    assert len(DEFAULT_INSTRUCTIONS) > 100
+    assert "re-check" in DEFAULT_INSTRUCTIONS
+    assert "bail marker" in DEFAULT_INSTRUCTIONS
+    assert "audit" in DEFAULT_INSTRUCTIONS
 
 
 def test_custom_instructions_passed_to_agent(monkeypatch: Any) -> None:
