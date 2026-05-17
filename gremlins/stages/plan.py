@@ -28,22 +28,15 @@ def _fmt_escape(s: str) -> str:
 class Plan(Stage):
     type = "plan"
 
-    @classmethod
-    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> Plan:
-        from gremlins.pipeline.loader import get_client_from_dict
-
-        stage = cls(d["name"], None, d.get("prompt") or [], d.get("options") or {})
-        stage.client = get_client_from_dict(d)
-        return stage
-
     def __init__(
         self,
         name: str,
-        model: str | None,
         prompts: list[str],
         options: dict[str, Any],
     ) -> None:
-        super().__init__(name, model, prompts, options)
+        super().__init__(name)
+        self.prompts = prompts
+        self.options = options
 
     @classmethod
     def orchestration_args(cls) -> list[StageInput]:
@@ -110,7 +103,6 @@ class Plan(Stage):
                 state,
                 plan_prompt,
                 label="plan",
-                model=self.model,
                 raw_path=state.session_dir / "ghplan-out.jsonl",
                 capture_events=True,
             )
@@ -136,7 +128,6 @@ class Plan(Stage):
                 state,
                 prompt,
                 label="plan",
-                model=self.model,
                 raw_path=state.session_dir / "stream-plan.jsonl",
             )
             if not plan_md.exists() or plan_md.stat().st_size == 0:
@@ -170,7 +161,6 @@ class Plan(Stage):
             state,
             title_prompt,
             label="plan-title",
-            model=self.model,
             raw_path=state.session_dir / "plan-title.jsonl",
         )
         parts = (completed.text_result or "").strip().splitlines()

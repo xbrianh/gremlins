@@ -16,7 +16,7 @@ class SequenceStage(Stage):
     type = "sequence"
 
     def __init__(self, name: str, *, body: list[Stage] | None = None) -> None:
-        super().__init__(name, None, [], {})
+        super().__init__(name)
         self.body = body or []
         for c in self.body:
             c.path = f"{name}/{c.name}"

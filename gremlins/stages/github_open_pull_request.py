@@ -59,7 +59,6 @@ class GitHubOpenPullRequest(Stage):
         options: dict[str, Any] = d.get("options") or {}
         stage = cls(
             d["name"],
-            None,
             d.get("prompt") or [],
             options,
             base_ref=options.get("base_ref") or None,
@@ -70,13 +69,14 @@ class GitHubOpenPullRequest(Stage):
     def __init__(
         self,
         name: str,
-        model: str | None,
         prompts: list[str],
         options: dict[str, Any],
         *,
         base_ref: str | None = None,
     ) -> None:
-        super().__init__(name, model, prompts, options)
+        super().__init__(name)
+        self.prompts = prompts
+        self.options = options
         self.base_ref = base_ref
 
     def run(self, state: State) -> Outcome:
@@ -116,7 +116,6 @@ class GitHubOpenPullRequest(Stage):
             state,
             prompt,
             label="github-open-pull-request",
-            model=self.model,
             raw_path=state.session_dir / "stream-github-open-pull-request.jsonl",
             capture_events=True,
         )

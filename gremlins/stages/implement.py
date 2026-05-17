@@ -64,22 +64,15 @@ def _read_spec(session_dir: pathlib.Path) -> str:
 class Implement(Stage):
     type = "implement"
 
-    @classmethod
-    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> Implement:
-        from gremlins.pipeline.loader import get_client_from_dict
-
-        stage = cls(d["name"], None, d.get("prompt") or [], d.get("options") or {})
-        stage.client = get_client_from_dict(d)
-        return stage
-
     def __init__(
         self,
         name: str,
-        model: str | None,
         prompts: list[str],
         options: dict[str, Any],
     ) -> None:
-        super().__init__(name, model, prompts, options)
+        super().__init__(name)
+        self.prompts = prompts
+        self.options = options
 
     def run(self, state: State) -> Outcome:
         spec_text = _read_spec(state.session_dir)
@@ -113,7 +106,6 @@ class Implement(Stage):
             state,
             prompt,
             label="implement",
-            model=self.model,
             raw_path=state.session_dir / "stream-implement.jsonl",
             capture_events=True,
             idle_timeout=IMPLEMENT_IDLE_TIMEOUT,

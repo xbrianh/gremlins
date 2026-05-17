@@ -8,7 +8,7 @@ from collections.abc import Callable
 from typing import Any
 
 from gremlins.executor.state import State
-from gremlins.stages.agent import run_agent
+from gremlins.stages.agent import bail_command, run_agent
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, Outcome
 from gremlins.utils.git import head_sha
@@ -129,18 +129,9 @@ class GitHubWaitCI(Stage):
     type = "github-wait-ci"
     needs_gh = True
 
-    @classmethod
-    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> GitHubWaitCI:
-        from gremlins.pipeline.loader import get_client_from_dict
-
-        stage = cls(d["name"], None, d.get("prompt") or [], d.get("options") or {})
-        stage.client = get_client_from_dict(d)
-        return stage
-
     def __init__(
         self,
         name: str,
-        model: str | None,
         prompts: list[str],
         options: dict[str, Any],
         *,
@@ -153,7 +144,9 @@ class GitHubWaitCI(Stage):
         head_sha_getter: Callable[[], str] | None = None,
         fix_sha_getter: Callable[[], str] | None = None,
     ) -> None:
-        super().__init__(name, model, prompts, options)
+        super().__init__(name)
+        self.prompts = prompts
+        self.options = options
         self.pr_url = pr_url
         self.max_attempts = max_attempts
         self.poll_timeout = poll_timeout
@@ -202,7 +195,7 @@ class GitHubWaitCI(Stage):
             raise Bail("ci-fix: pr_branch unknown, cannot push")
 
         fix_prompt = template.format(
-            bail_command=self.bail_command(state),
+            bail_command=bail_command(state),
             failure_output=failure_output,
             pr_branch=pr_branch,
         )
@@ -210,7 +203,6 @@ class GitHubWaitCI(Stage):
             state,
             fix_prompt,
             label=f"ci-fix-{attempt}",
-            model=self.model,
             raw_path=state.session_dir / f"stream-ci-fix-{attempt}.jsonl",
         )
 

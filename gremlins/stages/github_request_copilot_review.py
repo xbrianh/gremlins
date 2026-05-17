@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from typing import Any
 
 from gremlins.executor.state import State
@@ -13,24 +14,17 @@ class GitHubRequestCopilotReview(Stage):
     type = "github-request-copilot-review"
     needs_gh = True
 
-    @classmethod
-    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> GitHubRequestCopilotReview:
-        from gremlins.pipeline.loader import get_client_from_dict
-
-        stage = cls(d["name"], None, d.get("prompt") or [], d.get("options") or {})
-        stage.client = get_client_from_dict(d)
-        return stage
-
     def __init__(
         self,
         name: str,
-        model: str | None,
         prompts: list[str],
         options: dict[str, Any],
         *,
         pr_num: str = "",
     ) -> None:
-        super().__init__(name, model, prompts, options)
+        super().__init__(name)
+        self.prompts = prompts
+        self.options = options
         self._pr_num = pr_num
 
     def run(self, state: State) -> Outcome:
@@ -38,7 +32,7 @@ class GitHubRequestCopilotReview(Stage):
         pr_num = self._pr_num or state.data.read_pr_num()
         if not pr_num:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
-        r = self.run_subprocess(
+        r = subprocess.run(
             [
                 "gh",
                 "pr",
@@ -49,7 +43,6 @@ class GitHubRequestCopilotReview(Stage):
                 "--add-reviewer",
                 "copilot-pull-request-reviewer",
             ],
-            state,
             capture_output=True,
             text=True,
             check=False,

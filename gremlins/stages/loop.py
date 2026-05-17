@@ -59,7 +59,7 @@ class LoopStage(Stage):
         max_iterations: int,
         pr_stack: bool = False,
     ) -> None:
-        super().__init__(name, None, [], {})
+        super().__init__(name)
         self.body = body or []
         for c in self.body:
             c.path = f"{name}/{c.name}"

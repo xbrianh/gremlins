@@ -428,7 +428,7 @@ class Handoff(Stage):
         return stage
 
     def __init__(self, name: str) -> None:
-        super().__init__(name, None, [], {})
+        super().__init__(name)
 
     def run(self, state: State) -> Outcome:
         session_dir = state.session_dir
@@ -518,7 +518,7 @@ class Handoff(Stage):
             with_reap_after(
                 state.client,
                 HANDOFF_TIMEOUT,
-                lambda: run_agent(state, prompt, label="handoff", model=self.model),
+                lambda: run_agent(state, prompt, label="handoff"),
             )
 
         args = argparse.Namespace(

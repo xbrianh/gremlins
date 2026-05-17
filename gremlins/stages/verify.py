@@ -7,7 +7,7 @@ import pathlib
 from typing import Any
 
 from gremlins.executor.state import State
-from gremlins.stages.agent import run_agent
+from gremlins.stages.agent import bail_command, run_agent
 from gremlins.stages.base import Stage
 from gremlins.stages.cmd import Cmd
 from gremlins.stages.loop import LoopStage
@@ -29,13 +29,10 @@ def _diff_text(cwd: pathlib.Path) -> str:
 class Verify(Stage):
     type = "verify"
 
-    @classmethod
-    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> Verify:
-        from gremlins.pipeline.loader import get_client_from_dict
-
-        stage = cls(d["name"], None, d.get("prompt") or [], d.get("options") or {})
-        stage.client = get_client_from_dict(d)
-        return stage
+    def __init__(self, name: str, prompts: list[str], options: dict[str, Any]) -> None:
+        super().__init__(name)
+        self.prompts = prompts
+        self.options = options
 
     def run(self, state: State) -> Outcome:
         session_dir = state.session_dir
@@ -59,7 +56,6 @@ class Verify(Stage):
 
         cmd_stage = Cmd(
             "verify-cmd",
-            None,
             [],
             {"cmds": cmds, "log_path": "verify-attempt-{n}.log"},
         )
@@ -82,7 +78,7 @@ class Verify(Stage):
             )
             diff = _diff_text(state.cwd)
             fix_prompt = template.format(
-                bail_command=self.bail_command(state),
+                bail_command=bail_command(state),
                 commands_section=commands_section,
                 verify_output=log_text,
                 diff_text=diff,
@@ -91,7 +87,6 @@ class Verify(Stage):
                 state,
                 fix_prompt,
                 label=f"verify-fix-{n}",
-                model=self.model,
                 raw_path=session_dir / f"stream-verify-{n}.jsonl",
             )
             return Done()

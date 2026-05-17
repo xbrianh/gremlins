@@ -8,7 +8,7 @@ import re
 from typing import Any
 
 from gremlins.executor.state import State
-from gremlins.stages.agent import run_agent
+from gremlins.stages.agent import bail_command, run_agent
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Done, Outcome
 
@@ -49,14 +49,10 @@ def _model_from(path: pathlib.Path, stage_name: str) -> str:
 class AddressCode(Stage):
     type = "address-code"
 
-    @classmethod
-    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> AddressCode:
-        from gremlins.pipeline.loader import get_client_from_dict
-
-        prompts: list[str] = d.get("prompt") or []
-        stage = cls(d["name"], None, prompts, d.get("options") or {})
-        stage.client = get_client_from_dict(d)
-        return stage
+    def __init__(self, name: str, prompts: list[str], options: dict[str, Any]) -> None:
+        super().__init__(name)
+        self.prompts = prompts
+        self.options = options
 
     def run(self, state: State) -> Outcome:
         inputs = self._inputs_from_local(state)
@@ -88,7 +84,7 @@ class AddressCode(Stage):
     def _run_local(self, inputs: dict[str, str], state: State) -> None:
         template = "\n\n".join(self.prompts).rstrip()
         address_prompt = template.format(
-            bail_command=self.bail_command(state),
+            bail_command=bail_command(state),
             model=inputs["review_model"],
             text=inputs["text"],
         )
@@ -96,7 +92,6 @@ class AddressCode(Stage):
             state,
             address_prompt,
             label="address-code",
-            model=self.model,
             raw_path=state.session_dir / "stream-address.jsonl",
         )
 
@@ -115,20 +110,21 @@ class GitHubAddressPullRequestReviews(Stage):
             raise ValueError(
                 f"stage {d['name']!r}: 'prompt' is required for github-address-pull-request-reviews"
             )
-        stage = cls(d["name"], None, prompts, d.get("options") or {})
+        stage = cls(d["name"], prompts, d.get("options") or {})
         stage.client = get_client_from_dict(d)
         return stage
 
     def __init__(
         self,
         name: str,
-        model: str | None,
         prompts: list[str],
         options: dict[str, Any],
         *,
         pr_url: str = "",
     ) -> None:
-        super().__init__(name, model, prompts, options)
+        super().__init__(name)
+        self.prompts = prompts
+        self.options = options
         self.pr_url = pr_url
 
     def run(self, state: State) -> Outcome:
@@ -139,7 +135,7 @@ class GitHubAddressPullRequestReviews(Stage):
             "\n\n".join(self.prompts)
             .rstrip()
             .format(
-                bail_command=self.bail_command(state),
+                bail_command=bail_command(state),
                 pr_url=pr_url,
             )
         )
@@ -147,7 +143,6 @@ class GitHubAddressPullRequestReviews(Stage):
             state,
             prompt,
             label="github-address-pull-request-reviews",
-            model=self.model,
             raw_path=state.session_dir
             / "stream-github-address-pull-request-reviews.jsonl",
         )
