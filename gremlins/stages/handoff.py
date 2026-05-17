@@ -348,6 +348,8 @@ def run(
                 args.timeout,
                 lambda: client.run(prompt, label="handoff", model=client_spec.model),
             )
+    except Bail:
+        raise
     except Exception as exc:
         sys.stderr.write(f"error: handoff agent failed: {exc}\n")
         return 1
@@ -514,10 +516,12 @@ class Handoff(Stage):
             base_ref[:12] if len(base_ref) >= 12 else base_ref,
         )
 
-        _model = self.model
-
         def _run_fn(prompt: str) -> None:
-            run_agent(state, prompt, label="handoff", model=_model)
+            with_reap_after(
+                state.client,
+                HANDOFF_TIMEOUT,
+                lambda: run_agent(state, prompt, label="handoff", model=self.model),
+            )
 
         args = argparse.Namespace(
             plan=current_plan,

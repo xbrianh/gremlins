@@ -47,6 +47,8 @@ def test_calls_client_run_with_expected_kwargs(tmp_path):
     assert call.label == "test-label"
     assert call.prompt == "hello"
     assert call.cwd == tmp_path
+    assert call.raw_path == tmp_path / "out.jsonl"
+    assert call.model == state.client.model
 
 
 def test_extra_env_injected_when_attempt_set(tmp_path):

@@ -11,6 +11,24 @@ from gremlins.executor.state import State, resolve_state_file
 from gremlins.stages.outcome import Bail
 
 
+def _read_bail_detail(bail_path: pathlib.Path) -> str:
+    try:
+        return json.loads(bail_path.read_text(encoding="utf-8")).get("detail", "")
+    except Exception:
+        return ""
+
+
+def _check_bail(state: State) -> None:
+    if not state.data.attempt:
+        return
+    sf = state.data.state_file or resolve_state_file(state.data.gremlin_id)
+    if sf is None:
+        return
+    bail_path = sf.parent / f"bail_{state.data.attempt}.json"
+    if bail_path.exists():
+        raise Bail(_read_bail_detail(bail_path))
+
+
 def run_agent(
     state: State,
     prompt: str,
@@ -20,15 +38,12 @@ def run_agent(
     model: str | None = None,
     **kw: Any,
 ) -> CompletedRun:
-    """Invoke the agent and check for a bail marker afterward.
-
-    Wraps state.client.run(...) plus the bail-marker check. Raises Bail
-    if the agent wrote a bail file.
-    """
+    """Invoke the agent, inject bail-marker env, and raise Bail if the marker is set."""
     extra_env: dict[str, str] = {}
-    if state.data.attempt and state.data.state_file is not None:
+    sf = state.data.state_file or resolve_state_file(state.data.gremlin_id)
+    if state.data.attempt and sf is not None:
         extra_env["GREMLIN_ATTEMPT"] = state.data.attempt
-        extra_env["GREMLIN_STATE_DIR"] = str(state.data.state_file.parent)
+        extra_env["GREMLIN_STATE_DIR"] = str(sf.parent)
     completed = state.client.run(
         prompt,
         label=label,
@@ -38,16 +53,5 @@ def run_agent(
         extra_env=extra_env or None,
         **kw,
     )
-    if state.data.attempt:
-        sf = state.data.state_file or resolve_state_file(state.data.gremlin_id)
-        if sf is not None:
-            bail_path = sf.parent / f"bail_{state.data.attempt}.json"
-            if bail_path.exists():
-                try:
-                    detail = json.loads(bail_path.read_text(encoding="utf-8")).get(
-                        "detail", ""
-                    )
-                except Exception:
-                    detail = ""
-                raise Bail(detail)
+    _check_bail(state)
     return completed
