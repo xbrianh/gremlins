@@ -10,6 +10,8 @@ import json
 import pathlib
 import shutil
 import subprocess
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 
@@ -26,6 +28,13 @@ from gremlins.utils.git import (
     record_pre_impl_state,
 )
 from gremlins.utils.github import parse_issue_ref as _parse_issue_ref
+
+
+def _async(fn: Callable[..., Any]) -> Callable[..., Any]:
+    async def _w(*a: Any, **kw: Any) -> Any:
+        return fn(*a, **kw)
+
+    return _w
 
 
 def _gh_pipeline_path(cwd):
@@ -423,23 +432,26 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
-        lambda self, pipe: "APPROVED",
+        _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
-    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr(
-        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+        "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
+        _async(lambda self, pipe: None),
     )
 
     client = _CommittingClient(
@@ -475,23 +487,26 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
     )
     monkeypatch.setattr(
         "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
-        lambda self, pipe: "APPROVED",
+        _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
-    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr(
-        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+        "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
+        _async(lambda self, pipe: None),
     )
 
     client = _CommittingClient(
@@ -531,23 +546,26 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
-        lambda self, pipe: "APPROVED",
+        _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
-    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr(
-        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+        "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
+        _async(lambda self, pipe: None),
     )
 
     client = _CommittingClient(
@@ -591,23 +609,26 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
-        lambda self, pipe: "APPROVED",
+        _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
-    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr(
-        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+        "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
+        _async(lambda self, pipe: None),
     )
 
     client = _CommittingClient(
@@ -650,23 +671,26 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
-        lambda self, pipe: "APPROVED",
+        _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
-    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr(
-        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+        "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
+        _async(lambda self, pipe: None),
     )
 
     client = _CommittingClient(
@@ -718,23 +742,26 @@ def test_resume_from_implement(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
-        lambda self, pipe: "APPROVED",
+        _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
-    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr(
-        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+        "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
+        _async(lambda self, pipe: None),
     )
 
     client = _CommittingClient(
@@ -777,34 +804,37 @@ def test_resume_from_github_review_pull_request(tmp_path, monkeypatch):
     gh_review_called = []
     monkeypatch.setattr(
         "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        lambda self, pipe: gh_review_called.append(
-            self.pr_url
-            or next(
-                (
-                    a["url"]
-                    for a in reversed(
-                        json.loads(state_file.read_text()).get("artifacts", [])
-                    )
-                    if a.get("type") == "pr"
-                ),
-                "",
+        _async(
+            lambda self, pipe: gh_review_called.append(
+                self.pr_url
+                or next(
+                    (
+                        a["url"]
+                        for a in reversed(
+                            json.loads(state_file.read_text()).get("artifacts", [])
+                        )
+                        if a.get("type") == "pr"
+                    ),
+                    "",
+                )
             )
         ),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
-        lambda self, pipe: "APPROVED",
+        _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
-        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
 
@@ -860,27 +890,42 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
             )
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
+    async def fake_gh_run_async(cmd, *args, **kwargs):
+        prog = cmd[0] if cmd else ""
+        if prog != "gh":
+            return fake_gh_run(cmd, *args, **kwargs)
+        sub = cmd[1] if len(cmd) > 1 else ""
+        if sub == "issue" and "create" in cmd:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/owner/repo/issues/42\n", stderr=""
+            )
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
     monkeypatch.setattr(subprocess, "run", fake_gh_run)
+    monkeypatch.setattr("gremlins.stages.plan.proc.run_async", fake_gh_run_async)
 
     monkeypatch.setattr(
         "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
-        lambda self, pipe: "APPROVED",
+        _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
-    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr(
-        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+        "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
+        _async(lambda self, pipe: None),
     )
 
     # Each fixture carries a distinct non-zero cost so a regression that drops
@@ -990,34 +1035,37 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
     gh_review_called = []
     monkeypatch.setattr(
         "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        lambda self, pipe: gh_review_called.append(
-            self.pr_url
-            or next(
-                (
-                    a["url"]
-                    for a in reversed(
-                        json.loads(state_file.read_text()).get("artifacts", [])
-                    )
-                    if a.get("type") == "pr"
-                ),
-                "",
+        _async(
+            lambda self, pipe: gh_review_called.append(
+                self.pr_url
+                or next(
+                    (
+                        a["url"]
+                        for a in reversed(
+                            json.loads(state_file.read_text()).get("artifacts", [])
+                        )
+                        if a.get("type") == "pr"
+                    ),
+                    "",
+                )
             )
         ),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
-        lambda self, pipe: "APPROVED",
+        _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
-        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
+        _async(lambda self, pipe: None),
     )
 
     client = FakeClaudeClient(fixtures={"github-open-pull-request": _pr_events()})
@@ -1064,27 +1112,29 @@ def test_github_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
-    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr(
-        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+        "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
+        _async(lambda self, pipe: None),
     )
 
     captured_stage = {}
 
-    def record_github_wait_copilot(self, state):
+    async def record_github_wait_copilot(self, state):
         captured_stage["stage"] = self
         captured_stage["state"] = state
-        return "APPROVED"
 
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
@@ -1141,25 +1191,27 @@ def test_github_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
-        lambda self, pipe: "APPROVED",
+        _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
-    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
+    monkeypatch.setattr(
+        "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
+    )
 
     captured_stage = {}
 
-    def record_github_wait_ci(self, state):
+    async def record_github_wait_ci(self, state):
         captured_stage["stage"] = self
         captured_stage["state"] = state
 
@@ -1216,27 +1268,27 @@ def test_github_wait_ci_stage_ordering(tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         "gremlins.stages.verify.Verify.run",
-        lambda self, pipe: order.append("verify"),
+        _async(lambda self, pipe: order.append("verify")),
     )
     monkeypatch.setattr(
         "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        lambda self, pipe: order.append("github-review-pull-request"),
+        _async(lambda self, pipe: order.append("github-review-pull-request")),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
-        lambda self, pipe: order.append("github-wait-copilot") or "APPROVED",
+        _async(lambda self, pipe: order.append("github-wait-copilot") or "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        lambda self, pipe: order.append("github-request-copilot-review"),
+        _async(lambda self, pipe: order.append("github-request-copilot-review")),
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
-        lambda self, pipe: order.append("github-address-pull-request-reviews"),
+        _async(lambda self, pipe: order.append("github-address-pull-request-reviews")),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
-        lambda self, pipe: order.append("ci-gate"),
+        _async(lambda self, pipe: order.append("ci-gate")),
     )
 
     client = _CommittingClient(
@@ -1278,23 +1330,33 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        lambda self, pipe: earlier_called.append("github-review-pull-request"),
+        _async(lambda self, pipe: earlier_called.append("github-review-pull-request")),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
-        lambda self, pipe: earlier_called.append("github-wait-copilot") or "APPROVED",
+        _async(
+            lambda self, pipe: (
+                earlier_called.append("github-wait-copilot") or "APPROVED"
+            )
+        ),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        lambda self, pipe: earlier_called.append("github-request-copilot-review"),
+        _async(
+            lambda self, pipe: earlier_called.append("github-request-copilot-review")
+        ),
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
-        lambda self, pipe: earlier_called.append("github-address-pull-request-reviews"),
+        _async(
+            lambda self, pipe: earlier_called.append(
+                "github-address-pull-request-reviews"
+            )
+        ),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
-        lambda self, pipe: ci_stages.append(self),
+        _async(lambda self, pipe: ci_stages.append(self)),
     )
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
 
@@ -1340,27 +1402,28 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
-        lambda self, pipe: "APPROVED",
+        _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
-        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
+        _async(lambda self, pipe: None),
     )
 
     captured_stage = {}
 
-    def record_verify(self, state):
+    async def record_verify(self, state):
         captured_stage["stage"] = self
         captured_stage["state"] = state
 
@@ -1420,26 +1483,27 @@ def test_resume_from_verify(tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         "gremlins.stages.verify.Verify.run",
-        lambda self, pipe: verify_calls.append(self),
+        _async(lambda self, pipe: verify_calls.append(self)),
     )
     monkeypatch.setattr(
         "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        lambda self, pipe: earlier_called.append("github-review-pull-request"),
+        _async(lambda self, pipe: earlier_called.append("github-review-pull-request")),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
-        lambda self, pipe: "APPROVED",
+        _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
-        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
 
@@ -1472,23 +1536,26 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
-        lambda self, pipe: "APPROVED",
+        _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
-    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr(
-        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+        "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
+        _async(lambda self, pipe: None),
     )
 
     client = _CommittingClient(
@@ -1530,23 +1597,26 @@ def test_gh_main_state_client_tracks_effective_model(
     )
     monkeypatch.setattr(
         "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
-        lambda self, pipe: "APPROVED",
+        _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
-    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr(
-        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+        "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
+        _async(lambda self, pipe: None),
     )
 
     client = _CommittingClient(
@@ -1613,23 +1683,26 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
-        lambda self, pipe: "APPROVED",
+        _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
-    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr(
-        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+        "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
+        _async(lambda self, pipe: None),
     )
 
     client = _CommittingClient(
@@ -1673,23 +1746,26 @@ def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
     monkeypatch.setattr(
         "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
-        lambda self, pipe: "APPROVED",
+        _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
-        lambda self, pipe: None,
+        _async(lambda self, pipe: None),
     )
-    monkeypatch.setattr("gremlins.stages.verify.Verify.run", lambda self, pipe: None)
     monkeypatch.setattr(
-        "gremlins.stages.github_wait_ci.GitHubWaitCI.run", lambda self, pipe: None
+        "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
+        _async(lambda self, pipe: None),
     )
 
     client = _CommittingClient(
