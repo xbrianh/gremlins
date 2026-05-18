@@ -117,7 +117,7 @@ class ParallelStage(Stage):
 
     def build_runtime_stages(
         self,
-        child_runners: list[tuple[str, State, Callable[[], None]]],
+        child_runners: list[tuple[str, State, Callable[[], Any]]],
         *,
         parent_data: StateData | None = None,
         project_root: pathlib.Path | None = None,
@@ -166,7 +166,7 @@ class ParallelStage(Stage):
 
 def _parallel_stages(
     group_name: str,
-    child_runners: list[tuple[str, State, Callable[[], None]]],
+    child_runners: list[tuple[str, State, Callable[[], Any]]],
     *,
     max_concurrent: int | None,
     set_stage_fn: Callable[[str], None],
@@ -319,6 +319,26 @@ def _parallel_stages(
             else:
                 await asyncio.to_thread(fn)
 
+        def _cancel_siblings() -> None:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+
+        def _write_bail_state(b: Bail, child_key: str) -> None:
+            sf = resolve_state_file(gremlin_id)
+            if sf is None or not sf.exists():
+                return
+            try:
+                pa: dict[str, Any] = (
+                    json.loads(sf.read_text(encoding="utf-8")).get("parallel_attempts")
+                    or {}
+                )
+                parent_data.write_bail_file(
+                    "other", b.reason, attempt=pa.get(child_key) or ""
+                )
+            except Exception:
+                pass
+
         async def _run_child(child_key: str, fn: Callable[[], Any]) -> None:
             try:
                 if sem is not None:
@@ -330,39 +350,18 @@ def _parallel_stages(
                 raise
             except Bail as b:
                 if cancel_on_bail:
-                    for t in tasks:
-                        if not t.done():
-                            t.cancel()
-                sf = resolve_state_file(gremlin_id)
-                if sf is not None and sf.exists():
-                    try:
-                        pa: dict[str, Any] = (
-                            json.loads(sf.read_text(encoding="utf-8")).get(
-                                "parallel_attempts"
-                            )
-                            or {}
-                        )
-                        parent_data.write_bail_file(
-                            "other", b.reason, attempt=pa.get(child_key) or ""
-                        )
-                    except Exception:
-                        pass
+                    _cancel_siblings()
+                _write_bail_state(b, child_key)
                 return
             except Exception:
                 if cancel_on_bail:
-                    for t in tasks:
-                        if not t.done():
-                            t.cancel()
+                    _cancel_siblings()
                 raise
             parent_data.mark_done(stage_path, child_key)
 
         tasks = [asyncio.create_task(_run_child(k, fn)) for k, _, fn in active]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        errors = [
-            r
-            for r in results
-            if isinstance(r, Exception) and not isinstance(r, asyncio.CancelledError)
-        ]
+        errors = [r for r in results if isinstance(r, Exception)]
         if errors:
             for extra in errors[1:]:
                 logger.error("parallel child also failed: %s", extra)

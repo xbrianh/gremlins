@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import pathlib
 import threading
 import time
@@ -370,13 +371,11 @@ def test_parallel_sequence_child_worktree_flows() -> None:
     )
 
     async def _run_all() -> None:
-        import inspect as _inspect
-
         for _, fn in stages:
-            if _inspect.iscoroutinefunction(fn):
+            if inspect.iscoroutinefunction(fn):
                 await fn()
             else:
-                await asyncio.to_thread(fn)
+                fn()
 
     asyncio.run(_run_all())
 
@@ -416,8 +415,6 @@ def test_run_stages_async_and_sync_callables_both_execute_in_order() -> None:
 
 
 def test_make_runner_returns_async_for_async_stage() -> None:
-    import inspect
-
     from gremlins.stages.base import Stage
     from gremlins.stages.outcome import Done, Outcome
 
@@ -435,8 +432,6 @@ def test_make_runner_returns_async_for_async_stage() -> None:
 
 
 def test_make_runner_returns_sync_for_sync_stage() -> None:
-    import inspect
-
     from gremlins.stages.base import Stage
     from gremlins.stages.outcome import Done, Outcome
 

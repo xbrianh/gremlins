@@ -13,6 +13,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import pathlib
 import subprocess
@@ -685,8 +686,6 @@ def test_parallel_all_children_complete_with_defaults():
 
     # Run all three stages end-to-end (no git repo → fanout is a no-op).
     async def _run_all():
-        import inspect
-
         for _, fn in stages:
             if inspect.iscoroutinefunction(fn):
                 await fn()
