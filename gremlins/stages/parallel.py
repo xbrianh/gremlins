@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import concurrent.futures
+import asyncio
 import dataclasses
 import inspect
 import json
@@ -10,7 +10,6 @@ import logging
 import pathlib
 import secrets
 import tempfile
-import threading
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -26,7 +25,7 @@ from gremlins.utils import proc
 
 logger = logging.getLogger(__name__)
 
-_Stage = tuple[str, Callable[[], None]]
+_Stage = tuple[str, Callable[[], Any]]
 
 
 def _noop_set_stage(_n: str) -> None:
@@ -139,21 +138,17 @@ class ParallelStage(Stage):
             stage_path=self.path or self.name,
         )
 
-    def run(self, state: State) -> Outcome:
+    async def run(self, state: State) -> Outcome:
         group_dir = state.session_dir / self.name
         group_dir.mkdir(parents=True, exist_ok=True)
         group_state = dataclasses.replace(
             state, session_dir=group_dir, parent_stage=state.parent_stage or self.name
         )
-        child_runners: list[tuple[str, State, Callable[[], None]]] = []
+        child_runners: list[tuple[str, State, Callable[[], Any]]] = []
         for child in self.body:
             (group_dir / child.name).mkdir(parents=True, exist_ok=True)
             cs = _child_state(group_state, child, fan_out=True)
             runner = cs.make_runner(child, scope=self.body)
-            if inspect.iscoroutinefunction(runner):
-                raise TypeError(
-                    f"async stage {child.name!r} cannot be nested inside a parallel stage"
-                )
             child_runners.append((child.name, cs, runner))
         for _, fn in self.build_runtime_stages(
             child_runners,
@@ -162,7 +157,10 @@ class ParallelStage(Stage):
             worktree_parent=state.worktree_parent,
             set_stage_fn=lambda n: state.record_stage_progress(self.name, sub_stage=n),
         ):
-            fn()
+            if inspect.iscoroutinefunction(fn):
+                await fn()
+            else:
+                await asyncio.to_thread(fn)
         return Done()
 
 
@@ -295,7 +293,7 @@ def _parallel_stages(
             raise
         _persist_state()
 
-    def _parallel() -> None:
+    async def _parallel() -> None:
         set_stage_fn(group_name)
         if not child_runners:
             return
@@ -312,17 +310,29 @@ def _parallel_stages(
             if child_key in _worktree_paths and child_state.worktree is None:
                 child_state.worktree = _worktree_paths[child_key]
 
-        workers = max_concurrent if max_concurrent is not None else len(active)
-        cancel_event = threading.Event() if cancel_on_bail else None
+        sem = asyncio.Semaphore(max_concurrent) if max_concurrent is not None else None
+        tasks: list[asyncio.Task[None]] = []
 
-        def _run_child(child_key: str, fn: Callable[[], None]) -> None:
-            if cancel_event is not None and cancel_event.is_set():
-                return
+        async def _invoke(fn: Callable[[], Any]) -> None:
+            if inspect.iscoroutinefunction(fn):
+                await fn()
+            else:
+                await asyncio.to_thread(fn)
+
+        async def _run_child(child_key: str, fn: Callable[[], Any]) -> None:
             try:
-                fn()
+                if sem is not None:
+                    async with sem:
+                        await _invoke(fn)
+                else:
+                    await _invoke(fn)
+            except asyncio.CancelledError:
+                raise
             except Bail as b:
-                if cancel_event is not None:
-                    cancel_event.set()
+                if cancel_on_bail:
+                    for t in tasks:
+                        if not t.done():
+                            t.cancel()
                 sf = resolve_state_file(gremlin_id)
                 if sf is not None and sf.exists():
                     try:
@@ -339,15 +349,20 @@ def _parallel_stages(
                         pass
                 return
             except Exception:
-                if cancel_event is not None:
-                    cancel_event.set()
+                if cancel_on_bail:
+                    for t in tasks:
+                        if not t.done():
+                            t.cancel()
                 raise
             parent_data.mark_done(stage_path, child_key)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-            futs = [pool.submit(_run_child, k, fn) for k, _, fn in active]
-
-        errors = [e for fut in futs if (e := fut.exception()) is not None]
+        tasks = [asyncio.create_task(_run_child(k, fn)) for k, _, fn in active]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        errors = [
+            r
+            for r in results
+            if isinstance(r, Exception) and not isinstance(r, asyncio.CancelledError)
+        ]
         if errors:
             for extra in errors[1:]:
                 logger.error("parallel child also failed: %s", extra)

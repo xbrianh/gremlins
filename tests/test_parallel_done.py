@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import pathlib
 
@@ -80,7 +81,7 @@ def test_completed_child_skipped_on_resume(state_root):
 
     # First run: a succeeds, b fails.
     with pytest.raises(RuntimeError, match="b failed"):
-        parallel_fn()
+        asyncio.run(parallel_fn())
 
     state = _read_state(sf)
     assert "a" in state.get("done_children", {}).get("grp", [])
@@ -90,7 +91,7 @@ def test_completed_child_skipped_on_resume(state_root):
 
     # Resume: only b should run.
     with pytest.raises(RuntimeError, match="b failed"):
-        parallel_fn()
+        asyncio.run(parallel_fn())
 
     assert ran == ["b"]
 
@@ -121,13 +122,13 @@ def test_both_children_present_in_done_after_second_run(state_root):
     parallel_fn = stages[1][1]
 
     with pytest.raises(RuntimeError):
-        parallel_fn()
+        asyncio.run(parallel_fn())
 
     ran.clear()
     fail["b"] = False
 
     # Second run: b now succeeds; a is skipped.
-    parallel_fn()
+    asyncio.run(parallel_fn())
 
     assert ran == ["b"]
     state = _read_state(sf)
@@ -156,7 +157,7 @@ def test_parallel_done_cleared_after_full_success(state_root):
     parallel_fn = stages[1][1]
     fanin_fn = stages[2][1]
 
-    parallel_fn()
+    asyncio.run(parallel_fn())
 
     # done_children present before fan-in.
     assert "grp" in _read_state(sf).get("done_children", {})
@@ -193,7 +194,7 @@ def test_bail_aggregation_unaffected_by_done_tracking(state_root):
     parallel_fn = stages[1][1]
     fanin_fn = stages[2][1]
 
-    parallel_fn()
+    asyncio.run(parallel_fn())
 
     # ok-child is done; bail-child ran but wrote a bail file.
     state = _read_state(sf)

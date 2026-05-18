@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from typing import Any, cast
 
@@ -37,7 +38,7 @@ class SequenceStage(Stage):
         stage.client = get_client_from_dict(d)
         return stage
 
-    def run(self, state: State) -> Outcome:
+    async def run(self, state: State) -> Outcome:
         key = self.path or self.name
         done = state.done_for(key)
         for child in self.body:
@@ -47,9 +48,8 @@ class SequenceStage(Stage):
                 child, scope=self.body, record_stage=False
             )
             if inspect.iscoroutinefunction(runner):
-                raise TypeError(
-                    f"async stage {child.name!r} cannot be nested inside a sequence stage"
-                )
-            runner()
+                await runner()
+            else:
+                await asyncio.to_thread(runner)
             state.mark_done(key, child.name)
         return Done()

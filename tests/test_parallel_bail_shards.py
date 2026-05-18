@@ -342,7 +342,7 @@ def test_cancel_on_bail_skips_unstarted_children():
 
     # Run just the parallel stage (index 1); skip fanout/fanin.
     with pytest.raises(RuntimeError, match="child-a bailed"):
-        stages[1][1]()
+        asyncio.run(stages[1][1]())
 
     # child-c should not have run (cancel flag set before it started).
     assert "c" not in ran
@@ -492,7 +492,7 @@ def test_worktree_lifecycle_fanout_creates_and_fanin_removes(tmp_path):
         assert ctx_b.worktree is not None and ctx_b.worktree.is_dir()
 
         # Parallel stage: noop children.
-        stages[1][1]()  # parallel
+        asyncio.run(stages[1][1]())  # parallel
 
         # Fan-in: worktrees should be removed.
         stages[2][1]()  # fanin (no bails, should not raise)
@@ -684,8 +684,14 @@ def test_parallel_all_children_complete_with_defaults():
     )
 
     # Run all three stages end-to-end (no git repo → fanout is a no-op).
-    for _, fn in stages:
-        fn()
+    async def _run_all():
+        import inspect
+        for _, fn in stages:
+            if inspect.iscoroutinefunction(fn):
+                await fn()
+            else:
+                fn()
+    asyncio.run(_run_all())
 
     assert sorted(ran) == ["a", "b"]
 
