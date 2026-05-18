@@ -414,6 +414,16 @@ class OpenAIAgentsClient:
             self._untrack(run)
             if raw is not None:
                 raw.close()
+            if not stream_task.done():
+                stream_task.cancel()
+                try:
+                    await stream_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            try:
+                run.cancel()
+            except Exception:
+                pass
 
         cost = _compute_run_cost(model, run)
         with self._lock:

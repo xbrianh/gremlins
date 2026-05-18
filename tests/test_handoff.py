@@ -1,6 +1,7 @@
 """Tests for gremlins/stages/handoff.py."""
 
 import argparse
+import asyncio
 import json
 import pathlib
 
@@ -41,7 +42,7 @@ class WritingHandoffClient(FakeClaudeClient):
         self.handoff_error = handoff_error
         self.sanitize_error = sanitize_error
 
-    def run(self, prompt, *, label, **kwargs):
+    async def run(self, prompt, *, label, **kwargs):
         if label == "handoff":
             if self.handoff_error is not None:
                 raise self.handoff_error
@@ -54,7 +55,7 @@ class WritingHandoffClient(FakeClaudeClient):
                 raise self.sanitize_error
             if self.sanitize_text is not None:
                 self.out_path.write_text(self.sanitize_text)
-        return super().run(prompt, label=label, **kwargs)
+        return await super().run(prompt, label=label, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -255,7 +256,7 @@ def test_run_chain_done_signal(monkeypatch, tmp_path):
             "operator_followups": [],
         },
     )
-    rc = handoff.run(client, args)
+    rc = asyncio.run(handoff.run(client, args))
     assert rc == 0
     assert sig_path.exists()
     assert json.loads(sig_path.read_text())["exit_state"] == "chain-done"
@@ -280,7 +281,7 @@ def test_run_next_plan_signal(monkeypatch, tmp_path):
         "reason": None,
         "operator_followups": [],
     }
-    rc = handoff.run(client, args)
+    rc = asyncio.run(handoff.run(client, args))
     assert rc == 0
     assert child_path.exists()
     assert json.loads(sig_path.read_text())["child_plan"] == str(child_path)
@@ -298,7 +299,7 @@ def test_run_bail_signal(monkeypatch, tmp_path):
             "operator_followups": [],
         },
     )
-    rc = handoff.run(client, args)
+    rc = asyncio.run(handoff.run(client, args))
     assert rc == 0
     assert (
         json.loads(client.signal_path.read_text())["reason"]
@@ -322,7 +323,7 @@ def test_run_signal_file_not_written(monkeypatch, tmp_path, capsys):
         rev=None,
     )
     client = FakeClaudeClient(fixtures={"handoff": MINIMAL_EVENTS})
-    rc = handoff.run(client, args)
+    rc = asyncio.run(handoff.run(client, args))
     assert rc == 1
     err = capsys.readouterr().err
     assert "signal file not written" in err
@@ -332,18 +333,18 @@ def test_run_signal_file_invalid_json(monkeypatch, tmp_path, capsys):
     args, client, sig_path, _, _ = _stub_happy_run(monkeypatch, tmp_path, {})
     client.signal_payload = {}
 
-    def write_bad_json(prompt, *, label, **kwargs):
+    async def write_bad_json(prompt, *, label, **kwargs):
         if label == "handoff":
             sig_path.write_text("not json")
             client.out_path.write_text("# Rolling plan\n")
-        return FakeClaudeClient.run(client, prompt, label=label, **kwargs)
+        return await FakeClaudeClient.run(client, prompt, label=label, **kwargs)
 
     monkeypatch.setattr(
         client,
         "run",
         write_bad_json,
     )
-    rc = handoff.run(client, args)
+    rc = asyncio.run(handoff.run(client, args))
     assert rc == 1
     err = capsys.readouterr().err
     assert "could not parse signal file" in err
@@ -357,7 +358,7 @@ def test_run_signal_unknown_exit_state(monkeypatch, tmp_path, capsys):
             "exit_state": "bogus",
         },
     )
-    rc = handoff.run(client, args)
+    rc = asyncio.run(handoff.run(client, args))
     assert rc == 1
     err = capsys.readouterr().err
     assert "unrecognized exit_state" in err
@@ -374,7 +375,7 @@ def test_run_next_plan_missing_child_plan(monkeypatch, tmp_path, capsys):
             "operator_followups": [],
         },
     )
-    rc = handoff.run(client, args)
+    rc = asyncio.run(handoff.run(client, args))
     assert rc == 1
     err = capsys.readouterr().err
     assert "child_plan is null" in err
@@ -391,7 +392,7 @@ def test_run_next_plan_child_plan_path_does_not_exist(monkeypatch, tmp_path, cap
             "operator_followups": [],
         },
     )
-    rc = handoff.run(client, args)
+    rc = asyncio.run(handoff.run(client, args))
     assert rc == 1
     err = capsys.readouterr().err
     assert "child plan path in signal file does not exist" in err
@@ -404,7 +405,7 @@ def test_run_client_error(monkeypatch, tmp_path, capsys):
         {},
         handoff_error=RuntimeError("boom"),
     )
-    rc = handoff.run(client, args)
+    rc = asyncio.run(handoff.run(client, args))
     assert rc == 1
     err = capsys.readouterr().err
     assert "handoff agent failed: boom" in err
@@ -424,7 +425,7 @@ def test_run_claude_sanitizes_with_haiku(monkeypatch, tmp_path):
     )
     args.client = "claude:opus"
 
-    rc = handoff.run(client, args)
+    rc = asyncio.run(handoff.run(client, args))
 
     assert rc == 0
     assert [(c.label, c.model) for c in client.calls] == [
@@ -447,7 +448,7 @@ def test_run_non_claude_sanitizes_with_main_model(monkeypatch, tmp_path):
     )
     args.client = "copilot:gpt-5.4"
 
-    rc = handoff.run(client, args)
+    rc = asyncio.run(handoff.run(client, args))
 
     assert rc == 0
     assert [(c.label, c.model) for c in client.calls] == [
@@ -467,7 +468,7 @@ def test_run_operator_followups_preserved_in_signal(monkeypatch, tmp_path):
             "operator_followups": ["Sync ~/.claude/", "Run smoke test manually"],
         },
     )
-    rc = handoff.run(client, args)
+    rc = asyncio.run(handoff.run(client, args))
     assert rc == 0
     assert json.loads(sig_path.read_text())["operator_followups"] == [
         "Sync ~/.claude/",
@@ -492,7 +493,7 @@ def test_run_missing_spec_warns_and_continues(monkeypatch, tmp_path, capsys):
         },
     )
     args.spec = str(tmp_path / "no-such-spec.md")
-    rc = handoff.run(client, args)
+    rc = asyncio.run(handoff.run(client, args))
     assert rc == 0
     err = capsys.readouterr().err
     assert "warning" in err.lower()
@@ -534,7 +535,7 @@ def test_sanitize_rolling_plan_rewrites_file(monkeypatch, tmp_path):
         signal_payload={},
         sanitize_text=cleaned,
     )
-    handoff.sanitize_rolling_plan(client, out_path, Client("claude", "sonnet"))
+    asyncio.run(handoff.sanitize_rolling_plan(client, out_path, Client("claude", "sonnet")))
     assert out_path.read_text() == cleaned
 
 
@@ -548,7 +549,7 @@ def test_sanitize_rolling_plan_nonzero_is_nonfatal(monkeypatch, tmp_path, capsys
         signal_payload={},
         sanitize_error=RuntimeError("sanitize failed"),
     )
-    handoff.sanitize_rolling_plan(client, out_path, Client("claude", "sonnet"))
+    asyncio.run(handoff.sanitize_rolling_plan(client, out_path, Client("claude", "sonnet")))
     err = capsys.readouterr().err
     assert "warning" in err.lower()
     assert out_path.read_text() == original

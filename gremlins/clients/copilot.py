@@ -46,6 +46,9 @@ class SubprocessCopilotClient:
                 p.terminate()
             except Exception:
                 pass
+        # asyncio.subprocess.Process.wait() is async so we cannot give processes a
+        # window to handle SIGTERM before escalating. SIGTERM above is a courtesy;
+        # the SIGKILL below is what actually reclaims them.
         for p in procs:
             try:
                 p.kill()
@@ -109,6 +112,16 @@ class SubprocessCopilotClient:
             rc = p.returncode
         finally:
             self._untrack(p)
+            if p.returncode is None:
+                # cancellation path: communicate() was interrupted before the process exited
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
+                try:
+                    p.kill()
+                except Exception:
+                    pass
 
         stdout = raw_out.decode(errors="replace")
         stderr = raw_err.decode(errors="replace")

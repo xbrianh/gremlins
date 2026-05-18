@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import pathlib
 
@@ -40,7 +41,7 @@ def _make_state(
 
 def test_calls_client_run_with_expected_kwargs(tmp_path):
     state = _make_state(tmp_path, attempt="att1")
-    run_agent(state, "hello", label="test-label", raw_path=tmp_path / "out.jsonl")
+    asyncio.run(run_agent(state, "hello", label="test-label", raw_path=tmp_path / "out.jsonl"))
 
     assert len(state.client.calls) == 1
     call = state.client.calls[0]
@@ -55,13 +56,13 @@ def test_extra_env_injected_when_attempt_set(tmp_path):
     state = _make_state(tmp_path, attempt="att1")
     # FakeClaudeClient discards extra_env, but run_agent should compute it
     # without error and forward it.
-    run_agent(state, "hello", label="test-label")
+    asyncio.run(run_agent(state, "hello", label="test-label"))
     assert len(state.client.calls) == 1
 
 
 def test_returns_completed_run_when_no_bail(tmp_path):
     state = _make_state(tmp_path, attempt="att1")
-    result = run_agent(state, "hello", label="test-label")
+    result = asyncio.run(run_agent(state, "hello", label="test-label"))
     assert result.exit_code == 0
 
 
@@ -72,7 +73,7 @@ def test_raises_bail_when_bail_file_exists(tmp_path):
         json.dumps({"class": "other", "detail": "timed out"}), encoding="utf-8"
     )
     with pytest.raises(Bail) as exc_info:
-        run_agent(state, "hello", label="test-label")
+        asyncio.run(run_agent(state, "hello", label="test-label"))
     assert "timed out" in exc_info.value.args[0]
 
 
@@ -81,19 +82,19 @@ def test_bail_detail_empty_when_missing_field(tmp_path):
     bail_path = state.data.state_file.parent / "bail_att1.json"
     bail_path.write_text(json.dumps({"class": "other"}), encoding="utf-8")
     with pytest.raises(Bail) as exc_info:
-        run_agent(state, "hello", label="test-label")
+        asyncio.run(run_agent(state, "hello", label="test-label"))
     assert exc_info.value.args[0] == ""
 
 
 def test_no_bail_check_when_no_attempt(tmp_path):
     state = _make_state(tmp_path)
-    result = run_agent(state, "hello", label="test-label")
+    result = asyncio.run(run_agent(state, "hello", label="test-label"))
     assert result.exit_code == 0
 
 
 def test_model_kwarg_forwarded(tmp_path):
     state = _make_state(tmp_path)
-    run_agent(state, "hello", label="test-label", model="haiku")
+    asyncio.run(run_agent(state, "hello", label="test-label", model="haiku"))
     assert state.client.calls[0].model == "haiku"
 
 
@@ -106,7 +107,7 @@ def test_stage_model_forwarded_when_set(tmp_path):
         session_dir=tmp_path,
         stage_model="sonnet",
     )
-    run_agent(state, "hello", label="test-label")
+    asyncio.run(run_agent(state, "hello", label="test-label"))
     assert state.client.calls[0].model == "sonnet"
 
 
@@ -119,5 +120,5 @@ def test_stage_model_overridden_by_kwarg(tmp_path):
         session_dir=tmp_path,
         stage_model="sonnet",
     )
-    run_agent(state, "hello", label="test-label", model="haiku")
+    asyncio.run(run_agent(state, "hello", label="test-label", model="haiku"))
     assert state.client.calls[0].model == "haiku"

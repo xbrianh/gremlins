@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import pathlib
 from typing import Any
@@ -50,7 +51,7 @@ def _make_stage(
 
 def test_green_on_first_attempt(tmp_path):
     stage, state = _make_stage(tmp_path, cmds=["true"])
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert len(state.client.calls) == 0
     assert (tmp_path / "verify-attempt-1.log").exists()
 
@@ -58,7 +59,7 @@ def test_green_on_first_attempt(tmp_path):
 def test_no_op_when_cmds_empty(tmp_path):
     """Empty cmds list -> stage skips without invoking the shell or agent."""
     stage, state = _make_stage(tmp_path, cmds=[])
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert len(state.client.calls) == 0
     assert not (tmp_path / "verify-attempt-1.log").exists()
 
@@ -66,7 +67,7 @@ def test_no_op_when_cmds_empty(tmp_path):
 def test_single_cmd(tmp_path):
     """A single cmd in the list runs without shell-syntax error."""
     stage, state = _make_stage(tmp_path, cmds=["true"])
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert len(state.client.calls) == 0
     assert (tmp_path / "verify-attempt-1.log").exists()
 
@@ -77,9 +78,9 @@ def test_fix_then_green(tmp_path):
     check_cmd = f"grep -q '^pass$' {flag}"
 
     class _FixingClient(FakeClaudeClient):
-        def run(self, prompt, *, label, **kwargs):
+        async def run(self, prompt, *, label, **kwargs):
             flag.write_text("pass\n")
-            return super().run(prompt, label=label, **kwargs)
+            return await super().run(prompt, label=label, **kwargs)
 
     client = _FixingClient(fixtures={"verify-fix-1": MINIMAL_EVENTS})
     stage, state = _make_stage(
@@ -88,7 +89,7 @@ def test_fix_then_green(tmp_path):
         max_attempts=3,
         client=client,
     )
-    stage.run(state)
+    asyncio.run(stage.run(state))
 
     assert len(state.client.calls) == 1
     assert state.client.calls[0].label == "verify-fix-1"
@@ -111,7 +112,7 @@ def test_attempts_exhausted_raises(tmp_path, monkeypatch):
     )
 
     with pytest.raises(Bail):
-        stage.run(state)
+        asyncio.run(stage.run(state))
 
     assert len(state.client.calls) == 2
     assert (tmp_path / "verify-attempt-1.log").exists()
@@ -123,7 +124,7 @@ def test_exhaustion_with_max_1(tmp_path):
     stage, state = _make_stage(tmp_path, cmds=["false"], max_attempts=1)
 
     with pytest.raises(Bail):
-        stage.run(state)
+        asyncio.run(stage.run(state))
 
     assert len(state.client.calls) == 0
     assert (tmp_path / "verify-attempt-1.log").exists()
@@ -146,7 +147,7 @@ def test_both_cmds_in_fix_prompt(tmp_path, monkeypatch):
     )
 
     with pytest.raises(Bail):
-        stage.run(state)
+        asyncio.run(stage.run(state))
 
     assert "false" in state.client.calls[0].prompt
     assert "make test" in state.client.calls[0].prompt
@@ -154,7 +155,7 @@ def test_both_cmds_in_fix_prompt(tmp_path, monkeypatch):
 
 def test_log_file_captures_output(tmp_path):
     stage, state = _make_stage(tmp_path, cmds=["echo hello_check", "echo hello_test"])
-    stage.run(state)
+    asyncio.run(stage.run(state))
 
     log = tmp_path / "verify-attempt-1.log"
     assert log.exists()
@@ -175,7 +176,7 @@ def test_no_pr_opened_on_exhaustion(tmp_path, monkeypatch):
     stage, state = _make_stage(tmp_path, cmds=["false"], max_attempts=3, client=client)
 
     with pytest.raises(Bail):
-        stage.run(state)
+        asyncio.run(stage.run(state))
 
     assert len(state.client.calls) == 2
 
@@ -200,7 +201,7 @@ def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
     )
 
     with pytest.raises(Bail):
-        stage.run(state)
+        asyncio.run(stage.run(state))
 
     bail_file = state_dir / f"bail_{attempt}.json"
     assert bail_file.exists()
@@ -214,13 +215,13 @@ def test_commit_instr_in_fix_prompt(tmp_path):
     check_cmd = f"grep -q '^pass$' {flag}"
 
     class _FixingClient(FakeClaudeClient):
-        def run(self, prompt, *, label, **kwargs):
+        async def run(self, prompt, *, label, **kwargs):
             flag.write_text("pass\n")
-            return super().run(prompt, label=label, **kwargs)
+            return await super().run(prompt, label=label, **kwargs)
 
     client = _FixingClient(fixtures={"verify-fix-1": MINIMAL_EVENTS})
     stage, state = _make_stage(tmp_path, cmds=[check_cmd], client=client)
-    stage.run(state)
+    asyncio.run(stage.run(state))
 
     assert len(state.client.calls) == 1
     assert "Fix failing checks" in state.client.calls[0].prompt
@@ -250,7 +251,7 @@ def test_parallel_child_fix_prompt_uses_new_bail_command(tmp_path):
     )
 
     with pytest.raises(Bail):
-        stage.run(state)
+        asyncio.run(stage.run(state))
 
     assert "python -c" in state.client.calls[0].prompt
     assert "gremlins.bail" not in state.client.calls[0].prompt
@@ -282,7 +283,7 @@ def test_verify_fix_reads_latest_log_and_runs_agent(tmp_path):
         ["fix: {verify_output} {commands_section} {bail_command} {diff_text}"],
         "cmds",
     )
-    outcome = stage.run(state)
+    outcome = asyncio.run(stage.run(state))
     assert isinstance(outcome, Done)
     assert len(client.calls) == 1
     assert client.calls[0].label == "verify-fix-1"
@@ -292,7 +293,7 @@ def test_verify_fix_reads_latest_log_and_runs_agent(tmp_path):
 def test_verify_fix_returns_done_with_no_log(tmp_path):
     state = _make_fix_state(tmp_path)
     stage = VerifyFix("fix", ["fix: {verify_output}"], "cmds")
-    outcome = stage.run(state)
+    outcome = asyncio.run(stage.run(state))
     assert isinstance(outcome, Done)
     assert len(state.client.calls) == 0
 
@@ -309,6 +310,6 @@ def test_verify_fix_uses_loop_iteration(tmp_path):
         ["fix: {verify_output} {commands_section} {bail_command} {diff_text}"],
         "cmds",
     )
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert client.calls[0].label == "verify-fix-2"
     assert "current error" in client.calls[0].prompt

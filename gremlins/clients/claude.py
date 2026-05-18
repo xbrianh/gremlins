@@ -63,6 +63,9 @@ class SubprocessClaudeClient:
                 p.terminate()
             except Exception:
                 pass
+        # asyncio.subprocess.Process.wait() is async so we cannot give processes a
+        # window to handle SIGTERM before escalating. SIGTERM above is a courtesy;
+        # the SIGKILL below is what actually reclaims them.
         for p in procs:
             try:
                 p.kill()
@@ -111,14 +114,31 @@ class SubprocessClaudeClient:
             raise
         return p
 
-    async def _consume(
+    async def _terminate_and_wait(self, p: asyncio.subprocess.Process) -> None:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(p.wait(), timeout=5.0)
+        except TimeoutError:
+            try:
+                p.kill()
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(p.wait(), timeout=5.0)
+            except TimeoutError:
+                pass
+
+    async def _read_lines(
         self,
         p: asyncio.subprocess.Process,
         prefix: str,
         raw_path: pathlib.Path | None,
         capture_events: bool,
         idle_timeout: float,
-    ) -> CompletedRun:
+    ) -> tuple[dict[str, Any], list[dict[str, Any]] | None, bool]:
         assert p.stdout is not None
         state: dict[str, Any] = {"cost_usd": None, "result_text": None}
         events: list[dict[str, Any]] | None = [] if capture_events else None
@@ -154,34 +174,35 @@ class SubprocessClaudeClient:
                 except Exception:
                     pass
         finally:
-            self._untrack(p)
             if raw is not None:
                 raw.close()
+        return state, events, timed_out
 
+    async def _consume(
+        self,
+        p: asyncio.subprocess.Process,
+        prefix: str,
+        raw_path: pathlib.Path | None,
+        capture_events: bool,
+        idle_timeout: float,
+    ) -> CompletedRun:
+        try:
+            state, events, timed_out = await self._read_lines(
+                p, prefix, raw_path, capture_events, idle_timeout
+            )
+        finally:
+            self._untrack(p)
         if timed_out:
-            try:
-                p.terminate()
-            except Exception:
-                pass
-            try:
-                await asyncio.wait_for(p.wait(), timeout=5.0)
-            except TimeoutError:
-                try:
-                    p.kill()
-                except Exception:
-                    pass
-                await asyncio.wait_for(p.wait(), timeout=5.0)
+            await self._terminate_and_wait(p)
             raise StreamTimeoutError("claude -p stream idle timeout")
-
         rc = await p.wait()
         cost_usd = state["cost_usd"]
-        result_text = state["result_text"]
         if cost_usd is not None:
             with self._lock:
                 self._total_cost_usd += cost_usd
         return CompletedRun(
             exit_code=rc,
-            text_result=result_text,
+            text_result=state["result_text"],
             events=events,
             cost_usd=cost_usd,
         )

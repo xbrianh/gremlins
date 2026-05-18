@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import pathlib
 
 from conftest import MINIMAL_EVENTS
@@ -41,7 +42,7 @@ def _make_stage(
 
 def test_run_calls_claude_with_pr_url(tmp_path: pathlib.Path) -> None:
     stage, client, state = _make_stage(tmp_path)
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert len(client.calls) == 1
     call = client.calls[0]
     assert PR_URL in call.prompt
@@ -50,12 +51,12 @@ def test_run_calls_claude_with_pr_url(tmp_path: pathlib.Path) -> None:
 
 def test_run_includes_style_from_prompt_paths(tmp_path: pathlib.Path) -> None:
     stage, client, state = _make_stage(tmp_path, style_content="Use type hints.")
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert "Use type hints." in client.calls[0].prompt
 
 
 def test_run_writes_raw_path(tmp_path: pathlib.Path) -> None:
     stage, client, state = _make_stage(tmp_path)
-    stage.run(state)
+    asyncio.run(stage.run(state))
     call = client.calls[0]
     assert call.raw_path == tmp_path / "stream-github-review-pull-request.jsonl"

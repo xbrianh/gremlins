@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import argparse
 import pathlib
 
@@ -26,7 +27,7 @@ def test_plan_source_file_local(tmp_path: pathlib.Path) -> None:
     client = FakeClaudeClient(fixtures={})
     state = _state(tmp_path, client)
     state.args = argparse.Namespace(plan=str(plan_src))
-    stage.run(state)
+    asyncio.run(stage.run(state))
 
     plan_md = tmp_path / "plan.md"
     assert plan_md.exists()
@@ -53,7 +54,7 @@ def test_plan_source_issue_ref_local(
     client = FakeClaudeClient(fixtures={})
     state = _state(tmp_path, client)
     state.args = argparse.Namespace(plan="#42")
-    stage.run(state)
+    asyncio.run(stage.run(state))
 
     plan_md = tmp_path / "plan.md"
     assert plan_md.exists()
@@ -95,7 +96,7 @@ def test_plan_source_file_github(
     state = _state(tmp_path, client)
     state.args = argparse.Namespace(plan=str(plan_src))
     state.repo = "owner/repo"
-    stage.run(state)
+    asyncio.run(stage.run(state))
 
     plan_md = tmp_path / "plan.md"
     assert plan_md.exists()
@@ -128,7 +129,7 @@ def test_plan_source_issue_ref_github(
     state = _state(tmp_path, client)
     state.args = argparse.Namespace(plan="#99")
     state.repo = "owner/repo"
-    stage.run(state)
+    asyncio.run(stage.run(state))
 
     plan_md = tmp_path / "plan.md"
     assert plan_md.exists()
@@ -143,7 +144,7 @@ def test_plan_reuses_existing_plan_md(tmp_path: pathlib.Path) -> None:
 
     stage = Plan("plan", ["dummy prompt"], {})
     client = FakeClaudeClient(fixtures={})
-    stage.run(_state(tmp_path, client))
+    asyncio.run(stage.run(_state(tmp_path, client)))
 
     assert client.calls == []
     assert plan_md.read_text() == "# Cached Plan\n"
@@ -154,7 +155,7 @@ def test_plan_without_plan_resolves_session_dir(tmp_path: pathlib.Path) -> None:
     (tmp_path / "plan.md").write_text("# Existing\n")
     stage = Plan("plan", ["dummy prompt"], {})
     client = FakeClaudeClient(fixtures={})
-    stage.run(_state(tmp_path, client))
+    asyncio.run(stage.run(_state(tmp_path, client)))
     assert client.calls == []
 
 
@@ -191,7 +192,7 @@ def test_resolve_issue_source_empty_repo_writes_url(
     state = _state(tmp_path, client)
     state.args = argparse.Namespace(plan="#355")
     state.repo = ""
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert captured.get("issue_url") == "https://github.com/owner/repo/issues/355"
     assert captured.get("issue_num") == "355"
 
@@ -211,7 +212,7 @@ def test_resolve_issue_source_matching_repo_writes_url(
     state = _state(tmp_path, client)
     state.args = argparse.Namespace(plan="#355")
     state.repo = "owner/repo"
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert captured.get("issue_url") == "https://github.com/owner/repo/issues/355"
     assert captured.get("issue_num") == "355"
 
@@ -231,6 +232,6 @@ def test_resolve_issue_source_cross_repo_clears_url(
     state = _state(tmp_path, client)
     state.args = argparse.Namespace(plan="owner/b#355")
     state.repo = "owner/a"
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert captured.get("issue_url") == ""
     assert captured.get("issue_num") == ""

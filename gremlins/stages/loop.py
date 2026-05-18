@@ -29,7 +29,7 @@ def max_iters(n: int) -> UntilFn:
     return lambda _state, iteration, _head: iteration >= n
 
 
-def _dispatch_runners(
+async def _dispatch_runners(
     runners: list[Callable[[], Outcome]],
     iteration: int,
     max_iterations: int,
@@ -38,7 +38,10 @@ def _dispatch_runners(
     for i, runner in enumerate(runners):
         if i > 0 and (not had_failure or iteration == max_iterations):
             continue
-        outcome = runner()
+        if inspect.iscoroutinefunction(runner):
+            outcome = await runner()
+        else:
+            outcome = runner()
         if isinstance(outcome, NeedsFix):
             had_failure = True
     return had_failure
@@ -109,14 +112,10 @@ class LoopStage(Stage):
         for child in self.body:
             cs = _child_state(state, child)
             runner = cs.make_runner(child, scope=self.body, record_stage=False)
-            if inspect.iscoroutinefunction(runner):
-                raise TypeError(
-                    f"async stage {child.name!r} cannot be nested inside a loop stage"
-                )
             result.append(cast(Callable[[], Outcome], runner))
         return result
 
-    def run(self, state: State) -> Outcome:
+    async def run(self, state: State) -> Outcome:
         runners = (
             self._body_runners
             if self._body_runners is not None
@@ -127,7 +126,7 @@ class LoopStage(Stage):
             if self._on_iteration_start:
                 self._on_iteration_start(state)
             head_before = _git.head_sha(state.cwd)
-            had_failure = _dispatch_runners(runners, iteration, self._max_iterations)
+            had_failure = await _dispatch_runners(runners, iteration, self._max_iterations)
 
             if not had_failure:
                 if self._until(state, iteration, head_before):

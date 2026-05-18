@@ -14,7 +14,7 @@ from gremlins.stages.outcome import Done, Outcome
 logger = logging.getLogger(__name__)
 
 
-def _run_reviewer(
+async def _run_reviewer(
     *,
     state: State,
     model: str,
@@ -51,7 +51,7 @@ Do NOT make any code changes — only write the review file.
 {focus}
 
 `{out_file}` is the canonical and required location for your review output in every case, including any short-circuit one-liner the prompt tells you to emit. Do not emit the verdict only to chat; write it to `{out_file}` and then stop."""
-    run_agent(state, prompt, label=label, model=model, raw_path=raw_path)
+    await run_agent(state, prompt, label=label, model=model, raw_path=raw_path)
 
 
 class ReviewCode(Stage):
@@ -62,7 +62,7 @@ class ReviewCode(Stage):
         self.prompts = prompts
         self.options = options
 
-    def run(self, state: State) -> Outcome:
+    async def run(self, state: State) -> Outcome:
         model = state.stage_model or state.client.model
         if not model:
             raise ValueError(f"stage {self.name!r}: model must be set")
@@ -99,7 +99,7 @@ class ReviewCode(Stage):
         state.record_stage_progress(
             self.name, {"model": f"running ({model})"}, parent_stage=state.parent_stage
         )
-        _run_reviewer(
+        await _run_reviewer(
             state=state,
             model=model,
             out_file=out_file,
@@ -148,7 +148,7 @@ class GitHubReviewPullRequest(Stage):
         self.options = options
         self.pr_url = pr_url
 
-    def run(self, state: State) -> Outcome:
+    async def run(self, state: State) -> Outcome:
         pr_url = self.pr_url or state.data.read_pr_url()
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
@@ -160,7 +160,7 @@ class GitHubReviewPullRequest(Stage):
                 pr_url=pr_url,
             )
         )
-        run_agent(
+        await run_agent(
             state,
             prompt,
             label="github-review-pull-request",

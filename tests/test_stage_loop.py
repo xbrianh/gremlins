@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -42,7 +43,7 @@ def test_loop_head_stable_exits_cleanly(tmp_path):
         return Done()
 
     loop = LoopStage("loop", body_runners=[runner], max_iterations=3)
-    outcome = loop.run(_loop_state(tmp_path))
+    outcome = asyncio.run(loop.run(_loop_state(tmp_path)))
 
     assert outcome == Done()
     assert calls == ["run"]
@@ -63,7 +64,7 @@ def test_loop_cmd_failure_then_fix_then_green(tmp_path):
         return Done()
 
     loop = LoopStage("loop", body_runners=[check, fix], max_iterations=3)
-    loop.run(_loop_state(tmp_path))
+    asyncio.run(loop.run(_loop_state(tmp_path)))
 
     assert state["attempt"] == 2
     assert state["fixed"]
@@ -81,7 +82,7 @@ def test_loop_fix_skipped_on_success(tmp_path):
         return Done()
 
     loop = LoopStage("loop", body_runners=[check, fix], max_iterations=3)
-    loop.run(_loop_state(tmp_path))
+    asyncio.run(loop.run(_loop_state(tmp_path)))
 
     assert fix_calls == []
 
@@ -95,7 +96,7 @@ def test_loop_exhausted_returns_bail(tmp_path):
 
     loop = LoopStage("loop", body_runners=[check, fix], max_iterations=3)
     with pytest.raises(Bail):
-        loop.run(_loop_state(tmp_path))
+        asyncio.run(loop.run(_loop_state(tmp_path)))
 
 
 def test_loop_fix_skipped_on_final_iteration(tmp_path):
@@ -113,7 +114,7 @@ def test_loop_fix_skipped_on_final_iteration(tmp_path):
 
     loop = LoopStage("loop", body_runners=[check, fix], max_iterations=3)
     with pytest.raises(Bail):
-        loop.run(_loop_state(tmp_path))
+        asyncio.run(loop.run(_loop_state(tmp_path)))
     # fix ran for iterations 1 and 2, NOT 3
     assert fix_calls == [1, 2]
 
@@ -126,7 +127,7 @@ def test_loop_bail_propagates_immediately(tmp_path):
 
     loop = LoopStage("loop", body_runners=[bail_runner], max_iterations=3)
     with pytest.raises(Bail) as exc_info:
-        loop.run(_loop_state(tmp_path))
+        asyncio.run(loop.run(_loop_state(tmp_path)))
     assert "bail_class=other" in exc_info.value.reason
 
 
@@ -152,7 +153,7 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
     )
     loop = LoopStage("loop", body_runners=[check, fix], max_iterations=2)
     with pytest.raises(Bail):
-        loop.run(loop_state)
+        asyncio.run(loop.run(loop_state))
 
     bail_file = state_dir / f"bail_{attempt}.json"
     assert bail_file.exists()
@@ -197,7 +198,7 @@ def test_custom_until_predicate(tmp_path):
         max_iterations=5,
         until=max_iters(2),
     )
-    result = loop.run(_loop_state(tmp_path))
+    result = asyncio.run(loop.run(_loop_state(tmp_path)))
     assert result == Done()
 
 
@@ -221,7 +222,7 @@ def test_on_iteration_start_called_each_iteration(tmp_path):
         max_iterations=3,
         on_iteration_start=on_start,
     )
-    loop.run(_loop_state(tmp_path))
+    asyncio.run(loop.run(_loop_state(tmp_path)))
     assert len(calls) == 2  # fired for iteration 1 and 2
 
 
@@ -335,7 +336,7 @@ def test_pr_stack_detaches_to_prior_pr_branch(tmp_path, make_state_dir, monkeypa
         max_iterations=1,
         on_iteration_start=detach_to_pr_base,
     )
-    loop.run(_loop_state_with_gr(tmp_path, gremlin_id))
+    asyncio.run(loop.run(_loop_state_with_gr(tmp_path, gremlin_id)))
 
     assert detach_calls == ["feat-abc"]
 
@@ -359,7 +360,7 @@ def test_pr_stack_skipped_when_no_prior_pr(tmp_path, make_state_dir, monkeypatch
         max_iterations=1,
         on_iteration_start=detach_to_pr_base,
     )
-    loop.run(_loop_state_with_gr(tmp_path, gremlin_id))
+    asyncio.run(loop.run(_loop_state_with_gr(tmp_path, gremlin_id)))
 
     assert git_calls == []
 
@@ -394,7 +395,7 @@ def test_no_on_iteration_start_skips_detach(tmp_path, make_state_dir, monkeypatc
     )
 
     loop = LoopStage("test", body_runners=[lambda: Done()], max_iterations=1)
-    loop.run(_loop_state_with_gr(tmp_path, gremlin_id))
+    asyncio.run(loop.run(_loop_state_with_gr(tmp_path, gremlin_id)))
 
     assert git_calls == []
 
@@ -422,7 +423,7 @@ def test_loop_patches_loop_iteration_to_state(tmp_path, make_state_dir):
     )
     loop = LoopStage("loop", body_runners=[runner], max_iterations=3)
     with pytest.raises(Bail):
-        loop.run(loop_state)
+        asyncio.run(loop.run(loop_state))
 
     assert seen_iterations == [1, 2, 3]
 
@@ -465,6 +466,6 @@ def test_pr_stack_iter2_detaches_to_iter1_branch(tmp_path, make_state_dir, monke
         max_iterations=2,
         on_iteration_start=detach_to_pr_base,
     )
-    loop.run(_loop_state_with_gr(tmp_path, gremlin_id))
+    asyncio.run(loop.run(_loop_state_with_gr(tmp_path, gremlin_id)))
 
     assert detach_calls == ["feat-iter1"]

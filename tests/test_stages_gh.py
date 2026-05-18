@@ -1,5 +1,6 @@
 """Stage-level tests for the gh pipeline stages (github-review-pull-request, github-address-pull-request-reviews)."""
 
+import asyncio
 import pathlib
 
 from conftest import MINIMAL_EVENTS
@@ -52,7 +53,7 @@ def test_gh_review_prompt_includes_pr_url(tmp_path: pathlib.Path) -> None:
     stage = _make_gh_review(
         client, tmp_path, pr_url="https://github.com/owner/repo/pull/1"
     )
-    stage.run(state)
+    asyncio.run(stage.run(state))
     prompt = client.calls[0].prompt
     assert "https://github.com/owner/repo/pull/1" in prompt
     assert not prompt.startswith("/github-review-pull-request")
@@ -65,7 +66,7 @@ def test_gh_review_prompt_includes_bail_content(tmp_path: pathlib.Path) -> None:
     stage = _make_gh_review(
         client, tmp_path, pr_url="https://github.com/owner/repo/pull/1"
     )
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert "python -c" in client.calls[0].prompt
 
 
@@ -75,7 +76,7 @@ def test_gh_review_bail_rubric(tmp_path: pathlib.Path) -> None:
     stage = _make_gh_review(
         client, tmp_path, pr_url="https://github.com/owner/repo/pull/1"
     )
-    stage.run(state)
+    asyncio.run(stage.run(state))
     prompt = client.calls[0].prompt
     assert "30 seconds" in prompt
     assert "missing import" in prompt
@@ -96,7 +97,7 @@ def test_gh_review_parallel_child_uses_new_bail_command(
         child_key="review-child",
         pipeline_data=_gh_pipeline(),
     )
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert "python -c" in client.calls[0].prompt
     assert "GREMLIN_STATE_DIR" in client.calls[0].prompt
     assert "gremlins.bail" not in client.calls[0].prompt
@@ -129,7 +130,7 @@ def test_gh_address_prompt_includes_pr_url(tmp_path: pathlib.Path) -> None:
     stage = _make_gh_address(
         client, tmp_path, pr_url="https://github.com/owner/repo/pull/1"
     )
-    stage.run(state)
+    asyncio.run(stage.run(state))
     prompt = client.calls[0].prompt
     assert "https://github.com/owner/repo/pull/1" in prompt
     assert not prompt.startswith("/github-address-pull-request-reviews")
@@ -144,7 +145,7 @@ def test_gh_address_prompt_includes_bail_content(tmp_path: pathlib.Path) -> None
     stage = _make_gh_address(
         client, tmp_path, pr_url="https://github.com/owner/repo/pull/1"
     )
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert (
         "## Bail markers (running under a gremlin pipeline)" in client.calls[0].prompt
     )
@@ -166,7 +167,7 @@ def test_gh_address_parallel_child_uses_new_bail_command(
         child_key="address-child",
         pipeline_data=_gh_pipeline(),
     )
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert "python -c" in client.calls[0].prompt
     assert "GREMLIN_STATE_DIR" in client.calls[0].prompt
     assert "gremlins.bail" not in client.calls[0].prompt
