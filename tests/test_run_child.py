@@ -258,8 +258,11 @@ def test_run_bad_spec_missing_stage_dict(tmp_path: pathlib.Path) -> None:
         json.dumps({"client": "fake:fake", "session_dir": str(tmp_path)}),
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="stage_dict"):
-        asyncio.run(_rc._run(spec_path))
+    rc = asyncio.run(_rc._run(spec_path))
+    assert rc == 2
+    result = _read_result(spec_path)
+    assert result["status"] == "error"
+    assert "stage_dict" in result["detail"]
 
 
 # ---------------------------------------------------------------------------
