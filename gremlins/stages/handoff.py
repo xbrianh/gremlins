@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import sys
 import threading
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar, cast
 
 from gremlins.clients.client import Client
@@ -50,6 +50,21 @@ def with_reap_after(client: Client, timeout: int | None, fn: Callable[[], T]) ->
     timer.start()
     try:
         return fn()
+    finally:
+        timer.cancel()
+
+
+async def with_reap_after_async(
+    client: Client, timeout: int | None, coro: Awaitable[T]
+) -> T:
+    """Await coro, reaping the client's subprocesses if it doesn't return in time."""
+    if timeout is None:
+        return await coro
+    timer = threading.Timer(timeout, client.reap_all)
+    timer.daemon = True
+    timer.start()
+    try:
+        return await coro
     finally:
         timer.cancel()
 
@@ -189,7 +204,7 @@ def _read_rolling_plan_for_sanitize(out_path: pathlib.Path) -> str | None:
         return None
 
 
-def sanitize_rolling_plan(
+async def sanitize_rolling_plan(
     client: Client,
     out_path: pathlib.Path,
     spec: Client,
@@ -203,10 +218,10 @@ def sanitize_rolling_plan(
     model = sanitize_model_for(spec)
     logger.info("sanitizing rolling plan (model: %s)", model)
     try:
-        with_reap_after(
+        await with_reap_after_async(
             client,
             timeout,
-            lambda: client.run(prompt, label="handoff:sanitize", model=model),
+            client.run(prompt, label="handoff:sanitize", model=model),
         )
     except Exception as exc:
         _restore_rolling_plan(out_path, plan_text, f"sanitize pass failed: {exc}")
@@ -267,11 +282,11 @@ def _parse_client_spec(client_arg: str) -> Client:
         raise RuntimeError(str(exc)) from exc
 
 
-def run(
+async def run(
     client: Client,
     args: argparse.Namespace,
     *,
-    run_fn: Callable[[str], None] | None = None,
+    run_fn: Callable[[str], Awaitable[None]] | None = None,
 ) -> int:
     plan_path = pathlib.Path(args.plan).resolve()
     if not plan_path.exists():
@@ -341,12 +356,12 @@ def run(
     logger.info("running handoff agent (client: %s)", client_spec)
     try:
         if run_fn is not None:
-            run_fn(prompt)
+            await run_fn(prompt)
         else:
-            with_reap_after(
+            await with_reap_after_async(
                 client,
                 args.timeout,
-                lambda: client.run(prompt, label="handoff", model=client_spec.model),
+                client.run(prompt, label="handoff", model=client_spec.model),
             )
     except Bail:
         raise
@@ -407,7 +422,7 @@ def run(
         for item in followups:
             logger.info("  - %s", item)
 
-    sanitize_rolling_plan(
+    await sanitize_rolling_plan(
         client,
         out_path,
         spec=client_spec,
@@ -430,7 +445,7 @@ class Handoff(Stage):
     def __init__(self, name: str) -> None:
         super().__init__(name)
 
-    def run(self, state: State) -> Outcome:
+    async def run(self, state: State) -> Outcome:
         session_dir = state.session_dir
         client = state.client
 
@@ -456,7 +471,7 @@ class Handoff(Stage):
         )
 
         state.record_stage_progress("handoff", parent_stage=state.parent_stage)
-        exit_state, sig = self._run_handoff(
+        exit_state, sig = await self._run_handoff(
             handoff_n=handoff_n,
             current_plan=current_plan,
             original_plan=str(boss_spec),
@@ -486,7 +501,7 @@ class Handoff(Stage):
         shutil.copyfile(child_plan_path, plan_md)
         return NeedsFix(f"next-plan: handoff {handoff_n}")
 
-    def _run_handoff(
+    async def _run_handoff(
         self,
         *,
         handoff_n: int,
@@ -514,11 +529,11 @@ class Handoff(Stage):
             base_ref[:12] if len(base_ref) >= 12 else base_ref,
         )
 
-        def _run_fn(prompt: str) -> None:
-            with_reap_after(
+        async def _run_fn(prompt: str) -> None:
+            await with_reap_after_async(
                 state.client,
                 HANDOFF_TIMEOUT,
-                lambda: run_agent(state, prompt, label="handoff"),
+                run_agent(state, prompt, label="handoff"),
             )
 
         args = argparse.Namespace(
@@ -531,7 +546,7 @@ class Handoff(Stage):
             rev=None,
         )
 
-        rc = run(client, args, run_fn=_run_fn)
+        rc = await run(client, args, run_fn=_run_fn)
         if rc != 0:
             raise RuntimeError(f"handoff agent exited {rc}")
 

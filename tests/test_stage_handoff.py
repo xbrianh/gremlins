@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import pathlib
 from typing import Any
@@ -92,7 +93,9 @@ def test_chain_done_immediately(tmp_path, monkeypatch, test_state_root):
 
     calls: list[str] = []
 
-    def fake_handoff_run(client: Any, args: argparse.Namespace, **_kw: Any) -> int:
+    async def fake_handoff_run(
+        client: Any, args: argparse.Namespace, **_kw: Any
+    ) -> int:
         n = int(str(args.out).split("-")[-1].split(".")[0])
         _make_signal_file(pathlib.Path(args.out).parent, n, "chain-done")
         calls.append("handoff")
@@ -103,7 +106,7 @@ def test_chain_done_immediately(tmp_path, monkeypatch, test_state_root):
 
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
     monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
-    h.run(state)
+    asyncio.run(h.run(state))
 
     assert calls == ["handoff"]
     # boss-spec.md should have been created and plan.md restored from it
@@ -125,7 +128,9 @@ def test_next_plan_writes_plan_and_raises(tmp_path, monkeypatch, test_state_root
     child_plan = tmp_path / "child-001.md"
     child_plan.write_text("# Child Plan\n", encoding="utf-8")
 
-    def fake_handoff_run(client: Any, args: argparse.Namespace, **_kw: Any) -> int:
+    async def fake_handoff_run(
+        client: Any, args: argparse.Namespace, **_kw: Any
+    ) -> int:
         n = int(str(args.out).split("-")[-1].split(".")[0])
         _make_signal_file(
             pathlib.Path(args.out).parent, n, "next-plan", str(child_plan)
@@ -138,7 +143,7 @@ def test_next_plan_writes_plan_and_raises(tmp_path, monkeypatch, test_state_root
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
     monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
 
-    outcome = h.run(state)
+    outcome = asyncio.run(h.run(state))
     assert isinstance(outcome, NeedsFix)
     assert "next-plan" in outcome.detail
     assert (tmp_path / "plan.md").read_text(encoding="utf-8") == "# Child Plan\n"
@@ -157,7 +162,9 @@ def test_bail_emits_bail_and_raises(tmp_path, monkeypatch, test_state_root):
     state_mod.StateData.load(gremlin_id).patch(attempt=attempt)
     _write_plan(tmp_path)
 
-    def fake_handoff_run(client: Any, args: argparse.Namespace, **_kw: Any) -> int:
+    async def fake_handoff_run(
+        client: Any, args: argparse.Namespace, **_kw: Any
+    ) -> int:
         _make_signal_file(tmp_path, 1, "bail", reason="scope too big")
         return 0
 
@@ -169,7 +176,7 @@ def test_bail_emits_bail_and_raises(tmp_path, monkeypatch, test_state_root):
     monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
 
     with pytest.raises(Bail) as exc_info:
-        h.run(state)
+        asyncio.run(h.run(state))
     assert "chain halted by handoff" in exc_info.value.reason
 
     bail_file = state_dir / f"bail_{attempt}.json"
@@ -191,7 +198,9 @@ def test_handoff_index_first_iteration(tmp_path, monkeypatch, test_state_root):
 
     calls: list[int] = []
 
-    def fake_handoff_run(client: Any, args: argparse.Namespace, **_kw: Any) -> int:
+    async def fake_handoff_run(
+        client: Any, args: argparse.Namespace, **_kw: Any
+    ) -> int:
         n = int(str(args.out).split("-")[-1].split(".")[0])
         _make_signal_file(pathlib.Path(args.out).parent, n, "chain-done")
         calls.append(n)
@@ -202,7 +211,7 @@ def test_handoff_index_first_iteration(tmp_path, monkeypatch, test_state_root):
 
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
     monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
-    h.run(state)
+    asyncio.run(h.run(state))
 
     assert calls == [1]
     assert (tmp_path / "boss-spec.md").exists()
@@ -220,14 +229,17 @@ def test_handoff_nonzero_exit_raises(tmp_path, monkeypatch, test_state_root):
     _write_state(state_dir, gremlin_id)
     _write_plan(tmp_path)
 
-    monkeypatch.setattr("gremlins.stages.handoff.run", lambda *a, **kw: 1)  # noqa: ARG005
+    async def _failing_run(*a, **kw):  # noqa: ARG001
+        return 1
+
+    monkeypatch.setattr("gremlins.stages.handoff.run", _failing_run)
     monkeypatch.setenv("GREMLIN_ID", gremlin_id)
 
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
     monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
 
     with pytest.raises(RuntimeError, match="handoff agent exited 1"):
-        h.run(state)
+        asyncio.run(h.run(state))
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +259,9 @@ def test_resume_continues_from_file_index(tmp_path, monkeypatch, test_state_root
     calls: list[int] = []
     captured_plan: list[str] = []
 
-    def fake_handoff_run(client: Any, args: argparse.Namespace, **_kw: Any) -> int:
+    async def fake_handoff_run(
+        client: Any, args: argparse.Namespace, **_kw: Any
+    ) -> int:
         n = int(str(args.out).split("-")[-1].split(".")[0])
         _make_signal_file(pathlib.Path(args.out).parent, n, "chain-done")
         calls.append(n)
@@ -259,7 +273,7 @@ def test_resume_continues_from_file_index(tmp_path, monkeypatch, test_state_root
 
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
     monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
-    h.run(state)
+    asyncio.run(h.run(state))
 
     # Should have run handoff #2 (index derived from existing handoff-001.state.json)
     assert calls == [2]
@@ -278,7 +292,9 @@ def test_base_ref_from_state(tmp_path, monkeypatch, test_state_root):
 
     captured_base: list[str] = []
 
-    def fake_handoff_run(client: Any, args: argparse.Namespace, **_kw: Any) -> int:
+    async def fake_handoff_run(
+        client: Any, args: argparse.Namespace, **_kw: Any
+    ) -> int:
         n = int(str(args.out).split("-")[-1].split(".")[0])
         _make_signal_file(pathlib.Path(args.out).parent, n, "chain-done")
         captured_base.append(args.base)
@@ -289,6 +305,6 @@ def test_base_ref_from_state(tmp_path, monkeypatch, test_state_root):
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
     state.data.base_ref_name = "deadbeef1234"
     # Do NOT monkeypatch _resolve_base_ref — state has base_ref_name, fallback must not run
-    h.run(state)
+    asyncio.run(h.run(state))
 
     assert captured_base == ["deadbeef1234"]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import pathlib
 from unittest.mock import patch
@@ -46,7 +47,7 @@ def test_run_calls_claude_with_push_prompt(tmp_path: pathlib.Path) -> None:
         ),
         patch("gremlins.executor.state.StateData.append_artifact"),
     ):
-        stage.run(state)
+        asyncio.run(stage.run(state))
     assert len(state.client.calls) == 1
     call = state.client.calls[0]
     assert call.label == "github-open-pull-request"
@@ -68,7 +69,7 @@ def test_issue_num_adds_closes_clause(tmp_path: pathlib.Path) -> None:
         ),
         patch("gremlins.executor.state.StateData.append_artifact"),
     ):
-        stage.run(state)
+        asyncio.run(stage.run(state))
     assert "Closes #42" in state.client.calls[0].prompt
 
 
@@ -85,7 +86,7 @@ def test_no_issue_url_skips_closes(tmp_path: pathlib.Path) -> None:
         ),
         patch("gremlins.executor.state.StateData.append_artifact"),
     ):
-        stage.run(state)
+        asyncio.run(stage.run(state))
     assert "Include 'Closes" not in state.client.calls[0].prompt
 
 
@@ -104,7 +105,7 @@ def test_run_returns_done(tmp_path: pathlib.Path) -> None:
         ),
         patch("gremlins.executor.state.StateData.append_artifact"),
     ):
-        result = stage.run(state)
+        result = asyncio.run(stage.run(state))
     assert result == Done()
 
 
@@ -121,7 +122,7 @@ def test_run_writes_raw_path(tmp_path: pathlib.Path) -> None:
         ),
         patch("gremlins.executor.state.StateData.append_artifact"),
     ):
-        stage.run(state)
+        asyncio.run(stage.run(state))
     assert (
         state.client.calls[0].raw_path
         == tmp_path / "stream-github-open-pull-request.jsonl"
@@ -145,7 +146,7 @@ def test_run_records_pr_artifact(tmp_path: pathlib.Path) -> None:
             side_effect=lambda artifact: artifact_calls.append(artifact),
         ),
     ):
-        stage.run(state)
+        asyncio.run(stage.run(state))
     assert len(artifact_calls) == 1
     assert artifact_calls[0]["type"] == "pr"
     assert artifact_calls[0]["url"] == PR_URL
@@ -180,6 +181,11 @@ def test_stacked_pr_uses_prior_pr_branch(tmp_path: pathlib.Path) -> None:
     """For child N>1, PR base is the previous child's PR branch."""
     stage, state = _make_state_with_gr(tmp_path, base_ref_name="main")
     prompts_seen: list[str] = []
+
+    async def _fake_run_agent(state, prompt, **kw):
+        prompts_seen.append(prompt)
+        return type("R", (), {"events": [], "text_result": ""})()
+
     with (
         patch(
             "gremlins.executor.state.StateData.last_pr_branch",
@@ -194,15 +200,9 @@ def test_stacked_pr_uses_prior_pr_branch(tmp_path: pathlib.Path) -> None:
             return_value=PR_BRANCH,
         ),
         patch("gremlins.executor.state.StateData.append_artifact"),
-        patch(
-            "gremlins.stages.github_open_pull_request.run_agent",
-            side_effect=lambda state, prompt, **kw: (
-                prompts_seen.append(prompt)
-                or type("R", (), {"events": [], "text_result": ""})()
-            ),
-        ),
+        patch("gremlins.stages.github_open_pull_request.run_agent", _fake_run_agent),
     ):
-        stage.run(state)
+        asyncio.run(stage.run(state))
     assert prompts_seen, "run_agent should have been called"
     assert "gremlin/abc-child-1" in prompts_seen[0], (
         "PR prompt should target previous child branch, not main"
@@ -215,6 +215,11 @@ def test_single_pr_without_prior_pr_branch_uses_base_ref_name(
     """Regression: when no prior PR branch exists, base_ref_name is used as the PR base."""
     stage, state = _make_state_with_gr(tmp_path, base_ref_name="main")
     prompts_seen: list[str] = []
+
+    async def _fake_run_agent(state, prompt, **kw):
+        prompts_seen.append(prompt)
+        return type("R", (), {"events": [], "text_result": ""})()
+
     with (
         patch("gremlins.executor.state.StateData.last_pr_branch", return_value=""),
         patch(
@@ -226,15 +231,9 @@ def test_single_pr_without_prior_pr_branch_uses_base_ref_name(
             return_value=PR_BRANCH,
         ),
         patch("gremlins.executor.state.StateData.append_artifact"),
-        patch(
-            "gremlins.stages.github_open_pull_request.run_agent",
-            side_effect=lambda state, prompt, **kw: (
-                prompts_seen.append(prompt)
-                or type("R", (), {"events": [], "text_result": ""})()
-            ),
-        ),
+        patch("gremlins.stages.github_open_pull_request.run_agent", _fake_run_agent),
     ):
-        stage.run(state)
+        asyncio.run(stage.run(state))
     assert prompts_seen, "run_agent should have been called"
     assert "main" in prompts_seen[0]
 
@@ -243,6 +242,11 @@ def test_first_child_uses_base_ref_name(tmp_path: pathlib.Path) -> None:
     """For child 1 (no previous artifact branch), PR base is base_ref_name."""
     stage, state = _make_state_with_gr(tmp_path, base_ref_name="main")
     prompts_seen: list[str] = []
+
+    async def _fake_run_agent(state, prompt, **kw):
+        prompts_seen.append(prompt)
+        return type("R", (), {"events": [], "text_result": ""})()
+
     with (
         patch(
             "gremlins.stages.github_open_pull_request.extract_gh_url",
@@ -253,15 +257,9 @@ def test_first_child_uses_base_ref_name(tmp_path: pathlib.Path) -> None:
             return_value=PR_BRANCH,
         ),
         patch("gremlins.executor.state.StateData.append_artifact"),
-        patch(
-            "gremlins.stages.github_open_pull_request.run_agent",
-            side_effect=lambda state, prompt, **kw: (
-                prompts_seen.append(prompt)
-                or type("R", (), {"events": [], "text_result": ""})()
-            ),
-        ),
+        patch("gremlins.stages.github_open_pull_request.run_agent", _fake_run_agent),
     ):
-        stage.run(state)
+        asyncio.run(stage.run(state))
     assert prompts_seen, "run_agent should have been called"
     assert "main" in prompts_seen[0]
 
@@ -276,6 +274,11 @@ def test_explicit_base_ref_used_when_no_prior_pr(tmp_path: pathlib.Path) -> None
         session_dir=tmp_path,
     )
     prompts_seen: list[str] = []
+
+    async def _fake_run_agent(state, prompt, **kw):
+        prompts_seen.append(prompt)
+        return type("R", (), {"events": [], "text_result": ""})()
+
     with (
         patch("gremlins.executor.state.StateData.last_pr_branch", return_value=None),
         patch(
@@ -287,15 +290,9 @@ def test_explicit_base_ref_used_when_no_prior_pr(tmp_path: pathlib.Path) -> None
             return_value=PR_BRANCH,
         ),
         patch("gremlins.executor.state.StateData.append_artifact"),
-        patch(
-            "gremlins.stages.github_open_pull_request.run_agent",
-            side_effect=lambda state, prompt, **kw: (
-                prompts_seen.append(prompt)
-                or type("R", (), {"events": [], "text_result": ""})()
-            ),
-        ),
+        patch("gremlins.stages.github_open_pull_request.run_agent", _fake_run_agent),
     ):
-        stage.run(state)
+        asyncio.run(stage.run(state))
     assert "feature-base" in prompts_seen[0]
 
 
@@ -309,6 +306,11 @@ def test_last_pr_branch_takes_priority_over_base_ref(tmp_path: pathlib.Path) -> 
         session_dir=tmp_path,
     )
     prompts_seen: list[str] = []
+
+    async def _fake_run_agent(state, prompt, **kw):
+        prompts_seen.append(prompt)
+        return type("R", (), {"events": [], "text_result": ""})()
+
     with (
         patch(
             "gremlins.executor.state.StateData.last_pr_branch",
@@ -323,15 +325,9 @@ def test_last_pr_branch_takes_priority_over_base_ref(tmp_path: pathlib.Path) -> 
             return_value=PR_BRANCH,
         ),
         patch("gremlins.executor.state.StateData.append_artifact"),
-        patch(
-            "gremlins.stages.github_open_pull_request.run_agent",
-            side_effect=lambda state, prompt, **kw: (
-                prompts_seen.append(prompt)
-                or type("R", (), {"events": [], "text_result": ""})()
-            ),
-        ),
+        patch("gremlins.stages.github_open_pull_request.run_agent", _fake_run_agent),
     ):
-        stage.run(state)
+        asyncio.run(stage.run(state))
     assert "gremlin/child-1" in prompts_seen[0]
     assert "feature-base" not in prompts_seen[0]
 
@@ -346,6 +342,11 @@ def test_loop_iteration_gt1_adds_iter_suffix_instruction(
         state, data=dataclasses.replace(state.data, loop_iteration=2)
     )
     prompts_seen: list[str] = []
+
+    async def _fake_run_agent(state, prompt, **kw):
+        prompts_seen.append(prompt)
+        return type("R", (), {"events": [], "text_result": ""})()
+
     with (
         patch(
             "gremlins.stages.github_open_pull_request.extract_gh_url",
@@ -356,15 +357,9 @@ def test_loop_iteration_gt1_adds_iter_suffix_instruction(
             return_value=PR_BRANCH,
         ),
         patch("gremlins.executor.state.StateData.append_artifact"),
-        patch(
-            "gremlins.stages.github_open_pull_request.run_agent",
-            side_effect=lambda state, prompt, **kw: (
-                prompts_seen.append(prompt)
-                or type("R", (), {"events": [], "text_result": ""})()
-            ),
-        ),
+        patch("gremlins.stages.github_open_pull_request.run_agent", _fake_run_agent),
     ):
-        stage.run(state)
+        asyncio.run(stage.run(state))
     assert prompts_seen
     assert "-iter2" in prompts_seen[0]
 
@@ -374,6 +369,11 @@ def test_loop_iteration_1_no_iter_suffix(tmp_path: pathlib.Path) -> None:
         tmp_path, gremlin_id="test-gr", issue_url="https://github.com/o/r/issues/431"
     )
     prompts_seen: list[str] = []
+
+    async def _fake_run_agent(state, prompt, **kw):
+        prompts_seen.append(prompt)
+        return type("R", (), {"events": [], "text_result": ""})()
+
     with (
         patch(
             "gremlins.stages.github_open_pull_request.extract_gh_url",
@@ -384,15 +384,9 @@ def test_loop_iteration_1_no_iter_suffix(tmp_path: pathlib.Path) -> None:
             return_value=PR_BRANCH,
         ),
         patch("gremlins.executor.state.StateData.append_artifact"),
-        patch(
-            "gremlins.stages.github_open_pull_request.run_agent",
-            side_effect=lambda state, prompt, **kw: (
-                prompts_seen.append(prompt)
-                or type("R", (), {"events": [], "text_result": ""})()
-            ),
-        ),
+        patch("gremlins.stages.github_open_pull_request.run_agent", _fake_run_agent),
     ):
-        stage.run(state)
+        asyncio.run(stage.run(state))
     assert prompts_seen
     assert "-iter" not in prompts_seen[0]
 
@@ -415,7 +409,7 @@ def test_record_child_pr_appends_pr_artifact(tmp_path: pathlib.Path) -> None:
             side_effect=lambda artifact: artifact_calls.append(artifact),
         ),
     ):
-        stage.run(state)
+        asyncio.run(stage.run(state))
     assert artifact_calls, "append_artifact should be called with PR info"
     artifact = artifact_calls[0]
     assert artifact["type"] == "pr"

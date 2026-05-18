@@ -1,5 +1,6 @@
 """Tests for gremlins.stages.github_wait_ci."""
 
+import asyncio
 import json
 import pathlib
 from collections.abc import Callable
@@ -80,7 +81,7 @@ def test_no_checks_skips(tmp_path: pathlib.Path) -> None:
     stage, state = _make_stage(
         client, tmp_path, startup_grace_secs=0, checks_getter=getter
     )
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert client.calls == []
 
 
@@ -91,7 +92,7 @@ def test_review_required_no_checks_bails(tmp_path: pathlib.Path) -> None:
     getter = _make_getter([([], "REVIEW_REQUIRED")])
     stage, state = _make_stage(client, tmp_path, checks_getter=getter)
     with pytest.raises(Bail) as exc_info:
-        stage.run(state)
+        asyncio.run(stage.run(state))
     assert "PR blocked by required human review" in exc_info.value.reason
     assert client.calls == []
 
@@ -105,7 +106,7 @@ def test_all_checks_passing_returns(tmp_path: pathlib.Path) -> None:
         ]
     )
     stage, state = _make_stage(client, tmp_path, checks_getter=getter)
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert client.calls == []
 
 
@@ -120,7 +121,7 @@ def test_checks_pending_then_passing(tmp_path: pathlib.Path) -> None:
         return [_PASSING_CHECK], ""
 
     stage, state = _make_stage(client, tmp_path, poll_interval=0, checks_getter=getter)
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert client.calls == []
 
 
@@ -131,7 +132,7 @@ def test_review_required_bails(tmp_path: pathlib.Path) -> None:
     getter = _make_getter([([_PASSING_CHECK], "REVIEW_REQUIRED")])
     stage, state = _make_stage(client, tmp_path, checks_getter=getter)
     with pytest.raises(Bail) as exc_info:
-        stage.run(state)
+        asyncio.run(stage.run(state))
     assert "PR blocked by required human review" in exc_info.value.reason
     assert client.calls == []
 
@@ -149,7 +150,7 @@ def test_review_required_after_fix_bails(tmp_path: pathlib.Path) -> None:
     )
     stage, state = _make_stage(client, tmp_path, poll_interval=0, checks_getter=getter)
     with pytest.raises(Bail) as exc_info:
-        stage.run(state)
+        asyncio.run(stage.run(state))
     assert "PR blocked by required human review" in exc_info.value.reason
     assert len(client.calls) == 1
     assert client.calls[0].label == "ci-fix-1"
@@ -167,7 +168,7 @@ def test_review_required_while_pending_bails(tmp_path: pathlib.Path) -> None:
     )
     stage, state = _make_stage(client, tmp_path, poll_interval=0, checks_getter=getter)
     with pytest.raises(Bail) as exc_info:
-        stage.run(state)
+        asyncio.run(stage.run(state))
     assert "PR blocked by required human review" in exc_info.value.reason
     assert client.calls == []
 
@@ -183,7 +184,7 @@ def test_fix_on_failure_then_pass(tmp_path: pathlib.Path) -> None:
         return [_PASSING_CHECK], ""
 
     stage, state = _make_stage(client, tmp_path, poll_interval=0, checks_getter=getter)
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert len(client.calls) == 1
     assert client.calls[0].label == "ci-fix-1"
 
@@ -215,7 +216,7 @@ def test_ci_fix_prompt_contains_pr_branch(
         checks_getter=getter,
         pr_branch=None,
     )
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert len(client.calls) == 1
     assert branch in client.calls[0].prompt
 
@@ -239,7 +240,7 @@ def test_exhausted_bails(tmp_path: pathlib.Path) -> None:
 
     stage, state = _make_stage(client, tmp_path, poll_interval=0, checks_getter=getter)
     with pytest.raises(Bail) as exc_info:
-        stage.run(state)
+        asyncio.run(stage.run(state))
     assert "CI failed after 3 attempts" in exc_info.value.reason
     fix_labels = [c.label for c in client.calls]
     assert fix_labels == ["ci-fix-1", "ci-fix-2"]
@@ -258,7 +259,7 @@ def test_timeout_counts_as_failed(tmp_path: pathlib.Path) -> None:
     stage, state = _make_stage(
         client, tmp_path, poll_timeout=0, poll_interval=0, checks_getter=getter
     )
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert client.calls == []
 
 
@@ -288,7 +289,7 @@ def test_post_fix_waits_for_sha_propagation(tmp_path: pathlib.Path) -> None:
         head_sha_getter=head_sha_getter,
         fix_sha_getter=lambda: "new_sha",
     )
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert len(client.calls) == 1
     assert sha_call[0] >= 2
 
@@ -311,7 +312,7 @@ def test_post_fix_no_sha_available_falls_back(tmp_path: pathlib.Path) -> None:
         checks_getter=getter,
         fix_sha_getter=lambda: "",
     )
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert len(client.calls) == 1
 
 
@@ -328,7 +329,7 @@ def test_grace_period_waits_for_checks_to_appear(tmp_path: pathlib.Path) -> None
     stage, state = _make_stage(
         client, tmp_path, poll_interval=0, startup_grace_secs=60, checks_getter=getter
     )
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert client.calls == []
     assert call_count[0] >= 2
 
@@ -345,7 +346,7 @@ def test_no_checks_after_grace_skips(tmp_path: pathlib.Path) -> None:
     stage, state = _make_stage(
         client, tmp_path, poll_interval=0, startup_grace_secs=1, checks_getter=getter
     )
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert client.calls == []
     assert call_count[0] >= 2
 
@@ -365,7 +366,7 @@ def test_poll_empty_mid_run_continues_polling(tmp_path: pathlib.Path) -> None:
     stage, state = _make_stage(
         client, tmp_path, poll_interval=0, startup_grace_secs=0, checks_getter=getter
     )
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert client.calls == []
     assert call_count[0] >= 3
 
@@ -388,7 +389,7 @@ def test_review_required_emits_bail_to_state(
 
     state.data.attempt = attempt
     with pytest.raises(Bail):
-        stage.run(state)
+        asyncio.run(stage.run(state))
     bail_file = state_dir / f"bail_{attempt}.json"
     assert bail_file.exists()
     data = json.loads(bail_file.read_text())
@@ -431,7 +432,7 @@ def test_empty_pr_branch_bails(
 
     state.data.attempt = attempt
     with pytest.raises(Bail):
-        stage.run(state)
+        asyncio.run(stage.run(state))
     bail_file = state_dir / f"bail_{attempt}.json"
     assert bail_file.exists()
     data = json.loads(bail_file.read_text())
@@ -467,5 +468,5 @@ def test_check_bail_raises_from_state(
 
     state.data.attempt = attempt
     with pytest.raises(Bail) as exc_info:
-        stage.run(state)
+        asyncio.run(stage.run(state))
     assert "ci bailed" in exc_info.value.reason

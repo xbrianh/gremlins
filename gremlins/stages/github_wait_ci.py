@@ -156,7 +156,7 @@ class GitHubWaitCI(Stage):
         self.head_sha_getter = head_sha_getter
         self.fix_sha_getter = fix_sha_getter
 
-    def _run_ci_attempt(
+    async def _run_ci_attempt(
         self, state: State, attempt: int, pr_url: str, template: str, fix_sha: str
     ) -> tuple[Outcome | None, str]:
         logger.info(
@@ -199,7 +199,7 @@ class GitHubWaitCI(Stage):
             failure_output=failure_output,
             pr_branch=pr_branch,
         )
-        run_agent(
+        await run_agent(
             state,
             fix_prompt,
             label=f"ci-fix-{attempt}",
@@ -213,7 +213,7 @@ class GitHubWaitCI(Stage):
         )
         return None, new_fix_sha
 
-    def run(self, state: State) -> Outcome:
+    async def run(self, state: State) -> Outcome:
         pr_url = self.pr_url or state.data.read_pr_url()
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
@@ -232,7 +232,7 @@ class GitHubWaitCI(Stage):
         template = "\n\n".join(self.prompts).rstrip()
         fix_sha = ""
         for attempt in range(1, self.max_attempts + 1):
-            outcome, fix_sha = self._run_ci_attempt(
+            outcome, fix_sha = await self._run_ci_attempt(
                 state, attempt, pr_url, template, fix_sha
             )
             if outcome is not None:

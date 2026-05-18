@@ -54,9 +54,9 @@ class AddressCode(Stage):
         self.prompts = prompts
         self.options = options
 
-    def run(self, state: State) -> Outcome:
+    async def run(self, state: State) -> Outcome:
         inputs = self._inputs_from_local(state)
-        self._run_local(inputs, state)
+        await self._run_local(inputs, state)
         return Done()
 
     def _inputs_from_local(self, state: State) -> dict[str, str]:
@@ -81,14 +81,14 @@ class AddressCode(Stage):
         )
         return {"text": text, "review_model": review_model}
 
-    def _run_local(self, inputs: dict[str, str], state: State) -> None:
+    async def _run_local(self, inputs: dict[str, str], state: State) -> None:
         template = "\n\n".join(self.prompts).rstrip()
         address_prompt = template.format(
             bail_command=bail_command(state),
             model=inputs["review_model"],
             text=inputs["text"],
         )
-        run_agent(
+        await run_agent(
             state,
             address_prompt,
             label="address-code",
@@ -127,7 +127,7 @@ class GitHubAddressPullRequestReviews(Stage):
         self.options = options
         self.pr_url = pr_url
 
-    def run(self, state: State) -> Outcome:
+    async def run(self, state: State) -> Outcome:
         pr_url = self.pr_url or state.data.read_pr_url()
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
@@ -139,7 +139,7 @@ class GitHubAddressPullRequestReviews(Stage):
                 pr_url=pr_url,
             )
         )
-        run_agent(
+        await run_agent(
             state,
             prompt,
             label="github-address-pull-request-reviews",

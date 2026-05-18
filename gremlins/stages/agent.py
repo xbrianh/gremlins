@@ -41,7 +41,7 @@ def bail_command(state: State) -> str:
     return f"python -c {shlex.quote(script)}"
 
 
-def run_agent(
+async def run_agent(
     state: State,
     prompt: str,
     *,
@@ -57,7 +57,7 @@ def run_agent(
         extra_env["GREMLIN_ATTEMPT"] = state.data.attempt
         extra_env["GREMLIN_STATE_DIR"] = str(sf.parent)
     resolved_model = model or state.stage_model or state.client.model
-    completed = state.client.run(
+    completed = await state.client.run(
         prompt,
         label=label,
         model=resolved_model,

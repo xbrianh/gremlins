@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import contextlib
+import asyncio
+import json
 import os
 import pathlib
-import subprocess
 import sys
 import threading
-from collections.abc import Generator
-from typing import IO, cast
+from typing import Any
 
 from gremlins.clients.config import (
     STREAM_IDLE_BACKOFF,
@@ -16,11 +15,7 @@ from gremlins.clients.config import (
     validate_max_retries,
 )
 from gremlins.clients.protocol import CompletedRun
-from gremlins.clients.stream import stream_events
-from gremlins.clients.subprocess_utils import (
-    reap_processes,
-    terminate_and_kill,
-)
+from gremlins.clients.stream import decode_line, emit_event, extract_state
 from gremlins.utils.decorators import swallow
 
 
@@ -48,33 +43,34 @@ class SubprocessClaudeClient:
         # while _track/_untrack already hold it. A plain Lock would deadlock
         # in that narrow window.
         self._lock = threading.RLock()
-        self._children: list[subprocess.Popen[bytes]] = []
+        self._children: list[asyncio.subprocess.Process] = []
         self._total_cost_usd: float = 0.0
 
-    def _track(self, p: subprocess.Popen[bytes]) -> None:
+    def _track(self, p: asyncio.subprocess.Process) -> None:
         with self._lock:
             self._children.append(p)
 
     @swallow(ValueError)
-    def _untrack(self, p: subprocess.Popen[bytes]) -> None:
+    def _untrack(self, p: asyncio.subprocess.Process) -> None:
         with self._lock:
             self._children.remove(p)
-
-    @contextlib.contextmanager
-    def _tracked(
-        self, p: subprocess.Popen[bytes]
-    ) -> Generator[subprocess.Popen[bytes], None, None]:
-        self._track(p)
-        try:
-            yield p
-        except Exception:
-            self._untrack(p)
-            raise
 
     def reap_all(self) -> None:
         with self._lock:
             procs = list(self._children)
-        reap_processes(procs)
+        for p in procs:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+        # asyncio.subprocess.Process.wait() is async so we cannot give processes a
+        # window to handle SIGTERM before escalating. SIGTERM above is a courtesy;
+        # the SIGKILL below is what actually reclaims them.
+        for p in procs:
+            try:
+                p.kill()
+            except Exception:
+                pass
 
     @property
     def total_cost_usd(self) -> float:
@@ -88,73 +84,130 @@ class SubprocessClaudeClient:
         cmd += ["--output-format", "stream-json"]
         return cmd
 
-    def _spawn(
+    async def _spawn(
         self,
         argv: list[str],
         prompt: str,
         cwd: pathlib.Path | None = None,
         extra_env: dict[str, str] | None = None,
-    ) -> subprocess.Popen[bytes]:
+    ) -> asyncio.subprocess.Process:
         env = os.environ.copy()
         env["GREMLIN_SKIP_SUMMARY"] = "1"
         if extra_env:
             env.update(extra_env)
-        # Default bufsize (-1) gives a BufferedReader with 8 KiB reads, so
-        # readline() scans for '\n' in-buffer instead of doing one os.read()
-        # per byte. Streaming latency is preserved and throughput on large
-        # stream-json traces jumps by orders of magnitude.
-        p = subprocess.Popen(
-            argv,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
+        p = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
             stderr=None,
-            start_new_session=False,
             env=env,
             cwd=str(cwd) if cwd is not None else None,
         )
-        with self._tracked(p):
-            stdin = cast(IO[bytes], p.stdin)
-            stdin.write(prompt.encode())
-            stdin.close()
+        self._track(p)
+        try:
+            assert p.stdin is not None
+            p.stdin.write(prompt.encode())
+            await p.stdin.drain()
+            p.stdin.close()
+        except Exception:
+            self._untrack(p)
+            raise
         return p
 
-    def _consume(
+    async def _terminate_and_wait(self, p: asyncio.subprocess.Process) -> None:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(p.wait(), timeout=5.0)
+        except TimeoutError:
+            try:
+                p.kill()
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(p.wait(), timeout=5.0)
+            except TimeoutError:
+                pass
+
+    async def _read_lines(
         self,
-        p: subprocess.Popen[bytes],
+        p: asyncio.subprocess.Process,
         prefix: str,
         raw_path: pathlib.Path | None,
         capture_events: bool,
-        idle_timeout: float = STREAM_IDLE_TIMEOUT,
+        idle_timeout: float,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]] | None, bool]:
+        assert p.stdout is not None
+        state: dict[str, Any] = {"cost_usd": None, "result_text": None}
+        events: list[dict[str, Any]] | None = [] if capture_events else None
+        timed_out = False
+        raw = open(raw_path, "ab") if raw_path is not None else None
+        try:
+            while True:
+                try:
+                    line = await asyncio.wait_for(
+                        p.stdout.readline(), timeout=idle_timeout
+                    )
+                except TimeoutError:
+                    timed_out = True
+                    break
+                if not line:
+                    break
+                if raw is not None:
+                    raw.write(line)
+                    raw.flush()
+                if b"Stream idle timeout" in line:
+                    try:
+                        json.loads(line.decode("utf-8", errors="replace"))
+                    except Exception:
+                        timed_out = True
+                evt = decode_line(line)
+                if evt is None:
+                    continue
+                extract_state(evt, state)
+                if events is not None:
+                    events.append(evt)
+                try:
+                    emit_event(prefix, evt)
+                except Exception:
+                    pass
+        finally:
+            if raw is not None:
+                raw.close()
+        return state, events, timed_out
+
+    async def _consume(
+        self,
+        p: asyncio.subprocess.Process,
+        prefix: str,
+        raw_path: pathlib.Path | None,
+        capture_events: bool,
+        idle_timeout: float,
     ) -> CompletedRun:
         try:
-            stdout = cast(IO[bytes], p.stdout)
-            cost_usd, result_text, events, timed_out = stream_events(
-                stdout,
-                prefix=prefix,
-                raw_path=raw_path,
-                capture=capture_events,
-                idle_timeout=idle_timeout,
+            state, events, timed_out = await self._read_lines(
+                p, prefix, raw_path, capture_events, idle_timeout
             )
-            if cost_usd is not None:
-                with self._lock:
-                    self._total_cost_usd += cost_usd
-            if timed_out:
-                terminate_and_kill(p, 5.0)
-                stdout.close()
-                raise StreamTimeoutError("claude -p stream idle timeout")
-            stdout.close()
-            rc = p.wait()
         finally:
             self._untrack(p)
-
+        if timed_out:
+            await self._terminate_and_wait(p)
+            raise StreamTimeoutError("claude -p stream idle timeout")
+        rc = await p.wait()
+        cost_usd = state["cost_usd"]
+        if cost_usd is not None:
+            with self._lock:
+                self._total_cost_usd += cost_usd
         return CompletedRun(
             exit_code=rc,
-            text_result=result_text,
+            text_result=state["result_text"],
             events=events,
             cost_usd=cost_usd,
         )
 
-    def run(
+    async def run(
         self,
         prompt: str,
         *,
@@ -189,11 +242,13 @@ class SubprocessClaudeClient:
             backoff=STREAM_IDLE_BACKOFF[:max_retries],
             on_retry=_on_retry,
         )
-        def _run_once() -> CompletedRun:
-            p = self._spawn(argv, active_prompt, cwd=cwd, extra_env=extra_env)
-            return self._consume(p, prefix, raw_path, capture_events, idle_timeout)
+        async def _run_once() -> CompletedRun:
+            p = await self._spawn(argv, active_prompt, cwd=cwd, extra_env=extra_env)
+            return await self._consume(
+                p, prefix, raw_path, capture_events, idle_timeout
+            )
 
-        result = _run_once()
+        result = await _run_once()
         if result.exit_code != 0:
             raise RuntimeError(
                 f"claude -p (model={model}, label={label}) exited {result.exit_code}"

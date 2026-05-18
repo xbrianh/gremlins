@@ -153,7 +153,7 @@ class ReviewCreatingClient(FakeClaudeClient):
     exactly the path run_review_code_stage expects to exist after the reviewer
     finishes. Shared between test_orchestrator_local and test_state_isolation."""
 
-    def run(self, prompt, *, label, **kwargs):
+    async def run(self, prompt, *, label, **kwargs):
         if label.startswith("review-code:"):
             m = re.search(r"`([^`]+\.md)`\s+is the canonical", prompt)
             assert m, f"regex did not match review-code prompt for label {label!r}"
@@ -166,7 +166,7 @@ class ReviewCreatingClient(FakeClaudeClient):
                     f"expected one of {sorted(REVIEW_LABELS)}"
                 )
                 self._fixtures[label] = MINIMAL_EVENTS
-        return super().run(prompt, label=label, **kwargs)
+        return await super().run(prompt, label=label, **kwargs)
 
 
 def common_local_patches(monkeypatch):

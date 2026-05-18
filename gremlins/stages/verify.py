@@ -36,7 +36,7 @@ class VerifyFix(Stage):
         self.prompts = prompts
         self._commands_section = commands_section
 
-    def run(self, state: State) -> Outcome:
+    async def run(self, state: State) -> Outcome:
         n = state.data.loop_iteration
         log_path = state.session_dir / f"verify-attempt-{n}.log"
         if not log_path.exists():
@@ -50,7 +50,7 @@ class VerifyFix(Stage):
             verify_output=log_text,
             diff_text=diff,
         )
-        run_agent(
+        await run_agent(
             state,
             fix_prompt,
             label=f"verify-fix-{n}",
@@ -67,7 +67,7 @@ class Verify(Stage):
         self.prompts = prompts
         self.options = options
 
-    def run(self, state: State) -> Outcome:
+    async def run(self, state: State) -> Outcome:
         options = dict(self.options)
         if not state.repo:
             cmds_arg = getattr(state.args, "cmds", None)
@@ -86,6 +86,6 @@ class Verify(Stage):
         commands_section = "**Commands run:**\n" + "\n".join(f"- `{c}`" for c in cmds)
         cmd_stage = Cmd("cmd", [], {"cmds": cmds, "log_path": "verify-attempt-{n}.log"})
         fix_stage = VerifyFix("fix", self.prompts, commands_section)
-        return LoopStage(
+        return await LoopStage(
             "verify", body=[cmd_stage, fix_stage], max_iterations=max_attempts
         ).run(state)

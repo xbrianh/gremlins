@@ -64,7 +64,7 @@ class Plan(Stage):
             ),
         ]
 
-    def run(self, state: State) -> Outcome:
+    async def run(self, state: State) -> Outcome:
         plan_val = getattr(state.args, "plan", None)
         if not self.prompts and not plan_val:
             die(
@@ -80,15 +80,15 @@ class Plan(Stage):
         if plan_val:
             src = pathlib.Path(plan_val)
             if src.is_file():
-                self._resolve_file_source(plan_val, plan_md, state)
+                await self._resolve_file_source(plan_val, plan_md, state)
             else:
                 self._resolve_issue_source(plan_val, plan_md, state)
             return Done()
 
-        self._run_agent(plan_md, state)
+        await self._run_agent(plan_md, state)
         return Done()
 
-    def _run_agent(self, plan_md: pathlib.Path, state: State) -> None:
+    async def _run_agent(self, plan_md: pathlib.Path, state: State) -> None:
         if state.repo:
             base_ref_name = state.data.base_ref_name
             plan_prompt = (
@@ -99,7 +99,7 @@ class Plan(Stage):
                     instructions=_fmt_escape(state.instructions),
                 )
             )
-            completed = run_agent(
+            completed = await run_agent(
                 state,
                 plan_prompt,
                 label="plan",
@@ -124,7 +124,7 @@ class Plan(Stage):
                 plan_file=plan_md,
                 instructions=state.instructions,
             )
-            completed = run_agent(
+            completed = await run_agent(
                 state,
                 prompt,
                 label="plan",
@@ -135,7 +135,7 @@ class Plan(Stage):
                 detail = f"; model said: {snippet}" if snippet else ""
                 raise RuntimeError(f"plan stage did not produce {plan_md}{detail}")
 
-    def _resolve_file_source(
+    async def _resolve_file_source(
         self, path: str, plan_md: pathlib.Path, state: State
     ) -> None:
         src = pathlib.Path(path)
@@ -149,7 +149,7 @@ class Plan(Stage):
         logger.info(
             "[1/8] plan supplied via --plan (file): %s — posting as GitHub issue", path
         )
-        issue_url, issue_title = _post_file_as_github_issue(path, state)
+        issue_url, issue_title = await _post_file_as_github_issue(path, state)
         issue_num = issue_url.split("/")[-1]
         shutil.copyfile(src, plan_md)
         state.record_state_field(issue_url=issue_url, issue_num=issue_num)
@@ -226,7 +226,7 @@ class Plan(Stage):
             pass
 
 
-def _post_file_as_github_issue(path: str, state: State) -> tuple[str, str]:
+async def _post_file_as_github_issue(path: str, state: State) -> tuple[str, str]:
     """Post a local file as a GitHub issue. Returns (issue_url, issue_title)."""
     issue_body = pathlib.Path(path).read_text(encoding="utf-8")
     title_prompt = (
@@ -234,7 +234,7 @@ def _post_file_as_github_issue(path: str, state: State) -> tuple[str, str]:
         "summarizing the spec below. Output ONLY the title, nothing else."
         f"\n\n{issue_body}"
     )
-    completed = run_agent(
+    completed = await run_agent(
         state,
         title_prompt,
         label="plan-title",

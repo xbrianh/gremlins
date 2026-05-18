@@ -1,3 +1,4 @@
+import asyncio
 import json
 import pathlib
 import subprocess
@@ -122,7 +123,7 @@ def test_implement_renders_spec_block_when_present(tmp_path, monkeypatch):
     session_dir.mkdir()
 
     class _CommittingClient(FakeClaudeClient):
-        def run(self, prompt, *, label, **kwargs):
+        async def run(self, prompt, *, label, **kwargs):
             (git_dir / "newfile.txt").write_text("change\n")
             subprocess.run(
                 ["git", "add", "newfile.txt"],
@@ -136,7 +137,7 @@ def test_implement_renders_spec_block_when_present(tmp_path, monkeypatch):
                 check=True,
                 capture_output=True,
             )
-            return super().run(prompt, label=label, **kwargs)
+            return await super().run(prompt, label=label, **kwargs)
 
     client = _CommittingClient(fixtures={"implement": MINIMAL_EVENTS})
     (session_dir / "plan.md").write_text("task 1: do something", encoding="utf-8")
@@ -147,7 +148,7 @@ def test_implement_renders_spec_block_when_present(tmp_path, monkeypatch):
         {},
     )
     state = _make_state(client, session_dir)
-    stage.run(state)
+    asyncio.run(stage.run(state))
     prompt = client.calls[0].prompt
     assert "Overarching goal (north star)" in prompt
     assert "overall spec body" in prompt
@@ -164,7 +165,7 @@ def test_implement_omits_spec_block_when_absent(tmp_path, monkeypatch):
     session_dir.mkdir()
 
     class _CommittingClient(FakeClaudeClient):
-        def run(self, prompt, *, label, **kwargs):
+        async def run(self, prompt, *, label, **kwargs):
             (git_dir / "newfile.txt").write_text("change\n")
             subprocess.run(
                 ["git", "add", "newfile.txt"],
@@ -178,7 +179,7 @@ def test_implement_omits_spec_block_when_absent(tmp_path, monkeypatch):
                 check=True,
                 capture_output=True,
             )
-            return super().run(prompt, label=label, **kwargs)
+            return await super().run(prompt, label=label, **kwargs)
 
     client = _CommittingClient(fixtures={"implement": MINIMAL_EVENTS})
     (session_dir / "plan.md").write_text("task 1: do something", encoding="utf-8")
@@ -188,7 +189,7 @@ def test_implement_omits_spec_block_when_absent(tmp_path, monkeypatch):
         {},
     )
     state = _make_state(client, session_dir)
-    stage.run(state)
+    asyncio.run(stage.run(state))
     prompt = client.calls[0].prompt
     assert "Overarching goal" not in prompt
 
@@ -210,7 +211,7 @@ def test_plan_stage_raises_when_file_absent(tmp_path):
     state = _make_state(client, session_dir)
     state.instructions = "do stuff"
     with pytest.raises(RuntimeError, match="plan stage did not produce"):
-        stage.run(state)
+        asyncio.run(stage.run(state))
     assert len(client.calls) == 1
     assert client.calls[0].label == "plan"
 
@@ -221,9 +222,9 @@ def test_plan_stage_succeeds_when_file_exists(tmp_path):
     plan_file = session_dir / "plan.md"
 
     class _WritingClient(FakeClaudeClient):
-        def run(self, prompt, *, label, **kwargs):
+        async def run(self, prompt, *, label, **kwargs):
             plan_file.write_text("# Plan\nDo stuff.\n")
-            return super().run(prompt, label=label, **kwargs)
+            return await super().run(prompt, label=label, **kwargs)
 
     client = _WritingClient(fixtures={"plan": MINIMAL_EVENTS})
     stage = plan.Plan(
@@ -233,7 +234,7 @@ def test_plan_stage_succeeds_when_file_exists(tmp_path):
     )
     state = _make_state(client, session_dir)
     state.instructions = "do stuff"
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert plan_file.exists()
     assert client.calls[0].label == "plan"
 
@@ -261,7 +262,7 @@ def test_implement_stage_raises_on_empty_diff(tmp_path, monkeypatch):
     )
     state = _make_state(client, session_dir)
     with pytest.raises(RuntimeError, match="no committed work"):
-        stage.run(state)
+        asyncio.run(stage.run(state))
     assert len(client.calls) == 1
     assert client.calls[0].label == "implement"
 
@@ -315,7 +316,7 @@ def test_address_code_stage_calls_client_with_review_content(tmp_path):
     client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
     stage = _make_address_code_stage(client, tmp_path)
     state = _make_state(client, tmp_path)
-    stage.run(state)
+    asyncio.run(stage.run(state))
 
     assert len(client.calls) == 1
     call = client.calls[0]
@@ -343,7 +344,7 @@ def test_plan_stage_includes_style_from_prompts(tmp_path):
     state = _make_state(client, session_dir)
     state.instructions = "do stuff"
     with pytest.raises(RuntimeError, match="plan stage did not produce"):
-        stage.run(state)
+        asyncio.run(stage.run(state))
     assert "Be good." in client.calls[0].prompt
 
 
@@ -360,7 +361,7 @@ def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
         session_dir=tmp_path,
         worktree=worktree,
     )
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert client.calls[0].cwd == worktree
 
 
@@ -375,7 +376,7 @@ def test_review_code_stage_includes_style_from_prompts(tmp_path):
         {},
     )
     state = _make_state(client, tmp_path)
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert "Be good." in client.calls[0].prompt
 
 
@@ -393,7 +394,7 @@ def test_address_code_stage_includes_style_from_prompts(tmp_path):
         {},
     )
     state = _make_state(client, tmp_path)
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert "Be good." in client.calls[0].prompt
 
 
@@ -403,7 +404,7 @@ def test_review_code_stage_writes_stage_to_state(tmp_path, make_state_dir):
     client = ReviewCreatingClient(fixtures={"review-code:fake": MINIMAL_EVENTS})
     stage = _make_review_code_stage(client, tmp_path, gremlin_id=gremlin_id)
     state = _make_state(client, tmp_path, gremlin_id=gremlin_id)
-    stage.run(state)
+    asyncio.run(stage.run(state))
     data = json.loads((state_dir / "state.json").read_text())
     assert data.get("stage") == "review-code"
 
@@ -415,7 +416,7 @@ def test_address_code_stage_raises_on_missing_review_files(tmp_path, make_state_
     stage = _make_address_code_stage(client, tmp_path, gremlin_id=gremlin_id)
     state = _make_state(client, tmp_path, gremlin_id=gremlin_id)
     with pytest.raises(FileNotFoundError):
-        stage.run(state)
+        asyncio.run(stage.run(state))
 
 
 def test_address_code_finds_review_files_in_parallel_subdirs(tmp_path):
@@ -449,7 +450,7 @@ def test_address_code_finds_review_files_in_parallel_subdirs(tmp_path):
         session_dir=tmp_path,
         current_scope=[parallel_stage],
     )
-    stage.run(state)
+    asyncio.run(stage.run(state))
 
     assert len(client.calls) == 1
     prompt = client.calls[0].prompt

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import pathlib
@@ -64,7 +65,7 @@ def test_subprocess_client_sets_gremlin_skip_summary(tmp_path, monkeypatch):
     monkeypatch.delenv("GREMLIN_SKIP_SUMMARY", raising=False)
 
     client = SubprocessClaudeClient()
-    client.run("hello", label="test")
+    asyncio.run(client.run("hello", label="test"))
 
     assert env_out.exists(), "stub did not write env file"
     child_env = json.loads(env_out.read_text(encoding="utf-8"))
@@ -82,7 +83,7 @@ def test_subprocess_client_inherits_other_env_vars(tmp_path, monkeypatch):
     monkeypatch.setenv("MY_SENTINEL_VAR", sentinel)
 
     client = SubprocessClaudeClient()
-    client.run("hello", label="test")
+    asyncio.run(client.run("hello", label="test"))
 
     child_env = json.loads(env_out.read_text(encoding="utf-8"))
     assert child_env.get("MY_SENTINEL_VAR") == sentinel
@@ -100,7 +101,7 @@ def test_subprocess_client_sends_prompt_via_stdin_not_argv(tmp_path, monkeypatch
 
     prompt = "the prompt text"
     client = SubprocessClaudeClient()
-    client.run(prompt, label="test")
+    asyncio.run(client.run(prompt, label="test"))
 
     assert stdin_out.read_text(encoding="utf-8") == prompt
     child_argv = json.loads(argv_out.read_text(encoding="utf-8"))
@@ -153,10 +154,14 @@ def test_retry_succeeds_on_second_attempt(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     monkeypatch.setenv("STUB_COUNT_FILE", str(count_file))
     monkeypatch.setenv("STUB_FAIL_TIMES", "1")
-    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    async def _noop_sleep(_: float) -> None:
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", _noop_sleep)
 
     client = SubprocessClaudeClient()
-    result = client.run("hello", label="test", max_retries=2)
+    result = asyncio.run(client.run("hello", label="test", max_retries=2))
     assert result.exit_code == 0
     assert int(count_file.read_text()) == 2  # called twice
 
@@ -170,11 +175,15 @@ def test_retry_exhaustion_raises_stream_timeout_error(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     monkeypatch.setenv("STUB_COUNT_FILE", str(count_file))
     monkeypatch.setenv("STUB_FAIL_TIMES", "99")
-    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    async def _noop_sleep(_: float) -> None:
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", _noop_sleep)
 
     client = SubprocessClaudeClient()
     with pytest.raises(StreamTimeoutError):
-        client.run("hello", label="test", max_retries=2)
+        asyncio.run(client.run("hello", label="test", max_retries=2))
     assert int(count_file.read_text()) == 3  # initial + 2 retries
 
 
@@ -202,7 +211,7 @@ def test_idle_timeout_raises_stream_timeout_error(tmp_path, monkeypatch):
 
     client = SubprocessClaudeClient()
     with pytest.raises(StreamTimeoutError):
-        client.run("hello", label="test", idle_timeout=0.1, max_retries=0)
+        asyncio.run(client.run("hello", label="test", idle_timeout=0.1, max_retries=0))
 
 
 def test_on_timeout_prompt_used_on_retry(tmp_path, monkeypatch):
@@ -231,11 +240,17 @@ if stdin_out:
     monkeypatch.setenv("STUB_COUNT_FILE", str(count_file))
     monkeypatch.setenv("STUB_FAIL_TIMES", "1")
     monkeypatch.setenv("STUB_STDIN_OUT", str(stdin_out))
-    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    async def _noop_sleep(_: float) -> None:
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", _noop_sleep)
 
     client = SubprocessClaudeClient()
-    client.run(
-        "original", label="test", on_timeout_prompt="retry-prompt", max_retries=2
+    asyncio.run(
+        client.run(
+            "original", label="test", on_timeout_prompt="retry-prompt", max_retries=2
+        )
     )
     assert stdin_out.read_text(encoding="utf-8") == "retry-prompt"
 
@@ -251,11 +266,15 @@ def test_backoff_schedule_matches_stream_idle_backoff(tmp_path, monkeypatch):
     monkeypatch.setenv("STUB_FAIL_TIMES", "99")
 
     sleep_calls: list[float] = []
-    monkeypatch.setattr("time.sleep", sleep_calls.append)
+
+    async def _record_sleep(t: float) -> None:
+        sleep_calls.append(t)
+
+    monkeypatch.setattr("asyncio.sleep", _record_sleep)
 
     client = SubprocessClaudeClient()
     with pytest.raises(StreamTimeoutError):
-        client.run("hello", label="test", max_retries=3)
+        asyncio.run(client.run("hello", label="test", max_retries=3))
 
     assert sleep_calls == list(STREAM_IDLE_BACKOFF)
 
@@ -263,4 +282,6 @@ def test_backoff_schedule_matches_stream_idle_backoff(tmp_path, monkeypatch):
 def test_max_retries_exceeds_schedule_raises_value_error():
     client = SubprocessClaudeClient()
     with pytest.raises(ValueError, match="max_retries"):
-        client.run("hello", label="test", max_retries=len(STREAM_IDLE_BACKOFF) + 1)
+        asyncio.run(
+            client.run("hello", label="test", max_retries=len(STREAM_IDLE_BACKOFF) + 1)
+        )

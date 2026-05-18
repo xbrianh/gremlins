@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import pathlib
 from unittest.mock import patch
 
@@ -55,7 +56,7 @@ def test_local_git_succeeds_on_head_advanced(
             return_value=HeadAdvanced(commit_count=2),
         ),
     ):
-        stage.run(state)
+        asyncio.run(stage.run(state))
     assert len(state.client.calls) == 1
 
 
@@ -72,7 +73,7 @@ def test_local_git_raises_on_empty_impl(tmp_path: pathlib.Path, monkeypatch) -> 
         ),
         pytest.raises(RuntimeError, match="no committed work"),
     ):
-        stage.run(state)
+        asyncio.run(stage.run(state))
 
 
 def test_gh_calls_claude_with_plan_text(tmp_path: pathlib.Path) -> None:
@@ -88,7 +89,7 @@ def test_gh_calls_claude_with_plan_text(tmp_path: pathlib.Path) -> None:
             return_value=HeadAdvanced(commit_count=1),
         ),
     ):
-        stage.run(state)
+        asyncio.run(stage.run(state))
     assert len(state.client.calls) == 1
     call = state.client.calls[0]
     assert call.label == "implement"
@@ -108,7 +109,7 @@ def test_gh_plan_source_label_with_issue_num(tmp_path: pathlib.Path) -> None:
             return_value=HeadAdvanced(commit_count=1),
         ),
     ):
-        stage.run(state)
+        asyncio.run(stage.run(state))
     prompt = state.client.calls[0].prompt
     assert "from the GitHub issue" in prompt
 
@@ -124,7 +125,7 @@ def test_gh_plan_source_label_without_issue_num(tmp_path: pathlib.Path) -> None:
             return_value=HeadAdvanced(commit_count=1),
         ),
     ):
-        stage.run(state)
+        asyncio.run(stage.run(state))
     prompt = state.client.calls[0].prompt
     assert "below" in prompt
 
@@ -144,7 +145,7 @@ def test_local_git_raises_on_divergent_head(
         ),
         pytest.raises(RuntimeError, match="diverged"),
     ):
-        stage.run(state)
+        asyncio.run(stage.run(state))
 
 
 def test_raises_on_empty_impl(tmp_path: pathlib.Path) -> None:
@@ -159,7 +160,7 @@ def test_raises_on_empty_impl(tmp_path: pathlib.Path) -> None:
         ),
         pytest.raises(RuntimeError, match="no committed work"),
     ):
-        stage.run(state)
+        asyncio.run(stage.run(state))
 
 
 def test_raises_on_divergent_head(tmp_path: pathlib.Path) -> None:
@@ -174,7 +175,7 @@ def test_raises_on_divergent_head(tmp_path: pathlib.Path) -> None:
         ),
         pytest.raises(RuntimeError, match="diverged"),
     ):
-        stage.run(state)
+        asyncio.run(stage.run(state))
 
 
 def test_run_does_not_access_pipeline_data(tmp_path: pathlib.Path) -> None:
@@ -193,4 +194,4 @@ def test_run_does_not_access_pipeline_data(tmp_path: pathlib.Path) -> None:
             return_value=HeadAdvanced(commit_count=1),
         ),
     ):
-        stage.run(state)
+        asyncio.run(stage.run(state))

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import pathlib
@@ -86,7 +87,7 @@ def test_copilot_client_runs_and_returns_text(tmp_path, monkeypatch):
     monkeypatch.setenv("STUB_OUTPUT", "copilot response text")
 
     client = SubprocessCopilotClient()
-    result = client.run("my prompt", label="test")
+    result = asyncio.run(client.run("my prompt", label="test"))
 
     assert result.exit_code == 0
     assert result.text_result == "copilot response text"
@@ -103,7 +104,7 @@ def test_copilot_client_sends_prompt_via_argv(tmp_path, monkeypatch):
     monkeypatch.setenv("STUB_ARGV_OUT", str(argv_out))
 
     client = SubprocessCopilotClient()
-    client.run("the prompt", label="test")
+    asyncio.run(client.run("the prompt", label="test"))
 
     argv = json.loads(argv_out.read_text(encoding="utf-8"))
     p_idx = argv.index("-p")
@@ -119,7 +120,7 @@ def test_copilot_client_passes_allow_all_flag(tmp_path, monkeypatch):
     monkeypatch.setenv("STUB_ARGV_OUT", str(argv_out))
 
     client = SubprocessCopilotClient()
-    client.run("the-prompt", label="test")
+    asyncio.run(client.run("the-prompt", label="test"))
 
     argv = json.loads(argv_out.read_text(encoding="utf-8"))
     assert "--allow-all" in argv
@@ -138,7 +139,7 @@ def test_copilot_client_passes_model_when_specified(tmp_path, monkeypatch):
     monkeypatch.setenv("STUB_ARGV_OUT", str(argv_out))
 
     client = SubprocessCopilotClient()
-    client.run("prompt", label="test", model="gpt-5.4")
+    asyncio.run(client.run("prompt", label="test", model="gpt-5.4"))
 
     argv = json.loads(argv_out.read_text(encoding="utf-8"))
     assert "--model" in argv
@@ -154,7 +155,7 @@ def test_copilot_client_omits_model_when_none(tmp_path, monkeypatch):
     monkeypatch.setenv("STUB_ARGV_OUT", str(argv_out))
 
     client = SubprocessCopilotClient()
-    client.run("prompt", label="test", model=None)
+    asyncio.run(client.run("prompt", label="test", model=None))
 
     argv = json.loads(argv_out.read_text(encoding="utf-8"))
     assert "--model" not in argv
@@ -168,7 +169,7 @@ def test_copilot_client_raises_on_nonzero_exit(tmp_path, monkeypatch):
 
     client = SubprocessCopilotClient()
     with pytest.raises(RuntimeError, match="copilot -p.*exited 2"):
-        client.run("prompt", label="test")
+        asyncio.run(client.run("prompt", label="test"))
 
 
 def test_copilot_client_strips_footer(tmp_path, monkeypatch):
@@ -178,7 +179,7 @@ def test_copilot_client_strips_footer(tmp_path, monkeypatch):
     monkeypatch.setenv("STUB_OUTPUT", "response text\n⏺ Cost: $0.01 | Duration: 1s")
 
     client = SubprocessCopilotClient()
-    result = client.run("prompt", label="test")
+    result = asyncio.run(client.run("prompt", label="test"))
 
     assert result.text_result == "response text"
 
@@ -200,7 +201,7 @@ def test_copilot_run_accepts_extra_env_without_type_error(tmp_path, monkeypatch)
 
     client = SubprocessCopilotClient()
     # Must not raise TypeError
-    result = client.run("prompt", label="x", extra_env={"FOO": "bar"})
+    result = asyncio.run(client.run("prompt", label="x", extra_env={"FOO": "bar"}))
     assert result.exit_code == 0
 
 
@@ -213,7 +214,7 @@ def test_copilot_extra_env_merged_into_subprocess_env(tmp_path, monkeypatch):
     monkeypatch.setenv("STUB_ENV_OUT", str(env_out))
 
     client = SubprocessCopilotClient()
-    client.run("prompt", label="x", extra_env={"FOO": "bar"})
+    asyncio.run(client.run("prompt", label="x", extra_env={"FOO": "bar"}))
 
     captured = json.loads(env_out.read_text(encoding="utf-8"))
     assert captured.get("FOO") == "bar"

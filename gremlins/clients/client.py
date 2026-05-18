@@ -51,7 +51,7 @@ class Client:
             self._impl = CLIENT_FACTORIES[self.provider](self.model)
         return self._impl
 
-    def run(
+    async def run(
         self,
         prompt: str,
         *,
@@ -65,7 +65,7 @@ class Client:
         idle_timeout: float | None = None,
         extra_env: dict[str, str] | None = None,
     ) -> CompletedRun:
-        return self._get_impl().run(
+        return await self._get_impl().run(
             prompt,
             label=label,
             model=model if model is not None else self.model,

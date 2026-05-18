@@ -100,14 +100,14 @@ _HANDLERS: dict[str, Callable[[str, dict[str, Any]], None]] = {
 }
 
 
-def _emit_event(prefix: str, evt: dict[str, Any]) -> None:
+def emit_event(prefix: str, evt: dict[str, Any]) -> None:
     handler = _HANDLERS.get(str(evt.get("type") or ""))
     if handler:
         handler(prefix, evt)
     sys.stderr.flush()
 
 
-def _decode_line(line: bytes) -> dict[str, Any] | None:
+def decode_line(line: bytes) -> dict[str, Any] | None:
     try:
         evt = json.loads(line.decode("utf-8", errors="replace"))
     except Exception:
@@ -115,7 +115,7 @@ def _decode_line(line: bytes) -> dict[str, Any] | None:
     return cast(dict[str, Any], evt) if isinstance(evt, dict) else None
 
 
-def _extract_state(evt: dict[str, Any], state: dict[str, Any]) -> None:
+def extract_state(evt: dict[str, Any], state: dict[str, Any]) -> None:
     if evt.get("type") == "result":
         raw_cost = evt.get("total_cost_usd", evt.get("cost_usd"))
         if isinstance(raw_cost, (int, float)):
@@ -162,16 +162,16 @@ def stream_events(
             if raw is not None:
                 raw.write(line)
                 raw.flush()
-            if b"Stream idle timeout" in line and _decode_line(line) is None:
+            if b"Stream idle timeout" in line and decode_line(line) is None:
                 timed_out = True
-            evt = _decode_line(line)
+            evt = decode_line(line)
             if evt is None:
                 continue
-            _extract_state(evt, state)
+            extract_state(evt, state)
             if events is not None:
                 events.append(evt)
             try:
-                _emit_event(prefix, evt)
+                emit_event(prefix, evt)
             except Exception:
                 pass
     finally:

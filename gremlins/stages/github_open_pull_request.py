@@ -79,7 +79,7 @@ class GitHubOpenPullRequest(Stage):
         self.options = options
         self.base_ref = base_ref
 
-    def run(self, state: State) -> Outcome:
+    async def run(self, state: State) -> Outcome:
         issue_url = state.data.issue_url
         base_ref = (
             state.data.last_pr_branch()
@@ -112,7 +112,7 @@ class GitHubOpenPullRequest(Stage):
 
         prompt = f"{base_prompt} {closes_clause}{iter_clause}"
 
-        completed: CompletedRun = run_agent(
+        completed: CompletedRun = await run_agent(
             state,
             prompt,
             label="github-open-pull-request",

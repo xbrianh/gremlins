@@ -176,7 +176,7 @@ class OpenAIAgentsClient:
             except Exception:
                 pass
 
-    def run(
+    async def run(
         self,
         prompt: str,
         *,
@@ -241,24 +241,22 @@ class OpenAIAgentsClient:
             classify=_should_retry,
             on_retry=_on_retry,
         )
-        def _run_once() -> CompletedRun:
-            return asyncio.run(
-                self._run_streamed(
-                    agent,
-                    active_prompt,
-                    ctx,
-                    run_config,
-                    prefix=prefix,
-                    model=effective_model,
-                    raw_path=raw_path,
-                    capture_events=capture_events,
-                    cwd=cwd,
-                    idle_timeout=idle_timeout,
-                )
+        async def _run_once() -> CompletedRun:
+            return await self._run_streamed(
+                agent,
+                active_prompt,
+                ctx,
+                run_config,
+                prefix=prefix,
+                model=effective_model,
+                raw_path=raw_path,
+                capture_events=capture_events,
+                cwd=cwd,
+                idle_timeout=idle_timeout,
             )
 
         try:
-            return _run_once()
+            return await _run_once()
         except StreamTerminalError as exc:
             if is_transient_stream_error(str(exc)):
                 sys.stderr.write(
@@ -416,6 +414,16 @@ class OpenAIAgentsClient:
             self._untrack(run)
             if raw is not None:
                 raw.close()
+            if not stream_task.done():
+                stream_task.cancel()
+                try:
+                    await stream_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            try:
+                run.cancel()
+            except Exception:
+                pass
 
         cost = _compute_run_cost(model, run)
         with self._lock:

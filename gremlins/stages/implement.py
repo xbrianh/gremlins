@@ -74,7 +74,7 @@ class Implement(Stage):
         self.prompts = prompts
         self.options = options
 
-    def run(self, state: State) -> Outcome:
+    async def run(self, state: State) -> Outcome:
         spec_text = _read_spec(state.session_dir)
         plan_text = (state.session_dir / "plan.md").read_text(encoding="utf-8")
 
@@ -102,7 +102,7 @@ class Implement(Stage):
             plan_location_note=plan_location_note,
         )
 
-        run_agent(
+        await run_agent(
             state,
             prompt,
             label="implement",
