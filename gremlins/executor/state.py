@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime
+import inspect
 import json
 import logging
 import os
@@ -552,7 +553,7 @@ class State:
         attempt = f"{entry.name}-{secrets.token_hex(4)}" if gremlin_id else ""
         scope_list = list(scope) if scope is not None else []
 
-        def _run() -> Any:
+        def _prepare() -> State:
             if record_stage:
                 base_state.data.set_stage(
                     entry.name, parent_stage=base_state.parent_stage
@@ -567,11 +568,18 @@ class State:
             loaded = StateData.load(gremlin_id)
             if attempt:
                 loaded = dataclasses.replace(loaded, attempt=attempt)
-            state = dataclasses.replace(
-                base_state,
-                data=loaded,
-                current_scope=scope_list,
+            return dataclasses.replace(
+                base_state, data=loaded, current_scope=scope_list
             )
-            return entry.run(state)
+
+        if inspect.iscoroutinefunction(entry.run):
+
+            async def _run_async() -> Any:
+                return await entry.run(_prepare())  # type: ignore[misc]
+
+            return _run_async
+
+        def _run() -> Any:
+            return entry.run(_prepare())
 
         return _run
