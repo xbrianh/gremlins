@@ -69,6 +69,25 @@ def _key_arg(args_json: str) -> str:
     return ""
 
 
+def _bash_denied(command: str, root: pathlib.Path, cwd: str | None) -> str | None:
+    if not command:
+        return None
+    tokens = command.strip().split(maxsplit=1)
+    if not tokens:
+        return None
+    first = tokens[0]
+    if first.startswith(("/", "~")):
+        p = pathlib.Path(first).expanduser()
+        if not _within_worktree(p, root):
+            return f"Error: path outside worktree: {first}"
+    if first == "cd" and len(tokens) > 1:
+        target = tokens[1].strip().strip("'\"")
+        p = _resolve(target, cwd)
+        if not _within_worktree(p, root):
+            return f"Error: path outside worktree: {target}"
+    return None
+
+
 async def _read_invoke(ctx: ToolContext[Any], args_json: str) -> str:
     args: dict[str, Any] = json.loads(args_json)
     path = _resolve(args["file_path"], _cwd(ctx))
