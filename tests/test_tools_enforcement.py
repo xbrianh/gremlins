@@ -59,7 +59,7 @@ def test_bash_abs_outside_denied(tmp_path: pathlib.Path) -> None:
     tb = build_tools(bypass=True, worktree_root=root, audit_log=None)
     bashb = next(tt for tt in tb if tt.name == "Bash")
     resb = asyncio.run(bashb.on_invoke_tool(_ctx(str(root)), cmd))
-    assert "bin" in resb or "ls" in resb or resb  # may vary
+    assert "path outside worktree" not in resb
 
 
 def test_audit_log(tmp_path: pathlib.Path) -> None:
