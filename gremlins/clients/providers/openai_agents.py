@@ -30,7 +30,7 @@ from gremlins.clients.config import (
 )
 from gremlins.clients.protocol import CompletedRun
 from gremlins.clients.stream import trunc
-from gremlins.clients.tools import GREMLINS_TOOLS
+from gremlins.clients.tools import build_tools
 from gremlins.utils.decorators import default_on_exception, swallow
 from gremlins.utils.yaml_io import load_bundled_prompt
 
