@@ -188,7 +188,7 @@ def extract_gh_url(
     raise RuntimeError(f"failed to extract {label} URL from claude output events")
 
 
-def _parse_ci_status_response(stdout: str) -> dict[str, Any]:
+def parse_ci_status_response(stdout: str) -> dict[str, Any]:
     try:
         data = json.loads(stdout)
     except json.JSONDecodeError as exc:
@@ -220,7 +220,7 @@ async def get_pr_ci_status_async(pr_url: str) -> dict[str, Any]:
         ) from exc
     if r.returncode != 0:
         raise RuntimeError(f"could not fetch PR CI status: {r.stderr.strip()}")
-    return _parse_ci_status_response(r.stdout)
+    return parse_ci_status_response(r.stdout)
 
 
 async def fetch_check_run_logs_async(details_url: str) -> str:

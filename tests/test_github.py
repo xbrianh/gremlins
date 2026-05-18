@@ -1,14 +1,14 @@
 import json
 import subprocess
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from gremlins.utils.github import (
     GET_PR_CI_STATUS_TIMEOUT,
-    _parse_ci_status_response,
     fetch_issue,
     get_pr_ci_status_async,
+    parse_ci_status_response,
 )
 
 PR_URL = "https://github.com/owner/repo/pull/42"
@@ -87,7 +87,7 @@ def test_parse_ci_status_returns_full_rollup():
             "conclusion": "FAILURE",
         },
     ]
-    result = _parse_ci_status_response(
+    result = parse_ci_status_response(
         json.dumps({"statusCheckRollup": rollup, "reviewDecision": ""})
     )
 
@@ -106,7 +106,7 @@ def test_parse_ci_status_failing_non_required_check_included():
             "conclusion": "FAILURE",
         },
     ]
-    result = _parse_ci_status_response(
+    result = parse_ci_status_response(
         json.dumps({"statusCheckRollup": rollup, "reviewDecision": ""})
     )
 
@@ -116,7 +116,7 @@ def test_parse_ci_status_failing_non_required_check_included():
 
 def test_parse_ci_status_empty_rollup_returns_empty_checks():
     """PR with no check-runs returns an empty checks list."""
-    result = _parse_ci_status_response(
+    result = parse_ci_status_response(
         json.dumps({"statusCheckRollup": [], "reviewDecision": ""})
     )
     assert result["checks"] == []
@@ -136,7 +136,7 @@ def test_parse_ci_status_returns_review_decision_and_head_sha():
         "reviewDecision": "APPROVED",
         "headRefOid": "abc123",
     }
-    result = _parse_ci_status_response(json.dumps(payload))
+    result = parse_ci_status_response(json.dumps(payload))
 
     assert result["review_decision"] == "APPROVED"
     assert result["head_sha"] == "abc123"

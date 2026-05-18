@@ -7,6 +7,8 @@ import inspect
 import pathlib
 import threading
 import time
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 
@@ -44,22 +46,15 @@ def _make_ctx(child_key: str) -> State:
 
 def _make_parallel_stages(
     group_name: str,
-    child_runners: list,
+    child_runners: list[tuple[str, State, Callable[[], Any]]],
     *,
     max_concurrent: int | None = None,
-    set_stage_fn=None,
+    set_stage_fn: Callable[[str], None] | None = None,
     cancel_on_bail: bool = False,
     bail_policy: str = "any",
     parent_data: StateData | None = None,
     project_root: pathlib.Path | None = None,
-) -> list:
-    if set_stage_fn is None:
-
-        def set_stage_fn(_n):
-            return None
-
-    if project_root is None:
-        project_root = pathlib.Path.cwd()
+) -> list[tuple[str, Callable[[], Any]]]:
     return ParallelStage(
         group_name,
         [],
@@ -69,24 +64,19 @@ def _make_parallel_stages(
     ).build_runtime_stages(
         child_runners,
         parent_data=parent_data,
-        project_root=project_root,
+        project_root=project_root or pathlib.Path.cwd(),
         set_stage_fn=set_stage_fn,
     )
 
 
 def _parallel_wrapper(
-    children: list[tuple[str, object]],
+    children: list[tuple[str, Callable[[], Any]]],
     *,
     max_concurrent: int | None = None,
-    set_stage_fn: object = None,
-) -> object:
+    set_stage_fn: Callable[[str], None] | None = None,
+) -> Callable[[], Any]:
     """Return the parallel-stage callable from ParallelStage."""
-    if set_stage_fn is None:
-
-        def set_stage_fn(_name: str) -> None:
-            pass
-
-    triples = [(n, _make_ctx(n), fn) for n, fn in children]  # type: ignore[misc]
+    triples = [(n, _make_ctx(n), fn) for n, fn in children]
     stages = _make_parallel_stages(
         "test-group",
         triples,
@@ -310,7 +300,9 @@ stages:
 """,
     )
     pipeline = Pipeline.from_yaml(tmp_path / "pipeline.yaml")
-    assert pipeline.stages[0].max_concurrent == 2
+    stage = pipeline.stages[0]
+    assert isinstance(stage, ParallelStage)
+    assert stage.max_concurrent == 2
 
 
 def test_pipeline_max_concurrent_on_leaf_stage_raises(tmp_path: pathlib.Path) -> None:

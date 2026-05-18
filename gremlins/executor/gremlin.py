@@ -8,7 +8,7 @@ import logging
 import os
 import pathlib
 import shutil
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
@@ -62,7 +62,7 @@ def _expand_stage_entries(raw_stages: list[Stage]) -> list[Stage]:
 
 
 async def run_stages(
-    stages: list[tuple[str, Callable[[], Awaitable[Any]]]], *, resume_from: str | None = None
+    stages: Sequence[tuple[str, Callable[[], Awaitable[Any]]]], *, resume_from: str | None = None
 ) -> None:
     start_idx = 0
     if resume_from is not None:
