@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import fnmatch
 import json
 import os
@@ -171,7 +172,7 @@ async def _glob_invoke(ctx: ToolContext[Any], args_json: str) -> str:
     return "\n".join(str(m) for m in matches) or "(no matches)"
 
 
-GREMLINS_TOOLS: list[Tool] = [
+_BASE_TOOLS: list[Tool] = [
     FunctionTool(
         name="Read",
         description="Read a file from the filesystem.",
@@ -277,3 +278,102 @@ GREMLINS_TOOLS: list[Tool] = [
         strict_json_schema=False,
     ),
 ]
+
+
+def _within_worktree(p: pathlib.Path, root: pathlib.Path) -> bool:
+    try:
+        return p.resolve().is_relative_to(root.resolve())
+    except Exception:
+        return False
+
+
+def _audit(log: pathlib.Path | None, tool: str, key_arg: str, status: str, bypass: bool) -> None:
+    if log is None:
+        return
+    entry = {
+        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "tool": tool,
+        "key_arg": (key_arg or "")[:200],
+        "status": status,
+        "bypass": bypass,
+    }
+    try:
+        with log.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+
+
+def _key_arg(args_json: str) -> str:
+    try:
+        d: dict[str, Any] = json.loads(args_json)
+        for k in ("file_path", "command", "pattern", "path"):
+            if v := d.get(k):
+                return str(v)
+    except Exception:
+        pass
+    return ""
+
+
+def build_tools(*, bypass: bool, worktree_root: pathlib.Path, audit_log: pathlib.Path | None) -> list[Tool]:
+    root = worktree_root.resolve()
+
+    def _enforce(pth: str, cwd: str | None) -> str | None:
+        if bypass:
+            return None
+        p = _resolve(pth, cwd)
+        if not _within_worktree(p, root):
+            return f"Error: path outside worktree: {pth}"
+        return None
+
+    def _bash_check(cmd: str, cwd: str | None) -> str | None:
+        if bypass:
+            return None
+        s = cmd.strip()
+        if not s:
+            return None
+        toks = s.split()
+        first = toks[0] if toks else ""
+        if first and first[0] in ("/", "~"):
+            p = _resolve(first, cwd)
+            if not _within_worktree(p, root):
+                return f"Error: path outside worktree: {first}"
+        if s.startswith("cd "):
+            tgt = s[3:].strip().strip("'\"")
+            if tgt.startswith("..") or (tgt and _resolve(tgt, cwd).is_absolute() and not _within_worktree(_resolve(tgt, cwd), root)):
+                return f"Error: path outside worktree: {tgt}"
+        return None
+
+    def _wrap(invoke, name: str):
+        async def w(ctx: ToolContext[Any], args_json: str) -> str:
+            ka = _key_arg(args_json)
+            if name in {"Read", "Edit", "Write", "Grep", "Glob"}:
+                args: dict[str, Any] = json.loads(args_json)
+                pth = args.get("file_path") or args.get("path", ".")
+                err = _enforce(pth, _cwd(ctx))
+                if err:
+                    _audit(audit_log, name, ka, "denied", bypass)
+                    return err
+            elif name == "Bash":
+                args: dict[str, Any] = json.loads(args_json)
+                err = _bash_check(args.get("command", ""), _cwd(ctx))
+                if err:
+                    _audit(audit_log, name, ka, "denied", bypass)
+                    return err
+            res = await invoke(ctx, args_json)
+            st = "error" if str(res).startswith(("Error:", "[exit", "[timeout]")) else "ok"
+            _audit(audit_log, name, ka, st, bypass)
+            return res
+        return w
+
+    return [
+        FunctionTool(
+            name=t.name,
+            description=t.description,
+            params_json_schema=t.params_json_schema,
+            on_invoke_tool=_wrap(t.on_invoke_tool, t.name),
+            strict_json_schema=getattr(t, "strict_json_schema", False),
+        )
+        for t in _BASE_TOOLS
+    ]
+
