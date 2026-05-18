@@ -189,16 +189,25 @@ class OpenAIAgentsClient:
         cwd: pathlib.Path | None = None,
         idle_timeout: float | None = None,
         extra_env: dict[str, str] | None = None,
+        bypass: bool = True,
+        audit_log: pathlib.Path | None = None,
     ) -> CompletedRun:
         validate_max_retries(max_retries)
         if idle_timeout is None:
             idle_timeout = STREAM_IDLE_TIMEOUT
         effective_model = model or self._model
         prefix = f"[{label}] " if label else ""
+        worktree = cwd or pathlib.Path.cwd()
+        if cwd is None and not bypass:
+            sys.stderr.write(f"{prefix}warning: enforcing with implicit cwd\n")
+        if audit_log is None and raw_path is not None:
+            audit_log = raw_path.with_name(raw_path.stem + ".audit.jsonl")
         agent = Agent(
             name=f"gremlins-{label}",
             instructions=self._instructions,
-            tools=GREMLINS_TOOLS,
+            tools=build_tools(
+                bypass=bypass, worktree_root=worktree, audit_log=audit_log
+            ),
             model=effective_model,
             model_settings=self._model_settings
             if self._model_settings is not None

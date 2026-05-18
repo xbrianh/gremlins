@@ -64,6 +64,8 @@ class Client:
         cwd: pathlib.Path | None = None,
         idle_timeout: float | None = None,
         extra_env: dict[str, str] | None = None,
+        bypass: bool = True,
+        audit_log: pathlib.Path | None = None,
     ) -> CompletedRun:
         return self._get_impl().run(
             prompt,
@@ -76,6 +78,8 @@ class Client:
             cwd=cwd,
             idle_timeout=idle_timeout,
             extra_env=extra_env,
+            bypass=bypass,
+            audit_log=audit_log,
         )
 
     def reap_all(self) -> None:
