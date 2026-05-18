@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 import logging
 from collections.abc import Callable
 from typing import Any, cast
@@ -38,10 +37,7 @@ async def _dispatch_runners(
     for i, runner in enumerate(runners):
         if i > 0 and (not had_failure or iteration == max_iterations):
             continue
-        if inspect.iscoroutinefunction(runner):
-            outcome = await runner()
-        else:
-            outcome = runner()
+        outcome = await runner()
         if isinstance(outcome, NeedsFix):
             had_failure = True
     return had_failure
