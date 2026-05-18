@@ -247,9 +247,11 @@ if stdin_out:
     monkeypatch.setattr("asyncio.sleep", _noop_sleep)
 
     client = SubprocessClaudeClient()
-    asyncio.run(client.run(
-        "original", label="test", on_timeout_prompt="retry-prompt", max_retries=2
-    ))
+    asyncio.run(
+        client.run(
+            "original", label="test", on_timeout_prompt="retry-prompt", max_retries=2
+        )
+    )
     assert stdin_out.read_text(encoding="utf-8") == "retry-prompt"
 
 
@@ -280,4 +282,6 @@ def test_backoff_schedule_matches_stream_idle_backoff(tmp_path, monkeypatch):
 def test_max_retries_exceeds_schedule_raises_value_error():
     client = SubprocessClaudeClient()
     with pytest.raises(ValueError, match="max_retries"):
-        asyncio.run(client.run("hello", label="test", max_retries=len(STREAM_IDLE_BACKOFF) + 1))
+        asyncio.run(
+            client.run("hello", label="test", max_retries=len(STREAM_IDLE_BACKOFF) + 1)
+        )

@@ -207,7 +207,9 @@ def sanitize_rolling_plan(
         with_reap_after(
             client,
             timeout,
-            lambda: asyncio.run(client.run(prompt, label="handoff:sanitize", model=model)),
+            lambda: asyncio.run(
+                client.run(prompt, label="handoff:sanitize", model=model)
+            ),
         )
     except Exception as exc:
         _restore_rolling_plan(out_path, plan_text, f"sanitize pass failed: {exc}")
@@ -347,7 +349,9 @@ def run(
             with_reap_after(
                 client,
                 args.timeout,
-                lambda: asyncio.run(client.run(prompt, label="handoff", model=client_spec.model)),
+                lambda: asyncio.run(
+                    client.run(prompt, label="handoff", model=client_spec.model)
+                ),
             )
     except Bail:
         raise

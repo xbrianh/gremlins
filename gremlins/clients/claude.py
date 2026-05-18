@@ -127,7 +127,9 @@ class SubprocessClaudeClient:
         try:
             while True:
                 try:
-                    line = await asyncio.wait_for(p.stdout.readline(), timeout=idle_timeout)
+                    line = await asyncio.wait_for(
+                        p.stdout.readline(), timeout=idle_timeout
+                    )
                 except TimeoutError:
                     timed_out = True
                     break
@@ -221,7 +223,9 @@ class SubprocessClaudeClient:
         )
         async def _run_once() -> CompletedRun:
             p = await self._spawn(argv, active_prompt, cwd=cwd, extra_env=extra_env)
-            return await self._consume(p, prefix, raw_path, capture_events, idle_timeout)
+            return await self._consume(
+                p, prefix, raw_path, capture_events, idle_timeout
+            )
 
         result = await _run_once()
         if result.exit_code != 0:

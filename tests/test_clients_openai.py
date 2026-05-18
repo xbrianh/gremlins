@@ -389,7 +389,9 @@ def test_openai_client_missing_key(monkeypatch: Any) -> None:
 )
 def test_openai_integration_run() -> None:
     client = make_openai_client("gpt-4o-mini")
-    result = asyncio.run(client.run("Reply with the single word: done", label="integration-test"))
+    result = asyncio.run(
+        client.run("Reply with the single word: done", label="integration-test")
+    )
     assert result.exit_code == 0
     assert result.text_result
 
@@ -400,7 +402,9 @@ def test_openai_integration_run() -> None:
 )
 def test_xai_integration_run() -> None:
     client = make_xai_client("grok-3-mini-fast")
-    result = asyncio.run(client.run("Reply with the single word: done", label="integration-test"))
+    result = asyncio.run(
+        client.run("Reply with the single word: done", label="integration-test")
+    )
     assert result.exit_code == 0
     assert result.text_result
 
@@ -514,6 +518,7 @@ def test_terminal_stream_error_cost_is_recorded(monkeypatch: Any) -> None:
         "agents.run.Runner.run_streamed",
         lambda *a, **kw: _make_erroring_run(error_msg, usage),
     )
+
     async def _noop_sleep(_: float) -> None:
         pass
 
