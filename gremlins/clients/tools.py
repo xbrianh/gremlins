@@ -293,7 +293,7 @@ def _audit(
     if log is None:
         return
     entry = {
-        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "ts": datetime.datetime.now(datetime.UTC).isoformat(),
         "tool": tool,
         "key_arg": (key_arg or "")[:200],
         "status": status,
