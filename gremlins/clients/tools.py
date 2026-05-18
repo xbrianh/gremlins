@@ -347,15 +347,14 @@ def build_tools(*, bypass: bool, worktree_root: pathlib.Path, audit_log: pathlib
     def _wrap(invoke, name: str):
         async def w(ctx: ToolContext[Any], args_json: str) -> str:
             ka = _key_arg(args_json)
+            args: dict[str, Any] = json.loads(args_json)
             if name in {"Read", "Edit", "Write", "Grep", "Glob"}:
-                args: dict[str, Any] = json.loads(args_json)
                 pth = args.get("file_path") or args.get("path", ".")
                 err = _enforce(pth, _cwd(ctx))
                 if err:
                     _audit(audit_log, name, ka, "denied", bypass)
                     return err
             elif name == "Bash":
-                args: dict[str, Any] = json.loads(args_json)
                 err = _bash_check(args.get("command", ""), _cwd(ctx))
                 if err:
                     _audit(audit_log, name, ka, "denied", bypass)
