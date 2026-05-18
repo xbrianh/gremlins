@@ -328,10 +328,6 @@ class OpenAIAgentsClient:
                     timed_out = True
                     run.cancel()
                     stream_task.cancel()
-                    try:
-                        await stream_task
-                    except (asyncio.CancelledError, Exception):
-                        pass
                     break
 
                 if event is None:
@@ -413,6 +409,12 @@ class OpenAIAgentsClient:
                 sys.stderr.flush()
 
         finally:
+            if not stream_task.done():
+                stream_task.cancel()
+            try:
+                await stream_task
+            except (asyncio.CancelledError, Exception):
+                pass
             self._untrack(run)
             if raw is not None:
                 raw.close()

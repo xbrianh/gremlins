@@ -30,6 +30,8 @@ _TRANSIENT_SUBSTRINGS = (
     "overloaded",
     "timed out in queue",
     " 529",
+    # loop teardown race in concurrent asyncio.run usage; fresh loop on retry
+    "event loop is closed",
 )
 
 
