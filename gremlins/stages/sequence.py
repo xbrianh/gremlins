@@ -47,7 +47,9 @@ class SequenceStage(Stage):
                 child, scope=self.body, record_stage=False
             )
             if inspect.iscoroutinefunction(runner):
-                raise TypeError(f"async stage {child.name!r} cannot be nested inside a sequence stage")
+                raise TypeError(
+                    f"async stage {child.name!r} cannot be nested inside a sequence stage"
+                )
             runner()
             state.mark_done(key, child.name)
         return Done()

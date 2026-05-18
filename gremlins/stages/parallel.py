@@ -151,7 +151,9 @@ class ParallelStage(Stage):
             cs = _child_state(group_state, child, fan_out=True)
             runner = cs.make_runner(child, scope=self.body)
             if inspect.iscoroutinefunction(runner):
-                raise TypeError(f"async stage {child.name!r} cannot be nested inside a parallel stage")
+                raise TypeError(
+                    f"async stage {child.name!r} cannot be nested inside a parallel stage"
+                )
             child_runners.append((child.name, cs, runner))
         for _, fn in self.build_runtime_stages(
             child_runners,
