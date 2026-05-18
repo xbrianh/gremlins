@@ -57,7 +57,7 @@ def test_claude_client_raises_on_overrun() -> None:
 
     client = SubprocessClaudeClient()
     with pytest.raises(ValueError, match="max_retries"):
-        client.run("x", label="t", max_retries=len(STREAM_IDLE_BACKOFF) + 1)
+        _asyncio.run(client.run("x", label="t", max_retries=len(STREAM_IDLE_BACKOFF) + 1))
 
 
 def test_openai_client_raises_on_overrun() -> None:
@@ -65,7 +65,7 @@ def test_openai_client_raises_on_overrun() -> None:
 
     client = OpenAIAgentsClient("gpt-4o")
     with pytest.raises(ValueError, match="max_retries"):
-        client.run("x", label="t", max_retries=len(STREAM_IDLE_BACKOFF) + 1)
+        _asyncio.run(client.run("x", label="t", max_retries=len(STREAM_IDLE_BACKOFF) + 1))
 
 
 # ---------------------------------------------------------------------------

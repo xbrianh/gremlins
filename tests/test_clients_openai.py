@@ -53,7 +53,7 @@ def test_custom_instructions_passed_to_agent(monkeypatch: Any) -> None:
 
     custom = "Custom instructions here."
     client = OpenAIAgentsClient("gpt-4o", instructions=custom)
-    client.run("do something", label="t")
+    asyncio.run(client.run("do something", label="t"))
 
     assert captured_agents, "Runner.run_streamed was not called"
     assert captured_agents[0].instructions == custom
@@ -170,7 +170,7 @@ def test_streamed_run_produces_completed_run(monkeypatch: Any) -> None:
     monkeypatch.setattr("agents.run.Runner.run_streamed", lambda *a, **kw: fake_run)
 
     client = OpenAIAgentsClient("gpt-4o")
-    result = client.run("do something", label="test")
+    result = asyncio.run(client.run("do something", label="test"))
 
     assert isinstance(result, CompletedRun)
     assert result.exit_code == 0
@@ -192,7 +192,7 @@ def test_streamed_run_log_lines(
     monkeypatch.setattr("agents.run.Runner.run_streamed", lambda *a, **kw: fake_run)
 
     client = OpenAIAgentsClient("gpt-4o")
-    client.run("ls", label="mylabel", cwd=tmp_path)
+    asyncio.run(client.run("ls", label="mylabel", cwd=tmp_path))
 
     err = capsys.readouterr().err
     assert f"[mylabel] init model=gpt-4o cwd={tmp_path}" in err
@@ -213,7 +213,7 @@ def test_streamed_run_raw_path(monkeypatch: Any, tmp_path: pathlib.Path) -> None
 
     raw_path = tmp_path / "stream.jsonl"
     client = OpenAIAgentsClient("gpt-4o")
-    client.run("read", label="t", raw_path=raw_path)
+    asyncio.run(client.run("read", label="t", raw_path=raw_path))
 
     lines = raw_path.read_text().splitlines()
     assert len(lines) >= 2
@@ -233,7 +233,7 @@ def test_capture_events_tool_call_shape(monkeypatch: Any) -> None:
     monkeypatch.setattr("agents.run.Runner.run_streamed", lambda *a, **kw: fake_run)
 
     client = OpenAIAgentsClient("gpt-4o")
-    result = client.run("create pr", label="t", capture_events=True)
+    result = asyncio.run(client.run("create pr", label="t", capture_events=True))
 
     assert result.events is not None
     tool_evts = [
@@ -285,7 +285,7 @@ def test_idle_timeout_calls_run_cancel(monkeypatch: Any) -> None:
 
     client = OpenAIAgentsClient("gpt-4o")
     with pytest.raises(StreamTimeoutError):
-        client.run("block", label="t", idle_timeout=0.05, max_retries=0)
+        asyncio.run(client.run("block", label="t", idle_timeout=0.05, max_retries=0))
 
     assert cancel_called
 
@@ -315,7 +315,7 @@ def test_idle_timeout_raises_stream_timeout_error(monkeypatch: Any) -> None:
 
     client = OpenAIAgentsClient("gpt-4o")
     with pytest.raises(StreamTimeoutError):
-        client.run("slow", label="t", idle_timeout=0.05, max_retries=0)
+        asyncio.run(client.run("slow", label="t", idle_timeout=0.05, max_retries=0))
 
 
 def test_model_settings_stored_and_passed_to_agent(monkeypatch: Any) -> None:
@@ -332,7 +332,7 @@ def test_model_settings_stored_and_passed_to_agent(monkeypatch: Any) -> None:
     settings = ModelSettings(temperature=0.5)
     client = OpenAIAgentsClient("gpt-4o", model_settings=settings)
     assert client._model_settings is settings
-    client.run("do something", label="t")
+    asyncio.run(client.run("do something", label="t"))
 
     assert captured_agents, "Runner.run_streamed was not called"
     assert captured_agents[0].model_settings.temperature == 0.5
@@ -389,7 +389,7 @@ def test_openai_client_missing_key(monkeypatch: Any) -> None:
 )
 def test_openai_integration_run() -> None:
     client = make_openai_client("gpt-4o-mini")
-    result = client.run("Reply with the single word: done", label="integration-test")
+    result = asyncio.run(client.run("Reply with the single word: done", label="integration-test"))
     assert result.exit_code == 0
     assert result.text_result
 
@@ -400,7 +400,7 @@ def test_openai_integration_run() -> None:
 )
 def test_xai_integration_run() -> None:
     client = make_xai_client("grok-3-mini-fast")
-    result = client.run("Reply with the single word: done", label="integration-test")
+    result = asyncio.run(client.run("Reply with the single word: done", label="integration-test"))
     assert result.exit_code == 0
     assert result.text_result
 
@@ -467,10 +467,14 @@ def test_terminal_stream_error_transient_retries_and_succeeds(monkeypatch: Any) 
         )
 
     monkeypatch.setattr("agents.run.Runner.run_streamed", _fake_run_streamed)
-    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    async def _noop_sleep(_: float) -> None:
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", _noop_sleep)
 
     client = OpenAIAgentsClient("gpt-4o")
-    result = client.run("do something", label="t", max_retries=2)
+    result = asyncio.run(client.run("do something", label="t", max_retries=2))
 
     assert call_count[0] == 2
     assert result.text_result == "done"
@@ -489,11 +493,15 @@ def test_terminal_stream_error_permanent_fails_immediately(monkeypatch: Any) -> 
         return _make_erroring_run(error_msg, usage)
 
     monkeypatch.setattr("agents.run.Runner.run_streamed", _fake_run_streamed)
-    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    async def _noop_sleep(_: float) -> None:
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", _noop_sleep)
 
     client = OpenAIAgentsClient("gpt-4o")
     with pytest.raises(StreamTerminalError):
-        client.run("do something", label="t", max_retries=2)
+        asyncio.run(client.run("do something", label="t", max_retries=2))
 
     assert call_count[0] == 1
 
@@ -506,11 +514,14 @@ def test_terminal_stream_error_cost_is_recorded(monkeypatch: Any) -> None:
         "agents.run.Runner.run_streamed",
         lambda *a, **kw: _make_erroring_run(error_msg, usage),
     )
-    monkeypatch.setattr("time.sleep", lambda _: None)
+    async def _noop_sleep(_: float) -> None:
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", _noop_sleep)
 
     client = OpenAIAgentsClient("gpt-4o")
     with pytest.raises(StreamTerminalError):
-        client.run("do something", label="t", max_retries=1)
+        asyncio.run(client.run("do something", label="t", max_retries=1))
 
     # two attempts (original + 1 retry), both accrued cost
     assert client.total_cost_usd > 0
@@ -528,7 +539,7 @@ def test_run_streamed_passes_max_turns(monkeypatch: Any) -> None:
     monkeypatch.setattr("agents.run.Runner.run_streamed", _fake_run_streamed)
 
     client = OpenAIAgentsClient("gpt-4o")
-    client.run("do something", label="t")
+    asyncio.run(client.run("do something", label="t"))
 
     assert captured_kwargs, "Runner.run_streamed was not called"
     assert captured_kwargs[0].get("max_turns") == OPENAI_AGENTS_MAX_TURNS
