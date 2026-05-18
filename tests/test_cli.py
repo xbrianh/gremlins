@@ -184,7 +184,7 @@ def test_run_pipeline_forwards_gremlin_id_to_orchestrator(
 
     from gremlins.executor.state import StateData
 
-    def fake_run_pipeline(pipeline_path, *, argv, gremlin_id=None, client=None):
+    async def fake_run_pipeline(pipeline_path, *, argv, gremlin_id=None, client=None):
         StateData.load(gremlin_id).set_stage("implement")
         return 0
 

@@ -4,6 +4,7 @@ Uses FakeClaudeClient throughout — no real claude subprocess or gh CLI calls
 (gh calls are monkeypatched at the subprocess.run level).
 """
 
+import asyncio
 import dataclasses
 import json
 import pathlib
@@ -449,8 +450,8 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
         },
     )
 
-    result = run_pipeline(
-        _gh_pipeline_path(tmp_path), argv=["--plan", "#42"], client=client
+    result = asyncio.run(
+        run_pipeline(_gh_pipeline_path(tmp_path), argv=["--plan", "#42"], client=client)
     )
     assert result == 0
 
@@ -503,8 +504,10 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
         },
     )
 
-    result = run_pipeline(
-        _gh_pipeline_path(tmp_path), argv=["add foo feature"], client=client
+    result = asyncio.run(
+        run_pipeline(
+            _gh_pipeline_path(tmp_path), argv=["add foo feature"], client=client
+        )
     )
     assert result == 0
 
@@ -556,10 +559,12 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
         },
     )
 
-    result = run_pipeline(
-        _gh_pipeline_path(tmp_path),
-        argv=["--plan", "#42", "--client", "claude:claude-opus-4-7"],
-        client=client,
+    result = asyncio.run(
+        run_pipeline(
+            _gh_pipeline_path(tmp_path),
+            argv=["--plan", "#42", "--client", "claude:claude-opus-4-7"],
+            client=client,
+        )
     )
     assert result == 0
 
@@ -615,8 +620,8 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
     )
 
     # Invoke with NO --model.
-    result = run_pipeline(
-        _gh_pipeline_path(tmp_path), argv=["--plan", "#42"], client=client
+    result = asyncio.run(
+        run_pipeline(_gh_pipeline_path(tmp_path), argv=["--plan", "#42"], client=client)
     )
     assert result == 0
 
@@ -673,10 +678,12 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
         },
     )
 
-    result = run_pipeline(
-        _gh_pipeline_path(tmp_path),
-        argv=["--plan", "#42", "--client", "copilot:gpt-4o"],
-        client=client,
+    result = asyncio.run(
+        run_pipeline(
+            _gh_pipeline_path(tmp_path),
+            argv=["--plan", "#42", "--client", "copilot:gpt-4o"],
+            client=client,
+        )
     )
     assert result == 0
 
@@ -739,10 +746,12 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         },
     )
 
-    result = run_pipeline(
-        _gh_pipeline_path(tmp_path),
-        argv=["--plan", "#99", "--resume-from", "implement"],
-        client=client,
+    result = asyncio.run(
+        run_pipeline(
+            _gh_pipeline_path(tmp_path),
+            argv=["--plan", "#99", "--resume-from", "implement"],
+            client=client,
+        )
     )
     assert result == 0
 
@@ -801,10 +810,12 @@ def test_resume_from_github_review_pull_request(tmp_path, monkeypatch):
 
     client = FakeClaudeClient(fixtures={})
 
-    result = run_pipeline(
-        _gh_pipeline_path(tmp_path),
-        argv=["--plan", "#5", "--resume-from", "github-review-pull-request"],
-        client=client,
+    result = asyncio.run(
+        run_pipeline(
+            _gh_pipeline_path(tmp_path),
+            argv=["--plan", "#5", "--resume-from", "github-review-pull-request"],
+            client=client,
+        )
     )
     assert result == 0
 
@@ -923,8 +934,10 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
         git_dir=tmp_path,
         fixtures=fixtures,
     )
-    result = run_pipeline(
-        _gh_pipeline_path(tmp_path), argv=["--plan", str(plan_file)], client=client
+    result = asyncio.run(
+        run_pipeline(
+            _gh_pipeline_path(tmp_path), argv=["--plan", str(plan_file)], client=client
+        )
     )
     assert result == 0
 
@@ -1009,10 +1022,12 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
 
     client = FakeClaudeClient(fixtures={"github-open-pull-request": _pr_events()})
 
-    result = run_pipeline(
-        _gh_pipeline_path(tmp_path),
-        argv=["--plan", "#42", "--resume-from", "open-pr"],
-        client=client,
+    result = asyncio.run(
+        run_pipeline(
+            _gh_pipeline_path(tmp_path),
+            argv=["--plan", "#42", "--resume-from", "open-pr"],
+            client=client,
+        )
     )
     assert result == 0
 
@@ -1087,10 +1102,12 @@ def test_github_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
         },
     )
 
-    result = run_pipeline(
-        _gh_pipeline_path(tmp_path),
-        argv=["--plan", "#42", "--client", "claude:claude-opus-4-7"],
-        client=client,
+    result = asyncio.run(
+        run_pipeline(
+            _gh_pipeline_path(tmp_path),
+            argv=["--plan", "#42", "--client", "claude:claude-opus-4-7"],
+            client=client,
+        )
     )
     assert result == 0
 
@@ -1161,10 +1178,12 @@ def test_github_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
         },
     )
 
-    result = run_pipeline(
-        _gh_pipeline_path(tmp_path),
-        argv=["--plan", "#42", "--client", "claude:claude-opus-4-7"],
-        client=client,
+    result = asyncio.run(
+        run_pipeline(
+            _gh_pipeline_path(tmp_path),
+            argv=["--plan", "#42", "--client", "claude:claude-opus-4-7"],
+            client=client,
+        )
     )
     assert result == 0
 
@@ -1229,8 +1248,8 @@ def test_github_wait_ci_stage_ordering(tmp_path, monkeypatch):
         },
     )
 
-    result = run_pipeline(
-        _gh_pipeline_path(tmp_path), argv=["--plan", "#42"], client=client
+    result = asyncio.run(
+        run_pipeline(_gh_pipeline_path(tmp_path), argv=["--plan", "#42"], client=client)
     )
     assert result == 0
 
@@ -1281,10 +1300,12 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
 
     client = FakeClaudeClient(fixtures={})
 
-    result = run_pipeline(
-        _gh_pipeline_path(tmp_path),
-        argv=["--plan", "#5", "--resume-from", "ci-gate"],
-        client=client,
+    result = asyncio.run(
+        run_pipeline(
+            _gh_pipeline_path(tmp_path),
+            argv=["--plan", "#5", "--resume-from", "ci-gate"],
+            client=client,
+        )
     )
     assert result == 0
 
@@ -1356,10 +1377,12 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
         },
     )
 
-    result = run_pipeline(
-        _gh_pipeline_path(tmp_path),
-        argv=["--plan", "#42", "--client", "claude:claude-opus-4-7"],
-        client=client,
+    result = asyncio.run(
+        run_pipeline(
+            _gh_pipeline_path(tmp_path),
+            argv=["--plan", "#42", "--client", "claude:claude-opus-4-7"],
+            client=client,
+        )
     )
     assert result == 0
 
@@ -1422,10 +1445,12 @@ def test_resume_from_verify(tmp_path, monkeypatch):
 
     client = FakeClaudeClient(fixtures={"github-open-pull-request": _pr_events()})
 
-    result = run_pipeline(
-        _gh_pipeline_path(tmp_path),
-        argv=["--plan", "#5", "--resume-from", "verify"],
-        client=client,
+    result = asyncio.run(
+        run_pipeline(
+            _gh_pipeline_path(tmp_path),
+            argv=["--plan", "#5", "--resume-from", "verify"],
+            client=client,
+        )
     )
     assert result == 0
 
@@ -1475,11 +1500,13 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch):
         },
     )
 
-    result = run_pipeline(
-        _gh_pipeline_path(tmp_path),
-        argv=["--plan", "#42"],
-        gremlin_id=gremlin_id,
-        client=client,
+    result = asyncio.run(
+        run_pipeline(
+            _gh_pipeline_path(tmp_path),
+            argv=["--plan", "#42"],
+            gremlin_id=gremlin_id,
+            client=client,
+        )
     )
     assert result == 0
 
@@ -1531,11 +1558,13 @@ def test_gh_main_state_client_tracks_effective_model(
         },
     )
 
-    result = run_pipeline(
-        _gh_pipeline_path(tmp_path),
-        argv=["--plan", "#42", "--client", "copilot:gpt-5.4"],
-        gremlin_id=gremlin_id,
-        client=client,
+    result = asyncio.run(
+        run_pipeline(
+            _gh_pipeline_path(tmp_path),
+            argv=["--plan", "#42", "--client", "copilot:gpt-5.4"],
+            gremlin_id=gremlin_id,
+            client=client,
+        )
     )
     assert result == 0
 
@@ -1612,8 +1641,8 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
         },
     )
 
-    result = run_pipeline(
-        _gh_pipeline_path(tmp_path), argv=["--plan", "#42"], client=client
+    result = asyncio.run(
+        run_pipeline(_gh_pipeline_path(tmp_path), argv=["--plan", "#42"], client=client)
     )
     assert result == 0
 
@@ -1673,8 +1702,10 @@ def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
         },
     )
 
-    result = run_pipeline(
-        _gh_pipeline_path(tmp_path), argv=["instr from cli"], client=client
+    result = asyncio.run(
+        run_pipeline(
+            _gh_pipeline_path(tmp_path), argv=["instr from cli"], client=client
+        )
     )
     assert result == 0
 

@@ -1,3 +1,4 @@
+import asyncio
 import dataclasses
 import json
 import shutil
@@ -44,8 +45,12 @@ def test_local_main_plan_mode(tmp_path, monkeypatch):
         }
     )
 
-    result = run_pipeline(
-        _local_pipeline_path(tmp_path), argv=["--plan", str(plan_file)], client=client
+    result = asyncio.run(
+        run_pipeline(
+            _local_pipeline_path(tmp_path),
+            argv=["--plan", str(plan_file)],
+            client=client,
+        )
     )
     assert result == 0
 
@@ -74,10 +79,12 @@ def test_local_main_resume_from_review_code_requires_git_changes(
     monkeypatch.setattr("gremlins.executor.run.has_commits", lambda: False)
 
     with pytest.raises(SystemExit):
-        run_pipeline(
-            _local_pipeline_path(tmp_path),
-            argv=["--plan", str(plan_file), "--resume-from", "review-code"],
-            client=FakeClaudeClient(fixtures={}),
+        asyncio.run(
+            run_pipeline(
+                _local_pipeline_path(tmp_path),
+                argv=["--plan", str(plan_file), "--resume-from", "review-code"],
+                client=FakeClaudeClient(fixtures={}),
+            )
         )
 
     assert (
@@ -111,10 +118,12 @@ def test_local_main_resume_from_review_code_allows_existing_git_changes(
         }
     )
 
-    result = run_pipeline(
-        _local_pipeline_path(tmp_path),
-        argv=["--plan", str(plan_file), "--resume-from", "review-code"],
-        client=client,
+    result = asyncio.run(
+        run_pipeline(
+            _local_pipeline_path(tmp_path),
+            argv=["--plan", str(plan_file), "--resume-from", "review-code"],
+            client=client,
+        )
     )
 
     assert result == 0
@@ -146,10 +155,12 @@ def test_local_main_client_specifier_model(tmp_path, monkeypatch):
         }
     )
 
-    result = run_pipeline(
-        _local_pipeline_path(tmp_path),
-        argv=["--plan", str(plan_file), "--client", "copilot:gpt-4o"],
-        client=client,
+    result = asyncio.run(
+        run_pipeline(
+            _local_pipeline_path(tmp_path),
+            argv=["--plan", str(plan_file), "--client", "copilot:gpt-4o"],
+            client=client,
+        )
     )
     assert result == 0
     assert client.calls[0].model == "gpt-4o"  # implement stage
@@ -185,11 +196,13 @@ def test_local_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir)
         }
     )
 
-    result = run_pipeline(
-        _local_pipeline_path(tmp_path),
-        argv=["--plan", str(plan_file)],
-        client=client,
-        gremlin_id=gremlin_id,
+    result = asyncio.run(
+        run_pipeline(
+            _local_pipeline_path(tmp_path),
+            argv=["--plan", str(plan_file)],
+            client=client,
+            gremlin_id=gremlin_id,
+        )
     )
     assert result == 0
 
@@ -226,10 +239,12 @@ def test_local_main_env_file_vars_reach_verify(tmp_path, monkeypatch):
     )
 
     monkeypatch.delenv("GREMLIN_ENV_TEST_SENTINEL", raising=False)
-    result = run_pipeline(
-        _local_pipeline_path(tmp_path),
-        argv=["--plan", str(plan_file), "--cmd", verify_cmd],
-        client=client,
+    result = asyncio.run(
+        run_pipeline(
+            _local_pipeline_path(tmp_path),
+            argv=["--plan", str(plan_file), "--cmd", verify_cmd],
+            client=client,
+        )
     )
     assert result == 0
 
@@ -284,8 +299,12 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
         }
     )
 
-    result = run_pipeline(
-        _local_pipeline_path(tmp_path), argv=["--plan", str(plan_file)], client=client
+    result = asyncio.run(
+        run_pipeline(
+            _local_pipeline_path(tmp_path),
+            argv=["--plan", str(plan_file)],
+            client=client,
+        )
     )
     assert result == 0
     assert client.calls[0].model == "gpt-5.4"  # implement
@@ -341,11 +360,13 @@ def test_local_stage_inputs_instructions_reach_plan(
     monkeypatch.setattr(_ac_mod.AddressCode, "run", lambda self, pipe: None)
     monkeypatch.setattr(_v_mod.Verify, "run", lambda self, pipe: None)
 
-    result = run_pipeline(
-        _local_pipeline_path(tmp_path),
-        argv=["instr from cli"],
-        client=FakeClaudeClient(fixtures={}),
-        gremlin_id=gremlin_id,
+    result = asyncio.run(
+        run_pipeline(
+            _local_pipeline_path(tmp_path),
+            argv=["instr from cli"],
+            client=FakeClaudeClient(fixtures={}),
+            gremlin_id=gremlin_id,
+        )
     )
 
     assert result == 0
@@ -365,9 +386,11 @@ def test_startup_fails_in_non_git_dir(tmp_path, monkeypatch, capsys):
     )
     monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: False)
     with pytest.raises(SystemExit):
-        run_pipeline(
-            _local_pipeline_path(tmp_path),
-            argv=["--plan", str(plan_file)],
-            client=FakeClaudeClient(fixtures={}),
+        asyncio.run(
+            run_pipeline(
+                _local_pipeline_path(tmp_path),
+                argv=["--plan", str(plan_file)],
+                client=FakeClaudeClient(fixtures={}),
+            )
         )
     assert "not inside a git worktree" in capsys.readouterr().err

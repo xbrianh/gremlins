@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -55,7 +56,7 @@ def test_gremlin_run_in_process(project_dir, pipeline_yaml, test_state_root):
     try:
         gremlin.initialize_runtime()
         worktree = gremlin.worktree_dir
-        gremlin.run()
+        asyncio.run(gremlin.run())
         rc = 0
     finally:
         os.chdir(saved_cwd)

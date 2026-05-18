@@ -12,6 +12,7 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import pathlib
 import subprocess
@@ -360,7 +361,7 @@ def test_fanin_resume_aggregates_existing_shards(tmp_path, state_root):
     # Simulate resuming from fanin: only run the fanin stage.
     # Fanin raises because one child bailed; state must still be written.
     with pytest.raises(RuntimeError, match="bailed"):
-        run_stages(stages[2:], resume_from="reviews-fanin")
+        asyncio.run(run_stages(stages[2:], resume_from="reviews-fanin"))
 
     state_dir = sf.parent
     assert (state_dir / "bail_parent-attempt.json").exists()
@@ -401,7 +402,7 @@ def test_run_stages_resume_from_fanin_name(tmp_path, state_root):
 
     # run_stages with resume_from=reviews-fanin skips fanout and parallel.
     with pytest.raises(RuntimeError, match="bailed"):
-        run_stages(stages, resume_from="reviews-fanin")
+        asyncio.run(run_stages(stages, resume_from="reviews-fanin"))
 
     assert (state_dir / "bail_fanin-resume-parent.json").exists()
     data = _read_state(sf)
@@ -760,7 +761,7 @@ def test_parallel_child_set_stage_writes_parent_as_stage(tmp_path, state_root):
         ("github-address-pull-request-reviews", lambda: None),
     ]
     # Should not raise — this is what gremlins resume does.
-    run_stages(pipeline_stages, resume_from=data["stage"])
+    asyncio.run(run_stages(pipeline_stages, resume_from=data["stage"]))
 
 
 def test_parallel_child_set_stage_with_sub_stage_payload_writes_parent_as_stage(
