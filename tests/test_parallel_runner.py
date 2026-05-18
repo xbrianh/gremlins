@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import pathlib
 import threading
 import time
@@ -163,7 +164,7 @@ def test_parallel_wrapper_runs_all_children() -> None:
 
     children = [("a", track("a")), ("b", track("b"))]
     wrapper = _parallel_wrapper(children)
-    wrapper()  # type: ignore[operator]
+    asyncio.run(wrapper())  # type: ignore[operator]
     assert sorted(log) == ["a", "b"]
 
 
@@ -188,7 +189,7 @@ def test_parallel_wrapper_children_overlap_in_time() -> None:
 
     children = [("a", make_timed("a")), ("b", make_timed("b"))]
     wrapper = _parallel_wrapper(children)
-    wrapper()  # type: ignore[operator]
+    asyncio.run(wrapper())  # type: ignore[operator]
 
     # Both started before either finished → overlapping execution
     assert timings["a"]["start"] < timings["b"]["end"]
@@ -213,7 +214,7 @@ def test_parallel_wrapper_sibling_runs_when_one_child_fails() -> None:
     children = [("fail", failing), ("sibling", sibling)]
     wrapper = _parallel_wrapper(children)
     with pytest.raises(RuntimeError, match="child failed"):
-        wrapper()  # type: ignore[operator]
+        asyncio.run(wrapper())  # type: ignore[operator]
     assert "sibling" in ran
 
 
@@ -232,7 +233,7 @@ def test_parallel_wrapper_runs_all_children_unconditionally() -> None:
         ("c", lambda: log.append("c")),
     ]
     wrapper = _parallel_wrapper(children)
-    wrapper()  # type: ignore[operator]
+    asyncio.run(wrapper())  # type: ignore[operator]
     assert sorted(log) == ["a", "b", "c"]
 
 
@@ -359,8 +360,8 @@ def test_parallel_sequence_child_worktree_flows() -> None:
         child_key="seq",
     )
 
-    def seq_runner() -> None:
-        seq_stage.run(seq_ctx)
+    async def seq_runner() -> None:
+        await seq_stage.run(seq_ctx)
 
     project_root = pathlib.Path.cwd()
     stages = _make_parallel_stages(
@@ -368,8 +369,15 @@ def test_parallel_sequence_child_worktree_flows() -> None:
         [("seq", seq_ctx, seq_runner)],
         project_root=project_root,
     )
-    for _, fn in stages:
-        fn()
+
+    async def _run_all() -> None:
+        for _, fn in stages:
+            if inspect.iscoroutinefunction(fn):
+                await fn()
+            else:
+                fn()
+
+    asyncio.run(_run_all())
 
     assert len(observed) == 2
     # Both sub-stages saw the same non-None worktree that is not the project root
@@ -407,8 +415,6 @@ def test_run_stages_async_and_sync_callables_both_execute_in_order() -> None:
 
 
 def test_make_runner_returns_async_for_async_stage() -> None:
-    import inspect
-
     from gremlins.stages.base import Stage
     from gremlins.stages.outcome import Done, Outcome
 
@@ -426,8 +432,6 @@ def test_make_runner_returns_async_for_async_stage() -> None:
 
 
 def test_make_runner_returns_sync_for_sync_stage() -> None:
-    import inspect
-
     from gremlins.stages.base import Stage
     from gremlins.stages.outcome import Done, Outcome
 

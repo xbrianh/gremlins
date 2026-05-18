@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import pathlib
 
@@ -48,7 +49,7 @@ def test_sequence_runs_body_in_order() -> None:
             return Done()
 
     stage = SequenceStage("seq", body=[_LogStage("a"), _LogStage("b"), _LogStage("c")])
-    stage.run(_state())
+    asyncio.run(stage.run(_state()))
     assert log == ["a", "b", "c"]
 
 
@@ -72,7 +73,7 @@ def test_sequence_stops_on_exception() -> None:
         body=[_LogStage("a"), _LogStage("b", fail=True), _LogStage("c")],
     )
     with pytest.raises(RuntimeError, match="boom"):
-        stage.run(_state())
+        asyncio.run(stage.run(_state()))
     assert log == ["a", "b"]
 
 
@@ -80,7 +81,7 @@ def test_sequence_propagates_worktree() -> None:
     wt = pathlib.Path("/tmp/fake-worktree")
     child = _FakeStage("child")
     stage = SequenceStage("seq", body=[child])
-    stage.run(_state(worktree=wt))
+    asyncio.run(stage.run(_state(worktree=wt)))
     assert child.received is not None
     assert child.received.worktree == wt
 
@@ -88,7 +89,7 @@ def test_sequence_propagates_worktree() -> None:
 def test_sequence_propagates_child_key() -> None:
     child = _FakeStage("child")
     stage = SequenceStage("seq", body=[child])
-    stage.run(_state(child_key="my-child"))
+    asyncio.run(stage.run(_state(child_key="my-child")))
     assert child.received is not None
     assert child.received.child_key == "my-child"
 
@@ -97,7 +98,7 @@ def test_sequence_propagates_session_dir() -> None:
     shard_dir = pathlib.Path("/tmp/shard-session")
     child = _FakeStage("child")
     stage = SequenceStage("seq", body=[child])
-    stage.run(_state(session_dir=shard_dir))
+    asyncio.run(stage.run(_state(session_dir=shard_dir)))
     assert child.received is not None
     assert child.received.session_dir == shard_dir
 
@@ -141,13 +142,13 @@ def test_sequence_resume_skips_completed_children(state_root: pathlib.Path) -> N
     )
 
     with pytest.raises(Bail, match="b failed"):
-        seq.run(state)
+        asyncio.run(seq.run(state))
     assert ran == ["a", "b"]
 
     ran.clear()
     fail["b"] = False
 
-    seq.run(state)
+    asyncio.run(seq.run(state))
     assert ran == ["b", "c"]
 
 
@@ -171,8 +172,8 @@ def test_sibling_sequences_done_sets_are_independent(state_root: pathlib.Path) -
     # Mark "a" done in seq1's slot only.
     state.mark_done("pipeline/seq1", "a")
 
-    seq1.run(state)
-    seq2.run(state)
+    asyncio.run(seq1.run(state))
+    asyncio.run(seq2.run(state))
 
     # seq1/a was skipped; seq2/a was not.
     assert ran == ["a"]  # only seq2's "a"
