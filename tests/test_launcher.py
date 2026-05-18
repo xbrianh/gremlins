@@ -483,7 +483,7 @@ def test_resume_keeps_resume_flag_for_pipeline_gremlin(lenv, monkeypatch):
     class _Proc:
         pid = 12345
 
-    # cmd layout: [sys.executable, "-m", "gremlins.run_pipeline", gremlin_id, pipeline_path, *spawn_args]
+    # cmd layout: [sys.executable, "-m", "gremlins.spawn.pipeline", gremlin_id, pipeline_path, *spawn_args]
     def fake_spawn(cmd, cwd, env, log_path, log_mode="w"):
         captured["subcommand"] = cmd[4]
         captured["spawn_args"] = list(cmd[5:])
@@ -538,7 +538,7 @@ def test_resume_bossgremlin_resumes_at_chain_stage(lenv, monkeypatch):
     class _Proc:
         pid = 12345
 
-    # cmd layout: [sys.executable, "-m", "gremlins.run_pipeline", gremlin_id, pipeline_path, *spawn_args]
+    # cmd layout: [sys.executable, "-m", "gremlins.spawn.pipeline", gremlin_id, pipeline_path, *spawn_args]
     def fake_spawn(cmd, cwd, env, log_path, log_mode="w"):
         captured["subcommand"] = cmd[4]
         captured["spawn_args"] = list(cmd[5:])

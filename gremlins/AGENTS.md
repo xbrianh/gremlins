@@ -8,7 +8,8 @@ review / address pipelines, the fleet manager
 ## Module layout
 
 - `cli/` — subcommand entry points. `__init__.py` is the top-level dispatch; one file per subcommand group: `launch.py`, `resume.py`, `fleet.py`. Bare invocation prints fleet status.
-- `run_pipeline.py` — `python -m gremlins.run_pipeline <gremlin_id> <pipeline_path> [args...]`. Spawned by the launcher; wraps `cli.main` and writes terminal state on exit.
+- `spawn/pipeline.py` — `python -m gremlins.spawn.pipeline <gremlin_id> <pipeline_path> [args...]`. Spawned by the launcher; wraps `executor.run.run_pipeline` and writes terminal state on exit.
+- `spawn/child.py` — `python -m gremlins.spawn.child <spec_path>`. Spawned by the parallel runner to run a single stage in a fresh process (lands with #690).
 - `runner.py` — `run_stages` sequencer (with `resume_from`) + SIGINT/SIGTERM handlers that reap `claude -p` children.
 - `state.py` — session-dir resolution, `set_stage` / `write_bail_file` / `patch_state` / `check_bail`.
 - `utils/git.py` — `in_git_repo`, `head_sha`, branch / worktree helpers.

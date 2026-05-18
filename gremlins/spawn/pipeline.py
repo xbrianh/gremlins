@@ -1,6 +1,6 @@
 """Internal spawn boundary: run a pipeline by path and record terminal state.
 
-Usage: python -m gremlins.run_pipeline <gremlin_id> <pipeline_path> [args...]
+Usage: python -m gremlins.spawn.pipeline <gremlin_id> <pipeline_path> [args...]
 
 Not intended for direct human invocation.
 """

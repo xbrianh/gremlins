@@ -11,7 +11,7 @@ import pytest
 import gremlins.cli as cli_mod
 import gremlins.executor.state as state_mod
 from gremlins.cli import main
-from gremlins.run_pipeline import main as run_pipeline_main
+from gremlins.spawn.pipeline import main as run_pipeline_main
 from gremlins.utils.yaml_io import YamlLoadError
 
 
@@ -143,7 +143,7 @@ def test_check_bail_stale_attempt_not_detected(state_root, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# run_pipeline_main — extracted to gremlins/run_pipeline.py
+# run_pipeline_main — gremlins/spawn/pipeline.py
 # ---------------------------------------------------------------------------
 
 

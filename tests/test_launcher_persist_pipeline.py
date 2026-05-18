@@ -167,7 +167,7 @@ stages:
         pid = 12345
 
     def fake_spawn(cmd, cwd, env, log_path, log_mode="w"):
-        # cmd: [python, -m, gremlins.run_pipeline, gremlin_id, pipeline_path, *args]
+        # cmd: [python, -m, gremlins.spawn.pipeline, gremlin_id, pipeline_path, *args]
         captured["pipeline_path"] = cmd[4]
         return _Proc()
 
