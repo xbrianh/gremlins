@@ -428,7 +428,7 @@ def _spawn(gremlin_id: str, inputs: _Inputs, state_dir: pathlib.Path) -> Any:
     cmd = [
         sys.executable,
         "-m",
-        "gremlins.run_pipeline",
+        "gremlins.spawn.pipeline",
         gremlin_id,
         inputs.pipeline_path,
         *spawn_args,
@@ -671,7 +671,7 @@ def _spawn_resume(
     cmd = [
         sys.executable,
         "-m",
-        "gremlins.run_pipeline",
+        "gremlins.spawn.pipeline",
         gremlin_id,
         pipeline_path,
         *spawn_args,
