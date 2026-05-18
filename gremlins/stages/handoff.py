@@ -114,7 +114,9 @@ async def collect_git_context(
     )
     git_log = result.stdout.strip()
 
-    result = await proc.run_async(["git", "diff", f"{merge_base}..{inspect_rev}"], check=True)
+    result = await proc.run_async(
+        ["git", "diff", f"{merge_base}..{inspect_rev}"], check=True
+    )
     git_diff = result.stdout
 
     return branch, git_log, git_diff

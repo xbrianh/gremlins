@@ -247,7 +247,17 @@ async def _post_file_as_github_issue(path: str, state: State) -> tuple[str, str]
         sys.stderr.flush()
         sys.exit(1)
     r = await proc.run_async(
-        ["gh", "issue", "create", "--repo", state.repo, "--title", issue_title, "--body-file", path],
+        [
+            "gh",
+            "issue",
+            "create",
+            "--repo",
+            state.repo,
+            "--title",
+            issue_title,
+            "--body-file",
+            path,
+        ],
     )
     if r.returncode != 0:
         sys.stderr.write(

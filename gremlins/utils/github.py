@@ -228,9 +228,17 @@ def get_pr_ci_status(pr_url: str) -> dict[str, Any]:
 
 async def get_pr_ci_status_async(pr_url: str) -> dict[str, Any]:
     import subprocess as _subprocess
+
     try:
         r = await proc.run_async(
-            ["gh", "pr", "view", pr_url, "--json", "statusCheckRollup,reviewDecision,headRefOid"],
+            [
+                "gh",
+                "pr",
+                "view",
+                pr_url,
+                "--json",
+                "statusCheckRollup,reviewDecision,headRefOid",
+            ],
             timeout=GET_PR_CI_STATUS_TIMEOUT,
         )
     except _subprocess.TimeoutExpired as exc:
@@ -306,8 +314,13 @@ def resolve_default_branch(project_root: str) -> str:
 
 async def check_copilot_review_async(repo: str, pr_num: str) -> str | None:
     r = await proc.run_async(
-        ["gh", "api", f"repos/{repo}/pulls/{pr_num}/reviews",
-         "--jq", '.[] | select(.user.login | test("[Cc]opilot")) | .state'],
+        [
+            "gh",
+            "api",
+            f"repos/{repo}/pulls/{pr_num}/reviews",
+            "--jq",
+            '.[] | select(.user.login | test("[Cc]opilot")) | .state',
+        ],
     )
     if r.returncode != 0:
         return None

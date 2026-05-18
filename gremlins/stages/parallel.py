@@ -183,7 +183,9 @@ def _parallel_stages(
 
     async def _in_git_repo() -> bool:
         try:
-            return await proc.run_ok_async(["git", "rev-parse", "--git-dir"], cwd=str(project_root))
+            return await proc.run_ok_async(
+                ["git", "rev-parse", "--git-dir"], cwd=str(project_root)
+            )
         except Exception:
             return False
 
@@ -231,7 +233,9 @@ def _parallel_stages(
             except Exception:
                 pass
         try:
-            await proc.run_quiet_async(["git", "worktree", "prune"], cwd=str(project_root))
+            await proc.run_quiet_async(
+                ["git", "worktree", "prune"], cwd=str(project_root)
+            )
         except Exception:
             pass
 
@@ -380,7 +384,9 @@ def _parallel_stages(
                     f"parallel child {child_key!r} mutated its worktree "
                     "(fan-in merge for mutating parallel is not yet implemented)"
                 )
-            status_r = await proc.run_async(["git", "status", "--porcelain"], cwd=str(wt))
+            status_r = await proc.run_async(
+                ["git", "status", "--porcelain"], cwd=str(wt)
+            )
             if status_r.stdout.strip():
                 raise NotImplementedError(
                     f"parallel child {child_key!r} has uncommitted changes "
@@ -423,7 +429,9 @@ def _parallel_stages(
 
     async def _do_fan_in() -> None:
         if await _in_git_repo():
-            await proc.run_quiet_async(["git", "worktree", "prune"], cwd=str(project_root))
+            await proc.run_quiet_async(
+                ["git", "worktree", "prune"], cwd=str(project_root)
+            )
         if await _in_git_repo() and base_head:
             await _validate_no_mutations()
 
