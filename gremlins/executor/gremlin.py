@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
-import inspect
 import json
 import logging
 import os
@@ -75,10 +73,7 @@ async def run_stages(
             )
         start_idx = names.index(resume_from)
     for _, fn in stages[start_idx:]:
-        if inspect.iscoroutinefunction(fn):
-            await fn()
-        else:
-            await asyncio.to_thread(fn)
+        await fn()
 
 
 class Gremlin:

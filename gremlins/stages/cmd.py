@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
 import pathlib
-import subprocess
 from typing import Any
 
 from gremlins.executor.state import State
@@ -20,23 +20,23 @@ class Cmd(Stage):
         self.options = options
         self.n: int = 0
 
-    def run(self, state: State) -> Outcome:
+    async def run(self, state: State) -> Outcome:
         cmds = [c for c in self.options.get("cmds", []) if c.strip()]
         if not cmds:
             return Done()
         self.n += 1
         combined = " && ".join(cmds)
-        result = subprocess.run(
+        proc = await asyncio.create_subprocess_shell(
             combined,
-            shell=True,
             cwd=state.cwd,
-            capture_output=True,
-            text=True,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        output = result.stdout + result.stderr
+        stdout_b, stderr_b = await proc.communicate()
+        output = stdout_b.decode() + stderr_b.decode()
         self._log_path(state).write_text(output, encoding="utf-8")
-        if result.returncode != 0:
-            return NeedsFix(output, result.returncode)
+        if proc.returncode != 0:
+            return NeedsFix(output, proc.returncode)
         return Done()
 
     def _log_path(self, state: State) -> pathlib.Path:

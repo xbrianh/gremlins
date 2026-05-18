@@ -309,6 +309,7 @@ def test_run_bail_signal(monkeypatch, tmp_path):
 def test_run_signal_file_not_written(monkeypatch, tmp_path, capsys):
     plan_path = tmp_path / "plan.md"
     plan_path.write_text("# Plan\n")
+
     async def _fake_collect_git_context_b(base_ref, rev=None):
         return ("b", "", "")
 

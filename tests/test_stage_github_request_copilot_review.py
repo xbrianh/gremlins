@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import subprocess
+import asyncio
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -10,6 +11,7 @@ from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData
 from gremlins.stages.github_request_copilot_review import GitHubRequestCopilotReview
+from gremlins.utils import proc
 
 
 def _make_stage(
@@ -30,14 +32,18 @@ def _make_stage(
 def test_run_calls_gh_pr_edit(tmp_path, monkeypatch):
     calls = []
 
-    def fake_run(cmd, *args, **kwargs):
+    async def fake_run_async(cmd, *args, **kwargs):
         calls.append(cmd)
-        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        result = AsyncMock()
+        result.returncode = 0
+        result.stdout = ""
+        result.stderr = ""
+        return result
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(proc, "run_async", fake_run_async)
 
     stage, state = _make_stage(tmp_path, repo="owner/repo", pr_num="42")
-    stage.run(state)
+    asyncio.run(stage.run(state))
 
     assert len(calls) == 1
     cmd = calls[0]
@@ -50,13 +56,15 @@ def test_run_calls_gh_pr_edit(tmp_path, monkeypatch):
 
 
 def test_run_raises_on_nonzero_returncode(tmp_path, monkeypatch):
-    def fake_run(cmd, *args, **kwargs):
-        return subprocess.CompletedProcess(
-            cmd, 1, stdout="", stderr="review not enabled"
-        )
+    async def fake_run_async(cmd, *args, **kwargs):
+        result = AsyncMock()
+        result.returncode = 1
+        result.stdout = ""
+        result.stderr = "review not enabled"
+        return result
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(proc, "run_async", fake_run_async)
 
     stage, state = _make_stage(tmp_path, repo="owner/repo", pr_num="7")
     with pytest.raises(RuntimeError, match="could not request Copilot review"):
-        stage.run(state)
+        asyncio.run(stage.run(state))

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 from gremlins.executor.state import State
@@ -29,7 +29,7 @@ def max_iters(n: int) -> UntilFn:
 
 
 async def _dispatch_runners(
-    runners: list[Callable[[], Outcome]],
+    runners: list[Callable[[], Awaitable[Outcome]]],
     iteration: int,
     max_iterations: int,
 ) -> bool:
@@ -62,7 +62,7 @@ class LoopStage(Stage):
         name: str,
         *,
         body: list[Stage] | None = None,
-        body_runners: list[Callable[[], Outcome]] | None = None,
+        body_runners: list[Callable[[], Awaitable[Outcome]]] | None = None,
         max_iterations: int,
         until: UntilFn = head_stable,
         on_iteration_start: Callable[[State], None] | None = None,
@@ -103,12 +103,12 @@ class LoopStage(Stage):
         stage.client = get_client_from_dict(d)
         return stage
 
-    def _build_runners(self, state: State) -> list[Callable[[], Outcome]]:
-        result: list[Callable[[], Outcome]] = []
+    def _build_runners(self, state: State) -> list[Callable[[], Awaitable[Outcome]]]:
+        result: list[Callable[[], Awaitable[Outcome]]] = []
         for child in self.body:
             cs = _child_state(state, child)
             runner = cs.make_runner(child, scope=self.body, record_stage=False)
-            result.append(cast(Callable[[], Outcome], runner))
+            result.append(cast(Callable[[], Awaitable[Outcome]], runner))
         return result
 
     async def run(self, state: State) -> Outcome:

@@ -29,7 +29,7 @@ class _SimpleStage(Stage):
         self.prompts = prompts
         self.options = options
 
-    def run(self, state: State) -> Outcome:
+    async def run(self, state: State) -> Outcome:
         return Done()
 
 
@@ -41,6 +41,8 @@ def test_stage_init_takes_only_name() -> None:
 
 
 def test_stage_run_raises_not_implemented() -> None:
+    import asyncio
+
     stage = Stage("my-stage")
     client = FakeClaudeClient(fixtures={})
     state = State(
@@ -50,7 +52,7 @@ def test_stage_run_raises_not_implemented() -> None:
         pipeline_data=_PIPELINE,
     )
     with pytest.raises(NotImplementedError):
-        stage.run(state)
+        asyncio.run(stage.run(state))
 
 
 def test_default_with_dict_constructs_subclass() -> None:

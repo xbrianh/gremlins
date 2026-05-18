@@ -13,12 +13,10 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import pathlib
 import subprocess
 import threading
-import time
 
 import pytest
 
@@ -249,7 +247,7 @@ def test_bail_policy_any_one_bailed_sets_parent_bail(tmp_path, state_root):
 
     # Run just the fanin stage.
     with pytest.raises(RuntimeError, match="bailed"):
-        stages[2][1]()  # fanin is index 2
+        asyncio.run(stages[2][1]())  # fanin is index 2
 
     state_dir = sf.parent
     bail_path = state_dir / "bail_parent-attempt.json"
@@ -266,7 +264,7 @@ def test_bail_policy_all_one_bailed_no_parent_bail(tmp_path, state_root):
     sf, stages = _build_fanin_test(tmp_path, state_root, gremlin_id, shards, "all")
 
     # Only one bailed; policy=all requires all → no parent bail.
-    stages[2][1]()  # fanin should not raise
+    asyncio.run(stages[2][1]())  # fanin should not raise
 
     state_dir = sf.parent
     assert not (state_dir / "bail_parent-attempt.json").exists()
@@ -280,7 +278,7 @@ def test_bail_policy_all_both_bailed_sets_parent_bail(tmp_path, state_root):
     sf, stages = _build_fanin_test(tmp_path, state_root, gremlin_id, shards, "all")
 
     with pytest.raises(RuntimeError, match="bailed"):
-        stages[2][1]()
+        asyncio.run(stages[2][1]())
 
     state_dir = sf.parent
     bail_path = state_dir / "bail_parent-attempt.json"
@@ -296,18 +294,15 @@ def test_bail_policy_all_both_bailed_sets_parent_bail(tmp_path, state_root):
 
 def test_cancel_on_bail_skips_unstarted_children():
     ran: list[str] = []
-    barrier = threading.Barrier(2)  # synchronize first two children
 
-    def child_a() -> None:
-        barrier.wait()
+    async def child_a() -> None:
         raise RuntimeError("child-a bailed")
 
-    def child_b() -> None:
-        barrier.wait()
-        time.sleep(0.05)
+    async def child_b() -> None:
+        await asyncio.sleep(0.05)
         ran.append("b")
 
-    def child_c() -> None:
+    async def child_c() -> None:
         ran.append("c")
 
     ctx_a = State(
@@ -458,9 +453,12 @@ def test_worktree_lifecycle_fanout_creates_and_fanin_removes(tmp_path):
         child_key="b",
     )
 
+    async def _noop() -> None:
+        pass
+
     stages = _make_parallel_stages(
         "reviews",
-        [("a", ctx_a, lambda: None), ("b", ctx_b, lambda: None)],
+        [("a", ctx_a, _noop), ("b", ctx_b, _noop)],
         max_concurrent=None,
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
@@ -474,7 +472,7 @@ def test_worktree_lifecycle_fanout_creates_and_fanin_removes(tmp_path):
     orig_cwd = os.getcwd()
     os.chdir(str(repo))
     try:
-        stages[0][1]()  # fanout
+        asyncio.run(stages[0][1]())  # fanout
         wt_list_after_fanout = subprocess.run(
             ["git", "worktree", "list", "--porcelain"],
             cwd=str(repo),
@@ -496,7 +494,7 @@ def test_worktree_lifecycle_fanout_creates_and_fanin_removes(tmp_path):
         asyncio.run(stages[1][1]())  # parallel
 
         # Fan-in: worktrees should be removed.
-        stages[2][1]()  # fanin (no bails, should not raise)
+        asyncio.run(stages[2][1]())  # fanin (no bails, should not raise)
 
         wt_list_after_fanin = subprocess.run(
             ["git", "worktree", "list", "--porcelain"],
@@ -531,11 +529,14 @@ def test_fanout_persists_worktrees_and_fresh_fanin_can_clean_up(tmp_path, state_
             child_key=name,
         )
 
+    async def _noop() -> None:
+        pass
+
     # First instance: only run fan-out, then drop the closure (simulating
     # process exit between fan-out and parallel/fan-in).
     stages_run1 = _make_parallel_stages(
         "reviews",
-        [("a", _make_ctx("a"), lambda: None), ("b", _make_ctx("b"), lambda: None)],
+        [("a", _make_ctx("a"), _noop), ("b", _make_ctx("b"), _noop)],
         max_concurrent=None,
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
@@ -543,7 +544,7 @@ def test_fanout_persists_worktrees_and_fresh_fanin_can_clean_up(tmp_path, state_
         parent_data=StateData.load(gremlin_id),
         project_root=repo,
     )
-    stages_run1[0][1]()  # fan-out only
+    asyncio.run(stages_run1[0][1]())  # fan-out only
 
     # state.json should now record both worktree paths.
     sf = state_mod.resolve_state_file(gremlin_id)
@@ -559,7 +560,7 @@ def test_fanout_persists_worktrees_and_fresh_fanin_can_clean_up(tmp_path, state_
     # down the worktrees fan-out created in run 1.
     stages_run2 = _make_parallel_stages(
         "reviews",
-        [("a", _make_ctx("a"), lambda: None), ("b", _make_ctx("b"), lambda: None)],
+        [("a", _make_ctx("a"), _noop), ("b", _make_ctx("b"), _noop)],
         max_concurrent=None,
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
@@ -567,7 +568,7 @@ def test_fanout_persists_worktrees_and_fresh_fanin_can_clean_up(tmp_path, state_
         parent_data=StateData.load(gremlin_id),
         project_root=repo,
     )
-    stages_run2[2][1]()  # fan-in
+    asyncio.run(stages_run2[2][1]())  # fan-in
 
     # Worktrees gone from disk and from state.json.
     for p in prior_paths:
@@ -593,9 +594,12 @@ def test_fanout_resume_tears_down_prior_worktrees(tmp_path, state_root):
             child_key=name,
         )
 
+    async def _noop() -> None:
+        pass
+
     stages_run1 = _make_parallel_stages(
         "reviews",
-        [("a", _make_ctx("a"), lambda: None)],
+        [("a", _make_ctx("a"), _noop)],
         max_concurrent=None,
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
@@ -603,7 +607,7 @@ def test_fanout_resume_tears_down_prior_worktrees(tmp_path, state_root):
         parent_data=StateData.load(gremlin_id),
         project_root=repo,
     )
-    stages_run1[0][1]()  # fan-out
+    asyncio.run(stages_run1[0][1]())  # fan-out
 
     sf = state_mod.resolve_state_file(gremlin_id)
     assert sf is not None
@@ -615,7 +619,7 @@ def test_fanout_resume_tears_down_prior_worktrees(tmp_path, state_root):
     # new one created at a fresh path.
     stages_run2 = _make_parallel_stages(
         "reviews",
-        [("a", _make_ctx("a"), lambda: None)],
+        [("a", _make_ctx("a"), _noop)],
         max_concurrent=None,
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
@@ -623,7 +627,7 @@ def test_fanout_resume_tears_down_prior_worktrees(tmp_path, state_root):
         parent_data=StateData.load(gremlin_id),
         project_root=repo,
     )
-    stages_run2[0][1]()  # fan-out again
+    asyncio.run(stages_run2[0][1]())  # fan-out again
 
     new_path_str = (_read_state(sf)["parallel_worktrees"]["reviews"]["paths"])["a"]
     assert new_path_str != prior_path_str
@@ -671,12 +675,15 @@ def test_parallel_all_children_complete_with_defaults():
         child_key="b",
     )
 
+    async def child_a() -> None:
+        ran.append("a")
+
+    async def child_b() -> None:
+        ran.append("b")
+
     stages = _make_parallel_stages(
         "reviews",
-        [
-            ("a", ctx_a, lambda: ran.append("a")),
-            ("b", ctx_b, lambda: ran.append("b")),
-        ],
+        [("a", ctx_a, child_a), ("b", ctx_b, child_b)],
         max_concurrent=None,
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
@@ -684,13 +691,9 @@ def test_parallel_all_children_complete_with_defaults():
         project_root=pathlib.Path.cwd(),
     )
 
-    # Run all three stages end-to-end (no git repo → fanout is a no-op).
-    async def _run_all():
+    async def _run_all() -> None:
         for _, fn in stages:
-            if inspect.iscoroutinefunction(fn):
-                await fn()
-            else:
-                fn()
+            await fn()
 
     asyncio.run(_run_all())
 
@@ -758,14 +761,17 @@ def test_parallel_child_set_stage_writes_parent_as_stage(tmp_path, state_root):
     assert data["stage"] == "reviews"
     assert data["sub_stage"] == "github-review-pull-request"
 
+    async def _noop() -> None:
+        pass
+
     # The recorded stage must be a valid resume_from target in a pipeline that
     # has "reviews" as a top-level name.
     pipeline_stages: list[tuple[str, object]] = [
-        ("plan", lambda: None),
-        ("reviews-fanout", lambda: None),
-        ("reviews", lambda: None),
-        ("reviews-fanin", lambda: None),
-        ("github-address-pull-request-reviews", lambda: None),
+        ("plan", _noop),
+        ("reviews-fanout", _noop),
+        ("reviews", _noop),
+        ("reviews-fanin", _noop),
+        ("github-address-pull-request-reviews", _noop),
     ]
     # Should not raise — this is what gremlins resume does.
     asyncio.run(run_stages(pipeline_stages, resume_from=data["stage"]))

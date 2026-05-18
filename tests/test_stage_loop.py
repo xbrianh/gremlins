@@ -38,7 +38,7 @@ def _loop_state(tmp_path: Any) -> RuntimeState:
 def test_loop_head_stable_exits_cleanly(tmp_path):
     calls: list[str] = []
 
-    def runner() -> Done:
+    async def runner() -> Done:
         calls.append("run")
         return Done()
 
@@ -53,13 +53,13 @@ def test_loop_cmd_failure_then_fix_then_green(tmp_path):
     """NeedsFix on iter 1 allows fix runner; clean on iter 2."""
     state = {"attempt": 0, "fixed": False}
 
-    def check() -> Done | NeedsFix:
+    async def check() -> Done | NeedsFix:
         state["attempt"] += 1
         if not state["fixed"]:
             return NeedsFix("commands failed")
         return Done()
 
-    def fix() -> Done:
+    async def fix() -> Done:
         state["fixed"] = True
         return Done()
 
@@ -74,10 +74,10 @@ def test_loop_fix_skipped_on_success(tmp_path):
     """Fix runner must not execute when the check runner succeeds."""
     fix_calls: list[int] = []
 
-    def check() -> Done:
+    async def check() -> Done:
         return Done()
 
-    def fix() -> Done:
+    async def fix() -> Done:
         fix_calls.append(1)
         return Done()
 
@@ -88,10 +88,10 @@ def test_loop_fix_skipped_on_success(tmp_path):
 
 
 def test_loop_exhausted_returns_bail(tmp_path):
-    def check() -> NeedsFix:
+    async def check() -> NeedsFix:
         return NeedsFix("always fails")
 
-    def fix() -> Done:
+    async def fix() -> Done:
         return Done()
 
     loop = LoopStage("loop", body_runners=[check, fix], max_iterations=3)
@@ -104,11 +104,11 @@ def test_loop_fix_skipped_on_final_iteration(tmp_path):
     fix_calls: list[int] = []
     attempt = [0]
 
-    def check() -> NeedsFix:
+    async def check() -> NeedsFix:
         attempt[0] += 1
         return NeedsFix("fail")
 
-    def fix() -> Done:
+    async def fix() -> Done:
         fix_calls.append(attempt[0])
         return Done()
 
@@ -122,7 +122,7 @@ def test_loop_fix_skipped_on_final_iteration(tmp_path):
 def test_loop_bail_propagates_immediately(tmp_path):
     """Bail raised from a body runner propagates without continuing."""
 
-    def bail_runner() -> Done:
+    async def bail_runner() -> Done:
         raise Bail("stage bailed: bail_class=other")
 
     loop = LoopStage("loop", body_runners=[bail_runner], max_iterations=3)
@@ -139,10 +139,10 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
     attempt = "loop-test-attempt"
     state_mod.StateData.load(gremlin_id).patch(attempt=attempt)
 
-    def check() -> NeedsFix:
+    async def check() -> NeedsFix:
         return NeedsFix("fail")
 
-    def fix() -> Done:
+    async def fix() -> Done:
         return Done()
 
     loop_state = RuntimeState(
@@ -188,7 +188,7 @@ def test_max_iters_terminates_at_n(tmp_path):
 def test_custom_until_predicate(tmp_path):
     """Loop exits when custom predicate returns True."""
 
-    def runner() -> Done:
+    async def runner() -> Done:
         return Done()
 
     # max_iters(2) fires at iteration 2 — no Bail raised
@@ -210,7 +210,7 @@ def test_on_iteration_start_called_each_iteration(tmp_path):
     def on_start(state: RuntimeState) -> None:
         calls.append(1)
 
-    def runner() -> Done | NeedsFix:
+    async def runner() -> Done | NeedsFix:
         iter_counter[0] += 1
         if iter_counter[0] < 2:
             return NeedsFix("keep going")
@@ -244,19 +244,19 @@ def _run_cmd_stage(tmp_path: Any, cmds: list[str]) -> tuple[Cmd, RuntimeState]:
 
 def test_run_cmd_success(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, ["true"])
-    outcome = stage.run(state)
+    outcome = asyncio.run(stage.run(state))
     assert outcome == Done()
 
 
 def test_run_cmd_failure_returns_needs_fix(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, ["false"])
-    outcome = stage.run(state)
+    outcome = asyncio.run(stage.run(state))
     assert isinstance(outcome, NeedsFix)
 
 
 def test_run_cmd_failure_writes_log(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, ["echo boom >&2; false"])
-    outcome = stage.run(state)
+    outcome = asyncio.run(stage.run(state))
     assert isinstance(outcome, NeedsFix)
     log = tmp_path / "cmd.log"
     assert log.exists()
@@ -264,14 +264,14 @@ def test_run_cmd_failure_writes_log(tmp_path):
 
 def test_run_cmd_empty_cmds_is_noop(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, [])
-    outcome = stage.run(state)
+    outcome = asyncio.run(stage.run(state))
     assert outcome == Done()
     assert not (tmp_path / "cmd.log").exists()
 
 
 def test_run_cmd_output_in_needs_fix(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, ["echo hello_output; false"])
-    outcome = stage.run(state)
+    outcome = asyncio.run(stage.run(state))
     assert isinstance(outcome, NeedsFix)
     assert "hello_output" in outcome.detail
 
@@ -281,9 +281,9 @@ def test_run_cmd_log_path_interpolation(tmp_path):
     state = RuntimeState(
         data=StateData(), client=_fake_client(), session_dir=tmp_path, worktree=tmp_path
     )
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert (tmp_path / "run-1.log").exists()
-    stage.run(state)
+    asyncio.run(stage.run(state))
     assert (tmp_path / "run-2.log").exists()
 
 
@@ -330,9 +330,12 @@ def test_pr_stack_detaches_to_prior_pr_branch(tmp_path, make_state_dir, monkeypa
         lambda branch, cwd=None: detach_calls.append(branch),
     )
 
+    async def done_runner() -> Done:
+        return Done()
+
     loop = LoopStage(
         "test",
-        body_runners=[lambda: Done()],
+        body_runners=[done_runner],
         max_iterations=1,
         on_iteration_start=detach_to_pr_base,
     )
@@ -354,9 +357,12 @@ def test_pr_stack_skipped_when_no_prior_pr(tmp_path, make_state_dir, monkeypatch
         lambda branch, cwd=None: git_calls.append(branch),
     )
 
+    async def done_runner() -> Done:
+        return Done()
+
     loop = LoopStage(
         "test",
-        body_runners=[lambda: Done()],
+        body_runners=[done_runner],
         max_iterations=1,
         on_iteration_start=detach_to_pr_base,
     )
@@ -394,7 +400,10 @@ def test_no_on_iteration_start_skips_detach(tmp_path, make_state_dir, monkeypatc
         lambda branch, cwd=None: git_calls.append(branch),
     )
 
-    loop = LoopStage("test", body_runners=[lambda: Done()], max_iterations=1)
+    async def done_runner() -> Done:
+        return Done()
+
+    loop = LoopStage("test", body_runners=[done_runner], max_iterations=1)
     asyncio.run(loop.run(_loop_state_with_gr(tmp_path, gremlin_id)))
 
     assert git_calls == []
@@ -410,7 +419,7 @@ def test_loop_patches_loop_iteration_to_state(tmp_path, make_state_dir):
     state_dir = make_state_dir(gremlin_id)
     seen_iterations: list[int] = []
 
-    def runner() -> NeedsFix:
+    async def runner() -> NeedsFix:
         data = json.loads((state_dir / "state.json").read_text())
         seen_iterations.append(int(data.get("loop_iteration") or 0))
         return NeedsFix("keep going")
@@ -444,7 +453,7 @@ def test_pr_stack_iter2_detaches_to_iter1_branch(tmp_path, make_state_dir, monke
 
     count = 0
 
-    def runner() -> Done | NeedsFix:
+    async def runner() -> Done | NeedsFix:
         nonlocal count
         count += 1
         if count == 1:
