@@ -9,6 +9,7 @@ import json
 import os
 import pathlib
 import re
+from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 from agents import FunctionTool, Tool
@@ -172,7 +173,7 @@ async def _glob_invoke(ctx: ToolContext[Any], args_json: str) -> str:
     return "\n".join(str(m) for m in matches) or "(no matches)"
 
 
-_BASE_TOOLS: list[Tool] = [
+_BASE_TOOLS: list[FunctionTool] = [
     FunctionTool(
         name="Read",
         description="Read a file from the filesystem.",
@@ -352,8 +353,10 @@ def build_tools(
                 return f"Error: path outside worktree: {tgt}"
         return None
 
-    def _wrap(invoke, name: str):
-        async def w(ctx: ToolContext[Any], args_json: str) -> str:
+    def _wrap(
+        invoke: Callable[[ToolContext[Any], str], Awaitable[Any]], name: str
+    ) -> Callable[[ToolContext[Any], str], Awaitable[Any]]:
+        async def w(ctx: ToolContext[Any], args_json: str) -> Any:
             ka = _key_arg(args_json)
             args: dict[str, Any] = json.loads(args_json)
             if name in {"Read", "Edit", "Write", "Grep", "Glob"}:
@@ -367,7 +370,7 @@ def build_tools(
                 if err:
                     _audit(audit_log, name, ka, "denied", bypass)
                     return err
-            res = await invoke(ctx, args_json)
+            res: Any = await invoke(ctx, args_json)
             st = (
                 "error"
                 if str(res).startswith(("Error:", "[exit", "[timeout]"))
@@ -378,13 +381,21 @@ def build_tools(
 
         return w
 
-    return [
-        FunctionTool(
-            name=t.name,
-            description=t.description,
-            params_json_schema=t.params_json_schema,
-            on_invoke_tool=_wrap(t.on_invoke_tool, t.name),
-            strict_json_schema=getattr(t, "strict_json_schema", False),
-        )
-        for t in _BASE_TOOLS
-    ]
+    return cast(
+        "list[Tool]",
+        [
+            FunctionTool(
+                name=t.name,
+                description=t.description,
+                params_json_schema=t.params_json_schema,
+                on_invoke_tool=_wrap(t.on_invoke_tool, t.name),
+                strict_json_schema=getattr(t, "strict_json_schema", False),
+            )
+            for t in _BASE_TOOLS
+        ],
+    )
+
+
+GREMLINS_TOOLS: list[Tool] = build_tools(
+    bypass=True, worktree_root=pathlib.Path.cwd(), audit_log=None
+)
