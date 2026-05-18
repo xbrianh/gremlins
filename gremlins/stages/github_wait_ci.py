@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Callable
@@ -12,7 +13,7 @@ from gremlins.stages.agent import bail_command, run_agent
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, Outcome
 from gremlins.utils.git import head_sha
-from gremlins.utils.github import fetch_check_run_logs, get_pr_ci_status
+from gremlins.utils.github import fetch_check_run_logs_async, get_pr_ci_status_async
 
 logger = logging.getLogger(__name__)
 
@@ -32,17 +33,30 @@ def _is_failing(check: dict[str, Any]) -> bool:
     return check.get("conclusion") in _FAILING_CONCLUSIONS
 
 
-def _fetch_checks(
+async def _fetch_checks(
     pr_url: str,
     checks_getter: Callable[[], tuple[list[dict[str, Any]], str]] | None,
 ) -> tuple[list[dict[str, Any]], str]:
     if checks_getter is not None:
         return checks_getter()
-    status = get_pr_ci_status(pr_url)
+    status = await get_pr_ci_status_async(pr_url)
     return status["checks"], status["review_decision"]
 
 
-def _wait_for_checks(
+async def _fetch_current_status(
+    pr_url: str,
+    checks_getter: Callable[[], tuple[list[dict[str, Any]], str]] | None,
+    head_sha_getter: Callable[[], str] | None,
+) -> tuple[list[dict[str, Any]], str, str]:
+    if checks_getter is not None:
+        checks, review_decision = checks_getter()
+        current_sha = head_sha_getter() if head_sha_getter is not None else ""
+        return checks, review_decision, current_sha
+    status = await get_pr_ci_status_async(pr_url)
+    return status["checks"], status["review_decision"], status["head_sha"]
+
+
+async def _wait_for_checks(
     pr_url: str,
     checks_getter: Callable[[], tuple[list[dict[str, Any]], str]] | None,
     poll_interval: int,
@@ -51,10 +65,10 @@ def _wait_for_checks(
     deadline = time.time() + grace_secs
     review_decision = ""
     while True:
-        checks, review_decision = _fetch_checks(pr_url, checks_getter)
+        checks, review_decision = await _fetch_checks(pr_url, checks_getter)
         if checks or review_decision == "REVIEW_REQUIRED" or time.time() >= deadline:
             return checks, review_decision
-        time.sleep(poll_interval)
+        await asyncio.sleep(poll_interval)
 
 
 def _bail_if_review_required(state: State, decision: str) -> None:
@@ -64,7 +78,7 @@ def _bail_if_review_required(state: State, decision: str) -> None:
     raise Bail("ci-gate: PR blocked by required human review")
 
 
-def _poll_until_done(
+async def _poll_until_done(
     state: State,
     pr_url: str,
     timeout: int,
@@ -74,19 +88,10 @@ def _poll_until_done(
     head_sha_getter: Callable[[], str] | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     deadline = time.time() + timeout
-    review_decision = ""
     while True:
-        current_sha = ""
-        if checks_getter is not None:
-            checks, review_decision = checks_getter()
-            if head_sha_getter is not None:
-                current_sha = head_sha_getter()
-        else:
-            status = get_pr_ci_status(pr_url)
-            checks = status["checks"]
-            review_decision = status["review_decision"]
-            current_sha = status["head_sha"]
-
+        checks, review_decision, current_sha = await _fetch_current_status(
+            pr_url, checks_getter, head_sha_getter
+        )
         _bail_if_review_required(state, review_decision)
 
         if required_sha and current_sha and current_sha != required_sha:
@@ -100,7 +105,7 @@ def _poll_until_done(
                 current_sha[:8],
                 required_sha[:8],
             )
-            time.sleep(interval)
+            await asyncio.sleep(interval)
             continue
 
         if checks and all(_is_done(c) for c in checks):
@@ -109,15 +114,15 @@ def _poll_until_done(
             logger.info("ci-gate: poll timed out after %ds", timeout)
             return checks, review_decision
         logger.debug("ci-gate: checks still pending, sleeping %ds", interval)
-        time.sleep(interval)
+        await asyncio.sleep(interval)
 
 
-def _collect_failure_output(failed: list[dict[str, Any]]) -> str:
+async def _collect_failure_output(failed: list[dict[str, Any]]) -> str:
     parts: list[str] = []
     for check in failed:
         name = check.get("name") or check.get("context") or "unknown"
         details = check.get("detailsUrl") or check.get("targetUrl") or ""
-        logs = fetch_check_run_logs(details)
+        logs = await fetch_check_run_logs_async(details)
         header = f"## Check: {name}"
         parts.append(
             f"{header}\n\n{logs}" if logs else f"{header}\n\n(no output available)"
@@ -165,7 +170,7 @@ class GitHubWaitCI(Stage):
             self.max_attempts,
             self.poll_timeout,
         )
-        final_checks, _ = _poll_until_done(
+        final_checks, _ = await _poll_until_done(
             state,
             pr_url,
             self.poll_timeout,
@@ -185,7 +190,7 @@ class GitHubWaitCI(Stage):
         if attempt == self.max_attempts:
             return None, fix_sha
 
-        failure_output = _collect_failure_output(failed)
+        failure_output = await _collect_failure_output(failed)
         log_file = state.session_dir / f"ci-attempt-{attempt}.log"
         log_file.write_text(failure_output, encoding="utf-8")
 
@@ -217,7 +222,7 @@ class GitHubWaitCI(Stage):
         pr_url = self.pr_url or state.data.read_pr_url()
         if not pr_url:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
-        checks, review_decision = _wait_for_checks(
+        checks, review_decision = await _wait_for_checks(
             pr_url, self.checks_getter, self.poll_interval, self.startup_grace_secs
         )
         _bail_if_review_required(state, review_decision)

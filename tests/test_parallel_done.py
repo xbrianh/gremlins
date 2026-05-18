@@ -61,10 +61,10 @@ def test_completed_child_skipped_on_resume(state_root):
     ran: list[str] = []
     fail = {"b": True}
 
-    def child_a() -> None:
+    async def child_a() -> None:
         ran.append("a")
 
-    def child_b() -> None:
+    async def child_b() -> None:
         ran.append("b")
         if fail["b"]:
             raise RuntimeError("b failed")
@@ -103,10 +103,10 @@ def test_both_children_present_in_done_after_second_run(state_root):
     ran: list[str] = []
     fail = {"b": True}
 
-    def child_a() -> None:
+    async def child_a() -> None:
         ran.append("a")
 
-    def child_b() -> None:
+    async def child_b() -> None:
         ran.append("b")
         if fail["b"]:
             raise RuntimeError("b failed")
@@ -146,11 +146,14 @@ def test_parallel_done_cleared_after_full_success(state_root):
     gremlin_id = "gr-done-clear"
     sf = _make_state(state_root, gremlin_id)
 
+    async def _noop() -> None:
+        pass
+
     stages = _build_stages(
         "grp",
         [
-            ("a", _ctx(gremlin_id, sf, "a"), lambda: None),
-            ("b", _ctx(gremlin_id, sf, "b"), lambda: None),
+            ("a", _ctx(gremlin_id, sf, "a"), _noop),
+            ("b", _ctx(gremlin_id, sf, "b"), _noop),
         ],
         gremlin_id,
     )
@@ -162,7 +165,7 @@ def test_parallel_done_cleared_after_full_success(state_root):
     # done_children present before fan-in.
     assert "grp" in _read_state(sf).get("done_children", {})
 
-    fanin_fn()
+    asyncio.run(fanin_fn())
 
     # done_children absent after successful fan-in.
     assert "done_children" not in _read_state(sf)
@@ -178,15 +181,18 @@ def test_bail_aggregation_unaffected_by_done_tracking(state_root):
     gremlin_id = "gr-done-bail"
     sf = _make_state(state_root, gremlin_id)
 
-    def child_bail() -> None:
+    async def child_bail() -> None:
         StateData.load(gremlin_id).patch_parallel_attempt("bail-child", "attempt-bail")
         bail_path = sf.parent / "bail_attempt-bail.json"
         bail_path.write_text(json.dumps({"class": "other", "detail": "nope"}))
 
+    async def _noop() -> None:
+        pass
+
     stages = _build_stages(
         "grp",
         [
-            ("ok-child", _ctx(gremlin_id, sf, "ok-child"), lambda: None),
+            ("ok-child", _ctx(gremlin_id, sf, "ok-child"), _noop),
             ("bail-child", _ctx(gremlin_id, sf, "bail-child"), child_bail),
         ],
         gremlin_id,
@@ -201,4 +207,4 @@ def test_bail_aggregation_unaffected_by_done_tracking(state_root):
     assert "ok-child" in state.get("done_children", {}).get("grp", [])
 
     with pytest.raises(RuntimeError, match="bailed"):
-        fanin_fn()
+        asyncio.run(fanin_fn())

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import pathlib
 from collections.abc import Callable
 
@@ -51,7 +52,7 @@ def test_returns_review_state_immediately(tmp_path: pathlib.Path) -> None:
         return "APPROVED"
 
     stage, state = _make_stage(tmp_path, review_checker=checker)
-    result = stage.run(state)
+    result = asyncio.run(stage.run(state))
     assert result == Done()
     assert call_count[0] == 1
 
@@ -66,7 +67,7 @@ def test_polls_until_review_arrives(tmp_path: pathlib.Path) -> None:
         return "CHANGES_REQUESTED" if call_count[0] >= 3 else None
 
     stage, state = _make_stage(tmp_path, review_checker=checker)
-    result = stage.run(state)
+    result = asyncio.run(stage.run(state))
     assert result == Done()
     assert call_count[0] == 3
 
@@ -76,11 +77,11 @@ def test_timeout_bails(tmp_path: pathlib.Path) -> None:
 
     stage, state = _make_stage(tmp_path, timeout=0, review_checker=lambda: None)
     with pytest.raises(Bail) as exc_info:
-        stage.run(state)
+        asyncio.run(stage.run(state))
     assert "timed out" in exc_info.value.reason
 
 
 def test_no_pr_num_raises(tmp_path: pathlib.Path) -> None:
     stage, state = _make_stage(tmp_path, pr_num="")
     with pytest.raises(RuntimeError, match="no pr_url in state.json"):
-        stage.run(state)
+        asyncio.run(stage.run(state))

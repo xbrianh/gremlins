@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime
-import inspect
 import json
 import logging
 import os
@@ -572,14 +571,7 @@ class State:
                 base_state, data=loaded, current_scope=scope_list
             )
 
-        if inspect.iscoroutinefunction(entry.run):
+        async def _run_async() -> Any:
+            return await entry.run(_prepare())
 
-            async def _run_async() -> Any:
-                return await entry.run(_prepare())  # type: ignore[misc]
-
-            return _run_async
-
-        def _run() -> Any:
-            return entry.run(_prepare())
-
-        return _run
+        return _run_async

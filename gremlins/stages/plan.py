@@ -7,7 +7,6 @@ import logging
 import pathlib
 import re
 import shutil
-import subprocess
 import sys
 from typing import Any
 
@@ -16,6 +15,7 @@ from gremlins.executor.state import State
 from gremlins.stages.agent import run_agent
 from gremlins.stages.base import Stage, StageInput
 from gremlins.stages.outcome import Done, Outcome
+from gremlins.utils import proc
 from gremlins.utils.github import extract_gh_url, get_repo, parse_issue_ref, view_issue
 
 logger = logging.getLogger(__name__)
@@ -246,7 +246,7 @@ async def _post_file_as_github_issue(path: str, state: State) -> tuple[str, str]
         sys.stderr.write("error: --plan: title agent returned empty output\n")
         sys.stderr.flush()
         sys.exit(1)
-    r = subprocess.run(
+    r = await proc.run_async(
         [
             "gh",
             "issue",
@@ -258,9 +258,6 @@ async def _post_file_as_github_issue(path: str, state: State) -> tuple[str, str]
             "--body-file",
             path,
         ],
-        capture_output=True,
-        text=True,
-        check=False,
     )
     if r.returncode != 0:
         sys.stderr.write(
@@ -268,7 +265,7 @@ async def _post_file_as_github_issue(path: str, state: State) -> tuple[str, str]
         )
         sys.stderr.flush()
         sys.exit(1)
-    create_out = r.stdout + r.stderr
+    create_out = (r.stdout or "") + (r.stderr or "")
     m = re.search(r"https://github\.com/[^ )]+/issues/[0-9]+", create_out)
     if not m:
         sys.stderr.write(

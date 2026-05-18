@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import Any, NamedTuple
 
 from gremlins.clients.client import Client
 from gremlins.executor.state import State
 from gremlins.stages.outcome import Outcome
-
-if TYPE_CHECKING:
-    from collections.abc import Awaitable
 
 
 class StageInput(NamedTuple):
@@ -50,5 +47,5 @@ class Stage:
     def orchestration_args(cls) -> list[StageInput]:
         return []
 
-    def run(self, state: State) -> Outcome | Awaitable[Outcome]:  # noqa: ARG002
+    async def run(self, state: State) -> Outcome:  # noqa: ARG002
         raise NotImplementedError

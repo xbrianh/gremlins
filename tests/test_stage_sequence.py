@@ -29,7 +29,7 @@ class _FakeStage(Stage):
         self.received: RuntimeState | None = None
         self._raises = raises
 
-    def run(self, state: RuntimeState) -> Outcome:  # type: ignore[override]
+    async def run(self, state: RuntimeState) -> Outcome:
         self.received = state
         if self._raises:
             raise self._raises
@@ -44,7 +44,7 @@ def test_sequence_runs_body_in_order() -> None:
             super().__init__(label)
             self._label = label
 
-        def run(self, state: RuntimeState) -> Outcome:  # type: ignore[override]
+        async def run(self, state: RuntimeState) -> Outcome:
             log.append(self._label)
             return Done()
 
@@ -62,7 +62,7 @@ def test_sequence_stops_on_exception() -> None:
             self._label = label
             self._fail = fail
 
-        def run(self, state: RuntimeState) -> Outcome:  # type: ignore[override]
+        async def run(self, state: RuntimeState) -> Outcome:
             log.append(self._label)
             if self._fail:
                 raise RuntimeError("boom")
@@ -130,7 +130,7 @@ def test_sequence_resume_skips_completed_children(state_root: pathlib.Path) -> N
         def __init__(self, label: str) -> None:
             super().__init__(label)
 
-        def run(self, s: RuntimeState) -> Outcome:  # type: ignore[override]
+        async def run(self, s: RuntimeState) -> Outcome:
             ran.append(self.name)
             if self.name == "b" and fail["b"]:
                 raise Bail("b failed")
@@ -159,7 +159,7 @@ def test_sibling_sequences_done_sets_are_independent(state_root: pathlib.Path) -
         def __init__(self, label: str) -> None:
             super().__init__(label)
 
-        def run(self, s: RuntimeState) -> Outcome:  # type: ignore[override]
+        async def run(self, s: RuntimeState) -> Outcome:
             ran.append(self.name)
             return Done()
 

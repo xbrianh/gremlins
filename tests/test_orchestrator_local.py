@@ -345,7 +345,7 @@ def test_local_stage_inputs_instructions_reach_plan(
 
     from gremlins.stages import plan as _plan_mod
 
-    def _capturing_plan_run(self, state):
+    async def _capturing_plan_run(self, state):
         received.append(state.instructions)
 
     monkeypatch.setattr(_plan_mod.Plan, "run", _capturing_plan_run)
@@ -355,10 +355,13 @@ def test_local_stage_inputs_instructions_reach_plan(
     from gremlins.stages import review_code as _rc_mod
     from gremlins.stages import verify as _v_mod
 
-    monkeypatch.setattr(_impl_mod.Implement, "run", lambda self, pipe: None)
-    monkeypatch.setattr(_rc_mod.ReviewCode, "run", lambda self, pipe: None)
-    monkeypatch.setattr(_ac_mod.AddressCode, "run", lambda self, pipe: None)
-    monkeypatch.setattr(_v_mod.Verify, "run", lambda self, pipe: None)
+    async def _noop(self, state):  # noqa: ARG001
+        pass
+
+    monkeypatch.setattr(_impl_mod.Implement, "run", _noop)
+    monkeypatch.setattr(_rc_mod.ReviewCode, "run", _noop)
+    monkeypatch.setattr(_ac_mod.AddressCode, "run", _noop)
+    monkeypatch.setattr(_v_mod.Verify, "run", _noop)
 
     result = asyncio.run(
         run_pipeline(

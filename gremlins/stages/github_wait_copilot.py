@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Callable
@@ -10,7 +11,7 @@ from typing import Any
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, Outcome
-from gremlins.utils.github import check_copilot_review
+from gremlins.utils.github import check_copilot_review_async
 
 logger = logging.getLogger(__name__)
 
@@ -38,26 +39,21 @@ class GitHubWaitCopilot(Stage):
         self.interval = interval
         self.review_checker = review_checker
 
-    def run(self, state: State) -> Outcome:
+    async def run(self, state: State) -> Outcome:
         repo = state.repo
         pr_num = self.pr_num or state.data.read_pr_num()
         if not pr_num:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
 
-        review_checker = self.review_checker
-        if review_checker is None:
-
-            def _default_checker() -> str | None:
-                return check_copilot_review(repo, pr_num)
-
-            review_checker = _default_checker
-
         deadline = time.time() + self.timeout
         while True:
-            result = review_checker()
+            if self.review_checker is not None:
+                result = self.review_checker()
+            else:
+                result = await check_copilot_review_async(repo, pr_num)
             if result:
                 logger.info("Copilot review: %s", result)
                 return Done()
             if time.time() >= deadline:
                 raise Bail(f"Copilot review timed out after {self.timeout}s")
-            time.sleep(self.interval)
+            await asyncio.sleep(self.interval)

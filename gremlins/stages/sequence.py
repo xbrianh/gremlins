@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import inspect
 from typing import Any, cast
 
 from gremlins.executor.state import State
@@ -47,9 +45,6 @@ class SequenceStage(Stage):
             runner = _child_state(state, child).make_runner(
                 child, scope=self.body, record_stage=False
             )
-            if inspect.iscoroutinefunction(runner):
-                await runner()
-            else:
-                await asyncio.to_thread(runner)
+            await runner()
             state.mark_done(key, child.name)
         return Done()

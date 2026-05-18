@@ -214,11 +214,10 @@ def _stub_happy_run(
     plan_path = tmp_path / "plan.md"
     plan_path.write_text("# Plan\nTasks\n- [ ] thing\n")
 
-    monkeypatch.setattr(
-        handoff,
-        "collect_git_context",
-        lambda base_ref, rev=None: ("test-branch", "log line", "diff body"),
-    )
+    async def _fake_collect_git_context(base_ref, rev=None):
+        return ("test-branch", "log line", "diff body")
+
+    monkeypatch.setattr(handoff, "collect_git_context", _fake_collect_git_context)
 
     out_path = handoff.auto_name_out(plan_path)
     sig_path = out_path.parent / (out_path.stem + ".state.json")
@@ -310,9 +309,11 @@ def test_run_bail_signal(monkeypatch, tmp_path):
 def test_run_signal_file_not_written(monkeypatch, tmp_path, capsys):
     plan_path = tmp_path / "plan.md"
     plan_path.write_text("# Plan\n")
-    monkeypatch.setattr(
-        handoff, "collect_git_context", lambda base_ref, rev=None: ("b", "", "")
-    )
+
+    async def _fake_collect_git_context_b(base_ref, rev=None):
+        return ("b", "", "")
+
+    monkeypatch.setattr(handoff, "collect_git_context", _fake_collect_git_context_b)
     args = argparse.Namespace(
         plan=str(plan_path),
         spec=None,

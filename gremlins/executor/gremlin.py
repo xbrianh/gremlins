@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
-import inspect
 import json
 import logging
 import os
 import pathlib
 import shutil
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
@@ -64,7 +62,9 @@ def _expand_stage_entries(raw_stages: list[Stage]) -> list[Stage]:
 
 
 async def run_stages(
-    stages: list[tuple[str, Callable[[], Any]]], *, resume_from: str | None = None
+    stages: Sequence[tuple[str, Callable[[], Awaitable[Any]]]],
+    *,
+    resume_from: str | None = None,
 ) -> None:
     start_idx = 0
     if resume_from is not None:
@@ -75,10 +75,7 @@ async def run_stages(
             )
         start_idx = names.index(resume_from)
     for _, fn in stages[start_idx:]:
-        if inspect.iscoroutinefunction(fn):
-            await fn()
-        else:
-            await asyncio.to_thread(fn)
+        await fn()
 
 
 class Gremlin:
@@ -210,7 +207,7 @@ class Gremlin:
 
     def _collect_stages(
         self, stages: list[Stage]
-    ) -> list[tuple[str, Callable[[], Any]]]:
+    ) -> list[tuple[str, Callable[[], Awaitable[Any]]]]:
         args = argparse.Namespace(
             plan=self.plan,
             cmds=self.cmds,
@@ -219,7 +216,7 @@ class Gremlin:
             spec=self.spec,
             instructions=[self.instructions] if self.instructions else [],
         )
-        built: list[tuple[str, Callable[[], Any]]] = []
+        built: list[tuple[str, Callable[[], Awaitable[Any]]]] = []
         for e in stages:
             stage_client = e.client or PACKAGE_DEFAULT
             resolved = self.test_client or stage_client

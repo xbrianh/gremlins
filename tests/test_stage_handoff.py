@@ -105,7 +105,11 @@ def test_chain_done_immediately(tmp_path, monkeypatch, test_state_root):
     monkeypatch.setenv("GREMLIN_ID", gremlin_id)
 
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
-    monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
+
+    async def _fake_resolve_base_ref(_state: Any) -> str:
+        return "abc123"
+
+    monkeypatch.setattr(h, "_resolve_base_ref", _fake_resolve_base_ref)
     asyncio.run(h.run(state))
 
     assert calls == ["handoff"]
@@ -141,7 +145,11 @@ def test_next_plan_writes_plan_and_raises(tmp_path, monkeypatch, test_state_root
     monkeypatch.setenv("GREMLIN_ID", gremlin_id)
 
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
-    monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
+
+    async def _fake_resolve_base_ref(_state: Any) -> str:
+        return "abc123"
+
+    monkeypatch.setattr(h, "_resolve_base_ref", _fake_resolve_base_ref)
 
     outcome = asyncio.run(h.run(state))
     assert isinstance(outcome, NeedsFix)
@@ -173,7 +181,11 @@ def test_bail_emits_bail_and_raises(tmp_path, monkeypatch, test_state_root):
 
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
     state.data.attempt = attempt  # simulate what make_runner() would set
-    monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
+
+    async def _fake_resolve_base_ref(_state: Any) -> str:
+        return "abc123"
+
+    monkeypatch.setattr(h, "_resolve_base_ref", _fake_resolve_base_ref)
 
     with pytest.raises(Bail) as exc_info:
         asyncio.run(h.run(state))
@@ -210,7 +222,11 @@ def test_handoff_index_first_iteration(tmp_path, monkeypatch, test_state_root):
     monkeypatch.setenv("GREMLIN_ID", gremlin_id)
 
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
-    monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
+
+    async def _fake_resolve_base_ref(_state: Any) -> str:
+        return "abc123"
+
+    monkeypatch.setattr(h, "_resolve_base_ref", _fake_resolve_base_ref)
     asyncio.run(h.run(state))
 
     assert calls == [1]
@@ -236,7 +252,11 @@ def test_handoff_nonzero_exit_raises(tmp_path, monkeypatch, test_state_root):
     monkeypatch.setenv("GREMLIN_ID", gremlin_id)
 
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
-    monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
+
+    async def _fake_resolve_base_ref(_state: Any) -> str:
+        return "abc123"
+
+    monkeypatch.setattr(h, "_resolve_base_ref", _fake_resolve_base_ref)
 
     with pytest.raises(RuntimeError, match="handoff agent exited 1"):
         asyncio.run(h.run(state))
@@ -272,7 +292,11 @@ def test_resume_continues_from_file_index(tmp_path, monkeypatch, test_state_root
     monkeypatch.setenv("GREMLIN_ID", gremlin_id)
 
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
-    monkeypatch.setattr(h, "_resolve_base_ref", lambda _state: "abc123")
+
+    async def _fake_resolve_base_ref(_state: Any) -> str:
+        return "abc123"
+
+    monkeypatch.setattr(h, "_resolve_base_ref", _fake_resolve_base_ref)
     asyncio.run(h.run(state))
 
     # Should have run handoff #2 (index derived from existing handoff-001.state.json)

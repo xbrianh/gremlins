@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import inspect
 import json
 import logging
 import pathlib
@@ -157,10 +156,7 @@ class ParallelStage(Stage):
             worktree_parent=state.worktree_parent,
             set_stage_fn=lambda n: state.record_stage_progress(self.name, sub_stage=n),
         ):
-            if inspect.iscoroutinefunction(fn):
-                await fn()
-            else:
-                await asyncio.to_thread(fn)
+            await fn()
         return Done()
 
 
@@ -185,9 +181,11 @@ def _parallel_stages(
     _worktree_paths: dict[str, pathlib.Path] = {}
     base_head: str = ""
 
-    def _in_git_repo() -> bool:
+    async def _in_git_repo() -> bool:
         try:
-            return proc.run_ok(["git", "rev-parse", "--git-dir"], cwd=str(project_root))
+            return await proc.run_ok_async(
+                ["git", "rev-parse", "--git-dir"], cwd=str(project_root)
+            )
         except Exception:
             return False
 
@@ -223,41 +221,43 @@ def _parallel_stages(
     def _clear_persisted_state() -> None:
         parent_data.patch_parallel_worktrees(group_name, base_head=None, paths=None)
 
-    def _remove_worktrees(paths: list[pathlib.Path]) -> None:
-        if not _in_git_repo():
+    async def _remove_worktrees(paths: list[pathlib.Path]) -> None:
+        if not await _in_git_repo():
             return
         for wt in paths:
             try:
-                proc.run_quiet(
+                await proc.run_quiet_async(
                     ["git", "worktree", "remove", "--force", str(wt)],
                     cwd=str(project_root),
                 )
             except Exception:
                 pass
         try:
-            proc.run_quiet(["git", "worktree", "prune"], cwd=str(project_root))
+            await proc.run_quiet_async(
+                ["git", "worktree", "prune"], cwd=str(project_root)
+            )
         except Exception:
             pass
 
-    def _fan_out() -> None:
+    async def _fan_out() -> None:
         nonlocal base_head
         set_stage_fn(fanout_name)
 
         _hydrate_from_state()
         prior = list(_worktree_paths.values())
         if prior:
-            _remove_worktrees(prior)
+            await _remove_worktrees(prior)
         _worktree_paths.clear()
         base_head = ""
         _clear_persisted_state()
         parent_data.clear_done(stage_path)
 
-        if not _in_git_repo():
+        if not await _in_git_repo():
             return
 
-        proc.run_quiet(["git", "worktree", "prune"], cwd=str(project_root))
+        await proc.run_quiet_async(["git", "worktree", "prune"], cwd=str(project_root))
 
-        r = proc.run(["git", "rev-parse", "HEAD"], cwd=str(project_root))
+        r = await proc.run_async(["git", "rev-parse", "HEAD"], cwd=str(project_root))
         base_head = r.stdout.strip() if r.returncode == 0 else ""
 
         if worktree_parent is not None:
@@ -275,7 +275,7 @@ def _parallel_stages(
                         pathlib.Path(tempfile.gettempdir())
                         / f"aibg-parallel-{group_name}-{secrets.token_hex(8)}"
                     )
-                r2 = proc.run(
+                r2 = await proc.run_async(
                     ["git", "worktree", "add", "--detach", wt_dir, "HEAD"],
                     cwd=str(project_root),
                 )
@@ -288,7 +288,7 @@ def _parallel_stages(
                 _worktree_paths[child_key] = wt_path
                 child_state.worktree = wt_path
         except Exception:
-            _remove_worktrees(list(_worktree_paths.values()))
+            await _remove_worktrees(list(_worktree_paths.values()))
             _worktree_paths.clear()
             raise
         _persist_state()
@@ -314,10 +314,7 @@ def _parallel_stages(
         tasks: list[asyncio.Task[None]] = []
 
         async def _invoke(fn: Callable[[], Any]) -> None:
-            if inspect.iscoroutinefunction(fn):
-                await fn()
-            else:
-                await asyncio.to_thread(fn)
+            await fn()
 
         def _cancel_siblings() -> None:
             for t in tasks:
@@ -367,27 +364,29 @@ def _parallel_stages(
                 logger.error("parallel child also failed: %s", extra)
             raise errors[0]
 
-    def _fan_in() -> None:
+    async def _fan_in() -> None:
         set_stage_fn(fanin_name)
         _hydrate_from_state()
         try:
-            _do_fan_in()
+            await _do_fan_in()
         finally:
-            _teardown_worktrees()
+            await _teardown_worktrees()
 
-    def _validate_no_mutations() -> None:
+    async def _validate_no_mutations() -> None:
         for child_key, _, _ in child_runners:
             wt = _worktree_paths.get(child_key)
             if wt is None or not wt.is_dir():
                 continue
-            r = proc.run(["git", "rev-parse", "HEAD"], cwd=str(wt))
+            r = await proc.run_async(["git", "rev-parse", "HEAD"], cwd=str(wt))
             child_head = r.stdout.strip() if r.returncode == 0 else ""
             if child_head and child_head != base_head:
                 raise NotImplementedError(
                     f"parallel child {child_key!r} mutated its worktree "
                     "(fan-in merge for mutating parallel is not yet implemented)"
                 )
-            status_r = proc.run(["git", "status", "--porcelain"], cwd=str(wt))
+            status_r = await proc.run_async(
+                ["git", "status", "--porcelain"], cwd=str(wt)
+            )
             if status_r.stdout.strip():
                 raise NotImplementedError(
                     f"parallel child {child_key!r} has uncommitted changes "
@@ -428,11 +427,13 @@ def _parallel_stages(
             logger.warning("fan-in bail aggregation failed: %s", exc)
             return [], {}
 
-    def _do_fan_in() -> None:
-        if _in_git_repo():
-            proc.run_quiet(["git", "worktree", "prune"], cwd=str(project_root))
-        if _in_git_repo() and base_head:
-            _validate_no_mutations()
+    async def _do_fan_in() -> None:
+        if await _in_git_repo():
+            await proc.run_quiet_async(
+                ["git", "worktree", "prune"], cwd=str(project_root)
+            )
+        if await _in_git_repo() and base_head:
+            await _validate_no_mutations()
 
         bailed, first_bail = _collect_bails()
 
@@ -456,9 +457,9 @@ def _parallel_stages(
                 f"({len(bailed)} child(ren), policy={bail_policy!r})"
             )
 
-    def _teardown_worktrees() -> None:
+    async def _teardown_worktrees() -> None:
         nonlocal base_head
-        _remove_worktrees(list(_worktree_paths.values()))
+        await _remove_worktrees(list(_worktree_paths.values()))
         _worktree_paths.clear()
         base_head = ""
         _clear_persisted_state()

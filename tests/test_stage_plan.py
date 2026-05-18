@@ -66,23 +66,30 @@ def test_plan_source_file_github(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """plan=<file> with repo set creates a GitHub issue and copies the file."""
-    import subprocess as _subprocess
+    from gremlins.utils import proc
 
     plan_src = tmp_path / "spec.md"
     plan_src.write_text("# Feature\nDo the thing.\n")
 
     issue_url = "https://github.com/owner/repo/issues/7"
 
-    def fake_run(
+    async def fake_run_async(
         cmd: list[str], *_args: object, **_kwargs: object
-    ) -> _subprocess.CompletedProcess[str]:
-        if cmd[0] == "gh" and "create" in cmd:
-            return _subprocess.CompletedProcess(
-                cmd, 0, stdout=issue_url + "\n", stderr=""
-            )
-        return _subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+    ) -> object:
+        from unittest.mock import AsyncMock
 
-    monkeypatch.setattr("gremlins.stages.plan.subprocess.run", fake_run)
+        r = AsyncMock()
+        if cmd[0] == "gh" and "create" in cmd:
+            r.returncode = 0
+            r.stdout = issue_url + "\n"
+            r.stderr = ""
+        else:
+            r.returncode = 0
+            r.stdout = ""
+            r.stderr = ""
+        return r
+
+    monkeypatch.setattr(proc, "run_async", fake_run_async)
 
     fixtures: dict[str, object] = {
         "plan-title": [

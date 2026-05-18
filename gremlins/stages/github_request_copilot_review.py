@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import subprocess
 from typing import Any
 
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Done, Outcome
+from gremlins.utils import proc
 
 
 class GitHubRequestCopilotReview(Stage):
@@ -27,12 +27,12 @@ class GitHubRequestCopilotReview(Stage):
         self.options = options
         self._pr_num = pr_num
 
-    def run(self, state: State) -> Outcome:
+    async def run(self, state: State) -> Outcome:
         repo = state.repo
         pr_num = self._pr_num or state.data.read_pr_num()
         if not pr_num:
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
-        r = subprocess.run(
+        r = await proc.run_async(
             [
                 "gh",
                 "pr",
@@ -43,9 +43,6 @@ class GitHubRequestCopilotReview(Stage):
                 "--add-reviewer",
                 "copilot-pull-request-reviewer",
             ],
-            capture_output=True,
-            text=True,
-            check=False,
             cwd=state.cwd,
         )
         if r.returncode != 0:
