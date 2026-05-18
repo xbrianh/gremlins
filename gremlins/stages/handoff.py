@@ -9,7 +9,6 @@ import os
 import pathlib
 import re
 import shutil
-import subprocess
 import sys
 import threading
 from collections.abc import Awaitable, Callable
@@ -81,41 +80,41 @@ def auto_name_out(plan_path: pathlib.Path) -> pathlib.Path:
         n += 1
 
 
-def collect_git_context(
+async def collect_git_context(
     base_ref: str | None, rev: str | None = None
 ) -> tuple[str, str, str]:
     """Return (branch_name, git_log, git_diff) since merge-base with base_ref."""
     target = base_ref or "main"
     inspect_rev = rev or "HEAD"
 
-    result = proc.run(["git", "rev-parse", "--verify", target])
+    result = await proc.run_async(["git", "rev-parse", "--verify", target])
     if result.returncode != 0:
         raise RuntimeError(f"--base ref not found in repo: {target!r}")
 
     if rev is not None:
-        result = proc.run(["git", "rev-parse", "--verify", rev])
+        result = await proc.run_async(["git", "rev-parse", "--verify", rev])
         if result.returncode != 0:
             raise RuntimeError(f"--rev ref not found in repo: {rev!r}")
 
-    result = proc.run(["git", "rev-parse", "--abbrev-ref", inspect_rev])
+    result = await proc.run_async(["git", "rev-parse", "--abbrev-ref", inspect_rev])
     branch = result.stdout.strip() if result.returncode == 0 else inspect_rev
     if branch == "HEAD":
-        sha = proc.run(["git", "rev-parse", inspect_rev]).stdout.strip()
+        sha = (await proc.run_async(["git", "rev-parse", inspect_rev])).stdout.strip()
         branch = f"(detached at {sha[:12]})" if sha else "(detached)"
 
-    result = proc.run(["git", "merge-base", inspect_rev, target])
+    result = await proc.run_async(["git", "merge-base", inspect_rev, target])
     if result.returncode != 0:
         raise RuntimeError(
             f"could not compute merge-base between {inspect_rev!r} and {target!r}"
         )
     merge_base = result.stdout.strip()
 
-    result = proc.run(
+    result = await proc.run_async(
         ["git", "log", f"{merge_base}..{inspect_rev}", "--oneline"], check=True
     )
     git_log = result.stdout.strip()
 
-    result = proc.run(["git", "diff", f"{merge_base}..{inspect_rev}"], check=True)
+    result = await proc.run_async(["git", "diff", f"{merge_base}..{inspect_rev}"], check=True)
     git_diff = result.stdout
 
     return branch, git_log, git_diff
@@ -328,7 +327,7 @@ async def run(
     signal_path = out_path.parent / (out_path.stem + ".state.json")
 
     try:
-        branch, git_log, git_diff = collect_git_context(args.base, rev=args.rev)
+        branch, git_log, git_diff = await collect_git_context(args.base, rev=args.rev)
     except Exception as exc:
         sys.stderr.write(f"error: git context collection failed: {exc}\n")
         return 1
@@ -458,7 +457,7 @@ class Handoff(Stage):
         if not boss_spec.exists():
             shutil.copyfile(plan_md, boss_spec)
 
-        base_ref = state.data.base_ref_name or self._resolve_base_ref(state)
+        base_ref = state.data.base_ref_name or await self._resolve_base_ref(state)
         handoff_n = self._next_handoff_index(session_dir)
 
         prev_rolling = (
@@ -573,14 +572,8 @@ class Handoff(Stage):
         logger.info("handoff %d result: %s", handoff_n, exit_state)
         return exit_state, sig_data
 
-    def _resolve_base_ref(self, state: State) -> str:
-        r = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            cwd=str(state.cwd),
-            check=False,
-        )
+    async def _resolve_base_ref(self, state: State) -> str:
+        r = await proc.run_async(["git", "rev-parse", "HEAD"], cwd=str(state.cwd))
         return r.stdout.strip() if r.returncode == 0 else "HEAD"
 
     @staticmethod
