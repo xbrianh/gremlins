@@ -70,11 +70,17 @@ def test_audit_log(tmp_path: pathlib.Path) -> None:
     t = build_tools(bypass=False, worktree_root=root, audit_log=log)
     readt = next(tt for tt in t if tt.name == "Read")
     # ok
-    asyncio.run(readt.on_invoke_tool(_ctx(str(root)), json.dumps({"file_path": "f.txt"})))
+    asyncio.run(
+        readt.on_invoke_tool(_ctx(str(root)), json.dumps({"file_path": "f.txt"}))
+    )
     # denied
-    asyncio.run(readt.on_invoke_tool(_ctx(str(root)), json.dumps({"file_path": "/etc/passwd"})))
+    asyncio.run(
+        readt.on_invoke_tool(_ctx(str(root)), json.dumps({"file_path": "/etc/passwd"}))
+    )
     # error (missing)
-    asyncio.run(readt.on_invoke_tool(_ctx(str(root)), json.dumps({"file_path": "no.txt"})))
+    asyncio.run(
+        readt.on_invoke_tool(_ctx(str(root)), json.dumps({"file_path": "no.txt"}))
+    )
     lines = log.read_text().splitlines()
     assert len(lines) == 3
     statuses = [json.loads(l)["status"] for l in lines]
@@ -92,7 +98,9 @@ def test_symlink_denied(tmp_path: pathlib.Path) -> None:
     link.symlink_to(secret)
     t = build_tools(bypass=False, worktree_root=root, audit_log=None)
     readt = next(tt for tt in t if tt.name == "Read")
-    res = asyncio.run(readt.on_invoke_tool(_ctx(str(root)), json.dumps({"file_path": "link.txt"})))
+    res = asyncio.run(
+        readt.on_invoke_tool(_ctx(str(root)), json.dumps({"file_path": "link.txt"}))
+    )
     assert "path outside worktree" in res
 
 
@@ -105,14 +113,30 @@ def test_bypass_equivalence(tmp_path: pathlib.Path) -> None:
     g.write_text("foo bar")
     t = build_tools(bypass=True, worktree_root=root, audit_log=None)
     readt = next(tt for tt in t if tt.name == "Read")
-    r1 = asyncio.run(readt.on_invoke_tool(_ctx(str(root)), json.dumps({"file_path": "a.py"})))
+    r1 = asyncio.run(
+        readt.on_invoke_tool(_ctx(str(root)), json.dumps({"file_path": "a.py"}))
+    )
     r2 = asyncio.run(_read_invoke(_ctx(str(root)), json.dumps({"file_path": "a.py"})))
     assert r1 == r2
     et = next(tt for tt in t if tt.name == "Edit")
-    e1 = asyncio.run(et.on_invoke_tool(_ctx(str(root)), json.dumps({"file_path": "a.py", "old_string": "1", "new_string": "2"})))
-    e2 = asyncio.run(_edit_invoke(_ctx(str(root)), json.dumps({"file_path": "a.py", "old_string": "1", "new_string": "2"})))
+    e1 = asyncio.run(
+        et.on_invoke_tool(
+            _ctx(str(root)),
+            json.dumps({"file_path": "a.py", "old_string": "1", "new_string": "2"}),
+        )
+    )
+    e2 = asyncio.run(
+        _edit_invoke(
+            _ctx(str(root)),
+            json.dumps({"file_path": "a.py", "old_string": "1", "new_string": "2"}),
+        )
+    )
     assert e1 == e2
     gt = next(tt for tt in t if tt.name == "Grep")
-    g1 = asyncio.run(gt.on_invoke_tool(_ctx(str(root)), json.dumps({"pattern": "foo", "path": "."})))
-    g2 = asyncio.run(_grep_invoke(_ctx(str(root)), json.dumps({"pattern": "foo", "path": "."})))
+    g1 = asyncio.run(
+        gt.on_invoke_tool(_ctx(str(root)), json.dumps({"pattern": "foo", "path": "."}))
+    )
+    g2 = asyncio.run(
+        _grep_invoke(_ctx(str(root)), json.dumps({"pattern": "foo", "path": "."}))
+    )
     assert g1 == g2

@@ -390,7 +390,10 @@ def build_tools(
                         "type": "string",
                         "description": "Directory or file to search",
                     },
-                    "glob": {"type": "string", "description": "Glob filter for file names"},
+                    "glob": {
+                        "type": "string",
+                        "description": "Glob filter for file names",
+                    },
                 },
                 "required": ["pattern"],
                 "additionalProperties": False,
