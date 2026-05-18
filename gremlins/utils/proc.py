@@ -42,6 +42,7 @@ async def run_async(
     *,
     cwd: str | os.PathLike[str] | None = None,
     check: bool = False,
+    text: bool = True,
     timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     proc = await asyncio.create_subprocess_exec(
@@ -54,16 +55,16 @@ async def run_async(
         stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except TimeoutError:
         proc.kill()
+        await proc.communicate()
         raise subprocess.TimeoutExpired(cmd, timeout or 0)
-    rc = proc.returncode if proc.returncode is not None else -1
-    stdout = stdout_b.decode()
-    stderr = stderr_b.decode()
-    result: subprocess.CompletedProcess[str] = subprocess.CompletedProcess(
-        cmd, rc, stdout, stderr
-    )
+    assert proc.returncode is not None
+    rc = proc.returncode
+    stdout = stdout_b.decode() if text else stdout_b
+    stderr = stderr_b.decode() if text else stderr_b
+    result = subprocess.CompletedProcess(cmd, rc, stdout, stderr)
     if check and rc != 0:
         raise subprocess.CalledProcessError(rc, cmd, stdout, stderr)
-    return result
+    return result  # type: ignore[return-value]
 
 
 async def run_ok_async(
@@ -89,7 +90,8 @@ async def run_quiet_async(
         stderr=asyncio.subprocess.DEVNULL,
     )
     await proc.wait()
-    return proc.returncode if proc.returncode is not None else -1
+    assert proc.returncode is not None
+    return proc.returncode
 
 
 async def run_or_raise_async(
