@@ -93,7 +93,9 @@ def test_chain_done_immediately(tmp_path, monkeypatch, test_state_root):
 
     calls: list[str] = []
 
-    async def fake_handoff_run(client: Any, args: argparse.Namespace, **_kw: Any) -> int:
+    async def fake_handoff_run(
+        client: Any, args: argparse.Namespace, **_kw: Any
+    ) -> int:
         n = int(str(args.out).split("-")[-1].split(".")[0])
         _make_signal_file(pathlib.Path(args.out).parent, n, "chain-done")
         calls.append("handoff")
@@ -126,7 +128,9 @@ def test_next_plan_writes_plan_and_raises(tmp_path, monkeypatch, test_state_root
     child_plan = tmp_path / "child-001.md"
     child_plan.write_text("# Child Plan\n", encoding="utf-8")
 
-    async def fake_handoff_run(client: Any, args: argparse.Namespace, **_kw: Any) -> int:
+    async def fake_handoff_run(
+        client: Any, args: argparse.Namespace, **_kw: Any
+    ) -> int:
         n = int(str(args.out).split("-")[-1].split(".")[0])
         _make_signal_file(
             pathlib.Path(args.out).parent, n, "next-plan", str(child_plan)
@@ -158,7 +162,9 @@ def test_bail_emits_bail_and_raises(tmp_path, monkeypatch, test_state_root):
     state_mod.StateData.load(gremlin_id).patch(attempt=attempt)
     _write_plan(tmp_path)
 
-    async def fake_handoff_run(client: Any, args: argparse.Namespace, **_kw: Any) -> int:
+    async def fake_handoff_run(
+        client: Any, args: argparse.Namespace, **_kw: Any
+    ) -> int:
         _make_signal_file(tmp_path, 1, "bail", reason="scope too big")
         return 0
 
@@ -192,7 +198,9 @@ def test_handoff_index_first_iteration(tmp_path, monkeypatch, test_state_root):
 
     calls: list[int] = []
 
-    async def fake_handoff_run(client: Any, args: argparse.Namespace, **_kw: Any) -> int:
+    async def fake_handoff_run(
+        client: Any, args: argparse.Namespace, **_kw: Any
+    ) -> int:
         n = int(str(args.out).split("-")[-1].split(".")[0])
         _make_signal_file(pathlib.Path(args.out).parent, n, "chain-done")
         calls.append(n)
@@ -251,7 +259,9 @@ def test_resume_continues_from_file_index(tmp_path, monkeypatch, test_state_root
     calls: list[int] = []
     captured_plan: list[str] = []
 
-    async def fake_handoff_run(client: Any, args: argparse.Namespace, **_kw: Any) -> int:
+    async def fake_handoff_run(
+        client: Any, args: argparse.Namespace, **_kw: Any
+    ) -> int:
         n = int(str(args.out).split("-")[-1].split(".")[0])
         _make_signal_file(pathlib.Path(args.out).parent, n, "chain-done")
         calls.append(n)
@@ -282,7 +292,9 @@ def test_base_ref_from_state(tmp_path, monkeypatch, test_state_root):
 
     captured_base: list[str] = []
 
-    async def fake_handoff_run(client: Any, args: argparse.Namespace, **_kw: Any) -> int:
+    async def fake_handoff_run(
+        client: Any, args: argparse.Namespace, **_kw: Any
+    ) -> int:
         n = int(str(args.out).split("-")[-1].split(".")[0])
         _make_signal_file(pathlib.Path(args.out).parent, n, "chain-done")
         captured_base.append(args.base)

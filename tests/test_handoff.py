@@ -535,7 +535,9 @@ def test_sanitize_rolling_plan_rewrites_file(monkeypatch, tmp_path):
         signal_payload={},
         sanitize_text=cleaned,
     )
-    asyncio.run(handoff.sanitize_rolling_plan(client, out_path, Client("claude", "sonnet")))
+    asyncio.run(
+        handoff.sanitize_rolling_plan(client, out_path, Client("claude", "sonnet"))
+    )
     assert out_path.read_text() == cleaned
 
 
@@ -549,7 +551,9 @@ def test_sanitize_rolling_plan_nonzero_is_nonfatal(monkeypatch, tmp_path, capsys
         signal_payload={},
         sanitize_error=RuntimeError("sanitize failed"),
     )
-    asyncio.run(handoff.sanitize_rolling_plan(client, out_path, Client("claude", "sonnet")))
+    asyncio.run(
+        handoff.sanitize_rolling_plan(client, out_path, Client("claude", "sonnet"))
+    )
     err = capsys.readouterr().err
     assert "warning" in err.lower()
     assert out_path.read_text() == original

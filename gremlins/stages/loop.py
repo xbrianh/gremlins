@@ -126,7 +126,9 @@ class LoopStage(Stage):
             if self._on_iteration_start:
                 self._on_iteration_start(state)
             head_before = _git.head_sha(state.cwd)
-            had_failure = await _dispatch_runners(runners, iteration, self._max_iterations)
+            had_failure = await _dispatch_runners(
+                runners, iteration, self._max_iterations
+            )
 
             if not had_failure:
                 if self._until(state, iteration, head_before):

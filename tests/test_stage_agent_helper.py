@@ -41,7 +41,9 @@ def _make_state(
 
 def test_calls_client_run_with_expected_kwargs(tmp_path):
     state = _make_state(tmp_path, attempt="att1")
-    asyncio.run(run_agent(state, "hello", label="test-label", raw_path=tmp_path / "out.jsonl"))
+    asyncio.run(
+        run_agent(state, "hello", label="test-label", raw_path=tmp_path / "out.jsonl")
+    )
 
     assert len(state.client.calls) == 1
     call = state.client.calls[0]
