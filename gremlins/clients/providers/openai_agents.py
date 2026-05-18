@@ -30,7 +30,7 @@ from gremlins.clients.config import (
 )
 from gremlins.clients.protocol import CompletedRun
 from gremlins.clients.stream import trunc
-from gremlins.clients.tools import GREMLINS_TOOLS
+from gremlins.clients.tools import build_tools
 from gremlins.utils.decorators import default_on_exception, swallow
 from gremlins.utils.yaml_io import load_bundled_prompt
 
@@ -189,16 +189,23 @@ class OpenAIAgentsClient:
         cwd: pathlib.Path | None = None,
         idle_timeout: float | None = None,
         extra_env: dict[str, str] | None = None,
+        bypass: bool = True,
+        audit_log: pathlib.Path | None = None,
     ) -> CompletedRun:
         validate_max_retries(max_retries)
         if idle_timeout is None:
             idle_timeout = STREAM_IDLE_TIMEOUT
         effective_model = model or self._model
         prefix = f"[{label}] " if label else ""
+        worktree_root = cwd or pathlib.Path.cwd()
+        if cwd is None and not bypass:
+            sys.stderr.write(f"{prefix}warning: enforcing against implicit cwd\n")
+        if audit_log is None and raw_path is not None:
+            audit_log = raw_path.with_name(raw_path.stem + ".audit.jsonl")
         agent = Agent(
             name=f"gremlins-{label}",
             instructions=self._instructions,
-            tools=GREMLINS_TOOLS,
+            tools=build_tools(bypass=bypass, worktree_root=worktree_root, audit_log=audit_log),
             model=effective_model,
             model_settings=self._model_settings
             if self._model_settings is not None
