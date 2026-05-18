@@ -26,7 +26,7 @@ from gremlins.clients.providers.openai_agents import (
     make_openai_client,
     make_xai_client,
 )
-from gremlins.clients.tools import GREMLINS_TOOLS, _bash_invoke
+from gremlins.clients.tools import build_tools, _bash_invoke
 
 
 def test_openai_client_constructs() -> None:
