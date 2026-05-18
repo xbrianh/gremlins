@@ -167,10 +167,13 @@ class SubprocessClaudeClient:
         cwd: pathlib.Path | None = None,
         idle_timeout: float | None = None,
         extra_env: dict[str, str] | None = None,
+        bypass: bool = True,
+        audit_log: pathlib.Path | None = None,
     ) -> CompletedRun:
         validate_max_retries(max_retries)
         if idle_timeout is None:
             idle_timeout = STREAM_IDLE_TIMEOUT
+        del bypass, audit_log
         argv = self._build_argv(model)
         prefix = f"[{label}] " if label else ""
         active_prompt = prompt

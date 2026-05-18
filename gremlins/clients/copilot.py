@@ -91,8 +91,14 @@ class SubprocessCopilotClient:
         cwd: pathlib.Path | None = None,
         idle_timeout: float | None = None,
         extra_env: dict[str, str] | None = None,
+        bypass: bool = True,
+        audit_log: pathlib.Path | None = None,
     ) -> CompletedRun:
-        del idle_timeout  # copilot reads stdout to EOF; no streaming idle concept
+        del (
+            idle_timeout,
+            bypass,
+            audit_log,
+        )  # copilot reads stdout to EOF; no streaming idle concept; bypass/audit_log for tools only
         argv = self._build_argv(model, prompt)
         p = self._spawn(argv, cwd=cwd, extra_env=extra_env)
         try:

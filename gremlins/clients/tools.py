@@ -44,7 +44,7 @@ def _audit(
 ) -> None:
     if log is None:
         return
-    ts = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+    ts = datetime.datetime.now(tz=datetime.UTC).isoformat()
     rec = {
         "ts": ts,
         "tool": tool,

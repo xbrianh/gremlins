@@ -5,11 +5,9 @@ import pathlib
 from agents.tool_context import ToolContext
 
 from gremlins.clients.tools import (
-    _bash_invoke,
     _edit_invoke,
     _grep_invoke,
     _read_invoke,
-    _write_invoke,
     build_tools,
 )
 
@@ -83,8 +81,8 @@ def test_audit_log(tmp_path: pathlib.Path) -> None:
     )
     lines = log.read_text().splitlines()
     assert len(lines) == 3
-    statuses = [json.loads(l)["status"] for l in lines]
-    bypasses = [json.loads(l)["bypass"] for l in lines]
+    statuses = [json.loads(line)["status"] for line in lines]
+    bypasses = [json.loads(line)["bypass"] for line in lines]
     assert statuses == ["ok", "denied", "error"]
     assert all(b is False for b in bypasses)
 
