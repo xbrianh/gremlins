@@ -228,109 +228,192 @@ async def _glob_invoke(ctx: ToolContext[Any], args_json: str) -> str:
     return "\n".join(str(m) for m in matches) or "(no matches)"
 
 
-GREMLINS_TOOLS: list[Tool] = [
-    FunctionTool(
-        name="Read",
-        description="Read a file from the filesystem.",
-        params_json_schema={
-            "type": "object",
-            "properties": {
-                "file_path": {
-                    "type": "string",
-                    "description": "Absolute or relative path",
+def build_tools(
+    *, bypass: bool, worktree_root: pathlib.Path, audit_log: pathlib.Path | None
+) -> list[Tool]:
+    root = worktree_root.resolve()
+
+    def _enforce_path(arg: str, ctx: ToolContext[Any], tool: str) -> str | None:
+        if bypass:
+            return None
+        p = _resolve(arg, _cwd(ctx))
+        if not _within_worktree(p, root):
+            err = f"Error: path outside worktree: {arg}"
+            _audit(audit_log, tool, arg, "denied", bypass)
+            return err
+        return None
+
+    async def _read(ctx: ToolContext[Any], args_json: str) -> str:
+        args: dict[str, Any] = json.loads(args_json)
+        fp = args["file_path"]
+        denied = _enforce_path(fp, ctx, "Read")
+        if denied:
+            return denied
+        res = await _read_invoke(ctx, args_json)
+        status = "error" if res.startswith("Error:") else "ok"
+        _audit(audit_log, "Read", _key_arg(args_json), status, bypass)
+        return res
+
+    async def _edit(ctx: ToolContext[Any], args_json: str) -> str:
+        args: dict[str, Any] = json.loads(args_json)
+        fp = args["file_path"]
+        denied = _enforce_path(fp, ctx, "Edit")
+        if denied:
+            return denied
+        res = await _edit_invoke(ctx, args_json)
+        status = "error" if res.startswith("Error:") else "ok"
+        _audit(audit_log, "Edit", _key_arg(args_json), status, bypass)
+        return res
+
+    async def _write(ctx: ToolContext[Any], args_json: str) -> str:
+        args: dict[str, Any] = json.loads(args_json)
+        fp = args["file_path"]
+        denied = _enforce_path(fp, ctx, "Write")
+        if denied:
+            return denied
+        res = await _write_invoke(ctx, args_json)
+        status = "error" if res.startswith("Error:") else "ok"
+        _audit(audit_log, "Write", _key_arg(args_json), status, bypass)
+        return res
+
+    async def _grep(ctx: ToolContext[Any], args_json: str) -> str:
+        args: dict[str, Any] = json.loads(args_json)
+        base_arg = args.get("path", ".")
+        denied = _enforce_path(base_arg, ctx, "Grep")
+        if denied:
+            return denied
+        res = await _grep_invoke(ctx, args_json)
+        status = "error" if res.startswith("Error:") else "ok"
+        _audit(audit_log, "Grep", _key_arg(args_json), status, bypass)
+        return res
+
+    async def _glob(ctx: ToolContext[Any], args_json: str) -> str:
+        args: dict[str, Any] = json.loads(args_json)
+        base_arg = args.get("path", ".")
+        denied = _enforce_path(base_arg, ctx, "Glob")
+        if denied:
+            return denied
+        res = await _glob_invoke(ctx, args_json)
+        status = "error" if res.startswith("Error:") else "ok"
+        _audit(audit_log, "Glob", _key_arg(args_json), status, bypass)
+        return res
+
+    async def _bash(ctx: ToolContext[Any], args_json: str) -> str:
+        args: dict[str, Any] = json.loads(args_json)
+        cmd = args["command"]
+        if not bypass:
+            denied = _bash_denied(cmd, root, _cwd(ctx))
+            if denied:
+                _audit(audit_log, "Bash", cmd, "denied", bypass)
+                return denied
+        res = await _bash_invoke(ctx, args_json)
+        status = "error" if res.startswith(("[exit", "Error:", "[timeout]")) else "ok"
+        _audit(audit_log, "Bash", _key_arg(args_json), status, bypass)
+        return res
+
+    return [
+        FunctionTool(
+            name="Read",
+            description="Read a file from the filesystem.",
+            params_json_schema={
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Absolute or relative path",
+                    },
+                    "limit": {"type": "integer", "description": "Max lines to read"},
+                    "offset": {
+                        "type": "integer",
+                        "description": "Line offset to start from",
+                    },
                 },
-                "limit": {"type": "integer", "description": "Max lines to read"},
-                "offset": {
-                    "type": "integer",
-                    "description": "Line offset to start from",
+                "required": ["file_path"],
+                "additionalProperties": False,
+            },
+            on_invoke_tool=_read,
+            strict_json_schema=False,
+        ),
+        FunctionTool(
+            name="Edit",
+            description="Replace old_string with new_string in a file (first occurrence).",
+            params_json_schema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string"},
+                    "old_string": {"type": "string"},
+                    "new_string": {"type": "string"},
                 },
+                "required": ["file_path", "old_string", "new_string"],
+                "additionalProperties": False,
             },
-            "required": ["file_path"],
-            "additionalProperties": False,
-        },
-        on_invoke_tool=_read_invoke,
-        strict_json_schema=False,
-    ),
-    FunctionTool(
-        name="Edit",
-        description="Replace old_string with new_string in a file (first occurrence).",
-        params_json_schema={
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string"},
-                "old_string": {"type": "string"},
-                "new_string": {"type": "string"},
-            },
-            "required": ["file_path", "old_string", "new_string"],
-            "additionalProperties": False,
-        },
-        on_invoke_tool=_edit_invoke,
-        strict_json_schema=False,
-    ),
-    FunctionTool(
-        name="Bash",
-        description="Run a shell command and return combined stdout/stderr.",
-        params_json_schema={
-            "type": "object",
-            "properties": {
-                "command": {"type": "string"},
-            },
-            "required": ["command"],
-            "additionalProperties": False,
-        },
-        on_invoke_tool=_bash_invoke,
-        strict_json_schema=False,
-    ),
-    FunctionTool(
-        name="Write",
-        description="Write content to a file, creating it if necessary.",
-        params_json_schema={
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string"},
-                "content": {"type": "string"},
-            },
-            "required": ["file_path", "content"],
-            "additionalProperties": False,
-        },
-        on_invoke_tool=_write_invoke,
-        strict_json_schema=False,
-    ),
-    FunctionTool(
-        name="Grep",
-        description="Search file contents using a regex pattern.",
-        params_json_schema={
-            "type": "object",
-            "properties": {
-                "pattern": {"type": "string"},
-                "path": {
-                    "type": "string",
-                    "description": "Directory or file to search",
+            on_invoke_tool=_edit,
+            strict_json_schema=False,
+        ),
+        FunctionTool(
+            name="Bash",
+            description="Run a shell command and return combined stdout/stderr.",
+            params_json_schema={
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
                 },
-                "glob": {"type": "string", "description": "Glob filter for file names"},
+                "required": ["command"],
+                "additionalProperties": False,
             },
-            "required": ["pattern"],
-            "additionalProperties": False,
-        },
-        on_invoke_tool=_grep_invoke,
-        strict_json_schema=False,
-    ),
-    FunctionTool(
-        name="Glob",
-        description="Find files matching a glob pattern.",
-        params_json_schema={
-            "type": "object",
-            "properties": {
-                "pattern": {"type": "string"},
-                "path": {
-                    "type": "string",
-                    "description": "Base directory to search in",
+            on_invoke_tool=_bash,
+            strict_json_schema=False,
+        ),
+        FunctionTool(
+            name="Write",
+            description="Write content to a file, creating it if necessary.",
+            params_json_schema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string"},
+                    "content": {"type": "string"},
                 },
+                "required": ["file_path", "content"],
+                "additionalProperties": False,
             },
-            "required": ["pattern"],
-            "additionalProperties": False,
-        },
-        on_invoke_tool=_glob_invoke,
-        strict_json_schema=False,
-    ),
-]
+            on_invoke_tool=_write,
+            strict_json_schema=False,
+        ),
+        FunctionTool(
+            name="Grep",
+            description="Search file contents using a regex pattern.",
+            params_json_schema={
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string"},
+                    "path": {
+                        "type": "string",
+                        "description": "Directory or file to search",
+                    },
+                    "glob": {"type": "string", "description": "Glob filter for file names"},
+                },
+                "required": ["pattern"],
+                "additionalProperties": False,
+            },
+            on_invoke_tool=_grep,
+            strict_json_schema=False,
+        ),
+        FunctionTool(
+            name="Glob",
+            description="Find files matching a glob pattern.",
+            params_json_schema={
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string"},
+                    "path": {
+                        "type": "string",
+                        "description": "Base directory to search in",
+                    },
+                },
+                "required": ["pattern"],
+                "additionalProperties": False,
+            },
+            on_invoke_tool=_glob,
+            strict_json_schema=False,
+        ),
+    ]
