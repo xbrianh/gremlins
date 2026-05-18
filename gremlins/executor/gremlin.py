@@ -210,7 +210,7 @@ class Gremlin:
 
     def _collect_stages(
         self, stages: list[Stage]
-    ) -> list[tuple[str, Callable[[], None]]]:
+    ) -> list[tuple[str, Callable[[], Any]]]:
         args = argparse.Namespace(
             plan=self.plan,
             cmds=self.cmds,
@@ -219,7 +219,7 @@ class Gremlin:
             spec=self.spec,
             instructions=[self.instructions] if self.instructions else [],
         )
-        built: list[tuple[str, Callable[[], None]]] = []
+        built: list[tuple[str, Callable[[], Any]]] = []
         for e in stages:
             stage_client = e.client or PACKAGE_DEFAULT
             resolved = self.test_client or stage_client

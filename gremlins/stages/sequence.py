@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import Any, cast
 
 from gremlins.executor.state import State
@@ -42,8 +43,11 @@ class SequenceStage(Stage):
         for child in self.body:
             if child.name in done:
                 continue
-            _child_state(state, child).make_runner(
+            runner = _child_state(state, child).make_runner(
                 child, scope=self.body, record_stage=False
-            )()
+            )
+            if inspect.iscoroutinefunction(runner):
+                raise TypeError(f"async stage {child.name!r} cannot be nested inside a sequence stage")
+            runner()
             state.mark_done(key, child.name)
         return Done()

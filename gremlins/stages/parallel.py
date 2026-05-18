@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import dataclasses
+import inspect
 import json
 import logging
 import pathlib
@@ -148,9 +149,10 @@ class ParallelStage(Stage):
         for child in self.body:
             (group_dir / child.name).mkdir(parents=True, exist_ok=True)
             cs = _child_state(group_state, child, fan_out=True)
-            child_runners.append(
-                (child.name, cs, cs.make_runner(child, scope=self.body))
-            )
+            runner = cs.make_runner(child, scope=self.body)
+            if inspect.iscoroutinefunction(runner):
+                raise TypeError(f"async stage {child.name!r} cannot be nested inside a parallel stage")
+            child_runners.append((child.name, cs, runner))
         for _, fn in self.build_runtime_stages(
             child_runners,
             parent_data=state.data,

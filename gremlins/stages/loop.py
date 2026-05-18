@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 from collections.abc import Callable
 from typing import Any, cast
@@ -108,6 +109,8 @@ class LoopStage(Stage):
         for child in self.body:
             cs = _child_state(state, child)
             runner = cs.make_runner(child, scope=self.body, record_stage=False)
+            if inspect.iscoroutinefunction(runner):
+                raise TypeError(f"async stage {child.name!r} cannot be nested inside a loop stage")
             result.append(cast(Callable[[], Outcome], runner))
         return result
 
