@@ -548,3 +548,20 @@ def test_bash_invoke_no_extra_env_passes_none() -> None:
 
     _call_kwargs = mock_spawn.call_args.kwargs
     assert _call_kwargs.get("env") is None
+
+
+def test_openai_uses_wrapped_tools(monkeypatch: Any, tmp_path: pathlib.Path) -> None:
+    captured: list[Any] = []
+
+    def _fake(agent: Any, *a: Any, **kw: Any) -> Any:
+        captured.append(agent)
+        return _make_run_result_streaming("ok", _make_usage(), [])
+
+    monkeypatch.setattr("agents.run.Runner.run_streamed", _fake)
+    client = OpenAIAgentsClient("gpt-4o")
+    audit = tmp_path / "audit.jsonl"
+    raw = tmp_path / "raw.jsonl"
+    client.run("x", label="t", bypass=False, audit_log=audit, raw_path=raw)
+    assert captured
+    tnames = [t.name for t in captured[0].tools]
+    assert len(tnames) == 6 and "Read" in tnames
