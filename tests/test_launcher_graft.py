@@ -314,9 +314,8 @@ def test_resume_without_graft_after_graft_uses_updated_pipeline(lenv, monkeypatc
     assert "--resume-from" in spawn_args
 
 
-def test_graft_missing_worktree_no_recovery_raises(lenv, monkeypatch):
-    """resume(graft=...) raises if worktree is gone and cannot be recreated."""
-    import gremlins.fleet.rescue as rescue_mod
+def test_graft_missing_worktree_raises(lenv, monkeypatch):
+    """resume(graft=...) raises immediately if the worktree directory is gone."""
     from gremlins import launcher
 
     gremlin_id = "graft-no-worktree-test"
@@ -328,17 +327,47 @@ def test_graft_missing_worktree_no_recovery_raises(lenv, monkeypatch):
     _write_graft_pipeline(lenv.repo, "address", "address-code")
 
     monkeypatch.setattr(launcher, "_spawn_logged_process", lambda *a, **kw: _FakeProc())
-    monkeypatch.setattr(
-        rescue_mod, "recreate_worktree", lambda s: (False, "not a repo")
-    )
 
-    with pytest.raises(
-        RuntimeError, match="worktree missing and could not be recreated"
-    ):
+    with pytest.raises(RuntimeError, match="worktree missing"):
         launcher.resume(gremlin_id, graft="address")
 
     # State must not be mutated (finished marker still present)
     assert (state_dir / "finished").exists()
+
+
+def test_graft_succeeds_without_branch(lenv, monkeypatch):
+    """Graft proceeds even when artifacts reference a deleted branch."""
+    from gremlins import launcher
+
+    gremlin_id = "graft-no-branch-test"
+    state_dir = lenv.state_root / gremlin_id
+
+    # worktree_base is deliberately bogus — mismatched value must not block resume
+    # when workdir exists.  The branch artifact also names a nonexistent branch to
+    # prove graft never consults last_artifact_branch().
+    _make_state(
+        state_dir,
+        lenv.repo,
+        workdir=str(lenv.repo),
+        worktree_base="abc123deadbeef",
+        artifacts=[{"type": "branch", "name": "deleted-branch-nonexistent"}],
+    )
+    _write_hermetic(state_dir)
+    _write_graft_pipeline(lenv.repo, "address", "address-code")
+
+    captured: dict[str, object] = {}
+
+    def fake_spawn(cmd, cwd, env, log_path, log_mode="w"):
+        captured["cmd"] = cmd
+        return _FakeProc()
+
+    monkeypatch.setattr(launcher, "_spawn_logged_process", fake_spawn)
+
+    launcher.resume(gremlin_id, graft="address")
+
+    cmd = list(captured["cmd"])
+    assert "--resume-from" in cmd
+    assert cmd[cmd.index("--resume-from") + 1] == "graft-1"
 
 
 def test_graft_missing_worktree_plain_resume_still_raises(lenv):

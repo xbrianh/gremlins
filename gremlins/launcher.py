@@ -521,16 +521,7 @@ def _check_resume_preconditions(
         )
 
     if workdir and not os.path.isdir(workdir):
-        if graft is not None:
-            import gremlins.fleet.rescue as _rescue_mod
-
-            ok, detail = _rescue_mod.recreate_worktree(state)
-            if not ok:
-                raise RuntimeError(
-                    f"worktree missing and could not be recreated: {detail}"
-                )
-        else:
-            raise RuntimeError(f"worktree missing: {workdir}")
+        raise RuntimeError(f"worktree missing: {workdir}")
 
 
 def _resolve_resume_pipeline(
