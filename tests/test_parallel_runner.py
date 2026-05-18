@@ -120,39 +120,34 @@ stages:
 
 def test_run_stages_two_test_entries_both_execute() -> None:
     log: list[str] = []
-
-    async def _run() -> None:
-        for name in ("test-pre", "implement", "test-post"):
-            log.append(name)
-
-    stages: list[tuple[str, object]] = [
+    stages = [
         ("test-pre", _make_afn("test-pre", log)),
         ("implement", _make_afn("implement", log)),
         ("test-post", _make_afn("test-post", log)),
     ]
-    asyncio.run(run_stages(stages))  # type: ignore[arg-type]
+    asyncio.run(run_stages(stages))
     assert log == ["test-pre", "implement", "test-post"]
 
 
 def test_run_stages_resume_targets_first_test() -> None:
     log: list[str] = []
-    stages: list[tuple[str, object]] = [
+    stages = [
         ("test-pre", _make_afn("test-pre", log)),
         ("implement", _make_afn("implement", log)),
         ("test-post", _make_afn("test-post", log)),
     ]
-    asyncio.run(run_stages(stages, resume_from="test-pre"))  # type: ignore[arg-type]
+    asyncio.run(run_stages(stages, resume_from="test-pre"))
     assert log == ["test-pre", "implement", "test-post"]
 
 
 def test_run_stages_resume_targets_second_test() -> None:
     log: list[str] = []
-    stages: list[tuple[str, object]] = [
+    stages = [
         ("test-pre", _make_afn("test-pre", log)),
         ("implement", _make_afn("implement", log)),
         ("test-post", _make_afn("test-post", log)),
     ]
-    asyncio.run(run_stages(stages, resume_from="test-post"))  # type: ignore[arg-type]
+    asyncio.run(run_stages(stages, resume_from="test-post"))
     assert log == ["test-post"]
     assert "test-pre" not in log
     assert "implement" not in log
@@ -263,12 +258,12 @@ def test_run_stages_drives_parallel_group() -> None:
         [(_n, _make_ctx(_n), _fn) for _n, _fn in children],
     )
 
-    stages: list[tuple[str, object]] = [
+    stages = [
         ("plan", _make_afn("plan", log)),
         *parallel_stages,
         ("address", _make_afn("address", log)),
     ]
-    asyncio.run(run_stages(stages))  # type: ignore[arg-type]
+    asyncio.run(run_stages(stages))
     assert log[0] == "plan"
     assert sorted(log[1:3]) == ["r1", "r2"]
     assert log[3] == "address"
@@ -283,12 +278,12 @@ def test_run_stages_resume_from_group_skips_before_group() -> None:
         [(_n, _make_ctx(_n), _fn) for _n, _fn in children],
     )
 
-    stages: list[tuple[str, object]] = [
+    stages = [
         ("plan", _make_afn("plan", log)),
         *parallel_stages,
         ("address", _make_afn("address", log)),
     ]
-    asyncio.run(run_stages(stages, resume_from="reviews"))  # type: ignore[arg-type]
+    asyncio.run(run_stages(stages, resume_from="reviews"))
     assert "plan" not in log
     assert "r1" in log
     assert "r2" in log

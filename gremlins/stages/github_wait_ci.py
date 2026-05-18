@@ -43,6 +43,19 @@ async def _fetch_checks(
     return status["checks"], status["review_decision"]
 
 
+async def _fetch_current_status(
+    pr_url: str,
+    checks_getter: Callable[[], tuple[list[dict[str, Any]], str]] | None,
+    head_sha_getter: Callable[[], str] | None,
+) -> tuple[list[dict[str, Any]], str, str]:
+    if checks_getter is not None:
+        checks, review_decision = checks_getter()
+        current_sha = head_sha_getter() if head_sha_getter is not None else ""
+        return checks, review_decision, current_sha
+    status = await get_pr_ci_status_async(pr_url)
+    return status["checks"], status["review_decision"], status["head_sha"]
+
+
 async def _wait_for_checks(
     pr_url: str,
     checks_getter: Callable[[], tuple[list[dict[str, Any]], str]] | None,
@@ -75,19 +88,10 @@ async def _poll_until_done(
     head_sha_getter: Callable[[], str] | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     deadline = time.time() + timeout
-    review_decision = ""
     while True:
-        current_sha = ""
-        if checks_getter is not None:
-            checks, review_decision = checks_getter()
-            if head_sha_getter is not None:
-                current_sha = head_sha_getter()
-        else:
-            status = await get_pr_ci_status_async(pr_url)
-            checks = status["checks"]
-            review_decision = status["review_decision"]
-            current_sha = status["head_sha"]
-
+        checks, review_decision, current_sha = await _fetch_current_status(
+            pr_url, checks_getter, head_sha_getter
+        )
         _bail_if_review_required(state, review_decision)
 
         if required_sha and current_sha and current_sha != required_sha:

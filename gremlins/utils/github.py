@@ -188,16 +188,21 @@ def extract_gh_url(
     raise RuntimeError(f"failed to extract {label} URL from claude output events")
 
 
-def get_pr_ci_status(pr_url: str) -> dict[str, Any]:
-    """Return CI check status and review decision for a PR.
-
-    Returns dict with:
-    - 'checks': full statusCheckRollup list (may be empty when PR has no checks)
-    - 'review_decision': reviewDecision string (e.g. 'REVIEW_REQUIRED', 'APPROVED', '')
-    - 'head_sha': current PR headRefOid (commit SHA), or '' if unavailable
-    """
+def _parse_ci_status_response(stdout: str) -> dict[str, Any]:
     try:
-        r = proc.run(
+        data = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"could not parse PR CI status response: {exc}") from exc
+    return {
+        "checks": cast(list[dict[str, Any]], data.get("statusCheckRollup") or []),
+        "review_decision": data.get("reviewDecision") or "",
+        "head_sha": data.get("headRefOid") or "",
+    }
+
+
+async def get_pr_ci_status_async(pr_url: str) -> dict[str, Any]:
+    try:
+        r = await proc.run_async(
             [
                 "gh",
                 "pr",
@@ -215,65 +220,7 @@ def get_pr_ci_status(pr_url: str) -> dict[str, Any]:
         ) from exc
     if r.returncode != 0:
         raise RuntimeError(f"could not fetch PR CI status: {r.stderr.strip()}")
-    try:
-        data = json.loads(r.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"could not parse PR CI status response: {exc}") from exc
-    return {
-        "checks": cast(list[dict[str, Any]], data.get("statusCheckRollup") or []),
-        "review_decision": data.get("reviewDecision") or "",
-        "head_sha": data.get("headRefOid") or "",
-    }
-
-
-async def get_pr_ci_status_async(pr_url: str) -> dict[str, Any]:
-    import subprocess as _subprocess
-
-    try:
-        r = await proc.run_async(
-            [
-                "gh",
-                "pr",
-                "view",
-                pr_url,
-                "--json",
-                "statusCheckRollup,reviewDecision,headRefOid",
-            ],
-            timeout=GET_PR_CI_STATUS_TIMEOUT,
-        )
-    except _subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
-            f"timed out after {GET_PR_CI_STATUS_TIMEOUT}s fetching CI status for "
-            f"{pr_url!r} via `gh pr view`; check GitHub CLI authentication and network"
-        ) from exc
-    if r.returncode != 0:
-        raise RuntimeError(f"could not fetch PR CI status: {r.stderr.strip()}")
-    try:
-        data = json.loads(r.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"could not parse PR CI status response: {exc}") from exc
-    return {
-        "checks": cast(list[dict[str, Any]], data.get("statusCheckRollup") or []),
-        "review_decision": data.get("reviewDecision") or "",
-        "head_sha": data.get("headRefOid") or "",
-    }
-
-
-def fetch_check_run_logs(details_url: str) -> str:
-    """Try to fetch failed-step logs for a GitHub Actions check run.
-
-    Extracts the workflow run ID from `details_url` and calls
-    `gh run view <id> --log-failed`. Returns empty string when the URL
-    doesn't match Actions or the gh call fails.
-    """
-    m = re.search(r"/actions/runs/(\d+)", details_url or "")
-    if not m:
-        return ""
-    run_id = m.group(1)
-    r = proc.run(["gh", "run", "view", run_id, "--log-failed"], timeout=30)
-    if r.returncode == 0:
-        return r.stdout.strip()[:10000]
-    return ""
+    return _parse_ci_status_response(r.stdout)
 
 
 async def fetch_check_run_logs_async(details_url: str) -> str:
@@ -328,18 +275,3 @@ async def check_copilot_review_async(repo: str, pr_num: str) -> str | None:
     return lines[0] if lines else None
 
 
-def check_copilot_review(repo: str, pr_num: str) -> str | None:
-    """Return the first non-PENDING Copilot review state, or None if not ready."""
-    r = proc.run(
-        [
-            "gh",
-            "api",
-            f"repos/{repo}/pulls/{pr_num}/reviews",
-            "--jq",
-            '.[] | select(.user.login | test("[Cc]opilot")) | .state',
-        ],
-    )
-    if r.returncode != 0:
-        return None
-    lines = [ln for ln in r.stdout.splitlines() if ln and ln != "PENDING"]
-    return lines[0] if lines else None
