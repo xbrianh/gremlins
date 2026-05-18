@@ -60,8 +60,9 @@ def test_custom_instructions_passed_to_agent(monkeypatch: Any) -> None:
 
 
 def test_gremlins_tools_nonempty() -> None:
-    assert len(GREMLINS_TOOLS) > 0
-    for tool in GREMLINS_TOOLS:
+    tools = build_tools(bypass=True, worktree_root=pathlib.Path.cwd(), audit_log=None)
+    assert len(tools) > 0
+    for tool in tools:
         assert hasattr(tool, "name") and tool.name
         assert hasattr(tool, "params_json_schema") and isinstance(
             tool.params_json_schema, dict
