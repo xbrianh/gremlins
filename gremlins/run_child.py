@@ -88,7 +88,9 @@ def _build_state(spec: dict[str, Any]) -> State:
         try:
             pipeline_data = Pipeline.from_yaml(pathlib.Path(str(spec["pipeline_path"])))
         except Exception:
-            logger.warning("failed to load pipeline from %s", spec["pipeline_path"], exc_info=True)
+            logger.warning(
+                "failed to load pipeline from %s", spec["pipeline_path"], exc_info=True
+            )
 
     return State(
         data=data,
@@ -113,14 +115,30 @@ async def _run(spec_path: pathlib.Path) -> int:
 
     stage_dict = spec.get("stage_dict")
     if not isinstance(stage_dict, dict):
-        _write_result(result_path, {"status": "error", "detail": "spec missing required 'stage_dict' field", "returncode": None, "cost_usd": 0.0})
+        _write_result(
+            result_path,
+            {
+                "status": "error",
+                "detail": "spec missing required 'stage_dict' field",
+                "returncode": None,
+                "cost_usd": 0.0,
+            },
+        )
         return 2
 
     try:
         stage = parse_stage(cast(dict[str, Any], stage_dict))
         state = _build_state(spec)
     except Exception as exc:
-        _write_result(result_path, {"status": "error", "detail": str(exc), "returncode": None, "cost_usd": 0.0})
+        _write_result(
+            result_path,
+            {
+                "status": "error",
+                "detail": str(exc),
+                "returncode": None,
+                "cost_usd": 0.0,
+            },
+        )
         return 2
 
     if stage.client is None:
@@ -130,20 +148,47 @@ async def _run(spec_path: pathlib.Path) -> int:
         outcome = await stage.run(state)
     except Bail as b:
         cost = getattr(state.client, "total_cost_usd", 0.0) or 0.0
-        _write_result(result_path, {"status": "bail", "detail": b.reason, "returncode": None, "cost_usd": cost})
+        _write_result(
+            result_path,
+            {
+                "status": "bail",
+                "detail": b.reason,
+                "returncode": None,
+                "cost_usd": cost,
+            },
+        )
         return 1
     except Exception as exc:
         cost = getattr(state.client, "total_cost_usd", 0.0) or 0.0
-        _write_result(result_path, {"status": "error", "detail": str(exc), "returncode": None, "cost_usd": cost})
+        _write_result(
+            result_path,
+            {
+                "status": "error",
+                "detail": str(exc),
+                "returncode": None,
+                "cost_usd": cost,
+            },
+        )
         traceback.print_exc()
         return 2
 
     cost = getattr(state.client, "total_cost_usd", 0.0) or 0.0
     if isinstance(outcome, Done):
-        _write_result(result_path, {"status": "done", "detail": "", "returncode": None, "cost_usd": cost})
+        _write_result(
+            result_path,
+            {"status": "done", "detail": "", "returncode": None, "cost_usd": cost},
+        )
         return 0
 
-    _write_result(result_path, {"status": "needs_fix", "detail": outcome.detail, "returncode": outcome.returncode, "cost_usd": cost})
+    _write_result(
+        result_path,
+        {
+            "status": "needs_fix",
+            "detail": outcome.detail,
+            "returncode": outcome.returncode,
+            "cost_usd": cost,
+        },
+    )
     return 1
 
 
