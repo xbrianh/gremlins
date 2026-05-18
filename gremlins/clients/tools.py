@@ -287,7 +287,9 @@ def _within_worktree(p: pathlib.Path, root: pathlib.Path) -> bool:
         return False
 
 
-def _audit(log: pathlib.Path | None, tool: str, key_arg: str, status: str, bypass: bool) -> None:
+def _audit(
+    log: pathlib.Path | None, tool: str, key_arg: str, status: str, bypass: bool
+) -> None:
     if log is None:
         return
     entry = {
@@ -315,7 +317,9 @@ def _key_arg(args_json: str) -> str:
     return ""
 
 
-def build_tools(*, bypass: bool, worktree_root: pathlib.Path, audit_log: pathlib.Path | None) -> list[Tool]:
+def build_tools(
+    *, bypass: bool, worktree_root: pathlib.Path, audit_log: pathlib.Path | None
+) -> list[Tool]:
     root = worktree_root.resolve()
 
     def _enforce(pth: str, cwd: str | None) -> str | None:
@@ -340,7 +344,11 @@ def build_tools(*, bypass: bool, worktree_root: pathlib.Path, audit_log: pathlib
                 return f"Error: path outside worktree: {first}"
         if s.startswith("cd "):
             tgt = s[3:].strip().strip("'\"")
-            if tgt.startswith("..") or (tgt and _resolve(tgt, cwd).is_absolute() and not _within_worktree(_resolve(tgt, cwd), root)):
+            if tgt.startswith("..") or (
+                tgt
+                and _resolve(tgt, cwd).is_absolute()
+                and not _within_worktree(_resolve(tgt, cwd), root)
+            ):
                 return f"Error: path outside worktree: {tgt}"
         return None
 
@@ -360,9 +368,14 @@ def build_tools(*, bypass: bool, worktree_root: pathlib.Path, audit_log: pathlib
                     _audit(audit_log, name, ka, "denied", bypass)
                     return err
             res = await invoke(ctx, args_json)
-            st = "error" if str(res).startswith(("Error:", "[exit", "[timeout]")) else "ok"
+            st = (
+                "error"
+                if str(res).startswith(("Error:", "[exit", "[timeout]"))
+                else "ok"
+            )
             _audit(audit_log, name, ka, st, bypass)
             return res
+
         return w
 
     return [
@@ -375,4 +388,3 @@ def build_tools(*, bypass: bool, worktree_root: pathlib.Path, audit_log: pathlib
         )
         for t in _BASE_TOOLS
     ]
-

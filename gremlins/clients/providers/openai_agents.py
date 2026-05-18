@@ -205,7 +205,9 @@ class OpenAIAgentsClient:
         agent = Agent(
             name=f"gremlins-{label}",
             instructions=self._instructions,
-            tools=build_tools(bypass=bypass, worktree_root=worktree_root, audit_log=audit_log),
+            tools=build_tools(
+                bypass=bypass, worktree_root=worktree_root, audit_log=audit_log
+            ),
             model=effective_model,
             model_settings=self._model_settings
             if self._model_settings is not None
