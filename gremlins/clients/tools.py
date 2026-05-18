@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import fnmatch
 import json
 import os
@@ -29,6 +30,31 @@ def _resolve(file_path: str, cwd: str | None) -> pathlib.Path:
     if not p.is_absolute() and cwd is not None:
         return pathlib.Path(cwd) / p
     return p
+
+
+def _within_worktree(target: pathlib.Path, root: pathlib.Path) -> bool:
+    try:
+        return target.resolve().is_relative_to(root.resolve())
+    except (OSError, RuntimeError):
+        return False
+
+
+def _audit(
+    log: pathlib.Path | None, tool: str, key_arg: str, status: str, bypass: bool
+) -> None:
+    if log is None:
+        return
+    ts = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+    rec = {
+        "ts": ts,
+        "tool": tool,
+        "key_arg": key_arg[:200],
+        "status": status,
+        "bypass": bypass,
+    }
+    with log.open("a", encoding="utf-8") as f:
+        json.dump(rec, f)
+        f.write("\n")
 
 
 async def _read_invoke(ctx: ToolContext[Any], args_json: str) -> str:
