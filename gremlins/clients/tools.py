@@ -318,9 +318,7 @@ def _key_arg(args_json: str) -> str:
     return ""
 
 
-def _enforce(
-    bypass: bool, root: pathlib.Path, pth: str, cwd: str | None
-) -> str | None:
+def _enforce(bypass: bool, root: pathlib.Path, pth: str, cwd: str | None) -> str | None:
     if bypass:
         return None
     p = _resolve(pth, cwd)
@@ -375,11 +373,7 @@ def _wrap(
                 _audit(audit_log, name, ka, "denied", bypass)
                 return err
         res: Any = await invoke(ctx, args_json)
-        st = (
-            "error"
-            if str(res).startswith(("Error:", "[exit", "[timeout]"))
-            else "ok"
-        )
+        st = "error" if str(res).startswith(("Error:", "[exit", "[timeout]")) else "ok"
         _audit(audit_log, name, ka, st, bypass)
         return res
 
@@ -397,9 +391,7 @@ def build_tools(
                 name=t.name,
                 description=t.description,
                 params_json_schema=t.params_json_schema,
-                on_invoke_tool=_wrap(
-                    bypass, root, audit_log, t.on_invoke_tool, t.name
-                ),
+                on_invoke_tool=_wrap(bypass, root, audit_log, t.on_invoke_tool, t.name),
                 strict_json_schema=getattr(t, "strict_json_schema", False),
             )
             for t in _BASE_TOOLS
