@@ -371,6 +371,7 @@ def test_parallel_sequence_child_worktree_flows() -> None:
 
     async def _run_all() -> None:
         import inspect as _inspect
+
         for _, fn in stages:
             if _inspect.iscoroutinefunction(fn):
                 await fn()

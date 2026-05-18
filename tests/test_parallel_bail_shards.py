@@ -686,11 +686,13 @@ def test_parallel_all_children_complete_with_defaults():
     # Run all three stages end-to-end (no git repo → fanout is a no-op).
     async def _run_all():
         import inspect
+
         for _, fn in stages:
             if inspect.iscoroutinefunction(fn):
                 await fn()
             else:
                 fn()
+
     asyncio.run(_run_all())
 
     assert sorted(ran) == ["a", "b"]
