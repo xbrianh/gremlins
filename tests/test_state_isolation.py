@@ -26,6 +26,7 @@ on-disk contents directly — no fake executables or subprocess interception
 needed since set_stage is pure Python.
 """
 
+import asyncio
 import json
 import os
 import pathlib
@@ -154,10 +155,12 @@ def test_local_main_does_not_clobber_external_state(tmp_path, monkeypatch):
         }
     )
     assert (
-        run_pipeline(
-            resolve_pipeline_path("local", tmp_path),
-            argv=["--plan", str(plan_file)],
-            client=client,
+        asyncio.run(
+            run_pipeline(
+                resolve_pipeline_path("local", tmp_path),
+                argv=["--plan", str(plan_file)],
+                client=client,
+            )
         )
         == 0
     )

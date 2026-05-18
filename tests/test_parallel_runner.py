@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import pathlib
 import threading
 import time
@@ -116,7 +117,7 @@ def test_run_stages_two_test_entries_both_execute() -> None:
         ("implement", lambda: log.append("implement")),
         ("test-post", lambda: log.append("test-post")),
     ]
-    run_stages(stages)
+    asyncio.run(run_stages(stages))
     assert log == ["test-pre", "implement", "test-post"]
 
 
@@ -127,7 +128,7 @@ def test_run_stages_resume_targets_first_test() -> None:
         ("implement", lambda: log.append("implement")),
         ("test-post", lambda: log.append("test-post")),
     ]
-    run_stages(stages, resume_from="test-pre")
+    asyncio.run(run_stages(stages, resume_from="test-pre"))
     assert log == ["test-pre", "implement", "test-post"]
 
 
@@ -138,7 +139,7 @@ def test_run_stages_resume_targets_second_test() -> None:
         ("implement", lambda: log.append("implement")),
         ("test-post", lambda: log.append("test-post")),
     ]
-    run_stages(stages, resume_from="test-post")
+    asyncio.run(run_stages(stages, resume_from="test-post"))
     assert log == ["test-post"]
     assert "test-pre" not in log
     assert "implement" not in log
@@ -254,7 +255,7 @@ def test_run_stages_drives_parallel_group() -> None:
         *parallel_stages,
         ("address", lambda: log.append("address")),
     ]
-    run_stages(stages)
+    asyncio.run(run_stages(stages))
     assert log[0] == "plan"
     assert sorted(log[1:3]) == ["r1", "r2"]
     assert log[3] == "address"
@@ -274,7 +275,7 @@ def test_run_stages_resume_from_group_skips_before_group() -> None:
         *parallel_stages,
         ("address", lambda: log.append("address")),
     ]
-    run_stages(stages, resume_from="reviews")
+    asyncio.run(run_stages(stages, resume_from="reviews"))
     assert "plan" not in log
     assert "r1" in log
     assert "r2" in log
@@ -375,3 +376,100 @@ def test_parallel_sequence_child_worktree_flows() -> None:
     assert all(wt is not None for wt in observed)
     assert all(wt != project_root for wt in observed)
     assert observed[0] == observed[1]
+
+
+# ---------------------------------------------------------------------------
+# Async stage protocol
+# ---------------------------------------------------------------------------
+
+
+def test_run_stages_async_callable_executes() -> None:
+    log: list[str] = []
+
+    async def async_fn() -> None:
+        log.append("async")
+
+    asyncio.run(run_stages([("a", async_fn)]))
+    assert log == ["async"]
+
+
+def test_run_stages_async_and_sync_callables_both_execute_in_order() -> None:
+    log: list[str] = []
+
+    def sync_fn() -> None:
+        log.append("sync")
+
+    async def async_fn() -> None:
+        log.append("async")
+
+    asyncio.run(run_stages([("s", sync_fn), ("a", async_fn)]))
+    assert log == ["sync", "async"]
+
+
+def test_make_runner_returns_async_for_async_stage() -> None:
+    import inspect
+
+    from gremlins.stages.base import Stage
+    from gremlins.stages.outcome import Done, Outcome
+
+    class AsyncStage(Stage):
+        type = "async-test"
+
+        async def run(self, state: State) -> Outcome:  # type: ignore[override]
+            return Done()
+
+    state = State(
+        data=StateData(), client=FakeClaudeClient(), session_dir=pathlib.Path("/tmp")
+    )
+    runner = state.make_runner(AsyncStage("a"))
+    assert inspect.iscoroutinefunction(runner)
+
+
+def test_make_runner_returns_sync_for_sync_stage() -> None:
+    import inspect
+
+    from gremlins.stages.base import Stage
+    from gremlins.stages.outcome import Done, Outcome
+
+    class SyncStage(Stage):
+        type = "sync-test"
+
+        def run(self, state: State) -> Outcome:  # type: ignore[override]
+            return Done()
+
+    state = State(
+        data=StateData(), client=FakeClaudeClient(), session_dir=pathlib.Path("/tmp")
+    )
+    runner = state.make_runner(SyncStage("s"))
+    assert not inspect.iscoroutinefunction(runner)
+
+
+def test_async_and_sync_stages_run_together_via_make_runner() -> None:
+    from gremlins.stages.base import Stage
+    from gremlins.stages.outcome import Done, Outcome
+
+    executed: list[str] = []
+
+    class SyncStage(Stage):
+        type = "sync-test"
+
+        def run(self, state: State) -> Outcome:  # type: ignore[override]
+            executed.append("sync")
+            return Done()
+
+    class AsyncStage(Stage):
+        type = "async-test"
+
+        async def run(self, state: State) -> Outcome:  # type: ignore[override]
+            executed.append("async")
+            return Done()
+
+    base_state = State(
+        data=StateData(), client=FakeClaudeClient(), session_dir=pathlib.Path("/tmp")
+    )
+    stages = [
+        ("s", base_state.make_runner(SyncStage("s"))),
+        ("a", base_state.make_runner(AsyncStage("a"))),
+    ]
+    asyncio.run(run_stages(stages))
+    assert executed == ["sync", "async"]

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import inspect
 import json
 import logging
 import os
@@ -61,8 +63,8 @@ def _expand_stage_entries(raw_stages: list[Stage]) -> list[Stage]:
     return result
 
 
-def run_stages(
-    stages: list[tuple[str, Callable[[], None]]], *, resume_from: str | None = None
+async def run_stages(
+    stages: list[tuple[str, Callable[[], Any]]], *, resume_from: str | None = None
 ) -> None:
     start_idx = 0
     if resume_from is not None:
@@ -73,7 +75,10 @@ def run_stages(
             )
         start_idx = names.index(resume_from)
     for _, fn in stages[start_idx:]:
-        fn()
+        if inspect.iscoroutinefunction(fn):
+            await fn()
+        else:
+            await asyncio.to_thread(fn)
 
 
 class Gremlin:
@@ -205,7 +210,7 @@ class Gremlin:
 
     def _collect_stages(
         self, stages: list[Stage]
-    ) -> list[tuple[str, Callable[[], None]]]:
+    ) -> list[tuple[str, Callable[[], Any]]]:
         args = argparse.Namespace(
             plan=self.plan,
             cmds=self.cmds,
@@ -214,7 +219,7 @@ class Gremlin:
             spec=self.spec,
             instructions=[self.instructions] if self.instructions else [],
         )
-        built: list[tuple[str, Callable[[], None]]] = []
+        built: list[tuple[str, Callable[[], Any]]] = []
         for e in stages:
             stage_client = e.client or PACKAGE_DEFAULT
             resolved = self.test_client or stage_client
@@ -233,11 +238,11 @@ class Gremlin:
             built.append((e.name, stage_state.make_runner(e, scope=stages)))
         return built
 
-    def run(self) -> None:
+    async def run(self) -> None:
         if not self._initialized:
             raise RuntimeError("call initialize_runtime() before run()")
         built = self._collect_stages(self.stages)
-        run_stages(built, resume_from=self.resume_from)
+        await run_stages(built, resume_from=self.resume_from)
 
     @classmethod
     def build(

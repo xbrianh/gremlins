@@ -96,7 +96,7 @@ def _read_state_json(gremlin_id: str | None) -> dict[str, Any]:
     return json.loads(sf.read_text(encoding="utf-8"))
 
 
-def run_pipeline(
+async def run_pipeline(
     pipeline_path: pathlib.Path,
     *,
     argv: list[str],
@@ -209,7 +209,7 @@ def run_pipeline(
 
     _install_signal_handlers(_signal_clients)
     try:
-        gremlin.run()
+        await gremlin.run()
     except Bail as b:
         sd = StateData.load(gremlin_id)
         sd.write_bail_file("other", b.reason, attempt=sd.attempt)

@@ -7,6 +7,7 @@ Not intended for direct human invocation.
 
 from __future__ import annotations
 
+import asyncio
 import pathlib
 import sys
 import traceback
@@ -34,7 +35,9 @@ def main(argv: list[str] | None = None) -> int:
 
     rc = 1
     try:
-        rc = _run_pipeline(pathlib.Path(pipeline_arg), argv=args, gremlin_id=gremlin_id)
+        rc = asyncio.run(
+            _run_pipeline(pathlib.Path(pipeline_arg), argv=args, gremlin_id=gremlin_id)
+        )
     except SystemExit as e:
         rc = e.code if isinstance(e.code, int) else 1
     except BaseException:
