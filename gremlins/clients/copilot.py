@@ -1,13 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import pathlib
 import re
-import subprocess
 import threading
 
 from gremlins.clients.protocol import CompletedRun
-from gremlins.clients.subprocess_utils import reap_processes
 from gremlins.utils.decorators import swallow
 
 # Copilot appends a stats footer like "⏺ Cost: $0.01 | Duration: 3.2s | ..."
@@ -28,21 +27,30 @@ class SubprocessCopilotClient:
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._children: list[subprocess.Popen[bytes]] = []
+        self._children: list[asyncio.subprocess.Process] = []
 
-    def _track(self, p: subprocess.Popen[bytes]) -> None:
+    def _track(self, p: asyncio.subprocess.Process) -> None:
         with self._lock:
             self._children.append(p)
 
     @swallow(ValueError)
-    def _untrack(self, p: subprocess.Popen[bytes]) -> None:
+    def _untrack(self, p: asyncio.subprocess.Process) -> None:
         with self._lock:
             self._children.remove(p)
 
     def reap_all(self) -> None:
         with self._lock:
             procs = list(self._children)
-        reap_processes(procs)
+        for p in procs:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+        for p in procs:
+            try:
+                p.kill()
+            except Exception:
+                pass
 
     @property
     def total_cost_usd(self) -> float:
@@ -57,28 +65,27 @@ class SubprocessCopilotClient:
         cmd += ["-p", prompt]
         return cmd
 
-    def _spawn(
+    async def _spawn(
         self,
         argv: list[str],
         cwd: pathlib.Path | None = None,
         extra_env: dict[str, str] | None = None,
-    ) -> subprocess.Popen[bytes]:
+    ) -> asyncio.subprocess.Process:
         env = os.environ.copy()
         if extra_env:
             env.update(extra_env)
-        p = subprocess.Popen(
-            argv,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=False,
+        p = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
             env=env,
             cwd=str(cwd) if cwd is not None else None,
         )
         self._track(p)
         return p
 
-    def run(
+    async def run(
         self,
         prompt: str,
         *,
@@ -94,9 +101,11 @@ class SubprocessCopilotClient:
     ) -> CompletedRun:
         del idle_timeout  # copilot reads stdout to EOF; no streaming idle concept
         argv = self._build_argv(model, prompt)
-        p = self._spawn(argv, cwd=cwd, extra_env=extra_env)
+        p = await self._spawn(argv, cwd=cwd, extra_env=extra_env)
         try:
-            raw_out, raw_err = p.communicate()
+            assert p.stdout is not None
+            assert p.stderr is not None
+            raw_out, raw_err = await p.communicate()
             rc = p.returncode
         finally:
             self._untrack(p)

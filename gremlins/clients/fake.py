@@ -63,7 +63,7 @@ class FakeClaudeClient(Client):
             return events
         raise TypeError(f"unsupported fixture type: {type(fixture).__name__}")
 
-    def run(
+    async def run(
         self,
         prompt: str,
         *,

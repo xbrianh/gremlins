@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import pathlib
 import shlex
@@ -57,14 +58,16 @@ def run_agent(
         extra_env["GREMLIN_ATTEMPT"] = state.data.attempt
         extra_env["GREMLIN_STATE_DIR"] = str(sf.parent)
     resolved_model = model or state.stage_model or state.client.model
-    completed = state.client.run(
-        prompt,
-        label=label,
-        model=resolved_model,
-        raw_path=raw_path,
-        cwd=state.worktree,
-        extra_env=extra_env or None,
-        **kw,
+    completed = asyncio.run(
+        state.client.run(
+            prompt,
+            label=label,
+            model=resolved_model,
+            raw_path=raw_path,
+            cwd=state.worktree,
+            extra_env=extra_env or None,
+            **kw,
+        )
     )
     _check_bail(state)
     return completed
