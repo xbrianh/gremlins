@@ -37,8 +37,8 @@ def extract_pr_branch_from_events(events: list[dict[str, Any]]) -> str:
     return ""
 
 
-def _get_pr_branch(pr_url: str) -> str:
-    r = proc.run(
+async def _get_pr_branch(pr_url: str) -> str:
+    r = await proc.run_async(
         ["gh", "pr", "view", pr_url, "--json", "headRefName", "-q", ".headRefName"],
         timeout=15,
     )
@@ -128,7 +128,7 @@ class GitHubOpenPullRequest(Stage):
             label="PR",
             text_result=completed.text_result,
         )
-        branch = extract_pr_branch_from_events(events) or _get_pr_branch(pr_url)
+        branch = extract_pr_branch_from_events(events) or await _get_pr_branch(pr_url)
         if not branch:
             logger.warning("open-pr: could not determine PR branch for %s", pr_url)
         state.record_artifact({"type": "pr", "url": pr_url, "branch": branch})
