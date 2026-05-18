@@ -57,6 +57,18 @@ def _audit(
         f.write("\n")
 
 
+def _key_arg(args_json: str) -> str:
+    try:
+        inp = json.loads(args_json)
+    except Exception:
+        return ""
+    for k in ("file_path", "command", "pattern", "path"):
+        v = inp.get(k)
+        if v:
+            return str(v)
+    return ""
+
+
 async def _read_invoke(ctx: ToolContext[Any], args_json: str) -> str:
     args: dict[str, Any] = json.loads(args_json)
     path = _resolve(args["file_path"], _cwd(ctx))
