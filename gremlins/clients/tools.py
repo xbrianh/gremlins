@@ -318,69 +318,78 @@ def _key_arg(args_json: str) -> str:
     return ""
 
 
+def _enforce(
+    bypass: bool, root: pathlib.Path, pth: str, cwd: str | None
+) -> str | None:
+    if bypass:
+        return None
+    p = _resolve(pth, cwd)
+    if not _within_worktree(p, root):
+        return f"Error: path outside worktree: {pth}"
+    return None
+
+
+def _bash_check(
+    bypass: bool, root: pathlib.Path, cmd: str, cwd: str | None
+) -> str | None:
+    if bypass:
+        return None
+    s = cmd.strip()
+    if not s:
+        return None
+    toks = s.split()
+    for raw_tok in toks:
+        tok = raw_tok.strip("'\"")
+        if tok and (tok[0] in ("/", "~") or tok.startswith("..")):
+            if tok.startswith("~"):
+                tok = os.path.expanduser(tok)
+            p = _resolve(tok, cwd)
+            if not _within_worktree(p, root):
+                return f"Error: path outside worktree: {raw_tok}"
+    return None
+
+
+def _wrap(
+    bypass: bool,
+    root: pathlib.Path,
+    audit_log: pathlib.Path | None,
+    invoke: Callable[[ToolContext[Any], str], Awaitable[Any]],
+    name: str,
+) -> Callable[[ToolContext[Any], str], Awaitable[Any]]:
+    async def w(ctx: ToolContext[Any], args_json: str) -> Any:
+        ka = _key_arg(args_json)
+        try:
+            args: dict[str, Any] = json.loads(args_json)
+        except Exception:
+            _audit(audit_log, name, ka, "error", bypass)
+            return "Error: invalid arguments"
+        if name in {"Read", "Edit", "Write", "Grep", "Glob"}:
+            pth = args.get("file_path") or args.get("path", ".")
+            err = _enforce(bypass, root, pth, _cwd(ctx))
+            if err:
+                _audit(audit_log, name, ka, "denied", bypass)
+                return err
+        elif name == "Bash":
+            err = _bash_check(bypass, root, args.get("command", ""), _cwd(ctx))
+            if err:
+                _audit(audit_log, name, ka, "denied", bypass)
+                return err
+        res: Any = await invoke(ctx, args_json)
+        st = (
+            "error"
+            if str(res).startswith(("Error:", "[exit", "[timeout]"))
+            else "ok"
+        )
+        _audit(audit_log, name, ka, st, bypass)
+        return res
+
+    return w
+
+
 def build_tools(
     *, bypass: bool, worktree_root: pathlib.Path, audit_log: pathlib.Path | None
 ) -> list[Tool]:
     root = worktree_root.resolve()
-
-    def _enforce(pth: str, cwd: str | None) -> str | None:
-        if bypass:
-            return None
-        p = _resolve(pth, cwd)
-        if not _within_worktree(p, root):
-            return f"Error: path outside worktree: {pth}"
-        return None
-
-    def _bash_check(cmd: str, cwd: str | None) -> str | None:
-        if bypass:
-            return None
-        s = cmd.strip()
-        if not s:
-            return None
-        toks = s.split()
-        first = toks[0] if toks else ""
-        if first and first[0] in ("/", "~"):
-            p = _resolve(first, cwd)
-            if not _within_worktree(p, root):
-                return f"Error: path outside worktree: {first}"
-        if s.startswith("cd "):
-            tgt = s[3:].strip().strip("'\"")
-            if tgt.startswith("..") or (
-                tgt
-                and _resolve(tgt, cwd).is_absolute()
-                and not _within_worktree(_resolve(tgt, cwd), root)
-            ):
-                return f"Error: path outside worktree: {tgt}"
-        return None
-
-    def _wrap(
-        invoke: Callable[[ToolContext[Any], str], Awaitable[Any]], name: str
-    ) -> Callable[[ToolContext[Any], str], Awaitable[Any]]:
-        async def w(ctx: ToolContext[Any], args_json: str) -> Any:
-            ka = _key_arg(args_json)
-            args: dict[str, Any] = json.loads(args_json)
-            if name in {"Read", "Edit", "Write", "Grep", "Glob"}:
-                pth = args.get("file_path") or args.get("path", ".")
-                err = _enforce(pth, _cwd(ctx))
-                if err:
-                    _audit(audit_log, name, ka, "denied", bypass)
-                    return err
-            elif name == "Bash":
-                err = _bash_check(args.get("command", ""), _cwd(ctx))
-                if err:
-                    _audit(audit_log, name, ka, "denied", bypass)
-                    return err
-            res: Any = await invoke(ctx, args_json)
-            st = (
-                "error"
-                if str(res).startswith(("Error:", "[exit", "[timeout]"))
-                else "ok"
-            )
-            _audit(audit_log, name, ka, st, bypass)
-            return res
-
-        return w
-
     return cast(
         "list[Tool]",
         [
@@ -388,7 +397,9 @@ def build_tools(
                 name=t.name,
                 description=t.description,
                 params_json_schema=t.params_json_schema,
-                on_invoke_tool=_wrap(t.on_invoke_tool, t.name),
+                on_invoke_tool=_wrap(
+                    bypass, root, audit_log, t.on_invoke_tool, t.name
+                ),
                 strict_json_schema=getattr(t, "strict_json_schema", False),
             )
             for t in _BASE_TOOLS
