@@ -15,7 +15,7 @@ from gremlins.clients.config import (
     validate_max_retries,
 )
 from gremlins.clients.protocol import CompletedRun
-from gremlins.clients.stream import _decode_line, _emit_event, _extract_state
+from gremlins.clients.stream import decode_line, emit_event, extract_state
 from gremlins.utils.decorators import swallow
 
 
@@ -143,14 +143,14 @@ class SubprocessClaudeClient:
                         json.loads(line.decode("utf-8", errors="replace"))
                     except Exception:
                         timed_out = True
-                evt = _decode_line(line)
+                evt = decode_line(line)
                 if evt is None:
                     continue
-                _extract_state(evt, state)
+                extract_state(evt, state)
                 if events is not None:
                     events.append(evt)
                 try:
-                    _emit_event(prefix, evt)
+                    emit_event(prefix, evt)
                 except Exception:
                     pass
         finally:
