@@ -62,7 +62,9 @@ def _expand_stage_entries(raw_stages: list[Stage]) -> list[Stage]:
 
 
 async def run_stages(
-    stages: Sequence[tuple[str, Callable[[], Awaitable[Any]]]], *, resume_from: str | None = None
+    stages: Sequence[tuple[str, Callable[[], Awaitable[Any]]]],
+    *,
+    resume_from: str | None = None,
 ) -> None:
     start_idx = 0
     if resume_from is not None:
