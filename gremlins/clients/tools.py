@@ -111,8 +111,6 @@ async def _edit_invoke(ctx: ToolContext[Any], args_json: str) -> str:
         content = path.read_text(encoding="utf-8")
     except OSError as e:
         return f"Error: {e}"
-    if old not in content:
-        return f"Error: old_string not found in {args['file_path']}"
     if content.count(old) > 1:
         return f"Error: old_string is not unique in {args['file_path']}"
     path.write_text(content.replace(old, new, 1), encoding="utf-8")
