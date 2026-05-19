@@ -298,7 +298,9 @@ class OpenAIAgentsClient:
         )
         self._track(run)
 
-        sys.stderr.write(f"{ts()} {prefix}init model={model} cwd={str(cwd) if cwd else '?'}\n")
+        sys.stderr.write(
+            f"{ts()} {prefix}init model={model} cwd={str(cwd) if cwd else '?'}\n"
+        )
         sys.stderr.flush()
 
         raw = open(raw_path, "ab") if raw_path is not None else None
@@ -370,7 +372,9 @@ class OpenAIAgentsClient:
                         )
 
                 elif isinstance(item, ReasoningItem):
-                    sys.stderr.write(f"{ts()} {prefix}think: {trunc(_reasoning_text(item))}\n")
+                    sys.stderr.write(
+                        f"{ts()} {prefix}think: {trunc(_reasoning_text(item))}\n"
+                    )
 
                 elif isinstance(item, ToolCallItem):
                     name = item.tool_name or "?"
@@ -444,7 +448,9 @@ class OpenAIAgentsClient:
             suffix = " (stream-error)"
         else:
             suffix = ""
-        sys.stderr.write(f"{ts()} {prefix}final: turns={turns} cost={cost:.6f}{suffix}\n")
+        sys.stderr.write(
+            f"{ts()} {prefix}final: turns={turns} cost={cost:.6f}{suffix}\n"
+        )
         sys.stderr.flush()
 
         if timed_out:

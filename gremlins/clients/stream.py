@@ -6,14 +6,14 @@ import queue
 import sys
 import threading
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import IO, Any, cast
 
 from gremlins.clients.config import STREAM_IDLE_TIMEOUT
 
 
 def ts() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def trunc(s: object, n: int = 200) -> str:
