@@ -1290,3 +1290,19 @@ def test_launch_explicit_gremlin_id_stale_dir_allowed(lenv, monkeypatch):
         project_root=str(lenv.repo),
     )
     assert result_id == gremlin_id
+
+
+def test_launch_pr_kwarg_sets_state_fields(lenv, monkeypatch):
+    """launch(pr=...) persists setup_kind=worktree-detached-from-ref and the pull/<N>/head ref."""
+    launcher = _launcher()
+    monkeypatch.setattr(launcher, "_spawn_logged_process", lambda *a, **kw: _FakeProc())
+    gremlin_id, _ = launcher.launch(
+        "local",
+        stage_inputs={"instructions": "pr kwarg test"},
+        pr="697",
+        project_root=str(lenv.repo),
+    )
+    state = _read_state(_gremlins_state_root(lenv) / gremlin_id)
+    assert state["setup_kind"] == "worktree-detached-from-ref"
+    assert state["base_ref_sha"] == "pull/697/head"
+    assert state["base_ref_name"] == ""

@@ -230,6 +230,7 @@ def _resolve_inputs(
     pipeline_args: tuple[str, ...],
     spec_path: str | None,
     gremlin_id: str | None,
+    pr: str | None = None,
 ) -> _Inputs:
     from gremlins.cli.pipeline_args import launch_client_label, resolve_pipeline
 
@@ -283,9 +284,22 @@ def _resolve_inputs(
     ):
         raise RuntimeError("gh CLI not found on PATH (required for gh pipeline)")
 
-    base_ref_name, base_ref_sha = _resolve_base_ref(
-        base_ref, project_root, loaded_pipeline
-    )
+    if pr is not None:
+        from gremlins.utils.pr import pr_arg_to_ref
+
+        pr_ref = pr_arg_to_ref(pr)
+        base_ref_name = ""
+        base_ref_sha = pr_ref
+        setup_kind = "worktree-detached-from-ref"
+    else:
+        base_ref_name, base_ref_sha = _resolve_base_ref(
+            base_ref, project_root, loaded_pipeline
+        )
+        setup_kind = (
+            loaded_pipeline.setup_kind()
+            if loaded_pipeline is not None
+            else "worktree-branch"
+        )
 
     stored_args = list(resolved_pipeline_args)
     if spec_path and "--spec" not in stored_args:
@@ -294,11 +308,6 @@ def _resolve_inputs(
         stored_args = ["--plan", plan] + stored_args
 
     client_label = launch_client_label(stored_args, loaded_pipeline)
-    setup_kind = (
-        loaded_pipeline.setup_kind()
-        if loaded_pipeline is not None
-        else "worktree-branch"
-    )
 
     return _Inputs(
         gremlin_id=resolved_gremlin_id,
@@ -441,6 +450,7 @@ def launch(
     pipeline_args: tuple[str, ...] = (),
     spec_path: str | None = None,
     gremlin_id: str | None = None,
+    pr: str | None = None,
 ) -> tuple[str, subprocess.Popen[bytes]]:
     """Set up state dir, spawn the pipeline detached, return gremlin id and process.
 
@@ -459,6 +469,7 @@ def launch(
         pipeline_args,
         spec_path,
         gremlin_id,
+        pr,
     )
     state_dir = _state_root() / inputs.gremlin_id
     try:
