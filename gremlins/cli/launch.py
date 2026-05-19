@@ -23,6 +23,7 @@ _INFRA_ARGS = frozenset(
         "client",
         "gremlin_id",
         "wait",
+        "pr",
     }
 )
 _INFRA_FLAG_NAMES = frozenset(
@@ -35,6 +36,7 @@ _INFRA_FLAG_NAMES = frozenset(
         "client",
         "gremlin-id",
         "wait",
+        "pr",
     }
 )
 _LAUNCH_BRIEF = "usage: gremlins launch <name> [opts]\nLaunch a background gremlin by pipeline name. Run 'gremlins launch --list' to see available pipelines.\n"
@@ -73,6 +75,12 @@ def build_launch_parser(
     )
     p.add_argument("--base-ref", default=None)
     p.add_argument("--client", default=None)
+    p.add_argument(
+        "--pr",
+        default=None,
+        metavar="PR",
+        help="PR number or URL (e.g. 697 or https://github.com/.../pull/697). Checks out the PR head in a detached worktree.",
+    )
     for si in stage_cls.orchestration_args():
         flag = "--" + si.name.replace("_", "-")
         if flag.lstrip("-") in _INFRA_FLAG_NAMES:
@@ -157,6 +165,7 @@ def _self_background_main(
             base_ref=args.base_ref,
             pipeline_args=pipeline_args,
             gremlin_id=args.gremlin_id,
+            pr=args.pr,
         )
     except (ValueError, RuntimeError) as exc:
         sys.stderr.write(f"error: {exc}\n")
