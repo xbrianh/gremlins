@@ -405,7 +405,9 @@ def test_claude_probe_conditional_on_provider(tmp_path, monkeypatch, capsys):
     plan_file.write_text("# Plan\nDo stuff.\n")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
-        shutil, "which", lambda n: None if n == "claude" else f"/fake/{n}" if n == "git" else None
+        shutil,
+        "which",
+        lambda n: None if n == "claude" else f"/fake/{n}" if n == "git" else None,
     )
     monkeypatch.setattr(
         "gremlins.executor.run._install_signal_handlers", lambda c: None
