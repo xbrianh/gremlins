@@ -56,7 +56,8 @@ def _list(argv: list[str]) -> int:
     return list_queue()
 
 
-def _run(_argv: list[str]) -> int:
+def _run(argv: list[str]) -> int:
+    argparse.ArgumentParser(prog="gremlins queue run").parse_args(argv)
     return run()
 
 
