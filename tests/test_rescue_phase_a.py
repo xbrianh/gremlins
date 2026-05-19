@@ -34,6 +34,7 @@ from __future__ import annotations
 import datetime
 import json
 import pathlib
+import re
 import subprocess
 
 from fixtures.shell_env import (
@@ -407,7 +408,10 @@ def test_rescue_diagnosis_streams_events_to_stderr(tmp_path, monkeypatch, capsys
     _do_rescue("victim-abcdef", headless=False)
 
     captured = capsys.readouterr()
-    rescue_lines = [ln for ln in captured.err.splitlines() if "[rescue]" in ln]
+    _TS = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"
+    rescue_lines = [
+        ln for ln in captured.err.splitlines() if re.match(rf"{_TS} \[rescue\]", ln)
+    ]
     assert len(rescue_lines) >= 2, (
         f"Expected [rescue]-prefixed events on stderr; got: {captured.err!r}"
     )

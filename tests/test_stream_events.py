@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import time
 
 from gremlins.clients.stream import (
@@ -41,7 +42,10 @@ def test_init_event_renders(capsys):
         "cwd": "/x",
     }
     emit_event(">>", evt)
-    assert ">>init model=m cwd=/x" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert re.match(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z >>init model=m cwd=/x\n", err
+    )
 
 
 def test_assistant_text(capsys):
