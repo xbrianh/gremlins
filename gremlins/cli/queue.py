@@ -61,7 +61,7 @@ def _run(argv: list[str]) -> int:
     try:
         parser.parse_args(argv)
     except SystemExit as exc:
-        return exc.code or 0
+        return int(exc.code or 0)
     return run()
 
 
