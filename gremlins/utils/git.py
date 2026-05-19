@@ -363,15 +363,8 @@ def setup_detached_from_remote_ref(
     worktree_parent: pathlib.Path | None = None,
 ) -> str:
     """Fetch <ref> from origin and add a detached worktree at FETCH_HEAD. Returns the worktree path."""
-    _run_git(["fetch", "origin", ref], cwd=project_root)
-    if worktree_parent is not None:
-        worktree_parent.mkdir(parents=True, exist_ok=True)
-        workdir = str(worktree_parent / f"aibg-gremlin.{secrets.token_hex(6)}")
-    else:
-        workdir = tempfile.mkdtemp(prefix="aibg-gremlin.")
-        os.rmdir(workdir)
-    _run_git(["worktree", "add", "--detach", workdir, "FETCH_HEAD"], cwd=project_root)
-    return workdir
+    _run_git(["fetch", "origin", "--", ref], cwd=project_root)
+    return setup_detached_worktree(project_root, "FETCH_HEAD", worktree_parent=worktree_parent)
 
 
 def setup_copy(project_root: str) -> str:
