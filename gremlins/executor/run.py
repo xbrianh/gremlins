@@ -114,9 +114,6 @@ async def run_pipeline(
         except RuntimeError as exc:
             die(str(exc))
 
-    if shutil.which("claude") is None:
-        die("claude CLI not found")
-
     if shutil.which("git") is None:
         die("git not found on PATH")
 
@@ -174,6 +171,10 @@ async def run_pipeline(
 
     _stage_clients = _unique_clients(gremlin.stages)
     _signal_clients = [client] if client is not None else _stage_clients
+
+    if any(c.provider == "claude" for c in _signal_clients):
+        if shutil.which("claude") is None:
+            die("claude not found on PATH")
 
     logger.info("session: %s", session_dir)
 
