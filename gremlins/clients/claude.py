@@ -15,7 +15,7 @@ from gremlins.clients.config import (
     validate_max_retries,
 )
 from gremlins.clients.protocol import CompletedRun
-from gremlins.clients.stream import decode_line, emit_event, extract_state
+from gremlins.clients.stream import decode_line, emit_event, extract_state, ts
 from gremlins.utils.decorators import swallow
 
 
@@ -231,7 +231,7 @@ class SubprocessClaudeClient:
         def _on_retry(attempt: int, _exc: BaseException, wait: float) -> None:
             nonlocal active_prompt
             sys.stderr.write(
-                f"{prefix}stream idle timeout, retrying in {wait}s"
+                f"{ts()} {prefix}stream idle timeout, retrying in {wait}s"
                 f" ({attempt + 1}/{max_retries})...\n"
             )
             if on_timeout_prompt is not None:

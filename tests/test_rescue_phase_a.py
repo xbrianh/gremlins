@@ -407,7 +407,7 @@ def test_rescue_diagnosis_streams_events_to_stderr(tmp_path, monkeypatch, capsys
     _do_rescue("victim-abcdef", headless=False)
 
     captured = capsys.readouterr()
-    rescue_lines = [ln for ln in captured.err.splitlines() if ln.startswith("[rescue]")]
+    rescue_lines = [ln for ln in captured.err.splitlines() if "[rescue]" in ln]
     assert len(rescue_lines) >= 2, (
         f"Expected [rescue]-prefixed events on stderr; got: {captured.err!r}"
     )

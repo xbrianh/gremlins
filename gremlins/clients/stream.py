@@ -6,9 +6,14 @@ import queue
 import sys
 import threading
 from collections.abc import Callable
+from datetime import datetime, timezone
 from typing import IO, Any, cast
 
 from gremlins.clients.config import STREAM_IDLE_TIMEOUT
+
+
+def ts() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def trunc(s: object, n: int = 200) -> str:
@@ -103,7 +108,7 @@ _HANDLERS: dict[str, Callable[[str, dict[str, Any]], None]] = {
 def emit_event(prefix: str, evt: dict[str, Any]) -> None:
     handler = _HANDLERS.get(str(evt.get("type") or ""))
     if handler:
-        handler(prefix, evt)
+        handler(f"{ts()} {prefix}", evt)
     sys.stderr.flush()
 
 

@@ -41,7 +41,7 @@ def test_init_event_renders(capsys):
         "cwd": "/x",
     }
     emit_event(">>", evt)
-    assert capsys.readouterr().err == ">>init model=m cwd=/x\n"
+    assert ">>init model=m cwd=/x" in capsys.readouterr().err
 
 
 def test_assistant_text(capsys):
@@ -50,7 +50,7 @@ def test_assistant_text(capsys):
         "message": {"content": [{"type": "text", "text": "hello"}]},
     }
     emit_event("", evt)
-    assert capsys.readouterr().err == "text: hello\n"
+    assert "text: hello" in capsys.readouterr().err
 
 
 def test_assistant_thinking(capsys):
@@ -59,7 +59,7 @@ def test_assistant_thinking(capsys):
         "message": {"content": [{"type": "thinking", "thinking": "hm"}]},
     }
     emit_event("", evt)
-    assert capsys.readouterr().err == "think: hm\n"
+    assert "think: hm" in capsys.readouterr().err
 
 
 def test_assistant_tool_use_preferred_keys(capsys):
@@ -71,7 +71,7 @@ def test_assistant_tool_use_preferred_keys(capsys):
             },
         }
         emit_event("", evt)
-        assert capsys.readouterr().err == "tool: T val\n"
+        assert "tool: T val" in capsys.readouterr().err
 
 
 def test_assistant_tool_use_no_arg(capsys):
@@ -80,7 +80,7 @@ def test_assistant_tool_use_no_arg(capsys):
         "message": {"content": [{"type": "tool_use", "name": "T", "input": {}}]},
     }
     emit_event("", evt)
-    assert capsys.readouterr().err == "tool: T \n"
+    assert "tool: T " in capsys.readouterr().err
 
 
 def test_user_tool_result_str(capsys):
@@ -89,7 +89,7 @@ def test_user_tool_result_str(capsys):
         "message": {"content": [{"type": "tool_result", "content": "ok"}]},
     }
     emit_event("", evt)
-    assert capsys.readouterr().err == "result: ok\n"
+    assert "result: ok" in capsys.readouterr().err
 
 
 def test_user_tool_result_list(capsys):
@@ -99,7 +99,7 @@ def test_user_tool_result_list(capsys):
         "message": {"content": [{"type": "tool_result", "content": body}]},
     }
     emit_event("", evt)
-    assert capsys.readouterr().err == "result: part1 part2\n"
+    assert "result: part1 part2" in capsys.readouterr().err
 
 
 def test_user_tool_result_none(capsys):
@@ -108,7 +108,7 @@ def test_user_tool_result_none(capsys):
         "message": {"content": [{"type": "tool_result", "content": None}]},
     }
     emit_event("", evt)
-    assert capsys.readouterr().err == "result: \n"
+    assert "result: " in capsys.readouterr().err
 
 
 def test_user_tool_result_error(capsys):
@@ -119,7 +119,7 @@ def test_user_tool_result_error(capsys):
         },
     }
     emit_event("", evt)
-    assert capsys.readouterr().err == "result ERROR: boom\n"
+    assert "result ERROR: boom" in capsys.readouterr().err
 
 
 def test_result_event(capsys):
