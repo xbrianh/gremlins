@@ -397,3 +397,37 @@ def test_startup_fails_in_non_git_dir(tmp_path, monkeypatch, capsys):
             )
         )
     assert "not inside a git worktree" in capsys.readouterr().err
+
+
+def test_claude_probe_conditional_on_provider(tmp_path, monkeypatch, capsys):
+    """claude missing errors only for claude provider."""
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("# Plan\nDo stuff.\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        shutil, "which", lambda n: None if n == "claude" else f"/fake/{n}" if n == "git" else None
+    )
+    monkeypatch.setattr(
+        "gremlins.executor.run._install_signal_handlers", lambda c: None
+    )
+    monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: True)
+    monkeypatch.setenv("GREMLINS_TEST_NOOP_PIPELINE", "1")
+    # non-claude succeeds
+    result = asyncio.run(
+        run_pipeline(
+            _local_pipeline_path(tmp_path),
+            argv=["--plan", str(plan_file)],
+            client=Client("copilot", "gpt-4o"),
+        )
+    )
+    assert result == 0
+    # claude errors
+    with pytest.raises(SystemExit):
+        asyncio.run(
+            run_pipeline(
+                _local_pipeline_path(tmp_path),
+                argv=["--plan", str(plan_file)],
+                client=Client("claude", "sonnet"),
+            )
+        )
+    assert "claude not found on PATH" in capsys.readouterr().err

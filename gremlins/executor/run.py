@@ -174,7 +174,7 @@ async def run_pipeline(
 
     if any(c.provider == "claude" for c in _signal_clients):
         if shutil.which("claude") is None:
-            die("claude CLI not found")
+            die("claude not found on PATH")
 
     logger.info("session: %s", session_dir)
 
