@@ -128,8 +128,6 @@ def _validate_plan_args(
 ) -> tuple[str | None, str | None]:
     if plan and instructions:
         raise ValueError("--plan and instructions are mutually exclusive")
-    if shutil.which("claude") is None:
-        raise RuntimeError("claude CLI not found on PATH")
 
     if plan and os.path.isfile(plan) and os.path.getsize(plan) == 0:
         raise ValueError(f"--plan: file is empty: {plan}")
