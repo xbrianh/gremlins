@@ -29,7 +29,7 @@ from gremlins.clients.config import (
     validate_max_retries,
 )
 from gremlins.clients.protocol import CompletedRun
-from gremlins.clients.stream import trunc
+from gremlins.clients.stream import trunc, ts
 from gremlins.clients.tools import build_tools
 from gremlins.utils.decorators import default_on_exception, swallow
 from gremlins.utils.yaml_io import load_bundled_prompt
@@ -232,7 +232,7 @@ class OpenAIAgentsClient:
                 else "transient-error"
             )
             sys.stderr.write(
-                f"{prefix}stream {label_str}, retrying in {wait}s"
+                f"{ts()} {prefix}stream {label_str}, retrying in {wait}s"
                 f" ({attempt + 1}/{max_retries})...\n"
             )
             if isinstance(exc, StreamTimeoutError) and on_timeout_prompt is not None:
@@ -269,10 +269,10 @@ class OpenAIAgentsClient:
         except StreamTerminalError as exc:
             if is_transient_stream_error(str(exc)):
                 sys.stderr.write(
-                    f"{prefix}stream transient-error, retries exhausted, failing\n"
+                    f"{ts()} {prefix}stream transient-error, retries exhausted, failing\n"
                 )
             else:
-                sys.stderr.write(f"{prefix}stream permanent-error, failing\n")
+                sys.stderr.write(f"{ts()} {prefix}stream permanent-error, failing\n")
             raise
 
     async def _run_streamed(
@@ -298,7 +298,9 @@ class OpenAIAgentsClient:
         )
         self._track(run)
 
-        sys.stderr.write(f"{prefix}init model={model} cwd={str(cwd) if cwd else '?'}\n")
+        sys.stderr.write(
+            f"{ts()} {prefix}init model={model} cwd={str(cwd) if cwd else '?'}\n"
+        )
         sys.stderr.flush()
 
         raw = open(raw_path, "ab") if raw_path is not None else None
@@ -314,7 +316,7 @@ class OpenAIAgentsClient:
                 async for event in run.stream_events():
                     await event_queue.put(event)
             except Exception as exc:
-                sys.stderr.write(f"{prefix}stream error: {exc}\n")
+                sys.stderr.write(f"{ts()} {prefix}stream error: {exc}\n")
                 stream_error.append(exc)
                 try:
                     run.cancel()
@@ -358,7 +360,7 @@ class OpenAIAgentsClient:
 
                 if isinstance(item, MessageOutputItem):
                     text = _message_text(item)
-                    sys.stderr.write(f"{prefix}text: {trunc(text)}\n")
+                    sys.stderr.write(f"{ts()} {prefix}text: {trunc(text)}\n")
                     if captured is not None:
                         captured.append(
                             {
@@ -370,14 +372,16 @@ class OpenAIAgentsClient:
                         )
 
                 elif isinstance(item, ReasoningItem):
-                    sys.stderr.write(f"{prefix}think: {trunc(_reasoning_text(item))}\n")
+                    sys.stderr.write(
+                        f"{ts()} {prefix}think: {trunc(_reasoning_text(item))}\n"
+                    )
 
                 elif isinstance(item, ToolCallItem):
                     name = item.tool_name or "?"
                     args_json = getattr(item.raw_item, "arguments", "") or ""
                     call_id = item.call_id or ""
                     sys.stderr.write(
-                        f"{prefix}tool: {name} {trunc(_key_arg(args_json))}\n"
+                        f"{ts()} {prefix}tool: {name} {trunc(_key_arg(args_json))}\n"
                     )
                     if captured is not None:
                         captured.append(
@@ -399,7 +403,7 @@ class OpenAIAgentsClient:
                 elif isinstance(item, ToolCallOutputItem):
                     output = str(item.output) if item.output is not None else ""
                     call_id = item.call_id or ""
-                    sys.stderr.write(f"{prefix}result: {trunc(output)}\n")
+                    sys.stderr.write(f"{ts()} {prefix}result: {trunc(output)}\n")
                     if captured is not None:
                         captured.append(
                             {
@@ -444,7 +448,9 @@ class OpenAIAgentsClient:
             suffix = " (stream-error)"
         else:
             suffix = ""
-        sys.stderr.write(f"{prefix}final: turns={turns} cost={cost:.6f}{suffix}\n")
+        sys.stderr.write(
+            f"{ts()} {prefix}final: turns={turns} cost={cost:.6f}{suffix}\n"
+        )
         sys.stderr.flush()
 
         if timed_out:
