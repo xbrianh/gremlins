@@ -364,7 +364,9 @@ def setup_detached_from_remote_ref(
 ) -> str:
     """Fetch <ref> from origin and add a detached worktree at FETCH_HEAD. Returns the worktree path."""
     _run_git(["fetch", "origin", "--", ref], cwd=project_root)
-    return setup_detached_worktree(project_root, "FETCH_HEAD", worktree_parent=worktree_parent)
+    return setup_detached_worktree(
+        project_root, "FETCH_HEAD", worktree_parent=worktree_parent
+    )
 
 
 def setup_copy(project_root: str) -> str:
