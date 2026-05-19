@@ -25,3 +25,8 @@ def test_invalid_raises():
 def test_invalid_bare_word_raises():
     with pytest.raises(ValueError):
         pr_arg_to_ref("main")
+
+
+def test_url_with_invalid_suffix_raises():
+    with pytest.raises(ValueError):
+        pr_arg_to_ref("https://github.com/owner/repo/pull/123abc")
