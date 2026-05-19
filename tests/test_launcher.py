@@ -936,6 +936,118 @@ def test_setup_workdir_overlay_goes_to_state_dir(lenv):
 
 
 # ---------------------------------------------------------------------------
+# worktree-detached-from-ref
+# ---------------------------------------------------------------------------
+
+
+def test_setup_detached_from_remote_ref(tmp_path):
+    """setup_detached_from_remote_ref fetches an arbitrary ref and creates a detached worktree at it."""
+    # Create a local repo with a bare origin so fetch works without a network.
+    repo = tmp_path / "repo"
+    _init_git_repo(repo, with_origin=True)
+
+    # Add a second commit on a feature branch and push it to origin.
+    feature = "feature/test-ref"
+    subprocess.run(
+        ["git", "checkout", "-b", feature], cwd=repo, check=True, capture_output=True
+    )
+    (repo / "feature.txt").write_text("feature\n")
+    subprocess.run(
+        ["git", "add", "feature.txt"], cwd=repo, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "feature commit"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "push", "origin", feature], cwd=repo, check=True, capture_output=True
+    )
+    feature_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    # Switch back to main so the worktree is added from a different HEAD.
+    subprocess.run(
+        ["git", "checkout", "main"], cwd=repo, check=True, capture_output=True
+    )
+
+    workdir = git_mod.setup_detached_from_remote_ref(str(repo), feature)
+    try:
+        wt_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=workdir,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert wt_sha == feature_sha
+        assert (pathlib.Path(workdir) / "feature.txt").exists()
+    finally:
+        git_mod.remove_worktree(str(repo), workdir)
+
+
+def test_setup_workdir_detached_from_ref(tmp_path):
+    """setup_workdir with setup_kind='worktree-detached-from-ref' uses fetch+detach."""
+    repo = tmp_path / "repo"
+    _init_git_repo(repo, with_origin=True)
+
+    feature = "feature/wkdir-ref"
+    subprocess.run(
+        ["git", "checkout", "-b", feature], cwd=repo, check=True, capture_output=True
+    )
+    (repo / "wkdir.txt").write_text("wkdir\n")
+    subprocess.run(
+        ["git", "add", "wkdir.txt"], cwd=repo, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "wkdir commit"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "push", "origin", feature], cwd=repo, check=True, capture_output=True
+    )
+    feature_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "checkout", "main"], cwd=repo, check=True, capture_output=True
+    )
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    workdir, branch, wt_base, kind = git_mod.setup_workdir(
+        "worktree-detached-from-ref", str(repo), feature, "test-gremlin", state_dir
+    )
+    try:
+        assert kind == "worktree-detached-from-ref"
+        assert branch == ""
+        assert wt_base == feature
+        wt_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=workdir,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert wt_sha == feature_sha
+    finally:
+        git_mod.remove_worktree(str(repo), workdir)
+
+
+# ---------------------------------------------------------------------------
 # spec_path forwarding
 # ---------------------------------------------------------------------------
 
