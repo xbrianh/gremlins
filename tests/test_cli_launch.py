@@ -38,7 +38,9 @@ def test_pr_flag_forwarded_to_launch():
     fake_id = "gr-prtest1"
     parser = build_launch_parser("some-pipeline", Stage)
     args = parser.parse_args(["--pr", "697"])
-    with patch("gremlins.cli.launch.launch", return_value=(fake_id, fake_proc)) as mock_launch:
+    with patch(
+        "gremlins.cli.launch.launch", return_value=(fake_id, fake_proc)
+    ) as mock_launch:
         _self_background_main("some-pipeline", args, {})
     mock_launch.assert_called_once()
     assert mock_launch.call_args.kwargs.get("pr") == "697"
