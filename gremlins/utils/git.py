@@ -356,6 +356,24 @@ def setup_detached_worktree(
     return workdir
 
 
+def setup_detached_from_remote_ref(
+    project_root: str,
+    ref: str,
+    *,
+    worktree_parent: pathlib.Path | None = None,
+) -> str:
+    """Fetch <ref> from origin and add a detached worktree at FETCH_HEAD. Returns the worktree path."""
+    _run_git(["fetch", "origin", ref], cwd=project_root)
+    if worktree_parent is not None:
+        worktree_parent.mkdir(parents=True, exist_ok=True)
+        workdir = str(worktree_parent / f"aibg-gremlin.{secrets.token_hex(6)}")
+    else:
+        workdir = tempfile.mkdtemp(prefix="aibg-gremlin.")
+        os.rmdir(workdir)
+    _run_git(["worktree", "add", "--detach", workdir, "FETCH_HEAD"], cwd=project_root)
+    return workdir
+
+
 def setup_copy(project_root: str) -> str:
     """Non-git fallback: copy project root into a fresh temp dir. Returns workdir path."""
     workdir = tempfile.mkdtemp(prefix="aibg-gremlin.")
@@ -425,6 +443,13 @@ def setup_workdir(
         )
         stage_gremlins_overlay(project_root, state_dir)
         return workdir, branch, "", "worktree-branch"
+
+    if setup_kind == "worktree-detached-from-ref":
+        workdir = setup_detached_from_remote_ref(
+            project_root, base_ref_sha, worktree_parent=worktree_parent
+        )
+        stage_gremlins_overlay(project_root, state_dir)
+        return workdir, "", base_ref_sha, "worktree-detached-from-ref"
 
     if setup_kind not in ("worktree", "worktree-detached", "local"):
         raise ValueError(f"unknown setup_kind: {setup_kind!r}")
