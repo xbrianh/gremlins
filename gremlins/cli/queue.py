@@ -56,7 +56,12 @@ def _list(argv: list[str]) -> int:
     return list_queue()
 
 
-def _run(_argv: list[str]) -> int:
+def _run(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="gremlins queue run")
+    try:
+        parser.parse_args(argv)
+    except SystemExit as exc:
+        return int(exc.code or 0)
     return run()
 
 
