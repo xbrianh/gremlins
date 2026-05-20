@@ -17,6 +17,7 @@ from gremlins.clients.config import (
 from gremlins.clients.protocol import CompletedRun
 from gremlins.clients.stream import decode_line, emit_event, extract_state, ts
 from gremlins.utils.decorators import swallow
+from gremlins.utils import proc
 
 
 class StreamTimeoutError(RuntimeError):
@@ -145,16 +146,9 @@ class SubprocessClaudeClient:
         timed_out = False
         raw = open(raw_path, "ab") if raw_path is not None else None
         try:
-            while True:
-                try:
-                    line = await asyncio.wait_for(
-                        p.stdout.readline(), timeout=idle_timeout
-                    )
-                except TimeoutError:
-                    timed_out = True
-                    break
-                if not line:
-                    break
+            async for line in proc.iter_lines(
+                p.stdout, idle_timeout=idle_timeout
+            ):
                 if raw is not None:
                     raw.write(line)
                     raw.flush()
@@ -173,6 +167,8 @@ class SubprocessClaudeClient:
                     emit_event(prefix, evt)
                 except Exception:
                     pass
+        except TimeoutError:
+            timed_out = True
         finally:
             if raw is not None:
                 raw.close()
