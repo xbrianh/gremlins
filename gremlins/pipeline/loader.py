@@ -6,6 +6,7 @@ from gremlins.clients.client import Client
 from gremlins.stages.address_code import AddressCode, GitHubAddressPullRequestReviews
 from gremlins.stages.base import Stage
 from gremlins.stages.cmd import Cmd
+from gremlins.stages.apply import Apply
 from gremlins.stages.github_open_pull_request import GitHubOpenPullRequest
 from gremlins.stages.github_push_to_pr_branch import GitHubPushToPrBranch
 from gremlins.stages.github_request_copilot_review import GitHubRequestCopilotReview
@@ -38,6 +39,7 @@ STAGE_TYPES: dict[str, type[Stage]] = {
     "parallel": ParallelStage,
     "sequence": SequenceStage,
     "cmd": Cmd,
+    "apply": Apply,
 }
 
 
