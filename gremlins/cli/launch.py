@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import pathlib
 import sys
+import time
 from typing import Any
 
 from gremlins import paths as _paths
@@ -40,6 +41,7 @@ _INFRA_FLAG_NAMES = frozenset(
     }
 )
 _LAUNCH_BRIEF = "usage: gremlins launch <name> [opts]\nLaunch a background gremlin by pipeline name. Run 'gremlins launch --list' to see available pipelines.\n"
+_LOG_TAIL_BYTES = 4096
 
 
 def _parse_bool(v: str) -> bool:
@@ -176,6 +178,17 @@ def _self_background_main(
     state_dir = state_root / gremlin_id
     log_path = state_dir / "log"
     sf = state_dir / "state.json"
+
+    deadline = time.time() + 2
+    rc = proc.poll()
+    while rc is None and time.time() < deadline:
+        time.sleep(0.1)
+        rc = proc.poll()
+    if rc is not None:
+        sys.stderr.write(f"error: gremlin {gremlin_id} exited with code {rc} before any stage ran\n")
+        if log_path.is_file():
+            sys.stderr.write(log_path.read_bytes()[-_LOG_TAIL_BYTES:].decode("utf-8", errors="replace"))
+        return rc or 1
 
     if args.print_id_only:
         sys.stdout.write(gremlin_id + "\n")
