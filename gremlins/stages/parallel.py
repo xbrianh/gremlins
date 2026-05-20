@@ -8,6 +8,8 @@ import json
 import logging
 import pathlib
 import secrets
+import signal
+import sys
 import tempfile
 from collections.abc import Callable
 from typing import Any, cast
@@ -122,6 +124,7 @@ class ParallelStage(Stage):
         project_root: pathlib.Path | None = None,
         worktree_parent: pathlib.Path | None = None,
         set_stage_fn: Callable[[str], None] | None = None,
+        child_stages: list[Stage] | None = None,
     ) -> list[_Stage]:
         """Return the three runtime stages for this parallel block."""
         return _parallel_stages(
@@ -135,6 +138,7 @@ class ParallelStage(Stage):
             project_root=project_root or pathlib.Path.cwd(),
             worktree_parent=worktree_parent,
             stage_path=self.path or self.name,
+            child_stages=child_stages,
         )
 
     async def run(self, state: State) -> Outcome:
@@ -144,17 +148,20 @@ class ParallelStage(Stage):
             state, session_dir=group_dir, parent_stage=state.parent_stage or self.name
         )
         child_runners: list[tuple[str, State, Callable[[], Any]]] = []
+        child_stages: list[Stage] = []
         for child in self.body:
             (group_dir / child.name).mkdir(parents=True, exist_ok=True)
             cs = _child_state(group_state, child, fan_out=True)
             runner = cs.make_runner(child, scope=self.body)
             child_runners.append((child.name, cs, runner))
+            child_stages.append(child)
         for _, fn in self.build_runtime_stages(
             child_runners,
             parent_data=state.data,
             project_root=pathlib.Path.cwd(),
             worktree_parent=state.worktree_parent,
             set_stage_fn=lambda n: state.record_stage_progress(self.name, sub_stage=n),
+            child_stages=child_stages,
         ):
             await fn()
         return Done()
@@ -172,6 +179,7 @@ def _parallel_stages(
     project_root: pathlib.Path,
     worktree_parent: pathlib.Path | None = None,
     stage_path: str = "",
+    child_stages: list[Stage] | None = None,
 ) -> list[_Stage]:
     gremlin_id = parent_data.gremlin_id
     fanout_name = f"{group_name}-fanout"
@@ -312,9 +320,11 @@ def _parallel_stages(
 
         sem = asyncio.Semaphore(max_concurrent) if max_concurrent is not None else None
         tasks: list[asyncio.Task[None]] = []
-
-        async def _invoke(fn: Callable[[], Any]) -> None:
-            await fn()
+        _stages_by_key: dict[str, Stage] = (
+            {k: st for (k, _, _), st in zip(child_runners, child_stages)}
+            if child_stages
+            else {}
+        )
 
         def _cancel_siblings() -> None:
             for t in tasks:
@@ -336,13 +346,99 @@ def _parallel_stages(
             except Exception:
                 pass
 
+        async def _run_subprocess(
+            child_key: str, child_st: State, stage_obj: Stage
+        ) -> None:
+            attempt = f"{child_key}-{secrets.token_hex(4)}"
+            parent_data.patch_parallel_attempt(child_key, attempt)
+            spec_path = child_st.session_dir / "spec.json"
+            spec_path.write_text(
+                json.dumps(
+                    {
+                        "stage_dict": stage_obj.raw_dict,
+                        "client": str(child_st.client),
+                        "session_dir": str(child_st.session_dir),
+                        "gremlin_id": child_st.data.gremlin_id,
+                        "worktree": (
+                            str(child_st.worktree) if child_st.worktree else None
+                        ),
+                        "worktree_parent": (
+                            str(child_st.worktree_parent)
+                            if child_st.worktree_parent
+                            else None
+                        ),
+                        "pipeline_path": child_st.data.pipeline_path or None,
+                        "child_key": child_key,
+                        "parent_stage": child_st.parent_stage,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            child_proc = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m",
+                "gremlins.spawn.child",
+                str(spec_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+            async def _pump(stream: asyncio.StreamReader) -> None:
+                while True:
+                    line = await stream.readline()
+                    if not line:
+                        break
+                    sys.stdout.write(f"[{child_key}] {line.decode('utf-8', 'replace')}")
+                sys.stdout.flush()
+
+            pump_out = asyncio.create_task(
+                _pump(child_proc.stdout)  # type: ignore[arg-type]
+            )
+            pump_err = asyncio.create_task(
+                _pump(child_proc.stderr)  # type: ignore[arg-type]
+            )
+
+            try:
+                await child_proc.wait()
+            except asyncio.CancelledError:
+                try:
+                    child_proc.send_signal(signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                await child_proc.wait()
+                pump_out.cancel()
+                pump_err.cancel()
+                raise
+
+            await asyncio.gather(pump_out, pump_err, return_exceptions=True)
+
+            result_path = pathlib.Path(str(spec_path) + ".result")
+            if not result_path.exists():
+                raise RuntimeError(
+                    f"parallel child {child_key!r}: subprocess exited with no result file"
+                )
+            result: dict[str, Any] = json.loads(result_path.read_text(encoding="utf-8"))
+            status = result.get("status")
+            if status in ("done", "needs_fix"):
+                parent_data.mark_done(stage_path, child_key)
+            elif status == "bail":
+                if cancel_on_bail:
+                    _cancel_siblings()
+                _write_bail_state(Bail(result.get("detail") or ""), child_key)
+            else:
+                if cancel_on_bail:
+                    _cancel_siblings()
+                raise RuntimeError(
+                    f"parallel child {child_key!r} error: {result.get('detail') or ''}"
+                )
+
         async def _run_child(child_key: str, fn: Callable[[], Any]) -> None:
             try:
                 if sem is not None:
                     async with sem:
-                        await _invoke(fn)
+                        await fn()
                 else:
-                    await _invoke(fn)
+                    await fn()
             except asyncio.CancelledError:
                 raise
             except Bail as b:
@@ -356,7 +452,20 @@ def _parallel_stages(
                 raise
             parent_data.mark_done(stage_path, child_key)
 
-        tasks = [asyncio.create_task(_run_child(k, fn)) for k, _, fn in active]
+        async def _dispatch(
+            child_key: str, child_st: State, fn: Callable[[], Any]
+        ) -> None:
+            stage_obj = _stages_by_key.get(child_key)
+            if stage_obj is not None and stage_obj.raw_dict is not None:
+                if sem is not None:
+                    async with sem:
+                        await _run_subprocess(child_key, child_st, stage_obj)
+                else:
+                    await _run_subprocess(child_key, child_st, stage_obj)
+            else:
+                await _run_child(child_key, fn)
+
+        tasks = [asyncio.create_task(_dispatch(k, s, fn)) for k, s, fn in active]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         errors = [r for r in results if isinstance(r, Exception)]
         if errors:

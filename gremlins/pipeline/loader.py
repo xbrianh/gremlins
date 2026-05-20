@@ -52,7 +52,9 @@ def get_client_from_dict(d: dict[str, Any]) -> Client | None:
 
 def parse_stage(d: dict[str, Any], depth: int = 0) -> Stage:
     if "parallel" in d:
-        return ParallelStage.with_dict(d, depth=depth)
+        stage = ParallelStage.with_dict(d, depth=depth)
+        stage.raw_dict = d
+        return stage
 
     name = d.get("name")
     if not isinstance(name, str) or not name:
@@ -66,4 +68,6 @@ def parse_stage(d: dict[str, Any], depth: int = 0) -> Stage:
         raise ValueError(f"stage {name!r}: must have a 'type' field")
     if stage_type not in STAGE_TYPES:
         raise ValueError(f"stage {name!r}: unknown type {stage_type!r}")
-    return STAGE_TYPES[stage_type].with_dict(d, depth=depth)
+    stage = STAGE_TYPES[stage_type].with_dict(d, depth=depth)
+    stage.raw_dict = d
+    return stage
