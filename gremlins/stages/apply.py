@@ -40,6 +40,8 @@ class Apply(Stage):
         return Done()
 
     def _maybe_commit(self, state: State) -> None:
+        if not proc.run_ok(["git", "rev-parse", "--git-dir"], cwd=state.cwd):
+            return
         r = proc.run(["git", "add", "-A"], cwd=state.cwd)
         if r.returncode != 0:
             raise Bail(
