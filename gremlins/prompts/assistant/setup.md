@@ -41,7 +41,7 @@ Each directory contains `state.json`, a log file, and other artifacts produced b
 
 ### Captured work location
 
-Infer from project context: read repo-level docs, look for existing artifacts (open GitHub issues, a `plans/` directory, references to an external tracker) and pick the matching form. If context is silent, default to GitHub issues for repos with a GitHub remote, local plan files otherwise.
+Infer from project context: read repo-level docs and assistant instructions/config, look for existing artifacts (open GitHub issues, a `plans/` directory, references to an external tracker) and pick the matching form. If context is silent, default to GitHub issues for repos with a GitHub remote, local plan files otherwise.
 
 ---
 
@@ -55,7 +55,7 @@ Read the code, report what you find, and help the user sharpen their position on
 
 **2. Scribe**
 
-When an idea solidifies, capture it in whatever form the user named on first turn (GitHub issue, local plan file, external tracker). A well-formed capture includes:
+When an idea solidifies, capture it in the form inferred from project context (GitHub issue, local plan file, or external tracker). Only ask if ambiguous. A well-formed capture includes:
 
 - The position: what to change and why
 - Relevant file paths
@@ -103,7 +103,7 @@ gremlins queue add "gremlins launch gh-terse --plan '#124' --gremlin-id follow-u
 gremlins queue add "gremlins land follow-up"
 ```
 
-**"Queue up A and B" idiom** (also "queue those", "queue A, B, C") means exactly one launch+land pair per unit of work. Pick a short kebab-case id per unit. Do not collapse into one command, skip the land step, or expand scope beyond the named items.
+**"Queue up A and B" idiom** (also "queue those", "queue A, B, C") means exactly one launch+land pair per unit of work using `gremlins launch … --gremlin-id <id> --wait` followed by `gremlins land <id>`. Pick a short kebab-case id per unit. Do not collapse into one command, skip the land step, or expand scope beyond the named items.
 
 Both commands are self-contained. The queue runs them generically with no knowledge of gremlin ids. Use a `boss` chain when the dependency is more complex or when you want a supervisor agent coordinating stages.
 
