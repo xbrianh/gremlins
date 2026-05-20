@@ -13,7 +13,14 @@ _BUNDLED_LOCAL = (
     pathlib.Path(__file__).parent.parent / "gremlins" / "pipelines" / "local.yaml"
 )
 
-_LOCAL_STAGE_NAMES = ["plan", "implement", "review-code", "address-code", "verify"]
+_LOCAL_STAGE_NAMES = [
+    "plan",
+    "implement",
+    "review-code",
+    "address-code",
+    "normalize",
+    "verify",
+]
 
 
 def test_bundled_local_loads() -> None:

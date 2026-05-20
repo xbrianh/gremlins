@@ -25,9 +25,16 @@ _BUNDLED_PROMPTS = (
 
 def test_local_yaml_loads_and_validates(tmp_path):
     pipeline = Pipeline.from_yaml(resolve_pipeline_path("local", tmp_path))
-    assert len(pipeline.stages) == 5
+    assert len(pipeline.stages) == 6
     names = [s.name for s in pipeline.stages]
-    assert names == ["plan", "implement", "review-code", "address-code", "verify"]
+    assert names == [
+        "plan",
+        "implement",
+        "review-code",
+        "address-code",
+        "normalize",
+        "verify",
+    ]
 
 
 def _make_state(client, session_dir, *, gremlin_id=None):
