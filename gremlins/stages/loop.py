@@ -78,24 +78,22 @@ class LoopStage(Stage):
 
     @classmethod
     def with_dict(cls, d: dict[str, Any], depth: int = 0) -> LoopStage:
-        from gremlins.pipeline.loader import get_client_from_dict, parse_stage
+        from gremlins.pipeline.loader import get_client_from_dict, parse_stages
 
+        name = d.get("name") or ""
         raw_options: object = d.get("options") or {}
         if not isinstance(raw_options, dict):
-            raise ValueError(f"stage {d['name']!r}: 'options' must be a mapping")
+            raise ValueError(f"stage {name!r}: 'options' must be a mapping")
         options = cast(dict[str, Any], raw_options)
         max_iterations: int = int(options.get("max_iterations", 3))
         pr_stack: bool = bool(options.get("pr_stack", False))
         raw_children: object = d.get("body") or []
         if not isinstance(raw_children, list):
-            raise ValueError(f"stage {d['name']!r}: 'body' must be a list")
-        body = [
-            parse_stage(child_d, depth=depth)
-            for child_d in cast(list[dict[str, Any]], raw_children)
-        ]
+            raise ValueError(f"stage {name!r}: 'body' must be a list")
+        body = parse_stages(cast(list[dict[str, Any]], raw_children), depth=depth)
         on_iter = detach_to_pr_base if pr_stack else None
         stage = cls(
-            d["name"],
+            name,
             body=body,
             max_iterations=max_iterations,
             on_iteration_start=on_iter,

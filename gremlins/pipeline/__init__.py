@@ -54,7 +54,7 @@ class Pipeline:
     def from_yaml(cls, path: pathlib.Path) -> Pipeline:
         importlib.import_module("gremlins.clients")
 
-        from gremlins.pipeline.loader import parse_stage
+        from gremlins.pipeline.loader import parse_stages
         from gremlins.pipeline.preprocess import expand_pipeline
 
         path = path.resolve()
@@ -81,9 +81,7 @@ class Pipeline:
         else:
             pipeline_base_ref = "current"
 
-        stages: list[Stage] = []
-        for entry in cast(list[dict[str, Any]], raw.get("stages") or []):
-            stages.append(parse_stage(entry))
+        stages = parse_stages(cast(list[dict[str, Any]], raw.get("stages") or []))
 
         _fill_stage_clients(stages, default_client or PACKAGE_DEFAULT)
 

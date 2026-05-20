@@ -11,7 +11,7 @@ stages:
     options:
       pr_stack: true
     body:
-      - { name: handoff, type: handoff }
+      - { type: handoff }
       - { include: gh }
 
   - name: review-chain

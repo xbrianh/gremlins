@@ -46,10 +46,38 @@ def get_client_from_dict(d: dict[str, Any]) -> Client | None:
     if raw is None:
         return None
     if not isinstance(raw, str):
+        name = d.get("name") or d.get("type") or "?"
         raise ValueError(
-            f"stage {d.get('name', '?')!r}: 'client' must be a string, got {type(raw)!r}"
+            f"stage {name!r}: 'client' must be a string, got {type(raw)!r}"
         )
     return Client.parse(raw)
+
+
+def _fill_names(raw_stages: list[dict[str, Any]]) -> None:
+    """Fill missing 'name' fields in-place; append -N suffix on collisions."""
+    explicit: set[str] = {
+        d["name"] for d in raw_stages if isinstance(d.get("name"), str) and d["name"]
+    }
+    used: set[str] = set(explicit)
+    counts: dict[str, int] = {}
+    for d in raw_stages:
+        if isinstance(d.get("name"), str) and d["name"]:
+            continue
+        stage_type = "parallel" if "parallel" in d else str(d.get("type") or "")
+        counts[stage_type] = counts.get(stage_type, 0) + 1
+        n = counts[stage_type]
+        candidate = stage_type if n == 1 else f"{stage_type}-{n}"
+        while candidate in used:
+            n += 1
+            candidate = f"{stage_type}-{n}"
+        counts[stage_type] = n
+        d["name"] = candidate
+        used.add(candidate)
+
+
+def parse_stages(raw: list[dict[str, Any]], depth: int = 0) -> list[Stage]:
+    _fill_names(raw)
+    return [parse_stage(d, depth=depth) for d in raw]
 
 
 def parse_stage(d: dict[str, Any], depth: int = 0) -> Stage:
@@ -58,9 +86,7 @@ def parse_stage(d: dict[str, Any], depth: int = 0) -> Stage:
         stage.raw_dict = d
         return stage
 
-    name = d.get("name")
-    if not isinstance(name, str) or not name:
-        raise ValueError("stage entry must have a 'name' field")
+    name = d.get("name") or ""
     if "max_concurrent" in d:
         raise ValueError(
             f"stage {name!r}: 'max_concurrent' is only valid on parallel groups"
