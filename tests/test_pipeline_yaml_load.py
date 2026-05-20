@@ -8,7 +8,9 @@ import pytest
 from gremlins.clients.client import Client
 from gremlins.pipeline import Pipeline
 
-_BUNDLED_LOCAL = pathlib.Path(__file__).parent.parent / "gremlins" / "pipelines" / "local.yaml"
+_BUNDLED_LOCAL = (
+    pathlib.Path(__file__).parent.parent / "gremlins" / "pipelines" / "local.yaml"
+)
 
 _LOCAL_STAGE_NAMES = ["plan", "implement", "review-code", "address-code", "verify"]
 
