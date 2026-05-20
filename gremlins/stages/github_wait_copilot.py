@@ -84,6 +84,8 @@ class GitHubWaitCopilot(Stage):
                     f"polls={poll_count}, last_error={last_error!r}, "
                     f"observed={observed_states or 'none'}"
                 )
-                raise Bail(f"Copilot review timed out after {self.timeout}s ({context})")
+                raise Bail(
+                    f"Copilot review timed out after {self.timeout}s ({context})"
+                )
 
             await asyncio.sleep(self.interval)
