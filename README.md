@@ -23,6 +23,12 @@ The workflow: you discuss the work with the assistant, it captures discrete unit
 
 ---
 
+## Prerequisites
+
+- `gh` — GitHub CLI: https://github.com/cli/cli#installation
+- `git` — Git (pre-installed on most systems)
+- `claude` — Claude Code CLI: https://docs.anthropic.com/en/docs/claude-code
+
 ## Dev install
 
 ```sh
