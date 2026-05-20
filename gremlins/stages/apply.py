@@ -42,10 +42,14 @@ class Apply(Stage):
     def _maybe_commit(self, state: State) -> None:
         r = proc.run(["git", "add", "-A"], cwd=state.cwd)
         if r.returncode != 0:
-            raise Bail(f"apply {self.name}: git add failed: {(r.stdout + r.stderr).strip()}")
+            raise Bail(
+                f"apply {self.name}: git add failed: {(r.stdout + r.stderr).strip()}"
+            )
         if proc.run_ok(["git", "diff", "--cached", "--quiet"], cwd=state.cwd):
             return
         msg = self.options.get("commit_message") or self.name
         r = proc.run(["git", "commit", "-m", msg], cwd=state.cwd)
         if r.returncode != 0:
-            raise Bail(f"apply {self.name}: git commit failed: {(r.stdout + r.stderr).strip()}")
+            raise Bail(
+                f"apply {self.name}: git commit failed: {(r.stdout + r.stderr).strip()}"
+            )

@@ -46,7 +46,11 @@ def test_apply_success_with_changes(tmp_path):
     outcome = asyncio.run(stage.run(state))
     assert outcome == Done()
     log = subprocess.run(
-        ["git", "log", "--oneline", "-1"], cwd=tmp_path, capture_output=True, text=True, check=True
+        ["git", "log", "--oneline", "-1"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     assert "norm" in log.stdout
 
