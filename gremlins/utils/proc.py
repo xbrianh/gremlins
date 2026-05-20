@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+from collections.abc import AsyncIterator
 
 
 def run(
@@ -99,3 +100,27 @@ async def run_or_raise_async(
 ) -> str:
     r = await run_async(cmd, cwd=cwd, check=True)
     return r.stdout.strip()
+
+
+async def iter_lines(
+    stream: asyncio.StreamReader,
+    *,
+    chunk_size: int = 4096,
+    idle_timeout: float | None = None,
+) -> AsyncIterator[bytes]:
+    """Yield newline-terminated lines from stream without a per-line size limit.
+
+    Raises TimeoutError if a chunk doesn't arrive within idle_timeout.
+    Final partial line (no trailing newline at EOF) is yielded as-is.
+    """
+    buf = b""
+    while True:
+        chunk = await asyncio.wait_for(stream.read(chunk_size), timeout=idle_timeout)
+        if not chunk:
+            if buf:
+                yield buf
+            return
+        buf += chunk
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            yield line + b"\n"
