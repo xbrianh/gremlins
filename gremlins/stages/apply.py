@@ -21,7 +21,10 @@ class Apply(Stage):
         cmds = [c for c in self.options.get("cmds", []) if c.strip()]
         for cmd in cmds:
             p = await asyncio.create_subprocess_shell(
-                cmd, cwd=state.cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                cmd,
+                cwd=state.cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
             out_b, err_b = await p.communicate()
             if p.returncode != 0:

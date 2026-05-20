@@ -1,12 +1,11 @@
 import asyncio
-import json
 import pathlib
 import subprocess
-from typing import Any
 
 import pytest
 
-from gremlins.executor.state import State as RuntimeState, StateData
+from gremlins.executor.state import State as RuntimeState
+from gremlins.executor.state import StateData
 from gremlins.stages.apply import Apply
 from gremlins.stages.outcome import Bail, Done
 
@@ -22,9 +21,21 @@ def _apply_state(tmp_path: pathlib.Path) -> RuntimeState:
 
 def _init_git_repo(path: pathlib.Path) -> None:
     subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "t@t"], cwd=path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "t"], cwd=path, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "t@t"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "t"], cwd=path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "init"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
 
 
 def test_apply_success_with_changes(tmp_path):
@@ -34,7 +45,9 @@ def test_apply_success_with_changes(tmp_path):
     state = _apply_state(tmp_path)
     outcome = asyncio.run(stage.run(state))
     assert outcome == Done()
-    log = subprocess.run(["git", "log", "--oneline", "-1"], cwd=tmp_path, capture_output=True, text=True)
+    log = subprocess.run(
+        ["git", "log", "--oneline", "-1"], cwd=tmp_path, capture_output=True, text=True
+    )
     assert "norm" in log.stdout
 
 
@@ -45,7 +58,12 @@ def test_apply_success_no_changes(tmp_path):
     outcome = asyncio.run(stage.run(state))
     assert outcome == Done()
     # no new commit: count should be 1
-    cnt = subprocess.run(["git", "rev-list", "--count", "HEAD"], cwd=tmp_path, capture_output=True, text=True)
+    cnt = subprocess.run(
+        ["git", "rev-list", "--count", "HEAD"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
     assert cnt.stdout.strip() == "1"
 
 
@@ -68,5 +86,10 @@ def test_apply_mid_cmd_failure_no_partial_commit(tmp_path):
         asyncio.run(stage.run(state))
     assert (tmp_path / "apply.log").exists()
     # still only init commit
-    cnt = subprocess.run(["git", "rev-list", "--count", "HEAD"], cwd=tmp_path, capture_output=True, text=True)
+    cnt = subprocess.run(
+        ["git", "rev-list", "--count", "HEAD"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
     assert cnt.stdout.strip() == "1"
