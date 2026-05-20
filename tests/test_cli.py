@@ -314,6 +314,7 @@ def test_launch_unified_dispatch_calls_launch(tmp_path, monkeypatch):
     monkeypatch.setattr("gremlins.cli.launch.STAGE_TYPES", {"plan": _FakePlanStage})
     launched = []
     fake_proc = MagicMock()
+    fake_proc.poll.return_value = None
 
     def _fake_launch(kind, **kw):
         launched.append((kind, kw))
