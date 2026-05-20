@@ -532,6 +532,7 @@ def _parallel_stages(
             else:
                 await _run_child(child_key, fn)
 
+        # Snapshot of all dispatched keys; not updated per-task as children finish.
         parent_data.patch(active_children=[k for k, _, _ in active])
         try:
             tasks = [asyncio.create_task(_dispatch(k, s, fn)) for k, s, fn in active]

@@ -2,7 +2,7 @@
 
 import os
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from gremlins.fleet.constants import FMT
 from gremlins.fleet.state import (
@@ -50,7 +50,12 @@ def build_row(
     if stage == "waiting" and sub_disp:
         stage_disp = f"waiting:{sub_disp}"
 
-    active_children: list[str] = list(state.get("active_children") or [])
+    _raw_ac = state.get("active_children")
+    active_children: list[str] = (
+        [c for c in cast(list[object], _raw_ac) if isinstance(c, str)]
+        if isinstance(_raw_ac, list)
+        else []
+    )
     if active_children and stage != "waiting":
         children_part = (
             f"[{','.join(active_children)}]"

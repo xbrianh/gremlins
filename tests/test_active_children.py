@@ -16,6 +16,7 @@ from gremlins.fleet.views import _gremlin_to_json  # type: ignore[reportPrivateU
 from gremlins.stages.base import Stage
 from gremlins.stages.loop import LoopStage
 from gremlins.stages.outcome import Done, Outcome
+from gremlins.stages.parallel import ParallelStage
 from gremlins.stages.sequence import SequenceStage
 
 
@@ -155,3 +156,54 @@ def test_gremlin_to_json_active_children_empty_when_absent() -> None:
     state: dict[str, Any] = {"stage": "parallel"}
     result = _gremlin_to_json("gr-abc123", "/tmp/fake-wdir", state, "running")
     assert result["active_children"] == []
+
+
+# ---------------------------------------------------------------------------
+# Parallel
+# ---------------------------------------------------------------------------
+
+
+def _parallel_execute_stage(
+    parent_data: StateData,
+    child_fns: list[tuple[str, Any]],
+    tmp_path: pathlib.Path,
+) -> Any:
+    child_runners = [
+        (k, State(data=StateData(), client=FakeClaudeClient(), session_dir=tmp_path, child_key=k), fn)
+        for k, fn in child_fns
+    ]
+    stages = ParallelStage("grp", []).build_runtime_stages(
+        child_runners, parent_data=parent_data, project_root=pathlib.Path.cwd()
+    )
+    return stages[1][1]  # execute stage
+
+
+def test_parallel_active_children_set_and_cleared(tmp_path: pathlib.Path) -> None:
+    sf = tmp_path / "state.json"
+    sf.write_text(json.dumps({"id": "test-id"}), encoding="utf-8")
+    parent_data = StateData(gremlin_id="test-id", state_file=sf)
+    captured: list[list[str] | None] = []
+
+    async def child_fn() -> None:
+        captured.append(_read_state(tmp_path).get("active_children"))
+
+    execute = _parallel_execute_stage(parent_data, [("child-a", child_fn)], tmp_path)
+    asyncio.run(execute())
+
+    assert captured == [["child-a"]]
+    assert "active_children" not in _read_state(tmp_path)
+
+
+def test_parallel_active_children_cleared_on_exception(tmp_path: pathlib.Path) -> None:
+    sf = tmp_path / "state.json"
+    sf.write_text(json.dumps({"id": "test-id"}), encoding="utf-8")
+    parent_data = StateData(gremlin_id="test-id", state_file=sf)
+
+    async def boom() -> None:
+        raise RuntimeError("boom")
+
+    execute = _parallel_execute_stage(parent_data, [("child-a", boom)], tmp_path)
+    with pytest.raises(RuntimeError, match="boom"):
+        asyncio.run(execute())
+
+    assert "active_children" not in _read_state(tmp_path)
