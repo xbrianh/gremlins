@@ -376,6 +376,7 @@ def test_gh_pipeline_stage_names(tmp_path):
     assert names == [
         "plan",
         "implement",
+        "normalize",
         "verify",
         "open-pr",
         "github-request-copilot-review",
