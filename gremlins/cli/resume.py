@@ -16,7 +16,7 @@ def resume_main(argv: list[str]) -> int:
     p.add_argument(
         "--graft",
         metavar="PIPELINE",
-        help="Append this pipeline's stages (as a graft-N sequence) and resume into them.",
+        help="Append this pipeline's stages flat and resume into them.",
     )
     args = p.parse_args(argv)
 

@@ -10,43 +10,65 @@ import pytest
 import yaml
 
 # ---------------------------------------------------------------------------
-# _next_graft_name — unit tests
+# _disambiguate_graft_names — unit tests
 # ---------------------------------------------------------------------------
 
 
-def test_next_graft_name_empty():
-    from gremlins.launcher import _next_graft_name
+def test_disambiguate_no_collision():
+    from gremlins.launcher import _disambiguate_graft_names
 
-    assert _next_graft_name([]) == "graft-1"
-
-
-def test_next_graft_name_first_graft():
-    from gremlins.launcher import _next_graft_name
-
-    stages = [{"name": "plan"}, {"name": "implement"}]
-    assert _next_graft_name(stages) == "graft-1"
+    stages = [{"name": "address"}, {"name": "push"}]
+    _disambiguate_graft_names(stages, {"plan", "implement"})
+    assert [s["name"] for s in stages] == ["address", "push"]
 
 
-def test_next_graft_name_increments():
-    from gremlins.launcher import _next_graft_name
+def test_disambiguate_collision_gets_suffix():
+    from gremlins.launcher import _disambiguate_graft_names
 
-    stages = [{"name": "graft-1"}, {"name": "graft-2"}]
-    assert _next_graft_name(stages) == "graft-3"
-
-
-def test_next_graft_name_mixed():
-    from gremlins.launcher import _next_graft_name
-
-    stages = [{"name": "plan"}, {"name": "graft-1"}, {"name": "implement"}]
-    assert _next_graft_name(stages) == "graft-2"
+    stages = [{"name": "plan"}]
+    _disambiguate_graft_names(stages, {"plan"})
+    assert stages[0]["name"] == "plan-2"
 
 
-def test_next_graft_name_noncontiguous():
-    from gremlins.launcher import _next_graft_name
+def test_disambiguate_suffix_increments_past_taken():
+    from gremlins.launcher import _disambiguate_graft_names
 
-    # graft-2 present without graft-1 — must not return graft-2 (duplicate)
-    stages = [{"name": "graft-2"}, {"name": "graft-3"}]
-    assert _next_graft_name(stages) == "graft-4"
+    stages = [{"name": "plan"}]
+    _disambiguate_graft_names(stages, {"plan", "plan-2"})
+    assert stages[0]["name"] == "plan-3"
+
+
+def test_disambiguate_multiple_collisions():
+    from gremlins.launcher import _disambiguate_graft_names
+
+    stages = [{"name": "plan"}, {"name": "plan"}]
+    _disambiguate_graft_names(stages, {"plan"})
+    assert stages[0]["name"] == "plan-2"
+    assert stages[1]["name"] == "plan-3"
+
+
+def test_disambiguate_parallel_child_collision_with_existing_top_level():
+    from gremlins.launcher import _disambiguate_graft_names
+
+    # Grafted parallel child collides with an existing top-level name.
+    stages = [{"name": "review", "type": "parallel", "body": [{"name": "plan"}]}]
+    _disambiguate_graft_names(stages, {"plan"})
+    assert stages[0]["body"][0]["name"] == "plan-2"
+
+
+def test_disambiguate_parallel_children_collide_with_each_other():
+    from gremlins.launcher import _disambiguate_graft_names
+
+    stages = [
+        {
+            "name": "review",
+            "type": "parallel",
+            "body": [{"name": "check"}, {"name": "check"}],
+        }
+    ]
+    _disambiguate_graft_names(stages, set())
+    assert stages[0]["body"][0]["name"] == "check"
+    assert stages[0]["body"][1]["name"] == "check-2"
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +83,7 @@ def _write_pipeline(path: pathlib.Path, stages: list) -> None:
     )
 
 
-def test_append_graft_adds_sequence(tmp_path):
+def test_append_graft_adds_stages_flat(tmp_path):
     from gremlins.launcher import _append_graft
 
     hermetic = tmp_path / "state" / "pipeline.yaml"
@@ -75,17 +97,17 @@ def test_append_graft_adds_sequence(tmp_path):
         encoding="utf-8",
     )
 
-    _append_graft(hermetic.parent, "address", str(tmp_path))
+    result = _append_graft(hermetic.parent, "address", str(tmp_path))
 
     loaded = yaml.safe_load(hermetic.read_text(encoding="utf-8"))
     top = loaded["stages"]
     assert len(top) == 2
-    assert top[1]["name"] == "graft-1"
-    assert top[1]["type"] == "sequence"
-    assert top[1]["body"] == [{"name": "address", "type": "address"}]
+    assert top[1]["name"] == "address"
+    assert top[1]["type"] == "address"
+    assert result == "address"
 
 
-def test_append_graft_increments_name(tmp_path):
+def test_append_graft_disambiguates_collision(tmp_path):
     from gremlins.launcher import _append_graft
 
     hermetic = tmp_path / "state" / "pipeline.yaml"
@@ -94,21 +116,76 @@ def test_append_graft_increments_name(tmp_path):
         hermetic,
         [
             {"name": "plan", "type": "plan"},
-            {"name": "graft-1", "type": "sequence", "body": [{"name": "x"}]},
+            {"name": "address", "type": "address"},
         ],
     )
 
     graft_yaml = tmp_path / ".gremlins" / "review.yaml"
     graft_yaml.parent.mkdir()
     graft_yaml.write_text(
-        yaml.dump({"stages": [{"name": "review", "type": "review"}]}),
+        yaml.dump({"stages": [{"name": "address", "type": "address"}]}),
         encoding="utf-8",
     )
 
-    _append_graft(hermetic.parent, "review", str(tmp_path))
+    result = _append_graft(hermetic.parent, "review", str(tmp_path))
 
     loaded = yaml.safe_load(hermetic.read_text(encoding="utf-8"))
-    assert loaded["stages"][-1]["name"] == "graft-2"
+    assert loaded["stages"][-1]["name"] == "address-2"
+    assert result == "address-2"
+
+
+def test_append_graft_unnamed_first_stage_gets_type_name(tmp_path):
+    from gremlins.launcher import _append_graft
+
+    hermetic = tmp_path / "state" / "pipeline.yaml"
+    hermetic.parent.mkdir()
+    _write_pipeline(hermetic, [{"name": "plan", "type": "plan"}])
+
+    graft_yaml = tmp_path / ".gremlins" / "address.yaml"
+    graft_yaml.parent.mkdir()
+    # No name; _fill_names should derive it from type.
+    graft_yaml.write_text(
+        yaml.dump({"stages": [{"type": "address"}]}),
+        encoding="utf-8",
+    )
+
+    result = _append_graft(hermetic.parent, "address", str(tmp_path))
+
+    loaded = yaml.safe_load(hermetic.read_text(encoding="utf-8"))
+    assert result == "address"
+    assert loaded["stages"][-1]["name"] == "address"
+
+
+def test_append_graft_existing_parallel_child_blocks_graft_name(tmp_path):
+    from gremlins.launcher import _append_graft
+
+    hermetic = tmp_path / "state" / "pipeline.yaml"
+    hermetic.parent.mkdir()
+    # Existing pipeline has a parallel stage with child named "check".
+    _write_pipeline(
+        hermetic,
+        [
+            {
+                "name": "parallel-group",
+                "type": "parallel",
+                "body": [{"name": "check", "type": "plan"}],
+            }
+        ],
+    )
+
+    graft_yaml = tmp_path / ".gremlins" / "review.yaml"
+    graft_yaml.parent.mkdir()
+    # Graft top-level stage collides with existing parallel child name.
+    graft_yaml.write_text(
+        yaml.dump({"stages": [{"name": "check", "type": "plan"}]}),
+        encoding="utf-8",
+    )
+
+    result = _append_graft(hermetic.parent, "review", str(tmp_path))
+
+    loaded = yaml.safe_load(hermetic.read_text(encoding="utf-8"))
+    assert result == "check-2"
+    assert loaded["stages"][-1]["name"] == "check-2"
 
 
 def test_append_graft_no_hermetic_raises(tmp_path):
@@ -221,11 +298,11 @@ def test_graft_on_finished_success_works(lenv, monkeypatch):
 
     cmd = list(captured["cmd"])
     assert "--resume-from" in cmd
-    assert cmd[cmd.index("--resume-from") + 1] == "graft-1"
+    assert cmd[cmd.index("--resume-from") + 1] == "address"
 
 
-def test_graft_appends_wrapped_stage(lenv, monkeypatch):
-    """resume(graft=...) appends a graft-N sequence to the hermetic pipeline.yaml."""
+def test_graft_appends_flat_stages(lenv, monkeypatch):
+    """resume(graft=...) appends stages flat to the hermetic pipeline.yaml."""
     from gremlins import launcher
 
     gremlin_id = "graft-append-test"
@@ -240,14 +317,14 @@ def test_graft_appends_wrapped_stage(lenv, monkeypatch):
 
     pipeline = yaml.safe_load((state_dir / "pipeline.yaml").read_text(encoding="utf-8"))
     top = pipeline["stages"]
-    graft_stage = top[-1]
-    assert graft_stage["name"] == "graft-1"
-    assert graft_stage["type"] == "sequence"
-    assert graft_stage["body"][0]["name"] == "address-code"
+    appended = top[-1]
+    assert appended["name"] == "address-code"
+    assert appended["type"] == "plan"
+    assert "body" not in appended
 
 
-def test_repeated_grafts_increment_names(lenv, monkeypatch):
-    """Two grafts produce graft-1 then graft-2 with no collisions."""
+def test_repeated_grafts_produce_real_names(lenv, monkeypatch):
+    """Two grafts append real stage names with no collisions."""
     from gremlins import launcher
 
     gremlin_id = "graft-repeat-test"
@@ -271,8 +348,8 @@ def test_repeated_grafts_increment_names(lenv, monkeypatch):
 
     pipeline = yaml.safe_load((state_dir / "pipeline.yaml").read_text(encoding="utf-8"))
     names = [s["name"] for s in pipeline["stages"]]
-    assert "graft-1" in names
-    assert "graft-2" in names
+    assert "address-code" in names
+    assert "review-code" in names
 
 
 def test_resume_without_graft_after_graft_uses_updated_pipeline(lenv, monkeypatch):
@@ -289,12 +366,12 @@ def test_resume_without_graft_after_graft_uses_updated_pipeline(lenv, monkeypatc
     )
     # Remove finished marker so plain resume works
     (state_dir / "finished").unlink(missing_ok=True)
-    # Write hermetic pipeline that already has a graft-1 stage
+    # Write hermetic pipeline that already has a grafted stage
     _write_hermetic(
         state_dir,
         [
             {"name": "plan", "type": "plan"},
-            {"name": "graft-1", "type": "sequence", "body": [{"name": "address-code"}]},
+            {"name": "address-code", "type": "plan"},
         ],
     )
 
@@ -367,7 +444,7 @@ def test_graft_succeeds_without_branch(lenv, monkeypatch):
 
     cmd = list(captured["cmd"])
     assert "--resume-from" in cmd
-    assert cmd[cmd.index("--resume-from") + 1] == "graft-1"
+    assert cmd[cmd.index("--resume-from") + 1] == "address-code"
 
 
 def test_graft_missing_worktree_plain_resume_still_raises(lenv):

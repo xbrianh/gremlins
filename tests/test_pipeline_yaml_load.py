@@ -7,7 +7,7 @@ import pytest
 
 from gremlins.clients.client import Client
 from gremlins.pipeline import Pipeline
-from gremlins.pipeline.loader import _fill_names  # type: ignore[reportPrivateUsage]
+from gremlins.pipeline.loader import fill_names as _fill_names
 
 _BUNDLED_LOCAL = (
     pathlib.Path(__file__).parent.parent / "gremlins" / "pipelines" / "local.yaml"

@@ -386,22 +386,49 @@ def _initial_state_data(inputs: _Inputs) -> StateData:
     )
 
 
-def _next_graft_name(stages: list[dict[str, Any]]) -> str:
-    nums: list[int] = []
+def _make_name_unique(stage: dict[str, Any], used: set[str]) -> None:
+    name = str(stage.get("name") or "")
+    if not name or name not in used:
+        if name:
+            used.add(name)
+        return
+    n = 2
+    while f"{name}-{n}" in used:
+        n += 1
+    stage["name"] = f"{name}-{n}"
+    used.add(stage["name"])
+
+
+def _disambiguate_graft_names(
+    graft_stages: list[dict[str, Any]], existing_names: set[str]
+) -> None:
+    used = set(existing_names)
+    for d in graft_stages:
+        _make_name_unique(d, used)
+        if d.get("type") == "parallel":
+            for child in cast(list[dict[str, Any]], d.get("body") or []):
+                _make_name_unique(child, used)
+
+
+def _all_stage_names(stages: list[dict[str, Any]]) -> set[str]:
+    names: set[str] = set()
     for s in stages:
-        name = str(s.get("name", ""))
-        if name.startswith("graft-"):
-            try:
-                nums.append(int(name[6:]))
-            except ValueError:
-                pass
-    return f"graft-{max(nums, default=0) + 1}"
+        name = str(s.get("name") or "")
+        if name:
+            names.add(name)
+        if s.get("type") == "parallel":
+            for child in cast(list[dict[str, Any]], s.get("body") or []):
+                child_name = str(child.get("name") or "")
+                if child_name:
+                    names.add(child_name)
+    return names
 
 
 def _append_graft(
     state_dir: pathlib.Path, graft_pipeline_name: str, project_root: str
 ) -> str:
     from gremlins.pipeline.discovery import resolve_pipeline_name
+    from gremlins.pipeline.loader import fill_names
     from gremlins.pipeline.preprocess import expand_pipeline
     from gremlins.utils.yaml_io import dump_yaml_text, load_yaml_file
 
@@ -414,16 +441,23 @@ def _append_graft(
     graft_stages = list(expanded.get("stages") or [])
     if not graft_stages:
         raise RuntimeError(f"graft pipeline {graft_pipeline_name!r} has no stages")
+    fill_names(graft_stages)
 
     current = load_yaml_file(hermetic)
     top_stages: list[dict[str, Any]] = list(
         cast(list[dict[str, Any]], current.get("stages") or [])
     )
-    graft_name = _next_graft_name(top_stages)
-    top_stages.append({"name": graft_name, "type": "sequence", "body": graft_stages})
+    existing_names = _all_stage_names(top_stages)
+    _disambiguate_graft_names(graft_stages, existing_names)
+    top_stages.extend(graft_stages)
     current["stages"] = top_stages
     hermetic.write_text(dump_yaml_text(current), encoding="utf-8")
-    return graft_name
+    name = str(graft_stages[0].get("name") or "")
+    if not name:
+        raise RuntimeError(
+            f"first stage of graft {graft_pipeline_name!r} has no name after expansion"
+        )
+    return name
 
 
 def _persist_expanded_pipeline(state_dir: pathlib.Path, pipeline_path: str) -> str:
