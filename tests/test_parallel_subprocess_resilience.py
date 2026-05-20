@@ -292,3 +292,41 @@ def test_cancellation_sigterm_then_sigkill(
 
     assert sigtermed
     assert fake_proc.returncode is not None  # SIGKILL was sent
+
+
+def test_subprocess_result_done_bail_error(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage = _child_stage("c")
+    state = _child_state(tmp_path / "c")
+    p = _run_parallel([stage], [state], StateData(), tmp_path)
+
+    async def mock_done(*args: Any, **_: Any) -> _FakeProcess:
+        _write_result(pathlib.Path(args[-1]), "done")
+        return _FakeProcess(0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_done)
+    asyncio.run(p())
+
+    stage = _child_stage("c")
+    state = _child_state(tmp_path / "c")
+    p = _run_parallel([stage], [state], StateData(), tmp_path)
+
+    async def mock_bail(*args: Any, **_: Any) -> _FakeProcess:
+        _write_result(pathlib.Path(args[-1]), "bail")
+        return _FakeProcess(0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_bail)
+    asyncio.run(p())
+
+    stage = _child_stage("c")
+    state = _child_state(tmp_path / "c")
+    p = _run_parallel([stage], [state], StateData(), tmp_path)
+
+    async def mock_err(*args: Any, **_: Any) -> _FakeProcess:
+        _write_result(pathlib.Path(args[-1]), "error")
+        return _FakeProcess(0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_err)
+    with pytest.raises(RuntimeError, match="error"):
+        asyncio.run(p())
