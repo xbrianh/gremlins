@@ -69,7 +69,7 @@ def parse_issue_ref(plan_source: str, repo: str) -> tuple[str | None, str | None
 
 VIEW_ISSUE_TIMEOUT = 30  # seconds; bounds `gh issue view` shell-out
 GET_PR_CI_STATUS_TIMEOUT = 30  # seconds; bounds `gh pr view` shell-out in poll loop
-VIEW_PR_TIMEOUT = 30
+VIEW_PR_TIMEOUT = 30  # seconds; bounds `gh pr view` shell-out
 
 
 def view_pr(pr: str, *, project_root: str | None = None) -> dict[str, Any]:
@@ -85,7 +85,8 @@ def view_pr(pr: str, *, project_root: str | None = None) -> dict[str, Any]:
             f"timed out after {VIEW_PR_TIMEOUT}s while resolving PR {pr!r} via `gh pr view`"
         ) from exc
     if r.returncode != 0:
-        raise RuntimeError(f"gh pr view failed for {pr!r}: {r.stderr.strip()}")
+        msg = r.stderr.strip() or r.stdout.strip()
+        raise RuntimeError(f"gh pr view failed for {pr!r}: {msg}")
     try:
         return json.loads(r.stdout)
     except json.JSONDecodeError as exc:

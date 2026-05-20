@@ -293,15 +293,18 @@ def _resolve_inputs(
         base_ref_name = ""
         base_ref_sha = pr_ref
         setup_kind = "worktree-detached-from-ref"
-        try:
-            pr_data = view_pr(pr, project_root=project_root)
-            pr_artifact: dict[str, Any] | None = {
-                "type": "pr",
-                "url": pr_data.get("url") or "",
-                "branch": pr_data.get("headRefName") or "",
-            }
-        except RuntimeError:
-            pr_artifact = None
+        pr_data = view_pr(pr, project_root=project_root)
+        pr_url = pr_data.get("url") or ""
+        pr_branch = pr_data.get("headRefName") or ""
+        if not pr_url or not pr_branch:
+            raise RuntimeError(
+                f"gh pr view returned empty url or headRefName for {pr!r}: {pr_data!r}"
+            )
+        pr_artifact: dict[str, Any] | None = {
+            "type": "pr",
+            "url": pr_url,
+            "branch": pr_branch,
+        }
     else:
         base_ref_name, base_ref_sha = _resolve_base_ref(
             base_ref, project_root, loaded_pipeline

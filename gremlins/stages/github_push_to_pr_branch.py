@@ -33,6 +33,6 @@ class GitHubPushToPrBranch(Stage):
         )
         stdout_b, stderr_b = await proc.communicate()
         if proc.returncode != 0:
-            output = (stdout_b + stderr_b).decode().strip()
+            output = (stdout_b + stderr_b).decode(errors="replace").strip()
             raise Bail(f"git push origin HEAD:{branch} failed: {output}")
         return Done()
