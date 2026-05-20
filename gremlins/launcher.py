@@ -406,7 +406,7 @@ def _disambiguate_graft_names(
     for d in graft_stages:
         _make_name_unique(d, used)
         if d.get("type") == "parallel":
-            for child in d.get("body") or []:
+            for child in cast(list[dict[str, Any]], d.get("body") or []):
                 _make_name_unique(child, used)
 
 
@@ -417,7 +417,7 @@ def _all_stage_names(stages: list[dict[str, Any]]) -> set[str]:
         if name:
             names.add(name)
         if s.get("type") == "parallel":
-            for child in s.get("body") or []:
+            for child in cast(list[dict[str, Any]], s.get("body") or []):
                 child_name = str(child.get("name") or "")
                 if child_name:
                     names.add(child_name)
@@ -428,7 +428,7 @@ def _append_graft(
     state_dir: pathlib.Path, graft_pipeline_name: str, project_root: str
 ) -> str:
     from gremlins.pipeline.discovery import resolve_pipeline_name
-    from gremlins.pipeline.loader import _fill_names
+    from gremlins.pipeline.loader import fill_names
     from gremlins.pipeline.preprocess import expand_pipeline
     from gremlins.utils.yaml_io import dump_yaml_text, load_yaml_file
 
@@ -441,7 +441,7 @@ def _append_graft(
     graft_stages = list(expanded.get("stages") or [])
     if not graft_stages:
         raise RuntimeError(f"graft pipeline {graft_pipeline_name!r} has no stages")
-    _fill_names(graft_stages)
+    fill_names(graft_stages)
 
     current = load_yaml_file(hermetic)
     top_stages: list[dict[str, Any]] = list(

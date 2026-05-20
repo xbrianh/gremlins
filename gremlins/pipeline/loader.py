@@ -53,7 +53,7 @@ def get_client_from_dict(d: dict[str, Any]) -> Client | None:
     return Client.parse(raw)
 
 
-def _fill_names(raw_stages: list[dict[str, Any]]) -> None:
+def fill_names(raw_stages: list[dict[str, Any]]) -> None:
     """Fill missing 'name' fields in-place; append -N suffix on collisions."""
     explicit: set[str] = {
         d["name"] for d in raw_stages if isinstance(d.get("name"), str) and d["name"]
@@ -76,7 +76,7 @@ def _fill_names(raw_stages: list[dict[str, Any]]) -> None:
 
 
 def parse_stages(raw: list[dict[str, Any]], depth: int = 0) -> list[Stage]:
-    _fill_names(raw)
+    fill_names(raw)
     return [parse_stage(d, depth=depth) for d in raw]
 
 
