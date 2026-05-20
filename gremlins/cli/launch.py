@@ -185,9 +185,7 @@ def _self_background_main(
         time.sleep(0.1)
         rc = proc.poll()
     if rc is not None:
-        sys.stderr.write(
-            f"error: gremlin {gremlin_id} exited early with code {rc}\n"
-        )
+        sys.stderr.write(f"error: gremlin {gremlin_id} exited early with code {rc}\n")
         if log_path.is_file():
             sys.stderr.write(
                 log_path.read_bytes()[-_LOG_TAIL_BYTES:].decode(

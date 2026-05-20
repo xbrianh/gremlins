@@ -28,7 +28,11 @@ def test_wait_blocks_and_returns_exit_code():
         wait=True,
         pr=None,
     )
-    with patch("gremlins.cli.launch.launch", return_value=(fake_id, fake_proc)), patch("gremlins.cli.launch.time.sleep"), patch("gremlins.cli.launch.time.time", side_effect=[0, 100]):
+    with (
+        patch("gremlins.cli.launch.launch", return_value=(fake_id, fake_proc)),
+        patch("gremlins.cli.launch.time.sleep"),
+        patch("gremlins.cli.launch.time.time", side_effect=[0, 100]),
+    ):
         rc = _self_background_main("some-pipeline", args, {})
     fake_proc.wait.assert_called_once()
     assert rc == 42
@@ -40,9 +44,13 @@ def test_pr_flag_forwarded_to_launch():
     fake_id = "gr-prtest1"
     parser = build_launch_parser("some-pipeline", Stage)
     args = parser.parse_args(["--pr", "697"])
-    with patch(
-        "gremlins.cli.launch.launch", return_value=(fake_id, fake_proc)
-    ) as mock_launch, patch("gremlins.cli.launch.time.sleep"), patch("gremlins.cli.launch.time.time", side_effect=[0, 100]):
+    with (
+        patch(
+            "gremlins.cli.launch.launch", return_value=(fake_id, fake_proc)
+        ) as mock_launch,
+        patch("gremlins.cli.launch.time.sleep"),
+        patch("gremlins.cli.launch.time.time", side_effect=[0, 100]),
+    ):
         _self_background_main("some-pipeline", args, {})
     mock_launch.assert_called_once()
     assert mock_launch.call_args.kwargs.get("pr") == "697"
@@ -64,7 +72,11 @@ def test_no_wait_returns_zero():
         wait=False,
         pr=None,
     )
-    with patch("gremlins.cli.launch.launch", return_value=(fake_id, fake_proc)), patch("gremlins.cli.launch.time.sleep"), patch("gremlins.cli.launch.time.time", side_effect=[0, 100]):
+    with (
+        patch("gremlins.cli.launch.launch", return_value=(fake_id, fake_proc)),
+        patch("gremlins.cli.launch.time.sleep"),
+        patch("gremlins.cli.launch.time.time", side_effect=[0, 100]),
+    ):
         rc = _self_background_main("some-pipeline", args, {})
     fake_proc.wait.assert_not_called()
     assert rc == 0
