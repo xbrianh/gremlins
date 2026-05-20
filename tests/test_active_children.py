@@ -110,7 +110,9 @@ def test_loop_active_children_cleared_on_exception(tmp_path: pathlib.Path) -> No
 
 
 def _row(state: dict[str, Any]) -> Any:
-    return build_row("gr-abc123", "/fake/state.json", "/tmp/fake-wdir", state, "running")
+    return build_row(
+        "gr-abc123", "/fake/state.json", "/tmp/fake-wdir", state, "running"
+    )
 
 
 def test_build_row_single_active_child() -> None:
