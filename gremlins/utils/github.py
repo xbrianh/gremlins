@@ -292,6 +292,8 @@ async def check_copilot_review_async(repo: str, pr_num: str) -> str | None:
         ],
     )
     if r.returncode != 0:
-        return None
+        raise RuntimeError(
+            f"gh api reviews failed (exit {r.returncode}): {r.stderr.strip() or '(no stderr)'}"
+        )
     lines = [ln for ln in r.stdout.splitlines() if ln and ln != "PENDING"]
     return lines[0] if lines else None

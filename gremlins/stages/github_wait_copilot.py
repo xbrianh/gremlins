@@ -29,6 +29,7 @@ class GitHubWaitCopilot(Stage):
         pr_num: str = "",
         timeout: int = 600,
         interval: int = 20,
+        max_poll_failures: int = 5,
         review_checker: Callable[[], str | None] | None = None,
     ) -> None:
         super().__init__(name)
@@ -37,6 +38,7 @@ class GitHubWaitCopilot(Stage):
         self.pr_num = pr_num
         self.timeout = timeout
         self.interval = interval
+        self.max_poll_failures = max_poll_failures
         self.review_checker = review_checker
 
     async def run(self, state: State) -> Outcome:
@@ -46,14 +48,42 @@ class GitHubWaitCopilot(Stage):
             raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
 
         deadline = time.time() + self.timeout
+        consecutive_failures = 0
+        last_error: str = ""
+        poll_count = 0
+        observed_states: list[str] = []
+
         while True:
-            if self.review_checker is not None:
-                result = self.review_checker()
-            else:
-                result = await check_copilot_review_async(repo, pr_num)
-            if result:
-                logger.info("Copilot review: %s", result)
-                return Done()
+            try:
+                if self.review_checker is not None:
+                    result = self.review_checker()
+                else:
+                    result = await check_copilot_review_async(repo, pr_num)
+                consecutive_failures = 0
+                poll_count += 1
+                if result:
+                    observed_states.append(result)
+                    logger.info("Copilot review: %s", result)
+                    return Done()
+            except Exception as exc:
+                consecutive_failures += 1
+                last_error = str(exc)
+                logger.warning(
+                    "Copilot review poll failed (%d/%d): %s",
+                    consecutive_failures,
+                    self.max_poll_failures,
+                    last_error,
+                )
+                if consecutive_failures >= self.max_poll_failures:
+                    raise Bail(
+                        f"Copilot review poll failed {consecutive_failures} times in a row: {last_error}"
+                    )
+
             if time.time() >= deadline:
-                raise Bail(f"Copilot review timed out after {self.timeout}s")
+                context = (
+                    f"polls={poll_count}, last_error={last_error!r}, "
+                    f"observed={observed_states or 'none'}"
+                )
+                raise Bail(f"Copilot review timed out after {self.timeout}s ({context})")
+
             await asyncio.sleep(self.interval)
