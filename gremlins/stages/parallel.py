@@ -319,9 +319,7 @@ def _parallel_stages(
         sem = asyncio.Semaphore(max_concurrent) if max_concurrent is not None else None
         tasks: list[asyncio.Task[None]] = []
         _stages_by_key: dict[str, Stage] = (
-            {st.name: st for st in child_stages}
-            if child_stages
-            else {}
+            {st.name: st for st in child_stages} if child_stages else {}
         )
 
         def _cancel_siblings() -> None:
