@@ -148,9 +148,13 @@ class ParallelStage(Stage):
         group_state = dataclasses.replace(
             state, session_dir=group_dir, parent_stage=state.parent_stage or self.name
         )
-        child_runners: list[tuple[str, State, Callable[[], Any]]] = []
         for child in self.body:
             (group_dir / child.name).mkdir(parents=True, exist_ok=True)
+        done = state.data.done_for(self.path or self.name)
+        child_runners: list[tuple[str, State, Callable[[], Any]]] = []
+        for child in self.body:
+            if child.name in done:
+                continue
             cs = _child_state(group_state, child, fan_out=True)
             runner = cs.make_runner(child, scope=self.body)
             child_runners.append((child.name, cs, runner))
