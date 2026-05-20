@@ -61,6 +61,8 @@ class _ArtifactStage(_SimpleStage):
         return Done()
 
 
+
+
 @pytest.fixture(autouse=True)
 def _register_test_stages(
     monkeypatch: pytest.MonkeyPatch,
@@ -119,6 +121,32 @@ def test_load_spec_invalid_json(tmp_path: pathlib.Path) -> None:
     p.write_text("{not valid json", encoding="utf-8")
     with pytest.raises(Exception):
         _rc._load_spec(p)
+
+
+def test_build_state_propagates_repo_and_instructions(
+    tmp_path: pathlib.Path,
+) -> None:
+    state = _rc._build_state(
+        {
+            "client": "fake:fake",
+            "session_dir": str(tmp_path / "artifacts"),
+            "repo": "owner/myrepo",
+            "instructions": "do the thing",
+        }
+    )
+    assert state.repo == "owner/myrepo"
+    assert state.instructions == "do the thing"
+
+
+def test_build_state_repo_defaults_to_empty(tmp_path: pathlib.Path) -> None:
+    state = _rc._build_state(
+        {
+            "client": "fake:fake",
+            "session_dir": str(tmp_path / "artifacts"),
+        }
+    )
+    assert state.repo == ""
+    assert state.instructions == ""
 
 
 def test_build_state_missing_client() -> None:
