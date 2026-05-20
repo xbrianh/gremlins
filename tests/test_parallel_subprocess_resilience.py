@@ -273,7 +273,12 @@ def test_cancellation_sigterm_then_sigkill(
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
     # Make the grace period very short so the test doesn't actually wait 10s.
-    monkeypatch.setattr("gremlins.stages.parallel._SIGTERM_GRACE_S", 0.05)
+    import functools
+    from gremlins.utils import proc as _proc_mod
+    monkeypatch.setattr(
+        _proc_mod, "terminate_with_grace",
+        functools.partial(_proc_mod.terminate_with_grace, grace_s=0.05),
+    )
 
     stage = _child_stage("child-a")
     state = _child_state(tmp_path / "child-a")

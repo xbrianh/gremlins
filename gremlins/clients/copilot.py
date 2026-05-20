@@ -8,6 +8,7 @@ import threading
 
 from gremlins.clients.protocol import CompletedRun
 from gremlins.utils.decorators import swallow
+from gremlins.utils.proc import terminate_with_grace
 
 # Copilot appends a stats footer like "⏺ Cost: $0.01 | Duration: 3.2s | ..."
 # after the response text. Strip it so text_result contains only the response.
@@ -114,14 +115,7 @@ class SubprocessCopilotClient:
             self._untrack(p)
             if p.returncode is None:
                 # cancellation path: communicate() was interrupted before the process exited
-                try:
-                    p.terminate()
-                except Exception:
-                    pass
-                try:
-                    p.kill()
-                except Exception:
-                    pass
+                await terminate_with_grace(p)
 
         stdout = raw_out.decode(errors="replace")
         stderr = raw_err.decode(errors="replace")

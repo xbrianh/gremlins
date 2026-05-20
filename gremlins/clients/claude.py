@@ -16,7 +16,7 @@ from gremlins.clients.config import (
 from gremlins.clients.protocol import CompletedRun
 from gremlins.clients.stream import decode_line, emit_event, extract_state, ts
 from gremlins.utils.decorators import swallow
-from gremlins.utils.proc import iter_lines
+from gremlins.utils.proc import iter_lines, terminate_with_grace
 
 
 class StreamTimeoutError(RuntimeError):
@@ -114,23 +114,6 @@ class SubprocessClaudeClient:
             raise
         return p
 
-    async def _terminate_and_wait(self, p: asyncio.subprocess.Process) -> None:
-        try:
-            p.terminate()
-        except Exception:
-            pass
-        try:
-            await asyncio.wait_for(p.wait(), timeout=5.0)
-        except TimeoutError:
-            try:
-                p.kill()
-            except Exception:
-                pass
-            try:
-                await asyncio.wait_for(p.wait(), timeout=5.0)
-            except TimeoutError:
-                pass
-
     async def _read_lines(
         self,
         p: asyncio.subprocess.Process,
@@ -184,7 +167,7 @@ class SubprocessClaudeClient:
         finally:
             self._untrack(p)
         if timed_out:
-            await self._terminate_and_wait(p)
+            await terminate_with_grace(p, grace_s=5.0)
             raise StreamTimeoutError("claude -p stream idle timeout")
         rc = await p.wait()
         cost_usd = state["cost_usd"]
