@@ -70,7 +70,9 @@ def parse_issue_ref(plan_source: str, repo: str) -> tuple[str | None, str | None
 VIEW_ISSUE_TIMEOUT = 30  # seconds; bounds `gh issue view` shell-out
 GET_PR_CI_STATUS_TIMEOUT = 30  # seconds; bounds `gh pr view` shell-out in poll loop
 VIEW_PR_TIMEOUT = 30  # seconds; bounds `gh pr view` shell-out
-GET_COPILOT_REVIEW_TIMEOUT = 30  # seconds; bounds `gh api reviews` shell-out in poll loop
+GET_COPILOT_REVIEW_TIMEOUT = (
+    30  # seconds; bounds `gh api reviews` shell-out in poll loop
+)
 
 
 def view_pr(pr: str, *, project_root: str | None = None) -> dict[str, Any]:
