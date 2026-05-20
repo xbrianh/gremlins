@@ -17,7 +17,6 @@ from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Done, Outcome
 from gremlins.stages.parallel import ParallelStage
 
-
 # ---------------------------------------------------------------------------
 # Fake subprocess helpers
 # ---------------------------------------------------------------------------
@@ -118,7 +117,9 @@ def _run_parallel(
 def _write_result(spec_path: pathlib.Path, status: str = "done") -> None:
     result_path = pathlib.Path(str(spec_path) + ".result")
     result_path.write_text(
-        json.dumps({"status": status, "detail": "", "returncode": None, "cost_usd": 0.0}),
+        json.dumps(
+            {"status": status, "detail": "", "returncode": None, "cost_usd": 0.0}
+        ),
         encoding="utf-8",
     )
 
@@ -172,7 +173,9 @@ def test_external_kill_siblings_continue(
     state_a = _child_state(tmp_path / "child-a")
     state_b = _child_state(tmp_path / "child-b")
     parent_data = StateData()
-    parallel = _run_parallel([stage_a, stage_b], [state_a, state_b], parent_data, tmp_path)
+    parallel = _run_parallel(
+        [stage_a, stage_b], [state_a, state_b], parent_data, tmp_path
+    )
 
     with pytest.raises(RuntimeError, match="child-a"):
         asyncio.run(parallel())  # type: ignore[operator]
@@ -211,7 +214,11 @@ def test_timeout_kills_child_and_records_failure(
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
 
     stage = _child_stage("child-a")
-    stage.raw_dict = {"name": "child-a", "type": "_resilience_noop", "timeout_seconds": 0.05}
+    stage.raw_dict = {
+        "name": "child-a",
+        "type": "_resilience_noop",
+        "timeout_seconds": 0.05,
+    }
     state = _child_state(tmp_path / "child-a")
     parallel = _run_parallel([stage], [state], StateData(), tmp_path)
 
