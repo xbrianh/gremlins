@@ -65,7 +65,7 @@ def test_fill_names_explicit_wins() -> None:
 
 
 def test_fill_names_explicit_name_reserves_slot() -> None:
-    # explicit {name: verify} then unnamed {type: verify} → second gets verify-2
+    # explicit name "verify" (on a different type) still blocks the default for unnamed {type: verify}
     raw = [{"name": "verify", "type": "implement"}, {"type": "verify"}]
     _fill_names(raw)
     assert raw[0]["name"] == "verify"

@@ -70,6 +70,7 @@ def _fill_names(raw_stages: list[dict[str, Any]]) -> None:
         while candidate in used:
             n += 1
             candidate = f"{stage_type}-{n}"
+        counts[stage_type] = n
         d["name"] = candidate
         used.add(candidate)
 
