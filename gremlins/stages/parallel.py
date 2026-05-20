@@ -27,6 +27,7 @@ from gremlins.utils import proc
 logger = logging.getLogger(__name__)
 
 _Stage = tuple[str, Callable[[], Any]]
+_SIGTERM_GRACE_S = 10.0
 
 
 def _noop_set_stage(_n: str) -> None:
@@ -319,9 +320,7 @@ def _parallel_stages(
         sem = asyncio.Semaphore(max_concurrent) if max_concurrent is not None else None
         tasks: list[asyncio.Task[None]] = []
         _stages_by_key: dict[str, Stage] = (
-            {st.name: st for st in child_stages}
-            if child_stages
-            else {}
+            {st.name: st for st in child_stages} if child_stages else {}
         )
 
         def _cancel_siblings() -> None:
@@ -382,11 +381,17 @@ def _parallel_stages(
             )
 
             async def _pump(stream: asyncio.StreamReader) -> None:
+                # Read in chunks (not readline) so a child emitting a single huge
+                # un-newlined blob cannot deadlock by filling the pipe buffer.
+                # Re-split on newlines so each line still gets the [attempt] prefix.
                 while True:
-                    line = await stream.readline()
-                    if not line:
+                    chunk = await stream.read(4096)
+                    if not chunk:
                         break
-                    sys.stdout.write(f"[{attempt}] {line.decode('utf-8', 'replace')}")
+                    for line in chunk.decode("utf-8", "replace").splitlines(
+                        keepends=True
+                    ):
+                        sys.stdout.write(f"[{attempt}] {line}")
                     sys.stdout.flush()
 
             pump_out = asyncio.create_task(
@@ -396,25 +401,88 @@ def _parallel_stages(
                 _pump(child_proc.stderr)  # type: ignore[arg-type]
             )
 
-            try:
-                await child_proc.wait()
-            except asyncio.CancelledError:
+            timeout_s: float | None = None
+            if stage_obj.raw_dict:
+                raw_t = stage_obj.raw_dict.get("timeout_seconds")
+                if raw_t is not None:
+                    try:
+                        parsed_t = float(raw_t)
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(
+                            f"parallel child {child_key!r}: 'timeout_seconds' must be a "
+                            f"number, got {raw_t!r}"
+                        ) from exc
+                    # Treat <=0 as unset rather than firing wait_for immediately.
+                    if parsed_t > 0:
+                        timeout_s = parsed_t
+
+            async def _kill_with_grace() -> None:
+                # Always escalate to SIGKILL on any exit path (timeout, second
+                # cancellation, etc.) so the child is never orphaned.
                 try:
                     child_proc.send_signal(signal.SIGTERM)
                 except ProcessLookupError:
-                    pass
-                await child_proc.wait()
-                raise
-            finally:
+                    return
+                try:
+                    await asyncio.shield(
+                        asyncio.wait_for(child_proc.wait(), timeout=_SIGTERM_GRACE_S)
+                    )
+                except (TimeoutError, asyncio.CancelledError):
+                    try:
+                        child_proc.kill()
+                    except ProcessLookupError:
+                        pass
+                    await asyncio.shield(child_proc.wait())
+
+            try:
+                if timeout_s is not None:
+                    try:
+                        await asyncio.wait_for(child_proc.wait(), timeout=timeout_s)
+                    except TimeoutError:
+                        await _kill_with_grace()
+                        await asyncio.gather(pump_out, pump_err, return_exceptions=True)
+                        raise RuntimeError(
+                            f"parallel child {child_key!r} timed out after {timeout_s}s"
+                        )
+                else:
+                    await child_proc.wait()
+            except asyncio.CancelledError:
+                await _kill_with_grace()
                 pump_out.cancel()
                 pump_err.cancel()
                 await asyncio.gather(pump_out, pump_err, return_exceptions=True)
+                raise
+
+            await asyncio.gather(pump_out, pump_err, return_exceptions=True)
 
             result_path = pathlib.Path(str(spec_path) + ".result")
             if not result_path.exists():
-                raise RuntimeError(
-                    f"parallel child {child_key!r}: subprocess exited with no result file"
-                )
+                rc = child_proc.returncode
+                if rc is None:
+                    detail = (
+                        f"parallel child {child_key!r}: subprocess exited with no "
+                        f"result file (returncode unavailable)"
+                    )
+                elif rc == 0:
+                    detail = (
+                        f"parallel child {child_key!r} exited 0 without writing result"
+                    )
+                elif rc < 0:
+                    try:
+                        sig_name = signal.Signals(-rc).name
+                    except ValueError:
+                        sig_name = f"signal {-rc}"
+                    detail = (
+                        f"parallel child {child_key!r} terminated by {sig_name} "
+                        f"with no result file"
+                    )
+                else:
+                    detail = (
+                        f"parallel child {child_key!r} exited with returncode {rc} "
+                        f"and no result file"
+                    )
+                raise RuntimeError(detail)
+
             result: dict[str, Any] = json.loads(result_path.read_text(encoding="utf-8"))
             status = result.get("status")
             if status in ("done", "needs_fix"):
