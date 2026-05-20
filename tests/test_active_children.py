@@ -123,7 +123,12 @@ def test_build_row_single_active_child() -> None:
 
 def test_build_row_multiple_active_children() -> None:
     row = _row({"stage": "parallel", "active_children": ["a", "b"]})
-    assert row.stage == "parallel/[a,b]"
+    assert row.stage == "a+1"
+
+
+def test_build_row_five_active_children() -> None:
+    row = _row({"stage": "loop", "active_children": ["x"] * 5})
+    assert row.stage == "x+4"
 
 
 def test_build_row_no_active_children_when_waiting() -> None:
