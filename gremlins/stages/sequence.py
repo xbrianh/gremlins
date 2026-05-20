@@ -23,16 +23,14 @@ class SequenceStage(Stage):
 
     @classmethod
     def with_dict(cls, d: dict[str, Any], depth: int = 0) -> SequenceStage:
-        from gremlins.pipeline.loader import get_client_from_dict, parse_stage
+        from gremlins.pipeline.loader import get_client_from_dict, parse_stages
 
+        name = d.get("name") or ""
         raw_children: object = d.get("body") or []
         if not isinstance(raw_children, list):
-            raise ValueError(f"stage {d['name']!r}: 'body' must be a list")
-        children = [
-            parse_stage(child_d, depth=depth)
-            for child_d in cast(list[dict[str, Any]], raw_children)
-        ]
-        stage = cls(d["name"], body=children)
+            raise ValueError(f"stage {name!r}: 'body' must be a list")
+        children = parse_stages(cast(list[dict[str, Any]], raw_children), depth=depth)
+        stage = cls(name, body=children)
         stage.client = get_client_from_dict(d)
         return stage
 

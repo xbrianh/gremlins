@@ -7,12 +7,12 @@ prompts:
   verify: [gremlins:verify_fix.md, gremlins:bail_section_fix.md]
 
 stages:
-  - { name: plan,            type: plan,            prompt: [code-style, gremlins:plan_gh.md] }
-  - { name: implement,       type: implement,       prompt: [code-style, gremlins:implement_gh.md] }
-  - { name: verify,          type: verify,          options: { cmds: ["make check", "make test"] }, prompt: verify }
+  - { type: plan,            prompt: [code-style, gremlins:plan_gh.md] }
+  - { type: implement,       prompt: [code-style, gremlins:implement_gh.md] }
+  - { type: verify,          options: { cmds: ["make check", "make test"] }, prompt: verify }
   - { name: open-pr,         type: github-open-pull-request }
-  - { name: github-request-copilot-review, type: github-request-copilot-review }
-  - { name: github-review-pull-request,        type: github-review-pull-request,        prompt: [code-style, gremlins:github_review_pull_request.md] }
-  - { name: github-wait-copilot, type: github-wait-copilot }
-  - { name: github-address-pull-request-reviews,       type: github-address-pull-request-reviews,       prompt: [code-style, gremlins:github_address_pull_request_reviews.md, gremlins:bail_section.md] }
+  - { type: github-request-copilot-review }
+  - { type: github-review-pull-request,        prompt: [code-style, gremlins:github_review_pull_request.md] }
+  - { type: github-wait-copilot }
+  - { type: github-address-pull-request-reviews,       prompt: [code-style, gremlins:github_address_pull_request_reviews.md, gremlins:bail_section.md] }
   - { name: ci-gate,         type: github-wait-ci,  prompt: [gremlins:ci_fix.md, gremlins:bail_section_fix.md] }

@@ -282,11 +282,11 @@ a `test` stage before `review-code`:
 name: local
 
 stages:
-  - { name: plan,         type: plan,         options: { plan_model: opus } }
-  - { name: implement,    type: implement,    options: { impl_model: opus } }
-  - { name: test,         type: test,         options: { test_cmd: pytest } }
-  - { name: review-code,  type: review-code }
-  - { name: address-code, type: address-code, options: { address_model: opus } }
+  - { type: plan,         options: { plan_model: opus } }
+  - { type: implement,    options: { impl_model: opus } }
+  - { type: test,         options: { test_cmd: pytest } }
+  - { type: review-code }
+  - { type: address-code, options: { address_model: opus } }
 ```
 
 Add a `prompt:` key to any stage to supply a custom prompt; paths are
@@ -302,8 +302,8 @@ name: local
 default_client: claude:sonnet
 
 stages:
-  - { name: plan,      type: plan }
-  - { name: implement, type: implement }
+  - { type: plan }
+  - { type: implement }
 
   - name: reviews
     parallel:
@@ -313,7 +313,7 @@ stages:
         type: review-code
     max_concurrent: 2
 
-  - { name: address-code, type: address-code }
+  - { type: address-code }
 ```
 
 Note: `review-code` does not currently support per-stage prompt overrides

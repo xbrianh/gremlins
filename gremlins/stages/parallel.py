@@ -70,28 +70,24 @@ class ParallelStage(Stage):
 
     @classmethod
     def with_dict(cls, d: dict[str, Any], depth: int = 0) -> ParallelStage:
-        from gremlins.pipeline.loader import parse_stage
+        from gremlins.pipeline.loader import parse_stages
 
         if depth > 0:
             raise ValueError(
                 f"nested parallel groups are not allowed (stage {d.get('name', '?')!r})"
             )
-        name = d.get("name")
-        if not isinstance(name, str) or not name:
-            raise ValueError("parallel group must have a 'name' field")
+        name = d.get("name") or ""
         children_field: object = d.get("parallel") or []
         if not isinstance(children_field, list):
             raise ValueError(f"parallel group {name!r}: 'parallel' must be a list")
+        body = parse_stages(cast(list[dict[str, Any]], children_field), depth=depth + 1)
         seen: set[str] = set()
-        body: list[Stage] = []
-        for child_raw in cast(list[dict[str, Any]], children_field):
-            child = parse_stage(child_raw, depth=depth + 1)
+        for child in body:
             if child.name in seen:
                 raise ValueError(
                     f"parallel group {name!r}: duplicate child name {child.name!r}"
                 )
             seen.add(child.name)
-            body.append(child)
         max_concurrent = d.get("max_concurrent")
         if max_concurrent is not None and (
             not isinstance(max_concurrent, int) or max_concurrent <= 0
