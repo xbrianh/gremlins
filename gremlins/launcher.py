@@ -119,6 +119,7 @@ class _Inputs:
     base_ref_sha: str
     stage_inputs: dict[str, Any]
     issue_data: dict[str, Any] | None
+    pr_artifact: dict[str, Any] | None
 
 
 def _validate_plan_args(
@@ -285,12 +286,22 @@ def _resolve_inputs(
         raise RuntimeError("gh CLI not found on PATH (required for gh pipeline)")
 
     if pr is not None:
+        from gremlins.utils.github import view_pr
         from gremlins.utils.pr import pr_arg_to_ref
 
         pr_ref = pr_arg_to_ref(pr)
         base_ref_name = ""
         base_ref_sha = pr_ref
         setup_kind = "worktree-detached-from-ref"
+        try:
+            pr_data = view_pr(pr, project_root=project_root)
+            pr_artifact: dict[str, Any] | None = {
+                "type": "pr",
+                "url": pr_data.get("url") or "",
+                "branch": pr_data.get("headRefName") or "",
+            }
+        except RuntimeError:
+            pr_artifact = None
     else:
         base_ref_name, base_ref_sha = _resolve_base_ref(
             base_ref, project_root, loaded_pipeline
@@ -300,6 +311,7 @@ def _resolve_inputs(
             if loaded_pipeline is not None
             else "worktree-branch"
         )
+        pr_artifact = None
 
     stored_args = list(resolved_pipeline_args)
     if spec_path and "--spec" not in stored_args:
@@ -326,6 +338,7 @@ def _resolve_inputs(
         base_ref_sha=base_ref_sha,
         stage_inputs=stage_inputs,
         issue_data=issue_data,
+        pr_artifact=pr_artifact,
     )
 
 
@@ -479,6 +492,8 @@ def launch(
         )
         sd = _initial_state_data(inputs)
         sd.persist(state_dir)
+        if inputs.pr_artifact:
+            sd.append_artifact(inputs.pr_artifact)
         p = _spawn(inputs.gremlin_id, inputs, state_dir)
     except Exception:
         shutil.rmtree(state_dir, ignore_errors=True)

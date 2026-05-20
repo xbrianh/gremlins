@@ -69,6 +69,27 @@ def parse_issue_ref(plan_source: str, repo: str) -> tuple[str | None, str | None
 
 VIEW_ISSUE_TIMEOUT = 30  # seconds; bounds `gh issue view` shell-out
 GET_PR_CI_STATUS_TIMEOUT = 30  # seconds; bounds `gh pr view` shell-out in poll loop
+VIEW_PR_TIMEOUT = 30
+
+
+def view_pr(pr: str, *, project_root: str | None = None) -> dict[str, Any]:
+    """Fetch url and headRefName for a PR via gh pr view."""
+    try:
+        r = proc.run(
+            ["gh", "pr", "view", pr, "--json", "url,headRefName"],
+            timeout=VIEW_PR_TIMEOUT,
+            cwd=project_root,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"timed out after {VIEW_PR_TIMEOUT}s while resolving PR {pr!r} via `gh pr view`"
+        ) from exc
+    if r.returncode != 0:
+        raise RuntimeError(f"gh pr view failed for {pr!r}: {r.stderr.strip()}")
+    try:
+        return json.loads(r.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"gh pr view returned invalid JSON for {pr!r}") from exc
 
 
 def view_issue(issue_ref: str, repo: str) -> dict[str, Any]:
