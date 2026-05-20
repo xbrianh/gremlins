@@ -257,7 +257,6 @@ def _parallel_stages(
         _worktree_paths.clear()
         base_head = ""
         _clear_persisted_state()
-        parent_data.clear_done(stage_path)
 
         if not await _in_git_repo():
             return
