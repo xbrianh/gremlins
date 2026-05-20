@@ -38,6 +38,7 @@ from typing import Any, cast
 
 from gremlins.clients.client import Client
 from gremlins.executor.state import State, StateData, validate_gremlin_id
+from gremlins.logging_setup import configure_logging
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.loader import parse_stage
 from gremlins.stages.outcome import Bail, Done
@@ -193,6 +194,7 @@ async def _run(spec_path: pathlib.Path) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_logging()
     if argv is None:
         argv = sys.argv[1:]
     if len(argv) != 1:
