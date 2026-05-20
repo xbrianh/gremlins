@@ -272,6 +272,7 @@ def _gremlin_to_json(
         "kind": kind,
         "stage": str(state.get("stage") or ""),
         "sub_stage": state.get("sub_stage"),
+        "active_children": list(state.get("active_children") or []),
         "liveness": parse_liveness(live),
         "age_seconds": age_seconds,
         "client": str(state.get("client") or ""),

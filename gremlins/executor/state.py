@@ -462,6 +462,12 @@ class StateData:
         except Exception:
             pass
 
+    def patch_active_children(self, children: list[str] | None) -> None:
+        if children:
+            self.patch(active_children=children)
+        else:
+            self.patch(_delete=("active_children",))
+
     def write_terminal_state(self, exit_code: int) -> None:
         if not self.gremlin_id:
             return

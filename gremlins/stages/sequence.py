@@ -40,9 +40,13 @@ class SequenceStage(Stage):
         for child in self.body:
             if child.name in done:
                 continue
+            state.data.patch(active_children=[child.name])
             runner = _child_state(state, child).make_runner(
                 child, scope=self.body, record_stage=False
             )
-            await runner()
+            try:
+                await runner()
+            finally:
+                state.data.patch(_delete=("active_children",))
             state.mark_done(key, child.name)
         return Done()

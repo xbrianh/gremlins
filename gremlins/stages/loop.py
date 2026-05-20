@@ -105,8 +105,17 @@ class LoopStage(Stage):
         result: list[Callable[[], Awaitable[Outcome]]] = []
         for child in self.body:
             cs = _child_state(state, child)
-            runner = cs.make_runner(child, scope=self.body, record_stage=False)
-            result.append(cast(Callable[[], Awaitable[Outcome]], runner))
+            base = cs.make_runner(child, scope=self.body, record_stage=False)
+            name = child.name
+
+            async def _tracked(r=base, n=name) -> Outcome:
+                state.data.patch(active_children=[n])
+                try:
+                    return cast(Outcome, await r())
+                finally:
+                    state.data.patch(_delete=("active_children",))
+
+            result.append(_tracked)
         return result
 
     async def run(self, state: State) -> Outcome:

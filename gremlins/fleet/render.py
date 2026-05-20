@@ -50,6 +50,14 @@ def build_row(
     if stage == "waiting" and sub_disp:
         stage_disp = f"waiting:{sub_disp}"
 
+    active_children: list[str] = list(state.get("active_children") or [])
+    if active_children and stage != "waiting":
+        children_part = (
+            f"[{','.join(active_children)}]" if len(active_children) > 1
+            else active_children[0]
+        )
+        stage_disp = f"{stage}/{children_part}"
+
     rescue_count = state.get("rescue_count") or 0
     try:
         rescue_count = int(rescue_count)
