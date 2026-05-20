@@ -367,6 +367,8 @@ def _parallel_stages(
                         "pipeline_path": child_st.data.pipeline_path or None,
                         "child_key": child_key,
                         "parent_stage": child_st.parent_stage,
+                        "repo": child_st.repo,
+                        "instructions": child_st.instructions,
                     }
                 ),
                 encoding="utf-8",
