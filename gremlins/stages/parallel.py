@@ -148,20 +148,18 @@ class ParallelStage(Stage):
             state, session_dir=group_dir, parent_stage=state.parent_stage or self.name
         )
         child_runners: list[tuple[str, State, Callable[[], Any]]] = []
-        child_stages: list[Stage] = []
         for child in self.body:
             (group_dir / child.name).mkdir(parents=True, exist_ok=True)
             cs = _child_state(group_state, child, fan_out=True)
             runner = cs.make_runner(child, scope=self.body)
             child_runners.append((child.name, cs, runner))
-            child_stages.append(child)
         for _, fn in self.build_runtime_stages(
             child_runners,
             parent_data=state.data,
             project_root=pathlib.Path.cwd(),
             worktree_parent=state.worktree_parent,
             set_stage_fn=lambda n: state.record_stage_progress(self.name, sub_stage=n),
-            child_stages=child_stages,
+            child_stages=self.body,
         ):
             await fn()
         return Done()
@@ -321,7 +319,7 @@ def _parallel_stages(
         sem = asyncio.Semaphore(max_concurrent) if max_concurrent is not None else None
         tasks: list[asyncio.Task[None]] = []
         _stages_by_key: dict[str, Stage] = (
-            {k: st for (k, _, _), st in zip(child_runners, child_stages)}
+            {st.name: st for st in child_stages}
             if child_stages
             else {}
         )
@@ -351,7 +349,7 @@ def _parallel_stages(
         ) -> None:
             attempt = f"{child_key}-{secrets.token_hex(4)}"
             parent_data.patch_parallel_attempt(child_key, attempt)
-            spec_path = child_st.session_dir / "spec.json"
+            spec_path = child_st.session_dir / f"spec_{attempt}.json"
             spec_path.write_text(
                 json.dumps(
                     {
@@ -388,8 +386,8 @@ def _parallel_stages(
                     line = await stream.readline()
                     if not line:
                         break
-                    sys.stdout.write(f"[{child_key}] {line.decode('utf-8', 'replace')}")
-                sys.stdout.flush()
+                    sys.stdout.write(f"[{attempt}] {line.decode('utf-8', 'replace')}")
+                    sys.stdout.flush()
 
             pump_out = asyncio.create_task(
                 _pump(child_proc.stdout)  # type: ignore[arg-type]
@@ -406,11 +404,11 @@ def _parallel_stages(
                 except ProcessLookupError:
                     pass
                 await child_proc.wait()
+                raise
+            finally:
                 pump_out.cancel()
                 pump_err.cancel()
-                raise
-
-            await asyncio.gather(pump_out, pump_err, return_exceptions=True)
+                await asyncio.gather(pump_out, pump_err, return_exceptions=True)
 
             result_path = pathlib.Path(str(spec_path) + ".result")
             if not result_path.exists():

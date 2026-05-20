@@ -19,7 +19,6 @@ class Stage:
     type: str = ""
     needs_gh: bool = False
     body: list[Stage] = []
-    raw_dict: dict[str, Any] | None = None
 
     def __init__(self, name: str) -> None:
         self.name = name
