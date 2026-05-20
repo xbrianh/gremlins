@@ -118,7 +118,7 @@ def _row(state: dict[str, Any]) -> Any:
 
 def test_build_row_single_active_child() -> None:
     row = _row({"stage": "parallel", "active_children": ["review-pr"]})
-    assert row.stage == "parallel/review-pr"
+    assert row.stage == "review-pr"
 
 
 def test_build_row_multiple_active_children() -> None:
