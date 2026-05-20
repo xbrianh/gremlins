@@ -532,8 +532,13 @@ def _parallel_stages(
             else:
                 await _run_child(child_key, fn)
 
-        tasks = [asyncio.create_task(_dispatch(k, s, fn)) for k, s, fn in active]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Snapshot of all dispatched keys; not updated per-task as children finish.
+        parent_data.patch(active_children=[k for k, _, _ in active])
+        try:
+            tasks = [asyncio.create_task(_dispatch(k, s, fn)) for k, s, fn in active]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            parent_data.patch(_delete=("active_children",))
         errors = [r for r in results if isinstance(r, Exception)]
         if errors:
             for extra in errors[1:]:
