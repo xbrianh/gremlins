@@ -382,9 +382,13 @@ def _parallel_stages(
             )
 
             async def _pump(stream: asyncio.StreamReader) -> None:
-                async for line in proc.iter_lines(stream):
-                    sys.stdout.write(f"[{attempt}] {line.decode('utf-8', 'replace')}")
-                    sys.stdout.flush()
+                while True:
+                    chunk = await stream.read(4096)
+                    if not chunk:
+                        break
+                    for line in chunk.decode("utf-8", "replace").splitlines(keepends=True):
+                        sys.stdout.write(f"[{attempt}] {line}")
+                        sys.stdout.flush()
 
             pump_out = asyncio.create_task(
                 _pump(child_proc.stdout)  # type: ignore[arg-type]

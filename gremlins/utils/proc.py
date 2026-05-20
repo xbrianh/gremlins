@@ -108,14 +108,17 @@ async def iter_lines(
     chunk_size: int = 4096,
     idle_timeout: float | None = None,
 ) -> AsyncIterator[bytes]:
-    buf = b""
+    buf = bytearray()
     while True:
         chunk = await asyncio.wait_for(stream.read(chunk_size), timeout=idle_timeout)
         if not chunk:
             if buf:
-                yield buf
+                yield bytes(buf)
             return
-        buf += chunk
-        while b"\n" in buf:
-            line, buf = buf.split(b"\n", 1)
-            yield line + b"\n"
+        buf.extend(chunk)
+        while True:
+            i = buf.find(b"\n")
+            if i == -1:
+                break
+            yield bytes(buf[: i + 1])
+            del buf[: i + 1]

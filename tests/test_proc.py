@@ -76,3 +76,48 @@ def test_run_or_raise_async_returns_stripped_stdout():
 def test_run_or_raise_async_raises_on_failure():
     with pytest.raises(subprocess.CalledProcessError):
         run(proc.run_or_raise_async(["false"]))
+
+
+def test_iter_lines_empty():
+    async def t():
+        r = asyncio.StreamReader()
+        r.feed_eof()
+        assert [line async for line in proc.iter_lines(r)] == []
+    run(t())
+
+
+def test_iter_lines_with_newlines():
+    async def t():
+        r = asyncio.StreamReader()
+        r.feed_data(b"hello\nworld\n")
+        r.feed_eof()
+        assert [line async for line in proc.iter_lines(r)] == [b"hello\n", b"world\n"]
+    run(t())
+
+
+def test_iter_lines_without_final_newline():
+    async def t():
+        r = asyncio.StreamReader()
+        r.feed_data(b"hello\nworld")
+        r.feed_eof()
+        assert [line async for line in proc.iter_lines(r)] == [b"hello\n", b"world"]
+    run(t())
+
+
+def test_iter_lines_idle_timeout():
+    async def t():
+        r = asyncio.StreamReader()
+        with pytest.raises(TimeoutError):
+            async for _ in proc.iter_lines(r, idle_timeout=0.01):
+                pass
+    run(t())
+
+
+def test_iter_lines_long_line():
+    async def t():
+        r = asyncio.StreamReader()
+        data = b"x" * 100000
+        r.feed_data(data)
+        r.feed_eof()
+        assert [line async for line in proc.iter_lines(r)] == [data]
+    run(t())
