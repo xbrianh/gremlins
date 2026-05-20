@@ -15,6 +15,7 @@ from gremlins.stages.implement import Implement
 from gremlins.stages.loop import LoopStage
 from gremlins.stages.parallel import ParallelStage
 from gremlins.stages.plan import Plan
+from gremlins.stages.record_pr_artifact import RecordPrArtifact
 from gremlins.stages.review_code import GitHubReviewPullRequest, ReviewCode
 from gremlins.stages.sequence import SequenceStage
 from gremlins.stages.verify import Verify
@@ -32,6 +33,7 @@ STAGE_TYPES: dict[str, type[Stage]] = {
     "address-code": AddressCode,
     "github-address-pull-request-reviews": GitHubAddressPullRequestReviews,
     "handoff": Handoff,
+    "record-pr-artifact": RecordPrArtifact,
     "loop": LoopStage,
     "parallel": ParallelStage,
     "sequence": SequenceStage,
