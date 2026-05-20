@@ -76,3 +76,71 @@ def test_run_or_raise_async_returns_stripped_stdout():
 def test_run_or_raise_async_raises_on_failure():
     with pytest.raises(subprocess.CalledProcessError):
         run(proc.run_or_raise_async(["false"]))
+
+
+# iter_lines
+
+
+def _feed(r: asyncio.StreamReader, *chunks: bytes, eof: bool = True) -> None:
+    for chunk in chunks:
+        r.feed_data(chunk)
+    if eof:
+        r.feed_eof()
+
+
+def test_iter_lines_short_lines():
+    async def _go() -> list[bytes]:
+        r = asyncio.StreamReader()
+        _feed(r, b"line1\nline2\n")
+        return [line async for line in proc.iter_lines(r)]
+
+    assert run(_go()) == [b"line1\n", b"line2\n"]
+
+
+def test_iter_lines_large_line():
+    big = b"x" * (128 * 1024)  # 128 KiB, well over readline's 64 KiB default limit
+
+    async def _go() -> list[bytes]:
+        r = asyncio.StreamReader()
+        _feed(r, big + b"\n")
+        return [line async for line in proc.iter_lines(r)]
+
+    assert run(_go()) == [big + b"\n"]
+
+
+def test_iter_lines_partial_final_line():
+    async def _go() -> list[bytes]:
+        r = asyncio.StreamReader()
+        _feed(r, b"line1\npartial")
+        return [line async for line in proc.iter_lines(r)]
+
+    assert run(_go()) == [b"line1\n", b"partial"]
+
+
+def test_iter_lines_empty_stream():
+    async def _go() -> list[bytes]:
+        r = asyncio.StreamReader()
+        _feed(r)
+        return [line async for line in proc.iter_lines(r)]
+
+    assert run(_go()) == []
+
+
+def test_iter_lines_multi_chunk_single_line():
+    async def _go() -> list[bytes]:
+        r = asyncio.StreamReader()
+        _feed(r, b"hel", b"lo\n")
+        return [line async for line in proc.iter_lines(r)]
+
+    assert run(_go()) == [b"hello\n"]
+
+
+def test_iter_lines_idle_timeout():
+    async def _go() -> None:
+        r = asyncio.StreamReader()
+        # no data fed, no EOF — read will block until timeout fires
+        async for _ in proc.iter_lines(r, idle_timeout=0.05):
+            pass
+
+    with pytest.raises(TimeoutError):
+        run(_go())
