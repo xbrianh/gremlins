@@ -139,7 +139,7 @@ def test_iter_lines_idle_timeout():
     async def _go() -> None:
         r = asyncio.StreamReader()
         # no data fed, no EOF — read will block until timeout fires
-        async for _ in proc.iter_lines(r, idle_timeout=0.01):
+        async for _ in proc.iter_lines(r, idle_timeout=0.05):
             pass
 
     with pytest.raises(TimeoutError):

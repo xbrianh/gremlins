@@ -105,17 +105,12 @@ async def run_or_raise_async(
 async def iter_lines(
     stream: asyncio.StreamReader,
     *,
-    chunk_size: int = 4096,
     idle_timeout: float | None = None,
 ) -> AsyncIterator[bytes]:
-    """Yield newline-terminated lines from stream without a per-line size limit.
-
-    Raises TimeoutError if a chunk doesn't arrive within idle_timeout.
-    Final partial line (no trailing newline at EOF) is yielded as-is.
-    """
+    """Yield newline-terminated lines from stream without a per-line size limit."""
     buf = b""
     while True:
-        chunk = await asyncio.wait_for(stream.read(chunk_size), timeout=idle_timeout)
+        chunk = await asyncio.wait_for(stream.read(4096), timeout=idle_timeout)
         if not chunk:
             if buf:
                 yield buf

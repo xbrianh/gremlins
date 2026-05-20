@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import pathlib
 import sys
@@ -151,12 +150,9 @@ class SubprocessClaudeClient:
                     if raw is not None:
                         raw.write(line)
                         raw.flush()
-                    if b"Stream idle timeout" in line:
-                        try:
-                            json.loads(line.decode("utf-8", errors="replace"))
-                        except Exception:
-                            timed_out = True
                     evt = decode_line(line)
+                    if b"Stream idle timeout" in line and evt is None:
+                        timed_out = True
                     if evt is None:
                         continue
                     extract_state(evt, state)
