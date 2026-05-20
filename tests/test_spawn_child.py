@@ -61,8 +61,6 @@ class _ArtifactStage(_SimpleStage):
         return Done()
 
 
-
-
 @pytest.fixture(autouse=True)
 def _register_test_stages(
     monkeypatch: pytest.MonkeyPatch,
