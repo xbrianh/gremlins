@@ -19,6 +19,9 @@ class Apply(Stage):
 
     async def run(self, state: State) -> Outcome:
         cmds = [c for c in self.options.get("cmds", []) if c.strip()]
+        if not cmds:
+            return Done()
+        log_lines: list[str] = []
         for cmd in cmds:
             p = await asyncio.create_subprocess_shell(
                 cmd,
@@ -27,17 +30,22 @@ class Apply(Stage):
                 stderr=asyncio.subprocess.PIPE,
             )
             out_b, err_b = await p.communicate()
+            log_lines.append(out_b.decode() + err_b.decode())
             if p.returncode != 0:
                 (state.session_dir / "apply.log").write_text(
-                    out_b.decode() + err_b.decode(), encoding="utf-8"
+                    "\n".join(log_lines), encoding="utf-8"
                 )
                 raise Bail(f"apply {self.name}: {cmd} exited {p.returncode}")
         self._maybe_commit(state)
         return Done()
 
     def _maybe_commit(self, state: State) -> None:
-        proc.run(["git", "add", "-A"], cwd=state.cwd)
+        r = proc.run(["git", "add", "-A"], cwd=state.cwd)
+        if r.returncode != 0:
+            raise Bail(f"apply {self.name}: git add failed: {(r.stdout + r.stderr).strip()}")
         if proc.run_ok(["git", "diff", "--cached", "--quiet"], cwd=state.cwd):
             return
         msg = self.options.get("commit_message") or self.name
-        proc.run(["git", "commit", "-m", msg], cwd=state.cwd, check=True)
+        r = proc.run(["git", "commit", "-m", msg], cwd=state.cwd)
+        if r.returncode != 0:
+            raise Bail(f"apply {self.name}: git commit failed: {(r.stdout + r.stderr).strip()}")

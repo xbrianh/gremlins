@@ -46,7 +46,7 @@ def test_apply_success_with_changes(tmp_path):
     outcome = asyncio.run(stage.run(state))
     assert outcome == Done()
     log = subprocess.run(
-        ["git", "log", "--oneline", "-1"], cwd=tmp_path, capture_output=True, text=True
+        ["git", "log", "--oneline", "-1"], cwd=tmp_path, capture_output=True, text=True, check=True
     )
     assert "norm" in log.stdout
 
@@ -63,6 +63,7 @@ def test_apply_success_no_changes(tmp_path):
         cwd=tmp_path,
         capture_output=True,
         text=True,
+        check=True,
     )
     assert cnt.stdout.strip() == "1"
 
@@ -91,5 +92,6 @@ def test_apply_mid_cmd_failure_no_partial_commit(tmp_path):
         cwd=tmp_path,
         capture_output=True,
         text=True,
+        check=True,
     )
     assert cnt.stdout.strip() == "1"
