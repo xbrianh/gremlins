@@ -185,9 +185,15 @@ def _self_background_main(
         time.sleep(0.1)
         rc = proc.poll()
     if rc is not None:
-        sys.stderr.write(f"error: gremlin {gremlin_id} exited with code {rc} before any stage ran\n")
+        sys.stderr.write(
+            f"error: gremlin {gremlin_id} exited with code {rc} before any stage ran\n"
+        )
         if log_path.is_file():
-            sys.stderr.write(log_path.read_bytes()[-_LOG_TAIL_BYTES:].decode("utf-8", errors="replace"))
+            sys.stderr.write(
+                log_path.read_bytes()[-_LOG_TAIL_BYTES:].decode(
+                    "utf-8", errors="replace"
+                )
+            )
         return rc or 1
 
     if args.print_id_only:
