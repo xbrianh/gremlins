@@ -170,7 +170,14 @@ def test_local_main_client_specifier_model(tmp_path, monkeypatch):
 def test_local_pipeline_stage_names(tmp_path):
     pipeline = Pipeline.from_yaml(resolve_pipeline_path("local", tmp_path))
     names = [s.name for s in pipeline.stages]
-    assert names == ["plan", "implement", "review-code", "address-code", "normalize", "verify"]
+    assert names == [
+        "plan",
+        "implement",
+        "review-code",
+        "address-code",
+        "normalize",
+        "verify",
+    ]
 
 
 def test_local_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir):
