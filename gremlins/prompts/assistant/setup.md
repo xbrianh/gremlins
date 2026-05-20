@@ -29,7 +29,6 @@ Add these to avoid repeated permission prompts for status and triage checks:
 - `Bash(gh run view:*)`
 - `Bash(gh issue view:*)`
 
-If you have the `fewer-permission-prompts` skill available in this session, run it to refine the allowlist further based on what commands actually appear in recent transcripts.
 
 ### Where gremlin state lives
 
@@ -144,7 +143,7 @@ Each item is a `.cmd` file named `<timestamp>-<slug>.cmd`.
 - `queue: done <item>` — stdout — item completed cleanly, moved to `done/`
 - `queue: failed <item>` — stderr — item bailed; runner halted
 
-**React to events as they arrive, don't poll.** The right pattern is: spawn the runner, attach a line-by-line consumer to its stdout **and stderr**, and act on each event. Your assistant environment almost certainly has a primitive for "stream stdout from a long-running process and react to each line" — use that. In Claude Code it's the `Monitor` tool; other tools have analogues.
+**React to events as they arrive, don't poll.** The right pattern is: spawn the runner, attach a line-by-line consumer to its stdout **and stderr**, and act on each event. Your assistant environment almost certainly has a primitive for "stream stdout from a long-running process and react to each line" — use that.
 
 **Concrete example — land each gremlin as it finishes:**
 
