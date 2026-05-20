@@ -386,16 +386,24 @@ def _initial_state_data(inputs: _Inputs) -> StateData:
     )
 
 
-def _next_graft_name(stages: list[dict[str, Any]]) -> str:
-    nums: list[int] = []
-    for s in stages:
-        name = str(s.get("name", ""))
-        if name.startswith("graft-"):
-            try:
-                nums.append(int(name[6:]))
-            except ValueError:
-                pass
-    return f"graft-{max(nums, default=0) + 1}"
+def _disambiguate_graft_names(
+    graft_stages: list[dict[str, Any]], existing_names: set[str]
+) -> None:
+    """Rename graft stages that collide with existing_names, in-place."""
+    used = set(existing_names)
+    for d in graft_stages:
+        name = str(d.get("name") or "")
+        if not name or name not in used:
+            if name:
+                used.add(name)
+            continue
+        n = 2
+        candidate = f"{name}-{n}"
+        while candidate in used:
+            n += 1
+            candidate = f"{name}-{n}"
+        d["name"] = candidate
+        used.add(candidate)
 
 
 def _append_graft(
@@ -419,11 +427,12 @@ def _append_graft(
     top_stages: list[dict[str, Any]] = list(
         cast(list[dict[str, Any]], current.get("stages") or [])
     )
-    graft_name = _next_graft_name(top_stages)
-    top_stages.append({"name": graft_name, "type": "sequence", "body": graft_stages})
+    existing_names = {str(s.get("name") or "") for s in top_stages}
+    _disambiguate_graft_names(graft_stages, existing_names)
+    top_stages.extend(graft_stages)
     current["stages"] = top_stages
     hermetic.write_text(dump_yaml_text(current), encoding="utf-8")
-    return graft_name
+    return str(graft_stages[0]["name"])
 
 
 def _persist_expanded_pipeline(state_dir: pathlib.Path, pipeline_path: str) -> str:
