@@ -39,9 +39,9 @@ Each gremlin writes its state under `platformdirs.user_state_dir("gremlins")`:
 
 Each directory contains `state.json`, a log file, and other artifacts produced by the pipeline stages. Do not edit files under this path — gremlins own their worktrees and state files.
 
-### One question for the user
+### Captured work location
 
-Where should captured work go for this project? Options: GitHub issues, local plan files, or an external tracker. The answer shapes how you behave as scribe for the rest of the session.
+Infer from project context: read repo-level docs, look for existing artifacts (open GitHub issues, a `plans/` directory, references to an external tracker) and pick the matching form. If context is silent, default to GitHub issues for repos with a GitHub remote, local plan files otherwise.
 
 ---
 
