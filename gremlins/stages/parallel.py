@@ -1,5 +1,3 @@
-"""ParallelStage: fan-out/fan-in execution of a parallel YAML block."""
-
 from __future__ import annotations
 
 import asyncio
@@ -35,8 +33,6 @@ def _noop_set_stage(_n: str) -> None:
 
 
 class ParallelStage(Stage):
-    """Fan-out/fan-in execution of a parallel pipeline block."""
-
     type = "parallel"
 
     def __init__(
@@ -123,7 +119,6 @@ class ParallelStage(Stage):
         set_stage_fn: Callable[[str], None] | None = None,
         child_stages: list[Stage] | None = None,
     ) -> list[_Stage]:
-        """Return the three runtime stages for this parallel block."""
         return _parallel_stages(
             self.name,
             child_runners,
@@ -184,7 +179,6 @@ def _parallel_stages(
     fanout_name = f"{group_name}-fanout"
     fanin_name = f"{group_name}-fanin"
 
-    # In-process mirror of state.json parallel_worktrees[group_name].
     _worktree_paths: dict[str, pathlib.Path] = {}
     base_head: str = ""
 
@@ -529,7 +523,6 @@ def _parallel_stages(
             else:
                 await _run_child(child_key, fn)
 
-        # Snapshot of all dispatched keys; not updated per-task as children finish.
         parent_data.patch(active_children=[k for k, _, _ in active])
         try:
             tasks = [asyncio.create_task(_dispatch(k, s, fn)) for k, s, fn in active]
