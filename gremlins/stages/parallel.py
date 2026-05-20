@@ -382,17 +382,8 @@ def _parallel_stages(
             )
 
             async def _pump(stream: asyncio.StreamReader) -> None:
-                # Read in chunks (not readline) so a child emitting a single huge
-                # un-newlined blob cannot deadlock by filling the pipe buffer.
-                # Re-split on newlines so each line still gets the [attempt] prefix.
-                while True:
-                    chunk = await stream.read(4096)
-                    if not chunk:
-                        break
-                    for line in chunk.decode("utf-8", "replace").splitlines(
-                        keepends=True
-                    ):
-                        sys.stdout.write(f"[{attempt}] {line}")
+                async for line in proc.iter_lines(stream):
+                    sys.stdout.write(f"[{attempt}] {line.decode('utf-8', 'replace')}")
                     sys.stdout.flush()
 
             pump_out = asyncio.create_task(
