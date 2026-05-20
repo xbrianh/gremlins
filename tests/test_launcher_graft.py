@@ -47,6 +47,30 @@ def test_disambiguate_multiple_collisions():
     assert stages[1]["name"] == "plan-3"
 
 
+def test_disambiguate_parallel_child_collision_with_existing_top_level():
+    from gremlins.launcher import _disambiguate_graft_names
+
+    # Grafted parallel child collides with an existing top-level name.
+    stages = [{"name": "review", "type": "parallel", "body": [{"name": "plan"}]}]
+    _disambiguate_graft_names(stages, {"plan"})
+    assert stages[0]["body"][0]["name"] == "plan-2"
+
+
+def test_disambiguate_parallel_children_collide_with_each_other():
+    from gremlins.launcher import _disambiguate_graft_names
+
+    stages = [
+        {
+            "name": "review",
+            "type": "parallel",
+            "body": [{"name": "check"}, {"name": "check"}],
+        }
+    ]
+    _disambiguate_graft_names(stages, set())
+    assert stages[0]["body"][0]["name"] == "check"
+    assert stages[0]["body"][1]["name"] == "check-2"
+
+
 # ---------------------------------------------------------------------------
 # _append_graft — unit tests
 # ---------------------------------------------------------------------------
@@ -108,6 +132,60 @@ def test_append_graft_disambiguates_collision(tmp_path):
     loaded = yaml.safe_load(hermetic.read_text(encoding="utf-8"))
     assert loaded["stages"][-1]["name"] == "address-2"
     assert result == "address-2"
+
+
+def test_append_graft_unnamed_first_stage_gets_type_name(tmp_path):
+    from gremlins.launcher import _append_graft
+
+    hermetic = tmp_path / "state" / "pipeline.yaml"
+    hermetic.parent.mkdir()
+    _write_pipeline(hermetic, [{"name": "plan", "type": "plan"}])
+
+    graft_yaml = tmp_path / ".gremlins" / "address.yaml"
+    graft_yaml.parent.mkdir()
+    # No name; _fill_names should derive it from type.
+    graft_yaml.write_text(
+        yaml.dump({"stages": [{"type": "address"}]}),
+        encoding="utf-8",
+    )
+
+    result = _append_graft(hermetic.parent, "address", str(tmp_path))
+
+    loaded = yaml.safe_load(hermetic.read_text(encoding="utf-8"))
+    assert result == "address"
+    assert loaded["stages"][-1]["name"] == "address"
+
+
+def test_append_graft_existing_parallel_child_blocks_graft_name(tmp_path):
+    from gremlins.launcher import _append_graft
+
+    hermetic = tmp_path / "state" / "pipeline.yaml"
+    hermetic.parent.mkdir()
+    # Existing pipeline has a parallel stage with child named "check".
+    _write_pipeline(
+        hermetic,
+        [
+            {
+                "name": "parallel-group",
+                "type": "parallel",
+                "body": [{"name": "check", "type": "plan"}],
+            }
+        ],
+    )
+
+    graft_yaml = tmp_path / ".gremlins" / "review.yaml"
+    graft_yaml.parent.mkdir()
+    # Graft top-level stage collides with existing parallel child name.
+    graft_yaml.write_text(
+        yaml.dump({"stages": [{"name": "check", "type": "plan"}]}),
+        encoding="utf-8",
+    )
+
+    result = _append_graft(hermetic.parent, "review", str(tmp_path))
+
+    loaded = yaml.safe_load(hermetic.read_text(encoding="utf-8"))
+    assert result == "check-2"
+    assert loaded["stages"][-1]["name"] == "check-2"
 
 
 def test_append_graft_no_hermetic_raises(tmp_path):
