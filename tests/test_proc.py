@@ -83,6 +83,7 @@ def test_iter_lines_empty():
         r = asyncio.StreamReader()
         r.feed_eof()
         assert [line async for line in proc.iter_lines(r)] == []
+
     run(t())
 
 
@@ -92,6 +93,7 @@ def test_iter_lines_with_newlines():
         r.feed_data(b"hello\nworld\n")
         r.feed_eof()
         assert [line async for line in proc.iter_lines(r)] == [b"hello\n", b"world\n"]
+
     run(t())
 
 
@@ -101,6 +103,7 @@ def test_iter_lines_without_final_newline():
         r.feed_data(b"hello\nworld")
         r.feed_eof()
         assert [line async for line in proc.iter_lines(r)] == [b"hello\n", b"world"]
+
     run(t())
 
 
@@ -110,6 +113,7 @@ def test_iter_lines_idle_timeout():
         with pytest.raises(TimeoutError):
             async for _ in proc.iter_lines(r, idle_timeout=0.01):
                 pass
+
     run(t())
 
 
@@ -120,4 +124,5 @@ def test_iter_lines_long_line():
         r.feed_data(data)
         r.feed_eof()
         assert [line async for line in proc.iter_lines(r)] == [data]
+
     run(t())

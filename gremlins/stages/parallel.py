@@ -386,7 +386,9 @@ def _parallel_stages(
                     chunk = await stream.read(4096)
                     if not chunk:
                         break
-                    for line in chunk.decode("utf-8", "replace").splitlines(keepends=True):
+                    for line in chunk.decode("utf-8", "replace").splitlines(
+                        keepends=True
+                    ):
                         sys.stdout.write(f"[{attempt}] {line}")
                         sys.stdout.flush()
 
