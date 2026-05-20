@@ -12,7 +12,7 @@ import pytest
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData
 from gremlins.fleet.render import build_row
-from gremlins.fleet.views import _gremlin_to_json
+from gremlins.fleet.views import _gremlin_to_json  # type: ignore[reportPrivateUsage]
 from gremlins.stages.base import Stage
 from gremlins.stages.loop import LoopStage
 from gremlins.stages.outcome import Done, Outcome
@@ -44,7 +44,7 @@ def test_sequence_active_children_cleared_after_run(tmp_path: pathlib.Path) -> N
     class _Spy(Stage):
         captured: list[str] | None = None
 
-        async def run(self, s: State) -> Outcome:
+        async def run(self, state: State) -> Outcome:
             _Spy.captured = _read_state(tmp_path).get("active_children")
             return Done()
 
@@ -59,7 +59,7 @@ def test_sequence_active_children_cleared_on_exception(tmp_path: pathlib.Path) -
     state = _stateful(tmp_path)
 
     class _Boom(Stage):
-        async def run(self, s: State) -> Outcome:
+        async def run(self, state: State) -> Outcome:
             raise RuntimeError("boom")
 
     seq = SequenceStage("seq", body=[_Boom("child-a")])
@@ -79,7 +79,7 @@ def test_loop_active_children_set_and_cleared(tmp_path: pathlib.Path) -> None:
     captured: list[list[str] | None] = []
 
     class _Spy(Stage):
-        async def run(self, s: State) -> Outcome:
+        async def run(self, state: State) -> Outcome:
             captured.append(_read_state(tmp_path).get("active_children"))
             return Done()
 
@@ -94,7 +94,7 @@ def test_loop_active_children_cleared_on_exception(tmp_path: pathlib.Path) -> No
     state = _stateful(tmp_path)
 
     class _Boom(Stage):
-        async def run(self, s: State) -> Outcome:
+        async def run(self, state: State) -> Outcome:
             raise RuntimeError("boom")
 
     loop = LoopStage("lp", body=[_Boom("body-stage")], max_iterations=1)
