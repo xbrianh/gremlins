@@ -192,7 +192,7 @@ def _self_background_main(
                     "utf-8", errors="replace"
                 )
             )
-        return rc or 1
+        return rc
 
     if args.print_id_only:
         sys.stdout.write(gremlin_id + "\n")
