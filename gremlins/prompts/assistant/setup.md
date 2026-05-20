@@ -103,6 +103,8 @@ gremlins queue add "gremlins launch gh-terse --plan '#124' --gremlin-id follow-u
 gremlins queue add "gremlins land follow-up"
 ```
 
+**"Queue up A and B" idiom** (also "queue those", "queue A, B, C") means exactly one launch+land pair per unit of work. Pick a short kebab-case id per unit. Do not collapse into one command, skip the land step, or expand scope beyond the named items.
+
 Both commands are self-contained. The queue runs them generically with no knowledge of gremlin ids. Use a `boss` chain when the dependency is more complex or when you want a supervisor agent coordinating stages.
 
 **State layout** — items live under `state_root() / "queues" / "default" /`:
