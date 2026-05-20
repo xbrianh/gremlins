@@ -16,8 +16,8 @@ from gremlins.clients.config import (
 )
 from gremlins.clients.protocol import CompletedRun
 from gremlins.clients.stream import decode_line, emit_event, extract_state, ts
-from gremlins.utils.decorators import swallow
 from gremlins.utils import proc
+from gremlins.utils.decorators import swallow
 
 
 class StreamTimeoutError(RuntimeError):
