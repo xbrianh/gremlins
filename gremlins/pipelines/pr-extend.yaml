@@ -12,6 +12,7 @@ prompts:
 stages:
   - { type: plan,      prompt: [code-style, gremlins:plan_gh.md] }
   - { type: implement, prompt: [code-style, gremlins:implement_gh.md] }
+  - { name: normalize, type: apply, options: { cmds: ["ruff format .", "ruff check --fix ."] } }
   - { type: verify,    options: { cmds: ["make check", "make test"] }, prompt: verify }
   - { name: push,      type: github-push-to-pr-branch }
   - { type: github-request-copilot-review }
