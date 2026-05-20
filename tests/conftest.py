@@ -187,6 +187,13 @@ def common_local_patches(monkeypatch):
         lambda pre, **kwargs: HeadAdvanced(commit_count=1),
     )
 
+    async def _apply_noop(self, state):  # noqa: ARG001
+        from gremlins.stages.outcome import Done
+
+        return Done()
+
+    monkeypatch.setattr("gremlins.stages.apply.Apply.run", _apply_noop)
+
 
 @pytest.fixture(autouse=True)
 def _restore_root_logger():
