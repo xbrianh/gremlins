@@ -11,4 +11,5 @@ stages:
   - { type: implement,    prompt: [code-style, gremlins:implement_local.md] }
   - { type: review-code,  prompt: [code-style, gremlins:review/detail.md] }
   - { type: address-code, prompt: [code-style, gremlins:address.md, gremlins:bail_section.md] }
+  - { name: normalize,    type: apply, options: { cmds: ["ruff format .", "ruff check --fix ."] } }
   - { type: verify,       prompt: verify }
