@@ -314,6 +314,7 @@ def test_launch_unified_dispatch_calls_launch(tmp_path, monkeypatch):
     monkeypatch.setattr("gremlins.cli.launch.STAGE_TYPES", {"plan": _FakePlanStage})
     launched = []
     fake_proc = MagicMock()
+    fake_proc.poll.return_value = None
 
     def _fake_launch(kind, **kw):
         launched.append((kind, kw))
@@ -321,6 +322,9 @@ def test_launch_unified_dispatch_calls_launch(tmp_path, monkeypatch):
 
     monkeypatch.setattr("gremlins.cli.launch.launch", _fake_launch)
     monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    times = iter([0, 100])
+    monkeypatch.setattr("gremlins.cli.launch.time.sleep", lambda x: None)
+    monkeypatch.setattr("gremlins.cli.launch.time.time", lambda: next(times))
 
     rc = main(["launch", "local", "--instructions", "fix the bug"])
     assert rc == 0
