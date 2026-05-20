@@ -146,9 +146,7 @@ class SubprocessClaudeClient:
         timed_out = False
         raw = open(raw_path, "ab") if raw_path is not None else None
         try:
-            async for line in proc.iter_lines(
-                p.stdout, idle_timeout=idle_timeout
-            ):
+            async for line in proc.iter_lines(p.stdout, idle_timeout=idle_timeout):
                 if raw is not None:
                     raw.write(line)
                     raw.flush()
