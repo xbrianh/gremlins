@@ -169,7 +169,16 @@ def _parallel_execute_stage(
     tmp_path: pathlib.Path,
 ) -> Any:
     child_runners = [
-        (k, State(data=StateData(), client=FakeClaudeClient(), session_dir=tmp_path, child_key=k), fn)
+        (
+            k,
+            State(
+                data=StateData(),
+                client=FakeClaudeClient(),
+                session_dir=tmp_path,
+                child_key=k,
+            ),
+            fn,
+        )
         for k, fn in child_fns
     ]
     stages = ParallelStage("grp", []).build_runtime_stages(
