@@ -132,4 +132,4 @@ def test_timeout_message_includes_context(tmp_path: pathlib.Path) -> None:
     with pytest.raises(Bail) as exc_info:
         asyncio.run(stage.run(state))
     assert "polls=" in exc_info.value.reason
-    assert "observed=" in exc_info.value.reason
+    assert "last_error=" in exc_info.value.reason

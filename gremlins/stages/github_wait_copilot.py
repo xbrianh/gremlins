@@ -51,18 +51,16 @@ class GitHubWaitCopilot(Stage):
         consecutive_failures = 0
         last_error: str = ""
         poll_count = 0
-        observed_states: list[str] = []
 
         while True:
+            poll_count += 1
             try:
                 if self.review_checker is not None:
                     result = self.review_checker()
                 else:
                     result = await check_copilot_review_async(repo, pr_num)
                 consecutive_failures = 0
-                poll_count += 1
                 if result:
-                    observed_states.append(result)
                     logger.info("Copilot review: %s", result)
                     return Done()
             except Exception as exc:
@@ -80,10 +78,7 @@ class GitHubWaitCopilot(Stage):
                     )
 
             if time.time() >= deadline:
-                context = (
-                    f"polls={poll_count}, last_error={last_error!r}, "
-                    f"observed={observed_states or 'none'}"
-                )
+                context = f"polls={poll_count}, last_error={last_error!r}"
                 raise Bail(
                     f"Copilot review timed out after {self.timeout}s ({context})"
                 )
