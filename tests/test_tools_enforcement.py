@@ -121,7 +121,9 @@ def test_bash_check_absolute_inside(tmp_path: pathlib.Path) -> None:
     assert _bash_check(False, tmp_path, cmd, str(tmp_path)) is None
 
 
-def test_bash_check_tilde_expansion_outside(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_bash_check_tilde_expansion_outside(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("HOME", "/nonexistent-home")
     err = _bash_check(False, tmp_path, "cat ~/.ssh/id_rsa", str(tmp_path))
     assert err is not None
