@@ -21,9 +21,9 @@ from gremlins.utils.watch import watch_render
 
 
 def _add(argv: list[str]) -> int:
-    if not argv:
+    if not argv or argv[0] in ("-h", "--help"):
         print("usage: gremlins queue add <command>", file=sys.stderr)
-        return 1
+        return 0 if argv else 1
     command = argv[0] if len(argv) == 1 else shlex.join(argv)
     name = add(command)
     print(f"queued: {name}")

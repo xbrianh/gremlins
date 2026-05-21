@@ -366,8 +366,6 @@ def test_clear_item_mutex_with_purge(tmp_path, monkeypatch):
 
 def test_cli_queue_clear_flags_mutually_exclusive(tmp_path, monkeypatch):
     monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
-    import pytest
-
     with pytest.raises(SystemExit):
         main(["queue", "clear", "--failed", "--done"])
 
@@ -378,6 +376,24 @@ def test_cli_queue_add_dispatches(tmp_path, monkeypatch, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "queued:" in out
+
+
+def test_cli_queue_add_help_prints_usage_and_does_not_enqueue(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    rc = main(["queue", "add", "--help"])
+    assert rc == 0
+    assert capsys.readouterr().err != ""
+    assert not list((core.queue_root() / "pending").glob("*.cmd"))
+
+
+def test_cli_queue_add_flag_prefixed_command_is_queued(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    rc = main(["queue", "add", "--verbose", "script.sh"])
+    assert rc == 0
+    pending = list((core.queue_root() / "pending").glob("*.cmd"))
+    assert len(pending) == 1
 
 
 def test_cli_queue_add_single_quoted_command_stored_verbatim(tmp_path, monkeypatch):
