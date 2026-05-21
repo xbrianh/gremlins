@@ -6,12 +6,11 @@ import json
 import pathlib
 
 from gremlins.utils.parallel_bail import (
-    BailedChild,
     BailDecision,
+    BailedChild,
     collect_bails,
     decide,
 )
-
 
 # ---------------------------------------------------------------------------
 # collect_bails
