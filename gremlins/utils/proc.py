@@ -262,9 +262,7 @@ async def _wait_child_proc(
         await asyncio.wait_for(child_proc.wait(), timeout=timeout_s)
     except TimeoutError:
         await terminate_with_grace(child_proc)
-        raise RuntimeError(
-            f"parallel child {child_key!r} timed out after {timeout_s}s"
-        )
+        raise RuntimeError(f"parallel child {child_key!r} timed out after {timeout_s}s")
 
 
 def _read_child_result(

@@ -92,7 +92,9 @@ def _state(session_dir: pathlib.Path) -> State:
 def _write_result(spec_path: pathlib.Path, status: str, cost: float = 0.0) -> None:
     result_path = pathlib.Path(str(spec_path) + ".result")
     result_path.write_text(
-        json.dumps({"status": status, "detail": "d", "returncode": None, "cost_usd": cost}),
+        json.dumps(
+            {"status": status, "detail": "d", "returncode": None, "cost_usd": cost}
+        ),
         encoding="utf-8",
     )
 
@@ -161,7 +163,9 @@ def test_missing_result_detail_no_returncode() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_run_child_done_status(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_child_done_status(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     child_st = _state(tmp_path / "c")
     stage = _stage("c")
     bailed: list[str] = []
@@ -173,14 +177,18 @@ def test_run_child_done_status(tmp_path: pathlib.Path, monkeypatch: pytest.Monke
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
 
     status, cost = asyncio.run(
-        proc.run_child_subprocess(stage, child_st, "c", "attempt-1", on_bail=bailed.append)
+        proc.run_child_subprocess(
+            stage, child_st, "c", "attempt-1", on_bail=bailed.append
+        )
     )
     assert status == "done"
     assert cost == pytest.approx(0.5)
     assert bailed == []
 
 
-def test_run_child_needs_fix_maps_to_done(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_child_needs_fix_maps_to_done(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     child_st = _state(tmp_path / "c")
     stage = _stage("c")
 
@@ -191,7 +199,9 @@ def test_run_child_needs_fix_maps_to_done(tmp_path: pathlib.Path, monkeypatch: p
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
 
     status, _ = asyncio.run(
-        proc.run_child_subprocess(stage, child_st, "c", "attempt-1", on_bail=lambda _: None)
+        proc.run_child_subprocess(
+            stage, child_st, "c", "attempt-1", on_bail=lambda _: None
+        )
     )
     assert status == "done"
 
@@ -201,7 +211,9 @@ def test_run_child_needs_fix_maps_to_done(tmp_path: pathlib.Path, monkeypatch: p
 # ---------------------------------------------------------------------------
 
 
-def test_run_child_bail_calls_on_bail(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_child_bail_calls_on_bail(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     child_st = _state(tmp_path / "c")
     stage = _stage("c")
     bailed: list[str] = []
@@ -217,7 +229,9 @@ def test_run_child_bail_calls_on_bail(tmp_path: pathlib.Path, monkeypatch: pytes
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
 
     status, _ = asyncio.run(
-        proc.run_child_subprocess(stage, child_st, "c", "attempt-1", on_bail=bailed.append)
+        proc.run_child_subprocess(
+            stage, child_st, "c", "attempt-1", on_bail=bailed.append
+        )
     )
     assert status == "bail"
     assert bailed == ["nope"]
@@ -228,7 +242,9 @@ def test_run_child_bail_calls_on_bail(tmp_path: pathlib.Path, monkeypatch: pytes
 # ---------------------------------------------------------------------------
 
 
-def test_run_child_error_status_raises(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_child_error_status_raises(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     child_st = _state(tmp_path / "c")
     stage = _stage("c")
 
@@ -240,7 +256,9 @@ def test_run_child_error_status_raises(tmp_path: pathlib.Path, monkeypatch: pyte
 
     with pytest.raises(RuntimeError, match="error"):
         asyncio.run(
-            proc.run_child_subprocess(stage, child_st, "c", "attempt-1", on_bail=lambda _: None)
+            proc.run_child_subprocess(
+                stage, child_st, "c", "attempt-1", on_bail=lambda _: None
+            )
         )
 
 
@@ -249,7 +267,9 @@ def test_run_child_error_status_raises(tmp_path: pathlib.Path, monkeypatch: pyte
 # ---------------------------------------------------------------------------
 
 
-def test_missing_result_file_raises(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_missing_result_file_raises(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     child_st = _state(tmp_path / "c")
     stage = _stage("c")
     fake_proc = _FakeProcess(exit_code=-signal.SIGKILL)
@@ -261,11 +281,15 @@ def test_missing_result_file_raises(tmp_path: pathlib.Path, monkeypatch: pytest.
 
     with pytest.raises(RuntimeError, match="SIGKILL.*no result file"):
         asyncio.run(
-            proc.run_child_subprocess(stage, child_st, "c", "attempt-1", on_bail=lambda _: None)
+            proc.run_child_subprocess(
+                stage, child_st, "c", "attempt-1", on_bail=lambda _: None
+            )
         )
 
 
-def test_exit_zero_no_result_file_raises(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_exit_zero_no_result_file_raises(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     child_st = _state(tmp_path / "c")
     stage = _stage("c")
 
@@ -276,7 +300,9 @@ def test_exit_zero_no_result_file_raises(tmp_path: pathlib.Path, monkeypatch: py
 
     with pytest.raises(RuntimeError, match="exited 0 without writing result"):
         asyncio.run(
-            proc.run_child_subprocess(stage, child_st, "c", "attempt-1", on_bail=lambda _: None)
+            proc.run_child_subprocess(
+                stage, child_st, "c", "attempt-1", on_bail=lambda _: None
+            )
         )
 
 
@@ -285,7 +311,9 @@ def test_exit_zero_no_result_file_raises(tmp_path: pathlib.Path, monkeypatch: py
 # ---------------------------------------------------------------------------
 
 
-def test_timeout_raises_and_kills_child(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_timeout_raises_and_kills_child(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     child_st = _state(tmp_path / "c")
     stage = _stage("c", timeout=0.05)
     fake_proc = _FakeProcess(hang=True)
@@ -297,7 +325,9 @@ def test_timeout_raises_and_kills_child(tmp_path: pathlib.Path, monkeypatch: pyt
 
     with pytest.raises(RuntimeError, match="timed out"):
         asyncio.run(
-            proc.run_child_subprocess(stage, child_st, "c", "attempt-1", on_bail=lambda _: None)
+            proc.run_child_subprocess(
+                stage, child_st, "c", "attempt-1", on_bail=lambda _: None
+            )
         )
 
     assert fake_proc.returncode is not None
@@ -322,5 +352,7 @@ def test_signal_terminated_child_no_result_raises(
 
     with pytest.raises(RuntimeError, match="SIGTERM.*no result file"):
         asyncio.run(
-            proc.run_child_subprocess(stage, child_st, "c", "attempt-1", on_bail=lambda _: None)
+            proc.run_child_subprocess(
+                stage, child_st, "c", "attempt-1", on_bail=lambda _: None
+            )
         )
