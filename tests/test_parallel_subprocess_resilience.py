@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import functools
 import json
 import pathlib
@@ -11,8 +12,6 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-
-import dataclasses
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, write_state
