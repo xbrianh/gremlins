@@ -1,0 +1,7 @@
+tools:
+  - bash
+  - edit
+  - read
+  - write
+  - grep
+  - glob

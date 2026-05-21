@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import pathlib
 
+import pytest
+
+from gremlins.permissions.defaults import __file__ as _defaults_init
 from gremlins.permissions.loader import load_policy
-from gremlins.permissions.policy import Policy
+from gremlins.permissions.policy import KNOWN_PROVIDERS, Policy
+from gremlins.utils.yaml_io import YamlLoadError
 
 
 def _load(
@@ -81,7 +85,11 @@ def test_user_config_honored(tmp_path, monkeypatch):
 
 def test_empty_inputs_give_default_policy(tmp_path):
     policy = _load(tmp_path=tmp_path)
-    assert policy == Policy(bypass=False, blocks={})
+    assert policy.bypass is False
+    for provider in KNOWN_PROVIDERS:
+        assert policy.block_for(provider), (
+            f"expected non-empty default block for {provider}"
+        )
 
 
 def test_missing_env_var_gives_default(tmp_path):
@@ -112,7 +120,7 @@ def test_cli_permissions_file_loads_blocks(tmp_path):
         cli_permissions_file=perm_file,
         tmp_path=tmp_path,
     )
-    assert policy.blocks == {"claude": {"deny": ["bash"]}}
+    assert policy.block_for("claude") == {"deny": ["bash"]}
 
 
 def test_env_bypass_truthy_values(tmp_path):
@@ -125,3 +133,34 @@ def test_env_bypass_falsy_values(tmp_path):
     for val in ("0", "false", "no"):
         policy = _load(env={"GREMLINS_BYPASS_PERMISSIONS": val}, tmp_path=tmp_path)
         assert policy.bypass is False, f"expected no bypass for {val!r}"
+
+
+def test_defaults_all_providers_populated(tmp_path):
+    policy = _load(tmp_path=tmp_path)
+    for provider in KNOWN_PROVIDERS:
+        assert policy.block_for(provider), f"default block missing for {provider}"
+
+
+def test_project_override_does_not_wipe_other_defaults(tmp_path):
+    project_dir = tmp_path / ".gremlins"
+    project_dir.mkdir()
+    (project_dir / "permissions.yaml").write_text(
+        "blocks:\n  claude:\n    allowed_tools: [Read]\n"
+    )
+    policy = _load(cwd=tmp_path, tmp_path=tmp_path)
+    assert policy.block_for("claude") == {"allowed_tools": ["Read"]}
+    for provider in KNOWN_PROVIDERS:
+        if provider != "claude":
+            assert policy.block_for(provider), f"default wiped for {provider}"
+
+
+def test_corrupt_default_file_raises_at_load(tmp_path, monkeypatch):
+    defaults_dir = pathlib.Path(_defaults_init).parent
+    corrupt = defaults_dir / "claude.yaml"
+    original = corrupt.read_text()
+    try:
+        corrupt.write_text(": bad: yaml: [\n")
+        with pytest.raises(YamlLoadError):
+            _load(tmp_path=tmp_path)
+    finally:
+        corrupt.write_text(original)

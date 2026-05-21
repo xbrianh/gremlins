@@ -1,0 +1,8 @@
+allowed_tools:
+  - Read
+  - Edit
+  - Bash
+  - Write
+  - Grep
+  - Glob
+permission_mode: default
