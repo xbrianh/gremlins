@@ -90,11 +90,10 @@ def _requeue(argv: list[str]) -> int:
     parser.add_argument("--done", action="store_true", help="Also requeue done items.")
     args = parser.parse_args(argv)
     rc = requeue(include_done=args.done)
-    if rc == 0:
-        if runner_active():
-            print("runner: active")
-        else:
-            print("warning: no runner active — start with: gremlins queue run")
+    if runner_active():
+        print("runner: active")
+    else:
+        print("warning: no runner active — start with: gremlins queue run")
     return rc
 
 

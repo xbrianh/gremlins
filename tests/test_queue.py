@@ -6,6 +6,7 @@ import json
 import re
 import threading
 import time
+import types
 from unittest.mock import MagicMock
 
 import pytest
@@ -660,7 +661,7 @@ def test_cli_queue_set_state_invalid_state(tmp_path, monkeypatch):
 def test_runner_active_true_when_pgrep_exits_zero(monkeypatch):
     monkeypatch.setattr(
         "gremlins.queue.core.subprocess.run",
-        lambda cmd, **kw: type("R", (), {"returncode": 0})(),
+        lambda cmd, **kw: types.SimpleNamespace(returncode=0),
     )
     assert core.runner_active() is True
 
@@ -668,7 +669,7 @@ def test_runner_active_true_when_pgrep_exits_zero(monkeypatch):
 def test_runner_active_false_when_pgrep_exits_nonzero(monkeypatch):
     monkeypatch.setattr(
         "gremlins.queue.core.subprocess.run",
-        lambda cmd, **kw: type("R", (), {"returncode": 1})(),
+        lambda cmd, **kw: types.SimpleNamespace(returncode=1),
     )
     assert core.runner_active() is False
 
