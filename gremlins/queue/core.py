@@ -30,7 +30,9 @@ def _pid_is_runner(pid: int) -> bool:
     try:
         result = subprocess.run(
             ["ps", "-o", "command=", "-p", str(pid)],
-            capture_output=True, text=True, timeout=2,
+            capture_output=True,
+            text=True,
+            timeout=2,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
@@ -314,7 +316,9 @@ def stop() -> int:
         pid_path.unlink(missing_ok=True)
         return 1
     if not _pid_is_runner(pid):
-        print(f"queue stop: stale pidfile (pid {pid} is not our runner)", file=sys.stderr)
+        print(
+            f"queue stop: stale pidfile (pid {pid} is not our runner)", file=sys.stderr
+        )
         pid_path.unlink(missing_ok=True)
         return 1
     try:

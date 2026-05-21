@@ -899,7 +899,9 @@ def test_stop_stale_if_pid_is_not_runner(tmp_path, monkeypatch, capsys):
     assert "stale" in capsys.readouterr().err
 
 
-def test_runner_active_false_for_live_non_runner_pid_no_pgrep_match(tmp_path, monkeypatch):
+def test_runner_active_false_for_live_non_runner_pid_no_pgrep_match(
+    tmp_path, monkeypatch
+):
     monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
     root = core.queue_root()
     pid_path = root / "runner.pid"
