@@ -31,7 +31,7 @@ from gremlins.clients.tools import GREMLINS_TOOLS, _bash_invoke
 
 def test_openai_client_constructs() -> None:
     client = OpenAIAgentsClient("gpt-4o")
-    assert client.total_cost_usd == 0.0
+    assert client.total_cost_usd is None
 
 
 def test_default_instructions_are_substantive() -> None:
@@ -175,8 +175,8 @@ def test_streamed_run_produces_completed_run(monkeypatch: Any) -> None:
     assert isinstance(result, CompletedRun)
     assert result.exit_code == 0
     assert result.text_result == "Task done."
-    assert result.cost_usd is not None and result.cost_usd > 0
-    assert client.total_cost_usd == result.cost_usd
+    assert result.cost_usd is None
+    assert client.total_cost_usd is None
 
 
 def test_streamed_run_log_lines(
@@ -482,8 +482,8 @@ def test_terminal_stream_error_transient_retries_and_succeeds(monkeypatch: Any) 
 
     assert call_count[0] == 2
     assert result.text_result == "done"
-    # cost from both attempts (failed + successful) must be recorded
-    assert client.total_cost_usd > result.cost_usd  # type: ignore[operator]
+    assert result.cost_usd is None
+    assert client.total_cost_usd is None
 
 
 def test_terminal_stream_error_permanent_fails_immediately(monkeypatch: Any) -> None:
@@ -528,8 +528,7 @@ def test_terminal_stream_error_cost_is_recorded(monkeypatch: Any) -> None:
     with pytest.raises(StreamTerminalError):
         asyncio.run(client.run("do something", label="t", max_retries=1))
 
-    # two attempts (original + 1 retry), both accrued cost
-    assert client.total_cost_usd > 0
+    assert client.total_cost_usd is None
 
 
 def test_run_streamed_passes_max_turns(monkeypatch: Any) -> None:
