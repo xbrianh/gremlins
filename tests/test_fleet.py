@@ -1654,7 +1654,11 @@ def test_do_list_json_dead_liveness_structured(tmp_path, monkeypatch, capsys):
     _views.do_list_json(_make_args(), here_root=None)
     out = capsys.readouterr().out
     data = json.loads(out)
-    assert data["gremlins"][0]["liveness"] == {"state": "dead", "reason": "exit", "exit_code": 1}
+    assert data["gremlins"][0]["liveness"] == {
+        "state": "dead",
+        "reason": "exit",
+        "exit_code": 1,
+    }
 
 
 def test_do_list_json_empty_fleet(tmp_path, monkeypatch, capsys):
@@ -1699,7 +1703,8 @@ def test_do_list_shows_queue_header_with_active_runner(tmp_path, monkeypatch, ca
     state_root.mkdir()
     monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     monkeypatch.setattr(
-        _views, "queue_summary",
+        _views,
+        "queue_summary",
         lambda: {"pending": 3, "running": 1, "failed": 0, "runner_active": True},
     )
     _views.do_list(_make_args(), here_root=None)
@@ -1716,7 +1721,8 @@ def test_do_list_shows_loud_warning_when_runner_dead(tmp_path, monkeypatch, caps
     state_root.mkdir()
     monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     monkeypatch.setattr(
-        _views, "queue_summary",
+        _views,
+        "queue_summary",
         lambda: {"pending": 3, "running": 0, "failed": 0, "runner_active": False},
     )
     _views.do_list(_make_args(), here_root=None)
