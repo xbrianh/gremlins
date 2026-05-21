@@ -1,5 +1,3 @@
-"""Tests for AnthropicSdkClient (gremlins/clients/providers/anthropic_sdk.py)."""
-
 from __future__ import annotations
 
 import pytest
