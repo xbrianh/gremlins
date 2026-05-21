@@ -54,13 +54,16 @@ def test_setup_dirs_with_gremlin_id_does_not_overwrite_existing_state_json(tmp_p
 
 
 def _make_state_dir(
-    tmp_path: pathlib.Path, gremlin_id: str
+    tmp_path: pathlib.Path, gremlin_id: str, *, attempt: str = ""
 ) -> tuple[pathlib.Path, pathlib.Path]:
     state_root = tmp_path / "state"
     state_dir = state_root / gremlin_id
     state_dir.mkdir(parents=True)
     sf = state_dir / "state.json"
-    sf.write_text(json.dumps({"id": gremlin_id}))
+    initial: dict = {"id": gremlin_id}
+    if attempt:
+        initial["attempt"] = attempt
+    sf.write_text(json.dumps(initial))
     return state_root, sf
 
 
@@ -159,3 +162,161 @@ def test_last_artifact_branch_multiple_prs(tmp_path, monkeypatch):
     )
 
     assert StateData.load(gremlin_id).last_artifact_branch() == "feat-2"
+
+
+# ---------------------------------------------------------------------------
+# attempt stamping on append_artifact
+# ---------------------------------------------------------------------------
+
+
+def test_append_artifact_stamps_attempt_when_set(tmp_path, monkeypatch):
+    gremlin_id = "gr-stamp-test"
+    state_root, sf = _make_state_dir(tmp_path, gremlin_id, attempt="implement-aabb")
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
+
+    sd = StateData.load(gremlin_id)
+    sd.append_artifact({"type": "branch", "name": "feat-stamp"})
+
+    data = json.loads(sf.read_text())
+    assert data["artifacts"] == [
+        {"type": "branch", "name": "feat-stamp", "attempt": "implement-aabb"}
+    ]
+
+
+def test_append_artifact_no_stamp_when_attempt_empty(tmp_path, monkeypatch):
+    gremlin_id = "gr-nostamp-test"
+    state_root, sf = _make_state_dir(tmp_path, gremlin_id)
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
+
+    StateData.load(gremlin_id).append_artifact({"type": "branch", "name": "feat-ns"})
+
+    data = json.loads(sf.read_text())
+    assert data["artifacts"] == [{"type": "branch", "name": "feat-ns"}]
+
+
+# ---------------------------------------------------------------------------
+# read_artifacts_for_attempt / read_artifacts_for_stage
+# ---------------------------------------------------------------------------
+
+
+def test_read_artifacts_for_attempt_exact_match(tmp_path, monkeypatch):
+    gremlin_id = "gr-rafa-test"
+    state_root, sf = _make_state_dir(tmp_path, gremlin_id)
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
+
+    arts = [
+        {"type": "branch", "name": "a", "attempt": "implement-1111"},
+        {"type": "pr", "url": "u1", "branch": "a", "attempt": "implement-1111"},
+        {"type": "branch", "name": "b", "attempt": "implement-2222"},
+    ]
+    sf.write_text(json.dumps({"id": gremlin_id, "artifacts": arts}))
+
+    sd = StateData.load(gremlin_id)
+    result = sd.read_artifacts_for_attempt("implement-1111")
+    assert result == [
+        {"type": "branch", "name": "a", "attempt": "implement-1111"},
+        {"type": "pr", "url": "u1", "branch": "a", "attempt": "implement-1111"},
+    ]
+
+
+def test_read_artifacts_for_attempt_no_match(tmp_path, monkeypatch):
+    gremlin_id = "gr-rafa-none"
+    state_root, sf = _make_state_dir(tmp_path, gremlin_id)
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
+
+    sf.write_text(
+        json.dumps(
+            {
+                "id": gremlin_id,
+                "artifacts": [
+                    {"type": "branch", "name": "x", "attempt": "review-aaaa"}
+                ],
+            }
+        )
+    )
+
+    assert StateData.load(gremlin_id).read_artifacts_for_attempt("implement-aaaa") == []
+
+
+def test_read_artifacts_for_stage_prefix_match(tmp_path, monkeypatch):
+    gremlin_id = "gr-rafs-test"
+    state_root, sf = _make_state_dir(tmp_path, gremlin_id)
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
+
+    arts = [
+        {"type": "branch", "name": "a", "attempt": "implement-1111"},
+        {"type": "pr", "url": "u1", "branch": "a", "attempt": "implement-2222"},
+        {"type": "branch", "name": "b", "attempt": "review-3333"},
+    ]
+    sf.write_text(json.dumps({"id": gremlin_id, "artifacts": arts}))
+
+    sd = StateData.load(gremlin_id)
+    result = sd.read_artifacts_for_stage("implement")
+    assert result == [
+        {"type": "branch", "name": "a", "attempt": "implement-1111"},
+        {"type": "pr", "url": "u1", "branch": "a", "attempt": "implement-2222"},
+    ]
+
+
+def test_read_artifacts_for_stage_excludes_unstamped(tmp_path, monkeypatch):
+    gremlin_id = "gr-rafs-unstamped"
+    state_root, sf = _make_state_dir(tmp_path, gremlin_id)
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
+
+    arts = [
+        {"type": "branch", "name": "old"},
+        {"type": "branch", "name": "new", "attempt": "implement-9999"},
+    ]
+    sf.write_text(json.dumps({"id": gremlin_id, "artifacts": arts}))
+
+    result = StateData.load(gremlin_id).read_artifacts_for_stage("implement")
+    assert result == [{"type": "branch", "name": "new", "attempt": "implement-9999"}]
+
+
+# ---------------------------------------------------------------------------
+# read_artifacts_for_attempt: empty attempt guard
+# ---------------------------------------------------------------------------
+
+
+def test_read_artifacts_for_attempt_empty_returns_empty(tmp_path, monkeypatch):
+    gremlin_id = "gr-rafa-empty"
+    state_root, sf = _make_state_dir(tmp_path, gremlin_id)
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
+
+    sf.write_text(
+        json.dumps(
+            {
+                "id": gremlin_id,
+                "artifacts": [{"type": "branch", "name": "x", "attempt": ""}],
+            }
+        )
+    )
+
+    assert StateData.load(gremlin_id).read_artifacts_for_attempt("") == []
+
+
+# ---------------------------------------------------------------------------
+# parallel subprocess child: attempt override
+# ---------------------------------------------------------------------------
+
+
+def test_append_artifact_stamps_child_attempt(tmp_path, monkeypatch):
+    # Simulates a subprocess child whose attempt comes from the spec, not the
+    # top-level state.json field (which holds the parent stage's attempt).
+    import dataclasses
+
+    gremlin_id = "gr-child-stamp"
+    state_root, sf = _make_state_dir(tmp_path, gremlin_id, attempt="parent-stage-aabb")
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
+
+    child_attempt = "child-key-ccdd"
+    data = StateData.load(gremlin_id)
+    data = dataclasses.replace(data, attempt=child_attempt)
+    data.append_artifact({"type": "branch", "name": "feat-child"})
+
+    arts = StateData.load(gremlin_id).read_artifacts()
+    assert arts == [{"type": "branch", "name": "feat-child", "attempt": child_attempt}]
+    assert StateData.load(gremlin_id).read_artifacts_for_attempt(child_attempt) == arts
+    assert (
+        StateData.load(gremlin_id).read_artifacts_for_attempt("parent-stage-aabb") == []
+    )

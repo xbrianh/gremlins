@@ -10,6 +10,7 @@ Spec file schema (JSON):
         "worktree_parent": <str|null>   absolute path to worktree parent or null
         "pipeline_path":   <str|null>   absolute path to pipeline YAML or null
         "child_key":       <str|null>   parallel group child identifier or null
+        "attempt":         <str|null>   attempt id for this child (overrides state.json)
         "parent_stage":    <str>        parent stage name for sub-stage tracking
         "repo":            <str>        "owner/repo" for gh API calls (from parent)
         "instructions":    <str>        freeform instructions forwarded from parent
@@ -30,6 +31,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import importlib
 import json
 import logging
@@ -77,6 +79,9 @@ def _build_state(spec: dict[str, Any]) -> State:
     if gremlin_id:
         validate_gremlin_id(gremlin_id)
     data = StateData.load(gremlin_id)
+    spec_attempt = spec.get("attempt") or ""
+    if spec_attempt:
+        data = dataclasses.replace(data, attempt=spec_attempt)
 
     worktree: pathlib.Path | None = None
     if spec.get("worktree"):
