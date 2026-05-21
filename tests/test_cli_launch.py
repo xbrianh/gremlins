@@ -144,9 +144,7 @@ def test_self_background_main_populates_registry_before_validation(monkeypatch):
         ):
             rc = _self_background_main("some-pipeline", args, {})
     finally:
+        CLIENT_FACTORIES.clear()
         CLIENT_FACTORIES.update(saved)
 
-    # Default policy has non-empty blocks for known providers ("claude", etc.).
-    # Without the importlib.import_module fix, validate_policy_against_registry
-    # would raise ValueError (empty registry) and rc would be 1.
     assert rc == 0
