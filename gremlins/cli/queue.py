@@ -11,12 +11,14 @@ from gremlins.queue.core import (
     SUBDIRS,
     add,
     clear,
+    detach_run,
     list_queue,
     list_queue_json,
     requeue,
     run,
     runner_active,
     set_state,
+    stop,
 )
 from gremlins.utils.watch import watch_render
 
@@ -75,6 +77,11 @@ def _run(argv: list[str]) -> int:
         metavar="SEC",
         help="Seconds between pending-dir polls when watching (default 1).",
     )
+    parser.add_argument(
+        "--detach",
+        action="store_true",
+        help="Fork into background; writes pid to runner.pid and exits.",
+    )
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
@@ -82,6 +89,8 @@ def _run(argv: list[str]) -> int:
     if args.poll_interval <= 0:
         print("queue run: --poll-interval must be > 0", file=sys.stderr)
         return 1
+    if args.detach:
+        return detach_run(once=args.once, poll_interval=args.poll_interval)
     return run(once=args.once, poll_interval=args.poll_interval)
 
 
@@ -131,6 +140,12 @@ def _set_state(argv: list[str]) -> int:
     return set_state(args.item, args.state)
 
 
+def _stop(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="gremlins queue stop")
+    parser.parse_args(argv)
+    return stop()
+
+
 _DISPATCH: dict[str, tuple[str, Callable[[list[str]], int]]] = {
     "add": ("Add a command to the queue.", _add),
     "list": ("List queued items.", _list),
@@ -138,6 +153,7 @@ _DISPATCH: dict[str, tuple[str, Callable[[list[str]], int]]] = {
     "requeue": ("Move failed items back to pending.", _requeue),
     "clear": ("Remove items from the queue.", _clear),
     "set-state": ("Manually transition a queue item to a different state.", _set_state),
+    "stop": ("Stop the detached runner.", _stop),
 }
 
 
