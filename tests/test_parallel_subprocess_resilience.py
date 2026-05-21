@@ -275,8 +275,10 @@ def test_cancellation_sigterm_then_sigkill(
     # Make the grace period very short so the test doesn't actually wait 10s.
     import functools
     from gremlins.utils import proc as _proc_mod
+
     monkeypatch.setattr(
-        _proc_mod, "terminate_with_grace",
+        _proc_mod,
+        "terminate_with_grace",
         functools.partial(_proc_mod.terminate_with_grace, grace_s=0.05),
     )
 

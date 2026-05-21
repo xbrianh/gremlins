@@ -194,7 +194,9 @@ def _missing_result_detail(child_key: str, returncode: int | None) -> str:
             sig_name = signal.Signals(-returncode).name
         except ValueError:
             sig_name = f"signal {-returncode}"
-        return f"parallel child {child_key!r} terminated by {sig_name} with no result file"
+        return (
+            f"parallel child {child_key!r} terminated by {sig_name} with no result file"
+        )
     return f"parallel child {child_key!r} exited with returncode {returncode} and no result file"
 
 
@@ -343,7 +345,8 @@ class _ParallelExecutor:
         try:
             for child_key, child_state, _ in self._child_runners:
                 wt_dir = await git.setup_detached_worktree_async(
-                    str(self._project_root), "HEAD",
+                    str(self._project_root),
+                    "HEAD",
                     worktree_parent=self._worktree_parent,
                 )
                 wt_path = pathlib.Path(wt_dir)
@@ -404,7 +407,8 @@ class _ParallelExecutor:
             return
         try:
             pa: dict[str, Any] = (
-                json.loads(sf.read_text(encoding="utf-8")).get("parallel_attempts") or {}
+                json.loads(sf.read_text(encoding="utf-8")).get("parallel_attempts")
+                or {}
             )
             self._parent_data.write_bail_file(
                 "other", b.reason, attempt=pa.get(child_key) or ""
@@ -582,9 +586,9 @@ class _ParallelExecutor:
                         try:
                             first_bail = dict(
                                 json.loads(
-                                    (sf.parent / f"bail_{child_attempt}.json").read_text(
-                                        encoding="utf-8"
-                                    )
+                                    (
+                                        sf.parent / f"bail_{child_attempt}.json"
+                                    ).read_text(encoding="utf-8")
                                 )
                             )
                         except Exception:
