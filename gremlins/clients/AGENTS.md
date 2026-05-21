@@ -78,6 +78,21 @@ Both backends are fully supported and both stay; neither replaces the other.
 
 Pipelines opt in to `anthropic:` by setting `default_client: anthropic:<model-id>` or a per-stage `client:` field.
 
+## Copilot permission surface
+
+GitHub Copilot Agent CLI (`copilot -p`) exposes a thin permission surface:
+
+| Scenario | Flags added |
+|---|---|
+| `bypass=True` | `--allow-all` (grants file-path + URL access beyond `--allow-all-tools`) |
+| `bypass=False`, any `native_block` | *(none)* |
+
+The `allowed_tools` list in `gremlins/permissions/defaults/copilot.yaml` names
+gremlins-layer tools (Read, Edit, Bash, …). Copilot's CLI has no per-tool flags
+that accept these names, so the block cannot be expressed as argv. The minimum
+safe default for non-bypass runs is no extra flags. If Copilot's CLI grows a
+per-tool allow-list flag in the future, translate `allowed_tools` there.
+
 ## Load-bearing invariants
 
 - `STREAM_IDLE_TIMEOUT` and `STREAM_IDLE_BACKOFF` in `config.py` are the
