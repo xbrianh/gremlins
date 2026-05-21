@@ -275,6 +275,8 @@ def test_empty_impl_with_prior_commit_artifacts_does_not_raise(
             "gremlins.stages.implement.classify_impl_outcome",
             return_value=EmptyImpl(),
         ),
-        patch.object(state.data, "read_artifacts_for_stage", return_value=prior_artifacts),
+        patch.object(
+            state.data, "read_artifacts_for_stage", return_value=prior_artifacts
+        ),
     ):
         asyncio.run(stage.run(state))
