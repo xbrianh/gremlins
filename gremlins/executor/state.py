@@ -7,6 +7,7 @@ import dataclasses
 import datetime
 import json
 import logging
+import math
 import os
 import pathlib
 import re
@@ -464,13 +465,18 @@ class StateData:
     def add_subprocess_cost(self, amount: float) -> None:
         if not amount or not self.gremlin_id:
             return
+        if not math.isfinite(amount) or amount < 0:
+            return
         sf = self.state_file or resolve_state_file(self.gremlin_id)
         if sf is None or not sf.exists():
             return
         try:
 
             def _apply(data: dict[str, Any]) -> None:
-                current = float(data.get("subprocess_cost_usd") or 0.0)
+                try:
+                    current = float(data.get("subprocess_cost_usd") or 0.0)
+                except (ValueError, TypeError):
+                    current = 0.0
                 data["subprocess_cost_usd"] = current + amount
 
             locked_update(sf, _apply)
