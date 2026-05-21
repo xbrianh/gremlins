@@ -174,7 +174,7 @@ class OpenAIAgentsClient:
         all_tools = build_tools(
             bypass=self._bypass, worktree_root=worktree_root, audit_log=audit_log
         )
-        tool_names: list[str] | None = self._native_block.get("tools")
+        tool_names: list[str] | None = self._native_block.get("allowed_tools")
         tools = (
             [t for t in all_tools if t.name in tool_names]
             if tool_names is not None

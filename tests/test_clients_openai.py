@@ -26,7 +26,7 @@ from gremlins.clients.providers.openai_agents import (
     make_openai_client,
     make_xai_client,
 )
-from gremlins.clients.tools import GREMLINS_TOOLS, _bash_invoke
+from gremlins.clients.tools import GREMLINS_TOOLS, _bash_invoke, build_tools
 from gremlins.permissions.policy import Policy
 
 
@@ -553,8 +553,6 @@ def test_run_streamed_passes_max_turns(monkeypatch: Any) -> None:
 def test_bypass_false_enforces_path_scoping(tmp_path: pathlib.Path) -> None:
     worktree = tmp_path / "worktree"
     worktree.mkdir()
-    from gremlins.clients.tools import build_tools
-
     tools = build_tools(bypass=False, worktree_root=worktree, audit_log=None)
     edit_tool = next(t for t in tools if t.name == "Edit")
 
@@ -582,7 +580,7 @@ def test_native_block_tools_allowlist_filters_agent_tools(monkeypatch: Any) -> N
 
     monkeypatch.setattr("agents.run.Runner.run_streamed", _fake_run_streamed)
 
-    client = OpenAIAgentsClient("gpt-4o", native_block={"tools": ["Read", "Bash"]})
+    client = OpenAIAgentsClient("gpt-4o", native_block={"allowed_tools": ["Read", "Bash"]})
     asyncio.run(client.run("do something", label="t"))
 
     assert captured_agents, "Runner.run_streamed was not called"
@@ -605,7 +603,8 @@ def test_native_block_absent_tools_uses_all(monkeypatch: Any) -> None:
     asyncio.run(client.run("do something", label="t"))
 
     assert captured_agents
-    assert len(captured_agents[0].tools) == 6
+    expected_tools = build_tools(bypass=True, worktree_root=pathlib.Path.cwd(), audit_log=None)
+    assert len(captured_agents[0].tools) == len(expected_tools)
 
 
 def test_bash_invoke_no_extra_env_passes_none() -> None:
