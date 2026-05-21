@@ -6,6 +6,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import math
 import pathlib
 import secrets
 import signal
@@ -476,6 +477,12 @@ class _ParallelExecutor:
         finally:
             await asyncio.gather(*pumps, return_exceptions=True)
         result = self._read_result(spec_path, child_proc, child_key)
+        try:
+            cost = float(result.get("cost_usd") or 0.0)
+        except (ValueError, TypeError):
+            cost = 0.0
+        if cost > 0 and math.isfinite(cost):
+            self._parent_data.add_subprocess_cost(cost)
         self._handle_result_status(result, child_key)
 
     async def _spawn_with_pumps(

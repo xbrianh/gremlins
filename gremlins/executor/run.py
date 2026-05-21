@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import pathlib
 import shutil
@@ -225,8 +226,15 @@ async def run_pipeline(
     total_cost = 0.0
     for c in [client] if client else _stage_clients:
         total_cost += getattr(c, "total_cost_usd", 0.0) or 0.0
+    sd = StateData.load(gremlin_id)
+    try:
+        subprocess_cost = float(sd.read_str("subprocess_cost_usd") or 0.0)
+    except (ValueError, TypeError):
+        subprocess_cost = 0.0
+    if math.isfinite(subprocess_cost) and subprocess_cost >= 0:
+        total_cost += subprocess_cost
     if total_cost > 0:
-        StateData.load(gremlin_id).patch(total_cost_usd=total_cost)
+        sd.patch(total_cost_usd=total_cost)
 
     if gh:
         logger.info(
