@@ -38,7 +38,9 @@ def _add(argv: list[str]) -> int:
         if runner_active():
             print("error: runner already active", file=sys.stderr)
             return 1
-        os.execvp(sys.executable, [sys.executable, "-m", "gremlins.cli", "queue", "run"])
+        os.execvp(
+            sys.executable, [sys.executable, "-m", "gremlins.cli", "queue", "run"]
+        )
     if runner_active():
         print("runner: active")
     else:
