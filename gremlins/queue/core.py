@@ -14,6 +14,7 @@ import time
 import traceback
 from datetime import datetime
 from pathlib import Path
+from typing import TypedDict
 
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 SUBDIRS = ("pending", "running", "done", "failed")
@@ -44,8 +45,14 @@ def runner_active() -> bool:
         return False
 
 
-def queue_summary() -> dict[str, object]:
-    """Return counts of queue items and whether the runner is active."""
+class QueueSummary(TypedDict):
+    pending: int
+    running: int
+    failed: int
+    runner_active: bool
+
+
+def queue_summary() -> QueueSummary:
     from gremlins.paths import state_root
 
     root = state_root() / "queues" / "default"
@@ -55,12 +62,12 @@ def queue_summary() -> dict[str, object]:
             d = root / sub
             if d.is_dir():
                 counts[sub] = sum(1 for _ in d.glob("*.cmd"))
-    return {
-        "pending": counts["pending"],
-        "running": counts["running"],
-        "failed": counts["failed"],
-        "runner_active": runner_active(),
-    }
+    return QueueSummary(
+        pending=counts["pending"],
+        running=counts["running"],
+        failed=counts["failed"],
+        runner_active=runner_active(),
+    )
 
 
 def queue_root() -> Path:

@@ -20,14 +20,14 @@ from gremlins.fleet.state import (
     load_state,
     parse_liveness,
 )
-from gremlins.queue.core import queue_summary
+from gremlins.queue.core import QueueSummary, queue_summary
 
 
-def _queue_header_line(summary: dict[str, object]) -> str | None:
-    pending = int(summary["pending"])  # type: ignore[arg-type]
-    running = int(summary["running"])  # type: ignore[arg-type]
-    failed = int(summary["failed"])  # type: ignore[arg-type]
-    active = bool(summary["runner_active"])
+def _queue_header_line(summary: QueueSummary) -> str | None:
+    pending = summary["pending"]
+    running = summary["running"]
+    failed = summary["failed"]
+    active = summary["runner_active"]
 
     if pending == 0 and running == 0 and failed == 0:
         return None
