@@ -36,7 +36,11 @@ def test_no_hardcoded_pipeline_names():
     out = _output()
     # pipeline names are project-specific and must not be baked in except
     # the default gh-terse mentioned for the queue skill
-    for hardcoded in ["gremlins launch gh-plain", "gremlins launch gh-verbose", "gremlins launch local"]:
+    for hardcoded in [
+        "gremlins launch gh-plain",
+        "gremlins launch gh-verbose",
+        "gremlins launch local",
+    ]:
         assert hardcoded not in out
 
 
