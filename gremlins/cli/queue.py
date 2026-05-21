@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shlex
 import sys
 from collections.abc import Callable
@@ -24,12 +25,20 @@ from gremlins.utils.watch import watch_render
 
 
 def _add(argv: list[str]) -> int:
+    run_after = argv[:1] == ["--run"]
+    if run_after:
+        argv = argv[1:]
     if not argv or argv[0] in ("-h", "--help"):
-        print("usage: gremlins queue add <command>", file=sys.stderr)
+        print("usage: gremlins queue add [--run] <command>", file=sys.stderr)
         return 0 if argv else 1
     command = argv[0] if len(argv) == 1 else shlex.join(argv)
     name = add(command)
     print(f"queued: {name}")
+    if run_after:
+        if runner_active():
+            print("error: runner already active", file=sys.stderr)
+            return 1
+        os.execvp(sys.argv[0], [sys.argv[0], "queue", "run"])
     if runner_active():
         print("runner: active")
     else:
