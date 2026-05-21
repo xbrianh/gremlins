@@ -461,6 +461,22 @@ class StateData:
         except Exception:
             pass
 
+    def add_subprocess_cost(self, amount: float) -> None:
+        if not amount or not self.gremlin_id:
+            return
+        sf = self.state_file or resolve_state_file(self.gremlin_id)
+        if sf is None or not sf.exists():
+            return
+        try:
+
+            def _apply(data: dict[str, Any]) -> None:
+                current = float(data.get("subprocess_cost_usd") or 0.0)
+                data["subprocess_cost_usd"] = current + amount
+
+            locked_update(sf, _apply)
+        except Exception:
+            pass
+
     def patch_parallel_attempt(self, child_key: str, attempt: str) -> None:
         sf = self.state_file or resolve_state_file(self.gremlin_id)
         if sf is None or not sf.exists() or not attempt:

@@ -12,8 +12,10 @@ from typing import Any
 
 import pytest
 
+import dataclasses
+
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State, StateData
+from gremlins.executor.state import State, StateData, write_state
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Done, Outcome
 from gremlins.stages.parallel import ParallelStage
@@ -336,3 +338,62 @@ def test_subprocess_result_done_bail_error(
     monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_err)
     with pytest.raises(RuntimeError, match="error"):
         asyncio.run(p())
+
+
+def test_subprocess_cost_accumulated_in_state(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cost_usd from each subprocess result is folded into state.json subprocess_cost_usd."""
+    state_dir = tmp_path / "state" / "test-gremlin"
+    state_dir.mkdir(parents=True)
+    write_state(state_dir, {"id": "test-gremlin"})
+    sf = state_dir / "state.json"
+
+    parent_data = dataclasses.replace(StateData(gremlin_id="test-gremlin"), state_file=sf)
+
+    stage_a = _child_stage("child-a")
+    stage_b = _child_stage("child-b")
+    session_a = tmp_path / "child-a"
+    session_b = tmp_path / "child-b"
+    session_a.mkdir(parents=True)
+    session_b.mkdir(parents=True)
+
+    def _make_child_state(session: pathlib.Path) -> State:
+        return State(
+            data=dataclasses.replace(StateData(gremlin_id="test-gremlin"), state_file=sf),
+            client=FakeClaudeClient(),
+            session_dir=session,
+        )
+
+    runners: list[tuple[str, State, Callable[[], Any]]] = [
+        (stage_a.name, _make_child_state(session_a), lambda: None),
+        (stage_b.name, _make_child_state(session_b), lambda: None),
+    ]
+    rt = ParallelStage("g", [stage_a, stage_b]).build_runtime_stages(
+        runners,
+        parent_data=parent_data,
+        project_root=tmp_path,
+        child_stages=[stage_a, stage_b],
+    )
+    parallel_fn = dict(rt)["g"]
+
+    COST_A, COST_B = 0.30, 0.12
+
+    async def _mock_exec(*args: Any, **_kwargs: Any) -> _FakeProcess:
+        spec_path = pathlib.Path(args[-1])
+        child_key = spec_path.parent.name
+        cost = COST_A if child_key == "child-a" else COST_B
+        result_path = pathlib.Path(str(spec_path) + ".result")
+        result_path.write_text(
+            json.dumps(
+                {"status": "done", "detail": "", "returncode": None, "cost_usd": cost}
+            ),
+            encoding="utf-8",
+        )
+        return _FakeProcess(exit_code=0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
+    asyncio.run(parallel_fn())
+
+    data = json.loads(sf.read_text())
+    assert data.get("subprocess_cost_usd") == pytest.approx(COST_A + COST_B)
