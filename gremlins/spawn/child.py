@@ -88,7 +88,7 @@ def _build_state(spec: dict[str, Any]) -> State:
     )
     perm_file = pathlib.Path(data.permissions_file) if data.permissions_file else None
     policy = load_policy(
-        cli_bypass=True if data.bypass else None,
+        cli_bypass=data.bypass or None,
         cli_permissions_file=perm_file,
         env=os.environ,
         cwd=project_root,

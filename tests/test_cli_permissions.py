@@ -194,13 +194,13 @@ def test_statedata_bypass_roundtrip(tmp_path):
     assert raw["permissions_file"] == "/tmp/p.yaml"
 
 
-def test_statedata_bypass_load(tmp_path):
+def test_statedata_bypass_load(tmp_path, monkeypatch):
     state_file = tmp_path / "state.json"
     state_file.write_text(json.dumps({"bypass": True, "permissions_file": "/p.yaml"}))
-    StateData(gremlin_id=None, state_file=state_file)
-    raw = json.loads(state_file.read_text())
-    assert raw["bypass"] is True
-    assert raw["permissions_file"] == "/p.yaml"
+    monkeypatch.setattr("gremlins.executor.state.resolve_state_file", lambda _: state_file)
+    sd = StateData.load(None)
+    assert sd.bypass is True
+    assert sd.permissions_file == "/p.yaml"
 
 
 # --- launch() persists bypass + permissions_file into state.json ---
