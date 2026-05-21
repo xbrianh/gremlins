@@ -265,6 +265,25 @@ def ls_others(*, cwd: str | os.PathLike[str] | None = None) -> str:
 
 
 @dataclasses.dataclass
+class Commit:
+    sha: str
+    subject: str
+
+
+def commits_since(ref: str, *, cwd: str | None = None) -> list[Commit]:
+    """Return commits reachable from HEAD but not from ref, oldest first."""
+    r = _run_git(["log", f"{ref}..HEAD", "--format=%H %s", "--reverse"], cwd=cwd, check=False)
+    if r.returncode != 0:
+        return []
+    result: list[Commit] = []
+    for line in r.stdout.splitlines():
+        sha, _, subject = line.partition(" ")
+        if sha:
+            result.append(Commit(sha=sha, subject=subject))
+    return result
+
+
+@dataclasses.dataclass
 class PreImplState:
     """Git state captured before the implement stage runs."""
 
