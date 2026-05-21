@@ -26,14 +26,29 @@ def _runner_pid_path() -> Path:
     return state_root() / "queues" / "default" / "runner.pid"
 
 
+def _pid_is_runner(pid: int) -> bool:
+    try:
+        result = subprocess.run(
+            ["ps", "-ww", "-U", str(os.getuid()), "-o", "command=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    return "gremlins queue run" in result.stdout
+
+
 def runner_active() -> bool:
     pid_path = _runner_pid_path()
     if pid_path.exists():
         try:
             pid = int(pid_path.read_text().strip())
-            os.kill(pid, 0)
-            return True
-        except (ProcessLookupError, ValueError, PermissionError, OSError):
+            if _pid_is_runner(pid):
+                return True
+        except (ValueError, OSError):
             pass
     try:
         result = subprocess.run(
@@ -300,14 +315,11 @@ def stop() -> int:
         print("queue stop: pidfile is corrupt", file=sys.stderr)
         pid_path.unlink(missing_ok=True)
         return 1
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        print(f"queue stop: stale pidfile (pid {pid} not found)", file=sys.stderr)
+    if not _pid_is_runner(pid):
+        print(
+            f"queue stop: stale pidfile (pid {pid} is not our runner)", file=sys.stderr
+        )
         pid_path.unlink(missing_ok=True)
-        return 1
-    except PermissionError:
-        print(f"queue stop: no permission to signal pid {pid}", file=sys.stderr)
         return 1
     try:
         os.kill(pid, signal.SIGTERM)
