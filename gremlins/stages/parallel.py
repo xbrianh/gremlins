@@ -215,8 +215,6 @@ class _ParallelExecutor:
             await git.remove_worktrees_async(
                 str(self._project_root), [str(p) for p in prior]
             )
-        gs.worktree_paths.clear()
-        gs.base_head = ""
         gs.clear()
 
         if not await git.in_git_repo_async(cwd=str(self._project_root)):
@@ -248,8 +246,6 @@ class _ParallelExecutor:
         await git.remove_worktrees_async(
             str(self._project_root), [str(p) for p in gs.worktree_paths.values()]
         )
-        gs.worktree_paths.clear()
-        gs.base_head = ""
         gs.clear()
 
     # --- parallel execution ---

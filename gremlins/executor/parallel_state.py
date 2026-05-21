@@ -53,6 +53,8 @@ class ParallelGroupState:
         )
 
     def clear(self) -> None:
+        self.worktree_paths.clear()
+        self.base_head = ""
         self.parent_data.patch_parallel_worktrees(
             self.group_name, base_head=None, paths=None
         )
@@ -100,8 +102,6 @@ class ParallelGroupState:
                         except Exception:
                             first_bail = {"class": "other"}
             return bailed, first_bail
-        except RuntimeError:
-            raise
         except Exception as exc:
             logger.warning("fan-in bail aggregation failed: %s", exc)
             return [], {}
