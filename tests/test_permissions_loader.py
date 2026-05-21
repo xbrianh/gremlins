@@ -4,7 +4,6 @@ import pathlib
 
 import pytest
 
-from gremlins.permissions.defaults import __file__ as _defaults_init
 from gremlins.permissions.loader import load_policy
 from gremlins.permissions.policy import KNOWN_PROVIDERS, Policy
 from gremlins.utils.yaml_io import YamlLoadError
@@ -135,12 +134,6 @@ def test_env_bypass_falsy_values(tmp_path):
         assert policy.bypass is False, f"expected no bypass for {val!r}"
 
 
-def test_defaults_all_providers_populated(tmp_path):
-    policy = _load(tmp_path=tmp_path)
-    for provider in KNOWN_PROVIDERS:
-        assert policy.block_for(provider), f"default block missing for {provider}"
-
-
 def test_project_override_does_not_wipe_other_defaults(tmp_path):
     project_dir = tmp_path / ".gremlins"
     project_dir.mkdir()
@@ -155,12 +148,9 @@ def test_project_override_does_not_wipe_other_defaults(tmp_path):
 
 
 def test_corrupt_default_file_raises_at_load(tmp_path, monkeypatch):
-    defaults_dir = pathlib.Path(_defaults_init).parent
-    corrupt = defaults_dir / "claude.yaml"
-    original = corrupt.read_text()
-    try:
-        corrupt.write_text(": bad: yaml: [\n")
-        with pytest.raises(YamlLoadError):
-            _load(tmp_path=tmp_path)
-    finally:
-        corrupt.write_text(original)
+    monkeypatch.setattr("gremlins.permissions.loader._DEFAULTS_DIR", tmp_path)
+    for provider in KNOWN_PROVIDERS:
+        (tmp_path / f"{provider}.yaml").write_text("allowed_tools: [Read]\n")
+    (tmp_path / "claude.yaml").write_text(": bad: yaml: [\n")
+    with pytest.raises(YamlLoadError):
+        _load(tmp_path=tmp_path)

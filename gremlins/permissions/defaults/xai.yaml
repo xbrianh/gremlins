@@ -1,7 +1,7 @@
-tools:
-  - bash
-  - edit
-  - read
-  - write
-  - grep
-  - glob
+allowed_tools:
+  - Bash
+  - Edit
+  - Read
+  - Write
+  - Grep
+  - Glob

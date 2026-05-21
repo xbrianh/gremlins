@@ -1,9 +1,7 @@
-# Native Copilot permission block. bypass: true maps to --allow-all at invocation time.
-# Full native-config wiring (AGENT.md / .github/copilot-instructions.md) lands in #788.
 allowed_tools:
-  - read
-  - edit
-  - bash
-  - write
-  - grep
-  - glob
+  - Read
+  - Edit
+  - Bash
+  - Write
+  - Grep
+  - Glob
