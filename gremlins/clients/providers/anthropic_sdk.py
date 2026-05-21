@@ -159,19 +159,14 @@ class AnthropicSdkClient:
             if raw is not None:
                 raw.close()
 
-        turns = result_evt.get("num_turns", "?") if result_evt else "?"
-        cost = (
-            result_evt.get("total_cost_usd", "not-reported")
-            if result_evt
-            else "not-reported"
-        )
-        sys.stderr.write(f"{ts()} {prefix}final: turns={turns} cost={cost}\n")
-        sys.stderr.flush()
-
-        exit_code = 1 if (result_evt is not None and result_evt.get("is_error")) else 0
+        exit_code = 1 if result_evt is None or result_evt.get("is_error") else 0
         text_result = result_evt.get("result") if result_evt else None
+        raw_cost = result_evt.get("total_cost_usd") if result_evt else None
         return CompletedRun(
-            exit_code=exit_code, text_result=text_result, events=captured, cost_usd=None
+            exit_code=exit_code,
+            text_result=text_result,
+            events=captured,
+            cost_usd=float(raw_cost) if isinstance(raw_cost, (int, float)) else None,
         )
 
     def reap_all(self) -> None:
