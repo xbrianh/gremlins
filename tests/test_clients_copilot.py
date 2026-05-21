@@ -256,7 +256,6 @@ def test_copilot_native_block_produces_base_argv(tmp_path, monkeypatch):
     asyncio.run(client.run("the-prompt", label="test"))
 
     argv = json.loads(argv_out.read_text(encoding="utf-8"))
-    assert "--allow-all" not in argv
     assert argv == ["-p", "the-prompt"]
 
 
@@ -290,5 +289,4 @@ def test_copilot_empty_block_runs_with_no_extra_flags(tmp_path, monkeypatch):
     asyncio.run(client.run("the-prompt", label="test"))
 
     argv = json.loads(argv_out.read_text(encoding="utf-8"))
-    assert "--allow-all" not in argv
     assert argv == ["-p", "the-prompt"]
