@@ -74,6 +74,9 @@ def _run(argv: list[str]) -> int:
         args = parser.parse_args(argv)
     except SystemExit as exc:
         return int(exc.code or 0)
+    if args.poll_interval <= 0:
+        print("queue run: --poll-interval must be > 0", file=sys.stderr)
+        return 1
     return run(once=args.once, poll_interval=args.poll_interval)
 
 

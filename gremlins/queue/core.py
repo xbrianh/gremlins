@@ -169,7 +169,10 @@ def run(
             if not pending:
                 if once or _should_stop():
                     return 0
-                time.sleep(poll_interval)
+                if _stop_event is not None:
+                    _stop_event.wait(timeout=poll_interval)
+                else:
+                    time.sleep(poll_interval)
                 continue
 
             if _should_stop():
@@ -185,8 +188,7 @@ def run(
             clean = _run_plain(cmd, log_path)
 
             if _should_stop():
-                if not clean:
-                    _move_item(item, root / "failed")
+                _move_item(item, root / "done" if clean else root / "failed")
                 return 0
 
             if clean:

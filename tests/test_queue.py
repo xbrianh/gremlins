@@ -131,22 +131,23 @@ def test_run_picks_up_item_added_while_watching(q):
 
     result: list[int] = []
     t = threading.Thread(
-        target=lambda: result.append(core.run(poll_interval=0.05, _stop_event=stop))
+        target=lambda: result.append(core.run(poll_interval=0.05, _stop_event=stop)),
+        daemon=True,
     )
     t.start()
+    try:
+        deadline = time.time() + 5.0
+        while not list((q / "done").glob("*.cmd")) and time.time() < deadline:
+            time.sleep(0.05)
 
-    deadline = time.time() + 5.0
-    while not list((q / "done").glob("*.cmd")) and time.time() < deadline:
-        time.sleep(0.05)
+        core.add("true")
 
-    core.add("true")
-
-    deadline = time.time() + 5.0
-    while len(list((q / "done").glob("*.cmd"))) < 2 and time.time() < deadline:
-        time.sleep(0.05)
-
-    stop.set()
-    t.join(timeout=2.0)
+        deadline = time.time() + 5.0
+        while len(list((q / "done").glob("*.cmd"))) < 2 and time.time() < deadline:
+            time.sleep(0.05)
+    finally:
+        stop.set()
+        t.join(timeout=2.0)
 
     assert not t.is_alive()
     assert result == [0]
