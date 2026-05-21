@@ -8,7 +8,7 @@ import time
 from typing import Any
 
 from gremlins import paths as _paths
-from gremlins.clients.registry import PROVIDER_CAPABILITIES
+from gremlins.clients.registry import CLIENT_FACTORIES
 from gremlins.launcher import launch
 from gremlins.permissions.loader import load_policy
 from gremlins.permissions.validation import validate_policy_against_registry
@@ -173,7 +173,7 @@ def _self_background_main(
         sys.stderr.write(f"error: failed to load permissions policy: {exc}\n")
         return 1
     try:
-        validate_policy_against_registry(policy, PROVIDER_CAPABILITIES)
+        validate_policy_against_registry(policy, set(CLIENT_FACTORIES))
     except ValueError as exc:
         sys.stderr.write(f"error: {exc}\n")
         return 1

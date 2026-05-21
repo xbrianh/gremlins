@@ -5,6 +5,7 @@ import os
 import pathlib
 import re
 import threading
+from typing import Any
 
 from gremlins.clients.protocol import CompletedRun
 from gremlins.utils.decorators import swallow
@@ -26,9 +27,17 @@ class SubprocessCopilotClient:
     so it can be swapped in via pipeline YAML ``provider: copilot``.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        bypass: bool = False,
+        native_block: dict[str, Any] | None = None,
+    ) -> None:
         self._lock = threading.RLock()
         self._children: list[asyncio.subprocess.Process] = []
+        self._bypass = bypass
+        self._native_block: dict[str, Any] = (
+            native_block if native_block is not None else {}
+        )
 
     def _track(self, p: asyncio.subprocess.Process) -> None:
         with self._lock:

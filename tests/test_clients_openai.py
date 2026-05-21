@@ -27,6 +27,7 @@ from gremlins.clients.providers.openai_agents import (
     make_xai_client,
 )
 from gremlins.clients.tools import GREMLINS_TOOLS, _bash_invoke
+from gremlins.permissions.policy import Policy
 
 
 def test_openai_client_constructs() -> None:
@@ -340,7 +341,7 @@ def test_model_settings_stored_and_passed_to_agent(monkeypatch: Any) -> None:
 
 def test_xai_client_constructs(monkeypatch: Any) -> None:
     monkeypatch.setenv("XAI_API_KEY", "test-key")
-    client = make_xai_client(None)
+    client = make_xai_client(None, Policy())
     assert isinstance(client, OpenAIAgentsClient)
     assert client._model == "grok-4"
     assert client.base_url == "https://api.x.ai/v1"
@@ -349,7 +350,7 @@ def test_xai_client_constructs(monkeypatch: Any) -> None:
 
 def test_xai_client_model_settings(monkeypatch: Any) -> None:
     monkeypatch.setenv("XAI_API_KEY", "test-key")
-    client = make_xai_client(None)
+    client = make_xai_client(None, Policy())
     assert client._model_settings is not None
     assert client._model_settings.temperature == 0.3
     assert client._model_settings.reasoning is not None
@@ -360,19 +361,19 @@ def test_xai_client_model_settings(monkeypatch: Any) -> None:
 def test_xai_client_missing_key(monkeypatch: Any) -> None:
     monkeypatch.delenv("XAI_API_KEY", raising=False)
     with pytest.raises(RuntimeError):
-        make_xai_client(None)
+        make_xai_client(None, Policy())
 
 
 def test_openai_client_constructs_with_api_key(monkeypatch: Any) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    client = make_openai_client(None)
+    client = make_openai_client(None, Policy())
     assert isinstance(client, OpenAIAgentsClient)
     assert client.api_key == "sk-test"
 
 
 def test_openai_client_model_settings(monkeypatch: Any) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    client = make_openai_client(None)
+    client = make_openai_client(None, Policy())
     assert client._model_settings is not None
     assert client._model_settings.temperature == 0.3
 
@@ -380,7 +381,7 @@ def test_openai_client_model_settings(monkeypatch: Any) -> None:
 def test_openai_client_missing_key(monkeypatch: Any) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     with pytest.raises(RuntimeError):
-        make_openai_client(None)
+        make_openai_client(None, Policy())
 
 
 @pytest.mark.skipif(
@@ -388,7 +389,7 @@ def test_openai_client_missing_key(monkeypatch: Any) -> None:
     reason="OPENAI_API_KEY not set",
 )
 def test_openai_integration_run() -> None:
-    client = make_openai_client("gpt-4o-mini")
+    client = make_openai_client("gpt-4o-mini", Policy())
     result = asyncio.run(
         client.run("Reply with the single word: done", label="integration-test")
     )
@@ -401,7 +402,7 @@ def test_openai_integration_run() -> None:
     reason="XAI_API_KEY not set",
 )
 def test_xai_integration_run() -> None:
-    client = make_xai_client("grok-3-mini-fast")
+    client = make_xai_client("grok-3-mini-fast", Policy())
     result = asyncio.run(
         client.run("Reply with the single word: done", label="integration-test")
     )

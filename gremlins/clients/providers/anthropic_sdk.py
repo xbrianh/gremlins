@@ -17,6 +17,7 @@ from gremlins.clients.config import (
 )
 from gremlins.clients.protocol import CompletedRun
 from gremlins.clients.stream import emit_event, ts
+from gremlins.permissions.policy import Policy
 
 _DEFAULT_MODEL = "claude-sonnet-4-6"
 
@@ -137,11 +138,20 @@ def _extract_cost(msg: Any, model: str) -> float | None:
 
 
 class AnthropicSdkClient:
-    def __init__(self, model: str | None) -> None:
+    def __init__(
+        self,
+        model: str | None,
+        bypass: bool = False,
+        native_block: dict[str, Any] | None = None,
+    ) -> None:
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             raise RuntimeError("ANTHROPIC_API_KEY environment variable is not set")
         self._model = model or _DEFAULT_MODEL
+        self._bypass = bypass
+        self._native_block: dict[str, Any] = (
+            native_block if native_block is not None else {}
+        )
 
     async def _execute(
         self,
@@ -305,5 +315,9 @@ class AnthropicSdkClient:
         return None
 
 
-def make_anthropic_client(model: str | None) -> AnthropicSdkClient:
-    return AnthropicSdkClient(model)
+def make_anthropic_client(model: str | None, policy: Policy) -> AnthropicSdkClient:
+    return AnthropicSdkClient(
+        model,
+        bypass=policy.bypass,
+        native_block=policy.block_for("anthropic"),
+    )

@@ -5,16 +5,18 @@ from typing import Any
 
 from gremlins.clients.protocol import CompletedRun
 from gremlins.clients.registry import CLIENT_FACTORIES
+from gremlins.permissions.policy import Policy
 
 
 class Client:
-    def __init__(self, provider: str, model: str) -> None:
+    def __init__(self, provider: str, model: str, policy: Policy | None = None) -> None:
         self.provider = provider
         self.model = model
+        self._policy = policy if policy is not None else Policy()
         self._impl: Any = None
 
     @classmethod
-    def parse(cls, s: str) -> Client:
+    def parse(cls, s: str, policy: Policy | None = None) -> Client:
         if ":" not in s:
             raise ValueError(
                 f"invalid client specifier {s!r}: expected 'provider:model'"
@@ -28,7 +30,7 @@ class Client:
             raise ValueError(f"invalid client specifier {s!r}: model must not be empty")
         if provider not in CLIENT_FACTORIES:
             raise ValueError(f"unknown provider {provider!r} in client specifier {s!r}")
-        return cls(provider=provider, model=model)
+        return cls(provider=provider, model=model, policy=policy)
 
     def __str__(self) -> str:
         return f"{self.provider}:{self.model}"
@@ -48,7 +50,7 @@ class Client:
         if self._impl is None:
             if self.provider not in CLIENT_FACTORIES:
                 raise ValueError(f"unknown provider {self.provider!r}")
-            self._impl = CLIENT_FACTORIES[self.provider](self.model)
+            self._impl = CLIENT_FACTORIES[self.provider](self.model, self._policy)
         return self._impl
 
     async def run(

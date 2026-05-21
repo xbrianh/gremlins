@@ -16,6 +16,7 @@ from gremlins.clients.providers.anthropic_sdk import (
     StreamTimeoutError,
     make_anthropic_client,
 )
+from gremlins.permissions.policy import Policy
 
 # ---------------------------------------------------------------------------
 # Stub types that mirror the real claude_agent_sdk message types.
@@ -144,7 +145,7 @@ def test_client_total_cost_usd(monkeypatch):
 
 def test_factory_constructs_client(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-    client = make_anthropic_client("claude-sonnet-4-7")
+    client = make_anthropic_client("claude-sonnet-4-7", Policy())
     assert isinstance(client, AnthropicSdkClient)
     assert client._model == "claude-sonnet-4-7"
 
@@ -152,7 +153,7 @@ def test_factory_constructs_client(monkeypatch):
 def test_factory_missing_key_raises(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
-        make_anthropic_client("claude-sonnet-4-7")
+        make_anthropic_client("claude-sonnet-4-7", Policy())
 
 
 def test_registered_factory_parses_url(monkeypatch):

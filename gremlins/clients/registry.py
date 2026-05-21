@@ -3,15 +3,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-CLIENT_FACTORIES: dict[str, Callable[[str | None], Any]] = {}
-PROVIDER_CAPABILITIES: dict[str, bool] = {}
+from gremlins.permissions.policy import Policy
+
+CLIENT_FACTORIES: dict[str, Callable[[str | None, Policy], Any]] = {}
 
 
 def register_client_factory(
     provider: str,
-    factory: Callable[[str | None], Any],
-    *,
-    takes_permission_block: bool = True,
+    factory: Callable[[str | None, Policy], Any],
 ) -> None:
     CLIENT_FACTORIES[provider] = factory
-    PROVIDER_CAPABILITIES[provider] = takes_permission_block

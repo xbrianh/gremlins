@@ -43,6 +43,7 @@ from typing import Any, cast
 from gremlins.clients.client import Client
 from gremlins.executor.state import State, StateData, validate_gremlin_id
 from gremlins.logging_setup import configure_logging
+from gremlins.permissions.policy import Policy
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.loader import parse_stage
 from gremlins.stages.outcome import Bail, Done
@@ -66,7 +67,7 @@ def _build_state(spec: dict[str, Any]) -> State:
     client_label = spec.get("client")
     if not isinstance(client_label, str) or not client_label:
         raise ValueError("spec missing required 'client' field")
-    client = Client.parse(client_label)
+    client = Client.parse(client_label, policy=Policy())
 
     raw_session = spec.get("session_dir")
     if not isinstance(raw_session, str) or not raw_session:
