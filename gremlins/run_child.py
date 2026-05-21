@@ -31,14 +31,17 @@ import asyncio
 import importlib
 import json
 import logging
+import os
 import pathlib
 import sys
 import traceback
 from typing import Any, cast
 
 from gremlins.clients.client import Client
+from gremlins.clients.registry import CLIENT_FACTORIES
 from gremlins.executor.state import State, StateData, validate_gremlin_id
-from gremlins.permissions.policy import Policy
+from gremlins.permissions.loader import load_policy
+from gremlins.permissions.validation import validate_policy_against_registry
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.loader import parse_stage
 from gremlins.stages.outcome import Bail, Done
@@ -62,7 +65,6 @@ def _build_state(spec: dict[str, Any]) -> State:
     client_label = spec.get("client")
     if not isinstance(client_label, str) or not client_label:
         raise ValueError("spec missing required 'client' field")
-    client = Client.parse(client_label, policy=Policy())
 
     raw_session = spec.get("session_dir")
     if not isinstance(raw_session, str) or not raw_session:
@@ -75,6 +77,19 @@ def _build_state(spec: dict[str, Any]) -> State:
     if gremlin_id:
         validate_gremlin_id(gremlin_id)
     data = StateData.load(gremlin_id)
+
+    project_root = (
+        pathlib.Path(data.project_root) if data.project_root else pathlib.Path.cwd()
+    )
+    perm_file = pathlib.Path(data.permissions_file) if data.permissions_file else None
+    policy = load_policy(
+        cli_bypass=data.bypass or None,
+        cli_permissions_file=perm_file,
+        env=os.environ,
+        cwd=project_root,
+    )
+    validate_policy_against_registry(policy, set(CLIENT_FACTORIES))
+    client = Client.parse(client_label, policy=policy)
 
     worktree: pathlib.Path | None = None
     if spec.get("worktree"):

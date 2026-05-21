@@ -208,6 +208,9 @@ def _self_background_main(
             gremlin_id=args.gremlin_id,
             pr=args.pr,
             bypass=policy.bypass,
+            permissions_file=str(args.permissions_file.resolve())
+            if args.permissions_file
+            else "",
         )
     except (ValueError, RuntimeError) as exc:
         sys.stderr.write(f"error: {exc}\n")

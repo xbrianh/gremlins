@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
 import pathlib
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from gremlins.cli.launch import _self_background_main, build_launch_parser
+from gremlins.executor.state import StateData
 from gremlins.permissions.policy import Policy
 from gremlins.stages.base import Stage
 
@@ -177,3 +181,152 @@ def test_exactly_one_permissions_line_bypass(capsys):
         if ln.startswith("permissions:")
     ]
     assert len(lines) == 1
+
+
+# --- StateData round-trip ---
+
+
+def test_statedata_bypass_roundtrip(tmp_path):
+    sd = StateData(gremlin_id="g1", bypass=True, permissions_file="/tmp/p.yaml")
+    sd.persist(tmp_path)
+    raw = json.loads((tmp_path / "state.json").read_text())
+    assert raw["bypass"] is True
+    assert raw["permissions_file"] == "/tmp/p.yaml"
+
+
+def test_statedata_bypass_load(tmp_path, monkeypatch):
+    state_file = tmp_path / "state.json"
+    state_file.write_text(json.dumps({"bypass": True, "permissions_file": "/p.yaml"}))
+    monkeypatch.setattr(
+        "gremlins.executor.state.resolve_state_file", lambda _: state_file
+    )
+    sd = StateData.load(None)
+    assert sd.bypass is True
+    assert sd.permissions_file == "/p.yaml"
+
+
+# --- launch() persists bypass + permissions_file into state.json ---
+
+
+def test_launch_persists_bypass(tmp_path, monkeypatch):
+    import gremlins.launcher as launcher_mod
+
+    monkeypatch.setattr(launcher_mod, "_state_root", lambda: tmp_path)
+    with (
+        patch.object(launcher_mod, "_resolve_inputs") as mock_ri,
+        patch.object(launcher_mod, "_prepare_state_dir"),
+        patch.object(
+            launcher_mod, "_persist_expanded_pipeline", return_value="pipe.yaml"
+        ),
+        patch.object(launcher_mod, "_spawn") as mock_spawn,
+    ):
+        gid = "gr-bypass-test"
+        inputs = MagicMock()
+        inputs.gremlin_id = gid
+        inputs.pipeline_path = "pipe.yaml"
+        inputs.pr_artifact = None
+        mock_ri.return_value = inputs
+        proc = MagicMock()
+        proc.pid = 99
+        mock_spawn.return_value = proc
+
+        state_dir = tmp_path / gid
+        state_dir.mkdir(parents=True)
+
+        sd = StateData(gremlin_id=gid)
+
+        with patch.object(launcher_mod, "_initial_state_data", return_value=sd):
+            launcher_mod.launch("some-kind", bypass=True, permissions_file="/p.yaml")
+
+    raw = json.loads((state_dir / "state.json").read_text())
+    assert raw["bypass"] is True
+    assert raw["permissions_file"] == "/p.yaml"
+
+
+# --- child _build_state reconstructs policy from StateData ---
+
+_CHILD_MODULES = [
+    ("gremlins.spawn.child", "gremlins.spawn.child"),
+    ("gremlins.run_child", "gremlins.run_child"),
+]
+
+
+@pytest.mark.parametrize("mod_path,_label", _CHILD_MODULES)
+def test_child_build_state_bypass_policy(mod_path, _label, tmp_path):
+    import importlib
+
+    mod = importlib.import_module(mod_path)
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    fake_data = StateData(
+        gremlin_id=None,
+        bypass=True,
+        permissions_file="",
+        project_root=str(tmp_path),
+    )
+    spec = {
+        "client": "claude:claude-haiku-4-5-20251001",
+        "session_dir": str(session_dir),
+    }
+
+    captured_policy: list[Policy] = []
+
+    def fake_client_parse(label, policy=None):
+        captured_policy.append(policy)
+        return MagicMock()
+
+    with (
+        patch(f"{mod_path}.StateData.load", return_value=fake_data),
+        patch(f"{mod_path}.Client.parse", side_effect=fake_client_parse),
+        patch(f"{mod_path}.validate_policy_against_registry"),
+    ):
+        mod._build_state(spec)
+
+    assert len(captured_policy) == 1
+    assert captured_policy[0] is not None
+    assert captured_policy[0].bypass is True
+
+
+@pytest.mark.parametrize("mod_path,_label", _CHILD_MODULES)
+def test_child_build_state_project_permissions_blocks(mod_path, _label, tmp_path):
+    import importlib
+
+    mod = importlib.import_module(mod_path)
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    gremlins_dir = tmp_path / ".gremlins"
+    gremlins_dir.mkdir()
+    (gremlins_dir / "permissions.yaml").write_text(
+        "blocks:\n  claude:\n    allow_edits: true\n"
+    )
+
+    fake_data = StateData(
+        gremlin_id=None,
+        bypass=False,
+        permissions_file="",
+        project_root=str(tmp_path),
+    )
+    spec = {
+        "client": "claude:claude-haiku-4-5-20251001",
+        "session_dir": str(session_dir),
+    }
+
+    captured_policy: list[Policy] = []
+
+    def fake_client_parse(label, policy=None):
+        captured_policy.append(policy)
+        return MagicMock()
+
+    with (
+        patch(f"{mod_path}.StateData.load", return_value=fake_data),
+        patch(f"{mod_path}.Client.parse", side_effect=fake_client_parse),
+        patch(f"{mod_path}.validate_policy_against_registry"),
+    ):
+        mod._build_state(spec)
+
+    assert len(captured_policy) == 1
+    policy = captured_policy[0]
+    assert policy is not None
+    assert "claude" in policy.blocks
