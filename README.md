@@ -340,8 +340,9 @@ Gremlins operate in one of two permission modes:
 **Default mode** (no flags): The agent is restricted to an allowlist of tools
 (Read, Edit, Write, Bash, Grep, Glob) and its Bash commands are path-scoped to
 the gremlin's git worktree.  It can read and modify files inside that worktree
-and run commands that don't reference paths outside it.  It cannot reach your
-SSH keys, credentials, or other files outside the worktree.
+and blocks direct path references outside it.  This is a best-effort token
+check, not a full sandbox — indirect references (heredocs, computed paths) may
+not be caught.
 
 **Bypass mode** (`--bypass`, `GREMLINS_BYPASS_PERMISSIONS=1`, project
 `.gremlins/permissions.yaml bypass_permissions: true`, or user config

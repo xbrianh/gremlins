@@ -47,7 +47,7 @@ class Client:
         return hash((self.provider, self.model))
 
     def set_policy(self, policy: Policy) -> None:
-        """Replace the effective policy before the implementation is created."""
+        assert self._impl is None, "set_policy called after impl was already created"
         self._policy = policy
 
     def _get_impl(self) -> Any:

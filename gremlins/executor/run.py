@@ -39,9 +39,8 @@ def _apply_policy_to_stages(stages: list[Stage], policy: Policy) -> None:
     for stage in stages:
         if stage.client is not None:
             stage.client.set_policy(policy)
-        body = getattr(stage, "body", [])
-        if body:
-            _apply_policy_to_stages(body, policy)
+        if stage.body:
+            _apply_policy_to_stages(stage.body, policy)
 
 
 def _install_signal_handlers(clients: Sequence[Client]) -> None:
@@ -175,9 +174,8 @@ async def run_pipeline(
         die(str(exc))
 
     stored_bypass = bool(state_json.get("bypass", False))
-    cli_bypass_for_policy: bool | None = True if stored_bypass else None
     policy = load_policy(
-        cli_bypass=cli_bypass_for_policy,
+        cli_bypass=stored_bypass,
         cli_permissions_file=None,
         env=os.environ,
         cwd=pathlib.Path(project_root) if project_root else pathlib.Path.cwd(),

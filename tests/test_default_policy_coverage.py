@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import pathlib
 
-import pytest
-
 from gremlins.permissions.loader import load_policy
 from gremlins.permissions.policy import KNOWN_PROVIDERS
 from gremlins.pipeline import Pipeline
@@ -31,20 +29,3 @@ def test_gh_terse_pipeline_loads() -> None:
     assert "plan" in stage_types
     assert "implement" in stage_types
     assert "github-open-pull-request" in stage_types
-
-
-@pytest.mark.integration
-def test_local_pipeline_default_block_no_denied_tools() -> None:
-    """Verify local pipeline runs under default block without tool denials.
-
-    Requires OPENAI_API_KEY or XAI_API_KEY to be set.
-    Gated with: pytest -m integration
-    """
-    import os
-
-    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("XAI_API_KEY")
-    if not api_key:
-        pytest.skip("no OPENAI_API_KEY or XAI_API_KEY set")
-    # The actual run is intentionally omitted — the test above verifies structural
-    # correctness; a live run is left to CI integration job configuration.
-    pytest.skip("live run not wired in unit test runner")
