@@ -29,6 +29,8 @@ _INFRA_ARGS = frozenset(
         "gremlin_id",
         "wait",
         "pr",
+        "bypass",
+        "permissions_file",
     }
 )
 _INFRA_FLAG_NAMES = frozenset(
@@ -42,6 +44,8 @@ _INFRA_FLAG_NAMES = frozenset(
         "gremlin-id",
         "wait",
         "pr",
+        "bypass",
+        "permissions-file",
     }
 )
 _LAUNCH_BRIEF = "usage: gremlins launch <name> [opts]\nLaunch a background gremlin by pipeline name. Run 'gremlins launch --list' to see available pipelines.\n"
@@ -88,6 +92,20 @@ def build_launch_parser(
         help="PR number or URL (e.g. 697 or https://github.com/.../pull/697). Checks out the PR head in a detached worktree.",
     )
     p.add_argument("--client", default=None)
+    p.add_argument(
+        "--bypass",
+        action="store_true",
+        default=False,
+        help="Skip permission checks; run in bypass mode.",
+    )
+    p.add_argument(
+        "--permissions-file",
+        dest="permissions_file",
+        type=pathlib.Path,
+        default=None,
+        metavar="PATH",
+        help="Path to a permissions YAML file to load instead of the project default.",
+    )
     for si in stage_cls.orchestration_args():
         flag = "--" + si.name.replace("_", "-")
         if flag.lstrip("-") in _INFRA_FLAG_NAMES:
@@ -164,8 +182,8 @@ def _self_background_main(
 ) -> int:
     try:
         policy = load_policy(
-            cli_bypass=None,
-            cli_permissions_file=None,
+            cli_bypass=args.bypass or None,
+            cli_permissions_file=args.permissions_file,
             env=os.environ,
             cwd=pathlib.Path.cwd(),
         )
@@ -217,8 +235,12 @@ def _self_background_main(
     if args.print_id_only:
         sys.stdout.write(gremlin_id + "\n")
     else:
+        perm_mode = "bypass" if policy.bypass else "default (allowlist)"
         info = (
-            f"gremlin id:  {gremlin_id}\nlog:         {log_path}\nstate file:  {sf}\n"
+            f"gremlin id:  {gremlin_id}\n"
+            f"log:         {log_path}\n"
+            f"state file:  {sf}\n"
+            f"permissions: {perm_mode}\n"
         )
         sys.stderr.write(info)
         if args.print_id:
