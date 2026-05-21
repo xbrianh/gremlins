@@ -190,7 +190,10 @@ def test_resume_uses_persisted_pre_impl_head(tmp_path: pathlib.Path) -> None:
         return _FAKE_PRE
 
     with (
-        patch("gremlins.stages.implement.record_pre_impl_state", side_effect=_fail_if_called),
+        patch(
+            "gremlins.stages.implement.record_pre_impl_state",
+            side_effect=_fail_if_called,
+        ),
         patch(
             "gremlins.stages.implement.classify_impl_outcome",
             return_value=HeadAdvanced(commit_count=3),
@@ -198,7 +201,9 @@ def test_resume_uses_persisted_pre_impl_head(tmp_path: pathlib.Path) -> None:
     ):
         asyncio.run(stage.run(state))
 
-    assert not called, "record_pre_impl_state must not be called when pre_impl_head is set"
+    assert not called, (
+        "record_pre_impl_state must not be called when pre_impl_head is set"
+    )
     assert state.data.pre_impl_head == "", "pre_impl_head must be cleared on success"
 
 
