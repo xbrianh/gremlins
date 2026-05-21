@@ -31,6 +31,7 @@ from gremlins.clients.config import (
 from gremlins.clients.protocol import CompletedRun
 from gremlins.clients.stream import trunc, ts
 from gremlins.clients.tools import build_tools
+from gremlins.permissions.policy import Policy
 from gremlins.utils.decorators import default_on_exception, swallow
 from gremlins.utils.yaml_io import load_bundled_prompt
 
@@ -106,6 +107,8 @@ class OpenAIAgentsClient:
         api_key: str | None = None,
         model_settings: ModelSettings | None = None,
         instructions: str = DEFAULT_INSTRUCTIONS,
+        bypass: bool = False,
+        native_block: dict[str, Any] | None = None,
     ) -> None:
         self._model = model or "gpt-4o"
         self._base_url = base_url
@@ -120,6 +123,10 @@ class OpenAIAgentsClient:
         # RLock so signal handlers on the main thread don't deadlock
         self._lock = threading.RLock()
         self._active_runs: list[RunResultStreaming] = []
+        self._bypass = bypass
+        self._native_block: dict[str, Any] = (
+            native_block if native_block is not None else {}
+        )
 
     def _track(self, run: RunResultStreaming) -> None:
         with self._lock:
@@ -435,7 +442,7 @@ class OpenAIAgentsClient:
         return self._api_key
 
 
-def make_openai_client(model: str | None) -> OpenAIAgentsClient:
+def make_openai_client(model: str | None, policy: Policy) -> OpenAIAgentsClient:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY environment variable is not set")
@@ -443,10 +450,12 @@ def make_openai_client(model: str | None) -> OpenAIAgentsClient:
         model,
         api_key=api_key,
         model_settings=ModelSettings(temperature=_DEFAULT_TEMPERATURE),
+        bypass=policy.bypass,
+        native_block=policy.block_for("openai"),
     )
 
 
-def make_xai_client(model: str | None) -> OpenAIAgentsClient:
+def make_xai_client(model: str | None, policy: Policy) -> OpenAIAgentsClient:
     api_key = os.environ.get("XAI_API_KEY")
     if not api_key:
         raise RuntimeError("XAI_API_KEY environment variable is not set")
@@ -458,4 +467,6 @@ def make_xai_client(model: str | None) -> OpenAIAgentsClient:
             temperature=_DEFAULT_TEMPERATURE,
             reasoning=Reasoning(effort="high", summary="auto"),
         ),
+        bypass=policy.bypass,
+        native_block=policy.block_for("xai"),
     )

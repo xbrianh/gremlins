@@ -38,13 +38,21 @@ class SubprocessClaudeClient:
     ``claude -p`` before the orchestrator exits.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        bypass: bool = False,
+        native_block: dict[str, Any] | None = None,
+    ) -> None:
         # Reentrant lock: signal handlers run on the main thread and may land
         # while _track/_untrack already hold it. A plain Lock would deadlock
         # in that narrow window.
         self._lock = threading.RLock()
         self._children: list[asyncio.subprocess.Process] = []
         self._total_cost_usd: float = 0.0
+        self._bypass = bypass
+        self._native_block: dict[str, Any] = (
+            native_block if native_block is not None else {}
+        )
 
     def _track(self, p: asyncio.subprocess.Process) -> None:
         with self._lock:
