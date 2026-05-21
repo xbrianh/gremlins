@@ -19,6 +19,14 @@ _TEMPLATE_LOCAL = "plan: {plan_text}{spec_block}"
 _TEMPLATE_GH = "{spec_block}{plan_source_label}{plan_text}{plan_location_note}"
 
 
+@pytest.fixture(autouse=True)
+def _mock_rev_parse(monkeypatch):
+    monkeypatch.setattr(
+        "gremlins.stages.implement.proc.run_or_raise",
+        lambda cmd, **kwargs: cmd[-1],
+    )
+
+
 def _make_state(
     tmp_path: pathlib.Path,
     *,

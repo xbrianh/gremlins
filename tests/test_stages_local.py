@@ -149,7 +149,7 @@ def test_implement_renders_spec_block_when_present(tmp_path, monkeypatch):
             return await super().run(prompt, label=label, **kwargs)
 
     head_r = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=git_dir, capture_output=True, text=True
+        ["git", "rev-parse", "HEAD"], cwd=git_dir, capture_output=True, text=True, check=True
     )
     client = _CommittingClient(fixtures={"implement": MINIMAL_EVENTS})
     (session_dir / "plan.md").write_text("task 1: do something", encoding="utf-8")
@@ -194,7 +194,7 @@ def test_implement_omits_spec_block_when_absent(tmp_path, monkeypatch):
             return await super().run(prompt, label=label, **kwargs)
 
     head_r = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=git_dir, capture_output=True, text=True
+        ["git", "rev-parse", "HEAD"], cwd=git_dir, capture_output=True, text=True, check=True
     )
     client = _CommittingClient(fixtures={"implement": MINIMAL_EVENTS})
     (session_dir / "plan.md").write_text("task 1: do something", encoding="utf-8")
@@ -269,7 +269,7 @@ def test_implement_stage_raises_on_empty_diff(tmp_path, monkeypatch):
     session_dir.mkdir()
 
     head_r = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=git_dir, capture_output=True, text=True
+        ["git", "rev-parse", "HEAD"], cwd=git_dir, capture_output=True, text=True, check=True
     )
     client = FakeClaudeClient(fixtures={"implement": MINIMAL_EVENTS})
     (session_dir / "plan.md").write_text("# Plan\nDo stuff.\n", encoding="utf-8")

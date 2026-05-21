@@ -179,6 +179,10 @@ def common_local_patches(monkeypatch):
     )
     monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: True)
     monkeypatch.setattr(
+        "gremlins.stages.implement.proc.run_or_raise",
+        lambda cmd, **kwargs: cmd[-1],
+    )
+    monkeypatch.setattr(
         "gremlins.stages.implement.classify_impl_outcome",
         lambda pre, **kwargs: HeadAdvanced(commit_count=1),
     )

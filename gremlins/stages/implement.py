@@ -10,6 +10,7 @@ from gremlins.executor.state import State
 from gremlins.stages.agent import run_agent
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Done, Outcome
+from gremlins.utils import proc
 from gremlins.utils.git import (
     DivergentHead,
     EmptyImpl,
@@ -92,7 +93,10 @@ class Implement(Stage):
             )
 
         cwd_arg = str(state.worktree) if state.worktree is not None else None
-        pre = PreImplState(head=state.data.base_ref_sha)
+        pre_head = proc.run_or_raise(
+            ["git", "rev-parse", "--verify", state.data.base_ref_sha], cwd=cwd_arg
+        )
+        pre = PreImplState(head=pre_head)
 
         template = "\n\n".join(self.prompts).rstrip()
         prompt = template.format(
