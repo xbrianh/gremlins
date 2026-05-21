@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
 import pathlib
 import sys
@@ -180,6 +181,7 @@ def launch_main(argv: list[str]) -> int:
 def _self_background_main(
     pipeline_name: str, args: argparse.Namespace, stage_inputs: dict[str, Any]
 ) -> int:
+    importlib.import_module("gremlins.clients")
     try:
         policy = load_policy(
             cli_bypass=args.bypass or None,
