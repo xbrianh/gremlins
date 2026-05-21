@@ -285,7 +285,10 @@ def test_read_artifacts_for_attempt_empty_returns_empty(tmp_path, monkeypatch):
 
     sf.write_text(
         json.dumps(
-            {"id": gremlin_id, "artifacts": [{"type": "branch", "name": "x", "attempt": ""}]}
+            {
+                "id": gremlin_id,
+                "artifacts": [{"type": "branch", "name": "x", "attempt": ""}],
+            }
         )
     )
 
@@ -314,4 +317,6 @@ def test_append_artifact_stamps_child_attempt(tmp_path, monkeypatch):
     arts = StateData.load(gremlin_id).read_artifacts()
     assert arts == [{"type": "branch", "name": "feat-child", "attempt": child_attempt}]
     assert StateData.load(gremlin_id).read_artifacts_for_attempt(child_attempt) == arts
-    assert StateData.load(gremlin_id).read_artifacts_for_attempt("parent-stage-aabb") == []
+    assert (
+        StateData.load(gremlin_id).read_artifacts_for_attempt("parent-stage-aabb") == []
+    )
