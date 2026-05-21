@@ -346,7 +346,8 @@ class StateData:
     def read_artifacts_for_stage(self, stage_name: str) -> list[dict[str, Any]]:
         prefix = f"{stage_name}-"
         return [
-            a for a in self.read_artifacts()
+            a
+            for a in self.read_artifacts()
             if str(a.get("attempt") or "").startswith(prefix)
         ]
 

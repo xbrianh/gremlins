@@ -224,10 +224,16 @@ def test_read_artifacts_for_attempt_no_match(tmp_path, monkeypatch):
     state_root, sf = _make_state_dir(tmp_path, gremlin_id)
     monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
 
-    sf.write_text(json.dumps({
-        "id": gremlin_id,
-        "artifacts": [{"type": "branch", "name": "x", "attempt": "review-aaaa"}],
-    }))
+    sf.write_text(
+        json.dumps(
+            {
+                "id": gremlin_id,
+                "artifacts": [
+                    {"type": "branch", "name": "x", "attempt": "review-aaaa"}
+                ],
+            }
+        )
+    )
 
     assert StateData.load(gremlin_id).read_artifacts_for_attempt("implement-aaaa") == []
 
