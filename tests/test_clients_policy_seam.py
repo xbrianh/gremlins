@@ -12,8 +12,8 @@ from gremlins.clients.registry import CLIENT_FACTORIES
 from gremlins.permissions.loader import load_default_block
 from gremlins.permissions.policy import Policy
 
-_CLAUDE_BLOCK: dict[str, Any] = {"allowedTools": ["Read"]}
-_COPILOT_BLOCK: dict[str, Any] = {"allowedTools": ["Write"]}
+_CLAUDE_BLOCK: dict[str, Any] = {"allowed_tools": ["Read"]}
+_COPILOT_BLOCK: dict[str, Any] = {"allowed_tools": ["Write"]}
 
 
 def test_subprocess_claude_stores_bypass_and_block() -> None:

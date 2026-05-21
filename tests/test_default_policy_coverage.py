@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pathlib
 
+import gremlins.clients  # noqa: F401 — registers CLIENT_FACTORIES as a side effect
 from gremlins.clients.registry import CLIENT_FACTORIES
 from gremlins.permissions.loader import load_default_block
 from gremlins.pipeline import Pipeline

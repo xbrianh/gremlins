@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import pathlib
 
+import pytest
+
+import gremlins.clients  # noqa: F401 — registers CLIENT_FACTORIES as a side effect
 from gremlins.clients.registry import CLIENT_FACTORIES
 from gremlins.permissions.loader import load_default_block, load_policy
 from gremlins.permissions.policy import Policy
+from gremlins.utils.yaml_io import YamlLoadError
 
 
 def _load(
@@ -146,3 +150,10 @@ def test_project_override_stored_without_defaults(tmp_path):
             assert policy.block_for(provider) == {}, (
                 f"unexpected override for {provider}"
             )
+
+
+def test_corrupt_default_file_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr("gremlins.permissions.loader._DEFAULTS_DIR", tmp_path)
+    (tmp_path / "claude.yaml").write_text(": bad: yaml: [\n")
+    with pytest.raises(YamlLoadError):
+        load_default_block("claude")
