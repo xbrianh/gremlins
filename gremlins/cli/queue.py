@@ -58,11 +58,26 @@ def _list(argv: list[str]) -> int:
 
 def _run(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="gremlins queue run")
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Exit when pending/ is empty instead of watching for new items.",
+    )
+    parser.add_argument(
+        "--poll-interval",
+        type=float,
+        default=1.0,
+        metavar="SEC",
+        help="Seconds between pending-dir polls when watching (default 1).",
+    )
     try:
-        parser.parse_args(argv)
+        args = parser.parse_args(argv)
     except SystemExit as exc:
         return int(exc.code or 0)
-    return run()
+    if args.poll_interval <= 0:
+        print("queue run: --poll-interval must be > 0", file=sys.stderr)
+        return 1
+    return run(once=args.once, poll_interval=args.poll_interval)
 
 
 def _requeue(argv: list[str]) -> int:
