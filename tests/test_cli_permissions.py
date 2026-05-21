@@ -213,7 +213,9 @@ def test_launch_persists_bypass(tmp_path, monkeypatch):
     with (
         patch.object(launcher_mod, "_resolve_inputs") as mock_ri,
         patch.object(launcher_mod, "_prepare_state_dir"),
-        patch.object(launcher_mod, "_persist_expanded_pipeline", return_value="pipe.yaml"),
+        patch.object(
+            launcher_mod, "_persist_expanded_pipeline", return_value="pipe.yaml"
+        ),
         patch.object(launcher_mod, "_spawn") as mock_spawn,
     ):
         gid = "gr-bypass-test"
@@ -261,7 +263,10 @@ def test_child_build_state_bypass_policy(mod_path, _label, tmp_path):
         permissions_file="",
         project_root=str(tmp_path),
     )
-    spec = {"client": "claude:claude-haiku-4-5-20251001", "session_dir": str(session_dir)}
+    spec = {
+        "client": "claude:claude-haiku-4-5-20251001",
+        "session_dir": str(session_dir),
+    }
 
     captured_policy: list[Policy] = []
 
@@ -301,7 +306,10 @@ def test_child_build_state_project_permissions_blocks(mod_path, _label, tmp_path
         permissions_file="",
         project_root=str(tmp_path),
     )
-    spec = {"client": "claude:claude-haiku-4-5-20251001", "session_dir": str(session_dir)}
+    spec = {
+        "client": "claude:claude-haiku-4-5-20251001",
+        "session_dir": str(session_dir),
+    }
 
     captured_policy: list[Policy] = []
 

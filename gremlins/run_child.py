@@ -79,7 +79,9 @@ def _build_state(spec: dict[str, Any]) -> State:
         validate_gremlin_id(gremlin_id)
     data = StateData.load(gremlin_id)
 
-    project_root = pathlib.Path(data.project_root) if data.project_root else pathlib.Path.cwd()
+    project_root = (
+        pathlib.Path(data.project_root) if data.project_root else pathlib.Path.cwd()
+    )
     perm_file = pathlib.Path(data.permissions_file) if data.permissions_file else None
     policy = load_policy(
         cli_bypass=True if data.bypass else None,
