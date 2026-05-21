@@ -301,11 +301,12 @@ class StateData:
         sf = self.state_file or resolve_state_file(self.gremlin_id)
         if sf is None or not sf.exists():
             return
+        stamped = {**artifact, "attempt": self.attempt} if self.attempt else artifact
         try:
 
             def _apply(data: dict[str, Any]) -> None:
                 arts: list[Any] = list(data.get("artifacts") or [])
-                arts.append(artifact)
+                arts.append(stamped)
                 data["artifacts"] = arts
 
             locked_update(sf, _apply)
@@ -338,6 +339,16 @@ class StateData:
             return [a for a in artifacts if isinstance(a, dict)]
         except (json.JSONDecodeError, OSError):
             return []
+
+    def read_artifacts_for_attempt(self, attempt: str) -> list[dict[str, Any]]:
+        return [a for a in self.read_artifacts() if a.get("attempt") == attempt]
+
+    def read_artifacts_for_stage(self, stage_name: str) -> list[dict[str, Any]]:
+        prefix = f"{stage_name}-"
+        return [
+            a for a in self.read_artifacts()
+            if str(a.get("attempt") or "").startswith(prefix)
+        ]
 
     def read_pr_url(self) -> str:
         for art in reversed(self.read_artifacts()):
