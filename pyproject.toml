@@ -31,6 +31,9 @@ packages = ["gremlins"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "integration: slow tests that call real external APIs (deselect with -m 'not integration')",
+]
 
 [tool.ruff]
 target-version = "py311"

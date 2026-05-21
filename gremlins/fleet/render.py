@@ -22,6 +22,7 @@ class FleetRow:
     live_full: str
     age: str
     client: str
+    perm_mode: str
     desc: str
     project_root: str
     gremlin_id: str
@@ -85,6 +86,7 @@ def build_row(
     age = humanize_age(started_at)
     sid = display_id(gremlin_id)
     client = state.get("client") or "—"
+    perm_mode = "bypass" if state.get("bypass") else "default"
 
     return FleetRow(
         started_at=str(started_at),
@@ -95,6 +97,7 @@ def build_row(
         live_full=live,
         age=age,
         client=str(client),
+        perm_mode=perm_mode,
         desc=str(desc_trim),
         project_root=str(pr),
         gremlin_id=gremlin_id,
@@ -105,6 +108,12 @@ def build_row(
 
 def print_table(rows: list[FleetRow]) -> None:
     """Print header + rows using the fixed format string."""
-    print(FMT % ("KIND", "ID", "STAGE", "LIVENESS", "AGE", "CLIENT", "DESCRIPTION"))
+    print(
+        FMT
+        % ("KIND", "ID", "STAGE", "LIVENESS", "AGE", "CLIENT", "PERM", "DESCRIPTION")
+    )
     for r in rows:
-        print(FMT % (r.kind, r.sid, r.stage, r.liveness, r.age, r.client, r.desc))
+        print(
+            FMT
+            % (r.kind, r.sid, r.stage, r.liveness, r.age, r.client, r.perm_mode, r.desc)
+        )

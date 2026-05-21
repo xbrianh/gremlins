@@ -309,6 +309,7 @@ def _gremlin_to_json(
         "liveness": parse_liveness(live),
         "age_seconds": age_seconds,
         "client": str(state.get("client") or ""),
+        "perm_mode": "bypass" if bool(state.get("bypass")) else "default",
         "description": str(state.get("description") or state.get("instructions") or ""),
         "started_at": started_at,
         "project_root": str(state.get("project_root") or ""),
