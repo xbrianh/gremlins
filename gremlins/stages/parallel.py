@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import json
 import logging
 import math
 import pathlib
@@ -12,11 +11,8 @@ import secrets
 from collections.abc import Callable
 from typing import Any, cast
 
-from gremlins.executor.state import (
-    State,
-    StateData,
-    resolve_state_file,
-)
+from gremlins.executor.parallel_state import ParallelGroupState
+from gremlins.executor.state import State, StateData
 from gremlins.stages.base import Stage
 from gremlins.stages.composite import child_state as _child_state
 from gremlins.stages.outcome import Bail, Done, Outcome
@@ -193,9 +189,7 @@ class _ParallelExecutor:
         self._stages_by_key: dict[str, Stage] = (
             {st.name: st for st in child_stages} if child_stages else {}
         )
-        # In-process mirror of state.json parallel_worktrees[group_name].
-        self._worktree_paths: dict[str, pathlib.Path] = {}
-        self._base_head: str = ""
+        self._group_state = ParallelGroupState(group_name, parent_data)
         self._tasks: list[asyncio.Task[None]] = []
         self._sem: asyncio.Semaphore | None = (
             asyncio.Semaphore(max_concurrent) if max_concurrent is not None else None
@@ -210,60 +204,26 @@ class _ParallelExecutor:
             (fanin_name, self._fan_in),
         ]
 
-    # --- state persistence ---
-
-    def _hydrate_from_state(self) -> None:
-        if self._worktree_paths:
-            return
-        sf = resolve_state_file(self._parent_data.gremlin_id)
-        if sf is None or not sf.exists():
-            return
-        try:
-            data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
-            groups: dict[str, Any] = data.get("parallel_worktrees") or {}
-            entry: dict[str, Any] = groups.get(self._group_name) or {}
-            paths: dict[str, str] = entry.get("paths") or {}
-            for k, v in paths.items():
-                self._worktree_paths[k] = pathlib.Path(v)
-            self._base_head = entry.get("base_head", "") or self._base_head
-        except Exception as exc:
-            logger.warning(
-                "parallel group %r: could not hydrate worktree paths: %s",
-                self._group_name,
-                exc,
-            )
-
-    def _persist_state(self) -> None:
-        self._parent_data.patch_parallel_worktrees(
-            self._group_name,
-            base_head=self._base_head,
-            paths={k: str(v) for k, v in self._worktree_paths.items()},
-        )
-
-    def _clear_persisted_state(self) -> None:
-        self._parent_data.patch_parallel_worktrees(
-            self._group_name, base_head=None, paths=None
-        )
-
     # --- worktree lifecycle ---
 
     async def _fan_out(self) -> None:
         self._set_stage(f"{self._group_name}-fanout")
-        self._hydrate_from_state()
-        prior = list(self._worktree_paths.values())
+        gs = self._group_state
+        gs.hydrate()
+        prior = list(gs.worktree_paths.values())
         if prior:
             await git.remove_worktrees_async(
                 str(self._project_root), [str(p) for p in prior]
             )
-        self._worktree_paths.clear()
-        self._base_head = ""
-        self._clear_persisted_state()
+        gs.worktree_paths.clear()
+        gs.base_head = ""
+        gs.clear()
 
         if not await git.in_git_repo_async(cwd=str(self._project_root)):
             return
 
         await git.prune_worktrees_async(str(self._project_root))
-        self._base_head = await git.head_sha_async(cwd=str(self._project_root))
+        gs.base_head = await git.head_sha_async(cwd=str(self._project_root))
 
         try:
             for child_key, child_state, _ in self._child_runners:
@@ -273,23 +233,24 @@ class _ParallelExecutor:
                     worktree_parent=self._worktree_parent,
                 )
                 wt_path = pathlib.Path(wt_dir)
-                self._worktree_paths[child_key] = wt_path
+                gs.worktree_paths[child_key] = wt_path
                 child_state.worktree = wt_path
         except Exception:
             await git.remove_worktrees_async(
-                str(self._project_root), [str(p) for p in self._worktree_paths.values()]
+                str(self._project_root), [str(p) for p in gs.worktree_paths.values()]
             )
-            self._worktree_paths.clear()
+            gs.worktree_paths.clear()
             raise
-        self._persist_state()
+        gs.persist()
 
     async def _teardown_worktrees(self) -> None:
+        gs = self._group_state
         await git.remove_worktrees_async(
-            str(self._project_root), [str(p) for p in self._worktree_paths.values()]
+            str(self._project_root), [str(p) for p in gs.worktree_paths.values()]
         )
-        self._worktree_paths.clear()
-        self._base_head = ""
-        self._clear_persisted_state()
+        gs.worktree_paths.clear()
+        gs.base_head = ""
+        gs.clear()
 
     # --- parallel execution ---
 
@@ -298,15 +259,16 @@ class _ParallelExecutor:
         if not self._child_runners:
             return
 
-        self._hydrate_from_state()
+        self._group_state.hydrate()
         done = self._parent_data.done_for(self._stage_path)
         active = [(k, s, fn) for k, s, fn in self._child_runners if k not in done]
         if not active:
             return
 
         for child_key, child_state, _ in active:
-            if child_key in self._worktree_paths and child_state.worktree is None:
-                child_state.worktree = self._worktree_paths[child_key]
+            wt = self._group_state.worktree_paths.get(child_key)
+            if wt is not None and child_state.worktree is None:
+                child_state.worktree = wt
 
         # Snapshot of all dispatched keys; not updated per-task as children finish.
         self._parent_data.patch(active_children=[k for k, _, _ in active])
@@ -327,21 +289,6 @@ class _ParallelExecutor:
         for t in self._tasks:
             if not t.done():
                 t.cancel()
-
-    def _write_bail_state(self, b: Bail, child_key: str) -> None:
-        sf = resolve_state_file(self._parent_data.gremlin_id)
-        if sf is None or not sf.exists():
-            return
-        try:
-            pa: dict[str, Any] = (
-                json.loads(sf.read_text(encoding="utf-8")).get("parallel_attempts")
-                or {}
-            )
-            self._parent_data.write_bail_file(
-                "other", b.reason, attempt=pa.get(child_key) or ""
-            )
-        except Exception:
-            pass
 
     async def _dispatch(
         self, child_key: str, child_st: State, fn: Callable[[], Any]
@@ -370,7 +317,7 @@ class _ParallelExecutor:
         except Bail as b:
             if self._cancel_on_bail:
                 self._cancel_siblings()
-            self._write_bail_state(b, child_key)
+            self._group_state.write_bail(child_key, b.reason)
             return
         except Exception:
             if self._cancel_on_bail:
@@ -384,12 +331,12 @@ class _ParallelExecutor:
         self, child_key: str, child_st: State, stage_obj: Stage
     ) -> None:
         attempt = f"{child_key}-{secrets.token_hex(4)}"
-        self._parent_data.patch_parallel_attempt(child_key, attempt)
+        self._group_state.record_attempt(child_key, attempt)
 
         def on_bail(detail: str) -> None:
             if self._cancel_on_bail:
                 self._cancel_siblings()
-            self._write_bail_state(Bail(detail), child_key)
+            self._group_state.write_bail(child_key, detail)
 
         status, cost = await proc.run_child_subprocess(
             stage_obj, child_st, child_key, attempt, on_bail=on_bail
@@ -403,19 +350,20 @@ class _ParallelExecutor:
 
     async def _fan_in(self) -> None:
         self._set_stage(f"{self._group_name}-fanin")
-        self._hydrate_from_state()
+        self._group_state.hydrate()
         try:
             await self._do_fan_in()
         finally:
             await self._teardown_worktrees()
 
     async def _validate_no_mutations(self) -> None:
+        gs = self._group_state
         for child_key, _, _ in self._child_runners:
-            wt = self._worktree_paths.get(child_key)
+            wt = gs.worktree_paths.get(child_key)
             if wt is None or not wt.is_dir():
                 continue
             child_head = await git.head_sha_async(cwd=str(wt))
-            if child_head and child_head != self._base_head:
+            if child_head and child_head != gs.base_head:
                 raise NotImplementedError(
                     f"parallel child {child_key!r} mutated its worktree "
                     "(fan-in merge for mutating parallel is not yet implemented)"
@@ -426,46 +374,14 @@ class _ParallelExecutor:
                     "(fan-in merge for mutating parallel is not yet implemented)"
                 )
 
-    def _collect_bails(self) -> tuple[list[str], dict[str, str]]:
-        sf = resolve_state_file(self._parent_data.gremlin_id)
-        if sf is None or not sf.exists():
-            return [], {}
-        try:
-            data = json.loads(sf.read_text(encoding="utf-8"))
-            parallel_attempts: dict[str, str] = data.get("parallel_attempts") or {}
-            bailed: list[str] = []
-            first_bail: dict[str, str] = {}
-            for key, _, _ in self._child_runners:
-                child_attempt = parallel_attempts.get(key) or ""
-                if (
-                    child_attempt
-                    and (sf.parent / f"bail_{child_attempt}.json").exists()
-                ):
-                    bailed.append(key)
-                    if not first_bail:
-                        try:
-                            first_bail = dict(
-                                json.loads(
-                                    (
-                                        sf.parent / f"bail_{child_attempt}.json"
-                                    ).read_text(encoding="utf-8")
-                                )
-                            )
-                        except Exception:
-                            first_bail = {"class": "other"}
-            return bailed, first_bail
-        except RuntimeError:
-            raise
-        except Exception as exc:
-            logger.warning("fan-in bail aggregation failed: %s", exc)
-            return [], {}
-
     async def _do_fan_in(self) -> None:
         await git.prune_worktrees_async(str(self._project_root))
-        if await git.in_git_repo_async(cwd=str(self._project_root)) and self._base_head:
+        if await git.in_git_repo_async(cwd=str(self._project_root)) and self._group_state.base_head:
             await self._validate_no_mutations()
 
-        bailed, first_bail = self._collect_bails()
+        bailed, first_bail = self._group_state.collect_bails(
+            [k for k, _, _ in self._child_runners]
+        )
         should_bail = (
             bool(bailed)
             if self._bail_policy == "any"
@@ -478,7 +394,7 @@ class _ParallelExecutor:
                 first_bail.get("detail") or "",
                 attempt=self._parent_data.attempt,
             )
-        self._parent_data.patch(_delete=("parallel_attempts",))
+        self._group_state.clear_attempts()
         if not should_bail:
             self._parent_data.clear_done(self._stage_path)
         if should_bail:
