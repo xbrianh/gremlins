@@ -38,10 +38,8 @@ def _make_anthropic_client(model: str | None, policy: Policy) -> object:
     return make_anthropic_client(model, policy)
 
 
-register_client_factory(
-    "anthropic", _make_anthropic_client, takes_permission_block=True
-)
-register_client_factory("claude", _make_claude_client, takes_permission_block=True)
-register_client_factory("copilot", _make_copilot_client, takes_permission_block=True)
-register_client_factory("openai", _make_openai_client, takes_permission_block=True)
-register_client_factory("xai", _make_xai_client, takes_permission_block=True)
+register_client_factory("anthropic", _make_anthropic_client)
+register_client_factory("claude", _make_claude_client)
+register_client_factory("copilot", _make_copilot_client)
+register_client_factory("openai", _make_openai_client)
+register_client_factory("xai", _make_xai_client)
