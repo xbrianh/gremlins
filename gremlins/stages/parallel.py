@@ -253,7 +253,6 @@ class _ParallelExecutor:
     ) -> None:
         self._group_name = group_name
         self._child_runners = child_runners
-        self._max_concurrent = max_concurrent
         self._set_stage = set_stage_fn
         self._cancel_on_bail = cancel_on_bail
         self._bail_policy = bail_policy
@@ -323,6 +322,7 @@ class _ParallelExecutor:
             return
         for wt in paths:
             await git.remove_worktree_async(str(self._project_root), str(wt))
+        await git.prune_worktrees_async(str(self._project_root))
 
     async def _fan_out(self) -> None:
         self._set_stage(f"{self._group_name}-fanout")

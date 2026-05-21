@@ -130,11 +130,18 @@ async def terminate_with_grace(
         p.send_signal(signal.SIGTERM)
     except ProcessLookupError:
         return
+    cancelled = False
     try:
         await asyncio.shield(asyncio.wait_for(p.wait(), timeout=grace_s))
-    except (TimeoutError, asyncio.CancelledError):
+    except asyncio.CancelledError:
+        cancelled = True
+    except TimeoutError:
+        pass
+    if p.returncode is None:
         try:
             p.kill()
         except ProcessLookupError:
             pass
         await asyncio.shield(p.wait())
+    if cancelled:
+        raise asyncio.CancelledError()

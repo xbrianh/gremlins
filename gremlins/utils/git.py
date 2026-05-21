@@ -451,8 +451,7 @@ async def setup_detached_worktree_async(
         worktree_parent.mkdir(parents=True, exist_ok=True)
         workdir = str(worktree_parent / f"aibg-gremlin.{secrets.token_hex(6)}")
     else:
-        workdir = tempfile.mkdtemp(prefix="aibg-gremlin.")
-        os.rmdir(workdir)
+        workdir = os.path.join(tempfile.gettempdir(), f"aibg-gremlin.{secrets.token_hex(6)}")
     r = await proc.run_async(
         ["git", "worktree", "add", "--detach", workdir, base_ref], cwd=project_root
     )
@@ -462,11 +461,18 @@ async def setup_detached_worktree_async(
 
 
 async def remove_worktree_async(project_root: str, workdir: str) -> None:
-    """Remove a git worktree and prune stale entries. Best-effort; never raises."""
+    """Remove a git worktree. Best-effort; never raises."""
     try:
         await proc.run_quiet_async(
             ["git", "worktree", "remove", "--force", workdir], cwd=project_root
         )
+    except Exception:
+        pass
+
+
+async def prune_worktrees_async(project_root: str) -> None:
+    """Prune stale worktree entries. Best-effort; never raises."""
+    try:
         await proc.run_quiet_async(["git", "worktree", "prune"], cwd=project_root)
     except Exception:
         pass

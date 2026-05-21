@@ -115,7 +115,7 @@ class SubprocessCopilotClient:
             self._untrack(p)
             if p.returncode is None:
                 # cancellation path: communicate() was interrupted before the process exited
-                await terminate_with_grace(p)
+                await terminate_with_grace(p, grace_s=5.0)
 
         stdout = raw_out.decode(errors="replace")
         stderr = raw_err.decode(errors="replace")
