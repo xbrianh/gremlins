@@ -142,7 +142,6 @@ class AnthropicSdkClient:
         if not api_key:
             raise RuntimeError("ANTHROPIC_API_KEY environment variable is not set")
         self._model = model or _DEFAULT_MODEL
-        self._api_key = api_key
 
     async def _execute(
         self,
@@ -178,11 +177,12 @@ class AnthropicSdkClient:
         result_evt: dict[str, Any] | None = None
         cost: float | None = None
 
-        gen: AsyncGenerator[Any, None] = cast(
-            AsyncGenerator[Any, None],
-            claude_agent_sdk.query(prompt=prompt, options=options),  # pyright: ignore[reportUnknownMemberType]
-        )
+        gen: AsyncGenerator[Any, None] | None = None
         try:
+            gen = cast(
+                AsyncGenerator[Any, None],
+                claude_agent_sdk.query(prompt=prompt, options=options),  # pyright: ignore[reportUnknownMemberType]
+            )
             while True:
                 try:
                     msg = await asyncio.wait_for(gen.__anext__(), timeout=idle_timeout)
@@ -215,10 +215,11 @@ class AnthropicSdkClient:
         finally:
             if raw is not None:
                 raw.close()
-            try:
-                await gen.aclose()
-            except Exception:
-                pass
+            if gen is not None:
+                try:
+                    await gen.aclose()
+                except Exception:
+                    pass
 
         exit_code = 1 if result_evt is None or result_evt.get("is_error") else 0
         text_result = result_evt.get("result") if result_evt is not None else None
@@ -290,13 +291,10 @@ class AnthropicSdkClient:
 
         try:
             return await _run_once()
-        except StreamTerminalError as exc:
-            if is_transient_stream_error(str(exc)):
-                sys.stderr.write(
-                    f"{ts()} {prefix}stream transient-error, retries exhausted, failing\n"
-                )
-            else:
-                sys.stderr.write(f"{ts()} {prefix}stream permanent-error, failing\n")
+        except StreamTerminalError:
+            sys.stderr.write(
+                f"{ts()} {prefix}stream transient-error, retries exhausted, failing\n"
+            )
             raise
 
     def reap_all(self) -> None:
