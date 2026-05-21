@@ -714,7 +714,9 @@ def test_cli_queue_add_run_execs_queue_run(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
     monkeypatch.setattr("gremlins.cli.queue.runner_active", lambda: False)
     execvp_calls = []
-    monkeypatch.setattr("os.execvp", lambda prog, args: execvp_calls.append((prog, args)))
+    monkeypatch.setattr(
+        "os.execvp", lambda prog, args: execvp_calls.append((prog, args))
+    )
     rc = main(["queue", "add", "--run", "echo hello"])
     assert rc == 0
     out = capsys.readouterr().out
@@ -728,7 +730,9 @@ def test_cli_queue_add_run_errors_when_runner_active(tmp_path, monkeypatch, caps
     monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
     monkeypatch.setattr("gremlins.cli.queue.runner_active", lambda: True)
     execvp_calls = []
-    monkeypatch.setattr("os.execvp", lambda prog, args: execvp_calls.append((prog, args)))
+    monkeypatch.setattr(
+        "os.execvp", lambda prog, args: execvp_calls.append((prog, args))
+    )
     rc = main(["queue", "add", "--run", "echo hello"])
     assert rc == 1
     assert "runner already active" in capsys.readouterr().err
