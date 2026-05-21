@@ -25,9 +25,9 @@ from gremlins.utils.watch import watch_render
 
 
 def _add(argv: list[str]) -> int:
-    run_after = "--run" in argv
+    run_after = argv[:1] == ["--run"]
     if run_after:
-        argv = [a for a in argv if a != "--run"]
+        argv = argv[1:]
     if not argv or argv[0] in ("-h", "--help"):
         print("usage: gremlins queue add [--run] <command>", file=sys.stderr)
         return 0 if argv else 1
@@ -38,7 +38,7 @@ def _add(argv: list[str]) -> int:
         if runner_active():
             print("error: runner already active", file=sys.stderr)
             return 1
-        os.execvp(sys.argv[0], [sys.argv[0], "queue", "run"])
+        os.execvp(sys.executable, [sys.executable, "-m", "gremlins.cli", "queue", "run"])
     if runner_active():
         print("runner: active")
     else:
