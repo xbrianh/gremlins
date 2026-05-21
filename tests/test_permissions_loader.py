@@ -85,7 +85,9 @@ def test_empty_inputs_give_default_policy(tmp_path):
     assert policy.bypass is False
     assert policy.blocks == {}
     for provider in CLIENT_FACTORIES:
-        assert load_default_block(provider), f"expected non-empty default block for {provider}"
+        assert load_default_block(provider), (
+            f"expected non-empty default block for {provider}"
+        )
 
 
 def test_missing_env_var_gives_default(tmp_path):
@@ -141,4 +143,6 @@ def test_project_override_stored_without_defaults(tmp_path):
     assert policy.block_for("claude") == {"allowed_tools": ["Read"]}
     for provider in CLIENT_FACTORIES:
         if provider != "claude":
-            assert policy.block_for(provider) == {}, f"unexpected override for {provider}"
+            assert policy.block_for(provider) == {}, (
+                f"unexpected override for {provider}"
+            )
