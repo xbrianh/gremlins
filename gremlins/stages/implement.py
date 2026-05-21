@@ -128,10 +128,12 @@ class Implement(Stage):
                 )
         else:
             for c in commits_since(pre.head, cwd=cwd_arg):
-                state.record_artifact({
-                    "type": "commit",
-                    "sha": c.sha,
-                    "subject": c.subject,
-                    "worktree": cwd_arg or "",
-                })
+                state.record_artifact(
+                    {
+                        "type": "commit",
+                        "sha": c.sha,
+                        "subject": c.subject,
+                        "worktree": cwd_arg or "",
+                    }
+                )
         return Done()

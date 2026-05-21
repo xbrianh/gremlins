@@ -13,7 +13,13 @@ from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData
 from gremlins.stages.implement import Implement
-from gremlins.utils.git import Commit, DivergentHead, EmptyImpl, HeadAdvanced, PreImplState
+from gremlins.utils.git import (
+    Commit,
+    DivergentHead,
+    EmptyImpl,
+    HeadAdvanced,
+    PreImplState,
+)
 
 _TEMPLATE_LOCAL = "plan: {plan_text}{spec_block}"
 _TEMPLATE_GH = "{spec_block}{plan_source_label}{plan_text}{plan_location_note}"
@@ -206,7 +212,12 @@ def test_records_commit_artifacts_on_head_advanced(tmp_path: pathlib.Path) -> No
         asyncio.run(stage.run(state))
 
     assert len(recorded) == 3
-    assert recorded[0] == {"type": "commit", "sha": "a" * 40, "subject": "fix: first", "worktree": ""}
+    assert recorded[0] == {
+        "type": "commit",
+        "sha": "a" * 40,
+        "subject": "fix: first",
+        "worktree": "",
+    }
     assert recorded[1]["sha"] == "b" * 40
     assert recorded[2]["sha"] == "c" * 40
 
@@ -233,7 +244,9 @@ def test_empty_impl_with_prior_commit_artifacts_does_not_raise(
     tmp_path: pathlib.Path,
 ) -> None:
     stage, state = _make_state(tmp_path, prompts=[_TEMPLATE_GH])
-    prior_artifacts = [{"type": "commit", "sha": "e" * 40, "subject": "prior", "worktree": ""}]
+    prior_artifacts = [
+        {"type": "commit", "sha": "e" * 40, "subject": "prior", "worktree": ""}
+    ]
     with (
         patch(
             "gremlins.stages.implement.classify_impl_outcome",
