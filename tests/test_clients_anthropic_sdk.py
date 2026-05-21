@@ -12,6 +12,8 @@ from gremlins.clients.client import Client
 from gremlins.clients.protocol import CompletedRun
 from gremlins.clients.providers.anthropic_sdk import (
     AnthropicSdkClient,
+    StreamTerminalError,
+    StreamTimeoutError,
     make_anthropic_client,
 )
 
@@ -62,6 +64,8 @@ class ResultMessage:
     session_id: str
     result: Any = None
     total_cost_usd: Any = None
+    input_tokens: Any = None
+    output_tokens: Any = None
 
 
 @dataclass
@@ -355,3 +359,183 @@ def test_no_mcp_servers_no_hooks(monkeypatch, mock_sdk):
 
     assert captured[0].mcp_servers == {}
     assert captured[0].hooks is None
+
+
+# ---------------------------------------------------------------------------
+# Cost computation tests
+# ---------------------------------------------------------------------------
+
+
+def _result_msg(**kwargs: Any) -> ResultMessage:
+    defaults: dict[str, Any] = dict(
+        subtype="success",
+        duration_ms=10,
+        duration_api_ms=8,
+        is_error=False,
+        num_turns=1,
+        session_id="s",
+        result="ok",
+    )
+    defaults.update(kwargs)
+    return ResultMessage(**defaults)
+
+
+def test_cost_known_model_from_tokens(monkeypatch, mock_sdk):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+    # claude-sonnet-4-6: $3.0/1M input, $15.0/1M output
+    # 1M input + 1M output = $3.0 + $15.0 = $18.0
+    async def _query(*, prompt: Any, options: Any):
+        yield _result_msg(input_tokens=1_000_000, output_tokens=1_000_000)
+
+    mock_sdk.query = _query
+    client = AnthropicSdkClient("claude-sonnet-4-6")
+    result = asyncio.run(client.run("test", label="cost"))
+    assert result.cost_usd == pytest.approx(18.0)
+
+
+def test_cost_known_model_partial_tokens(monkeypatch, mock_sdk):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+    # 500k input + 100k output at sonnet rates = $1.5 + $1.5 = $3.0
+    async def _query(*, prompt: Any, options: Any):
+        yield _result_msg(input_tokens=500_000, output_tokens=100_000)
+
+    mock_sdk.query = _query
+    client = AnthropicSdkClient("claude-sonnet-4-6")
+    result = asyncio.run(client.run("test", label="cost"))
+    assert result.cost_usd == pytest.approx(3.0)
+
+
+def test_cost_unknown_model_falls_back_to_sonnet(monkeypatch, mock_sdk):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+    # Unknown model falls back to sonnet rates (3.0/1M input, 15.0/1M output)
+    # 1M input + 1M output = $18.0
+    async def _query(*, prompt: Any, options: Any):
+        yield _result_msg(input_tokens=1_000_000, output_tokens=1_000_000)
+
+    mock_sdk.query = _query
+    client = AnthropicSdkClient("claude-unknown-99")
+    result = asyncio.run(client.run("test", label="cost"))
+    assert result.cost_usd == pytest.approx(18.0)
+
+
+def test_cost_falls_back_to_total_cost_usd(monkeypatch, mock_sdk):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+    # No token counts → fall back to SDK-reported total_cost_usd
+    async def _query(*, prompt: Any, options: Any):
+        yield _result_msg(total_cost_usd=0.042)
+
+    mock_sdk.query = _query
+    client = AnthropicSdkClient("claude-sonnet-4-6")
+    result = asyncio.run(client.run("test", label="cost"))
+    assert result.cost_usd == pytest.approx(0.042)
+
+
+def test_cost_none_when_no_data(monkeypatch, mock_sdk):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+    async def _query(*, prompt: Any, options: Any):
+        yield _result_msg(total_cost_usd=None)
+
+    mock_sdk.query = _query
+    client = AnthropicSdkClient("claude-sonnet-4-6")
+    result = asyncio.run(client.run("test", label="cost"))
+    assert result.cost_usd is None
+
+
+# ---------------------------------------------------------------------------
+# Retry policy tests
+# ---------------------------------------------------------------------------
+
+
+def test_retry_on_transient_error(monkeypatch, mock_sdk):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+    async def _no_sleep(s: float) -> None:
+        pass
+
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    call_count = [0]
+
+    async def _query(*, prompt: Any, options: Any):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            raise RuntimeError("rate limit exceeded — please retry")
+        yield _result_msg()
+
+    mock_sdk.query = _query
+    client = AnthropicSdkClient("claude-sonnet-4-6")
+    result = asyncio.run(client.run("test", label="retry", max_retries=2))
+    assert result.exit_code == 0
+    assert call_count[0] == 2
+
+
+def test_no_retry_on_non_transient_error(monkeypatch, mock_sdk):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+    call_count = [0]
+
+    async def _query(*, prompt: Any, options: Any):
+        call_count[0] += 1
+        raise RuntimeError("authentication failed — invalid api key")
+        yield  # make it a generator
+
+    mock_sdk.query = _query
+    client = AnthropicSdkClient("claude-sonnet-4-6")
+    with pytest.raises(RuntimeError, match="authentication failed"):
+        asyncio.run(client.run("test", label="no-retry", max_retries=2))
+    assert call_count[0] == 1
+
+
+def test_retry_exhaustion_raises(monkeypatch, mock_sdk):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+    async def _no_sleep(s: float) -> None:
+        pass
+
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    async def _query(*, prompt: Any, options: Any):
+        raise RuntimeError("overloaded")
+        yield
+
+    mock_sdk.query = _query
+    client = AnthropicSdkClient("claude-sonnet-4-6")
+    with pytest.raises(StreamTerminalError):
+        asyncio.run(client.run("test", label="exhaust", max_retries=2))
+
+
+def test_on_timeout_prompt_switches_on_retry(monkeypatch, mock_sdk):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+    async def _no_sleep(s: float) -> None:
+        pass
+
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    prompts_seen: list[str] = []
+
+    async def _query(*, prompt: Any, options: Any):
+        prompts_seen.append(prompt)
+        if len(prompts_seen) == 1:
+            # Simulate idle timeout on first attempt
+            raise StreamTimeoutError("anthropic SDK stream idle timeout")
+        yield _result_msg()
+
+    mock_sdk.query = _query
+    client = AnthropicSdkClient("claude-sonnet-4-6")
+    result = asyncio.run(
+        client.run(
+            "original prompt",
+            label="timeout",
+            max_retries=2,
+            on_timeout_prompt="resume prompt",
+        )
+    )
+    assert result.exit_code == 0
+    assert prompts_seen[0] == "original prompt"
+    assert prompts_seen[1] == "resume prompt"
