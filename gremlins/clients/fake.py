@@ -31,6 +31,8 @@ class FakeClaudeClient(Client):
     realistic on-disk shape.
     """
 
+    takes_permission_block: bool = False
+
     def __init__(
         self,
         *,

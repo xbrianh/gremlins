@@ -4,9 +4,14 @@ from collections.abc import Callable
 from typing import Any
 
 CLIENT_FACTORIES: dict[str, Callable[[str | None], Any]] = {}
+PROVIDER_CAPABILITIES: dict[str, bool] = {}
 
 
 def register_client_factory(
-    provider: str, factory: Callable[[str | None], Any]
+    provider: str,
+    factory: Callable[[str | None], Any],
+    *,
+    takes_permission_block: bool = True,
 ) -> None:
     CLIENT_FACTORIES[provider] = factory
+    PROVIDER_CAPABILITIES[provider] = takes_permission_block

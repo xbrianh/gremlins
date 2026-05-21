@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import sys
 import time
 from typing import Any
 
 from gremlins import paths as _paths
+from gremlins.clients.registry import PROVIDER_CAPABILITIES
 from gremlins.launcher import launch
+from gremlins.permissions.loader import load_policy
+from gremlins.permissions.validation import validate_policy_against_registry
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import list_pipelines, resolve_pipeline_name
 from gremlins.pipeline.loader import STAGE_TYPES
@@ -158,6 +162,18 @@ def launch_main(argv: list[str]) -> int:
 def _self_background_main(
     pipeline_name: str, args: argparse.Namespace, stage_inputs: dict[str, Any]
 ) -> int:
+    policy = load_policy(
+        cli_bypass=None,
+        cli_permissions_file=None,
+        env=os.environ,
+        cwd=pathlib.Path.cwd(),
+    )
+    try:
+        validate_policy_against_registry(policy, PROVIDER_CAPABILITIES)
+    except ValueError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 1
+
     pipeline_args = ("--client", args.client) if args.client else ()
     try:
         gremlin_id, proc = launch(

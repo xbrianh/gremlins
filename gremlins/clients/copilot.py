@@ -26,6 +26,8 @@ class SubprocessCopilotClient:
     so it can be swapped in via pipeline YAML ``provider: copilot``.
     """
 
+    takes_permission_block: bool = True
+
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._children: list[asyncio.subprocess.Process] = []
