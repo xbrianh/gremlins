@@ -40,7 +40,6 @@ def test_within_worktree_child(tmp_path: pathlib.Path) -> None:
 
 
 def test_within_worktree_outside(tmp_path: pathlib.Path) -> None:
-    other = tmp_path.parent
     assert not _within_worktree(tmp_path, tmp_path / "sub")
 
 
@@ -97,7 +96,7 @@ def test_enforce_relative_path_escapes_via_cwd(tmp_path: pathlib.Path) -> None:
 
 
 def test_bash_check_bypass_allows_absolute(tmp_path: pathlib.Path) -> None:
-    cmd = f"cat /etc/passwd"
+    cmd = "cat /etc/passwd"
     assert _bash_check(True, tmp_path, cmd, None) is None
 
 
@@ -106,7 +105,7 @@ def test_bash_check_safe_command(tmp_path: pathlib.Path) -> None:
 
 
 def test_bash_check_absolute_outside(tmp_path: pathlib.Path) -> None:
-    cmd = f"cat /etc/passwd"
+    cmd = "cat /etc/passwd"
     err = _bash_check(False, tmp_path, cmd, str(tmp_path))
     assert err is not None
     assert "outside worktree" in err
