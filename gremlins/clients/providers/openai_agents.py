@@ -423,7 +423,7 @@ class OpenAIAgentsClient:
         )
 
     @property
-    def total_cost_usd(self) -> None:
+    def total_cost_usd(self) -> float | None:
         return None
 
     @property
