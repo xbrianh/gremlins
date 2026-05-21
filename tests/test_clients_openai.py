@@ -580,7 +580,9 @@ def test_native_block_tools_allowlist_filters_agent_tools(monkeypatch: Any) -> N
 
     monkeypatch.setattr("agents.run.Runner.run_streamed", _fake_run_streamed)
 
-    client = OpenAIAgentsClient("gpt-4o", native_block={"allowed_tools": ["Read", "Bash"]})
+    client = OpenAIAgentsClient(
+        "gpt-4o", native_block={"allowed_tools": ["Read", "Bash"]}
+    )
     asyncio.run(client.run("do something", label="t"))
 
     assert captured_agents, "Runner.run_streamed was not called"
@@ -603,7 +605,9 @@ def test_native_block_absent_tools_uses_all(monkeypatch: Any) -> None:
     asyncio.run(client.run("do something", label="t"))
 
     assert captured_agents
-    expected_tools = build_tools(bypass=True, worktree_root=pathlib.Path.cwd(), audit_log=None)
+    expected_tools = build_tools(
+        bypass=True, worktree_root=pathlib.Path.cwd(), audit_log=None
+    )
     assert len(captured_agents[0].tools) == len(expected_tools)
 
 
