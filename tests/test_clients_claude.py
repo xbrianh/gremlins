@@ -434,3 +434,10 @@ def test_no_credentials_symlink_on_darwin(tmp_path, monkeypatch):
 
     creds_dst = config_dir / ".claude" / ".credentials.json"
     assert not creds_dst.exists()
+
+
+def test_native_block_without_state_dir_raises(monkeypatch):
+    monkeypatch.delenv("GREMLIN_STATE_DIR", raising=False)
+    client = SubprocessClaudeClient(native_block={"allowedTools": ["Read"]})
+    with pytest.raises(RuntimeError, match="GREMLIN_STATE_DIR absent"):
+        asyncio.run(client.run("hello", label="test"))
