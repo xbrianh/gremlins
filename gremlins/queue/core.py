@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -236,28 +237,34 @@ def detach_run(once: bool = False, poll_interval: float = 1.0) -> int:
         return 1
     root = queue_root()
     log_path = root / "runner.log"
-    pid_path = root / "runner.pid"
-    child_pid = os.fork()
+    pid_path = _runner_pid_path()
+    try:
+        child_pid = os.fork()
+    except OSError as exc:
+        print(f"queue run: fork failed: {exc}", file=sys.stderr)
+        return 1
     if child_pid > 0:
         pid_path.write_text(str(child_pid))
         print(f"runner detached: pid {child_pid}, log: {log_path}")
         return 0
     os.setsid()
-    log_f = open(log_path, "w")
-    os.dup2(log_f.fileno(), sys.stdout.fileno())
-    os.dup2(log_f.fileno(), sys.stderr.fileno())
-    log_f.close()
     rc = 1
     try:
-        rc = run(once=once, poll_interval=poll_interval)
-    except Exception:
-        rc = 1
-    pid_path.unlink(missing_ok=True)
-    os._exit(rc)
+        log_f = open(log_path, "w")
+        os.dup2(log_f.fileno(), sys.stdout.fileno())
+        os.dup2(log_f.fileno(), sys.stderr.fileno())
+        log_f.close()
+        try:
+            rc = run(once=once, poll_interval=poll_interval)
+        except Exception:
+            traceback.print_exc()
+    finally:
+        pid_path.unlink(missing_ok=True)
+        os._exit(rc)
 
 
 def stop() -> int:
-    pid_path = queue_root() / "runner.pid"
+    pid_path = _runner_pid_path()
     if not pid_path.exists():
         print("queue stop: no pidfile found", file=sys.stderr)
         return 1
@@ -276,7 +283,11 @@ def stop() -> int:
     except PermissionError:
         print(f"queue stop: no permission to signal pid {pid}", file=sys.stderr)
         return 1
-    os.kill(pid, signal.SIGTERM)
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pid_path.unlink(missing_ok=True)
+        return 0
     for _ in range(50):
         time.sleep(0.1)
         try:
@@ -284,6 +295,8 @@ def stop() -> int:
         except ProcessLookupError:
             pid_path.unlink(missing_ok=True)
             return 0
+        except PermissionError:
+            break
     print(f"queue stop: pid {pid} did not exit within 5s", file=sys.stderr)
     return 1
 
