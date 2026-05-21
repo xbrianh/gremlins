@@ -151,7 +151,7 @@ def run(
 
     _stopped = False
 
-    def _handle_signal(sig: int, frame: object) -> None:
+    def _handle_signal(_sig: int, _frame: object) -> None:
         nonlocal _stopped
         _stopped = True
 
