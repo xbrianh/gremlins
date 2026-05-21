@@ -650,3 +650,76 @@ def test_cli_queue_set_state_invalid_state(tmp_path, monkeypatch):
     monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
     with pytest.raises(SystemExit):
         main(["queue", "set-state", "bogus", "--item", "0001-item"])
+
+
+# ---------------------------------------------------------------------------
+# runner_active detection
+# ---------------------------------------------------------------------------
+
+
+def test_runner_active_true_when_pgrep_exits_zero(monkeypatch):
+    monkeypatch.setattr(
+        "gremlins.queue.core.subprocess.run",
+        lambda cmd, **kw: type("R", (), {"returncode": 0})(),
+    )
+    assert core.runner_active() is True
+
+
+def test_runner_active_false_when_pgrep_exits_nonzero(monkeypatch):
+    monkeypatch.setattr(
+        "gremlins.queue.core.subprocess.run",
+        lambda cmd, **kw: type("R", (), {"returncode": 1})(),
+    )
+    assert core.runner_active() is False
+
+
+def test_runner_active_false_when_pgrep_missing(monkeypatch):
+    def _raise(*_a, **_kw):
+        raise FileNotFoundError
+
+    monkeypatch.setattr("gremlins.queue.core.subprocess.run", _raise)
+    assert core.runner_active() is False
+
+
+# ---------------------------------------------------------------------------
+# queue add — runner status output
+# ---------------------------------------------------------------------------
+
+
+def test_cli_queue_add_warns_when_no_runner(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    monkeypatch.setattr("gremlins.cli.queue.runner_active", lambda: False)
+    rc = main(["queue", "add", "echo hello"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "warning: no runner active" in out
+    assert "gremlins queue run" in out
+
+
+def test_cli_queue_add_confirms_when_runner_active(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    monkeypatch.setattr("gremlins.cli.queue.runner_active", lambda: True)
+    rc = main(["queue", "add", "echo hello"])
+    assert rc == 0
+    assert "runner: active" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# queue requeue — runner status output
+# ---------------------------------------------------------------------------
+
+
+def test_cli_queue_requeue_warns_when_no_runner(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    monkeypatch.setattr("gremlins.cli.queue.runner_active", lambda: False)
+    rc = main(["queue", "requeue"])
+    assert rc == 0
+    assert "warning: no runner active" in capsys.readouterr().out
+
+
+def test_cli_queue_requeue_confirms_when_runner_active(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    monkeypatch.setattr("gremlins.cli.queue.runner_active", lambda: True)
+    rc = main(["queue", "requeue"])
+    assert rc == 0
+    assert "runner: active" in capsys.readouterr().out
