@@ -204,7 +204,9 @@ def test_resume_retains_pre_impl_head_on_failure(tmp_path: pathlib.Path) -> None
     state.data.pre_impl_head = "deadbeef"
 
     with (
-        patch("gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE),
+        patch(
+            "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
+        ),
         patch(
             "gremlins.stages.implement.classify_impl_outcome",
             return_value=EmptyImpl(),
@@ -213,7 +215,9 @@ def test_resume_retains_pre_impl_head_on_failure(tmp_path: pathlib.Path) -> None
     ):
         asyncio.run(stage.run(state))
 
-    assert state.data.pre_impl_head == "deadbeef", "pre_impl_head must survive a failed resumed run"
+    assert state.data.pre_impl_head == "deadbeef", (
+        "pre_impl_head must survive a failed resumed run"
+    )
 
 
 def test_run_does_not_access_pipeline_data(tmp_path: pathlib.Path) -> None:
