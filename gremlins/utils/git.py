@@ -492,7 +492,7 @@ async def remove_worktree_async(project_root: str, workdir: str) -> None:
 
 
 async def remove_worktrees_async(project_root: str, paths: list[str]) -> None:
-    """Remove git worktrees in bulk and prune stale entries. No-op outside a repo. Best-effort; never raises."""
+    """Remove worktrees in bulk and prune stale entries. No-op outside a repo."""
     if not await in_git_repo_async(cwd=project_root):
         return
     for wt in paths:
@@ -501,7 +501,9 @@ async def remove_worktrees_async(project_root: str, paths: list[str]) -> None:
 
 
 async def prune_worktrees_async(project_root: str) -> None:
-    """Prune stale worktree entries. Best-effort; never raises."""
+    """Prune stale worktree entries. No-op outside a repo."""
+    if not await in_git_repo_async(cwd=project_root):
+        return
     try:
         await proc.run_quiet_async(["git", "worktree", "prune"], cwd=project_root)
     except Exception:
