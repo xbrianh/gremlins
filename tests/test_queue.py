@@ -366,8 +366,6 @@ def test_clear_item_mutex_with_purge(tmp_path, monkeypatch):
 
 def test_cli_queue_clear_flags_mutually_exclusive(tmp_path, monkeypatch):
     monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
-    import pytest
-
     with pytest.raises(SystemExit):
         main(["queue", "clear", "--failed", "--done"])
 
