@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import logging
 import pathlib
-
-logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass
@@ -44,9 +41,11 @@ def collect_bails(
 
 
 def decide(bailed: list[BailedChild], total: int, policy: str) -> BailDecision:
-    if policy == "all":
+    if policy == "any":
+        should_bail = bool(bailed)
+    elif policy == "all":
         should_bail = bool(bailed) and len(bailed) == total
     else:
-        should_bail = bool(bailed)
+        raise ValueError(f"unknown bail_policy {policy!r}")
     first_bail = bailed[0].bail if bailed else {}
     return BailDecision(should_bail=should_bail, first_bail=first_bail)
