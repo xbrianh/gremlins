@@ -14,7 +14,7 @@
 - `gremlins rm <id-prefix>` — delete a dead gremlin's state dir, worktree, and branch
 - `gremlins queue add <cmd…>` — append a command to the default queue
 - `gremlins queue list [--json | --watch [SEC]]` — show all queue items with bucket and status
-- `gremlins queue run` — execute the queue serially, halting on first failure
+- `gremlins queue run` — execute the queue serially, halting on first failure; watches for new items when empty (use `--once` to exit instead of watching; `--poll-interval SEC` to tune the polling interval, default 1s)
 - `gremlins queue requeue [--done]` — move failed items back to pending; `--done` also requeues done items
 - `gremlins queue clear` — remove done + failed items; `--failed`, `--done`, or `--purge` for finer control
 

@@ -5,8 +5,11 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import signal
 import subprocess
 import sys
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -130,7 +133,11 @@ def list_queue_json() -> int:
     return 0
 
 
-def run() -> int:
+def run(
+    once: bool = False,
+    poll_interval: float = 1.0,
+    _stop_event: threading.Event | None = None,
+) -> int:
     root = queue_root()
     running = sorted((root / "running").glob("*.cmd"))
     if running:
@@ -142,27 +149,57 @@ def run() -> int:
         )
         return 1
 
-    while True:
-        pending = sorted((root / "pending").glob("*.cmd"))
-        if not pending:
-            return 0
+    _stopped = False
 
-        src = pending[0]
-        cmd = src.read_text().strip()
-        item = _move_item(src, root / "running")
-        log_path = item.with_suffix(".log")
+    def _handle_signal(sig: int, frame: object) -> None:
+        nonlocal _stopped
+        _stopped = True
 
-        print(f"queue: running {item.stem}", flush=True)
+    def _should_stop() -> bool:
+        return _stopped or (_stop_event is not None and _stop_event.is_set())
 
-        clean = _run_plain(cmd, log_path)
+    on_main = threading.current_thread() is threading.main_thread()
+    if on_main:
+        old_int = signal.signal(signal.SIGINT, _handle_signal)
+        old_term = signal.signal(signal.SIGTERM, _handle_signal)
 
-        if clean:
-            _move_item(item, root / "done")
-            print(f"queue: done {item.stem}", flush=True)
-        else:
-            _move_item(item, root / "failed")
-            print(f"queue: failed {item.stem}", file=sys.stderr)
-            return 1
+    try:
+        while True:
+            pending = sorted((root / "pending").glob("*.cmd"))
+            if not pending:
+                if once or _should_stop():
+                    return 0
+                time.sleep(poll_interval)
+                continue
+
+            if _should_stop():
+                return 0
+
+            src = pending[0]
+            cmd = src.read_text().strip()
+            item = _move_item(src, root / "running")
+            log_path = item.with_suffix(".log")
+
+            print(f"queue: running {item.stem}", flush=True)
+
+            clean = _run_plain(cmd, log_path)
+
+            if _should_stop():
+                if not clean:
+                    _move_item(item, root / "failed")
+                return 0
+
+            if clean:
+                _move_item(item, root / "done")
+                print(f"queue: done {item.stem}", flush=True)
+            else:
+                _move_item(item, root / "failed")
+                print(f"queue: failed {item.stem}", file=sys.stderr)
+                return 1
+    finally:
+        if on_main:
+            signal.signal(signal.SIGINT, old_int)  # type: ignore[reportPossiblyUnbound]
+            signal.signal(signal.SIGTERM, old_term)  # type: ignore[reportPossiblyUnbound]
 
 
 def requeue(include_done: bool = False) -> int:
