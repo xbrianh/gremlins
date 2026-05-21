@@ -23,8 +23,14 @@ def _make_anthropic_client(model: str | None) -> object:
     return make_anthropic_client(model)
 
 
-register_client_factory("anthropic", _make_anthropic_client)
-register_client_factory("claude", lambda _: SubprocessClaudeClient())
-register_client_factory("copilot", lambda _: SubprocessCopilotClient())
-register_client_factory("openai", _make_openai_client)
-register_client_factory("xai", _make_xai_client)
+register_client_factory(
+    "anthropic", _make_anthropic_client, takes_permission_block=True
+)
+register_client_factory(
+    "claude", lambda _: SubprocessClaudeClient(), takes_permission_block=True
+)
+register_client_factory(
+    "copilot", lambda _: SubprocessCopilotClient(), takes_permission_block=True
+)
+register_client_factory("openai", _make_openai_client, takes_permission_block=True)
+register_client_factory("xai", _make_xai_client, takes_permission_block=True)
