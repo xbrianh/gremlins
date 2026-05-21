@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pathlib
 
-from gremlins.permissions import Policy, load_policy
+from gremlins.permissions.loader import load_policy
+from gremlins.permissions.policy import Policy
 
 
 def _load(
@@ -58,9 +59,10 @@ def test_project_file_wins_over_user_config(tmp_path, monkeypatch):
     (project_dir / "permissions.yaml").write_text("bypass_permissions: true\n")
 
     user_config_dir = tmp_path / "user_config"
-    user_config_dir.mkdir()
-    (user_config_dir / "config.toml").write_text("bypass_permissions = false\n")
-    monkeypatch.setattr(pathlib.Path, "home", lambda: user_config_dir)
+    config_dir = user_config_dir / ".config" / "gremlins"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.toml").write_text("bypass_permissions = false\n")
+    monkeypatch.setattr(pathlib.Path, "home", lambda *_: user_config_dir)
 
     policy = _load(cwd=tmp_path, tmp_path=tmp_path)
     assert policy.bypass is True
@@ -71,7 +73,7 @@ def test_user_config_honored(tmp_path, monkeypatch):
     config_dir = user_config_dir / ".config" / "gremlins"
     config_dir.mkdir(parents=True)
     (config_dir / "config.toml").write_text("bypass_permissions = true\n")
-    monkeypatch.setattr(pathlib.Path, "home", lambda: user_config_dir)
+    monkeypatch.setattr(pathlib.Path, "home", lambda *_: user_config_dir)
 
     policy = _load(cwd=tmp_path, tmp_path=tmp_path)
     assert policy.bypass is True
@@ -87,8 +89,8 @@ def test_missing_env_var_gives_default(tmp_path):
     assert policy.bypass is False
 
 
-def test_block_for_returns_empty_dict_for_unknown_provider():
-    policy = Policy.empty()
+def test_block_for_returns_empty_dict_when_no_blocks():
+    policy = Policy()
     assert policy.block_for("claude") == {}
 
 

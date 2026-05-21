@@ -5,9 +5,8 @@ import tomllib
 from collections.abc import Mapping
 from typing import Any
 
-import yaml
-
 from gremlins.permissions.policy import Policy
+from gremlins.utils.yaml_io import load_yaml_file
 
 
 def load_policy(
@@ -17,51 +16,55 @@ def load_policy(
     env: Mapping[str, str],
     cwd: pathlib.Path,
 ) -> Policy:
-    bypass, blocks = _resolve(
-        cli_bypass=cli_bypass,
-        cli_permissions_file=cli_permissions_file,
-        env=env,
-        cwd=cwd,
+    bypass = _resolve_bypass(cli_bypass=cli_bypass, env=env, cwd=cwd)
+    blocks = (
+        _blocks_from_file(cli_permissions_file)
+        if cli_permissions_file is not None
+        else _blocks_from_project(cwd)
     )
     return Policy(bypass=bypass, blocks=blocks)
 
 
-def _resolve(
+def _resolve_bypass(
     *,
     cli_bypass: bool | None,
-    cli_permissions_file: pathlib.Path | None,
     env: Mapping[str, str],
     cwd: pathlib.Path,
-) -> tuple[bool, dict[str, dict[str, Any]]]:
+) -> bool:
     if cli_bypass is not None:
-        return cli_bypass, _blocks_from_file(cli_permissions_file)
+        return cli_bypass
 
     env_bypass = env.get("GREMLINS_BYPASS_PERMISSIONS", "")
     if env_bypass:
-        return _truthy(env_bypass), {}
+        return _truthy(env_bypass)
 
     project_file = cwd / ".gremlins" / "permissions.yaml"
     if project_file.exists():
-        data: dict[str, Any] = (
-            yaml.safe_load(project_file.read_text(encoding="utf-8")) or {}
-        )
-        blocks: dict[str, dict[str, Any]] = dict(data.get("blocks", {}))
-        return bool(data.get("bypass_permissions", False)), blocks
+        data = load_yaml_file(project_file)
+        return bool(data.get("bypass_permissions", False))
 
     user_config = pathlib.Path.home() / ".config" / "gremlins" / "config.toml"
     if user_config.exists():
         toml_data: dict[str, Any] = tomllib.loads(
             user_config.read_text(encoding="utf-8")
         )
-        return bool(toml_data.get("bypass_permissions", False)), {}
+        return bool(toml_data.get("bypass_permissions", False))
 
-    return False, {}
+    return False
+
+
+def _blocks_from_project(cwd: pathlib.Path) -> dict[str, dict[str, Any]]:
+    project_file = cwd / ".gremlins" / "permissions.yaml"
+    if not project_file.exists():
+        return {}
+    data = load_yaml_file(project_file)
+    return dict(data.get("blocks", {}))
 
 
 def _blocks_from_file(path: pathlib.Path | None) -> dict[str, dict[str, Any]]:
     if path is None or not path.exists():
         return {}
-    data: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    data = load_yaml_file(path)
     return dict(data.get("blocks", {}))
 
 
