@@ -19,7 +19,9 @@ class ParallelGroupState:
 
     group_name: str
     parent_data: StateData
-    worktree_paths: dict[str, pathlib.Path] = dataclasses.field(default_factory=dict)
+    worktree_paths: dict[str, pathlib.Path] = dataclasses.field(
+        default_factory=dict[str, pathlib.Path]
+    )
     base_head: str = ""
 
     def hydrate(self) -> None:
@@ -30,10 +32,10 @@ class ParallelGroupState:
             return
         try:
             data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
-            entry: dict[str, Any] = (data.get("parallel_worktrees") or {}).get(
-                self.group_name
-            ) or {}
-            for k, v in (entry.get("paths") or {}).items():
+            parallel_worktrees: dict[str, Any] = data.get("parallel_worktrees") or {}
+            entry: dict[str, Any] = parallel_worktrees.get(self.group_name) or {}
+            paths: dict[str, str] = entry.get("paths") or {}
+            for k, v in paths.items():
                 self.worktree_paths[k] = pathlib.Path(v)
             self.base_head = entry.get("base_head", "") or self.base_head
         except Exception as exc:
