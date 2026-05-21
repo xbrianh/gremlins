@@ -21,7 +21,7 @@ Steps to create it:
 3. Populate the body from `gremlins queue --help`, `gremlins queue run --help`, and `gremlins queue add --help` output. Bake in these invariants:
    - **One runner per session.** Start `gremlins queue run` in the background once; never re-spawn it.
    - **One unit = one launch+land pair.** Each unit of work is exactly one `gremlins launch <pipeline> <args> --gremlin-id <id> --wait` followed by one `gremlins land <id>`. Never collapse two units into one command or skip the land step.
-   - **Operator-supplied ids.** The assistant generates a short kebab-case `--gremlin-id` and passes the same id to both the `launch` and `land` commands.
+   - **Assistant-generated ids.** The assistant generates a short kebab-case `--gremlin-id` and passes the same id to both the `launch` and `land` commands.
    - **No scope expansion.** Queue exactly what the user named — not that plus anything else outstanding.
 
 ---

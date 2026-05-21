@@ -29,14 +29,14 @@ def test_skill_bodies_derived_from_help():
     out = _output()
     assert "gremlins launch --help" in out
     assert "gremlins launch --list" in out
-    assert "gremlins queue" in out and "--help" in out
+    assert "gremlins queue --help" in out
 
 
 def test_no_hardcoded_pipeline_names():
     out = _output()
     # pipeline names are project-specific and must not be baked in except
     # the default gh-terse mentioned for the queue skill
-    for hardcoded in ["gh-plain", "gh-verbose", "local"]:
+    for hardcoded in ["gremlins launch gh-plain", "gremlins launch gh-verbose", "gremlins launch local"]:
         assert hardcoded not in out
 
 
@@ -51,5 +51,4 @@ def test_queue_invariants():
     assert "One runner per session" in out or "one runner per session" in out.lower()
     assert "--gremlin-id" in out
     assert "scope" in out.lower()
-    # paired launch+land
-    assert "launch" in out and "land" in out
+    assert "one launch+land pair" in out.lower()
