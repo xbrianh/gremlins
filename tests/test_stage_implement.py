@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import pathlib
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from conftest import MINIMAL_EVENTS
@@ -183,17 +183,10 @@ def test_resume_uses_persisted_pre_impl_head(tmp_path: pathlib.Path) -> None:
     stage, state = _make_state(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH])
     state.data.pre_impl_head = "deadbeef"
 
-    called = []
-
-    def _fail_if_called(**_: object) -> PreImplState:
-        called.append(True)
-        return _FAKE_PRE
+    record_mock = MagicMock(return_value=_FAKE_PRE)
 
     with (
-        patch(
-            "gremlins.stages.implement.record_pre_impl_state",
-            side_effect=_fail_if_called,
-        ),
+        patch("gremlins.stages.implement.record_pre_impl_state", record_mock),
         patch(
             "gremlins.stages.implement.classify_impl_outcome",
             return_value=HeadAdvanced(commit_count=3),
@@ -201,10 +194,26 @@ def test_resume_uses_persisted_pre_impl_head(tmp_path: pathlib.Path) -> None:
     ):
         asyncio.run(stage.run(state))
 
-    assert not called, (
-        "record_pre_impl_state must not be called when pre_impl_head is set"
-    )
+    record_mock.assert_not_called()
     assert state.data.pre_impl_head == "", "pre_impl_head must be cleared on success"
+
+
+def test_resume_retains_pre_impl_head_on_failure(tmp_path: pathlib.Path) -> None:
+    """pre_impl_head must not be cleared when the resumed run produces EmptyImpl."""
+    stage, state = _make_state(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH])
+    state.data.pre_impl_head = "deadbeef"
+
+    with (
+        patch("gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE),
+        patch(
+            "gremlins.stages.implement.classify_impl_outcome",
+            return_value=EmptyImpl(),
+        ),
+        pytest.raises(RuntimeError, match="no committed work"),
+    ):
+        asyncio.run(stage.run(state))
+
+    assert state.data.pre_impl_head == "deadbeef", "pre_impl_head must survive a failed resumed run"
 
 
 def test_run_does_not_access_pipeline_data(tmp_path: pathlib.Path) -> None:
