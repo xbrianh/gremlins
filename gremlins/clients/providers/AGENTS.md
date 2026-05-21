@@ -29,3 +29,17 @@ No output means the boundary is intact.
 - `openai_agents.py` — `OpenAIAgentsClient`, a `ClaudeClient`-protocol
   implementation that drives prompts through the `openai-agents` SDK.
   Uses `GREMLINS_TOOLS` from `gremlins.clients.tools` as the tool list.
+- `anthropic_sdk.py` — `AnthropicSdkClient`, a `ClaudeClient`-protocol
+  implementation that drives prompts through the `claude-agent-sdk` Python
+  package. **Auth**: requires `ANTHROPIC_API_KEY` in the environment; raises
+  `RuntimeError` at construction time if the key is absent. **Hermetic**: all
+  `CLAUDE_*` vars and all `ANTHROPIC_*` vars except `ANTHROPIC_API_KEY` are
+  stripped from the child environment, and `setting_sources=[]` / no MCP /
+  no hooks are passed to the SDK so no local operator config leaks in.
+  **Cost**: extracts `input_tokens` + `output_tokens` from the SDK's
+  `ResultMessage` and prices them against a module-level `_PRICING` table
+  (Sonnet/Opus/Haiku IDs); unknown model IDs fall back to Sonnet rates.
+  **Retry**: applies the same `STREAM_IDLE_TIMEOUT`, `STREAM_IDLE_BACKOFF`,
+  and `is_transient_stream_error` classifier used by `openai_agents.py`.
+  Transient SDK errors (rate limit, overloaded, etc.) are retried up to
+  `max_retries` times; permanent errors propagate immediately.

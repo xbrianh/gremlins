@@ -32,9 +32,9 @@ the `Client` class is the seam tests swap out.
   stages emit (`text:` / `think:` / `tool:` / `result:` / `final:`).
   `stream_events` is used by `claude.py` and `fleet/rescue.py`; `trunc`
   is used by `providers/openai_agents.py`.
-- `__init__.py` — registers the `claude`, `copilot`, `openai`, and `xai`
-  factories with `CLIENT_FACTORIES` at import time. Importing the package is
-  what wires the providers up.
+- `__init__.py` — registers the `claude`, `copilot`, `openai`, `xai`, and
+  `anthropic` factories with `CLIENT_FACTORIES` at import time. Importing the
+  package is what wires the providers up.
 - `tools.py` — `GREMLINS_TOOLS`, the list of `openai-agents` `FunctionTool`
   objects (Read, Edit, Bash, Write, Grep, Glob) that back the OpenAI
   provider's agent loop.
@@ -52,7 +52,8 @@ the `Client` class is the seam tests swap out.
 - Registered providers: `claude` → `SubprocessClaudeClient`; `copilot` →
   `SubprocessCopilotClient`; `openai` and `xai` → `OpenAIAgentsClient` in
   `providers/openai_agents.py` (both share the same backend, keyed by
-  provider).
+  provider); `anthropic` → `AnthropicSdkClient` in
+  `providers/anthropic_sdk.py`.
 - The `label=` kwarg on `run(...)` is the stream-event prefix in logs and
   the `FakeClaudeClient` lookup key. Stages that re-enter the same logical
   step within one process must use distinct labels per phase so the fake's
@@ -62,6 +63,20 @@ the `Client` class is the seam tests swap out.
   the same pattern so SIGINT/SIGTERM cleanup stays uniform.
 - Never spawn the underlying CLI directly from a stage — go through
   `client.run(...)` so tests can substitute `FakeClaudeClient`.
+
+## `claude:` vs `anthropic:` — two backends, not migration phases
+
+Both backends are fully supported and both stay; neither replaces the other.
+
+| | `claude:` | `anthropic:` |
+|---|---|---|
+| **Mechanism** | Subprocess (`claude -p --output-format stream-json`) | Python SDK (`claude-agent-sdk`) |
+| **Auth** | Claude subscription / operator config | `ANTHROPIC_API_KEY` environment variable |
+| **Operator config** | Inherited (reads local Claude settings, MCP, hooks) | Hermetic — `setting_sources=[]`, no MCP, no hooks |
+| **Cost reporting** | From SDK `result` event `total_cost_usd` | From token counts + pricing table; fallback to SDK `total_cost_usd` |
+| **When to use** | Default; matches what an operator-configured Claude session would do | Isolated, API-key-driven runs where hermetic behavior is required |
+
+Pipelines opt in to `anthropic:` by setting `default_client: anthropic:<model-id>` or a per-stage `client:` field.
 
 ## Load-bearing invariants
 
