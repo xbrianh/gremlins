@@ -5,7 +5,8 @@ import json
 import os
 import pathlib
 import sys
-from typing import Any, AsyncGenerator, cast
+from collections.abc import AsyncGenerator
+from typing import Any, cast
 
 from gremlins.clients.config import (
     STREAM_IDLE_BACKOFF,
@@ -155,9 +156,9 @@ class AnthropicSdkClient:
         idle_timeout: float,
         extra_env: dict[str, str] | None,
     ) -> CompletedRun:
-        import claude_agent_sdk
+        import claude_agent_sdk  # type: ignore[import-untyped]
 
-        options = claude_agent_sdk.ClaudeAgentOptions(
+        options: Any = claude_agent_sdk.ClaudeAgentOptions(  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
             model=effective_model,
             cwd=cwd,
             permission_mode="bypassPermissions",
@@ -179,7 +180,7 @@ class AnthropicSdkClient:
 
         gen: AsyncGenerator[Any, None] = cast(
             AsyncGenerator[Any, None],
-            claude_agent_sdk.query(prompt=prompt, options=options),
+            claude_agent_sdk.query(prompt=prompt, options=options),  # pyright: ignore[reportUnknownMemberType]
         )
         try:
             while True:
