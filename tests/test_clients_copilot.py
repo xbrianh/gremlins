@@ -232,3 +232,61 @@ def test_copilot_extra_env_merged_into_subprocess_env(tmp_path, monkeypatch):
 
     captured = json.loads(env_out.read_text(encoding="utf-8"))
     assert captured.get("FOO") == "bar"
+
+
+# ---------------------------------------------------------------------------
+# native_block pass-through (rollout 8/9 of #582)
+# ---------------------------------------------------------------------------
+# Copilot's CLI has no per-tool flags, so the native block cannot be expressed
+# as argv. The three tests below document the expected invocation shape for
+# all three cases: non-empty block, bypass, and empty block.
+
+
+def test_copilot_native_block_produces_base_argv(tmp_path, monkeypatch):
+    """Non-empty native_block: no extra flags (copilot has no per-tool surface)."""
+    bin_dir = tmp_path / "bin"
+    _install_stub(bin_dir, _STUB_COPILOT_SRC)
+    argv_out = tmp_path / "argv.json"
+
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("STUB_ARGV_OUT", str(argv_out))
+
+    native_block = {"allowed_tools": ["Read", "Edit", "Bash", "Write", "Grep", "Glob"]}
+    client = SubprocessCopilotClient(bypass=False, native_block=native_block)
+    asyncio.run(client.run("the-prompt", label="test"))
+
+    argv = json.loads(argv_out.read_text(encoding="utf-8"))
+    assert argv == ["-p", "the-prompt"]
+
+
+def test_copilot_bypass_still_passes_allow_all_with_native_block(tmp_path, monkeypatch):
+    """bypass=True + native_block: --allow-all present (regression guard for #786)."""
+    bin_dir = tmp_path / "bin"
+    _install_stub(bin_dir, _STUB_COPILOT_SRC)
+    argv_out = tmp_path / "argv.json"
+
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("STUB_ARGV_OUT", str(argv_out))
+
+    native_block = {"allowed_tools": ["Read", "Edit"]}
+    client = SubprocessCopilotClient(bypass=True, native_block=native_block)
+    asyncio.run(client.run("the-prompt", label="test"))
+
+    argv = json.loads(argv_out.read_text(encoding="utf-8"))
+    assert "--allow-all" in argv
+
+
+def test_copilot_empty_block_runs_with_no_extra_flags(tmp_path, monkeypatch):
+    """Empty native_block: clean invocation, no --allow-all."""
+    bin_dir = tmp_path / "bin"
+    _install_stub(bin_dir, _STUB_COPILOT_SRC)
+    argv_out = tmp_path / "argv.json"
+
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("STUB_ARGV_OUT", str(argv_out))
+
+    client = SubprocessCopilotClient(bypass=False, native_block={})
+    asyncio.run(client.run("the-prompt", label="test"))
+
+    argv = json.loads(argv_out.read_text(encoding="utf-8"))
+    assert argv == ["-p", "the-prompt"]
