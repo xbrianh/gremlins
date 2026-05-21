@@ -11,6 +11,7 @@ from collections.abc import Iterator
 from gremlins.executor.state import StateData
 from gremlins.fleet.duration import parse_duration
 from gremlins.fleet.render import FleetRow, build_row, print_table
+from gremlins.queue.core import queue_summary
 from gremlins.fleet.resolve import collect_gremlin_matches, resolve_gremlin
 from gremlins.fleet.state import (
     humanize_age,
@@ -20,6 +21,30 @@ from gremlins.fleet.state import (
     load_state,
     parse_liveness,
 )
+
+
+def _queue_header_line(summary: dict[str, object]) -> str | None:
+    pending = int(summary["pending"])  # type: ignore[arg-type]
+    running = int(summary["running"])  # type: ignore[arg-type]
+    failed = int(summary["failed"])  # type: ignore[arg-type]
+    active = bool(summary["runner_active"])
+
+    if pending == 0 and running == 0 and failed == 0:
+        return None
+
+    parts: list[str] = []
+    if running:
+        parts.append(f"running {running}")
+    if pending:
+        parts.append(f"pending {pending}")
+    if failed:
+        parts.append(f"failed {failed}")
+    counts = ", ".join(parts)
+
+    if not active and pending:
+        return f"queue:   {counts}   runner: NOT RUNNING ({pending} item{'s' if pending != 1 else ''} waiting)"
+    runner_str = "active" if active else "idle"
+    return f"queue:   {counts}   runner: {runner_str}"
 
 
 def _iter_filtered_gremlins(
@@ -120,6 +145,10 @@ def do_list(args: argparse.Namespace, here_root: str | None = None) -> None:
             r.started_at,
         )
     )
+
+    header = _queue_header_line(queue_summary())
+    if header:
+        print(header)
 
     if not rows:
         if here_root is not None:
@@ -324,7 +353,7 @@ def do_list_json(args: argparse.Namespace, here_root: str | None = None) -> None
         ),
         key=lambda d: str(d.get("started_at") or ""),
     )
-    print(json.dumps(items, indent=2))
+    print(json.dumps({"gremlins": items, "queue": queue_summary()}, indent=2))
 
 
 def do_drill_in_json(target: str) -> None:

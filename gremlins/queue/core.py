@@ -44,6 +44,25 @@ def runner_active() -> bool:
         return False
 
 
+def queue_summary() -> dict[str, object]:
+    """Return counts of queue items and whether the runner is active."""
+    from gremlins.paths import state_root
+
+    root = state_root() / "queues" / "default"
+    counts: dict[str, int] = {sub: 0 for sub in SUBDIRS}
+    if root.exists():
+        for sub in SUBDIRS:
+            d = root / sub
+            if d.is_dir():
+                counts[sub] = sum(1 for _ in d.glob("*.cmd"))
+    return {
+        "pending": counts["pending"],
+        "running": counts["running"],
+        "failed": counts["failed"],
+        "runner_active": runner_active(),
+    }
+
+
 def queue_root() -> Path:
     from gremlins.paths import state_root
 

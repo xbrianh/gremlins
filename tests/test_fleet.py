@@ -7,6 +7,7 @@ import subprocess
 
 import pytest
 
+import gremlins.cli.fleet as _fleet_cli
 import gremlins.fleet.ack as _ack
 import gremlins.fleet.close as _close
 import gremlins.fleet.constants as _constants
@@ -1592,7 +1593,10 @@ def _make_args(**kwargs):
     return argparse.Namespace(**defaults)
 
 
-def test_do_list_json_emits_json_array(tmp_path, monkeypatch, capsys):
+_EMPTY_QUEUE = {"pending": 0, "running": 0, "failed": 0, "runner_active": False}
+
+
+def test_do_list_json_emits_gremlins_and_queue(tmp_path, monkeypatch, capsys):
     state_root = tmp_path / "state-root"
     state_root.mkdir()
     gr_dir = state_root / "test-id-json01"
@@ -1611,12 +1615,14 @@ def test_do_list_json_emits_json_array(tmp_path, monkeypatch, capsys):
         log_text="recent",
     )
     monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+    monkeypatch.setattr(_views, "queue_summary", lambda: _EMPTY_QUEUE)
     _views.do_list_json(_make_args(), here_root=None)
     out = capsys.readouterr().out
     data = json.loads(out)
-    assert isinstance(data, list)
-    assert len(data) == 1
-    item = data[0]
+    assert "gremlins" in data
+    assert "queue" in data
+    assert len(data["gremlins"]) == 1
+    item = data["gremlins"][0]
     assert item["id"] == "test-id-json01"
     assert item["kind"] == "localgremlin"
     assert item["stage"] == "implement"
@@ -1644,19 +1650,89 @@ def test_do_list_json_dead_liveness_structured(tmp_path, monkeypatch, capsys):
         finished=True,
     )
     monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+    monkeypatch.setattr(_views, "queue_summary", lambda: _EMPTY_QUEUE)
     _views.do_list_json(_make_args(), here_root=None)
     out = capsys.readouterr().out
     data = json.loads(out)
-    assert data[0]["liveness"] == {"state": "dead", "reason": "exit", "exit_code": 1}
+    assert data["gremlins"][0]["liveness"] == {"state": "dead", "reason": "exit", "exit_code": 1}
 
 
 def test_do_list_json_empty_fleet(tmp_path, monkeypatch, capsys):
     state_root = tmp_path / "state-root"
     state_root.mkdir()
     monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+    monkeypatch.setattr(_views, "queue_summary", lambda: _EMPTY_QUEUE)
     _views.do_list_json(_make_args(), here_root=None)
     out = capsys.readouterr().out
-    assert json.loads(out) == []
+    data = json.loads(out)
+    assert data["gremlins"] == []
+
+
+# ---------------------------------------------------------------------------
+# Queue header — do_list text output and do_list_json queue field
+# ---------------------------------------------------------------------------
+
+
+def test_do_list_json_queue_field_empty(tmp_path, monkeypatch, capsys):
+    state_root = tmp_path / "state-root"
+    state_root.mkdir()
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+    monkeypatch.setattr(_views, "queue_summary", lambda: _EMPTY_QUEUE)
+    _views.do_list_json(_make_args(), here_root=None)
+    data = json.loads(capsys.readouterr().out)
+    assert data["queue"] == _EMPTY_QUEUE
+
+
+def test_do_list_json_queue_field_with_items(tmp_path, monkeypatch, capsys):
+    state_root = tmp_path / "state-root"
+    state_root.mkdir()
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+    summary = {"pending": 3, "running": 1, "failed": 0, "runner_active": True}
+    monkeypatch.setattr(_views, "queue_summary", lambda: summary)
+    _views.do_list_json(_make_args(), here_root=None)
+    data = json.loads(capsys.readouterr().out)
+    assert data["queue"] == summary
+
+
+def test_do_list_shows_queue_header_with_active_runner(tmp_path, monkeypatch, capsys):
+    state_root = tmp_path / "state-root"
+    state_root.mkdir()
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+    monkeypatch.setattr(
+        _views, "queue_summary",
+        lambda: {"pending": 3, "running": 1, "failed": 0, "runner_active": True},
+    )
+    _views.do_list(_make_args(), here_root=None)
+    out = capsys.readouterr().out
+    assert "queue:" in out
+    assert "pending 3" in out
+    assert "running 1" in out
+    assert "runner: active" in out
+    assert "NOT RUNNING" not in out
+
+
+def test_do_list_shows_loud_warning_when_runner_dead(tmp_path, monkeypatch, capsys):
+    state_root = tmp_path / "state-root"
+    state_root.mkdir()
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+    monkeypatch.setattr(
+        _views, "queue_summary",
+        lambda: {"pending": 3, "running": 0, "failed": 0, "runner_active": False},
+    )
+    _views.do_list(_make_args(), here_root=None)
+    out = capsys.readouterr().out
+    assert "NOT RUNNING" in out
+    assert "3 items waiting" in out
+
+
+def test_do_list_suppresses_queue_header_when_empty(tmp_path, monkeypatch, capsys):
+    state_root = tmp_path / "state-root"
+    state_root.mkdir()
+    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+    monkeypatch.setattr(_views, "queue_summary", lambda: _EMPTY_QUEUE)
+    _views.do_list(_make_args(), here_root=None)
+    out = capsys.readouterr().out
+    assert "queue:" not in out
 
 
 # ---------------------------------------------------------------------------
@@ -1735,11 +1811,13 @@ def test_do_drill_in_json_includes_log_path(tmp_path, monkeypatch, capsys):
 
 def test_cli_fleet_json_no_state_root(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(_constants, "STATE_ROOT", str(tmp_path / "nonexistent"))
+    monkeypatch.setattr(_views, "queue_summary", lambda: _EMPTY_QUEUE)
+    monkeypatch.setattr(_fleet_cli, "queue_summary", lambda: _EMPTY_QUEUE)
     with pytest.raises(SystemExit) as exc:
         _main_impl(["--json"])
     assert exc.value.code == 0
     out = capsys.readouterr().out
-    assert json.loads(out) == []
+    assert json.loads(out)["gremlins"] == []
 
 
 def test_cli_fleet_json_drill_in_no_state_root(tmp_path, monkeypatch, capsys):
@@ -1769,12 +1847,13 @@ def test_cli_fleet_json_list(tmp_path, monkeypatch, capsys):
         log_text="recent",
     )
     monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+    monkeypatch.setattr(_views, "queue_summary", lambda: _EMPTY_QUEUE)
     with pytest.raises(SystemExit) as exc:
         _main_impl(["--json"])
     assert exc.value.code == 0
     data = json.loads(capsys.readouterr().out)
-    assert isinstance(data, list)
-    assert data[0]["id"] == "test-cli-json01"
+    assert "gremlins" in data
+    assert data["gremlins"][0]["id"] == "test-cli-json01"
 
 
 def test_cli_fleet_json_drill_in(tmp_path, monkeypatch, capsys):

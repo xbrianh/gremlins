@@ -20,6 +20,7 @@ from gremlins.fleet.views import (
     do_list_json,
     do_recent,
 )
+from gremlins.queue.core import queue_summary
 from gremlins.utils.watch import watch_render
 
 
@@ -262,7 +263,9 @@ def _main_impl(argv: list[str] | None = None) -> int:
     if not os.path.isdir(_constants.STATE_ROOT):
         if args.json:
             empty: object = (
-                [] if args.id_prefix is None else {"error": "no gremlins state root"}
+                {"gremlins": [], "queue": queue_summary()}
+                if args.id_prefix is None
+                else {"error": "no gremlins state root"}
             )
             print(json.dumps(empty))
         else:
