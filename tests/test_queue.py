@@ -380,7 +380,9 @@ def test_cli_queue_add_dispatches(tmp_path, monkeypatch, capsys):
     assert "queued:" in out
 
 
-def test_cli_queue_add_help_prints_usage_and_does_not_enqueue(tmp_path, monkeypatch, capsys):
+def test_cli_queue_add_help_prints_usage_and_does_not_enqueue(
+    tmp_path, monkeypatch, capsys
+):
     monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
     rc = main(["queue", "add", "--help"])
     assert rc == 0
