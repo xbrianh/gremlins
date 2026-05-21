@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import signal
@@ -15,6 +16,17 @@ from pathlib import Path
 
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 SUBDIRS = ("pending", "running", "done", "failed")
+
+
+def runner_active() -> bool:
+    try:
+        result = subprocess.run(
+            ["pgrep", "-u", str(os.getuid()), "-f", "gremlins queue run"],
+            capture_output=True,
+        )
+        return result.returncode == 0
+    except FileNotFoundError:
+        return False
 
 
 def queue_root() -> Path:

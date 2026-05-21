@@ -15,6 +15,7 @@ from gremlins.queue.core import (
     list_queue_json,
     requeue,
     run,
+    runner_active,
     set_state,
 )
 from gremlins.utils.watch import watch_render
@@ -27,6 +28,10 @@ def _add(argv: list[str]) -> int:
     command = argv[0] if len(argv) == 1 else shlex.join(argv)
     name = add(command)
     print(f"queued: {name}")
+    if runner_active():
+        print("runner: active")
+    else:
+        print("warning: no runner active — start with: gremlins queue run")
     return 0
 
 
@@ -84,7 +89,12 @@ def _requeue(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="gremlins queue requeue")
     parser.add_argument("--done", action="store_true", help="Also requeue done items.")
     args = parser.parse_args(argv)
-    return requeue(include_done=args.done)
+    rc = requeue(include_done=args.done)
+    if runner_active():
+        print("runner: active")
+    else:
+        print("warning: no runner active — start with: gremlins queue run")
+    return rc
 
 
 def _clear(argv: list[str]) -> int:
