@@ -5,7 +5,12 @@ from __future__ import annotations
 import json
 import pathlib
 
-from gremlins.utils.parallel_bail import BailedChild, BailDecision, collect_bails, decide
+from gremlins.utils.parallel_bail import (
+    BailedChild,
+    BailDecision,
+    collect_bails,
+    decide,
+)
 
 
 # ---------------------------------------------------------------------------
