@@ -21,13 +21,10 @@ from gremlins.utils.watch import watch_render
 
 
 def _add(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(prog="gremlins queue add")
-    parser.add_argument("command", nargs=argparse.REMAINDER, help="Command to queue.")
-    args = parser.parse_args(argv)
-    if not args.command:
-        parser.print_help(sys.stderr)
-        return 1
-    command = args.command[0] if len(args.command) == 1 else shlex.join(args.command)
+    if not argv or argv[0] in ("-h", "--help"):
+        print("usage: gremlins queue add <command>", file=sys.stderr)
+        return 0 if argv else 1
+    command = argv[0] if len(argv) == 1 else shlex.join(argv)
     name = add(command)
     print(f"queued: {name}")
     return 0
