@@ -31,6 +31,10 @@ def _mock_rev_parse(monkeypatch):
         "gremlins.stages.implement.proc.run_or_raise",
         lambda cmd, **kwargs: cmd[-1],
     )
+    monkeypatch.setattr(
+        "gremlins.stages.implement.commits_since",
+        lambda ref, **kwargs: [],
+    )
 
 
 def _make_state(
@@ -237,7 +241,26 @@ def test_commit_artifacts_include_worktree(tmp_path: pathlib.Path) -> None:
         asyncio.run(stage.run(state))
 
     assert len(recorded) == 1
-    assert "worktree" in recorded[0]
+    assert recorded[0]["worktree"] == ""
+
+
+def test_commit_artifacts_worktree_path(tmp_path: pathlib.Path) -> None:
+    stage, state = _make_state(tmp_path, prompts=[_TEMPLATE_GH])
+    state.worktree = tmp_path
+    fake_commit = Commit(sha="e" * 40, subject="feat: worktree")
+    recorded: list[dict] = []
+    with (
+        patch(
+            "gremlins.stages.implement.classify_impl_outcome",
+            return_value=HeadAdvanced(commit_count=1),
+        ),
+        patch("gremlins.stages.implement.commits_since", return_value=[fake_commit]),
+        patch.object(state, "record_artifact", side_effect=recorded.append),
+    ):
+        asyncio.run(stage.run(state))
+
+    assert len(recorded) == 1
+    assert recorded[0]["worktree"] == str(tmp_path)
 
 
 def test_empty_impl_with_prior_commit_artifacts_does_not_raise(
@@ -252,6 +275,6 @@ def test_empty_impl_with_prior_commit_artifacts_does_not_raise(
             "gremlins.stages.implement.classify_impl_outcome",
             return_value=EmptyImpl(),
         ),
-        patch.object(state.data, "read_artifacts", return_value=prior_artifacts),
+        patch.object(state.data, "read_artifacts_for_stage", return_value=prior_artifacts),
     ):
         asyncio.run(stage.run(state))

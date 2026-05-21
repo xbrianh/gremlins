@@ -270,13 +270,9 @@ class Commit:
     subject: str
 
 
-def commits_since(ref: str, *, cwd: str | None = None) -> list[Commit]:
+def commits_since(ref: str, *, cwd: str | os.PathLike[str] | None = None) -> list[Commit]:
     """Return commits reachable from HEAD but not from ref, oldest first."""
-    r = _run_git(
-        ["log", f"{ref}..HEAD", "--format=%H %s", "--reverse"], cwd=cwd, check=False
-    )
-    if r.returncode != 0:
-        return []
+    r = _run_git(["log", f"{ref}..HEAD", "--format=%H %s", "--reverse"], cwd=cwd)
     result: list[Commit] = []
     for line in r.stdout.splitlines():
         sha, _, subject = line.partition(" ")

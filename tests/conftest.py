@@ -186,6 +186,10 @@ def common_local_patches(monkeypatch):
         "gremlins.stages.implement.classify_impl_outcome",
         lambda pre, **kwargs: HeadAdvanced(commit_count=1),
     )
+    monkeypatch.setattr(
+        "gremlins.stages.implement.commits_since",
+        lambda ref, **kwargs: [],
+    )
 
 
 @pytest.fixture(autouse=True)

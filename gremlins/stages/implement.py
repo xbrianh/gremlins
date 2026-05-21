@@ -122,7 +122,7 @@ class Implement(Stage):
                 f"implement diverged from pre-impl HEAD {pre.head[:7]}; expected a fast-forward"
             )
         if isinstance(outcome, EmptyImpl):
-            if not any(a.get("type") == "commit" for a in state.data.read_artifacts()):
+            if not any(a.get("type") == "commit" for a in state.data.read_artifacts_for_stage(self.name)):
                 raise RuntimeError(
                     "implement produced no committed work; the agent must commit before returning"
                 )
