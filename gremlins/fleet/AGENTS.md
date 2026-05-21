@@ -23,10 +23,23 @@ Fleet manager package for background gremlins. Reads every gremlin state file un
 
 ## JSON output contract (`--json`)
 
-`gremlins --json` emits a JSON array; `gremlins <id> --json` emits one JSON object. Both are stdout-only — no decorative text when `--json` is active.
+`gremlins --json` emits a JSON object; `gremlins <id> --json` emits one JSON object. Both are stdout-only — no decorative text when `--json` is active.
 
 ### Fleet list (`gremlins --json`)
-Each array element:
+Top-level shape:
+```json
+{
+  "gremlins": [ ... ],
+  "queue": {
+    "pending": 0,
+    "running": 0,
+    "failed": 0,
+    "runner_active": false
+  }
+}
+```
+
+Each element of `gremlins`:
 ```json
 {
   "id": "string",
