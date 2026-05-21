@@ -11,7 +11,6 @@ from collections.abc import Iterator
 from gremlins.executor.state import StateData
 from gremlins.fleet.duration import parse_duration
 from gremlins.fleet.render import FleetRow, build_row, print_table
-from gremlins.queue.core import queue_summary
 from gremlins.fleet.resolve import collect_gremlin_matches, resolve_gremlin
 from gremlins.fleet.state import (
     humanize_age,
@@ -21,6 +20,7 @@ from gremlins.fleet.state import (
     load_state,
     parse_liveness,
 )
+from gremlins.queue.core import queue_summary
 
 
 def _queue_header_line(summary: dict[str, object]) -> str | None:
