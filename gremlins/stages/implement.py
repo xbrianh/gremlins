@@ -16,6 +16,7 @@ from gremlins.utils.git import (
     EmptyImpl,
     PreImplState,
     classify_impl_outcome,
+    commits_since,
 )
 
 logger = logging.getLogger(__name__)
@@ -116,12 +117,26 @@ class Implement(Stage):
         )
 
         outcome = classify_impl_outcome(pre, cwd=cwd_arg)
-        if isinstance(outcome, EmptyImpl):
-            raise RuntimeError(
-                "implement produced no committed work; the agent must commit before returning"
-            )
         if isinstance(outcome, DivergentHead):
             raise RuntimeError(
                 f"implement diverged from pre-impl HEAD {pre.head[:7]}; expected a fast-forward"
             )
+        if isinstance(outcome, EmptyImpl):
+            if not any(
+                a.get("type") == "commit"
+                for a in state.data.read_artifacts_for_stage(self.name)
+            ):
+                raise RuntimeError(
+                    "implement produced no committed work; the agent must commit before returning"
+                )
+        else:
+            for c in commits_since(pre.head, cwd=cwd_arg):
+                state.record_artifact(
+                    {
+                        "type": "commit",
+                        "sha": c.sha,
+                        "subject": c.subject,
+                        "worktree": cwd_arg or "",
+                    }
+                )
         return Done()
