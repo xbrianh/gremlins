@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import subprocess
 from collections.abc import AsyncIterator
 
@@ -119,3 +120,28 @@ async def iter_lines(
         while b"\n" in buf:
             line, buf = buf.split(b"\n", 1)
             yield line + b"\n"
+
+
+async def terminate_with_grace(
+    p: asyncio.subprocess.Process, grace_s: float = 10.0
+) -> None:
+    """SIGTERM → wait grace_s → SIGKILL. Shielded so it completes under cancellation."""
+    try:
+        p.send_signal(signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    cancelled = False
+    try:
+        await asyncio.shield(asyncio.wait_for(p.wait(), timeout=grace_s))
+    except asyncio.CancelledError:
+        cancelled = True
+    except TimeoutError:
+        pass
+    if p.returncode is None:
+        try:
+            p.kill()
+        except ProcessLookupError:
+            pass
+        await asyncio.shield(p.wait())
+    if cancelled:
+        raise asyncio.CancelledError()

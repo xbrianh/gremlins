@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import pathlib
 import signal
@@ -16,6 +17,7 @@ from gremlins.executor.state import State, StateData
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Done, Outcome
 from gremlins.stages.parallel import ParallelStage
+from gremlins.utils import proc as _proc_mod
 
 # ---------------------------------------------------------------------------
 # Fake subprocess helpers
@@ -273,7 +275,11 @@ def test_cancellation_sigterm_then_sigkill(
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
     # Make the grace period very short so the test doesn't actually wait 10s.
-    monkeypatch.setattr("gremlins.stages.parallel._SIGTERM_GRACE_S", 0.05)
+    monkeypatch.setattr(
+        _proc_mod,
+        "terminate_with_grace",
+        functools.partial(_proc_mod.terminate_with_grace, grace_s=0.05),
+    )
 
     stage = _child_stage("child-a")
     state = _child_state(tmp_path / "child-a")

@@ -420,6 +420,66 @@ def setup_named_worktree(
     return workdir, branch
 
 
+async def in_git_repo_async(cwd: str | os.PathLike[str] | None = None) -> bool:
+    try:
+        return await proc.run_ok_async(["git", "rev-parse", "--git-dir"], cwd=cwd)
+    except OSError:
+        return False
+
+
+async def head_sha_async(cwd: str | os.PathLike[str] | None = None) -> str:
+    r = await proc.run_async(["git", "rev-parse", "HEAD"], cwd=cwd)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+async def status_porcelain_async(cwd: str | os.PathLike[str] | None = None) -> str:
+    try:
+        r = await proc.run_async(["git", "status", "--porcelain"], cwd=cwd)
+        return r.stdout
+    except OSError:
+        return ""
+
+
+async def setup_detached_worktree_async(
+    project_root: str,
+    base_ref: str,
+    *,
+    worktree_parent: pathlib.Path | None = None,
+) -> str:
+    """Add a detached worktree at base_ref. Returns the worktree path."""
+    if worktree_parent is not None:
+        worktree_parent.mkdir(parents=True, exist_ok=True)
+        workdir = str(worktree_parent / f"aibg-gremlin.{secrets.token_hex(6)}")
+    else:
+        workdir = os.path.join(
+            tempfile.gettempdir(), f"aibg-gremlin.{secrets.token_hex(6)}"
+        )
+    r = await proc.run_async(
+        ["git", "worktree", "add", "--detach", workdir, base_ref], cwd=project_root
+    )
+    if r.returncode != 0:
+        raise GitError(r.returncode, r.stderr.strip())
+    return workdir
+
+
+async def remove_worktree_async(project_root: str, workdir: str) -> None:
+    """Remove a git worktree. Best-effort; never raises."""
+    try:
+        await proc.run_quiet_async(
+            ["git", "worktree", "remove", "--force", workdir], cwd=project_root
+        )
+    except Exception:
+        pass
+
+
+async def prune_worktrees_async(project_root: str) -> None:
+    """Prune stale worktree entries. Best-effort; never raises."""
+    try:
+        await proc.run_quiet_async(["git", "worktree", "prune"], cwd=project_root)
+    except Exception:
+        pass
+
+
 def setup_workdir(
     setup_kind: str,
     project_root: str,
