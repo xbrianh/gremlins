@@ -341,6 +341,8 @@ class StateData:
             return []
 
     def read_artifacts_for_attempt(self, attempt: str) -> list[dict[str, Any]]:
+        if not attempt:
+            return []
         return [a for a in self.read_artifacts() if a.get("attempt") == attempt]
 
     def read_artifacts_for_stage(self, stage_name: str) -> list[dict[str, Any]]:

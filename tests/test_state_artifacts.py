@@ -271,3 +271,47 @@ def test_read_artifacts_for_stage_excludes_unstamped(tmp_path, monkeypatch):
 
     result = StateData.load(gremlin_id).read_artifacts_for_stage("implement")
     assert result == [{"type": "branch", "name": "new", "attempt": "implement-9999"}]
+
+
+# ---------------------------------------------------------------------------
+# read_artifacts_for_attempt: empty attempt guard
+# ---------------------------------------------------------------------------
+
+
+def test_read_artifacts_for_attempt_empty_returns_empty(tmp_path, monkeypatch):
+    gremlin_id = "gr-rafa-empty"
+    state_root, sf = _make_state_dir(tmp_path, gremlin_id)
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
+
+    sf.write_text(
+        json.dumps(
+            {"id": gremlin_id, "artifacts": [{"type": "branch", "name": "x", "attempt": ""}]}
+        )
+    )
+
+    assert StateData.load(gremlin_id).read_artifacts_for_attempt("") == []
+
+
+# ---------------------------------------------------------------------------
+# parallel subprocess child: attempt override
+# ---------------------------------------------------------------------------
+
+
+def test_append_artifact_stamps_child_attempt(tmp_path, monkeypatch):
+    # Simulates a subprocess child whose attempt comes from the spec, not the
+    # top-level state.json field (which holds the parent stage's attempt).
+    import dataclasses
+
+    gremlin_id = "gr-child-stamp"
+    state_root, sf = _make_state_dir(tmp_path, gremlin_id, attempt="parent-stage-aabb")
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
+
+    child_attempt = "child-key-ccdd"
+    data = StateData.load(gremlin_id)
+    data = dataclasses.replace(data, attempt=child_attempt)
+    data.append_artifact({"type": "branch", "name": "feat-child"})
+
+    arts = StateData.load(gremlin_id).read_artifacts()
+    assert arts == [{"type": "branch", "name": "feat-child", "attempt": child_attempt}]
+    assert StateData.load(gremlin_id).read_artifacts_for_attempt(child_attempt) == arts
+    assert StateData.load(gremlin_id).read_artifacts_for_attempt("parent-stage-aabb") == []

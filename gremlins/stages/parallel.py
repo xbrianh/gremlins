@@ -201,7 +201,7 @@ def _missing_result_detail(child_key: str, returncode: int | None) -> str:
 
 
 def _build_child_spec_dict(
-    stage_obj: Stage, child_st: State, child_key: str
+    stage_obj: Stage, child_st: State, child_key: str, attempt: str
 ) -> dict[str, Any]:
     return {
         "stage_dict": stage_obj.raw_dict,
@@ -214,6 +214,7 @@ def _build_child_spec_dict(
         ),
         "pipeline_path": child_st.data.pipeline_path or None,
         "child_key": child_key,
+        "attempt": attempt,
         "parent_stage": child_st.parent_stage,
         "repo": child_st.repo,
         "instructions": child_st.instructions,
@@ -460,7 +461,7 @@ class _ParallelExecutor:
         self._parent_data.patch_parallel_attempt(child_key, attempt)
         spec_path = child_st.session_dir / f"spec_{attempt}.json"
         spec_path.write_text(
-            json.dumps(_build_child_spec_dict(stage_obj, child_st, child_key)),
+            json.dumps(_build_child_spec_dict(stage_obj, child_st, child_key, attempt)),
             encoding="utf-8",
         )
         timeout_s = _parse_timeout(stage_obj, child_key)
