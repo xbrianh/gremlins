@@ -162,12 +162,16 @@ def launch_main(argv: list[str]) -> int:
 def _self_background_main(
     pipeline_name: str, args: argparse.Namespace, stage_inputs: dict[str, Any]
 ) -> int:
-    policy = load_policy(
-        cli_bypass=None,
-        cli_permissions_file=None,
-        env=os.environ,
-        cwd=pathlib.Path.cwd(),
-    )
+    try:
+        policy = load_policy(
+            cli_bypass=None,
+            cli_permissions_file=None,
+            env=os.environ,
+            cwd=pathlib.Path.cwd(),
+        )
+    except Exception as exc:
+        sys.stderr.write(f"error: failed to load permissions policy: {exc}\n")
+        return 1
     try:
         validate_policy_against_registry(policy, PROVIDER_CAPABILITIES)
     except ValueError as exc:

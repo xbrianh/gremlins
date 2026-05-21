@@ -38,8 +38,6 @@ class SubprocessClaudeClient:
     ``claude -p`` before the orchestrator exits.
     """
 
-    takes_permission_block: bool = True
-
     def __init__(self) -> None:
         # Reentrant lock: signal handlers run on the main thread and may land
         # while _track/_untrack already hold it. A plain Lock would deadlock

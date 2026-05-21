@@ -47,7 +47,7 @@ def test_error_message_names_offending_provider() -> None:
         validate_policy_against_registry(policy, caps)
 
 
-def test_error_message_for_unknown_provider_mentions_removal() -> None:
+def test_error_message_for_unknown_provider_names_provider() -> None:
     policy = _policy({"unknown": {"allowed_tools": ["Read"]}})
-    with pytest.raises(ValueError, match="remove"):
+    with pytest.raises(ValueError, match="unknown"):
         validate_policy_against_registry(policy, {})

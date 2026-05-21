@@ -98,8 +98,6 @@ def _raw_dict(event: Any) -> dict[str, Any]:
 
 
 class OpenAIAgentsClient:
-    takes_permission_block: bool = True
-
     def __init__(
         self,
         model: str | None,

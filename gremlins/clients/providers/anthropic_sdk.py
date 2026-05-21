@@ -137,8 +137,6 @@ def _extract_cost(msg: Any, model: str) -> float | None:
 
 
 class AnthropicSdkClient:
-    takes_permission_block: bool = True
-
     def __init__(self, model: str | None) -> None:
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
