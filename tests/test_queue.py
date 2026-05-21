@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -661,7 +662,7 @@ def test_cli_queue_set_state_invalid_state(tmp_path, monkeypatch):
 def test_runner_active_true_when_pgrep_exits_zero(monkeypatch):
     monkeypatch.setattr(
         "gremlins.queue.core.subprocess.run",
-        lambda cmd, **kw: types.SimpleNamespace(returncode=0),
+        lambda cmd, **kw: types.SimpleNamespace(returncode=0, stdout=""),
     )
     assert core.runner_active() is True
 
@@ -669,7 +670,7 @@ def test_runner_active_true_when_pgrep_exits_zero(monkeypatch):
 def test_runner_active_false_when_pgrep_exits_nonzero(monkeypatch):
     monkeypatch.setattr(
         "gremlins.queue.core.subprocess.run",
-        lambda cmd, **kw: types.SimpleNamespace(returncode=1),
+        lambda cmd, **kw: types.SimpleNamespace(returncode=1, stdout=""),
     )
     assert core.runner_active() is False
 
@@ -829,11 +830,6 @@ def test_stop_stale_pid_cleans_up(tmp_path, monkeypatch, capsys):
     root = core.queue_root()
     pid_path = root / "runner.pid"
     pid_path.write_text("99999999")  # pid that won't exist
-
-    def fake_kill(pid, sig):
-        raise ProcessLookupError
-
-    monkeypatch.setattr("gremlins.queue.core.os.kill", fake_kill)
     rc = core.stop()
     assert rc == 1
     assert not pid_path.exists()
@@ -854,10 +850,16 @@ def test_stop_sends_sigterm_and_cleans_up(tmp_path, monkeypatch):
     def fake_kill(pid, sig):
         kill_calls.append((pid, sig))
         call_count[0] += 1
-        if call_count[0] > 2:
+        if call_count[0] > 1:
             raise ProcessLookupError
 
+    def fake_subprocess_run(cmd, **kw):
+        if cmd[0] == "ps":
+            return types.SimpleNamespace(returncode=0, stdout="gremlins queue run\n")
+        return types.SimpleNamespace(returncode=0, stdout="")
+
     monkeypatch.setattr("gremlins.queue.core.os.kill", fake_kill)
+    monkeypatch.setattr("gremlins.queue.core.subprocess.run", fake_subprocess_run)
     monkeypatch.setattr("gremlins.queue.core.time.sleep", lambda _: None)
 
     rc = core.stop()
@@ -871,3 +873,42 @@ def test_cli_queue_stop_dispatches(tmp_path, monkeypatch):
     monkeypatch.setattr("gremlins.cli.queue.stop", lambda: 0)
     rc = main(["queue", "stop"])
     assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# _pid_is_runner
+# ---------------------------------------------------------------------------
+
+
+def test_pid_is_runner_false_for_current_process():
+    assert core._pid_is_runner(os.getpid()) is False
+
+
+def test_pid_is_runner_false_for_nonexistent_pid():
+    assert core._pid_is_runner(2**31 - 1) is False
+
+
+def test_stop_stale_if_pid_is_not_runner(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    root = core.queue_root()
+    pid_path = root / "runner.pid"
+    pid_path.write_text(str(os.getpid()))
+    rc = core.stop()
+    assert rc == 1
+    assert not pid_path.exists()
+    assert "stale" in capsys.readouterr().err
+
+
+def test_runner_active_false_for_live_non_runner_pid_no_pgrep_match(tmp_path, monkeypatch):
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    root = core.queue_root()
+    pid_path = root / "runner.pid"
+    pid_path.write_text(str(os.getpid()))
+
+    def fake_subprocess_run(cmd, **kw):
+        if cmd[0] == "ps":
+            return types.SimpleNamespace(returncode=0, stdout="python -m pytest\n")
+        return types.SimpleNamespace(returncode=1)  # pgrep finds no match
+
+    monkeypatch.setattr("gremlins.queue.core.subprocess.run", fake_subprocess_run)
+    assert core.runner_active() is False
