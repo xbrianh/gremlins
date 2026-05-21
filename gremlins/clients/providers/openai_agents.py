@@ -31,6 +31,7 @@ from gremlins.clients.config import (
 from gremlins.clients.protocol import CompletedRun
 from gremlins.clients.stream import trunc, ts
 from gremlins.clients.tools import build_tools
+from gremlins.permissions.loader import load_default_block
 from gremlins.permissions.policy import Policy
 from gremlins.utils.decorators import default_on_exception, swallow
 from gremlins.utils.yaml_io import load_bundled_prompt
@@ -457,7 +458,7 @@ def make_openai_client(model: str | None, policy: Policy) -> OpenAIAgentsClient:
         api_key=api_key,
         model_settings=ModelSettings(temperature=_DEFAULT_TEMPERATURE),
         bypass=policy.bypass,
-        native_block=policy.block_for("openai"),
+        native_block=load_default_block("openai") | policy.block_for("openai"),
     )
 
 
@@ -474,5 +475,5 @@ def make_xai_client(model: str | None, policy: Policy) -> OpenAIAgentsClient:
             reasoning=Reasoning(effort="high", summary="auto"),
         ),
         bypass=policy.bypass,
-        native_block=policy.block_for("xai"),
+        native_block=load_default_block("xai") | policy.block_for("xai"),
     )

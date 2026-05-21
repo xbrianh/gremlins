@@ -17,6 +17,7 @@ from gremlins.clients.config import (
 )
 from gremlins.clients.protocol import CompletedRun
 from gremlins.clients.stream import emit_event, ts
+from gremlins.permissions.loader import load_default_block
 from gremlins.permissions.policy import Policy
 
 _DEFAULT_MODEL = "claude-sonnet-4-6"
@@ -326,5 +327,5 @@ def make_anthropic_client(model: str | None, policy: Policy) -> AnthropicSdkClie
     return AnthropicSdkClient(
         model,
         bypass=policy.bypass,
-        native_block=policy.block_for("anthropic"),
+        native_block=load_default_block("anthropic") | policy.block_for("anthropic"),
     )

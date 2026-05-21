@@ -5,7 +5,7 @@ import tomllib
 from collections.abc import Mapping
 from typing import Any
 
-from gremlins.permissions.policy import KNOWN_PROVIDERS, Policy
+from gremlins.permissions.policy import Policy
 from gremlins.utils.yaml_io import load_yaml_file
 
 _DEFAULTS_DIR = pathlib.Path(__file__).parent / "defaults"
@@ -19,21 +19,16 @@ def load_policy(
     cwd: pathlib.Path,
 ) -> Policy:
     bypass = _resolve_bypass(cli_bypass=cli_bypass, env=env, cwd=cwd)
-    overrides = (
+    blocks = (
         _blocks_from_file(cli_permissions_file)
         if cli_permissions_file is not None
         else _blocks_from_project(cwd)
     )
-    blocks = {**_load_defaults(), **overrides}
     return Policy(bypass=bypass, blocks=blocks)
 
 
-def _load_defaults() -> dict[str, dict[str, Any]]:
-    result: dict[str, dict[str, Any]] = {}
-    for provider in KNOWN_PROVIDERS:
-        path = _DEFAULTS_DIR / f"{provider}.yaml"
-        result[provider] = load_yaml_file(path)
-    return result
+def load_default_block(provider: str) -> dict[str, Any]:
+    return load_yaml_file(_DEFAULTS_DIR / f"{provider}.yaml")
 
 
 def _resolve_bypass(
