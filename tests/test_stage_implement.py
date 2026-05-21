@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import pathlib
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from conftest import MINIMAL_EVENTS
@@ -18,7 +18,13 @@ from gremlins.utils.git import DivergentHead, EmptyImpl, HeadAdvanced, PreImplSt
 _TEMPLATE_LOCAL = "plan: {plan_text}{spec_block}"
 _TEMPLATE_GH = "{spec_block}{plan_source_label}{plan_text}{plan_location_note}"
 
-_FAKE_PRE = PreImplState(head="abc123")
+
+@pytest.fixture(autouse=True)
+def _mock_rev_parse(monkeypatch):
+    monkeypatch.setattr(
+        "gremlins.stages.implement.proc.run_or_raise",
+        lambda cmd, **kwargs: cmd[-1],
+    )
 
 
 def _make_state(
@@ -28,11 +34,12 @@ def _make_state(
     spec_text: str = "",
     prompts: list[str] | None = None,
     issue_num: str = "",
+    base_ref_sha: str = "abc123",
 ) -> tuple[Implement, RuntimeState]:
     stage = Implement("implement", prompts or [], {})
     client = FakeClaudeClient(fixtures={"implement": MINIMAL_EVENTS})
     state = RuntimeState(
-        data=StateData(issue_num=issue_num),
+        data=StateData(issue_num=issue_num, base_ref_sha=base_ref_sha),
         client=client,
         session_dir=tmp_path,
     )
@@ -47,14 +54,9 @@ def test_local_git_succeeds_on_head_advanced(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     stage, state = _make_state(tmp_path, prompts=[_TEMPLATE_LOCAL])
-    with (
-        patch(
-            "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
-        ),
-        patch(
-            "gremlins.stages.implement.classify_impl_outcome",
-            return_value=HeadAdvanced(commit_count=2),
-        ),
+    with patch(
+        "gremlins.stages.implement.classify_impl_outcome",
+        return_value=HeadAdvanced(commit_count=2),
     ):
         asyncio.run(stage.run(state))
     assert len(state.client.calls) == 1
@@ -64,9 +66,6 @@ def test_local_git_raises_on_empty_impl(tmp_path: pathlib.Path, monkeypatch) -> 
     monkeypatch.chdir(tmp_path)
     stage, state = _make_state(tmp_path, prompts=[_TEMPLATE_LOCAL])
     with (
-        patch(
-            "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
-        ),
         patch(
             "gremlins.stages.implement.classify_impl_outcome",
             return_value=EmptyImpl(),
@@ -80,14 +79,9 @@ def test_gh_calls_claude_with_plan_text(tmp_path: pathlib.Path) -> None:
     stage, state = _make_state(
         tmp_path, plan_text="issue body here", prompts=[_TEMPLATE_GH]
     )
-    with (
-        patch(
-            "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
-        ),
-        patch(
-            "gremlins.stages.implement.classify_impl_outcome",
-            return_value=HeadAdvanced(commit_count=1),
-        ),
+    with patch(
+        "gremlins.stages.implement.classify_impl_outcome",
+        return_value=HeadAdvanced(commit_count=1),
     ):
         asyncio.run(stage.run(state))
     assert len(state.client.calls) == 1
@@ -100,14 +94,9 @@ def test_gh_plan_source_label_with_issue_num(tmp_path: pathlib.Path) -> None:
     stage, state = _make_state(
         tmp_path, plan_text="body", prompts=[_TEMPLATE_GH], issue_num="99"
     )
-    with (
-        patch(
-            "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
-        ),
-        patch(
-            "gremlins.stages.implement.classify_impl_outcome",
-            return_value=HeadAdvanced(commit_count=1),
-        ),
+    with patch(
+        "gremlins.stages.implement.classify_impl_outcome",
+        return_value=HeadAdvanced(commit_count=1),
     ):
         asyncio.run(stage.run(state))
     prompt = state.client.calls[0].prompt
@@ -116,14 +105,9 @@ def test_gh_plan_source_label_with_issue_num(tmp_path: pathlib.Path) -> None:
 
 def test_gh_plan_source_label_without_issue_num(tmp_path: pathlib.Path) -> None:
     stage, state = _make_state(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH])
-    with (
-        patch(
-            "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
-        ),
-        patch(
-            "gremlins.stages.implement.classify_impl_outcome",
-            return_value=HeadAdvanced(commit_count=1),
-        ),
+    with patch(
+        "gremlins.stages.implement.classify_impl_outcome",
+        return_value=HeadAdvanced(commit_count=1),
     ):
         asyncio.run(stage.run(state))
     prompt = state.client.calls[0].prompt
@@ -137,9 +121,6 @@ def test_local_git_raises_on_divergent_head(
     stage, state = _make_state(tmp_path, prompts=[_TEMPLATE_LOCAL])
     with (
         patch(
-            "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
-        ),
-        patch(
             "gremlins.stages.implement.classify_impl_outcome",
             return_value=DivergentHead(pre_head="abc123", post_head="def456"),
         ),
@@ -151,9 +132,6 @@ def test_local_git_raises_on_divergent_head(
 def test_raises_on_empty_impl(tmp_path: pathlib.Path) -> None:
     stage, state = _make_state(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH])
     with (
-        patch(
-            "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
-        ),
         patch(
             "gremlins.stages.implement.classify_impl_outcome",
             return_value=EmptyImpl(),
@@ -167,9 +145,6 @@ def test_raises_on_divergent_head(tmp_path: pathlib.Path) -> None:
     stage, state = _make_state(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH])
     with (
         patch(
-            "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
-        ),
-        patch(
             "gremlins.stages.implement.classify_impl_outcome",
             return_value=DivergentHead(pre_head="abc123", post_head="def456"),
         ),
@@ -178,45 +153,22 @@ def test_raises_on_divergent_head(tmp_path: pathlib.Path) -> None:
         asyncio.run(stage.run(state))
 
 
-def test_resume_uses_persisted_pre_impl_head(tmp_path: pathlib.Path) -> None:
-    """On a resume, pre_impl_head in state must be used; record_pre_impl_state must not be called."""
-    stage, state = _make_state(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH])
-    state.data.pre_impl_head = "deadbeef"
+def test_base_ref_sha_used_as_baseline(tmp_path: pathlib.Path) -> None:
+    """base_ref_sha is the pre-impl baseline; resume works without pre_impl_head."""
+    stage, state = _make_state(
+        tmp_path, plan_text="body", prompts=[_TEMPLATE_GH], base_ref_sha="deadbeef"
+    )
+    captured: list[PreImplState] = []
 
-    record_mock = MagicMock(return_value=_FAKE_PRE)
+    def _capture(pre: PreImplState, **kwargs: object) -> HeadAdvanced:
+        captured.append(pre)
+        return HeadAdvanced(commit_count=3)
 
-    with (
-        patch("gremlins.stages.implement.record_pre_impl_state", record_mock),
-        patch(
-            "gremlins.stages.implement.classify_impl_outcome",
-            return_value=HeadAdvanced(commit_count=3),
-        ),
-    ):
+    with patch("gremlins.stages.implement.classify_impl_outcome", _capture):
         asyncio.run(stage.run(state))
 
-    record_mock.assert_not_called()
-    assert state.data.pre_impl_head == "", "pre_impl_head must be cleared on success"
-
-
-def test_resume_retains_pre_impl_head_on_failure(tmp_path: pathlib.Path) -> None:
-    """pre_impl_head must not be cleared when the resumed run produces EmptyImpl."""
-    stage, state = _make_state(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH])
-    state.data.pre_impl_head = "deadbeef"
-
-    with (
-        patch(
-            "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
-        ),
-        patch(
-            "gremlins.stages.implement.classify_impl_outcome",
-            return_value=EmptyImpl(),
-        ),
-        pytest.raises(RuntimeError, match="no committed work"),
-    ):
-        asyncio.run(stage.run(state))
-
-    head = state.data.pre_impl_head
-    assert head == "deadbeef", "pre_impl_head must survive a failed resumed run"
+    assert len(captured) == 1
+    assert captured[0].head == "deadbeef"
 
 
 def test_run_does_not_access_pipeline_data(tmp_path: pathlib.Path) -> None:
@@ -227,9 +179,6 @@ def test_run_does_not_access_pipeline_data(tmp_path: pathlib.Path) -> None:
 
     with (
         patch.object(type(state), "pipeline_data", property(_raise)),
-        patch(
-            "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
-        ),
         patch(
             "gremlins.stages.implement.classify_impl_outcome",
             return_value=HeadAdvanced(commit_count=1),

@@ -145,7 +145,6 @@ class StateData:
     stage: str = ""
     pid: int | None = None
     stage_inputs: dict[str, Any] = dataclasses.field(default_factory=dict[str, Any])
-    pre_impl_head: str = ""
 
     @classmethod
     def load(cls, gremlin_id: str | None) -> StateData:
@@ -177,7 +176,6 @@ class StateData:
             stage=sd.get("stage") or "",
             pid=sd.get("pid"),
             stage_inputs=dict(cast(dict[str, Any], sd.get("stage_inputs") or {})),
-            pre_impl_head=sd.get("pre_impl_head") or "",
         )
 
     def persist(self, state_dir: pathlib.Path) -> None:
@@ -208,7 +206,6 @@ class StateData:
             "base_ref_sha": self.base_ref_sha,
             "issue_url": self.issue_url,
             "issue_num": self.issue_num,
-            "pre_impl_head": self.pre_impl_head,
         }
         write_state(state_dir, data)
         self.state_file = state_dir / "state.json"

@@ -37,9 +37,11 @@ def test_local_yaml_loads_and_validates(tmp_path):
     ]
 
 
-def _make_state(client, session_dir, *, gremlin_id=None):
+def _make_state(client, session_dir, *, gremlin_id=None, base_ref_sha=""):
     return RuntimeState(
-        data=StateData(gremlin_id=gremlin_id), client=client, session_dir=session_dir
+        data=StateData(gremlin_id=gremlin_id, base_ref_sha=base_ref_sha),
+        client=client,
+        session_dir=session_dir,
     )
 
 
@@ -146,6 +148,13 @@ def test_implement_renders_spec_block_when_present(tmp_path, monkeypatch):
             )
             return await super().run(prompt, label=label, **kwargs)
 
+    head_r = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=git_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
     client = _CommittingClient(fixtures={"implement": MINIMAL_EVENTS})
     (session_dir / "plan.md").write_text("task 1: do something", encoding="utf-8")
     (session_dir / "spec.md").write_text("overall spec body", encoding="utf-8")
@@ -154,7 +163,7 @@ def test_implement_renders_spec_block_when_present(tmp_path, monkeypatch):
         [(_BUNDLED_PROMPTS / "implement_local.md").read_text(encoding="utf-8")],
         {},
     )
-    state = _make_state(client, session_dir)
+    state = _make_state(client, session_dir, base_ref_sha=head_r.stdout.strip())
     asyncio.run(stage.run(state))
     prompt = client.calls[0].prompt
     assert "Overarching goal (north star)" in prompt
@@ -188,6 +197,13 @@ def test_implement_omits_spec_block_when_absent(tmp_path, monkeypatch):
             )
             return await super().run(prompt, label=label, **kwargs)
 
+    head_r = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=git_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
     client = _CommittingClient(fixtures={"implement": MINIMAL_EVENTS})
     (session_dir / "plan.md").write_text("task 1: do something", encoding="utf-8")
     stage = implement.Implement(
@@ -195,7 +211,7 @@ def test_implement_omits_spec_block_when_absent(tmp_path, monkeypatch):
         [(_BUNDLED_PROMPTS / "implement_local.md").read_text(encoding="utf-8")],
         {},
     )
-    state = _make_state(client, session_dir)
+    state = _make_state(client, session_dir, base_ref_sha=head_r.stdout.strip())
     asyncio.run(stage.run(state))
     prompt = client.calls[0].prompt
     assert "Overarching goal" not in prompt
@@ -260,6 +276,13 @@ def test_implement_stage_raises_on_empty_diff(tmp_path, monkeypatch):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
+    head_r = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=git_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
     client = FakeClaudeClient(fixtures={"implement": MINIMAL_EVENTS})
     (session_dir / "plan.md").write_text("# Plan\nDo stuff.\n", encoding="utf-8")
     stage = implement.Implement(
@@ -267,7 +290,7 @@ def test_implement_stage_raises_on_empty_diff(tmp_path, monkeypatch):
         [(_BUNDLED_PROMPTS / "implement_local.md").read_text(encoding="utf-8")],
         {},
     )
-    state = _make_state(client, session_dir)
+    state = _make_state(client, session_dir, base_ref_sha=head_r.stdout.strip())
     with pytest.raises(RuntimeError, match="no committed work"):
         asyncio.run(stage.run(state))
     assert len(client.calls) == 1
