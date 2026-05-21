@@ -319,19 +319,14 @@ class _ParallelExecutor:
 
     # --- worktree lifecycle ---
 
-    async def _remove_worktrees(self, paths: list[pathlib.Path]) -> None:
-        if not await git.in_git_repo_async(cwd=str(self._project_root)):
-            return
-        for wt in paths:
-            await git.remove_worktree_async(str(self._project_root), str(wt))
-        await git.prune_worktrees_async(str(self._project_root))
-
     async def _fan_out(self) -> None:
         self._set_stage(f"{self._group_name}-fanout")
         self._hydrate_from_state()
         prior = list(self._worktree_paths.values())
         if prior:
-            await self._remove_worktrees(prior)
+            await git.remove_worktrees_async(
+                str(self._project_root), [str(p) for p in prior]
+            )
         self._worktree_paths.clear()
         self._base_head = ""
         self._clear_persisted_state()
@@ -339,9 +334,7 @@ class _ParallelExecutor:
         if not await git.in_git_repo_async(cwd=str(self._project_root)):
             return
 
-        await proc.run_quiet_async(
-            ["git", "worktree", "prune"], cwd=str(self._project_root)
-        )
+        await git.prune_worktrees_async(str(self._project_root))
         self._base_head = await git.head_sha_async(cwd=str(self._project_root))
 
         try:
@@ -355,13 +348,17 @@ class _ParallelExecutor:
                 self._worktree_paths[child_key] = wt_path
                 child_state.worktree = wt_path
         except Exception:
-            await self._remove_worktrees(list(self._worktree_paths.values()))
+            await git.remove_worktrees_async(
+                str(self._project_root), [str(p) for p in self._worktree_paths.values()]
+            )
             self._worktree_paths.clear()
             raise
         self._persist_state()
 
     async def _teardown_worktrees(self) -> None:
-        await self._remove_worktrees(list(self._worktree_paths.values()))
+        await git.remove_worktrees_async(
+            str(self._project_root), [str(p) for p in self._worktree_paths.values()]
+        )
         self._worktree_paths.clear()
         self._base_head = ""
         self._clear_persisted_state()
@@ -609,10 +606,7 @@ class _ParallelExecutor:
             return [], {}
 
     async def _do_fan_in(self) -> None:
-        if await git.in_git_repo_async(cwd=str(self._project_root)):
-            await proc.run_quiet_async(
-                ["git", "worktree", "prune"], cwd=str(self._project_root)
-            )
+        await git.prune_worktrees_async(str(self._project_root))
         if await git.in_git_repo_async(cwd=str(self._project_root)) and self._base_head:
             await self._validate_no_mutations()
 
