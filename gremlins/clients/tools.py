@@ -338,7 +338,7 @@ def _bash_check(
     toks = s.split()
     for raw_tok in toks:
         tok = raw_tok.strip("'\"")
-        if tok and (tok[0] in ("/", "~") or tok.startswith("..")):
+        if tok and (tok[0] in ("/", "~") or tok.startswith("..") or "/" in tok):
             if tok.startswith("~"):
                 tok = os.path.expanduser(tok)
             p = _resolve(tok, cwd)

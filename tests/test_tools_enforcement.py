@@ -8,6 +8,8 @@ import pathlib
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
+
 from agents import FunctionTool
 
 from gremlins.clients.tools import (  # pyright: ignore[reportPrivateUsage]
@@ -49,11 +51,13 @@ def test_within_worktree_sibling(tmp_path: pathlib.Path) -> None:
 
 
 def test_within_worktree_symlink_traversal(tmp_path: pathlib.Path) -> None:
-    outside = tmp_path.parent / "outside"
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    outside = tmp_path / "outside"
     outside.mkdir()
-    link = tmp_path / "link"
+    link = worktree / "link"
     link.symlink_to(outside)
-    assert not _within_worktree(link, tmp_path)
+    assert not _within_worktree(link, worktree)
 
 
 # ---------------------------------------------------------------------------
@@ -117,15 +121,22 @@ def test_bash_check_absolute_inside(tmp_path: pathlib.Path) -> None:
     assert _bash_check(False, tmp_path, cmd, str(tmp_path)) is None
 
 
-def test_bash_check_tilde_expansion_outside(tmp_path: pathlib.Path) -> None:
+def test_bash_check_tilde_expansion_outside(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", "/nonexistent-home")
     err = _bash_check(False, tmp_path, "cat ~/.ssh/id_rsa", str(tmp_path))
-    # ~/.ssh should not be inside tmp_path worktree
     assert err is not None
     assert "outside worktree" in err
 
 
 def test_bash_check_dotdot_escapes(tmp_path: pathlib.Path) -> None:
     err = _bash_check(False, tmp_path, "cat ../secret", str(tmp_path))
+    assert err is not None
+    assert "outside worktree" in err
+
+
+def test_bash_check_intermediate_traversal(tmp_path: pathlib.Path) -> None:
+    # subdir/../../etc/passwd doesn't start with /, ~, or .., but still escapes
+    err = _bash_check(False, tmp_path, "cat subdir/../../etc/passwd", str(tmp_path))
     assert err is not None
     assert "outside worktree" in err
 
@@ -232,10 +243,12 @@ def test_wrap_invalid_json_writes_error(tmp_path: pathlib.Path) -> None:
 
 
 def test_wrap_bypass_skips_enforcement(tmp_path: pathlib.Path) -> None:
-    log = tmp_path / "audit.jsonl"
-    outside = tmp_path.parent / "outside.txt"
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    log = worktree / "audit.jsonl"
+    outside = tmp_path / "outside.txt"
     outside.write_text("sensitive")
-    tools = build_tools(bypass=True, worktree_root=tmp_path, audit_log=log)
+    tools = build_tools(bypass=True, worktree_root=worktree, audit_log=log)
     read_tool = _ft(tools, "Read")
     ctx = _ctx()
     result = asyncio.run(
