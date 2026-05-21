@@ -451,7 +451,9 @@ async def setup_detached_worktree_async(
         worktree_parent.mkdir(parents=True, exist_ok=True)
         workdir = str(worktree_parent / f"aibg-gremlin.{secrets.token_hex(6)}")
     else:
-        workdir = os.path.join(tempfile.gettempdir(), f"aibg-gremlin.{secrets.token_hex(6)}")
+        workdir = os.path.join(
+            tempfile.gettempdir(), f"aibg-gremlin.{secrets.token_hex(6)}"
+        )
     r = await proc.run_async(
         ["git", "worktree", "add", "--detach", workdir, base_ref], cwd=project_root
     )
