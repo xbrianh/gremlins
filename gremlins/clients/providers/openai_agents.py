@@ -8,7 +8,7 @@ import sys
 import threading
 from typing import Any
 
-from agents import Agent, ModelSettings, RunConfig, Runner, Usage
+from agents import Agent, ModelSettings, RunConfig, Runner
 from agents.items import (
     MessageOutputItem,
     ReasoningItem,
@@ -34,30 +34,6 @@ from gremlins.clients.tools import build_tools
 from gremlins.utils.decorators import default_on_exception, swallow
 from gremlins.utils.yaml_io import load_bundled_prompt
 
-# USD per 1M tokens: (input, output)
-_PRICING: dict[str, tuple[float, float]] = {
-    "gpt-4o": (2.50, 10.00),
-    "gpt-4o-mini": (0.15, 0.60),
-    "gpt-4o-2024-11-20": (2.50, 10.00),
-    "gpt-4o-2024-08-06": (2.50, 10.00),
-    "gpt-4.1": (2.00, 8.00),
-    "gpt-4.1-mini": (0.40, 1.60),
-    "gpt-4.1-nano": (0.10, 0.40),
-    "gpt-4-turbo": (10.00, 30.00),
-    # o1/o3: Usage.output_tokens bundles reasoning tokens; prices cover blended rate.
-    "o1": (15.00, 60.00),
-    "o1-mini": (1.10, 4.40),
-    "o3": (10.00, 40.00),
-    "o3-mini": (1.10, 4.40),
-    "o4-mini": (1.10, 4.40),
-    # xAI Grok models
-    "grok-3": (3.00, 15.00),
-    "grok-3-fast": (0.60, 4.00),
-    "grok-3-mini": (0.30, 0.50),
-    "grok-3-mini-fast": (0.06, 0.40),
-    "grok-4": (3.00, 15.00),
-}
-_DEFAULT_PRICING = (2.50, 10.00)
 _DEFAULT_TEMPERATURE = 0.3
 
 DEFAULT_INSTRUCTIONS = load_bundled_prompt("default_openai_agents_instructions.md")
@@ -71,13 +47,6 @@ class StreamTerminalError(RuntimeError):
     pass
 
 
-def _compute_cost(model: str, usage: Usage) -> float:
-    input_price, output_price = _PRICING.get(model, _DEFAULT_PRICING)
-    return (
-        usage.input_tokens * input_price + usage.output_tokens * output_price
-    ) / 1_000_000
-
-
 @default_on_exception({})
 def _parse_args_json(args_json: str) -> dict[str, Any]:
     return json.loads(args_json)
@@ -89,11 +58,6 @@ def _key_arg(args_json: str) -> str:
         if inp.get(k):
             return str(inp[k])
     return ""
-
-
-@default_on_exception(0.0)
-def _compute_run_cost(model: str, run: RunResultStreaming) -> float:
-    return _compute_cost(model, run.context_wrapper.usage)
 
 
 def _message_text(item: MessageOutputItem) -> str:
@@ -144,7 +108,6 @@ class OpenAIAgentsClient:
         instructions: str = DEFAULT_INSTRUCTIONS,
     ) -> None:
         self._model = model or "gpt-4o"
-        self._total_cost_usd = 0.0
         self._base_url = base_url
         self._api_key = api_key
         self._model_settings = model_settings
@@ -438,10 +401,6 @@ class OpenAIAgentsClient:
             except Exception:
                 pass
 
-        cost = _compute_run_cost(model, run)
-        with self._lock:
-            self._total_cost_usd += cost
-
         if timed_out:
             suffix = " (timeout)"
         elif stream_error:
@@ -449,7 +408,7 @@ class OpenAIAgentsClient:
         else:
             suffix = ""
         sys.stderr.write(
-            f"{ts()} {prefix}final: turns={turns} cost={cost:.6f}{suffix}\n"
+            f"{ts()} {prefix}final: turns={turns} cost=not-reported{suffix}\n"
         )
         sys.stderr.flush()
 
@@ -460,12 +419,12 @@ class OpenAIAgentsClient:
 
         text = str(run.final_output) if run.final_output is not None else None
         return CompletedRun(
-            exit_code=0, text_result=text, events=captured, cost_usd=cost
+            exit_code=0, text_result=text, events=captured, cost_usd=None
         )
 
     @property
-    def total_cost_usd(self) -> float:
-        return self._total_cost_usd
+    def total_cost_usd(self) -> float | None:
+        return None
 
     @property
     def base_url(self) -> str | None:

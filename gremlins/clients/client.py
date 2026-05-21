@@ -83,9 +83,9 @@ class Client:
             self._impl.reap_all()
 
     @property
-    def total_cost_usd(self) -> float:
+    def total_cost_usd(self) -> float | None:
         if self._impl is None:
-            return 0.0
+            return None
         return self._impl.total_cost_usd
 
 
