@@ -9,7 +9,6 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-
 from agents import FunctionTool
 
 from gremlins.clients.tools import (  # pyright: ignore[reportPrivateUsage]
