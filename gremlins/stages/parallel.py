@@ -391,14 +391,9 @@ class _ParallelExecutor:
                 self._cancel_siblings()
             self._write_bail_state(Bail(detail), child_key)
 
-        try:
-            status, cost = await proc.run_child_subprocess(
-                stage_obj, child_st, child_key, attempt, on_bail=on_bail
-            )
-        except RuntimeError:
-            if self._cancel_on_bail:
-                self._cancel_siblings()
-            raise
+        status, cost = await proc.run_child_subprocess(
+            stage_obj, child_st, child_key, attempt, on_bail=on_bail
+        )
         if cost > 0 and math.isfinite(cost):
             self._parent_data.add_subprocess_cost(cost)
         if status == "done":

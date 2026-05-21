@@ -106,29 +106,29 @@ def _write_result(spec_path: pathlib.Path, status: str, cost: float = 0.0) -> No
 def test_parse_child_timeout_none_when_no_raw_dict() -> None:
     s = _stage("x")
     s.raw_dict = None
-    assert proc.parse_child_timeout(s, "x") is None
+    assert proc._parse_child_timeout(s, "x") is None
 
 
 def test_parse_child_timeout_none_when_missing_key() -> None:
-    assert proc.parse_child_timeout(_stage("x"), "x") is None
+    assert proc._parse_child_timeout(_stage("x"), "x") is None
 
 
 def test_parse_child_timeout_returns_value() -> None:
     s = _stage("x", timeout=30.0)
-    assert proc.parse_child_timeout(s, "x") == 30.0
+    assert proc._parse_child_timeout(s, "x") == 30.0
 
 
 def test_parse_child_timeout_zero_treated_as_none() -> None:
     s = _stage("x")
     s.raw_dict = {"timeout_seconds": 0}
-    assert proc.parse_child_timeout(s, "x") is None
+    assert proc._parse_child_timeout(s, "x") is None
 
 
 def test_parse_child_timeout_invalid_raises() -> None:
     s = _stage("x")
     s.raw_dict = {"timeout_seconds": "bad"}
     with pytest.raises(ValueError, match="must be a number"):
-        proc.parse_child_timeout(s, "x")
+        proc._parse_child_timeout(s, "x")
 
 
 # ---------------------------------------------------------------------------
@@ -137,23 +137,23 @@ def test_parse_child_timeout_invalid_raises() -> None:
 
 
 def test_missing_result_detail_exit_zero() -> None:
-    msg = proc.missing_result_detail("child-a", 0)
+    msg = proc._missing_result_detail("child-a", 0)
     assert "exited 0 without writing result" in msg
 
 
 def test_missing_result_detail_signal() -> None:
-    msg = proc.missing_result_detail("child-a", -signal.SIGKILL)
+    msg = proc._missing_result_detail("child-a", -signal.SIGKILL)
     assert "SIGKILL" in msg
     assert "no result file" in msg
 
 
 def test_missing_result_detail_nonzero() -> None:
-    msg = proc.missing_result_detail("child-a", 42)
+    msg = proc._missing_result_detail("child-a", 42)
     assert "returncode 42" in msg
 
 
 def test_missing_result_detail_no_returncode() -> None:
-    msg = proc.missing_result_detail("child-a", None)
+    msg = proc._missing_result_detail("child-a", None)
     assert "unavailable" in msg
 
 

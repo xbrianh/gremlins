@@ -160,7 +160,7 @@ async def terminate_with_grace(
 # ---------------------------------------------------------------------------
 
 
-async def pump_prefixed(stream: asyncio.StreamReader, prefix: str) -> None:
+async def _pump_prefixed(stream: asyncio.StreamReader, prefix: str) -> None:
     # Read in chunks so a child emitting a huge un-newlined blob cannot deadlock
     # by filling the pipe buffer. Re-split on newlines for the [prefix] label.
     while True:
@@ -172,7 +172,7 @@ async def pump_prefixed(stream: asyncio.StreamReader, prefix: str) -> None:
         sys.stdout.flush()
 
 
-def parse_child_timeout(stage_obj: Stage, child_key: str) -> float | None:
+def _parse_child_timeout(stage_obj: Stage, child_key: str) -> float | None:
     if not stage_obj.raw_dict:
         return None
     raw_t = stage_obj.raw_dict.get("timeout_seconds")
@@ -188,7 +188,7 @@ def parse_child_timeout(stage_obj: Stage, child_key: str) -> float | None:
     return parsed_t if parsed_t > 0 else None
 
 
-def missing_result_detail(child_key: str, returncode: int | None) -> str:
+def _missing_result_detail(child_key: str, returncode: int | None) -> str:
     if returncode is None:
         return (
             f"parallel child {child_key!r}: subprocess exited with no result file "
@@ -207,7 +207,7 @@ def missing_result_detail(child_key: str, returncode: int | None) -> str:
     return f"parallel child {child_key!r} exited with returncode {returncode} and no result file"
 
 
-def build_child_spec_dict(
+def _build_child_spec_dict(
     stage_obj: Stage, child_st: State, child_key: str, attempt: str
 ) -> dict[str, Any]:
     return {
@@ -231,10 +231,8 @@ def build_child_spec_dict(
 async def _spawn_child_with_pumps(
     spec_path: pathlib.Path, attempt: str
 ) -> tuple[asyncio.subprocess.Process, list[asyncio.Task[None]]]:
-    import sys as _sys
-
     child_proc = await asyncio.create_subprocess_exec(
-        _sys.executable,
+        sys.executable,
         "-m",
         "gremlins.spawn.child",
         str(spec_path),
@@ -242,10 +240,10 @@ async def _spawn_child_with_pumps(
         stderr=asyncio.subprocess.PIPE,
     )
     pump_out = asyncio.create_task(
-        pump_prefixed(child_proc.stdout, attempt)  # type: ignore[arg-type]
+        _pump_prefixed(child_proc.stdout, attempt)  # type: ignore[arg-type]
     )
     pump_err = asyncio.create_task(
-        pump_prefixed(child_proc.stderr, attempt)  # type: ignore[arg-type]
+        _pump_prefixed(child_proc.stderr, attempt)  # type: ignore[arg-type]
     )
     return child_proc, [pump_out, pump_err]
 
@@ -272,7 +270,7 @@ def _read_child_result(
 ) -> dict[str, Any]:
     result_path = pathlib.Path(str(spec_path) + ".result")
     if not result_path.exists():
-        raise RuntimeError(missing_result_detail(child_key, child_proc.returncode))
+        raise RuntimeError(_missing_result_detail(child_key, child_proc.returncode))
     return json.loads(result_path.read_text(encoding="utf-8"))
 
 
@@ -292,10 +290,10 @@ async def run_child_subprocess(
     """
     spec_path = child_st.session_dir / f"spec_{attempt}.json"
     spec_path.write_text(
-        json.dumps(build_child_spec_dict(stage_obj, child_st, child_key, attempt)),
+        json.dumps(_build_child_spec_dict(stage_obj, child_st, child_key, attempt)),
         encoding="utf-8",
     )
-    timeout_s = parse_child_timeout(stage_obj, child_key)
+    timeout_s = _parse_child_timeout(stage_obj, child_key)
     child_proc, pumps = await _spawn_child_with_pumps(spec_path, attempt)
     try:
         await _wait_child_proc(child_proc, timeout_s, child_key)
@@ -305,7 +303,7 @@ async def run_child_subprocess(
             p.cancel()
         raise
     finally:
-        await asyncio.gather(*pumps, return_exceptions=True)
+        await asyncio.shield(asyncio.gather(*pumps, return_exceptions=True))
     result = _read_child_result(spec_path, child_proc, child_key)
     try:
         cost = float(result.get("cost_usd") or 0.0)
