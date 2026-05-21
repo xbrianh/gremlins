@@ -215,9 +215,8 @@ def test_resume_retains_pre_impl_head_on_failure(tmp_path: pathlib.Path) -> None
     ):
         asyncio.run(stage.run(state))
 
-    assert state.data.pre_impl_head == "deadbeef", (
-        "pre_impl_head must survive a failed resumed run"
-    )
+    head = state.data.pre_impl_head
+    assert head == "deadbeef", "pre_impl_head must survive a failed resumed run"
 
 
 def test_run_does_not_access_pipeline_data(tmp_path: pathlib.Path) -> None:
