@@ -8,7 +8,7 @@ version = "0.0.0"
 description = "Background coding-agent pipelines that plan, implement, review, and land work end-to-end"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["openai-agents", "platformdirs", "pyyaml"]
+dependencies = ["claude-agent-sdk>=0.1.59", "openai-agents", "platformdirs", "pyyaml"]
 
 [project.urls]
 Homepage = "https://github.com/amorphous-industries/gremlins"
