@@ -78,6 +78,7 @@ class ClaudeAgentOptions:
     mcp_servers: Any = field(default_factory=dict)
     hooks: Any = None
     env: Any = field(default_factory=dict)
+    allowed_tools: Any = None
 
 
 # ---------------------------------------------------------------------------
@@ -337,7 +338,48 @@ def test_setting_sources_empty(monkeypatch, mock_sdk):
     assert captured[0].setting_sources == []
 
 
-def test_permission_mode_bypass(monkeypatch, mock_sdk):
+def test_permission_mode_bypass_true(monkeypatch, mock_sdk):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "valid-key")
+
+    captured: list[Any] = []
+    mock_sdk.query = _capturing_query(captured)
+
+    client = AnthropicSdkClient("claude-sonnet-4-6", bypass=True)
+    asyncio.run(client.run("hello", label="t"))
+
+    assert captured[0].permission_mode == "bypassPermissions"
+
+
+def test_permission_mode_bypass_false(monkeypatch, mock_sdk):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "valid-key")
+
+    captured: list[Any] = []
+    mock_sdk.query = _capturing_query(captured)
+
+    client = AnthropicSdkClient("claude-sonnet-4-6", bypass=False)
+    asyncio.run(client.run("hello", label="t"))
+
+    assert captured[0].permission_mode == "default"
+
+
+def test_allowed_tools_from_native_block(monkeypatch, mock_sdk):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "valid-key")
+
+    captured: list[Any] = []
+    mock_sdk.query = _capturing_query(captured)
+
+    client = AnthropicSdkClient(
+        "claude-sonnet-4-6",
+        native_block={"allowed_tools": ["Read", "Edit"]},
+    )
+    asyncio.run(client.run("hello", label="t"))
+
+    opts = captured[0]
+    assert hasattr(opts, "allowed_tools")
+    assert opts.allowed_tools == ["Read", "Edit"]
+
+
+def test_no_allowed_tools_when_not_in_native_block(monkeypatch, mock_sdk):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "valid-key")
 
     captured: list[Any] = []
@@ -346,7 +388,8 @@ def test_permission_mode_bypass(monkeypatch, mock_sdk):
     client = AnthropicSdkClient("claude-sonnet-4-6")
     asyncio.run(client.run("hello", label="t"))
 
-    assert captured[0].permission_mode == "bypassPermissions"
+    opts = captured[0]
+    assert getattr(opts, "allowed_tools", None) is None
 
 
 def test_no_mcp_servers_no_hooks(monkeypatch, mock_sdk):

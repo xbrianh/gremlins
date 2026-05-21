@@ -167,14 +167,21 @@ class AnthropicSdkClient:
     ) -> CompletedRun:
         import claude_agent_sdk  # type: ignore[import-untyped]
 
+        permission_mode = "bypassPermissions" if self._bypass else "default"
+        opts_kwargs: dict[str, Any] = {
+            "model": effective_model,
+            "cwd": cwd,
+            "permission_mode": permission_mode,
+            "setting_sources": [],
+            "mcp_servers": {},
+            "hooks": None,
+            "env": _scrub_env(extra_env),
+        }
+        allowed_tools: list[str] | None = self._native_block.get("allowed_tools")
+        if allowed_tools is not None:
+            opts_kwargs["allowed_tools"] = allowed_tools
         options: Any = claude_agent_sdk.ClaudeAgentOptions(  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-            model=effective_model,
-            cwd=cwd,
-            permission_mode="bypassPermissions",
-            setting_sources=[],
-            mcp_servers={},
-            hooks=None,
-            env=_scrub_env(extra_env),
+            **opts_kwargs
         )
 
         sys.stderr.write(

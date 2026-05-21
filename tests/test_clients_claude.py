@@ -108,6 +108,40 @@ def test_subprocess_client_sends_prompt_via_stdin_not_argv(tmp_path, monkeypatch
     assert prompt not in child_argv
 
 
+def test_subprocess_client_bypass_true_uses_bypass_permissions(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    _install_stub_claude(bin_dir)
+    argv_out = tmp_path / "child_argv.json"
+
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("STUB_ARGV_OUT", str(argv_out))
+
+    client = SubprocessClaudeClient(bypass=True)
+    asyncio.run(client.run("hello", label="test"))
+
+    argv = json.loads(argv_out.read_text(encoding="utf-8"))
+    idx = argv.index("--permission-mode")
+    assert argv[idx + 1] == "bypassPermissions"
+
+
+def test_subprocess_client_bypass_false_uses_default_mode(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    _install_stub_claude(bin_dir)
+    argv_out = tmp_path / "child_argv.json"
+
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("STUB_ARGV_OUT", str(argv_out))
+
+    client = SubprocessClaudeClient(bypass=False)
+    asyncio.run(client.run("hello", label="test"))
+
+    argv = json.loads(argv_out.read_text(encoding="utf-8"))
+    assert "--permission-mode" in argv
+    idx = argv.index("--permission-mode")
+    assert argv[idx + 1] == "default"
+    assert "bypassPermissions" not in argv
+
+
 # ---------------------------------------------------------------------------
 # Timeout / retry tests
 # ---------------------------------------------------------------------------

@@ -550,6 +550,64 @@ def test_run_streamed_passes_max_turns(monkeypatch: Any) -> None:
     assert captured_kwargs[0].get("max_turns") == OPENAI_AGENTS_MAX_TURNS
 
 
+def test_bypass_false_enforces_path_scoping(tmp_path: pathlib.Path) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    from gremlins.clients.tools import build_tools
+
+    tools = build_tools(bypass=False, worktree_root=worktree, audit_log=None)
+    edit_tool = next(t for t in tools if t.name == "Edit")
+
+    ctx = ToolContext(
+        context={"cwd": str(worktree), "extra_env": None},
+        tool_name="Edit",
+        tool_call_id="c1",
+        tool_arguments="{}",
+    )
+    args_json = json.dumps(
+        {"file_path": "/etc/passwd", "old_string": "x", "new_string": "y"}
+    )
+    result = asyncio.run(edit_tool.on_invoke_tool(ctx, args_json))
+    assert result.startswith("Error: path outside worktree")
+
+
+def test_native_block_tools_allowlist_filters_agent_tools(monkeypatch: Any) -> None:
+    usage = _make_usage()
+    fake_run = _make_run_result_streaming("done", usage, [])
+    captured_agents: list[Any] = []
+
+    def _fake_run_streamed(agent: Any, *a: Any, **kw: Any) -> Any:
+        captured_agents.append(agent)
+        return fake_run
+
+    monkeypatch.setattr("agents.run.Runner.run_streamed", _fake_run_streamed)
+
+    client = OpenAIAgentsClient("gpt-4o", native_block={"tools": ["Read", "Bash"]})
+    asyncio.run(client.run("do something", label="t"))
+
+    assert captured_agents, "Runner.run_streamed was not called"
+    tool_names = {t.name for t in captured_agents[0].tools}
+    assert tool_names == {"Read", "Bash"}
+
+
+def test_native_block_absent_tools_uses_all(monkeypatch: Any) -> None:
+    usage = _make_usage()
+    fake_run = _make_run_result_streaming("done", usage, [])
+    captured_agents: list[Any] = []
+
+    def _fake_run_streamed(agent: Any, *a: Any, **kw: Any) -> Any:
+        captured_agents.append(agent)
+        return fake_run
+
+    monkeypatch.setattr("agents.run.Runner.run_streamed", _fake_run_streamed)
+
+    client = OpenAIAgentsClient("gpt-4o")
+    asyncio.run(client.run("do something", label="t"))
+
+    assert captured_agents
+    assert len(captured_agents[0].tools) == 6
+
+
 def test_bash_invoke_no_extra_env_passes_none() -> None:
     fake_proc = MagicMock()
     fake_proc.communicate = AsyncMock(return_value=(b"hi\n", None))

@@ -23,13 +23,6 @@ class StreamTimeoutError(RuntimeError):
     pass
 
 
-CLAUDE_FLAGS_BASE = [
-    "--permission-mode",
-    "bypassPermissions",
-    "--verbose",
-]
-
-
 class SubprocessClaudeClient:
     """Production ClaudeClient: spawns ``claude -p`` subprocesses.
 
@@ -88,7 +81,8 @@ class SubprocessClaudeClient:
         cmd = ["claude", "-p"]
         if model is not None:
             cmd += ["--model", model]
-        cmd += list(CLAUDE_FLAGS_BASE)
+        mode = "bypassPermissions" if self._bypass else "default"
+        cmd += ["--permission-mode", mode, "--verbose"]
         cmd += ["--output-format", "stream-json"]
         return cmd
 
