@@ -46,6 +46,10 @@ class Client:
     def __hash__(self) -> int:
         return hash((self.provider, self.model))
 
+    def set_policy(self, policy: Policy) -> None:
+        """Replace the effective policy before the implementation is created."""
+        self._policy = policy
+
     def _get_impl(self) -> Any:
         if self._impl is None:
             if self.provider not in CLIENT_FACTORIES:

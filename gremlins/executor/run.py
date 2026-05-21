@@ -25,12 +25,23 @@ from gremlins.executor.state import (
     resolve_state_file,
 )
 from gremlins.logging_setup import configure_logging
+from gremlins.permissions.loader import load_policy
+from gremlins.permissions.policy import Policy
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail
 from gremlins.utils.git import has_commits, has_dirty_worktree, in_git_repo
 from gremlins.utils.github import get_repo
 
 logger = logging.getLogger(__name__)
+
+
+def _apply_policy_to_stages(stages: list[Stage], policy: Policy) -> None:
+    for stage in stages:
+        if stage.client is not None:
+            stage.client.set_policy(policy)
+        body = getattr(stage, "body", [])
+        if body:
+            _apply_policy_to_stages(body, policy)
 
 
 def _install_signal_handlers(clients: Sequence[Client]) -> None:
@@ -162,6 +173,16 @@ async def run_pipeline(
         gremlin.validate_resume_target()
     except ValueError as exc:
         die(str(exc))
+
+    stored_bypass = bool(state_json.get("bypass", False))
+    cli_bypass_for_policy: bool | None = True if stored_bypass else None
+    policy = load_policy(
+        cli_bypass=cli_bypass_for_policy,
+        cli_permissions_file=None,
+        env=os.environ,
+        cwd=pathlib.Path(project_root) if project_root else pathlib.Path.cwd(),
+    )
+    _apply_policy_to_stages(gremlin.stages, policy)
 
     gh = gremlin.pipeline_data.needs_gh()
     if gh:
