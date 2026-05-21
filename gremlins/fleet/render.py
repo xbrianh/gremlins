@@ -58,11 +58,12 @@ def build_row(
     )
     if active_children and stage != "waiting":
         leader = active_children[0]
-        stage_disp = (
-            f"{leader}+{len(active_children) - 1}"
-            if len(active_children) > 1
-            else leader
-        )
+        if len(active_children) > 1:
+            suffix = f"+{len(active_children) - 1}"
+            leader = leader[: 22 - len(suffix)]
+            stage_disp = f"{leader}{suffix}"
+        else:
+            stage_disp = leader[:22]
 
     rescue_count = state.get("rescue_count") or 0
     try:

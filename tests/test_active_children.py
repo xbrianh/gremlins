@@ -131,6 +131,13 @@ def test_build_row_five_active_children() -> None:
     assert row.stage == "x+4"
 
 
+def test_build_row_long_leader_multiple_children() -> None:
+    long_name = "x" * 30
+    row = _row({"stage": "parallel", "active_children": [long_name, "y"]})
+    assert row.stage == "x" * 20 + "+1"
+    assert len(row.stage) == 22
+
+
 def test_build_row_no_active_children_when_waiting() -> None:
     row = _row({"stage": "waiting", "active_children": ["some-child"]})
     assert "some-child" not in row.stage
