@@ -197,7 +197,7 @@ def test_statedata_bypass_roundtrip(tmp_path):
 def test_statedata_bypass_load(tmp_path):
     state_file = tmp_path / "state.json"
     state_file.write_text(json.dumps({"bypass": True, "permissions_file": "/p.yaml"}))
-    sd = StateData(gremlin_id=None, state_file=state_file)
+    StateData(gremlin_id=None, state_file=state_file)
     raw = json.loads(state_file.read_text())
     assert raw["bypass"] is True
     assert raw["permissions_file"] == "/p.yaml"
