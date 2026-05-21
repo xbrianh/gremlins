@@ -92,13 +92,19 @@ def build_launch_parser(
         help="PR number or URL (e.g. 697 or https://github.com/.../pull/697). Checks out the PR head in a detached worktree.",
     )
     p.add_argument("--client", default=None)
-    p.add_argument("--bypass", action="store_true", default=False)
+    p.add_argument(
+        "--bypass",
+        action="store_true",
+        default=False,
+        help="Skip permission checks; run in bypass mode.",
+    )
     p.add_argument(
         "--permissions-file",
         dest="permissions_file",
         type=pathlib.Path,
         default=None,
         metavar="PATH",
+        help="Path to a permissions YAML file to load instead of the project default.",
     )
     for si in stage_cls.orchestration_args():
         flag = "--" + si.name.replace("_", "-")
@@ -176,7 +182,7 @@ def _self_background_main(
 ) -> int:
     try:
         policy = load_policy(
-            cli_bypass=True if args.bypass else None,
+            cli_bypass=args.bypass or None,
             cli_permissions_file=args.permissions_file,
             env=os.environ,
             cwd=pathlib.Path.cwd(),
