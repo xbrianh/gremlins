@@ -27,6 +27,8 @@ def test_wait_blocks_and_returns_exit_code():
         print_id=False,
         wait=True,
         pr=None,
+        bypass=False,
+        permissions_file=None,
     )
     with (
         patch("gremlins.cli.launch.launch", return_value=(fake_id, fake_proc)),
@@ -71,6 +73,8 @@ def test_no_wait_returns_zero():
         print_id=False,
         wait=False,
         pr=None,
+        bypass=False,
+        permissions_file=None,
     )
     with (
         patch("gremlins.cli.launch.launch", return_value=(fake_id, fake_proc)),
@@ -96,6 +100,8 @@ def test_early_death_returns_exit_code(capsys):
         print_id=False,
         wait=False,
         pr=None,
+        bypass=False,
+        permissions_file=None,
     )
     with patch("gremlins.cli.launch.launch", return_value=(fake_id, fake_proc)):
         rc = _self_background_main("some-pipeline", args, {})
