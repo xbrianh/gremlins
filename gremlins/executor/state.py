@@ -146,6 +146,8 @@ class StateData:
     stage: str = ""
     pid: int | None = None
     stage_inputs: dict[str, Any] = dataclasses.field(default_factory=dict[str, Any])
+    bypass: bool = False
+    permissions_file: str = ""
 
     @classmethod
     def load(cls, gremlin_id: str | None) -> StateData:
@@ -177,6 +179,8 @@ class StateData:
             stage=sd.get("stage") or "",
             pid=sd.get("pid"),
             stage_inputs=dict(cast(dict[str, Any], sd.get("stage_inputs") or {})),
+            bypass=bool(sd.get("bypass", False)),
+            permissions_file=sd.get("permissions_file") or "",
         )
 
     def persist(self, state_dir: pathlib.Path) -> None:
@@ -207,6 +211,8 @@ class StateData:
             "base_ref_sha": self.base_ref_sha,
             "issue_url": self.issue_url,
             "issue_num": self.issue_num,
+            "bypass": self.bypass,
+            "permissions_file": self.permissions_file,
         }
         write_state(state_dir, data)
         self.state_file = state_dir / "state.json"

@@ -502,6 +502,7 @@ def launch(
     gremlin_id: str | None = None,
     pr: str | None = None,
     bypass: bool = False,
+    permissions_file: str = "",
 ) -> tuple[str, subprocess.Popen[bytes]]:
     """Set up state dir, spawn the pipeline detached, return gremlin id and process.
 
@@ -529,9 +530,9 @@ def launch(
             state_dir, inputs.pipeline_path
         )
         sd = _initial_state_data(inputs)
+        sd.bypass = bypass
+        sd.permissions_file = permissions_file
         sd.persist(state_dir)
-        if bypass:
-            sd.patch(bypass=True)
         if inputs.pr_artifact:
             sd.append_artifact(inputs.pr_artifact)
         p = _spawn(inputs.gremlin_id, inputs, state_dir)
