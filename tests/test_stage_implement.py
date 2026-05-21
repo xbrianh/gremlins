@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import pathlib
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from conftest import MINIMAL_EVENTS
@@ -176,6 +176,47 @@ def test_raises_on_divergent_head(tmp_path: pathlib.Path) -> None:
         pytest.raises(RuntimeError, match="diverged"),
     ):
         asyncio.run(stage.run(state))
+
+
+def test_resume_uses_persisted_pre_impl_head(tmp_path: pathlib.Path) -> None:
+    """On a resume, pre_impl_head in state must be used; record_pre_impl_state must not be called."""
+    stage, state = _make_state(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH])
+    state.data.pre_impl_head = "deadbeef"
+
+    record_mock = MagicMock(return_value=_FAKE_PRE)
+
+    with (
+        patch("gremlins.stages.implement.record_pre_impl_state", record_mock),
+        patch(
+            "gremlins.stages.implement.classify_impl_outcome",
+            return_value=HeadAdvanced(commit_count=3),
+        ),
+    ):
+        asyncio.run(stage.run(state))
+
+    record_mock.assert_not_called()
+    assert state.data.pre_impl_head == "", "pre_impl_head must be cleared on success"
+
+
+def test_resume_retains_pre_impl_head_on_failure(tmp_path: pathlib.Path) -> None:
+    """pre_impl_head must not be cleared when the resumed run produces EmptyImpl."""
+    stage, state = _make_state(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH])
+    state.data.pre_impl_head = "deadbeef"
+
+    with (
+        patch(
+            "gremlins.stages.implement.record_pre_impl_state", return_value=_FAKE_PRE
+        ),
+        patch(
+            "gremlins.stages.implement.classify_impl_outcome",
+            return_value=EmptyImpl(),
+        ),
+        pytest.raises(RuntimeError, match="no committed work"),
+    ):
+        asyncio.run(stage.run(state))
+
+    head = state.data.pre_impl_head
+    assert head == "deadbeef", "pre_impl_head must survive a failed resumed run"
 
 
 def test_run_does_not_access_pipeline_data(tmp_path: pathlib.Path) -> None:

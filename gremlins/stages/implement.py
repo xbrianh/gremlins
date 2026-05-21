@@ -13,6 +13,7 @@ from gremlins.stages.outcome import Done, Outcome
 from gremlins.utils.git import (
     DivergentHead,
     EmptyImpl,
+    PreImplState,
     classify_impl_outcome,
     record_pre_impl_state,
 )
@@ -92,7 +93,12 @@ class Implement(Stage):
             )
 
         cwd_arg = str(state.worktree) if state.worktree is not None else None
-        pre = record_pre_impl_state(cwd=cwd_arg)
+        if state.data.pre_impl_head:
+            pre = PreImplState(head=state.data.pre_impl_head)
+        else:
+            pre = record_pre_impl_state(cwd=cwd_arg)
+            state.data.pre_impl_head = pre.head
+            state.data.patch(pre_impl_head=pre.head)
 
         template = "\n\n".join(self.prompts).rstrip()
         prompt = template.format(
@@ -120,4 +126,6 @@ class Implement(Stage):
             raise RuntimeError(
                 f"implement diverged from pre-impl HEAD {pre.head[:7]}; expected a fast-forward"
             )
+        state.data.pre_impl_head = ""
+        state.data.patch(_delete=("pre_impl_head",))
         return Done()
