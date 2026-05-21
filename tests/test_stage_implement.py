@@ -178,6 +178,30 @@ def test_raises_on_divergent_head(tmp_path: pathlib.Path) -> None:
         asyncio.run(stage.run(state))
 
 
+def test_resume_uses_persisted_pre_impl_head(tmp_path: pathlib.Path) -> None:
+    """On a resume, pre_impl_head in state must be used; record_pre_impl_state must not be called."""
+    stage, state = _make_state(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH])
+    state.data.pre_impl_head = "deadbeef"
+
+    called = []
+
+    def _fail_if_called(**_: object) -> PreImplState:
+        called.append(True)
+        return _FAKE_PRE
+
+    with (
+        patch("gremlins.stages.implement.record_pre_impl_state", side_effect=_fail_if_called),
+        patch(
+            "gremlins.stages.implement.classify_impl_outcome",
+            return_value=HeadAdvanced(commit_count=3),
+        ),
+    ):
+        asyncio.run(stage.run(state))
+
+    assert not called, "record_pre_impl_state must not be called when pre_impl_head is set"
+    assert state.data.pre_impl_head == "", "pre_impl_head must be cleared on success"
+
+
 def test_run_does_not_access_pipeline_data(tmp_path: pathlib.Path) -> None:
     stage, state = _make_state(tmp_path, prompts=[_TEMPLATE_LOCAL])
 
