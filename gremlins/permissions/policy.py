@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+KNOWN_PROVIDERS = ("claude", "copilot", "openai", "xai", "anthropic")
+
 
 @dataclass(frozen=True)
 class Policy:
