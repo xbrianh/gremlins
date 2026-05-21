@@ -724,3 +724,116 @@ def test_cli_queue_requeue_confirms_when_runner_active(tmp_path, monkeypatch, ca
     rc = main(["queue", "requeue"])
     assert rc == 0
     assert "runner: active" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# detach_run
+# ---------------------------------------------------------------------------
+
+
+def test_detach_run_refuses_when_runner_active(tmp_path, monkeypatch):
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    monkeypatch.setattr("gremlins.queue.core.runner_active", lambda: True)
+    rc = core.detach_run()
+    assert rc == 1
+
+
+def test_detach_run_parent_writes_pidfile_and_prints(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    monkeypatch.setattr("gremlins.queue.core.runner_active", lambda: False)
+    monkeypatch.setattr("gremlins.queue.core.os.fork", lambda: 99999)
+    rc = core.detach_run()
+    assert rc == 0
+    root = core.queue_root()
+    pid_path = root / "runner.pid"
+    assert pid_path.read_text() == "99999"
+    assert "99999" in capsys.readouterr().out
+
+
+def test_detach_run_child_runs_queue_and_removes_pidfile(tmp_path, monkeypatch):
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    monkeypatch.setattr("gremlins.queue.core.runner_active", lambda: False)
+    monkeypatch.setattr("gremlins.queue.core.os.fork", lambda: 0)
+    monkeypatch.setattr("gremlins.queue.core.os.setsid", lambda: None)
+    monkeypatch.setattr("gremlins.queue.core.os.dup2", lambda a, b: None)
+
+    exited = {}
+
+    def fake_exit(code):
+        exited["code"] = code
+        raise SystemExit(code)
+
+    monkeypatch.setattr("gremlins.queue.core.os._exit", fake_exit)
+    monkeypatch.setattr("gremlins.queue.core.run", lambda **kw: 0)
+
+    root = core.queue_root()
+    pid_path = root / "runner.pid"
+    pid_path.write_text("12345")
+
+    with pytest.raises(SystemExit):
+        core.detach_run()
+
+    assert exited["code"] == 0
+    assert not pid_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# stop
+# ---------------------------------------------------------------------------
+
+
+def test_stop_no_pidfile(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    core.queue_root()  # create dirs
+    rc = core.stop()
+    assert rc == 1
+    assert "pidfile" in capsys.readouterr().err
+
+
+def test_stop_stale_pid_cleans_up(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    root = core.queue_root()
+    pid_path = root / "runner.pid"
+    pid_path.write_text("99999999")  # pid that won't exist
+
+    def fake_kill(pid, sig):
+        raise ProcessLookupError
+
+    monkeypatch.setattr("gremlins.queue.core.os.kill", fake_kill)
+    rc = core.stop()
+    assert rc == 1
+    assert not pid_path.exists()
+    assert "stale" in capsys.readouterr().err
+
+
+def test_stop_sends_sigterm_and_cleans_up(tmp_path, monkeypatch):
+    import signal
+
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    root = core.queue_root()
+    pid_path = root / "runner.pid"
+    pid_path.write_text("12345")
+
+    kill_calls = []
+    call_count = [0]
+
+    def fake_kill(pid, sig):
+        kill_calls.append((pid, sig))
+        call_count[0] += 1
+        if call_count[0] > 2:
+            raise ProcessLookupError
+
+    monkeypatch.setattr("gremlins.queue.core.os.kill", fake_kill)
+    monkeypatch.setattr("gremlins.queue.core.time.sleep", lambda _: None)
+
+    rc = core.stop()
+    assert rc == 0
+    assert (12345, signal.SIGTERM) in kill_calls
+    assert not pid_path.exists()
+
+
+def test_cli_queue_stop_dispatches(tmp_path, monkeypatch):
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    monkeypatch.setattr("gremlins.cli.queue.stop", lambda: 0)
+    rc = main(["queue", "stop"])
+    assert rc == 0

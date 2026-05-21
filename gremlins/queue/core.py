@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -18,7 +19,21 @@ _ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 SUBDIRS = ("pending", "running", "done", "failed")
 
 
+def _runner_pid_path() -> Path:
+    from gremlins.paths import state_root
+
+    return state_root() / "queues" / "default" / "runner.pid"
+
+
 def runner_active() -> bool:
+    pid_path = _runner_pid_path()
+    if pid_path.exists():
+        try:
+            pid = int(pid_path.read_text().strip())
+            os.kill(pid, 0)
+            return True
+        except (ProcessLookupError, ValueError, PermissionError, OSError):
+            pass
     try:
         result = subprocess.run(
             ["pgrep", "-u", str(os.getuid()), "-f", "gremlins queue run"],
@@ -214,6 +229,76 @@ def run(
         if on_main:
             signal.signal(signal.SIGINT, old_int)  # type: ignore[reportPossiblyUnbound]
             signal.signal(signal.SIGTERM, old_term)  # type: ignore[reportPossiblyUnbound]
+
+
+def detach_run(once: bool = False, poll_interval: float = 1.0) -> int:
+    if runner_active():
+        print("queue run: runner already active", file=sys.stderr)
+        return 1
+    root = queue_root()
+    log_path = root / "runner.log"
+    pid_path = _runner_pid_path()
+    try:
+        child_pid = os.fork()
+    except OSError as exc:
+        print(f"queue run: fork failed: {exc}", file=sys.stderr)
+        return 1
+    if child_pid > 0:
+        pid_path.write_text(str(child_pid))
+        print(f"runner detached: pid {child_pid}, log: {log_path}")
+        return 0
+    os.setsid()
+    rc = 1
+    try:
+        log_f = open(log_path, "w")
+        os.dup2(log_f.fileno(), sys.stdout.fileno())
+        os.dup2(log_f.fileno(), sys.stderr.fileno())
+        log_f.close()
+        try:
+            rc = run(once=once, poll_interval=poll_interval)
+        except Exception:
+            traceback.print_exc()
+    finally:
+        pid_path.unlink(missing_ok=True)
+        os._exit(rc)
+
+
+def stop() -> int:
+    pid_path = _runner_pid_path()
+    if not pid_path.exists():
+        print("queue stop: no pidfile found", file=sys.stderr)
+        return 1
+    try:
+        pid = int(pid_path.read_text().strip())
+    except ValueError:
+        print("queue stop: pidfile is corrupt", file=sys.stderr)
+        pid_path.unlink(missing_ok=True)
+        return 1
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        print(f"queue stop: stale pidfile (pid {pid} not found)", file=sys.stderr)
+        pid_path.unlink(missing_ok=True)
+        return 1
+    except PermissionError:
+        print(f"queue stop: no permission to signal pid {pid}", file=sys.stderr)
+        return 1
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pid_path.unlink(missing_ok=True)
+        return 0
+    for _ in range(50):
+        time.sleep(0.1)
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            pid_path.unlink(missing_ok=True)
+            return 0
+        except PermissionError:
+            break
+    print(f"queue stop: pid {pid} did not exit within 5s", file=sys.stderr)
+    return 1
 
 
 def requeue(include_done: bool = False) -> int:
