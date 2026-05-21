@@ -80,28 +80,17 @@ class ParallelGroupState:
         except Exception:
             pass
 
-    def collect_bails(self, child_keys: list[str]) -> tuple[list[str], dict[str, str]]:
+    def read_bail_scan_inputs(self) -> tuple[pathlib.Path | None, dict[str, str]]:
         sf = resolve_state_file(self.parent_data.gremlin_id)
         if sf is None or not sf.exists():
-            return [], {}
+            return None, {}
         try:
             data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
-            parallel_attempts: dict[str, str] = data.get("parallel_attempts") or {}
-            bailed: list[str] = []
-            first_bail: dict[str, str] = {}
-            for key in child_keys:
-                child_attempt = parallel_attempts.get(key) or ""
-                bail_file = sf.parent / f"bail_{child_attempt}.json"
-                if child_attempt and bail_file.exists():
-                    bailed.append(key)
-                    if not first_bail:
-                        try:
-                            first_bail = dict(
-                                json.loads(bail_file.read_text(encoding="utf-8"))
-                            )
-                        except Exception:
-                            first_bail = {"class": "other"}
-            return bailed, first_bail
+            return sf.parent, data.get("parallel_attempts") or {}
         except Exception as exc:
-            logger.warning("fan-in bail aggregation failed: %s", exc)
-            return [], {}
+            logger.warning(
+                "parallel group %r: could not read bail scan inputs: %s",
+                self.group_name,
+                exc,
+            )
+            return None, {}

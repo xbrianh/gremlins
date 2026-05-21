@@ -170,46 +170,27 @@ def test_write_bail_no_attempt_is_noop(state_root):
 
 
 # ---------------------------------------------------------------------------
-# collect_bails
+# read_bail_scan_inputs
 # ---------------------------------------------------------------------------
 
 
-def test_collect_bails_returns_bailed_keys(state_root):
-    gid = "gs-collect"
+def test_read_bail_scan_inputs_returns_dir_and_attempts(state_root):
+    gid = "gs-scan-inputs"
     sf = _make_state(state_root, gid)
-    state_dir = sf.parent
 
     data = StateData.load(gid)
     gs = ParallelGroupState("reviews", data)
     gs.record_attempt("child-a", "attempt-a")
     gs.record_attempt("child-b", "attempt-b")
 
-    (state_dir / "bail_attempt-a.json").write_text(
-        json.dumps({"class": "security", "detail": "oops"}), encoding="utf-8"
-    )
-
-    bailed, first_bail = gs.collect_bails(["child-a", "child-b"])
-    assert bailed == ["child-a"]
-    assert first_bail["class"] == "security"
-    assert first_bail["detail"] == "oops"
+    state_dir, attempts = gs.read_bail_scan_inputs()
+    assert state_dir == sf.parent
+    assert attempts == {"child-a": "attempt-a", "child-b": "attempt-b"}
 
 
-def test_collect_bails_empty_when_no_bail_files(state_root):
-    gid = "gs-collect-empty"
-    _make_state(state_root, gid)
-
-    data = StateData.load(gid)
-    gs = ParallelGroupState("reviews", data)
-    gs.record_attempt("child-a", "attempt-a")
-
-    bailed, first_bail = gs.collect_bails(["child-a"])
-    assert bailed == []
-    assert first_bail == {}
-
-
-def test_collect_bails_no_state_file_returns_empty():
+def test_read_bail_scan_inputs_no_state_file_returns_none():
     data = StateData(gremlin_id=None)
     gs = ParallelGroupState("reviews", data)
-    bailed, first_bail = gs.collect_bails(["child-a"])
-    assert bailed == []
-    assert first_bail == {}
+    state_dir, attempts = gs.read_bail_scan_inputs()
+    assert state_dir is None
+    assert attempts == {}

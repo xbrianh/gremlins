@@ -16,7 +16,7 @@ from gremlins.executor.state import State, StateData
 from gremlins.stages.base import Stage
 from gremlins.stages.composite import child_state as _child_state
 from gremlins.stages.outcome import Bail, Done, Outcome
-from gremlins.utils import git, proc
+from gremlins.utils import git, parallel_bail, proc
 
 logger = logging.getLogger(__name__)
 
@@ -378,25 +378,25 @@ class _ParallelExecutor:
         ):
             await self._validate_no_mutations()
 
-        bailed, first_bail = self._group_state.collect_bails(
-            [k for k, _, _ in self._child_runners]
+        state_dir, attempts = self._group_state.read_bail_scan_inputs()
+        child_keys = [k for k, _, _ in self._child_runners]
+        bailed = (
+            parallel_bail.collect_bails(state_dir, child_keys, attempts)
+            if state_dir is not None
+            else []
         )
-        should_bail = (
-            bool(bailed)
-            if self._bail_policy == "any"
-            else bool(bailed) and len(bailed) == len(self._child_runners)
-        )
+        decision = parallel_bail.decide(bailed, len(child_keys), self._bail_policy)
 
-        if should_bail and first_bail:
+        if decision.should_bail and decision.first_bail:
             self._parent_data.write_bail_file(
-                first_bail.get("class") or "other",
-                first_bail.get("detail") or "",
+                decision.first_bail.get("class") or "other",
+                decision.first_bail.get("detail") or "",
                 attempt=self._parent_data.attempt,
             )
         self._group_state.clear_attempts()
-        if not should_bail:
+        if not decision.should_bail:
             self._parent_data.clear_done(self._stage_path)
-        if should_bail:
+        if decision.should_bail:
             raise RuntimeError(
                 f"parallel group {self._group_name!r} bailed "
                 f"({len(bailed)} child(ren), policy={self._bail_policy!r})"
