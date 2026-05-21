@@ -67,7 +67,8 @@ class ParallelGroupState:
             return
         try:
             pa: dict[str, Any] = (
-                json.loads(sf.read_text(encoding="utf-8")).get("parallel_attempts") or {}
+                json.loads(sf.read_text(encoding="utf-8")).get("parallel_attempts")
+                or {}
             )
             self.parent_data.write_bail_file(
                 "other", reason, attempt=pa.get(child_key) or ""
@@ -75,9 +76,7 @@ class ParallelGroupState:
         except Exception:
             pass
 
-    def collect_bails(
-        self, child_keys: list[str]
-    ) -> tuple[list[str], dict[str, str]]:
+    def collect_bails(self, child_keys: list[str]) -> tuple[list[str], dict[str, str]]:
         sf = resolve_state_file(self.parent_data.gremlin_id)
         if sf is None or not sf.exists():
             return [], {}

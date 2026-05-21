@@ -376,7 +376,10 @@ class _ParallelExecutor:
 
     async def _do_fan_in(self) -> None:
         await git.prune_worktrees_async(str(self._project_root))
-        if await git.in_git_repo_async(cwd=str(self._project_root)) and self._group_state.base_head:
+        if (
+            await git.in_git_repo_async(cwd=str(self._project_root))
+            and self._group_state.base_head
+        ):
             await self._validate_no_mutations()
 
         bailed, first_bail = self._group_state.collect_bails(
