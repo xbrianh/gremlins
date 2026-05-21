@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import pathlib
+import secrets
 import sys
 import threading
 from typing import Any
@@ -77,6 +79,27 @@ class SubprocessClaudeClient:
     def total_cost_usd(self) -> float:
         return self._total_cost_usd
 
+    def _materialize_config(self, state_dir: pathlib.Path) -> pathlib.Path:
+        config_dir = state_dir / "claude-config"
+        claude_dir = config_dir / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        dst = claude_dir / "settings.json"
+        tmp = claude_dir / f"settings.json.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+        tmp.write_text(json.dumps(self._native_block), encoding="utf-8")
+        os.replace(tmp, dst)
+        # macOS: keychain handles auth; credentials follow automatically.
+        # Linux/Windows: credentials live on disk; symlink them into the redirect dir
+        # so subscription auth follows CLAUDE_CONFIG_DIR. This relies on undocumented
+        # behavior — use the anthropic: SDK backend if upstream breaks it.
+        if sys.platform != "darwin":
+            src = pathlib.Path.home() / ".claude" / ".credentials.json"
+            if src.exists():
+                try:
+                    (claude_dir / ".credentials.json").symlink_to(src)
+                except OSError:
+                    pass
+        return config_dir
+
     def _build_argv(self, model: str | None) -> list[str]:
         cmd = ["claude", "-p"]
         if model is not None:
@@ -97,6 +120,12 @@ class SubprocessClaudeClient:
         env["GREMLIN_SKIP_SUMMARY"] = "1"
         if extra_env:
             env.update(extra_env)
+        if self._native_block:
+            state_dir_str = env.get("GREMLIN_STATE_DIR")
+            if not state_dir_str:
+                raise RuntimeError("native_block set but GREMLIN_STATE_DIR absent")
+            config_dir = self._materialize_config(pathlib.Path(state_dir_str))
+            env["CLAUDE_CONFIG_DIR"] = str(config_dir)
         p = await asyncio.create_subprocess_exec(
             *argv,
             stdin=asyncio.subprocess.PIPE,
