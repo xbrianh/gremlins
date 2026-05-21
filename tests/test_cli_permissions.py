@@ -197,7 +197,9 @@ def test_statedata_bypass_roundtrip(tmp_path):
 def test_statedata_bypass_load(tmp_path, monkeypatch):
     state_file = tmp_path / "state.json"
     state_file.write_text(json.dumps({"bypass": True, "permissions_file": "/p.yaml"}))
-    monkeypatch.setattr("gremlins.executor.state.resolve_state_file", lambda _: state_file)
+    monkeypatch.setattr(
+        "gremlins.executor.state.resolve_state_file", lambda _: state_file
+    )
     sd = StateData.load(None)
     assert sd.bypass is True
     assert sd.permissions_file == "/p.yaml"
