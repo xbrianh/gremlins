@@ -45,7 +45,7 @@ def _apply_policy_to_stages(stages: list[Stage], policy: Policy) -> None:
 
 
 def _install_signal_handlers(clients: Sequence[Client]) -> None:
-    def handler(signum: int, frame: types.FrameType | None) -> None:
+    def handler(_signum: int, _frame: types.FrameType | None) -> None:  # pyright: ignore[reportUnusedParameter]
         for c in clients:
             try:
                 c.reap_all()

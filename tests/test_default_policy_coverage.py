@@ -34,7 +34,7 @@ def test_gh_terse_pipeline_loads() -> None:
 
 
 @pytest.mark.integration
-def test_local_pipeline_default_block_no_denied_tools(tmp_path: pathlib.Path) -> None:
+def test_local_pipeline_default_block_no_denied_tools() -> None:
     """Verify local pipeline runs under default block without tool denials.
 
     Requires OPENAI_API_KEY or XAI_API_KEY to be set.

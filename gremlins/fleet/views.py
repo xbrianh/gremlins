@@ -344,7 +344,7 @@ def do_list_json(args: argparse.Namespace, here_root: str | None = None) -> None
     items = sorted(
         (
             _gremlin_to_json(gid, wdir, state, live)
-            for gid, _sf, wdir, state, live in _iter_filtered_gremlins(
+            for gid, _, wdir, state, live in _iter_filtered_gremlins(
                 here_root=here_root,
                 pipeline_filter=args.pipeline,
                 since_secs=since_secs,
