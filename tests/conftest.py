@@ -13,7 +13,7 @@ import pytest
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.pipeline import Pipeline
 from gremlins.stages.github_open_pull_request import GitHubOpenPullRequest
-from gremlins.utils.git import HeadAdvanced, PreImplState
+from gremlins.utils.git import HeadAdvanced
 
 os.environ.setdefault("GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME", "main")
 
@@ -178,10 +178,6 @@ def common_local_patches(monkeypatch):
         "gremlins.executor.run._install_signal_handlers", lambda c: None
     )
     monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: True)
-    monkeypatch.setattr(
-        "gremlins.stages.implement.record_pre_impl_state",
-        lambda **kwargs: PreImplState(head="abc123"),
-    )
     monkeypatch.setattr(
         "gremlins.stages.implement.classify_impl_outcome",
         lambda pre, **kwargs: HeadAdvanced(commit_count=1),

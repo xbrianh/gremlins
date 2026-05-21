@@ -140,16 +140,24 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
     )
 
     state_file = tmp_path / "state.json"
+    head_r = _real_subprocess_run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True
+    )
+    base_ref_sha = head_r.stdout.strip() if head_r.returncode == 0 else ""
     initial = {
         "id": "gr-test",
         "kind": "ghgremlin",
         "stage": "starting",
+        "base_ref_sha": base_ref_sha,
     }
     if state_data:
         initial.update(state_data)
     state_file.write_text(json.dumps(initial))
     monkeypatch.setattr(
         "gremlins.executor.run.resolve_state_file", lambda gremlin_id=None: state_file
+    )
+    monkeypatch.setattr(
+        "gremlins.executor.state.resolve_state_file", lambda gremlin_id=None: state_file
     )
 
     # Use a writing shim so the commit runner can read back artifact values.
