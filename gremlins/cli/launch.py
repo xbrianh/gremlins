@@ -207,6 +207,7 @@ def _self_background_main(
             pipeline_args=pipeline_args,
             gremlin_id=args.gremlin_id,
             pr=args.pr,
+            bypass=policy.bypass,
         )
     except (ValueError, RuntimeError) as exc:
         sys.stderr.write(f"error: {exc}\n")

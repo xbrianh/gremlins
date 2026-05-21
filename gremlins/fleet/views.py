@@ -309,6 +309,7 @@ def _gremlin_to_json(
         "liveness": parse_liveness(live),
         "age_seconds": age_seconds,
         "client": str(state.get("client") or ""),
+        "perm_mode": "bypass" if bool(state.get("bypass")) else "default",
         "description": str(state.get("description") or state.get("instructions") or ""),
         "started_at": started_at,
         "project_root": str(state.get("project_root") or ""),
@@ -343,7 +344,7 @@ def do_list_json(args: argparse.Namespace, here_root: str | None = None) -> None
     items = sorted(
         (
             _gremlin_to_json(gid, wdir, state, live)
-            for gid, _sf, wdir, state, live in _iter_filtered_gremlins(
+            for gid, _, wdir, state, live in _iter_filtered_gremlins(
                 here_root=here_root,
                 pipeline_filter=args.pipeline,
                 since_secs=since_secs,

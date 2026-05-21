@@ -46,6 +46,10 @@ class Client:
     def __hash__(self) -> int:
         return hash((self.provider, self.model))
 
+    def set_policy(self, policy: Policy) -> None:
+        assert self._impl is None, "set_policy called after impl was already created"
+        self._policy = policy
+
     def _get_impl(self) -> Any:
         if self._impl is None:
             if self.provider not in CLIENT_FACTORIES:
