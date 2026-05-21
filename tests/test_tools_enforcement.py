@@ -197,7 +197,9 @@ def test_wrap_denied_writes_audit(tmp_path: pathlib.Path) -> None:
     read_tool = _ft(tools, "Read")
     outside = str(tmp_path.parent / "secret.txt")
     ctx = _ctx(cwd=str(tmp_path))
-    result = asyncio.run(read_tool.on_invoke_tool(ctx, json.dumps({"file_path": outside})))
+    result = asyncio.run(
+        read_tool.on_invoke_tool(ctx, json.dumps({"file_path": outside}))
+    )
     assert "outside worktree" in result
     entry = json.loads(log.read_text())
     assert entry["status"] == "denied"
@@ -211,7 +213,9 @@ def test_wrap_ok_writes_audit(tmp_path: pathlib.Path) -> None:
     tools = build_tools(bypass=False, worktree_root=tmp_path, audit_log=log)
     read_tool = _ft(tools, "Read")
     ctx = _ctx(cwd=str(tmp_path))
-    result = asyncio.run(read_tool.on_invoke_tool(ctx, json.dumps({"file_path": str(target)})))
+    result = asyncio.run(
+        read_tool.on_invoke_tool(ctx, json.dumps({"file_path": str(target)}))
+    )
     assert result == "hi"
     entry = json.loads(log.read_text())
     assert entry["status"] == "ok"
@@ -235,7 +239,9 @@ def test_wrap_bypass_skips_enforcement(tmp_path: pathlib.Path) -> None:
     tools = build_tools(bypass=True, worktree_root=tmp_path, audit_log=log)
     read_tool = _ft(tools, "Read")
     ctx = _ctx()
-    result = asyncio.run(read_tool.on_invoke_tool(ctx, json.dumps({"file_path": str(outside)})))
+    result = asyncio.run(
+        read_tool.on_invoke_tool(ctx, json.dumps({"file_path": str(outside)}))
+    )
     assert result == "sensitive"
     entry = json.loads(log.read_text())
     assert entry["status"] == "ok"
