@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pathlib
+import tempfile
 
 
 def state_root() -> pathlib.Path:
@@ -10,5 +11,17 @@ def state_root() -> pathlib.Path:
     import platformdirs
 
     path = pathlib.Path(platformdirs.user_state_dir("gremlins"))
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def work_root() -> pathlib.Path:
+    """Return the directory where gremlin worktrees are created by default.
+
+    Lives under the system temp dir so orphaned worktrees (from crashed or
+    killed gremlins) get cleaned up by the OS on reboot, and so a single
+    ambient permission rule covers every worktree path.
+    """
+    path = pathlib.Path(tempfile.gettempdir()) / "gremlins"
     path.mkdir(parents=True, exist_ok=True)
     return path
