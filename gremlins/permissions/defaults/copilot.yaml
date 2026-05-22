@@ -1,7 +1,3 @@
-allowed_tools:
-  - Read
-  - Edit
-  - Bash
-  - Write
-  - Grep
-  - Glob
+# copilot: backend is bypass-only; it has no per-tool allowlist surface.
+# Launching in default mode raises immediately — see gremlins/clients/__init__.py.
+{}

@@ -15,10 +15,11 @@ def _make_claude_client(_model: str | None, policy: Policy) -> SubprocessClaudeC
 
 
 def _make_copilot_client(_model: str | None, policy: Policy) -> SubprocessCopilotClient:
-    return SubprocessCopilotClient(
-        bypass=policy.bypass,
-        native_block=load_default_block("copilot") | policy.block_for("copilot"),
-    )
+    if not policy.bypass:
+        raise ValueError(
+            "copilot: backend requires --bypass; it has no per-tool allowlist surface"
+        )
+    return SubprocessCopilotClient(bypass=True, native_block={})
 
 
 def _make_openai_client(model: str | None, policy: Policy) -> object:
@@ -41,6 +42,6 @@ def _make_anthropic_client(model: str | None, policy: Policy) -> object:
 
 register_client_factory("anthropic", _make_anthropic_client)
 register_client_factory("claude", _make_claude_client)
-register_client_factory("copilot", _make_copilot_client)
+register_client_factory("copilot", _make_copilot_client, bypass_only=True)
 register_client_factory("openai", _make_openai_client)
 register_client_factory("xai", _make_xai_client)
