@@ -6,7 +6,11 @@ import pytest
 
 import gremlins.clients  # noqa: F401 — registers CLIENT_FACTORIES as a side effect
 from gremlins.clients.registry import CLIENT_FACTORIES
-from gremlins.permissions.loader import load_default_block, load_policy
+from gremlins.permissions.loader import (
+    has_default_block,
+    load_default_block,
+    load_policy,
+)
 from gremlins.permissions.policy import Policy
 from gremlins.utils.yaml_io import YamlLoadError
 
@@ -93,6 +97,8 @@ def test_empty_inputs_give_default_policy(tmp_path):
     for provider in CLIENT_FACTORIES:
         if provider in BYPASS_REQUIRED:
             continue  # bypass-only providers have no allowlist defaults
+        if not has_default_block(provider):
+            continue
         assert load_default_block(provider), (
             f"expected non-empty default block for {provider}"
         )

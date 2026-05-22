@@ -6,3 +6,8 @@ allowed_tools:
   - Grep
   - Glob
 permission_mode: default
+disallowed_tools:
+  - "Bash(sudo:*)"
+  - "Bash(rm -rf /:*)"
+  - "Bash(rm -rf /*:*)"
+  - "Bash(rm -rf ~:*)"

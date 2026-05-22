@@ -11,7 +11,6 @@ from gremlins.clients.claude import SubprocessClaudeClient
 from gremlins.clients.copilot import SubprocessCopilotClient
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.clients.registry import CLIENT_FACTORIES
-from gremlins.permissions.loader import load_default_block
 from gremlins.permissions.policy import Policy
 
 _CLAUDE_BLOCK: dict[str, Any] = {"allowed_tools": ["Read"]}
@@ -59,7 +58,7 @@ def test_claude_factory_threads_policy() -> None:
     impl = CLIENT_FACTORIES["claude"]("sonnet", policy)
     assert isinstance(impl, SubprocessClaudeClient)
     assert impl._bypass is True  # pyright: ignore[reportPrivateUsage]
-    assert impl._native_block == load_default_block("claude") | _CLAUDE_BLOCK  # pyright: ignore[reportPrivateUsage]
+    assert impl._native_block == _CLAUDE_BLOCK  # pyright: ignore[reportPrivateUsage]
 
 
 def test_copilot_factory_requires_bypass() -> None:

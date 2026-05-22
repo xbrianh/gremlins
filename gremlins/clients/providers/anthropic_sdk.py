@@ -181,6 +181,9 @@ class AnthropicSdkClient:
         allowed_tools: list[str] | None = self._native_block.get("allowed_tools")
         if allowed_tools is not None:
             opts_kwargs["allowed_tools"] = allowed_tools
+        disallowed_tools: list[str] | None = self._native_block.get("disallowed_tools")
+        if disallowed_tools is not None:
+            opts_kwargs["disallowed_tools"] = disallowed_tools
         options: Any = claude_agent_sdk.ClaudeAgentOptions(  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
             **opts_kwargs
         )
