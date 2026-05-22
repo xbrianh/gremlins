@@ -43,20 +43,12 @@ def _pid_is_runner(pid: int) -> bool:
 
 def runner_active() -> bool:
     pid_path = _runner_pid_path()
-    if pid_path.exists():
-        try:
-            pid = int(pid_path.read_text().strip())
-            if _pid_is_runner(pid):
-                return True
-        except (ValueError, OSError):
-            pass
+    if not pid_path.exists():
+        return False
     try:
-        result = subprocess.run(
-            ["pgrep", "-u", str(os.getuid()), "-f", "gremlins queue run"],
-            capture_output=True,
-        )
-        return result.returncode == 0
-    except FileNotFoundError:
+        pid = int(pid_path.read_text().strip())
+        return _pid_is_runner(pid)
+    except (ValueError, OSError):
         return False
 
 

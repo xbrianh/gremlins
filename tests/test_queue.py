@@ -659,27 +659,26 @@ def test_cli_queue_set_state_invalid_state(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_runner_active_true_when_pgrep_exits_zero(monkeypatch):
-    monkeypatch.setattr(
-        "gremlins.queue.core.subprocess.run",
-        lambda cmd, **kw: types.SimpleNamespace(returncode=0, stdout=""),
-    )
+def test_runner_active_true_with_valid_pid_file(tmp_path, monkeypatch):
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    pid_path = core._runner_pid_path()
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    pid_path.write_text(str(os.getpid()))
+    monkeypatch.setattr("gremlins.queue.core._pid_is_runner", lambda _: True)
     assert core.runner_active() is True
 
 
-def test_runner_active_false_when_pgrep_exits_nonzero(monkeypatch):
-    monkeypatch.setattr(
-        "gremlins.queue.core.subprocess.run",
-        lambda cmd, **kw: types.SimpleNamespace(returncode=1, stdout=""),
-    )
+def test_runner_active_false_when_no_pid_file(tmp_path, monkeypatch):
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
     assert core.runner_active() is False
 
 
-def test_runner_active_false_when_pgrep_missing(monkeypatch):
-    def _raise(*_a, **_kw):
-        raise FileNotFoundError
-
-    monkeypatch.setattr("gremlins.queue.core.subprocess.run", _raise)
+def test_runner_active_false_when_pid_not_runner(tmp_path, monkeypatch):
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+    pid_path = core._runner_pid_path()
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    pid_path.write_text(str(os.getpid()))
+    monkeypatch.setattr("gremlins.queue.core._pid_is_runner", lambda _: False)
     assert core.runner_active() is False
 
 
@@ -899,18 +898,15 @@ def test_stop_stale_if_pid_is_not_runner(tmp_path, monkeypatch, capsys):
     assert "stale" in capsys.readouterr().err
 
 
-def test_runner_active_false_for_live_non_runner_pid_no_pgrep_match(
-    tmp_path, monkeypatch
-):
+def test_runner_active_false_for_live_non_runner_pid(tmp_path, monkeypatch):
     monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
     root = core.queue_root()
     pid_path = root / "runner.pid"
     pid_path.write_text(str(os.getpid()))
-
-    def fake_subprocess_run(cmd, **kw):
-        if cmd[0] == "ps":
-            return types.SimpleNamespace(returncode=0, stdout="python -m pytest\n")
-        return types.SimpleNamespace(returncode=1)  # pgrep finds no match
-
-    monkeypatch.setattr("gremlins.queue.core.subprocess.run", fake_subprocess_run)
+    monkeypatch.setattr(
+        "gremlins.queue.core.subprocess.run",
+        lambda cmd, **kw: types.SimpleNamespace(
+            returncode=0, stdout="python -m pytest\n"
+        ),
+    )
     assert core.runner_active() is False
