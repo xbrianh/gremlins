@@ -78,6 +78,9 @@ Both backends are fully supported and both stay; neither replaces the other.
 
 Pipelines opt in to `anthropic:` by setting `default_client: anthropic:<model-id>` or a per-stage `client:` field.
 
+See the README for the user-facing description of how `claude:` picks up
+config and when to switch to an SDK backend for per-gremlin isolation.
+
 ## Copilot permission surface
 
 GitHub Copilot Agent CLI (`copilot -p`) exposes a thin permission surface:

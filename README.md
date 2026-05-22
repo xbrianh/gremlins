@@ -411,8 +411,55 @@ commits before merging.
 tool layer and enforces the allowlist directly.  On the `anthropic:` backend,
 enforcement is coarser — the SDK loop uses vendor-defined tools and the path
 scoping is advisory.  On `claude:` and `copilot:` subprocess backends, the
-native permission block is written to a settings.json and passed to the Claude
-Code / Copilot CLI, which enforces it natively.
+gremlins-layer permission block is **not** translated into CLI flags or
+settings — the underlying CLI reads the operator's ambient config and
+enforces whatever the operator has configured there.  See "Backend config
+inheritance" below.
+
+### Backend config inheritance
+
+The `claude:` backend is a thin wrapper around `claude -p`. It does *not*
+materialize a per-gremlin config dir, and it does *not* set
+`CLAUDE_CONFIG_DIR` for the subprocess. Whatever the operator has configured
+for their interactive Claude session is exactly what the subprocess sees:
+
+- **Settings** — `~/.claude/settings.json` (plus any project-level
+  `.claude/settings.json` the CLI discovers) is read by the CLI directly.
+  The gremlins-layer `allowed_tools` / `disallowed_tools` block has no
+  effect on `claude:` runs; configure tool permissions via your own
+  Claude settings or use the `anthropic:` backend.
+- **MCP servers and hooks** — inherited from the user's Claude config.
+- **Auth** — subscription auth follows `~/.claude/.credentials.json` (or the
+  macOS keychain) exactly as it would for an interactive session.
+- **Permission mode** — the only thing the wrapper still controls per call:
+  `--permission-mode bypassPermissions` when bypass is enabled, otherwise
+  `default`.
+
+#### True process isolation: use an SDK backend
+
+If you need per-gremlin tool allow-lists, hermetic config, or a clean
+separation between gremlins and your interactive Claude session, use one of
+the SDK-backed providers instead:
+
+- `anthropic:<model-id>` — `claude-agent-sdk` with `setting_sources=[]` (no
+  ambient settings, no MCP, no hooks). Requires `ANTHROPIC_API_KEY`.
+  `allowed_tools` from the native block is enforced by the SDK.
+- `openai:<model-id>` / `xai:<model-id>` — `openai-agents` SDK with the
+  in-tree `GREMLINS_TOOLS` list. Per-gremlin `allowed_tools` filters that
+  list. Requires `OPENAI_API_KEY` / `XAI_API_KEY`.
+
+Set via pipeline YAML:
+
+```yaml
+default_client: anthropic:claude-sonnet-4-6
+# or per-stage:
+stages:
+  - name: implement
+    client: anthropic:claude-sonnet-4-6
+```
+
+Subscription auth is not available on the SDK backends — that is Anthropic
+policy, not a gremlins limitation.
 
 ### Local environment overrides
 

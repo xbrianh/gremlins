@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import pathlib
-import secrets
 import sys
 import threading
 from typing import Any
@@ -25,29 +23,17 @@ class StreamTimeoutError(RuntimeError):
     pass
 
 
-def _to_claude_settings(block: dict[str, Any]) -> dict[str, Any]:
-    """Translate allowed_tools/disallowed_tools to Claude CLI permissions schema."""
-    settings: dict[str, Any] = {
-        k: v for k, v in block.items() if k not in ("allowed_tools", "disallowed_tools")
-    }
-    allow = block.get("allowed_tools")
-    deny = block.get("disallowed_tools")
-    if allow is not None or deny is not None:
-        perms: dict[str, Any] = dict(settings.pop("permissions", {}))
-        if allow is not None:
-            perms["allow"] = list(allow)
-        if deny is not None:
-            perms["deny"] = list(deny)
-        settings["permissions"] = perms
-    return settings
-
-
 class SubprocessClaudeClient:
     """Production ClaudeClient: spawns ``claude -p`` subprocesses.
 
     Owns the live-children list so ``reap_all()`` (called from the executor's
     SIGINT/SIGTERM handlers) can terminate every concurrently-running
     ``claude -p`` before the orchestrator exits.
+
+    Reads the operator's ambient ``~/.claude/`` config: settings, MCP servers,
+    and credentials follow whatever the user has configured for interactive
+    use. There is no per-gremlin config isolation on this backend — for that,
+    use the ``anthropic:`` SDK provider.
     """
 
     def __init__(
@@ -62,6 +48,8 @@ class SubprocessClaudeClient:
         self._children: list[asyncio.subprocess.Process] = []
         self._total_cost_usd: float = 0.0
         self._bypass = bypass
+        # accepted for factory shape parity with SubprocessCopilotClient; inert
+        # on this backend — the claude CLI reads ~/.claude/settings.json directly.
         self._native_block: dict[str, Any] = (
             native_block if native_block is not None else {}
         )
@@ -96,29 +84,6 @@ class SubprocessClaudeClient:
     def total_cost_usd(self) -> float:
         return self._total_cost_usd
 
-    def _materialize_config(self, state_dir: pathlib.Path) -> pathlib.Path:
-        config_dir = state_dir / "claude-config"
-        claude_dir = config_dir / ".claude"
-        claude_dir.mkdir(parents=True, exist_ok=True)
-        dst = claude_dir / "settings.json"
-        tmp = claude_dir / f"settings.json.{os.getpid()}.{secrets.token_hex(4)}.tmp"
-        tmp.write_text(
-            json.dumps(_to_claude_settings(self._native_block)), encoding="utf-8"
-        )
-        os.replace(tmp, dst)
-        # macOS: keychain handles auth; credentials follow automatically.
-        # Linux/Windows: credentials live on disk; symlink them into the redirect dir
-        # so subscription auth follows CLAUDE_CONFIG_DIR. This relies on undocumented
-        # behavior — use the anthropic: SDK backend if upstream breaks it.
-        if sys.platform != "darwin":
-            src = pathlib.Path.home() / ".claude" / ".credentials.json"
-            if src.exists():
-                try:
-                    (claude_dir / ".credentials.json").symlink_to(src)
-                except OSError:
-                    pass
-        return config_dir
-
     def _build_argv(self, model: str | None) -> list[str]:
         cmd = ["claude", "-p"]
         if model is not None:
@@ -139,12 +104,6 @@ class SubprocessClaudeClient:
         env["GREMLIN_SKIP_SUMMARY"] = "1"
         if extra_env:
             env.update(extra_env)
-        if self._native_block:
-            state_dir_str = env.get("GREMLIN_STATE_DIR")
-            if not state_dir_str:
-                raise RuntimeError("native_block set but GREMLIN_STATE_DIR absent")
-            config_dir = self._materialize_config(pathlib.Path(state_dir_str))
-            env["CLAUDE_CONFIG_DIR"] = str(config_dir)
         p = await asyncio.create_subprocess_exec(
             *argv,
             stdin=asyncio.subprocess.PIPE,
