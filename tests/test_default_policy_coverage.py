@@ -2,20 +2,16 @@ from __future__ import annotations
 
 import pathlib
 
-from gremlins.permissions.loader import load_policy
-from gremlins.permissions.policy import KNOWN_PROVIDERS
+import gremlins.clients  # noqa: F401 — registers CLIENT_FACTORIES as a side effect
+from gremlins.clients.registry import CLIENT_FACTORIES
+from gremlins.permissions.loader import load_default_block
 from gremlins.pipeline import Pipeline
 
 
-def test_all_provider_defaults_cover_local_pipeline_tools(
-    tmp_path: pathlib.Path,
-) -> None:
-    policy = load_policy(
-        cli_bypass=None, cli_permissions_file=None, env={}, cwd=tmp_path
-    )
+def test_all_provider_defaults_cover_local_pipeline_tools() -> None:
     required = {"Read", "Edit", "Bash", "Write", "Grep", "Glob"}
-    for provider in KNOWN_PROVIDERS:
-        block = policy.block_for(provider)
+    for provider in CLIENT_FACTORIES:
+        block = load_default_block(provider)
         allowed = set(block.get("allowed_tools", []))
         assert required <= allowed, f"{provider}: missing {required - allowed}"
 
