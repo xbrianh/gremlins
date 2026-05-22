@@ -26,6 +26,19 @@ Steps to create it:
 
 ---
 
+## Working across multiple repos
+
+The current shell's cwd determines which repo gremlins acts on. At launch,
+gremlins runs `git rev-parse --show-toplevel` from the cwd and pins that path
+as the gremlin's `project_root`. If the user asks to work on a different repo,
+`cd` to it first — there is no `--project-root` flag.
+
+The queue runner's cwd is frozen at `gremlins queue run --detach` time. To
+queue work against a different repo, prefix the command with `cd`:
+`"cd /path/to/repo && gremlins launch …"`.
+
+---
+
 ## What gremlins is
 
 `gremlins` is a CLI for launching and managing background AI agents ("gremlins") that work on tasks in isolated git worktrees. You interact with gremlins by issuing CLI commands; the agents run asynchronously and you land their results onto your branch when they finish.
