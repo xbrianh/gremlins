@@ -7,6 +7,6 @@ __pycache__/
 dist/
 build/
 plans/
-.at_venv_config
+.at_venv
 .claude/
 .gremlins/
