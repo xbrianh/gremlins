@@ -23,6 +23,37 @@ The workflow: you discuss the work with the assistant, it captures discrete unit
 
 ---
 
+## Using gremlins across multiple repos
+
+When you run `gremlins launch`, the launcher captures the current working
+directory's repo root via `git rev-parse --show-toplevel` and stores it as
+`project_root` in the gremlin's `state.json`. That value pins the worktree
+base, child process cwd, and pipeline discovery for that gremlin's lifetime.
+
+**To work on a different repo: `cd` there, then `gremlins launch`.** There is
+no `--project-root` flag; the cwd at launch time is the contract.
+
+**Fleet view** (`gremlins`) shows gremlins from all repos by default.
+Pass `--here` to filter to the current repo's `project_root`.
+
+**Pipeline discovery** walks from the launching cwd, so `.gremlins/pipelines/`
+overrides in each repo apply to gremlins launched from that repo.
+
+**Queue caveat**: there is one global queue and the runner's cwd is frozen at
+`gremlins queue run --detach` time. To queue work against a different repo,
+prefix the command with `cd`:
+
+```sh
+gremlins queue add "cd /path/to/other-repo && gremlins launch gh --plan '#42' --wait"
+gremlins queue add "cd /path/to/other-repo && gremlins land <id>"
+```
+
+**State isolation**: each gremlin's state lives under its own directory
+(resolved via `platformdirs.user_state_dir("gremlins")/<id>/`), so two repos
+can have running gremlins simultaneously without interference.
+
+---
+
 ## Runtime CLI prerequisites
 
 - `gh` — [GitHub CLI](https://github.com/cli/cli#installation)
@@ -79,7 +110,7 @@ the dispatch table in [`gremlins/cli/__init__.py`](gremlins/cli/__init__.py).
 | `run [--once] [--poll-interval SEC] [--detach]` | Start the queue runner |
 | `requeue [--done]` | Move failed (and optionally done) items back to pending |
 | `clear [--failed\|--done\|--pending\|--purge\|--item STEM]` | Remove items from the queue |
-| `set-state --item STEM <state>` | Manually transition a queue item to a different state |
+| `set-state <state> --item STEM` | Manually transition a queue item to a different state |
 | `stop` | Stop the detached runner |
 
 ### Launch flags
