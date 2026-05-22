@@ -417,8 +417,16 @@ def test_default_claude_block_permissions_honored_by_cli(tmp_path):
         f"run did not succeed: {result_event}\nstderr={result.stderr[:500]}"
     )
 
-    # Confirm no permission denials: tool_result errors containing "permission"
-    tool_results = [e for e in events if e.get("type") == "tool_result"]
+    # Confirm no permission denials: tool_result errors containing "permission".
+    # In stream-json, tool results are nested content blocks inside "user" events,
+    # not top-level events — filter accordingly.
+    tool_results = [
+        c
+        for e in events
+        if e.get("type") == "user"
+        for c in (e.get("message") or {}).get("content") or []
+        if c.get("type") == "tool_result"
+    ]
     denied = [
         r
         for r in tool_results
