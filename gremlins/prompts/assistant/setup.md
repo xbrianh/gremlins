@@ -84,10 +84,10 @@ Use a short kebab-case id per unit. Do not collapse into one command or skip the
 
 The `claude:` subprocess backend reads only the operator's ambient `~/.claude/settings.json` — the gremlins-layer `allowed_tools` block is inert there (see README "Backend config inheritance"). This only affects the `claude:` backend; `anthropic:`, `openai:`, and `xai:` enforce `allowed_tools` themselves and do not need the ambient rule.
 
-Every path gremlins owns sits under a single stable prefix. Find it with:
+Gremlin worktrees — where the `claude:` subprocess actually edits files — live under a single stable prefix in the system temp directory. Find it with:
 
 ```
-python -c "from gremlins import paths; print(paths.state_root())"
+python -c "from gremlins import paths; print(paths.work_root())"
 ```
 
 On first run with the `claude:` backend in non-bypass mode, **offer** to add a `permissions.allow` rule to `~/.claude/settings.json` that covers that prefix, for example:
@@ -96,12 +96,12 @@ On first run with the `claude:` backend in non-bypass mode, **offer** to add a `
 {
   "permissions": {
     "allow": [
-      "Edit(<state_root>/**)",
-      "Write(<state_root>/**)",
-      "Read(<state_root>/**)"
+      "Edit(<work_root>/**)",
+      "Write(<work_root>/**)",
+      "Read(<work_root>/**)"
     ]
   }
 }
 ```
 
-Replace `<state_root>` with the literal path returned by the command above. Do **not** install this silently — show the diff and confirm with the operator before writing.
+Replace `<work_root>` with the literal path returned by the command above. Do **not** install this silently — show the diff and confirm with the operator before writing.

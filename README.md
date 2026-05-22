@@ -429,30 +429,31 @@ for their interactive Claude session is exactly what the subprocess sees:
   effect on `claude:` runs; configure tool permissions via your own
   Claude settings or use the `anthropic:` backend.
 
-  Gremlin worktrees and state live under a stable, gremlins-scoped prefix
-  you can discover at runtime:
+  Gremlin worktrees — where the `claude:` subprocess does its file edits —
+  live under a stable, gremlins-scoped prefix in the system temp directory.
+  Discover it at runtime:
 
   ```
-  python -c "from gremlins import paths; print(paths.state_root())"
+  python -c "from gremlins import paths; print(paths.work_root())"
   ```
 
-  A single `permissions.allow` rule in `~/.claude/settings.json` covers
-  every path gremlins legitimately touches:
+  On Linux/macOS this is `/tmp/gremlins`; the OS reclaims orphaned
+  worktrees on reboot. A single `permissions.allow` rule in
+  `~/.claude/settings.json` covers every worktree path:
 
   ```json
   {
     "permissions": {
       "allow": [
-        "Edit(<state_root>/**)",
-        "Write(<state_root>/**)",
-        "Read(<state_root>/**)"
+        "Edit(<work_root>/**)",
+        "Write(<work_root>/**)",
+        "Read(<work_root>/**)"
       ]
     }
   }
   ```
 
-  Replace `<state_root>` with the actual output of the command above — the
-  path varies by OS and `$XDG_STATE_HOME`.
+  Replace `<work_root>` with the actual output of the command above.
 - **MCP servers and hooks** — inherited from the user's Claude config.
 - **Auth** — subscription auth follows `~/.claude/.credentials.json` (or the
   macOS keychain) exactly as it would for an interactive session.
