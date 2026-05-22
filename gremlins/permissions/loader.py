@@ -27,6 +27,10 @@ def load_policy(
     return Policy(bypass=bypass, blocks=blocks)
 
 
+def has_default_block(provider: str) -> bool:
+    return (_DEFAULTS_DIR / f"{provider}.yaml").exists()
+
+
 def load_default_block(provider: str) -> dict[str, Any]:
     return load_yaml_file(_DEFAULTS_DIR / f"{provider}.yaml")
 

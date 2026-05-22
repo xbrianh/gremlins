@@ -4,10 +4,7 @@ import pathlib
 
 import gremlins.clients  # noqa: F401 — registers CLIENT_FACTORIES as a side effect
 from gremlins.clients.registry import BYPASS_REQUIRED, CLIENT_FACTORIES
-from gremlins.permissions.loader import (  # pyright: ignore[reportPrivateUsage]
-    _DEFAULTS_DIR,
-    load_default_block,
-)
+from gremlins.permissions.loader import has_default_block, load_default_block
 from gremlins.pipeline import Pipeline
 
 
@@ -16,7 +13,7 @@ def test_all_provider_defaults_cover_local_pipeline_tools() -> None:
     for provider in CLIENT_FACTORIES:
         if provider in BYPASS_REQUIRED:
             continue  # bypass-only backends have no allowlist defaults
-        if not (_DEFAULTS_DIR / f"{provider}.yaml").exists():
+        if not has_default_block(provider):
             continue  # no bundled defaults for this provider
         block = load_default_block(provider)
         allowed = set(block.get("allowed_tools", []))

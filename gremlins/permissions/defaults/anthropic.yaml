@@ -11,4 +11,3 @@ disallowed_tools:
   - "Bash(rm -rf /:*)"
   - "Bash(rm -rf /*:*)"
   - "Bash(rm -rf ~:*)"
-  - "Bash(rm -rf $HOME:*)"
