@@ -322,225 +322,24 @@ def test_max_retries_exceeds_schedule_raises_value_error():
 
 
 # ---------------------------------------------------------------------------
-# Config materialization / CLAUDE_CONFIG_DIR tests
+# CLAUDE_CONFIG_DIR is not set: the claude: backend reads the operator's
+# ambient ~/.claude/ config. Per-gremlin isolation lives on the anthropic:
+# SDK backend.
 # ---------------------------------------------------------------------------
 
 
-def test_non_empty_block_writes_settings_and_sets_claude_config_dir(
-    tmp_path, monkeypatch
-):
+def test_claude_config_dir_not_set_regardless_of_native_block(tmp_path, monkeypatch):
     bin_dir = tmp_path / "bin"
     _install_stub_claude(bin_dir)
     env_out = tmp_path / "child_env.json"
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
-    monkeypatch.setenv("STUB_ENV_OUT", str(env_out))
-
-    block = {"allowedTools": ["Read", "Edit", "Bash", "Write", "Grep", "Glob"]}
-    client = SubprocessClaudeClient(bypass=False, native_block=block)
-    asyncio.run(
-        client.run(
-            "hello", label="test", extra_env={"GREMLIN_STATE_DIR": str(state_dir)}
-        )
-    )
-
-    child_env = json.loads(env_out.read_text(encoding="utf-8"))
-    config_dir = pathlib.Path(child_env["CLAUDE_CONFIG_DIR"])
-    assert config_dir == state_dir / "claude-config"
-    settings = json.loads(
-        (config_dir / ".claude" / "settings.json").read_text(encoding="utf-8")
-    )
-    assert settings == block
-
-
-def test_bypass_true_with_block_still_sets_claude_config_dir(tmp_path, monkeypatch):
-    bin_dir = tmp_path / "bin"
-    _install_stub_claude(bin_dir)
-    env_out = tmp_path / "child_env.json"
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
-    monkeypatch.setenv("STUB_ENV_OUT", str(env_out))
-
-    block = {"allowedTools": ["Read"]}
-    client = SubprocessClaudeClient(bypass=True, native_block=block)
-    asyncio.run(
-        client.run(
-            "hello", label="test", extra_env={"GREMLIN_STATE_DIR": str(state_dir)}
-        )
-    )
-
-    child_env = json.loads(env_out.read_text(encoding="utf-8"))
-    assert "CLAUDE_CONFIG_DIR" in child_env
-    settings_path = state_dir / "claude-config" / ".claude" / "settings.json"
-    assert settings_path.exists()
-
-
-def test_empty_block_no_claude_config_dir(tmp_path, monkeypatch):
-    bin_dir = tmp_path / "bin"
-    _install_stub_claude(bin_dir)
-    env_out = tmp_path / "child_env.json"
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
 
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     monkeypatch.setenv("STUB_ENV_OUT", str(env_out))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
 
-    client = SubprocessClaudeClient()
-    asyncio.run(
-        client.run(
-            "hello", label="test", extra_env={"GREMLIN_STATE_DIR": str(state_dir)}
-        )
-    )
+    block = {"allowed_tools": ["Read", "Edit"]}
+    client = SubprocessClaudeClient(bypass=False, native_block=block)
+    asyncio.run(client.run("hello", label="test"))
 
     child_env = json.loads(env_out.read_text(encoding="utf-8"))
     assert "CLAUDE_CONFIG_DIR" not in child_env
-
-
-def test_credentials_symlinked_on_non_darwin(tmp_path, monkeypatch):
-    fake_home = tmp_path / "home"
-    creds_src = fake_home / ".claude" / ".credentials.json"
-    creds_src.parent.mkdir(parents=True)
-    creds_src.write_text('{"token": "test"}', encoding="utf-8")
-
-    monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: fake_home))
-
-    state_dir = tmp_path / "state"
-    client = SubprocessClaudeClient(native_block={"allowedTools": ["Read"]})
-    config_dir = client._materialize_config(state_dir)
-
-    creds_dst = config_dir / ".claude" / ".credentials.json"
-    assert creds_dst.is_symlink()
-    assert creds_dst.resolve() == creds_src
-
-
-def test_no_credentials_symlink_on_darwin(tmp_path, monkeypatch):
-    fake_home = tmp_path / "home"
-    creds_src = fake_home / ".claude" / ".credentials.json"
-    creds_src.parent.mkdir(parents=True)
-    creds_src.write_text('{"token": "test"}', encoding="utf-8")
-
-    monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: fake_home))
-
-    state_dir = tmp_path / "state"
-    client = SubprocessClaudeClient(native_block={"allowedTools": ["Read"]})
-    config_dir = client._materialize_config(state_dir)
-
-    creds_dst = config_dir / ".claude" / ".credentials.json"
-    assert not creds_dst.exists()
-
-
-def test_native_block_without_state_dir_raises(monkeypatch):
-    monkeypatch.delenv("GREMLIN_STATE_DIR", raising=False)
-    client = SubprocessClaudeClient(native_block={"allowedTools": ["Read"]})
-    with pytest.raises(RuntimeError, match="GREMLIN_STATE_DIR absent"):
-        asyncio.run(client.run("hello", label="test"))
-
-
-# ---------------------------------------------------------------------------
-# _to_claude_settings translation
-# ---------------------------------------------------------------------------
-
-
-def test_allowed_tools_translated_to_permissions_allow():
-    from gremlins.clients.claude import _to_claude_settings
-
-    block = {"allowed_tools": ["Read", "Edit", "Bash"]}
-    assert _to_claude_settings(block) == {
-        "permissions": {"allow": ["Read", "Edit", "Bash"]}
-    }
-
-
-def test_disallowed_tools_translated_to_permissions_deny():
-    from gremlins.clients.claude import _to_claude_settings
-
-    block = {"disallowed_tools": ["Bash"]}
-    assert _to_claude_settings(block) == {"permissions": {"deny": ["Bash"]}}
-
-
-def test_both_translated_together():
-    from gremlins.clients.claude import _to_claude_settings
-
-    block = {"allowed_tools": ["Read"], "disallowed_tools": ["Bash"]}
-    assert _to_claude_settings(block) == {
-        "permissions": {"allow": ["Read"], "deny": ["Bash"]}
-    }
-
-
-def test_native_keys_pass_through():
-    from gremlins.clients.claude import _to_claude_settings
-
-    block = {"theme": "dark", "allowedTools": ["Read"]}
-    assert _to_claude_settings(block) == {"theme": "dark", "allowedTools": ["Read"]}
-
-
-def test_empty_block_stays_empty():
-    from gremlins.clients.claude import _to_claude_settings
-
-    assert _to_claude_settings({}) == {}
-
-
-# ---------------------------------------------------------------------------
-# regression: default block materializes to permissions.allow
-# ---------------------------------------------------------------------------
-
-
-def test_default_block_materializes_permissions_allow(tmp_path):
-    """Default claude block must produce permissions.allow, not be silently dropped."""
-    from gremlins.permissions.loader import load_default_block
-
-    default_block = load_default_block("claude")
-    client = SubprocessClaudeClient(bypass=False, native_block=default_block)
-    config_dir = client._materialize_config(tmp_path / "state")
-    settings = json.loads(
-        (config_dir / ".claude" / "settings.json").read_text(encoding="utf-8")
-    )
-    assert "permissions" in settings, "settings.json missing 'permissions' key"
-    assert "allow" in settings["permissions"], "permissions missing 'allow'"
-    allowed = set(settings["permissions"]["allow"])
-    assert {"Read", "Edit", "Bash", "Write", "Grep", "Glob"} <= allowed
-
-
-# ---------------------------------------------------------------------------
-# e2e guard: default mode run with bundled defaults
-# ---------------------------------------------------------------------------
-
-
-def test_default_mode_with_bundled_defaults_sets_permissions_allow(
-    tmp_path, monkeypatch
-):
-    """E2E guard: non-bypass run using bundled claude defaults sets CLAUDE_CONFIG_DIR
-    with a usable permissions.allow that Claude CLI can honour."""
-    bin_dir = tmp_path / "bin"
-    _install_stub_claude(bin_dir)
-    env_out = tmp_path / "child_env.json"
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
-    monkeypatch.setenv("STUB_ENV_OUT", str(env_out))
-
-    from gremlins.permissions.loader import load_default_block
-
-    default_block = load_default_block("claude")
-    client = SubprocessClaudeClient(bypass=False, native_block=default_block)
-    asyncio.run(
-        client.run(
-            "hello", label="test", extra_env={"GREMLIN_STATE_DIR": str(state_dir)}
-        )
-    )
-
-    child_env = json.loads(env_out.read_text(encoding="utf-8"))
-    config_dir = pathlib.Path(child_env["CLAUDE_CONFIG_DIR"])
-    settings = json.loads(
-        (config_dir / ".claude" / "settings.json").read_text(encoding="utf-8")
-    )
-    assert "permissions" in settings
-    allowed = set(settings["permissions"].get("allow", []))
-    assert {"Read", "Edit", "Bash", "Write", "Grep", "Glob"} <= allowed
