@@ -15,8 +15,8 @@ import os
 import pathlib
 import secrets
 import shutil
-import tempfile
 
+from gremlins import paths
 from gremlins.utils import proc
 
 
@@ -365,12 +365,9 @@ def setup_detached_worktree(
     worktree_parent: pathlib.Path | None = None,
 ) -> str:
     """Add a detached worktree at base_ref. Returns the worktree path."""
-    if worktree_parent is not None:
-        worktree_parent.mkdir(parents=True, exist_ok=True)
-        workdir = str(worktree_parent / f"aibg-gremlin.{secrets.token_hex(6)}")
-    else:
-        workdir = tempfile.mkdtemp(prefix="aibg-gremlin.")
-        os.rmdir(workdir)
+    parent = worktree_parent if worktree_parent is not None else paths.work_root()
+    parent.mkdir(parents=True, exist_ok=True)
+    workdir = str(parent / f"aibg-gremlin.{secrets.token_hex(6)}")
     _run_git(["worktree", "add", "--detach", workdir, base_ref], cwd=project_root)
     return workdir
 
@@ -390,9 +387,10 @@ def setup_detached_from_remote_ref(
 
 def setup_copy(project_root: str) -> str:
     """Non-git fallback: copy project root into a fresh temp dir. Returns workdir path."""
-    workdir = tempfile.mkdtemp(prefix="aibg-gremlin.")
+    work_root = paths.work_root()
+    workdir = work_root / f"aibg-gremlin.{secrets.token_hex(6)}"
     shutil.copytree(project_root, workdir, dirs_exist_ok=True)
-    return workdir
+    return str(workdir)
 
 
 def toplevel(cwd: str | os.PathLike[str] | None = None) -> str:
@@ -425,12 +423,9 @@ def setup_named_worktree(
     *,
     worktree_parent: pathlib.Path | None = None,
 ) -> tuple[str, str]:
-    if worktree_parent is not None:
-        worktree_parent.mkdir(parents=True, exist_ok=True)
-        workdir = str(worktree_parent / gremlin_id)
-    else:
-        workdir = tempfile.mkdtemp(prefix="aibg-localgremlin.")
-        os.rmdir(workdir)
+    parent = worktree_parent if worktree_parent is not None else paths.work_root()
+    parent.mkdir(parents=True, exist_ok=True)
+    workdir = str(parent / gremlin_id)
     branch = f"bg/local/{gremlin_id}"
     _run_git(
         ["worktree", "add", "-b", branch, workdir, base_ref_sha or "HEAD"],
@@ -466,13 +461,9 @@ async def setup_detached_worktree_async(
     worktree_parent: pathlib.Path | None = None,
 ) -> str:
     """Add a detached worktree at base_ref. Returns the worktree path."""
-    if worktree_parent is not None:
-        worktree_parent.mkdir(parents=True, exist_ok=True)
-        workdir = str(worktree_parent / f"aibg-gremlin.{secrets.token_hex(6)}")
-    else:
-        workdir = os.path.join(
-            tempfile.gettempdir(), f"aibg-gremlin.{secrets.token_hex(6)}"
-        )
+    parent = worktree_parent if worktree_parent is not None else paths.work_root()
+    parent.mkdir(parents=True, exist_ok=True)
+    workdir = str(parent / f"aibg-gremlin.{secrets.token_hex(6)}")
     r = await proc.run_async(
         ["git", "worktree", "add", "--detach", workdir, base_ref], cwd=project_root
     )

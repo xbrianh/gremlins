@@ -12,3 +12,10 @@ def state_root() -> pathlib.Path:
     path = pathlib.Path(platformdirs.user_state_dir("gremlins"))
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def work_root() -> pathlib.Path:
+    """Return the directory where gremlin worktrees are created by default."""
+    path = state_root() / "worktrees"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
