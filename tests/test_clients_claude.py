@@ -380,9 +380,7 @@ def test_default_claude_block_permissions_honored_by_cli(tmp_path):
     config_dir = tmp_path / "claude-config"
     claude_dir = config_dir / ".claude"
     claude_dir.mkdir(parents=True)
-    (claude_dir / "settings.json").write_text(
-        json.dumps(block), encoding="utf-8"
-    )
+    (claude_dir / "settings.json").write_text(json.dumps(block), encoding="utf-8")
 
     env = os.environ.copy()
     env["CLAUDE_CONFIG_DIR"] = str(config_dir)
@@ -422,7 +420,8 @@ def test_default_claude_block_permissions_honored_by_cli(tmp_path):
     # Confirm no permission denials: tool_result errors containing "permission"
     tool_results = [e for e in events if e.get("type") == "tool_result"]
     denied = [
-        r for r in tool_results
+        r
+        for r in tool_results
         if r.get("is_error") and "permission" in str(r.get("content", "")).lower()
     ]
     assert not denied, f"bash tool was permission-denied: {denied}"
