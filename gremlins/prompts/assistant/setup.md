@@ -77,3 +77,31 @@ gremlins queue add "gremlins land b-slug"
 ```
 
 Use a short kebab-case id per unit. Do not collapse into one command or skip the land step.
+
+---
+
+## Grant ambient permissions for gremlin paths (claude: backend, non-bypass)
+
+The `claude:` subprocess backend reads only the operator's ambient `~/.claude/settings.json` — the gremlins-layer `allowed_tools` block is inert there (see README "Backend config inheritance"). This only affects the `claude:` backend; `anthropic:`, `openai:`, and `xai:` enforce `allowed_tools` themselves and do not need the ambient rule.
+
+Every path gremlins owns sits under a single stable prefix. Find it with:
+
+```
+python -c "from gremlins import paths; print(paths.state_root())"
+```
+
+On first run with the `claude:` backend in non-bypass mode, **offer** to add a `permissions.allow` rule to `~/.claude/settings.json` that covers that prefix, for example:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Edit(<state_root>/**)",
+      "Write(<state_root>/**)",
+      "Read(<state_root>/**)"
+    ]
+  }
+}
+```
+
+Replace `<state_root>` with the literal path returned by the command above. Do **not** install this silently — show the diff and confirm with the operator before writing.
