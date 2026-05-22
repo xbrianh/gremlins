@@ -441,3 +441,106 @@ def test_native_block_without_state_dir_raises(monkeypatch):
     client = SubprocessClaudeClient(native_block={"allowedTools": ["Read"]})
     with pytest.raises(RuntimeError, match="GREMLIN_STATE_DIR absent"):
         asyncio.run(client.run("hello", label="test"))
+
+
+# ---------------------------------------------------------------------------
+# _to_claude_settings translation
+# ---------------------------------------------------------------------------
+
+
+def test_allowed_tools_translated_to_permissions_allow():
+    from gremlins.clients.claude import _to_claude_settings
+
+    block = {"allowed_tools": ["Read", "Edit", "Bash"]}
+    assert _to_claude_settings(block) == {
+        "permissions": {"allow": ["Read", "Edit", "Bash"]}
+    }
+
+
+def test_disallowed_tools_translated_to_permissions_deny():
+    from gremlins.clients.claude import _to_claude_settings
+
+    block = {"disallowed_tools": ["Bash"]}
+    assert _to_claude_settings(block) == {"permissions": {"deny": ["Bash"]}}
+
+
+def test_both_translated_together():
+    from gremlins.clients.claude import _to_claude_settings
+
+    block = {"allowed_tools": ["Read"], "disallowed_tools": ["Bash"]}
+    assert _to_claude_settings(block) == {
+        "permissions": {"allow": ["Read"], "deny": ["Bash"]}
+    }
+
+
+def test_native_keys_pass_through():
+    from gremlins.clients.claude import _to_claude_settings
+
+    block = {"theme": "dark", "allowedTools": ["Read"]}
+    assert _to_claude_settings(block) == {"theme": "dark", "allowedTools": ["Read"]}
+
+
+def test_empty_block_stays_empty():
+    from gremlins.clients.claude import _to_claude_settings
+
+    assert _to_claude_settings({}) == {}
+
+
+# ---------------------------------------------------------------------------
+# regression: default block materializes to permissions.allow
+# ---------------------------------------------------------------------------
+
+
+def test_default_block_materializes_permissions_allow(tmp_path):
+    """Default claude block must produce permissions.allow, not be silently dropped."""
+    from gremlins.permissions.loader import load_default_block
+
+    default_block = load_default_block("claude")
+    client = SubprocessClaudeClient(bypass=False, native_block=default_block)
+    config_dir = client._materialize_config(tmp_path / "state")
+    settings = json.loads(
+        (config_dir / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    assert "permissions" in settings, "settings.json missing 'permissions' key"
+    assert "allow" in settings["permissions"], "permissions missing 'allow'"
+    allowed = set(settings["permissions"]["allow"])
+    assert {"Read", "Edit", "Bash", "Write", "Grep", "Glob"} <= allowed
+
+
+# ---------------------------------------------------------------------------
+# e2e guard: default mode run with bundled defaults
+# ---------------------------------------------------------------------------
+
+
+def test_default_mode_with_bundled_defaults_sets_permissions_allow(
+    tmp_path, monkeypatch
+):
+    """E2E guard: non-bypass run using bundled claude defaults sets CLAUDE_CONFIG_DIR
+    with a usable permissions.allow that Claude CLI can honour."""
+    bin_dir = tmp_path / "bin"
+    _install_stub_claude(bin_dir)
+    env_out = tmp_path / "child_env.json"
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("STUB_ENV_OUT", str(env_out))
+
+    from gremlins.permissions.loader import load_default_block
+
+    default_block = load_default_block("claude")
+    client = SubprocessClaudeClient(bypass=False, native_block=default_block)
+    asyncio.run(
+        client.run(
+            "hello", label="test", extra_env={"GREMLIN_STATE_DIR": str(state_dir)}
+        )
+    )
+
+    child_env = json.loads(env_out.read_text(encoding="utf-8"))
+    config_dir = pathlib.Path(child_env["CLAUDE_CONFIG_DIR"])
+    settings = json.loads(
+        (config_dir / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    assert "permissions" in settings
+    allowed = set(settings["permissions"].get("allow", []))
+    assert {"Read", "Edit", "Bash", "Write", "Grep", "Glob"} <= allowed

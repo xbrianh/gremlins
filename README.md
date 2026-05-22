@@ -63,9 +63,24 @@ the dispatch table in [`gremlins/cli/__init__.py`](gremlins/cli/__init__.py).
 | `rm` | Delete a dead gremlin's state dir, worktree, and branch |
 | `close` | Mark a dead gremlin as closed |
 | `log` | Tail the gremlin's log file |
+| `ack` | Acknowledge a gremlin waiting for human input |
+| `skip` | Skip a gremlin waiting for human input |
+| `queue` | Manage the gremlin launch queue |
 | `prompt-for-assistant` | Print the assistant setup prompt to stdout |
 
 `_run-pipeline` is an internal spawn boundary; not for direct use.
+
+### `queue` sub-subcommands
+
+| Sub-subcommand | Description |
+|---|---|
+| `add [--run] <command>` | Add a command to the queue; `--run` also starts the runner if idle |
+| `list [--watch] [--json]` | List queued items |
+| `run [--once] [--poll-interval SEC] [--detach]` | Start the queue runner |
+| `requeue [--done]` | Move failed (and optionally done) items back to pending |
+| `clear [--failed\|--done\|--pending\|--purge\|--item STEM]` | Remove items from the queue |
+| `set-state --item STEM <state>` | Manually transition a queue item to a different state |
+| `stop` | Stop the detached runner |
 
 ### Launch flags
 
@@ -147,7 +162,7 @@ stages:
 
 **`provider:model` format:**
 
-Providers: `claude` (default), `copilot`. The model part is optional — `claude:` and `claude:sonnet` are both valid. Examples: `claude:sonnet`, `copilot:gpt-5.4`, `claude:`. Per-stage `client:` in YAML takes precedence over the CLI `--client` flag; `default_client:` at the pipeline level does not.
+Providers: `claude` (default), `copilot`, `openai`, `xai`, `anthropic`. The model part is optional — `claude:` and `claude:sonnet` are both valid. Examples: `claude:sonnet`, `copilot:gpt-5.4`, `openai:gpt-4o`. Per-stage `client:` in YAML takes precedence over the CLI `--client` flag; `default_client:` at the pipeline level does not.
 
 **Parallel-group form:**
 
@@ -183,7 +198,7 @@ stages:
     client: copilot:gpt-5.4       # this stage uses copilot instead
 ```
 
-Providers: `claude`, `copilot`. The CLI `--client provider:model` flag overrides the pipeline-level `default_client:` but yields to per-stage `client:` settings.
+Providers: `claude`, `copilot`, `openai`, `xai`, `anthropic`. The CLI `--client provider:model` flag overrides the pipeline-level `default_client:` but yields to per-stage `client:` settings.
 
 ### `prompt:` field
 
@@ -215,21 +230,12 @@ of `./.gremlins/pipelines/`, not nested under it) and pipelines set
 A free-form dict passed verbatim to the stage. Selected options by stage
 (see [`gremlins/stages/AGENTS.md`](gremlins/stages/AGENTS.md) for the full list):
 
-**`verify`** — runs `check_cmd` then `test_cmd`, with an agent fix-loop:
+**`verify`** — runs a list of shell commands with an agent fix-loop:
 
 ```yaml
 options:
-  check_cmd: make check   # lint/typecheck command (optional)
-  test_cmd: make test     # test command (optional)
-  max_attempts: 3         # fix-loop retries (default: 3)
-```
-
-**`test`** — runs a single test command, with an agent fix-loop:
-
-```yaml
-options:
-  test_cmd: pytest        # falls back to --test CLI flag; stage no-ops if unset in both
-  max_attempts: 3         # fix-loop retries (default: 3)
+  cmds: ["make check", "make test"]  # commands to run (joined with &&)
+  max_attempts: 3                    # fix-loop retries (default: 3)
 ```
 
 For `local` stages, model options (`plan_model`, `impl_model`, `address_model`,
@@ -244,12 +250,18 @@ For `local` stages, model options (`plan_model`, `impl_model`, `address_model`,
 | `review-code` | Runs a code review and writes findings to disk |
 | `address-code` | Applies code-review findings |
 | `verify` | Runs check and test commands with an agent fix-loop |
-| `test` | Runs a single test command with an agent fix-loop |
-| `request-copilot` | Requests a Copilot review on the open PR |
+| `cmd` | Runs shell commands; returns NeedsFix on non-zero exit |
+| `apply` | Runs shell commands and commits any resulting changes |
+| `handoff` | Runs the handoff agent once per boss loop iteration |
+| `loop` | Iterates body stages until a termination predicate or max iterations |
+| `sequence` | Runs body stages sequentially using child state |
+| `github-open-pull-request` | Opens a pull request on GitHub |
+| `github-push-to-pr-branch` | Pushes local commits to the PR branch recorded in state |
+| `github-request-copilot-review` | Requests a Copilot review on the open PR |
 | `github-review-pull-request` | Runs the `/ghreview` skill against the open PR |
 | `github-wait-copilot` | Polls until Copilot posts its review |
 | `github-address-pull-request-reviews` | Runs the `/ghaddress` skill to address PR review comments |
-| `wait-ci` | Polls PR CI checks until they pass or exhaust attempts |
+| `github-wait-ci` | Polls PR CI checks until they pass or exhaust attempts |
 
 ### Parallel groups
 
@@ -282,7 +294,7 @@ are not cancelled mid-run. `gremlins resume` accepts both the group name
 
 Create `.gremlins/pipelines/local.yaml` to override the bundled `local`
 pipeline. This example uses Opus for plan/implement/address stages and adds
-a `test` stage before `review-code`:
+a `verify` stage before `review-code`:
 
 ```yaml
 name: local
@@ -290,7 +302,7 @@ name: local
 stages:
   - { type: plan,         options: { plan_model: opus } }
   - { type: implement,    options: { impl_model: opus } }
-  - { type: test,         options: { test_cmd: pytest } }
+  - { type: verify,       options: { cmds: ["pytest"] } }
   - { type: review-code }
   - { type: address-code, options: { address_model: opus } }
 ```
@@ -331,6 +343,8 @@ The canonical reference pipelines:
 
 - [`gremlins/pipelines/local.yaml`](gremlins/pipelines/local.yaml) — `gremlins launch local`
 - [`gremlins/pipelines/gh.yaml`](gremlins/pipelines/gh.yaml) — `gremlins launch gh`
+- [`gremlins/pipelines/gh-terse.yaml`](gremlins/pipelines/gh-terse.yaml) — `gremlins launch gh-terse`
+- [`gremlins/pipelines/pr-extend.yaml`](gremlins/pipelines/pr-extend.yaml) — `gremlins launch pr-extend`
 - [`gremlins/pipelines/boss.yaml`](gremlins/pipelines/boss.yaml) — `gremlins launch boss`
 
 ## What can a gremlin do to my machine?
@@ -393,7 +407,7 @@ Add `.gremlins/env` to your `~/.gitignore_global` or project `.gitignore`.
 
 ### Loader API
 
-`gremlins/pipeline.py` exposes:
+`gremlins/pipeline/loader.py` exposes:
 
 - `load_pipeline(path)` → `Pipeline` — parses a YAML file, resolves `clients`
   via `CLIENT_FACTORIES`, and validates every stage `type` against

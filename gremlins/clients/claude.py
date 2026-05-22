@@ -25,6 +25,23 @@ class StreamTimeoutError(RuntimeError):
     pass
 
 
+def _to_claude_settings(block: dict[str, Any]) -> dict[str, Any]:
+    """Translate allowed_tools/disallowed_tools to Claude CLI permissions schema."""
+    settings: dict[str, Any] = {
+        k: v for k, v in block.items() if k not in ("allowed_tools", "disallowed_tools")
+    }
+    allow = block.get("allowed_tools")
+    deny = block.get("disallowed_tools")
+    if allow is not None or deny is not None:
+        perms: dict[str, Any] = dict(settings.pop("permissions", {}))
+        if allow is not None:
+            perms["allow"] = list(allow)
+        if deny is not None:
+            perms["deny"] = list(deny)
+        settings["permissions"] = perms
+    return settings
+
+
 class SubprocessClaudeClient:
     """Production ClaudeClient: spawns ``claude -p`` subprocesses.
 
@@ -85,7 +102,9 @@ class SubprocessClaudeClient:
         claude_dir.mkdir(parents=True, exist_ok=True)
         dst = claude_dir / "settings.json"
         tmp = claude_dir / f"settings.json.{os.getpid()}.{secrets.token_hex(4)}.tmp"
-        tmp.write_text(json.dumps(self._native_block), encoding="utf-8")
+        tmp.write_text(
+            json.dumps(_to_claude_settings(self._native_block)), encoding="utf-8"
+        )
         os.replace(tmp, dst)
         # macOS: keychain handles auth; credentials follow automatically.
         # Linux/Windows: credentials live on disk; symlink them into the redirect dir
