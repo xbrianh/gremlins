@@ -421,13 +421,13 @@ def test_default_claude_block_permissions_honored_by_cli(tmp_path: pathlib.Path)
     # Confirm no permission denials: tool_result errors containing "permission".
     # In stream-json, tool results are nested content blocks inside "user" events,
     # not top-level events — filter accordingly.
-    tool_results: list[dict[str, Any]] = [
-        c
-        for e in events
-        if e.get("type") == "user"
-        for c in (e.get("message") or {}).get("content") or []
-        if c.get("type") == "tool_result"
-    ]
+    tool_results: list[dict[str, Any]] = []
+    for e in events:
+        if e.get("type") != "user":
+            continue
+        msg: dict[str, Any] = e.get("message") or {}
+        content: list[dict[str, Any]] = msg.get("content") or []
+        tool_results.extend(c for c in content if c.get("type") == "tool_result")
     denied: list[dict[str, Any]] = [
         r
         for r in tool_results
