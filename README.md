@@ -443,16 +443,16 @@ for their interactive Claude session is exactly what the subprocess sees:
   {
     "permissions": {
       "allow": [
-        "Edit(~/.local/state/gremlins/**)",
-        "Write(~/.local/state/gremlins/**)",
-        "Read(~/.local/state/gremlins/**)"
+        "Edit(<state_root>/**)",
+        "Write(<state_root>/**)",
+        "Read(<state_root>/**)"
       ]
     }
   }
   ```
 
-  Replace `~/.local/state/gremlins` with the actual output of the command
-  above — the path varies by OS and `$XDG_STATE_HOME`.
+  Replace `<state_root>` with the actual output of the command above — the
+  path varies by OS and `$XDG_STATE_HOME`.
 - **MCP servers and hooks** — inherited from the user's Claude config.
 - **Auth** — subscription auth follows `~/.claude/.credentials.json` (or the
   macOS keychain) exactly as it would for an interactive session.
