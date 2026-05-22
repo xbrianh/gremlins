@@ -6,7 +6,11 @@ import pytest
 
 import gremlins.clients  # noqa: F401 — registers CLIENT_FACTORIES as a side effect
 from gremlins.clients.registry import CLIENT_FACTORIES
-from gremlins.permissions.loader import has_default_block, load_default_block, load_policy
+from gremlins.permissions.loader import (
+    has_default_block,
+    load_default_block,
+    load_policy,
+)
 from gremlins.permissions.policy import Policy
 from gremlins.utils.yaml_io import YamlLoadError
 
