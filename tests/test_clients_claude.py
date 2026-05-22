@@ -56,7 +56,9 @@ def _install_stub_claude(bin_dir: pathlib.Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_subprocess_client_sets_gremlin_skip_summary(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
+def test_subprocess_client_sets_gremlin_skip_summary(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+):
     bin_dir = tmp_path / "bin"
     _install_stub_claude(bin_dir)
     env_out = tmp_path / "child_env.json"
@@ -73,7 +75,9 @@ def test_subprocess_client_sets_gremlin_skip_summary(tmp_path: pathlib.Path, mon
     assert child_env.get("GREMLIN_SKIP_SUMMARY") == "1"
 
 
-def test_subprocess_client_inherits_other_env_vars(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
+def test_subprocess_client_inherits_other_env_vars(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+):
     bin_dir = tmp_path / "bin"
     _install_stub_claude(bin_dir)
     env_out = tmp_path / "child_env.json"
@@ -90,7 +94,9 @@ def test_subprocess_client_inherits_other_env_vars(tmp_path: pathlib.Path, monke
     assert child_env.get("MY_SENTINEL_VAR") == sentinel
 
 
-def test_subprocess_client_sends_prompt_via_stdin_not_argv(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
+def test_subprocess_client_sends_prompt_via_stdin_not_argv(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+):
     bin_dir = tmp_path / "bin"
     _install_stub_claude(bin_dir)
     stdin_out = tmp_path / "child_stdin.txt"
@@ -109,7 +115,9 @@ def test_subprocess_client_sends_prompt_via_stdin_not_argv(tmp_path: pathlib.Pat
     assert prompt not in child_argv
 
 
-def test_subprocess_client_bypass_true_uses_bypass_permissions(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
+def test_subprocess_client_bypass_true_uses_bypass_permissions(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+):
     bin_dir = tmp_path / "bin"
     _install_stub_claude(bin_dir)
     argv_out = tmp_path / "child_argv.json"
@@ -125,7 +133,9 @@ def test_subprocess_client_bypass_true_uses_bypass_permissions(tmp_path: pathlib
     assert argv[idx + 1] == "bypassPermissions"
 
 
-def test_subprocess_client_bypass_false_uses_default_mode(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
+def test_subprocess_client_bypass_false_uses_default_mode(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+):
     bin_dir = tmp_path / "bin"
     _install_stub_claude(bin_dir)
     argv_out = tmp_path / "child_argv.json"
@@ -180,7 +190,9 @@ def _install_timeout_stub(bin_dir: pathlib.Path) -> None:
     stub.chmod(0o755)
 
 
-def test_retry_succeeds_on_second_attempt(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
+def test_retry_succeeds_on_second_attempt(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+):
     bin_dir = tmp_path / "bin"
     _install_timeout_stub(bin_dir)
     count_file = tmp_path / "count.txt"
@@ -201,7 +213,9 @@ def test_retry_succeeds_on_second_attempt(tmp_path: pathlib.Path, monkeypatch: p
     assert int(count_file.read_text()) == 2  # called twice
 
 
-def test_retry_exhaustion_raises_stream_timeout_error(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
+def test_retry_exhaustion_raises_stream_timeout_error(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+):
     bin_dir = tmp_path / "bin"
     _install_timeout_stub(bin_dir)
     count_file = tmp_path / "count.txt"
@@ -238,7 +252,9 @@ def _install_sleep_forever_stub(bin_dir: pathlib.Path) -> None:
     stub.chmod(0o755)
 
 
-def test_idle_timeout_raises_stream_timeout_error(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
+def test_idle_timeout_raises_stream_timeout_error(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+):
     bin_dir = tmp_path / "bin"
     _install_sleep_forever_stub(bin_dir)
 
@@ -249,7 +265,9 @@ def test_idle_timeout_raises_stream_timeout_error(tmp_path: pathlib.Path, monkey
         asyncio.run(client.run("hello", label="test", idle_timeout=0.1, max_retries=0))
 
 
-def test_on_timeout_prompt_used_on_retry(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
+def test_on_timeout_prompt_used_on_retry(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+):
     bin_dir = tmp_path / "bin"
     _install_timeout_stub(bin_dir)
     count_file = tmp_path / "count.txt"
@@ -290,7 +308,9 @@ if stdin_out:
     assert stdin_out.read_text(encoding="utf-8") == "retry-prompt"
 
 
-def test_backoff_schedule_matches_stream_idle_backoff(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
+def test_backoff_schedule_matches_stream_idle_backoff(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+):
     bin_dir = tmp_path / "bin"
     _install_timeout_stub(bin_dir)
     count_file = tmp_path / "count.txt"
@@ -341,7 +361,10 @@ def test_max_retries_exceeds_schedule_raises_value_error():
     ],
 )
 def test_claude_config_dir_not_set_regardless_of_native_block(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, bypass: bool, native_block: dict[str, list[str]] | None
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bypass: bool,
+    native_block: dict[str, list[str]] | None,
 ):
     bin_dir = tmp_path / "bin"
     _install_stub_claude(bin_dir)
