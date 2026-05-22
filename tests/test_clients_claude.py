@@ -355,3 +355,74 @@ def test_claude_config_dir_not_set_regardless_of_native_block(
 
     child_env = json.loads(env_out.read_text(encoding="utf-8"))
     assert "CLAUDE_CONFIG_DIR" not in child_env
+
+
+# ---------------------------------------------------------------------------
+# E2E: verify default block materializes to a settings.json that the real
+# claude CLI honors.  Skipped when the claude CLI is not installed.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.e2e
+def test_default_claude_block_permissions_honored_by_cli(tmp_path):
+    import shutil
+    import subprocess
+
+    if shutil.which("claude") is None:
+        pytest.skip("claude CLI not installed")
+
+    from gremlins.permissions.loader import load_default_block
+
+    block = load_default_block("claude")
+
+    # Mirror the path structure SubprocessClaudeClient._materialize_config used:
+    # CLAUDE_CONFIG_DIR=<config_dir> and settings at <config_dir>/.claude/settings.json
+    config_dir = tmp_path / "claude-config"
+    claude_dir = config_dir / ".claude"
+    claude_dir.mkdir(parents=True)
+    (claude_dir / "settings.json").write_text(
+        json.dumps(block), encoding="utf-8"
+    )
+
+    env = os.environ.copy()
+    env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+
+    result = subprocess.run(
+        [
+            "claude",
+            "-p",
+            "--permission-mode",
+            "default",
+            "--output-format",
+            "stream-json",
+        ],
+        input="Run `echo ok` via Bash and report the output.",
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+    )
+
+    events = []
+    for line in result.stdout.splitlines():
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            pass
+
+    result_event = next((e for e in events if e.get("type") == "result"), None)
+    assert result_event is not None, (
+        f"no result event in stream; exit={result.returncode}\n"
+        f"stdout={result.stdout[:500]}\nstderr={result.stderr[:500]}"
+    )
+    assert result_event.get("subtype") == "success", (
+        f"run did not succeed: {result_event}\nstderr={result.stderr[:500]}"
+    )
+
+    # Confirm no permission denials: tool_result errors containing "permission"
+    tool_results = [e for e in events if e.get("type") == "tool_result"]
+    denied = [
+        r for r in tool_results
+        if r.get("is_error") and "permission" in str(r.get("content", "")).lower()
+    ]
+    assert not denied, f"bash tool was permission-denied: {denied}"

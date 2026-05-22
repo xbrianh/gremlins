@@ -1,7 +1,10 @@
-allowed_tools:
-  - Read
-  - Edit
-  - Bash
-  - Write
-  - Grep
-  - Glob
+permissions:
+  allow:
+    - Read
+    - Edit
+    - Bash
+    - Write
+    - Grep
+    - Glob
+    - Bash(git:*)
+    - Bash(gh:*)

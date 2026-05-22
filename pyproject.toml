@@ -33,6 +33,7 @@ packages = ["gremlins"]
 testpaths = ["tests"]
 markers = [
     "integration: slow tests that call real external APIs (deselect with -m 'not integration')",
+    "e2e: end-to-end tests that require real CLI binaries (skipped automatically when binary absent)",
 ]
 
 [tool.ruff]
