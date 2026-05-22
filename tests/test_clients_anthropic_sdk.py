@@ -79,6 +79,7 @@ class ClaudeAgentOptions:
     hooks: Any = None
     env: Any = field(default_factory=dict)
     allowed_tools: Any = None
+    disallowed_tools: Any = None
 
 
 # ---------------------------------------------------------------------------
@@ -390,6 +391,35 @@ def test_no_allowed_tools_when_not_in_native_block(monkeypatch, mock_sdk):
 
     opts = captured[0]
     assert getattr(opts, "allowed_tools", None) is None
+
+
+def test_disallowed_tools_from_native_block(monkeypatch, mock_sdk):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "valid-key")
+
+    captured: list[Any] = []
+    mock_sdk.query = _capturing_query(captured)
+
+    client = AnthropicSdkClient(
+        "claude-sonnet-4-6",
+        native_block={"disallowed_tools": ["Bash(sudo:*)"]},
+    )
+    asyncio.run(client.run("hello", label="t"))
+
+    opts = captured[0]
+    assert hasattr(opts, "disallowed_tools")
+    assert opts.disallowed_tools == ["Bash(sudo:*)"]
+
+
+def test_no_disallowed_tools_when_not_in_native_block(monkeypatch, mock_sdk):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "valid-key")
+
+    captured: list[Any] = []
+    mock_sdk.query = _capturing_query(captured)
+
+    client = AnthropicSdkClient("claude-sonnet-4-6")
+    asyncio.run(client.run("hello", label="t"))
+
+    assert getattr(captured[0], "disallowed_tools", None) is None
 
 
 def test_no_mcp_servers_no_hooks(monkeypatch, mock_sdk):

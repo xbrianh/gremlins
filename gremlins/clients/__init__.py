@@ -3,14 +3,13 @@ from __future__ import annotations
 from gremlins.clients.claude import SubprocessClaudeClient
 from gremlins.clients.copilot import SubprocessCopilotClient
 from gremlins.clients.registry import register_client_factory
-from gremlins.permissions.loader import load_default_block
 from gremlins.permissions.policy import Policy
 
 
 def _make_claude_client(_model: str | None, policy: Policy) -> SubprocessClaudeClient:
     return SubprocessClaudeClient(
         bypass=policy.bypass,
-        native_block=load_default_block("claude") | policy.block_for("claude"),
+        native_block=policy.block_for("claude"),
     )
 
 
