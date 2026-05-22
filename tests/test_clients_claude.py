@@ -448,7 +448,7 @@ def test_native_block_without_state_dir_raises(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_allowed_tools_translated_to_permissions_allow(tmp_path):
+def test_allowed_tools_translated_to_permissions_allow():
     from gremlins.clients.claude import _to_claude_settings
 
     block = {"allowed_tools": ["Read", "Edit", "Bash"]}
@@ -457,7 +457,7 @@ def test_allowed_tools_translated_to_permissions_allow(tmp_path):
     }
 
 
-def test_disallowed_tools_translated_to_permissions_deny(tmp_path):
+def test_disallowed_tools_translated_to_permissions_deny():
     from gremlins.clients.claude import _to_claude_settings
 
     block = {"disallowed_tools": ["Bash"]}
@@ -487,7 +487,7 @@ def test_empty_block_stays_empty():
 
 
 # ---------------------------------------------------------------------------
-# Task 3: regression — default block materializes to permissions.allow
+# regression: default block materializes to permissions.allow
 # ---------------------------------------------------------------------------
 
 
@@ -508,7 +508,7 @@ def test_default_block_materializes_permissions_allow(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 4: end-to-end guard — default mode run with bundled defaults
+# e2e guard: default mode run with bundled defaults
 # ---------------------------------------------------------------------------
 
 

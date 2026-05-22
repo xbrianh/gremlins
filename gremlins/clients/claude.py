@@ -26,22 +26,17 @@ class StreamTimeoutError(RuntimeError):
 
 
 def _to_claude_settings(block: dict[str, Any]) -> dict[str, Any]:
-    """Translate gremlins block schema to Claude CLI settings.json schema.
-
-    Gremlins uses ``allowed_tools``/``disallowed_tools`` internally; Claude CLI
-    expects ``{"permissions": {"allow": [...], "deny": [...]}}``.  All other keys
-    pass through unchanged so operators can supply native Claude settings directly.
-    """
+    """Translate allowed_tools/disallowed_tools to Claude CLI permissions schema."""
     settings: dict[str, Any] = {
         k: v for k, v in block.items() if k not in ("allowed_tools", "disallowed_tools")
     }
     allow = block.get("allowed_tools")
     deny = block.get("disallowed_tools")
-    if allow or deny:
-        perms: dict[str, Any] = {}
-        if allow:
+    if allow is not None or deny is not None:
+        perms: dict[str, Any] = dict(settings.pop("permissions", {}))
+        if allow is not None:
             perms["allow"] = list(allow)
-        if deny:
+        if deny is not None:
             perms["deny"] = list(deny)
         settings["permissions"] = perms
     return settings

@@ -230,13 +230,12 @@ of `./.gremlins/pipelines/`, not nested under it) and pipelines set
 A free-form dict passed verbatim to the stage. Selected options by stage
 (see [`gremlins/stages/AGENTS.md`](gremlins/stages/AGENTS.md) for the full list):
 
-**`verify`** — runs `check_cmd` then `test_cmd`, with an agent fix-loop:
+**`verify`** — runs a list of shell commands with an agent fix-loop:
 
 ```yaml
 options:
-  check_cmd: make check   # lint/typecheck command (optional)
-  test_cmd: make test     # test command (optional)
-  max_attempts: 3         # fix-loop retries (default: 3)
+  cmds: ["make check", "make test"]  # commands to run (joined with &&)
+  max_attempts: 3                    # fix-loop retries (default: 3)
 ```
 
 For `local` stages, model options (`plan_model`, `impl_model`, `address_model`,
@@ -303,7 +302,7 @@ name: local
 stages:
   - { type: plan,         options: { plan_model: opus } }
   - { type: implement,    options: { impl_model: opus } }
-  - { type: verify,       options: { test_cmd: pytest } }
+  - { type: verify,       options: { cmds: ["pytest"] } }
   - { type: review-code }
   - { type: address-code, options: { address_model: opus } }
 ```
