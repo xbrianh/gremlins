@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 import gremlins.clients  # noqa: F401 — registers CLIENT_FACTORIES as a side effect
 from gremlins.clients.claude import SubprocessClaudeClient
 from gremlins.clients.copilot import SubprocessCopilotClient
@@ -60,9 +62,14 @@ def test_claude_factory_threads_policy() -> None:
     assert impl._native_block == load_default_block("claude") | _CLAUDE_BLOCK  # pyright: ignore[reportPrivateUsage]
 
 
-def test_copilot_factory_threads_policy() -> None:
-    policy = Policy(bypass=False, blocks={"copilot": _COPILOT_BLOCK})
+def test_copilot_factory_requires_bypass() -> None:
+    policy = Policy(bypass=False, blocks={})
+    with pytest.raises(ValueError, match="bypass"):
+        CLIENT_FACTORIES["copilot"]("gpt-4o", policy)
+
+
+def test_copilot_factory_accepts_bypass() -> None:
+    policy = Policy(bypass=True, blocks={})
     impl = CLIENT_FACTORIES["copilot"]("gpt-4o", policy)
     assert isinstance(impl, SubprocessCopilotClient)
-    assert impl._bypass is False  # pyright: ignore[reportPrivateUsage]
-    assert impl._native_block == load_default_block("copilot") | _COPILOT_BLOCK  # pyright: ignore[reportPrivateUsage]
+    assert impl._bypass is True  # pyright: ignore[reportPrivateUsage]

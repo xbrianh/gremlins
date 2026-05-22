@@ -85,10 +85,14 @@ def test_user_config_honored(tmp_path, monkeypatch):
 
 
 def test_empty_inputs_give_default_policy(tmp_path):
+    from gremlins.clients.registry import BYPASS_REQUIRED
+
     policy = _load(tmp_path=tmp_path)
     assert policy.bypass is False
     assert policy.blocks == {}
     for provider in CLIENT_FACTORIES:
+        if provider in BYPASS_REQUIRED:
+            continue  # bypass-only providers have no allowlist defaults
         assert load_default_block(provider), (
             f"expected non-empty default block for {provider}"
         )
