@@ -328,7 +328,20 @@ def test_max_retries_exceeds_schedule_raises_value_error():
 # ---------------------------------------------------------------------------
 
 
-def test_claude_config_dir_not_set_regardless_of_native_block(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "bypass,native_block",
+    [
+        (False, None),
+        (False, {}),
+        (False, {"allowed_tools": ["Read", "Edit"]}),
+        (True, None),
+        (True, {"allowed_tools": ["Read"]}),
+        (True, {"disallowed_tools": ["Bash"]}),
+    ],
+)
+def test_claude_config_dir_not_set_regardless_of_native_block(
+    tmp_path, monkeypatch, bypass, native_block
+):
     bin_dir = tmp_path / "bin"
     _install_stub_claude(bin_dir)
     env_out = tmp_path / "child_env.json"
@@ -337,8 +350,7 @@ def test_claude_config_dir_not_set_regardless_of_native_block(tmp_path, monkeypa
     monkeypatch.setenv("STUB_ENV_OUT", str(env_out))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
 
-    block = {"allowed_tools": ["Read", "Edit"]}
-    client = SubprocessClaudeClient(bypass=False, native_block=block)
+    client = SubprocessClaudeClient(bypass=bypass, native_block=native_block)
     asyncio.run(client.run("hello", label="test"))
 
     child_env = json.loads(env_out.read_text(encoding="utf-8"))

@@ -48,6 +48,8 @@ class SubprocessClaudeClient:
         self._children: list[asyncio.subprocess.Process] = []
         self._total_cost_usd: float = 0.0
         self._bypass = bypass
+        # accepted for factory shape parity with SubprocessCopilotClient; inert
+        # on this backend — the claude CLI reads ~/.claude/settings.json directly.
         self._native_block: dict[str, Any] = (
             native_block if native_block is not None else {}
         )
