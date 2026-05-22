@@ -4,8 +4,10 @@ import pathlib
 
 import gremlins.clients  # noqa: F401 — registers CLIENT_FACTORIES as a side effect
 from gremlins.clients.registry import BYPASS_REQUIRED, CLIENT_FACTORIES
-from gremlins.permissions.loader import load_default_block
-from gremlins.permissions.loader import _DEFAULTS_DIR  # pyright: ignore[reportPrivateUsage]
+from gremlins.permissions.loader import (  # pyright: ignore[reportPrivateUsage]
+    _DEFAULTS_DIR,
+    load_default_block,
+)
 from gremlins.pipeline import Pipeline
 
 
