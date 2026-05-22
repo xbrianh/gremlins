@@ -107,7 +107,9 @@ class SubprocessClaudeClient:
         claude_dir.mkdir(parents=True, exist_ok=True)
         dst = claude_dir / "settings.json"
         tmp = claude_dir / f"settings.json.{os.getpid()}.{secrets.token_hex(4)}.tmp"
-        tmp.write_text(json.dumps(_to_claude_settings(self._native_block)), encoding="utf-8")
+        tmp.write_text(
+            json.dumps(_to_claude_settings(self._native_block)), encoding="utf-8"
+        )
         os.replace(tmp, dst)
         # macOS: keychain handles auth; credentials follow automatically.
         # Linux/Windows: credentials live on disk; symlink them into the redirect dir

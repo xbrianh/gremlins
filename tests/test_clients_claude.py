@@ -452,7 +452,9 @@ def test_allowed_tools_translated_to_permissions_allow(tmp_path):
     from gremlins.clients.claude import _to_claude_settings
 
     block = {"allowed_tools": ["Read", "Edit", "Bash"]}
-    assert _to_claude_settings(block) == {"permissions": {"allow": ["Read", "Edit", "Bash"]}}
+    assert _to_claude_settings(block) == {
+        "permissions": {"allow": ["Read", "Edit", "Bash"]}
+    }
 
 
 def test_disallowed_tools_translated_to_permissions_deny(tmp_path):
@@ -466,7 +468,9 @@ def test_both_translated_together():
     from gremlins.clients.claude import _to_claude_settings
 
     block = {"allowed_tools": ["Read"], "disallowed_tools": ["Bash"]}
-    assert _to_claude_settings(block) == {"permissions": {"allow": ["Read"], "deny": ["Bash"]}}
+    assert _to_claude_settings(block) == {
+        "permissions": {"allow": ["Read"], "deny": ["Bash"]}
+    }
 
 
 def test_native_keys_pass_through():
@@ -508,7 +512,9 @@ def test_default_block_materializes_permissions_allow(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_default_mode_with_bundled_defaults_sets_permissions_allow(tmp_path, monkeypatch):
+def test_default_mode_with_bundled_defaults_sets_permissions_allow(
+    tmp_path, monkeypatch
+):
     """E2E guard: non-bypass run using bundled claude defaults sets CLAUDE_CONFIG_DIR
     with a usable permissions.allow that Claude CLI can honour."""
     bin_dir = tmp_path / "bin"
@@ -525,7 +531,9 @@ def test_default_mode_with_bundled_defaults_sets_permissions_allow(tmp_path, mon
     default_block = load_default_block("claude")
     client = SubprocessClaudeClient(bypass=False, native_block=default_block)
     asyncio.run(
-        client.run("hello", label="test", extra_env={"GREMLIN_STATE_DIR": str(state_dir)})
+        client.run(
+            "hello", label="test", extra_env={"GREMLIN_STATE_DIR": str(state_dir)}
+        )
     )
 
     child_env = json.loads(env_out.read_text(encoding="utf-8"))
