@@ -9,7 +9,6 @@ import subprocess
 from gremlins import paths
 from gremlins.utils.git import setup_copy, setup_detached_worktree, setup_named_worktree
 
-
 _GIT_ENV = {
     **os.environ,
     "GIT_AUTHOR_NAME": "t",
