@@ -905,6 +905,8 @@ def test_runner_active_false_for_live_non_runner_pid(tmp_path, monkeypatch):
     pid_path.write_text(str(os.getpid()))
     monkeypatch.setattr(
         "gremlins.queue.core.subprocess.run",
-        lambda cmd, **kw: types.SimpleNamespace(returncode=0, stdout="python -m pytest\n"),
+        lambda cmd, **kw: types.SimpleNamespace(
+            returncode=0, stdout="python -m pytest\n"
+        ),
     )
     assert core.runner_active() is False
