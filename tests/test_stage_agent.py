@@ -53,6 +53,7 @@ def _make_agent(
 
 # --- in: resolution and prompt interpolation ---
 
+
 def test_in_content_substituted_into_prompt(tmp_path):
     registry = ArtifactRegistry(tmp_path, cwd=tmp_path)
     (tmp_path / "plan.md").write_bytes(b"# My Plan")
@@ -88,6 +89,7 @@ def test_no_in_map_runs_prompt_unchanged(tmp_path):
 
 
 # --- out: verification ---
+
 
 def test_verify_produced_passes_when_out_file_written(tmp_path):
     output_file = tmp_path / "output.md"
@@ -131,7 +133,9 @@ def test_out_uri_bound_in_registry_before_agent_runs(tmp_path):
         async def run(self, prompt, *, label, **kwargs):
             # Check that the out: key is bound before the agent runs
             registry = state.artifacts
-            seen_bound_before_run.append(registry is not None and registry.produced("result"))
+            seen_bound_before_run.append(
+                registry is not None and registry.produced("result")
+            )
             output_file.write_text("# Output")
             return await super().run(prompt, label=label, **kwargs)
 
@@ -146,6 +150,7 @@ def test_out_uri_bound_in_registry_before_agent_runs(tmp_path):
 
 
 # --- with_dict parsing ---
+
 
 def test_with_dict_parses_in_and_out_maps(tmp_path):
     d = {
@@ -173,6 +178,7 @@ def test_with_dict_rejects_non_dict_out(tmp_path):
 
 
 # --- fallback registry when state.artifacts is None ---
+
 
 def test_fallback_registry_created_when_state_artifacts_none(tmp_path):
     client = FakeClaudeClient(fixtures={"my-agent": MINIMAL_EVENTS})
