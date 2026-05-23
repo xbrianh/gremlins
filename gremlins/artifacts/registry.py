@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import pathlib
+import subprocess
 from collections.abc import Iterable
 from typing import Any
 
 from gremlins.artifacts._protocol import SchemeResolver
+from gremlins.artifacts.schemes import FileSessionResolver, GitHubResolver, GitResolver
 from gremlins.artifacts.uri import Uri
 
 
@@ -16,23 +18,18 @@ class MissingArtifact(KeyError):
         self.key = key
 
 
-class Registry:
+class ArtifactRegistry:
     def __init__(
         self,
         session_dir: pathlib.Path,
         cwd: pathlib.Path | None = None,
     ) -> None:
-        from gremlins.artifacts.schemes import (  # noqa: PLC0415
-            FileSessionResolver,
-            GhResolver,
-            GitResolver,
-        )
-
+        self._cwd = cwd
         self._bindings: dict[str, Uri] = {}
         self._resolvers: dict[str, SchemeResolver] = {
             "file": FileSessionResolver(session_dir),
             "git": GitResolver(cwd),
-            "gh": GhResolver(cwd),
+            "gh": GitHubResolver(cwd),
         }
 
     def bind(self, key: str, uri: Uri) -> None:
@@ -56,3 +53,13 @@ class Registry:
 
     def resolver(self, scheme: str) -> SchemeResolver:
         return self._resolvers[scheme]
+
+    def bind_git_commit_range(self, key: str, base_sha: str) -> None:
+        head_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self._cwd,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        self.bind(key, Uri.parse(f"git://range/{base_sha}..{head_sha}"))

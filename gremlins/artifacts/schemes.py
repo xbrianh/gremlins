@@ -81,7 +81,7 @@ class GitResolver:
 
 
 def snapshot_head_before(cwd: pathlib.Path | None = None) -> str:
-    """Return current HEAD sha for use with bind_range_after()."""
+    """Return current HEAD sha for use with ArtifactRegistry.bind_git_commit_range()."""
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=cwd,
@@ -92,28 +92,10 @@ def snapshot_head_before(cwd: pathlib.Path | None = None) -> str:
     return result.stdout.strip()
 
 
-def bind_range_after(
-    registry: Any,  # Registry — avoid circular import in type hint
-    key: str,
-    base_sha: str,
-    cwd: pathlib.Path | None = None,
-) -> None:
-    """Bind key to git://range/<base_sha>..<new_head> after a stage has run."""
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    head_sha = result.stdout.strip()
-    registry.bind(key, Uri.parse(f"git://range/{base_sha}..{head_sha}"))
-
-
 _PR_URL_RE = re.compile(r"https://github\.com/[^/]+/[^/]+/pull/(\d+)")
 
 
-class GhResolver:
+class GitHubResolver:
     """Resolves gh://pr/<n> and gh://issue/<n> via `gh` CLI."""
 
     def __init__(self, cwd: pathlib.Path | None = None) -> None:

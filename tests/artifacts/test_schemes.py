@@ -7,12 +7,11 @@ import subprocess
 
 import pytest
 
-from gremlins.artifacts.registry import Registry
+from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.schemes import (
     FileSessionResolver,
-    GhResolver,
+    GitHubResolver,
     GitResolver,
-    bind_range_after,
     snapshot_head_before,
 )
 from gremlins.artifacts.uri import Uri
@@ -102,32 +101,30 @@ def test_git_resolver_read_range(tmp_path: pathlib.Path) -> None:
     assert "sha" in commits[0]
 
 
-# GhResolver tests
+# GitHubResolver tests
 
 
 def test_gh_resolver_capture(tmp_path: pathlib.Path) -> None:
-    resolver = GhResolver(cwd=tmp_path)
+    resolver = GitHubResolver(cwd=tmp_path)
     stdout = "https://github.com/acme/repo/pull/42\n"
     uri = resolver.capture(stdout, "")
     assert uri == Uri.parse("gh://pr/42")
 
 
 def test_gh_resolver_capture_no_url_raises(tmp_path: pathlib.Path) -> None:
-    resolver = GhResolver(cwd=tmp_path)
+    resolver = GitHubResolver(cwd=tmp_path)
     with pytest.raises(ValueError):
         resolver.capture("no url here", "")
 
 
-# snapshot_head_before and bind_range_after tests
+# snapshot_head_before and bind_git_commit_range tests
 
 
 def test_snapshot_and_bind_range(tmp_path: pathlib.Path) -> None:
     make_git_repo(tmp_path)
 
-    # snapshot before adding a third commit
     base = snapshot_head_before(cwd=tmp_path)
 
-    # make a third commit
     (tmp_path / "c.txt").write_text("c")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(
@@ -141,9 +138,8 @@ def test_snapshot_and_bind_range(tmp_path: pathlib.Path) -> None:
         check=True,
     ).stdout.strip()
 
-    # patch module state to allow "file" scheme (it's already builtin, just need a registry)
-    registry = Registry(session_dir=tmp_path, cwd=tmp_path)
-    bind_range_after(registry, "impl-commits", base, cwd=tmp_path)
+    registry = ArtifactRegistry(session_dir=tmp_path, cwd=tmp_path)
+    registry.bind_git_commit_range("impl-commits", base)
 
     assert registry.produced("impl-commits")
     uri = registry.resolve("impl-commits")

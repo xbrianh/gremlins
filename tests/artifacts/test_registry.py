@@ -6,12 +6,12 @@ import pathlib
 
 import pytest
 
-from gremlins.artifacts.registry import MissingArtifact, Registry
+from gremlins.artifacts.registry import ArtifactRegistry, MissingArtifact
 from gremlins.artifacts.uri import Uri
 
 
-def make_registry(tmp_path: pathlib.Path) -> Registry:
-    return Registry(session_dir=tmp_path)
+def make_registry(tmp_path: pathlib.Path) -> ArtifactRegistry:
+    return ArtifactRegistry(session_dir=tmp_path)
 
 
 def test_bind_resolve_roundtrip(tmp_path: pathlib.Path) -> None:
