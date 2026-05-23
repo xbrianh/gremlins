@@ -12,7 +12,7 @@ format-write:
 	ruff format .
 
 typecheck:
-	PYTHONPATH='' pyright
+	PYTHONPATH='' pyright --pythonpath $(shell which python)
 
 test: $(TEST_FILES)
 

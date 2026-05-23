@@ -50,8 +50,6 @@ typeCheckingMode = "strict"
 include = [
     "gremlins",
 ]
-venvPath = "."
-venv = ".venv"
 
 [dependency-groups]
 dev = [
