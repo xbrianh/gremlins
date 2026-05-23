@@ -8,7 +8,7 @@ import re
 from typing import Any
 
 from gremlins.executor.state import State
-from gremlins.stages.agent import bail_command, run_agent
+from gremlins.stages.agent_runner import bail_command, run_agent
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Done, Outcome
 

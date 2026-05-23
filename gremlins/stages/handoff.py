@@ -16,7 +16,7 @@ from typing import Any, TypeVar, cast
 
 from gremlins.clients.client import Client
 from gremlins.executor.state import State
-from gremlins.stages.agent import run_agent
+from gremlins.stages.agent_runner import run_agent
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, NeedsFix, Outcome
 from gremlins.utils import proc

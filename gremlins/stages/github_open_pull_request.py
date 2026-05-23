@@ -8,7 +8,7 @@ from typing import Any, cast
 
 from gremlins.clients.protocol import CompletedRun
 from gremlins.executor.state import State
-from gremlins.stages.agent import run_agent
+from gremlins.stages.agent_runner import run_agent
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Done, Outcome
 from gremlins.utils import proc
