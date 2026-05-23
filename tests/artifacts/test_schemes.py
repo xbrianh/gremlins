@@ -1,4 +1,5 @@
 """Tests for gremlins.artifacts.schemes."""
+
 from __future__ import annotations
 
 import pathlib
@@ -21,20 +22,47 @@ from gremlins.artifacts.uri import Uri
 
 def make_git_repo(tmp_path: pathlib.Path) -> tuple[str, str]:
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
     (tmp_path / "a.txt").write_text("a")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "first"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "first"], cwd=tmp_path, check=True, capture_output=True
+    )
     (tmp_path / "b.txt").write_text("b")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "second"], cwd=tmp_path, check=True, capture_output=True)
-    first = subprocess.run(["git", "rev-parse", "HEAD~1"], cwd=tmp_path, capture_output=True, text=True, check=True).stdout.strip()
-    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True).stdout.strip()
+    subprocess.run(
+        ["git", "commit", "-m", "second"], cwd=tmp_path, check=True, capture_output=True
+    )
+    first = subprocess.run(
+        ["git", "rev-parse", "HEAD~1"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
     return first, head
 
 
 # FileSessionResolver tests
+
 
 def test_file_resolver_read(tmp_path: pathlib.Path) -> None:
     (tmp_path / "out.txt").write_bytes(b"content")
@@ -43,14 +71,18 @@ def test_file_resolver_read(tmp_path: pathlib.Path) -> None:
     assert resolver.read(uri) == b"content"
 
 
-def test_file_resolver_verify_produced_raises_when_absent(tmp_path: pathlib.Path) -> None:
+def test_file_resolver_verify_produced_raises_when_absent(
+    tmp_path: pathlib.Path,
+) -> None:
     resolver = FileSessionResolver(tmp_path)
     uri = Uri(scheme="file", path="session/missing.txt")
     with pytest.raises(FileNotFoundError):
         resolver.verify_produced(uri)
 
 
-def test_file_resolver_verify_produced_raises_when_empty(tmp_path: pathlib.Path) -> None:
+def test_file_resolver_verify_produced_raises_when_empty(
+    tmp_path: pathlib.Path,
+) -> None:
     (tmp_path / "empty.txt").write_bytes(b"")
     resolver = FileSessionResolver(tmp_path)
     uri = Uri(scheme="file", path="session/empty.txt")
@@ -59,6 +91,7 @@ def test_file_resolver_verify_produced_raises_when_empty(tmp_path: pathlib.Path)
 
 
 # GitResolver tests
+
 
 def test_git_resolver_read_range(tmp_path: pathlib.Path) -> None:
     first, head = make_git_repo(tmp_path)
@@ -72,6 +105,7 @@ def test_git_resolver_read_range(tmp_path: pathlib.Path) -> None:
 
 
 # GhResolver tests
+
 
 def test_gh_resolver_capture(tmp_path: pathlib.Path) -> None:
     resolver = GhResolver(cwd=tmp_path)
@@ -88,6 +122,7 @@ def test_gh_resolver_capture_no_url_raises(tmp_path: pathlib.Path) -> None:
 
 # snapshot_head_before and bind_range_after tests
 
+
 def test_snapshot_and_bind_range(tmp_path: pathlib.Path) -> None:
     make_git_repo(tmp_path)
 
@@ -97,9 +132,15 @@ def test_snapshot_and_bind_range(tmp_path: pathlib.Path) -> None:
     # make a third commit
     (tmp_path / "c.txt").write_text("c")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "third"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "third"], cwd=tmp_path, check=True, capture_output=True
+    )
     new_head = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
 
     # patch module state to allow "file" scheme (it's already builtin, just need a registry)

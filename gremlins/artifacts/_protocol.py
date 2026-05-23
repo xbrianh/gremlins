@@ -1,4 +1,5 @@
 """SchemeResolver protocol and CapturingSchemeResolver extension."""
+
 from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
@@ -15,4 +16,5 @@ class SchemeResolver(Protocol):
 @runtime_checkable
 class CapturingSchemeResolver(SchemeResolver, Protocol):
     """SchemeResolver that can derive its URI from command stdout/stderr."""
+
     def capture(self, stdout: str, stderr: str) -> Uri: ...

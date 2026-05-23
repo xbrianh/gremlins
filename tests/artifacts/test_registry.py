@@ -1,4 +1,5 @@
 """Tests for gremlins.artifacts.registry."""
+
 from __future__ import annotations
 
 import pathlib

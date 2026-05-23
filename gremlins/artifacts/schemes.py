@@ -1,4 +1,5 @@
 """Concrete SchemeResolver implementations for file://, git://, and gh:// URIs."""
+
 from __future__ import annotations
 
 import json
@@ -127,7 +128,11 @@ class GhResolver:
             n = path.removeprefix("pr/")
             raw = self._gh(["pr", "view", n, "--json", "url,number,headRefName"])
             data = json.loads(raw)
-            return {"url": data["url"], "number": data["number"], "branch": data["headRefName"]}
+            return {
+                "url": data["url"],
+                "number": data["number"],
+                "branch": data["headRefName"],
+            }
         if path.startswith("issue/"):
             n = path.removeprefix("issue/")
             raw = self._gh(["issue", "view", n, "--json", "url,number"])

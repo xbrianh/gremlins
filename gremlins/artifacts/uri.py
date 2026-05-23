@@ -1,4 +1,5 @@
 """URI value object for artifact references."""
+
 from __future__ import annotations
 
 import dataclasses

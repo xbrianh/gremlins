@@ -1,4 +1,5 @@
 """Artifact registry: maps string keys to URIs and resolves them via scheme resolvers."""
+
 from __future__ import annotations
 
 import pathlib
