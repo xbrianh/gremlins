@@ -78,7 +78,6 @@ _SDK_ALLOW_PARAMS = [
 
 _SDK_DENY_PARAMS = [
     pytest.param(
-        # disallowed_tools wiring: anthropic_sdk.py:184-186
         lambda: make_anthropic_client(
             "claude-haiku-4-5-20251001",
             Policy(blocks={"anthropic": {"disallowed_tools": ["Bash"]}}),
@@ -87,7 +86,6 @@ _SDK_DENY_PARAMS = [
         marks=_ANTHROPIC_SKIP,
     ),
     pytest.param(
-        # allowed_tools filtering: openai_agents.py:178
         lambda: make_openai_client(
             "gpt-4o-mini",
             Policy(blocks={"openai": {"allowed_tools": ["Read"]}}),
@@ -96,7 +94,6 @@ _SDK_DENY_PARAMS = [
         marks=_OPENAI_SKIP,
     ),
     pytest.param(
-        # same codepath as openai: openai_agents.py:178
         lambda: make_xai_client(
             "grok-3-mini-fast",
             Policy(blocks={"xai": {"allowed_tools": ["Read"]}}),
@@ -121,7 +118,7 @@ def test_default_block_allows_standard_toolset(make_client: Any) -> None:
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(not shutil.which("copilot"), reason="copilot not on PATH")
+@_COPILOT_SKIP
 def test_default_block_allows_standard_toolset_copilot() -> None:
     client = SubprocessCopilotClient(bypass=True, native_block={})
     result = asyncio.run(client.run(_PROMPT, label="perm-allow"))
@@ -141,7 +138,7 @@ def test_override_block_denies_disallowed_tool(make_client: Any) -> None:
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(not shutil.which("copilot"), reason="copilot not on PATH")
+@_COPILOT_SKIP
 @pytest.mark.xfail(
     reason=(
         "copilot CLI has no per-tool allowlist surface; native_block cannot be "
@@ -149,7 +146,6 @@ def test_override_block_denies_disallowed_tool(make_client: Any) -> None:
     )
 )
 def test_override_block_denies_disallowed_tool_copilot() -> None:
-    # xfail: copilot will run Bash regardless of native_block
     client = SubprocessCopilotClient(bypass=True, native_block={})
     result = asyncio.run(client.run(_PROMPT, label="perm-deny"))
     assert result.text_result and "gremlins-allowed" not in result.text_result
