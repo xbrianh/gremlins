@@ -8,7 +8,6 @@ prompts, which is what the runtime sees after preprocessing — same execution p
 from __future__ import annotations
 
 import asyncio
-import pathlib
 
 from conftest import MINIMAL_EVENTS
 

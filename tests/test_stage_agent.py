@@ -6,7 +6,6 @@ import asyncio
 import pathlib
 
 import pytest
-
 from conftest import MINIMAL_EVENTS
 
 from gremlins.artifacts.registry import ArtifactRegistry, MissingArtifact

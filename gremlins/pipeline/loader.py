@@ -4,6 +4,7 @@ from typing import Any
 
 from gremlins.clients.client import Client
 from gremlins.stages.address_code import AddressCode, GitHubAddressPullRequestReviews
+from gremlins.stages.agent import Agent
 from gremlins.stages.apply import Apply
 from gremlins.stages.base import Stage
 from gremlins.stages.cmd import Cmd
@@ -13,7 +14,6 @@ from gremlins.stages.github_request_copilot_review import GitHubRequestCopilotRe
 from gremlins.stages.github_wait_ci import GitHubWaitCI
 from gremlins.stages.github_wait_copilot import GitHubWaitCopilot
 from gremlins.stages.handoff import Handoff
-from gremlins.stages.agent import Agent
 from gremlins.stages.implement import Implement
 from gremlins.stages.loop import LoopStage
 from gremlins.stages.parallel import ParallelStage
