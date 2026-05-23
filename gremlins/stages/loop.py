@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 from gremlins.executor.state import State
-from gremlins.stages.base import Stage
+from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.composite import child_state as _child_state
 from gremlins.stages.outcome import Bail, Done, NeedsFix, Outcome
 from gremlins.utils import git as _git
@@ -79,7 +79,7 @@ class LoopStage(Stage):
 
     @classmethod
     def with_dict(cls, d: dict[str, Any], depth: int = 0) -> LoopStage:
-        from gremlins.pipeline.loader import get_client_from_dict, parse_stages
+        from gremlins.pipeline.loader import parse_stages
 
         name = d.get("name") or ""
         raw_options: object = d.get("options") or {}
@@ -136,6 +136,7 @@ class LoopStage(Stage):
             if self._on_iteration_start:
                 self._on_iteration_start(iter_state)
             head_before = _git.head_sha(iter_state.cwd)
+            # Rebuild each iteration so body stages inherit the per-iteration engine_ctx.
             runners = (
                 self._body_runners
                 if self._body_runners is not None

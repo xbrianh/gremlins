@@ -1,8 +1,10 @@
 # `gremlins/artifacts/`
 
-Artifact registry and URI model. The registry is wired into every run via
+Artifact registry and URI model. The registry is wired into runs via
 `state.artifacts` (an `ArtifactRegistry` instance constructed in
-`gremlins/executor/gremlin.py` and stored on `State`).
+`gremlins/executor/gremlin.py` and stored on `State`). This wiring
+applies to the main `Gremlin` executor path; subprocess child paths
+(`run_child.py`, `spawn/child.py`) construct `State` without artifacts.
 
 ## Public surface
 

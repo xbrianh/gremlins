@@ -9,7 +9,7 @@ from typing import Any
 
 from gremlins.executor.state import State
 from gremlins.stages.agent_runner import bail_command, run_agent
-from gremlins.stages.base import Stage
+from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.outcome import Done, Outcome
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -103,8 +103,6 @@ class GitHubAddressPullRequestReviews(Stage):
     def with_dict(
         cls, d: dict[str, Any], depth: int = 0
     ) -> GitHubAddressPullRequestReviews:
-        from gremlins.pipeline.loader import get_client_from_dict
-
         prompts: list[str] = d.get("prompt") or []
         if not prompts:
             raise ValueError(

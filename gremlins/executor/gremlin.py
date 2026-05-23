@@ -222,6 +222,7 @@ class Gremlin:
             session_dir=self.session_dir,
             cwd=self.worktree_dir,
         )
+        # attempt is always "" here; the loop patches it per-iteration via dataclasses.replace.
         engine_ctx = EngineContext(loop_iteration=1, attempt="", current_scope=())
         built: list[tuple[str, Callable[[], Awaitable[Any]]]] = []
         for e in stages:

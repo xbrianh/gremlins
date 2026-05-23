@@ -17,7 +17,7 @@ from typing import Any, TypeVar, cast
 from gremlins.clients.client import Client
 from gremlins.executor.state import State
 from gremlins.stages.agent_runner import run_agent
-from gremlins.stages.base import Stage
+from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.outcome import Bail, Done, NeedsFix, Outcome
 from gremlins.utils import proc
 from gremlins.utils.yaml_io import load_bundled_prompt, render_bundled_prompt
@@ -437,8 +437,6 @@ class Handoff(Stage):
 
     @classmethod
     def with_dict(cls, d: dict[str, Any], depth: int = 0) -> Handoff:
-        from gremlins.pipeline.loader import get_client_from_dict
-
         stage = cls(d["name"])
         stage.client = get_client_from_dict(d)
         return stage

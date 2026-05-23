@@ -2,23 +2,14 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any, cast
 
-from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
 from gremlins.executor.state import State
 from gremlins.stages.agent_runner import run_agent
-from gremlins.stages.base import Stage
+from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.outcome import Done, Outcome
-
-
-def _to_str(value: Any) -> str:
-    if isinstance(value, bytes):
-        return value.decode("utf-8")
-    if isinstance(value, (dict, list)):
-        return json.dumps(value, indent=2)
-    return str(value)
+from gremlins.utils.text import to_str
 
 
 class Agent(Stage):
@@ -47,8 +38,6 @@ class Agent(Stage):
 
     @classmethod
     def with_dict(cls, d: dict[str, Any], depth: int = 0) -> Agent:
-        from gremlins.pipeline.loader import get_client_from_dict
-
         name = d.get("name") or ""
         raw_in: object = d.get("in") or {}
         raw_out: object = d.get("out") or {}
@@ -67,22 +56,24 @@ class Agent(Stage):
         return stage
 
     async def run(self, state: State) -> Outcome:
+        if state.artifacts is None:
+            raise RuntimeError(f"stage {self.name!r}: state.artifacts is None")
         registry = state.artifacts
-        if registry is None:
-            registry = ArtifactRegistry(state.session_dir, cwd=state.worktree)
 
         for key, uri_str in self.out_map.items():
             registry.bind(key, Uri.parse(uri_str))
 
         subs: dict[str, str] = {}
         for var, key in self.in_map.items():
-            subs[var] = _to_str(registry.read(key))
+            subs[var] = to_str(registry.read(key))
 
         template = "\n\n".join(self.prompts).rstrip()
         prompt = template.format(**subs) if subs else template
 
         raw_path = state.session_dir / f"stream-{self.name}.jsonl"
-        await run_agent(state, prompt, label=self.name, raw_path=raw_path)
+        opts = dict(self.options)
+        model = cast(str | None, opts.pop("model", None))
+        await run_agent(state, prompt, label=self.name, raw_path=raw_path, model=model, **opts)
 
         for key, uri_str in self.out_map.items():
             uri = Uri.parse(uri_str)
