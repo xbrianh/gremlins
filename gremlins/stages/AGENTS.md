@@ -6,6 +6,13 @@ sequencing logic of their own.
 
 ## Modules
 
+- `agent.py` — `Agent(Stage)` (type `"agent"`). The generic agentic primitive. Declared in YAML with `in:` / `out:` maps:
+  - `in: {var_name: registry_key}` — resolves each `registry_key` from `state.artifacts`, converts to string, and substitutes `{var_name}` into the rendered prompt. Raises `MissingArtifact` if a key is not bound.
+  - `out: {registry_key: uri_string}` — binds each URI in `state.artifacts` before the agent runs, then calls `resolver.verify_produced(uri)` post-run to assert the artifact was written.
+  - Invokes the agent via `agent_runner.run_agent`; the `label` is the stage name.
+  - Prompt template is `"\n\n".join(self.prompts)`; if `in:` produces substitution vars, `str.format(**subs)` is applied.
+  - `plan` and `implement` currently call `agent_runner.run_agent` directly; migration to `Agent` wrappers is a follow-up chunk.
+- `agent_runner.py` — `run_agent`, `bail_command`, `_check_bail`. Single chokepoint for agentic execution: injects `GREMLIN_ATTEMPT` / `GREMLIN_STATE_DIR` env vars, delegates to `state.client.run()`, then raises `Bail` if the bail-marker file was set. Import from here (not from `agent.py`) in any stage that needs `run_agent`.
 - `loop.py` — `LoopStage(Stage)`. Iterates a `body: list[Stage]` (or raw `body_runners` callables) until a termination predicate fires or `max_iterations` is exhausted. Body stages execute in order; subsequent stages only run when a preceding stage returned `NeedsFix`, except on the final iteration where fix stages are skipped. Termination is controlled by an `until: UntilFn` predicate (default `head_stable`); `max_iters(n)` is a factory for count-bounded loops. `on_iteration_start` callback runs at the top of each iteration (used by `with_dict` to express `pr_stack` detach-to-prior-PR logic).
 - `cmd.py` — `Cmd(Stage)`. Runs `options["cmds"]` joined with `&&`; writes output to disk on every invocation. On non-zero exit returns `NeedsFix(output)`. Supports `log_path` option with `{n}` interpolation for per-invocation naming (e.g. `verify-attempt-{n}.log`); falls back to `cmd.log`. Stage type `"cmd"`.
 - `apply.py` — `Apply(Stage)`. Runs `options["cmds"]` sequentially in cwd; on non-zero writes output to apply.log and raises Bail. Then git add -A and commits (name or commit_message) iff staged diff non-empty; skips empty commit. For deterministic post-impl normalizers (e.g. ruff) before verify. Stage type `"apply"`.

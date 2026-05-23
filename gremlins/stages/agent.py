@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 
-from gremlins.artifacts.registry import ArtifactRegistry, MissingArtifact
+from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
 from gremlins.executor.state import State
 from gremlins.stages.agent_runner import run_agent
@@ -50,8 +50,8 @@ class Agent(Stage):
         from gremlins.pipeline.loader import get_client_from_dict
 
         name = d.get("name") or ""
-        raw_in = d.get("in") or {}
-        raw_out = d.get("out") or {}
+        raw_in: object = d.get("in") or {}
+        raw_out: object = d.get("out") or {}
         if not isinstance(raw_in, dict):
             raise ValueError(f"stage {name!r}: 'in' must be a mapping")
         if not isinstance(raw_out, dict):
@@ -60,8 +60,8 @@ class Agent(Stage):
             name,
             d.get("prompt") or [],
             d.get("options") or {},
-            in_map=dict(raw_in),
-            out_map=dict(raw_out),
+            in_map=dict(cast(dict[str, str], raw_in)),
+            out_map=dict(cast(dict[str, str], raw_out)),
         )
         stage.client = get_client_from_dict(d)
         return stage
