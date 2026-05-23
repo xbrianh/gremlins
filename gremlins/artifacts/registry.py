@@ -21,7 +21,6 @@ class Registry:
         self,
         session_dir: pathlib.Path,
         cwd: pathlib.Path | None = None,
-        extra_resolvers: dict[str, SchemeResolver] | None = None,
     ) -> None:
         from gremlins.artifacts.schemes import (  # noqa: PLC0415
             FileSessionResolver,
@@ -34,7 +33,6 @@ class Registry:
             "file": FileSessionResolver(session_dir),
             "git": GitResolver(cwd),
             "gh": GhResolver(cwd),
-            **(extra_resolvers or {}),
         }
 
     def bind(self, key: str, uri: Uri) -> None:

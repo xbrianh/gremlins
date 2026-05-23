@@ -22,8 +22,6 @@ from gremlins.artifacts.engine import EngineContext
 | `gh://pr/<n>` | `gh://pr/42` | GitHub PR (url, number, branch) via `gh pr view` |
 | `gh://issue/<n>` | `gh://issue/7` | GitHub issue (url, number) via `gh issue view` |
 
-Custom schemes: pass `extra_resolvers={"custom": resolver}` to `Registry(...)`.
-
 ## Registry API
 
 ```python

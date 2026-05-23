@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pathlib
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -49,13 +48,8 @@ def test_keys_returns_bound_keys(tmp_path: pathlib.Path) -> None:
     assert set(r.keys()) == {"a", "b"}
 
 
-def test_read_delegates_to_mock_resolver(tmp_path: pathlib.Path) -> None:
-    mock_resolver = MagicMock()
-    mock_resolver.read.return_value = b"hello"
-
-    r = Registry(session_dir=tmp_path, extra_resolvers={"mock": mock_resolver})
-    uri = Uri(scheme="mock", path="some/path")
-    r.bind("thing", uri)
-    result = r.read("thing")
-    assert result == b"hello"
-    mock_resolver.read.assert_called_once_with(uri)
+def test_read_returns_file_bytes(tmp_path: pathlib.Path) -> None:
+    (tmp_path / "plan.md").write_bytes(b"hello")
+    r = make_registry(tmp_path)
+    r.bind("plan", Uri(scheme="file", path="session/plan.md"))
+    assert r.read("plan") == b"hello"
