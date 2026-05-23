@@ -28,6 +28,26 @@ review / address pipelines, the fleet manager
 - `executor/pipeline.py` — `StageRunner`. Sequences stages for a pipeline run.
 - `prompts/` — externalized prompt templates (plan, implement, review lenses, etc).
 
+## Conventions
+
+### Reuse `gremlins/utils/`
+
+Before shelling out to `subprocess`, `git`, or `gh`, check `gremlins/utils/`:
+
+- `utils/proc.py` — `run`, `run_or_raise`, `run_async`, etc. Use instead of `subprocess.run`.
+- `utils/git.py` — `head_sha`, `current_branch`, worktree helpers, etc. Use instead of shelling `git` directly.
+- `utils/github.py` — `view_pr`, `view_issue`, `get_pr_ci_status_async`, etc. Use instead of ad-hoc `gh pr view` / `gh api` calls.
+
+If a helper is missing, add it to `utils/` rather than duplicating subprocess plumbing in the consumer.
+
+### No module-level globals or registration side-effects
+
+Module-level mutable state and `register_*` side-effect APIs are not allowed. Pass dependencies into constructors. A registry that needs extension takes its resolver map as a constructor argument; it does not expose a module-level `register_x()` that mutates a global dict.
+
+### No speculative plugin hooks
+
+Don't add extension points (registries, plugin loaders, scheme-resolver maps) for hypothetical second consumers. Hand-curate the built-in set; generalize only when a real second user lands. Three concrete lines beat a premature plugin API.
+
 ## Entry points
 
 | Subcommand | Module |
