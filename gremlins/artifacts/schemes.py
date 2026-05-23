@@ -49,7 +49,9 @@ class GitResolver:
         path = uri.path
         if path.startswith("range/"):
             range_str = path.removeprefix("range/")
-            out = proc.run_or_raise(["git", "log", "--format=%H %s", range_str], cwd=self._cwd)
+            out = proc.run_or_raise(
+                ["git", "log", "--format=%H %s", range_str], cwd=self._cwd
+            )
             commits: list[dict[str, str]] = []
             for line in out.splitlines():
                 sha, _, subject = line.partition(" ")
@@ -60,7 +62,9 @@ class GitResolver:
             return proc.run_or_raise(["git", "rev-parse", name], cwd=self._cwd)
         if path.startswith("commit/"):
             sha = path.removeprefix("commit/")
-            out = proc.run_or_raise(["git", "log", "-1", "--format=%H%n%an%n%ae%n%s", sha], cwd=self._cwd)
+            out = proc.run_or_raise(
+                ["git", "log", "-1", "--format=%H%n%an%n%ae%n%s", sha], cwd=self._cwd
+            )
             lines = out.splitlines()
             return {
                 "sha": lines[0],
@@ -96,7 +100,10 @@ class GitHubResolver:
         path = uri.path
         if path.startswith("pr/"):
             n = path.removeprefix("pr/")
-            raw = proc.run_or_raise(["gh", "pr", "view", n, "--json", "url,number,headRefName"], cwd=self._cwd)
+            raw = proc.run_or_raise(
+                ["gh", "pr", "view", n, "--json", "url,number,headRefName"],
+                cwd=self._cwd,
+            )
             data = json.loads(raw)
             return {
                 "url": data["url"],
@@ -105,7 +112,9 @@ class GitHubResolver:
             }
         if path.startswith("issue/"):
             n = path.removeprefix("issue/")
-            raw = proc.run_or_raise(["gh", "issue", "view", n, "--json", "url,number"], cwd=self._cwd)
+            raw = proc.run_or_raise(
+                ["gh", "issue", "view", n, "--json", "url,number"], cwd=self._cwd
+            )
             data = json.loads(raw)
             return {"url": data["url"], "number": data["number"]}
         raise ValueError(f"unrecognised gh URI path: {uri}")
