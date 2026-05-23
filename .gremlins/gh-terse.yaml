@@ -1,0 +1,25 @@
+default_client: claude:sonnet
+base_ref: main
+prompt_dir: prompts
+
+prompts:
+  code-style: gremlins:code_style.md
+  terse: terse_style.md
+  verify: [gremlins:verify_fix.md, gremlins:bail_section_fix.md]
+
+stages:
+  - { type: plan,      prompt: [code-style, terse, gremlins:plan_gh.md] }
+  - { type: implement, prompt: [code-style, terse, gremlins:implement_gh.md] }
+  - { type: apply, options: { cmds: ["ruff format ."] } }
+  - { type: verify,    options: { cmds: ["make check"] }, prompt: verify }
+  - { type: github-open-pull-request }
+  - { type: github-request-copilot-review }
+
+  - parallel:
+      - { type: github-wait-copilot }
+      - { type: github-review-pull-request, prompt: [code-style, terse, gremlins:github_review_pull_request.md] }
+      - { type: github-review-pull-request, client: claude:sonnet, prompt: [code-style, terse, complexity_review.md] }
+
+  - { type: github-address-pull-request-reviews, prompt: [code-style, terse, gremlins:github_address_pull_request_reviews.md, gremlins:bail_section.md] }
+  - { type: apply, options: { cmds: ["ruff format ."] } }
+  - { type: github-wait-ci, prompt: [terse, gremlins:ci_fix.md, gremlins:bail_section_fix.md] }

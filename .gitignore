@@ -9,4 +9,4 @@ build/
 plans/
 .at_venv
 .claude/
-.gremlins/
+.gremlins/env

@@ -1,0 +1,27 @@
+default_client: claude:sonnet
+base_ref: current
+
+prompt_dir: prompts
+
+prompts:
+  code-style: gremlins:code_style.md
+  small-diffs: small_diffs.md
+
+stages:
+  - name: chain
+    type: loop
+    options:
+      pr_stack: true
+      max_iterations: 30
+    body:
+      - { type: handoff, client: claude:opus, prompt: [gremlins:handoff.md, small-diffs] }
+      - { include: gh-terse }
+
+  - name: review-chain
+    type: review-code
+    client: claude:opus
+    prompt: [code-style, gremlins:review/chain.md]
+
+  - name: address-chain
+    type: address-code
+    prompt: [code-style, gremlins:address.md, gremlins:bail_section.md]
