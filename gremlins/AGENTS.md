@@ -42,7 +42,7 @@ If a helper is missing, add it to `utils/` rather than duplicating subprocess pl
 
 ### No module-level globals or registration side-effects
 
-Module-level mutable state and `register_*` side-effect APIs are not allowed. Pass dependencies into constructors. A registry that needs extension takes its resolver map as a constructor argument; it does not expose a module-level `register_x()` that mutates a global dict.
+Do not introduce new module-level mutable state or `register_*` side-effect APIs. Pass dependencies into constructors instead. A new registry that needs extension should take its resolver map as a constructor argument, not expose a module-level `register_x()` that mutates a global dict.
 
 ### No speculative plugin hooks
 
