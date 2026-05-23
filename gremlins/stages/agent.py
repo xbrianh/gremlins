@@ -56,16 +56,14 @@ class Agent(Stage):
         return stage
 
     async def run(self, state: State) -> Outcome:
-        registry = state.artifacts
-        if (self.in_map or self.out_map) and registry is None:
+        if state.artifacts is None:
             raise RuntimeError(f"stage {self.name!r}: state.artifacts is None")
-
-        if registry is not None:
-            for key, uri_str in self.out_map.items():
-                registry.bind(key, Uri.parse(uri_str))
+        registry = state.artifacts
 
         subs: dict[str, str] = {}
-        if registry is not None:
+        if self.in_map or self.out_map:
+            for key, uri_str in self.out_map.items():
+                registry.bind(key, Uri.parse(uri_str))
             for var, key in self.in_map.items():
                 subs[var] = to_str(registry.read(key))
 
@@ -79,9 +77,8 @@ class Agent(Stage):
             state, prompt, label=self.name, raw_path=raw_path, model=model, **opts
         )
 
-        if registry is not None:
-            for key, uri_str in self.out_map.items():
-                uri = Uri.parse(uri_str)
-                registry.resolver(uri.scheme).verify_produced(uri)
+        for key, uri_str in self.out_map.items():
+            uri = Uri.parse(uri_str)
+            registry.resolver(uri.scheme).verify_produced(uri)
 
         return Done()
