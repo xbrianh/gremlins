@@ -7,8 +7,6 @@ import subprocess
 
 import pytest
 
-import gremlins.artifacts.registry as registry_mod
-import gremlins.artifacts.uri as uri_mod
 from gremlins.artifacts.registry import Registry
 from gremlins.artifacts.schemes import (
     FileSessionResolver,
