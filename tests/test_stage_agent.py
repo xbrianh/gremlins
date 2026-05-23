@@ -176,10 +176,11 @@ def test_with_dict_rejects_non_dict_out(tmp_path):
         Agent.with_dict(d)
 
 
-# --- fallback registry when state.artifacts is None ---
+# --- registry always required ---
 
 
 def test_raises_when_state_artifacts_none(tmp_path):
+    """state.artifacts is always required."""
     client = FakeClaudeClient(fixtures={"my-agent": MINIMAL_EVENTS})
     state = State(
         data=StateData(),
@@ -188,7 +189,7 @@ def test_raises_when_state_artifacts_none(tmp_path):
         worktree=tmp_path,
         artifacts=None,
     )
-    agent = _make_agent(prompts=["Static"], in_map=None)
+    agent = _make_agent(prompts=["Static"])
 
     with pytest.raises(RuntimeError, match="state.artifacts is None"):
         asyncio.run(agent.run(state))

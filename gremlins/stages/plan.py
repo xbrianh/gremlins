@@ -12,6 +12,7 @@ from typing import Any
 
 from gremlins.errors import die
 from gremlins.executor.state import State
+from gremlins.stages.agent import Agent
 from gremlins.stages.agent_runner import run_agent
 from gremlins.stages.base import Stage, StageInput
 from gremlins.stages.outcome import Done, Outcome
@@ -124,16 +125,13 @@ class Plan(Stage):
                 plan_file=plan_md,
                 instructions=state.instructions,
             )
-            completed = await run_agent(
-                state,
-                prompt,
-                label="plan",
-                raw_path=state.session_dir / "stream-plan.jsonl",
+            agent = Agent(
+                self.name,
+                [prompt],
+                {},
+                out_map={"plan": "file://session/plan.md"},
             )
-            if not plan_md.exists() or plan_md.stat().st_size == 0:
-                snippet = (completed.text_result or "")[:200].strip()
-                detail = f"; model said: {snippet}" if snippet else ""
-                raise RuntimeError(f"plan stage did not produce {plan_md}{detail}")
+            await agent.run(state)
 
     async def _resolve_file_source(
         self, path: str, plan_md: pathlib.Path, state: State

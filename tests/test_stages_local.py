@@ -6,6 +6,7 @@ import subprocess
 import pytest
 from conftest import MINIMAL_EVENTS, ReviewCreatingClient
 
+from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData
@@ -38,11 +39,13 @@ def test_local_yaml_loads_and_validates(tmp_path):
 
 
 def _make_state(client, session_dir, *, gremlin_id=None, base_ref_sha=""):
-    return RuntimeState(
+    state = RuntimeState(
         data=StateData(gremlin_id=gremlin_id, base_ref_sha=base_ref_sha),
         client=client,
         session_dir=session_dir,
     )
+    state.artifacts = ArtifactRegistry(session_dir)
+    return state
 
 
 def _init_git_repo(path: pathlib.Path) -> None:
@@ -233,7 +236,7 @@ def test_plan_stage_raises_when_file_absent(tmp_path):
     )
     state = _make_state(client, session_dir)
     state.instructions = "do stuff"
-    with pytest.raises(RuntimeError, match="plan stage did not produce"):
+    with pytest.raises(FileNotFoundError, match="plan.md"):
         asyncio.run(stage.run(state))
     assert len(client.calls) == 1
     assert client.calls[0].label == "plan"
@@ -373,7 +376,7 @@ def test_plan_stage_includes_style_from_prompts(tmp_path):
     )
     state = _make_state(client, session_dir)
     state.instructions = "do stuff"
-    with pytest.raises(RuntimeError, match="plan stage did not produce"):
+    with pytest.raises(FileNotFoundError, match="plan.md"):
         asyncio.run(stage.run(state))
     assert "Be good." in client.calls[0].prompt
 

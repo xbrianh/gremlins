@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 from conftest import MINIMAL_EVENTS
 
+from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData
@@ -52,6 +53,7 @@ def _make_state(
         data=StateData(issue_num=issue_num, base_ref_sha=base_ref_sha),
         client=client,
         session_dir=tmp_path,
+        artifacts=ArtifactRegistry(tmp_path, cwd=tmp_path),
     )
     (tmp_path / "plan.md").write_text(plan_text, encoding="utf-8")
     if spec_text:
@@ -280,3 +282,17 @@ def test_empty_impl_with_prior_commit_artifacts_does_not_raise(
         ),
     ):
         asyncio.run(stage.run(state))
+
+
+def test_implement_forwards_options_via_agent(tmp_path: pathlib.Path) -> None:
+    """capture_events is forwarded to run_agent via Agent."""
+    stage, state = _make_state(tmp_path, prompts=[_TEMPLATE_LOCAL])
+    with patch(
+        "gremlins.stages.implement.classify_impl_outcome",
+        return_value=HeadAdvanced(commit_count=1),
+    ):
+        asyncio.run(stage.run(state))
+    assert len(state.client.calls) == 1
+    call = state.client.calls[0]
+    assert call.label == "implement"
+    assert call.capture_events is True

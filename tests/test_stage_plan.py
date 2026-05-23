@@ -7,7 +7,9 @@ import asyncio
 import pathlib
 
 import pytest
+from conftest import MINIMAL_EVENTS
 
+from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData
@@ -16,6 +18,27 @@ from gremlins.stages.plan import Plan
 
 def _state(session_dir: pathlib.Path, client: FakeClaudeClient) -> RuntimeState:
     return RuntimeState(data=StateData(), client=client, session_dir=session_dir)
+
+
+def _state_with_artifacts(
+    session_dir: pathlib.Path, client: FakeClaudeClient
+) -> RuntimeState:
+    state = RuntimeState(data=StateData(), client=client, session_dir=session_dir)
+    state.artifacts = ArtifactRegistry(session_dir)
+    return state
+
+
+class _PlanWritingClient(FakeClaudeClient):
+    """Writes plan.md to session_dir when the 'plan' agent runs."""
+
+    def __init__(self, session_dir: pathlib.Path) -> None:
+        super().__init__(fixtures={"plan": MINIMAL_EVENTS})
+        self._session_dir = session_dir
+
+    async def run(self, prompt: str, *, label: str, **kwargs):  # type: ignore[override]
+        if label == "plan":
+            (self._session_dir / "plan.md").write_text("# Plan\n", encoding="utf-8")
+        return await super().run(prompt, label=label, **kwargs)
 
 
 def test_plan_source_file_local(tmp_path: pathlib.Path) -> None:
@@ -242,3 +265,25 @@ def test_resolve_issue_source_cross_repo_clears_url(
     asyncio.run(stage.run(state))
     assert captured.get("issue_url") == ""
     assert captured.get("issue_num") == ""
+
+
+# --- Agent delegation (local branch) ---
+
+
+def test_plan_agent_local_delegates_via_agent(tmp_path: pathlib.Path) -> None:
+    """Local agent branch calls run_agent via Agent and plan.md passes verify_produced."""
+    stage = Plan("plan", ["write a plan to {plan_file}"], {})
+    client = _PlanWritingClient(tmp_path)
+    state = _state_with_artifacts(tmp_path, client)
+    asyncio.run(stage.run(state))
+    assert any(c.label == "plan" for c in client.calls)
+    assert (tmp_path / "plan.md").read_text() == "# Plan\n"
+
+
+def test_plan_agent_local_verify_catches_missing_plan(tmp_path: pathlib.Path) -> None:
+    """verify_produced raises FileNotFoundError when agent doesn't write plan.md."""
+    stage = Plan("plan", ["write a plan to {plan_file}"], {})
+    client = FakeClaudeClient(fixtures={"plan": MINIMAL_EVENTS})
+    state = _state_with_artifacts(tmp_path, client)
+    with pytest.raises(FileNotFoundError, match="plan.md"):
+        asyncio.run(stage.run(state))
