@@ -7,6 +7,18 @@ from gremlins.executor.state import State
 from gremlins.stages.outcome import Outcome
 
 
+def get_client_from_dict(d: dict[str, Any]) -> Client | None:
+    raw = d.get("client")
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        name = d.get("name") or d.get("type") or "?"
+        raise ValueError(
+            f"stage {name!r}: 'client' must be a string, got {type(raw)!r}"
+        )
+    return Client.parse(raw)
+
+
 class StageInput(NamedTuple):
     name: str
     type: type
@@ -38,8 +50,6 @@ class Stage:
 
     @classmethod
     def with_dict(cls, d: dict[str, Any], depth: int = 0) -> Stage:
-        from gremlins.pipeline.loader import get_client_from_dict
-
         stage = cls(d["name"], d.get("prompt") or [], d.get("options") or {})  # type: ignore[call-arg]
         stage.client = get_client_from_dict(d)
         return stage

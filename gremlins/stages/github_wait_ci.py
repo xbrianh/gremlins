@@ -9,7 +9,7 @@ from collections.abc import Callable
 from typing import Any
 
 from gremlins.executor.state import State
-from gremlins.stages.agent import bail_command, run_agent
+from gremlins.stages.agent_runner import bail_command, run_agent
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, Outcome
 from gremlins.utils.git import head_sha

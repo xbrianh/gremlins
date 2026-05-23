@@ -16,6 +16,8 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from gremlins import paths as _paths
+from gremlins.artifacts.engine import EngineContext
+from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.clients.client import Client
 from gremlins.utils.state_file import locked_update
 
@@ -539,6 +541,8 @@ class State:
     parent_stage: str = ""
     worktree: pathlib.Path | None = None
     worktree_parent: pathlib.Path | None = None
+    artifacts: ArtifactRegistry | None = None
+    engine_ctx: EngineContext | None = None
 
     @staticmethod
     def setup_dirs(

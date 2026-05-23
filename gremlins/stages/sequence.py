@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, cast
 
 from gremlins.executor.state import State
-from gremlins.stages.base import Stage
+from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.composite import child_state as _child_state
 from gremlins.stages.outcome import Done, Outcome
 
@@ -23,7 +23,7 @@ class SequenceStage(Stage):
 
     @classmethod
     def with_dict(cls, d: dict[str, Any], depth: int = 0) -> SequenceStage:
-        from gremlins.pipeline.loader import get_client_from_dict, parse_stages
+        from gremlins.pipeline.loader import parse_stages
 
         name = d.get("name") or ""
         raw_children: object = d.get("body") or []

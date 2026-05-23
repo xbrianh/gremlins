@@ -12,7 +12,7 @@ from typing import Any
 
 from gremlins.errors import die
 from gremlins.executor.state import State
-from gremlins.stages.agent import run_agent
+from gremlins.stages.agent_runner import run_agent
 from gremlins.stages.base import Stage, StageInput
 from gremlins.stages.outcome import Done, Outcome
 from gremlins.utils import proc

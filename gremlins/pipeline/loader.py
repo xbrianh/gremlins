@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from gremlins.clients.client import Client
 from gremlins.stages.address_code import AddressCode, GitHubAddressPullRequestReviews
+from gremlins.stages.agent import Agent
 from gremlins.stages.apply import Apply
 from gremlins.stages.base import Stage
 from gremlins.stages.cmd import Cmd
@@ -22,6 +22,7 @@ from gremlins.stages.sequence import SequenceStage
 from gremlins.stages.verify import Verify
 
 STAGE_TYPES: dict[str, type[Stage]] = {
+    "agent": Agent,
     "plan": Plan,
     "implement": Implement,
     "verify": Verify,
@@ -41,18 +42,6 @@ STAGE_TYPES: dict[str, type[Stage]] = {
     "cmd": Cmd,
     "apply": Apply,
 }
-
-
-def get_client_from_dict(d: dict[str, Any]) -> Client | None:
-    raw = d.get("client")
-    if raw is None:
-        return None
-    if not isinstance(raw, str):
-        name = d.get("name") or d.get("type") or "?"
-        raise ValueError(
-            f"stage {name!r}: 'client' must be a string, got {type(raw)!r}"
-        )
-    return Client.parse(raw)
 
 
 def fill_names(raw_stages: list[dict[str, Any]]) -> None:

@@ -1,6 +1,16 @@
 from __future__ import annotations
 
+import json
 import re
+from typing import Any
+
+
+def to_str(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, indent=2)
+    return str(value)
 
 
 def slugify(text: str, max_len: int = 40) -> str:

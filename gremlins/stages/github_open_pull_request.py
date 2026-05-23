@@ -8,8 +8,8 @@ from typing import Any, cast
 
 from gremlins.clients.protocol import CompletedRun
 from gremlins.executor.state import State
-from gremlins.stages.agent import run_agent
-from gremlins.stages.base import Stage
+from gremlins.stages.agent_runner import run_agent
+from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.outcome import Done, Outcome
 from gremlins.utils import proc
 from gremlins.utils.github import extract_gh_url
@@ -54,8 +54,6 @@ class GitHubOpenPullRequest(Stage):
 
     @classmethod
     def with_dict(cls, d: dict[str, Any], depth: int = 0) -> GitHubOpenPullRequest:
-        from gremlins.pipeline.loader import get_client_from_dict
-
         options: dict[str, Any] = d.get("options") or {}
         stage = cls(
             d["name"],

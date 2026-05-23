@@ -11,6 +11,8 @@ import shutil
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
+from gremlins.artifacts.engine import EngineContext
+from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
 from gremlins.executor.state import State, StateData
 from gremlins.pipeline import Pipeline as _PipelineData
@@ -216,6 +218,12 @@ class Gremlin:
             spec=self.spec,
             instructions=[self.instructions] if self.instructions else [],
         )
+        registry = ArtifactRegistry(
+            session_dir=self.session_dir,
+            cwd=self.worktree_dir,
+        )
+        # attempt is always "" here; the loop patches it per-iteration via dataclasses.replace.
+        engine_ctx = EngineContext(loop_iteration=1, attempt="", current_scope=())
         built: list[tuple[str, Callable[[], Awaitable[Any]]]] = []
         for e in stages:
             stage_client = e.client or PACKAGE_DEFAULT
@@ -231,6 +239,8 @@ class Gremlin:
                 instructions=self.instructions,
                 test_client=self.test_client,
                 worktree_parent=self.worktree_parent,
+                artifacts=registry,
+                engine_ctx=engine_ctx,
             )
             built.append((e.name, stage_state.make_runner(e, scope=stages)))
         return built

@@ -12,7 +12,7 @@ from conftest import MINIMAL_EVENTS
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData
-from gremlins.stages.agent import run_agent
+from gremlins.stages.agent_runner import run_agent
 from gremlins.stages.outcome import Bail
 
 

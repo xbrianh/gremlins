@@ -1,12 +1,15 @@
 # `gremlins/artifacts/`
 
-Artifact registry and URI model. Standalone — nothing in `gremlins/stages/` or
-`gremlins/executor/` imports from here yet.
+Artifact registry and URI model. The registry is wired into runs via
+`state.artifacts` (an `ArtifactRegistry` instance constructed in
+`gremlins/executor/gremlin.py` and stored on `State`). This wiring
+applies to the main `Gremlin` executor path; subprocess child paths
+(`run_child.py`, `spawn/child.py`) construct `State` without artifacts.
 
 ## Public surface
 
 ```python
-from gremlins.artifacts.registry import Registry, MissingArtifact
+from gremlins.artifacts.registry import ArtifactRegistry, MissingArtifact
 from gremlins.artifacts.uri import Uri
 from gremlins.artifacts.engine import EngineContext
 ```
@@ -25,7 +28,7 @@ from gremlins.artifacts.engine import EngineContext
 ## Registry API
 
 ```python
-r = Registry(session_dir=state.session_dir, cwd=state.cwd)
+r = ArtifactRegistry(session_dir=state.session_dir, cwd=state.cwd)
 r.bind("plan", Uri.parse("file://session/plan.md"))
 r.produced("plan")          # True
 r.resolve("plan")           # Uri(scheme="file", path="session/plan.md")
@@ -34,6 +37,9 @@ r.keys()                    # iterable of bound keys
 ```
 
 `read()` on an unbound key raises `MissingArtifact(key)`.
+
+In normal pipeline runs `state.artifacts` is already constructed — use it directly
+rather than constructing a new registry.
 
 ## EngineContext vs artifacts
 

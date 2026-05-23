@@ -1,70 +1,84 @@
-"""Single chokepoint for agentic stage execution."""
+"""Agent primitive stage: resolves in: artifacts, renders prompt, invokes agent, verifies out:."""
 
 from __future__ import annotations
 
-import json
-import pathlib
-import shlex
-from typing import Any
+from typing import Any, cast
 
-from gremlins.clients.protocol import CompletedRun
-from gremlins.executor.state import State, resolve_state_file
-from gremlins.stages.outcome import Bail
-
-
-def _read_bail_detail(bail_path: pathlib.Path) -> str:
-    try:
-        return json.loads(bail_path.read_text(encoding="utf-8")).get("detail", "")
-    except Exception:
-        return ""
+from gremlins.artifacts.uri import Uri
+from gremlins.executor.state import State
+from gremlins.stages.agent_runner import run_agent
+from gremlins.stages.base import Stage, get_client_from_dict
+from gremlins.stages.outcome import Done, Outcome
+from gremlins.utils.text import to_str
 
 
-def _check_bail(state: State) -> None:
-    if not state.data.attempt:
-        return
-    sf = state.data.state_file or resolve_state_file(state.data.gremlin_id)
-    if sf is None:
-        return
-    bail_path = sf.parent / f"bail_{state.data.attempt}.json"
-    if bail_path.exists():
-        raise Bail(_read_bail_detail(bail_path))
+class Agent(Stage):
+    """YAML type: agent.
 
+    in:  var_name -> registry_key   (resolved content substituted into prompt)
+    out: registry_key -> uri_string (bound before run, verified after)
+    """
 
-def bail_command(state: State) -> str:
-    script = (
-        "import sys,json,os,pathlib; "
-        "d=pathlib.Path(os.environ['GREMLIN_STATE_DIR']); "
-        "a=os.environ['GREMLIN_ATTEMPT']; "
-        "p=d/f'bail_{a}.json'; "
-        "p.exists() or p.write_text(json.dumps({'class':sys.argv[1],'detail':sys.argv[2] if len(sys.argv)>2 else ''}))"
-    )
-    return f"python -c {shlex.quote(script)}"
+    type = "agent"
 
+    def __init__(
+        self,
+        name: str,
+        prompts: list[str],
+        options: dict[str, Any],
+        *,
+        in_map: dict[str, str] | None = None,
+        out_map: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(name)
+        self.prompts = prompts
+        self.options = options
+        self.in_map = in_map or {}
+        self.out_map = out_map or {}
 
-async def run_agent(
-    state: State,
-    prompt: str,
-    *,
-    label: str,
-    raw_path: pathlib.Path | None = None,
-    model: str | None = None,
-    **kw: Any,
-) -> CompletedRun:
-    """Invoke the agent, inject bail-marker env, and raise Bail if the marker is set."""
-    extra_env: dict[str, str] = {}
-    sf = state.data.state_file or resolve_state_file(state.data.gremlin_id)
-    if state.data.attempt and sf is not None:
-        extra_env["GREMLIN_ATTEMPT"] = state.data.attempt
-        extra_env["GREMLIN_STATE_DIR"] = str(sf.parent)
-    resolved_model = model or state.stage_model or state.client.model
-    completed = await state.client.run(
-        prompt,
-        label=label,
-        model=resolved_model,
-        raw_path=raw_path,
-        cwd=state.worktree,
-        extra_env=extra_env or None,
-        **kw,
-    )
-    _check_bail(state)
-    return completed
+    @classmethod
+    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> Agent:
+        name = d.get("name") or ""
+        raw_in: object = d.get("in") or {}
+        raw_out: object = d.get("out") or {}
+        if not isinstance(raw_in, dict):
+            raise ValueError(f"stage {name!r}: 'in' must be a mapping")
+        if not isinstance(raw_out, dict):
+            raise ValueError(f"stage {name!r}: 'out' must be a mapping")
+        stage = cls(
+            name,
+            d.get("prompt") or [],
+            d.get("options") or {},
+            in_map=dict(cast(dict[str, str], raw_in)),
+            out_map=dict(cast(dict[str, str], raw_out)),
+        )
+        stage.client = get_client_from_dict(d)
+        return stage
+
+    async def run(self, state: State) -> Outcome:
+        if state.artifacts is None:
+            raise RuntimeError(f"stage {self.name!r}: state.artifacts is None")
+        registry = state.artifacts
+
+        for key, uri_str in self.out_map.items():
+            registry.bind(key, Uri.parse(uri_str))
+
+        subs: dict[str, str] = {}
+        for var, key in self.in_map.items():
+            subs[var] = to_str(registry.read(key))
+
+        template = "\n\n".join(self.prompts).rstrip()
+        prompt = template.format(**subs) if subs else template
+
+        raw_path = state.session_dir / f"stream-{self.name}.jsonl"
+        opts = dict(self.options)
+        model = cast(str | None, opts.pop("model", None))
+        await run_agent(
+            state, prompt, label=self.name, raw_path=raw_path, model=model, **opts
+        )
+
+        for key, uri_str in self.out_map.items():
+            uri = Uri.parse(uri_str)
+            registry.resolver(uri.scheme).verify_produced(uri)
+
+        return Done()
