@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import pathlib
 import re
-import subprocess
 from typing import Any
 
 from gremlins.artifacts.uri import Uri
+from gremlins.utils import git as git_utils
+from gremlins.utils import proc
 
 
 class FileSessionResolver:
@@ -44,17 +45,11 @@ class GitResolver:
     def __init__(self, cwd: pathlib.Path | None = None) -> None:
         self._cwd = cwd
 
-    def _run(self, cmd: list[str]) -> str:
-        result = subprocess.run(
-            cmd, cwd=self._cwd, capture_output=True, text=True, check=True
-        )
-        return result.stdout.strip()
-
     def read(self, uri: Uri) -> Any:
         path = uri.path
         if path.startswith("range/"):
             range_str = path.removeprefix("range/")
-            out = self._run(["git", "log", "--format=%H %s", range_str])
+            out = proc.run_or_raise(["git", "log", "--format=%H %s", range_str], cwd=self._cwd)
             commits: list[dict[str, str]] = []
             for line in out.splitlines():
                 sha, _, subject = line.partition(" ")
@@ -62,10 +57,10 @@ class GitResolver:
             return commits
         if path.startswith("ref/"):
             name = path.removeprefix("ref/")
-            return self._run(["git", "rev-parse", name])
+            return proc.run_or_raise(["git", "rev-parse", name], cwd=self._cwd)
         if path.startswith("commit/"):
             sha = path.removeprefix("commit/")
-            out = self._run(["git", "log", "-1", "--format=%H%n%an%n%ae%n%s", sha])
+            out = proc.run_or_raise(["git", "log", "-1", "--format=%H%n%an%n%ae%n%s", sha], cwd=self._cwd)
             lines = out.splitlines()
             return {
                 "sha": lines[0],
@@ -82,14 +77,10 @@ class GitResolver:
 
 def snapshot_head_before(cwd: pathlib.Path | None = None) -> str:
     """Return current HEAD sha for use with ArtifactRegistry.bind_git_commit_range()."""
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return result.stdout.strip()
+    sha = git_utils.head_sha(cwd=cwd)
+    if not sha:
+        raise RuntimeError("could not resolve HEAD")
+    return sha
 
 
 _PR_URL_RE = re.compile(r"https://github\.com/[^/]+/[^/]+/pull/(\d+)")
@@ -101,21 +92,11 @@ class GitHubResolver:
     def __init__(self, cwd: pathlib.Path | None = None) -> None:
         self._cwd = cwd
 
-    def _gh(self, args: list[str]) -> str:
-        result = subprocess.run(
-            ["gh", *args],
-            cwd=self._cwd,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return result.stdout.strip()
-
     def read(self, uri: Uri) -> Any:
         path = uri.path
         if path.startswith("pr/"):
             n = path.removeprefix("pr/")
-            raw = self._gh(["pr", "view", n, "--json", "url,number,headRefName"])
+            raw = proc.run_or_raise(["gh", "pr", "view", n, "--json", "url,number,headRefName"], cwd=self._cwd)
             data = json.loads(raw)
             return {
                 "url": data["url"],
@@ -124,7 +105,7 @@ class GitHubResolver:
             }
         if path.startswith("issue/"):
             n = path.removeprefix("issue/")
-            raw = self._gh(["issue", "view", n, "--json", "url,number"])
+            raw = proc.run_or_raise(["gh", "issue", "view", n, "--json", "url,number"], cwd=self._cwd)
             data = json.loads(raw)
             return {"url": data["url"], "number": data["number"]}
         raise ValueError(f"unrecognised gh URI path: {uri}")

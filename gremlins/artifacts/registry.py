@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import pathlib
-import subprocess
 from collections.abc import Iterable
 from typing import Any
 
 from gremlins.artifacts._protocol import SchemeResolver
 from gremlins.artifacts.schemes import FileSessionResolver, GitHubResolver, GitResolver
 from gremlins.artifacts.uri import Uri
+from gremlins.utils import git as git_utils
 
 
 class MissingArtifact(KeyError):
@@ -55,11 +55,7 @@ class ArtifactRegistry:
         return self._resolvers[scheme]
 
     def bind_git_commit_range(self, key: str, base_sha: str) -> None:
-        head_sha = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=self._cwd,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-        self.bind(key, Uri.parse(f"git://range/{base_sha}..{head_sha}"))
+        sha = git_utils.head_sha(cwd=self._cwd)
+        if not sha:
+            raise RuntimeError("could not resolve HEAD")
+        self.bind(key, Uri.parse(f"git://range/{base_sha}..{sha}"))
