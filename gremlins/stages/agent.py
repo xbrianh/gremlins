@@ -73,7 +73,9 @@ class Agent(Stage):
         raw_path = state.session_dir / f"stream-{self.name}.jsonl"
         opts = dict(self.options)
         model = cast(str | None, opts.pop("model", None))
-        await run_agent(state, prompt, label=self.name, raw_path=raw_path, model=model, **opts)
+        await run_agent(
+            state, prompt, label=self.name, raw_path=raw_path, model=model, **opts
+        )
 
         for key, uri_str in self.out_map.items():
             uri = Uri.parse(uri_str)
