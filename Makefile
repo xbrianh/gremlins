@@ -17,6 +17,6 @@ typecheck:
 test: $(TEST_FILES)
 
 $(TEST_FILES):
-	PYTHONPATH='' pytest $@ || { code=$$?; [ $$code -eq 5 ] && exit 0 || exit $$code; }
+	PYTHONPATH='' python -m pytest $@ || { code=$$?; [ $$code -eq 5 ] && exit 0 || exit $$code; }
 
 check: lint format typecheck

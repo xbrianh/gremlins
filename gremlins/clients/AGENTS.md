@@ -96,6 +96,10 @@ that accept these names, so the block cannot be expressed as argv. The minimum
 safe default for non-bypass runs is no extra flags. If Copilot's CLI grows a
 per-tool allow-list flag in the future, translate `allowed_tools` there.
 
+## Tests
+
+Integration tests that exercise each backend's `native_block` wiring against a live API live in `tests/test_permissions_integration.py`. Run with `pytest -m integration`.
+
 ## Load-bearing invariants
 
 - `STREAM_IDLE_TIMEOUT` and `STREAM_IDLE_BACKOFF` in `config.py` are the
