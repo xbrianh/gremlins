@@ -110,7 +110,11 @@ class Implement(Stage):
         agent = Agent(
             self.name,
             [prompt],
-            {**self.options, "idle_timeout": IMPLEMENT_IDLE_TIMEOUT, "capture_events": True},
+            {
+                **self.options,
+                "idle_timeout": IMPLEMENT_IDLE_TIMEOUT,
+                "capture_events": True,
+            },
         )
         await agent.run(state)
 
