@@ -7,9 +7,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from gremlins.artifacts._protocol import SchemeResolver
-from gremlins.artifacts.uri import Uri, extra_scheme_names
-
-_extra_resolvers: dict[str, SchemeResolver] = {}
+from gremlins.artifacts.uri import Uri
 
 
 class MissingArtifact(KeyError):
@@ -18,17 +16,12 @@ class MissingArtifact(KeyError):
         self.key = key
 
 
-def register_scheme(scheme: str, resolver: SchemeResolver) -> None:
-    """Register a custom scheme resolver. The scheme becomes valid in Uri.parse()."""
-    extra_scheme_names.add(scheme)
-    _extra_resolvers[scheme] = resolver
-
-
 class Registry:
     def __init__(
         self,
         session_dir: pathlib.Path,
         cwd: pathlib.Path | None = None,
+        extra_resolvers: dict[str, SchemeResolver] | None = None,
     ) -> None:
         from gremlins.artifacts.schemes import (  # noqa: PLC0415
             FileSessionResolver,
@@ -41,7 +34,7 @@ class Registry:
             "file": FileSessionResolver(session_dir),
             "git": GitResolver(cwd),
             "gh": GhResolver(cwd),
-            **_extra_resolvers,
+            **(extra_resolvers or {}),
         }
 
     def bind(self, key: str, uri: Uri) -> None:

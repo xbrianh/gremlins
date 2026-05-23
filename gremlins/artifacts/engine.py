@@ -17,7 +17,7 @@ class EngineContext:
 
     loop_iteration: int
     attempt: str
-    current_scope: list[str]
+    current_scope: tuple[str, ...]
 
     def format(self, template: str) -> str:
         scope = "/".join(self.current_scope)

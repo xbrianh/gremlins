@@ -5,11 +5,6 @@ from __future__ import annotations
 import dataclasses
 
 _BUILTIN_SCHEMES: frozenset[str] = frozenset({"file", "git", "gh"})
-extra_scheme_names: set[str] = set()
-
-
-def _known_schemes() -> frozenset[str]:
-    return _BUILTIN_SCHEMES | frozenset(extra_scheme_names)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -22,10 +17,9 @@ class Uri:
         if "://" not in s:
             raise ValueError(f"invalid URI (missing '://'): {s!r}")
         scheme, path = s.split("://", 1)
-        known = _known_schemes()
-        if scheme not in known:
+        if scheme not in _BUILTIN_SCHEMES:
             raise ValueError(
-                f"unknown scheme {scheme!r}; registered schemes: {sorted(known)}"
+                f"unknown scheme {scheme!r}; known schemes: {sorted(_BUILTIN_SCHEMES)}"
             )
         return cls(scheme=scheme, path=path)
 

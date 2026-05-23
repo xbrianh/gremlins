@@ -7,8 +7,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import gremlins.artifacts.registry as registry_mod
-import gremlins.artifacts.uri as uri_mod
 from gremlins.artifacts.registry import MissingArtifact, Registry
 from gremlins.artifacts.uri import Uri
 
@@ -51,17 +49,11 @@ def test_keys_returns_bound_keys(tmp_path: pathlib.Path) -> None:
     assert set(r.keys()) == {"a", "b"}
 
 
-def test_read_delegates_to_mock_resolver(
-    tmp_path: pathlib.Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_read_delegates_to_mock_resolver(tmp_path: pathlib.Path) -> None:
     mock_resolver = MagicMock()
     mock_resolver.read.return_value = b"hello"
 
-    monkeypatch.setitem(registry_mod._extra_resolvers, "mock", mock_resolver)
-    monkeypatch.setattr(uri_mod, "extra_scheme_names", {"mock"})
-
-    r = make_registry(tmp_path)
+    r = Registry(session_dir=tmp_path, extra_resolvers={"mock": mock_resolver})
     uri = Uri(scheme="mock", path="some/path")
     r.bind("thing", uri)
     result = r.read("thing")

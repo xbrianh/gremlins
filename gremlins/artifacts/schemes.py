@@ -18,9 +18,16 @@ class FileSessionResolver:
         self._session_dir = session_dir
 
     def _path(self, uri: Uri) -> pathlib.Path:
-        # uri.path is "session/<name>"
-        name = uri.path.removeprefix("session/")
-        return self._session_dir / name
+        if not uri.path.startswith("session/"):
+            raise ValueError(f"file:// URI must start with 'session/': {uri}")
+        name = uri.path[len("session/"):]
+        p = (self._session_dir / name).resolve()
+        base = self._session_dir.resolve()
+        try:
+            p.relative_to(base)
+        except ValueError:
+            raise ValueError(f"path escapes session directory: {uri}") from None
+        return p
 
     def read(self, uri: Uri) -> bytes:
         return self._path(uri).read_bytes()

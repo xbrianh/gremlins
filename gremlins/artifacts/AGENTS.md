@@ -6,7 +6,9 @@ Artifact registry and URI model. Standalone — nothing in `gremlins/stages/` or
 ## Public surface
 
 ```python
-from gremlins.artifacts import Registry, Uri, register_scheme, EngineContext, MissingArtifact
+from gremlins.artifacts.registry import Registry, MissingArtifact
+from gremlins.artifacts.uri import Uri
+from gremlins.artifacts.engine import EngineContext
 ```
 
 ## URI schemes
@@ -17,10 +19,10 @@ from gremlins.artifacts import Registry, Uri, register_scheme, EngineContext, Mi
 | `git://range/<base>..<head>` | `git://range/abc123..def456` | Commit range (SHAs) |
 | `git://ref/<name>` | `git://ref/main` | Git ref → resolved SHA |
 | `git://commit/<sha>` | `git://commit/abc123` | Single commit metadata |
-| `gh://pr/<n>` | `gh://pr/42` | GitHub PR (url, number, branch) |
-| `gh://issue/<n>` | `gh://issue/7` | GitHub issue (url, number) |
+| `gh://pr/<n>` | `gh://pr/42` | GitHub PR (url, number, branch) via `gh pr view` |
+| `gh://issue/<n>` | `gh://issue/7` | GitHub issue (url, number) via `gh issue view` |
 
-Custom schemes: call `register_scheme(scheme, resolver)` before constructing any `Registry`.
+Custom schemes: pass `extra_resolvers={"custom": resolver}` to `Registry(...)`.
 
 ## Registry API
 

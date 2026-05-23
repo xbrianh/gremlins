@@ -28,7 +28,7 @@ def test_parse_unknown_scheme_raises() -> None:
         Uri.parse("unknown://foo")
     msg = str(exc_info.value)
     assert "unknown" in msg
-    assert "registered schemes" in msg
+    assert "known schemes" in msg
 
 
 def test_parse_missing_separator_raises() -> None:
