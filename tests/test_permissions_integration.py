@@ -15,8 +15,7 @@ from gremlins.clients.providers.openai_agents import make_openai_client, make_xa
 from gremlins.permissions.policy import Policy
 
 _PROMPT = (
-    "Run `echo gremlins-allowed` via the Bash tool. "
-    "Reply with exactly the word DONE."
+    "Run `echo gremlins-allowed` via the Bash tool. Reply with exactly the word DONE."
 )
 
 _ANTHROPIC_SKIP = pytest.mark.skipif(
@@ -112,9 +111,7 @@ _SDK_DENY_PARAMS = [
 @pytest.mark.parametrize("make_client", _SDK_ALLOW_PARAMS)
 def test_default_block_allows_standard_toolset(make_client: Any) -> None:
     client = make_client()
-    result = asyncio.run(
-        client.run(_PROMPT, label="perm-allow", capture_events=True)
-    )
+    result = asyncio.run(client.run(_PROMPT, label="perm-allow", capture_events=True))
     assert result.exit_code == 0
     assert result.text_result and "DONE" in result.text_result
     assert _bash_ran(result.events), "Bash was not called"
@@ -136,9 +133,7 @@ def test_default_block_allows_standard_toolset_copilot() -> None:
 @pytest.mark.parametrize("make_client", _SDK_DENY_PARAMS)
 def test_override_block_denies_disallowed_tool(make_client: Any) -> None:
     client = make_client()
-    result = asyncio.run(
-        client.run(_PROMPT, label="perm-deny", capture_events=True)
-    )
+    result = asyncio.run(client.run(_PROMPT, label="perm-deny", capture_events=True))
     assert not _bash_ran(result.events), "Bash ran despite being blocked"
     assert not any(
         "gremlins-allowed" in line for line in _bash_output_lines(result.events)
