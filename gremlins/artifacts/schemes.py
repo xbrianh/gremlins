@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import pathlib
 import re
 from typing import Any
 
 from gremlins.artifacts.uri import Uri
 from gremlins.utils import git as git_utils
+from gremlins.utils import github as gh_utils
 from gremlins.utils import proc
 
 
@@ -100,22 +100,14 @@ class GitHubResolver:
         path = uri.path
         if path.startswith("pr/"):
             n = path.removeprefix("pr/")
-            raw = proc.run_or_raise(
-                ["gh", "pr", "view", n, "--json", "url,number,headRefName"],
-                cwd=self._cwd,
+            data = gh_utils.view_pr(
+                n, project_root=str(self._cwd) if self._cwd else None
             )
-            data = json.loads(raw)
-            return {
-                "url": data["url"],
-                "number": data["number"],
-                "branch": data["headRefName"],
-            }
+            return {"url": data["url"], "number": data["number"], "branch": data["headRefName"]}
         if path.startswith("issue/"):
             n = path.removeprefix("issue/")
-            raw = proc.run_or_raise(
-                ["gh", "issue", "view", n, "--json", "url,number"], cwd=self._cwd
-            )
-            data = json.loads(raw)
+            repo = gh_utils.current_repo()
+            data = gh_utils.view_issue(n, repo)
             return {"url": data["url"], "number": data["number"]}
         raise ValueError(f"unrecognised gh URI path: {uri}")
 

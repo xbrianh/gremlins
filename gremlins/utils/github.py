@@ -79,7 +79,7 @@ def view_pr(pr: str, *, project_root: str | None = None) -> dict[str, Any]:
     """Fetch url and headRefName for a PR via gh pr view."""
     try:
         r = proc.run(
-            ["gh", "pr", "view", pr, "--json", "url,headRefName"],
+            ["gh", "pr", "view", pr, "--json", "url,number,headRefName"],
             timeout=VIEW_PR_TIMEOUT,
             cwd=project_root,
         )
