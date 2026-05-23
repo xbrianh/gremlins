@@ -103,7 +103,11 @@ class GitHubResolver:
             data = gh_utils.view_pr(
                 n, project_root=str(self._cwd) if self._cwd else None
             )
-            return {"url": data["url"], "number": data["number"], "branch": data["headRefName"]}
+            return {
+                "url": data["url"],
+                "number": data["number"],
+                "branch": data["headRefName"],
+            }
         if path.startswith("issue/"):
             n = path.removeprefix("issue/")
             repo = gh_utils.current_repo()
