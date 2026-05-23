@@ -179,7 +179,8 @@ def test_with_dict_rejects_non_dict_out(tmp_path):
 # --- fallback registry when state.artifacts is None ---
 
 
-def test_raises_when_state_artifacts_none(tmp_path):
+def test_raises_when_state_artifacts_none_with_out_map(tmp_path):
+    """state.artifacts is required when out_map is non-empty."""
     client = FakeClaudeClient(fixtures={"my-agent": MINIMAL_EVENTS})
     state = State(
         data=StateData(),
@@ -188,7 +189,21 @@ def test_raises_when_state_artifacts_none(tmp_path):
         worktree=tmp_path,
         artifacts=None,
     )
-    agent = _make_agent(prompts=["Static"], in_map=None)
+    agent = _make_agent(prompts=["Static"], out_map={"plan": "file://session/plan.md"})
 
     with pytest.raises(RuntimeError, match="state.artifacts is None"):
         asyncio.run(agent.run(state))
+
+
+def test_no_raise_when_state_artifacts_none_no_maps(tmp_path):
+    """Agent with empty in:/out: can run without a registry (e.g. implement delegation)."""
+    client = FakeClaudeClient(fixtures={"my-agent": MINIMAL_EVENTS})
+    state = State(
+        data=StateData(),
+        client=client,
+        session_dir=tmp_path,
+        worktree=tmp_path,
+        artifacts=None,
+    )
+    agent = _make_agent(prompts=["Static"], in_map=None, out_map=None)
+    asyncio.run(agent.run(state))  # must not raise

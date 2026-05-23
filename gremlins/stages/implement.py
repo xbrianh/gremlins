@@ -7,7 +7,7 @@ import pathlib
 from typing import Any
 
 from gremlins.executor.state import State
-from gremlins.stages.agent_runner import run_agent
+from gremlins.stages.agent import Agent
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Done, Outcome
 from gremlins.utils import proc
@@ -107,14 +107,12 @@ class Implement(Stage):
             plan_location_note=plan_location_note,
         )
 
-        await run_agent(
-            state,
-            prompt,
-            label="implement",
-            raw_path=state.session_dir / "stream-implement.jsonl",
-            capture_events=True,
-            idle_timeout=IMPLEMENT_IDLE_TIMEOUT,
+        agent = Agent(
+            self.name,
+            [prompt],
+            {**self.options, "idle_timeout": IMPLEMENT_IDLE_TIMEOUT, "capture_events": True},
         )
+        await agent.run(state)
 
         outcome = classify_impl_outcome(pre, cwd=cwd_arg)
         if isinstance(outcome, DivergentHead):

@@ -280,3 +280,17 @@ def test_empty_impl_with_prior_commit_artifacts_does_not_raise(
         ),
     ):
         asyncio.run(stage.run(state))
+
+
+def test_implement_forwards_options_via_agent(tmp_path: pathlib.Path) -> None:
+    """idle_timeout and capture_events are forwarded to run_agent via Agent."""
+    stage, state = _make_state(tmp_path, prompts=[_TEMPLATE_LOCAL])
+    with patch(
+        "gremlins.stages.implement.classify_impl_outcome",
+        return_value=HeadAdvanced(commit_count=1),
+    ):
+        asyncio.run(stage.run(state))
+    assert len(state.client.calls) == 1
+    call = state.client.calls[0]
+    assert call.label == "implement"
+    assert call.capture_events is True
