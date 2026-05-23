@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
@@ -123,22 +124,27 @@ class LoopStage(Stage):
         return result
 
     async def run(self, state: State) -> Outcome:
-        runners = (
-            self._body_runners
-            if self._body_runners is not None
-            else self._build_runners(state)
-        )
         for iteration in range(1, self._max_iterations + 1):
             state.record_state_field(loop_iteration=iteration)
+            if state.engine_ctx is not None:
+                iter_ctx = dataclasses.replace(state.engine_ctx, loop_iteration=iteration)
+                iter_state = dataclasses.replace(state, engine_ctx=iter_ctx)
+            else:
+                iter_state = state
             if self._on_iteration_start:
-                self._on_iteration_start(state)
-            head_before = _git.head_sha(state.cwd)
+                self._on_iteration_start(iter_state)
+            head_before = _git.head_sha(iter_state.cwd)
+            runners = (
+                self._body_runners
+                if self._body_runners is not None
+                else self._build_runners(iter_state)
+            )
             had_failure = await _dispatch_runners(
                 runners, iteration, self._max_iterations
             )
 
             if not had_failure:
-                if self._until(state, iteration, head_before):
+                if self._until(iter_state, iteration, head_before):
                     return Done()
                 logger.info("loop iteration %d: continuing", iteration)
                 if iteration == self._max_iterations:
