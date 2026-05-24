@@ -62,7 +62,9 @@ async def run_shell_async(
     )
     out_b, err_b = await p.communicate()
     assert p.returncode is not None
-    return subprocess.CompletedProcess(cmd, p.returncode, out_b.decode(), err_b.decode())
+    return subprocess.CompletedProcess(
+        cmd, p.returncode, out_b.decode(), err_b.decode()
+    )
 
 
 async def run_async(
