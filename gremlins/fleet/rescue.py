@@ -903,7 +903,7 @@ def do_rescue(target: str, headless: bool = False, from_boss: bool = False) -> b
         print(f"Relaunch step: resuming gremlin {gremlin_id} in the background...")
         report["relaunch_attempted"] = True
         try:
-            _resume(gremlin_id)
+            _resume(gremlin_id, is_rescue=True)
         except GremlinAlreadyRunning as exc:
             detail = str(exc)
             # The gremlin is already running — skip relaunch regardless of how it got there.

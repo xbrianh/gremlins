@@ -659,6 +659,7 @@ def _patch_state_for_resume(
     stage: str,
     pipeline_args: list[str],
     pipeline_path: str,
+    is_rescue: bool = False,
 ) -> None:
     for marker in ("finished", "summarized"):
         try:
@@ -673,7 +674,7 @@ def _patch_state_for_resume(
     except (ValueError, TypeError):
         pass
 
-    StateData.load(gremlin_id).patch(
+    patch_kwargs: dict[str, Any] = dict(
         _delete=(
             "exit_code",
             "ended_at",
@@ -688,12 +689,15 @@ def _patch_state_for_resume(
         stage=stage,
         rescued_at=now_iso,
         resumed_from_stage=stage,
-        rescue_count=rescue_count + 1,
         pid=None,
         pipeline_args=pipeline_args,
         pipeline_path=pipeline_path,
         client=str(state.get("client") or PACKAGE_DEFAULT),
     )
+    if is_rescue:
+        patch_kwargs["rescue_count"] = rescue_count + 1
+
+    StateData.load(gremlin_id).patch(**patch_kwargs)
 
     try:
         with open(state_dir / "log", "a", encoding="utf-8") as f:
@@ -737,7 +741,7 @@ def _spawn_resume(
     )
 
 
-def resume(gremlin_id: str, *, graft: str | None = None) -> None:
+def resume(gremlin_id: str, *, graft: str | None = None, is_rescue: bool = False) -> None:
     state_dir, state = _load_resume_state(gremlin_id)
     _check_resume_preconditions(gremlin_id, state_dir, state, graft)
     pipeline_args, pipeline_path, project_root = _resolve_resume_pipeline(
@@ -750,7 +754,7 @@ def resume(gremlin_id: str, *, graft: str | None = None) -> None:
     if graft is not None:
         stage = _append_graft(state_dir, graft, project_root)
     _patch_state_for_resume(
-        gremlin_id, state_dir, state, stage, pipeline_args, pipeline_path
+        gremlin_id, state_dir, state, stage, pipeline_args, pipeline_path, is_rescue=is_rescue
     )
     p = _spawn_resume(
         gremlin_id, state_dir, state, pipeline_path, pipeline_args, stage, project_root
