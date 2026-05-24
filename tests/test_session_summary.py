@@ -67,7 +67,6 @@ def _make_state(
 def _invoke(
     hook_event: str,
     project_root: str,
-    state_root: pathlib.Path,
     monkeypatch,
     capsys,
     *,
@@ -110,7 +109,7 @@ def _invoke(
 
 
 def test_no_gremlins_empty_state_root(sandbox, monkeypatch, capsys):
-    rc, out, err = _invoke("SessionStart", "/proj", sandbox.state, monkeypatch, capsys)
+    rc, out, err = _invoke("SessionStart", "/proj", monkeypatch, capsys)
     assert rc == 0
     assert out == ""
     assert err == ""
@@ -123,7 +122,7 @@ def test_running_gremlin_shown_at_session_start(sandbox, monkeypatch, capsys):
     )
 
     rc, out, err = _invoke(
-        "SessionStart", project_root, sandbox.state, monkeypatch, capsys
+        "SessionStart", project_root, monkeypatch, capsys
     )
     assert rc == 0
     assert "running" in out or "running" in err
@@ -138,7 +137,7 @@ def test_running_gremlin_not_shown_at_user_prompt_submit(sandbox, monkeypatch, c
     )
 
     rc, out, err = _invoke(
-        "UserPromptSubmit", project_root, sandbox.state, monkeypatch, capsys
+        "UserPromptSubmit", project_root, monkeypatch, capsys
     )
     assert rc == 0
     assert out == ""
@@ -156,7 +155,7 @@ def test_newly_finished_gremlin_shown_at_session_start(sandbox, monkeypatch, cap
     )
 
     rc, out, err = _invoke(
-        "SessionStart", project_root, sandbox.state, monkeypatch, capsys
+        "SessionStart", project_root, monkeypatch, capsys
     )
     assert rc == 0
     assert "gr-done01" in out
@@ -178,7 +177,7 @@ def test_newly_finished_gremlin_shown_at_user_prompt_submit(
     )
 
     rc, out, err = _invoke(
-        "UserPromptSubmit", project_root, sandbox.state, monkeypatch, capsys
+        "UserPromptSubmit", project_root, monkeypatch, capsys
     )
     assert rc == 0
     assert "gr-done02" in out
@@ -200,7 +199,7 @@ def test_already_summarized_gremlin_not_re_announced(sandbox, monkeypatch, capsy
     )
 
     rc, out, err = _invoke(
-        "SessionStart", project_root, sandbox.state, monkeypatch, capsys
+        "SessionStart", project_root, monkeypatch, capsys
     )
     assert rc == 0
     assert "finished since last check" not in out
@@ -223,7 +222,7 @@ def test_closed_gremlin_not_in_finished_block(sandbox, monkeypatch, capsys):
     )
 
     rc, out, err = _invoke(
-        "SessionStart", project_root, sandbox.state, monkeypatch, capsys
+        "SessionStart", project_root, monkeypatch, capsys
     )
     assert rc == 0
     assert "gr-closed1" not in out
@@ -246,7 +245,7 @@ def test_stalled_gremlin_shown_as_stalled(sandbox, monkeypatch, capsys):
     monkeypatch.setattr(_const, "BG_STALL_SECS", 100)
 
     rc, out, err = _invoke(
-        "SessionStart", project_root, sandbox.state, monkeypatch, capsys
+        "SessionStart", project_root, monkeypatch, capsys
     )
     assert rc == 0
     assert "stalled?" in out
@@ -265,7 +264,7 @@ def test_crashed_gremlin_shown_as_crashed(sandbox, monkeypatch, capsys):
     )
 
     rc, out, err = _invoke(
-        "SessionStart", project_root, sandbox.state, monkeypatch, capsys
+        "SessionStart", project_root, monkeypatch, capsys
     )
     assert rc == 0
     assert "crashed" in out or "dead" in out
@@ -279,7 +278,6 @@ def test_skip_summary_env_short_circuits(sandbox, monkeypatch, capsys):
     rc, out, err = _invoke(
         "SessionStart",
         project_root,
-        sandbox.state,
         monkeypatch,
         capsys,
         skip_summary=True,
@@ -293,7 +291,7 @@ def test_project_root_mismatch_filtered_out(sandbox, monkeypatch, capsys):
     _make_state(sandbox.state, "gr-other1", "/other-project", finished=True)
 
     rc, out, err = _invoke(
-        "SessionStart", "/myproject", sandbox.state, monkeypatch, capsys
+        "SessionStart", "/myproject", monkeypatch, capsys
     )
     assert rc == 0
     assert "gr-other1" not in out
@@ -349,7 +347,7 @@ def test_stdout_is_valid_json_with_hook_event_name(sandbox, monkeypatch, capsys)
     _make_state(sandbox.state, "gr-json01", project_root, finished=True)
 
     rc, out, err = _invoke(
-        "SessionStart", project_root, sandbox.state, monkeypatch, capsys
+        "SessionStart", project_root, monkeypatch, capsys
     )
     assert rc == 0
     data = json.loads(out)
@@ -370,7 +368,7 @@ def test_exit_code_shown_in_finished_block(sandbox, monkeypatch, capsys):
     )
 
     rc, out, err = _invoke(
-        "SessionStart", project_root, sandbox.state, monkeypatch, capsys
+        "SessionStart", project_root, monkeypatch, capsys
     )
     assert rc == 0
     assert "exit 2" in out
@@ -387,7 +385,7 @@ def test_description_shown_in_summary(sandbox, monkeypatch, capsys):
     )
 
     rc, out, err = _invoke(
-        "SessionStart", project_root, sandbox.state, monkeypatch, capsys
+        "SessionStart", project_root, monkeypatch, capsys
     )
     assert rc == 0
     assert "add feature X" in out

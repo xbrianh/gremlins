@@ -168,17 +168,16 @@ def test_local_main_does_not_clobber_external_state(tmp_path, monkeypatch, sandb
 
 
 def _make_state_dir(state_root, gremlin_id):
-    """Create state dir with a minimal state.json and return the file path."""
     state_dir = state_root / gremlin_id
     state_dir.mkdir(parents=True)
     sf = state_dir / "state.json"
     sf.write_text(json.dumps({"id": gremlin_id, "stage": "implement"}))
-    return state_root, sf
+    return sf
 
 
 def test_set_stage_noop_when_gremlin_id_unset(sandbox):
     """set_stage is a no-op when gremlin_id is None (autouse already clears GREMLIN_ID)."""
-    state_root, sf = _make_state_dir(sandbox.state, "gr-noop-test")
+    sf = _make_state_dir(sandbox.state, "gr-noop-test")
     # GREMLIN_ID is already unset via autouse fixture
     mtime_before = sf.stat().st_mtime_ns
     StateData.load(None).set_stage("running")
@@ -188,7 +187,7 @@ def test_set_stage_noop_when_gremlin_id_unset(sandbox):
 def test_set_stage_writes_stage_and_timestamp(sandbox):
     """set_stage writes stage and stage_updated_at to state.json."""
     gremlin_id = "gr-stage-write-test"
-    state_root, sf = _make_state_dir(sandbox.state, gremlin_id)
+    sf = _make_state_dir(sandbox.state, gremlin_id)
 
     StateData.load(gremlin_id).set_stage("review-code")
 
@@ -204,7 +203,7 @@ def test_set_stage_writes_stage_and_timestamp(sandbox):
 def test_set_stage_with_sub_stage(sandbox):
     """set_stage with sub_stage writes the sub_stage key."""
     gremlin_id = "gr-substage-test"
-    state_root, sf = _make_state_dir(sandbox.state, gremlin_id)
+    sf = _make_state_dir(sandbox.state, gremlin_id)
 
     StateData.load(gremlin_id).set_stage("implement", sub_stage={"attempt": 2})
 
@@ -216,7 +215,7 @@ def test_set_stage_with_sub_stage(sandbox):
 def test_set_stage_removes_sub_stage_when_none(sandbox):
     """Calling set_stage without sub_stage removes a previously written sub_stage key."""
     gremlin_id = "gr-substage-del-test"
-    state_root, sf = _make_state_dir(sandbox.state, gremlin_id)
+    sf = _make_state_dir(sandbox.state, gremlin_id)
 
     StateData.load(gremlin_id).set_stage("implement", sub_stage={"k": 1})
     assert "sub_stage" in json.loads(sf.read_text())
@@ -243,7 +242,7 @@ def test_set_stage_noop_when_state_json_missing(sandbox):
 
 def test_write_bail_file_creates_bail_file(sandbox):
     gremlin_id = "gr-wbf-write"
-    state_root, sf = _make_state_dir(sandbox.state, gremlin_id)
+    sf = _make_state_dir(sandbox.state, gremlin_id)
 
     StateData.load(gremlin_id).write_bail_file(
         "other", "something went wrong", attempt="stage-abc123"
@@ -258,7 +257,7 @@ def test_write_bail_file_creates_bail_file(sandbox):
 
 def test_write_bail_file_noop_when_gremlin_id_none(sandbox):
     gremlin_id = "gr-wbf-noop"
-    state_root, sf = _make_state_dir(sandbox.state, gremlin_id)
+    sf = _make_state_dir(sandbox.state, gremlin_id)
     mtime_before = sf.stat().st_mtime_ns
     StateData.load(None).write_bail_file("other", attempt="some-attempt")
     assert sf.stat().st_mtime_ns == mtime_before
@@ -266,7 +265,7 @@ def test_write_bail_file_noop_when_gremlin_id_none(sandbox):
 
 def test_write_bail_file_noop_when_attempt_empty(sandbox):
     gremlin_id = "gr-wbf-empty-attempt"
-    state_root, sf = _make_state_dir(sandbox.state, gremlin_id)
+    sf = _make_state_dir(sandbox.state, gremlin_id)
     StateData.load(gremlin_id).write_bail_file("other", attempt="")
     bail_files = list((sandbox.state / gremlin_id).glob("bail_*.json"))
     assert not bail_files
