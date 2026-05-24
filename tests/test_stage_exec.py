@@ -7,7 +7,7 @@ import pathlib
 
 import pytest
 
-from gremlins.artifacts.registry import ArtifactRegistry, MissingArtifact
+from gremlins.artifacts.registry import MissingArtifact
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import StateData, build_state
