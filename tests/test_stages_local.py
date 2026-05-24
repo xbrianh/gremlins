@@ -6,7 +6,8 @@ import subprocess
 import pytest
 from conftest import MINIMAL_EVENTS, ReviewCreatingClient
 
-from gremlins.artifacts.registry import ArtifactRegistry
+from gremlins.artifacts.registry import ArtifactRegistry, MissingArtifact
+from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData
@@ -15,9 +16,7 @@ from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.stages import implement, plan
 from gremlins.stages.address_code import AddressCode
 from gremlins.stages.implement import _render_spec_block
-from gremlins.stages.parallel import ParallelStage
 from gremlins.stages.review_code import ReviewCode
-from gremlins.stages.review_code import ReviewCode as _ReviewCode
 
 _BUNDLED_PROMPTS = (
     pathlib.Path(__file__).resolve().parent.parent / "gremlins" / "prompts"
@@ -338,6 +337,7 @@ def _make_address_code_stage(
         "address-code",
         [(_BUNDLED_PROMPTS / "address.md").read_text(encoding="utf-8")],
         {},
+        in_map={"text": "review-code"},
     )
     return stage
 
@@ -349,6 +349,9 @@ def test_address_code_stage_calls_client_with_review_content(tmp_path):
     client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
     stage = _make_address_code_stage(client, tmp_path)
     state = _make_state(client, tmp_path)
+    state.artifacts.bind(
+        "review-code", Uri.parse("file://session/review-code-sonnet.md")
+    )
     asyncio.run(stage.run(state))
 
     assert len(client.calls) == 1
@@ -384,7 +387,7 @@ def test_plan_stage_includes_style_from_prompts(tmp_path):
 def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
     """When state.worktree is set (parallel child), client.run gets cwd=worktree
     so claude -p reads/writes the isolated worktree, not the parent process cwd."""
-    client = ReviewCreatingClient(fixtures={"review-code:fake": MINIMAL_EVENTS})
+    client = ReviewCreatingClient(fixtures={"review-code-fake": MINIMAL_EVENTS})
     worktree = tmp_path / "wt"
     worktree.mkdir()
     stage = _make_review_code_stage(client, tmp_path)
@@ -393,13 +396,14 @@ def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
         client=client,
         session_dir=tmp_path,
         worktree=worktree,
+        artifacts=ArtifactRegistry(tmp_path),
     )
     asyncio.run(stage.run(state))
     assert client.calls[0].cwd == worktree
 
 
 def test_review_code_stage_includes_style_from_prompts(tmp_path):
-    client = ReviewCreatingClient(fixtures={"review-code:fake": MINIMAL_EVENTS})
+    client = ReviewCreatingClient(fixtures={"review-code-fake": MINIMAL_EVENTS})
     stage = ReviewCode(
         "review-code",
         [
@@ -425,8 +429,12 @@ def test_address_code_stage_includes_style_from_prompts(tmp_path):
             (_BUNDLED_PROMPTS / "address.md").read_text(encoding="utf-8"),
         ],
         {},
+        in_map={"text": "review-code"},
     )
     state = _make_state(client, tmp_path)
+    state.artifacts.bind(
+        "review-code", Uri.parse("file://session/review-code-sonnet.md")
+    )
     asyncio.run(stage.run(state))
     assert "Be good." in client.calls[0].prompt
 
@@ -434,7 +442,7 @@ def test_address_code_stage_includes_style_from_prompts(tmp_path):
 def test_review_code_stage_writes_stage_to_state(tmp_path, make_state_dir):
     gremlin_id = "test-gr-id"
     state_dir = make_state_dir(gremlin_id)
-    client = ReviewCreatingClient(fixtures={"review-code:fake": MINIMAL_EVENTS})
+    client = ReviewCreatingClient(fixtures={"review-code-fake": MINIMAL_EVENTS})
     stage = _make_review_code_stage(client, tmp_path, gremlin_id=gremlin_id)
     state = _make_state(client, tmp_path, gremlin_id=gremlin_id)
     asyncio.run(stage.run(state))
@@ -448,44 +456,5 @@ def test_address_code_stage_raises_on_missing_review_files(tmp_path, make_state_
     client = FakeClaudeClient(fixtures={})
     stage = _make_address_code_stage(client, tmp_path, gremlin_id=gremlin_id)
     state = _make_state(client, tmp_path, gremlin_id=gremlin_id)
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(MissingArtifact):
         asyncio.run(stage.run(state))
-
-
-def test_address_code_finds_review_files_in_parallel_subdirs(tmp_path):
-    # Simulate parallel group: reviews_dir/<child>/<stage>-<model>.md
-    reviews_dir = tmp_path / "reviews"
-    child1_dir = reviews_dir / "review-code"
-    child2_dir = reviews_dir / "review-code-fidelity"
-    child1_dir.mkdir(parents=True)
-    child2_dir.mkdir(parents=True)
-    (child1_dir / "review-code-sonnet.md").write_text("# Review 1\nFindings A.\n")
-    (child2_dir / "review-code-fidelity-sonnet.md").write_text(
-        "# Review 2\nFindings B.\n"
-    )
-
-    client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
-    stage = AddressCode(
-        "address-code",
-        [(_BUNDLED_PROMPTS / "address.md").read_text(encoding="utf-8")],
-        {},
-    )
-    parallel_stage = ParallelStage(
-        "reviews",
-        [
-            _ReviewCode("review-code", [], {}),
-            _ReviewCode("review-code-fidelity", [], {}),
-        ],
-    )
-    state = RuntimeState(
-        data=StateData(),
-        client=client,
-        session_dir=tmp_path,
-        current_scope=[parallel_stage],
-    )
-    asyncio.run(stage.run(state))
-
-    assert len(client.calls) == 1
-    prompt = client.calls[0].prompt
-    assert "Findings A." in prompt
-    assert "Findings B." in prompt

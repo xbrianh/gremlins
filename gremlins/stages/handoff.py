@@ -16,7 +16,7 @@ from typing import Any, TypeVar, cast
 
 from gremlins.clients.client import Client
 from gremlins.executor.state import State
-from gremlins.stages.agent_runner import run_agent
+from gremlins.stages.agent import Agent
 from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.outcome import Bail, Done, NeedsFix, Outcome
 from gremlins.utils import proc
@@ -446,7 +446,6 @@ class Handoff(Stage):
 
     async def run(self, state: State) -> Outcome:
         session_dir = state.session_dir
-        client = state.client
 
         boss_spec = session_dir / "boss-spec.md"
         plan_md = session_dir / "plan.md"
@@ -476,7 +475,6 @@ class Handoff(Stage):
             original_plan=str(boss_spec),
             base_ref=base_ref,
             session_dir=session_dir,
-            client=client,
             state=state,
         )
 
@@ -508,17 +506,22 @@ class Handoff(Stage):
         original_plan: str,
         base_ref: str,
         session_dir: pathlib.Path,
-        client: Any,
         state: State,
     ) -> tuple[str, dict[str, Any]]:
         out_path = session_dir / f"handoff-{handoff_n:03d}.md"
+        child_plan_path = session_dir / f"handoff-{handoff_n:03d}-child.md"
         signal_path = session_dir / f"handoff-{handoff_n:03d}.state.json"
 
+        plan_text = pathlib.Path(current_plan).read_text(encoding="utf-8")
         forward_spec = (
             pathlib.Path(original_plan).read_bytes()
             != pathlib.Path(current_plan).read_bytes()
         )
-        model_str = str(client)
+        spec_text = (
+            pathlib.Path(original_plan).read_text(encoding="utf-8")
+            if forward_spec
+            else None
+        )
 
         logger.info(
             "handoff %d: plan=%s, spec=%s, base=%s",
@@ -528,26 +531,27 @@ class Handoff(Stage):
             base_ref[:12] if len(base_ref) >= 12 else base_ref,
         )
 
-        async def _run_fn(prompt: str) -> None:
-            await with_reap_after_async(
-                state.client,
-                HANDOFF_TIMEOUT,
-                run_agent(state, prompt, label="handoff"),
-            )
-
-        args = argparse.Namespace(
-            plan=current_plan,
-            spec=original_plan if forward_spec else None,
-            out=str(out_path),
-            base=base_ref,
-            client=model_str,
-            timeout=HANDOFF_TIMEOUT,
-            rev=None,
+        branch, git_log, git_diff = await collect_git_context(base_ref)
+        prompt = build_prompt(
+            plan_text=plan_text,
+            branch=branch,
+            git_log=git_log,
+            git_diff=git_diff,
+            out_path=out_path,
+            child_plan_path=child_plan_path,
+            signal_path=signal_path,
+            spec_text=spec_text,
         )
 
-        rc = await run(client, args, run_fn=_run_fn)
-        if rc != 0:
-            raise RuntimeError(f"handoff agent exited {rc}")
+        agent = Agent(
+            "handoff",
+            [prompt],
+            {},
+            out_map={
+                f"handoff-{handoff_n:03d}": f"file://session/handoff-{handoff_n:03d}.md"
+            },
+        )
+        await with_reap_after_async(state.client, HANDOFF_TIMEOUT, agent.run(state))
 
         if not signal_path.exists():
             raise RuntimeError(f"handoff signal file not written: {signal_path}")
@@ -570,6 +574,11 @@ class Handoff(Stage):
         sig_data["out_path"] = str(out_path)
         sig_data["signal_path"] = str(signal_path)
         logger.info("handoff %d result: %s", handoff_n, exit_state)
+
+        await sanitize_rolling_plan(
+            state.client, out_path, spec=state.client, timeout=60
+        )
+
         return exit_state, sig_data
 
     async def _resolve_base_ref(self, state: State) -> str:

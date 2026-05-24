@@ -142,8 +142,8 @@ MINIMAL_EVENTS = [
 # orchestrator smoke tests and the GREMLIN_ID-isolation regression tests stay
 # in sync if the label scheme changes.
 REVIEW_LABELS = {
-    "review-code:sonnet",
-    "review-code:fake",
+    "review-code-sonnet",
+    "review-code-fake",
 }
 
 
@@ -154,7 +154,7 @@ class ReviewCreatingClient(FakeClaudeClient):
     finishes. Shared between test_orchestrator_local and test_state_isolation."""
 
     async def run(self, prompt, *, label, **kwargs):
-        if label.startswith("review-code:"):
+        if label.startswith("review-code-"):
             m = re.search(r"`([^`]+\.md)`\s+is the canonical", prompt)
             assert m, f"regex did not match review-code prompt for label {label!r}"
             out = pathlib.Path(m.group(1))

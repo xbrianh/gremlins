@@ -2,97 +2,49 @@
 
 from __future__ import annotations
 
-import glob
-import pathlib
-import re
-from typing import Any
+from typing import Any, cast
 
 from gremlins.executor.state import State
-from gremlins.stages.agent_runner import run_agent
+from gremlins.stages.agent import Agent
 from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.outcome import Done, Outcome
-
-MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-
-
-def _review_stage_info(
-    state: State,
-) -> tuple[list[str], dict[str, pathlib.Path]]:
-    names: list[str] = []
-    dirs: dict[str, pathlib.Path] = {}
-    scope = state.current_scope or (
-        list(state.pipeline_data.stages) if state.pipeline_data else []
-    )
-    for s in scope:
-        if s.type == "parallel":
-            for child in s.body:
-                if child.type == "review-code":
-                    names.append(child.name)
-                    dirs[child.name] = state.session_dir / s.name / child.name
-        elif s.type == "review-code":
-            names.append(s.name)
-            dirs[s.name] = state.session_dir
-    return names, dirs
-
-
-def _model_from(path: pathlib.Path, stage_name: str) -> str:
-    stem = path.stem
-    prefix = f"{stage_name}-"
-    model = stem[len(prefix) :] if stem.startswith(prefix) else ""
-    if not model or not MODEL_RE.match(model):
-        raise ValueError(
-            f"cannot extract a valid model name from review file: {path.name}"
-        )
-    return model
 
 
 class AddressCode(Stage):
     type = "address-code"
 
-    def __init__(self, name: str, prompts: list[str], options: dict[str, Any]) -> None:
+    @classmethod
+    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> AddressCode:
+        name = d.get("name") or ""
+        raw_in: object = d.get("in") or {}
+        if not isinstance(raw_in, dict):
+            raise ValueError(f"stage {name!r}: 'in' must be a mapping")
+        stage = cls(
+            name,
+            d.get("prompt") or [],
+            d.get("options") or {},
+            in_map=dict(cast(dict[str, str], raw_in)),
+        )
+        stage.client = get_client_from_dict(d)
+        return stage
+
+    def __init__(
+        self,
+        name: str,
+        prompts: list[str],
+        options: dict[str, Any],
+        *,
+        in_map: dict[str, str] | None = None,
+    ) -> None:
         super().__init__(name)
         self.prompts = prompts
         self.options = options
+        self.in_map = in_map or {}
 
     async def run(self, state: State) -> Outcome:
-        inputs = self._inputs_from_local(state)
-        await self._run_local(inputs, state)
+        agent = Agent(self.name, self.prompts, self.options, in_map=self.in_map)
+        await agent.run(state)
         return Done()
-
-    def _inputs_from_local(self, state: State) -> dict[str, str]:
-        names, dirs = _review_stage_info(state)
-        if not names:
-            names = ["review-code"]
-        review_files: list[tuple[str, pathlib.Path]] = []
-        for stage_name in names:
-            search_dir = dirs.get(stage_name, state.session_dir)
-            for m in sorted(glob.glob(str(search_dir / f"{stage_name}-*.md"))):
-                review_files.append((stage_name, pathlib.Path(m)))
-        if not review_files:
-            stages_str = ", ".join(names)
-            searched = ", ".join(str(dirs.get(s, state.session_dir)) for s in names)
-            raise FileNotFoundError(
-                f"no review files found in [{searched}] (stages: {stages_str})"
-            )
-        first_stage_name, first_path = review_files[0]
-        review_model = _model_from(first_path, first_stage_name)
-        text = "\n\n---\n\n".join(
-            p.read_text(encoding="utf-8") for _, p in review_files
-        )
-        return {"text": text, "review_model": review_model}
-
-    async def _run_local(self, inputs: dict[str, str], state: State) -> None:
-        template = "\n\n".join(self.prompts).rstrip()
-        address_prompt = template.format(
-            model=inputs["review_model"],
-            text=inputs["text"],
-        )
-        await run_agent(
-            state,
-            address_prompt,
-            label="address-code",
-            raw_path=state.session_dir / "stream-address.jsonl",
-        )
 
 
 class GitHubAddressPullRequestReviews(Stage):
@@ -135,11 +87,6 @@ class GitHubAddressPullRequestReviews(Stage):
                 pr_url=pr_url,
             )
         )
-        await run_agent(
-            state,
-            prompt,
-            label="github-address-pull-request-reviews",
-            raw_path=state.session_dir
-            / "stream-github-address-pull-request-reviews.jsonl",
-        )
+        agent = Agent(self.name, [prompt], self.options)
+        await agent.run(state)
         return Done()

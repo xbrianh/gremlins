@@ -56,7 +56,7 @@ def test_local_main_plan_mode(tmp_path, monkeypatch):
 
     labels = [c.label for c in client.calls]
     assert labels[0] == "implement"
-    assert labels[1] == "review-code:sonnet"
+    assert labels[1] == "review-code-sonnet"
     assert labels[2] == "address-code"
 
 
@@ -113,7 +113,7 @@ def test_local_main_resume_from_review_code_allows_existing_git_changes(
 
     client = _ReviewCreatingClient(
         fixtures={
-            "review-code:sonnet": MINIMAL_EVENTS,
+            "review-code-sonnet": MINIMAL_EVENTS,
             "address-code": MINIMAL_EVENTS,
         }
     )
@@ -128,7 +128,7 @@ def test_local_main_resume_from_review_code_allows_existing_git_changes(
 
     assert result == 0
     assert [call.label for call in client.calls] == [
-        "review-code:sonnet",
+        "review-code-sonnet",
         "address-code",
     ]
 
@@ -146,7 +146,7 @@ def test_local_main_client_specifier_model(tmp_path, monkeypatch):
         "gremlins.executor.run.resolve_session_dir",
         lambda gremlin_id=None: session_dir,
     )
-    review_label = "review-code:gpt-4o"
+    review_label = "review-code-gpt-4o"
     client = _ReviewCreatingClient(
         fixtures={
             "implement": MINIMAL_EVENTS,
@@ -297,7 +297,7 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
         "gremlins.pipeline.Pipeline.from_yaml", _from_yaml_copilot_default
     )
 
-    review_label = "review-code:gpt-5.4"
+    review_label = "review-code-gpt-5.4"
     client = _ReviewCreatingClient(
         fixtures={
             "implement": MINIMAL_EVENTS,

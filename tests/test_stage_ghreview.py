@@ -8,6 +8,7 @@ import pathlib
 from conftest import MINIMAL_EVENTS
 from conftest import gh_pipeline as _gh_pipeline
 
+from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData
@@ -36,6 +37,7 @@ def _make_stage(
         client=client,
         session_dir=tmp_path,
         pipeline_data=_gh_pipeline(),
+        artifacts=ArtifactRegistry(tmp_path),
     )
     return stage, client, state
 
