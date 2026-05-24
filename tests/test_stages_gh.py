@@ -67,7 +67,8 @@ def test_gh_review_prompt_includes_bail_content(tmp_path: pathlib.Path) -> None:
         client, tmp_path, pr_url="https://github.com/owner/repo/pull/1"
     )
     asyncio.run(stage.run(state))
-    assert "python -c" in client.calls[0].prompt
+    assert "BAIL:" in client.calls[0].prompt
+    assert "python -c" not in client.calls[0].prompt
 
 
 def test_gh_review_bail_rubric(tmp_path: pathlib.Path) -> None:
@@ -83,7 +84,7 @@ def test_gh_review_bail_rubric(tmp_path: pathlib.Path) -> None:
     assert "anything a human should weigh in on" not in prompt
 
 
-def test_gh_review_parallel_child_uses_new_bail_command(
+def test_gh_review_parallel_child_prompt_includes_sentinel(
     tmp_path: pathlib.Path,
 ) -> None:
     client = FakeClaudeClient(fixtures={"github-review-pull-request": MINIMAL_EVENTS})
@@ -98,9 +99,9 @@ def test_gh_review_parallel_child_uses_new_bail_command(
         pipeline_data=_gh_pipeline(),
     )
     asyncio.run(stage.run(state))
-    assert "python -c" in client.calls[0].prompt
-    assert "GREMLIN_STATE_DIR" in client.calls[0].prompt
-    assert "gremlins.bail" not in client.calls[0].prompt
+    assert "BAIL:" in client.calls[0].prompt
+    assert "python -c" not in client.calls[0].prompt
+    assert "GREMLIN_STATE_DIR" not in client.calls[0].prompt
 
 
 def _make_gh_address(
@@ -151,7 +152,7 @@ def test_gh_address_prompt_includes_bail_content(tmp_path: pathlib.Path) -> None
     )
 
 
-def test_gh_address_parallel_child_uses_new_bail_command(
+def test_gh_address_parallel_child_prompt_includes_sentinel(
     tmp_path: pathlib.Path,
 ) -> None:
     client = FakeClaudeClient(
@@ -168,6 +169,6 @@ def test_gh_address_parallel_child_uses_new_bail_command(
         pipeline_data=_gh_pipeline(),
     )
     asyncio.run(stage.run(state))
-    assert "python -c" in client.calls[0].prompt
-    assert "GREMLIN_STATE_DIR" in client.calls[0].prompt
-    assert "gremlins.bail" not in client.calls[0].prompt
+    assert "BAIL:" in client.calls[0].prompt
+    assert "python -c" not in client.calls[0].prompt
+    assert "GREMLIN_STATE_DIR" not in client.calls[0].prompt

@@ -228,7 +228,7 @@ def test_commit_instr_in_fix_prompt(tmp_path):
     assert "stage the changed files" in state.client.calls[0].prompt
 
 
-def test_parallel_child_fix_prompt_uses_new_bail_command(tmp_path):
+def test_parallel_child_fix_prompt_includes_sentinel_instruction(tmp_path):
     client = FakeClaudeClient(fixtures={"verify-fix-1": MINIMAL_EVENTS})
     _bail_fix_path = (
         pathlib.Path(__file__).resolve().parent.parent
@@ -253,9 +253,9 @@ def test_parallel_child_fix_prompt_uses_new_bail_command(tmp_path):
     with pytest.raises(Bail):
         asyncio.run(stage.run(state))
 
-    assert "python -c" in state.client.calls[0].prompt
-    assert "gremlins.bail" not in state.client.calls[0].prompt
-    assert "GREMLIN_STATE_DIR" in state.client.calls[0].prompt
+    assert "BAIL:" in state.client.calls[0].prompt
+    assert "python -c" not in state.client.calls[0].prompt
+    assert "GREMLIN_STATE_DIR" not in state.client.calls[0].prompt
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +280,7 @@ def test_verify_fix_reads_latest_log_and_runs_agent(tmp_path):
     state = _make_fix_state(tmp_path, client)
     stage = VerifyFix(
         "fix",
-        ["fix: {verify_output} {commands_section} {bail_command} {diff_text}"],
+        ["fix: {verify_output} {commands_section} {diff_text}"],
         "cmds",
     )
     outcome = asyncio.run(stage.run(state))
@@ -307,7 +307,7 @@ def test_verify_fix_uses_loop_iteration(tmp_path):
     state.data.loop_iteration = 2
     stage = VerifyFix(
         "fix",
-        ["fix: {verify_output} {commands_section} {bail_command} {diff_text}"],
+        ["fix: {verify_output} {commands_section} {diff_text}"],
         "cmds",
     )
     asyncio.run(stage.run(state))

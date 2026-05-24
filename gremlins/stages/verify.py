@@ -7,7 +7,7 @@ import pathlib
 from typing import Any
 
 from gremlins.executor.state import State
-from gremlins.stages.agent_runner import bail_command, run_agent
+from gremlins.stages.agent_runner import run_agent
 from gremlins.stages.base import Stage
 from gremlins.stages.cmd import Cmd
 from gremlins.stages.loop import LoopStage
@@ -45,7 +45,6 @@ class VerifyFix(Stage):
         diff = _diff_text(state.cwd)
         template = "\n\n".join(self.prompts).rstrip()
         fix_prompt = template.format(
-            bail_command=bail_command(state),
             commands_section=self._commands_section,
             verify_output=log_text,
             diff_text=diff,

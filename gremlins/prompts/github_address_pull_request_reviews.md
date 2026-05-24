@@ -74,7 +74,7 @@ Use `gh issue create` with:
 - **Title**: a short distillation of the comment (no special prefix). Aim for a sentence fragment that names the defect, not the comment ID.
 - **Body**: must stand on its own — a reader should not need to chase the PR to understand the issue. Include:
   - A short summary of the defect in your own words.
-  - The reviewer's comment, quoted or summarized. **Before quoting, scan for secrets or sensitive data (credentials, API keys, tokens, internal URLs, customer data). If present, redact them with `[redacted]` — or if redaction isn't clean, skip filing and bail with `{bail_command} secrets "..."` instead. Issues are public and permanent.**
+  - The reviewer's comment, quoted or summarized. **Before quoting, scan for secrets or sensitive data (credentials, API keys, tokens, internal URLs, customer data). If present, redact them with `[redacted]` — or if redaction isn't clean, skip filing and end your final message with `BAIL: secrets: <one-line reason>` instead. Issues are public and permanent.**
   - A PR cross-link (`Ref #<pr-number>` for same-repo, `Ref <owner>/<repo>#<pr-number>` cross-repo).
   - A permalink to the originating review comment (`html_url` from the API response).
 
