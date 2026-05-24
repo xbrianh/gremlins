@@ -53,7 +53,9 @@ class Exec(Stage):
 
     async def run(self, state: State) -> Outcome:
         if (self.in_map or self.out_map) and state.artifacts is None:
-            raise RuntimeError(f"exec {self.name}: in/out bindings require an artifact registry")
+            raise RuntimeError(
+                f"exec {self.name}: in/out bindings require an artifact registry"
+            )
 
         extra_env: dict[str, str] = {}
         if state.artifacts is not None:
