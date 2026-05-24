@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import os
 import pathlib
+import secrets
 from collections.abc import Iterable
 from typing import Any
 
@@ -31,19 +34,36 @@ class ArtifactRegistry:
         self,
         session_dir: pathlib.Path,
         cwd: pathlib.Path | None = None,
+        persist_path: pathlib.Path | None = None,
     ) -> None:
         self._cwd = cwd
+        self._persist_path = persist_path
         self._bindings: dict[str, Uri] = {}
         self._resolvers: dict[str, SchemeResolver] = {
             "file": FileSessionResolver(session_dir),
             "git": GitResolver(cwd),
             "gh": GitHubResolver(cwd),
         }
+        if persist_path is not None and persist_path.exists():
+            try:
+                data = json.loads(persist_path.read_text(encoding="utf-8"))
+                for k, v in data.items():
+                    self._bindings[k] = Uri.parse(v)
+            except Exception:
+                pass
 
     def bind(self, key: str, uri: Uri) -> None:
         if key in self._bindings:
             raise DuplicateArtifact(key, self._bindings[key], uri)
         self._bindings[key] = uri
+        if self._persist_path:
+            data = {k: str(v) for k, v in self._bindings.items()}
+            tmp = self._persist_path.with_name(
+                self._persist_path.name + f".{os.getpid()}.{secrets.token_hex(4)}.tmp"
+            )
+            self._persist_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(data), encoding="utf-8")
+            os.replace(tmp, self._persist_path)
 
     def resolve(self, key: str) -> Uri:
         try:
@@ -69,3 +89,22 @@ class ArtifactRegistry:
         if not sha:
             raise RuntimeError("could not resolve HEAD")
         self.bind(key, Uri.parse(f"git://range/{base_sha}..{sha}"))
+
+
+def read_pr_info(state_dir: pathlib.Path, cwd: pathlib.Path | None = None) -> "PrInfo | None":
+    """Read PrInfo from registry.json in state_dir, or None if not bound."""
+    from gremlins.artifacts.schemes import GitHubResolver, PrInfo
+
+    registry_path = state_dir / "registry.json"
+    if not registry_path.exists():
+        return None
+    try:
+        data = json.loads(registry_path.read_text(encoding="utf-8"))
+        uri_str = data.get("pr") or ""
+        if not uri_str:
+            return None
+        uri = Uri.parse(uri_str)
+        resolver = GitHubResolver(cwd=cwd)
+        return resolver.read(uri)
+    except Exception:
+        return None
