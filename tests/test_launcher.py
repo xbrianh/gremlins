@@ -389,7 +389,9 @@ def test_resume_patches_state(lenv, monkeypatch):
     launcher.resume(gremlin_id)
 
     post_state = _read_state(state_dir)
-    assert post_state["rescue_count"] == pre_rescue_count, "manual resume must not bump rescue_count"
+    assert post_state["rescue_count"] == pre_rescue_count, (
+        "manual resume must not bump rescue_count"
+    )
     assert post_state["status"] == "running"
     assert post_state["resumed_from_stage"] == "plan"
     assert post_state["pipeline_path"].endswith(".yaml")
@@ -418,7 +420,9 @@ def test_rescue_resume_bumps_rescue_count(lenv, monkeypatch):
     launcher.resume(gremlin_id, is_rescue=True)
 
     post_state = _read_state(state_dir)
-    assert post_state["rescue_count"] == pre_rescue_count + 1, "rescue resume must bump rescue_count"
+    assert post_state["rescue_count"] == pre_rescue_count + 1, (
+        "rescue resume must bump rescue_count"
+    )
 
     _wait_for_finished(state_dir, timeout=60)
 
