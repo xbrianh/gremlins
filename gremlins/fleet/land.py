@@ -13,8 +13,8 @@ from typing import Any, cast
 import gremlins.fleet.constants as _constants
 import gremlins.utils.git as _git
 from gremlins import paths
-from gremlins.artifacts.registry import read_pr_info
-from gremlins.executor.state import landable_shape
+from gremlins.artifacts.registry import ArtifactRegistry, MissingArtifact
+from gremlins.executor.state import landable_shape, resolve_session_dir
 from gremlins.fleet.resolve import resolve_gremlin
 from gremlins.fleet.state import (
     liveness_of_state_file,
@@ -754,14 +754,19 @@ def _land_gh(
     from gremlins import paths as _paths_mod
 
     _state_dir = _paths_mod.state_root() / gremlin_id
-    _pr_info = read_pr_info(_state_dir, cwd=None)
-    if not _pr_info:
-        print(f"error: no PR recorded for {gremlin_id}")
-        return False
-    pr_url = _pr_info.url
-
     project_root = _resolve_landing_cwd(state)
     cwd = project_root if project_root and os.path.isdir(project_root) else None
+
+    registry = ArtifactRegistry(
+        session_dir=resolve_session_dir(gremlin_id),
+        cwd=pathlib.Path(cwd) if cwd else None,
+        persist_path=_state_dir / "registry.json",
+    )
+    try:
+        pr_url = registry.read("pr").url
+    except MissingArtifact:
+        print(f"error: no PR recorded for {gremlin_id}")
+        return False
 
     print(f"Checking PR: {pr_url}")
     r = proc.run(

@@ -89,22 +89,3 @@ class ArtifactRegistry:
         if not sha:
             raise RuntimeError("could not resolve HEAD")
         self.bind(key, Uri.parse(f"git://range/{base_sha}..{sha}"))
-
-
-def read_pr_info(state_dir: pathlib.Path, cwd: pathlib.Path | None = None) -> Any:
-    """Read PrInfo from registry.json in state_dir, or None if not bound."""
-    from gremlins.artifacts.schemes import GitHubResolver
-
-    registry_path = state_dir / "registry.json"
-    if not registry_path.exists():
-        return None
-    try:
-        data = json.loads(registry_path.read_text(encoding="utf-8"))
-        uri_str = data.get("pr") or ""
-        if not uri_str:
-            return None
-        uri = Uri.parse(uri_str)
-        resolver = GitHubResolver(cwd=cwd)
-        return resolver.read(uri)
-    except Exception:
-        return None

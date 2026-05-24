@@ -9,6 +9,8 @@ from typing import Any
 import pytest
 from conftest import MINIMAL_EVENTS
 
+from gremlins.artifacts.schemes import PrInfo
+from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData, build_state
@@ -62,7 +64,10 @@ def _make_stage(
         data=StateData(gremlin_id=gremlin_id), client=client, session_dir=tmp_path
     )
     if pr_branch is not None:
-        state.data.last_pr_branch = lambda: pr_branch  # type: ignore[method-assign]
+        state.artifacts.bind("pr", Uri.parse("gh://pr/42"))
+        state.artifacts._resolvers["gh"].read = (  # type: ignore[attr-defined]
+            lambda uri, _b=pr_branch: PrInfo(url=PR_URL, number=42, branch=_b)
+        )
     return stage, state
 
 
@@ -214,7 +219,7 @@ def test_ci_fix_prompt_contains_pr_branch(
         gremlin_id=gremlin_id,
         poll_interval=0,
         checks_getter=getter,
-        pr_branch=None,
+        pr_branch=branch,
     )
     asyncio.run(stage.run(state))
     assert len(client.calls) == 1
