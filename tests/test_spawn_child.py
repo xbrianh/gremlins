@@ -159,6 +159,31 @@ def test_build_state_missing_session_dir() -> None:
         _rc._build_state({"client": "fake:fake"})
 
 
+def test_build_state_propagates_test_client(tmp_path: pathlib.Path) -> None:
+    state = _rc._build_state(
+        {
+            "client": "fake:fake",
+            "session_dir": str(tmp_path / "artifacts"),
+            "test_client": "fake:fake",
+            "stage_model": "real-model",
+        }
+    )
+    assert state.test_client is not None
+    assert str(state.test_client) == "fake:fake"
+    assert state.stage_model == "real-model"
+
+
+def test_build_state_no_test_client_defaults(tmp_path: pathlib.Path) -> None:
+    state = _rc._build_state(
+        {
+            "client": "fake:fake",
+            "session_dir": str(tmp_path / "artifacts"),
+        }
+    )
+    assert state.test_client is None
+    assert state.stage_model == ""
+
+
 def test_run_done(tmp_path: pathlib.Path) -> None:
     spec_path = _write_spec(tmp_path, "_test_done")
     rc = asyncio.run(_rc._run(spec_path))

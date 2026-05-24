@@ -225,6 +225,8 @@ def _build_child_spec_dict(
         "parent_stage": child_st.parent_stage,
         "repo": child_st.repo,
         "instructions": child_st.instructions,
+        "test_client": str(child_st.test_client) if child_st.test_client else None,
+        "stage_model": child_st.stage_model,
     }
 
 
