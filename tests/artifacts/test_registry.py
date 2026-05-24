@@ -70,3 +70,30 @@ def test_read_returns_file_bytes(tmp_path: pathlib.Path) -> None:
     r = make_registry(tmp_path)
     r.bind("plan", Uri(scheme="file", path="session/plan.md"))
     assert r.read("plan") == b"hello"
+
+
+def test_bind_persists_to_file(tmp_path: pathlib.Path) -> None:
+    import json
+
+    persist = tmp_path / "reg.json"
+    r = ArtifactRegistry(session_dir=tmp_path, persist_path=persist)
+    r.bind("plan", Uri.parse("file://session/plan.md"))
+    data = json.loads(persist.read_text())
+    assert data["plan"] == "file://session/plan.md"
+
+
+def test_init_loads_from_persist_file(tmp_path: pathlib.Path) -> None:
+    import json
+
+    persist = tmp_path / "reg.json"
+    persist.write_text(json.dumps({"plan": "file://session/plan.md"}))
+    r = ArtifactRegistry(session_dir=tmp_path, persist_path=persist)
+    assert r.resolve("plan") == Uri.parse("file://session/plan.md")
+
+
+def test_persist_survives_roundtrip(tmp_path: pathlib.Path) -> None:
+    persist = tmp_path / "reg.json"
+    r1 = ArtifactRegistry(session_dir=tmp_path, persist_path=persist)
+    r1.bind("pr", Uri.parse("gh://pr/42"))
+    r2 = ArtifactRegistry(session_dir=tmp_path, persist_path=persist)
+    assert r2.resolve("pr") == Uri.parse("gh://pr/42")

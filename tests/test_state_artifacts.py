@@ -93,29 +93,6 @@ def test_append_artifact_noop_when_no_gremlin_id(sandbox):
     assert "artifacts" not in data
 
 
-def test_read_pr_url_returns_last_pr_url(sandbox):
-    gremlin_id = "gr-pr-url-test"
-    _make_state_dir(sandbox.state, gremlin_id)
-
-    StateData.load(gremlin_id).append_artifact({"type": "branch", "name": "feat-1"})
-    StateData.load(gremlin_id).append_artifact(
-        {"type": "pr", "url": "https://github.com/o/r/pull/1", "branch": "feat-1"},
-    )
-    StateData.load(gremlin_id).append_artifact({"type": "branch", "name": "feat-2"})
-    StateData.load(gremlin_id).append_artifact(
-        {"type": "pr", "url": "https://github.com/o/r/pull/2", "branch": "feat-2"},
-    )
-
-    assert StateData.load(gremlin_id).read_pr_url() == "https://github.com/o/r/pull/2"
-
-
-def test_read_pr_url_empty_when_no_pr(sandbox):
-    gremlin_id = "gr-no-pr-test"
-    _make_state_dir(sandbox.state, gremlin_id)
-
-    assert StateData.load(gremlin_id).read_pr_url() == ""
-
-
 def test_last_artifact_branch_from_branch_entry(sandbox):
     gremlin_id = "gr-lab-test"
     _make_state_dir(sandbox.state, gremlin_id)

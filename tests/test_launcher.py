@@ -1344,12 +1344,7 @@ def test_launch_pr_kwarg_sets_state_fields(lenv, monkeypatch):
     assert state["setup_kind"] == "worktree-detached-from-ref"
     assert state["base_ref_sha"] == "pull/697/head"
     assert state["base_ref_name"] == ""
-    artifacts = state.get("artifacts", [])
-    pr_artifacts = [a for a in artifacts if a.get("type") == "pr"]
-    assert pr_artifacts == [
-        {
-            "type": "pr",
-            "url": "https://github.com/x/y/pull/697",
-            "branch": "feature-branch",
-        }
-    ]
+    registry_path = _gremlins_state_root(lenv) / gremlin_id / "registry.json"
+    assert registry_path.exists(), "registry.json should have been written"
+    registry_data = json.loads(registry_path.read_text())
+    assert registry_data.get("pr") == "gh://pr/697"
