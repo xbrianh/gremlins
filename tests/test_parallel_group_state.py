@@ -5,17 +5,8 @@ from __future__ import annotations
 import json
 import pathlib
 
-import pytest
-
 from gremlins.executor.parallel_state import ParallelGroupState
 from gremlins.executor.state import StateData
-
-
-@pytest.fixture
-def state_root(tmp_path: pathlib.Path, monkeypatch):
-    root = tmp_path / "state"
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: root)
-    return root
 
 
 def _make_state(state_root: pathlib.Path, gremlin_id: str) -> pathlib.Path:
@@ -35,9 +26,9 @@ def _read(sf: pathlib.Path) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_persist_and_hydrate_round_trip(tmp_path, state_root):
+def test_persist_and_hydrate_round_trip(tmp_path, sandbox):
     gid = "gs-roundtrip"
-    sf = _make_state(state_root, gid)
+    sf = _make_state(sandbox.state, gid)
 
     data = StateData.load(gid)
     gs = ParallelGroupState("reviews", data)
@@ -58,9 +49,9 @@ def test_persist_and_hydrate_round_trip(tmp_path, state_root):
     assert gs2.worktree_paths["b"] == tmp_path / "wt-b"
 
 
-def test_hydrate_skips_when_paths_already_populated(tmp_path, state_root):
+def test_hydrate_skips_when_paths_already_populated(tmp_path, sandbox):
     gid = "gs-skip-hydrate"
-    _make_state(state_root, gid)
+    _make_state(sandbox.state, gid)
 
     data = StateData.load(gid)
     gs = ParallelGroupState("reviews", data)
@@ -78,9 +69,9 @@ def test_hydrate_skips_when_paths_already_populated(tmp_path, state_root):
     assert "x" not in gs.worktree_paths
 
 
-def test_clear_removes_group_entry(state_root):
+def test_clear_removes_group_entry(sandbox):
     gid = "gs-clear"
-    sf = _make_state(state_root, gid)
+    sf = _make_state(sandbox.state, gid)
 
     data = StateData.load(gid)
     gs = ParallelGroupState("reviews", data)
@@ -107,9 +98,9 @@ def test_hydrate_missing_state_file_is_noop(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_record_attempt_writes_parallel_attempts(state_root):
+def test_record_attempt_writes_parallel_attempts(sandbox):
     gid = "gs-attempt"
-    sf = _make_state(state_root, gid)
+    sf = _make_state(sandbox.state, gid)
 
     data = StateData.load(gid)
     gs = ParallelGroupState("reviews", data)
@@ -119,9 +110,9 @@ def test_record_attempt_writes_parallel_attempts(state_root):
     assert raw["parallel_attempts"]["child-a"] == "attempt-abc"
 
 
-def test_clear_attempts_removes_parallel_attempts(state_root):
+def test_clear_attempts_removes_parallel_attempts(sandbox):
     gid = "gs-clear-attempts"
-    sf = _make_state(state_root, gid)
+    sf = _make_state(sandbox.state, gid)
 
     data = StateData.load(gid)
     gs = ParallelGroupState("reviews", data)
@@ -137,9 +128,9 @@ def test_clear_attempts_removes_parallel_attempts(state_root):
 # ---------------------------------------------------------------------------
 
 
-def test_write_bail_creates_bail_file_for_child(state_root):
+def test_write_bail_creates_bail_file_for_child(sandbox):
     gid = "gs-bail"
-    sf = _make_state(state_root, gid)
+    sf = _make_state(sandbox.state, gid)
     state_dir = sf.parent
 
     data = StateData.load(gid)
@@ -155,9 +146,9 @@ def test_write_bail_creates_bail_file_for_child(state_root):
     assert payload["detail"] == "something went wrong"
 
 
-def test_write_bail_no_attempt_is_noop(state_root):
+def test_write_bail_no_attempt_is_noop(sandbox):
     gid = "gs-bail-noop"
-    sf = _make_state(state_root, gid)
+    sf = _make_state(sandbox.state, gid)
     state_dir = sf.parent
 
     data = StateData.load(gid)
@@ -174,9 +165,9 @@ def test_write_bail_no_attempt_is_noop(state_root):
 # ---------------------------------------------------------------------------
 
 
-def test_read_bail_scan_inputs_returns_dir_and_attempts(state_root):
+def test_read_bail_scan_inputs_returns_dir_and_attempts(sandbox):
     gid = "gs-scan-inputs"
-    sf = _make_state(state_root, gid)
+    sf = _make_state(sandbox.state, gid)
 
     data = StateData.load(gid)
     gs = ParallelGroupState("reviews", data)

@@ -21,9 +21,8 @@ from gremlins.cli import main
 
 
 @pytest.fixture
-def q(tmp_path, monkeypatch):
-    """Patch state_root and return the queue root."""
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def q():
+    """Return the queue root (sandbox already redirects state_root)."""
     root = core.queue_root()
     return root
 
@@ -390,53 +389,44 @@ def test_clear_item_multi_match(q, capsys):
     assert "failed" in err
 
 
-def test_clear_item_mutex_with_pending(tmp_path, monkeypatch):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_clear_item_mutex_with_pending(monkeypatch):
     with pytest.raises(SystemExit):
         main(["queue", "clear", "--item", "foo", "--pending"])
 
 
-def test_clear_item_mutex_with_purge(tmp_path, monkeypatch):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_clear_item_mutex_with_purge(monkeypatch):
     with pytest.raises(SystemExit):
         main(["queue", "clear", "--item", "foo", "--purge"])
 
 
-def test_cli_queue_clear_flags_mutually_exclusive(tmp_path, monkeypatch):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_cli_queue_clear_flags_mutually_exclusive(monkeypatch):
     with pytest.raises(SystemExit):
         main(["queue", "clear", "--failed", "--done"])
 
 
-def test_cli_queue_add_dispatches(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_cli_queue_add_dispatches(monkeypatch, capsys):
     rc = main(["queue", "add", "echo hello"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "queued:" in out
 
 
-def test_cli_queue_add_help_prints_usage_and_does_not_enqueue(
-    tmp_path, monkeypatch, capsys
-):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_cli_queue_add_help_prints_usage_and_does_not_enqueue(monkeypatch, capsys):
     rc = main(["queue", "add", "--help"])
     assert rc == 0
     assert capsys.readouterr().err != ""
     assert not list((core.queue_root() / "pending").glob("*.cmd"))
 
 
-def test_cli_queue_add_flag_prefixed_command_is_queued(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_cli_queue_add_flag_prefixed_command_is_queued(monkeypatch, capsys):
     rc = main(["queue", "add", "--verbose", "script.sh"])
     assert rc == 0
     pending = list((core.queue_root() / "pending").glob("*.cmd"))
     assert len(pending) == 1
 
 
-def test_cli_queue_add_single_quoted_command_stored_verbatim(tmp_path, monkeypatch):
+def test_cli_queue_add_single_quoted_command_stored_verbatim(monkeypatch):
     """Single-element argv (quoted shell command) must be stored without extra escaping."""
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
     cmd = "gremlins launch gh-terse --plan '#1' --description 'hi'"
     main(["queue", "add", cmd])
     pending = list((core.queue_root() / "pending").glob("*.cmd"))
@@ -444,36 +434,31 @@ def test_cli_queue_add_single_quoted_command_stored_verbatim(tmp_path, monkeypat
     assert pending[0].read_text() == cmd
 
 
-def test_cli_queue_add_multi_argv_shell_metacharacters_quoted(tmp_path, monkeypatch):
+def test_cli_queue_add_multi_argv_shell_metacharacters_quoted(monkeypatch):
     """Multi-element argv with shell metacharacters must be shell-quoted."""
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
     main(["queue", "add", "gremlins", "launch", "--plan", "#1"])
     pending = list((core.queue_root() / "pending").glob("*.cmd"))
     assert len(pending) == 1
     assert pending[0].read_text() == "gremlins launch --plan '#1'"
 
 
-def test_cli_queue_list_dispatches(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_cli_queue_list_dispatches(capsys):
     rc = main(["queue", "list"])
     assert rc == 0
     assert "(queue is empty)" in capsys.readouterr().out
 
 
-def test_cli_queue_run_dispatches(tmp_path, monkeypatch):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_cli_queue_run_dispatches():
     rc = main(["queue", "run", "--once"])
     assert rc == 0
 
 
-def test_cli_queue_requeue_dispatches(tmp_path, monkeypatch):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_cli_queue_requeue_dispatches():
     rc = main(["queue", "requeue"])
     assert rc == 0
 
 
-def test_cli_queue_clear_dispatches(tmp_path, monkeypatch):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_cli_queue_clear_dispatches():
     rc = main(["queue", "clear"])
     assert rc == 0
 
@@ -483,9 +468,8 @@ def test_cli_queue_clear_dispatches(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_cli_queue_list_watch_default_interval(tmp_path, monkeypatch):
+def test_cli_queue_list_watch_default_interval(monkeypatch):
     """--watch with no value uses interval=2 and calls render at least once."""
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
     renders = []
 
     def fake_watch_render(interval, render):
@@ -499,8 +483,7 @@ def test_cli_queue_list_watch_default_interval(tmp_path, monkeypatch):
     assert renders == [2]
 
 
-def test_cli_queue_list_watch_custom_interval(tmp_path, monkeypatch):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_cli_queue_list_watch_custom_interval(monkeypatch):
     renders = []
 
     def fake_watch_render(interval, render):
@@ -513,9 +496,8 @@ def test_cli_queue_list_watch_custom_interval(tmp_path, monkeypatch):
     assert renders == [5]
 
 
-def test_cli_queue_list_no_watch_skips_watch_render(tmp_path, monkeypatch, capsys):
+def test_cli_queue_list_no_watch_skips_watch_render(monkeypatch, capsys):
     """No --watch flag: single render, watch_render not called."""
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
     called = []
     monkeypatch.setattr(
         "gremlins.cli.queue.watch_render", lambda *a, **kw: called.append(1)
@@ -569,8 +551,7 @@ def test_list_queue_json_all_fields_present(q, capsys):
         assert field in item
 
 
-def test_cli_queue_list_json_flag(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_cli_queue_list_json_flag(capsys):
     root = core.queue_root()
     (root / "pending" / "0001-item.cmd").write_text("echo hi")
     rc = main(["queue", "list", "--json"])
@@ -580,8 +561,7 @@ def test_cli_queue_list_json_flag(tmp_path, monkeypatch, capsys):
     assert data[0]["bucket"] == "pending"
 
 
-def test_cli_queue_list_json_watch_mutually_exclusive(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_cli_queue_list_json_watch_mutually_exclusive(capsys):
     rc = main(["queue", "list", "--json", "--watch"])
     assert rc == 1
     assert "json" in capsys.readouterr().err.lower()
@@ -639,8 +619,7 @@ def test_set_state_all_four_destinations(q, state):
     assert (q / state / "0001-item.cmd").exists()
 
 
-def test_cli_queue_set_state_dispatches(tmp_path, monkeypatch):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_cli_queue_set_state_dispatches():
     root = core.queue_root()
     (root / "failed" / "0001-item.cmd").write_text("echo x")
     rc = main(["queue", "set-state", "pending", "--item", "0001-item"])
@@ -648,8 +627,7 @@ def test_cli_queue_set_state_dispatches(tmp_path, monkeypatch):
     assert (root / "pending" / "0001-item.cmd").exists()
 
 
-def test_cli_queue_set_state_invalid_state(tmp_path, monkeypatch):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_cli_queue_set_state_invalid_state():
     with pytest.raises(SystemExit):
         main(["queue", "set-state", "bogus", "--item", "0001-item"])
 
@@ -659,8 +637,7 @@ def test_cli_queue_set_state_invalid_state(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_runner_active_true_with_valid_pid_file(tmp_path, monkeypatch):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_runner_active_true_with_valid_pid_file(monkeypatch):
     pid_path = core._runner_pid_path()
     pid_path.parent.mkdir(parents=True, exist_ok=True)
     pid_path.write_text(str(os.getpid()))
@@ -668,13 +645,11 @@ def test_runner_active_true_with_valid_pid_file(tmp_path, monkeypatch):
     assert core.runner_active() is True
 
 
-def test_runner_active_false_when_no_pid_file(tmp_path, monkeypatch):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_runner_active_false_when_no_pid_file():
     assert core.runner_active() is False
 
 
-def test_runner_active_false_when_pid_not_runner(tmp_path, monkeypatch):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_runner_active_false_when_pid_not_runner(monkeypatch):
     pid_path = core._runner_pid_path()
     pid_path.parent.mkdir(parents=True, exist_ok=True)
     pid_path.write_text(str(os.getpid()))
@@ -687,8 +662,7 @@ def test_runner_active_false_when_pid_not_runner(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_cli_queue_add_warns_when_no_runner(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_cli_queue_add_warns_when_no_runner(monkeypatch, capsys):
     monkeypatch.setattr("gremlins.cli.queue.runner_active", lambda: False)
     rc = main(["queue", "add", "echo hello"])
     assert rc == 0
@@ -697,8 +671,7 @@ def test_cli_queue_add_warns_when_no_runner(tmp_path, monkeypatch, capsys):
     assert "gremlins queue run" in out
 
 
-def test_cli_queue_add_confirms_when_runner_active(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_cli_queue_add_confirms_when_runner_active(monkeypatch, capsys):
     monkeypatch.setattr("gremlins.cli.queue.runner_active", lambda: True)
     rc = main(["queue", "add", "echo hello"])
     assert rc == 0
@@ -710,8 +683,7 @@ def test_cli_queue_add_confirms_when_runner_active(tmp_path, monkeypatch, capsys
 # ---------------------------------------------------------------------------
 
 
-def test_cli_queue_add_run_execs_queue_run(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_cli_queue_add_run_execs_queue_run(monkeypatch, capsys):
     monkeypatch.setattr("gremlins.cli.queue.runner_active", lambda: False)
     execvp_calls = []
     monkeypatch.setattr(
@@ -726,8 +698,7 @@ def test_cli_queue_add_run_execs_queue_run(tmp_path, monkeypatch, capsys):
     assert args[1:] == ["queue", "run"]
 
 
-def test_cli_queue_add_run_errors_when_runner_active(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_cli_queue_add_run_errors_when_runner_active(monkeypatch, capsys):
     monkeypatch.setattr("gremlins.cli.queue.runner_active", lambda: True)
     execvp_calls = []
     monkeypatch.setattr(
@@ -744,16 +715,14 @@ def test_cli_queue_add_run_errors_when_runner_active(tmp_path, monkeypatch, caps
 # ---------------------------------------------------------------------------
 
 
-def test_cli_queue_requeue_warns_when_no_runner(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_cli_queue_requeue_warns_when_no_runner(monkeypatch, capsys):
     monkeypatch.setattr("gremlins.cli.queue.runner_active", lambda: False)
     rc = main(["queue", "requeue"])
     assert rc == 0
     assert "warning: no runner active" in capsys.readouterr().out
 
 
-def test_cli_queue_requeue_confirms_when_runner_active(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_cli_queue_requeue_confirms_when_runner_active(monkeypatch, capsys):
     monkeypatch.setattr("gremlins.cli.queue.runner_active", lambda: True)
     rc = main(["queue", "requeue"])
     assert rc == 0
@@ -765,15 +734,13 @@ def test_cli_queue_requeue_confirms_when_runner_active(tmp_path, monkeypatch, ca
 # ---------------------------------------------------------------------------
 
 
-def test_detach_run_refuses_when_runner_active(tmp_path, monkeypatch):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_detach_run_refuses_when_runner_active(monkeypatch):
     monkeypatch.setattr("gremlins.queue.core.runner_active", lambda: True)
     rc = core.detach_run()
     assert rc == 1
 
 
-def test_detach_run_parent_writes_pidfile_and_prints(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_detach_run_parent_writes_pidfile_and_prints(monkeypatch, capsys):
     monkeypatch.setattr("gremlins.queue.core.runner_active", lambda: False)
     monkeypatch.setattr("gremlins.queue.core.os.fork", lambda: 99999)
     rc = core.detach_run()
@@ -784,8 +751,7 @@ def test_detach_run_parent_writes_pidfile_and_prints(tmp_path, monkeypatch, caps
     assert "99999" in capsys.readouterr().out
 
 
-def test_detach_run_child_runs_queue_and_removes_pidfile(tmp_path, monkeypatch):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_detach_run_child_runs_queue_and_removes_pidfile(monkeypatch):
     monkeypatch.setattr("gremlins.queue.core.runner_active", lambda: False)
     monkeypatch.setattr("gremlins.queue.core.os.fork", lambda: 0)
     monkeypatch.setattr("gremlins.queue.core.os.setsid", lambda: None)
@@ -816,16 +782,14 @@ def test_detach_run_child_runs_queue_and_removes_pidfile(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_stop_no_pidfile(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_stop_no_pidfile(capsys):
     core.queue_root()  # create dirs
     rc = core.stop()
     assert rc == 1
     assert "pidfile" in capsys.readouterr().err
 
 
-def test_stop_stale_pid_cleans_up(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_stop_stale_pid_cleans_up(capsys):
     root = core.queue_root()
     pid_path = root / "runner.pid"
     pid_path.write_text("99999999")  # pid that won't exist
@@ -835,10 +799,9 @@ def test_stop_stale_pid_cleans_up(tmp_path, monkeypatch, capsys):
     assert "stale" in capsys.readouterr().err
 
 
-def test_stop_sends_sigterm_and_cleans_up(tmp_path, monkeypatch):
+def test_stop_sends_sigterm_and_cleans_up(monkeypatch):
     import signal
 
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
     root = core.queue_root()
     pid_path = root / "runner.pid"
     pid_path.write_text("12345")
@@ -867,8 +830,7 @@ def test_stop_sends_sigterm_and_cleans_up(tmp_path, monkeypatch):
     assert not pid_path.exists()
 
 
-def test_cli_queue_stop_dispatches(tmp_path, monkeypatch):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_cli_queue_stop_dispatches(monkeypatch):
     monkeypatch.setattr("gremlins.cli.queue.stop", lambda: 0)
     rc = main(["queue", "stop"])
     assert rc == 0
@@ -887,8 +849,7 @@ def test_pid_is_runner_false_for_nonexistent_pid():
     assert core._pid_is_runner(2**31 - 1) is False
 
 
-def test_stop_stale_if_pid_is_not_runner(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_stop_stale_if_pid_is_not_runner(capsys):
     root = core.queue_root()
     pid_path = root / "runner.pid"
     pid_path.write_text(str(os.getpid()))
@@ -898,8 +859,7 @@ def test_stop_stale_if_pid_is_not_runner(tmp_path, monkeypatch, capsys):
     assert "stale" in capsys.readouterr().err
 
 
-def test_runner_active_false_for_live_non_runner_pid(tmp_path, monkeypatch):
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
+def test_runner_active_false_for_live_non_runner_pid(monkeypatch):
     root = core.queue_root()
     pid_path = root / "runner.pid"
     pid_path.write_text(str(os.getpid()))

@@ -103,13 +103,6 @@ def test_sequence_propagates_session_dir() -> None:
     assert child.received.session_dir == shard_dir
 
 
-@pytest.fixture
-def state_root(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
-    root = tmp_path / "state"
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: root)
-    return root
-
-
 def _stateful(state_root: pathlib.Path, gremlin_id: str) -> RuntimeState:
     state_dir = state_root / gremlin_id
     state_dir.mkdir(parents=True)
@@ -122,7 +115,7 @@ def _stateful(state_root: pathlib.Path, gremlin_id: str) -> RuntimeState:
     )
 
 
-def test_sequence_resume_skips_completed_children(state_root: pathlib.Path) -> None:
+def test_sequence_resume_skips_completed_children(sandbox) -> None:
     ran: list[str] = []
     fail = {"b": True}
 
@@ -136,7 +129,7 @@ def test_sequence_resume_skips_completed_children(state_root: pathlib.Path) -> N
                 raise Bail("b failed")
             return Done()
 
-    state = _stateful(state_root, "gr-seq-resume")
+    state = _stateful(sandbox.state, "gr-seq-resume")
     seq = SequenceStage(
         "seq", body=[_TrackedStage("a"), _TrackedStage("b"), _TrackedStage("c")]
     )
@@ -152,7 +145,7 @@ def test_sequence_resume_skips_completed_children(state_root: pathlib.Path) -> N
     assert ran == ["b", "c"]
 
 
-def test_sibling_sequences_done_sets_are_independent(state_root: pathlib.Path) -> None:
+def test_sibling_sequences_done_sets_are_independent(sandbox) -> None:
     ran: list[str] = []
 
     class _LogStage(Stage):
@@ -163,7 +156,7 @@ def test_sibling_sequences_done_sets_are_independent(state_root: pathlib.Path) -
             ran.append(self.name)
             return Done()
 
-    state = _stateful(state_root, "gr-seq-siblings")
+    state = _stateful(sandbox.state, "gr-seq-siblings")
     seq1 = SequenceStage("seq1", body=[_LogStage("a")])
     seq2 = SequenceStage("seq2", body=[_LogStage("a")])
     seq1.path = "pipeline/seq1"

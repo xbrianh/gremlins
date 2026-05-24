@@ -157,8 +157,6 @@ def lenv(sandbox, monkeypatch):
     old_path = os.environ.get("PATH", "")
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{old_path}")
     monkeypatch.delenv("PYTHONPATH", raising=False)
-    monkeypatch.delenv("GREMLIN_ID", raising=False)
-    monkeypatch.delenv("GREMLINS_OVERLAY_DIR", raising=False)
 
     class _Env:
         pass
@@ -273,22 +271,14 @@ def _clear_gremlins_overlay_env(monkeypatch):
 
 
 @pytest.fixture
-def test_state_root(tmp_path, monkeypatch):
-    """Create and patch an isolated gremlins state root."""
-    root = tmp_path / "state"
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: root)
-    return root
-
-
-@pytest.fixture
-def make_state_dir(test_state_root):
+def make_state_dir(sandbox):
     """Fixture factory: create a minimal state.json for gremlin_id under the state root.
 
     Returns a callable: make_state_dir(gremlin_id) -> state_dir_path
     """
 
     def _factory(gremlin_id: str) -> pathlib.Path:
-        state_dir = test_state_root / gremlin_id
+        state_dir = sandbox.state / gremlin_id
         state_dir.mkdir(parents=True, exist_ok=True)
         (state_dir / "state.json").write_text(
             json.dumps({"id": gremlin_id, "stage": ""})

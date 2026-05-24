@@ -38,9 +38,9 @@ def pipeline_yaml(tmp_path):
     return p
 
 
-def test_gremlin_run_in_process(project_dir, pipeline_yaml, test_state_root):
+def test_gremlin_run_in_process(project_dir, pipeline_yaml, sandbox):
     gremlin_id = "smoke-abc123"
-    sd = test_state_root / gremlin_id
+    sd = sandbox.state / gremlin_id
 
     gremlin = Gremlin.build(
         gremlin_id=gremlin_id,

@@ -107,9 +107,9 @@ def _patch_handoff(monkeypatch: Any, tmp_path: pathlib.Path, exit_state: str) ->
 # ---------------------------------------------------------------------------
 
 
-def test_chain_done_immediately(tmp_path, monkeypatch, test_state_root):
+def test_chain_done_immediately(tmp_path, monkeypatch, sandbox):
     gremlin_id = "boss-handoff-done-aabb12"
-    state_dir = test_state_root / gremlin_id
+    state_dir = sandbox.state / gremlin_id
     _write_state(state_dir, gremlin_id)
     _write_plan(tmp_path)
 
@@ -133,9 +133,9 @@ def test_chain_done_immediately(tmp_path, monkeypatch, test_state_root):
 # ---------------------------------------------------------------------------
 
 
-def test_next_plan_writes_plan_and_raises(tmp_path, monkeypatch, test_state_root):
+def test_next_plan_writes_plan_and_raises(tmp_path, monkeypatch, sandbox):
     gremlin_id = "boss-handoff-nextplan-aabb12"
-    state_dir = test_state_root / gremlin_id
+    state_dir = sandbox.state / gremlin_id
     _write_state(state_dir, gremlin_id)
     _write_plan(tmp_path)
 
@@ -176,10 +176,10 @@ def test_next_plan_writes_plan_and_raises(tmp_path, monkeypatch, test_state_root
 # ---------------------------------------------------------------------------
 
 
-def test_bail_emits_bail_and_raises(tmp_path, monkeypatch, test_state_root):
+def test_bail_emits_bail_and_raises(tmp_path, monkeypatch, sandbox):
     gremlin_id = "boss-handoff-bail-aabb12"
     attempt = "handoff-test-attempt"
-    state_dir = test_state_root / gremlin_id
+    state_dir = sandbox.state / gremlin_id
     _write_state(state_dir, gremlin_id)
     state_mod.StateData.load(gremlin_id).patch(attempt=attempt)
     _write_plan(tmp_path)
@@ -224,9 +224,9 @@ def test_bail_emits_bail_and_raises(tmp_path, monkeypatch, test_state_root):
 # ---------------------------------------------------------------------------
 
 
-def test_handoff_index_first_iteration(tmp_path, monkeypatch, test_state_root):
+def test_handoff_index_first_iteration(tmp_path, monkeypatch, sandbox):
     gremlin_id = "boss-handoff-persist-aabb12"
-    state_dir = test_state_root / gremlin_id
+    state_dir = sandbox.state / gremlin_id
     _write_state(state_dir, gremlin_id)
     _write_plan(tmp_path)
 
@@ -268,9 +268,9 @@ def test_handoff_index_first_iteration(tmp_path, monkeypatch, test_state_root):
 # ---------------------------------------------------------------------------
 
 
-def test_handoff_agent_error_raises(tmp_path, monkeypatch, test_state_root):
+def test_handoff_agent_error_raises(tmp_path, monkeypatch, sandbox):
     gremlin_id = "boss-handoff-hfail-aabb12"
-    state_dir = test_state_root / gremlin_id
+    state_dir = sandbox.state / gremlin_id
     _write_state(state_dir, gremlin_id)
     _write_plan(tmp_path)
 
@@ -303,9 +303,9 @@ def test_handoff_agent_error_raises(tmp_path, monkeypatch, test_state_root):
 # ---------------------------------------------------------------------------
 
 
-def test_resume_continues_from_file_index(tmp_path, monkeypatch, test_state_root):
+def test_resume_continues_from_file_index(tmp_path, monkeypatch, sandbox):
     gremlin_id = "boss-handoff-resume-aabb12"
-    state_dir = test_state_root / gremlin_id
+    state_dir = sandbox.state / gremlin_id
     _write_state(state_dir, gremlin_id)
     _write_plan(tmp_path)
     (tmp_path / "boss-spec.md").write_text("# Boss Spec\n", encoding="utf-8")
@@ -352,7 +352,7 @@ def test_resume_continues_from_file_index(tmp_path, monkeypatch, test_state_root
 # ---------------------------------------------------------------------------
 
 
-def test_base_ref_from_state(tmp_path, monkeypatch, test_state_root):
+def test_base_ref_from_state(tmp_path, monkeypatch, sandbox):
     gremlin_id = "boss-handoff-baseref-aabb12"
     _write_plan(tmp_path)
 

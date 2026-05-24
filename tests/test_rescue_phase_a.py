@@ -85,7 +85,6 @@ def _patch_state_root(state_root: pathlib.Path, monkeypatch):
         "STATE_ROOT",
         str(state_root),
     )
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
 
 
 def test_rescue_diagnosis_runs_in_scratch_dir_not_worktree(tmp_path, monkeypatch):

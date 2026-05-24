@@ -13,13 +13,6 @@ from gremlins.executor.state import State, StateData, build_state
 from gremlins.stages.parallel import ParallelStage
 
 
-@pytest.fixture
-def state_root(tmp_path: pathlib.Path, monkeypatch):
-    root = tmp_path / "state"
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: root)
-    return root
-
-
 def _make_state(state_root: pathlib.Path, gremlin_id: str) -> pathlib.Path:
     state_dir = state_root / gremlin_id
     state_dir.mkdir(parents=True)
@@ -54,9 +47,9 @@ def _build_stages(group: str, runners: list, gremlin_id: str) -> list:
 # ---------------------------------------------------------------------------
 
 
-def test_completed_child_skipped_on_resume(state_root):
+def test_completed_child_skipped_on_resume(sandbox):
     gremlin_id = "gr-done-skip"
-    sf = _make_state(state_root, gremlin_id)
+    sf = _make_state(sandbox.state, gremlin_id)
 
     ran: list[str] = []
     fail = {"b": True}
@@ -96,9 +89,9 @@ def test_completed_child_skipped_on_resume(state_root):
     assert ran == ["b"]
 
 
-def test_both_children_present_in_done_after_second_run(state_root):
+def test_both_children_present_in_done_after_second_run(sandbox):
     gremlin_id = "gr-done-both"
-    sf = _make_state(state_root, gremlin_id)
+    sf = _make_state(sandbox.state, gremlin_id)
 
     ran: list[str] = []
     fail = {"b": True}
@@ -142,9 +135,9 @@ def test_both_children_present_in_done_after_second_run(state_root):
 # ---------------------------------------------------------------------------
 
 
-def test_parallel_done_cleared_after_full_success(state_root):
+def test_parallel_done_cleared_after_full_success(sandbox):
     gremlin_id = "gr-done-clear"
-    sf = _make_state(state_root, gremlin_id)
+    sf = _make_state(sandbox.state, gremlin_id)
 
     async def _noop() -> None:
         pass
@@ -176,10 +169,10 @@ def test_parallel_done_cleared_after_full_success(state_root):
 # ---------------------------------------------------------------------------
 
 
-def test_bail_aggregation_unaffected_by_done_tracking(state_root):
+def test_bail_aggregation_unaffected_by_done_tracking(sandbox):
     """Fan-in detects bail via parallel_attempts even when bailed child is in parallel_done."""
     gremlin_id = "gr-done-bail"
-    sf = _make_state(state_root, gremlin_id)
+    sf = _make_state(sandbox.state, gremlin_id)
 
     async def child_bail() -> None:
         StateData.load(gremlin_id).patch_parallel_attempt("bail-child", "attempt-bail")
