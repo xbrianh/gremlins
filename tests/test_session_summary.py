@@ -76,7 +76,6 @@ def _invoke(
     """Call main() with a faked stdin, returning (rc, stdout, stderr)."""
     hook_input = json.dumps({"hook_event_name": hook_event, "cwd": project_root})
 
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     if skip_summary:
         monkeypatch.setenv("GREMLIN_SKIP_SUMMARY", "1")
@@ -110,24 +109,21 @@ def _invoke(
 # ---------------------------------------------------------------------------
 
 
-def test_no_gremlins_empty_state_root(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "gremlins"
-    state_root.mkdir()
-    rc, out, err = _invoke("SessionStart", "/proj", state_root, monkeypatch, capsys)
+def test_no_gremlins_empty_state_root(sandbox, monkeypatch, capsys):
+    rc, out, err = _invoke("SessionStart", "/proj", sandbox.state, monkeypatch, capsys)
     assert rc == 0
     assert out == ""
     assert err == ""
 
 
-def test_running_gremlin_shown_at_session_start(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "gremlins"
+def test_running_gremlin_shown_at_session_start(sandbox, monkeypatch, capsys):
     project_root = "/myproject"
     _make_state(
-        state_root, "gr-abc123", project_root, pid=os.getpid(), stage="implement"
+        sandbox.state, "gr-abc123", project_root, pid=os.getpid(), stage="implement"
     )
 
     rc, out, err = _invoke(
-        "SessionStart", project_root, state_root, monkeypatch, capsys
+        "SessionStart", project_root, sandbox.state, monkeypatch, capsys
     )
     assert rc == 0
     assert "running" in out or "running" in err
@@ -135,26 +131,24 @@ def test_running_gremlin_shown_at_session_start(tmp_path, monkeypatch, capsys):
     assert "gr-abc123" in err
 
 
-def test_running_gremlin_not_shown_at_user_prompt_submit(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "gremlins"
+def test_running_gremlin_not_shown_at_user_prompt_submit(sandbox, monkeypatch, capsys):
     project_root = "/myproject"
     _make_state(
-        state_root, "gr-abc123", project_root, pid=os.getpid(), stage="implement"
+        sandbox.state, "gr-abc123", project_root, pid=os.getpid(), stage="implement"
     )
 
     rc, out, err = _invoke(
-        "UserPromptSubmit", project_root, state_root, monkeypatch, capsys
+        "UserPromptSubmit", project_root, sandbox.state, monkeypatch, capsys
     )
     assert rc == 0
     assert out == ""
     assert err == ""
 
 
-def test_newly_finished_gremlin_shown_at_session_start(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "gremlins"
+def test_newly_finished_gremlin_shown_at_session_start(sandbox, monkeypatch, capsys):
     project_root = "/myproject"
     wdir = _make_state(
-        state_root,
+        sandbox.state,
         "gr-done01",
         project_root,
         status="running",
@@ -162,7 +156,7 @@ def test_newly_finished_gremlin_shown_at_session_start(tmp_path, monkeypatch, ca
     )
 
     rc, out, err = _invoke(
-        "SessionStart", project_root, state_root, monkeypatch, capsys
+        "SessionStart", project_root, sandbox.state, monkeypatch, capsys
     )
     assert rc == 0
     assert "gr-done01" in out
@@ -172,12 +166,11 @@ def test_newly_finished_gremlin_shown_at_session_start(tmp_path, monkeypatch, ca
 
 
 def test_newly_finished_gremlin_shown_at_user_prompt_submit(
-    tmp_path, monkeypatch, capsys
+    sandbox, monkeypatch, capsys
 ):
-    state_root = tmp_path / "gremlins"
     project_root = "/myproject"
     wdir = _make_state(
-        state_root,
+        sandbox.state,
         "gr-done02",
         project_root,
         status="running",
@@ -185,22 +178,21 @@ def test_newly_finished_gremlin_shown_at_user_prompt_submit(
     )
 
     rc, out, err = _invoke(
-        "UserPromptSubmit", project_root, state_root, monkeypatch, capsys
+        "UserPromptSubmit", project_root, sandbox.state, monkeypatch, capsys
     )
     assert rc == 0
     assert "gr-done02" in out
     assert (wdir / "summarized").exists()
 
 
-def test_already_summarized_gremlin_not_re_announced(tmp_path, monkeypatch, capsys):
+def test_already_summarized_gremlin_not_re_announced(sandbox, monkeypatch, capsys):
     # A gremlin that was already summarized must not appear in the
     # "finished since last check" block again. It may still appear in the
     # running block (as finished) because the bash running-block filter
     # only checks status=="running", not the summarized marker.
-    state_root = tmp_path / "gremlins"
     project_root = "/myproject"
     _make_state(
-        state_root,
+        sandbox.state,
         "gr-old01",
         project_root,
         finished=True,
@@ -208,22 +200,21 @@ def test_already_summarized_gremlin_not_re_announced(tmp_path, monkeypatch, caps
     )
 
     rc, out, err = _invoke(
-        "SessionStart", project_root, state_root, monkeypatch, capsys
+        "SessionStart", project_root, sandbox.state, monkeypatch, capsys
     )
     assert rc == 0
     assert "finished since last check" not in out
 
 
-def test_closed_gremlin_not_in_finished_block(tmp_path, monkeypatch, capsys):
+def test_closed_gremlin_not_in_finished_block(sandbox, monkeypatch, capsys):
     # A gremlin with the closed marker must not appear in the finished block.
     # (The closed marker only gates the finished-block listing; the running-block
     # filter only checks status=="running" and doesn't consult closed.)
-    state_root = tmp_path / "gremlins"
     project_root = "/myproject"
     # Use status="dead" so the gremlin does not trigger the running-block filter
     # either, making it fully absent from the output.
     _make_state(
-        state_root,
+        sandbox.state,
         "gr-closed1",
         project_root,
         status="dead",
@@ -232,18 +223,17 @@ def test_closed_gremlin_not_in_finished_block(tmp_path, monkeypatch, capsys):
     )
 
     rc, out, err = _invoke(
-        "SessionStart", project_root, state_root, monkeypatch, capsys
+        "SessionStart", project_root, sandbox.state, monkeypatch, capsys
     )
     assert rc == 0
     assert "gr-closed1" not in out
     assert "gr-closed1" not in err
 
 
-def test_stalled_gremlin_shown_as_stalled(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "gremlins"
+def test_stalled_gremlin_shown_as_stalled(sandbox, monkeypatch, capsys):
     project_root = "/myproject"
     wdir = _make_state(
-        state_root,
+        sandbox.state,
         "gr-stall1",
         project_root,
         pid=os.getpid(),
@@ -256,19 +246,18 @@ def test_stalled_gremlin_shown_as_stalled(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(_const, "BG_STALL_SECS", 100)
 
     rc, out, err = _invoke(
-        "SessionStart", project_root, state_root, monkeypatch, capsys
+        "SessionStart", project_root, sandbox.state, monkeypatch, capsys
     )
     assert rc == 0
     assert "stalled?" in out
     assert "gr-stall1" in out
 
 
-def test_crashed_gremlin_shown_as_crashed(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "gremlins"
+def test_crashed_gremlin_shown_as_crashed(sandbox, monkeypatch, capsys):
     project_root = "/myproject"
     # Use a PID that definitely doesn't exist.
     _make_state(
-        state_root,
+        sandbox.state,
         "gr-crash1",
         project_root,
         pid=999999999,
@@ -276,22 +265,21 @@ def test_crashed_gremlin_shown_as_crashed(tmp_path, monkeypatch, capsys):
     )
 
     rc, out, err = _invoke(
-        "SessionStart", project_root, state_root, monkeypatch, capsys
+        "SessionStart", project_root, sandbox.state, monkeypatch, capsys
     )
     assert rc == 0
     assert "crashed" in out or "dead" in out
     assert "gr-crash1" in out
 
 
-def test_skip_summary_env_short_circuits(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "gremlins"
+def test_skip_summary_env_short_circuits(sandbox, monkeypatch, capsys):
     project_root = "/myproject"
-    _make_state(state_root, "gr-skip01", project_root, finished=True)
+    _make_state(sandbox.state, "gr-skip01", project_root, finished=True)
 
     rc, out, err = _invoke(
         "SessionStart",
         project_root,
-        state_root,
+        sandbox.state,
         monkeypatch,
         capsys,
         skip_summary=True,
@@ -301,12 +289,11 @@ def test_skip_summary_env_short_circuits(tmp_path, monkeypatch, capsys):
     assert err == ""
 
 
-def test_project_root_mismatch_filtered_out(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "gremlins"
-    _make_state(state_root, "gr-other1", "/other-project", finished=True)
+def test_project_root_mismatch_filtered_out(sandbox, monkeypatch, capsys):
+    _make_state(sandbox.state, "gr-other1", "/other-project", finished=True)
 
     rc, out, err = _invoke(
-        "SessionStart", "/myproject", state_root, monkeypatch, capsys
+        "SessionStart", "/myproject", sandbox.state, monkeypatch, capsys
     )
     assert rc == 0
     assert "gr-other1" not in out
@@ -357,13 +344,12 @@ def test_prune_removes_old_direct_dirs(tmp_path):
     assert not old_dir.exists()
 
 
-def test_stdout_is_valid_json_with_hook_event_name(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "gremlins"
+def test_stdout_is_valid_json_with_hook_event_name(sandbox, monkeypatch, capsys):
     project_root = "/myproject"
-    _make_state(state_root, "gr-json01", project_root, finished=True)
+    _make_state(sandbox.state, "gr-json01", project_root, finished=True)
 
     rc, out, err = _invoke(
-        "SessionStart", project_root, state_root, monkeypatch, capsys
+        "SessionStart", project_root, sandbox.state, monkeypatch, capsys
     )
     assert rc == 0
     data = json.loads(out)
@@ -372,11 +358,10 @@ def test_stdout_is_valid_json_with_hook_event_name(tmp_path, monkeypatch, capsys
     assert "IMPORTANT:" in data["hookSpecificOutput"]["additionalContext"]
 
 
-def test_exit_code_shown_in_finished_block(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "gremlins"
+def test_exit_code_shown_in_finished_block(sandbox, monkeypatch, capsys):
     project_root = "/myproject"
     _make_state(
-        state_root,
+        sandbox.state,
         "gr-exit01",
         project_root,
         status="running",
@@ -385,17 +370,16 @@ def test_exit_code_shown_in_finished_block(tmp_path, monkeypatch, capsys):
     )
 
     rc, out, err = _invoke(
-        "SessionStart", project_root, state_root, monkeypatch, capsys
+        "SessionStart", project_root, sandbox.state, monkeypatch, capsys
     )
     assert rc == 0
     assert "exit 2" in out
 
 
-def test_description_shown_in_summary(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "gremlins"
+def test_description_shown_in_summary(sandbox, monkeypatch, capsys):
     project_root = "/myproject"
     _make_state(
-        state_root,
+        sandbox.state,
         "gr-desc01",
         project_root,
         finished=True,
@@ -403,18 +387,17 @@ def test_description_shown_in_summary(tmp_path, monkeypatch, capsys):
     )
 
     rc, out, err = _invoke(
-        "SessionStart", project_root, state_root, monkeypatch, capsys
+        "SessionStart", project_root, sandbox.state, monkeypatch, capsys
     )
     assert rc == 0
     assert "add feature X" in out
 
 
 def test_always_exits_zero_on_exception(monkeypatch, capsys):
-    # Force an exception inside _run by making os.path.isdir raise.
     def boom(*a, **kw):
         raise RuntimeError("simulated failure")
 
-    monkeypatch.setattr("gremlins.paths.state_root", boom)
+    monkeypatch.setattr("gremlins.fleet.session_summary._run", boom)
     rc = main([])
     assert rc == 0
 
