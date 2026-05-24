@@ -125,7 +125,7 @@ class _Inputs:
     base_ref_sha: str
     stage_inputs: dict[str, Any]
     issue_data: dict[str, Any] | None
-    pr_artifact: dict[str, Any] | None
+    pr_num: str = ""
 
 
 def _validate_plan_args(
@@ -314,11 +314,9 @@ def _resolve_inputs(
             raise RuntimeError(
                 f"gh pr view returned empty url or headRefName for {pr!r}: {pr_data!r}"
             )
-        pr_artifact: dict[str, Any] | None = {
-            "type": "pr",
-            "url": pr_url,
-            "branch": pr_branch,
-        }
+        import re as _re
+        _m = _re.search(r"/pull/(\d+)", pr_url)
+        pr_num = _m.group(1) if _m else ""
     else:
         base_ref_name, base_ref_sha = _resolve_base_ref(
             base_ref, project_root, loaded_pipeline
@@ -328,7 +326,7 @@ def _resolve_inputs(
             if loaded_pipeline is not None
             else "worktree-branch"
         )
-        pr_artifact = None
+        pr_num = ""
 
     stored_args = list(resolved_pipeline_args)
     if spec_path and "--spec" not in stored_args:
@@ -355,7 +353,7 @@ def _resolve_inputs(
         base_ref_sha=base_ref_sha,
         stage_inputs=stage_inputs,
         issue_data=issue_data,
-        pr_artifact=pr_artifact,
+        pr_num=pr_num,
     )
 
 
@@ -547,8 +545,16 @@ def launch(
         sd.bypass = bypass
         sd.permissions_file = permissions_file
         sd.persist(state_dir)
-        if inputs.pr_artifact:
-            sd.append_artifact(inputs.pr_artifact)
+        if inputs.pr_num:
+            from gremlins.artifacts.uri import Uri
+
+            registry_path = state_dir / "registry.json"
+            _data = {"pr": str(Uri.parse(f"gh://pr/{inputs.pr_num}"))}
+            _tmp = registry_path.with_name(
+                f"registry.json.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+            )
+            _tmp.write_text(json.dumps(_data), encoding="utf-8")
+            os.replace(_tmp, registry_path)
         p = _spawn(inputs.gremlin_id, inputs, state_dir)
     except Exception:
         shutil.rmtree(state_dir, ignore_errors=True)
