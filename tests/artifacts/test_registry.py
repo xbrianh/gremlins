@@ -6,7 +6,7 @@ import pathlib
 
 import pytest
 
-from gremlins.artifacts.registry import ArtifactRegistry, MissingArtifact
+from gremlins.artifacts.registry import ArtifactRegistry, DuplicateArtifact, MissingArtifact
 from gremlins.artifacts.uri import Uri
 
 
@@ -46,6 +46,19 @@ def test_keys_returns_bound_keys(tmp_path: pathlib.Path) -> None:
     r.bind("a", Uri(scheme="file", path="session/a.md"))
     r.bind("b", Uri(scheme="file", path="session/b.md"))
     assert set(r.keys()) == {"a", "b"}
+
+
+def test_bind_duplicate_raises(tmp_path: pathlib.Path) -> None:
+    r = make_registry(tmp_path)
+    first = Uri(scheme="file", path="session/a.md")
+    second = Uri(scheme="file", path="session/b.md")
+    r.bind("x", first)
+    with pytest.raises(DuplicateArtifact) as exc_info:
+        r.bind("x", second)
+    assert exc_info.value.key == "x"
+    assert "x" in str(exc_info.value)
+    assert str(first) in str(exc_info.value)
+    assert str(second) in str(exc_info.value)
 
 
 def test_read_returns_file_bytes(tmp_path: pathlib.Path) -> None:
