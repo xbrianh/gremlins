@@ -370,7 +370,7 @@ def test_launch_explicit_project_root(lenv):
 
 
 def test_resume_patches_state(lenv, monkeypatch):
-    """resume() bumps rescue_count, clears markers, and patches state.json."""
+    """Manual resume() clears markers and patches state.json without bumping rescue_count."""
     monkeypatch.delenv("GREMLINS_TEST_NOOP_PIPELINE")
     launcher = _launcher()
     monkeypatch.setenv("FAKE_CLAUDE_FAIL_AT", "plan")
@@ -389,11 +389,40 @@ def test_resume_patches_state(lenv, monkeypatch):
     launcher.resume(gremlin_id)
 
     post_state = _read_state(state_dir)
-    assert post_state["rescue_count"] == pre_rescue_count + 1
+    assert post_state["rescue_count"] == pre_rescue_count, (
+        "manual resume must not bump rescue_count"
+    )
     assert post_state["status"] == "running"
     assert post_state["resumed_from_stage"] == "plan"
     assert post_state["pipeline_path"].endswith(".yaml")
     assert not (state_dir / "finished").exists(), "finished marker must be cleared"
+
+    _wait_for_finished(state_dir, timeout=60)
+
+
+def test_rescue_resume_bumps_rescue_count(lenv, monkeypatch):
+    """resume(is_rescue=True) increments rescue_count."""
+    monkeypatch.delenv("GREMLINS_TEST_NOOP_PIPELINE")
+    launcher = _launcher()
+    monkeypatch.setenv("FAKE_CLAUDE_FAIL_AT", "plan")
+    gremlin_id, _ = launcher.launch(
+        "local", stage_inputs={"instructions": "test rescue resume"}
+    )
+    state_dir = _gremlins_state_root(lenv) / gremlin_id
+    assert _wait_for_finished(state_dir, timeout=30), (
+        "failed gremlin should terminate quickly"
+    )
+
+    pre_state = _read_state(state_dir)
+    pre_rescue_count = pre_state.get("rescue_count", 0)
+
+    monkeypatch.setenv("FAKE_CLAUDE_FAIL_AT", "")
+    launcher.resume(gremlin_id, is_rescue=True)
+
+    post_state = _read_state(state_dir)
+    assert post_state["rescue_count"] == pre_rescue_count + 1, (
+        "rescue resume must bump rescue_count"
+    )
 
     _wait_for_finished(state_dir, timeout=60)
 

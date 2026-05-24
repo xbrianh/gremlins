@@ -4,7 +4,7 @@ Public API:
     launch(kind, *, stage_inputs=None, plan=None, description=None,
            parent_id=None, project_root=None, base_ref="HEAD",
            pipeline_args=()) -> tuple[str, subprocess.Popen[bytes]]
-    resume(gremlin_id) -> None
+    resume(gremlin_id, *, graft=None, is_rescue=False) -> None
 """
 
 from __future__ import annotations
@@ -671,6 +671,8 @@ def _patch_state_for_resume(
     stage: str,
     pipeline_args: list[str],
     pipeline_path: str,
+    *,
+    is_rescue: bool = False,
 ) -> None:
     for marker in ("finished", "summarized"):
         try:
@@ -700,7 +702,7 @@ def _patch_state_for_resume(
         stage=stage,
         rescued_at=now_iso,
         resumed_from_stage=stage,
-        rescue_count=rescue_count + 1,
+        rescue_count=rescue_count + 1 if is_rescue else rescue_count,
         pid=None,
         pipeline_args=pipeline_args,
         pipeline_path=pipeline_path,
@@ -749,7 +751,9 @@ def _spawn_resume(
     )
 
 
-def resume(gremlin_id: str, *, graft: str | None = None) -> None:
+def resume(
+    gremlin_id: str, *, graft: str | None = None, is_rescue: bool = False
+) -> None:
     state_dir, state = _load_resume_state(gremlin_id)
     _check_resume_preconditions(gremlin_id, state_dir, state, graft)
     pipeline_args, pipeline_path, project_root = _resolve_resume_pipeline(
@@ -762,7 +766,13 @@ def resume(gremlin_id: str, *, graft: str | None = None) -> None:
     if graft is not None:
         stage = _append_graft(state_dir, graft, project_root)
     _patch_state_for_resume(
-        gremlin_id, state_dir, state, stage, pipeline_args, pipeline_path
+        gremlin_id,
+        state_dir,
+        state,
+        stage,
+        pipeline_args,
+        pipeline_path,
+        is_rescue=is_rescue,
     )
     p = _spawn_resume(
         gremlin_id, state_dir, state, pipeline_path, pipeline_args, stage, project_root
