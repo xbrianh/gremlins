@@ -1,7 +1,5 @@
 import pathlib
 
-import pytest
-
 from gremlins import paths
 
 
