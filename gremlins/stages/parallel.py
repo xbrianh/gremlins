@@ -11,12 +11,12 @@ import secrets
 from collections.abc import Callable
 from typing import Any, cast
 
+from gremlins import paths
 from gremlins.executor.parallel_state import ParallelGroupState
 from gremlins.executor.state import State, StateData
 from gremlins.stages.base import Stage
 from gremlins.stages.composite import child_state as _child_state
 from gremlins.stages.outcome import Bail, Done, Outcome
-from gremlins import paths
 from gremlins.utils import git, parallel_bail, proc
 
 logger = logging.getLogger(__name__)

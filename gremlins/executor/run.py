@@ -15,6 +15,7 @@ import types
 from collections.abc import Sequence
 from typing import Any
 
+from gremlins import paths
 from gremlins.clients.client import Client
 from gremlins.env_file import load_env_file
 from gremlins.errors import die
@@ -27,7 +28,6 @@ from gremlins.executor.state import (
 from gremlins.logging_setup import configure_logging
 from gremlins.permissions.loader import load_policy
 from gremlins.permissions.policy import Policy
-from gremlins import paths
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail
 from gremlins.utils.git import has_commits, has_dirty_worktree, in_git_repo
