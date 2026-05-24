@@ -12,7 +12,8 @@ import pytest
 import gremlins.executor.state as state_mod
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State as RuntimeState, StateData, build_state
+from gremlins.executor.state import State as RuntimeState
+from gremlins.executor.state import StateData, build_state
 from gremlins.stages.agent import Agent
 from gremlins.stages.handoff import Handoff
 from gremlins.stages.outcome import Bail, Done, NeedsFix

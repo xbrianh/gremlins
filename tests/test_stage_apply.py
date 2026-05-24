@@ -4,7 +4,8 @@ import subprocess
 
 import pytest
 
-from gremlins.executor.state import State as RuntimeState, StateData, build_state
+from gremlins.executor.state import State as RuntimeState
+from gremlins.executor.state import StateData, build_state
 from gremlins.stages.apply import Apply
 from gremlins.stages.outcome import Bail, Done
 

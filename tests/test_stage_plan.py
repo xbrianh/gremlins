@@ -11,7 +11,8 @@ from conftest import MINIMAL_EVENTS
 
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State as RuntimeState, StateData, build_state
+from gremlins.executor.state import State as RuntimeState
+from gremlins.executor.state import StateData, build_state
 from gremlins.stages.plan import Plan
 
 

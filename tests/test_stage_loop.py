@@ -8,7 +8,8 @@ from typing import Any
 
 import pytest
 
-from gremlins.executor.state import State as RuntimeState, StateData, build_state
+from gremlins.executor.state import State as RuntimeState
+from gremlins.executor.state import StateData, build_state
 from gremlins.stages.cmd import Cmd
 from gremlins.stages.loop import LoopStage, detach_to_pr_base, head_stable, max_iters
 from gremlins.stages.outcome import Bail, Done, NeedsFix

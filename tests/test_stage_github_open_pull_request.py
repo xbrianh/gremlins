@@ -10,7 +10,8 @@ from unittest.mock import patch
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State as RuntimeState, StateData, build_state
+from gremlins.executor.state import State as RuntimeState
+from gremlins.executor.state import StateData, build_state
 from gremlins.stages.github_open_pull_request import GitHubOpenPullRequest
 
 PR_URL = "https://github.com/owner/repo/pull/42"

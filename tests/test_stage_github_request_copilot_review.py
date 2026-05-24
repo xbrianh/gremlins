@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State as RuntimeState, StateData, build_state
+from gremlins.executor.state import State as RuntimeState
+from gremlins.executor.state import StateData, build_state
 from gremlins.stages.github_request_copilot_review import GitHubRequestCopilotReview
 from gremlins.utils import proc
 

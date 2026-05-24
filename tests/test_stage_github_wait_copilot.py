@@ -9,7 +9,8 @@ from collections.abc import Callable
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State as RuntimeState, StateData, build_state
+from gremlins.executor.state import State as RuntimeState
+from gremlins.executor.state import StateData, build_state
 from gremlins.stages.github_wait_copilot import GitHubWaitCopilot
 
 
