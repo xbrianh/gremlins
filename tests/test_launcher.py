@@ -23,7 +23,7 @@ from conftest import _init_git_repo
 from fixtures.shell_env import install_fake_bin
 
 import gremlins.utils.git as git_mod
-from gremlins.launcher import GremlinAlreadyRunning
+from gremlins.launcher import GremlinAlreadyRunning, GremlinStateDirExists
 
 FAKE_GH = pathlib.Path(__file__).resolve().parent / "fixtures" / "fake_gh.py"
 
@@ -1271,8 +1271,8 @@ def test_launch_explicit_gremlin_id_already_running(lenv, monkeypatch):
         )
 
 
-def test_launch_explicit_gremlin_id_stale_dir_allowed(lenv, monkeypatch):
-    """launch(gremlin_id=...) succeeds when the state dir exists but the process is not running."""
+def test_launch_explicit_gremlin_id_stale_dir_refused(lenv, monkeypatch):
+    """launch(gremlin_id=...) raises GremlinStateDirExists when the state dir exists but the process is not running."""
     launcher = _launcher()
     state_root = _gremlins_state_root(lenv)
     gremlin_id = "my-fixed-id"
@@ -1282,14 +1282,13 @@ def test_launch_explicit_gremlin_id_stale_dir_allowed(lenv, monkeypatch):
         json.dumps({"id": gremlin_id, "status": "running", "pid": 0}),
         encoding="utf-8",
     )
-    monkeypatch.setattr(launcher, "_spawn_logged_process", lambda *a, **kw: _FakeProc())
-    result_id, _ = launcher.launch(
-        "local",
-        stage_inputs={"instructions": "stale dir test"},
-        gremlin_id=gremlin_id,
-        project_root=str(lenv.repo),
-    )
-    assert result_id == gremlin_id
+    with pytest.raises(GremlinStateDirExists, match="gremlins rm"):
+        launcher.launch(
+            "local",
+            stage_inputs={"instructions": "stale dir test"},
+            gremlin_id=gremlin_id,
+            project_root=str(lenv.repo),
+        )
 
 
 def test_launch_pr_kwarg_sets_state_fields(lenv, monkeypatch):
