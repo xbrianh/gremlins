@@ -82,7 +82,7 @@ def test_exec_in_map_sets_env(tmp_path: pathlib.Path) -> None:
     stage = Exec(
         "env-test",
         [],
-        {"cmds": ["test \"$MY_VAR\" = hello-value"]},
+        {"cmds": ['test "$MY_VAR" = hello-value']},
         in_map={"MY_VAR": "mykey"},
     )
     result = asyncio.run(stage.run(state))

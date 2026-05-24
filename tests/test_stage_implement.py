@@ -219,6 +219,7 @@ def test_empty_impl_with_prior_commits_artifact_does_not_raise(
     stage, state = _make_state(tmp_path, prompts=[_TEMPLATE_GH])
     assert state.artifacts is not None
     from gremlins.artifacts.uri import Uri
+
     state.artifacts.bind("commits", Uri.parse("git://range/abc123..def456"))
     with patch(
         "gremlins.stages.implement.classify_impl_outcome",
