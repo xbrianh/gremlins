@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 import pathlib
 
-import pytest
-
 from gremlins.executor.parallel_state import ParallelGroupState
 from gremlins.executor.state import StateData
 

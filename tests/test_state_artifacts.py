@@ -95,7 +95,7 @@ def test_append_artifact_noop_when_no_gremlin_id(sandbox):
 
 def test_read_pr_url_returns_last_pr_url(sandbox):
     gremlin_id = "gr-pr-url-test"
-    sf = _make_state_dir(sandbox.state, gremlin_id)
+    _make_state_dir(sandbox.state, gremlin_id)
 
     StateData.load(gremlin_id).append_artifact({"type": "branch", "name": "feat-1"})
     StateData.load(gremlin_id).append_artifact(
@@ -294,7 +294,7 @@ def test_append_artifact_stamps_child_attempt(sandbox):
     import dataclasses
 
     gremlin_id = "gr-child-stamp"
-    sf = _make_state_dir(sandbox.state, gremlin_id, attempt="parent-stage-aabb")
+    _make_state_dir(sandbox.state, gremlin_id, attempt="parent-stage-aabb")
 
     child_attempt = "child-key-ccdd"
     data = StateData.load(gremlin_id)
