@@ -368,9 +368,7 @@ def test_launch_unified_dispatch_unknown_name_with_help_exits_nonzero(
         FileNotFoundError("prompt file not found: gremlins:missing.md"),
     ],
 )
-def test_launch_invalid_pipeline_exits_nonzero_with_message(
-    monkeypatch, capsys, exc
-):
+def test_launch_invalid_pipeline_exits_nonzero_with_message(monkeypatch, capsys, exc):
     monkeypatch.setattr(
         "gremlins.cli.launch.resolve_pipeline_name",
         lambda name, root: pathlib.Path(f"/fake/{name}.yaml"),
