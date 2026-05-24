@@ -60,8 +60,10 @@ def _make_stage(
 ) -> tuple[GitHubWaitCI, RuntimeState]:
     prompts = [_CI_PROMPT_PATH.read_text(encoding="utf-8")]
     stage = GitHubWaitCI("github-wait-ci", prompts, {}, pr_url=PR_URL, **kwargs)
+    session_dir = tmp_path / "artifacts"
+    session_dir.mkdir(exist_ok=True)
     state = build_state(
-        data=StateData(gremlin_id=gremlin_id), client=client, session_dir=tmp_path
+        data=StateData(gremlin_id=gremlin_id), client=client, session_dir=session_dir
     )
     if pr_branch is not None:
         state.artifacts.bind("pr", Uri.parse("gh://pr/42"))

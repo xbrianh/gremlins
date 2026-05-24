@@ -219,9 +219,6 @@ class Gremlin:
             spec=self.spec,
             instructions=[self.instructions] if self.instructions else [],
         )
-        from gremlins.artifacts import registry as _reg
-
-        _reg.REGISTRY_PATH = self.state_dir / "registry.json"
         registry = ArtifactRegistry(
             session_dir=self.session_dir,
             cwd=self.worktree_dir,

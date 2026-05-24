@@ -754,9 +754,6 @@ def _land_gh(
     project_root = _resolve_landing_cwd(state)
     cwd = project_root if project_root and os.path.isdir(project_root) else None
 
-    from gremlins.artifacts import registry as _reg
-
-    _reg.REGISTRY_PATH = resolve_session_dir(gremlin_id).parent / "registry.json"
     registry = ArtifactRegistry(
         session_dir=resolve_session_dir(gremlin_id),
         cwd=pathlib.Path(cwd) if cwd else None,

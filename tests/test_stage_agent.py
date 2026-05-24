@@ -24,11 +24,11 @@ def _make_state(
 ) -> State:
     if client is None:
         client = FakeClaudeClient(fixtures={"my-agent": MINIMAL_EVENTS})
-    reg = registry or ArtifactRegistry(tmp_path, cwd=tmp_path)
+    reg = registry or ArtifactRegistry(tmp_path / "artifacts", cwd=tmp_path)
     return build_state(
         data=StateData(),
         client=client,
-        session_dir=tmp_path,
+        session_dir=tmp_path / "artifacts",
         worktree=tmp_path,
         artifacts=reg,
     )
@@ -54,8 +54,9 @@ def _make_agent(
 
 
 def test_in_content_substituted_into_prompt(tmp_path):
-    registry = ArtifactRegistry(tmp_path, cwd=tmp_path)
-    (tmp_path / "plan.md").write_bytes(b"# My Plan")
+    registry = ArtifactRegistry(tmp_path / "artifacts", cwd=tmp_path)
+    (tmp_path / "artifacts").mkdir(exist_ok=True)
+    (tmp_path / "artifacts" / "plan.md").write_bytes(b"# My Plan")
     registry.bind("plan", Uri.parse("file://session/plan.md"))
 
     client = FakeClaudeClient(fixtures={"my-agent": MINIMAL_EVENTS})
@@ -91,7 +92,8 @@ def test_no_in_map_runs_prompt_unchanged(tmp_path):
 
 
 def test_verify_produced_passes_when_out_file_written(tmp_path):
-    output_file = tmp_path / "output.md"
+    output_file = tmp_path / "artifacts" / "output.md"
+    output_file.parent.mkdir(exist_ok=True)
 
     class WritingClient(FakeClaudeClient):
         async def run(self, prompt, *, label, **kwargs):
@@ -125,7 +127,8 @@ def test_verify_produced_fails_when_out_file_missing(tmp_path):
 
 
 def test_out_uri_bound_in_registry_before_agent_runs(tmp_path):
-    output_file = tmp_path / "output.md"
+    output_file = tmp_path / "artifacts" / "output.md"
+    output_file.parent.mkdir(exist_ok=True)
     seen_bound_before_run: list[bool] = []
 
     class CheckingClient(FakeClaudeClient):

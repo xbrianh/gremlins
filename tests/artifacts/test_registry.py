@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import pathlib
 
 import pytest
 
-from gremlins.artifacts import registry as registry_mod
 from gremlins.artifacts.registry import (
     ArtifactRegistry,
     DuplicateArtifact,
@@ -16,7 +16,7 @@ from gremlins.artifacts.uri import Uri
 
 
 def make_registry(tmp_path: pathlib.Path) -> ArtifactRegistry:
-    return ArtifactRegistry(session_dir=tmp_path)
+    return ArtifactRegistry(session_dir=tmp_path / "artifacts")
 
 
 def test_bind_resolve_roundtrip(tmp_path: pathlib.Path) -> None:
@@ -67,43 +67,37 @@ def test_bind_duplicate_raises(tmp_path: pathlib.Path) -> None:
 
 
 def test_read_returns_file_bytes(tmp_path: pathlib.Path) -> None:
-    (tmp_path / "plan.md").write_bytes(b"hello")
-    r = make_registry(tmp_path)
+    session_dir = tmp_path / "artifacts"
+    session_dir.mkdir()
+    (session_dir / "plan.md").write_bytes(b"hello")
+    r = ArtifactRegistry(session_dir=session_dir)
     r.bind("plan", Uri(scheme="file", path="session/plan.md"))
     assert r.read("plan") == b"hello"
 
 
-def test_bind_persists_to_file(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import json
+def test_registry_path_derives_from_session_dir(tmp_path: pathlib.Path) -> None:
+    r = ArtifactRegistry(session_dir=tmp_path / "artifacts")
+    assert r.registry_path == tmp_path / "registry.json"
 
-    persist = tmp_path / "reg.json"
-    monkeypatch.setattr(registry_mod, "REGISTRY_PATH", persist)
-    r = ArtifactRegistry(session_dir=tmp_path)
+
+def test_bind_persists_to_file(tmp_path: pathlib.Path) -> None:
+    r = ArtifactRegistry(session_dir=tmp_path / "artifacts")
     r.bind("plan", Uri.parse("file://session/plan.md"))
-    data = json.loads(persist.read_text())
+    data = json.loads(r.registry_path.read_text())
     assert data["plan"] == "file://session/plan.md"
 
 
-def test_init_loads_from_persist_file(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import json
-
-    persist = tmp_path / "reg.json"
-    persist.write_text(json.dumps({"plan": "file://session/plan.md"}))
-    monkeypatch.setattr(registry_mod, "REGISTRY_PATH", persist)
-    r = ArtifactRegistry(session_dir=tmp_path)
+def test_init_loads_from_persist_file(tmp_path: pathlib.Path) -> None:
+    (tmp_path / "registry.json").write_text(
+        json.dumps({"plan": "file://session/plan.md"})
+    )
+    r = ArtifactRegistry(session_dir=tmp_path / "artifacts")
     assert r.resolve("plan") == Uri.parse("file://session/plan.md")
 
 
-def test_persist_survives_roundtrip(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    persist = tmp_path / "reg.json"
-    monkeypatch.setattr(registry_mod, "REGISTRY_PATH", persist)
-    r1 = ArtifactRegistry(session_dir=tmp_path)
+def test_persist_survives_roundtrip(tmp_path: pathlib.Path) -> None:
+    session_dir = tmp_path / "artifacts"
+    r1 = ArtifactRegistry(session_dir=session_dir)
     r1.bind("pr", Uri.parse("gh://pr/42"))
-    r2 = ArtifactRegistry(session_dir=tmp_path)
+    r2 = ArtifactRegistry(session_dir=session_dir)
     assert r2.resolve("pr") == Uri.parse("gh://pr/42")

@@ -25,7 +25,7 @@ def _loop_state(tmp_path: Any) -> RuntimeState:
     return build_state(
         data=StateData(),
         client=_fake_client(),
-        session_dir=tmp_path,
+        session_dir=tmp_path / "artifacts",
         worktree=tmp_path,
     )
 
@@ -148,7 +148,7 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
     loop_state = build_state(
         data=StateData(gremlin_id=gremlin_id, attempt=attempt),
         client=_fake_client(),
-        session_dir=tmp_path,
+        session_dir=tmp_path / "artifacts",
         worktree=tmp_path,
     )
     loop = LoopStage("loop", body_runners=[check, fix], max_iterations=2)
@@ -236,7 +236,7 @@ def _run_cmd_stage(tmp_path: Any, cmds: list[str]) -> tuple[Cmd, RuntimeState]:
     state = build_state(
         data=StateData(),
         client=_fake_client(),
-        session_dir=tmp_path,
+        session_dir=tmp_path / "artifacts",
         worktree=tmp_path,
     )
     return stage, state
@@ -279,7 +279,7 @@ def test_run_cmd_output_in_needs_fix(tmp_path):
 def test_run_cmd_log_path_interpolation(tmp_path):
     stage = Cmd("cmd", [], {"cmds": ["true"], "log_path": "run-{n}.log"})
     state = build_state(
-        data=StateData(), client=_fake_client(), session_dir=tmp_path, worktree=tmp_path
+        data=StateData(), client=_fake_client(), session_dir=tmp_path / "artifacts", worktree=tmp_path
     )
     asyncio.run(stage.run(state))
     assert (tmp_path / "run-1.log").exists()
@@ -298,7 +298,7 @@ def _loop_state_with_gr(
     state = build_state(
         data=StateData(gremlin_id=gremlin_id),
         client=_fake_client(),
-        session_dir=tmp_path,
+        session_dir=tmp_path / "artifacts",
         worktree=tmp_path,
     )
     if pr_branch is not None:
@@ -442,7 +442,7 @@ def test_loop_patches_loop_iteration_to_state(tmp_path, make_state_dir):
     loop_state = build_state(
         data=StateData(gremlin_id=gremlin_id),
         client=_fake_client(),
-        session_dir=tmp_path,
+        session_dir=tmp_path / "artifacts",
         worktree=tmp_path,
     )
     loop = LoopStage("loop", body_runners=[runner], max_iterations=3)

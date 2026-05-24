@@ -547,13 +547,11 @@ def launch(
         sd.permissions_file = permissions_file
         sd.persist(state_dir)
         if inputs.pr_num:
-            from gremlins.artifacts import registry as _reg
             from gremlins.artifacts.registry import ArtifactRegistry
             from gremlins.artifacts.uri import Uri
 
             session_dir = state_dir / "artifacts"
             session_dir.mkdir(parents=True, exist_ok=True)
-            _reg.REGISTRY_PATH = state_dir / "registry.json"
             ArtifactRegistry(session_dir=session_dir).bind(
                 "pr", Uri.parse(f"gh://pr/{inputs.pr_num}")
             )

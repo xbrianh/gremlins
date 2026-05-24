@@ -31,7 +31,7 @@ def _make_state(
     state = build_state(
         data=StateData(gremlin_id=gremlin_id, issue_url=issue_url),
         client=client,
-        session_dir=tmp_path,
+        session_dir=tmp_path / "artifacts",
     )
     return stage, state
 
@@ -122,7 +122,7 @@ def test_run_writes_raw_path(tmp_path: pathlib.Path) -> None:
         asyncio.run(stage.run(state))
     assert (
         state.client.calls[0].raw_path
-        == tmp_path / "stream-github-open-pull-request.jsonl"
+        == tmp_path / "artifacts" / "stream-github-open-pull-request.jsonl"
     )
 
 
@@ -161,7 +161,7 @@ def _make_state_with_gr(
             gremlin_id=gremlin_id, base_ref_name=base_ref_name, issue_url=issue_url
         ),
         client=client,
-        session_dir=tmp_path,
+        session_dir=tmp_path / "artifacts",
     )
     return stage, state
 
@@ -263,7 +263,7 @@ def test_explicit_base_ref_used_when_no_prior_pr(tmp_path: pathlib.Path) -> None
     state = build_state(
         data=StateData(gremlin_id="test-gr", base_ref_name="main"),
         client=client,
-        session_dir=tmp_path,
+        session_dir=tmp_path / "artifacts",
     )
     prompts_seen: list[str] = []
 
@@ -293,7 +293,7 @@ def test_last_pr_branch_takes_priority_over_base_ref(tmp_path: pathlib.Path) -> 
     state = build_state(
         data=StateData(gremlin_id="test-gr", base_ref_name="main"),
         client=client,
-        session_dir=tmp_path,
+        session_dir=tmp_path / "artifacts",
     )
     prompts_seen: list[str] = []
 
