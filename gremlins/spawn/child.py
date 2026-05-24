@@ -15,7 +15,7 @@ Spec file schema (JSON):
         "repo":            <str>        "owner/repo" for gh API calls (from parent)
         "instructions":    <str>        freeform instructions forwarded from parent
         "test_client":     <str|null>   "provider:model" of the test client, or null in production
-        "stage_model":     <str>        real model name when test_client overrides execution
+        "stage_model":     <str>        real model name when test_client overrides execution; empty string in production
     }
 
 Result file schema (written to <spec_path>.result):
@@ -121,6 +121,8 @@ def _build_state(spec: dict[str, Any]) -> State:
     test_client: Client | None = None
     test_client_label = spec.get("test_client") or ""
     if test_client_label:
+        if not isinstance(test_client_label, str):
+            raise ValueError(f"'test_client' must be a string, got {type(test_client_label).__name__}")
         test_client = Client.parse(test_client_label, policy=policy)
 
     return build_state(
