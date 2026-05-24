@@ -7,7 +7,7 @@ import pathlib
 from typing import Any
 
 from gremlins.executor.state import State
-from gremlins.stages.agent_runner import bail_command, run_agent
+from gremlins.stages.agent_runner import run_agent
 from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.outcome import Done, Outcome
 
@@ -154,7 +154,6 @@ class GitHubReviewPullRequest(Stage):
             "\n\n".join(self.prompts)
             .rstrip()
             .format(
-                bail_command=bail_command(state),
                 pr_url=pr_url,
             )
         )

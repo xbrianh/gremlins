@@ -440,7 +440,7 @@ def test_empty_pr_branch_bails(
     assert client.calls == []
 
 
-def test_check_bail_raises_from_state(
+def test_bail_sentinel_in_transcript_raises_bail(
     tmp_path: pathlib.Path, make_state_dir: Callable[[str], pathlib.Path]
 ) -> None:
     gremlin_id = "test-gr-id"
@@ -448,12 +448,9 @@ def test_check_bail_raises_from_state(
     attempt = "ci-fix-test-attempt"
     sf = state_dir / "state.json"
     sf.write_text(json.dumps({"id": gremlin_id, "attempt": attempt}))
-    # Write bail file as the agent would have
-    (state_dir / f"bail_{attempt}.json").write_text(
-        json.dumps({"class": "other", "detail": "ci bailed"})
-    )
 
-    client = FakeClaudeClient(fixtures={"ci-fix-1": MINIMAL_EVENTS})
+    bail_events = [{"type": "result", "result": "tried to fix\nBAIL: other: ci bailed"}]
+    client = FakeClaudeClient(fixtures={"ci-fix-1": bail_events})
     getter = _make_getter([([_FAILING_CHECK], ""), ([_FAILING_CHECK], "")])
     stage, state = _make_stage(
         client,

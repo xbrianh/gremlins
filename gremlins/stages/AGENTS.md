@@ -12,7 +12,7 @@ sequencing logic of their own.
   - Invokes the agent via `agent_runner.run_agent`; the `label` is the stage name.
   - Prompt template is `"\n\n".join(self.prompts)`; if `in:` produces substitution vars, `str.format(**subs)` is applied.
   - `state.artifacts` is required only when `in:` or `out:` maps are non-empty; stages with empty maps (e.g. `implement`) can delegate to `Agent` without a registry.
-- `agent_runner.py` — `run_agent`, `bail_command`, `_check_bail`. Single chokepoint for agentic execution: injects `GREMLIN_ATTEMPT` / `GREMLIN_STATE_DIR` env vars, delegates to `state.client.run()`, then raises `Bail` if the bail-marker file was set. Import from here (not from `agent.py`) in any stage that needs `run_agent`.
+- `agent_runner.py` — `run_agent`, `_check_bail`. Single chokepoint for agentic execution: delegates to `state.client.run()`, then raises `Bail` if the agent's final message ends with a `BAIL: <class>: <detail>` sentinel line. Import from here (not from `agent.py`) in any stage that needs `run_agent`.
 - `loop.py` — `LoopStage(Stage)`. Iterates a `body: list[Stage]` (or raw `body_runners` callables) until a termination predicate fires or `max_iterations` is exhausted. Body stages execute in order; subsequent stages only run when a preceding stage returned `NeedsFix`, except on the final iteration where fix stages are skipped. Termination is controlled by an `until: UntilFn` predicate (default `head_stable`); `max_iters(n)` is a factory for count-bounded loops. `on_iteration_start` callback runs at the top of each iteration (used by `with_dict` to express `pr_stack` detach-to-prior-PR logic).
 - `cmd.py` — `Cmd(Stage)`. Runs `options["cmds"]` joined with `&&`; writes output to disk on every invocation. On non-zero exit returns `NeedsFix(output)`. Supports `log_path` option with `{n}` interpolation for per-invocation naming (e.g. `verify-attempt-{n}.log`); falls back to `cmd.log`. Stage type `"cmd"`.
 - `apply.py` — `Apply(Stage)`. Runs `options["cmds"]` sequentially in cwd; on non-zero writes output to apply.log and raises Bail. Then git add -A and commits (name or commit_message) iff staged diff non-empty; skips empty commit. For deterministic post-impl normalizers (e.g. ruff) before verify. Stage type `"apply"`.
@@ -37,10 +37,7 @@ sequencing logic of their own.
   Bundled internal prompts are loaded via `load_bundled_prompt` / `render_bundled_prompt`
   from `gremlins.utils.yaml_io`. Bundled prompt files live under `gremlins/prompts/`. See
   `gremlins/prompts/README.md` for the runtime placeholder inventory.
-- Stages that should respect a bail marker (written by the agent as
-  `bail_$GREMLIN_ATTEMPT.json` in `$GREMLIN_STATE_DIR`) call `check_bail(<phase-name>)`
-  from `..state` after the claude run. The runner inspects the bail and
-  halts the pipeline.
+- Stages that should respect a bail marker call `run_agent` from `agent_runner`, which parses the agent's final transcript message for a `BAIL: <class>: <detail>` sentinel line and raises `Bail` if found.
 - Most stages return `None`. Stages that produce information the
   orchestrator needs (`implement.py` → `ImplStageResult`) return it; the orchestrator threads
   it into later stages.
