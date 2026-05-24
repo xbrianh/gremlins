@@ -11,6 +11,7 @@ import secrets
 from collections.abc import Callable
 from typing import Any, cast
 
+from gremlins import paths
 from gremlins.executor.parallel_state import ParallelGroupState
 from gremlins.executor.state import State, StateData
 from gremlins.stages.base import Stage
@@ -125,7 +126,7 @@ class ParallelStage(Stage):
             cancel_on_bail=self._cancel_on_bail,
             bail_policy=self._bail_policy,
             parent_data=parent_data or StateData(),
-            project_root=project_root or pathlib.Path.cwd(),
+            project_root=project_root or paths.project_root(),
             worktree_parent=worktree_parent,
             stage_path=self.path or self.name,
             child_stages=child_stages,
@@ -150,7 +151,7 @@ class ParallelStage(Stage):
         for _, fn in self.build_runtime_stages(
             child_runners,
             parent_data=state.data,
-            project_root=pathlib.Path.cwd(),
+            project_root=paths.project_root(),
             worktree_parent=state.worktree_parent,
             set_stage_fn=lambda n: state.record_stage_progress(self.name, sub_stage=n),
             child_stages=self.body,

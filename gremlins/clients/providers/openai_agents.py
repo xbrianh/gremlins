@@ -20,6 +20,7 @@ from agents.result import RunResultStreaming
 from agents.stream_events import RunItemStreamEvent
 from openai.types.shared import Reasoning
 
+from gremlins import paths
 from gremlins.clients.config import (
     OPENAI_AGENTS_MAX_TURNS,
     STREAM_IDLE_BACKOFF,
@@ -167,7 +168,7 @@ class OpenAIAgentsClient:
             idle_timeout = STREAM_IDLE_TIMEOUT
         effective_model = model or self._model
         prefix = f"[{label}] " if label else ""
-        worktree_root = cwd or pathlib.Path.cwd()
+        worktree_root = cwd or paths.project_root()
         if cwd is None and not self._bypass:
             sys.stderr.write(f"{prefix}warning: enforcing against implicit cwd\n")
         if audit_log is None and raw_path is not None:

@@ -101,7 +101,9 @@ def _build_spawn_env(gremlin_id: str) -> dict[str, str]:
     env["PYTHONPATH"] = os.pathsep.join(parts)
     env["PYTHONSAFEPATH"] = "1"
     env["GREMLIN_ID"] = gremlin_id
-    env["GREMLINS_OVERLAY_DIR"] = str(_state_root() / gremlin_id / ".gremlins")
+    env["GREMLINS_OVERLAY_DIR"] = str(
+        _state_root() / gremlin_id / _paths.OVERLAY_DIRNAME
+    )
     return env
 
 
@@ -160,7 +162,7 @@ def _validate_plan_args(
 
 
 def _reject_pipeline_collision(gremlin_id: str) -> None:
-    pipeline_names = {name for name, _ in list_pipelines(pathlib.Path.cwd())}
+    pipeline_names = {name for name, _ in list_pipelines(_paths.project_root())}
     if gremlin_id in pipeline_names:
         raise ValueError(
             f"--gremlin-id {gremlin_id!r} shadows the name of a pipeline. Pick a different id."
@@ -269,7 +271,7 @@ def _resolve_inputs(
         if r.returncode == 0 and r.stdout.strip():
             project_root = r.stdout.strip()
         else:
-            project_root = os.getcwd()
+            project_root = str(_paths.project_root())
 
     resolved_gremlin_id = _resolve_gremlin_id(slug, gremlin_id)
 
@@ -609,7 +611,7 @@ def _resolve_resume_pipeline(
     kind = state.get("kind", "")
     pipeline_args = cast(list[str], state.get("pipeline_args") or [])
     pipeline_path = str(state.get("pipeline_path") or "")
-    project_root = str(state.get("project_root") or os.getcwd())
+    project_root = str(state.get("project_root") or _paths.project_root())
 
     try:
         pipeline_args, pipeline_path = resolve_pipeline(

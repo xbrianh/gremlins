@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from typing import cast
 
 import gremlins.fleet.constants as _constants
+from gremlins import paths
 from gremlins.utils import git as _git_mod
 
 
@@ -221,4 +222,4 @@ def git_toplevel() -> str:
     try:
         return _git_mod.toplevel()
     except Exception:
-        return os.getcwd()
+        return str(paths.project_root())

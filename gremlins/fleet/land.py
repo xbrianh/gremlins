@@ -12,6 +12,7 @@ from typing import Any, cast
 
 import gremlins.fleet.constants as _constants
 import gremlins.utils.git as _git
+from gremlins import paths
 from gremlins.executor.state import StateData, landable_shape
 from gremlins.fleet.resolve import resolve_gremlin
 from gremlins.fleet.state import (
@@ -145,7 +146,7 @@ def _remove_worktree(wdir: str, state: dict[str, Any], cwd: str | None) -> None:
 
     workdir = state.get("workdir") or ""
     if workdir and os.path.exists(workdir):
-        _git.remove_worktree(cwd or os.getcwd(), workdir)
+        _git.remove_worktree(cwd or str(paths.project_root()), workdir)
         if os.path.exists(workdir):
             try:
                 shutil.rmtree(workdir)

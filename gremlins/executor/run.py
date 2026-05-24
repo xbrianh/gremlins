@@ -15,6 +15,7 @@ import types
 from collections.abc import Sequence
 from typing import Any
 
+from gremlins import paths
 from gremlins.clients.client import Client
 from gremlins.env_file import load_env_file
 from gremlins.errors import die
@@ -118,7 +119,7 @@ async def run_pipeline(
     configure_logging()
     args = _parse_args(argv)
 
-    env_file = pathlib.Path(".gremlins/env")
+    env_file = paths.project_overlay_dir(paths.project_root()) / "env"
     if env_file.is_file():
         try:
             os.environ.update(load_env_file(env_file))
@@ -130,7 +131,7 @@ async def run_pipeline(
 
     if not in_git_repo():
         die(
-            f"gremlins requires a git repository; {pathlib.Path.cwd()} is not inside a git worktree"
+            f"gremlins requires a git repository; {paths.project_root()} is not inside a git worktree"
         )
 
     state_json = _read_state_json(gremlin_id)
@@ -154,7 +155,7 @@ async def run_pipeline(
             session_dir=session_dir,
             project_dir=pathlib.Path(project_root)
             if project_root
-            else pathlib.Path.cwd(),
+            else paths.project_root(),
             pipeline_ref=str(pipeline_path),
             instructions=instructions,
             resume_from=args.resume_from,
@@ -178,7 +179,7 @@ async def run_pipeline(
         cli_bypass=stored_bypass,
         cli_permissions_file=None,
         env=os.environ,
-        cwd=pathlib.Path(project_root) if project_root else pathlib.Path.cwd(),
+        cwd=pathlib.Path(project_root) if project_root else paths.project_root(),
     )
     _apply_policy_to_stages(gremlin.stages, policy)
 

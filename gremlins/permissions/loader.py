@@ -5,6 +5,7 @@ import tomllib
 from collections.abc import Mapping
 from typing import Any
 
+from gremlins import paths
 from gremlins.permissions.policy import Policy
 from gremlins.utils.yaml_io import load_yaml_file
 
@@ -48,12 +49,12 @@ def _resolve_bypass(
     if env_bypass:
         return _truthy(env_bypass)
 
-    project_file = cwd / ".gremlins" / "permissions.yaml"
+    project_file = paths.project_overlay_dir(cwd) / "permissions.yaml"
     if project_file.exists():
         data = load_yaml_file(project_file)
         return bool(data.get("bypass_permissions", False))
 
-    user_config = pathlib.Path.home() / ".config" / "gremlins" / "config.toml"
+    user_config = paths.user_config_root() / "config.toml"
     if user_config.exists():
         toml_data: dict[str, Any] = tomllib.loads(
             user_config.read_text(encoding="utf-8")
@@ -64,7 +65,7 @@ def _resolve_bypass(
 
 
 def _blocks_from_project(cwd: pathlib.Path) -> dict[str, dict[str, Any]]:
-    project_file = cwd / ".gremlins" / "permissions.yaml"
+    project_file = paths.project_overlay_dir(cwd) / "permissions.yaml"
     if not project_file.exists():
         return {}
     data = load_yaml_file(project_file)

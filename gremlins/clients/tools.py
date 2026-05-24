@@ -15,6 +15,8 @@ from typing import Any, cast
 from agents import FunctionTool, Tool
 from agents.tool_context import ToolContext
 
+from gremlins import paths
+
 
 def _cwd(ctx: ToolContext[Any]) -> str | None:
     c = cast("dict[str, object]", ctx.context)
@@ -340,7 +342,7 @@ def _bash_check(
         tok = raw_tok.strip("'\"")
         if tok and (tok[0] in ("/", "~") or tok.startswith("..") or "/" in tok):
             if tok.startswith("~"):
-                tok = os.path.expanduser(tok)
+                tok = paths.expand_user_path(tok)
             p = _resolve(tok, cwd)
             if not _within_worktree(p, root):
                 return f"Error: path outside worktree: {raw_tok}"
@@ -400,5 +402,5 @@ def build_tools(
 
 
 GREMLINS_TOOLS: list[Tool] = build_tools(
-    bypass=True, worktree_root=pathlib.Path.cwd(), audit_log=None
+    bypass=True, worktree_root=paths.project_root(), audit_log=None
 )

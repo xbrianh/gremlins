@@ -43,6 +43,7 @@ import sys
 import traceback
 from typing import Any, cast
 
+from gremlins import paths
 from gremlins.clients.client import Client
 from gremlins.clients.registry import CLIENT_FACTORIES
 from gremlins.executor.state import State, StateData, build_state, validate_gremlin_id
@@ -84,7 +85,7 @@ def _build_state(spec: dict[str, Any]) -> State:
     data = StateData.load(gremlin_id)
 
     project_root = (
-        pathlib.Path(data.project_root) if data.project_root else pathlib.Path.cwd()
+        pathlib.Path(data.project_root) if data.project_root else paths.project_root()
     )
     perm_file = pathlib.Path(data.permissions_file) if data.permissions_file else None
     policy = load_policy(
