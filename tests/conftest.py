@@ -87,7 +87,7 @@ class _Sandbox:
 
 
 class _ChildSandbox:
-    def __init__(self, root: pathlib.Path, env: dict) -> None:
+    def __init__(self, root: pathlib.Path, env: dict[str, str]) -> None:
         self.root = root
         self.state = root / "state"
         self.work = root / "work"
