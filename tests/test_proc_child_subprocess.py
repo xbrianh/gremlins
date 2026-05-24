@@ -355,3 +355,33 @@ def test_signal_terminated_child_no_result_raises(
                 stage, child_st, "c", "attempt-1", on_bail=lambda _: None
             )
         )
+
+
+# ---------------------------------------------------------------------------
+# _build_child_spec_dict — test_client propagation
+# ---------------------------------------------------------------------------
+
+
+def test_build_child_spec_dict_no_test_client(tmp_path: pathlib.Path) -> None:
+    child_st = _state(tmp_path / "c")
+    stage = _stage("c")
+    spec = proc._build_child_spec_dict(stage, child_st, "c", "attempt-1")
+    assert spec["test_client"] is None
+    assert spec["stage_model"] == ""
+
+
+def test_build_child_spec_dict_with_test_client(tmp_path: pathlib.Path) -> None:
+    session_dir = tmp_path / "c"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    test_client = FakeClaudeClient()
+    child_st = State(
+        data=StateData(),
+        client=test_client,
+        session_dir=session_dir,
+        test_client=test_client,
+        stage_model="real-model",
+    )
+    stage = _stage("c")
+    spec = proc._build_child_spec_dict(stage, child_st, "c", "attempt-1")
+    assert spec["test_client"] == "fake:fake"
+    assert spec["stage_model"] == "real-model"
