@@ -6,8 +6,6 @@ import logging
 import re
 from typing import Any, cast
 
-from gremlins.artifacts.registry import MissingArtifact
-from gremlins.artifacts.uri import Uri
 from gremlins.clients.protocol import CompletedRun
 from gremlins.executor.state import State
 from gremlins.stages.agent_runner import run_agent
@@ -81,11 +79,9 @@ class GitHubOpenPullRequest(Stage):
 
     async def run(self, state: State) -> Outcome:
         issue_url = state.data.issue_url
-        try:
-            _prev = state.artifacts.read("pr")
-            _prev_branch = _prev.branch
-        except MissingArtifact:
-            _prev_branch = ""
+        _prev_branch = (
+            state.artifacts.read("pr").branch if state.artifacts.produced("pr") else ""
+        )
         base_ref = (
             _prev_branch
             or self.base_ref
@@ -138,6 +134,7 @@ class GitHubOpenPullRequest(Stage):
             logger.warning("open-pr: could not determine PR branch for %s", pr_url)
         _m = re.search(r"/pull/(\d+)", pr_url)
         if _m:
-            state.artifacts.bind("pr", Uri.parse(f"gh://pr/{_m.group(1)}"))
+            from gremlins.artifacts.uri import Uri  # noqa: PLC0415
+            state.artifacts.bind("pr", Uri.parse(f"gh://pr/{_m.group(1)}"), override=True)
         logger.info("PR: %s", pr_url)
         return Done()

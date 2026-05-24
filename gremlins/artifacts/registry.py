@@ -52,8 +52,8 @@ class ArtifactRegistry:
             except Exception:
                 pass
 
-    def bind(self, key: str, uri: Uri) -> None:
-        if key in self._bindings:
+    def bind(self, key: str, uri: Uri, *, override: bool = False) -> None:
+        if key in self._bindings and not override:
             raise DuplicateArtifact(key, self._bindings[key], uri)
         self._bindings[key] = uri
         if self._persist_path:
@@ -91,9 +91,9 @@ class ArtifactRegistry:
         self.bind(key, Uri.parse(f"git://range/{base_sha}..{sha}"))
 
 
-def read_pr_info(state_dir: pathlib.Path, cwd: pathlib.Path | None = None) -> "PrInfo | None":
+def read_pr_info(state_dir: pathlib.Path, cwd: pathlib.Path | None = None) -> Any:
     """Read PrInfo from registry.json in state_dir, or None if not bound."""
-    from gremlins.artifacts.schemes import GitHubResolver, PrInfo
+    from gremlins.artifacts.schemes import GitHubResolver
 
     registry_path = state_dir / "registry.json"
     if not registry_path.exists():

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from gremlins.artifacts.registry import MissingArtifact
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Done, Outcome

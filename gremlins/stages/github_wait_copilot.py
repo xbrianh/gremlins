@@ -8,7 +8,6 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from gremlins.artifacts.registry import MissingArtifact
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, Outcome

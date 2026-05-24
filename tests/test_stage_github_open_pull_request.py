@@ -9,7 +9,6 @@ from unittest.mock import MagicMock, patch
 
 from conftest import MINIMAL_EVENTS
 
-from gremlins.artifacts.registry import MissingArtifact
 from gremlins.artifacts.schemes import PrInfo
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient

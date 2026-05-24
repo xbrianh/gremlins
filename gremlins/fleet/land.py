@@ -14,7 +14,7 @@ import gremlins.fleet.constants as _constants
 import gremlins.utils.git as _git
 from gremlins import paths
 from gremlins.artifacts.registry import read_pr_info
-from gremlins.executor.state import StateData, landable_shape
+from gremlins.executor.state import landable_shape
 from gremlins.fleet.resolve import resolve_gremlin
 from gremlins.fleet.state import (
     liveness_of_state_file,

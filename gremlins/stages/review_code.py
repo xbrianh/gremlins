@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from gremlins.artifacts.registry import MissingArtifact
 from gremlins.executor.state import State
 from gremlins.stages.agent import Agent
 from gremlins.stages.base import Stage, get_client_from_dict
