@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import json
 import logging
 import os
@@ -15,7 +14,6 @@ import threading
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar, cast
 
-from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.clients.client import Client
 from gremlins.executor.state import State
 from gremlins.stages.agent import Agent
@@ -553,12 +551,7 @@ class Handoff(Stage):
                 f"handoff-{handoff_n:03d}": f"file://session/handoff-{handoff_n:03d}.md"
             },
         )
-        _state = (
-            state
-            if state.artifacts is not None
-            else dataclasses.replace(state, artifacts=ArtifactRegistry(session_dir))
-        )
-        await with_reap_after_async(state.client, HANDOFF_TIMEOUT, agent.run(_state))
+        await with_reap_after_async(state.client, HANDOFF_TIMEOUT, agent.run(state))
 
         if not signal_path.exists():
             raise RuntimeError(f"handoff signal file not written: {signal_path}")

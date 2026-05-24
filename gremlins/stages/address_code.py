@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from gremlins.executor.state import State
 from gremlins.stages.agent import Agent
@@ -15,11 +15,15 @@ class AddressCode(Stage):
 
     @classmethod
     def with_dict(cls, d: dict[str, Any], depth: int = 0) -> AddressCode:
+        name = d.get("name") or ""
+        raw_in: object = d.get("in") or {}
+        if not isinstance(raw_in, dict):
+            raise ValueError(f"stage {name!r}: 'in' must be a mapping")
         stage = cls(
-            d["name"],
+            name,
             d.get("prompt") or [],
             d.get("options") or {},
-            in_map=d.get("in") or {},
+            in_map=dict(cast(dict[str, str], raw_in)),
         )
         stage.client = get_client_from_dict(d)
         return stage
@@ -83,6 +87,6 @@ class GitHubAddressPullRequestReviews(Stage):
                 pr_url=pr_url,
             )
         )
-        agent = Agent(self.name, [prompt], {})
+        agent = Agent(self.name, [prompt], self.options)
         await agent.run(state)
         return Done()

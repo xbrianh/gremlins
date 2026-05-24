@@ -86,7 +86,7 @@ Do NOT make any code changes — only write the review file.
             self.name, {"model": f"running ({model})"}, parent_stage=state.parent_stage
         )
         agent = Agent(
-            f"{self.name}:{model}",
+            f"{self.name}-{model}",
             [prompt],
             {**self.options, "model": model},
             out_map={self.name: f"file://session/{self.name}-{model}.md"},
@@ -138,6 +138,6 @@ class GitHubReviewPullRequest(Stage):
                 pr_url=pr_url,
             )
         )
-        agent = Agent(self.name, [prompt], {})
+        agent = Agent(self.name, [prompt], self.options)
         await agent.run(state)
         return Done()

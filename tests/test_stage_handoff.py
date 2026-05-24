@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 import gremlins.executor.state as state_mod
+from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData
@@ -32,6 +33,7 @@ def _make_state(
         data=StateData(gremlin_id=gremlin_id),
         client=client or FakeClaudeClient(),
         session_dir=tmp_path,
+        artifacts=ArtifactRegistry(tmp_path),
     )
 
 
@@ -310,6 +312,7 @@ def test_resume_continues_from_file_index(tmp_path, monkeypatch, test_state_root
     _make_signal_file(tmp_path, 1, "next-plan")
 
     seen_keys: list[str] = []
+    captured_prompts: list[str] = []
 
     async def fake_git_context(
         base_ref: str, rev: str | None = None
@@ -319,6 +322,7 @@ def test_resume_continues_from_file_index(tmp_path, monkeypatch, test_state_root
     monkeypatch.setattr("gremlins.stages.handoff.collect_git_context", fake_git_context)
 
     async def fake_agent_run(self: Agent, state: RuntimeState) -> Done:
+        captured_prompts.extend(self.prompts)
         for key in self.out_map:
             if key.startswith("handoff-"):
                 seen_keys.append(key)
@@ -338,6 +342,9 @@ def test_resume_continues_from_file_index(tmp_path, monkeypatch, test_state_root
     asyncio.run(h.run(state))
 
     assert seen_keys == ["handoff-002"]
+    # On resume the agent must receive the previous rolling plan, not plan.md
+    rolling_plan_text = (tmp_path / "handoff-001.md").read_text(encoding="utf-8")
+    assert captured_prompts and rolling_plan_text in captured_prompts[0]
 
 
 # ---------------------------------------------------------------------------

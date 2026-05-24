@@ -6,6 +6,7 @@ import pathlib
 from conftest import MINIMAL_EVENTS
 from conftest import gh_pipeline as _gh_pipeline
 
+from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData
@@ -28,6 +29,7 @@ def _make_state(
         client=client,
         session_dir=tmp_path,
         pipeline_data=_gh_pipeline(),
+        artifacts=ArtifactRegistry(tmp_path),
     )
 
 
@@ -97,6 +99,7 @@ def test_gh_review_parallel_child_prompt_includes_sentinel(
         session_dir=tmp_path,
         child_key="review-child",
         pipeline_data=_gh_pipeline(),
+        artifacts=ArtifactRegistry(tmp_path),
     )
     asyncio.run(stage.run(state))
     assert "BAIL:" in client.calls[0].prompt
@@ -167,6 +170,7 @@ def test_gh_address_parallel_child_prompt_includes_sentinel(
         session_dir=tmp_path,
         child_key="address-child",
         pipeline_data=_gh_pipeline(),
+        artifacts=ArtifactRegistry(tmp_path),
     )
     asyncio.run(stage.run(state))
     assert "BAIL:" in client.calls[0].prompt

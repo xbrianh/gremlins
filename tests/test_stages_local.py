@@ -387,7 +387,7 @@ def test_plan_stage_includes_style_from_prompts(tmp_path):
 def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
     """When state.worktree is set (parallel child), client.run gets cwd=worktree
     so claude -p reads/writes the isolated worktree, not the parent process cwd."""
-    client = ReviewCreatingClient(fixtures={"review-code:fake": MINIMAL_EVENTS})
+    client = ReviewCreatingClient(fixtures={"review-code-fake": MINIMAL_EVENTS})
     worktree = tmp_path / "wt"
     worktree.mkdir()
     stage = _make_review_code_stage(client, tmp_path)
@@ -403,7 +403,7 @@ def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
 
 
 def test_review_code_stage_includes_style_from_prompts(tmp_path):
-    client = ReviewCreatingClient(fixtures={"review-code:fake": MINIMAL_EVENTS})
+    client = ReviewCreatingClient(fixtures={"review-code-fake": MINIMAL_EVENTS})
     stage = ReviewCode(
         "review-code",
         [
@@ -442,7 +442,7 @@ def test_address_code_stage_includes_style_from_prompts(tmp_path):
 def test_review_code_stage_writes_stage_to_state(tmp_path, make_state_dir):
     gremlin_id = "test-gr-id"
     state_dir = make_state_dir(gremlin_id)
-    client = ReviewCreatingClient(fixtures={"review-code:fake": MINIMAL_EVENTS})
+    client = ReviewCreatingClient(fixtures={"review-code-fake": MINIMAL_EVENTS})
     stage = _make_review_code_stage(client, tmp_path, gremlin_id=gremlin_id)
     state = _make_state(client, tmp_path, gremlin_id=gremlin_id)
     asyncio.run(stage.run(state))
@@ -456,6 +456,5 @@ def test_address_code_stage_raises_on_missing_review_files(tmp_path, make_state_
     client = FakeClaudeClient(fixtures={})
     stage = _make_address_code_stage(client, tmp_path, gremlin_id=gremlin_id)
     state = _make_state(client, tmp_path, gremlin_id=gremlin_id)
-    # in_map references "review-code" which is not bound in the registry
-    with pytest.raises((MissingArtifact, KeyError)):
+    with pytest.raises(MissingArtifact):
         asyncio.run(stage.run(state))
