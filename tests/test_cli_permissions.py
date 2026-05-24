@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import pathlib
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -124,11 +123,8 @@ def test_project_file_bypass_yields_bypass_policy(monkeypatch, tmp_path, capsys)
     assert "permissions: bypass" in capsys.readouterr().err
 
 
-def test_user_config_bypass_yields_bypass_policy(monkeypatch, tmp_path, capsys):
-    config_dir = tmp_path / ".config" / "gremlins"
-    config_dir.mkdir(parents=True)
-    (config_dir / "config.toml").write_text("bypass_permissions = true\n")
-    monkeypatch.setattr(pathlib.Path, "home", lambda *_: tmp_path)
+def test_user_config_bypass_yields_bypass_policy(sandbox, capsys):
+    (sandbox.config / "config.toml").write_text("bypass_permissions = true\n")
     args = _args()
     rc, _ = _run(args)
     assert rc == 0
