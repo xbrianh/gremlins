@@ -750,10 +750,15 @@ def _land_gh(
     gremlin_id: str, wdir: str, state: dict[str, Any], force: bool = False
 ) -> bool:
     """Merge a gh gremlin's PR and clean up."""
-    pr_url = StateData.load(gremlin_id).read_pr_url()
-    if not pr_url:
-        print(f"error: no pr_url recorded for {gremlin_id}")
+    from gremlins import paths as _paths_mod
+    from gremlins.artifacts.registry import read_pr_info
+
+    _state_dir = _paths_mod.state_root() / gremlin_id
+    _pr_info = read_pr_info(_state_dir, cwd=None)
+    if not _pr_info:
+        print(f"error: no PR recorded for {gremlin_id}")
         return False
+    pr_url = _pr_info.url
 
     project_root = _resolve_landing_cwd(state)
     cwd = project_root if project_root and os.path.isdir(project_root) else None

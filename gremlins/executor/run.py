@@ -257,9 +257,11 @@ async def run_pipeline(
         sd.patch(total_cost_usd=total_cost)
 
     if gh:
-        logger.info(
-            "done. PR: %s", StateData.load(gremlin_id).read_pr_url() or "(unknown)"
-        )
+        try:
+            pr_url = gremlin.registry.read("pr").url
+        except Exception:
+            pr_url = "(unknown)"
+        logger.info("done. PR: %s", pr_url)
     else:
         logger.info("done. session artifacts in: %s", session_dir)
     if total_cost > 0:
