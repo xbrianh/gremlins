@@ -11,6 +11,8 @@ Spec file schema (JSON):
         "pipeline_path":   <str|null>   absolute path to pipeline YAML or null
         "child_key":       <str|null>   parallel group child identifier or null
         "parent_stage":    <str>        parent stage name for sub-stage tracking
+        "repo":            <str>        "owner/repo" for gh API calls
+        "instructions":    <str>        freeform instructions forwarded from parent
     }
 
 Result file schema (written to <spec_path>.result):
@@ -39,7 +41,7 @@ from typing import Any, cast
 
 from gremlins.clients.client import Client
 from gremlins.clients.registry import CLIENT_FACTORIES
-from gremlins.executor.state import State, StateData, validate_gremlin_id
+from gremlins.executor.state import State, StateData, build_state, validate_gremlin_id
 from gremlins.permissions.loader import load_policy
 from gremlins.permissions.validation import validate_policy_against_registry
 from gremlins.pipeline import Pipeline
@@ -108,11 +110,13 @@ def _build_state(spec: dict[str, Any]) -> State:
                 "failed to load pipeline from %s", spec["pipeline_path"], exc_info=True
             )
 
-    return State(
+    return build_state(
         data=data,
         client=client,
         session_dir=session_dir,
         pipeline_data=pipeline_data,
+        repo=str(spec.get("repo") or ""),
+        instructions=str(spec.get("instructions") or ""),
         child_key=spec.get("child_key") or None,
         parent_stage=str(spec.get("parent_stage") or ""),
         worktree=worktree,
