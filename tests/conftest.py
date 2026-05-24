@@ -335,6 +335,13 @@ def _clear_gremlins_overlay_env(monkeypatch):
     monkeypatch.delenv("GREMLINS_OVERLAY_DIR", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _reset_registry_path(monkeypatch):
+    from gremlins.artifacts import registry as _reg
+
+    monkeypatch.setattr(_reg, "REGISTRY_PATH", None)
+
+
 @pytest.fixture
 def make_state_dir(sandbox):
     """Fixture factory: create a minimal state.json for gremlin_id under the state root.

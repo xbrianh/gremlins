@@ -6,6 +6,7 @@ import pathlib
 
 import pytest
 
+from gremlins.artifacts import registry as registry_mod
 from gremlins.artifacts.registry import (
     ArtifactRegistry,
     DuplicateArtifact,
@@ -72,28 +73,37 @@ def test_read_returns_file_bytes(tmp_path: pathlib.Path) -> None:
     assert r.read("plan") == b"hello"
 
 
-def test_bind_persists_to_file(tmp_path: pathlib.Path) -> None:
+def test_bind_persists_to_file(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     import json
 
     persist = tmp_path / "reg.json"
-    r = ArtifactRegistry(session_dir=tmp_path, persist_path=persist)
+    monkeypatch.setattr(registry_mod, "REGISTRY_PATH", persist)
+    r = ArtifactRegistry(session_dir=tmp_path)
     r.bind("plan", Uri.parse("file://session/plan.md"))
     data = json.loads(persist.read_text())
     assert data["plan"] == "file://session/plan.md"
 
 
-def test_init_loads_from_persist_file(tmp_path: pathlib.Path) -> None:
+def test_init_loads_from_persist_file(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     import json
 
     persist = tmp_path / "reg.json"
     persist.write_text(json.dumps({"plan": "file://session/plan.md"}))
-    r = ArtifactRegistry(session_dir=tmp_path, persist_path=persist)
+    monkeypatch.setattr(registry_mod, "REGISTRY_PATH", persist)
+    r = ArtifactRegistry(session_dir=tmp_path)
     assert r.resolve("plan") == Uri.parse("file://session/plan.md")
 
 
-def test_persist_survives_roundtrip(tmp_path: pathlib.Path) -> None:
+def test_persist_survives_roundtrip(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     persist = tmp_path / "reg.json"
-    r1 = ArtifactRegistry(session_dir=tmp_path, persist_path=persist)
+    monkeypatch.setattr(registry_mod, "REGISTRY_PATH", persist)
+    r1 = ArtifactRegistry(session_dir=tmp_path)
     r1.bind("pr", Uri.parse("gh://pr/42"))
-    r2 = ArtifactRegistry(session_dir=tmp_path, persist_path=persist)
+    r2 = ArtifactRegistry(session_dir=tmp_path)
     assert r2.resolve("pr") == Uri.parse("gh://pr/42")

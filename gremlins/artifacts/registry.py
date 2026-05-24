@@ -14,6 +14,11 @@ from gremlins.artifacts.schemes import FileSessionResolver, GitHubResolver, GitR
 from gremlins.artifacts.uri import Uri
 from gremlins.utils import git as git_utils
 
+# Filesystem location of the persisted registry. Set at process startup once
+# the current gremlin is known; tests monkeypatch this to control persistence.
+# When None, the registry is in-memory only.
+REGISTRY_PATH: pathlib.Path | None = None
+
 
 class MissingArtifact(KeyError):
     def __init__(self, key: str) -> None:
@@ -34,36 +39,32 @@ class ArtifactRegistry:
         self,
         session_dir: pathlib.Path,
         cwd: pathlib.Path | None = None,
-        persist_path: pathlib.Path | None = None,
     ) -> None:
         self._cwd = cwd
-        self._persist_path = persist_path
         self._bindings: dict[str, Uri] = {}
         self._resolvers: dict[str, SchemeResolver] = {
             "file": FileSessionResolver(session_dir),
             "git": GitResolver(cwd),
             "gh": GitHubResolver(cwd),
         }
-        if persist_path is not None and persist_path.exists():
-            try:
-                data = json.loads(persist_path.read_text(encoding="utf-8"))
-                for k, v in data.items():
-                    self._bindings[k] = Uri.parse(v)
-            except Exception:
-                pass
+        if REGISTRY_PATH is not None and REGISTRY_PATH.exists():
+            data = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+            for k, v in data.items():
+                self._bindings[k] = Uri.parse(v)
 
     def bind(self, key: str, uri: Uri, *, override: bool = False) -> None:
         if key in self._bindings and not override:
             raise DuplicateArtifact(key, self._bindings[key], uri)
         self._bindings[key] = uri
-        if self._persist_path:
-            data = {k: str(v) for k, v in self._bindings.items()}
-            tmp = self._persist_path.with_name(
-                self._persist_path.name + f".{os.getpid()}.{secrets.token_hex(4)}.tmp"
-            )
-            self._persist_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp.write_text(json.dumps(data), encoding="utf-8")
-            os.replace(tmp, self._persist_path)
+        if REGISTRY_PATH is None:
+            return
+        data = {k: str(v) for k, v in self._bindings.items()}
+        tmp = REGISTRY_PATH.with_name(
+            REGISTRY_PATH.name + f".{os.getpid()}.{secrets.token_hex(4)}.tmp"
+        )
+        REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(tmp, REGISTRY_PATH)
 
     def resolve(self, key: str) -> Uri:
         try:

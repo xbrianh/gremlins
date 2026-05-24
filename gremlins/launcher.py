@@ -547,15 +547,16 @@ def launch(
         sd.permissions_file = permissions_file
         sd.persist(state_dir)
         if inputs.pr_num:
+            from gremlins.artifacts import registry as _reg
+            from gremlins.artifacts.registry import ArtifactRegistry
             from gremlins.artifacts.uri import Uri
 
-            registry_path = state_dir / "registry.json"
-            _data = {"pr": str(Uri.parse(f"gh://pr/{inputs.pr_num}"))}
-            _tmp = registry_path.with_name(
-                f"registry.json.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+            session_dir = state_dir / "artifacts"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            _reg.REGISTRY_PATH = state_dir / "registry.json"
+            ArtifactRegistry(session_dir=session_dir).bind(
+                "pr", Uri.parse(f"gh://pr/{inputs.pr_num}")
             )
-            _tmp.write_text(json.dumps(_data), encoding="utf-8")
-            os.replace(_tmp, registry_path)
         p = _spawn(inputs.gremlin_id, inputs, state_dir)
     except Exception:
         shutil.rmtree(state_dir, ignore_errors=True)

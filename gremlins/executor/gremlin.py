@@ -138,9 +138,7 @@ class Gremlin:
         self.base_ref_sha = base_ref_sha
         self.setup_kind = setup_kind
         self._initialized = False
-        self._registry: ArtifactRegistry = ArtifactRegistry(
-            session_dir=self.session_dir, cwd=self.worktree_dir
-        )
+        self._registry: ArtifactRegistry | None = None
 
     def initialize_runtime(self) -> None:
         State.setup_dirs(
@@ -221,10 +219,12 @@ class Gremlin:
             spec=self.spec,
             instructions=[self.instructions] if self.instructions else [],
         )
+        from gremlins.artifacts import registry as _reg
+
+        _reg.REGISTRY_PATH = self.state_dir / "registry.json"
         registry = ArtifactRegistry(
             session_dir=self.session_dir,
             cwd=self.worktree_dir,
-            persist_path=self.state_dir / "registry.json",
         )
         self._registry = registry
         # attempt is always "" here; the loop patches it per-iteration via dataclasses.replace.
@@ -252,6 +252,8 @@ class Gremlin:
 
     @property
     def registry(self) -> ArtifactRegistry:
+        if self._registry is None:
+            raise RuntimeError("registry not built; call run() first")
         return self._registry
 
     async def run(self) -> None:

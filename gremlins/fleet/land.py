@@ -751,16 +751,15 @@ def _land_gh(
     gremlin_id: str, wdir: str, state: dict[str, Any], force: bool = False
 ) -> bool:
     """Merge a gh gremlin's PR and clean up."""
-    from gremlins import paths as _paths_mod
-
-    _state_dir = _paths_mod.state_root() / gremlin_id
     project_root = _resolve_landing_cwd(state)
     cwd = project_root if project_root and os.path.isdir(project_root) else None
 
+    from gremlins.artifacts import registry as _reg
+
+    _reg.REGISTRY_PATH = resolve_session_dir(gremlin_id).parent / "registry.json"
     registry = ArtifactRegistry(
         session_dir=resolve_session_dir(gremlin_id),
         cwd=pathlib.Path(cwd) if cwd else None,
-        persist_path=_state_dir / "registry.json",
     )
     try:
         pr_url = registry.read("pr").url
