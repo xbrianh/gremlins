@@ -1,3 +1,5 @@
+MAKEFLAGS += -j$(shell sysctl -n hw.ncpu 2>/dev/null || nproc)
+
 TEST_FILES := $(wildcard tests/test_*.py)
 
 .PHONY: lint format format-write typecheck test check $(TEST_FILES)
