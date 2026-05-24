@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 
 import pytest
 
@@ -84,6 +85,17 @@ class _Sandbox:
         self.config = root / "config"
         self.home = root / "home"
         self.project = root / "project"
+
+
+class _ChildSandbox:
+    def __init__(self, root: pathlib.Path, env: dict[str, str]) -> None:
+        self.root = root
+        self.state = root / "state"
+        self.work = root / "work"
+        self.config = root / "config"
+        self.home = root / "home"
+        self.project = root / "project"
+        self.env = env
 
 
 def _get_gh_token() -> str:
@@ -168,6 +180,59 @@ def lenv(sandbox, monkeypatch):
     e.repo = sandbox.project
     e.fake_claude_log = sandbox.root / "fake_claude.log"
     return e
+
+
+@pytest.fixture
+def child_sandbox(sandbox, request):
+    """Subprocess envs for tests that spawn gremlins children."""
+    _owned: list[pathlib.Path] = []
+
+    def _child_env(overrides: dict) -> dict:
+        env = dict(os.environ)
+        existing = env.get("PYTHONPATH", "")
+        # Prepend repo root so subprocesses import source, not an installed copy.
+        src_root = str(pathlib.Path(__file__).resolve().parent.parent)
+        env["PYTHONPATH"] = src_root + os.pathsep + existing if existing else src_root
+        env.update(overrides)
+        return env
+
+    def _share() -> dict:
+        return _child_env(
+            {
+                "GREMLINS_SANDBOX_ROOT": str(sandbox.root),
+                "HOME": str(sandbox.home),
+                "GREMLINS_PROJECT_ROOT": str(sandbox.project),
+            }
+        )
+
+    def _fresh() -> _ChildSandbox:
+        node_id = re.sub(r"[^\w]", "_", request.node.nodeid)[-60:]
+        root = pathlib.Path(
+            tempfile.mkdtemp(prefix=f"grem_{node_id}_child_", dir="/tmp")
+        )
+        cs = _ChildSandbox(
+            root,
+            _child_env(
+                {
+                    "GREMLINS_SANDBOX_ROOT": str(root),
+                    "HOME": str(root / "home"),
+                    "GREMLINS_PROJECT_ROOT": str(root / "project"),
+                }
+            ),
+        )
+        for d in (cs.state, cs.work, cs.config, cs.home, cs.project):
+            d.mkdir(parents=True)
+        _owned.append(root)
+        return cs
+
+    yield types.SimpleNamespace(share=_share, fresh=_fresh)
+
+    failed = getattr(request.node, "_sandbox_failed", False)
+    for root in _owned:
+        if failed:
+            sys.stderr.write(f"\n[child sandbox retained] {root}\n")
+        else:
+            shutil.rmtree(root)
 
 
 TESTS_DIR = pathlib.Path(__file__).resolve().parent
