@@ -77,6 +77,26 @@ async def run_async(
     return result  # type: ignore[return-value]
 
 
+async def run_shell_async(
+    cmd: str,
+    *,
+    cwd: str | os.PathLike[str] | None = None,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    proc = await asyncio.create_subprocess_shell(
+        cmd,
+        cwd=cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+    )
+    stdout_b, stderr_b = await proc.communicate()
+    assert proc.returncode is not None
+    return subprocess.CompletedProcess(
+        cmd, proc.returncode, stdout_b.decode(), stderr_b.decode()
+    )
+
+
 async def run_ok_async(
     cmd: list[str], *, cwd: str | os.PathLike[str] | None = None
 ) -> bool:

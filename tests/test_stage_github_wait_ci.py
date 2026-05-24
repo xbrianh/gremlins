@@ -11,7 +11,7 @@ from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
-from gremlins.executor.state import StateData
+from gremlins.executor.state import StateData, build_state
 from gremlins.stages.github_wait_ci import GitHubWaitCI
 
 PR_URL = "https://github.com/owner/repo/pull/42"
@@ -58,7 +58,7 @@ def _make_stage(
 ) -> tuple[GitHubWaitCI, RuntimeState]:
     prompts = [_CI_PROMPT_PATH.read_text(encoding="utf-8")]
     stage = GitHubWaitCI("github-wait-ci", prompts, {}, pr_url=PR_URL, **kwargs)
-    state = RuntimeState(
+    state = build_state(
         data=StateData(gremlin_id=gremlin_id), client=client, session_dir=tmp_path
     )
     if pr_branch is not None:

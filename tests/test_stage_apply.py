@@ -5,13 +5,13 @@ import subprocess
 import pytest
 
 from gremlins.executor.state import State as RuntimeState
-from gremlins.executor.state import StateData
+from gremlins.executor.state import StateData, build_state
 from gremlins.stages.apply import Apply
 from gremlins.stages.outcome import Bail, Done
 
 
 def _apply_state(tmp_path: pathlib.Path) -> RuntimeState:
-    return RuntimeState(
+    return build_state(
         data=StateData(),
         client=None,
         session_dir=tmp_path,

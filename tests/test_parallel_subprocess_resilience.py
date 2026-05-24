@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State, StateData, write_state
+from gremlins.executor.state import State, StateData, build_state, write_state
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Done, Outcome
 from gremlins.stages.parallel import ParallelStage
@@ -91,7 +91,7 @@ def _child_stage(name: str) -> Stage:
 
 def _child_state(session_dir: pathlib.Path) -> State:
     session_dir.mkdir(parents=True, exist_ok=True)
-    return State(
+    return build_state(
         data=StateData(),
         client=FakeClaudeClient(),
         session_dir=session_dir,
@@ -360,7 +360,7 @@ def test_subprocess_cost_accumulated_in_state(
     session_b.mkdir(parents=True)
 
     def _make_child_state(session: pathlib.Path) -> State:
-        return State(
+        return build_state(
             data=dataclasses.replace(
                 StateData(gremlin_id="test-gremlin"), state_file=sf
             ),

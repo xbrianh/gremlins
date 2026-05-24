@@ -11,7 +11,7 @@ from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
-from gremlins.executor.state import StateData
+from gremlins.executor.state import StateData, build_state
 from gremlins.stages.github_open_pull_request import GitHubOpenPullRequest
 
 PR_URL = "https://github.com/owner/repo/pull/42"
@@ -26,7 +26,7 @@ def _make_state(
 ) -> tuple[GitHubOpenPullRequest, RuntimeState]:
     stage = GitHubOpenPullRequest("open-pr", [], {})
     client = FakeClaudeClient(fixtures={"github-open-pull-request": MINIMAL_EVENTS})
-    state = RuntimeState(
+    state = build_state(
         data=StateData(gremlin_id=gremlin_id, issue_url=issue_url),
         client=client,
         session_dir=tmp_path,
@@ -167,7 +167,7 @@ def _make_state_with_gr(
 ) -> tuple[GitHubOpenPullRequest, RuntimeState]:
     stage = GitHubOpenPullRequest("open-pr", [], {})
     client = FakeClaudeClient(fixtures={"github-open-pull-request": MINIMAL_EVENTS})
-    state = RuntimeState(
+    state = build_state(
         data=StateData(
             gremlin_id=gremlin_id, base_ref_name=base_ref_name, issue_url=issue_url
         ),
@@ -268,7 +268,7 @@ def test_explicit_base_ref_used_when_no_prior_pr(tmp_path: pathlib.Path) -> None
     """Stage-level base_ref is used when there is no prior PR artifact branch."""
     stage = GitHubOpenPullRequest("open-pr", [], {}, base_ref="feature-base")
     client = FakeClaudeClient(fixtures={"github-open-pull-request": MINIMAL_EVENTS})
-    state = RuntimeState(
+    state = build_state(
         data=StateData(gremlin_id="test-gr", base_ref_name="main"),
         client=client,
         session_dir=tmp_path,
@@ -300,7 +300,7 @@ def test_last_pr_branch_takes_priority_over_base_ref(tmp_path: pathlib.Path) -> 
     """last_pr_branch takes priority over stage-level base_ref when stacking."""
     stage = GitHubOpenPullRequest("open-pr", [], {}, base_ref="feature-base")
     client = FakeClaudeClient(fixtures={"github-open-pull-request": MINIMAL_EVENTS})
-    state = RuntimeState(
+    state = build_state(
         data=StateData(gremlin_id="test-gr", base_ref_name="main"),
         client=client,
         session_dir=tmp_path,

@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State, StateData
+from gremlins.executor.state import State, StateData, build_state
 from gremlins.pipeline import Pipeline
 from gremlins.stages.base import Stage
 from gremlins.stages.github_open_pull_request import GitHubOpenPullRequest
@@ -45,7 +45,7 @@ def test_stage_run_raises_not_implemented() -> None:
 
     stage = Stage("my-stage")
     client = FakeClaudeClient(fixtures={})
-    state = State(
+    state = build_state(
         data=StateData(gremlin_id=None),
         client=client,
         session_dir=pathlib.Path("."),

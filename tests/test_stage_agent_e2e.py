@@ -14,7 +14,7 @@ from conftest import MINIMAL_EVENTS
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State, StateData
+from gremlins.executor.state import StateData, build_state
 from gremlins.pipeline.loader import parse_stages
 from gremlins.stages.outcome import Done
 
@@ -52,7 +52,7 @@ def test_agent_stage_e2e_reads_artifact_and_writes_output(tmp_path):
             return await super().run(prompt, label=label, **kwargs)
 
     client = WritingClient(fixtures={"summarise": MINIMAL_EVENTS})
-    state = State(
+    state = build_state(
         data=StateData(),
         client=client,
         session_dir=tmp_path,

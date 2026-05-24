@@ -9,7 +9,7 @@ import pathlib
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State, StateData
+from gremlins.executor.state import State, StateData, build_state
 from gremlins.stages.parallel import ParallelStage
 
 
@@ -33,7 +33,7 @@ def _read_state(sf: pathlib.Path) -> dict:
 
 
 def _ctx(gremlin_id: str, sf: pathlib.Path, child_key: str) -> State:
-    return State(
+    return build_state(
         data=StateData(gremlin_id=gremlin_id, state_file=sf),
         client=FakeClaudeClient(),
         session_dir=sf.parent,

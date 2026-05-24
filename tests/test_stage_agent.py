@@ -11,7 +11,7 @@ from conftest import MINIMAL_EVENTS
 from gremlins.artifacts.registry import ArtifactRegistry, MissingArtifact
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State, StateData
+from gremlins.executor.state import State, StateData, build_state
 from gremlins.stages.agent import Agent
 from gremlins.stages.outcome import Done
 
@@ -25,7 +25,7 @@ def _make_state(
     if client is None:
         client = FakeClaudeClient(fixtures={"my-agent": MINIMAL_EVENTS})
     reg = registry or ArtifactRegistry(tmp_path, cwd=tmp_path)
-    return State(
+    return build_state(
         data=StateData(),
         client=client,
         session_dir=tmp_path,
@@ -177,19 +177,3 @@ def test_with_dict_rejects_non_dict_out(tmp_path):
 
 
 # --- registry always required ---
-
-
-def test_raises_when_state_artifacts_none(tmp_path):
-    """state.artifacts is always required."""
-    client = FakeClaudeClient(fixtures={"my-agent": MINIMAL_EVENTS})
-    state = State(
-        data=StateData(),
-        client=client,
-        session_dir=tmp_path,
-        worktree=tmp_path,
-        artifacts=None,
-    )
-    agent = _make_agent(prompts=["Static"])
-
-    with pytest.raises(RuntimeError, match="state.artifacts is None"):
-        asyncio.run(agent.run(state))

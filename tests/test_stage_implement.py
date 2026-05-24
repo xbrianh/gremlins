@@ -12,7 +12,7 @@ from conftest import MINIMAL_EVENTS
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
-from gremlins.executor.state import StateData
+from gremlins.executor.state import StateData, build_state
 from gremlins.stages.implement import Implement
 from gremlins.utils.git import (
     Commit,
@@ -49,7 +49,7 @@ def _make_state(
 ) -> tuple[Implement, RuntimeState]:
     stage = Implement("implement", prompts or [], {})
     client = FakeClaudeClient(fixtures={"implement": MINIMAL_EVENTS})
-    state = RuntimeState(
+    state = build_state(
         data=StateData(issue_num=issue_num, base_ref_sha=base_ref_sha),
         client=client,
         session_dir=tmp_path,

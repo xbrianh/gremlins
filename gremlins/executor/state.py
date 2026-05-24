@@ -535,6 +535,8 @@ class State:
     data: StateData
     client: Client
     session_dir: pathlib.Path
+    artifacts: ArtifactRegistry
+    engine_ctx: EngineContext
     test_client: Client | None = None
     stage_model: str = ""
     args: argparse.Namespace = dataclasses.field(default_factory=argparse.Namespace)
@@ -546,8 +548,6 @@ class State:
     parent_stage: str = ""
     worktree: pathlib.Path | None = None
     worktree_parent: pathlib.Path | None = None
-    artifacts: ArtifactRegistry | None = None
-    engine_ctx: EngineContext | None = None
 
     @staticmethod
     def setup_dirs(
@@ -646,16 +646,17 @@ def build_state(
     child_key: str | None = None,
     parent_stage: str = "",
 ) -> State:
-    if artifacts is None:
-        artifacts = ArtifactRegistry(session_dir=session_dir, cwd=worktree)
-    if engine_ctx is None:
-        engine_ctx = EngineContext(
-            loop_iteration=data.loop_iteration, attempt=data.attempt, current_scope=()
-        )
     return State(
         data=data,
         client=client,
         session_dir=session_dir,
+        artifacts=artifacts or ArtifactRegistry(session_dir=session_dir, cwd=worktree),
+        engine_ctx=engine_ctx
+        or EngineContext(
+            loop_iteration=data.loop_iteration,
+            attempt=data.attempt,
+            current_scope=(),
+        ),
         args=args if args is not None else argparse.Namespace(),
         pipeline_data=pipeline_data,
         repo=repo,
@@ -664,8 +665,6 @@ def build_state(
         stage_model=stage_model,
         worktree=worktree,
         worktree_parent=worktree_parent,
-        artifacts=artifacts,
-        engine_ctx=engine_ctx,
         child_key=child_key,
         parent_stage=parent_stage,
     )

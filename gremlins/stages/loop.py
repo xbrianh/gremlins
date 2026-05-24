@@ -126,13 +126,8 @@ class LoopStage(Stage):
     async def run(self, state: State) -> Outcome:
         for iteration in range(1, self._max_iterations + 1):
             state.record_state_field(loop_iteration=iteration)
-            if state.engine_ctx is not None:
-                iter_ctx = dataclasses.replace(
-                    state.engine_ctx, loop_iteration=iteration
-                )
-                iter_state = dataclasses.replace(state, engine_ctx=iter_ctx)
-            else:
-                iter_state = state
+            iter_ctx = dataclasses.replace(state.engine_ctx, loop_iteration=iteration)
+            iter_state = dataclasses.replace(state, engine_ctx=iter_ctx)
             if self._on_iteration_start:
                 self._on_iteration_start(iter_state)
             head_before = _git.head_sha(iter_state.cwd)
