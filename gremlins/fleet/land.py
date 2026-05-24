@@ -202,7 +202,7 @@ def _cleanup_gremlin(
     workdir = state.get("workdir") or ""
 
     if check_cwd and workdir and os.path.exists(workdir):
-        cwd_real = os.path.realpath(str(paths.project_root()))
+        cwd_real = os.path.realpath(os.getcwd())
         worktree_real = os.path.realpath(workdir)
         if cwd_real == worktree_real or cwd_real.startswith(worktree_real + os.sep):
             print(
@@ -474,7 +474,7 @@ def _build_commit_message(
 def _inside_worktree(workdir: str) -> bool:
     if not workdir or not os.path.exists(workdir):
         return False
-    cwd_real = os.path.realpath(str(paths.project_root()))
+    cwd_real = os.path.realpath(os.getcwd())
     worktree_real = os.path.realpath(workdir)
     return cwd_real == worktree_real or cwd_real.startswith(worktree_real + os.sep)
 

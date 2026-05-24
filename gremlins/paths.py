@@ -83,4 +83,4 @@ def project_overlay_dir(project_root: pathlib.Path) -> pathlib.Path:
 
 def expand_user_path(s: str) -> str:
     """Expand a leading ~ in a path string."""
-    return str(pathlib.Path(s).expanduser())
+    return os.path.expanduser(s)
