@@ -5,8 +5,6 @@ from __future__ import annotations
 import subprocess
 import sys
 
-import pytest
-
 
 def test_share_env_has_parent_sandbox_root(child_sandbox, sandbox):
     env = child_sandbox.share()
