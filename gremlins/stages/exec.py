@@ -20,14 +20,12 @@ class Exec(Stage):
     def __init__(
         self,
         name: str,
-        prompts: list[str],
         options: dict[str, Any],
         *,
         in_map: dict[str, str] | None = None,
         out_map: dict[str, str] | None = None,
     ) -> None:
         super().__init__(name)
-        self.prompts = prompts
         self.options = options
         self.in_map = in_map or {}
         self.out_map = out_map or {}
@@ -43,7 +41,6 @@ class Exec(Stage):
             raise ValueError(f"stage {name!r}: 'out' must be a mapping")
         return cls(
             name,
-            d.get("prompt") or [],
             d.get("options") or {},
             in_map=dict(cast(dict[str, str], raw_in)),
             out_map=dict(cast(dict[str, str], raw_out)),

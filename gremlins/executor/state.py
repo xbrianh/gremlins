@@ -658,12 +658,6 @@ def build_state(
     child_key: str | None = None,
     parent_stage: str = "",
 ) -> State:
-    if artifacts is None:
-        artifacts = ArtifactRegistry(session_dir=session_dir, cwd=worktree)
-    if engine_ctx is None:
-        engine_ctx = EngineContext(
-            loop_iteration=data.loop_iteration, attempt=data.attempt, current_scope=()
-        )
     return State(
         data=data,
         client=client,
@@ -676,8 +670,8 @@ def build_state(
         stage_model=stage_model,
         worktree=worktree,
         worktree_parent=worktree_parent,
-        artifacts=artifacts,
-        engine_ctx=engine_ctx,
+        artifacts=artifacts,  # type: ignore[arg-type]
+        engine_ctx=engine_ctx,  # type: ignore[arg-type]
         child_key=child_key,
         parent_stage=parent_stage,
     )

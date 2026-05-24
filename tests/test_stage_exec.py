@@ -16,6 +16,7 @@ from gremlins.stages.outcome import Bail, Done, NeedsFix
 
 
 def _make_state(tmp_path: pathlib.Path, **kw):
+    kw.setdefault("worktree", tmp_path)
     return build_state(
         data=StateData(),
         client=FakeClaudeClient(),
@@ -30,7 +31,7 @@ def _exec(name: str = "test", cmds=None, *, in_map=None, out_map=None, on_fail=N
         options["cmds"] = cmds
     if on_fail:
         options["on_fail"] = on_fail
-    return Exec(name, [], options, in_map=in_map, out_map=out_map)
+    return Exec(name, options, in_map=in_map, out_map=out_map)
 
 
 # ---------------------------------------------------------------------------
