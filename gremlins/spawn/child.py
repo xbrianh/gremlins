@@ -66,9 +66,7 @@ def _load_spec(spec_path: pathlib.Path) -> dict[str, Any]:
 
 
 def _build_state(spec: dict[str, Any]) -> State:
-    importlib.import_module(
-        "gremlins.clients"
-    )  # ensure CLIENT_FACTORIES are registered
+    importlib.import_module("gremlins.clients")  # registers CLIENT_FACTORIES
     client_label = spec.get("client")
     if not isinstance(client_label, str) or not client_label:
         raise ValueError("spec missing required 'client' field")
