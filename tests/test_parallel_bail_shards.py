@@ -32,13 +32,6 @@ from gremlins.utils.state_file import locked_update as _state_locked_update
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def state_root(tmp_path: pathlib.Path, monkeypatch):
-    root = tmp_path / "state"
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: root)
-    return root
-
-
 def _make_state(state_root: pathlib.Path, gremlin_id: str) -> pathlib.Path:
     state_dir = state_root / gremlin_id
     state_dir.mkdir(parents=True)
@@ -93,9 +86,9 @@ def _make_parallel_stages(
 # ---------------------------------------------------------------------------
 
 
-def test_write_bail_file_no_child_key_writes_bail_file(state_root):
+def test_write_bail_file_no_child_key_writes_bail_file(sandbox):
     gremlin_id = "gr-bail-file-a"
-    sf = _make_state(state_root, gremlin_id)
+    sf = _make_state(sandbox.state, gremlin_id)
     state_dir = sf.parent
     StateData.load(gremlin_id).patch(attempt="stage-abc")
 
@@ -110,9 +103,9 @@ def test_write_bail_file_no_child_key_writes_bail_file(state_root):
     assert data["detail"] == "child A bailed"
 
 
-def test_check_bail_reads_attempt_from_state_json(state_root):
+def test_check_bail_reads_attempt_from_state_json(sandbox):
     gremlin_id = "gr-check-attempt"
-    sf = _make_state(state_root, gremlin_id)
+    sf = _make_state(sandbox.state, gremlin_id)
     state_dir = sf.parent
     StateData.load(gremlin_id).patch(attempt="my-attempt-abc")
 
@@ -125,9 +118,9 @@ def test_check_bail_reads_attempt_from_state_json(state_root):
         StateData.load(gremlin_id).check_bail("test")
 
 
-def test_check_bail_child_key_reads_parallel_attempts(state_root):
+def test_check_bail_child_key_reads_parallel_attempts(sandbox):
     gremlin_id = "gr-parallel-attempt"
-    sf = _make_state(state_root, gremlin_id)
+    sf = _make_state(sandbox.state, gremlin_id)
     state_dir = sf.parent
     StateData.load(gremlin_id).patch_parallel_attempt("child-a", "attempt-a")
 
@@ -148,9 +141,9 @@ def test_check_bail_child_key_reads_parallel_attempts(state_root):
 # ---------------------------------------------------------------------------
 
 
-def test_patch_state_concurrent_no_lost_updates(state_root):
+def test_patch_state_concurrent_no_lost_updates(sandbox):
     gremlin_id = "gr-flock-race"
-    _make_state(state_root, gremlin_id)
+    _make_state(sandbox.state, gremlin_id)
 
     errors: list[Exception] = []
     n_threads = 20
@@ -240,10 +233,10 @@ def _build_fanin_test(
     return sf, stages
 
 
-def test_bail_policy_any_one_bailed_sets_parent_bail(tmp_path, state_root):
+def test_bail_policy_any_one_bailed_sets_parent_bail(tmp_path, sandbox):
     gremlin_id = "gr-policy-any"
     shards = {"child-a": "other", "child-b": ""}
-    sf, stages = _build_fanin_test(tmp_path, state_root, gremlin_id, shards, "any")
+    sf, stages = _build_fanin_test(tmp_path, sandbox.state, gremlin_id, shards, "any")
 
     # Run just the fanin stage.
     with pytest.raises(RuntimeError, match="bailed"):
@@ -258,10 +251,10 @@ def test_bail_policy_any_one_bailed_sets_parent_bail(tmp_path, state_root):
     assert "parallel_attempts" not in data
 
 
-def test_bail_policy_all_one_bailed_no_parent_bail(tmp_path, state_root):
+def test_bail_policy_all_one_bailed_no_parent_bail(tmp_path, sandbox):
     gremlin_id = "gr-policy-all-partial"
     shards = {"child-a": "other", "child-b": ""}
-    sf, stages = _build_fanin_test(tmp_path, state_root, gremlin_id, shards, "all")
+    sf, stages = _build_fanin_test(tmp_path, sandbox.state, gremlin_id, shards, "all")
 
     # Only one bailed; policy=all requires all → no parent bail.
     asyncio.run(stages[2][1]())  # fanin should not raise
@@ -272,10 +265,10 @@ def test_bail_policy_all_one_bailed_no_parent_bail(tmp_path, state_root):
     assert "parallel_attempts" not in data
 
 
-def test_bail_policy_all_both_bailed_sets_parent_bail(tmp_path, state_root):
+def test_bail_policy_all_both_bailed_sets_parent_bail(tmp_path, sandbox):
     gremlin_id = "gr-policy-all-both"
     shards = {"child-a": "other", "child-b": "reviewer_requested_changes"}
-    sf, stages = _build_fanin_test(tmp_path, state_root, gremlin_id, shards, "all")
+    sf, stages = _build_fanin_test(tmp_path, sandbox.state, gremlin_id, shards, "all")
 
     with pytest.raises(RuntimeError, match="bailed"):
         asyncio.run(stages[2][1]())
@@ -349,10 +342,10 @@ def test_cancel_on_bail_skips_unstarted_children():
 # ---------------------------------------------------------------------------
 
 
-def test_fanin_resume_aggregates_existing_shards(tmp_path, state_root):
+def test_fanin_resume_aggregates_existing_shards(tmp_path, sandbox):
     gremlin_id = "gr-fanin-resume"
     shards = {"child-a": "other", "child-b": ""}
-    sf, stages = _build_fanin_test(tmp_path, state_root, gremlin_id, shards, "any")
+    sf, stages = _build_fanin_test(tmp_path, sandbox.state, gremlin_id, shards, "any")
 
     # Simulate resuming from fanin: only run the fanin stage.
     # Fanin raises because one child bailed; state must still be written.
@@ -365,9 +358,9 @@ def test_fanin_resume_aggregates_existing_shards(tmp_path, state_root):
     assert "parallel_attempts" not in data
 
 
-def test_run_stages_resume_from_fanin_name(tmp_path, state_root):
+def test_run_stages_resume_from_fanin_name(tmp_path, sandbox):
     gremlin_id = "gr-resume-fanin-name"
-    sf = _make_state(state_root, gremlin_id)
+    sf = _make_state(sandbox.state, gremlin_id)
     state_dir = sf.parent
     # Pre-populate parallel_attempts and bail file as children would have written.
     state_mod.StateData.load(gremlin_id).patch(
@@ -510,12 +503,12 @@ def test_worktree_lifecycle_fanout_creates_and_fanin_removes(tmp_path):
         os.chdir(orig_cwd)
 
 
-def test_fanout_persists_worktrees_and_fresh_fanin_can_clean_up(tmp_path, state_root):
+def test_fanout_persists_worktrees_and_fresh_fanin_can_clean_up(tmp_path, sandbox):
     """Fan-out writes worktree paths to state.json; a fresh build_parallel_stages
     instance (simulating a resume in a new process) reads them back and cleans
     them up during fan-in."""
     gremlin_id = "gr-resume-wt"
-    _make_state(state_root, gremlin_id)
+    _make_state(sandbox.state, gremlin_id)
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -576,11 +569,11 @@ def test_fanout_persists_worktrees_and_fresh_fanin_can_clean_up(tmp_path, state_
     assert "reviews" not in (_read_state(sf).get("parallel_worktrees") or {})
 
 
-def test_fanout_resume_tears_down_prior_worktrees(tmp_path, state_root):
+def test_fanout_resume_tears_down_prior_worktrees(tmp_path, sandbox):
     """A second fan-out (e.g. after `--resume-from <group>-fanout`) cleans up
     the previous run's worktrees before creating fresh ones."""
     gremlin_id = "gr-resume-fanout"
-    _make_state(state_root, gremlin_id)
+    _make_state(sandbox.state, gremlin_id)
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -743,9 +736,9 @@ stages:
 # ---------------------------------------------------------------------------
 
 
-def test_parallel_child_set_stage_writes_parent_as_stage(tmp_path, state_root):
+def test_parallel_child_set_stage_writes_parent_as_stage(tmp_path, sandbox):
     gremlin_id = "gr-parent-stage-pin"
-    sf = _make_state(state_root, gremlin_id)
+    sf = _make_state(sandbox.state, gremlin_id)
 
     state = build_state(
         data=StateData(gremlin_id=gremlin_id),
@@ -778,10 +771,10 @@ def test_parallel_child_set_stage_writes_parent_as_stage(tmp_path, state_root):
 
 
 def test_parallel_child_set_stage_with_sub_stage_payload_writes_parent_as_stage(
-    tmp_path, state_root
+    tmp_path, sandbox
 ):
     gremlin_id = "gr-parent-stage-pin-sub"
-    sf = _make_state(state_root, gremlin_id)
+    sf = _make_state(sandbox.state, gremlin_id)
 
     state = build_state(
         data=StateData(gremlin_id=gremlin_id),
