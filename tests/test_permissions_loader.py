@@ -77,12 +77,9 @@ def test_project_file_wins_over_user_config(tmp_path, monkeypatch):
     assert policy.bypass is True
 
 
-def test_user_config_honored(tmp_path, monkeypatch):
-    user_config_dir = tmp_path / "user_config"
-    config_dir = user_config_dir / ".config" / "gremlins"
-    config_dir.mkdir(parents=True)
-    (config_dir / "config.toml").write_text("bypass_permissions = true\n")
-    monkeypatch.setattr(pathlib.Path, "home", lambda *_: user_config_dir)
+def test_user_config_honored(sandbox, tmp_path):
+    sandbox.config.mkdir(parents=True, exist_ok=True)
+    (sandbox.config / "config.toml").write_text("bypass_permissions = true\n")
 
     policy = _load(cwd=tmp_path, tmp_path=tmp_path)
     assert policy.bypass is True

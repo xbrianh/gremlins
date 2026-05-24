@@ -6,8 +6,8 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
-import platformdirs
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
@@ -76,27 +76,79 @@ def _init_git_repo(path: pathlib.Path, *, with_origin: bool = False) -> None:
         )
 
 
+class _Sandbox:
+    def __init__(self, root: pathlib.Path) -> None:
+        self.root = root
+        self.state = root / "state"
+        self.work = root / "work"
+        self.config = root / "config"
+        self.home = root / "home"
+        self.project = root / "project"
+
+
+def _get_gh_token() -> str:
+    try:
+        r = subprocess.run(
+            ["gh", "auth", "token"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+
+
+# Captured once at import time (before any sandbox HOME override).
+# Lets integration tests that spawn copilot/gh authenticate even with HOME
+# redirected to the sandbox.
+_GH_TOKEN: str = os.environ.get("GH_TOKEN", "") or _get_gh_token()
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    if outcome.get_result().failed:
+        item._sandbox_failed = True
+
+
+@pytest.fixture(autouse=True)
+def sandbox(monkeypatch, request):
+    node_id = re.sub(r"[^\w]", "_", request.node.nodeid)[-60:]
+    root = pathlib.Path(tempfile.mkdtemp(prefix=f"grem_{node_id}_", dir="/tmp"))
+
+    sb = _Sandbox(root)
+    for d in (sb.state, sb.work, sb.config, sb.home, sb.project):
+        d.mkdir(parents=True)
+
+    monkeypatch.setenv("GREMLINS_SANDBOX_ROOT", str(root))
+    monkeypatch.setenv("HOME", str(sb.home))
+    if _GH_TOKEN:
+        monkeypatch.setenv("GH_TOKEN", _GH_TOKEN)
+    monkeypatch.chdir(sb.project)
+
+    _init_git_repo(sb.project)
+
+    request.node._sandbox = sb
+    yield sb
+
+    if getattr(request.node, "_sandbox_failed", False):
+        sys.stderr.write(f"\n[sandbox retained] {root}\n")
+    else:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 @pytest.fixture
-def lenv(tmp_path, monkeypatch):
+def lenv(sandbox, monkeypatch):
     """Launcher environment: isolated HOME, state root, git repo, fake claude."""
     from fixtures.shell_env import install_fake_bin
 
-    home = tmp_path / "home"
-    home.mkdir(parents=True, exist_ok=True)
-    _setup_claude_home(home)
-    monkeypatch.setenv("HOME", str(home))
+    _setup_claude_home(sandbox.home)
 
-    bin_dir = tmp_path / "bin"
+    bin_dir = sandbox.root / "bin"
     install_fake_bin(bin_dir, "claude", FAKE_CLAUDE)
 
-    state_root = pathlib.Path(platformdirs.user_state_dir("gremlins"))
-    state_root.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: state_root)
-
-    repo = tmp_path / "repo"
-    _init_git_repo(repo)
-
-    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(tmp_path / "fake_claude.log"))
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(sandbox.root / "fake_claude.log"))
     monkeypatch.setenv("GIT_OPTIONAL_LOCKS", "0")
     monkeypatch.setenv("GREMLINS_TEST_NOOP_PIPELINE", "1")
     old_path = os.environ.get("PATH", "")
@@ -104,17 +156,16 @@ def lenv(tmp_path, monkeypatch):
     monkeypatch.delenv("PYTHONPATH", raising=False)
     monkeypatch.delenv("GREMLIN_ID", raising=False)
     monkeypatch.delenv("GREMLINS_OVERLAY_DIR", raising=False)
-    monkeypatch.chdir(repo)
 
     class _Env:
         pass
 
     e = _Env()
-    e.home = home
+    e.home = sandbox.home
     e.bin_dir = bin_dir
-    e.state_root = state_root
-    e.repo = repo
-    e.fake_claude_log = tmp_path / "fake_claude.log"
+    e.state_root = sandbox.state
+    e.repo = sandbox.project
+    e.fake_claude_log = sandbox.root / "fake_claude.log"
     return e
 
 
