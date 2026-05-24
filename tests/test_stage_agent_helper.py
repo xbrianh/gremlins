@@ -82,10 +82,17 @@ def test_bail_detail_empty_when_sentinel_has_no_detail(tmp_path):
     assert exc_info.value.args[0] == ""
 
 
-def test_no_bail_check_when_no_attempt(tmp_path):
+def test_no_bail_when_transcript_has_no_sentinel(tmp_path):
     state = _make_state(tmp_path)
     result = asyncio.run(run_agent(state, "hello", label="test-label"))
     assert result.exit_code == 0
+
+
+def test_raises_bail_when_sentinel_present_without_attempt(tmp_path):
+    bail_events = [{"type": "result", "result": "BAIL: other: reason"}]
+    state = _make_state(tmp_path, fixtures={"test-label": bail_events})
+    with pytest.raises(Bail):
+        asyncio.run(run_agent(state, "hello", label="test-label"))
 
 
 def test_model_kwarg_forwarded(tmp_path):
