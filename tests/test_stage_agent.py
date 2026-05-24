@@ -177,6 +177,3 @@ def test_with_dict_rejects_non_dict_out(tmp_path):
 
 
 # --- registry always required ---
-
-
-

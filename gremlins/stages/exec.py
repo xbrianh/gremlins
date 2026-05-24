@@ -82,7 +82,9 @@ class Exec(Stage):
         for key, uri_str in self.out_map.items():
             if uri_str == "git://range":
                 if pre_sha is None:
-                    raise RuntimeError(f"exec {self.name}: git://range requires pre-snapshot")
+                    raise RuntimeError(
+                        f"exec {self.name}: git://range requires pre-snapshot"
+                    )
                 state.artifacts.bind_git_commit_range(key, pre_sha)
             elif uri_str == "gh://pr":
                 resolver = cast(GitHubResolver, state.artifacts.resolver("gh"))

@@ -551,7 +551,9 @@ class State:
 
     def __post_init__(self) -> None:
         if self.artifacts is None:  # type: ignore[comparison-overlap]
-            self.artifacts = ArtifactRegistry(session_dir=self.session_dir, cwd=self.worktree)
+            self.artifacts = ArtifactRegistry(
+                session_dir=self.session_dir, cwd=self.worktree
+            )
         if self.engine_ctx is None:  # type: ignore[comparison-overlap]
             self.engine_ctx = EngineContext(
                 loop_iteration=self.data.loop_iteration,
