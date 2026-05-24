@@ -13,6 +13,7 @@ from typing import Any, cast
 import gremlins.fleet.constants as _constants
 import gremlins.utils.git as _git
 from gremlins import paths
+from gremlins.artifacts.registry import read_pr_info
 from gremlins.executor.state import StateData, landable_shape
 from gremlins.fleet.resolve import resolve_gremlin
 from gremlins.fleet.state import (
@@ -751,7 +752,6 @@ def _land_gh(
 ) -> bool:
     """Merge a gh gremlin's PR and clean up."""
     from gremlins import paths as _paths_mod
-    from gremlins.artifacts.registry import read_pr_info
 
     _state_dir = _paths_mod.state_root() / gremlin_id
     _pr_info = read_pr_info(_state_dir, cwd=None)
