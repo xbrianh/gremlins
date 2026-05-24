@@ -138,6 +138,9 @@ class Gremlin:
         self.base_ref_sha = base_ref_sha
         self.setup_kind = setup_kind
         self._initialized = False
+        self._registry: ArtifactRegistry = ArtifactRegistry(
+            session_dir=self.session_dir, cwd=self.worktree_dir
+        )
 
     def initialize_runtime(self) -> None:
         State.setup_dirs(
@@ -221,7 +224,9 @@ class Gremlin:
         registry = ArtifactRegistry(
             session_dir=self.session_dir,
             cwd=self.worktree_dir,
+            persist_path=self.state_dir / "registry.json",
         )
+        self._registry = registry
         # attempt is always "" here; the loop patches it per-iteration via dataclasses.replace.
         engine_ctx = EngineContext(loop_iteration=1, attempt="", current_scope=())
         built: list[tuple[str, Callable[[], Awaitable[Any]]]] = []
@@ -244,6 +249,10 @@ class Gremlin:
             )
             built.append((e.name, stage_state.make_runner(e, scope=stages)))
         return built
+
+    @property
+    def registry(self) -> ArtifactRegistry:
+        return self._registry
 
     async def run(self) -> None:
         if not self._initialized:
