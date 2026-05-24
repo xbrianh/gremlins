@@ -122,7 +122,9 @@ def _build_state(spec: dict[str, Any]) -> State:
     test_client_label = spec.get("test_client") or ""
     if test_client_label:
         if not isinstance(test_client_label, str):
-            raise ValueError(f"'test_client' must be a string, got {type(test_client_label).__name__}")
+            raise ValueError(
+                f"'test_client' must be a string, got {type(test_client_label).__name__}"
+            )
         test_client = Client.parse(test_client_label, policy=policy)
 
     return build_state(
