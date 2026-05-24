@@ -566,7 +566,7 @@ class State:
 
     @property
     def cwd(self) -> pathlib.Path:
-        return self.worktree if self.worktree is not None else pathlib.Path.cwd()
+        return self.worktree if self.worktree is not None else _paths.project_root()
 
     def done_for(self, path: str) -> set[str]:
         return self.data.done_for(path)

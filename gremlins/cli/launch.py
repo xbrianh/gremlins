@@ -133,7 +133,7 @@ def build_launch_parser(
 
 def launch_main(argv: list[str]) -> int:
     if "--list" in argv:
-        for name, path in list_pipelines(pathlib.Path.cwd()):
+        for name, path in list_pipelines(_paths.project_root()):
             try:
                 pipeline = Pipeline.from_yaml(path)
                 label = pipeline.name
@@ -149,7 +149,7 @@ def launch_main(argv: list[str]) -> int:
     name = argv[0]
 
     try:
-        pipeline_path = resolve_pipeline_name(name, pathlib.Path.cwd())
+        pipeline_path = resolve_pipeline_name(name, _paths.project_root())
     except FileNotFoundError as exc:
         sys.stderr.write(f"error: {exc}\n")
         return 1
@@ -187,7 +187,7 @@ def _self_background_main(
             cli_bypass=args.bypass or None,
             cli_permissions_file=args.permissions_file,
             env=os.environ,
-            cwd=pathlib.Path.cwd(),
+            cwd=_paths.project_root(),
         )
     except Exception as exc:
         sys.stderr.write(f"error: failed to load permissions policy: {exc}\n")

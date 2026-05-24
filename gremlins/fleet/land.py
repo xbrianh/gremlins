@@ -12,6 +12,7 @@ from typing import Any, cast
 
 import gremlins.fleet.constants as _constants
 import gremlins.utils.git as _git
+from gremlins import paths
 from gremlins.executor.state import StateData, landable_shape
 from gremlins.fleet.resolve import resolve_gremlin
 from gremlins.fleet.state import (
@@ -145,7 +146,7 @@ def _remove_worktree(wdir: str, state: dict[str, Any], cwd: str | None) -> None:
 
     workdir = state.get("workdir") or ""
     if workdir and os.path.exists(workdir):
-        _git.remove_worktree(cwd or os.getcwd(), workdir)
+        _git.remove_worktree(cwd or str(paths.project_root()), workdir)
         if os.path.exists(workdir):
             try:
                 shutil.rmtree(workdir)
@@ -201,7 +202,7 @@ def _cleanup_gremlin(
     workdir = state.get("workdir") or ""
 
     if check_cwd and workdir and os.path.exists(workdir):
-        cwd_real = os.path.realpath(os.getcwd())
+        cwd_real = os.path.realpath(str(paths.project_root()))
         worktree_real = os.path.realpath(workdir)
         if cwd_real == worktree_real or cwd_real.startswith(worktree_real + os.sep):
             print(
@@ -473,7 +474,7 @@ def _build_commit_message(
 def _inside_worktree(workdir: str) -> bool:
     if not workdir or not os.path.exists(workdir):
         return False
-    cwd_real = os.path.realpath(os.getcwd())
+    cwd_real = os.path.realpath(str(paths.project_root()))
     worktree_real = os.path.realpath(workdir)
     return cwd_real == worktree_real or cwd_real.startswith(worktree_real + os.sep)
 
