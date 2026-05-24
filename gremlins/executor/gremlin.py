@@ -14,7 +14,7 @@ from typing import Any
 from gremlins.artifacts.engine import EngineContext
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
-from gremlins.executor.state import State, StateData
+from gremlins.executor.state import State, StateData, build_state
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.pipeline.loader import STAGE_TYPES
@@ -228,16 +228,16 @@ class Gremlin:
         for e in stages:
             stage_client = e.client or PACKAGE_DEFAULT
             resolved = self.test_client or stage_client
-            stage_state = State(
+            stage_state = build_state(
                 data=StateData(gremlin_id=self.gremlin_id, state_file=self.state_file),
                 client=resolved,
-                stage_model=stage_client.model if self.test_client else "",
                 session_dir=self.session_dir,
                 args=args,
                 pipeline_data=self.pipeline_data,
                 repo=self.repo,
                 instructions=self.instructions,
                 test_client=self.test_client,
+                stage_model=stage_client.model if self.test_client else "",
                 worktree_parent=self.worktree_parent,
                 artifacts=registry,
                 engine_ctx=engine_ctx,

@@ -621,3 +621,44 @@ class State:
             return await entry.run(_prepare())
 
         return _run_async
+
+
+def build_state(
+    data: StateData,
+    client: Client,
+    session_dir: pathlib.Path,
+    *,
+    args: argparse.Namespace | None = None,
+    pipeline_data: Pipeline | None = None,
+    repo: str = "",
+    instructions: str = "",
+    test_client: Client | None = None,
+    stage_model: str = "",
+    worktree: pathlib.Path | None = None,
+    worktree_parent: pathlib.Path | None = None,
+    artifacts: ArtifactRegistry | None = None,
+    engine_ctx: EngineContext | None = None,
+    child_key: str | None = None,
+    parent_stage: str = "",
+) -> State:
+    if artifacts is None:
+        artifacts = ArtifactRegistry(session_dir=session_dir, cwd=worktree)
+    if engine_ctx is None:
+        engine_ctx = EngineContext(loop_iteration=1, attempt="", current_scope=())
+    return State(
+        data=data,
+        client=client,
+        session_dir=session_dir,
+        args=args if args is not None else argparse.Namespace(),
+        pipeline_data=pipeline_data,
+        repo=repo,
+        instructions=instructions,
+        test_client=test_client,
+        stage_model=stage_model,
+        worktree=worktree,
+        worktree_parent=worktree_parent,
+        artifacts=artifacts,
+        engine_ctx=engine_ctx,
+        child_key=child_key,
+        parent_stage=parent_stage,
+    )
