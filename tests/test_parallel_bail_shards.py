@@ -23,7 +23,7 @@ import pytest
 import gremlins.executor.state as state_mod
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.gremlin import run_stages
-from gremlins.executor.state import State, StateData
+from gremlins.executor.state import State, StateData, build_state
 from gremlins.stages.parallel import ParallelStage
 from gremlins.utils.state_file import locked_update as _state_locked_update
 
@@ -188,7 +188,7 @@ def test_patch_state_concurrent_no_lost_updates(state_root):
 
 
 def _make_simple_ctx(tmp_path: pathlib.Path, child_key: str) -> State:
-    return State(
+    return build_state(
         data=StateData(),
         client=FakeClaudeClient(),
         session_dir=tmp_path / child_key,
@@ -305,19 +305,19 @@ def test_cancel_on_bail_skips_unstarted_children():
     async def child_c() -> None:
         ran.append("c")
 
-    ctx_a = State(
+    ctx_a = build_state(
         data=StateData(),
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
         child_key="a",
     )
-    ctx_b = State(
+    ctx_b = build_state(
         data=StateData(),
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
         child_key="b",
     )
-    ctx_c = State(
+    ctx_c = build_state(
         data=StateData(),
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
@@ -440,13 +440,13 @@ def test_worktree_lifecycle_fanout_creates_and_fanin_removes(tmp_path):
     repo.mkdir()
     _init_git_repo(repo)
 
-    ctx_a = State(
+    ctx_a = build_state(
         data=StateData(),
         client=FakeClaudeClient(),
         session_dir=tmp_path / "a",
         child_key="a",
     )
-    ctx_b = State(
+    ctx_b = build_state(
         data=StateData(),
         client=FakeClaudeClient(),
         session_dir=tmp_path / "b",
@@ -522,7 +522,7 @@ def test_fanout_persists_worktrees_and_fresh_fanin_can_clean_up(tmp_path, state_
     _init_git_repo(repo)
 
     def _make_ctx(name: str) -> State:
-        return State(
+        return build_state(
             data=StateData(gremlin_id=gremlin_id),
             client=FakeClaudeClient(),
             session_dir=tmp_path / name,
@@ -587,7 +587,7 @@ def test_fanout_resume_tears_down_prior_worktrees(tmp_path, state_root):
     _init_git_repo(repo)
 
     def _make_ctx(name: str) -> State:
-        return State(
+        return build_state(
             data=StateData(gremlin_id=gremlin_id),
             client=FakeClaudeClient(),
             session_dir=tmp_path / name,
@@ -641,7 +641,7 @@ def test_fanout_resume_tears_down_prior_worktrees(tmp_path, state_root):
 
 
 def test_build_parallel_stages_returns_three_named_stages():
-    ctx = State(
+    ctx = build_state(
         data=StateData(),
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
@@ -662,13 +662,13 @@ def test_build_parallel_stages_returns_three_named_stages():
 
 def test_parallel_all_children_complete_with_defaults():
     ran: list[str] = []
-    ctx_a = State(
+    ctx_a = build_state(
         data=StateData(),
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
         child_key="a",
     )
-    ctx_b = State(
+    ctx_b = build_state(
         data=StateData(),
         client=FakeClaudeClient(),
         session_dir=pathlib.Path("/tmp"),
@@ -747,7 +747,7 @@ def test_parallel_child_set_stage_writes_parent_as_stage(tmp_path, state_root):
     gremlin_id = "gr-parent-stage-pin"
     sf = _make_state(state_root, gremlin_id)
 
-    state = State(
+    state = build_state(
         data=StateData(gremlin_id=gremlin_id),
         client=FakeClaudeClient(),
         session_dir=tmp_path,
@@ -783,7 +783,7 @@ def test_parallel_child_set_stage_with_sub_stage_payload_writes_parent_as_stage(
     gremlin_id = "gr-parent-stage-pin-sub"
     sf = _make_state(state_root, gremlin_id)
 
-    state = State(
+    state = build_state(
         data=StateData(gremlin_id=gremlin_id),
         client=FakeClaudeClient(),
         session_dir=tmp_path,

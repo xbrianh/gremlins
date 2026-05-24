@@ -8,8 +8,7 @@ from conftest import gh_pipeline as _gh_pipeline
 
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State as RuntimeState
-from gremlins.executor.state import StateData
+from gremlins.executor.state import State as RuntimeState, StateData, build_state
 from gremlins.stages.address_code import GitHubAddressPullRequestReviews
 from gremlins.stages.review_code import GitHubReviewPullRequest
 
@@ -24,7 +23,7 @@ def _make_state(
     *,
     gremlin_id: str | None = None,
 ) -> RuntimeState:
-    return RuntimeState(
+    return build_state(
         data=StateData(gremlin_id=gremlin_id),
         client=client,
         session_dir=tmp_path,
@@ -93,7 +92,7 @@ def test_gh_review_parallel_child_prompt_includes_sentinel(
     stage = _make_gh_review(
         client, tmp_path, pr_url="https://github.com/owner/repo/pull/1"
     )
-    state = RuntimeState(
+    state = build_state(
         data=StateData(gremlin_id="gr-123"),
         client=client,
         session_dir=tmp_path,
@@ -164,7 +163,7 @@ def test_gh_address_parallel_child_prompt_includes_sentinel(
     stage = _make_gh_address(
         client, tmp_path, pr_url="https://github.com/owner/repo/pull/1"
     )
-    state = RuntimeState(
+    state = build_state(
         data=StateData(gremlin_id="gr-123"),
         client=client,
         session_dir=tmp_path,

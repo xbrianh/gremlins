@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State, StateData
+from gremlins.executor.state import State, StateData, build_state
 from gremlins.fleet.render import build_row
 from gremlins.fleet.views import _gremlin_to_json  # type: ignore[reportPrivateUsage]
 from gremlins.stages.base import Stage
@@ -23,7 +23,7 @@ from gremlins.stages.sequence import SequenceStage
 def _stateful(tmp_path: pathlib.Path, gid: str = "test-id") -> State:
     sf = tmp_path / "state.json"
     sf.write_text(json.dumps({"id": gid}), encoding="utf-8")
-    return State(
+    return build_state(
         data=StateData(gremlin_id=gid, state_file=sf),
         client=FakeClaudeClient(),
         session_dir=tmp_path,
@@ -183,7 +183,7 @@ def _parallel_execute_stage(
     child_runners = [
         (
             k,
-            State(
+            build_state(
                 data=StateData(),
                 client=FakeClaudeClient(),
                 session_dir=tmp_path,

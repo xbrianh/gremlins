@@ -9,8 +9,7 @@ import pathlib
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State as RuntimeState
-from gremlins.executor.state import StateData
+from gremlins.executor.state import State as RuntimeState, StateData, build_state
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, Outcome
 from gremlins.stages.sequence import SequenceStage
@@ -18,7 +17,7 @@ from gremlins.stages.sequence import SequenceStage
 
 def _state(**kw) -> RuntimeState:
     kw.setdefault("session_dir", pathlib.Path("/tmp"))
-    return RuntimeState(data=StateData(), client=FakeClaudeClient(), **kw)
+    return build_state(data=StateData(), client=FakeClaudeClient(), **kw)
 
 
 class _FakeStage(Stage):
@@ -115,7 +114,7 @@ def _stateful(state_root: pathlib.Path, gremlin_id: str) -> RuntimeState:
     state_dir.mkdir(parents=True)
     sf = state_dir / "state.json"
     sf.write_text(json.dumps({"id": gremlin_id}), encoding="utf-8")
-    return RuntimeState(
+    return build_state(
         data=StateData(gremlin_id=gremlin_id, state_file=sf),
         client=FakeClaudeClient(),
         session_dir=state_dir,

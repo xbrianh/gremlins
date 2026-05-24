@@ -11,8 +11,7 @@ import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State as RuntimeState
-from gremlins.executor.state import StateData
+from gremlins.executor.state import State as RuntimeState, StateData, build_state
 from gremlins.stages.outcome import Bail, Done
 from gremlins.stages.verify import Verify, VerifyFix
 
@@ -40,7 +39,7 @@ def _make_stage(
         "max_attempts": max_attempts,
     }
     stage = Verify("verify", [_VERIFY_PROMPT_PATH.read_text(encoding="utf-8")], options)
-    state = RuntimeState(
+    state = build_state(
         data=StateData(),
         client=client,
         session_dir=tmp_path,
@@ -193,7 +192,7 @@ def test_exhaustion_emits_bail_to_state(tmp_path, make_state_dir):
     )
     options = {"cmds": ["false"], "max_attempts": 3}
     stage = Verify("verify", [_VERIFY_PROMPT_PATH.read_text(encoding="utf-8")], options)
-    state = RuntimeState(
+    state = build_state(
         data=StateData(gremlin_id=gremlin_id, attempt=attempt),
         client=client,
         session_dir=tmp_path,
@@ -242,7 +241,7 @@ def test_parallel_child_fix_prompt_includes_sentinel_instruction(tmp_path):
     ]
     options = {"cmds": ["false"], "max_attempts": 2}
     stage = Verify("verify", prompts, options)
-    state = RuntimeState(
+    state = build_state(
         data=StateData(gremlin_id="gr-verify"),
         client=client,
         session_dir=tmp_path,
@@ -266,7 +265,7 @@ def test_parallel_child_fix_prompt_includes_sentinel_instruction(tmp_path):
 def _make_fix_state(tmp_path: Any, client: Any = None) -> RuntimeState:
     if client is None:
         client = FakeClaudeClient(fixtures={"verify-fix-1": MINIMAL_EVENTS})
-    return RuntimeState(
+    return build_state(
         data=StateData(),
         client=client,
         session_dir=tmp_path,

@@ -8,8 +8,7 @@ from typing import Any
 
 import pytest
 
-from gremlins.executor.state import State as RuntimeState
-from gremlins.executor.state import StateData
+from gremlins.executor.state import State as RuntimeState, StateData, build_state
 from gremlins.stages.cmd import Cmd
 from gremlins.stages.loop import LoopStage, detach_to_pr_base, head_stable, max_iters
 from gremlins.stages.outcome import Bail, Done, NeedsFix
@@ -22,7 +21,7 @@ def _fake_client() -> Any:
 
 
 def _loop_state(tmp_path: Any) -> RuntimeState:
-    return RuntimeState(
+    return build_state(
         data=StateData(),
         client=_fake_client(),
         session_dir=tmp_path,
@@ -145,7 +144,7 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
     async def fix() -> Done:
         return Done()
 
-    loop_state = RuntimeState(
+    loop_state = build_state(
         data=StateData(gremlin_id=gremlin_id, attempt=attempt),
         client=_fake_client(),
         session_dir=tmp_path,
@@ -233,7 +232,7 @@ def test_on_iteration_start_called_each_iteration(tmp_path):
 
 def _run_cmd_stage(tmp_path: Any, cmds: list[str]) -> tuple[Cmd, RuntimeState]:
     stage = Cmd("cmd", [], {"cmds": cmds})
-    state = RuntimeState(
+    state = build_state(
         data=StateData(),
         client=_fake_client(),
         session_dir=tmp_path,
@@ -278,7 +277,7 @@ def test_run_cmd_output_in_needs_fix(tmp_path):
 
 def test_run_cmd_log_path_interpolation(tmp_path):
     stage = Cmd("cmd", [], {"cmds": ["true"], "log_path": "run-{n}.log"})
-    state = RuntimeState(
+    state = build_state(
         data=StateData(), client=_fake_client(), session_dir=tmp_path, worktree=tmp_path
     )
     asyncio.run(stage.run(state))
@@ -293,7 +292,7 @@ def test_run_cmd_log_path_interpolation(tmp_path):
 
 
 def _loop_state_with_gr(tmp_path: Any, gremlin_id: str) -> RuntimeState:
-    return RuntimeState(
+    return build_state(
         data=StateData(gremlin_id=gremlin_id),
         client=_fake_client(),
         session_dir=tmp_path,
@@ -424,7 +423,7 @@ def test_loop_patches_loop_iteration_to_state(tmp_path, make_state_dir):
         seen_iterations.append(int(data.get("loop_iteration") or 0))
         return NeedsFix("keep going")
 
-    loop_state = RuntimeState(
+    loop_state = build_state(
         data=StateData(gremlin_id=gremlin_id),
         client=_fake_client(),
         session_dir=tmp_path,

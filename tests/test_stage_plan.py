@@ -11,19 +11,18 @@ from conftest import MINIMAL_EVENTS
 
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State as RuntimeState
-from gremlins.executor.state import StateData
+from gremlins.executor.state import State as RuntimeState, StateData, build_state
 from gremlins.stages.plan import Plan
 
 
 def _state(session_dir: pathlib.Path, client: FakeClaudeClient) -> RuntimeState:
-    return RuntimeState(data=StateData(), client=client, session_dir=session_dir)
+    return build_state(data=StateData(), client=client, session_dir=session_dir)
 
 
 def _state_with_artifacts(
     session_dir: pathlib.Path, client: FakeClaudeClient
 ) -> RuntimeState:
-    state = RuntimeState(data=StateData(), client=client, session_dir=session_dir)
+    state = build_state(data=StateData(), client=client, session_dir=session_dir)
     state.artifacts = ArtifactRegistry(session_dir)
     return state
 

@@ -9,8 +9,7 @@ from conftest import MINIMAL_EVENTS, ReviewCreatingClient
 from gremlins.artifacts.registry import ArtifactRegistry, MissingArtifact
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State as RuntimeState
-from gremlins.executor.state import StateData
+from gremlins.executor.state import State as RuntimeState, StateData, build_state
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.stages import implement, plan
@@ -38,7 +37,7 @@ def test_local_yaml_loads_and_validates(tmp_path):
 
 
 def _make_state(client, session_dir, *, gremlin_id=None, base_ref_sha=""):
-    state = RuntimeState(
+    state = build_state(
         data=StateData(gremlin_id=gremlin_id, base_ref_sha=base_ref_sha),
         client=client,
         session_dir=session_dir,
@@ -391,7 +390,7 @@ def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
     worktree = tmp_path / "wt"
     worktree.mkdir()
     stage = _make_review_code_stage(client, tmp_path)
-    state = RuntimeState(
+    state = build_state(
         data=StateData(),
         client=client,
         session_dir=tmp_path,

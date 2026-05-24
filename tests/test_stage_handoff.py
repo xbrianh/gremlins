@@ -12,8 +12,7 @@ import pytest
 import gremlins.executor.state as state_mod
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State as RuntimeState
-from gremlins.executor.state import StateData
+from gremlins.executor.state import State as RuntimeState, StateData, build_state
 from gremlins.stages.agent import Agent
 from gremlins.stages.handoff import Handoff
 from gremlins.stages.outcome import Bail, Done, NeedsFix
@@ -29,7 +28,7 @@ def _make_state(
     gremlin_id: str | None = None,
     client: FakeClaudeClient | None = None,
 ) -> RuntimeState:
-    return RuntimeState(
+    return build_state(
         data=StateData(gremlin_id=gremlin_id),
         client=client or FakeClaudeClient(),
         session_dir=tmp_path,

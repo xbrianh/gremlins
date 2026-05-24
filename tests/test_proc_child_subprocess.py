@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State, StateData
+from gremlins.executor.state import State, StateData, build_state
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Done, Outcome
 from gremlins.utils import proc
@@ -81,7 +81,7 @@ def _stage(name: str, timeout: float | None = None) -> Stage:
 
 def _state(session_dir: pathlib.Path) -> State:
     session_dir.mkdir(parents=True, exist_ok=True)
-    return State(
+    return build_state(
         data=StateData(),
         client=FakeClaudeClient(),
         session_dir=session_dir,
@@ -374,7 +374,7 @@ def test_build_child_spec_dict_with_test_client(tmp_path: pathlib.Path) -> None:
     session_dir = tmp_path / "c"
     session_dir.mkdir(parents=True, exist_ok=True)
     test_client = FakeClaudeClient()
-    child_st = State(
+    child_st = build_state(
         data=StateData(),
         client=test_client,
         session_dir=session_dir,

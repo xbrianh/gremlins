@@ -10,8 +10,7 @@ import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State as RuntimeState
-from gremlins.executor.state import StateData
+from gremlins.executor.state import State as RuntimeState, StateData, build_state
 from gremlins.stages.agent_runner import run_agent
 from gremlins.stages.outcome import Bail
 
@@ -31,7 +30,7 @@ def _make_state(
         state_dir.mkdir(parents=True, exist_ok=True)
         state_file = state_dir / "state.json"
         state_file.write_text(json.dumps({"id": "gr-test", "stage": ""}))
-    return RuntimeState(
+    return build_state(
         data=StateData(attempt=attempt, state_file=state_file),
         client=client,
         session_dir=tmp_path,
@@ -104,7 +103,7 @@ def test_model_kwarg_forwarded(tmp_path):
 def test_stage_model_forwarded_when_set(tmp_path):
     """state.stage_model is used as the model when no explicit model= is given."""
     client = FakeClaudeClient(fixtures={"test-label": MINIMAL_EVENTS})
-    state = RuntimeState(
+    state = build_state(
         data=StateData(),
         client=client,
         session_dir=tmp_path,
@@ -117,7 +116,7 @@ def test_stage_model_forwarded_when_set(tmp_path):
 def test_stage_model_overridden_by_kwarg(tmp_path):
     """Explicit model= takes precedence over state.stage_model."""
     client = FakeClaudeClient(fixtures={"test-label": MINIMAL_EVENTS})
-    state = RuntimeState(
+    state = build_state(
         data=StateData(),
         client=client,
         session_dir=tmp_path,
