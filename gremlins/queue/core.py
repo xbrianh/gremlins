@@ -29,7 +29,7 @@ def _runner_pid_path() -> Path:
 def _pid_is_runner(pid: int) -> bool:
     try:
         result = subprocess.run(
-            ["ps", "-ww", "-U", str(os.getuid()), "-o", "command=", "-p", str(pid)],
+            ["ps", "-ww", "-o", "command=", "-p", str(pid)],
             capture_output=True,
             text=True,
             timeout=2,
