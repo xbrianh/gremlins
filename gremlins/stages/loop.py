@@ -160,8 +160,19 @@ class LoopStage(Stage):
 
 
 def detach_to_pr_base(state: State) -> None:
-    branch = state.data.last_pr_branch()
+    branch = _read_pr_branch(state)
     if not branch:
         return
     logger.info("detaching worktree to previous PR branch: %s", branch)
     _git.git_detach_to_branch(branch, cwd=state.cwd)
+
+
+def _read_pr_branch(state: State) -> str:
+    if state.artifacts is not None:
+        try:
+            pr_data = state.artifacts.read("pr")
+            if isinstance(pr_data, dict):
+                return str(pr_data.get("branch") or "")
+        except Exception:
+            pass
+    return state.data.last_pr_branch()

@@ -63,7 +63,7 @@ class _ArtifactStage(_SimpleStage):
     type = "_test_artifact"
 
     async def run(self, state: State) -> Outcome:
-        state.record_artifact({"type": "branch", "name": "feat/test"})
+        state.data.append_artifact({"type": "branch", "name": "feat/test"})
         return Done()
 
 

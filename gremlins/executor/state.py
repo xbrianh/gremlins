@@ -580,9 +580,6 @@ class State:
     def record_bail(self, reason: str, *, kind: str = "other") -> None:
         self.data.write_bail_file(kind, reason, attempt=self.data.attempt)
 
-    def record_artifact(self, artifact: dict[str, Any]) -> None:
-        self.data.append_artifact(artifact)
-
     def record_stage_progress(
         self, name: str, sub_stage: object = None, *, parent_stage: str = ""
     ) -> None:
