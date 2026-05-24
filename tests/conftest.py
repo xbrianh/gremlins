@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 
 import pytest
 
@@ -183,19 +184,13 @@ def lenv(sandbox, monkeypatch):
 
 @pytest.fixture
 def child_sandbox(sandbox, request):
-    """Produce explicit subprocess environments for gremlins child processes.
-
-    child_sandbox.share() → env dict sharing the parent test's sandbox.
-    child_sandbox.fresh() → _ChildSandbox with an isolated sandbox + env dict.
-    """
+    """Subprocess envs for tests that spawn gremlins children."""
     _owned: list[pathlib.Path] = []
 
     def _child_env(overrides: dict) -> dict:
         env = dict(os.environ)
         existing = env.get("PYTHONPATH", "")
-        # Two levels up from tests/conftest.py is the repo root containing
-        # the gremlins package source — needed so subprocesses import source,
-        # not a stale installed copy.
+        # Prepend repo root so subprocesses import source, not an installed copy.
         src_root = str(pathlib.Path(__file__).resolve().parent.parent)
         env["PYTHONPATH"] = src_root + os.pathsep + existing if existing else src_root
         env.update(overrides)
@@ -203,7 +198,11 @@ def child_sandbox(sandbox, request):
 
     def _share() -> dict:
         return _child_env(
-            {"GREMLINS_SANDBOX_ROOT": str(sandbox.root), "HOME": str(sandbox.home)}
+            {
+                "GREMLINS_SANDBOX_ROOT": str(sandbox.root),
+                "HOME": str(sandbox.home),
+                "GREMLINS_PROJECT_ROOT": str(sandbox.project),
+            }
         )
 
     def _fresh() -> _ChildSandbox:
@@ -214,7 +213,11 @@ def child_sandbox(sandbox, request):
         cs = _ChildSandbox(
             root,
             _child_env(
-                {"GREMLINS_SANDBOX_ROOT": str(root), "HOME": str(root / "home")}
+                {
+                    "GREMLINS_SANDBOX_ROOT": str(root),
+                    "HOME": str(root / "home"),
+                    "GREMLINS_PROJECT_ROOT": str(root / "project"),
+                }
             ),
         )
         for d in (cs.state, cs.work, cs.config, cs.home, cs.project):
@@ -222,18 +225,14 @@ def child_sandbox(sandbox, request):
         _owned.append(root)
         return cs
 
-    class _Helper:
-        share = staticmethod(_share)
-        fresh = staticmethod(_fresh)
-
-    yield _Helper
+    yield types.SimpleNamespace(share=_share, fresh=_fresh)
 
     failed = getattr(request.node, "_sandbox_failed", False)
     for root in _owned:
         if failed:
             sys.stderr.write(f"\n[child sandbox retained] {root}\n")
         else:
-            shutil.rmtree(root, ignore_errors=True)
+            shutil.rmtree(root)
 
 
 TESTS_DIR = pathlib.Path(__file__).resolve().parent
