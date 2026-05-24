@@ -41,11 +41,21 @@ class GitHubWaitCopilot(Stage):
         self.max_poll_failures = max_poll_failures
         self.review_checker = review_checker
 
+    def _read_pr_num(self, state: State) -> str:
+        if state.artifacts is not None:
+            try:
+                pr_data = state.artifacts.read("pr")
+                if isinstance(pr_data, dict):
+                    return str(pr_data.get("number") or "")
+            except Exception:
+                pass
+        return state.data.read_pr_num()
+
     async def run(self, state: State) -> Outcome:
         repo = state.repo
-        pr_num = self.pr_num or state.data.read_pr_num()
+        pr_num = self.pr_num or self._read_pr_num(state)
         if not pr_num:
-            raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
+            raise RuntimeError("no 'pr' artifact bound (rewind to open-pr?)")
 
         deadline = time.time() + self.timeout
         consecutive_failures = 0

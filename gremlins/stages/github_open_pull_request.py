@@ -6,6 +6,7 @@ import logging
 import re
 from typing import Any, cast
 
+from gremlins.artifacts.uri import Uri
 from gremlins.clients.protocol import CompletedRun
 from gremlins.executor.state import State
 from gremlins.stages.agent_runner import run_agent
@@ -129,6 +130,14 @@ class GitHubOpenPullRequest(Stage):
         branch = extract_pr_branch_from_events(events) or await _get_pr_branch(pr_url)
         if not branch:
             logger.warning("open-pr: could not determine PR branch for %s", pr_url)
-        state.record_artifact({"type": "pr", "url": pr_url, "branch": branch})
+
+        pr_num = pr_url.split("/")[-1]
+        if state.artifacts is not None:
+            try:
+                state.artifacts.bind("pr", Uri.parse(f"gh://pr/{pr_num}"))
+            except Exception:
+                pass  # already bound (e.g. loop retry)
+
+        state.data.append_artifact({"type": "pr", "url": pr_url, "branch": branch})
         logger.info("PR: %s", pr_url)
         return Done()

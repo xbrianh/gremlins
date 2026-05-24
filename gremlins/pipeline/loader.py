@@ -7,6 +7,7 @@ from gremlins.stages.agent import Agent
 from gremlins.stages.apply import Apply
 from gremlins.stages.base import Stage
 from gremlins.stages.cmd import Cmd
+from gremlins.stages.exec import Exec
 from gremlins.stages.github_open_pull_request import GitHubOpenPullRequest
 from gremlins.stages.github_push_to_pr_branch import GitHubPushToPrBranch
 from gremlins.stages.github_request_copilot_review import GitHubRequestCopilotReview
@@ -22,6 +23,7 @@ from gremlins.stages.sequence import SequenceStage
 from gremlins.stages.verify import Verify
 
 STAGE_TYPES: dict[str, type[Stage]] = {
+    "exec": Exec,
     "agent": Agent,
     "plan": Plan,
     "implement": Implement,

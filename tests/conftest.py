@@ -187,8 +187,8 @@ def common_local_patches(monkeypatch):
         lambda pre, **kwargs: HeadAdvanced(commit_count=1),
     )
     monkeypatch.setattr(
-        "gremlins.stages.implement.commits_since",
-        lambda ref, **kwargs: [],
+        "gremlins.artifacts.registry.git_utils.head_sha",
+        lambda cwd=None: "headsha",
     )
 
 

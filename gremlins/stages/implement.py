@@ -16,7 +16,6 @@ from gremlins.utils.git import (
     EmptyImpl,
     PreImplState,
     classify_impl_outcome,
-    commits_since,
 )
 
 logger = logging.getLogger(__name__)
@@ -124,21 +123,15 @@ class Implement(Stage):
                 f"implement diverged from pre-impl HEAD {pre.head[:7]}; expected a fast-forward"
             )
         if isinstance(outcome, EmptyImpl):
-            if not any(
-                a.get("type") == "commit"
-                for a in state.data.read_artifacts_for_stage(self.name)
-            ):
+            # Accept EmptyImpl only if commits were bound in a prior loop iteration.
+            if state.artifacts is None or not state.artifacts.produced("commits"):
                 raise RuntimeError(
                     "implement produced no committed work; the agent must commit before returning"
                 )
         else:
-            for c in commits_since(pre.head, cwd=cwd_arg):
-                state.record_artifact(
-                    {
-                        "type": "commit",
-                        "sha": c.sha,
-                        "subject": c.subject,
-                        "worktree": cwd_arg or "",
-                    }
-                )
+            if state.artifacts is not None and not state.artifacts.produced("commits"):
+                try:
+                    state.artifacts.bind_git_commit_range("commits", pre.head)
+                except Exception:
+                    pass  # already bound
         return Done()

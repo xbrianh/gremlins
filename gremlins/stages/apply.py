@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from gremlins.artifacts.schemes import snapshot_head_before
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, Outcome
@@ -21,6 +22,14 @@ class Apply(Stage):
         cmds = [c for c in self.options.get("cmds", []) if c.strip()]
         if not cmds:
             return Done()
+
+        pre_sha: str | None = None
+        if state.artifacts is not None and not state.artifacts.produced("commits"):
+            try:
+                pre_sha = snapshot_head_before(cwd=state.cwd)
+            except RuntimeError:
+                pass  # not a git repo
+
         log_lines: list[str] = []
         for cmd in cmds:
             p = await asyncio.create_subprocess_shell(
@@ -37,6 +46,13 @@ class Apply(Stage):
                 )
                 raise Bail(f"apply {self.name}: {cmd} exited {p.returncode}")
         self._maybe_commit(state)
+
+        if state.artifacts is not None and pre_sha is not None:
+            try:
+                state.artifacts.bind_git_commit_range("commits", pre_sha)
+            except Exception:
+                pass  # already bound (e.g. loop iteration 2+)
+
         return Done()
 
     def _maybe_commit(self, state: State) -> None:
