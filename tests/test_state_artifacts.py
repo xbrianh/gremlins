@@ -4,7 +4,10 @@ import json
 import pathlib
 
 import gremlins.executor.state as state_mod
-from gremlins.executor.state import StateData
+from gremlins.artifacts.engine import EngineContext
+from gremlins.artifacts.registry import ArtifactRegistry
+from gremlins.clients.client import Client
+from gremlins.executor.state import StateData, build_state
 
 # ---------------------------------------------------------------------------
 # State.setup_dirs
@@ -320,3 +323,44 @@ def test_append_artifact_stamps_child_attempt(tmp_path, monkeypatch):
     assert (
         StateData.load(gremlin_id).read_artifacts_for_attempt("parent-stage-aabb") == []
     )
+
+
+# ---------------------------------------------------------------------------
+# build_state factory
+# ---------------------------------------------------------------------------
+
+
+def test_build_state_defaults_artifacts_and_engine_ctx(tmp_path, monkeypatch):
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path)
+    state = build_state(
+        data=StateData.load(None),
+        client=Client("fake", "model"),
+        session_dir=tmp_path,
+    )
+    assert state.artifacts is not None
+    assert state.engine_ctx is not None
+
+
+def test_build_state_engine_ctx_mirrors_state_data(tmp_path, monkeypatch):
+    import dataclasses
+
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path)
+    data = dataclasses.replace(StateData.load(None), loop_iteration=3, attempt="implement-aabb")
+    state = build_state(data=data, client=Client("fake", "model"), session_dir=tmp_path)
+    assert state.engine_ctx.loop_iteration == 3
+    assert state.engine_ctx.attempt == "implement-aabb"
+
+
+def test_build_state_preserves_explicit_artifacts_and_engine_ctx(tmp_path, monkeypatch):
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path)
+    registry = ArtifactRegistry(session_dir=tmp_path, cwd=None)
+    ctx = EngineContext(loop_iteration=7, attempt="review-1111", current_scope=())
+    state = build_state(
+        data=StateData.load(None),
+        client=Client("fake", "model"),
+        session_dir=tmp_path,
+        artifacts=registry,
+        engine_ctx=ctx,
+    )
+    assert state.artifacts is registry
+    assert state.engine_ctx is ctx

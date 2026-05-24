@@ -11,6 +11,8 @@ Spec file schema (JSON):
         "pipeline_path":   <str|null>   absolute path to pipeline YAML or null
         "child_key":       <str|null>   parallel group child identifier or null
         "parent_stage":    <str>        parent stage name for sub-stage tracking
+        "repo":            <str>        "owner/repo" for gh API calls
+        "instructions":    <str>        freeform instructions forwarded from parent
     }
 
 Result file schema (written to <spec_path>.result):
@@ -113,6 +115,8 @@ def _build_state(spec: dict[str, Any]) -> State:
         client=client,
         session_dir=session_dir,
         pipeline_data=pipeline_data,
+        repo=str(spec.get("repo") or ""),
+        instructions=str(spec.get("instructions") or ""),
         child_key=spec.get("child_key") or None,
         parent_stage=str(spec.get("parent_stage") or ""),
         worktree=worktree,

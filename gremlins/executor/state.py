@@ -644,7 +644,7 @@ def build_state(
     if artifacts is None:
         artifacts = ArtifactRegistry(session_dir=session_dir, cwd=worktree)
     if engine_ctx is None:
-        engine_ctx = EngineContext(loop_iteration=1, attempt="", current_scope=())
+        engine_ctx = EngineContext(loop_iteration=data.loop_iteration, attempt=data.attempt, current_scope=())
     return State(
         data=data,
         client=client,
