@@ -546,8 +546,18 @@ class State:
     parent_stage: str = ""
     worktree: pathlib.Path | None = None
     worktree_parent: pathlib.Path | None = None
-    artifacts: ArtifactRegistry | None = None
-    engine_ctx: EngineContext | None = None
+    artifacts: ArtifactRegistry = dataclasses.field(default=None)  # type: ignore[assignment]
+    engine_ctx: EngineContext = dataclasses.field(default=None)  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.artifacts is None:  # type: ignore[comparison-overlap]
+            self.artifacts = ArtifactRegistry(session_dir=self.session_dir, cwd=self.worktree)
+        if self.engine_ctx is None:  # type: ignore[comparison-overlap]
+            self.engine_ctx = EngineContext(
+                loop_iteration=self.data.loop_iteration,
+                attempt=self.data.attempt,
+                current_scope=(),
+            )
 
     @staticmethod
     def setup_dirs(

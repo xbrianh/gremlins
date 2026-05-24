@@ -56,9 +56,6 @@ class Agent(Stage):
         return stage
 
     async def run(self, state: State) -> Outcome:
-        if state.artifacts is None:
-            raise RuntimeError(f"stage {self.name!r}: state.artifacts is None")
-
         subs: dict[str, str] = {}
         if self.in_map or self.out_map:
             for key, uri_str in self.out_map.items():
