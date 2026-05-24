@@ -4,7 +4,7 @@ Public API:
     launch(kind, *, stage_inputs=None, plan=None, description=None,
            parent_id=None, project_root=None, base_ref="HEAD",
            pipeline_args=()) -> tuple[str, subprocess.Popen[bytes]]
-    resume(gremlin_id) -> None
+    resume(gremlin_id, *, graft=None, is_rescue=False) -> None
 """
 
 from __future__ import annotations
