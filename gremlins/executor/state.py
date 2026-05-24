@@ -288,7 +288,12 @@ class StateData:
         except Exception:
             pass
 
-    def check_bail(self, label: str = "stage", *, child_key: str | None = None) -> None:
+    def check_bail(
+        self,
+        label: str = "stage",
+        *,
+        child_key: str | None = None,
+    ) -> None:
         sf = self.state_file or resolve_state_file(self.gremlin_id)
         if sf is None or not sf.exists():
             return

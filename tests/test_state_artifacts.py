@@ -238,7 +238,8 @@ def test_read_artifacts_for_attempt_no_match(tmp_path, monkeypatch):
         )
     )
 
-    assert StateData.load(gremlin_id).read_artifacts_for_attempt("implement-aaaa") == []
+    sd = StateData.load(gremlin_id)
+    assert sd.read_artifacts_for_attempt("implement-aaaa") == []
 
 
 def test_read_artifacts_for_stage_prefix_match(tmp_path, monkeypatch):
@@ -317,12 +318,11 @@ def test_append_artifact_stamps_child_attempt(tmp_path, monkeypatch):
     data = dataclasses.replace(data, attempt=child_attempt)
     data.append_artifact({"type": "branch", "name": "feat-child"})
 
-    arts = StateData.load(gremlin_id).read_artifacts()
+    sd = StateData.load(gremlin_id)
+    arts = sd.read_artifacts()
     assert arts == [{"type": "branch", "name": "feat-child", "attempt": child_attempt}]
-    assert StateData.load(gremlin_id).read_artifacts_for_attempt(child_attempt) == arts
-    assert (
-        StateData.load(gremlin_id).read_artifacts_for_attempt("parent-stage-aabb") == []
-    )
+    assert sd.read_artifacts_for_attempt(child_attempt) == arts
+    assert sd.read_artifacts_for_attempt("parent-stage-aabb") == []
 
 
 # ---------------------------------------------------------------------------
@@ -348,12 +348,13 @@ def test_build_state_engine_ctx_mirrors_state_data(tmp_path, monkeypatch):
     data = dataclasses.replace(
         StateData.load(None), loop_iteration=3, attempt="implement-aabb"
     )
-    state = build_state(data=data, client=Client("fake", "model"), session_dir=tmp_path)
+    client = Client("fake", "model")
+    state = build_state(data=data, client=client, session_dir=tmp_path)
     assert state.engine_ctx.loop_iteration == 3
     assert state.engine_ctx.attempt == "implement-aabb"
 
 
-def test_build_state_preserves_explicit_artifacts_and_engine_ctx(tmp_path, monkeypatch):
+def test_build_state_preserves_explicit_registry(tmp_path, monkeypatch):
     monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path)
     registry = ArtifactRegistry(session_dir=tmp_path, cwd=None)
     ctx = EngineContext(loop_iteration=7, attempt="review-1111", current_scope=())
