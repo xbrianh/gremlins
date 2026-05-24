@@ -741,7 +741,9 @@ def _spawn_resume(
     )
 
 
-def resume(gremlin_id: str, *, graft: str | None = None, is_rescue: bool = False) -> None:
+def resume(
+    gremlin_id: str, *, graft: str | None = None, is_rescue: bool = False
+) -> None:
     state_dir, state = _load_resume_state(gremlin_id)
     _check_resume_preconditions(gremlin_id, state_dir, state, graft)
     pipeline_args, pipeline_path, project_root = _resolve_resume_pipeline(
@@ -754,7 +756,13 @@ def resume(gremlin_id: str, *, graft: str | None = None, is_rescue: bool = False
     if graft is not None:
         stage = _append_graft(state_dir, graft, project_root)
     _patch_state_for_resume(
-        gremlin_id, state_dir, state, stage, pipeline_args, pipeline_path, is_rescue=is_rescue
+        gremlin_id,
+        state_dir,
+        state,
+        stage,
+        pipeline_args,
+        pipeline_path,
+        is_rescue=is_rescue,
     )
     p = _spawn_resume(
         gremlin_id, state_dir, state, pipeline_path, pipeline_args, stage, project_root
