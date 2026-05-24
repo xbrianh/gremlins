@@ -345,7 +345,9 @@ def test_build_state_engine_ctx_mirrors_state_data(tmp_path, monkeypatch):
     import dataclasses
 
     monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path)
-    data = dataclasses.replace(StateData.load(None), loop_iteration=3, attempt="implement-aabb")
+    data = dataclasses.replace(
+        StateData.load(None), loop_iteration=3, attempt="implement-aabb"
+    )
     state = build_state(data=data, client=Client("fake", "model"), session_dir=tmp_path)
     assert state.engine_ctx.loop_iteration == 3
     assert state.engine_ctx.attempt == "implement-aabb"
