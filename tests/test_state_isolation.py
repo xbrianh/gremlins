@@ -242,7 +242,7 @@ def test_set_stage_noop_when_state_json_missing(sandbox):
 
 def test_write_bail_file_creates_bail_file(sandbox):
     gremlin_id = "gr-wbf-write"
-    sf = _make_state_dir(sandbox.state, gremlin_id)
+    _make_state_dir(sandbox.state, gremlin_id)
 
     StateData.load(gremlin_id).write_bail_file(
         "other", "something went wrong", attempt="stage-abc123"
@@ -265,7 +265,7 @@ def test_write_bail_file_noop_when_gremlin_id_none(sandbox):
 
 def test_write_bail_file_noop_when_attempt_empty(sandbox):
     gremlin_id = "gr-wbf-empty-attempt"
-    sf = _make_state_dir(sandbox.state, gremlin_id)
+    _make_state_dir(sandbox.state, gremlin_id)
     StateData.load(gremlin_id).write_bail_file("other", attempt="")
     bail_files = list((sandbox.state / gremlin_id).glob("bail_*.json"))
     assert not bail_files
