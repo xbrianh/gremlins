@@ -549,7 +549,9 @@ class Handoff(Stage):
             "handoff",
             [prompt],
             {},
-            out_map={f"handoff-{handoff_n:03d}": f"file://session/handoff-{handoff_n:03d}.md"},
+            out_map={
+                f"handoff-{handoff_n:03d}": f"file://session/handoff-{handoff_n:03d}.md"
+            },
         )
         _state = (
             state
@@ -580,7 +582,9 @@ class Handoff(Stage):
         sig_data["signal_path"] = str(signal_path)
         logger.info("handoff %d result: %s", handoff_n, exit_state)
 
-        await sanitize_rolling_plan(state.client, out_path, spec=state.client, timeout=60)
+        await sanitize_rolling_plan(
+            state.client, out_path, spec=state.client, timeout=60
+        )
 
         return exit_state, sig_data
 

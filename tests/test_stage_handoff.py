@@ -83,7 +83,9 @@ def _make_signal_file(
 def _patch_handoff(monkeypatch: Any, tmp_path: pathlib.Path, exit_state: str) -> None:
     """Patch Agent.run and collect_git_context for a standard handoff test."""
 
-    async def fake_git_context(base_ref: str, rev: str | None = None) -> tuple[str, str, str]:
+    async def fake_git_context(
+        base_ref: str, rev: str | None = None
+    ) -> tuple[str, str, str]:
         return "main", "", ""
 
     monkeypatch.setattr("gremlins.stages.handoff.collect_git_context", fake_git_context)
@@ -135,7 +137,9 @@ def test_next_plan_writes_plan_and_raises(tmp_path, monkeypatch, test_state_root
     _write_state(state_dir, gremlin_id)
     _write_plan(tmp_path)
 
-    async def fake_git_context(base_ref: str, rev: str | None = None) -> tuple[str, str, str]:
+    async def fake_git_context(
+        base_ref: str, rev: str | None = None
+    ) -> tuple[str, str, str]:
         return "main", "", ""
 
     monkeypatch.setattr("gremlins.stages.handoff.collect_git_context", fake_git_context)
@@ -178,7 +182,9 @@ def test_bail_emits_bail_and_raises(tmp_path, monkeypatch, test_state_root):
     state_mod.StateData.load(gremlin_id).patch(attempt=attempt)
     _write_plan(tmp_path)
 
-    async def fake_git_context(base_ref: str, rev: str | None = None) -> tuple[str, str, str]:
+    async def fake_git_context(
+        base_ref: str, rev: str | None = None
+    ) -> tuple[str, str, str]:
         return "main", "", ""
 
     monkeypatch.setattr("gremlins.stages.handoff.collect_git_context", fake_git_context)
@@ -224,7 +230,9 @@ def test_handoff_index_first_iteration(tmp_path, monkeypatch, test_state_root):
 
     seen_keys: list[str] = []
 
-    async def fake_git_context(base_ref: str, rev: str | None = None) -> tuple[str, str, str]:
+    async def fake_git_context(
+        base_ref: str, rev: str | None = None
+    ) -> tuple[str, str, str]:
         return "main", "", ""
 
     monkeypatch.setattr("gremlins.stages.handoff.collect_git_context", fake_git_context)
@@ -264,7 +272,9 @@ def test_handoff_agent_error_raises(tmp_path, monkeypatch, test_state_root):
     _write_state(state_dir, gremlin_id)
     _write_plan(tmp_path)
 
-    async def fake_git_context(base_ref: str, rev: str | None = None) -> tuple[str, str, str]:
+    async def fake_git_context(
+        base_ref: str, rev: str | None = None
+    ) -> tuple[str, str, str]:
         return "main", "", ""
 
     monkeypatch.setattr("gremlins.stages.handoff.collect_git_context", fake_git_context)
@@ -301,7 +311,9 @@ def test_resume_continues_from_file_index(tmp_path, monkeypatch, test_state_root
 
     seen_keys: list[str] = []
 
-    async def fake_git_context(base_ref: str, rev: str | None = None) -> tuple[str, str, str]:
+    async def fake_git_context(
+        base_ref: str, rev: str | None = None
+    ) -> tuple[str, str, str]:
         return "main", "", ""
 
     monkeypatch.setattr("gremlins.stages.handoff.collect_git_context", fake_git_context)
@@ -339,7 +351,9 @@ def test_base_ref_from_state(tmp_path, monkeypatch, test_state_root):
 
     captured_base: list[str] = []
 
-    async def fake_git_context(base_ref: str, rev: str | None = None) -> tuple[str, str, str]:
+    async def fake_git_context(
+        base_ref: str, rev: str | None = None
+    ) -> tuple[str, str, str]:
         captured_base.append(base_ref)
         return "main", "", ""
 

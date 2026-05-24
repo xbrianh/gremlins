@@ -349,7 +349,9 @@ def test_address_code_stage_calls_client_with_review_content(tmp_path):
     client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
     stage = _make_address_code_stage(client, tmp_path)
     state = _make_state(client, tmp_path)
-    state.artifacts.bind("review-code", Uri.parse("file://session/review-code-sonnet.md"))
+    state.artifacts.bind(
+        "review-code", Uri.parse("file://session/review-code-sonnet.md")
+    )
     asyncio.run(stage.run(state))
 
     assert len(client.calls) == 1
@@ -430,7 +432,9 @@ def test_address_code_stage_includes_style_from_prompts(tmp_path):
         in_map={"text": "review-code"},
     )
     state = _make_state(client, tmp_path)
-    state.artifacts.bind("review-code", Uri.parse("file://session/review-code-sonnet.md"))
+    state.artifacts.bind(
+        "review-code", Uri.parse("file://session/review-code-sonnet.md")
+    )
     asyncio.run(stage.run(state))
     assert "Be good." in client.calls[0].prompt
 
@@ -455,5 +459,3 @@ def test_address_code_stage_raises_on_missing_review_files(tmp_path, make_state_
     # in_map references "review-code" which is not bound in the registry
     with pytest.raises((MissingArtifact, KeyError)):
         asyncio.run(stage.run(state))
-
-
