@@ -38,13 +38,13 @@ README.md                    Dev install + CLI usage
 ```sh
 uv venv && source .venv/bin/activate
 uv pip install -e ".[dev]"
-make test          # runs pytest per-file (Makefile splits the suite)
+make -j8 test      # runs pytest per-file in parallel (Makefile splits the suite)
 make check         # ruff lint + ruff format check + pyright
 ```
 
-**Run tests with `make test` or bare `pytest`. Never `uv run pytest`** — the project venv is the test target, not whatever `uv run` resolves.
+**Always run tests with `make -j8 test`** (or `make -j$(sysctl -n hw.ncpu) test` / `make -j$(nproc) test`). The Makefile depends on each `tests/test_*.py` as its own sub-target, so `-jN` parallelizes cleanly and the suite finishes several times faster. Serial `make test` is leaving time on the floor — don't do it. Never use bare `-j` (means *unlimited*, spawns one pytest per file simultaneously, bad).
 
-`make test` depends on each `tests/test_*.py` as its own sub-target, so it parallelizes cleanly with `-jN` — e.g. `make -j8 test`. `make` does not auto-detect CPU count (bare `-j` means *unlimited*, which spawns one pytest per file simultaneously and is bad). Portable auto-cap on this machine: `make -j$(sysctl -n hw.ncpu) test` on macOS, `make -j$(nproc) test` on Linux.
+**Never `uv run pytest`** — the project venv is the test target, not whatever `uv run` resolves. Bare `pytest` is fine for a single file; `make -j8 test` is the way to run the whole suite.
 
 ## Project-wide conventions
 
