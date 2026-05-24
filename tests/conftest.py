@@ -197,21 +197,25 @@ def child_sandbox(sandbox, request):
         # the gremlins package source — needed so subprocesses import source,
         # not a stale installed copy.
         src_root = str(pathlib.Path(__file__).resolve().parent.parent)
-        env["PYTHONPATH"] = (
-            src_root + os.pathsep + existing if existing else src_root
-        )
+        env["PYTHONPATH"] = src_root + os.pathsep + existing if existing else src_root
         env.update(overrides)
         return env
 
     def _share() -> dict:
-        return _child_env({"GREMLINS_SANDBOX_ROOT": str(sandbox.root), "HOME": str(sandbox.home)})
+        return _child_env(
+            {"GREMLINS_SANDBOX_ROOT": str(sandbox.root), "HOME": str(sandbox.home)}
+        )
 
     def _fresh() -> _ChildSandbox:
         node_id = re.sub(r"[^\w]", "_", request.node.nodeid)[-60:]
-        root = pathlib.Path(tempfile.mkdtemp(prefix=f"grem_{node_id}_child_", dir="/tmp"))
+        root = pathlib.Path(
+            tempfile.mkdtemp(prefix=f"grem_{node_id}_child_", dir="/tmp")
+        )
         cs = _ChildSandbox(
             root,
-            _child_env({"GREMLINS_SANDBOX_ROOT": str(root), "HOME": str(root / "home")}),
+            _child_env(
+                {"GREMLINS_SANDBOX_ROOT": str(root), "HOME": str(root / "home")}
+            ),
         )
         for d in (cs.state, cs.work, cs.config, cs.home, cs.project):
             d.mkdir(parents=True)

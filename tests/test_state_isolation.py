@@ -44,7 +44,9 @@ from gremlins.executor.state import StateData
 from gremlins.pipeline.discovery import resolve_pipeline_path
 
 
-def test_autouse_isolate_gremlin_id_unsets_gremlin_id_under_inherited_env(tmp_path, child_sandbox):
+def test_autouse_isolate_gremlin_id_unsets_gremlin_id_under_inherited_env(
+    tmp_path, child_sandbox
+):
     # Spawn a pytest subprocess with GREMLIN_ID set in env. The autouse fixture
     # must remove it inside the inner test body. Without the subprocess hop
     # this would pass trivially in any environment that doesn't already

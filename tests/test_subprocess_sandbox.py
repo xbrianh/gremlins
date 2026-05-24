@@ -1,4 +1,5 @@
 """Verify child_sandbox fixture: share and fresh subprocess environments."""
+
 from __future__ import annotations
 
 import subprocess
@@ -36,8 +37,12 @@ def test_fresh_child_writes_stay_in_child_sandbox(child_sandbox, sandbox):
         env=cs.env,
         check=True,
     )
-    assert (cs.state / "sentinel.txt").exists(), "child should write to its own state dir"
-    assert not (sandbox.state / "sentinel.txt").exists(), "child must not pollute parent sandbox"
+    assert (cs.state / "sentinel.txt").exists(), (
+        "child should write to its own state dir"
+    )
+    assert not (sandbox.state / "sentinel.txt").exists(), (
+        "child must not pollute parent sandbox"
+    )
 
 
 def test_share_child_writes_go_to_parent_sandbox(child_sandbox, sandbox):
@@ -52,4 +57,6 @@ def test_share_child_writes_go_to_parent_sandbox(child_sandbox, sandbox):
         env=env,
         check=True,
     )
-    assert (sandbox.state / "shared_sentinel.txt").exists(), "child should write to parent state dir"
+    assert (sandbox.state / "shared_sentinel.txt").exists(), (
+        "child should write to parent state dir"
+    )
