@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 from typing import Any, cast
 
@@ -11,6 +10,7 @@ from gremlins.artifacts.uri import Uri
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, NeedsFix, Outcome
+from gremlins.utils import proc as _proc
 from gremlins.utils.text import to_str
 
 
@@ -59,22 +59,19 @@ class Exec(Stage):
         stdout_str = ""
         stderr_str = ""
         if cmds:
-            proc = await asyncio.create_subprocess_shell(
+            result = await _proc.run_shell_async(
                 " && ".join(cmds),
                 cwd=state.cwd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
                 env={**os.environ, **extra_env},
             )
-            stdout_b, stderr_b = await proc.communicate()
-            stdout_str = stdout_b.decode()
-            stderr_str = stderr_b.decode()
-            if proc.returncode != 0:
+            stdout_str = result.stdout
+            stderr_str = result.stderr
+            if result.returncode != 0:
                 log_path = state.session_dir / f"exec-{self.name}.log"
                 log_path.write_text(stdout_str + stderr_str, encoding="utf-8")
                 if self.options.get("on_fail") == "needs_fix":
-                    return NeedsFix(stdout_str + stderr_str, proc.returncode)
-                raise Bail(f"exec {self.name}: exited {proc.returncode}")
+                    return NeedsFix(stdout_str + stderr_str, result.returncode)
+                raise Bail(f"exec {self.name}: exited {result.returncode}")
 
         for key, uri_str in self.out_map.items():
             if uri_str == "git://range":
