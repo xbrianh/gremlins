@@ -18,6 +18,14 @@ class MissingArtifact(KeyError):
         self.key = key
 
 
+class DuplicateArtifact(ValueError):
+    def __init__(self, key: str, existing: Uri, attempted: Uri) -> None:
+        super().__init__(
+            f"artifact {key!r} already bound to {existing}; cannot rebind to {attempted}"
+        )
+        self.key = key
+
+
 class ArtifactRegistry:
     def __init__(
         self,
@@ -33,6 +41,8 @@ class ArtifactRegistry:
         }
 
     def bind(self, key: str, uri: Uri) -> None:
+        if key in self._bindings:
+            raise DuplicateArtifact(key, self._bindings[key], uri)
         self._bindings[key] = uri
 
     def resolve(self, key: str) -> Uri:
