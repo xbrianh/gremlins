@@ -15,13 +15,6 @@ from gremlins.spawn.pipeline import main as run_pipeline_main
 from gremlins.utils.yaml_io import YamlLoadError
 
 
-@pytest.fixture
-def state_root(tmp_path: pathlib.Path, monkeypatch):
-    root = tmp_path / "state"
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: root)
-    return root
-
-
 def _make_state(state_root: pathlib.Path, gremlin_id: str) -> pathlib.Path:
     state_dir = state_root / gremlin_id
     state_dir.mkdir(parents=True)
@@ -62,9 +55,9 @@ def test_unknown_first_arg_falls_through_to_fleet(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_write_bail_file_creates_file(state_root, monkeypatch):
+def test_write_bail_file_creates_file(sandbox):
     gremlin_id = "gr-bail-file-a"
-    state_dir = state_root / gremlin_id
+    state_dir = sandbox.state / gremlin_id
     state_dir.mkdir(parents=True)
     sf = state_dir / "state.json"
     sf.write_text(json.dumps({"id": gremlin_id}))
@@ -80,9 +73,9 @@ def test_write_bail_file_creates_file(state_root, monkeypatch):
     assert data["detail"] == "reason"
 
 
-def test_write_bail_file_idempotent(state_root, monkeypatch):
+def test_write_bail_file_idempotent(sandbox):
     gremlin_id = "gr-bail-file-idempotent"
-    state_dir = state_root / gremlin_id
+    state_dir = sandbox.state / gremlin_id
     state_dir.mkdir(parents=True)
     sf = state_dir / "state.json"
     sf.write_text(json.dumps({"id": gremlin_id}))
@@ -98,9 +91,9 @@ def test_write_bail_file_idempotent(state_root, monkeypatch):
     assert data["class"] == "other"  # not overwritten
 
 
-def test_write_bail_file_noop_without_attempt(state_root, monkeypatch):
+def test_write_bail_file_noop_without_attempt(sandbox):
     gremlin_id = "gr-bail-noop"
-    state_dir = state_root / gremlin_id
+    state_dir = sandbox.state / gremlin_id
     state_dir.mkdir(parents=True)
     (state_dir / "state.json").write_text(json.dumps({"id": gremlin_id}))
 
@@ -109,9 +102,9 @@ def test_write_bail_file_noop_without_attempt(state_root, monkeypatch):
     assert not bail_files
 
 
-def test_check_bail_detects_bail_file(state_root, monkeypatch):
+def test_check_bail_detects_bail_file(sandbox):
     gremlin_id = "gr-check-bail-file"
-    state_dir = state_root / gremlin_id
+    state_dir = sandbox.state / gremlin_id
     state_dir.mkdir(parents=True)
     sf = state_dir / "state.json"
     sf.write_text(json.dumps({"id": gremlin_id, "attempt": "my-attempt"}))
@@ -121,18 +114,18 @@ def test_check_bail_detects_bail_file(state_root, monkeypatch):
         state_mod.StateData.load(gremlin_id).check_bail("test")
 
 
-def test_check_bail_no_bail_file(state_root, monkeypatch):
+def test_check_bail_no_bail_file(sandbox):
     gremlin_id = "gr-check-no-bail"
-    state_dir = state_root / gremlin_id
+    state_dir = sandbox.state / gremlin_id
     state_dir.mkdir(parents=True)
     sf = state_dir / "state.json"
     sf.write_text(json.dumps({"id": gremlin_id, "attempt": "my-attempt"}))
     state_mod.StateData.load(gremlin_id).check_bail("test")  # should not raise
 
 
-def test_check_bail_stale_attempt_not_detected(state_root, monkeypatch):
+def test_check_bail_stale_attempt_not_detected(sandbox):
     gremlin_id = "gr-stale-bail"
-    state_dir = state_root / gremlin_id
+    state_dir = sandbox.state / gremlin_id
     state_dir.mkdir(parents=True)
     sf = state_dir / "state.json"
     sf.write_text(json.dumps({"id": gremlin_id, "attempt": "current-attempt"}))
@@ -303,7 +296,7 @@ def _make_fake_pipeline(stage_type: str = "plan"):
     return Pipeline(name="local", path=pathlib.Path("/fake/local.yaml"), stages=[stage])
 
 
-def test_launch_unified_dispatch_calls_launch(tmp_path, monkeypatch):
+def test_launch_unified_dispatch_calls_launch(monkeypatch):
     monkeypatch.setattr(
         "gremlins.cli.launch.resolve_pipeline_name",
         lambda name, root: pathlib.Path(f"/fake/{name}.yaml"),
@@ -321,7 +314,6 @@ def test_launch_unified_dispatch_calls_launch(tmp_path, monkeypatch):
         return "gr-abc123", fake_proc
 
     monkeypatch.setattr("gremlins.cli.launch.launch", _fake_launch)
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
     times = iter([0, 100])
     monkeypatch.setattr("gremlins.cli.launch.time.sleep", lambda x: None)
     monkeypatch.setattr("gremlins.cli.launch.time.time", lambda: next(times))
@@ -377,7 +369,7 @@ def test_launch_unified_dispatch_unknown_name_with_help_exits_nonzero(
     ],
 )
 def test_launch_invalid_pipeline_exits_nonzero_with_message(
-    tmp_path, monkeypatch, capsys, exc
+    monkeypatch, capsys, exc
 ):
     monkeypatch.setattr(
         "gremlins.cli.launch.resolve_pipeline_name",
@@ -392,7 +384,6 @@ def test_launch_invalid_pipeline_exits_nonzero_with_message(
     monkeypatch.setattr(
         "gremlins.cli.launch.launch", lambda *a, **kw: launched.append(1) or "gr-x"
     )
-    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path / "state")
 
     rc = main(["launch", "my-pipeline"])
 
