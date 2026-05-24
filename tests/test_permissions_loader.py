@@ -78,7 +78,6 @@ def test_project_file_wins_over_user_config(tmp_path, monkeypatch):
 
 
 def test_user_config_honored(sandbox, tmp_path):
-    sandbox.config.mkdir(parents=True, exist_ok=True)
     (sandbox.config / "config.toml").write_text("bypass_permissions = true\n")
 
     policy = _load(cwd=tmp_path, tmp_path=tmp_path)

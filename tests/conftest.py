@@ -108,7 +108,8 @@ _GH_TOKEN: str = os.environ.get("GH_TOKEN", "") or _get_gh_token()
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield
-    if outcome.get_result().failed:
+    rep = outcome.get_result()
+    if call.when == "call" and rep.failed and not hasattr(rep, "wasxfail"):
         item._sandbox_failed = True
 
 
@@ -116,6 +117,7 @@ def pytest_runtest_makereport(item, call):
 def sandbox(monkeypatch, request):
     node_id = re.sub(r"[^\w]", "_", request.node.nodeid)[-60:]
     root = pathlib.Path(tempfile.mkdtemp(prefix=f"grem_{node_id}_", dir="/tmp"))
+    original_cwd = pathlib.Path.cwd()
 
     sb = _Sandbox(root)
     for d in (sb.state, sb.work, sb.config, sb.home, sb.project):
@@ -132,10 +134,11 @@ def sandbox(monkeypatch, request):
     request.node._sandbox = sb
     yield sb
 
+    os.chdir(original_cwd)
     if getattr(request.node, "_sandbox_failed", False):
         sys.stderr.write(f"\n[sandbox retained] {root}\n")
     else:
-        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(root)
 
 
 @pytest.fixture

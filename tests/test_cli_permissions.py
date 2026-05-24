@@ -124,7 +124,6 @@ def test_project_file_bypass_yields_bypass_policy(monkeypatch, tmp_path, capsys)
 
 
 def test_user_config_bypass_yields_bypass_policy(sandbox, capsys):
-    sandbox.config.mkdir(parents=True, exist_ok=True)
     (sandbox.config / "config.toml").write_text("bypass_permissions = true\n")
     args = _args()
     rc, _ = _run(args)
