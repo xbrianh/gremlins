@@ -6,7 +6,11 @@ import pathlib
 
 import pytest
 
-from gremlins.artifacts.registry import ArtifactRegistry, DuplicateArtifact, MissingArtifact
+from gremlins.artifacts.registry import (
+    ArtifactRegistry,
+    DuplicateArtifact,
+    MissingArtifact,
+)
 from gremlins.artifacts.uri import Uri
 
 
