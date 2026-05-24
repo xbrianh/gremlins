@@ -77,7 +77,7 @@ def test_exec_writes_log_on_failure(tmp_path: pathlib.Path) -> None:
 def test_exec_in_map_sets_env(tmp_path: pathlib.Path) -> None:
     state = _make_state(tmp_path)
     assert state.artifacts is not None
-    state.artifacts.bind("mykey", Uri.parse(f"file://session/out.txt"))
+    state.artifacts.bind("mykey", Uri.parse("file://session/out.txt"))
     (tmp_path / "out.txt").write_text("hello-value")
     stage = Exec(
         "env-test",

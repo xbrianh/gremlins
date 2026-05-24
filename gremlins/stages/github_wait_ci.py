@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from gremlins.executor.state import State
 from gremlins.stages.agent_runner import run_agent
@@ -222,7 +222,7 @@ class GitHubWaitCI(Stage):
             try:
                 pr_data = state.artifacts.read("pr")
                 if isinstance(pr_data, dict):
-                    return str(pr_data.get("url") or "")
+                    return str(cast(dict[str, Any], pr_data).get("url") or "")
             except Exception:
                 pass
         return state.data.read_pr_url()
@@ -232,7 +232,7 @@ class GitHubWaitCI(Stage):
             try:
                 pr_data = state.artifacts.read("pr")
                 if isinstance(pr_data, dict):
-                    return str(pr_data.get("branch") or "")
+                    return str(cast(dict[str, Any], pr_data).get("branch") or "")
             except Exception:
                 pass
         return state.data.last_pr_branch()

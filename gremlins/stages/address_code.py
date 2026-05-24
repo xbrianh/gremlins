@@ -81,7 +81,7 @@ class GitHubAddressPullRequestReviews(Stage):
             try:
                 pr_data = state.artifacts.read("pr")
                 if isinstance(pr_data, dict):
-                    return str(pr_data.get("url") or "")
+                    return str(cast(dict[str, Any], pr_data).get("url") or "")
             except Exception:
                 pass
         return state.data.read_pr_url()

@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
@@ -46,7 +46,7 @@ class GitHubWaitCopilot(Stage):
             try:
                 pr_data = state.artifacts.read("pr")
                 if isinstance(pr_data, dict):
-                    return str(pr_data.get("number") or "")
+                    return str(cast(dict[str, Any], pr_data).get("number") or "")
             except Exception:
                 pass
         return state.data.read_pr_num()

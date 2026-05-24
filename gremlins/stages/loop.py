@@ -172,7 +172,7 @@ def _read_pr_branch(state: State) -> str:
         try:
             pr_data = state.artifacts.read("pr")
             if isinstance(pr_data, dict):
-                return str(pr_data.get("branch") or "")
+                return str(cast(dict[str, Any], pr_data).get("branch") or "")
         except Exception:
             pass
     return state.data.last_pr_branch()

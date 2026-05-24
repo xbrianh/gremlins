@@ -70,7 +70,7 @@ class Exec(Stage):
             key, _, field = key_path.partition(".")
             value = state.artifacts.read(key) if state.artifacts is not None else None
             if field and isinstance(value, dict):
-                extra_env[var] = str(value.get(field, ""))
+                extra_env[var] = str(cast(dict[str, Any], value).get(field, ""))
             else:
                 extra_env[var] = to_str(value)
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
@@ -23,7 +23,7 @@ class GitHubPushToPrBranch(Stage):
             try:
                 pr_data = state.artifacts.read("pr")
                 if isinstance(pr_data, dict):
-                    return str(pr_data.get("branch") or "")
+                    return str(cast(dict[str, Any], pr_data).get("branch") or "")
             except Exception:
                 pass
         return state.data.last_pr_branch()
