@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, cast
+from typing import Any
 
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
@@ -18,18 +18,8 @@ class GitHubPushToPrBranch(Stage):
     ) -> None:
         super().__init__(name)
 
-    def _resolve_branch(self, state: State) -> str:
-        if state.artifacts is not None:
-            try:
-                pr_data = state.artifacts.read("pr")
-                if isinstance(pr_data, dict):
-                    return str(cast(dict[str, Any], pr_data).get("branch") or "")
-            except Exception:
-                pass
-        return state.data.last_pr_branch()
-
     async def run(self, state: State) -> Outcome:
-        branch = self._resolve_branch(state)
+        branch = state.pr_branch()
         if not branch:
             raise Bail("no 'pr' artifact bound — rewind to open-pr?")
         proc = await asyncio.create_subprocess_exec(

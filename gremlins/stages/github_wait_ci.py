@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
 
 from gremlins.executor.state import State
 from gremlins.stages.agent_runner import run_agent
@@ -194,7 +194,7 @@ class GitHubWaitCI(Stage):
         log_file = state.session_dir / f"ci-attempt-{attempt}.log"
         log_file.write_text(failure_output, encoding="utf-8")
 
-        pr_branch = self._read_pr_branch(state)
+        pr_branch = state.pr_branch()
         if not pr_branch:
             state.record_bail("ci-fix: pr_branch unknown, cannot push")
             raise Bail("ci-fix: pr_branch unknown, cannot push")
@@ -217,28 +217,8 @@ class GitHubWaitCI(Stage):
         )
         return None, new_fix_sha
 
-    def _read_pr_url(self, state: State) -> str:
-        if state.artifacts is not None:
-            try:
-                pr_data = state.artifacts.read("pr")
-                if isinstance(pr_data, dict):
-                    return str(cast(dict[str, Any], pr_data).get("url") or "")
-            except Exception:
-                pass
-        return state.data.read_pr_url()
-
-    def _read_pr_branch(self, state: State) -> str:
-        if state.artifacts is not None:
-            try:
-                pr_data = state.artifacts.read("pr")
-                if isinstance(pr_data, dict):
-                    return str(cast(dict[str, Any], pr_data).get("branch") or "")
-            except Exception:
-                pass
-        return state.data.last_pr_branch()
-
     async def run(self, state: State) -> Outcome:
-        pr_url = self.pr_url or self._read_pr_url(state)
+        pr_url = self.pr_url or state.pr_url()
         if not pr_url:
             raise RuntimeError("no 'pr' artifact bound (rewind to open-pr?)")
         checks, review_decision = await _wait_for_checks(

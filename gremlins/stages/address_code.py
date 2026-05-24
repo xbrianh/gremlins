@@ -76,18 +76,8 @@ class GitHubAddressPullRequestReviews(Stage):
         self.options = options
         self.pr_url = pr_url
 
-    def _read_pr_url(self, state: State) -> str:
-        if state.artifacts is not None:
-            try:
-                pr_data = state.artifacts.read("pr")
-                if isinstance(pr_data, dict):
-                    return str(cast(dict[str, Any], pr_data).get("url") or "")
-            except Exception:
-                pass
-        return state.data.read_pr_url()
-
     async def run(self, state: State) -> Outcome:
-        pr_url = self.pr_url or self._read_pr_url(state)
+        pr_url = self.pr_url or state.pr_url()
         if not pr_url:
             raise RuntimeError("no 'pr' artifact bound (rewind to open-pr?)")
         prompt = (

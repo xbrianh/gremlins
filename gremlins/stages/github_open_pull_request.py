@@ -131,12 +131,9 @@ class GitHubOpenPullRequest(Stage):
         if not branch:
             logger.warning("open-pr: could not determine PR branch for %s", pr_url)
 
-        pr_num = pr_url.split("/")[-1]
-        if state.artifacts is not None:
-            try:
-                state.artifacts.bind("pr", Uri.parse(f"gh://pr/{pr_num}"))
-            except Exception:
-                pass  # already bound (e.g. loop retry)
+        pr_num = pr_url.rstrip("/").rsplit("/", 1)[-1]
+        if state.artifacts is not None and not state.artifacts.produced("pr"):
+            state.artifacts.bind("pr", Uri.parse(f"gh://pr/{pr_num}"))
 
         state.data.append_artifact({"type": "pr", "url": pr_url, "branch": branch})
         logger.info("PR: %s", pr_url)

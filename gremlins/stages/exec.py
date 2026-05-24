@@ -15,18 +15,6 @@ from gremlins.utils.text import to_str
 
 
 class Exec(Stage):
-    """YAML type: exec.
-
-    in:  env_var_name -> registry_key (or registry_key.field)
-    out: registry_key -> uri or sentinel:
-         file://session/...  -> verify file exists after run
-         git://range         -> snapshot HEAD before/after, bind range
-         gh://pr             -> capture PR URL from stdout
-    options:
-         cmds: list of shell commands (joined with &&)
-         on_fail: bail (default) | needs_fix
-    """
-
     type = "exec"
 
     def __init__(
@@ -64,22 +52,23 @@ class Exec(Stage):
         return stage
 
     async def run(self, state: State) -> Outcome:
-        # Resolve in: bindings into env vars
-        extra_env: dict[str, str] = {}
-        for var, key_path in self.in_map.items():
-            key, _, field = key_path.partition(".")
-            value = state.artifacts.read(key) if state.artifacts is not None else None
-            if field and isinstance(value, dict):
-                extra_env[var] = str(cast(dict[str, Any], value).get(field, ""))
-            else:
-                extra_env[var] = to_str(value)
+        if (self.in_map or self.out_map) and state.artifacts is None:
+            raise RuntimeError(f"exec {self.name}: in/out bindings require an artifact registry")
 
-        # Snapshot HEAD if any out: needs git://range
+        extra_env: dict[str, str] = {}
+        if state.artifacts is not None:
+            for var, key_path in self.in_map.items():
+                key, _, field = key_path.partition(".")
+                value = state.artifacts.read(key)
+                if field and isinstance(value, dict):
+                    extra_env[var] = str(cast(dict[str, Any], value).get(field, ""))
+                else:
+                    extra_env[var] = to_str(value)
+
         pre_sha: str | None = None
         if any(v == "git://range" for v in self.out_map.values()):
             pre_sha = snapshot_head_before(cwd=state.cwd)
 
-        # Run commands
         cmds = [c for c in self.options.get("cmds", []) if c.strip()]
         stdout_str = ""
         stderr_str = ""
@@ -105,7 +94,6 @@ class Exec(Stage):
                     return NeedsFix(all_output, proc.returncode)
                 raise Bail(f"exec {self.name}: exited {proc.returncode}")
 
-        # Process out: bindings
         if state.artifacts is not None:
             for key, uri_str in self.out_map.items():
                 if uri_str == "git://range":

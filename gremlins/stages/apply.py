@@ -48,10 +48,7 @@ class Apply(Stage):
         self._maybe_commit(state)
 
         if state.artifacts is not None and pre_sha is not None:
-            try:
-                state.artifacts.bind_git_commit_range("commits", pre_sha)
-            except Exception:
-                pass  # already bound (e.g. loop iteration 2+)
+            state.artifacts.bind_git_commit_range("commits", pre_sha)
 
         return Done()
 

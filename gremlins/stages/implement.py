@@ -130,8 +130,5 @@ class Implement(Stage):
                 )
         else:
             if state.artifacts is not None and not state.artifacts.produced("commits"):
-                try:
-                    state.artifacts.bind_git_commit_range("commits", pre.head)
-                except Exception:
-                    pass  # already bound
+                state.artifacts.bind_git_commit_range("commits", pre.head)
         return Done()
