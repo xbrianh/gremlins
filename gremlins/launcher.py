@@ -38,6 +38,10 @@ class GremlinAlreadyRunning(RuntimeError):
     pass
 
 
+class GremlinStateDirExists(RuntimeError):
+    pass
+
+
 def _state_root() -> pathlib.Path:
     return _paths.state_root()
 
@@ -190,6 +194,10 @@ def _resolve_gremlin_id(slug: str, gremlin_id: str | None) -> str:
                         raise GremlinAlreadyRunning(
                             f"gremlin {gremlin_id!r} is already running (pid {_pid})"
                         )
+            raise GremlinStateDirExists(
+                f"state dir for {gremlin_id!r} already exists. "
+                f"Run 'gremlins rm {gremlin_id}' first, or pick a different --gremlin-id."
+            )
         return gremlin_id
     return f"{slug}-{secrets.token_hex(3)}"
 
