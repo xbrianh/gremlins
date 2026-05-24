@@ -1488,6 +1488,7 @@ def test_land_gh_removes_worktree_before_gh_merge(tmp_path, monkeypatch):
 
     monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     from gremlins.artifacts.schemes import PrInfo
+
     monkeypatch.setattr(
         "gremlins.fleet.land.read_pr_info",
         lambda state_dir, cwd=None: PrInfo(url=pr_url, number=42, branch="feat"),

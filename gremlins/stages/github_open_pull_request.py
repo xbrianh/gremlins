@@ -82,12 +82,7 @@ class GitHubOpenPullRequest(Stage):
         _prev_branch = (
             state.artifacts.read("pr").branch if state.artifacts.produced("pr") else ""
         )
-        base_ref = (
-            _prev_branch
-            or self.base_ref
-            or state.data.base_ref_name
-            or "main"
-        )
+        base_ref = _prev_branch or self.base_ref or state.data.base_ref_name or "main"
 
         issue_num = issue_url.split("/")[-1] if issue_url else ""
 
@@ -135,6 +130,9 @@ class GitHubOpenPullRequest(Stage):
         _m = re.search(r"/pull/(\d+)", pr_url)
         if _m:
             from gremlins.artifacts.uri import Uri  # noqa: PLC0415
-            state.artifacts.bind("pr", Uri.parse(f"gh://pr/{_m.group(1)}"), override=True)
+
+            state.artifacts.bind(
+                "pr", Uri.parse(f"gh://pr/{_m.group(1)}"), override=True
+            )
         logger.info("PR: %s", pr_url)
         return Done()

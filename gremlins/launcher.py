@@ -315,6 +315,7 @@ def _resolve_inputs(
                 f"gh pr view returned empty url or headRefName for {pr!r}: {pr_data!r}"
             )
         import re as _re
+
         _m = _re.search(r"/pull/(\d+)", pr_url)
         pr_num = _m.group(1) if _m else ""
     else:
