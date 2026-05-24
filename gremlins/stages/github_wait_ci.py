@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from gremlins.artifacts.registry import MissingArtifact
 from gremlins.executor.state import State
 from gremlins.stages.agent_runner import run_agent
 from gremlins.stages.base import Stage
@@ -194,10 +195,11 @@ class GitHubWaitCI(Stage):
         log_file = state.session_dir / f"ci-attempt-{attempt}.log"
         log_file.write_text(failure_output, encoding="utf-8")
 
-        pr_branch = state.data.last_pr_branch()
-        if not pr_branch:
-            state.record_bail("ci-fix: pr_branch unknown, cannot push")
-            raise Bail("ci-fix: pr_branch unknown, cannot push")
+        try:
+            pr_branch = state.artifacts.read("pr").branch
+        except MissingArtifact:
+            state.record_bail("ci-fix: pr not in registry, cannot push")
+            raise Bail("ci-fix: pr not in registry, cannot push")
 
         fix_prompt = template.format(
             failure_output=failure_output,
@@ -218,9 +220,7 @@ class GitHubWaitCI(Stage):
         return None, new_fix_sha
 
     async def run(self, state: State) -> Outcome:
-        pr_url = self.pr_url or state.data.read_pr_url()
-        if not pr_url:
-            raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
+        pr_url = self.pr_url or state.artifacts.read("pr").url
         checks, review_decision = await _wait_for_checks(
             pr_url, self.checks_getter, self.poll_interval, self.startup_grace_secs
         )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from gremlins.artifacts.registry import MissingArtifact
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, Outcome
@@ -19,9 +20,10 @@ class GitHubPushToPrBranch(Stage):
         super().__init__(name)
 
     async def run(self, state: State) -> Outcome:
-        branch = state.data.last_pr_branch()
-        if not branch:
-            raise Bail("no PR branch in state.artifacts — launch with --pr <num|url>")
+        try:
+            branch = state.artifacts.read("pr").branch
+        except MissingArtifact:
+            raise Bail("no PR branch in registry — launch with --pr <num|url>")
         proc = await asyncio.create_subprocess_exec(
             "git",
             "push",

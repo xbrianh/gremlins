@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from gremlins.artifacts.registry import MissingArtifact
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, Outcome
@@ -43,9 +44,7 @@ class GitHubWaitCopilot(Stage):
 
     async def run(self, state: State) -> Outcome:
         repo = state.repo
-        pr_num = self.pr_num or state.data.read_pr_num()
-        if not pr_num:
-            raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
+        pr_num = self.pr_num or str(state.artifacts.read("pr").number)
 
         deadline = time.time() + self.timeout
         consecutive_failures = 0

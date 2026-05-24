@@ -155,8 +155,11 @@ class LoopStage(Stage):
 
 
 def detach_to_pr_base(state: State) -> None:
-    branch = state.data.last_pr_branch()
-    if not branch:
+    from gremlins.artifacts.registry import MissingArtifact
+
+    try:
+        branch = state.artifacts.read("pr").branch
+    except MissingArtifact:
         return
     logger.info("detaching worktree to previous PR branch: %s", branch)
     _git.git_detach_to_branch(branch, cwd=state.cwd)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from gremlins.artifacts.registry import MissingArtifact
 from gremlins.executor.state import State
 from gremlins.stages.agent import Agent
 from gremlins.stages.base import Stage, get_client_from_dict
@@ -128,9 +129,7 @@ class GitHubReviewPullRequest(Stage):
         self.pr_url = pr_url
 
     async def run(self, state: State) -> Outcome:
-        pr_url = self.pr_url or state.data.read_pr_url()
-        if not pr_url:
-            raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
+        pr_url = self.pr_url or state.artifacts.read("pr").url
         prompt = (
             "\n\n".join(self.prompts)
             .rstrip()
