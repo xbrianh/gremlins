@@ -21,3 +21,4 @@ stages:
   - name: address-chain
     type: address-code
     prompt: [code-style, gremlins:address.md, gremlins:bail_section.md]
+    in: {text: review-chain}

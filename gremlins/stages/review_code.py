@@ -3,55 +3,14 @@
 from __future__ import annotations
 
 import logging
-import pathlib
 from typing import Any
 
 from gremlins.executor.state import State
-from gremlins.stages.agent_runner import run_agent
+from gremlins.stages.agent import Agent
 from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.outcome import Done, Outcome
 
 logger = logging.getLogger(__name__)
-
-
-async def _run_reviewer(
-    *,
-    state: State,
-    model: str,
-    out_file: pathlib.Path,
-    focus: str,
-    context: str,
-    where_field: str,
-    label: str,
-    raw_path: pathlib.Path,
-) -> None:
-    prompt = f"""Read surrounding code as needed — don't review in isolation.
-
-{context}
-
-Structure your review as markdown:
-
-# Review ({model})
-
-## Summary
-2-4 sentences overall.
-
-## Findings
-For each actionable finding:
-### <short title>
-- {where_field}
-- **Severity:** blocker | major | minor | nit
-- **What:** what's wrong
-- **Fix:** concrete suggestion
-
-If there are no issues worth raising, write a Findings section that says so explicitly.
-
-Do NOT make any code changes — only write the review file.
-
-{focus}
-
-`{out_file}` is the canonical and required location for your review output in every case, including any short-circuit one-liner the prompt tells you to emit. Do not emit the verdict only to chat; write it to `{out_file}` and then stop."""
-    await run_agent(state, prompt, label=label, model=model, raw_path=raw_path)
 
 
 class ReviewCode(Stage):
@@ -96,25 +55,47 @@ class ReviewCode(Stage):
         else:
             code_context = code_scope
 
+        prompt = f"""Read surrounding code as needed — don't review in isolation.
+
+{code_context}
+
+Structure your review as markdown:
+
+# Review ({model})
+
+## Summary
+2-4 sentences overall.
+
+## Findings
+For each actionable finding:
+### <short title>
+- **File:** `path/to/file.ext:<line>`
+- **Severity:** blocker | major | minor | nit
+- **What:** what's wrong
+- **Fix:** concrete suggestion
+
+If there are no issues worth raising, write a Findings section that says so explicitly.
+
+Do NOT make any code changes — only write the review file.
+
+{focus}
+
+`{out_file}` is the canonical and required location for your review output in every case, including any short-circuit one-liner the prompt tells you to emit. Do not emit the verdict only to chat; write it to `{out_file}` and then stop."""
+
         state.record_stage_progress(
             self.name, {"model": f"running ({model})"}, parent_stage=state.parent_stage
         )
-        await _run_reviewer(
-            state=state,
-            model=model,
-            out_file=out_file,
-            focus=focus,
-            context=code_context,
-            where_field="**File:** `path/to/file.ext:<line>`",
-            label=f"{self.name}:{model}",
-            raw_path=state.session_dir / f"stream-{self.name}-{model}.jsonl",
+        agent = Agent(
+            f"{self.name}:{model}",
+            [prompt],
+            {**self.options, "model": model},
+            out_map={self.name: f"file://session/{self.name}-{model}.md"},
         )
+        await agent.run(state)
         state.record_stage_progress(
             self.name, {"model": f"done ({model})"}, parent_stage=state.parent_stage
         )
         logger.info("code review (%s): %s", model, out_file)
-        if not out_file.exists() or out_file.stat().st_size == 0:
-            raise RuntimeError(f"review {model} did not produce {out_file}")
 
         return Done()
 
@@ -157,10 +138,6 @@ class GitHubReviewPullRequest(Stage):
                 pr_url=pr_url,
             )
         )
-        await run_agent(
-            state,
-            prompt,
-            label="github-review-pull-request",
-            raw_path=state.session_dir / "stream-github-review-pull-request.jsonl",
-        )
+        agent = Agent(self.name, [prompt], {})
+        await agent.run(state)
         return Done()

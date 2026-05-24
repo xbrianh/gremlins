@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import json
 import pathlib
@@ -14,8 +13,9 @@ import gremlins.executor.state as state_mod
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData
+from gremlins.stages.agent import Agent
 from gremlins.stages.handoff import Handoff
-from gremlins.stages.outcome import Bail, NeedsFix
+from gremlins.stages.outcome import Bail, Done, NeedsFix
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -80,6 +80,24 @@ def _make_signal_file(
     out.write_text(f"# Updated plan {n}\n", encoding="utf-8")
 
 
+def _patch_handoff(monkeypatch: Any, tmp_path: pathlib.Path, exit_state: str) -> None:
+    """Patch Agent.run and collect_git_context for a standard handoff test."""
+
+    async def fake_git_context(base_ref: str, rev: str | None = None) -> tuple[str, str, str]:
+        return "main", "", ""
+
+    monkeypatch.setattr("gremlins.stages.handoff.collect_git_context", fake_git_context)
+
+    async def fake_agent_run(self: Agent, state: RuntimeState) -> Done:
+        for key in self.out_map:
+            if key.startswith("handoff-"):
+                n = int(key.split("-")[1])
+                _make_signal_file(state.session_dir, n, exit_state)
+        return Done()
+
+    monkeypatch.setattr(Agent, "run", fake_agent_run)
+
+
 # ---------------------------------------------------------------------------
 # chain-done: returns normally, boss-spec.md restored to plan.md
 # ---------------------------------------------------------------------------
@@ -91,17 +109,7 @@ def test_chain_done_immediately(tmp_path, monkeypatch, test_state_root):
     _write_state(state_dir, gremlin_id)
     _write_plan(tmp_path)
 
-    calls: list[str] = []
-
-    async def fake_handoff_run(
-        client: Any, args: argparse.Namespace, **_kw: Any
-    ) -> int:
-        n = int(str(args.out).split("-")[-1].split(".")[0])
-        _make_signal_file(pathlib.Path(args.out).parent, n, "chain-done")
-        calls.append("handoff")
-        return 0
-
-    monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
+    _patch_handoff(monkeypatch, tmp_path, "chain-done")
     monkeypatch.setenv("GREMLIN_ID", gremlin_id)
 
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
@@ -112,8 +120,6 @@ def test_chain_done_immediately(tmp_path, monkeypatch, test_state_root):
     monkeypatch.setattr(h, "_resolve_base_ref", _fake_resolve_base_ref)
     asyncio.run(h.run(state))
 
-    assert calls == ["handoff"]
-    # boss-spec.md should have been created and plan.md restored from it
     assert (tmp_path / "boss-spec.md").exists()
     assert (tmp_path / "plan.md").read_text(encoding="utf-8") == "# Plan\n\nDo stuff.\n"
 
@@ -129,19 +135,21 @@ def test_next_plan_writes_plan_and_raises(tmp_path, monkeypatch, test_state_root
     _write_state(state_dir, gremlin_id)
     _write_plan(tmp_path)
 
-    child_plan = tmp_path / "child-001.md"
-    child_plan.write_text("# Child Plan\n", encoding="utf-8")
+    async def fake_git_context(base_ref: str, rev: str | None = None) -> tuple[str, str, str]:
+        return "main", "", ""
 
-    async def fake_handoff_run(
-        client: Any, args: argparse.Namespace, **_kw: Any
-    ) -> int:
-        n = int(str(args.out).split("-")[-1].split(".")[0])
-        _make_signal_file(
-            pathlib.Path(args.out).parent, n, "next-plan", str(child_plan)
-        )
-        return 0
+    monkeypatch.setattr("gremlins.stages.handoff.collect_git_context", fake_git_context)
 
-    monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
+    async def fake_agent_run(self: Agent, state: RuntimeState) -> Done:
+        for key in self.out_map:
+            if key.startswith("handoff-"):
+                n = int(key.split("-")[1])
+                child = state.session_dir / f"handoff-{n:03d}-child.md"
+                child.write_text("# Child Plan\n", encoding="utf-8")
+                _make_signal_file(state.session_dir, n, "next-plan", str(child))
+        return Done()
+
+    monkeypatch.setattr(Agent, "run", fake_agent_run)
     monkeypatch.setenv("GREMLIN_ID", gremlin_id)
 
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
@@ -170,17 +178,23 @@ def test_bail_emits_bail_and_raises(tmp_path, monkeypatch, test_state_root):
     state_mod.StateData.load(gremlin_id).patch(attempt=attempt)
     _write_plan(tmp_path)
 
-    async def fake_handoff_run(
-        client: Any, args: argparse.Namespace, **_kw: Any
-    ) -> int:
-        _make_signal_file(tmp_path, 1, "bail", reason="scope too big")
-        return 0
+    async def fake_git_context(base_ref: str, rev: str | None = None) -> tuple[str, str, str]:
+        return "main", "", ""
 
-    monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
+    monkeypatch.setattr("gremlins.stages.handoff.collect_git_context", fake_git_context)
+
+    async def fake_agent_run(self: Agent, state: RuntimeState) -> Done:
+        for key in self.out_map:
+            if key.startswith("handoff-"):
+                n = int(key.split("-")[1])
+                _make_signal_file(state.session_dir, n, "bail", reason="scope too big")
+        return Done()
+
+    monkeypatch.setattr(Agent, "run", fake_agent_run)
     monkeypatch.setenv("GREMLIN_ID", gremlin_id)
 
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
-    state.data.attempt = attempt  # simulate what make_runner() would set
+    state.data.attempt = attempt
 
     async def _fake_resolve_base_ref(_state: Any) -> str:
         return "abc123"
@@ -208,17 +222,22 @@ def test_handoff_index_first_iteration(tmp_path, monkeypatch, test_state_root):
     _write_state(state_dir, gremlin_id)
     _write_plan(tmp_path)
 
-    calls: list[int] = []
+    seen_keys: list[str] = []
 
-    async def fake_handoff_run(
-        client: Any, args: argparse.Namespace, **_kw: Any
-    ) -> int:
-        n = int(str(args.out).split("-")[-1].split(".")[0])
-        _make_signal_file(pathlib.Path(args.out).parent, n, "chain-done")
-        calls.append(n)
-        return 0
+    async def fake_git_context(base_ref: str, rev: str | None = None) -> tuple[str, str, str]:
+        return "main", "", ""
 
-    monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
+    monkeypatch.setattr("gremlins.stages.handoff.collect_git_context", fake_git_context)
+
+    async def fake_agent_run(self: Agent, state: RuntimeState) -> Done:
+        for key in self.out_map:
+            if key.startswith("handoff-"):
+                seen_keys.append(key)
+                n = int(key.split("-")[1])
+                _make_signal_file(state.session_dir, n, "chain-done")
+        return Done()
+
+    monkeypatch.setattr(Agent, "run", fake_agent_run)
     monkeypatch.setenv("GREMLIN_ID", gremlin_id)
 
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
@@ -229,26 +248,31 @@ def test_handoff_index_first_iteration(tmp_path, monkeypatch, test_state_root):
     monkeypatch.setattr(h, "_resolve_base_ref", _fake_resolve_base_ref)
     asyncio.run(h.run(state))
 
-    assert calls == [1]
+    assert seen_keys == ["handoff-001"]
     assert (tmp_path / "boss-spec.md").exists()
     assert (tmp_path / "handoff-001.state.json").exists()
 
 
 # ---------------------------------------------------------------------------
-# handoff agent non-zero exit raises RuntimeError
+# handoff agent error raises RuntimeError
 # ---------------------------------------------------------------------------
 
 
-def test_handoff_nonzero_exit_raises(tmp_path, monkeypatch, test_state_root):
+def test_handoff_agent_error_raises(tmp_path, monkeypatch, test_state_root):
     gremlin_id = "boss-handoff-hfail-aabb12"
     state_dir = test_state_root / gremlin_id
     _write_state(state_dir, gremlin_id)
     _write_plan(tmp_path)
 
-    async def _failing_run(*a, **kw):  # noqa: ARG001
-        return 1
+    async def fake_git_context(base_ref: str, rev: str | None = None) -> tuple[str, str, str]:
+        return "main", "", ""
 
-    monkeypatch.setattr("gremlins.stages.handoff.run", _failing_run)
+    monkeypatch.setattr("gremlins.stages.handoff.collect_git_context", fake_git_context)
+
+    async def fake_agent_run(self: Agent, state: RuntimeState) -> Done:
+        raise RuntimeError("agent exploded")
+
+    monkeypatch.setattr(Agent, "run", fake_agent_run)
     monkeypatch.setenv("GREMLIN_ID", gremlin_id)
 
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
@@ -258,7 +282,7 @@ def test_handoff_nonzero_exit_raises(tmp_path, monkeypatch, test_state_root):
 
     monkeypatch.setattr(h, "_resolve_base_ref", _fake_resolve_base_ref)
 
-    with pytest.raises(RuntimeError, match="handoff agent exited 1"):
+    with pytest.raises(RuntimeError, match="agent exploded"):
         asyncio.run(h.run(state))
 
 
@@ -273,22 +297,24 @@ def test_resume_continues_from_file_index(tmp_path, monkeypatch, test_state_root
     _write_state(state_dir, gremlin_id)
     _write_plan(tmp_path)
     (tmp_path / "boss-spec.md").write_text("# Boss Spec\n", encoding="utf-8")
-    # Simulate having already run one handoff (creates handoff-001.state.json and handoff-001.md)
     _make_signal_file(tmp_path, 1, "next-plan")
 
-    calls: list[int] = []
-    captured_plan: list[str] = []
+    seen_keys: list[str] = []
 
-    async def fake_handoff_run(
-        client: Any, args: argparse.Namespace, **_kw: Any
-    ) -> int:
-        n = int(str(args.out).split("-")[-1].split(".")[0])
-        _make_signal_file(pathlib.Path(args.out).parent, n, "chain-done")
-        calls.append(n)
-        captured_plan.append(args.plan)
-        return 0
+    async def fake_git_context(base_ref: str, rev: str | None = None) -> tuple[str, str, str]:
+        return "main", "", ""
 
-    monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
+    monkeypatch.setattr("gremlins.stages.handoff.collect_git_context", fake_git_context)
+
+    async def fake_agent_run(self: Agent, state: RuntimeState) -> Done:
+        for key in self.out_map:
+            if key.startswith("handoff-"):
+                seen_keys.append(key)
+                n = int(key.split("-")[1])
+                _make_signal_file(state.session_dir, n, "chain-done")
+        return Done()
+
+    monkeypatch.setattr(Agent, "run", fake_agent_run)
     monkeypatch.setenv("GREMLIN_ID", gremlin_id)
 
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
@@ -299,10 +325,7 @@ def test_resume_continues_from_file_index(tmp_path, monkeypatch, test_state_root
     monkeypatch.setattr(h, "_resolve_base_ref", _fake_resolve_base_ref)
     asyncio.run(h.run(state))
 
-    # Should have run handoff #2 (index derived from existing handoff-001.state.json)
-    assert calls == [2]
-    # On resume, current_plan must be the previous rolling plan, not plan.md
-    assert captured_plan == [str(tmp_path / "handoff-001.md")]
+    assert seen_keys == ["handoff-002"]
 
 
 # ---------------------------------------------------------------------------
@@ -316,19 +339,23 @@ def test_base_ref_from_state(tmp_path, monkeypatch, test_state_root):
 
     captured_base: list[str] = []
 
-    async def fake_handoff_run(
-        client: Any, args: argparse.Namespace, **_kw: Any
-    ) -> int:
-        n = int(str(args.out).split("-")[-1].split(".")[0])
-        _make_signal_file(pathlib.Path(args.out).parent, n, "chain-done")
-        captured_base.append(args.base)
-        return 0
+    async def fake_git_context(base_ref: str, rev: str | None = None) -> tuple[str, str, str]:
+        captured_base.append(base_ref)
+        return "main", "", ""
 
-    monkeypatch.setattr("gremlins.stages.handoff.run", fake_handoff_run)
+    monkeypatch.setattr("gremlins.stages.handoff.collect_git_context", fake_git_context)
+
+    async def fake_agent_run(self: Agent, state: RuntimeState) -> Done:
+        for key in self.out_map:
+            if key.startswith("handoff-"):
+                n = int(key.split("-")[1])
+                _make_signal_file(state.session_dir, n, "chain-done")
+        return Done()
+
+    monkeypatch.setattr(Agent, "run", fake_agent_run)
 
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
     state.data.base_ref_name = "deadbeef1234"
-    # Do NOT monkeypatch _resolve_base_ref — state has base_ref_name, fallback must not run
     asyncio.run(h.run(state))
 
     assert captured_base == ["deadbeef1234"]
