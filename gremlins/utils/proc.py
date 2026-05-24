@@ -47,6 +47,24 @@ def run_or_raise(cmd: list[str], *, cwd: str | os.PathLike[str] | None = None) -
     return r.stdout.strip()
 
 
+async def run_shell_async(
+    cmd: str,
+    *,
+    cwd: str | os.PathLike[str] | None = None,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    p = await asyncio.create_subprocess_shell(
+        cmd,
+        cwd=cwd,
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    out_b, err_b = await p.communicate()
+    assert p.returncode is not None
+    return subprocess.CompletedProcess(cmd, p.returncode, out_b.decode(), err_b.decode())
+
+
 async def run_async(
     cmd: list[str],
     *,

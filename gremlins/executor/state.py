@@ -578,33 +578,30 @@ class State:
         self.data.clear_done(path)
 
     def pr_url(self) -> str:
-        if self.artifacts is not None:
-            try:
-                pr_data = self.artifacts.read("pr")
-                if isinstance(pr_data, dict):
-                    return str(cast(dict[str, Any], pr_data).get("url") or "")
-            except Exception:
-                pass
+        try:
+            pr_data = self.artifacts.read("pr")  # type: ignore[union-attr]
+            if isinstance(pr_data, dict):
+                return str(cast(dict[str, Any], pr_data).get("url") or "")
+        except Exception:
+            pass
         return self.data.read_pr_url()
 
     def pr_branch(self) -> str:
-        if self.artifacts is not None:
-            try:
-                pr_data = self.artifacts.read("pr")
-                if isinstance(pr_data, dict):
-                    return str(cast(dict[str, Any], pr_data).get("branch") or "")
-            except Exception:
-                pass
+        try:
+            pr_data = self.artifacts.read("pr")  # type: ignore[union-attr]
+            if isinstance(pr_data, dict):
+                return str(cast(dict[str, Any], pr_data).get("branch") or "")
+        except Exception:
+            pass
         return self.data.last_pr_branch()
 
     def pr_num(self) -> str:
-        if self.artifacts is not None:
-            try:
-                pr_data = self.artifacts.read("pr")
-                if isinstance(pr_data, dict):
-                    return str(cast(dict[str, Any], pr_data).get("number") or "")
-            except Exception:
-                pass
+        try:
+            pr_data = self.artifacts.read("pr")  # type: ignore[union-attr]
+            if isinstance(pr_data, dict):
+                return str(cast(dict[str, Any], pr_data).get("number") or "")
+        except Exception:
+            pass
         return self.data.read_pr_num()
 
     def record_bail(self, reason: str, *, kind: str = "other") -> None:

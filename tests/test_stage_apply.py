@@ -4,6 +4,7 @@ import subprocess
 
 import pytest
 
+from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData
 from gremlins.stages.apply import Apply
@@ -16,6 +17,7 @@ def _apply_state(tmp_path: pathlib.Path) -> RuntimeState:
         client=None,
         session_dir=tmp_path,
         worktree=tmp_path,
+        artifacts=ArtifactRegistry(session_dir=tmp_path, cwd=tmp_path),
     )
 
 

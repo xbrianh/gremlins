@@ -24,7 +24,7 @@ class Apply(Stage):
             return Done()
 
         pre_sha: str | None = None
-        if state.artifacts is not None and not state.artifacts.produced("commits"):
+        if not state.artifacts.produced("commits"):  # type: ignore[union-attr]
             try:
                 pre_sha = snapshot_head_before(cwd=state.cwd)
             except RuntimeError:
@@ -47,8 +47,8 @@ class Apply(Stage):
                 raise Bail(f"apply {self.name}: {cmd} exited {p.returncode}")
         self._maybe_commit(state)
 
-        if state.artifacts is not None and pre_sha is not None:
-            state.artifacts.bind_git_commit_range("commits", pre_sha)
+        if pre_sha is not None:
+            state.artifacts.bind_git_commit_range("commits", pre_sha)  # type: ignore[union-attr]
 
         return Done()
 
