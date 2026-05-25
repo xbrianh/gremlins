@@ -23,8 +23,13 @@ def _state(session_dir: pathlib.Path, client: FakeClaudeClient) -> RuntimeState:
 def _state_with_artifacts(
     session_dir: pathlib.Path, client: FakeClaudeClient
 ) -> RuntimeState:
-    state = build_state(data=StateData(), client=client, session_dir=session_dir)
-    state.artifacts = ArtifactRegistry(session_dir)
+    # Ensure registry_path (derived from session_dir.parent) lands in an
+    # isolated per-test directory: caller passes tmp_path, we use a subdir
+    # so tmp_path acts as the "state_dir" parent.
+    sd = session_dir / "session"
+    sd.mkdir(parents=True, exist_ok=True)
+    state = build_state(data=StateData(), client=client, session_dir=sd)
+    state.artifacts = ArtifactRegistry(sd)
     return state
 
 
@@ -273,11 +278,12 @@ def test_resolve_issue_source_cross_repo_clears_url(
 def test_plan_agent_local_delegates_via_agent(tmp_path: pathlib.Path) -> None:
     """Local agent branch calls run_agent via Agent and plan.md passes verify_produced."""
     stage = Plan("plan", ["write a plan to {plan_file}"], {})
-    client = _PlanWritingClient(tmp_path)
-    state = _state_with_artifacts(tmp_path, client)
+    state = _state_with_artifacts(tmp_path, FakeClaudeClient(fixtures={}))
+    client = _PlanWritingClient(state.session_dir)
+    state.client = client
     asyncio.run(stage.run(state))
     assert any(c.label == "plan" for c in client.calls)
-    assert (tmp_path / "plan.md").read_text() == "# Plan\n"
+    assert (state.session_dir / "plan.md").read_text() == "# Plan\n"
 
 
 def test_plan_agent_local_verify_catches_missing_plan(tmp_path: pathlib.Path) -> None:

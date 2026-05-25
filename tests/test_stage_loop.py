@@ -22,6 +22,7 @@ def _fake_client() -> Any:
 
 
 def _loop_state(tmp_path: Any) -> RuntimeState:
+    (tmp_path / "artifacts").mkdir(exist_ok=True)
     return build_state(
         data=StateData(),
         client=_fake_client(),
@@ -145,6 +146,7 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
     async def fix() -> Done:
         return Done()
 
+    (tmp_path / "artifacts").mkdir(exist_ok=True)
     loop_state = build_state(
         data=StateData(gremlin_id=gremlin_id, attempt=attempt),
         client=_fake_client(),
@@ -232,6 +234,7 @@ def test_on_iteration_start_called_each_iteration(tmp_path):
 
 
 def _run_cmd_stage(tmp_path: Any, cmds: list[str]) -> tuple[Cmd, RuntimeState]:
+    (tmp_path / "artifacts").mkdir(exist_ok=True)
     stage = Cmd("cmd", [], {"cmds": cmds})
     state = build_state(
         data=StateData(),
@@ -258,7 +261,7 @@ def test_run_cmd_failure_writes_log(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, ["echo boom >&2; false"])
     outcome = asyncio.run(stage.run(state))
     assert isinstance(outcome, NeedsFix)
-    log = tmp_path / "cmd.log"
+    log = tmp_path / "artifacts" / "cmd.log"
     assert log.exists()
 
 
@@ -266,7 +269,7 @@ def test_run_cmd_empty_cmds_is_noop(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, [])
     outcome = asyncio.run(stage.run(state))
     assert outcome == Done()
-    assert not (tmp_path / "cmd.log").exists()
+    assert not (tmp_path / "artifacts" / "cmd.log").exists()
 
 
 def test_run_cmd_output_in_needs_fix(tmp_path):
@@ -277,14 +280,15 @@ def test_run_cmd_output_in_needs_fix(tmp_path):
 
 
 def test_run_cmd_log_path_interpolation(tmp_path):
+    (tmp_path / "artifacts").mkdir(exist_ok=True)
     stage = Cmd("cmd", [], {"cmds": ["true"], "log_path": "run-{n}.log"})
     state = build_state(
         data=StateData(), client=_fake_client(), session_dir=tmp_path / "artifacts", worktree=tmp_path
     )
     asyncio.run(stage.run(state))
-    assert (tmp_path / "run-1.log").exists()
+    assert (tmp_path / "artifacts" / "run-1.log").exists()
     asyncio.run(stage.run(state))
-    assert (tmp_path / "run-2.log").exists()
+    assert (tmp_path / "artifacts" / "run-2.log").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +299,7 @@ def test_run_cmd_log_path_interpolation(tmp_path):
 def _loop_state_with_gr(
     tmp_path: Any, gremlin_id: str, *, pr_branch: str | None = None
 ) -> RuntimeState:
+    (tmp_path / "artifacts").mkdir(exist_ok=True)
     state = build_state(
         data=StateData(gremlin_id=gremlin_id),
         client=_fake_client(),
@@ -439,6 +444,7 @@ def test_loop_patches_loop_iteration_to_state(tmp_path, make_state_dir):
         seen_iterations.append(int(data.get("loop_iteration") or 0))
         return NeedsFix("keep going")
 
+    (tmp_path / "artifacts").mkdir(exist_ok=True)
     loop_state = build_state(
         data=StateData(gremlin_id=gremlin_id),
         client=_fake_client(),
