@@ -164,7 +164,7 @@ def test_append_artifact_no_stamp_when_attempt_empty(sandbox):
 
 
 # ---------------------------------------------------------------------------
-# read_artifacts_for_attempt / read_artifacts_for_stage
+# read_artifacts_for_attempt
 # ---------------------------------------------------------------------------
 
 
@@ -204,39 +204,6 @@ def test_read_artifacts_for_attempt_no_match(sandbox):
 
     sd = StateData.load(gremlin_id)
     assert sd.read_artifacts_for_attempt("implement-aaaa") == []
-
-
-def test_read_artifacts_for_stage_prefix_match(sandbox):
-    gremlin_id = "gr-rafs-test"
-    sf = _make_state_dir(sandbox.state, gremlin_id)
-
-    arts = [
-        {"type": "branch", "name": "a", "attempt": "implement-1111"},
-        {"type": "pr", "url": "u1", "branch": "a", "attempt": "implement-2222"},
-        {"type": "branch", "name": "b", "attempt": "review-3333"},
-    ]
-    sf.write_text(json.dumps({"id": gremlin_id, "artifacts": arts}))
-
-    sd = StateData.load(gremlin_id)
-    result = sd.read_artifacts_for_stage("implement")
-    assert result == [
-        {"type": "branch", "name": "a", "attempt": "implement-1111"},
-        {"type": "pr", "url": "u1", "branch": "a", "attempt": "implement-2222"},
-    ]
-
-
-def test_read_artifacts_for_stage_excludes_unstamped(sandbox):
-    gremlin_id = "gr-rafs-unstamped"
-    sf = _make_state_dir(sandbox.state, gremlin_id)
-
-    arts = [
-        {"type": "branch", "name": "old"},
-        {"type": "branch", "name": "new", "attempt": "implement-9999"},
-    ]
-    sf.write_text(json.dumps({"id": gremlin_id, "artifacts": arts}))
-
-    result = StateData.load(gremlin_id).read_artifacts_for_stage("implement")
-    assert result == [{"type": "branch", "name": "new", "attempt": "implement-9999"}]
 
 
 # ---------------------------------------------------------------------------

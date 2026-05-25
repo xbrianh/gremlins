@@ -6,17 +6,18 @@ import logging
 import pathlib
 from typing import Any
 
+from gremlins.artifacts.schemes import snapshot_head_before
 from gremlins.executor.state import State
 from gremlins.stages.agent import Agent
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Done, Outcome
+from gremlins.utils import git as git_utils
 from gremlins.utils import proc
 from gremlins.utils.git import (
     DivergentHead,
     EmptyImpl,
     PreImplState,
     classify_impl_outcome,
-    commits_since,
 )
 
 logger = logging.getLogger(__name__)
@@ -99,6 +100,11 @@ class Implement(Stage):
         )
         pre = PreImplState(head=pre_head)
 
+        cwd = pathlib.Path(cwd_arg) if cwd_arg else None
+        pre_sha: str | None = None
+        if git_utils.in_git_repo(cwd=cwd):
+            pre_sha = snapshot_head_before(cwd=cwd)
+
         template = "\n\n".join(self.prompts).rstrip()
         prompt = template.format(
             spec_block=_render_spec_block(spec_text),
@@ -124,21 +130,11 @@ class Implement(Stage):
                 f"implement diverged from pre-impl HEAD {pre.head[:7]}; expected a fast-forward"
             )
         if isinstance(outcome, EmptyImpl):
-            if not any(
-                a.get("type") == "commit"
-                for a in state.data.read_artifacts_for_stage(self.name)
-            ):
+            # prior loop iteration or rescue run may have already bound this range
+            if not state.artifacts.produced("impl-commits"):
                 raise RuntimeError(
                     "implement produced no committed work; the agent must commit before returning"
                 )
-        else:
-            for c in commits_since(pre.head, cwd=cwd_arg):
-                state.record_artifact(
-                    {
-                        "type": "commit",
-                        "sha": c.sha,
-                        "subject": c.subject,
-                        "worktree": cwd_arg or "",
-                    }
-                )
+        elif pre_sha is not None:
+            state.artifacts.bind_git_commit_range("impl-commits", pre_sha)
         return Done()

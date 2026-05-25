@@ -359,14 +359,6 @@ class StateData:
             return []
         return [a for a in self.read_artifacts() if a.get("attempt") == attempt]
 
-    def read_artifacts_for_stage(self, stage_name: str) -> list[dict[str, Any]]:
-        prefix = f"{stage_name}-"
-        return [
-            a
-            for a in self.read_artifacts()
-            if str(a.get("attempt") or "").startswith(prefix)
-        ]
-
     def last_artifact_branch(self) -> str:
         for art in reversed(self.read_artifacts()):
             if art.get("type") == "branch":
@@ -563,9 +555,6 @@ class State:
 
     def record_bail(self, reason: str, *, kind: str = "other") -> None:
         self.data.write_bail_file(kind, reason, attempt=self.data.attempt)
-
-    def record_artifact(self, artifact: dict[str, Any]) -> None:
-        self.data.append_artifact(artifact)
 
     def record_stage_progress(
         self, name: str, sub_stage: object = None, *, parent_stage: str = ""

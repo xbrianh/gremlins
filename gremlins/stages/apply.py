@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from gremlins.artifacts.schemes import snapshot_head_before
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, Outcome
+from gremlins.utils import git as git_utils
 from gremlins.utils import proc
 
 
@@ -40,8 +42,9 @@ class Apply(Stage):
         return Done()
 
     def _maybe_commit(self, state: State) -> None:
-        if not proc.run_ok(["git", "rev-parse", "--git-dir"], cwd=state.cwd):
+        if not git_utils.in_git_repo(cwd=state.cwd):
             return
+        pre_sha = snapshot_head_before(cwd=state.cwd)
         r = proc.run(["git", "add", "-A"], cwd=state.cwd)
         if r.returncode != 0:
             raise Bail(
@@ -55,3 +58,6 @@ class Apply(Stage):
             raise Bail(
                 f"apply {self.name}: git commit failed: {(r.stdout + r.stderr).strip()}"
             )
+        # re-entry on rescue: a prior run may have already bound this key
+        if not state.artifacts.produced(f"{self.name}-commits"):
+            state.artifacts.bind_git_commit_range(f"{self.name}-commits", pre_sha)
