@@ -21,7 +21,7 @@ prompts:
 stages:
   - { type: plan, prompt: [code-style, terse, gremlins:plan_gh.md] }
 
-  - type: cmd
+  - type: exec
     options:
       cmds:
         - 'test -n "${PR_NUM:-}" || { echo "PR_NUM env var required" >&2; exit 1; }'
@@ -31,7 +31,7 @@ stages:
   - { type: implement, prompt: [code-style, terse, implement_pr_extension.md] }
   - { type: verify,    options: { cmds: ["make check", "make test"] }, prompt: verify }
 
-  - type: cmd
+  - type: exec
     options:
       cmds:
         - 'git push origin "HEAD:refs/heads/$(gh pr view "$PR_NUM" --json headRefName --jq .headRefName)"'
