@@ -180,7 +180,9 @@ async def terminate_with_grace(
 # ---------------------------------------------------------------------------
 
 
-async def _pump_prefixed(stream: asyncio.StreamReader, prefix: str) -> None:
+async def _pump_prefixed(
+    stream: asyncio.StreamReader, prefix: str, *, log_file: Any = None
+) -> None:
     # Read in chunks so a child emitting a huge un-newlined blob cannot deadlock
     # by filling the pipe buffer. Re-split on newlines for the [prefix] label.
     while True:
@@ -189,6 +191,11 @@ async def _pump_prefixed(stream: asyncio.StreamReader, prefix: str) -> None:
             break
         for line in chunk.decode("utf-8", "replace").splitlines(keepends=True):
             sys.stdout.write(f"[{prefix}] {line}")
+            if log_file is not None:
+                try:
+                    log_file.write(line)
+                except Exception:
+                    pass
         sys.stdout.flush()
 
 
@@ -228,13 +235,16 @@ def _missing_result_detail(child_key: str, returncode: int | None) -> str:
 
 
 def _build_child_spec_dict(
-    stage_obj: Stage, child_st: State, child_key: str, attempt: str
+    stage_obj: Stage, child_st: State, child_key: str, attempt: str, group_name: str = ""
 ) -> dict[str, Any]:
+    child_id = child_st.session_dir.parent.name  # session_dir is <state_root>/<child_id>/artifacts
+    parent_id = child_st.data.gremlin_id or ""
     return {
         "stage_dict": stage_obj.raw_dict,
         "client": str(child_st.client),
-        "session_dir": str(child_st.session_dir),
-        "gremlin_id": child_st.data.gremlin_id,
+        "child_id": child_id,
+        "parent_id": parent_id,
+        "group_name": group_name,
         "worktree": str(child_st.worktree) if child_st.worktree else None,
         "worktree_parent": (
             str(child_st.worktree_parent) if child_st.worktree_parent else None
@@ -251,7 +261,7 @@ def _build_child_spec_dict(
 
 
 async def _spawn_child_with_pumps(
-    spec_path: pathlib.Path, attempt: str
+    spec_path: pathlib.Path, attempt: str, *, log_file: Any = None
 ) -> tuple[asyncio.subprocess.Process, list[asyncio.Task[None]]]:
     child_proc = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -262,10 +272,10 @@ async def _spawn_child_with_pumps(
         stderr=asyncio.subprocess.PIPE,
     )
     pump_out = asyncio.create_task(
-        _pump_prefixed(child_proc.stdout, attempt)  # type: ignore[arg-type]
+        _pump_prefixed(child_proc.stdout, attempt, log_file=log_file)  # type: ignore[arg-type]
     )
     pump_err = asyncio.create_task(
-        _pump_prefixed(child_proc.stderr, attempt)  # type: ignore[arg-type]
+        _pump_prefixed(child_proc.stderr, attempt, log_file=log_file)  # type: ignore[arg-type]
     )
     return child_proc, [pump_out, pump_err]
 
@@ -303,6 +313,7 @@ async def run_child_subprocess(
     attempt: str,
     *,
     on_bail: Callable[[str], None],
+    group_name: str = "",
 ) -> tuple[str, float]:
     """Spawn gremlins.spawn.child for one parallel child; return (status, cost_usd).
 
@@ -312,20 +323,34 @@ async def run_child_subprocess(
     """
     spec_path = child_st.session_dir / f"spec_{attempt}.json"
     spec_path.write_text(
-        json.dumps(_build_child_spec_dict(stage_obj, child_st, child_key, attempt)),
+        json.dumps(_build_child_spec_dict(stage_obj, child_st, child_key, attempt, group_name)),
         encoding="utf-8",
     )
     timeout_s = _parse_child_timeout(stage_obj, child_key)
-    child_proc, pumps = await _spawn_child_with_pumps(spec_path, attempt)
+    log_path = child_st.session_dir.parent / "log"
+    log_file = None
+    if log_path.parent.exists():
+        try:
+            log_file = log_path.open("a", buffering=1, encoding="utf-8")
+        except OSError:
+            pass
     try:
-        await _wait_child_proc(child_proc, timeout_s, child_key)
-    except asyncio.CancelledError:
-        await terminate_with_grace(child_proc)
-        for p in pumps:
-            p.cancel()
-        raise
+        child_proc, pumps = await _spawn_child_with_pumps(spec_path, attempt, log_file=log_file)
+        try:
+            await _wait_child_proc(child_proc, timeout_s, child_key)
+        except asyncio.CancelledError:
+            await terminate_with_grace(child_proc)
+            for p in pumps:
+                p.cancel()
+            raise
+        finally:
+            await asyncio.shield(asyncio.gather(*pumps, return_exceptions=True))
     finally:
-        await asyncio.shield(asyncio.gather(*pumps, return_exceptions=True))
+        if log_file is not None:
+            try:
+                log_file.close()
+            except OSError:
+                pass
     result = _read_child_result(spec_path, child_proc, child_key)
     try:
         cost = float(result.get("cost_usd") or 0.0)

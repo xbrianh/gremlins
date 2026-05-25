@@ -4,8 +4,9 @@ Spec file schema (JSON):
     {
         "stage_dict":      <dict>       parsed YAML dict; passed to parse_stage()
         "client":          <str>        "provider:model"
-        "session_dir":     <str>        absolute path to artifacts directory
-        "gremlin_id":      <str|null>   load StateData from disk when present
+        "child_id":        <str>        gremlin id for this child; state.json loaded from state_root/<child_id>/
+        "parent_id":       <str|null>   parent gremlin id (informational)
+        "group_name":      <str|null>   parallel group name (informational)
         "worktree":        <str|null>   absolute path to git worktree or null
         "worktree_parent": <str|null>   absolute path to worktree parent or null
         "pipeline_path":   <str|null>   absolute path to pipeline YAML or null
@@ -72,17 +73,15 @@ def _build_state(spec: dict[str, Any]) -> State:
     if not isinstance(client_label, str) or not client_label:
         raise ValueError("spec missing required 'client' field")
 
-    raw_session = spec.get("session_dir")
-    if not isinstance(raw_session, str) or not raw_session:
-        raise ValueError("spec missing required 'session_dir' field")
-    session_dir = pathlib.Path(raw_session)
+    child_id = spec.get("child_id") or None
+    if not child_id:
+        raise ValueError("spec missing required 'child_id' field")
+    validate_gremlin_id(child_id)
 
+    session_dir = paths.state_root() / child_id / "artifacts"
     session_dir.mkdir(parents=True, exist_ok=True)
 
-    gremlin_id = spec.get("gremlin_id") or None
-    if gremlin_id:
-        validate_gremlin_id(gremlin_id)
-    data = StateData.load(gremlin_id)
+    data = StateData.load(child_id)
 
     project_root = (
         pathlib.Path(data.project_root) if data.project_root else paths.project_root()
@@ -147,6 +146,13 @@ def _write_result(result_path: pathlib.Path, payload: dict[str, Any]) -> None:
     result_path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _try_write_terminal(state: State, rc: int) -> None:
+    try:
+        state.data.write_terminal_state(rc)
+    except Exception:
+        logger.warning("write_terminal_state failed", exc_info=True)
+
+
 async def _run(spec_path: pathlib.Path) -> int:
     spec = _load_spec(spec_path)
     result_path = pathlib.Path(str(spec_path) + ".result")
@@ -195,6 +201,7 @@ async def _run(spec_path: pathlib.Path) -> int:
                 "cost_usd": cost,
             },
         )
+        _try_write_terminal(state, 1)
         return 1
     except Exception as exc:
         cost = getattr(state.client, "total_cost_usd", 0.0) or 0.0
@@ -208,6 +215,7 @@ async def _run(spec_path: pathlib.Path) -> int:
             },
         )
         traceback.print_exc()
+        _try_write_terminal(state, 2)
         return 2
 
     cost = getattr(state.client, "total_cost_usd", 0.0) or 0.0
@@ -216,6 +224,7 @@ async def _run(spec_path: pathlib.Path) -> int:
             result_path,
             {"status": "done", "detail": "", "returncode": None, "cost_usd": cost},
         )
+        _try_write_terminal(state, 0)
         return 0
 
     _write_result(
@@ -227,6 +236,7 @@ async def _run(spec_path: pathlib.Path) -> int:
             "cost_usd": cost,
         },
     )
+    _try_write_terminal(state, 1)
     return 1
 
 
