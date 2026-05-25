@@ -88,7 +88,7 @@ the dispatch table in [`gremlins/cli/__init__.py`](gremlins/cli/__init__.py).
 |---|---|
 | `launch <name>` | Launch a background gremlin by pipeline name (`gremlins launch --list` to see available) |
 | `resume` | Re-spawn an existing gremlin from its recorded stage |
-| `stop` | Send SIGTERM to a running gremlin |
+| `stop` | Send SIGTERM to a running gremlin and wait for it to exit |
 | `rescue` | Diagnose and resume a dead or stalled gremlin |
 | `land` | Land a finished gremlin onto the current branch |
 | `rm` | Delete a dead gremlin's state dir, worktree, and branch |
@@ -130,6 +130,7 @@ Common infrastructure flags (accepted by all pipelines):
 | `-c`/`--instructions <text>` | — | Instructions string (mutually exclusive with `--plan`) |
 | `--base-ref <ref>` | `HEAD` | Git ref to branch the worktree from; ignored for gh pipelines (always anchors to origin default branch) |
 | `--spec <path>` | — | Path to a coding-style spec file passed into stages |
+| `--bypass` | false | Skip permission checks; run in bypass mode |
 
 ## Pipeline configuration
 
@@ -281,8 +282,8 @@ For `local` stages, model options (`plan_model`, `impl_model`, `address_model`,
 | `review-code` | Runs a code review and writes findings to disk |
 | `address-code` | Applies code-review findings |
 | `verify` | Runs check and test commands with an agent fix-loop |
-| `cmd` | Runs shell commands; returns NeedsFix on non-zero exit |
-| `apply` | Runs shell commands and commits any resulting changes |
+| `exec` | Runs shell commands with in:/out: artifact bindings |
+| `agent` | Resolves in: artifacts, renders prompt, invokes agent, verifies out: artifacts |
 | `handoff` | Runs the handoff agent once per boss loop iteration |
 | `loop` | Iterates body stages until a termination predicate or max iterations |
 | `sequence` | Runs body stages sequentially using child state |
@@ -529,9 +530,3 @@ internally and carry a `children` list and optional `max_concurrent`).
 - [`gremlins/fleet/AGENTS.md`](gremlins/fleet/AGENTS.md) — fleet manager internals
 - [`gremlins/orchestrators/AGENTS.md`](gremlins/orchestrators/AGENTS.md) — orchestrator internals
 - [`gremlins/stages/AGENTS.md`](gremlins/stages/AGENTS.md) — stage internals
-
-## Planned: `gremlins install`
-
-A future `gremlins install` subcommand will bootstrap the Claude Code skill
-layer — syncing this package into `~/.claude/gremlins/` and wiring up the
-hook and skill definitions. **This command does not exist yet.**
