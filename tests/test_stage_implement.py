@@ -218,7 +218,9 @@ def test_binds_commit_range_on_head_advanced(tmp_path: pathlib.Path) -> None:
     assert state.artifacts.produced("impl-commits")
 
 
-def test_no_commit_range_bound_on_empty_impl_without_prior(tmp_path: pathlib.Path) -> None:
+def test_no_commit_range_bound_on_empty_impl_without_prior(
+    tmp_path: pathlib.Path,
+) -> None:
     stage, state = _make_state(tmp_path, prompts=[_TEMPLATE_GH])
     with (
         patch(
@@ -246,6 +248,7 @@ def test_empty_impl_with_prior_commit_range_does_not_raise(
     tmp_path: pathlib.Path,
 ) -> None:
     from gremlins.artifacts.uri import Uri
+
     stage, state = _make_state(tmp_path, prompts=[_TEMPLATE_GH])
     state.artifacts.bind("impl-commits", Uri.parse("git://range/aaa..bbb"))
     with patch(
