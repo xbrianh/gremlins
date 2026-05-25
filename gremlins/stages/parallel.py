@@ -16,6 +16,7 @@ from collections.abc import Callable
 from typing import Any, cast
 
 from gremlins import paths
+from gremlins.artifacts.uri import Uri
 from gremlins.executor.parallel_state import ParallelGroupState
 from gremlins.executor.state import State, StateData
 from gremlins.stages.base import Stage
@@ -187,6 +188,7 @@ class ParallelStage(Stage):
         child_runners: list[tuple[str, State, Callable[[], Any]]],
         *,
         parent_data: StateData | None = None,
+        parent_state: State | None = None,
         project_root: pathlib.Path | None = None,
         worktree_parent: pathlib.Path | None = None,
         set_stage_fn: Callable[[str], None] | None = None,
@@ -201,6 +203,7 @@ class ParallelStage(Stage):
             cancel_on_bail=self._cancel_on_bail,
             bail_policy=self._bail_policy,
             parent_data=parent_data or StateData(),
+            parent_state=parent_state,
             project_root=project_root or paths.project_root(),
             worktree_parent=worktree_parent,
             stage_path=self.path or self.name,
@@ -228,6 +231,7 @@ class ParallelStage(Stage):
         for _, fn in self.build_runtime_stages(
             child_runners,
             parent_data=state.data,
+            parent_state=state,
             project_root=paths.project_root(),
             worktree_parent=state.worktree_parent,
             set_stage_fn=lambda n: state.record_stage_progress(self.name, sub_stage=n),
@@ -250,6 +254,7 @@ class _ParallelExecutor:
         cancel_on_bail: bool,
         bail_policy: str,
         parent_data: StateData,
+        parent_state: State | None = None,
         project_root: pathlib.Path,
         worktree_parent: pathlib.Path | None = None,
         stage_path: str = "",
@@ -261,6 +266,7 @@ class _ParallelExecutor:
         self._cancel_on_bail = cancel_on_bail
         self._bail_policy = bail_policy
         self._parent_data = parent_data
+        self._parent_state = parent_state
         self._project_root = project_root
         self._worktree_parent = worktree_parent
         self._stage_path = stage_path
@@ -442,11 +448,69 @@ class _ParallelExecutor:
             if entry.name.startswith(prefix) and entry.is_dir():
                 shutil.rmtree(entry, ignore_errors=True)
 
+    def _gather_child_artifacts(self) -> None:
+        """Copy child artifact bindings into the parent registry before child dirs are removed."""
+        parent_state = self._parent_state
+        parent_gid = self._parent_data.gremlin_id
+        if parent_state is None or not parent_gid:
+            return
+
+        sr = paths.state_root()
+        parent_keys: set[str] = set()
+        if parent_state.artifacts.registry_path.exists():
+            raw = parent_state.artifacts.registry_path.read_text(encoding="utf-8")
+            parent_keys = set(json.loads(raw).keys())
+
+        # key -> [(child_key, uri_str)] — only new bindings not in parent at fan-out
+        per_key: dict[str, list[tuple[str, str]]] = {}
+        for child_key, _, _ in self._child_runners:
+            child_id = f"{parent_gid}--{self._group_name}--{child_key}"
+            child_reg = sr / child_id / "registry.json"
+            if not child_reg.exists():
+                continue
+            child_bindings: dict[str, str] = json.loads(
+                child_reg.read_text(encoding="utf-8")
+            )
+            for k, v in child_bindings.items():
+                if k in parent_keys:
+                    continue
+                per_key.setdefault(k, []).append((child_key, v))
+
+        for key, producers in per_key.items():
+            multi = len(producers) > 1
+            for child_key, uri_str in producers:
+                bound_key = f"{key}/{child_key}" if multi else key
+                if uri_str.startswith("file://session/"):
+                    name = uri_str[len("file://session/"):]
+                    child_id = f"{parent_gid}--{self._group_name}--{child_key}"
+                    src = sr / child_id / "artifacts" / name
+                    if not src.exists():
+                        logger.warning("child artifact missing: %s", src)
+                        continue
+                    dest_name = f"{child_key}/{name}" if multi else name
+                    dest = parent_state.session_dir / dest_name
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dest)
+                    parent_state.artifacts.bind(
+                        bound_key, Uri.parse(f"file://session/{dest_name}")
+                    )
+                else:
+                    try:
+                        parent_state.artifacts.bind(bound_key, Uri.parse(uri_str))
+                    except Exception:
+                        logger.warning(
+                            "failed to bind %s -> %s into parent registry",
+                            bound_key,
+                            uri_str,
+                            exc_info=True,
+                        )
+
     async def _fan_in(self) -> None:
         self._set_stage(f"{self._group_name}-fanin")
         self._group_state.hydrate()
         try:
             await self._do_fan_in()
+            self._gather_child_artifacts()
             self._rm_child_state_dirs()
         finally:
             await self._teardown_worktrees()
