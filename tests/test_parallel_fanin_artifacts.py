@@ -30,9 +30,7 @@ def _make_child_dir(
     child_dir = tmp_path / "state" / child_id
     artifacts_dir = child_dir / "artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
-    (child_dir / "registry.json").write_text(
-        json.dumps(bindings), encoding="utf-8"
-    )
+    (child_dir / "registry.json").write_text(json.dumps(bindings), encoding="utf-8")
     for name, content in files.items():
         (artifacts_dir / name).write_bytes(content)
 
@@ -142,7 +140,9 @@ def test_snapshotted_parent_keys_skipped(tmp_path: pathlib.Path) -> None:
     ex._gather_child_artifacts()
 
     # existing-key must not be rebound
-    assert str(parent.artifacts.resolve("existing-key")) == "file://session/existing.txt"
+    assert (
+        str(parent.artifacts.resolve("existing-key")) == "file://session/existing.txt"
+    )
     # new-key must be gathered
     assert parent.artifacts.produced("new-key")
     assert parent.artifacts.read("new-key") == b"new content"

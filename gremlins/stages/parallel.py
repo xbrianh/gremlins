@@ -478,7 +478,7 @@ class _ParallelExecutor:
             for child_key, child_id, uri_str in producers:
                 bound_key = f"{key}/{child_key}" if multi else key
                 if uri_str.startswith("file://session/"):
-                    name = uri_str[len("file://session/"):]
+                    name = uri_str[len("file://session/") :]
                     src = sr / child_id / "artifacts" / name
                     if not src.exists():
                         logger.warning("child artifact missing: %s", src)
