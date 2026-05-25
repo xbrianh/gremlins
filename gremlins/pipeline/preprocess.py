@@ -71,6 +71,7 @@ def _expand_entry(
     chain: list[pathlib.Path],
     named_prompts: dict[str, list[str]],
     stage_defs: dict[str, dict[str, Any]],
+    seen_defs: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     if "include" in entry and len(entry) == 1:
         name = entry["include"]
@@ -84,7 +85,7 @@ def _expand_entry(
     if isinstance(stage_type, str) and stage_type:
         if stage_type in stage_defs:
             return _expand_stage_def(
-                entry, stage_type, stage_defs, prompt_dir, project_root, chain, named_prompts
+                entry, stage_type, stage_defs, prompt_dir, project_root, chain, named_prompts, seen_defs
             )
         try:
             included_path = resolve_pipeline_name(stage_type, project_root)
@@ -114,6 +115,7 @@ def _expand_entry(
                 chain,
                 named_prompts,
                 stage_defs,
+                seen_defs,
             )
             if len(expanded) == 0:
                 raise ValueError(
@@ -134,7 +136,7 @@ def _expand_entry(
         for body_entry in cast(list[dict[str, Any]], entry["body"]):
             expanded_body.extend(
                 _expand_entry(
-                    body_entry, prompt_dir, project_root, chain, named_prompts, stage_defs
+                    body_entry, prompt_dir, project_root, chain, named_prompts, stage_defs, seen_defs
                 )
             )
         entry["body"] = expanded_body
@@ -150,7 +152,10 @@ def _expand_stage_def(
     project_root: pathlib.Path,
     chain: list[pathlib.Path],
     named_prompts: dict[str, list[str]],
+    seen_defs: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
+    if def_name in seen_defs:
+        raise ValueError(f"stage-definition cycle: {def_name!r}")
     definition = stage_defs[def_name]
     if "out" in definition:
         raise ValueError(
@@ -161,7 +166,7 @@ def _expand_stage_def(
     for key in ("name", "in", "out"):
         if key in call_site:
             merged[key] = call_site[key]
-    return _expand_entry(merged, prompt_dir, project_root, chain, named_prompts, stage_defs)
+    return _expand_entry(merged, prompt_dir, project_root, chain, named_prompts, stage_defs, seen_defs | {def_name})
 
 
 def _resolve_prompt_dir(value: object, yaml_dir: pathlib.Path) -> pathlib.Path:

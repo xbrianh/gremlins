@@ -291,3 +291,37 @@ def test_stage_definitions_not_in_expanded_output(tmp_path: pathlib.Path) -> Non
     )
     expanded = expand_pipeline(p)
     assert "stage-definitions" not in expanded
+
+
+def test_stage_definition_self_cycle_raises(tmp_path: pathlib.Path) -> None:
+    p = _write_pipeline(
+        tmp_path,
+        """\
+        default_client: claude:sonnet
+        stage-definitions:
+          loop:
+            type: loop
+        stages:
+          - { type: loop }
+        """,
+    )
+    with pytest.raises(ValueError, match="stage-definition cycle"):
+        expand_pipeline(p)
+
+
+def test_stage_definition_mutual_cycle_raises(tmp_path: pathlib.Path) -> None:
+    p = _write_pipeline(
+        tmp_path,
+        """\
+        default_client: claude:sonnet
+        stage-definitions:
+          a:
+            type: b
+          b:
+            type: a
+        stages:
+          - { type: a }
+        """,
+    )
+    with pytest.raises(ValueError, match="stage-definition cycle"):
+        expand_pipeline(p)
