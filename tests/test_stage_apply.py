@@ -55,6 +55,35 @@ def test_apply_success_with_changes(tmp_path):
     assert "norm" in log.stdout
 
 
+def test_apply_binds_commit_range_on_success(tmp_path):
+    _init_git_repo(tmp_path)
+    (tmp_path / "f.txt").write_text("x")
+    stage = Apply("apply-bind", [], {"cmds": ["true"], "commit_message": "bind"})
+    state = _apply_state(tmp_path)
+    asyncio.run(stage.run(state))
+    assert state.artifacts.produced("apply-bind-commits")
+
+
+def test_apply_no_commit_range_when_no_changes(tmp_path):
+    _init_git_repo(tmp_path)
+    stage = Apply("apply-nochange", [], {"cmds": ["true"]})
+    state = _apply_state(tmp_path)
+    asyncio.run(stage.run(state))
+    assert not state.artifacts.produced("apply-nochange-commits")
+
+
+def test_apply_reentry_does_not_rebind_commit_range(tmp_path):
+    _init_git_repo(tmp_path)
+    (tmp_path / "f.txt").write_text("x")
+    stage = Apply("apply-reentry", [], {"cmds": ["true"], "commit_message": "re"})
+    state = _apply_state(tmp_path)
+    asyncio.run(stage.run(state))
+    first_uri = str(state.artifacts.resolve("apply-reentry-commits"))
+    # re-entry: no new changes, so no new commit, and the binding must not change
+    asyncio.run(stage.run(state))
+    assert str(state.artifacts.resolve("apply-reentry-commits")) == first_uri
+
+
 def test_apply_success_no_changes(tmp_path):
     _init_git_repo(tmp_path)
     stage = Apply("n", [], {"cmds": ["true"]})
