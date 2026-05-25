@@ -48,7 +48,7 @@ def _snapshot_registry(
     rewritten: dict[str, str] = {}
     for k, v in data.items():
         if v.startswith("file://session/"):
-            name = v[len("file://session/"):]
+            name = v[len("file://session/") :]
             abs_path = (parent_session_dir / name).resolve()
             rewritten[k] = f"file://{abs_path}"
         else:
@@ -219,7 +219,9 @@ class ParallelStage(Stage):
             child_id = f"{parent_id}--{self.name}--{child.name}" if parent_id else ""
             if child_id:
                 _init_child_dir(state, child_id, parent_id, self.name, child.name)
-            cs = _child_state(group_state, child, fan_out=True, child_id=child_id or None)
+            cs = _child_state(
+                group_state, child, fan_out=True, child_id=child_id or None
+            )
             runner = cs.make_runner(child, scope=self.body)
             child_runners.append((child.name, cs, runner))
         for _, fn in self.build_runtime_stages(
@@ -410,7 +412,11 @@ class _ParallelExecutor:
             self._group_state.write_bail(child_key, detail)
 
         status, cost = await proc.run_child_subprocess(
-            stage_obj, child_st, child_key, attempt, on_bail=on_bail,
+            stage_obj,
+            child_st,
+            child_key,
+            attempt,
+            on_bail=on_bail,
             group_name=self._group_name,
         )
         if cost > 0 and math.isfinite(cost):

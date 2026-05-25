@@ -91,11 +91,16 @@ def test_snapshot_registry_rewrites_session_uris(tmp_path: pathlib.Path) -> None
     parent_session.mkdir(parents=True)
 
     src = tmp_path / "parent" / "registry.json"
-    src.write_text(json.dumps({
-        "my-artifact": "file://session/output.md",
-        "other-artifact": "git://ref/HEAD",
-        "gh-artifact": "gh://pr/42",
-    }), encoding="utf-8")
+    src.write_text(
+        json.dumps(
+            {
+                "my-artifact": "file://session/output.md",
+                "other-artifact": "git://ref/HEAD",
+                "gh-artifact": "gh://pr/42",
+            }
+        ),
+        encoding="utf-8",
+    )
 
     dst = tmp_path / "child" / "registry.json"
     dst.parent.mkdir(parents=True)
@@ -146,7 +151,6 @@ def _make_parent_state(sandbox, gremlin_id: str) -> State:
 
     data = StateData(gremlin_id=gremlin_id, state_file=state_file)
     return build_state(data=data, client=FakeClaudeClient(), session_dir=session_dir)
-
 
 
 def test_parallel_run_creates_child_state_dirs(sandbox) -> None:
@@ -245,8 +249,12 @@ def test_child_reads_parent_artifact_via_registry(sandbox) -> None:
     state_file.write_text(json.dumps({"id": gremlin_id}), encoding="utf-8")
     data = StateData(gremlin_id=gremlin_id, state_file=state_file)
     parent_artifacts = ArtifactRegistry(session_dir=parent_session)
-    parent = build_state(data=data, client=FakeClaudeClient(), session_dir=parent_session,
-                         artifacts=parent_artifacts)
+    parent = build_state(
+        data=data,
+        client=FakeClaudeClient(),
+        session_dir=parent_session,
+        artifacts=parent_artifacts,
+    )
 
     child_id = f"{gremlin_id}--mygrp--child-z"
     _init_child_dir(parent, child_id, gremlin_id, "mygrp", "child-z")

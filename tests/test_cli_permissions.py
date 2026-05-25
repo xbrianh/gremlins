@@ -270,6 +270,7 @@ def _child_module_patches(mod_path: str, tmp_path: pathlib.Path) -> list:
     if mod_path == "gremlins.spawn.child":
         # Patch paths.state_root so session_dir mkdir goes under tmp_path.
         import gremlins.spawn.child as _cm
+
         return [patch.object(_cm, "paths", **{"state_root.return_value": tmp_path})]
     return []
 
@@ -297,7 +298,9 @@ def test_child_build_state_bypass_policy(mod_path, _label, tmp_path):
 
     with ExitStack() as stack:
         stack.enter_context(patch(f"{mod_path}.StateData.load", return_value=fake_data))
-        stack.enter_context(patch(f"{mod_path}.Client.parse", side_effect=fake_client_parse))
+        stack.enter_context(
+            patch(f"{mod_path}.Client.parse", side_effect=fake_client_parse)
+        )
         stack.enter_context(patch(f"{mod_path}.validate_policy_against_registry"))
         for p in _child_module_patches(mod_path, tmp_path):
             stack.enter_context(p)
@@ -337,7 +340,9 @@ def test_child_build_state_project_permissions_blocks(mod_path, _label, tmp_path
 
     with ExitStack() as stack:
         stack.enter_context(patch(f"{mod_path}.StateData.load", return_value=fake_data))
-        stack.enter_context(patch(f"{mod_path}.Client.parse", side_effect=fake_client_parse))
+        stack.enter_context(
+            patch(f"{mod_path}.Client.parse", side_effect=fake_client_parse)
+        )
         stack.enter_context(patch(f"{mod_path}.validate_policy_against_registry"))
         for p in _child_module_patches(mod_path, tmp_path):
             stack.enter_context(p)

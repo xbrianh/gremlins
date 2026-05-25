@@ -235,9 +235,15 @@ def _missing_result_detail(child_key: str, returncode: int | None) -> str:
 
 
 def _build_child_spec_dict(
-    stage_obj: Stage, child_st: State, child_key: str, attempt: str, group_name: str = ""
+    stage_obj: Stage,
+    child_st: State,
+    child_key: str,
+    attempt: str,
+    group_name: str = "",
 ) -> dict[str, Any]:
-    child_id = child_st.session_dir.parent.name  # session_dir is <state_root>/<child_id>/artifacts
+    child_id = (
+        child_st.session_dir.parent.name
+    )  # session_dir is <state_root>/<child_id>/artifacts
     parent_id = child_st.data.gremlin_id or ""
     return {
         "stage_dict": stage_obj.raw_dict,
@@ -323,7 +329,9 @@ async def run_child_subprocess(
     """
     spec_path = child_st.session_dir / f"spec_{attempt}.json"
     spec_path.write_text(
-        json.dumps(_build_child_spec_dict(stage_obj, child_st, child_key, attempt, group_name)),
+        json.dumps(
+            _build_child_spec_dict(stage_obj, child_st, child_key, attempt, group_name)
+        ),
         encoding="utf-8",
     )
     timeout_s = _parse_child_timeout(stage_obj, child_key)
@@ -335,7 +343,9 @@ async def run_child_subprocess(
         except OSError:
             pass
     try:
-        child_proc, pumps = await _spawn_child_with_pumps(spec_path, attempt, log_file=log_file)
+        child_proc, pumps = await _spawn_child_with_pumps(
+            spec_path, attempt, log_file=log_file
+        )
         try:
             await _wait_child_proc(child_proc, timeout_s, child_key)
         except asyncio.CancelledError:
