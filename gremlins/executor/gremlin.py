@@ -81,6 +81,8 @@ async def run_stages(
 
 
 class Gremlin:
+    registry: ArtifactRegistry
+
     def __init__(
         self,
         stages: list[Stage],
@@ -137,9 +139,109 @@ class Gremlin:
         self.project_root = project_root
         self.base_ref_sha = base_ref_sha
         self.setup_kind = setup_kind
-        self._initialized = False
 
-    def initialize_runtime(self) -> None:
+    def validate_resume_target(self) -> None:
+        if not self.resume_from:
+            return
+        valid_names = [entry.name for entry in self.stages]
+        if self.resume_from not in valid_names:
+            raise ValueError(
+                f"--resume-from {self.resume_from!r} is not a valid stage; "
+                f"valid: {valid_names}"
+            )
+
+    def _collect_stages(
+        self, stages: list[Stage]
+    ) -> list[tuple[str, Callable[[], Awaitable[Any]]]]:
+        args = argparse.Namespace(
+            plan=self.plan,
+            cmds=self.cmds,
+            test_max_attempts=self.test_max_attempts,
+            resume_from=self.resume_from,
+            spec=self.spec,
+            instructions=[self.instructions] if self.instructions else [],
+        )
+        # attempt is always "" here; the loop patches it per-iteration via dataclasses.replace.
+        engine_ctx = EngineContext(loop_iteration=1, attempt="", current_scope=())
+        built: list[tuple[str, Callable[[], Awaitable[Any]]]] = []
+        for e in stages:
+            stage_client = e.client or PACKAGE_DEFAULT
+            resolved = self.test_client or stage_client
+            stage_state = build_state(
+                data=StateData(gremlin_id=self.gremlin_id, state_file=self.state_file),
+                client=resolved,
+                session_dir=self.session_dir,
+                args=args,
+                pipeline_data=self.pipeline_data,
+                repo=self.repo,
+                instructions=self.instructions,
+                test_client=self.test_client,
+                stage_model=stage_client.model if self.test_client else "",
+                worktree_parent=self.worktree_parent,
+                artifacts=self.registry,
+                engine_ctx=engine_ctx,
+            )
+            built.append((e.name, stage_state.make_runner(e, scope=stages)))
+        return built
+
+    async def run(self) -> None:
+        if not hasattr(self, "registry"):
+            raise RuntimeError("call initialize_with_runtime() before run()")
+        built = self._collect_stages(self.stages)
+        await run_stages(built, resume_from=self.resume_from)
+
+    @classmethod
+    def initialize_with_runtime(
+        cls,
+        *,
+        gremlin_id: str | None,
+        state_dir: pathlib.Path,
+        project_dir: pathlib.Path,
+        pipeline_ref: str,
+        session_dir: pathlib.Path | None = None,
+        worktree_parent: pathlib.Path | None = None,
+        instructions: str = "",
+        resume_from: str | None = None,
+        plan: str | None = None,
+        spec: str | None = None,
+        cmds: list[str] | None = None,
+        test_max_attempts: int = 3,
+        test_client: Client | None = None,
+        project_root: str = "",
+        base_ref_sha: str = "",
+        setup_kind: str = "worktree-branch",
+        worktree_dir: pathlib.Path | None = None,
+        client_label: str = "",
+    ) -> Gremlin:
+        try:
+            pipeline_path = resolve_pipeline_path(pipeline_ref, project_dir)
+            pipeline = _PipelineData.from_yaml(pipeline_path)
+        except (FileNotFoundError, _YamlLoadError) as exc:
+            raise ValueError(str(exc)) from exc
+        if client_label:
+            _apply_client_override(list(pipeline.stages), Client.parse(client_label))
+        self = cls(
+            pipeline.stages,
+            state_dir=state_dir,
+            session_dir=session_dir
+            if session_dir is not None
+            else state_dir / "artifacts",
+            gremlin_id=gremlin_id,
+            pipeline_data=pipeline,
+            worktree_dir=worktree_dir,
+            worktree_parent=worktree_parent,
+            resume_from=resume_from,
+            instructions=instructions,
+            spec=spec,
+            plan=plan,
+            cmds=cmds,
+            test_max_attempts=test_max_attempts,
+            test_client=test_client,
+            project_root=project_root,
+            base_ref_sha=base_ref_sha,
+            setup_kind=setup_kind,
+        )
+
         State.setup_dirs(
             self.state_dir,
             self.session_dir,
@@ -190,115 +292,14 @@ class Gremlin:
 
             if self.worktree_dir is not None:
                 os.chdir(self.worktree_dir)
+
+            self.registry = ArtifactRegistry(
+                session_dir=self.session_dir,
+                cwd=self.worktree_dir,
+            )
         except Exception:
-            if worktree_created and not self._initialized:
+            if worktree_created:
                 _git_mod.remove_worktree(self.project_root, worktree_created)
             raise
 
-        self._initialized = True
-
-    def validate_resume_target(self) -> None:
-        if not self.resume_from:
-            return
-        valid_names = [entry.name for entry in self.stages]
-        if self.resume_from not in valid_names:
-            raise ValueError(
-                f"--resume-from {self.resume_from!r} is not a valid stage; "
-                f"valid: {valid_names}"
-            )
-
-    def _collect_stages(
-        self, stages: list[Stage]
-    ) -> list[tuple[str, Callable[[], Awaitable[Any]]]]:
-        args = argparse.Namespace(
-            plan=self.plan,
-            cmds=self.cmds,
-            test_max_attempts=self.test_max_attempts,
-            resume_from=self.resume_from,
-            spec=self.spec,
-            instructions=[self.instructions] if self.instructions else [],
-        )
-        registry = ArtifactRegistry(
-            session_dir=self.session_dir,
-            cwd=self.worktree_dir,
-        )
-        # attempt is always "" here; the loop patches it per-iteration via dataclasses.replace.
-        engine_ctx = EngineContext(loop_iteration=1, attempt="", current_scope=())
-        built: list[tuple[str, Callable[[], Awaitable[Any]]]] = []
-        for e in stages:
-            stage_client = e.client or PACKAGE_DEFAULT
-            resolved = self.test_client or stage_client
-            stage_state = build_state(
-                data=StateData(gremlin_id=self.gremlin_id, state_file=self.state_file),
-                client=resolved,
-                session_dir=self.session_dir,
-                args=args,
-                pipeline_data=self.pipeline_data,
-                repo=self.repo,
-                instructions=self.instructions,
-                test_client=self.test_client,
-                stage_model=stage_client.model if self.test_client else "",
-                worktree_parent=self.worktree_parent,
-                artifacts=registry,
-                engine_ctx=engine_ctx,
-            )
-            built.append((e.name, stage_state.make_runner(e, scope=stages)))
-        return built
-
-    async def run(self) -> None:
-        if not self._initialized:
-            raise RuntimeError("call initialize_runtime() before run()")
-        built = self._collect_stages(self.stages)
-        await run_stages(built, resume_from=self.resume_from)
-
-    @classmethod
-    def build(
-        cls,
-        *,
-        gremlin_id: str | None,
-        state_dir: pathlib.Path,
-        project_dir: pathlib.Path,
-        pipeline_ref: str,
-        session_dir: pathlib.Path | None = None,
-        worktree_parent: pathlib.Path | None = None,
-        instructions: str = "",
-        resume_from: str | None = None,
-        plan: str | None = None,
-        spec: str | None = None,
-        cmds: list[str] | None = None,
-        test_max_attempts: int = 3,
-        test_client: Client | None = None,
-        project_root: str = "",
-        base_ref_sha: str = "",
-        setup_kind: str = "worktree-branch",
-        worktree_dir: pathlib.Path | None = None,
-        client_label: str = "",
-    ) -> Gremlin:
-        try:
-            pipeline_path = resolve_pipeline_path(pipeline_ref, project_dir)
-            pipeline = _PipelineData.from_yaml(pipeline_path)
-        except (FileNotFoundError, _YamlLoadError) as exc:
-            raise ValueError(str(exc)) from exc
-        if client_label:
-            _apply_client_override(list(pipeline.stages), Client.parse(client_label))
-        return cls(
-            pipeline.stages,
-            state_dir=state_dir,
-            session_dir=session_dir
-            if session_dir is not None
-            else state_dir / "artifacts",
-            gremlin_id=gremlin_id,
-            pipeline_data=pipeline,
-            worktree_dir=worktree_dir,
-            worktree_parent=worktree_parent,
-            resume_from=resume_from,
-            instructions=instructions,
-            spec=spec,
-            plan=plan,
-            cmds=cmds,
-            test_max_attempts=test_max_attempts,
-            test_client=test_client,
-            project_root=project_root,
-            base_ref_sha=base_ref_sha,
-            setup_kind=setup_kind,
-        )
+        return self

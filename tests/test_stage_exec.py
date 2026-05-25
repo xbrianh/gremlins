@@ -17,10 +17,12 @@ from gremlins.stages.outcome import Bail, Done, NeedsFix
 
 def _make_state(tmp_path: pathlib.Path, **kw):
     kw.setdefault("worktree", tmp_path)
+    session_dir = tmp_path / "artifacts"
+    session_dir.mkdir(exist_ok=True)
     return build_state(
         data=StateData(),
         client=FakeClaudeClient(),
-        session_dir=tmp_path,
+        session_dir=session_dir,
         **kw,
     )
 
@@ -60,7 +62,7 @@ def test_no_cmds_returns_done(tmp_path):
 
 def test_in_map_injects_env_var(tmp_path):
     state = _make_state(tmp_path)
-    (tmp_path / "value.txt").write_text("hello")
+    (state.session_dir / "value.txt").write_text("hello")
     state.artifacts.bind("my-key", Uri.parse("file://session/value.txt"))
 
     out_file = tmp_path / "captured.txt"
@@ -86,7 +88,7 @@ def test_in_map_missing_artifact_raises(tmp_path):
 
 def test_out_file_scheme_binds_and_verifies(tmp_path):
     state = _make_state(tmp_path)
-    (tmp_path / "out.txt").write_text("data")
+    (state.session_dir / "out.txt").write_text("data")
     stage = _exec(cmds=["true"], out_map={"result": "file://session/out.txt"})
     result = asyncio.run(stage.run(state))
     assert isinstance(result, Done)
@@ -176,7 +178,7 @@ def test_nonzero_exit_writes_log(tmp_path):
     stage = _exec("myname", cmds=["echo oops; exit 1"])
     with pytest.raises(Bail):
         asyncio.run(stage.run(state))
-    assert (tmp_path / "exec-myname.log").exists()
+    assert (state.session_dir / "exec-myname.log").exists()
 
 
 def test_on_fail_needs_fix_returns_needs_fix(tmp_path):

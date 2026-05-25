@@ -1487,8 +1487,11 @@ def test_land_gh_removes_worktree_before_gh_merge(tmp_path, monkeypatch):
     (gr_dir / "state.json").write_text(json.dumps(state))
 
     monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+    from gremlins.artifacts.schemes import PrInfo
+
     monkeypatch.setattr(
-        "gremlins.executor.state.StateData.read_pr_url", lambda self: pr_url
+        "gremlins.artifacts.registry.ArtifactRegistry.read",
+        lambda self, key: PrInfo(url=pr_url, number=42, branch="feat"),
     )
     monkeypatch.setattr(_land, "_resolve_landing_cwd", lambda s: str(tmp_path))
 

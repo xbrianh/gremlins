@@ -84,8 +84,10 @@ def test_timeout_bails(tmp_path: pathlib.Path) -> None:
 
 
 def test_no_pr_num_raises(tmp_path: pathlib.Path) -> None:
+    from gremlins.artifacts.registry import MissingArtifact
+
     stage, state = _make_stage(tmp_path, pr_num="")
-    with pytest.raises(RuntimeError, match="no pr_url in state.json"):
+    with pytest.raises(MissingArtifact):
         asyncio.run(stage.run(state))
 
 

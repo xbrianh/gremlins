@@ -367,22 +367,6 @@ class StateData:
             if str(a.get("attempt") or "").startswith(prefix)
         ]
 
-    def read_pr_url(self) -> str:
-        for art in reversed(self.read_artifacts()):
-            if art.get("type") == "pr":
-                return str(art.get("url") or "")
-        return ""
-
-    def last_pr_branch(self) -> str:
-        for art in reversed(self.read_artifacts()):
-            if art.get("type") == "pr":
-                return str(art.get("branch") or "")
-        return ""
-
-    def read_pr_num(self) -> str:
-        url = self.read_pr_url()
-        return url.split("/")[-1] if url else ""
-
     def last_artifact_branch(self) -> str:
         for art in reversed(self.read_artifacts()):
             if art.get("type") == "branch":

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import os
 import pathlib
+import secrets
 from collections.abc import Iterable
 from typing import Any
 
@@ -33,17 +36,28 @@ class ArtifactRegistry:
         cwd: pathlib.Path | None = None,
     ) -> None:
         self._cwd = cwd
+        self.registry_path = session_dir.parent / "registry.json"
         self._bindings: dict[str, Uri] = {}
         self._resolvers: dict[str, SchemeResolver] = {
             "file": FileSessionResolver(session_dir),
             "git": GitResolver(cwd),
             "gh": GitHubResolver(cwd),
         }
+        if self.registry_path.exists():
+            data = json.loads(self.registry_path.read_text(encoding="utf-8"))
+            for k, v in data.items():
+                self._bindings[k] = Uri.parse(v)
 
-    def bind(self, key: str, uri: Uri) -> None:
-        if key in self._bindings:
+    def bind(self, key: str, uri: Uri, *, override: bool = False) -> None:
+        if key in self._bindings and not override:
             raise DuplicateArtifact(key, self._bindings[key], uri)
         self._bindings[key] = uri
+        path = self.registry_path
+        data = {k: str(v) for k, v in self._bindings.items()}
+        tmp = path.with_name(path.name + f".{os.getpid()}.{secrets.token_hex(4)}.tmp")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(tmp, path)
 
     def resolve(self, key: str) -> Uri:
         try:

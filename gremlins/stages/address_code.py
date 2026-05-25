@@ -77,9 +77,7 @@ class GitHubAddressPullRequestReviews(Stage):
         self.pr_url = pr_url
 
     async def run(self, state: State) -> Outcome:
-        pr_url = self.pr_url or state.data.read_pr_url()
-        if not pr_url:
-            raise RuntimeError("no pr_url in state.json (rewind to open-pr?)")
+        pr_url = self.pr_url or state.artifacts.read("pr").url
         prompt = (
             "\n\n".join(self.prompts)
             .rstrip()

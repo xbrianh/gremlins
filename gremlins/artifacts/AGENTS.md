@@ -68,3 +68,25 @@ if isinstance(gh_resolver, CapturingSchemeResolver):
     uri = gh_resolver.capture(stdout, stderr)
     registry.bind("pr", uri)
 ```
+
+## Typed read returns
+
+`GitHubResolver.read()` returns typed objects rather than plain dicts:
+
+- `gh://pr/<n>` → `PrInfo(url: str, number: int, branch: str)`
+- `gh://issue/<n>` → `IssueInfo(url: str, number: int)`
+
+```python
+from gremlins.artifacts.schemes import PrInfo, IssueInfo
+
+pr: PrInfo = state.artifacts.read("pr")
+pr.url     # https://github.com/…/pull/42
+pr.number  # 42
+pr.branch  # issue-42-some-slug
+```
+
+## Registry persistence
+
+Bindings are atomically persisted to `session_dir.parent / "registry.json"`
+so they survive process restart. On construction, any existing file at that
+path is pre-loaded so resumed runs see prior bindings.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import pathlib
 import re
 from typing import Any
@@ -10,6 +11,19 @@ from gremlins.artifacts.uri import Uri
 from gremlins.utils import git as git_utils
 from gremlins.utils import github as gh_utils
 from gremlins.utils import proc
+
+
+@dataclasses.dataclass(frozen=True)
+class PrInfo:
+    url: str
+    number: int
+    branch: str
+
+
+@dataclasses.dataclass(frozen=True)
+class IssueInfo:
+    url: str
+    number: int
 
 
 class FileSessionResolver:
@@ -103,16 +117,16 @@ class GitHubResolver:
             data = gh_utils.view_pr(
                 n, project_root=str(self._cwd) if self._cwd else None
             )
-            return {
-                "url": data["url"],
-                "number": data["number"],
-                "branch": data["headRefName"],
-            }
+            return PrInfo(
+                url=data["url"],
+                number=data["number"],
+                branch=data["headRefName"],
+            )
         if path.startswith("issue/"):
             n = path.removeprefix("issue/")
             repo = gh_utils.current_repo()
             data = gh_utils.view_issue(n, repo)
-            return {"url": data["url"], "number": data["number"]}
+            return IssueInfo(url=data["url"], number=data["number"])
         raise ValueError(f"unrecognised gh URI path: {uri}")
 
     def verify_produced(self, uri: Uri) -> None:

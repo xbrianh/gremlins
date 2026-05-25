@@ -343,7 +343,7 @@ def test_stage_builders_registry_covers_all_known_types() -> None:
     assert expected <= set(STAGE_TYPES)
 
 
-def test_run_raises_without_initialize_runtime(tmp_path: pathlib.Path) -> None:
+def test_run_raises_without_initialize_with_runtime(tmp_path: pathlib.Path) -> None:
     gremlin = _local(_make_stages("plan"), tmp_path=tmp_path)
-    with pytest.raises(RuntimeError, match="initialize_runtime"):
+    with pytest.raises(RuntimeError, match="initialize_with_runtime"):
         asyncio.run(gremlin.run())

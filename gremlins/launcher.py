@@ -21,10 +21,12 @@ import sys
 from typing import Any, cast
 
 from gremlins import paths as _paths
+from gremlins.artifacts.registry import ArtifactRegistry
+from gremlins.artifacts.uri import Uri
 from gremlins.clients.client import PACKAGE_DEFAULT
-from gremlins.executor.gremlin import Gremlin as _Gremlin
 from gremlins.executor.state import StateData, validate_gremlin_id
-from gremlins.pipeline.discovery import list_pipelines
+from gremlins.pipeline import Pipeline as _PipelineData
+from gremlins.pipeline.discovery import list_pipelines, resolve_pipeline_path
 from gremlins.utils import git as _git_mod
 from gremlins.utils import proc
 from gremlins.utils.github import fetch_issue, parse_issue_ref
@@ -125,7 +127,7 @@ class _Inputs:
     base_ref_sha: str
     stage_inputs: dict[str, Any]
     issue_data: dict[str, Any] | None
-    pr_artifact: dict[str, Any] | None
+    pr_num: str = ""
 
 
 def _validate_plan_args(
@@ -279,16 +281,11 @@ def _resolve_inputs(
         kind, pipeline_args, project_root
     )
 
-    state_dir = _state_root() / resolved_gremlin_id
     loaded_pipeline = None
     try:
-        _gremlin = _Gremlin.build(
-            gremlin_id=resolved_gremlin_id,
-            state_dir=state_dir,
-            project_dir=pathlib.Path(project_root),
-            pipeline_ref=pipeline_path,
+        loaded_pipeline = _PipelineData.from_yaml(
+            resolve_pipeline_path(pipeline_path, pathlib.Path(project_root))
         )
-        loaded_pipeline = _gremlin.pipeline_data
     except (FileNotFoundError, OSError, ValueError):
         pass
 
@@ -309,16 +306,12 @@ def _resolve_inputs(
         setup_kind = "worktree-detached-from-ref"
         pr_data = view_pr(pr, project_root=project_root)
         pr_url = pr_data.get("url") or ""
-        pr_branch = pr_data.get("headRefName") or ""
-        if not pr_url or not pr_branch:
+        pr_num_raw = pr_data.get("number")
+        if not pr_url or pr_num_raw is None:
             raise RuntimeError(
-                f"gh pr view returned empty url or headRefName for {pr!r}: {pr_data!r}"
+                f"gh pr view returned empty url or number for {pr!r}: {pr_data!r}"
             )
-        pr_artifact: dict[str, Any] | None = {
-            "type": "pr",
-            "url": pr_url,
-            "branch": pr_branch,
-        }
+        pr_num = str(pr_num_raw)
     else:
         base_ref_name, base_ref_sha = _resolve_base_ref(
             base_ref, project_root, loaded_pipeline
@@ -328,7 +321,7 @@ def _resolve_inputs(
             if loaded_pipeline is not None
             else "worktree-branch"
         )
-        pr_artifact = None
+        pr_num = ""
 
     stored_args = list(resolved_pipeline_args)
     if spec_path and "--spec" not in stored_args:
@@ -355,7 +348,7 @@ def _resolve_inputs(
         base_ref_sha=base_ref_sha,
         stage_inputs=stage_inputs,
         issue_data=issue_data,
-        pr_artifact=pr_artifact,
+        pr_num=pr_num,
     )
 
 
@@ -520,7 +513,7 @@ def launch(
 ) -> tuple[str, subprocess.Popen[bytes]]:
     """Set up state dir, spawn the pipeline detached, return gremlin id and process.
 
-    Worktree setup is deferred to the child process via Gremlin.initialize_runtime().
+    Worktree setup is deferred to the child process via Gremlin.initialize_with_runtime().
     Synchronous through spawn; does not wait for the pipeline to finish.
     Raises ValueError on bad arguments, RuntimeError on infrastructure failure.
     """
@@ -547,8 +540,12 @@ def launch(
         sd.bypass = bypass
         sd.permissions_file = permissions_file
         sd.persist(state_dir)
-        if inputs.pr_artifact:
-            sd.append_artifact(inputs.pr_artifact)
+        if inputs.pr_num:
+            session_dir = state_dir / "artifacts"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            ArtifactRegistry(session_dir=session_dir).bind(
+                "pr", Uri.parse(f"gh://pr/{inputs.pr_num}")
+            )
         p = _spawn(inputs.gremlin_id, inputs, state_dir)
     except Exception:
         shutil.rmtree(state_dir, ignore_errors=True)
@@ -633,13 +630,9 @@ def _load_pipeline_and_check_gh(
     pipeline_data = None
     if pipeline_path:
         try:
-            _gremlin_resume = _Gremlin.build(
-                gremlin_id=gremlin_id,
-                state_dir=state_dir,
-                project_dir=pathlib.Path(project_root),
-                pipeline_ref=pipeline_path,
+            pipeline_data = _PipelineData.from_yaml(
+                resolve_pipeline_path(pipeline_path, pathlib.Path(project_root))
             )
-            pipeline_data = _gremlin_resume.pipeline_data
         except (FileNotFoundError, OSError, ValueError):
             pass
 

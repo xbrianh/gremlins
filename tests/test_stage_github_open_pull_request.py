@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import pathlib
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from conftest import MINIMAL_EVENTS
 
+from gremlins.artifacts.schemes import PrInfo
+from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData, build_state
@@ -29,7 +31,7 @@ def _make_state(
     state = build_state(
         data=StateData(gremlin_id=gremlin_id, issue_url=issue_url),
         client=client,
-        session_dir=tmp_path,
+        session_dir=tmp_path / "artifacts",
     )
     return stage, state
 
@@ -41,11 +43,6 @@ def test_run_calls_claude_with_push_prompt(tmp_path: pathlib.Path) -> None:
             "gremlins.stages.github_open_pull_request.extract_gh_url",
             return_value=PR_URL,
         ),
-        patch(
-            "gremlins.stages.github_open_pull_request._get_pr_branch",
-            return_value=PR_BRANCH,
-        ),
-        patch("gremlins.executor.state.StateData.append_artifact"),
     ):
         asyncio.run(stage.run(state))
     assert len(state.client.calls) == 1
@@ -63,11 +60,6 @@ def test_issue_num_adds_closes_clause(tmp_path: pathlib.Path) -> None:
             "gremlins.stages.github_open_pull_request.extract_gh_url",
             return_value=PR_URL,
         ),
-        patch(
-            "gremlins.stages.github_open_pull_request._get_pr_branch",
-            return_value=PR_BRANCH,
-        ),
-        patch("gremlins.executor.state.StateData.append_artifact"),
     ):
         asyncio.run(stage.run(state))
     assert "Closes #42" in state.client.calls[0].prompt
@@ -80,11 +72,6 @@ def test_no_issue_url_skips_closes(tmp_path: pathlib.Path) -> None:
             "gremlins.stages.github_open_pull_request.extract_gh_url",
             return_value=PR_URL,
         ),
-        patch(
-            "gremlins.stages.github_open_pull_request._get_pr_branch",
-            return_value=PR_BRANCH,
-        ),
-        patch("gremlins.executor.state.StateData.append_artifact"),
     ):
         asyncio.run(stage.run(state))
     assert "Include 'Closes" not in state.client.calls[0].prompt
@@ -99,11 +86,6 @@ def test_run_returns_done(tmp_path: pathlib.Path) -> None:
             "gremlins.stages.github_open_pull_request.extract_gh_url",
             return_value=PR_URL,
         ),
-        patch(
-            "gremlins.stages.github_open_pull_request._get_pr_branch",
-            return_value=PR_BRANCH,
-        ),
-        patch("gremlins.executor.state.StateData.append_artifact"),
     ):
         result = asyncio.run(stage.run(state))
     assert result == Done()
@@ -116,41 +98,24 @@ def test_run_writes_raw_path(tmp_path: pathlib.Path) -> None:
             "gremlins.stages.github_open_pull_request.extract_gh_url",
             return_value=PR_URL,
         ),
-        patch(
-            "gremlins.stages.github_open_pull_request._get_pr_branch",
-            return_value=PR_BRANCH,
-        ),
-        patch("gremlins.executor.state.StateData.append_artifact"),
     ):
         asyncio.run(stage.run(state))
     assert (
         state.client.calls[0].raw_path
-        == tmp_path / "stream-github-open-pull-request.jsonl"
+        == tmp_path / "artifacts" / "stream-github-open-pull-request.jsonl"
     )
 
 
 def test_run_records_pr_artifact(tmp_path: pathlib.Path) -> None:
     stage, state = _make_state(tmp_path, gremlin_id="test-gr")
-    artifact_calls: list[tuple] = []
     with (
         patch(
             "gremlins.stages.github_open_pull_request.extract_gh_url",
             return_value=PR_URL,
         ),
-        patch(
-            "gremlins.stages.github_open_pull_request._get_pr_branch",
-            return_value=PR_BRANCH,
-        ),
-        patch(
-            "gremlins.executor.state.StateData.append_artifact",
-            side_effect=lambda artifact: artifact_calls.append(artifact),
-        ),
     ):
         asyncio.run(stage.run(state))
-    assert len(artifact_calls) == 1
-    assert artifact_calls[0]["type"] == "pr"
-    assert artifact_calls[0]["url"] == PR_URL
-    assert artifact_calls[0]["branch"] == PR_BRANCH
+    assert state.artifacts.resolve("pr") == Uri.parse("gh://pr/42")
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +137,7 @@ def _make_state_with_gr(
             gremlin_id=gremlin_id, base_ref_name=base_ref_name, issue_url=issue_url
         ),
         client=client,
-        session_dir=tmp_path,
+        session_dir=tmp_path / "artifacts",
     )
     return stage, state
 
@@ -186,20 +151,21 @@ def test_stacked_pr_uses_prior_pr_branch(tmp_path: pathlib.Path) -> None:
         prompts_seen.append(prompt)
         return type("R", (), {"events": [], "text_result": ""})()
 
+    # Pre-bind a prior PR in the registry and mock the resolver read
+    state.artifacts.bind("pr", Uri.parse("gh://pr/1"))
+    mock_resolver = MagicMock()
+    mock_resolver.read.return_value = PrInfo(
+        url="https://github.com/o/r/pull/1",
+        number=1,
+        branch="gremlin/abc-child-1",
+    )
+    state.artifacts._resolvers["gh"] = mock_resolver
+
     with (
-        patch(
-            "gremlins.executor.state.StateData.last_pr_branch",
-            return_value="gremlin/abc-child-1",
-        ),
         patch(
             "gremlins.stages.github_open_pull_request.extract_gh_url",
             return_value=PR_URL,
         ),
-        patch(
-            "gremlins.stages.github_open_pull_request._get_pr_branch",
-            return_value=PR_BRANCH,
-        ),
-        patch("gremlins.executor.state.StateData.append_artifact"),
         patch("gremlins.stages.github_open_pull_request.run_agent", _fake_run_agent),
     ):
         asyncio.run(stage.run(state))
@@ -220,17 +186,12 @@ def test_single_pr_without_prior_pr_branch_uses_base_ref_name(
         prompts_seen.append(prompt)
         return type("R", (), {"events": [], "text_result": ""})()
 
+    # No pr bound in registry — stage falls back to base_ref_name via produced("pr") check
     with (
-        patch("gremlins.executor.state.StateData.last_pr_branch", return_value=""),
         patch(
             "gremlins.stages.github_open_pull_request.extract_gh_url",
             return_value=PR_URL,
         ),
-        patch(
-            "gremlins.stages.github_open_pull_request._get_pr_branch",
-            return_value=PR_BRANCH,
-        ),
-        patch("gremlins.executor.state.StateData.append_artifact"),
         patch("gremlins.stages.github_open_pull_request.run_agent", _fake_run_agent),
     ):
         asyncio.run(stage.run(state))
@@ -252,11 +213,6 @@ def test_first_child_uses_base_ref_name(tmp_path: pathlib.Path) -> None:
             "gremlins.stages.github_open_pull_request.extract_gh_url",
             return_value=PR_URL,
         ),
-        patch(
-            "gremlins.stages.github_open_pull_request._get_pr_branch",
-            return_value=PR_BRANCH,
-        ),
-        patch("gremlins.executor.state.StateData.append_artifact"),
         patch("gremlins.stages.github_open_pull_request.run_agent", _fake_run_agent),
     ):
         asyncio.run(stage.run(state))
@@ -271,7 +227,7 @@ def test_explicit_base_ref_used_when_no_prior_pr(tmp_path: pathlib.Path) -> None
     state = build_state(
         data=StateData(gremlin_id="test-gr", base_ref_name="main"),
         client=client,
-        session_dir=tmp_path,
+        session_dir=tmp_path / "artifacts",
     )
     prompts_seen: list[str] = []
 
@@ -280,16 +236,10 @@ def test_explicit_base_ref_used_when_no_prior_pr(tmp_path: pathlib.Path) -> None
         return type("R", (), {"events": [], "text_result": ""})()
 
     with (
-        patch("gremlins.executor.state.StateData.last_pr_branch", return_value=None),
         patch(
             "gremlins.stages.github_open_pull_request.extract_gh_url",
             return_value=PR_URL,
         ),
-        patch(
-            "gremlins.stages.github_open_pull_request._get_pr_branch",
-            return_value=PR_BRANCH,
-        ),
-        patch("gremlins.executor.state.StateData.append_artifact"),
         patch("gremlins.stages.github_open_pull_request.run_agent", _fake_run_agent),
     ):
         asyncio.run(stage.run(state))
@@ -297,13 +247,13 @@ def test_explicit_base_ref_used_when_no_prior_pr(tmp_path: pathlib.Path) -> None
 
 
 def test_last_pr_branch_takes_priority_over_base_ref(tmp_path: pathlib.Path) -> None:
-    """last_pr_branch takes priority over stage-level base_ref when stacking."""
+    """Prior PR branch from registry takes priority over stage-level base_ref when stacking."""
     stage = GitHubOpenPullRequest("open-pr", [], {}, base_ref="feature-base")
     client = FakeClaudeClient(fixtures={"github-open-pull-request": MINIMAL_EVENTS})
     state = build_state(
         data=StateData(gremlin_id="test-gr", base_ref_name="main"),
         client=client,
-        session_dir=tmp_path,
+        session_dir=tmp_path / "artifacts",
     )
     prompts_seen: list[str] = []
 
@@ -311,20 +261,20 @@ def test_last_pr_branch_takes_priority_over_base_ref(tmp_path: pathlib.Path) -> 
         prompts_seen.append(prompt)
         return type("R", (), {"events": [], "text_result": ""})()
 
+    state.artifacts.bind("pr", Uri.parse("gh://pr/1"))
+    mock_resolver = MagicMock()
+    mock_resolver.read.return_value = PrInfo(
+        url="https://github.com/o/r/pull/1",
+        number=1,
+        branch="gremlin/child-1",
+    )
+    state.artifacts._resolvers["gh"] = mock_resolver
+
     with (
-        patch(
-            "gremlins.executor.state.StateData.last_pr_branch",
-            return_value="gremlin/child-1",
-        ),
         patch(
             "gremlins.stages.github_open_pull_request.extract_gh_url",
             return_value=PR_URL,
         ),
-        patch(
-            "gremlins.stages.github_open_pull_request._get_pr_branch",
-            return_value=PR_BRANCH,
-        ),
-        patch("gremlins.executor.state.StateData.append_artifact"),
         patch("gremlins.stages.github_open_pull_request.run_agent", _fake_run_agent),
     ):
         asyncio.run(stage.run(state))
@@ -352,11 +302,6 @@ def test_loop_iteration_gt1_adds_iter_suffix_instruction(
             "gremlins.stages.github_open_pull_request.extract_gh_url",
             return_value=PR_URL,
         ),
-        patch(
-            "gremlins.stages.github_open_pull_request._get_pr_branch",
-            return_value=PR_BRANCH,
-        ),
-        patch("gremlins.executor.state.StateData.append_artifact"),
         patch("gremlins.stages.github_open_pull_request.run_agent", _fake_run_agent),
     ):
         asyncio.run(stage.run(state))
@@ -379,11 +324,6 @@ def test_loop_iteration_1_no_iter_suffix(tmp_path: pathlib.Path) -> None:
             "gremlins.stages.github_open_pull_request.extract_gh_url",
             return_value=PR_URL,
         ),
-        patch(
-            "gremlins.stages.github_open_pull_request._get_pr_branch",
-            return_value=PR_BRANCH,
-        ),
-        patch("gremlins.executor.state.StateData.append_artifact"),
         patch("gremlins.stages.github_open_pull_request.run_agent", _fake_run_agent),
     ):
         asyncio.run(stage.run(state))
@@ -392,26 +332,11 @@ def test_loop_iteration_1_no_iter_suffix(tmp_path: pathlib.Path) -> None:
 
 
 def test_record_child_pr_appends_pr_artifact(tmp_path: pathlib.Path) -> None:
-    """After opening a PR, a pr artifact with url and branch is appended."""
+    """After opening a PR, pr is bound in the registry."""
     stage, state = _make_state_with_gr(tmp_path, base_ref_name="main")
-    artifact_calls: list[tuple] = []
-    with (
-        patch(
-            "gremlins.stages.github_open_pull_request.extract_gh_url",
-            return_value="https://github.com/owner/repo/pull/314",
-        ),
-        patch(
-            "gremlins.stages.github_open_pull_request._get_pr_branch",
-            return_value="issue-42-some-slug",
-        ),
-        patch(
-            "gremlins.executor.state.StateData.append_artifact",
-            side_effect=lambda artifact: artifact_calls.append(artifact),
-        ),
+    with patch(
+        "gremlins.stages.github_open_pull_request.extract_gh_url",
+        return_value="https://github.com/owner/repo/pull/314",
     ):
         asyncio.run(stage.run(state))
-    assert artifact_calls, "append_artifact should be called with PR info"
-    artifact = artifact_calls[0]
-    assert artifact["type"] == "pr"
-    assert artifact["url"] == "https://github.com/owner/repo/pull/314"
-    assert artifact["branch"] == "issue-42-some-slug"
+    assert state.artifacts.resolve("pr") == Uri.parse("gh://pr/314")

@@ -22,10 +22,11 @@ def _fake_client() -> Any:
 
 
 def _loop_state(tmp_path: Any) -> RuntimeState:
+    (tmp_path / "artifacts").mkdir(exist_ok=True)
     return build_state(
         data=StateData(),
         client=_fake_client(),
-        session_dir=tmp_path,
+        session_dir=tmp_path / "artifacts",
         worktree=tmp_path,
     )
 
@@ -145,10 +146,11 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
     async def fix() -> Done:
         return Done()
 
+    (tmp_path / "artifacts").mkdir(exist_ok=True)
     loop_state = build_state(
         data=StateData(gremlin_id=gremlin_id, attempt=attempt),
         client=_fake_client(),
-        session_dir=tmp_path,
+        session_dir=tmp_path / "artifacts",
         worktree=tmp_path,
     )
     loop = LoopStage("loop", body_runners=[check, fix], max_iterations=2)
@@ -232,11 +234,12 @@ def test_on_iteration_start_called_each_iteration(tmp_path):
 
 
 def _run_cmd_stage(tmp_path: Any, cmds: list[str]) -> tuple[Cmd, RuntimeState]:
+    (tmp_path / "artifacts").mkdir(exist_ok=True)
     stage = Cmd("cmd", [], {"cmds": cmds})
     state = build_state(
         data=StateData(),
         client=_fake_client(),
-        session_dir=tmp_path,
+        session_dir=tmp_path / "artifacts",
         worktree=tmp_path,
     )
     return stage, state
@@ -258,7 +261,7 @@ def test_run_cmd_failure_writes_log(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, ["echo boom >&2; false"])
     outcome = asyncio.run(stage.run(state))
     assert isinstance(outcome, NeedsFix)
-    log = tmp_path / "cmd.log"
+    log = tmp_path / "artifacts" / "cmd.log"
     assert log.exists()
 
 
@@ -266,7 +269,7 @@ def test_run_cmd_empty_cmds_is_noop(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, [])
     outcome = asyncio.run(stage.run(state))
     assert outcome == Done()
-    assert not (tmp_path / "cmd.log").exists()
+    assert not (tmp_path / "artifacts" / "cmd.log").exists()
 
 
 def test_run_cmd_output_in_needs_fix(tmp_path):
@@ -277,14 +280,18 @@ def test_run_cmd_output_in_needs_fix(tmp_path):
 
 
 def test_run_cmd_log_path_interpolation(tmp_path):
+    (tmp_path / "artifacts").mkdir(exist_ok=True)
     stage = Cmd("cmd", [], {"cmds": ["true"], "log_path": "run-{n}.log"})
     state = build_state(
-        data=StateData(), client=_fake_client(), session_dir=tmp_path, worktree=tmp_path
+        data=StateData(),
+        client=_fake_client(),
+        session_dir=tmp_path / "artifacts",
+        worktree=tmp_path,
     )
     asyncio.run(stage.run(state))
-    assert (tmp_path / "run-1.log").exists()
+    assert (tmp_path / "artifacts" / "run-1.log").exists()
     asyncio.run(stage.run(state))
-    assert (tmp_path / "run-2.log").exists()
+    assert (tmp_path / "artifacts" / "run-2.log").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -292,13 +299,27 @@ def test_run_cmd_log_path_interpolation(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _loop_state_with_gr(tmp_path: Any, gremlin_id: str) -> RuntimeState:
-    return build_state(
+def _loop_state_with_gr(
+    tmp_path: Any, gremlin_id: str, *, pr_branch: str | None = None
+) -> RuntimeState:
+    (tmp_path / "artifacts").mkdir(exist_ok=True)
+    state = build_state(
         data=StateData(gremlin_id=gremlin_id),
         client=_fake_client(),
-        session_dir=tmp_path,
+        session_dir=tmp_path / "artifacts",
         worktree=tmp_path,
     )
+    if pr_branch is not None:
+        from gremlins.artifacts.schemes import PrInfo
+        from gremlins.artifacts.uri import Uri
+
+        state.artifacts.bind("pr", Uri.parse("gh://pr/1"))
+        state.artifacts._resolvers["gh"].read = (  # type: ignore[attr-defined]
+            lambda uri, _b=pr_branch: PrInfo(
+                url="https://github.com/x/r/pull/1", number=1, branch=_b
+            )
+        )
+    return state
 
 
 def test_pr_stack_detaches_to_prior_pr_branch(tmp_path, make_state_dir, monkeypatch):
@@ -339,7 +360,9 @@ def test_pr_stack_detaches_to_prior_pr_branch(tmp_path, make_state_dir, monkeypa
         max_iterations=1,
         on_iteration_start=detach_to_pr_base,
     )
-    asyncio.run(loop.run(_loop_state_with_gr(tmp_path, gremlin_id)))
+    asyncio.run(
+        loop.run(_loop_state_with_gr(tmp_path, gremlin_id, pr_branch="feat-abc"))
+    )
 
     assert detach_calls == ["feat-abc"]
 
@@ -424,10 +447,11 @@ def test_loop_patches_loop_iteration_to_state(tmp_path, make_state_dir):
         seen_iterations.append(int(data.get("loop_iteration") or 0))
         return NeedsFix("keep going")
 
+    (tmp_path / "artifacts").mkdir(exist_ok=True)
     loop_state = build_state(
         data=StateData(gremlin_id=gremlin_id),
         client=_fake_client(),
-        session_dir=tmp_path,
+        session_dir=tmp_path / "artifacts",
         worktree=tmp_path,
     )
     loop = LoopStage("loop", body_runners=[runner], max_iterations=3)
@@ -451,20 +475,23 @@ def test_pr_stack_iter2_detaches_to_iter1_branch(tmp_path, make_state_dir, monke
         lambda branch, cwd=None: detach_calls.append(branch),
     )
 
+    state = _loop_state_with_gr(tmp_path, gremlin_id)
     count = 0
 
     async def runner() -> Done | NeedsFix:
         nonlocal count
         count += 1
         if count == 1:
-            from gremlins.executor.state import StateData
+            from gremlins.artifacts.schemes import PrInfo
+            from gremlins.artifacts.uri import Uri
 
-            StateData.load(gremlin_id).append_artifact(
-                {
-                    "type": "pr",
-                    "url": "https://github.com/x/r/pull/1",
-                    "branch": "feat-iter1",
-                },
+            state.artifacts.bind("pr", Uri.parse("gh://pr/1"))
+            state.artifacts._resolvers["gh"].read = (  # type: ignore[attr-defined]
+                lambda uri: PrInfo(
+                    url="https://github.com/x/r/pull/1",
+                    number=1,
+                    branch="feat-iter1",
+                )
             )
             return NeedsFix("next-plan")
         return Done()
@@ -475,6 +502,6 @@ def test_pr_stack_iter2_detaches_to_iter1_branch(tmp_path, make_state_dir, monke
         max_iterations=2,
         on_iteration_start=detach_to_pr_base,
     )
-    asyncio.run(loop.run(_loop_state_with_gr(tmp_path, gremlin_id)))
+    asyncio.run(loop.run(state))
 
     assert detach_calls == ["feat-iter1"]

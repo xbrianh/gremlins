@@ -216,11 +216,17 @@ def _make_gh_subprocess(
         # gh pr diff
         if sub == "pr" and "diff" in cmd:
             return subprocess.CompletedProcess(cmd, 0, stdout=pr_diff, stderr="")
-        # gh pr view (github_open_pull_request._get_pr_branch)
+        # gh pr view --json url,number,headRefName (GitHubResolver.read for pr/<n>)
         if sub == "pr" and "view" in cmd and "--json" in cmd:
-            return subprocess.CompletedProcess(
-                cmd, 0, stdout="issue-42-impl-slug\n", stderr=""
+            num = cmd[3] if len(cmd) > 3 else "101"
+            data = json.dumps(
+                {
+                    "url": f"https://github.com/owner/repo/pull/{num}",
+                    "number": int(num),
+                    "headRefName": "issue-42-impl-slug",
+                }
             )
+            return subprocess.CompletedProcess(cmd, 0, stdout=data, stderr="")
         # gh api (github-wait-copilot)
         if sub == "api":
             return subprocess.CompletedProcess(
@@ -897,18 +903,20 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
             return subprocess.CompletedProcess(
                 cmd, 0, stdout="https://github.com/owner/repo/issues/42\n", stderr=""
             )
+        if sub == "pr" and "view" in cmd and "--json" in cmd:
+            num = cmd[3] if len(cmd) > 3 else "101"
+            data = json.dumps(
+                {
+                    "url": f"https://github.com/owner/repo/pull/{num}",
+                    "number": int(num),
+                    "headRefName": "issue-42-impl-slug",
+                }
+            )
+            return subprocess.CompletedProcess(cmd, 0, stdout=data, stderr="")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     async def fake_gh_run_async(cmd, *args, **kwargs):
-        prog = cmd[0] if cmd else ""
-        if prog != "gh":
-            return fake_gh_run(cmd, *args, **kwargs)
-        sub = cmd[1] if len(cmd) > 1 else ""
-        if sub == "issue" and "create" in cmd:
-            return subprocess.CompletedProcess(
-                cmd, 0, stdout="https://github.com/owner/repo/issues/42\n", stderr=""
-            )
-        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return fake_gh_run(cmd, *args, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", fake_gh_run)
     monkeypatch.setattr("gremlins.stages.plan.proc.run_async", fake_gh_run_async)
@@ -1042,23 +1050,21 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
     gh_review_called = []
+
+    def _gh_review_run(self, pipe):
+        registry_path = tmp_path / "registry.json"
+        pr_url = self.pr_url
+        if not pr_url and registry_path.exists():
+            reg = json.loads(registry_path.read_text())
+            uri_str = reg.get("pr") or ""
+            if uri_str:
+                n = uri_str.removeprefix("gh://pr/")
+                pr_url = f"https://github.com/owner/repo/pull/{n}"
+        gh_review_called.append(pr_url or "")
+
     monkeypatch.setattr(
         "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        _async(
-            lambda self, pipe: gh_review_called.append(
-                self.pr_url
-                or next(
-                    (
-                        a["url"]
-                        for a in reversed(
-                            json.loads(state_file.read_text()).get("artifacts", [])
-                        )
-                        if a.get("type") == "pr"
-                    ),
-                    "",
-                )
-            )
-        ),
+        _async(_gh_review_run),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
@@ -1093,13 +1099,10 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
     assert "github-open-pull-request" in labels
 
     assert gh_review_called == ["https://github.com/owner/repo/pull/101"]
-    # Verify GitHubOpenPullRequest wrote pr artifact to state.json
-    state = json.loads(state_file.read_text())
-    pr_artifacts = [a for a in state.get("artifacts", []) if a.get("type") == "pr"]
-    assert (
-        pr_artifacts
-        and pr_artifacts[-1].get("url") == "https://github.com/owner/repo/pull/101"
-    )
+    # Verify GitHubOpenPullRequest wrote pr to registry.json
+    registry_path = tmp_path / "registry.json"
+    assert registry_path.exists(), "registry.json should have been written"
+    assert json.loads(registry_path.read_text()).get("pr") == "gh://pr/101"
 
 
 # ---------------------------------------------------------------------------
@@ -1172,13 +1175,10 @@ def test_github_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
 
     assert captured_stage["state"].repo == "owner/repo"
     assert captured_stage["state"].session_dir == session_dir
-    # pr artifact written to state.json by GitHubOpenPullRequest; pr_num derived from it in run()
-    state = json.loads(state_file.read_text())
-    pr_artifacts = [a for a in state.get("artifacts", []) if a.get("type") == "pr"]
-    assert (
-        pr_artifacts
-        and pr_artifacts[-1].get("url") == "https://github.com/owner/repo/pull/77"
-    )
+    # pr is written to registry.json by GitHubOpenPullRequest
+    registry_path = tmp_path / "registry.json"
+    assert registry_path.exists(), "registry.json should have been written"
+    assert json.loads(registry_path.read_text()).get("pr") == "gh://pr/77"
 
 
 # ---------------------------------------------------------------------------
@@ -1251,13 +1251,10 @@ def test_github_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
     stage = captured_stage["stage"]
     assert stage.client.model == "claude-opus-4-7"
     assert captured_stage["state"].session_dir == session_dir
-    # pr artifact written to state.json by GitHubOpenPullRequest; read from state in GitHubWaitCI.run()
-    state = json.loads(state_file.read_text())
-    pr_artifacts = [a for a in state.get("artifacts", []) if a.get("type") == "pr"]
-    assert (
-        pr_artifacts
-        and pr_artifacts[-1].get("url") == "https://github.com/owner/repo/pull/77"
-    )
+    # pr is written to registry.json by GitHubOpenPullRequest
+    registry_path = tmp_path / "registry.json"
+    assert registry_path.exists(), "registry.json should have been written"
+    assert json.loads(registry_path.read_text()).get("pr") == "gh://pr/77"
 
 
 def test_github_wait_ci_stage_ordering(tmp_path, monkeypatch):

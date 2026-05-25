@@ -42,19 +42,17 @@ def test_gremlin_run_in_process(project_dir, pipeline_yaml, sandbox):
     gremlin_id = "smoke-abc123"
     sd = sandbox.state / gremlin_id
 
-    gremlin = Gremlin.build(
-        gremlin_id=gremlin_id,
-        state_dir=sd,
-        project_dir=project_dir,
-        pipeline_ref=str(pipeline_yaml),
-        project_root=str(project_dir),
-    )
-
     saved_cwd = os.getcwd()
     worktree = None
     rc = 1
     try:
-        gremlin.initialize_runtime()
+        gremlin = Gremlin.initialize_with_runtime(
+            gremlin_id=gremlin_id,
+            state_dir=sd,
+            project_dir=project_dir,
+            pipeline_ref=str(pipeline_yaml),
+            project_root=str(project_dir),
+        )
         worktree = gremlin.worktree_dir
         asyncio.run(gremlin.run())
         rc = 0

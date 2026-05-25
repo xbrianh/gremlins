@@ -342,12 +342,14 @@ def _make_address_code_stage(
 
 
 def test_address_code_stage_calls_client_with_review_content(tmp_path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
     review_text = "# Detail Review\n\n## Findings\nLooks good.\n"
-    (tmp_path / "review-code-sonnet.md").write_text(review_text)
+    (session_dir / "review-code-sonnet.md").write_text(review_text)
 
     client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
-    stage = _make_address_code_stage(client, tmp_path)
-    state = _make_state(client, tmp_path)
+    stage = _make_address_code_stage(client, session_dir)
+    state = _make_state(client, session_dir)
     state.artifacts.bind(
         "review-code", Uri.parse("file://session/review-code-sonnet.md")
     )
@@ -389,13 +391,15 @@ def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
     client = ReviewCreatingClient(fixtures={"review-code-fake": MINIMAL_EVENTS})
     worktree = tmp_path / "wt"
     worktree.mkdir()
-    stage = _make_review_code_stage(client, tmp_path)
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    stage = _make_review_code_stage(client, session_dir)
     state = build_state(
         data=StateData(),
         client=client,
-        session_dir=tmp_path,
+        session_dir=session_dir,
         worktree=worktree,
-        artifacts=ArtifactRegistry(tmp_path),
+        artifacts=ArtifactRegistry(session_dir),
     )
     asyncio.run(stage.run(state))
     assert client.calls[0].cwd == worktree
@@ -411,13 +415,17 @@ def test_review_code_stage_includes_style_from_prompts(tmp_path):
         ],
         {},
     )
-    state = _make_state(client, tmp_path)
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    state = _make_state(client, session_dir)
     asyncio.run(stage.run(state))
     assert "Be good." in client.calls[0].prompt
 
 
 def test_address_code_stage_includes_style_from_prompts(tmp_path):
-    (tmp_path / "review-code-sonnet.md").write_text(
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    (session_dir / "review-code-sonnet.md").write_text(
         "# Detail Review\n\n## Findings\nNone.\n"
     )
     client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
@@ -430,7 +438,7 @@ def test_address_code_stage_includes_style_from_prompts(tmp_path):
         {},
         in_map={"text": "review-code"},
     )
-    state = _make_state(client, tmp_path)
+    state = _make_state(client, session_dir)
     state.artifacts.bind(
         "review-code", Uri.parse("file://session/review-code-sonnet.md")
     )
@@ -441,9 +449,11 @@ def test_address_code_stage_includes_style_from_prompts(tmp_path):
 def test_review_code_stage_writes_stage_to_state(tmp_path, make_state_dir):
     gremlin_id = "test-gr-id"
     state_dir = make_state_dir(gremlin_id)
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
     client = ReviewCreatingClient(fixtures={"review-code-fake": MINIMAL_EVENTS})
-    stage = _make_review_code_stage(client, tmp_path, gremlin_id=gremlin_id)
-    state = _make_state(client, tmp_path, gremlin_id=gremlin_id)
+    stage = _make_review_code_stage(client, session_dir, gremlin_id=gremlin_id)
+    state = _make_state(client, session_dir, gremlin_id=gremlin_id)
     asyncio.run(stage.run(state))
     data = json.loads((state_dir / "state.json").read_text())
     assert data.get("stage") == "review-code"
@@ -452,8 +462,10 @@ def test_review_code_stage_writes_stage_to_state(tmp_path, make_state_dir):
 def test_address_code_stage_raises_on_missing_review_files(tmp_path, make_state_dir):
     gremlin_id = "test-gr-id"
     make_state_dir(gremlin_id)
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
     client = FakeClaudeClient(fixtures={})
-    stage = _make_address_code_stage(client, tmp_path, gremlin_id=gremlin_id)
-    state = _make_state(client, tmp_path, gremlin_id=gremlin_id)
+    stage = _make_address_code_stage(client, session_dir, gremlin_id=gremlin_id)
+    state = _make_state(client, session_dir, gremlin_id=gremlin_id)
     with pytest.raises(MissingArtifact):
         asyncio.run(stage.run(state))

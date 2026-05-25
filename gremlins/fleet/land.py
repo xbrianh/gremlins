@@ -13,7 +13,8 @@ from typing import Any, cast
 import gremlins.fleet.constants as _constants
 import gremlins.utils.git as _git
 from gremlins import paths
-from gremlins.executor.state import StateData, landable_shape
+from gremlins.artifacts.registry import ArtifactRegistry, MissingArtifact
+from gremlins.executor.state import landable_shape, resolve_session_dir
 from gremlins.fleet.resolve import resolve_gremlin
 from gremlins.fleet.state import (
     liveness_of_state_file,
@@ -750,13 +751,19 @@ def _land_gh(
     gremlin_id: str, wdir: str, state: dict[str, Any], force: bool = False
 ) -> bool:
     """Merge a gh gremlin's PR and clean up."""
-    pr_url = StateData.load(gremlin_id).read_pr_url()
-    if not pr_url:
-        print(f"error: no pr_url recorded for {gremlin_id}")
-        return False
-
     project_root = _resolve_landing_cwd(state)
     cwd = project_root if project_root and os.path.isdir(project_root) else None
+
+    session_dir = resolve_session_dir(gremlin_id)
+    registry = ArtifactRegistry(
+        session_dir=session_dir,
+        cwd=pathlib.Path(cwd) if cwd else None,
+    )
+    try:
+        pr_url = registry.read("pr").url
+    except MissingArtifact:
+        print(f"error: no PR recorded for {gremlin_id}")
+        return False
 
     print(f"Checking PR: {pr_url}")
     r = proc.run(
