@@ -78,6 +78,17 @@ class ArtifactRegistry:
     def resolver(self, scheme: str) -> SchemeResolver:
         return self._resolvers[scheme]
 
+    def unbind(self, key: str) -> None:
+        if key not in self._bindings:
+            return
+        del self._bindings[key]
+        path = self.registry_path
+        data = {k: str(v) for k, v in self._bindings.items()}
+        tmp = path.with_name(path.name + f".{os.getpid()}.{secrets.token_hex(4)}.tmp")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(tmp, path)
+
     def bind_git_commit_range(self, key: str, base_sha: str) -> None:
         sha = git_utils.head_sha(cwd=self._cwd)
         if not sha:

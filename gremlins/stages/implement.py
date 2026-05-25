@@ -80,7 +80,7 @@ class Implement(Stage):
         spec_text = _read_spec(state.session_dir)
         plan_text = (state.session_dir / "plan.md").read_text(encoding="utf-8")
 
-        if state.data.issue_num:
+        if state.artifacts.produced("issue"):
             plan_source_label = "from the GitHub issue"
             plan_location_note = (
                 "The plan lives in the GitHub issue and reviews go to PR comments; "
@@ -94,8 +94,13 @@ class Implement(Stage):
             )
 
         cwd_arg = str(state.worktree) if state.worktree is not None else None
+        _base_sha = (
+            state.artifacts.resolve("base_sha").path.removeprefix("commit/")
+            if state.artifacts.produced("base_sha")
+            else ""
+        )
         pre_head = proc.run_or_raise(
-            ["git", "rev-parse", "--verify", state.data.base_ref_sha], cwd=cwd_arg
+            ["git", "rev-parse", "--verify", _base_sha], cwd=cwd_arg
         )
         pre = PreImplState(head=pre_head)
 

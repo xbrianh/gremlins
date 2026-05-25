@@ -11,6 +11,7 @@ import pytest
 
 import gremlins.executor.state as state_mod
 from gremlins.artifacts.registry import ArtifactRegistry
+from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData, build_state
@@ -376,7 +377,7 @@ def test_base_ref_from_state(tmp_path, monkeypatch, sandbox):
     monkeypatch.setattr(Agent, "run", fake_agent_run)
 
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
-    state.data.base_ref_name = "deadbeef1234"
+    state.artifacts.bind("base_ref", Uri.parse("git://ref/deadbeef1234"))
     asyncio.run(h.run(state))
 
     assert captured_base == ["deadbeef1234"]

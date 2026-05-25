@@ -10,6 +10,7 @@ import shutil
 import sys
 from typing import Any
 
+from gremlins.artifacts.uri import Uri
 from gremlins.errors import die
 from gremlins.executor.state import State
 from gremlins.stages.agent import Agent
@@ -74,7 +75,11 @@ class Plan(Stage):
         plan_md = state.session_dir / "plan.md"
 
         if plan_md.exists() and plan_md.stat().st_size > 0:
-            label = f" (issue #{state.data.issue_num})" if state.data.issue_num else ""
+            if state.artifacts.produced("issue"):
+                _n = state.artifacts.resolve("issue").path.removeprefix("issue/")
+                label = f" (issue #{_n})"
+            else:
+                label = ""
             logger.info("[1/8] plan resumed from snapshot: %s%s", plan_md, label)
             return Done()
 
@@ -91,7 +96,11 @@ class Plan(Stage):
 
     async def _run_agent(self, plan_md: pathlib.Path, state: State) -> None:
         if state.repo:
-            base_ref_name = state.data.base_ref_name
+            base_ref_name = (
+                state.artifacts.resolve("base_ref").path.removeprefix("ref/")
+                if state.artifacts.produced("base_ref")
+                else ""
+            )
             plan_prompt = (
                 "\n\n".join(self.prompts)
                 .rstrip()
@@ -116,7 +125,10 @@ class Plan(Stage):
             )
             issue_num = issue_url.split("/")[-1]
             logger.info("issue: %s", issue_url)
-            state.record_state_field(issue_url=issue_url, issue_num=issue_num)
+            if issue_num:
+                state.artifacts.bind(
+                    "issue", Uri.parse(f"gh://issue/{issue_num}"), override=True
+                )
             issue_body = _fetch_issue_body(issue_num, state.repo)
             plan_md.write_text(issue_body, encoding="utf-8")
         else:
@@ -150,7 +162,9 @@ class Plan(Stage):
         issue_url, issue_title = await _post_file_as_github_issue(path, state)
         issue_num = issue_url.split("/")[-1]
         shutil.copyfile(src, plan_md)
-        state.record_state_field(issue_url=issue_url, issue_num=issue_num)
+        state.artifacts.bind(
+            "issue", Uri.parse(f"gh://issue/{issue_num}"), override=True
+        )
         self._update_description(plan_md, issue_title=issue_title, state=state)
 
     def _resolve_issue_source(
@@ -183,20 +197,19 @@ class Plan(Stage):
             sys.stderr.write(f"error: --plan: issue {ref} has an empty body\n")
             sys.stderr.flush()
             sys.exit(1)
-        resolved_url = issue_data.get("url") or ""
         resolved_num = str(issue_data.get("number") or "")
         issue_title = (issue_data.get("title") or "")[:60]
         plan_md.write_text(issue_body + "\n", encoding="utf-8")
-        if target_repo == pr_repo:
-            issue_url = resolved_url
-            issue_num = resolved_num
-        else:
-            issue_url = ""
-            issue_num = ""
+        issue_num = resolved_num if target_repo == pr_repo else ""
         logger.info(
             "[1/8] plan supplied via --plan (issue %s#%s)", target_repo, issue_ref
         )
-        state.record_state_field(issue_url=issue_url, issue_num=issue_num)
+        if issue_num:
+            state.artifacts.bind(
+                "issue", Uri.parse(f"gh://issue/{issue_num}"), override=True
+            )
+        else:
+            state.artifacts.unbind("issue")
         self._update_description(plan_md, issue_title=issue_title, state=state)
 
     def _update_description(

@@ -47,13 +47,20 @@ class GitHubOpenPullRequest(Stage):
         self.base_ref = base_ref
 
     async def run(self, state: State) -> Outcome:
-        issue_url = state.data.issue_url
         prev_branch = (
             state.artifacts.read("pr").branch if state.artifacts.produced("pr") else ""
         )
-        base_ref = prev_branch or self.base_ref or state.data.base_ref_name or "main"
-
-        issue_num = issue_url.split("/")[-1] if issue_url else ""
+        _default_base = (
+            state.artifacts.resolve("base_ref").path.removeprefix("ref/")
+            if state.artifacts.produced("base_ref")
+            else "main"
+        )
+        base_ref = prev_branch or self.base_ref or _default_base
+        issue_num = (
+            state.artifacts.resolve("issue").path.removeprefix("issue/")
+            if state.artifacts.produced("issue")
+            else ""
+        )
 
         if issue_num:
             closes_clause = f"Include 'Closes #{issue_num}' in the PR body."
