@@ -93,9 +93,11 @@ path is pre-loaded so resumed runs see prior bindings.
 
 ## Rehydration: base_ref_sha on resume
 
-`base_ref_sha` is bound at launch time as `git://commit/<sha>` under the key
-`"base_sha"`.  `run.py` reads this from `registry.json` (not `state.json`) before
-calling `Gremlin.initialize_with_runtime()` so the worktree can be created on
-first start.  On resume the worktree already exists (`workdir` is set in
-`state.json`), so `base_ref_sha` is not re-used by `setup_workdir`.  The binding
-in `registry.json` is the authoritative source.
+`base_ref_sha` is bound at launch time as `git://commit/<revspec>` under the key
+`"base_sha"`.  The value is a git revspec — either a 40-char SHA (normal branch
+launch) or a symbolic ref like `pull/N/head` (PR-mode launch); both are accepted
+by git commands that consume it.  `run.py` reads this from `registry.json` (not
+`state.json`) before calling `Gremlin.initialize_with_runtime()` so the worktree
+can be created on first start.  On resume the worktree already exists (`workdir`
+is set in `state.json`), so `base_ref_sha` is not re-used by `setup_workdir`.
+The binding in `registry.json` is the authoritative source.

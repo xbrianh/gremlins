@@ -125,7 +125,8 @@ class Plan(Stage):
             )
             issue_num = issue_url.split("/")[-1]
             logger.info("issue: %s", issue_url)
-            state.artifacts.bind("issue", Uri.parse(f"gh://issue/{issue_num}"))
+            if issue_num:
+                state.artifacts.bind("issue", Uri.parse(f"gh://issue/{issue_num}"), override=True)
             issue_body = _fetch_issue_body(issue_num, state.repo)
             plan_md.write_text(issue_body, encoding="utf-8")
         else:
@@ -201,6 +202,8 @@ class Plan(Stage):
         )
         if issue_num:
             state.artifacts.bind("issue", Uri.parse(f"gh://issue/{issue_num}"), override=True)
+        else:
+            state.artifacts.unbind("issue")
         self._update_description(plan_md, issue_title=issue_title, state=state)
 
     def _update_description(
