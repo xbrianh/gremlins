@@ -13,7 +13,7 @@ import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.pipeline import Pipeline
-from gremlins.stages.github_open_pull_request import GitHubOpenPullRequest
+from gremlins.stages.github_open_pull_request import GitHubDraftPullRequest
 from gremlins.utils.git import HeadAdvanced
 
 os.environ.setdefault("GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME", "main")
@@ -242,7 +242,7 @@ def gh_pipeline() -> Pipeline:
     return Pipeline(
         name="test",
         path=pathlib.Path("."),
-        stages=[GitHubOpenPullRequest("github-open-pull-request", [], {})],
+        stages=[GitHubDraftPullRequest("github-draft-pull-request", [], {})],
     )
 
 
