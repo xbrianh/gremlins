@@ -135,7 +135,7 @@ async def _collect_failure_output(failed: list[dict[str, Any]]) -> str:
 class _CIPollStage(Stage):
     """Polls CI for one attempt; returns Done on pass, NeedsFix on failure."""
 
-    type = ""
+    type = "_ci_poll"
 
     def __init__(
         self,
@@ -209,7 +209,7 @@ class _CIPollStage(Stage):
 class _CIFixStage(Stage):
     """Runs the CI-fix agent for the current attempt."""
 
-    type = ""
+    type = "_ci_fix"
 
     def __init__(
         self,

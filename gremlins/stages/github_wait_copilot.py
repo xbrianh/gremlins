@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 class _CopilotPollStage(Stage):
     """Single poll of the copilot review API; returns Done when review is posted."""
 
-    type = ""
+    type = "_copilot_poll"
 
     def __init__(
         self,

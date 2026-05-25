@@ -16,7 +16,7 @@ stages:
         - "ruff format ."
         - "ruff check --fix ."
         - "git add -A"
-        - "git commit -m 'normalize' || true"
+        - "git diff --cached --quiet || git commit -m 'normalize'"
     out:
       normalize-commits: git://range
   - { type: verify,    options: { cmds: ["make check", "make test"] }, prompt: verify }

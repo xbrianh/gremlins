@@ -53,7 +53,6 @@ def test_green_on_first_attempt(tmp_path):
     stage, state = _make_stage(tmp_path, cmds=["true"])
     asyncio.run(stage.run(state))
     assert len(state.client.calls) == 0
-    assert (tmp_path / "verify-attempt-1.log").exists()
 
 
 def test_no_op_when_cmds_empty(tmp_path):
@@ -69,7 +68,6 @@ def test_single_cmd(tmp_path):
     stage, state = _make_stage(tmp_path, cmds=["true"])
     asyncio.run(stage.run(state))
     assert len(state.client.calls) == 0
-    assert (tmp_path / "verify-attempt-1.log").exists()
 
 
 def test_fix_then_green(tmp_path):
@@ -93,8 +91,7 @@ def test_fix_then_green(tmp_path):
 
     assert len(state.client.calls) == 1
     assert state.client.calls[0].label == "verify-fix-1"
-    assert (tmp_path / "verify-attempt-1.log").exists()
-    assert (tmp_path / "verify-attempt-2.log").exists()
+    assert (tmp_path / "exec-cmd.log").exists()
     assert (tmp_path / "stream-verify-1.jsonl").exists()
 
 
@@ -115,9 +112,7 @@ def test_attempts_exhausted_raises(tmp_path, monkeypatch):
         asyncio.run(stage.run(state))
 
     assert len(state.client.calls) == 2
-    assert (tmp_path / "verify-attempt-1.log").exists()
-    assert (tmp_path / "verify-attempt-2.log").exists()
-    assert (tmp_path / "verify-attempt-3.log").exists()
+    assert (tmp_path / "exec-cmd.log").exists()
 
 
 def test_exhaustion_with_max_1(tmp_path):
@@ -127,7 +122,7 @@ def test_exhaustion_with_max_1(tmp_path):
         asyncio.run(stage.run(state))
 
     assert len(state.client.calls) == 0
-    assert (tmp_path / "verify-attempt-1.log").exists()
+    assert (tmp_path / "exec-cmd.log").exists()
 
 
 def test_both_cmds_in_fix_prompt(tmp_path, monkeypatch):
@@ -154,13 +149,13 @@ def test_both_cmds_in_fix_prompt(tmp_path, monkeypatch):
 
 
 def test_log_file_captures_output(tmp_path):
-    stage, state = _make_stage(tmp_path, cmds=["echo hello_check", "echo hello_test"])
-    asyncio.run(stage.run(state))
+    stage, state = _make_stage(tmp_path, cmds=["echo hello_output; false"], max_attempts=1)
+    with pytest.raises(Bail):
+        asyncio.run(stage.run(state))
 
-    log = tmp_path / "verify-attempt-1.log"
+    log = tmp_path / "exec-cmd.log"
     assert log.exists()
-    content = log.read_text()
-    assert "hello_check" in content or "hello_test" in content
+    assert "hello_output" in log.read_text()
 
 
 def test_no_pr_opened_on_exhaustion(tmp_path, monkeypatch):
@@ -275,7 +270,7 @@ def _make_fix_state(tmp_path: Any, client: Any = None) -> RuntimeState:
 
 
 def test_verify_fix_reads_latest_log_and_runs_agent(tmp_path):
-    (tmp_path / "verify-attempt-1.log").write_text("error output\n", encoding="utf-8")
+    (tmp_path / "exec-cmd.log").write_text("error output\n", encoding="utf-8")
     client = FakeClaudeClient(fixtures={"verify-fix-1": MINIMAL_EVENTS})
     state = _make_fix_state(tmp_path, client)
     stage = VerifyFix(
@@ -299,9 +294,8 @@ def test_verify_fix_returns_done_with_no_log(tmp_path):
 
 
 def test_verify_fix_uses_loop_iteration(tmp_path):
-    # Stale log from a previous run; current iteration is 2.
-    (tmp_path / "verify-attempt-3.log").write_text("stale", encoding="utf-8")
-    (tmp_path / "verify-attempt-2.log").write_text("current error", encoding="utf-8")
+    # loop_iteration controls the agent label; log is always exec-cmd.log.
+    (tmp_path / "exec-cmd.log").write_text("current error", encoding="utf-8")
     client = FakeClaudeClient(fixtures={"verify-fix-2": MINIMAL_EVENTS})
     state = _make_fix_state(tmp_path, client)
     state.data.loop_iteration = 2
