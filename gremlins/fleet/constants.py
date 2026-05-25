@@ -2,11 +2,7 @@
 
 import os
 
-from gremlins import paths as _paths
-
 BG_STALL_SECS = int(os.environ.get("BG_STALL_SECS") or 2700)
-
-STATE_ROOT = str(_paths.state_root())
 
 FMT = "%-15s  %-47s  %-22s  %-28s  %-5s  %-20s  %-7s  %s"
 

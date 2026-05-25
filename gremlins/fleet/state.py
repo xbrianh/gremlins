@@ -176,14 +176,15 @@ def parse_liveness(live: str) -> dict[str, object]:
 
 def iter_state_files() -> Iterator[tuple[str, str, str]]:
     """Yield (gremlin_id, state_file_path, wdir) for every gremlin in STATE_ROOT."""
-    if not os.path.isdir(_constants.STATE_ROOT):
+    state_root = str(paths.state_root())
+    if not os.path.isdir(state_root):
         return
     try:
-        entries = sorted(os.listdir(_constants.STATE_ROOT))
+        entries = sorted(os.listdir(state_root))
     except OSError:
         return
     for name in entries:
-        wdir = os.path.join(_constants.STATE_ROOT, name)
+        wdir = os.path.join(state_root, name)
         sf = os.path.join(wdir, "state.json")
         if os.path.isfile(sf):
             yield name, sf, wdir

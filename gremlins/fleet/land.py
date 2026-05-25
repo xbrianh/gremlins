@@ -10,7 +10,6 @@ import subprocess
 import time
 from typing import Any, cast
 
-import gremlins.fleet.constants as _constants
 import gremlins.utils.git as _git
 from gremlins import paths
 from gremlins.artifacts.registry import ArtifactRegistry, MissingArtifact
@@ -99,7 +98,7 @@ def _resolve_landing_cwd(state: dict[str, Any]) -> str:
             # returning a possibly-detached intermediate ancestor.
             return own_root
         seen.add(pid)
-        parent_sf = os.path.join(_constants.STATE_ROOT, pid, "state.json")
+        parent_sf = os.path.join(str(paths.state_root()), pid, "state.json")
         parent_state = load_state(parent_sf)
         if not parent_state:
             # Unreadable parent state — fall back to own_root rather than

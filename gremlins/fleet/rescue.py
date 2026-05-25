@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 from typing import IO, Any, cast
 
-import gremlins.fleet.constants as _constants
+from gremlins import paths as _paths
 from gremlins.clients.stream import stream_events
 from gremlins.executor.state import StateData
 from gremlins.fleet.constants import (
@@ -68,7 +68,7 @@ def build_rescue_prompt(
         ),
     ]
     parent_state_dir = (
-        os.path.join(_constants.STATE_ROOT, parent_id) if parent_id else ""
+        os.path.join(str(_paths.state_root()), parent_id) if parent_id else ""
     )
 
     context_lines = [
