@@ -124,7 +124,9 @@ def test_unbind_missing_key_is_noop(tmp_path: pathlib.Path) -> None:
     r.unbind("does-not-exist")  # must not raise
 
 
-def test_bind_still_raises_duplicate_after_unbind_rebind(tmp_path: pathlib.Path) -> None:
+def test_bind_still_raises_duplicate_after_unbind_rebind(
+    tmp_path: pathlib.Path,
+) -> None:
     r = make_registry(tmp_path)
     first = Uri.parse("file://session/a.md")
     second = Uri.parse("file://session/b.md")
