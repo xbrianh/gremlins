@@ -11,7 +11,6 @@ from gremlins.executor.state import State
 from gremlins.stages.agent import Agent
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Done, Outcome
-from gremlins.utils import git as git_utils
 from gremlins.utils import proc
 from gremlins.utils.git import (
     DivergentHead,
@@ -101,9 +100,7 @@ class Implement(Stage):
         pre = PreImplState(head=pre_head)
 
         cwd = pathlib.Path(cwd_arg) if cwd_arg else None
-        pre_sha: str | None = None
-        if git_utils.in_git_repo(cwd=cwd):
-            pre_sha = snapshot_head_before(cwd=cwd)
+        pre_sha = snapshot_head_before(cwd=cwd)
 
         template = "\n\n".join(self.prompts).rstrip()
         prompt = template.format(
@@ -135,6 +132,7 @@ class Implement(Stage):
                 raise RuntimeError(
                     "implement produced no committed work; the agent must commit before returning"
                 )
-        elif pre_sha is not None:
-            state.artifacts.bind_git_commit_range("impl-commits", pre_sha)
+        else:
+            if not state.artifacts.produced("impl-commits"):
+                state.artifacts.bind_git_commit_range("impl-commits", pre_sha)
         return Done()

@@ -307,6 +307,10 @@ def common_local_patches(monkeypatch):
         "gremlins.stages.implement.snapshot_head_before",
         lambda **kwargs: "pre-sha",
     )
+    monkeypatch.setattr(
+        "gremlins.artifacts.registry.git_utils.head_sha",
+        lambda *args, **kwargs: "post-sha",
+    )
 
 
 @pytest.fixture(autouse=True)

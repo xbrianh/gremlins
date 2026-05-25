@@ -32,16 +32,12 @@ def _mock_rev_parse(monkeypatch):
         lambda cmd, **kwargs: cmd[-1],
     )
     monkeypatch.setattr(
-        "gremlins.stages.implement.git_utils.in_git_repo",
-        lambda **kwargs: True,
-    )
-    monkeypatch.setattr(
         "gremlins.stages.implement.snapshot_head_before",
         lambda **kwargs: "pre-sha",
     )
     monkeypatch.setattr(
         "gremlins.artifacts.registry.git_utils.head_sha",
-        lambda **kwargs: "post-sha",
+        lambda *args, **kwargs: "post-sha",
     )
 
 
@@ -215,7 +211,7 @@ def test_binds_commit_range_on_head_advanced(tmp_path: pathlib.Path) -> None:
         return_value=HeadAdvanced(commit_count=3),
     ):
         asyncio.run(stage.run(state))
-    assert state.artifacts.produced("impl-commits")
+    assert str(state.artifacts.resolve("impl-commits")) == "git://range/pre-sha..post-sha"
 
 
 def test_no_commit_range_bound_on_empty_impl_without_prior(
@@ -241,7 +237,7 @@ def test_binds_commit_range_with_worktree(tmp_path: pathlib.Path) -> None:
         return_value=HeadAdvanced(commit_count=1),
     ):
         asyncio.run(stage.run(state))
-    assert state.artifacts.produced("impl-commits")
+    assert str(state.artifacts.resolve("impl-commits")) == "git://range/pre-sha..post-sha"
 
 
 def test_empty_impl_with_prior_commit_range_does_not_raise(
