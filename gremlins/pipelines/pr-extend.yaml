@@ -23,8 +23,20 @@ stages:
     out:
       normalize-commits: git://range
   - { type: verify,    options: { cmds: ["make check", "make test"] }, prompt: verify }
-  - { name: push,      type: github-push-to-pr-branch,              in: {pr: pr} }
-  - { type: github-request-copilot-review,                          in: {pr: pr} }
+  - name: push
+    type: exec
+    in:
+      BRANCH: pr.branch
+    options:
+      cmds:
+        - "git push origin HEAD:$BRANCH"
+  - name: copilot-review
+    type: exec
+    in:
+      PR_NUM: pr.number
+    options:
+      cmds:
+        - "gh pr edit $PR_NUM --add-reviewer copilot-pull-request-reviewer"
   - { type: github-review-pull-request,                             in: {pr: pr}, prompt: [code-style, gremlins:github_review_pull_request.md] }
   - { type: github-wait-copilot,                                    in: {pr: pr} }
   - { type: github-address-pull-request-reviews,                    in: {pr: pr}, prompt: [code-style, gremlins:github_address_pull_request_reviews.md, gremlins:bail_section.md] }

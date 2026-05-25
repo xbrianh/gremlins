@@ -20,8 +20,24 @@ stages:
     out:
       normalize-commits: git://range
   - { type: verify,     options: { cmds: ["make check", "make test"] }, prompt: verify }
-  - { name: open-pr,    type: github-open-pull-request, out: {pr: gh://pr} }
-  - { type: github-request-copilot-review,              in: {pr: pr} }
+  - { name: open-pr,    type: github-draft-pull-request }
+  - name: create-pr
+    type: exec
+    options:
+      cmds:
+        - 'HEAD=$(jq -r .head "$GREMLINS_SESSION_DIR/pr-draft.json")'
+        - 'BASE=$(jq -r .base "$GREMLINS_SESSION_DIR/pr-draft.json")'
+        - 'jq -r .body "$GREMLINS_SESSION_DIR/pr-draft.json" > "$GREMLINS_SESSION_DIR/pr-body.md"'
+        - 'gh pr create --head "$HEAD" --base "$BASE" --title "$(jq -r .title "$GREMLINS_SESSION_DIR/pr-draft.json")" --body-file "$GREMLINS_SESSION_DIR/pr-body.md"'
+    out:
+      pr: gh://pr
+  - name: copilot-review
+    type: exec
+    in:
+      PR_NUM: pr.number
+    options:
+      cmds:
+        - "gh pr edit $PR_NUM --add-reviewer copilot-pull-request-reviewer"
   - { type: github-review-pull-request,                 in: {pr: pr}, prompt: [code-style, gremlins:github_review_pull_request.md] }
   - { type: github-wait-copilot,                        in: {pr: pr} }
   - { type: github-address-pull-request-reviews,        in: {pr: pr}, prompt: [code-style, gremlins:github_address_pull_request_reviews.md, gremlins:bail_section.md] }

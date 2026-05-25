@@ -20,5 +20,15 @@ stages:
     out:
       normalize-commits: git://range
   - { type: verify,    options: { cmds: ["make check", "make test"] }, prompt: verify }
-  - { name: open-pr,   type: github-open-pull-request, out: {pr: gh://pr} }
+  - { name: open-pr,   type: github-draft-pull-request }
+  - name: create-pr
+    type: exec
+    options:
+      cmds:
+        - 'HEAD=$(jq -r .head "$GREMLINS_SESSION_DIR/pr-draft.json")'
+        - 'BASE=$(jq -r .base "$GREMLINS_SESSION_DIR/pr-draft.json")'
+        - 'jq -r .body "$GREMLINS_SESSION_DIR/pr-draft.json" > "$GREMLINS_SESSION_DIR/pr-body.md"'
+        - 'gh pr create --head "$HEAD" --base "$BASE" --title "$(jq -r .title "$GREMLINS_SESSION_DIR/pr-draft.json")" --body-file "$GREMLINS_SESSION_DIR/pr-body.md"'
+    out:
+      pr: gh://pr
   - { name: ci-gate,   type: github-wait-ci,           in: {pr: pr}, prompt: [gremlins:ci_fix.md, gremlins:bail_section_fix.md] }

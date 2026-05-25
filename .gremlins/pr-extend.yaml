@@ -36,7 +36,10 @@ stages:
       cmds:
         - 'git push origin "HEAD:refs/heads/$(gh pr view "$PR_NUM" --json headRefName --jq .headRefName)"'
 
-  - { type: github-request-copilot-review }
+  - type: exec
+    options:
+      cmds:
+        - 'gh pr edit "$PR_NUM" --add-reviewer copilot-pull-request-reviewer'
 
   - parallel:
       - { type: github-wait-copilot }

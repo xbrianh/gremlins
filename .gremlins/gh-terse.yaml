@@ -17,8 +17,24 @@ stages:
         - "git add -A"
         - "git diff --cached --quiet || git commit -m 'normalize'"
   - { type: verify,    options: { cmds: ["make check", "make test"] }, prompt: verify }
-  - { type: github-open-pull-request }
-  - { type: github-request-copilot-review }
+  - { type: github-draft-pull-request }
+  - name: create-pr
+    type: exec
+    options:
+      cmds:
+        - 'HEAD=$(jq -r .head "$GREMLINS_SESSION_DIR/pr-draft.json")'
+        - 'BASE=$(jq -r .base "$GREMLINS_SESSION_DIR/pr-draft.json")'
+        - 'jq -r .body "$GREMLINS_SESSION_DIR/pr-draft.json" > "$GREMLINS_SESSION_DIR/pr-body.md"'
+        - 'gh pr create --head "$HEAD" --base "$BASE" --title "$(jq -r .title "$GREMLINS_SESSION_DIR/pr-draft.json")" --body-file "$GREMLINS_SESSION_DIR/pr-body.md"'
+    out:
+      pr: gh://pr
+  - name: copilot-review
+    type: exec
+    in:
+      PR_NUM: pr.number
+    options:
+      cmds:
+        - "gh pr edit $PR_NUM --add-reviewer copilot-pull-request-reviewer"
 
   - parallel:
       - { type: github-wait-copilot }
