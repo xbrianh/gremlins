@@ -281,7 +281,6 @@ def _resolve_inputs(
         kind, pipeline_args, project_root
     )
 
-    state_dir = _state_root() / resolved_gremlin_id
     loaded_pipeline = None
     try:
         loaded_pipeline = _PipelineData.from_yaml(

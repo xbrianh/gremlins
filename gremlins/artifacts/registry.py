@@ -39,7 +39,8 @@ class ArtifactRegistry:
     ) -> None:
         self._cwd = cwd
         self.registry_path = (
-            persist_path if persist_path is not None
+            persist_path
+            if persist_path is not None
             else session_dir.parent / "registry.json"
         )
         self._bindings: dict[str, Uri] = {}
@@ -59,9 +60,7 @@ class ArtifactRegistry:
         self._bindings[key] = uri
         path = self.registry_path
         data = {k: str(v) for k, v in self._bindings.items()}
-        tmp = path.with_name(
-            path.name + f".{os.getpid()}.{secrets.token_hex(4)}.tmp"
-        )
+        tmp = path.with_name(path.name + f".{os.getpid()}.{secrets.token_hex(4)}.tmp")
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp.write_text(json.dumps(data), encoding="utf-8")
         os.replace(tmp, path)

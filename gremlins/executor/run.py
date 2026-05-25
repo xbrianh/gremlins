@@ -152,9 +152,7 @@ async def run_pipeline(
     session_dir = resolve_session_dir(gremlin_id)
     state_dir = session_dir.parent
 
-    project_dir = (
-        pathlib.Path(project_root) if project_root else paths.project_root()
-    )
+    project_dir = pathlib.Path(project_root) if project_root else paths.project_root()
     try:
         _pipeline_preview = _PipelineData.from_yaml(
             resolve_pipeline_path(str(pipeline_path), project_dir)

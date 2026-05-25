@@ -98,8 +98,6 @@ class GitHubOpenPullRequest(Stage):
             raise RuntimeError(f"could not parse PR number from {pr_url!r}")
         from gremlins.artifacts.uri import Uri  # noqa: PLC0415
 
-        state.artifacts.bind(
-            "pr", Uri.parse(f"gh://pr/{_m.group(1)}"), override=True
-        )
+        state.artifacts.bind("pr", Uri.parse(f"gh://pr/{_m.group(1)}"), override=True)
         logger.info("PR: %s", pr_url)
         return Done()

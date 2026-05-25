@@ -283,7 +283,10 @@ def test_run_cmd_log_path_interpolation(tmp_path):
     (tmp_path / "artifacts").mkdir(exist_ok=True)
     stage = Cmd("cmd", [], {"cmds": ["true"], "log_path": "run-{n}.log"})
     state = build_state(
-        data=StateData(), client=_fake_client(), session_dir=tmp_path / "artifacts", worktree=tmp_path
+        data=StateData(),
+        client=_fake_client(),
+        session_dir=tmp_path / "artifacts",
+        worktree=tmp_path,
     )
     asyncio.run(stage.run(state))
     assert (tmp_path / "artifacts" / "run-1.log").exists()
