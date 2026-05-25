@@ -329,7 +329,9 @@ async def run_child_subprocess(
     spec_path = child_st.session_dir / f"spec_{attempt}.json"
     spec_path.write_text(
         json.dumps(
-            _build_child_spec_dict(stage_obj, child_st, child_key, attempt, group_name, child_id)
+            _build_child_spec_dict(
+                stage_obj, child_st, child_key, attempt, group_name, child_id
+            )
         ),
         encoding="utf-8",
     )
