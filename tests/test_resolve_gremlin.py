@@ -3,7 +3,6 @@
 import json
 import pathlib
 
-import gremlins.fleet.constants as _constants
 from gremlins.fleet.resolve import collect_gremlin_matches, resolve_gremlin
 
 
@@ -13,12 +12,10 @@ def _make_gremlin(state_root: pathlib.Path, gremlin_id: str) -> None:
     (d / "state.json").write_text(json.dumps({"id": gremlin_id}))
 
 
-def test_exact_match_wins_over_prefix_ambiguity(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "state"
-    state_root.mkdir()
+def test_exact_match_wins_over_prefix_ambiguity(sandbox, capsys):
+    state_root = sandbox.state
     _make_gremlin(state_root, "update-assistant-prompt")
     _make_gremlin(state_root, "update-assistant-prompt-with-queue-docs-14f2fd")
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
 
     result = resolve_gremlin("update-assistant-prompt")
 
@@ -27,12 +24,10 @@ def test_exact_match_wins_over_prefix_ambiguity(tmp_path, monkeypatch, capsys):
     assert capsys.readouterr().out == ""
 
 
-def test_genuine_ambiguity_prints_error(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "state"
-    state_root.mkdir()
+def test_genuine_ambiguity_prints_error(sandbox, capsys):
+    state_root = sandbox.state
     _make_gremlin(state_root, "fix-bug-abc")
     _make_gremlin(state_root, "fix-bug-def")
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
 
     result = resolve_gremlin("fix-bug")
 
@@ -43,23 +38,17 @@ def test_genuine_ambiguity_prints_error(tmp_path, monkeypatch, capsys):
     assert "fix-bug-def" in out
 
 
-def test_no_match_prints_error(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "state"
-    state_root.mkdir()
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
-
+def test_no_match_prints_error(capsys):
     result = resolve_gremlin("nonexistent")
 
     assert result is None
     assert "no gremlin matched" in capsys.readouterr().out
 
 
-def test_collect_gremlin_matches_exact(tmp_path, monkeypatch):
-    state_root = tmp_path / "state"
-    state_root.mkdir()
+def test_collect_gremlin_matches_exact(sandbox):
+    state_root = sandbox.state
     _make_gremlin(state_root, "foo")
     _make_gremlin(state_root, "foobar")
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
 
     matches, exact = collect_gremlin_matches("foo")
 
