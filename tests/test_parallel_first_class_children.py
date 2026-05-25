@@ -23,7 +23,6 @@ from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state
 from gremlins.stages.parallel import ParallelStage, _snapshot_registry
 
-
 # ---------------------------------------------------------------------------
 # FileSessionResolver._path: absolute path URIs
 # ---------------------------------------------------------------------------
