@@ -43,14 +43,29 @@ def _expand(
         # Named prompts can't reference each other — pass empty dict to prevent cycles.
         named_prompts[name] = _read_prompts(value, prompt_dir, {})
 
+    raw_stage_defs = raw.get("stage-definitions")
+    if raw_stage_defs is not None and not isinstance(raw_stage_defs, dict):
+        raise ValueError(
+            f"stage-definitions must be a mapping, got {type(raw_stage_defs).__name__!r}"
+        )
+    stage_defs: dict[str, dict[str, Any]] = {}
+    for name, defn in cast(dict[str, Any], raw_stage_defs or {}).items():
+        if not isinstance(defn, dict):
+            raise ValueError(f"stage-definition {name!r} must be a dict")
+        stage_defs[name] = cast(dict[str, Any], defn)
+
     expanded_stages: list[dict[str, Any]] = []
     for entry in cast(list[dict[str, Any]], raw.get("stages") or []):
         expanded_stages.extend(
-            _expand_entry(entry, prompt_dir, project_root, new_chain, named_prompts)
+            _expand_entry(
+                entry, prompt_dir, project_root, new_chain, named_prompts, stage_defs
+            )
         )
 
     result: dict[str, Any] = {
-        k: v for k, v in raw.items() if k not in ("stages", "prompt_dir", "prompts")
+        k: v
+        for k, v in raw.items()
+        if k not in ("stages", "prompt_dir", "prompts", "stage-definitions")
     }
     result["stages"] = expanded_stages
     return result
@@ -62,6 +77,8 @@ def _expand_entry(
     project_root: pathlib.Path,
     chain: list[pathlib.Path],
     named_prompts: dict[str, list[str]],
+    stage_defs: dict[str, dict[str, Any]],
+    seen_defs: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     if "include" in entry and len(entry) == 1:
         name = entry["include"]
@@ -70,6 +87,30 @@ def _expand_entry(
         included_path = resolve_pipeline_name(name, project_root)
         included = _expand(included_path, project_root, chain)
         return cast(list[dict[str, Any]], included.get("stages") or [])
+
+    stage_type = entry.get("type")
+    if isinstance(stage_type, str) and stage_type:
+        if stage_type in stage_defs:
+            return _expand_stage_def(
+                entry,
+                stage_type,
+                stage_defs,
+                prompt_dir,
+                project_root,
+                chain,
+                named_prompts,
+                seen_defs,
+            )
+        try:
+            included_path = resolve_pipeline_name(stage_type, project_root)
+        except FileNotFoundError:
+            pass
+        else:
+            # Skip if the path is already in chain — the pipeline is referencing
+            # its own name as a type, which falls through to loader.py validation.
+            if included_path not in chain:
+                included = _expand(included_path, project_root, chain)
+                return cast(list[dict[str, Any]], included.get("stages") or [])
 
     entry = dict(entry)
 
@@ -87,6 +128,8 @@ def _expand_entry(
                 project_root,
                 chain,
                 named_prompts,
+                stage_defs,
+                seen_defs,
             )
             if len(expanded) == 0:
                 raise ValueError(
@@ -107,12 +150,51 @@ def _expand_entry(
         for body_entry in cast(list[dict[str, Any]], entry["body"]):
             expanded_body.extend(
                 _expand_entry(
-                    body_entry, prompt_dir, project_root, chain, named_prompts
+                    body_entry,
+                    prompt_dir,
+                    project_root,
+                    chain,
+                    named_prompts,
+                    stage_defs,
+                    seen_defs,
                 )
             )
         entry["body"] = expanded_body
 
     return [entry]
+
+
+def _expand_stage_def(
+    call_site: dict[str, Any],
+    def_name: str,
+    stage_defs: dict[str, dict[str, Any]],
+    prompt_dir: pathlib.Path,
+    project_root: pathlib.Path,
+    chain: list[pathlib.Path],
+    named_prompts: dict[str, list[str]],
+    seen_defs: frozenset[str] = frozenset(),
+) -> list[dict[str, Any]]:
+    if def_name in seen_defs:
+        raise ValueError(f"stage-definition cycle: {def_name!r}")
+    definition = stage_defs[def_name]
+    if "out" in definition:
+        raise ValueError(
+            f"stage-definition {def_name!r} must not declare 'out:' keys; "
+            "declare them at each call site instead"
+        )
+    merged = dict(definition)
+    for key in ("name", "in", "out"):
+        if key in call_site:
+            merged[key] = call_site[key]
+    return _expand_entry(
+        merged,
+        prompt_dir,
+        project_root,
+        chain,
+        named_prompts,
+        stage_defs,
+        seen_defs | {def_name},
+    )
 
 
 def _resolve_prompt_dir(value: object, yaml_dir: pathlib.Path) -> pathlib.Path:

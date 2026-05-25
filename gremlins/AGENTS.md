@@ -19,7 +19,7 @@ review / address pipelines, the fleet manager
 - `clients/stream.py` — `stream_events` + `_emit_event` (stream-json parser and stderr renderer).
 - `clients/claude.py` — `SubprocessClaudeClient` (production subprocess runner).
 - `clients/fake.py` — `FakeClaudeClient` recording test double; replays canned stream-json from fixtures keyed by `label`.
-- `pipeline/` — `Pipeline` dataclass + `Pipeline.from_yaml(path)` classmethod; `resolve_pipeline_path`; supports parallel stage groups. `pipeline/loader.py` holds `STAGE_TYPES`, the explicit dispatch table mapping type-name strings to Stage classes.
+- `pipeline/` — `Pipeline` dataclass + `Pipeline.from_yaml(path)` classmethod; `resolve_pipeline_path`; supports parallel stage groups. `pipeline/loader.py` holds `STAGE_TYPES`, the explicit dispatch table mapping type-name strings to Stage classes. `pipeline/preprocess.py` handles YAML expansion: resolves `include:`, `prompt:`, and `type: <name>` macros before the pipeline reaches the loader.
 - `pipelines/` — bundled YAML pipeline files (`local.yaml`, `gh.yaml`); lookup target for `resolve_pipeline_path`.
 - `stages/base.py` — `Stage` Protocol + `StageContext` dataclass: shared `client`, `session_dir`, `gremlin_id` threaded into every stage.
 - `stages/` — per-stage bodies: `plan`, `implement`, `review_code`, `address_code`, `verify`, `test`, `github_request_copilot_review`, `github_wait_copilot`, `github_wait_ci`, `handoff`.
@@ -47,6 +47,38 @@ Do not introduce new module-level mutable state or `register_*` side-effect APIs
 ### No speculative plugin hooks
 
 Don't add extension points (registries, plugin loaders, scheme-resolver maps) for hypothetical second consumers. Hand-curate the built-in set; generalize only when a real second user lands. Three concrete lines beat a premature plugin API.
+
+## Stage definitions (`stage-definitions:`)
+
+A top-level `stage-definitions:` map in a pipeline YAML lets you name a reusable stage dict, scoped to that file. Call it with `type: <name>` just like any primitive.
+
+```yaml
+stage-definitions:
+  normalize:
+    type: exec
+    options:
+      cmds: ["ruff format .", "git add -A", "git diff --cached --quiet || git commit -m 'normalize'"]
+
+stages:
+  - { type: plan, ... }
+  - name: post-plan-normalize
+    type: normalize
+    out: { post-plan-commits: git://range }
+  - { type: implement, ... }
+  - name: post-implement-normalize
+    type: normalize
+    out: { post-implement-commits: git://range }
+```
+
+**Resolution order** for an unknown `type:` value:
+
+1. `STAGE_TYPES` (primitives and container types in `pipeline/loader.py`)
+2. Inline `stage-definitions:` in the current file
+3. Discoverable pipeline files (`resolve_pipeline_name`) — expands the same way as `include:`
+
+**Call-site-owns-IO rule**: definitions must not declare `out:` keys. Each call site declares its own `out:` (and `in:`, `name:`), exactly as if writing a bare primitive stage. The preprocessor merges `name`, `in`, and `out` from the call site onto the definition's stage dict.
+
+**No parameters yet**: definitions contribute only fixed fields (`type`, `options`, `prompt`, etc.). There is no mechanism to pass options into a definition from the call site; add that only when a real use case demands it.
 
 ## Entry points
 

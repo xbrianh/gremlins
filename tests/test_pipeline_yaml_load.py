@@ -8,6 +8,7 @@ import pytest
 from gremlins.clients.client import Client
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.loader import fill_names as _fill_names
+from gremlins.pipeline.preprocess import expand_pipeline
 
 _BUNDLED_LOCAL = (
     pathlib.Path(__file__).parent.parent / "gremlins" / "pipelines" / "local.yaml"
@@ -180,3 +181,213 @@ def test_pipeline_nested_scopes_disambiguate_independently(
     parallel = pipeline.stages[1]
     assert parallel.name == "checks"
     assert [c.name for c in parallel.body] == ["verify", "verify-2"]
+
+
+# --- stage-definitions tests ---
+
+
+def test_stage_definition_expands_to_primitive(tmp_path: pathlib.Path) -> None:
+    p = _write_pipeline(
+        tmp_path,
+        """\
+        default_client: claude:sonnet
+        stage-definitions:
+          normalize:
+            type: exec
+            options:
+              cmds: ["ruff format ."]
+        stages:
+          - { type: plan }
+          - { type: normalize }
+        """,
+    )
+    expanded = expand_pipeline(p)
+    stages = expanded["stages"]
+    assert len(stages) == 2
+    assert stages[1]["type"] == "exec"
+    assert stages[1]["options"]["cmds"] == ["ruff format ."]
+
+
+def test_stage_definition_call_site_out_applied(tmp_path: pathlib.Path) -> None:
+    p = _write_pipeline(
+        tmp_path,
+        """\
+        default_client: claude:sonnet
+        stage-definitions:
+          normalize:
+            type: exec
+            options:
+              cmds: ["ruff format ."]
+        stages:
+          - name: normalize
+            type: normalize
+            out:
+              commits: git://range
+        """,
+    )
+    expanded = expand_pipeline(p)
+    stage = expanded["stages"][0]
+    assert stage["type"] == "exec"
+    assert stage["name"] == "normalize"
+    assert stage["out"] == {"commits": "git://range"}
+
+
+def test_stage_definition_reused_twice_with_different_out(
+    tmp_path: pathlib.Path,
+) -> None:
+    p = _write_pipeline(
+        tmp_path,
+        """\
+        default_client: claude:sonnet
+        stage-definitions:
+          normalize:
+            type: exec
+            options:
+              cmds: ["ruff format ."]
+        stages:
+          - { type: normalize, out: { a: git://range } }
+          - { type: normalize, out: { b: git://range } }
+        """,
+    )
+    expanded = expand_pipeline(p)
+    stages = expanded["stages"]
+    assert stages[0]["out"] == {"a": "git://range"}
+    assert stages[1]["out"] == {"b": "git://range"}
+    assert stages[0]["type"] == "exec"
+    assert stages[1]["type"] == "exec"
+
+
+def test_stage_definition_with_out_rejected(tmp_path: pathlib.Path) -> None:
+    p = _write_pipeline(
+        tmp_path,
+        """\
+        default_client: claude:sonnet
+        stage-definitions:
+          bad:
+            type: exec
+            out:
+              key: git://range
+            options:
+              cmds: ["echo hi"]
+        stages:
+          - { type: bad }
+        """,
+    )
+    with pytest.raises(ValueError, match="must not declare 'out:'"):
+        expand_pipeline(p)
+
+
+def test_stage_definitions_not_in_expanded_output(tmp_path: pathlib.Path) -> None:
+    p = _write_pipeline(
+        tmp_path,
+        """\
+        default_client: claude:sonnet
+        stage-definitions:
+          normalize:
+            type: exec
+            options:
+              cmds: ["echo"]
+        stages:
+          - { type: normalize }
+        """,
+    )
+    expanded = expand_pipeline(p)
+    assert "stage-definitions" not in expanded
+
+
+def test_stage_definition_self_cycle_raises(tmp_path: pathlib.Path) -> None:
+    p = _write_pipeline(
+        tmp_path,
+        """\
+        default_client: claude:sonnet
+        stage-definitions:
+          loop:
+            type: loop
+        stages:
+          - { type: loop }
+        """,
+    )
+    with pytest.raises(ValueError, match="stage-definition cycle"):
+        expand_pipeline(p)
+
+
+def test_stage_definition_mutual_cycle_raises(tmp_path: pathlib.Path) -> None:
+    p = _write_pipeline(
+        tmp_path,
+        """\
+        default_client: claude:sonnet
+        stage-definitions:
+          a:
+            type: b
+          b:
+            type: a
+        stages:
+          - { type: a }
+        """,
+    )
+    with pytest.raises(ValueError, match="stage-definition cycle"):
+        expand_pipeline(p)
+
+
+def test_stage_definitions_non_mapping_rejected(tmp_path: pathlib.Path) -> None:
+    p = _write_pipeline(
+        tmp_path,
+        """\
+        default_client: claude:sonnet
+        stage-definitions:
+          - normalize
+        stages:
+          - { type: plan }
+        """,
+    )
+    with pytest.raises(ValueError, match="stage-definitions must be a mapping"):
+        expand_pipeline(p)
+
+
+# --- type: <pipeline-name> tests ---
+
+
+def test_type_resolves_to_pipeline_file(tmp_path: pathlib.Path) -> None:
+    gremlins_dir = tmp_path / ".gremlins"
+    gremlins_dir.mkdir()
+    sub = gremlins_dir / "sub.yaml"
+    sub.write_text(
+        textwrap.dedent("""\
+        default_client: claude:sonnet
+        stages:
+          - { type: plan }
+          - { type: implement }
+        """),
+        encoding="utf-8",
+    )
+    p = _write_pipeline(
+        tmp_path,
+        """\
+        default_client: claude:sonnet
+        stages:
+          - { type: sub }
+        """,
+    )
+    expanded = expand_pipeline(p, project_root=tmp_path)
+    assert len(expanded["stages"]) == 2
+    assert expanded["stages"][0]["type"] == "plan"
+    assert expanded["stages"][1]["type"] == "implement"
+
+
+def test_type_self_referencing_pipeline_does_not_recurse(
+    tmp_path: pathlib.Path,
+) -> None:
+    gremlins_dir = tmp_path / ".gremlins"
+    gremlins_dir.mkdir()
+    p = gremlins_dir / "self-ref.yaml"
+    p.write_text(
+        textwrap.dedent("""\
+        default_client: claude:sonnet
+        stages:
+          - { type: self-ref }
+        """),
+        encoding="utf-8",
+    )
+    # self-reference is skipped (falls through to loader); expand_pipeline must not recurse
+    expanded = expand_pipeline(p)
+    assert expanded["stages"][0]["type"] == "self-ref"
