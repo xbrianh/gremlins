@@ -409,10 +409,6 @@ class _ParallelExecutor:
         child_id = (
             f"{parent_gid}--{self._group_name}--{child_key}" if parent_gid else ""
         )
-        if not child_id:
-            raise RuntimeError(
-                f"parallel child {child_key!r}: subprocess dispatch requires a parent gremlin_id"
-            )
         attempt = f"{child_key}-{secrets.token_hex(4)}"
         self._group_state.record_attempt(child_key, attempt)
 

@@ -123,8 +123,10 @@ async def run_pipeline(
     configure_logging()
     args = _parse_args(argv)
 
-    os.environ["GREMLINS_PROJECT_ROOT"] = str(paths.project_root())
-    env_file = paths.project_overlay_dir(paths.project_root()) / "env"
+    os.environ.pop("GREMLINS_PROJECT_ROOT", None)
+    _project_root = paths.project_root()
+    os.environ["GREMLINS_PROJECT_ROOT"] = str(_project_root)
+    env_file = paths.project_overlay_dir(_project_root) / "env"
     if env_file.is_file():
         try:
             os.environ.update(load_env_file(env_file))

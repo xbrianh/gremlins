@@ -74,14 +74,21 @@ def _build_state(spec: dict[str, Any]) -> State:
         raise ValueError("spec missing required 'client' field")
 
     child_id = spec.get("child_id") or None
-    if not child_id:
-        raise ValueError("spec missing required 'child_id' field")
-    validate_gremlin_id(child_id)
-
-    session_dir = paths.state_root() / child_id / "artifacts"
-    session_dir.mkdir(parents=True, exist_ok=True)
-
-    data = StateData.load(child_id)
+    if child_id:
+        validate_gremlin_id(child_id)
+        session_dir = paths.state_root() / child_id / "artifacts"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        data = StateData.load(child_id)
+    else:
+        raw_session = spec.get("session_dir")
+        if not isinstance(raw_session, str) or not raw_session:
+            raise ValueError("spec missing required 'session_dir' field")
+        session_dir = pathlib.Path(raw_session)
+        session_dir.mkdir(parents=True, exist_ok=True)
+        gremlin_id = spec.get("gremlin_id") or None
+        if gremlin_id:
+            validate_gremlin_id(gremlin_id)
+        data = StateData.load(gremlin_id)
 
     project_root = (
         pathlib.Path(data.project_root) if data.project_root else paths.project_root()
