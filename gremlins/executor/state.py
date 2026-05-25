@@ -125,12 +125,8 @@ def _read_state_json(sf: pathlib.Path | None) -> dict[str, Any]:
 class StateData:
     gremlin_id: str | None = None
     state_file: pathlib.Path | None = None
-    issue_url: str = ""
-    base_ref_name: str = ""
-    issue_num: str = ""
     loop_iteration: int = 1
     attempt: str = ""
-    base_ref_sha: str = ""
     kind: str = ""
     project_root: str = ""
     workdir: str = ""
@@ -160,12 +156,8 @@ class StateData:
         return cls(
             gremlin_id=gremlin_id,
             state_file=sf,
-            issue_url=sd.get("issue_url") or "",
-            base_ref_name=sd.get("base_ref_name") or "",
-            issue_num=sd.get("issue_num") or "",
             loop_iteration=_int_or(sd.get("loop_iteration"), 1),
             attempt=sd.get("attempt") or "",
-            base_ref_sha=sd.get("base_ref_sha") or "",
             kind=sd.get("kind") or "",
             project_root=sd.get("project_root") or "",
             workdir=sd.get("workdir") or "",
@@ -213,10 +205,6 @@ class StateData:
             "stage": self.stage,
             "pid": self.pid,
             "stage_inputs": self.stage_inputs,
-            "base_ref_name": self.base_ref_name,
-            "base_ref_sha": self.base_ref_sha,
-            "issue_url": self.issue_url,
-            "issue_num": self.issue_num,
             "bypass": self.bypass,
             "permissions_file": self.permissions_file,
             "group_name": self.group_name,

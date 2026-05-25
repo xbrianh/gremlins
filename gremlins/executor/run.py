@@ -142,18 +142,28 @@ async def run_pipeline(
         )
 
     state_json = _read_state_json(gremlin_id)
+    session_dir = resolve_session_dir(gremlin_id)
+    state_dir = session_dir.parent
     _workdir = str(state_json.get("workdir") or "")
     worktree_dir = pathlib.Path(_workdir) if _workdir else None
     project_root = str(state_json.get("project_root") or "")
-    base_ref_sha = str(state_json.get("base_ref_sha") or "")
     setup_kind = str(state_json.get("setup_kind") or "worktree-branch")
     stage_inputs: dict[str, Any] = dict(state_json.get("stage_inputs") or {})
     instructions: str = str(
         stage_inputs.get("instructions") or " ".join(args.instructions or [])
     )
 
-    session_dir = resolve_session_dir(gremlin_id)
-    state_dir = session_dir.parent
+    # base_ref_sha is bound in registry.json at launch time
+    _registry_path = state_dir / "registry.json"
+    base_ref_sha = ""
+    if _registry_path.exists():
+        try:
+            _reg = json.loads(_registry_path.read_text(encoding="utf-8"))
+            _sha_uri = str(_reg.get("base_sha") or "")
+            if _sha_uri.startswith("git://commit/"):
+                base_ref_sha = _sha_uri.removeprefix("git://commit/")
+        except Exception:
+            pass
 
     project_dir = pathlib.Path(project_root) if project_root else paths.project_root()
     try:

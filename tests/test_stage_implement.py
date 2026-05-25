@@ -10,6 +10,7 @@ import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins.artifacts.registry import ArtifactRegistry
+from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData, build_state
@@ -54,11 +55,15 @@ def _make_state(
     session_dir.mkdir()
     stage = Implement("implement", prompts or [], {})
     client = FakeClaudeClient(fixtures={"implement": MINIMAL_EVENTS})
+    registry = ArtifactRegistry(session_dir, cwd=tmp_path)
+    if issue_num:
+        registry.bind("issue", Uri.parse(f"gh://issue/{issue_num}"))
+    registry.bind("base_sha", Uri.parse(f"git://commit/{base_ref_sha}"))
     state = build_state(
-        data=StateData(issue_num=issue_num, base_ref_sha=base_ref_sha),
+        data=StateData(),
         client=client,
         session_dir=session_dir,
-        artifacts=ArtifactRegistry(session_dir, cwd=tmp_path),
+        artifacts=registry,
     )
     (session_dir / "plan.md").write_text(plan_text, encoding="utf-8")
     if spec_text:

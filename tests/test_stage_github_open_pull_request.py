@@ -26,12 +26,24 @@ def _make_state(
     gremlin_id: str | None = None,
     issue_url: str = "https://github.com/owner/repo/issues/42",
 ) -> tuple[GitHubOpenPullRequest, RuntimeState]:
+    import re as _re
+
     stage = GitHubOpenPullRequest("open-pr", [], {})
     client = FakeClaudeClient(fixtures={"github-open-pull-request": MINIMAL_EVENTS})
+    from gremlins.artifacts.registry import ArtifactRegistry
+
+    session_dir = tmp_path / "artifacts"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    registry = ArtifactRegistry(session_dir)
+    if issue_url:
+        m = _re.search(r"/issues/(\d+)", issue_url)
+        if m:
+            registry.bind("issue", Uri.parse(f"gh://issue/{m.group(1)}"))
     state = build_state(
-        data=StateData(gremlin_id=gremlin_id, issue_url=issue_url),
+        data=StateData(gremlin_id=gremlin_id),
         client=client,
-        session_dir=tmp_path / "artifacts",
+        session_dir=session_dir,
+        artifacts=registry,
     )
     return stage, state
 
@@ -130,14 +142,26 @@ def _make_state_with_gr(
     base_ref_name: str = "",
     issue_url: str = "",
 ) -> tuple[GitHubOpenPullRequest, RuntimeState]:
+    import re as _re
+
+    from gremlins.artifacts.registry import ArtifactRegistry
+
     stage = GitHubOpenPullRequest("open-pr", [], {})
     client = FakeClaudeClient(fixtures={"github-open-pull-request": MINIMAL_EVENTS})
+    session_dir = tmp_path / "artifacts"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    registry = ArtifactRegistry(session_dir)
+    if base_ref_name:
+        registry.bind("base_ref", Uri.parse(f"git://ref/{base_ref_name}"))
+    if issue_url:
+        m = _re.search(r"/issues/(\d+)", issue_url)
+        if m:
+            registry.bind("issue", Uri.parse(f"gh://issue/{m.group(1)}"))
     state = build_state(
-        data=StateData(
-            gremlin_id=gremlin_id, base_ref_name=base_ref_name, issue_url=issue_url
-        ),
+        data=StateData(gremlin_id=gremlin_id),
         client=client,
-        session_dir=tmp_path / "artifacts",
+        session_dir=session_dir,
+        artifacts=registry,
     )
     return stage, state
 
@@ -222,12 +246,19 @@ def test_first_child_uses_base_ref_name(tmp_path: pathlib.Path) -> None:
 
 def test_explicit_base_ref_used_when_no_prior_pr(tmp_path: pathlib.Path) -> None:
     """Stage-level base_ref is used when there is no prior PR artifact branch."""
+    from gremlins.artifacts.registry import ArtifactRegistry
+
     stage = GitHubOpenPullRequest("open-pr", [], {}, base_ref="feature-base")
     client = FakeClaudeClient(fixtures={"github-open-pull-request": MINIMAL_EVENTS})
+    session_dir = tmp_path / "artifacts"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    registry = ArtifactRegistry(session_dir)
+    registry.bind("base_ref", Uri.parse("git://ref/main"))
     state = build_state(
-        data=StateData(gremlin_id="test-gr", base_ref_name="main"),
+        data=StateData(gremlin_id="test-gr"),
         client=client,
-        session_dir=tmp_path / "artifacts",
+        session_dir=session_dir,
+        artifacts=registry,
     )
     prompts_seen: list[str] = []
 
@@ -248,12 +279,19 @@ def test_explicit_base_ref_used_when_no_prior_pr(tmp_path: pathlib.Path) -> None
 
 def test_last_pr_branch_takes_priority_over_base_ref(tmp_path: pathlib.Path) -> None:
     """Prior PR branch from registry takes priority over stage-level base_ref when stacking."""
+    from gremlins.artifacts.registry import ArtifactRegistry
+
     stage = GitHubOpenPullRequest("open-pr", [], {}, base_ref="feature-base")
     client = FakeClaudeClient(fixtures={"github-open-pull-request": MINIMAL_EVENTS})
+    session_dir = tmp_path / "artifacts"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    registry = ArtifactRegistry(session_dir)
+    registry.bind("base_ref", Uri.parse("git://ref/main"))
     state = build_state(
-        data=StateData(gremlin_id="test-gr", base_ref_name="main"),
+        data=StateData(gremlin_id="test-gr"),
         client=client,
-        session_dir=tmp_path / "artifacts",
+        session_dir=session_dir,
+        artifacts=registry,
     )
     prompts_seen: list[str] = []
 

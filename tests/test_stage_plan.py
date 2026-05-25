@@ -10,6 +10,7 @@ import pytest
 from conftest import MINIMAL_EVENTS
 
 from gremlins.artifacts.registry import ArtifactRegistry
+from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData, build_state
@@ -215,61 +216,45 @@ def _issue_source_mocks(
 def test_resolve_issue_source_empty_repo_writes_url(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """repo='' (gh-terse default) should write the resolved issue_url."""
+    """repo='' (gh-terse default) should bind the resolved issue in the registry."""
     _issue_source_mocks(monkeypatch, pr_repo="owner/repo")
-    captured: dict[str, object] = {}
-    monkeypatch.setattr(
-        "gremlins.executor.state.StateData.patch",
-        lambda self, _delete=(), **kw: captured.update(kw),
-    )
     stage = Plan("plan", [], {})
     client = FakeClaudeClient(fixtures={})
-    state = _state(tmp_path, client)
+    state = _state_with_artifacts(tmp_path, client)
     state.args = argparse.Namespace(plan="#355")
     state.repo = ""
     asyncio.run(stage.run(state))
-    assert captured.get("issue_url") == "https://github.com/owner/repo/issues/355"
-    assert captured.get("issue_num") == "355"
+    assert state.artifacts.produced("issue")
+    assert state.artifacts.resolve("issue") == Uri.parse("gh://issue/355")
 
 
 def test_resolve_issue_source_matching_repo_writes_url(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Explicit repo matching target_repo should write the resolved issue_url."""
+    """Explicit repo matching target_repo should bind the resolved issue in the registry."""
     _issue_source_mocks(monkeypatch, pr_repo="owner/repo")
-    captured: dict[str, object] = {}
-    monkeypatch.setattr(
-        "gremlins.executor.state.StateData.patch",
-        lambda self, _delete=(), **kw: captured.update(kw),
-    )
     stage = Plan("plan", [], {})
     client = FakeClaudeClient(fixtures={})
-    state = _state(tmp_path, client)
+    state = _state_with_artifacts(tmp_path, client)
     state.args = argparse.Namespace(plan="#355")
     state.repo = "owner/repo"
     asyncio.run(stage.run(state))
-    assert captured.get("issue_url") == "https://github.com/owner/repo/issues/355"
-    assert captured.get("issue_num") == "355"
+    assert state.artifacts.produced("issue")
+    assert state.artifacts.resolve("issue") == Uri.parse("gh://issue/355")
 
 
 def test_resolve_issue_source_cross_repo_clears_url(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Cross-repo ref (owner/b#355) with repo=owner/a should clear issue_url."""
+    """Cross-repo ref (owner/b#355) with repo=owner/a should not bind issue in the registry."""
     _issue_source_mocks(monkeypatch, pr_repo="owner/a")
-    captured: dict[str, object] = {}
-    monkeypatch.setattr(
-        "gremlins.executor.state.StateData.patch",
-        lambda self, _delete=(), **kw: captured.update(kw),
-    )
     stage = Plan("plan", [], {})
     client = FakeClaudeClient(fixtures={})
-    state = _state(tmp_path, client)
+    state = _state_with_artifacts(tmp_path, client)
     state.args = argparse.Namespace(plan="owner/b#355")
     state.repo = "owner/a"
     asyncio.run(stage.run(state))
-    assert captured.get("issue_url") == ""
-    assert captured.get("issue_num") == ""
+    assert not state.artifacts.produced("issue")
 
 
 # --- Agent delegation (local branch) ---

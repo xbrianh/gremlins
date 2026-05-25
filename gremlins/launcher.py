@@ -365,8 +365,6 @@ def _prepare_state_dir(state_dir: pathlib.Path, inputs: _Inputs) -> None:
 
 def _initial_state_data(inputs: _Inputs) -> StateData:
     now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    issue_url = str(inputs.issue_data.get("url", "")) if inputs.issue_data else ""
-    issue_num = str(inputs.issue_data.get("number", "")) if inputs.issue_data else ""
     return StateData(
         gremlin_id=inputs.gremlin_id,
         kind=inputs.kind,
@@ -386,10 +384,6 @@ def _initial_state_data(inputs: _Inputs) -> StateData:
         stage="starting",
         pid=None,
         stage_inputs=inputs.stage_inputs,
-        base_ref_name=inputs.base_ref_name,
-        base_ref_sha=inputs.base_ref_sha,
-        issue_url=issue_url,
-        issue_num=issue_num,
     )
 
 
@@ -540,12 +534,19 @@ def launch(
         sd.bypass = bypass
         sd.permissions_file = permissions_file
         sd.persist(state_dir)
+        session_dir = state_dir / "artifacts"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        registry = ArtifactRegistry(session_dir=session_dir)
         if inputs.pr_num:
-            session_dir = state_dir / "artifacts"
-            session_dir.mkdir(parents=True, exist_ok=True)
-            ArtifactRegistry(session_dir=session_dir).bind(
-                "pr", Uri.parse(f"gh://pr/{inputs.pr_num}")
-            )
+            registry.bind("pr", Uri.parse(f"gh://pr/{inputs.pr_num}"))
+        if inputs.base_ref_name:
+            registry.bind("base_ref", Uri.parse(f"git://ref/{inputs.base_ref_name}"))
+        if inputs.base_ref_sha:
+            registry.bind("base_sha", Uri.parse(f"git://commit/{inputs.base_ref_sha}"))
+        if inputs.issue_data:
+            _issue_num = str(inputs.issue_data.get("number", ""))
+            if _issue_num:
+                registry.bind("issue", Uri.parse(f"gh://issue/{_issue_num}"))
         p = _spawn(inputs.gremlin_id, inputs, state_dir)
     except Exception:
         shutil.rmtree(state_dir, ignore_errors=True)
