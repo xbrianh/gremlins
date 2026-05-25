@@ -167,7 +167,10 @@ class _CIPollStage(Stage):
         if self._first:
             self._first = False
             checks, review_decision = await _wait_for_checks(
-                pr_url, self._checks_getter, self._poll_interval, self._startup_grace_secs
+                pr_url,
+                self._checks_getter,
+                self._poll_interval,
+                self._startup_grace_secs,
             )
             _bail_if_review_required(state, review_decision)
             if not checks:
@@ -228,7 +231,9 @@ class _CIFixStage(Stage):
     async def run(self, state: State) -> Outcome:
         n = self._attempt_no[0]
         log_file = state.session_dir / f"ci-attempt-{n}.log"
-        failure_output = log_file.read_text(encoding="utf-8") if log_file.exists() else ""
+        failure_output = (
+            log_file.read_text(encoding="utf-8") if log_file.exists() else ""
+        )
 
         try:
             pr_branch = state.artifacts.read("pr").branch
@@ -250,7 +255,8 @@ class _CIFixStage(Stage):
             raw_path=state.session_dir / f"stream-ci-fix-{n}.jsonl",
         )
         self._fix_sha[0] = (
-            self._fix_sha_getter() if self._fix_sha_getter is not None
+            self._fix_sha_getter()
+            if self._fix_sha_getter is not None
             else head_sha(cwd=state.cwd)
         )
         return Done()

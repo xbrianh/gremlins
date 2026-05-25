@@ -149,7 +149,9 @@ def test_both_cmds_in_fix_prompt(tmp_path, monkeypatch):
 
 
 def test_log_file_captures_output(tmp_path):
-    stage, state = _make_stage(tmp_path, cmds=["echo hello_output; false"], max_attempts=1)
+    stage, state = _make_stage(
+        tmp_path, cmds=["echo hello_output; false"], max_attempts=1
+    )
     with pytest.raises(Bail):
         asyncio.run(stage.run(state))
 
