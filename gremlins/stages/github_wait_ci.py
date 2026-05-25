@@ -1,4 +1,4 @@
-"""CI gate stage for the gh pipeline."""
+"""CI gate stage — loop + poll + fix composition."""
 
 from __future__ import annotations
 
@@ -12,7 +12,8 @@ from gremlins.artifacts.registry import MissingArtifact
 from gremlins.executor.state import State
 from gremlins.stages.agent_runner import run_agent
 from gremlins.stages.base import Stage
-from gremlins.stages.outcome import Bail, Done, Outcome
+from gremlins.stages.loop import LoopStage
+from gremlins.stages.outcome import Bail, Done, NeedsFix, Outcome
 from gremlins.utils.git import head_sha
 from gremlins.utils.github import fetch_check_run_logs_async, get_pr_ci_status_async
 
@@ -131,6 +132,130 @@ async def _collect_failure_output(failed: list[dict[str, Any]]) -> str:
     return "\n\n".join(parts)
 
 
+class _CIPollStage(Stage):
+    """Polls CI for one attempt; returns Done on pass, NeedsFix on failure."""
+
+    type = ""
+
+    def __init__(
+        self,
+        *,
+        pr_url: str,
+        poll_timeout: int,
+        poll_interval: int,
+        startup_grace_secs: int,
+        checks_getter: Callable[[], tuple[list[dict[str, Any]], str]] | None,
+        head_sha_getter: Callable[[], str] | None,
+        attempt_no: list[int],
+        fix_sha: list[str],
+    ) -> None:
+        super().__init__("poll")
+        self._pr_url = pr_url
+        self._poll_timeout = poll_timeout
+        self._poll_interval = poll_interval
+        self._startup_grace_secs = startup_grace_secs
+        self._checks_getter = checks_getter
+        self._head_sha_getter = head_sha_getter
+        self._attempt_no = attempt_no
+        self._fix_sha = fix_sha
+        self._first = True
+
+    async def run(self, state: State) -> Outcome:
+        pr_url = self._pr_url or state.artifacts.read("pr").url
+        required_sha = ""
+
+        if self._first:
+            self._first = False
+            checks, review_decision = await _wait_for_checks(
+                pr_url, self._checks_getter, self._poll_interval, self._startup_grace_secs
+            )
+            _bail_if_review_required(state, review_decision)
+            if not checks:
+                logger.info(
+                    "ci-gate: no check-runs after %ds grace, skipping",
+                    self._startup_grace_secs,
+                )
+                return Done()
+        else:
+            required_sha = self._fix_sha[0]
+
+        self._attempt_no[0] += 1
+        n = self._attempt_no[0]
+        logger.info(
+            "ci-gate: attempt %d — polling (timeout %ds)", n, self._poll_timeout
+        )
+        final_checks, _ = await _poll_until_done(
+            state,
+            pr_url,
+            self._poll_timeout,
+            self._poll_interval,
+            self._checks_getter,
+            required_sha=required_sha,
+            head_sha_getter=self._head_sha_getter,
+        )
+        failed = [c for c in final_checks if _is_failing(c)]
+        if not failed:
+            logger.info("ci-gate: all checks passed on attempt %d", n)
+            return Done()
+
+        logger.info("ci-gate: %d check(s) failed on attempt %d", len(failed), n)
+        failure_output = await _collect_failure_output(failed)
+        (state.session_dir / f"ci-attempt-{n}.log").write_text(
+            failure_output, encoding="utf-8"
+        )
+        return NeedsFix(failure_output, 1)
+
+
+class _CIFixStage(Stage):
+    """Runs the CI-fix agent for the current attempt."""
+
+    type = ""
+
+    def __init__(
+        self,
+        *,
+        template: str,
+        attempt_no: list[int],
+        fix_sha: list[str],
+        fix_sha_getter: Callable[[], str] | None,
+    ) -> None:
+        super().__init__("fix")
+        self._template = template
+        self._attempt_no = attempt_no
+        self._fix_sha = fix_sha
+        self._fix_sha_getter = fix_sha_getter
+
+    async def run(self, state: State) -> Outcome:
+        n = self._attempt_no[0]
+        log_file = state.session_dir / f"ci-attempt-{n}.log"
+        failure_output = log_file.read_text(encoding="utf-8") if log_file.exists() else ""
+
+        try:
+            pr_branch = state.artifacts.read("pr").branch
+        except MissingArtifact:
+            state.record_bail("ci-fix: pr not in registry, cannot push")
+            raise Bail("ci-fix: pr not in registry, cannot push")
+
+        if not pr_branch:
+            state.record_bail("ci-fix: pr branch is empty, cannot push")
+            raise Bail("ci-fix: pr branch is empty, cannot push")
+
+        fix_prompt = self._template.format(
+            failure_output=failure_output, pr_branch=pr_branch
+        )
+        await run_agent(
+            state,
+            fix_prompt,
+            label=f"ci-fix-{n}",
+            raw_path=state.session_dir / f"stream-ci-fix-{n}.jsonl",
+        )
+        self._fix_sha[0] = (
+            self._fix_sha_getter() if self._fix_sha_getter is not None
+            else head_sha(cwd=state.cwd)
+        )
+        return Done()
+
+
 class GitHubWaitCI(Stage):
     type = "github-wait-ci"
     needs_gh = True
@@ -162,85 +287,26 @@ class GitHubWaitCI(Stage):
         self.head_sha_getter = head_sha_getter
         self.fix_sha_getter = fix_sha_getter
 
-    async def _run_ci_attempt(
-        self, state: State, attempt: int, pr_url: str, template: str, fix_sha: str
-    ) -> tuple[Outcome | None, str]:
-        logger.info(
-            "ci-gate: attempt %d/%d — polling (timeout %ds)",
-            attempt,
-            self.max_attempts,
-            self.poll_timeout,
-        )
-        final_checks, _ = await _poll_until_done(
-            state,
-            pr_url,
-            self.poll_timeout,
-            self.poll_interval,
-            self.checks_getter,
-            required_sha=fix_sha,
-            head_sha_getter=self.head_sha_getter,
-        )
-        failed = [c for c in final_checks if _is_failing(c)]
-
-        if not failed:
-            logger.info("ci-gate: all checks passed on attempt %d", attempt)
-            return Done(), ""
-
-        logger.info("ci-gate: %d check(s) failed on attempt %d", len(failed), attempt)
-
-        if attempt == self.max_attempts:
-            return None, fix_sha
-
-        failure_output = await _collect_failure_output(failed)
-        log_file = state.session_dir / f"ci-attempt-{attempt}.log"
-        log_file.write_text(failure_output, encoding="utf-8")
-
-        try:
-            pr_branch = state.artifacts.read("pr").branch
-        except MissingArtifact:
-            state.record_bail("ci-fix: pr not in registry, cannot push")
-            raise Bail("ci-fix: pr not in registry, cannot push")
-
-        fix_prompt = template.format(
-            failure_output=failure_output,
-            pr_branch=pr_branch,
-        )
-        await run_agent(
-            state,
-            fix_prompt,
-            label=f"ci-fix-{attempt}",
-            raw_path=state.session_dir / f"stream-ci-fix-{attempt}.jsonl",
-        )
-
-        new_fix_sha = (
-            self.fix_sha_getter()
-            if self.fix_sha_getter is not None
-            else head_sha(cwd=state.cwd)
-        )
-        return None, new_fix_sha
-
     async def run(self, state: State) -> Outcome:
-        pr_url = self.pr_url or state.artifacts.read("pr").url
-        checks, review_decision = await _wait_for_checks(
-            pr_url, self.checks_getter, self.poll_interval, self.startup_grace_secs
-        )
-        _bail_if_review_required(state, review_decision)
-
-        if not checks:
-            logger.info(
-                "ci-gate: PR has no check-runs after %ds, skipping",
-                self.startup_grace_secs,
-            )
-            return Done()
-
         template = "\n\n".join(self.prompts).rstrip()
-        fix_sha = ""
-        for attempt in range(1, self.max_attempts + 1):
-            outcome, fix_sha = await self._run_ci_attempt(
-                state, attempt, pr_url, template, fix_sha
-            )
-            if outcome is not None:
-                return outcome
-
-        state.record_bail(f"CI failed after {self.max_attempts} attempts")
-        raise Bail(f"CI failed after {self.max_attempts} attempts")
+        attempt_no: list[int] = [0]
+        fix_sha: list[str] = [""]
+        poll = _CIPollStage(
+            pr_url=self.pr_url,
+            poll_timeout=self.poll_timeout,
+            poll_interval=self.poll_interval,
+            startup_grace_secs=self.startup_grace_secs,
+            checks_getter=self.checks_getter,
+            head_sha_getter=self.head_sha_getter,
+            attempt_no=attempt_no,
+            fix_sha=fix_sha,
+        )
+        fix = _CIFixStage(
+            template=template,
+            attempt_no=attempt_no,
+            fix_sha=fix_sha,
+            fix_sha_getter=self.fix_sha_getter,
+        )
+        return await LoopStage(
+            self.name, body=[poll, fix], max_iterations=self.max_attempts
+        ).run(state)

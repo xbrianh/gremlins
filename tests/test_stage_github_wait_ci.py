@@ -248,7 +248,7 @@ def test_exhausted_bails(tmp_path: pathlib.Path) -> None:
     stage, state = _make_stage(client, tmp_path, poll_interval=0, checks_getter=getter)
     with pytest.raises(Bail) as exc_info:
         asyncio.run(stage.run(state))
-    assert "CI failed after 3 attempts" in exc_info.value.reason
+    assert "loop exhausted 3 iterations" in exc_info.value.reason
     fix_labels = [c.label for c in client.calls]
     assert fix_labels == ["ci-fix-1", "ci-fix-2"]
 
