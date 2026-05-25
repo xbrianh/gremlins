@@ -152,8 +152,8 @@ def _make_parent_state(sandbox, gremlin_id: str) -> State:
     return build_state(data=data, client=FakeClaudeClient(), session_dir=session_dir)
 
 
-def test_parallel_run_creates_child_state_dirs(sandbox) -> None:
-    """Each child of a parallel group gets its own directory under state_root."""
+def test_parallel_run_cleans_up_child_state_dirs(sandbox) -> None:
+    """Child state dirs are removed after a successful parallel run."""
     gremlin_id = "parent-gremlin-abc"
     parent = _make_parent_state(sandbox, gremlin_id)
 
@@ -176,18 +176,8 @@ def test_parallel_run_creates_child_state_dirs(sandbox) -> None:
     child_id_a = f"{gremlin_id}--mygroup--child-a"
     child_id_b = f"{gremlin_id}--mygroup--child-b"
 
-    assert (state_root / child_id_a / "state.json").exists()
-    assert (state_root / child_id_b / "state.json").exists()
-
-    data_a = json.loads((state_root / child_id_a / "state.json").read_text())
-    assert data_a["id"] == child_id_a
-    assert data_a["parent_id"] == gremlin_id
-    assert data_a["group_name"] == "mygroup"
-    assert data_a["child_key"] == "child-a"
-
-    data_b = json.loads((state_root / child_id_b / "state.json").read_text())
-    assert data_b["id"] == child_id_b
-    assert data_b["child_key"] == "child-b"
+    assert not (state_root / child_id_a).exists()
+    assert not (state_root / child_id_b).exists()
 
 
 def test_parallel_run_no_gremlin_id_uses_old_layout(sandbox) -> None:

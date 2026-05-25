@@ -222,6 +222,35 @@ def _cleanup_gremlin(
     return True
 
 
+def _rm_parallel_children(gremlin_id: str, cwd_for_git: str | None) -> None:
+    prefix = f"{gremlin_id}--"
+    state_root = str(paths.state_root())
+    if not os.path.isdir(state_root):
+        return
+    for name in sorted(os.listdir(state_root)):
+        if not name.startswith(prefix):
+            continue
+        wdir = os.path.join(state_root, name)
+        sf = os.path.join(wdir, "state.json")
+        if not os.path.isfile(sf):
+            continue
+        child_state = load_state(sf)
+        if not child_state:
+            continue
+        live = liveness_of_state_file(sf, child_state)
+        if live == "running" or (live and live.startswith("stalled:")):
+            print(f"rm: skipping live child {name} ({live}) — stop it first")
+            continue
+        _cleanup_gremlin(
+            name,
+            wdir,
+            cast(dict[str, Any], child_state),
+            cwd_for_git,
+            delete_branch=True,
+        )
+        print(f"rm: parallel child {name} cleaned up")
+
+
 def do_rm(target: str) -> bool:
     match = resolve_gremlin(target)
     if match is None:
@@ -258,6 +287,7 @@ def do_rm(target: str) -> bool:
     ):
         return False
 
+    _rm_parallel_children(gremlin_id, cwd_for_git)
     print(f"rm: gremlin {gremlin_id} cleaned up")
     return True
 
