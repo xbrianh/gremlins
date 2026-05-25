@@ -36,7 +36,7 @@ def test_file_resolver_absolute_path_uri(tmp_path: pathlib.Path) -> None:
     resolver = FileSessionResolver(tmp_path / "session")
     uri = Uri.parse(f"file://{target}")
     result = resolver._path(uri)
-    assert result == target
+    assert result == target.resolve()
 
 
 def test_file_resolver_absolute_path_read(tmp_path: pathlib.Path) -> None:

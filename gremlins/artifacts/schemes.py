@@ -34,7 +34,7 @@ class FileSessionResolver:
 
     def _path(self, uri: Uri) -> pathlib.Path:
         if uri.path.startswith("/"):
-            return pathlib.Path(uri.path)
+            return pathlib.Path(uri.path).resolve()
         if not uri.path.startswith("session/"):
             raise ValueError(f"file:// URI must start with 'session/': {uri}")
         name = uri.path[len("session/") :]

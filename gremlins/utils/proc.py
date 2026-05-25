@@ -240,10 +240,8 @@ def _build_child_spec_dict(
     child_key: str,
     attempt: str,
     group_name: str = "",
+    child_id: str = "",
 ) -> dict[str, Any]:
-    child_id = (
-        child_st.session_dir.parent.name
-    )  # session_dir is <state_root>/<child_id>/artifacts
     parent_id = child_st.data.gremlin_id or ""
     return {
         "stage_dict": stage_obj.raw_dict,
@@ -320,6 +318,7 @@ async def run_child_subprocess(
     *,
     on_bail: Callable[[str], None],
     group_name: str = "",
+    child_id: str = "",
 ) -> tuple[str, float]:
     """Spawn gremlins.spawn.child for one parallel child; return (status, cost_usd).
 
@@ -330,7 +329,7 @@ async def run_child_subprocess(
     spec_path = child_st.session_dir / f"spec_{attempt}.json"
     spec_path.write_text(
         json.dumps(
-            _build_child_spec_dict(stage_obj, child_st, child_key, attempt, group_name)
+            _build_child_spec_dict(stage_obj, child_st, child_key, attempt, group_name, child_id)
         ),
         encoding="utf-8",
     )

@@ -44,6 +44,7 @@ def _snapshot_registry(
     try:
         data: dict[str, str] = json.loads(src.read_text(encoding="utf-8"))
     except Exception:
+        logger.warning("_snapshot_registry: failed to parse %s", src, exc_info=True)
         return
     rewritten: dict[str, str] = {}
     for k, v in data.items():
@@ -76,6 +77,7 @@ def _init_child_dir(
         parent_id=parent_id,
         group_name=group_name,
         child_key=child_key,
+        issue_num=parent_state.data.issue_num,
         project_root=parent_state.data.project_root,
         permissions_file=parent_state.data.permissions_file,
         bypass=parent_state.data.bypass,
@@ -403,6 +405,12 @@ class _ParallelExecutor:
     async def _run_subprocess(
         self, child_key: str, child_st: State, stage_obj: Stage
     ) -> None:
+        parent_gid = self._parent_data.gremlin_id or ""
+        child_id = f"{parent_gid}--{self._group_name}--{child_key}" if parent_gid else ""
+        if not child_id:
+            raise RuntimeError(
+                f"parallel child {child_key!r}: subprocess dispatch requires a parent gremlin_id"
+            )
         attempt = f"{child_key}-{secrets.token_hex(4)}"
         self._group_state.record_attempt(child_key, attempt)
 
@@ -418,6 +426,7 @@ class _ParallelExecutor:
             attempt,
             on_bail=on_bail,
             group_name=self._group_name,
+            child_id=child_id,
         )
         if cost > 0 and math.isfinite(cost):
             self._parent_data.add_subprocess_cost(cost)
