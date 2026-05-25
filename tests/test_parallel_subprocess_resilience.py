@@ -6,6 +6,7 @@ import asyncio
 import dataclasses
 import functools
 import json
+import os
 import pathlib
 import signal
 from collections.abc import Callable
@@ -50,6 +51,8 @@ class _FakeProcess:
         self.stdout = _FakeStreamReader()
         self.stderr = _FakeStreamReader(stderr_data)
         self._event: asyncio.Event | None = None
+        self.pid = id(self) & 0x7FFFFFFF  # unique per instance; os.killpg is patched
+        _FAKE_PROCS[self.pid] = self
 
     def _ev(self) -> asyncio.Event:
         if self._event is None:
@@ -73,6 +76,29 @@ class _FakeProcess:
 # ---------------------------------------------------------------------------
 # Test helpers
 # ---------------------------------------------------------------------------
+
+
+_FAKE_PROCS: dict[int, _FakeProcess] = {}
+
+
+@pytest.fixture(autouse=True)
+def _patch_killpg(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Route os.killpg in proc module to the fake process registered by pid.
+
+    The real proc.py uses os.killpg() (POSIX, works on macOS and Linux). Tests
+    here use _FakeProcess instead of real subprocesses, so we intercept killpg
+    and forward to the fake's send_signal.
+    """
+
+    def _fake_killpg(pgid: int, sig: int) -> None:
+        proc = _FAKE_PROCS.get(pgid)
+        if proc is None:
+            raise ProcessLookupError(pgid)
+        proc.send_signal(sig)
+
+    monkeypatch.setattr(os, "killpg", _fake_killpg)
+    yield
+    _FAKE_PROCS.clear()
 
 
 def _child_stage(name: str) -> Stage:
