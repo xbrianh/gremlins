@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import pathlib
 import signal
 from typing import Any
@@ -44,6 +45,7 @@ class _FakeProcess:
         self.stdout = _FakeStreamReader()
         self.stderr = _FakeStreamReader(stderr_data)
         self._event: asyncio.Event | None = None
+        self.pid = 424242
 
     def _ev(self) -> asyncio.Event:
         if self._event is None:
@@ -320,7 +322,12 @@ def test_timeout_raises_and_kills_child(
     async def _mock_exec(*_: Any, **__: Any) -> _FakeProcess:
         return fake_proc
 
+    def _mock_killpg(pid: int, sig: int) -> None:
+        assert pid == fake_proc.pid
+        fake_proc.send_signal(sig)
+
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
+    monkeypatch.setattr(os, "killpg", _mock_killpg)
 
     with pytest.raises(RuntimeError, match="timed out"):
         asyncio.run(
