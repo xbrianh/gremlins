@@ -341,11 +341,14 @@ def test_launch_spawned_process_detached(lenv):
 def test_launch_concurrent_no_collision(lenv):
     """Concurrent launches produce distinct GREMLIN_IDs."""
     launcher = _launcher()
-    ids = [
-        launcher.launch("local", stage_inputs={"instructions": f"concurrent {i}"})[0]
+    results = [
+        launcher.launch("local", stage_inputs={"instructions": f"concurrent {i}"})
         for i in range(5)
     ]
+    ids = [r[0] for r in results]
     assert len(set(ids)) == len(ids), f"GREMLIN_ID collision among: {ids}"
+    for _, proc in results:
+        proc.wait()
 
 
 def test_launch_explicit_project_root(lenv):
