@@ -43,7 +43,6 @@ from fixtures.shell_env import (
     setup_shell_env,
 )
 
-import gremlins.fleet.constants as _constants
 import gremlins.fleet.rescue as rescue_mod
 from gremlins.fleet.rescue import do_rescue as _do_rescue
 from gremlins.launcher import GremlinAlreadyRunning
@@ -78,19 +77,10 @@ def _make_failed_gremlin(
     return state_dir
 
 
-def _patch_state_root(state_root: pathlib.Path, monkeypatch):
-    """Patch rescue state-path lookups to point at the test state root."""
-    monkeypatch.setattr(
-        _constants,
-        "STATE_ROOT",
-        str(state_root),
-    )
-
-
-def test_rescue_diagnosis_runs_in_scratch_dir_not_worktree(tmp_path, monkeypatch):
+def test_rescue_diagnosis_runs_in_scratch_dir_not_worktree(tmp_path, sandbox, monkeypatch):
     """The diagnosis agent's cwd is a /tmp scratch dir, not the gremlin's worktree."""
     sh = setup_shell_env(tmp_path)
-    _make_failed_gremlin(sh.state_root, sh.repo)
+    _make_failed_gremlin(sandbox.state, sh.repo)
 
     # HOME + PATH already steered by setup_shell_env. Tell our fake claude
     # to declare unsalvageable so the wrapper bails (no relaunch needed)
@@ -98,8 +88,6 @@ def test_rescue_diagnosis_runs_in_scratch_dir_not_worktree(tmp_path, monkeypatch
     sh.env["FAKE_CLAUDE_RESCUE_VERDICT"] = "unsalvageable"
     for k, v in sh.env.items():
         monkeypatch.setenv(k, v)
-
-    _patch_state_root(sh.state_root, monkeypatch)
 
     ok = _do_rescue("victim-abcdef", headless=False)
     # unsalvageable verdict returns False (no relaunch). That's expected.
@@ -118,17 +106,15 @@ def test_rescue_diagnosis_runs_in_scratch_dir_not_worktree(tmp_path, monkeypatch
     )
 
 
-def test_rescue_unsalvageable_records_bail(tmp_path, monkeypatch):
+def test_rescue_unsalvageable_records_bail(tmp_path, sandbox, monkeypatch):
     """An ``unsalvageable`` marker writes ``bail_reason=unsalvageable``."""
     sh = setup_shell_env(tmp_path)
-    state_dir = _make_failed_gremlin(sh.state_root, sh.repo)
+    state_dir = _make_failed_gremlin(sandbox.state, sh.repo)
 
     sh.env["FAKE_CLAUDE_RESCUE_VERDICT"] = "unsalvageable"
     sh.env["FAKE_CLAUDE_RESCUE_SUMMARY"] = "worktree gone"
     for k, v in sh.env.items():
         monkeypatch.setenv(k, v)
-
-    _patch_state_root(sh.state_root, monkeypatch)
 
     _do_rescue("victim-abcdef", headless=False)
 
@@ -138,17 +124,15 @@ def test_rescue_unsalvageable_records_bail(tmp_path, monkeypatch):
     assert state["status"] == "bailed"
 
 
-def test_rescue_structural_records_bail(tmp_path, monkeypatch):
+def test_rescue_structural_records_bail(tmp_path, sandbox, monkeypatch):
     """A ``structural`` marker writes ``bail_reason=structural`` with the agent's summary."""
     sh = setup_shell_env(tmp_path)
-    state_dir = _make_failed_gremlin(sh.state_root, sh.repo)
+    state_dir = _make_failed_gremlin(sandbox.state, sh.repo)
 
     sh.env["FAKE_CLAUDE_RESCUE_VERDICT"] = "structural"
     sh.env["FAKE_CLAUDE_RESCUE_SUMMARY"] = "pipeline bug in foo.py"
     for k, v in sh.env.items():
         monkeypatch.setenv(k, v)
-
-    _patch_state_root(sh.state_root, monkeypatch)
 
     _do_rescue("victim-abcdef", headless=False)
 
@@ -157,7 +141,7 @@ def test_rescue_structural_records_bail(tmp_path, monkeypatch):
     assert "pipeline bug in foo.py" in state.get("bail_detail", "")
 
 
-def test_rescue_no_marker_records_diagnosis_no_marker(tmp_path, monkeypatch):
+def test_rescue_no_marker_records_diagnosis_no_marker(tmp_path, sandbox, monkeypatch):
     """Agent that returns 0 without writing the marker → diagnosis_no_marker bail."""
     sh = setup_shell_env(tmp_path)
     # Override the fake claude with a stub that emits no marker but exits 0.
@@ -168,12 +152,10 @@ def test_rescue_no_marker_records_diagnosis_no_marker(tmp_path, monkeypatch):
     )
     install_fake_bin(sh.bin_dir, "claude", no_marker_claude)
 
-    state_dir = _make_failed_gremlin(sh.state_root, sh.repo)
+    state_dir = _make_failed_gremlin(sandbox.state, sh.repo)
 
     for k, v in sh.env.items():
         monkeypatch.setenv(k, v)
-
-    _patch_state_root(sh.state_root, monkeypatch)
 
     _do_rescue("victim-abcdef", headless=False)
 
@@ -181,7 +163,7 @@ def test_rescue_no_marker_records_diagnosis_no_marker(tmp_path, monkeypatch):
     assert state["bail_reason"] == "diagnosis_no_marker"
 
 
-def test_rescue_fixed_verdict_invokes_launcher_resume(tmp_path, monkeypatch):
+def test_rescue_fixed_verdict_invokes_launcher_resume(tmp_path, sandbox, monkeypatch):
     """A ``fixed`` marker triggers ``launcher.resume(<id>)``.
 
     Monkeypatches ``gremlins.launcher.resume`` so we don't actually fork a
@@ -189,7 +171,7 @@ def test_rescue_fixed_verdict_invokes_launcher_resume(tmp_path, monkeypatch):
     right gremlin id and reported relaunch_outcome=success.
     """
     sh = setup_shell_env(tmp_path)
-    _make_failed_gremlin(sh.state_root, sh.repo)
+    _make_failed_gremlin(sandbox.state, sh.repo)
 
     resume_calls = []
 
@@ -202,8 +184,6 @@ def test_rescue_fixed_verdict_invokes_launcher_resume(tmp_path, monkeypatch):
     for k, v in sh.env.items():
         monkeypatch.setenv(k, v)
 
-    _patch_state_root(sh.state_root, monkeypatch)
-
     ok = _do_rescue("victim-abcdef", headless=False)
     assert ok is True
 
@@ -211,10 +191,10 @@ def test_rescue_fixed_verdict_invokes_launcher_resume(tmp_path, monkeypatch):
     assert resume_calls[0] == "victim-abcdef"
 
 
-def test_rescue_already_running_returns_true_no_bail(tmp_path, monkeypatch):
+def test_rescue_already_running_returns_true_no_bail(tmp_path, sandbox, monkeypatch):
     """When _resume raises GremlinAlreadyRunning, do_rescue returns True without bailing."""
     sh = setup_shell_env(tmp_path)
-    state_dir = _make_failed_gremlin(sh.state_root, sh.repo)
+    state_dir = _make_failed_gremlin(sandbox.state, sh.repo)
 
     monkeypatch.setattr(
         rescue_mod,
@@ -228,7 +208,6 @@ def test_rescue_already_running_returns_true_no_bail(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(rescue_mod, "_resume", _raise_already_running)
-    _patch_state_root(sh.state_root, monkeypatch)
 
     ok = rescue_mod.do_rescue("victim-abcdef", headless=True)
     assert ok is True
@@ -238,10 +217,10 @@ def test_rescue_already_running_returns_true_no_bail(tmp_path, monkeypatch):
     assert "finished" not in state.get("status", "")
 
 
-def test_rescue_headless_excluded_class_refused(tmp_path, monkeypatch):
+def test_rescue_headless_excluded_class_refused(tmp_path, sandbox, monkeypatch):
     """Headless rescue refuses gremlins whose bail_class is in the exclusion list."""
     sh = setup_shell_env(tmp_path)
-    state_dir = _make_failed_gremlin(sh.state_root, sh.repo)
+    state_dir = _make_failed_gremlin(sandbox.state, sh.repo)
     # Add an excluded bail_class to the existing victim state.
     state = json.loads((state_dir / "state.json").read_text())
     state["bail_class"] = "secrets"
@@ -250,8 +229,6 @@ def test_rescue_headless_excluded_class_refused(tmp_path, monkeypatch):
 
     for k, v in sh.env.items():
         monkeypatch.setenv(k, v)
-
-    _patch_state_root(sh.state_root, monkeypatch)
 
     ok = _do_rescue("victim-abcdef", headless=True)
     assert ok is False
@@ -263,7 +240,7 @@ def test_rescue_headless_excluded_class_refused(tmp_path, monkeypatch):
     assert all(e["stage"] != "rescue-diagnosis" for e in log), log
 
 
-def test_rescue_nonzero_exit_records_diagnosis_claude_error(tmp_path, monkeypatch):
+def test_rescue_nonzero_exit_records_diagnosis_claude_error(tmp_path, sandbox, monkeypatch):
     """Agent that exits non-zero → do_rescue returns False with diagnosis_claude_error."""
     sh = setup_shell_env(tmp_path)
     failing_claude = tmp_path / "failing_claude.py"
@@ -273,12 +250,10 @@ def test_rescue_nonzero_exit_records_diagnosis_claude_error(tmp_path, monkeypatc
     )
     install_fake_bin(sh.bin_dir, "claude", failing_claude)
 
-    state_dir = _make_failed_gremlin(sh.state_root, sh.repo)
+    state_dir = _make_failed_gremlin(sandbox.state, sh.repo)
 
     for k, v in sh.env.items():
         monkeypatch.setenv(k, v)
-
-    _patch_state_root(sh.state_root, monkeypatch)
 
     ok = _do_rescue("victim-abcdef", headless=False)
     assert ok is False
@@ -287,15 +262,13 @@ def test_rescue_nonzero_exit_records_diagnosis_claude_error(tmp_path, monkeypatc
     assert state["bail_reason"] == "diagnosis_claude_error"
 
 
-def test_rescue_claude_not_found_records_diagnosis_claude_error(tmp_path, monkeypatch):
+def test_rescue_claude_not_found_records_diagnosis_claude_error(tmp_path, sandbox, monkeypatch):
     """Missing claude binary → do_rescue returns False with diagnosis_claude_error."""
     sh = setup_shell_env(tmp_path)
-    state_dir = _make_failed_gremlin(sh.state_root, sh.repo)
+    state_dir = _make_failed_gremlin(sandbox.state, sh.repo)
 
     for k, v in sh.env.items():
         monkeypatch.setenv(k, v)
-
-    _patch_state_root(sh.state_root, monkeypatch)
 
     original_popen = subprocess.Popen
 
@@ -315,16 +288,14 @@ def test_rescue_claude_not_found_records_diagnosis_claude_error(tmp_path, monkey
     assert state["bail_reason"] == "diagnosis_claude_error"
 
 
-def test_rescue_headless_excluded_class_short_circuits(tmp_path, monkeypatch):
+def test_rescue_headless_excluded_class_short_circuits(tmp_path, sandbox, monkeypatch):
     """Plain headless rescue refuses on EXCLUDED_BAIL_CLASSES without --from-boss."""
     sh = setup_shell_env(tmp_path)
-    state_dir = _make_failed_gremlin(sh.state_root, sh.repo)
+    state_dir = _make_failed_gremlin(sandbox.state, sh.repo)
     # Set bail_class to an excluded class
     state = json.loads((state_dir / "state.json").read_text())
     state["bail_class"] = "reviewer_requested_changes"
     (state_dir / "state.json").write_text(json.dumps(state))
-
-    _patch_state_root(sh.state_root, monkeypatch)
 
     agent_calls = []
 
@@ -344,16 +315,14 @@ def test_rescue_headless_excluded_class_short_circuits(tmp_path, monkeypatch):
     assert updated["bail_reason"].startswith("excluded_class:")
 
 
-def test_rescue_from_boss_bypasses_excluded_class(tmp_path, monkeypatch):
+def test_rescue_from_boss_bypasses_excluded_class(tmp_path, sandbox, monkeypatch):
     """--from-boss --headless rescue on an excluded-class bail invokes the diagnosis agent."""
     sh = setup_shell_env(tmp_path)
-    state_dir = _make_failed_gremlin(sh.state_root, sh.repo)
+    state_dir = _make_failed_gremlin(sandbox.state, sh.repo)
     # Set bail_class to an excluded class
     state = json.loads((state_dir / "state.json").read_text())
     state["bail_class"] = "reviewer_requested_changes"
     (state_dir / "state.json").write_text(json.dumps(state))
-
-    _patch_state_root(sh.state_root, monkeypatch)
 
     agent_calls = []
 
@@ -369,10 +338,10 @@ def test_rescue_from_boss_bypasses_excluded_class(tmp_path, monkeypatch):
     assert len(agent_calls) == 1, "diagnosis agent must run when --from-boss is set"
 
 
-def test_rescue_diagnosis_streams_events_to_stderr(tmp_path, monkeypatch, capsys):
+def test_rescue_diagnosis_streams_events_to_stderr(tmp_path, sandbox, monkeypatch, capsys):
     """Interactive rescue emits [rescue]-prefixed stream-json events to stderr."""
     sh = setup_shell_env(tmp_path)
-    _make_failed_gremlin(sh.state_root, sh.repo)
+    _make_failed_gremlin(sandbox.state, sh.repo)
 
     # Minimal fake claude: emit stream-json events, write unsalvageable marker.
     # Use "unsalvageable" so there's no relaunch step and the test stays self-contained.
@@ -401,8 +370,6 @@ def test_rescue_diagnosis_streams_events_to_stderr(tmp_path, monkeypatch, capsys
 
     for k, v in sh.env.items():
         monkeypatch.setenv(k, v)
-
-    _patch_state_root(sh.state_root, monkeypatch)
 
     _do_rescue("victim-abcdef", headless=False)
 

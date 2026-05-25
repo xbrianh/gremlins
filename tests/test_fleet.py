@@ -44,11 +44,10 @@ def _write_state(
 
 
 def _setup_dead_gremlin(
-    tmp_path, monkeypatch, gremlin_id="test-id-aabb12", **state_overrides
+    sandbox, tmp_path, gremlin_id="test-id-aabb12", **state_overrides
 ):
-    """Build a state-root with a single dead gremlin, monkeypatch STATE_ROOT."""
-    state_root = tmp_path / "state-root"
-    state_root.mkdir()
+    """Build a state-root with a single dead gremlin."""
+    state_root = sandbox.state
     gr_dir = state_root / gremlin_id
     workdir = tmp_path / "workdir"
     workdir.mkdir()
@@ -63,7 +62,6 @@ def _setup_dead_gremlin(
     }
     state.update(state_overrides)
     _write_state(gr_dir, state, finished=True)
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     return gr_dir, workdir
 
 
@@ -410,10 +408,10 @@ def test_marker_summary_capped_to_500_chars(tmp_path):
         "secrets",
     ],
 )
-def test_rescue_headless_excludes_class(tmp_path, monkeypatch, capsys, bail_class):
+def test_rescue_headless_excludes_class(sandbox, tmp_path, monkeypatch, capsys, bail_class):
     gr_dir, _ = _setup_dead_gremlin(
+        sandbox,
         tmp_path,
-        monkeypatch,
         bail_class=bail_class,
         bail_detail="upstream-set detail",
     )
@@ -426,9 +424,9 @@ def test_rescue_headless_excludes_class(tmp_path, monkeypatch, capsys, bail_clas
     assert (gr_dir / "finished").exists()
 
 
-def test_rescue_headless_does_not_exclude_other_class(tmp_path, monkeypatch):
+def test_rescue_headless_does_not_exclude_other_class(sandbox, tmp_path, monkeypatch):
     """`other` is the only attempted class — verify it gets past the exclusion check."""
-    gr_dir, _ = _setup_dead_gremlin(tmp_path, monkeypatch, bail_class="other")
+    gr_dir, _ = _setup_dead_gremlin(sandbox, tmp_path, bail_class="other")
     # Stub the diagnosis step so the rescue terminates without claude.
     monkeypatch.setattr(
         _rescue, "_run_headless_diagnosis", lambda *a, **kw: ("structural", "fake")
@@ -446,8 +444,8 @@ def test_rescue_headless_does_not_exclude_other_class(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("rescue_count", [3, 4, 10])
-def test_rescue_headless_at_or_above_cap_refuses(tmp_path, monkeypatch, rescue_count):
-    gr_dir, _ = _setup_dead_gremlin(tmp_path, monkeypatch, rescue_count=rescue_count)
+def test_rescue_headless_at_or_above_cap_refuses(sandbox, tmp_path, monkeypatch, rescue_count):
+    gr_dir, _ = _setup_dead_gremlin(sandbox, tmp_path, rescue_count=rescue_count)
     ok = _rescue.do_rescue("test-id-aabb12", headless=True)
     assert ok is False
     new = json.loads((gr_dir / "state.json").read_text())
@@ -455,9 +453,9 @@ def test_rescue_headless_at_or_above_cap_refuses(tmp_path, monkeypatch, rescue_c
     assert f"reached cap of {_constants.RESCUE_CAP}" in new["bail_detail"]
 
 
-def test_rescue_headless_below_cap_proceeds_past_check(tmp_path, monkeypatch):
+def test_rescue_headless_below_cap_proceeds_past_check(sandbox, tmp_path, monkeypatch):
     gr_dir, _ = _setup_dead_gremlin(
-        tmp_path, monkeypatch, rescue_count=_constants.RESCUE_CAP - 1
+        sandbox, tmp_path, rescue_count=_constants.RESCUE_CAP - 1
     )
     # Stub diagnosis so we don't actually run claude
     monkeypatch.setattr(
@@ -472,8 +470,8 @@ def test_rescue_headless_below_cap_proceeds_past_check(tmp_path, monkeypatch):
     assert new["bail_reason"] == "structural"
 
 
-def test_rescue_headless_running_refused(tmp_path, monkeypatch, capsys):
-    gr_dir, _ = _setup_dead_gremlin(tmp_path, monkeypatch)
+def test_rescue_headless_running_refused(sandbox, tmp_path, monkeypatch, capsys):
+    gr_dir, _ = _setup_dead_gremlin(sandbox, tmp_path)
     # Mark as running
     state = json.loads((gr_dir / "state.json").read_text())
     state["status"] = "running"
@@ -494,23 +492,23 @@ def test_rescue_headless_running_refused(tmp_path, monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 
 
-def test_close_dead_gremlin_marks_closed(tmp_path, monkeypatch, capsys):
-    gr_dir, _ = _setup_dead_gremlin(tmp_path, monkeypatch)
+def test_close_dead_gremlin_marks_closed(sandbox, tmp_path, monkeypatch, capsys):
+    gr_dir, _ = _setup_dead_gremlin(sandbox, tmp_path)
     ok = _close.do_close("test-id-aabb12")
     assert ok is True
     assert (gr_dir / "closed").exists()
 
 
-def test_close_already_closed_is_idempotent(tmp_path, monkeypatch, capsys):
-    gr_dir, _ = _setup_dead_gremlin(tmp_path, monkeypatch)
+def test_close_already_closed_is_idempotent(sandbox, tmp_path, monkeypatch, capsys):
+    gr_dir, _ = _setup_dead_gremlin(sandbox, tmp_path)
     (gr_dir / "closed").touch()
     ok = _close.do_close("test-id-aabb12")
     assert ok is True
     assert "already closed" in capsys.readouterr().out
 
 
-def test_close_running_refused(tmp_path, monkeypatch, capsys):
-    gr_dir, _ = _setup_dead_gremlin(tmp_path, monkeypatch)
+def test_close_running_refused(sandbox, tmp_path, monkeypatch, capsys):
+    gr_dir, _ = _setup_dead_gremlin(sandbox, tmp_path)
     state = json.loads((gr_dir / "state.json").read_text())
     state["status"] = "running"
     state["pid"] = os.getpid()
@@ -525,10 +523,7 @@ def test_close_running_refused(tmp_path, monkeypatch, capsys):
     assert "still live" in capsys.readouterr().out
 
 
-def test_close_not_found(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "state-root"
-    state_root.mkdir()
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+def test_close_not_found(sandbox, tmp_path, monkeypatch, capsys):
     ok = _close.do_close("nonexistent-id")
     assert ok is False
     assert "no gremlin matched" in capsys.readouterr().out
@@ -540,10 +535,9 @@ def test_close_not_found(tmp_path, monkeypatch, capsys):
 
 
 def _setup_bailed_gremlin(
-    tmp_path, monkeypatch, gremlin_id="test-id-aabb12", **state_overrides
+    sandbox, tmp_path, gremlin_id="test-id-aabb12", **state_overrides
 ):
-    state_root = tmp_path / "state-root"
-    state_root.mkdir()
+    state_root = sandbox.state
     gr_dir = state_root / gremlin_id
     workdir = tmp_path / "workdir"
     workdir.mkdir()
@@ -558,14 +552,13 @@ def _setup_bailed_gremlin(
     }
     state.update(state_overrides)
     _write_state(gr_dir, state, finished=True)
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     return gr_dir, workdir
 
 
 def test_ack_on_bailed_child_sets_external_outcome_landed(
-    tmp_path, monkeypatch, capsys
+    sandbox, tmp_path, monkeypatch, capsys
 ):
-    gr_dir, _ = _setup_bailed_gremlin(tmp_path, monkeypatch)
+    gr_dir, _ = _setup_bailed_gremlin(sandbox, tmp_path)
     ok = _ack.do_ack("test-id-aabb12")
     assert ok is True
     state = json.loads((gr_dir / "state.json").read_text())
@@ -576,9 +569,9 @@ def test_ack_on_bailed_child_sets_external_outcome_landed(
     assert state["exit_code"] == 2
 
 
-def test_ack_on_running_child_refuses(tmp_path, monkeypatch, capsys):
+def test_ack_on_running_child_refuses(sandbox, tmp_path, monkeypatch, capsys):
     gr_dir, _ = _setup_bailed_gremlin(
-        tmp_path, monkeypatch, status="running", exit_code=None
+        sandbox, tmp_path, status="running", exit_code=None
     )
     ok = _ack.do_ack("test-id-aabb12")
     assert ok is False
@@ -587,9 +580,9 @@ def test_ack_on_running_child_refuses(tmp_path, monkeypatch, capsys):
     assert "external_outcome" not in state
 
 
-def test_ack_on_completed_child_refuses(tmp_path, monkeypatch, capsys):
+def test_ack_on_completed_child_refuses(sandbox, tmp_path, monkeypatch, capsys):
     gr_dir, _ = _setup_bailed_gremlin(
-        tmp_path, monkeypatch, status="completed", exit_code=0
+        sandbox, tmp_path, status="completed", exit_code=0
     )
     ok = _ack.do_ack("test-id-aabb12")
     assert ok is False
@@ -599,9 +592,9 @@ def test_ack_on_completed_child_refuses(tmp_path, monkeypatch, capsys):
 
 
 def test_skip_on_bailed_child_sets_external_outcome_abandoned(
-    tmp_path, monkeypatch, capsys
+    sandbox, tmp_path, monkeypatch, capsys
 ):
-    gr_dir, _ = _setup_bailed_gremlin(tmp_path, monkeypatch)
+    gr_dir, _ = _setup_bailed_gremlin(sandbox, tmp_path)
     ok = _ack.do_skip("test-id-aabb12")
     assert ok is True
     state = json.loads((gr_dir / "state.json").read_text())
@@ -612,9 +605,9 @@ def test_skip_on_bailed_child_sets_external_outcome_abandoned(
     assert state["exit_code"] == 2
 
 
-def test_skip_on_running_child_refuses(tmp_path, monkeypatch, capsys):
+def test_skip_on_running_child_refuses(sandbox, tmp_path, monkeypatch, capsys):
     gr_dir, _ = _setup_bailed_gremlin(
-        tmp_path, monkeypatch, status="running", exit_code=None
+        sandbox, tmp_path, status="running", exit_code=None
     )
     ok = _ack.do_skip("test-id-aabb12")
     assert ok is False
@@ -623,9 +616,9 @@ def test_skip_on_running_child_refuses(tmp_path, monkeypatch, capsys):
     assert "external_outcome" not in state
 
 
-def test_skip_on_completed_child_refuses(tmp_path, monkeypatch, capsys):
+def test_skip_on_completed_child_refuses(sandbox, tmp_path, monkeypatch, capsys):
     gr_dir, _ = _setup_bailed_gremlin(
-        tmp_path, monkeypatch, status="completed", exit_code=0
+        sandbox, tmp_path, status="completed", exit_code=0
     )
     ok = _ack.do_skip("test-id-aabb12")
     assert ok is False
@@ -639,7 +632,7 @@ def test_skip_on_completed_child_refuses(tmp_path, monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 
 
-def test_land_local_squash_lands_branch_and_deletes_it(tmp_path, monkeypatch, capsys):
+def test_land_local_squash_lands_branch_and_deletes_it(sandbox, tmp_path, monkeypatch, capsys):
     project_root = tmp_path / "project"
     project_root.mkdir()
     _init_git_repo(project_root)
@@ -665,8 +658,7 @@ def test_land_local_squash_lands_branch_and_deletes_it(tmp_path, monkeypatch, ca
         ["git", "checkout", "main"], cwd=project_root, check=True, capture_output=True
     )
 
-    state_root = tmp_path / "state-root"
-    state_root.mkdir()
+    state_root = sandbox.state
     gremlin_id = "test-id-aabb12"
     gr_dir = state_root / gremlin_id
     artifacts_dir = gr_dir / "artifacts"
@@ -688,7 +680,6 @@ def test_land_local_squash_lands_branch_and_deletes_it(tmp_path, monkeypatch, ca
     }
     _write_state(gr_dir, state, finished=True)
 
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     monkeypatch.setattr(
         _land,
         "_synthesize_commit_message_ai",
@@ -725,7 +716,7 @@ def test_land_local_squash_lands_branch_and_deletes_it(tmp_path, monkeypatch, ca
 
 
 def test_land_local_squash_folds_commit_synthesis_cost_into_total(
-    tmp_path, monkeypatch, capsys
+    sandbox, tmp_path, monkeypatch, capsys
 ):
     """Squash-land must add the commit-message `claude -p` cost to total_cost_usd
     so the printed total — and the persisted state — cover land-time spend."""
@@ -754,8 +745,7 @@ def test_land_local_squash_folds_commit_synthesis_cost_into_total(
         ["git", "checkout", "main"], cwd=project_root, check=True, capture_output=True
     )
 
-    state_root = tmp_path / "state-root"
-    state_root.mkdir()
+    state_root = sandbox.state
     gremlin_id = "test-id-cost12"
     gr_dir = state_root / gremlin_id
     artifacts_dir = gr_dir / "artifacts"
@@ -778,7 +768,6 @@ def test_land_local_squash_folds_commit_synthesis_cost_into_total(
     }
     sf_path = _write_state(gr_dir, state, finished=True)
 
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     monkeypatch.setattr(
         _land,
         "_synthesize_commit_message_ai",
@@ -840,7 +829,7 @@ def test_land_local_into_dir_nonexistent_fails(tmp_path, monkeypatch, capsys):
     assert "--into directory does not exist" in capsys.readouterr().out
 
 
-def test_land_local_into_dir_lands_in_worktree(tmp_path, monkeypatch, capsys):
+def test_land_local_into_dir_lands_in_worktree(sandbox, tmp_path, monkeypatch, capsys):
     """When into_dir is provided, the squash commit lands there instead of project_root."""
     project_root = tmp_path / "project"
     project_root.mkdir()
@@ -882,7 +871,7 @@ def test_land_local_into_dir_lands_in_worktree(tmp_path, monkeypatch, capsys):
         capture_output=True,
     )
 
-    state_root = tmp_path / "state-root"
+    state_root = sandbox.state
     gr_dir = state_root / gremlin_id
     artifacts_dir = gr_dir / "artifacts"
     artifacts_dir.mkdir(parents=True)
@@ -905,7 +894,6 @@ def test_land_local_into_dir_lands_in_worktree(tmp_path, monkeypatch, capsys):
     sf = str(gr_dir / "state.json")
     pathlib.Path(sf).write_text(json.dumps(state))
 
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     monkeypatch.setattr(
         _land,
         "_synthesize_commit_message_ai",
@@ -923,7 +911,7 @@ def test_land_local_into_dir_lands_in_worktree(tmp_path, monkeypatch, capsys):
     assert not (project_root / "wt_feature.txt").exists()
 
 
-def test_land_proceeds_with_untracked_files_present(tmp_path, monkeypatch, capsys):
+def test_land_proceeds_with_untracked_files_present(sandbox, tmp_path, monkeypatch, capsys):
     """Untracked files must not block land (they can't be clobbered by squash merge)."""
     project_root = tmp_path / "project"
     project_root.mkdir()
@@ -953,8 +941,7 @@ def test_land_proceeds_with_untracked_files_present(tmp_path, monkeypatch, capsy
     # Drop an untracked file into the working tree on main.
     (project_root / "scratch.tmp").write_text("scratch\n")
 
-    state_root = tmp_path / "state-root"
-    state_root.mkdir()
+    state_root = sandbox.state
     gremlin_id = "test-id-untr12"
     gr_dir = state_root / gremlin_id
     artifacts_dir = gr_dir / "artifacts"
@@ -976,7 +963,6 @@ def test_land_proceeds_with_untracked_files_present(tmp_path, monkeypatch, capsy
     }
     _write_state(gr_dir, state, finished=True)
 
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     monkeypatch.setattr(
         _land,
         "_synthesize_commit_message_ai",
@@ -992,7 +978,7 @@ def test_land_proceeds_with_untracked_files_present(tmp_path, monkeypatch, capsy
     assert (project_root / "scratch.tmp").exists()
 
 
-def test_land_refuses_with_tracked_modifications(tmp_path, monkeypatch, capsys):
+def test_land_refuses_with_tracked_modifications(sandbox, tmp_path, monkeypatch, capsys):
     """Staged or modified tracked files must still block land."""
     project_root = tmp_path / "project"
     project_root.mkdir()
@@ -1022,8 +1008,7 @@ def test_land_refuses_with_tracked_modifications(tmp_path, monkeypatch, capsys):
     # Dirty the tracked README.md on main.
     (project_root / "README.md").write_text("modified\n")
 
-    state_root = tmp_path / "state-root"
-    state_root.mkdir()
+    state_root = sandbox.state
     gremlin_id = "test-id-dirty1"
     gr_dir = state_root / gremlin_id
     (gr_dir / "artifacts").mkdir(parents=True)
@@ -1041,7 +1026,6 @@ def test_land_refuses_with_tracked_modifications(tmp_path, monkeypatch, capsys):
     }
     _write_state(gr_dir, state, finished=True)
 
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     monkeypatch.chdir(project_root)
 
     ok = _land._land_local(
@@ -1051,7 +1035,7 @@ def test_land_refuses_with_tracked_modifications(tmp_path, monkeypatch, capsys):
     assert "working tree is not clean" in capsys.readouterr().out
 
 
-def test_squash_land_failure_preserves_untracked_files(tmp_path, monkeypatch):
+def test_squash_land_failure_preserves_untracked_files(sandbox, tmp_path, monkeypatch):
     """git clean -fd must not run when untracked files existed before the merge."""
     project_root = tmp_path / "project"
     project_root.mkdir()
@@ -1083,8 +1067,7 @@ def test_squash_land_failure_preserves_untracked_files(tmp_path, monkeypatch):
     # Drop an untracked file with the same name — this will cause the squash merge to fail.
     (project_root / "conflict.txt").write_text("pre-existing untracked\n")
 
-    state_root = tmp_path / "state-root"
-    state_root.mkdir()
+    state_root = sandbox.state
     gremlin_id = "test-id-conf12"
     gr_dir = state_root / gremlin_id
     artifacts_dir = gr_dir / "artifacts"
@@ -1103,7 +1086,6 @@ def test_squash_land_failure_preserves_untracked_files(tmp_path, monkeypatch):
     }
     _write_state(gr_dir, state, finished=True)
 
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     monkeypatch.chdir(project_root)
 
     # The merge will fail (untracked file would be overwritten), but the
@@ -1227,11 +1209,10 @@ def test_liveness_crashed_when_pid_gone_and_no_workdir_in_state(tmp_path):
 
 
 def test_rescue_host_terminated_project_root_gone_bails_headless(
-    tmp_path, monkeypatch, capsys
+    sandbox, tmp_path, monkeypatch, capsys
 ):
     """When project_root is also missing, headless rescue should bail with host_terminated_unrecoverable."""
-    state_root = tmp_path / "state-root"
-    state_root.mkdir()
+    state_root = sandbox.state
     gremlin_id = "test-id-htbb12"
     gr_dir = state_root / gremlin_id
     workdir = tmp_path / "workdir"
@@ -1247,7 +1228,6 @@ def test_rescue_host_terminated_project_root_gone_bails_headless(
         "rescue_count": 0,
     }
     _write_state(gr_dir, state)
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
 
     ok = _rescue.do_rescue(gremlin_id, headless=True)
     assert ok is False
@@ -1259,11 +1239,10 @@ def test_rescue_host_terminated_project_root_gone_bails_headless(
 
 
 def test_rescue_host_terminated_worktree_recreation_failure_bails_headless(
-    tmp_path, monkeypatch, capsys
+    sandbox, tmp_path, monkeypatch, capsys
 ):
     """When worktree recreation fails, headless rescue should bail with host_terminated_unrecoverable."""
-    state_root = tmp_path / "state-root"
-    state_root.mkdir()
+    state_root = sandbox.state
     gremlin_id = "test-id-htcc12"
     gr_dir = state_root / gremlin_id
     project_root = tmp_path / "project"
@@ -1281,7 +1260,6 @@ def test_rescue_host_terminated_worktree_recreation_failure_bails_headless(
         "rescue_count": 0,
     }
     _write_state(gr_dir, state)
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     monkeypatch.setattr(
         _rescue, "recreate_worktree", lambda s: (False, "git not a repo")
     )
@@ -1294,11 +1272,10 @@ def test_rescue_host_terminated_worktree_recreation_failure_bails_headless(
 
 
 def test_rescue_host_terminated_recreates_worktree_and_proceeds(
-    tmp_path, monkeypatch, capsys
+    sandbox, tmp_path, monkeypatch, capsys
 ):
     """When worktree recreation succeeds, rescue continues to the diagnosis step."""
-    state_root = tmp_path / "state-root"
-    state_root.mkdir()
+    state_root = sandbox.state
     gremlin_id = "test-id-htdd12"
     gr_dir = state_root / gremlin_id
     project_root = tmp_path / "project"
@@ -1316,7 +1293,6 @@ def test_rescue_host_terminated_recreates_worktree_and_proceeds(
         "rescue_count": 0,
     }
     _write_state(gr_dir, state)
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
 
     def fake_recreate(s):
         workdir.mkdir(exist_ok=True)
@@ -1383,11 +1359,10 @@ def test_rescue_host_terminated_recreates_worktree_and_proceeds(
     ids=lambda x: x if isinstance(x, str) else "",
 )
 def test_do_land_dispatches_to_correct_helper(
-    label, state, artifacts, expected_land_fn, tmp_path, monkeypatch, capsys
+    label, state, artifacts, expected_land_fn, sandbox, tmp_path, monkeypatch, capsys
 ):
     gremlin_id = "test-dispatch-id"
-    state_root = tmp_path / "state-root"
-    state_root.mkdir()
+    state_root = sandbox.state
     gr_dir = state_root / gremlin_id
     workdir = tmp_path / "workdir"
     workdir.mkdir()
@@ -1400,7 +1375,6 @@ def test_do_land_dispatches_to_correct_helper(
         **state,
     }
     _write_state(gr_dir, full_state, finished=True)
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
 
     called = []
 
@@ -1425,11 +1399,10 @@ def test_do_land_dispatches_to_correct_helper(
     assert called == [expected_land_fn], f"expected {expected_land_fn}, got {called}"
 
 
-def test_do_land_one_branch_routes_to_local(tmp_path, monkeypatch):
+def test_do_land_one_branch_routes_to_local(sandbox, tmp_path, monkeypatch):
     """A gremlin with one branch artifact dispatches to _land_local."""
     gremlin_id = "custard-pipeline-id"
-    state_root = tmp_path / "state-root"
-    state_root.mkdir()
+    state_root = sandbox.state
     gr_dir = state_root / gremlin_id
     workdir = tmp_path / "workdir"
     workdir.mkdir()
@@ -1444,7 +1417,6 @@ def test_do_land_one_branch_routes_to_local(tmp_path, monkeypatch):
         "artifacts": [{"type": "branch", "name": "bg/local/custard-pipeline-id"}],
     }
     _write_state(gr_dir, state, finished=True)
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
 
     called = []
     monkeypatch.setattr(
@@ -1462,15 +1434,14 @@ def test_do_land_one_branch_routes_to_local(tmp_path, monkeypatch):
     assert called == ["_land_local"]
 
 
-def test_land_gh_removes_worktree_before_gh_merge(tmp_path, monkeypatch):
+def test_land_gh_removes_worktree_before_gh_merge(sandbox, tmp_path, monkeypatch):
     """_remove_worktree must be called before gh pr merge so --delete-branch succeeds."""
     import types
 
     pr_url = "https://github.com/o/r/pull/42"
     gremlin_id = "gh-land-order-test12"
 
-    state_root = tmp_path / "state-root"
-    state_root.mkdir()
+    state_root = sandbox.state
     gr_dir = state_root / gremlin_id
     gr_dir.mkdir(parents=True)
     workdir = tmp_path / "workdir"
@@ -1486,7 +1457,6 @@ def test_land_gh_removes_worktree_before_gh_merge(tmp_path, monkeypatch):
     }
     (gr_dir / "state.json").write_text(json.dumps(state))
 
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     from gremlins.artifacts.schemes import PrInfo
 
     monkeypatch.setattr(
@@ -1599,9 +1569,8 @@ def _make_args(**kwargs):
 _EMPTY_QUEUE = {"pending": 0, "running": 0, "failed": 0, "runner_active": False}
 
 
-def test_do_list_json_emits_gremlins_and_queue(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "state-root"
-    state_root.mkdir()
+def test_do_list_json_emits_gremlins_and_queue(sandbox, tmp_path, monkeypatch, capsys):
+    state_root = sandbox.state
     gr_dir = state_root / "test-id-json01"
     _write_state(
         gr_dir,
@@ -1617,7 +1586,6 @@ def test_do_list_json_emits_gremlins_and_queue(tmp_path, monkeypatch, capsys):
         },
         log_text="recent",
     )
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     monkeypatch.setattr(_views, "queue_summary", lambda: _EMPTY_QUEUE)
     _views.do_list_json(_make_args(), here_root=None)
     out = capsys.readouterr().out
@@ -1636,9 +1604,8 @@ def test_do_list_json_emits_gremlins_and_queue(tmp_path, monkeypatch, capsys):
     assert item["age_seconds"] is not None
 
 
-def test_do_list_json_dead_liveness_structured(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "state-root"
-    state_root.mkdir()
+def test_do_list_json_dead_liveness_structured(sandbox, tmp_path, monkeypatch, capsys):
+    state_root = sandbox.state
     gr_dir = state_root / "test-id-dead01"
     _write_state(
         gr_dir,
@@ -1652,7 +1619,6 @@ def test_do_list_json_dead_liveness_structured(tmp_path, monkeypatch, capsys):
         },
         finished=True,
     )
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     monkeypatch.setattr(_views, "queue_summary", lambda: _EMPTY_QUEUE)
     _views.do_list_json(_make_args(), here_root=None)
     out = capsys.readouterr().out
@@ -1664,10 +1630,7 @@ def test_do_list_json_dead_liveness_structured(tmp_path, monkeypatch, capsys):
     }
 
 
-def test_do_list_json_empty_fleet(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "state-root"
-    state_root.mkdir()
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+def test_do_list_json_empty_fleet(sandbox, tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(_views, "queue_summary", lambda: _EMPTY_QUEUE)
     _views.do_list_json(_make_args(), here_root=None)
     out = capsys.readouterr().out
@@ -1680,20 +1643,14 @@ def test_do_list_json_empty_fleet(tmp_path, monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 
 
-def test_do_list_json_queue_field_empty(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "state-root"
-    state_root.mkdir()
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+def test_do_list_json_queue_field_empty(sandbox, tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(_views, "queue_summary", lambda: _EMPTY_QUEUE)
     _views.do_list_json(_make_args(), here_root=None)
     data = json.loads(capsys.readouterr().out)
     assert data["queue"] == _EMPTY_QUEUE
 
 
-def test_do_list_json_queue_field_with_items(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "state-root"
-    state_root.mkdir()
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+def test_do_list_json_queue_field_with_items(sandbox, tmp_path, monkeypatch, capsys):
     summary = {"pending": 3, "running": 1, "failed": 0, "runner_active": True}
     monkeypatch.setattr(_views, "queue_summary", lambda: summary)
     _views.do_list_json(_make_args(), here_root=None)
@@ -1701,10 +1658,7 @@ def test_do_list_json_queue_field_with_items(tmp_path, monkeypatch, capsys):
     assert data["queue"] == summary
 
 
-def test_do_list_shows_queue_header_with_active_runner(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "state-root"
-    state_root.mkdir()
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+def test_do_list_shows_queue_header_with_active_runner(sandbox, tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(
         _views,
         "queue_summary",
@@ -1719,10 +1673,7 @@ def test_do_list_shows_queue_header_with_active_runner(tmp_path, monkeypatch, ca
     assert "NOT RUNNING" not in out
 
 
-def test_do_list_shows_loud_warning_when_runner_dead(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "state-root"
-    state_root.mkdir()
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+def test_do_list_shows_loud_warning_when_runner_dead(sandbox, tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(
         _views,
         "queue_summary",
@@ -1734,10 +1685,7 @@ def test_do_list_shows_loud_warning_when_runner_dead(tmp_path, monkeypatch, caps
     assert "3 items waiting" in out
 
 
-def test_do_list_suppresses_queue_header_when_empty(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "state-root"
-    state_root.mkdir()
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+def test_do_list_suppresses_queue_header_when_empty(sandbox, tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(_views, "queue_summary", lambda: _EMPTY_QUEUE)
     _views.do_list(_make_args(), here_root=None)
     out = capsys.readouterr().out
@@ -1749,9 +1697,8 @@ def test_do_list_suppresses_queue_header_when_empty(tmp_path, monkeypatch, capsy
 # ---------------------------------------------------------------------------
 
 
-def test_do_drill_in_json_emits_json_object(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "state-root"
-    state_root.mkdir()
+def test_do_drill_in_json_emits_json_object(sandbox, tmp_path, monkeypatch, capsys):
+    state_root = sandbox.state
     gr_dir = state_root / "test-id-drill1"
     _write_state(
         gr_dir,
@@ -1765,7 +1712,6 @@ def test_do_drill_in_json_emits_json_object(tmp_path, monkeypatch, capsys):
         },
         finished=True,
     )
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     _views.do_drill_in_json("test-id-drill1")
     out = capsys.readouterr().out
     obj = json.loads(out)
@@ -1778,10 +1724,7 @@ def test_do_drill_in_json_emits_json_object(tmp_path, monkeypatch, capsys):
     assert obj["rescue_reports"] == []
 
 
-def test_do_drill_in_json_no_match(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "state-root"
-    state_root.mkdir()
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
+def test_do_drill_in_json_no_match(sandbox, tmp_path, monkeypatch, capsys):
     _views.do_drill_in_json("nonexistent")
     out = capsys.readouterr().out
     obj = json.loads(out)
@@ -1789,9 +1732,8 @@ def test_do_drill_in_json_no_match(tmp_path, monkeypatch, capsys):
     assert "no gremlin matched" in obj["error"]
 
 
-def test_do_drill_in_json_includes_log_path(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "state-root"
-    state_root.mkdir()
+def test_do_drill_in_json_includes_log_path(sandbox, tmp_path, monkeypatch, capsys):
+    state_root = sandbox.state
     gr_dir = state_root / "test-id-log001"
     _write_state(
         gr_dir,
@@ -1805,7 +1747,6 @@ def test_do_drill_in_json_includes_log_path(tmp_path, monkeypatch, capsys):
         finished=True,
         log_text="some output",
     )
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     _views.do_drill_in_json("test-id-log001")
     out = capsys.readouterr().out
     obj = json.loads(out)
@@ -1818,8 +1759,7 @@ def test_do_drill_in_json_includes_log_path(tmp_path, monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 
 
-def test_cli_fleet_json_no_state_root(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(tmp_path / "nonexistent"))
+def test_cli_fleet_json_no_state_root(sandbox, tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(_views, "queue_summary", lambda: _EMPTY_QUEUE)
     monkeypatch.setattr(_fleet_cli, "queue_summary", lambda: _EMPTY_QUEUE)
     with pytest.raises(SystemExit) as exc:
@@ -1829,8 +1769,7 @@ def test_cli_fleet_json_no_state_root(tmp_path, monkeypatch, capsys):
     assert json.loads(out)["gremlins"] == []
 
 
-def test_cli_fleet_json_drill_in_no_state_root(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(tmp_path / "nonexistent"))
+def test_cli_fleet_json_drill_in_no_state_root(sandbox, tmp_path, monkeypatch, capsys):
     with pytest.raises(SystemExit) as exc:
         _main_impl(["gr-abc", "--json"])
     assert exc.value.code == 0
@@ -1839,9 +1778,8 @@ def test_cli_fleet_json_drill_in_no_state_root(tmp_path, monkeypatch, capsys):
     assert "error" in obj
 
 
-def test_cli_fleet_json_list(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "state-root"
-    state_root.mkdir()
+def test_cli_fleet_json_list(sandbox, tmp_path, monkeypatch, capsys):
+    state_root = sandbox.state
     gr_dir = state_root / "test-cli-json01"
     _write_state(
         gr_dir,
@@ -1855,7 +1793,6 @@ def test_cli_fleet_json_list(tmp_path, monkeypatch, capsys):
         },
         log_text="recent",
     )
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     monkeypatch.setattr(_views, "queue_summary", lambda: _EMPTY_QUEUE)
     with pytest.raises(SystemExit) as exc:
         _main_impl(["--json"])
@@ -1865,9 +1802,8 @@ def test_cli_fleet_json_list(tmp_path, monkeypatch, capsys):
     assert data["gremlins"][0]["id"] == "test-cli-json01"
 
 
-def test_cli_fleet_json_drill_in(tmp_path, monkeypatch, capsys):
-    state_root = tmp_path / "state-root"
-    state_root.mkdir()
+def test_cli_fleet_json_drill_in(sandbox, tmp_path, monkeypatch, capsys):
+    state_root = sandbox.state
     gr_dir = state_root / "test-cli-drill01"
     _write_state(
         gr_dir,
@@ -1881,7 +1817,6 @@ def test_cli_fleet_json_drill_in(tmp_path, monkeypatch, capsys):
         },
         finished=True,
     )
-    monkeypatch.setattr(_constants, "STATE_ROOT", str(state_root))
     with pytest.raises(SystemExit) as exc:
         _main_impl(["test-cli-drill01", "--json"])
     assert exc.value.code == 0
