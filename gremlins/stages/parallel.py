@@ -438,10 +438,9 @@ class _ParallelExecutor:
             return
         sr = paths.state_root()
         prefix = f"{parent_gid}--{self._group_name}--"
-        for child_key, _, _ in self._child_runners:
-            child_dir = sr / f"{prefix}{child_key}"
-            if child_dir.is_dir():
-                shutil.rmtree(child_dir, ignore_errors=True)
+        for entry in sr.iterdir():
+            if entry.name.startswith(prefix) and entry.is_dir():
+                shutil.rmtree(entry, ignore_errors=True)
 
     async def _fan_in(self) -> None:
         self._set_stage(f"{self._group_name}-fanin")
