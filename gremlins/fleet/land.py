@@ -921,6 +921,12 @@ def do_land(
 
     shape = landable_shape(state)
 
+    if shape == "empty":
+        session_dir = resolve_session_dir(gremlin_id)
+        registry = ArtifactRegistry(session_dir=session_dir)
+        if registry.produced("pr"):
+            shape = "one_pr"
+
     if shape == "many_prs":
         print("error: stacked PR series — merge in order on GitHub")
         return False
