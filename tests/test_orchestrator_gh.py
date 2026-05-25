@@ -216,7 +216,7 @@ def _make_gh_subprocess(
         # gh pr diff
         if sub == "pr" and "diff" in cmd:
             return subprocess.CompletedProcess(cmd, 0, stdout=pr_diff, stderr="")
-        # gh pr view (github_open_pull_request._get_pr_branch)
+        # gh pr view --json (resolver / branch lookup)
         if sub == "pr" and "view" in cmd and "--json" in cmd:
             return subprocess.CompletedProcess(
                 cmd, 0, stdout="issue-42-impl-slug\n", stderr=""

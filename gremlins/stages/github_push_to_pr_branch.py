@@ -20,7 +20,7 @@ class GitHubPushToPrBranch(Stage):
 
     async def run(self, state: State) -> Outcome:
         if not state.artifacts.produced("pr"):
-            raise Bail("no PR branch in registry — launch with --pr <num|url>")
+            raise Bail("no PR recorded in registry — launch with --pr <num|url>")
         branch = state.artifacts.read("pr").branch
         proc = await asyncio.create_subprocess_exec(
             "git",

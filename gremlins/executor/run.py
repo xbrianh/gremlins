@@ -16,6 +16,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from gremlins import paths
+from gremlins.artifacts.registry import MissingArtifact
 from gremlins.clients.client import Client
 from gremlins.env_file import load_env_file
 from gremlins.errors import die
@@ -270,7 +271,7 @@ async def run_pipeline(
     if gh:
         try:
             pr_url = gremlin.registry.read("pr").url
-        except Exception:
+        except MissingArtifact:
             pr_url = "(unknown)"
         logger.info("done. PR: %s", pr_url)
     else:

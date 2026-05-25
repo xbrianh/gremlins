@@ -754,9 +754,11 @@ def _land_gh(
     project_root = _resolve_landing_cwd(state)
     cwd = project_root if project_root and os.path.isdir(project_root) else None
 
+    session_dir = resolve_session_dir(gremlin_id)
     registry = ArtifactRegistry(
-        session_dir=resolve_session_dir(gremlin_id),
+        session_dir=session_dir,
         cwd=pathlib.Path(cwd) if cwd else None,
+        persist_path=session_dir.parent / "registry.json",
     )
     try:
         pr_url = registry.read("pr").url

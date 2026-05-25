@@ -292,13 +292,15 @@ class Gremlin:
 
             if self.worktree_dir is not None:
                 os.chdir(self.worktree_dir)
+
+            self.registry = ArtifactRegistry(
+                session_dir=self.session_dir,
+                cwd=self.worktree_dir,
+                persist_path=self.state_dir / "registry.json",
+            )
         except Exception:
             if worktree_created:
                 _git_mod.remove_worktree(self.project_root, worktree_created)
             raise
 
-        self.registry = ArtifactRegistry(
-            session_dir=self.session_dir,
-            cwd=self.worktree_dir,
-        )
         return self

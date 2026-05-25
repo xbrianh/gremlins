@@ -1331,6 +1331,7 @@ def test_launch_pr_kwarg_sets_state_fields(lenv, monkeypatch):
         "view_pr",
         lambda pr, *, project_root=None: {
             "url": f"https://github.com/x/y/pull/{pr}",
+            "number": int(pr),
             "headRefName": "feature-branch",
         },
     )

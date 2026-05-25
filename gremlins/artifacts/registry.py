@@ -34,9 +34,14 @@ class ArtifactRegistry:
         self,
         session_dir: pathlib.Path,
         cwd: pathlib.Path | None = None,
+        *,
+        persist_path: pathlib.Path | None = None,
     ) -> None:
         self._cwd = cwd
-        self.registry_path = session_dir.parent / "registry.json"
+        self.registry_path = (
+            persist_path if persist_path is not None
+            else session_dir.parent / "registry.json"
+        )
         self._bindings: dict[str, Uri] = {}
         self._resolvers: dict[str, SchemeResolver] = {
             "file": FileSessionResolver(session_dir),
