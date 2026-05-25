@@ -96,9 +96,6 @@ def test_resume_unbinds_stale_exec_out_keys(tmp_path):
 
 
 def test_resume_unbind_only_affects_exec_stages(tmp_path):
-    """Non-Exec stages starting at resume_from are not touched."""
-    from gremlins.stages.base import Stage as BaseStage
-
     session_dir = tmp_path / "artifacts"
     state_dir = tmp_path / "state"
     state_dir.mkdir()
@@ -115,6 +112,8 @@ def test_resume_unbind_only_affects_exec_stages(tmp_path):
     )
     gremlin.registry = ArtifactRegistry(session_dir=session_dir)
     gremlin.registry.bind("work-out", Uri.parse("git://range/a..b"))
+    gremlin.registry.bind("non-exec-artifact", Uri.parse("git://range/x..y"))
 
     gremlin._unbind_stale_exec_artifacts()
     assert not gremlin.registry.produced("work-out")
+    assert gremlin.registry.produced("non-exec-artifact")
