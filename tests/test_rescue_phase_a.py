@@ -77,7 +77,9 @@ def _make_failed_gremlin(
     return state_dir
 
 
-def test_rescue_diagnosis_runs_in_scratch_dir_not_worktree(tmp_path, sandbox, monkeypatch):
+def test_rescue_diagnosis_runs_in_scratch_dir_not_worktree(
+    tmp_path, sandbox, monkeypatch
+):
     """The diagnosis agent's cwd is a /tmp scratch dir, not the gremlin's worktree."""
     sh = setup_shell_env(tmp_path)
     _make_failed_gremlin(sandbox.state, sh.repo)
@@ -240,7 +242,9 @@ def test_rescue_headless_excluded_class_refused(tmp_path, sandbox, monkeypatch):
     assert all(e["stage"] != "rescue-diagnosis" for e in log), log
 
 
-def test_rescue_nonzero_exit_records_diagnosis_claude_error(tmp_path, sandbox, monkeypatch):
+def test_rescue_nonzero_exit_records_diagnosis_claude_error(
+    tmp_path, sandbox, monkeypatch
+):
     """Agent that exits non-zero → do_rescue returns False with diagnosis_claude_error."""
     sh = setup_shell_env(tmp_path)
     failing_claude = tmp_path / "failing_claude.py"
@@ -262,7 +266,9 @@ def test_rescue_nonzero_exit_records_diagnosis_claude_error(tmp_path, sandbox, m
     assert state["bail_reason"] == "diagnosis_claude_error"
 
 
-def test_rescue_claude_not_found_records_diagnosis_claude_error(tmp_path, sandbox, monkeypatch):
+def test_rescue_claude_not_found_records_diagnosis_claude_error(
+    tmp_path, sandbox, monkeypatch
+):
     """Missing claude binary → do_rescue returns False with diagnosis_claude_error."""
     sh = setup_shell_env(tmp_path)
     state_dir = _make_failed_gremlin(sandbox.state, sh.repo)
@@ -338,7 +344,9 @@ def test_rescue_from_boss_bypasses_excluded_class(tmp_path, sandbox, monkeypatch
     assert len(agent_calls) == 1, "diagnosis agent must run when --from-boss is set"
 
 
-def test_rescue_diagnosis_streams_events_to_stderr(tmp_path, sandbox, monkeypatch, capsys):
+def test_rescue_diagnosis_streams_events_to_stderr(
+    tmp_path, sandbox, monkeypatch, capsys
+):
     """Interactive rescue emits [rescue]-prefixed stream-json events to stderr."""
     sh = setup_shell_env(tmp_path)
     _make_failed_gremlin(sandbox.state, sh.repo)

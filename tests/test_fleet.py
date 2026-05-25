@@ -408,7 +408,9 @@ def test_marker_summary_capped_to_500_chars(tmp_path):
         "secrets",
     ],
 )
-def test_rescue_headless_excludes_class(sandbox, tmp_path, monkeypatch, capsys, bail_class):
+def test_rescue_headless_excludes_class(
+    sandbox, tmp_path, monkeypatch, capsys, bail_class
+):
     gr_dir, _ = _setup_dead_gremlin(
         sandbox,
         tmp_path,
@@ -444,7 +446,9 @@ def test_rescue_headless_does_not_exclude_other_class(sandbox, tmp_path, monkeyp
 
 
 @pytest.mark.parametrize("rescue_count", [3, 4, 10])
-def test_rescue_headless_at_or_above_cap_refuses(sandbox, tmp_path, monkeypatch, rescue_count):
+def test_rescue_headless_at_or_above_cap_refuses(
+    sandbox, tmp_path, monkeypatch, rescue_count
+):
     gr_dir, _ = _setup_dead_gremlin(sandbox, tmp_path, rescue_count=rescue_count)
     ok = _rescue.do_rescue("test-id-aabb12", headless=True)
     assert ok is False
@@ -632,7 +636,9 @@ def test_skip_on_completed_child_refuses(sandbox, tmp_path, monkeypatch, capsys)
 # ---------------------------------------------------------------------------
 
 
-def test_land_local_squash_lands_branch_and_deletes_it(sandbox, tmp_path, monkeypatch, capsys):
+def test_land_local_squash_lands_branch_and_deletes_it(
+    sandbox, tmp_path, monkeypatch, capsys
+):
     project_root = tmp_path / "project"
     project_root.mkdir()
     _init_git_repo(project_root)
@@ -911,7 +917,9 @@ def test_land_local_into_dir_lands_in_worktree(sandbox, tmp_path, monkeypatch, c
     assert not (project_root / "wt_feature.txt").exists()
 
 
-def test_land_proceeds_with_untracked_files_present(sandbox, tmp_path, monkeypatch, capsys):
+def test_land_proceeds_with_untracked_files_present(
+    sandbox, tmp_path, monkeypatch, capsys
+):
     """Untracked files must not block land (they can't be clobbered by squash merge)."""
     project_root = tmp_path / "project"
     project_root.mkdir()
@@ -978,7 +986,9 @@ def test_land_proceeds_with_untracked_files_present(sandbox, tmp_path, monkeypat
     assert (project_root / "scratch.tmp").exists()
 
 
-def test_land_refuses_with_tracked_modifications(sandbox, tmp_path, monkeypatch, capsys):
+def test_land_refuses_with_tracked_modifications(
+    sandbox, tmp_path, monkeypatch, capsys
+):
     """Staged or modified tracked files must still block land."""
     project_root = tmp_path / "project"
     project_root.mkdir()
@@ -1658,7 +1668,9 @@ def test_do_list_json_queue_field_with_items(sandbox, tmp_path, monkeypatch, cap
     assert data["queue"] == summary
 
 
-def test_do_list_shows_queue_header_with_active_runner(sandbox, tmp_path, monkeypatch, capsys):
+def test_do_list_shows_queue_header_with_active_runner(
+    sandbox, tmp_path, monkeypatch, capsys
+):
     monkeypatch.setattr(
         _views,
         "queue_summary",
@@ -1673,7 +1685,9 @@ def test_do_list_shows_queue_header_with_active_runner(sandbox, tmp_path, monkey
     assert "NOT RUNNING" not in out
 
 
-def test_do_list_shows_loud_warning_when_runner_dead(sandbox, tmp_path, monkeypatch, capsys):
+def test_do_list_shows_loud_warning_when_runner_dead(
+    sandbox, tmp_path, monkeypatch, capsys
+):
     monkeypatch.setattr(
         _views,
         "queue_summary",
@@ -1685,7 +1699,9 @@ def test_do_list_shows_loud_warning_when_runner_dead(sandbox, tmp_path, monkeypa
     assert "3 items waiting" in out
 
 
-def test_do_list_suppresses_queue_header_when_empty(sandbox, tmp_path, monkeypatch, capsys):
+def test_do_list_suppresses_queue_header_when_empty(
+    sandbox, tmp_path, monkeypatch, capsys
+):
     monkeypatch.setattr(_views, "queue_summary", lambda: _EMPTY_QUEUE)
     _views.do_list(_make_args(), here_root=None)
     out = capsys.readouterr().out
