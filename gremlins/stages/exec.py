@@ -47,9 +47,13 @@ class Exec(Stage):
         )
 
     async def run(self, state: State) -> Outcome:
-        extra_env: dict[str, str] = {}
+        extra_env: dict[str, str] = {"GREMLINS_SESSION_DIR": str(state.session_dir)}
         for var, key in self.in_map.items():
-            extra_env[var] = to_str(state.artifacts.read(key))
+            if "." in key:
+                artifact_key, field = key.split(".", 1)
+                extra_env[var] = str(getattr(state.artifacts.read(artifact_key), field))
+            else:
+                extra_env[var] = to_str(state.artifacts.read(key))
 
         pre_sha: str | None = None
         if any(v == "git://range" for v in self.out_map.values()):

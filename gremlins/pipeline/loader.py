@@ -6,9 +6,7 @@ from gremlins.stages.address_code import AddressCode, GitHubAddressPullRequestRe
 from gremlins.stages.agent import Agent
 from gremlins.stages.base import Stage
 from gremlins.stages.exec import Exec
-from gremlins.stages.github_open_pull_request import GitHubOpenPullRequest
-from gremlins.stages.github_push_to_pr_branch import GitHubPushToPrBranch
-from gremlins.stages.github_request_copilot_review import GitHubRequestCopilotReview
+from gremlins.stages.github_open_pull_request import GitHubDraftPullRequest
 from gremlins.stages.github_wait_ci import GitHubWaitCI
 from gremlins.stages.github_wait_copilot import GitHubWaitCopilot
 from gremlins.stages.handoff import Handoff
@@ -25,9 +23,7 @@ STAGE_TYPES: dict[str, type[Stage]] = {
     "plan": Plan,
     "implement": Implement,
     "verify": Verify,
-    "github-open-pull-request": GitHubOpenPullRequest,
-    "github-push-to-pr-branch": GitHubPushToPrBranch,
-    "github-request-copilot-review": GitHubRequestCopilotReview,
+    "github-draft-pull-request": GitHubDraftPullRequest,
     "github-wait-copilot": GitHubWaitCopilot,
     "github-wait-ci": GitHubWaitCI,
     "review-code": ReviewCode,

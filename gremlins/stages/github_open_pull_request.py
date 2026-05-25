@@ -1,28 +1,22 @@
-"""GitHub-Open-Pull-Request stage for the gh pipeline."""
+"""GitHub-Draft-Pull-Request stage: pushes branch and writes pr-draft.json."""
 
 from __future__ import annotations
 
-import logging
-import re
 from typing import Any
 
-from gremlins.clients.protocol import CompletedRun
 from gremlins.executor.state import State
 from gremlins.stages.agent_runner import run_agent
 from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.outcome import Done, Outcome
-from gremlins.utils.github import extract_gh_url
 from gremlins.utils.yaml_io import render_bundled_prompt
 
-logger = logging.getLogger(__name__)
 
-
-class GitHubOpenPullRequest(Stage):
-    type = "github-open-pull-request"
+class GitHubDraftPullRequest(Stage):
+    type = "github-draft-pull-request"
     needs_gh = True
 
     @classmethod
-    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> GitHubOpenPullRequest:
+    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> GitHubDraftPullRequest:
         options: dict[str, Any] = d.get("options") or {}
         stage = cls(
             d["name"],
@@ -70,7 +64,9 @@ class GitHubOpenPullRequest(Stage):
             )
 
         base_prompt = render_bundled_prompt(
-            "github_open_pull_request.md", base_ref=base_ref
+            "github_draft_pull_request.md",
+            base_ref=base_ref,
+            session_dir=str(state.session_dir),
         ).rstrip()
 
         n = state.data.loop_iteration
@@ -84,27 +80,11 @@ class GitHubOpenPullRequest(Stage):
 
         prompt = f"{base_prompt} {closes_clause}{iter_clause}"
 
-        completed: CompletedRun = await run_agent(
+        await run_agent(
             state,
             prompt,
-            label="github-open-pull-request",
-            raw_path=state.session_dir / "stream-github-open-pull-request.jsonl",
+            label="github-draft-pull-request",
+            raw_path=state.session_dir / "stream-github-draft-pull-request.jsonl",
             capture_events=True,
         )
-
-        events = completed.events or []
-        pr_url = extract_gh_url(
-            events,
-            url_pattern=r"https://github\.com/[^ )]+/pull/[0-9]+",
-            cmd_pattern=r"gh pr create",
-            label="PR",
-            text_result=completed.text_result,
-        )
-        _m = re.search(r"/pull/(\d+)", pr_url)
-        if not _m:
-            raise RuntimeError(f"could not parse PR number from {pr_url!r}")
-        from gremlins.artifacts.uri import Uri  # noqa: PLC0415
-
-        state.artifacts.bind("pr", Uri.parse(f"gh://pr/{_m.group(1)}"), override=True)
-        logger.info("PR: %s", pr_url)
         return Done()
