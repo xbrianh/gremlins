@@ -43,6 +43,14 @@ def test_run_async_timeout():
         run(proc.run_async(["sleep", "10"], timeout=0.05))
 
 
+def test_run_async_timeout_kills_grandchildren():
+    # Shell forks a grandchild that inherits the pipe write end. Without killpg,
+    # the grandchild keeps the pipe open after the parent exits and communicate()
+    # hangs past the timeout. This verifies the timeout is actually enforced.
+    with pytest.raises(subprocess.TimeoutExpired):
+        run(proc.run_async(["sh", "-c", "sleep 60 & sleep 60"], timeout=0.1))
+
+
 # run_ok_async
 
 
