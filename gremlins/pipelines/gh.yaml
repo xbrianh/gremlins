@@ -7,13 +7,22 @@ prompts:
   verify: [gremlins:verify_fix.md, gremlins:bail_section_fix.md]
 
 stages:
-  - { type: plan,            prompt: [code-style, gremlins:plan_gh.md] }
-  - { type: implement,       prompt: [code-style, gremlins:implement_gh.md] }
-  - { name: normalize,       type: apply, options: { cmds: ["ruff format .", "ruff check --fix ."] } }
-  - { type: verify,          options: { cmds: ["make check", "make test"] }, prompt: verify }
-  - { name: open-pr,         type: github-open-pull-request }
-  - { type: github-request-copilot-review }
-  - { type: github-review-pull-request,        prompt: [code-style, gremlins:github_review_pull_request.md] }
-  - { type: github-wait-copilot }
-  - { type: github-address-pull-request-reviews,       prompt: [code-style, gremlins:github_address_pull_request_reviews.md, gremlins:bail_section.md] }
-  - { name: ci-gate,         type: github-wait-ci,  prompt: [gremlins:ci_fix.md, gremlins:bail_section_fix.md] }
+  - { type: plan,       prompt: [code-style, gremlins:plan_gh.md] }
+  - { type: implement,  prompt: [code-style, gremlins:implement_gh.md] }
+  - name: normalize
+    type: exec
+    options:
+      cmds:
+        - "ruff format ."
+        - "ruff check --fix ."
+        - "git add -A"
+        - "git commit -m 'normalize' || true"
+    out:
+      normalize-commits: git://range
+  - { type: verify,     options: { cmds: ["make check", "make test"] }, prompt: verify }
+  - { name: open-pr,    type: github-open-pull-request, out: {pr: gh://pr} }
+  - { type: github-request-copilot-review,              in: {pr: pr} }
+  - { type: github-review-pull-request,                 in: {pr: pr}, prompt: [code-style, gremlins:github_review_pull_request.md] }
+  - { type: github-wait-copilot,                        in: {pr: pr} }
+  - { type: github-address-pull-request-reviews,        in: {pr: pr}, prompt: [code-style, gremlins:github_address_pull_request_reviews.md, gremlins:bail_section.md] }
+  - { name: ci-gate,    type: github-wait-ci,           in: {pr: pr}, prompt: [gremlins:ci_fix.md, gremlins:bail_section_fix.md] }

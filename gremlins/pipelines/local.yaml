@@ -11,5 +11,14 @@ stages:
   - { type: implement,    prompt: [code-style, gremlins:implement_local.md] }
   - { type: review-code,  prompt: [code-style, gremlins:review/detail.md] }
   - { type: address-code, prompt: [code-style, gremlins:address.md, gremlins:bail_section.md], in: {text: review-code} }
-  - { name: normalize,    type: apply, options: { cmds: ["ruff format .", "ruff check --fix ."] } }
-  - { type: verify,       prompt: verify }
+  - name: normalize
+    type: exec
+    options:
+      cmds:
+        - "ruff format ."
+        - "ruff check --fix ."
+        - "git add -A"
+        - "git commit -m 'normalize' || true"
+    out:
+      normalize-commits: git://range
+  - { type: verify, prompt: verify }
