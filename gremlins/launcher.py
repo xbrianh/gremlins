@@ -22,9 +22,9 @@ from typing import Any, cast
 
 from gremlins import paths as _paths
 from gremlins.clients.client import PACKAGE_DEFAULT
-from gremlins.executor.gremlin import Gremlin as _Gremlin
 from gremlins.executor.state import StateData, validate_gremlin_id
-from gremlins.pipeline.discovery import list_pipelines
+from gremlins.pipeline import Pipeline as _PipelineData
+from gremlins.pipeline.discovery import list_pipelines, resolve_pipeline_path
 from gremlins.utils import git as _git_mod
 from gremlins.utils import proc
 from gremlins.utils.github import fetch_issue, parse_issue_ref
@@ -282,13 +282,9 @@ def _resolve_inputs(
     state_dir = _state_root() / resolved_gremlin_id
     loaded_pipeline = None
     try:
-        _gremlin = _Gremlin.build(
-            gremlin_id=resolved_gremlin_id,
-            state_dir=state_dir,
-            project_dir=pathlib.Path(project_root),
-            pipeline_ref=pipeline_path,
+        loaded_pipeline = _PipelineData.from_yaml(
+            resolve_pipeline_path(pipeline_path, pathlib.Path(project_root))
         )
-        loaded_pipeline = _gremlin.pipeline_data
     except (FileNotFoundError, OSError, ValueError):
         pass
 
@@ -519,7 +515,7 @@ def launch(
 ) -> tuple[str, subprocess.Popen[bytes]]:
     """Set up state dir, spawn the pipeline detached, return gremlin id and process.
 
-    Worktree setup is deferred to the child process via Gremlin.initialize_runtime().
+    Worktree setup is deferred to the child process via Gremlin.initialize_with_runtime().
     Synchronous through spawn; does not wait for the pipeline to finish.
     Raises ValueError on bad arguments, RuntimeError on infrastructure failure.
     """
@@ -639,13 +635,9 @@ def _load_pipeline_and_check_gh(
     pipeline_data = None
     if pipeline_path:
         try:
-            _gremlin_resume = _Gremlin.build(
-                gremlin_id=gremlin_id,
-                state_dir=state_dir,
-                project_dir=pathlib.Path(project_root),
-                pipeline_ref=pipeline_path,
+            pipeline_data = _PipelineData.from_yaml(
+                resolve_pipeline_path(pipeline_path, pathlib.Path(project_root))
             )
-            pipeline_data = _gremlin_resume.pipeline_data
         except (FileNotFoundError, OSError, ValueError):
             pass
 

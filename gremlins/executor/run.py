@@ -28,10 +28,13 @@ from gremlins.executor.state import (
 from gremlins.logging_setup import configure_logging
 from gremlins.permissions.loader import load_policy
 from gremlins.permissions.policy import Policy
+from gremlins.pipeline import Pipeline as _PipelineData
+from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail
 from gremlins.utils.git import has_commits, has_dirty_worktree, in_git_repo
 from gremlins.utils.github import get_repo
+from gremlins.utils.yaml_io import YamlLoadError as _YamlLoadError
 
 logger = logging.getLogger(__name__)
 
@@ -148,8 +151,23 @@ async def run_pipeline(
     session_dir = resolve_session_dir(gremlin_id)
     state_dir = session_dir.parent
 
+    project_dir = (
+        pathlib.Path(project_root) if project_root else paths.project_root()
+    )
     try:
-        gremlin = Gremlin.build(
+        _pipeline_preview = _PipelineData.from_yaml(
+            resolve_pipeline_path(str(pipeline_path), project_dir)
+        )
+    except (FileNotFoundError, _YamlLoadError, ValueError) as exc:
+        die(str(exc))
+    gh = _pipeline_preview.needs_gh()
+    if gh and shutil.which("gh") is None:
+        die("gh CLI not found")
+
+    logger.info("session: %s", session_dir)
+
+    try:
+        gremlin = Gremlin.initialize_with_runtime(
             gremlin_id=gremlin_id,
             state_dir=state_dir,
             session_dir=session_dir,
@@ -183,10 +201,7 @@ async def run_pipeline(
     )
     _apply_policy_to_stages(gremlin.stages, policy)
 
-    gh = gremlin.pipeline_data.needs_gh()
     if gh:
-        if shutil.which("gh") is None:
-            die("gh CLI not found")
         gremlin.repo = get_repo()
         gremlin.state_file = resolve_state_file(gremlin_id)
 
@@ -196,10 +211,6 @@ async def run_pipeline(
     if any(c.provider == "claude" for c in _signal_clients):
         if shutil.which("claude") is None:
             die("claude not found on PATH")
-
-    logger.info("session: %s", session_dir)
-
-    gremlin.initialize_runtime()
 
     if os.environ.get("GREMLINS_TEST_NOOP_PIPELINE"):
         return 0
