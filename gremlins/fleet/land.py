@@ -758,7 +758,6 @@ def _land_gh(
     registry = ArtifactRegistry(
         session_dir=session_dir,
         cwd=pathlib.Path(cwd) if cwd else None,
-        persist_path=session_dir.parent / "registry.json",
     )
     try:
         pr_url = registry.read("pr").url

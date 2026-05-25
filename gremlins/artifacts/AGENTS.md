@@ -87,17 +87,6 @@ pr.branch  # issue-42-some-slug
 
 ## Registry persistence
 
-Bindings are atomically persisted to a `registry.json` file so they survive
-process restart. By default the registry writes to `session_dir.parent /
-"registry.json"`; pass `persist_path` to override:
-
-```python
-registry = ArtifactRegistry(
-    session_dir=session_dir,
-    cwd=worktree_dir,
-    persist_path=state_dir / "registry.json",
-)
-```
-
-On construction, any existing `registry.json` at `persist_path` is pre-loaded
-so resumed runs see prior bindings.
+Bindings are atomically persisted to `session_dir.parent / "registry.json"`
+so they survive process restart. On construction, any existing file at that
+path is pre-loaded so resumed runs see prior bindings.

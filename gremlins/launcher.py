@@ -543,10 +543,9 @@ def launch(
         if inputs.pr_num:
             session_dir = state_dir / "artifacts"
             session_dir.mkdir(parents=True, exist_ok=True)
-            ArtifactRegistry(
-                session_dir=session_dir,
-                persist_path=state_dir / "registry.json",
-            ).bind("pr", Uri.parse(f"gh://pr/{inputs.pr_num}"))
+            ArtifactRegistry(session_dir=session_dir).bind(
+                "pr", Uri.parse(f"gh://pr/{inputs.pr_num}")
+            )
         p = _spawn(inputs.gremlin_id, inputs, state_dir)
     except Exception:
         shutil.rmtree(state_dir, ignore_errors=True)

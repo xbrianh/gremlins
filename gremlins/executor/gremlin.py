@@ -296,7 +296,6 @@ class Gremlin:
             self.registry = ArtifactRegistry(
                 session_dir=self.session_dir,
                 cwd=self.worktree_dir,
-                persist_path=self.state_dir / "registry.json",
             )
         except Exception:
             if worktree_created:
