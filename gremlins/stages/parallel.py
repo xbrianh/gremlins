@@ -11,6 +11,7 @@ import os
 import pathlib
 import re
 import secrets
+import shutil
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -431,6 +432,17 @@ class _ParallelExecutor:
 
     # --- fan-in ---
 
+    def _rm_child_state_dirs(self) -> None:
+        parent_gid = self._parent_data.gremlin_id
+        if not parent_gid:
+            return
+        sr = paths.state_root()
+        prefix = f"{parent_gid}--{self._group_name}--"
+        for child_key, _, _ in self._child_runners:
+            child_dir = sr / f"{prefix}{child_key}"
+            if child_dir.is_dir():
+                shutil.rmtree(child_dir, ignore_errors=True)
+
     async def _fan_in(self) -> None:
         self._set_stage(f"{self._group_name}-fanin")
         self._group_state.hydrate()
@@ -438,6 +450,7 @@ class _ParallelExecutor:
             await self._do_fan_in()
         finally:
             await self._teardown_worktrees()
+            self._rm_child_state_dirs()
 
     async def _validate_no_mutations(self) -> None:
         gs = self._group_state
