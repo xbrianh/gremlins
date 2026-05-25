@@ -101,3 +101,35 @@ def test_persist_survives_roundtrip(tmp_path: pathlib.Path) -> None:
     r1.bind("pr", Uri.parse("gh://pr/42"))
     r2 = ArtifactRegistry(session_dir=session_dir)
     assert r2.resolve("pr") == Uri.parse("gh://pr/42")
+
+
+def test_unbind_removes_binding(tmp_path: pathlib.Path) -> None:
+    r = make_registry(tmp_path)
+    r.bind("x", Uri.parse("file://session/x.md"))
+    assert r.produced("x")
+    r.unbind("x")
+    assert not r.produced("x")
+
+
+def test_unbind_persists_removal(tmp_path: pathlib.Path) -> None:
+    r = make_registry(tmp_path)
+    r.bind("x", Uri.parse("file://session/x.md"))
+    r.unbind("x")
+    data = json.loads(r.registry_path.read_text())
+    assert "x" not in data
+
+
+def test_unbind_missing_key_is_noop(tmp_path: pathlib.Path) -> None:
+    r = make_registry(tmp_path)
+    r.unbind("does-not-exist")  # must not raise
+
+
+def test_bind_still_raises_duplicate_after_unbind_rebind(tmp_path: pathlib.Path) -> None:
+    r = make_registry(tmp_path)
+    first = Uri.parse("file://session/a.md")
+    second = Uri.parse("file://session/b.md")
+    r.bind("x", first)
+    r.unbind("x")
+    r.bind("x", first)  # clean re-bind after unbind
+    with pytest.raises(DuplicateArtifact):
+        r.bind("x", second)  # bind() is still strict
