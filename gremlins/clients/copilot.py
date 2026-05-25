@@ -4,6 +4,7 @@ import asyncio
 import os
 import pathlib
 import re
+import signal
 import threading
 from typing import Any
 
@@ -53,7 +54,7 @@ class SubprocessCopilotClient:
             procs = list(self._children)
         for p in procs:
             try:
-                p.terminate()
+                os.killpg(p.pid, signal.SIGTERM)
             except Exception:
                 pass
         # asyncio.subprocess.Process.wait() is async so we cannot give processes a
@@ -61,7 +62,7 @@ class SubprocessCopilotClient:
         # the SIGKILL below is what actually reclaims them.
         for p in procs:
             try:
-                p.kill()
+                os.killpg(p.pid, signal.SIGKILL)
             except Exception:
                 pass
 

@@ -71,6 +71,13 @@ async def run_async(
             pass
         await proc.communicate()
         raise subprocess.TimeoutExpired(cmd, timeout or 0)
+    except asyncio.CancelledError:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        await asyncio.shield(proc.communicate())
+        raise
     assert proc.returncode is not None
     rc = proc.returncode
     stdout = stdout_b.decode() if text else stdout_b
@@ -95,7 +102,15 @@ async def run_shell_async(
         env=env,
         start_new_session=True,
     )
-    stdout_b, stderr_b = await proc.communicate()
+    try:
+        stdout_b, stderr_b = await proc.communicate()
+    except asyncio.CancelledError:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        await asyncio.shield(proc.communicate())
+        raise
     assert proc.returncode is not None
     return subprocess.CompletedProcess(
         cmd, proc.returncode, stdout_b.decode(), stderr_b.decode()
@@ -160,7 +175,10 @@ async def iter_lines(
 async def terminate_with_grace(
     p: asyncio.subprocess.Process, grace_s: float = 10.0
 ) -> None:
-    """SIGTERM → wait grace_s → SIGKILL. Shielded so it completes under cancellation."""
+    """SIGTERM → wait grace_s → SIGKILL. Shielded so it completes under cancellation.
+
+    p must be a session leader (started with start_new_session=True).
+    """
     try:
         os.killpg(p.pid, signal.SIGTERM)
     except ProcessLookupError:

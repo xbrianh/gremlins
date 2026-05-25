@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import pathlib
+import signal
 import sys
 import threading
 from typing import Any
@@ -68,7 +69,7 @@ class SubprocessClaudeClient:
             procs = list(self._children)
         for p in procs:
             try:
-                p.terminate()
+                os.killpg(p.pid, signal.SIGTERM)
             except Exception:
                 pass
         # asyncio.subprocess.Process.wait() is async so we cannot give processes a
@@ -76,7 +77,7 @@ class SubprocessClaudeClient:
         # the SIGKILL below is what actually reclaims them.
         for p in procs:
             try:
-                p.kill()
+                os.killpg(p.pid, signal.SIGKILL)
             except Exception:
                 pass
 
