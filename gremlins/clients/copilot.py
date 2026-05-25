@@ -95,6 +95,7 @@ class SubprocessCopilotClient:
             stderr=asyncio.subprocess.PIPE,
             env=env,
             cwd=str(cwd) if cwd is not None else None,
+            start_new_session=True,
         )
         self._track(p)
         return p

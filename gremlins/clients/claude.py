@@ -111,6 +111,7 @@ class SubprocessClaudeClient:
             stderr=None,
             env=env,
             cwd=str(cwd) if cwd is not None else None,
+            start_new_session=True,
         )
         self._track(p)
         try:
