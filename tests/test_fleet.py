@@ -1776,6 +1776,7 @@ def test_do_drill_in_json_includes_log_path(sandbox, tmp_path, monkeypatch, caps
 
 
 def test_cli_fleet_json_no_state_root(sandbox, tmp_path, monkeypatch, capsys):
+    sandbox.state.rmdir()
     monkeypatch.setattr(_views, "queue_summary", lambda: _EMPTY_QUEUE)
     monkeypatch.setattr(_fleet_cli, "queue_summary", lambda: _EMPTY_QUEUE)
     with pytest.raises(SystemExit) as exc:
@@ -1786,6 +1787,7 @@ def test_cli_fleet_json_no_state_root(sandbox, tmp_path, monkeypatch, capsys):
 
 
 def test_cli_fleet_json_drill_in_no_state_root(sandbox, tmp_path, monkeypatch, capsys):
+    sandbox.state.rmdir()
     with pytest.raises(SystemExit) as exc:
         _main_impl(["gr-abc", "--json"])
     assert exc.value.code == 0

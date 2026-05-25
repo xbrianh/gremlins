@@ -175,7 +175,7 @@ def parse_liveness(live: str) -> dict[str, object]:
 
 
 def iter_state_files() -> Iterator[tuple[str, str, str]]:
-    """Yield (gremlin_id, state_file_path, wdir) for every gremlin in STATE_ROOT."""
+    """Yield (gremlin_id, state_file_path, wdir) for every gremlin in the state root."""
     state_root = str(paths.state_root())
     if not os.path.isdir(state_root):
         return
