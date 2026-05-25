@@ -201,3 +201,37 @@ def test_bail_aggregation_unaffected_by_done_tracking(sandbox):
 
     with pytest.raises(RuntimeError, match="bailed"):
         asyncio.run(fanin_fn())
+
+
+# ---------------------------------------------------------------------------
+# Fan-in removes child state dirs for already-done children (regression #894)
+# ---------------------------------------------------------------------------
+
+
+def test_rm_child_state_dirs_includes_already_done_children(sandbox):
+    gremlin_id = "gr-rm-all"
+    sf = _make_state(sandbox.state, gremlin_id)
+
+    async def _noop() -> None:
+        pass
+
+    stages = _build_stages(
+        "grp",
+        [
+            ("a", _ctx(gremlin_id, sf, "a"), _noop),
+            ("b", _ctx(gremlin_id, sf, "b"), _noop),
+        ],
+        gremlin_id,
+    )
+    parallel_fn = stages[1][1]
+    fanin_fn = stages[2][1]
+
+    asyncio.run(parallel_fn())
+
+    # Simulate a stale child dir from a prior run — not tracked in _child_runners.
+    stale_dir = sandbox.state / f"{gremlin_id}--grp--stale-child"
+    stale_dir.mkdir()
+
+    asyncio.run(fanin_fn())
+
+    assert not stale_dir.exists()
