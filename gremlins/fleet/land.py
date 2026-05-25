@@ -237,6 +237,10 @@ def _rm_parallel_children(gremlin_id: str, cwd_for_git: str | None) -> None:
         child_state = load_state(sf)
         if not child_state:
             continue
+        live = liveness_of_state_file(sf, child_state)
+        if live == "running" or (live and live.startswith("stalled:")):
+            print(f"rm: skipping live child {name} ({live}) — stop it first")
+            continue
         _cleanup_gremlin(name, wdir, cast(dict[str, Any], child_state), cwd_for_git, delete_branch=True)
         print(f"rm: parallel child {name} cleaned up")
 

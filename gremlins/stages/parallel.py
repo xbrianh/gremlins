@@ -448,9 +448,9 @@ class _ParallelExecutor:
         self._group_state.hydrate()
         try:
             await self._do_fan_in()
+            self._rm_child_state_dirs()
         finally:
             await self._teardown_worktrees()
-            self._rm_child_state_dirs()
 
     async def _validate_no_mutations(self) -> None:
         gs = self._group_state
