@@ -47,7 +47,7 @@ def _snapshot_registry(
         return
     rewritten: dict[str, str] = {}
     for k, v in data.items():
-        if isinstance(v, str) and v.startswith("file://session/"):
+        if v.startswith("file://session/"):
             name = v[len("file://session/"):]
             abs_path = (parent_session_dir / name).resolve()
             rewritten[k] = f"file://{abs_path}"

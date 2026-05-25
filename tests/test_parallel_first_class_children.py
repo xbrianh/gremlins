@@ -148,19 +148,6 @@ def _make_parent_state(sandbox, gremlin_id: str) -> State:
     return build_state(data=data, client=FakeClaudeClient(), session_dir=session_dir)
 
 
-def _noop_child_stage_inline() -> tuple:
-    """Return a (name, raw_dict, run_fn) triple for an inline (non-subprocess) child."""
-    from gremlins.stages.base import Stage
-    from gremlins.stages.outcome import Done, Outcome
-
-    class _NoopStage(Stage):
-        type = "_test_noop"
-
-        async def run(self, state: State) -> Outcome:
-            return Done()
-
-    return _NoopStage
-
 
 def test_parallel_run_creates_child_state_dirs(sandbox) -> None:
     """Each child of a parallel group gets its own directory under state_root."""
