@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pathlib
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -247,13 +248,39 @@ _CHILD_MODULES = [
 ]
 
 
+def _make_child_spec(mod_path: str, tmp_path: pathlib.Path) -> dict:
+    """Build a minimal spec dict appropriate for the given child module."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir(exist_ok=True)
+    if mod_path == "gremlins.spawn.child":
+        # New schema: child_id required; StateData.load and paths.state_root are mocked.
+        return {
+            "client": "claude:claude-haiku-4-5-20251001",
+            "child_id": "test-child-id",
+        }
+    # Legacy gremlins.run_child schema
+    return {
+        "client": "claude:claude-haiku-4-5-20251001",
+        "session_dir": str(session_dir),
+    }
+
+
+def _child_module_patches(mod_path: str, tmp_path: pathlib.Path) -> list:
+    """Return extra patches needed for the given child module."""
+    if mod_path == "gremlins.spawn.child":
+        # Patch paths.state_root so session_dir mkdir goes under tmp_path.
+        import gremlins.spawn.child as _cm
+
+        return [patch.object(_cm, "paths", **{"state_root.return_value": tmp_path})]
+    return []
+
+
 @pytest.mark.parametrize("mod_path,_label", _CHILD_MODULES)
 def test_child_build_state_bypass_policy(mod_path, _label, tmp_path):
     import importlib
+    from contextlib import ExitStack
 
     mod = importlib.import_module(mod_path)
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
 
     fake_data = StateData(
         gremlin_id=None,
@@ -261,10 +288,7 @@ def test_child_build_state_bypass_policy(mod_path, _label, tmp_path):
         permissions_file="",
         project_root=str(tmp_path),
     )
-    spec = {
-        "client": "claude:claude-haiku-4-5-20251001",
-        "session_dir": str(session_dir),
-    }
+    spec = _make_child_spec(mod_path, tmp_path)
 
     captured_policy: list[Policy] = []
 
@@ -272,11 +296,14 @@ def test_child_build_state_bypass_policy(mod_path, _label, tmp_path):
         captured_policy.append(policy)
         return MagicMock()
 
-    with (
-        patch(f"{mod_path}.StateData.load", return_value=fake_data),
-        patch(f"{mod_path}.Client.parse", side_effect=fake_client_parse),
-        patch(f"{mod_path}.validate_policy_against_registry"),
-    ):
+    with ExitStack() as stack:
+        stack.enter_context(patch(f"{mod_path}.StateData.load", return_value=fake_data))
+        stack.enter_context(
+            patch(f"{mod_path}.Client.parse", side_effect=fake_client_parse)
+        )
+        stack.enter_context(patch(f"{mod_path}.validate_policy_against_registry"))
+        for p in _child_module_patches(mod_path, tmp_path):
+            stack.enter_context(p)
         mod._build_state(spec)
 
     assert len(captured_policy) == 1
@@ -287,10 +314,9 @@ def test_child_build_state_bypass_policy(mod_path, _label, tmp_path):
 @pytest.mark.parametrize("mod_path,_label", _CHILD_MODULES)
 def test_child_build_state_project_permissions_blocks(mod_path, _label, tmp_path):
     import importlib
+    from contextlib import ExitStack
 
     mod = importlib.import_module(mod_path)
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
 
     gremlins_dir = tmp_path / ".gremlins"
     gremlins_dir.mkdir()
@@ -304,10 +330,7 @@ def test_child_build_state_project_permissions_blocks(mod_path, _label, tmp_path
         permissions_file="",
         project_root=str(tmp_path),
     )
-    spec = {
-        "client": "claude:claude-haiku-4-5-20251001",
-        "session_dir": str(session_dir),
-    }
+    spec = _make_child_spec(mod_path, tmp_path)
 
     captured_policy: list[Policy] = []
 
@@ -315,11 +338,14 @@ def test_child_build_state_project_permissions_blocks(mod_path, _label, tmp_path
         captured_policy.append(policy)
         return MagicMock()
 
-    with (
-        patch(f"{mod_path}.StateData.load", return_value=fake_data),
-        patch(f"{mod_path}.Client.parse", side_effect=fake_client_parse),
-        patch(f"{mod_path}.validate_policy_against_registry"),
-    ):
+    with ExitStack() as stack:
+        stack.enter_context(patch(f"{mod_path}.StateData.load", return_value=fake_data))
+        stack.enter_context(
+            patch(f"{mod_path}.Client.parse", side_effect=fake_client_parse)
+        )
+        stack.enter_context(patch(f"{mod_path}.validate_policy_against_registry"))
+        for p in _child_module_patches(mod_path, tmp_path):
+            stack.enter_context(p)
         mod._build_state(spec)
 
     assert len(captured_policy) == 1

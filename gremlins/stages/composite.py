@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import dataclasses
 
+from gremlins import paths as _paths
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
 
 
-def child_state(parent: State, child: Stage, *, fan_out: bool = False) -> State:
+def child_state(
+    parent: State, child: Stage, *, fan_out: bool = False, child_id: str | None = None
+) -> State:
     """Derive a child State from parent."""
     client = parent.test_client or child.client or parent.client
     stage_model = (
@@ -18,11 +21,16 @@ def child_state(parent: State, child: Stage, *, fan_out: bool = False) -> State:
     )
     if not fan_out:
         return dataclasses.replace(parent, client=client, stage_model=stage_model)
-    # fan_out=True: caller pre-sets parent.session_dir to the group dir
+    if child_id:
+        session_dir = _paths.state_root() / child_id / "artifacts"
+        session_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        session_dir = parent.session_dir / child.name
+        session_dir.mkdir(parents=True, exist_ok=True)
     return dataclasses.replace(
         parent,
         client=client,
         stage_model=stage_model,
-        session_dir=parent.session_dir / child.name,
+        session_dir=session_dir,
         child_key=child.name,
     )

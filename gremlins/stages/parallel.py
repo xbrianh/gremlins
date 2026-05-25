@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import logging
 import math
+import os
 import pathlib
+import re
 import secrets
 from collections.abc import Callable
 from typing import Any, cast
@@ -19,6 +22,8 @@ from gremlins.stages.composite import child_state as _child_state
 from gremlins.stages.outcome import Bail, Done, Outcome
 from gremlins.utils import git, parallel_bail, proc
 
+_CHILD_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
 logger = logging.getLogger(__name__)
 
 _Stage = tuple[str, Callable[[], Any]]
@@ -26,6 +31,68 @@ _Stage = tuple[str, Callable[[], Any]]
 
 def _noop_set_stage(_n: str) -> None:
     pass
+
+
+def _snapshot_registry(
+    src: pathlib.Path,
+    dst: pathlib.Path,
+    parent_session_dir: pathlib.Path,
+) -> None:
+    """Copy parent's registry.json to child, rewriting file://session/ URIs to absolute paths."""
+    if not src.exists():
+        return
+    try:
+        data: dict[str, str] = json.loads(src.read_text(encoding="utf-8"))
+    except Exception:
+        logger.warning("_snapshot_registry: failed to parse %s", src, exc_info=True)
+        return
+    rewritten: dict[str, str] = {}
+    for k, v in data.items():
+        if v.startswith("file://session/"):
+            name = v[len("file://session/") :]
+            abs_path = (parent_session_dir / name).resolve()
+            rewritten[k] = f"file://{abs_path}"
+        else:
+            rewritten[k] = v
+    tmp = dst.with_name(dst.name + f".{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    tmp.write_text(json.dumps(rewritten), encoding="utf-8")
+    os.replace(tmp, dst)
+
+
+def _init_child_dir(
+    parent_state: State,
+    child_id: str,
+    parent_id: str,
+    group_name: str,
+    child_key: str,
+) -> None:
+    """Set up <state_root>/<child_id>/ with state.json, artifacts/, registry.json, log."""
+    state_root = paths.state_root()
+    child_state_dir = state_root / child_id
+    child_state_dir.mkdir(parents=True, exist_ok=True)
+    (child_state_dir / "artifacts").mkdir(parents=True, exist_ok=True)
+
+    child_data = StateData(
+        gremlin_id=child_id,
+        parent_id=parent_id,
+        group_name=group_name,
+        child_key=child_key,
+        issue_num=parent_state.data.issue_num,
+        project_root=parent_state.data.project_root,
+        permissions_file=parent_state.data.permissions_file,
+        bypass=parent_state.data.bypass,
+        base_ref_sha=parent_state.data.base_ref_sha,
+        setup_kind=parent_state.data.setup_kind,
+        pipeline_path=parent_state.data.pipeline_path,
+        kind=parent_state.data.kind,
+    )
+    child_data.persist(child_state_dir)
+
+    parent_registry = parent_state.artifacts.registry_path
+    child_registry = child_state_dir / "registry.json"
+    _snapshot_registry(parent_registry, child_registry, parent_state.session_dir)
+
+    (child_state_dir / "log").touch()
 
 
 class ParallelStage(Stage):
@@ -99,6 +166,15 @@ class ParallelStage(Stage):
             raise ValueError(
                 f"parallel group {name!r}: 'bail_policy' must be 'any' or 'all'"
             )
+        if name and not _CHILD_ID_RE.match(name):
+            raise ValueError(
+                f"parallel group name {name!r} contains invalid characters for child_id"
+            )
+        for child in body:
+            if not _CHILD_ID_RE.match(child.name):
+                raise ValueError(
+                    f"parallel child name {child.name!r} contains invalid characters for child_id"
+                )
         return cls(
             name,
             body,
@@ -133,19 +209,21 @@ class ParallelStage(Stage):
         ).runtime_stages()
 
     async def run(self, state: State) -> Outcome:
-        group_dir = state.session_dir / self.name
-        group_dir.mkdir(parents=True, exist_ok=True)
+        parent_id = state.data.gremlin_id or ""
         group_state = dataclasses.replace(
-            state, session_dir=group_dir, parent_stage=state.parent_stage or self.name
+            state, parent_stage=state.parent_stage or self.name
         )
-        for child in self.body:
-            (group_dir / child.name).mkdir(parents=True, exist_ok=True)
         done = state.data.done_for(self.path or self.name)
         child_runners: list[tuple[str, State, Callable[[], Any]]] = []
         for child in self.body:
             if child.name in done:
                 continue
-            cs = _child_state(group_state, child, fan_out=True)
+            child_id = f"{parent_id}--{self.name}--{child.name}" if parent_id else ""
+            if child_id:
+                _init_child_dir(state, child_id, parent_id, self.name, child.name)
+            cs = _child_state(
+                group_state, child, fan_out=True, child_id=child_id or None
+            )
             runner = cs.make_runner(child, scope=self.body)
             child_runners.append((child.name, cs, runner))
         for _, fn in self.build_runtime_stages(
@@ -327,6 +405,10 @@ class _ParallelExecutor:
     async def _run_subprocess(
         self, child_key: str, child_st: State, stage_obj: Stage
     ) -> None:
+        parent_gid = self._parent_data.gremlin_id or ""
+        child_id = (
+            f"{parent_gid}--{self._group_name}--{child_key}" if parent_gid else ""
+        )
         attempt = f"{child_key}-{secrets.token_hex(4)}"
         self._group_state.record_attempt(child_key, attempt)
 
@@ -336,7 +418,13 @@ class _ParallelExecutor:
             self._group_state.write_bail(child_key, detail)
 
         status, cost = await proc.run_child_subprocess(
-            stage_obj, child_st, child_key, attempt, on_bail=on_bail
+            stage_obj,
+            child_st,
+            child_key,
+            attempt,
+            on_bail=on_bail,
+            group_name=self._group_name,
+            child_id=child_id,
         )
         if cost > 0 and math.isfinite(cost):
             self._parent_data.add_subprocess_cost(cost)
