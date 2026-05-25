@@ -15,7 +15,7 @@ from gremlins.executor.state import StateData
 TRIVIAL_PIPELINE = """\
 stages:
   - name: smoke
-    type: cmd
+    type: exec
     options:
       cmds:
         - "true"

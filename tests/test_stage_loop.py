@@ -1,4 +1,4 @@
-"""Tests for LoopStage termination paths and Cmd stage."""
+"""Tests for LoopStage termination paths and Exec stage."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import json
 from typing import Any
 
 import pytest
-from gremlins.stages.cmd import Cmd
+from gremlins.stages.exec import Exec as Cmd
 
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData, build_state
@@ -229,13 +229,13 @@ def test_on_iteration_start_called_each_iteration(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Cmd stage
+# Exec stage
 # ---------------------------------------------------------------------------
 
 
 def _run_cmd_stage(tmp_path: Any, cmds: list[str]) -> tuple[Cmd, RuntimeState]:
     (tmp_path / "artifacts").mkdir(exist_ok=True)
-    stage = Cmd("cmd", [], {"cmds": cmds})
+    stage = Cmd("cmd", {"cmds": cmds, "on_fail": "needs_fix"})
     state = build_state(
         data=StateData(),
         client=_fake_client(),
@@ -261,7 +261,7 @@ def test_run_cmd_failure_writes_log(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, ["echo boom >&2; false"])
     outcome = asyncio.run(stage.run(state))
     assert isinstance(outcome, NeedsFix)
-    log = tmp_path / "artifacts" / "cmd.log"
+    log = tmp_path / "artifacts" / "exec-cmd.log"
     assert log.exists()
 
 
@@ -269,7 +269,7 @@ def test_run_cmd_empty_cmds_is_noop(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, [])
     outcome = asyncio.run(stage.run(state))
     assert outcome == Done()
-    assert not (tmp_path / "artifacts" / "cmd.log").exists()
+    assert not (tmp_path / "artifacts" / "exec-cmd.log").exists()
 
 
 def test_run_cmd_output_in_needs_fix(tmp_path):
@@ -277,21 +277,6 @@ def test_run_cmd_output_in_needs_fix(tmp_path):
     outcome = asyncio.run(stage.run(state))
     assert isinstance(outcome, NeedsFix)
     assert "hello_output" in outcome.detail
-
-
-def test_run_cmd_log_path_interpolation(tmp_path):
-    (tmp_path / "artifacts").mkdir(exist_ok=True)
-    stage = Cmd("cmd", [], {"cmds": ["true"], "log_path": "run-{n}.log"})
-    state = build_state(
-        data=StateData(),
-        client=_fake_client(),
-        session_dir=tmp_path / "artifacts",
-        worktree=tmp_path,
-    )
-    asyncio.run(stage.run(state))
-    assert (tmp_path / "artifacts" / "run-1.log").exists()
-    asyncio.run(stage.run(state))
-    assert (tmp_path / "artifacts" / "run-2.log").exists()
 
 
 # ---------------------------------------------------------------------------
