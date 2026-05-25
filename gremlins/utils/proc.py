@@ -60,11 +60,15 @@ async def run_async(
         cwd=cwd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
     )
     try:
         stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except TimeoutError:
-        proc.kill()
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         await proc.communicate()
         raise subprocess.TimeoutExpired(cmd, timeout or 0)
     assert proc.returncode is not None
@@ -89,6 +93,7 @@ async def run_shell_async(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
+        start_new_session=True,
     )
     stdout_b, stderr_b = await proc.communicate()
     assert proc.returncode is not None
@@ -105,6 +110,7 @@ async def run_ok_async(
         cwd=cwd,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
+        start_new_session=True,
     )
     await proc.wait()
     return proc.returncode == 0
@@ -118,6 +124,7 @@ async def run_quiet_async(
         cwd=cwd,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
+        start_new_session=True,
     )
     await proc.wait()
     assert proc.returncode is not None
@@ -155,7 +162,7 @@ async def terminate_with_grace(
 ) -> None:
     """SIGTERM → wait grace_s → SIGKILL. Shielded so it completes under cancellation."""
     try:
-        p.send_signal(signal.SIGTERM)
+        os.killpg(p.pid, signal.SIGTERM)
     except ProcessLookupError:
         return
     cancelled = False
@@ -167,7 +174,7 @@ async def terminate_with_grace(
         pass
     if p.returncode is None:
         try:
-            p.kill()
+            os.killpg(p.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         await asyncio.shield(p.wait())
@@ -274,6 +281,7 @@ async def _spawn_child_with_pumps(
         str(spec_path),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
     )
     pump_out = asyncio.create_task(
         _pump_prefixed(child_proc.stdout, attempt, log_file=log_file)  # type: ignore[arg-type]
