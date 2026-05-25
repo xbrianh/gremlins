@@ -216,11 +216,17 @@ def _make_gh_subprocess(
         # gh pr diff
         if sub == "pr" and "diff" in cmd:
             return subprocess.CompletedProcess(cmd, 0, stdout=pr_diff, stderr="")
-        # gh pr view --json (resolver / branch lookup)
+        # gh pr view --json url,number,headRefName (GitHubResolver.read for pr/<n>)
         if sub == "pr" and "view" in cmd and "--json" in cmd:
-            return subprocess.CompletedProcess(
-                cmd, 0, stdout="issue-42-impl-slug\n", stderr=""
+            num = cmd[3] if len(cmd) > 3 else "101"
+            data = json.dumps(
+                {
+                    "url": f"https://github.com/owner/repo/pull/{num}",
+                    "number": int(num),
+                    "headRefName": "issue-42-impl-slug",
+                }
             )
+            return subprocess.CompletedProcess(cmd, 0, stdout=data, stderr="")
         # gh api (github-wait-copilot)
         if sub == "api":
             return subprocess.CompletedProcess(
@@ -897,18 +903,20 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
             return subprocess.CompletedProcess(
                 cmd, 0, stdout="https://github.com/owner/repo/issues/42\n", stderr=""
             )
+        if sub == "pr" and "view" in cmd and "--json" in cmd:
+            num = cmd[3] if len(cmd) > 3 else "101"
+            data = json.dumps(
+                {
+                    "url": f"https://github.com/owner/repo/pull/{num}",
+                    "number": int(num),
+                    "headRefName": "issue-42-impl-slug",
+                }
+            )
+            return subprocess.CompletedProcess(cmd, 0, stdout=data, stderr="")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     async def fake_gh_run_async(cmd, *args, **kwargs):
-        prog = cmd[0] if cmd else ""
-        if prog != "gh":
-            return fake_gh_run(cmd, *args, **kwargs)
-        sub = cmd[1] if len(cmd) > 1 else ""
-        if sub == "issue" and "create" in cmd:
-            return subprocess.CompletedProcess(
-                cmd, 0, stdout="https://github.com/owner/repo/issues/42\n", stderr=""
-            )
-        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return fake_gh_run(cmd, *args, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", fake_gh_run)
     monkeypatch.setattr("gremlins.stages.plan.proc.run_async", fake_gh_run_async)
