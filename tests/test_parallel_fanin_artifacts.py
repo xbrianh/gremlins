@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import pathlib
 
 import pytest
 
-from gremlins.artifacts.registry import ArtifactRegistry
+from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state
-from gremlins.stages.parallel import ParallelStage, _ParallelExecutor
+from gremlins.stages.parallel import _ParallelExecutor
 
 
 def _make_parent(tmp_path: pathlib.Path, gremlin_id: str) -> State:
@@ -125,8 +126,6 @@ def test_snapshotted_parent_keys_skipped(tmp_path: pathlib.Path) -> None:
     parent = _make_parent(tmp_path, "p3")
     parent_file = parent.session_dir / "existing.txt"
     parent_file.write_bytes(b"existing")
-    from gremlins.artifacts.uri import Uri
-
     parent.artifacts.bind("existing-key", Uri.parse("file://session/existing.txt"))
 
     _make_child_dir(
@@ -178,8 +177,6 @@ def test_non_file_artifact_bound_directly(tmp_path: pathlib.Path) -> None:
 def test_missing_child_artifact_file_skipped(
     tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    import logging
-
     parent = _make_parent(tmp_path, "p5")
     _make_child_dir(
         tmp_path,

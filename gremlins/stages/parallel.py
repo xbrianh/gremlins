@@ -456,13 +456,10 @@ class _ParallelExecutor:
             return
 
         sr = paths.state_root()
-        parent_keys: set[str] = set()
-        if parent_state.artifacts.registry_path.exists():
-            raw = parent_state.artifacts.registry_path.read_text(encoding="utf-8")
-            parent_keys = set(json.loads(raw).keys())
+        parent_keys: set[str] = set(parent_state.artifacts.keys())
 
-        # key -> [(child_key, uri_str)] — only new bindings not in parent at fan-out
-        per_key: dict[str, list[tuple[str, str]]] = {}
+        # key -> [(child_key, child_id, uri_str)] — only new bindings not in parent at fan-out
+        per_key: dict[str, list[tuple[str, str, str]]] = {}
         for child_key, _, _ in self._child_runners:
             child_id = f"{parent_gid}--{self._group_name}--{child_key}"
             child_reg = sr / child_id / "registry.json"
@@ -474,15 +471,14 @@ class _ParallelExecutor:
             for k, v in child_bindings.items():
                 if k in parent_keys:
                     continue
-                per_key.setdefault(k, []).append((child_key, v))
+                per_key.setdefault(k, []).append((child_key, child_id, v))
 
         for key, producers in per_key.items():
             multi = len(producers) > 1
-            for child_key, uri_str in producers:
+            for child_key, child_id, uri_str in producers:
                 bound_key = f"{key}/{child_key}" if multi else key
                 if uri_str.startswith("file://session/"):
                     name = uri_str[len("file://session/"):]
-                    child_id = f"{parent_gid}--{self._group_name}--{child_key}"
                     src = sr / child_id / "artifacts" / name
                     if not src.exists():
                         logger.warning("child artifact missing: %s", src)
@@ -508,9 +504,9 @@ class _ParallelExecutor:
     async def _fan_in(self) -> None:
         self._set_stage(f"{self._group_name}-fanin")
         self._group_state.hydrate()
+        self._gather_child_artifacts()
         try:
             await self._do_fan_in()
-            self._gather_child_artifacts()
             self._rm_child_state_dirs()
         finally:
             await self._teardown_worktrees()
