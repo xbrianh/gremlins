@@ -57,7 +57,9 @@ def _expand(
     expanded_stages: list[dict[str, Any]] = []
     for entry in cast(list[dict[str, Any]], raw.get("stages") or []):
         expanded_stages.extend(
-            _expand_entry(entry, prompt_dir, project_root, new_chain, named_prompts, stage_defs)
+            _expand_entry(
+                entry, prompt_dir, project_root, new_chain, named_prompts, stage_defs
+            )
         )
 
     result: dict[str, Any] = {
@@ -90,7 +92,14 @@ def _expand_entry(
     if isinstance(stage_type, str) and stage_type:
         if stage_type in stage_defs:
             return _expand_stage_def(
-                entry, stage_type, stage_defs, prompt_dir, project_root, chain, named_prompts, seen_defs
+                entry,
+                stage_type,
+                stage_defs,
+                prompt_dir,
+                project_root,
+                chain,
+                named_prompts,
+                seen_defs,
             )
         try:
             included_path = resolve_pipeline_name(stage_type, project_root)
@@ -141,7 +150,13 @@ def _expand_entry(
         for body_entry in cast(list[dict[str, Any]], entry["body"]):
             expanded_body.extend(
                 _expand_entry(
-                    body_entry, prompt_dir, project_root, chain, named_prompts, stage_defs, seen_defs
+                    body_entry,
+                    prompt_dir,
+                    project_root,
+                    chain,
+                    named_prompts,
+                    stage_defs,
+                    seen_defs,
                 )
             )
         entry["body"] = expanded_body
@@ -171,7 +186,15 @@ def _expand_stage_def(
     for key in ("name", "in", "out"):
         if key in call_site:
             merged[key] = call_site[key]
-    return _expand_entry(merged, prompt_dir, project_root, chain, named_prompts, stage_defs, seen_defs | {def_name})
+    return _expand_entry(
+        merged,
+        prompt_dir,
+        project_root,
+        chain,
+        named_prompts,
+        stage_defs,
+        seen_defs | {def_name},
+    )
 
 
 def _resolve_prompt_dir(value: object, yaml_dir: pathlib.Path) -> pathlib.Path:

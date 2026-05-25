@@ -232,7 +232,9 @@ def test_stage_definition_call_site_out_applied(tmp_path: pathlib.Path) -> None:
     assert stage["out"] == {"commits": "git://range"}
 
 
-def test_stage_definition_reused_twice_with_different_out(tmp_path: pathlib.Path) -> None:
+def test_stage_definition_reused_twice_with_different_out(
+    tmp_path: pathlib.Path,
+) -> None:
     p = _write_pipeline(
         tmp_path,
         """\
@@ -372,7 +374,9 @@ def test_type_resolves_to_pipeline_file(tmp_path: pathlib.Path) -> None:
     assert expanded["stages"][1]["type"] == "implement"
 
 
-def test_type_self_referencing_pipeline_does_not_recurse(tmp_path: pathlib.Path) -> None:
+def test_type_self_referencing_pipeline_does_not_recurse(
+    tmp_path: pathlib.Path,
+) -> None:
     gremlins_dir = tmp_path / ".gremlins"
     gremlins_dir.mkdir()
     p = gremlins_dir / "self-ref.yaml"
