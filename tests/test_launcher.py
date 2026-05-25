@@ -822,9 +822,10 @@ def test_launch_ghgremlin_state_layout(lenv_with_gh):
         f"base_ref should be 'git://ref/main', got: {registry_data.get('base_ref')!r}"
     )
     _sha_uri = registry_data.get("base_sha", "")
-    assert _sha_uri.startswith("git://commit/") and len(_sha_uri.removeprefix("git://commit/")) == 40, (
-        f"base_sha should be a git://commit/<40-char SHA>, got: {_sha_uri!r}"
-    )
+    assert (
+        _sha_uri.startswith("git://commit/")
+        and len(_sha_uri.removeprefix("git://commit/")) == 40
+    ), f"base_sha should be a git://commit/<40-char SHA>, got: {_sha_uri!r}"
     assert len(state.get("worktree_base", "")) == 40, (
         f"worktree_base should be a SHA, got: {state.get('worktree_base')!r}"
     )
@@ -1238,7 +1239,6 @@ def test_launch_plan_issue_ref_writes_issue_url_and_num(lenv, monkeypatch):
     )
 
     gremlin_id, _ = launcher.launch("boss", plan="#378", project_root=str(lenv.repo))
-    state = _read_state(_gremlins_state_root(lenv) / gremlin_id)
 
     registry_data = json.loads(
         (_gremlins_state_root(lenv) / gremlin_id / "registry.json").read_text()

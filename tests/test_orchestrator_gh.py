@@ -155,7 +155,9 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
     # base_ref_sha is now stored in registry.json, not state.json
     if base_ref_sha:
         registry_file = tmp_path / "registry.json"
-        registry_file.write_text(json.dumps({"base_sha": f"git://commit/{base_ref_sha}"}))
+        registry_file.write_text(
+            json.dumps({"base_sha": f"git://commit/{base_ref_sha}"})
+        )
     monkeypatch.setattr(
         "gremlins.executor.run.resolve_state_file", lambda gremlin_id=None: state_file
     )

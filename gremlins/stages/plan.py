@@ -126,7 +126,9 @@ class Plan(Stage):
             issue_num = issue_url.split("/")[-1]
             logger.info("issue: %s", issue_url)
             if issue_num:
-                state.artifacts.bind("issue", Uri.parse(f"gh://issue/{issue_num}"), override=True)
+                state.artifacts.bind(
+                    "issue", Uri.parse(f"gh://issue/{issue_num}"), override=True
+                )
             issue_body = _fetch_issue_body(issue_num, state.repo)
             plan_md.write_text(issue_body, encoding="utf-8")
         else:
@@ -160,7 +162,9 @@ class Plan(Stage):
         issue_url, issue_title = await _post_file_as_github_issue(path, state)
         issue_num = issue_url.split("/")[-1]
         shutil.copyfile(src, plan_md)
-        state.artifacts.bind("issue", Uri.parse(f"gh://issue/{issue_num}"), override=True)
+        state.artifacts.bind(
+            "issue", Uri.parse(f"gh://issue/{issue_num}"), override=True
+        )
         self._update_description(plan_md, issue_title=issue_title, state=state)
 
     def _resolve_issue_source(
@@ -201,7 +205,9 @@ class Plan(Stage):
             "[1/8] plan supplied via --plan (issue %s#%s)", target_repo, issue_ref
         )
         if issue_num:
-            state.artifacts.bind("issue", Uri.parse(f"gh://issue/{issue_num}"), override=True)
+            state.artifacts.bind(
+                "issue", Uri.parse(f"gh://issue/{issue_num}"), override=True
+            )
         else:
             state.artifacts.unbind("issue")
         self._update_description(plan_md, issue_title=issue_title, state=state)
