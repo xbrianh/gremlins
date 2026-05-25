@@ -325,3 +325,65 @@ def test_stage_definition_mutual_cycle_raises(tmp_path: pathlib.Path) -> None:
     )
     with pytest.raises(ValueError, match="stage-definition cycle"):
         expand_pipeline(p)
+
+
+def test_stage_definitions_non_mapping_rejected(tmp_path: pathlib.Path) -> None:
+    p = _write_pipeline(
+        tmp_path,
+        """\
+        default_client: claude:sonnet
+        stage-definitions:
+          - normalize
+        stages:
+          - { type: plan }
+        """,
+    )
+    with pytest.raises(ValueError, match="stage-definitions must be a mapping"):
+        expand_pipeline(p)
+
+
+# --- type: <pipeline-name> tests ---
+
+
+def test_type_resolves_to_pipeline_file(tmp_path: pathlib.Path) -> None:
+    gremlins_dir = tmp_path / ".gremlins"
+    gremlins_dir.mkdir()
+    sub = gremlins_dir / "sub.yaml"
+    sub.write_text(
+        textwrap.dedent("""\
+        default_client: claude:sonnet
+        stages:
+          - { type: plan }
+          - { type: implement }
+        """),
+        encoding="utf-8",
+    )
+    p = _write_pipeline(
+        tmp_path,
+        """\
+        default_client: claude:sonnet
+        stages:
+          - { type: sub }
+        """,
+    )
+    expanded = expand_pipeline(p, project_root=tmp_path)
+    assert len(expanded["stages"]) == 2
+    assert expanded["stages"][0]["type"] == "plan"
+    assert expanded["stages"][1]["type"] == "implement"
+
+
+def test_type_self_referencing_pipeline_does_not_recurse(tmp_path: pathlib.Path) -> None:
+    gremlins_dir = tmp_path / ".gremlins"
+    gremlins_dir.mkdir()
+    p = gremlins_dir / "self-ref.yaml"
+    p.write_text(
+        textwrap.dedent("""\
+        default_client: claude:sonnet
+        stages:
+          - { type: self-ref }
+        """),
+        encoding="utf-8",
+    )
+    # self-reference is skipped (falls through to loader); expand_pipeline must not recurse
+    expanded = expand_pipeline(p)
+    assert expanded["stages"][0]["type"] == "self-ref"

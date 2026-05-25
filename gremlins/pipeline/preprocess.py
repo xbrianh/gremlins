@@ -43,8 +43,13 @@ def _expand(
         # Named prompts can't reference each other — pass empty dict to prevent cycles.
         named_prompts[name] = _read_prompts(value, prompt_dir, {})
 
+    raw_stage_defs = raw.get("stage-definitions")
+    if raw_stage_defs is not None and not isinstance(raw_stage_defs, dict):
+        raise ValueError(
+            f"stage-definitions must be a mapping, got {type(raw_stage_defs).__name__!r}"
+        )
     stage_defs: dict[str, dict[str, Any]] = {}
-    for name, defn in cast(dict[str, Any], raw.get("stage-definitions") or {}).items():
+    for name, defn in cast(dict[str, Any], raw_stage_defs or {}).items():
         if not isinstance(defn, dict):
             raise ValueError(f"stage-definition {name!r} must be a dict")
         stage_defs[name] = cast(dict[str, Any], defn)
