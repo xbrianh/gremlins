@@ -543,10 +543,11 @@ def launch(
             registry.bind("base_ref", Uri.parse(f"git://ref/{inputs.base_ref_name}"))
         if inputs.base_ref_sha:
             registry.bind("base_sha", Uri.parse(f"git://commit/{inputs.base_ref_sha}"))
+        registry.bind("spec", Uri.parse("file://session/spec.md"))
         if inputs.issue_data:
             _issue_num = str(inputs.issue_data.get("number", ""))
             if _issue_num:
-                registry.bind("issue", Uri.parse(f"gh://issue/{_issue_num}"))
+                registry.bind("plan", Uri.parse(f"gh://issue/{_issue_num}"))
         p = _spawn(inputs.gremlin_id, inputs, state_dir)
     except Exception:
         shutil.rmtree(state_dir, ignore_errors=True)

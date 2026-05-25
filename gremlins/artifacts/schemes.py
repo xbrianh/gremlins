@@ -128,7 +128,7 @@ class GitHubResolver:
     def verify_produced(self, uri: Uri) -> None:
         self.read(uri)
 
-    def capture(self, stdout: str, _stderr: str) -> Uri:
+    def capture(self, stdout: str, _: str) -> Uri:
         """Parse a gh://pr/<n> URI from `gh pr create` stdout."""
         m = _PR_URL_RE.search(stdout)
         if not m:
