@@ -37,6 +37,7 @@ class ArtifactRegistry:
     ) -> None:
         self._session_dir = session_dir
         self._cwd = cwd
+        self.registry_path = session_dir.parent / "registry.json"
         self._bindings: dict[str, Uri] = {}
         self._resolvers: dict[str, SchemeResolver] = {
             "file": FileSessionResolver(session_dir),
@@ -47,10 +48,6 @@ class ArtifactRegistry:
             data = json.loads(self.registry_path.read_text(encoding="utf-8"))
             for k, v in data.items():
                 self._bindings[k] = Uri.parse(v)
-
-    @property
-    def registry_path(self) -> pathlib.Path:
-        return self._session_dir.parent / "registry.json"
 
     def bind(self, key: str, uri: Uri, *, override: bool = False) -> None:
         if key in self._bindings and not override:
