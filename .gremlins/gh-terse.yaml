@@ -11,7 +11,7 @@ stages:
   - { type: plan,      prompt: [code-style, terse, gremlins:plan_gh.md] }
   - { type: implement, prompt: [code-style, terse, gremlins:implement_gh.md] }
   - { type: apply, options: { cmds: ["ruff format ."] } }
-  - { type: verify,    options: { cmds: ["make check"] }, prompt: verify }
+  - { type: verify,    options: { cmds: ["make check", "make test"] }, prompt: verify }
   - { type: github-open-pull-request }
   - { type: github-request-copilot-review }
 

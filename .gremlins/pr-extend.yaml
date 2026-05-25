@@ -29,7 +29,7 @@ stages:
         - 'git reset --hard FETCH_HEAD'
 
   - { type: implement, prompt: [code-style, terse, implement_pr_extension.md] }
-  - { type: verify,    options: { cmds: ["make check"] }, prompt: verify }
+  - { type: verify,    options: { cmds: ["make check", "make test"] }, prompt: verify }
 
   - type: cmd
     options:
