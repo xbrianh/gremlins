@@ -35,7 +35,6 @@ class ArtifactRegistry:
         session_dir: pathlib.Path,
         cwd: pathlib.Path | None = None,
     ) -> None:
-        self._session_dir = session_dir
         self._cwd = cwd
         self.registry_path = session_dir.parent / "registry.json"
         self._bindings: dict[str, Uri] = {}
