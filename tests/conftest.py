@@ -311,6 +311,17 @@ def common_local_patches(monkeypatch):
         "gremlins.artifacts.registry.git_utils.head_sha",
         lambda *args, **kwargs: "post-sha",
     )
+    import subprocess as _subprocess
+
+    monkeypatch.setattr(
+        "gremlins.stages.exec.snapshot_head_before",
+        lambda cwd=None: "pre-sha",
+    )
+
+    async def _noop_shell(cmd, **kwargs):
+        return _subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("gremlins.stages.exec._proc.run_shell_async", _noop_shell)
 
 
 @pytest.fixture(autouse=True)
@@ -337,6 +348,7 @@ def _isolate_gremlin_id(monkeypatch):
 @pytest.fixture(autouse=True)
 def _clear_gremlins_overlay_env(monkeypatch):
     monkeypatch.delenv("GREMLINS_OVERLAY_DIR", raising=False)
+    monkeypatch.delenv("GREMLINS_PROJECT_ROOT", raising=False)
 
 
 @pytest.fixture

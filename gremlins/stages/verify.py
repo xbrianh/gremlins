@@ -9,7 +9,7 @@ from typing import Any
 from gremlins.executor.state import State
 from gremlins.stages.agent_runner import run_agent
 from gremlins.stages.base import Stage
-from gremlins.stages.cmd import Cmd
+from gremlins.stages.exec import Exec
 from gremlins.stages.loop import LoopStage
 from gremlins.stages.outcome import Done, Outcome
 from gremlins.utils import git as _git_mod
@@ -38,7 +38,7 @@ class VerifyFix(Stage):
 
     async def run(self, state: State) -> Outcome:
         n = state.data.loop_iteration
-        log_path = state.session_dir / f"verify-attempt-{n}.log"
+        log_path = state.session_dir / "exec-cmd.log"
         if not log_path.exists():
             return Done()
         log_text = log_path.read_text(encoding="utf-8")
@@ -83,7 +83,7 @@ class Verify(Stage):
             return Done()
 
         commands_section = "**Commands run:**\n" + "\n".join(f"- `{c}`" for c in cmds)
-        cmd_stage = Cmd("cmd", [], {"cmds": cmds, "log_path": "verify-attempt-{n}.log"})
+        cmd_stage = Exec("cmd", {"cmds": cmds, "on_fail": "needs_fix"})
         fix_stage = VerifyFix("fix", self.prompts, commands_section)
         return await LoopStage(
             "verify", body=[cmd_stage, fix_stage], max_iterations=max_attempts

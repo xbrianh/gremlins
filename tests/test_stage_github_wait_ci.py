@@ -248,7 +248,7 @@ def test_exhausted_bails(tmp_path: pathlib.Path) -> None:
     stage, state = _make_stage(client, tmp_path, poll_interval=0, checks_getter=getter)
     with pytest.raises(Bail) as exc_info:
         asyncio.run(stage.run(state))
-    assert "CI failed after 3 attempts" in exc_info.value.reason
+    assert "loop exhausted 3 iterations" in exc_info.value.reason
     fix_labels = [c.label for c in client.calls]
     assert fix_labels == ["ci-fix-1", "ci-fix-2"]
 
@@ -397,9 +397,9 @@ def test_review_required_emits_bail_to_state(
     state.data.attempt = attempt
     with pytest.raises(Bail):
         asyncio.run(stage.run(state))
-    bail_file = state_dir / f"bail_{attempt}.json"
-    assert bail_file.exists()
-    data = json.loads(bail_file.read_text())
+    bail_files = list(state_dir.glob("bail_*.json"))
+    assert bail_files, f"no bail file written under {state_dir}"
+    data = json.loads(bail_files[0].read_text())
     assert data["class"] == "other"
 
 
@@ -440,9 +440,9 @@ def test_empty_pr_branch_bails(
     state.data.attempt = attempt
     with pytest.raises(Bail):
         asyncio.run(stage.run(state))
-    bail_file = state_dir / f"bail_{attempt}.json"
-    assert bail_file.exists()
-    data = json.loads(bail_file.read_text())
+    bail_files = list(state_dir.glob("bail_*.json"))
+    assert bail_files, f"no bail file written under {state_dir}"
+    data = json.loads(bail_files[0].read_text())
     assert data["class"] == "other"
     assert client.calls == []
 
