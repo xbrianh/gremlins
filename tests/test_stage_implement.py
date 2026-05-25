@@ -211,7 +211,9 @@ def test_binds_commit_range_on_head_advanced(tmp_path: pathlib.Path) -> None:
         return_value=HeadAdvanced(commit_count=3),
     ):
         asyncio.run(stage.run(state))
-    assert str(state.artifacts.resolve("impl-commits")) == "git://range/pre-sha..post-sha"
+    assert (
+        str(state.artifacts.resolve("impl-commits")) == "git://range/pre-sha..post-sha"
+    )
 
 
 def test_no_commit_range_bound_on_empty_impl_without_prior(
@@ -237,7 +239,9 @@ def test_binds_commit_range_with_worktree(tmp_path: pathlib.Path) -> None:
         return_value=HeadAdvanced(commit_count=1),
     ):
         asyncio.run(stage.run(state))
-    assert str(state.artifacts.resolve("impl-commits")) == "git://range/pre-sha..post-sha"
+    assert (
+        str(state.artifacts.resolve("impl-commits")) == "git://range/pre-sha..post-sha"
+    )
 
 
 def test_empty_impl_with_prior_commit_range_does_not_raise(
