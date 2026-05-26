@@ -97,7 +97,8 @@ class Plan(Stage):
         return Done()
 
     async def _run_agent(self, plan_md: pathlib.Path, state: State) -> None:
-        if state.repo:
+        repo = state.artifacts.read("repo")
+        if repo:
             base_ref_name = (
                 state.artifacts.resolve("base_ref").path.removeprefix("ref/")
                 if state.artifacts.produced("base_ref")
@@ -131,7 +132,7 @@ class Plan(Stage):
                 state.artifacts.bind(
                     "plan", Uri.parse(f"gh://issue/{issue_num}"), override=True
                 )
-            issue_body = _fetch_issue_body(issue_num, state.repo)
+            issue_body = _fetch_issue_body(issue_num, repo)
             plan_md.write_text(issue_body, encoding="utf-8")
         else:
             template = "\n\n".join(self.prompts).rstrip()
@@ -155,7 +156,7 @@ class Plan(Stage):
             sys.stderr.write(f"error: --plan: file is empty: {path}\n")
             sys.stderr.flush()
             sys.exit(1)
-        if not state.repo:
+        if not state.artifacts.read("repo"):
             shutil.copyfile(src, plan_md)
             return
         logger.info(
@@ -172,14 +173,15 @@ class Plan(Stage):
     def _resolve_issue_source(
         self, ref: str, plan_md: pathlib.Path, state: State
     ) -> None:
-        target_repo, issue_ref = parse_issue_ref(ref, state.repo or "")
+        repo = state.artifacts.read("repo")
+        target_repo, issue_ref = parse_issue_ref(ref, repo or "")
         if issue_ref is None:
             sys.stderr.write(
                 f"error: --plan: not a readable file or recognized issue reference: {ref}\n"
             )
             sys.stderr.flush()
             sys.exit(1)
-        pr_repo = state.repo
+        pr_repo = repo
         if not pr_repo:
             try:
                 pr_repo = get_repo()
@@ -243,6 +245,7 @@ class Plan(Stage):
 
 async def _post_file_as_github_issue(path: str, state: State) -> tuple[str, str]:
     """Post a local file as a GitHub issue. Returns (issue_url, issue_title)."""
+    repo = state.artifacts.read("repo")
     issue_body = pathlib.Path(path).read_text(encoding="utf-8")
     title_prompt = (
         "Produce a concise GitHub issue title (under 80 characters) "
@@ -267,7 +270,7 @@ async def _post_file_as_github_issue(path: str, state: State) -> tuple[str, str]
             "issue",
             "create",
             "--repo",
-            state.repo,
+            repo,
             "--title",
             issue_title,
             "--body-file",

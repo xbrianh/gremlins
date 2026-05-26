@@ -137,3 +137,19 @@ class GitHubResolver:
             raise ValueError(f"no PR URL found in gh pr create output: {stdout!r}")
         n = m.group(1)
         return Uri.parse(f"gh://pr/{n}")
+
+
+class EnvResolver:
+    """Resolves env://<key> to ambient session strings (repo, cwd, etc.)."""
+
+    def __init__(self, values: dict[str, str]) -> None:
+        self._values = values
+
+    def read(self, uri: Uri) -> str:
+        key = uri.path
+        if key not in self._values:
+            raise KeyError(f"env://{key!r} not set")
+        return self._values[key]
+
+    def verify_produced(self, uri: Uri) -> None:
+        pass

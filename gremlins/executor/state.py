@@ -511,7 +511,6 @@ class State:
     stage_model: str = ""
     args: argparse.Namespace = dataclasses.field(default_factory=argparse.Namespace)
     pipeline_data: Pipeline | None = None
-    repo: str = ""
     instructions: str = ""
     current_scope: list[Stage] = dataclasses.field(default_factory=_stage_list)
     child_key: str | None = None
@@ -533,10 +532,6 @@ class State:
         sf = state_dir / "state.json"
         if gremlin_id and not sf.exists():
             write_state(state_dir, {"id": gremlin_id})
-
-    @property
-    def cwd(self) -> pathlib.Path:
-        return self.worktree if self.worktree is not None else _paths.project_root()
 
     def done_for(self, path: str) -> set[str]:
         return self.data.done_for(path)
@@ -617,7 +612,11 @@ def build_state(
         data=data,
         client=client,
         session_dir=session_dir,
-        artifacts=artifacts or ArtifactRegistry(session_dir=session_dir, cwd=worktree),
+        artifacts=artifacts or ArtifactRegistry(
+            session_dir=session_dir,
+            cwd=worktree,
+            env_vars={"repo": repo, "cwd": str(worktree) if worktree is not None else str(_paths.project_root())},
+        ),
         engine_ctx=engine_ctx
         or EngineContext(
             loop_iteration=data.loop_iteration,
@@ -626,7 +625,6 @@ def build_state(
         ),
         args=args if args is not None else argparse.Namespace(),
         pipeline_data=pipeline_data,
-        repo=repo,
         instructions=instructions,
         test_client=test_client,
         stage_model=stage_model,

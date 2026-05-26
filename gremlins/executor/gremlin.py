@@ -174,7 +174,6 @@ class Gremlin:
                 session_dir=self.session_dir,
                 args=args,
                 pipeline_data=self.pipeline_data,
-                repo=self.repo,
                 instructions=self.instructions,
                 test_client=self.test_client,
                 stage_model=stage_client.model if self.test_client else "",
@@ -228,6 +227,7 @@ class Gremlin:
         setup_kind: str = "worktree-branch",
         worktree_dir: pathlib.Path | None = None,
         client_label: str = "",
+        repo: str = "",
     ) -> Gremlin:
         try:
             pipeline_path = resolve_pipeline_path(pipeline_ref, project_dir)
@@ -256,6 +256,7 @@ class Gremlin:
             project_root=project_root,
             base_ref_sha=base_ref_sha,
             setup_kind=setup_kind,
+            repo=repo,
         )
 
         State.setup_dirs(
@@ -312,6 +313,7 @@ class Gremlin:
             self.registry = ArtifactRegistry(
                 session_dir=self.session_dir,
                 cwd=self.worktree_dir,
+                env_vars={"repo": self.repo, "cwd": str(self.worktree_dir) if self.worktree_dir is not None else ""},
             )
             if not self.registry.produced("spec"):
                 self.registry.bind("spec", Uri.parse("file://session/spec.md"))
@@ -319,6 +321,10 @@ class Gremlin:
                 sha = _git_mod.head_sha(cwd=self.worktree_dir)
                 if sha:
                     self.registry.bind("base_sha", Uri.parse(f"git://commit/{sha}"))
+            if not self.registry.produced("repo"):
+                self.registry.bind("repo", Uri.parse("env://repo"))
+            if not self.registry.produced("cwd"):
+                self.registry.bind("cwd", Uri.parse("env://cwd"))
         except Exception:
             if worktree_created:
                 _git_mod.remove_worktree(self.project_root, worktree_created)

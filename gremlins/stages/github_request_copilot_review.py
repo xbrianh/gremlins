@@ -28,7 +28,7 @@ class GitHubRequestCopilotReview(Stage):
         self._pr_num = pr_num
 
     async def run(self, state: State) -> Outcome:
-        repo = state.repo
+        repo = state.artifacts.read("repo")
         pr_num = self._pr_num or str(state.artifacts.read("pr").number)
         r = await proc.run_async(
             [
@@ -41,7 +41,7 @@ class GitHubRequestCopilotReview(Stage):
                 "--add-reviewer",
                 "copilot-pull-request-reviewer",
             ],
-            cwd=state.cwd,
+            cwd=state.artifacts.read("cwd"),
         )
         if r.returncode != 0:
             detail = r.stderr.strip() or r.stdout.strip()

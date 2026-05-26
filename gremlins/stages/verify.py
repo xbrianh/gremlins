@@ -42,7 +42,7 @@ class VerifyFix(Stage):
         if not log_path.exists():
             return Done()
         log_text = log_path.read_text(encoding="utf-8")
-        diff = _diff_text(state.cwd)
+        diff = _diff_text(pathlib.Path(state.artifacts.read("cwd")))
         template = "\n\n".join(self.prompts).rstrip()
         fix_prompt = template.format(
             commands_section=self._commands_section,
@@ -68,7 +68,7 @@ class Verify(Stage):
 
     async def run(self, state: State) -> Outcome:
         options = dict(self.options)
-        if not state.repo:
+        if not state.artifacts.read("repo"):
             cmds_arg = getattr(state.args, "cmds", None)
             if cmds_arg is not None:
                 options["cmds"] = cmds_arg
