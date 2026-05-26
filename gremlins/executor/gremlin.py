@@ -163,8 +163,14 @@ class Gremlin:
             instructions=[self.instructions] if self.instructions else [],
         )
         # attempt is always "" here; the loop patches it per-iteration via dataclasses.replace.
-        cwd = str(self.worktree_dir) if self.worktree_dir is not None else (self.project_root or str(pathlib.Path.cwd()))
-        engine_ctx = EngineContext(loop_iteration=1, attempt="", current_scope=(), repo=self.repo, cwd=cwd)
+        cwd = (
+            str(self.worktree_dir)
+            if self.worktree_dir is not None
+            else (self.project_root or str(pathlib.Path.cwd()))
+        )
+        engine_ctx = EngineContext(
+            loop_iteration=1, attempt="", current_scope=(), repo=self.repo, cwd=cwd
+        )
         built: list[tuple[str, Callable[[], Awaitable[Any]]]] = []
         for e in stages:
             stage_client = e.client or PACKAGE_DEFAULT

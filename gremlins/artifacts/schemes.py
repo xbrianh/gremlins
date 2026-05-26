@@ -137,5 +137,3 @@ class GitHubResolver:
             raise ValueError(f"no PR URL found in gh pr create output: {stdout!r}")
         n = m.group(1)
         return Uri.parse(f"gh://pr/{n}")
-
-

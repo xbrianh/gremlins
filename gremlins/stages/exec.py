@@ -54,19 +54,25 @@ class Exec(Stage):
         except ValueError as exc:
             raise Bail(f"exec {self.name}: {exc}") from exc
 
-        _pt = _Passthrough(dict(
-            name=self.name,
-            model=state.stage_model or state.client.model,
-            session_dir=str(state.session_dir),
-            repo=state.engine_ctx.repo,
-            cwd=state.engine_ctx.cwd,
-        ))
+        _pt = _Passthrough(
+            dict(
+                name=self.name,
+                model=state.stage_model or state.client.model,
+                session_dir=str(state.session_dir),
+                repo=state.engine_ctx.repo,
+                cwd=state.engine_ctx.cwd,
+            )
+        )
 
         pre_sha: str | None = None
         if any(v == "git://range" for v in self.out_map.values()):
             pre_sha = snapshot_head_before(cwd=pathlib.Path(state.engine_ctx.cwd))
 
-        cmds = [c.rstrip().format_map(_pt) for c in self.options.get("cmds", []) if c.strip()]
+        cmds = [
+            c.rstrip().format_map(_pt)
+            for c in self.options.get("cmds", [])
+            if c.strip()
+        ]
         stdout_str = ""
         stderr_str = ""
         if cmds:
