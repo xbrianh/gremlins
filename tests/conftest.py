@@ -12,7 +12,6 @@ import types
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.pipeline import Pipeline
 
 os.environ.setdefault("GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME", "main")
 
