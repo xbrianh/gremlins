@@ -12,7 +12,6 @@ from gremlins.stages.handoff import Handoff
 from gremlins.stages.loop import LoopStage
 from gremlins.stages.parallel import ParallelStage
 from gremlins.stages.plan import Plan
-from gremlins.stages.review_code import ReviewCode
 from gremlins.stages.sequence import SequenceStage
 from gremlins.stages.verify import Verify
 
@@ -23,7 +22,6 @@ STAGE_TYPES: dict[str, type[Stage]] = {
     "github-open-pull-request": GitHubOpenPullRequest,
     "github-wait-copilot": GitHubWaitCopilot,
     "github-wait-ci": GitHubWaitCI,
-    "review-code": ReviewCode,
     "handoff": Handoff,
     "loop": LoopStage,
     "parallel": ParallelStage,

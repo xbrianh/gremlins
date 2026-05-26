@@ -233,9 +233,9 @@ async def run_pipeline(
     if not gh and args.resume_from:
         _expanded_stage_names = [s.name for s in gremlin.stages]
 
-        def _type_idx(stage_type: str) -> int:
+        def _name_idx(stage_name: str) -> int:
             for i, s in enumerate(gremlin.stages):
-                if s.type == stage_type:
+                if s.name == stage_name:
                     return i
             return len(gremlin.stages)
 
@@ -244,10 +244,10 @@ async def run_pipeline(
             if args.resume_from in _expanded_stage_names
             else 0
         )
-        if start_idx >= _type_idx("implement"):
+        if start_idx >= _name_idx("implement"):
             if not plan_file.exists() or plan_file.stat().st_size == 0:
                 die(f"--resume-from {args.resume_from} requires existing {plan_file}")
-        if start_idx >= _type_idx("review-code"):
+        if start_idx >= _name_idx("review-code"):
             if not has_dirty_worktree() and not has_commits():
                 die(
                     f"--resume-from {args.resume_from} requires implementation changes in the worktree"

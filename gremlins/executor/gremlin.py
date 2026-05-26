@@ -333,6 +333,9 @@ class Gremlin:
                     self.registry.bind("base_sha", Uri.parse(f"git://commit/{sha}"))
             if not self.registry.produced("env"):
                 self.registry.bind("env", Uri.parse("env://"))
+            if not self.registry.produced("plan"):
+                if (self.session_dir / "plan.md").exists():
+                    self.registry.bind("plan", Uri.parse("file://session/plan.md"))
         except Exception:
             if worktree_created:
                 _git_mod.remove_worktree(self.project_root, worktree_created)
