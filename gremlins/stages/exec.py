@@ -7,6 +7,7 @@ import pathlib
 import re
 from typing import Any, cast
 
+from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.resolve import resolve_in_map
 from gremlins.artifacts.schemes import snapshot_head_before
 from gremlins.artifacts.uri import Uri
@@ -21,8 +22,8 @@ _READ_SUB = re.compile(r"\{read:([-\w]+)\}")
 _FRAMEWORK_KEYS = frozenset(["name", "model", "session_dir", "repo", "cwd"])
 
 
-def _sub_reads(s: str, artifacts) -> str:
-    def _r(m):
+def _sub_reads(s: str, artifacts: ArtifactRegistry) -> str:
+    def _r(m: re.Match[str]) -> str:
         raw = artifacts.read(m.group(1))
         return (raw.decode() if isinstance(raw, bytes) else str(raw)).strip()
 
