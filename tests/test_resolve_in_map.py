@@ -7,9 +7,9 @@ import dataclasses
 import pathlib
 
 import pytest
+from conftest import MINIMAL_EVENTS
 
 import gremlins.artifacts.schemes as schemes
-from conftest import MINIMAL_EVENTS
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.resolve import resolve_in_map
 from gremlins.artifacts.schemes import PrInfo
