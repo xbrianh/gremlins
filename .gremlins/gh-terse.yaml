@@ -9,6 +9,7 @@ prompts:
 
 stage-definitions:
   implement: gremlins:implement
+  github-request-copilot-review: gremlins:github_request_copilot_review
   normalize:
     type: exec
     options:
