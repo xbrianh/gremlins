@@ -10,7 +10,7 @@ from gremlins.clients.client import PACKAGE_DEFAULT, Client
 if TYPE_CHECKING:
     from gremlins.stages.base import Stage
 
-BUNDLED_PROMPT_PREFIX = "gremlins:"
+GREMLINS_PREFIX = "gremlins:"
 
 
 def _fill_stage_clients(stages: list[Stage], default: Client) -> None:

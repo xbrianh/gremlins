@@ -149,7 +149,7 @@ def sandbox(monkeypatch, request):
     if getattr(request.node, "_sandbox_failed", False):
         sys.stderr.write(f"\n[sandbox retained] {root}\n")
     else:
-        shutil.rmtree(root)
+        shutil.rmtree(root, ignore_errors=True)
 
 
 @pytest.fixture
@@ -231,7 +231,7 @@ def child_sandbox(sandbox, request):
         if failed:
             sys.stderr.write(f"\n[child sandbox retained] {root}\n")
         else:
-            shutil.rmtree(root)
+            shutil.rmtree(root, ignore_errors=True)
 
 
 TESTS_DIR = pathlib.Path(__file__).resolve().parent
