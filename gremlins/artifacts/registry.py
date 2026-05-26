@@ -67,6 +67,10 @@ class ArtifactRegistry:
         tmp.write_text(json.dumps(data), encoding="utf-8")
         os.replace(tmp, path)
 
+    def mount(self, key: str, uri: Uri) -> None:
+        """Register a binding in-memory only; not persisted to disk."""
+        self._bindings[key] = uri
+
     def resolve(self, key: str) -> Uri:
         try:
             return self._bindings[key]

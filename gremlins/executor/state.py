@@ -625,7 +625,7 @@ def build_state(
         },
     )
     if not reg.produced("env"):
-        reg.bind("env", Uri.parse("env://"))
+        reg.mount("env", Uri.parse("env://"))
     return State(
         data=data,
         client=client,
