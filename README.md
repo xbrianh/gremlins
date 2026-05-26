@@ -280,7 +280,6 @@ For `local` stages, model options (`plan_model`, `impl_model`, `address_model`,
 | `plan` | Produces an implementation plan |
 | `implement` | Applies the plan to the working tree |
 | `review-code` | Runs a code review and writes findings to disk |
-| `address-code` | Applies code-review findings |
 | `verify` | Runs check and test commands with an agent fix-loop |
 | `exec` | Runs shell commands with in:/out: artifact bindings |
 | `agent` | Resolves in: artifacts, renders prompt, invokes agent, verifies out: artifacts |
@@ -315,7 +314,7 @@ stages:
     max_concurrent: 2
 
   - name: address-code
-    type: address-code
+    type: agent
 ```
 
 If any child fails, the pipeline halts after the group finishes — siblings
@@ -336,7 +335,7 @@ stages:
   - { type: implement,    options: { impl_model: opus } }
   - { type: verify,       options: { cmds: ["pytest"] } }
   - { type: review-code }
-  - { type: address-code, options: { address_model: opus } }
+  - { name: address-code, type: agent, options: { address_model: opus } }
 ```
 
 Add a `prompt:` key to any stage to supply a custom prompt; paths are
@@ -363,7 +362,7 @@ stages:
         type: review-code
     max_concurrent: 2
 
-  - { type: address-code }
+  - { name: address-code, type: agent }
 ```
 
 Note: `review-code` does not currently support per-stage prompt overrides

@@ -15,12 +15,12 @@ escaped as `{{owner}}` in the template source.
 | `{verify_output}` | Captured stdout+stderr of the failed check/test run | `verify.py` | Multi-line |
 | `{failure_output}` | Captured CI check failure logs from the PR | `github_wait_ci.py` | Multi-line |
 | `{commands_section}` | Markdown-formatted list of commands that were run | `verify.py` | Single or multi-line |
-| `{pr_url}` | Full GitHub PR URL | `review_code.py` (`GitHubReviewPullRequest`), `address_code.py` (`GitHubAddressPullRequestReviews`) | e.g. `https://github.com/owner/repo/pull/N` |
+| `{pr_url}` | Full GitHub PR URL | `review_code.py` (`GitHubReviewPullRequest`), `github_address_pull_request_reviews.py` (`GitHubAddressPullRequestReviews`) | e.g. `https://github.com/owner/repo/pull/N` |
 | `{instructions}` | User-supplied task instructions | `plan.py`, `ghplan.py` | Multi-line |
 | `{plan_file}` | Absolute path where the plan should be written | `plan.py` | File path string |
 | `{ref}` | Optional issue/PR reference passed to the plan stage | `ghplan.py` | May be empty string |
-| `{model}` | Model identifier extracted from the review filename | `address_code.py` | e.g. `claude-opus-4-7` |
-| `{text}` | Full concatenated text of one or more review files | `address_code.py` | Multi-line |
+| `{model}` | Model identifier extracted from the review filename | `github_address_pull_request_reviews.py` | e.g. `claude-opus-4-7` |
+| `{text}` | Full concatenated text of one or more review files | `github_address_pull_request_reviews.py` | Multi-line |
 | `{spec_block}` | Rendered overarching chain spec block | `implement.py` | Multi-line; empty string when no spec |
 | `{plan_source_label}` | Human-readable label for where the plan came from | `implement.py` | e.g. `"from the GitHub issue"` or `"below"` |
 | `{plan_location_note}` | Sentence about where the plan lives | `implement.py` | Appended to the implement preamble |
