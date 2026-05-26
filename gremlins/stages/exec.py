@@ -25,6 +25,7 @@ def _sub_reads(s: str, artifacts) -> str:
     def _r(m):
         raw = artifacts.read(m.group(1))
         return (raw.decode() if isinstance(raw, bytes) else str(raw)).strip()
+
     return _READ_SUB.sub(_r, s)
 
 
