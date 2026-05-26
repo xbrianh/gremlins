@@ -33,7 +33,8 @@ def test_gh_terse_pipeline_loads() -> None:
 
     path = resolve_pipeline_name("gh-terse", pathlib.Path.cwd())
     pipeline = Pipeline.from_yaml(path)
+    stage_names = [s.name for s in pipeline.stages]
     stage_types = [s.type for s in pipeline.stages]
     assert "plan" in stage_types
-    assert "implement" in stage_types
+    assert "implement" in stage_names
     assert "github-open-pull-request" in stage_types

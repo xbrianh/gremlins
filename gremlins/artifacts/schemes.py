@@ -80,8 +80,7 @@ class GitResolver:
             name = path.removeprefix("ref/")
             return proc.run_or_raise(["git", "rev-parse", name], cwd=self._cwd)
         if path.startswith("commit/"):
-            sha = path.removeprefix("commit/")
-            return proc.run_or_raise(["git", "rev-parse", "--verify", sha], cwd=self._cwd)
+            return path.removeprefix("commit/")
         raise ValueError(f"unrecognised git URI path: {uri}")
 
     def verify_produced(self, uri: Uri) -> None:

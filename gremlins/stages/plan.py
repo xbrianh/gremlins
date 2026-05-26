@@ -80,6 +80,8 @@ class Plan(Stage):
                 _uri = state.artifacts.resolve("plan")
                 if _uri.path.startswith("issue/"):
                     label = f" (issue #{_uri.path.removeprefix('issue/')})"
+            else:
+                state.artifacts.bind("plan", Uri.parse("file://session/plan.md"))
             logger.info("[1/8] plan resumed from snapshot: %s%s", plan_md, label)
             return Done()
 

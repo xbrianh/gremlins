@@ -224,8 +224,8 @@ def test_resolve_issue_source_empty_repo_writes_url(
     state.args = argparse.Namespace(plan="#355")
     state.repo = ""
     asyncio.run(stage.run(state))
-    assert state.artifacts.produced("issue")
-    assert state.artifacts.resolve("issue") == Uri.parse("gh://issue/355")
+    assert state.artifacts.produced("plan")
+    assert state.artifacts.resolve("plan") == Uri.parse("gh://issue/355")
 
 
 def test_resolve_issue_source_matching_repo_writes_url(
@@ -239,8 +239,8 @@ def test_resolve_issue_source_matching_repo_writes_url(
     state.args = argparse.Namespace(plan="#355")
     state.repo = "owner/repo"
     asyncio.run(stage.run(state))
-    assert state.artifacts.produced("issue")
-    assert state.artifacts.resolve("issue") == Uri.parse("gh://issue/355")
+    assert state.artifacts.produced("plan")
+    assert state.artifacts.resolve("plan") == Uri.parse("gh://issue/355")
 
 
 def test_resolve_issue_source_cross_repo_clears_url(
@@ -254,7 +254,7 @@ def test_resolve_issue_source_cross_repo_clears_url(
     state.args = argparse.Namespace(plan="owner/b#355")
     state.repo = "owner/a"
     asyncio.run(stage.run(state))
-    assert not state.artifacts.produced("issue")
+    assert state.artifacts.resolve("plan") == Uri.parse("file://session/plan.md")
 
 
 # --- Agent delegation (local branch) ---

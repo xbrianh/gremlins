@@ -185,10 +185,20 @@ def _expand_stage_def(
             raise ValueError(
                 f"stage-definition {def_name!r}: 'stages' must be a non-empty list"
             )
+        if "out" in definition:
+            raise ValueError(
+                f"stage-definition {def_name!r} must not declare 'out:' keys; "
+                "declare them at each call site instead"
+            )
         inner_list = cast(list[dict[str, Any]], inner_list)
         last_idx = len(inner_list) - 1
         result: list[dict[str, Any]] = []
         for i, raw_inner in enumerate(inner_list):
+            if "out" in raw_inner:
+                raise ValueError(
+                    f"stage-definition {def_name!r}: inner stage {i} must not declare 'out:'; "
+                    "declare it at the call site instead"
+                )
             inner = dict(raw_inner)
             if i == 0:
                 for key in ("name", "prompt", "client"):

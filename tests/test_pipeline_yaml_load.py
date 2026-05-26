@@ -17,6 +17,7 @@ _BUNDLED_LOCAL = (
 _LOCAL_STAGE_NAMES = [
     "plan",
     "implement",
+    "require-impl-progress",
     "review-code",
     "address-code",
     "normalize",
@@ -115,12 +116,12 @@ def test_pipeline_name_optional_defaults_to_type(tmp_path: pathlib.Path) -> None
         default_client: claude:sonnet
         stages:
           - { type: plan }
-          - { type: implement }
+          - { type: agent, prompt: [] }
           - { type: verify }
         """,
     )
     pipeline = Pipeline.from_yaml(p)
-    assert [s.name for s in pipeline.stages] == ["plan", "implement", "verify"]
+    assert [s.name for s in pipeline.stages] == ["plan", "agent", "verify"]
 
 
 def test_pipeline_duplicate_unnamed_stages_auto_numbered(
