@@ -6,6 +6,7 @@ from typing import Any, cast
 from gremlins.pipeline import BUNDLED_PROMPT_PREFIX
 from gremlins.pipeline.discovery import resolve_pipeline_name
 from gremlins.prompts import BUNDLED_PROMPT_DIR
+from gremlins.recipes import BUNDLED_STAGE_DEF_DIR
 from gremlins.utils.yaml_io import load_yaml_file
 
 
@@ -50,9 +51,22 @@ def _expand(
         )
     stage_defs: dict[str, dict[str, Any]] = {}
     for name, defn in cast(dict[str, Any], raw_stage_defs or {}).items():
-        if not isinstance(defn, dict):
-            raise ValueError(f"stage-definition {name!r} must be a dict")
-        stage_defs[name] = cast(dict[str, Any], defn)
+        if isinstance(defn, str) and defn.startswith(BUNDLED_PROMPT_PREFIX):
+            recipe_name = defn[len(BUNDLED_PROMPT_PREFIX):]
+            if not recipe_name:
+                raise ValueError(
+                    f"stage-definition {name!r}: missing name after {BUNDLED_PROMPT_PREFIX!r}"
+                )
+            recipe_path = (BUNDLED_STAGE_DEF_DIR / f"{recipe_name}.yaml").resolve()
+            if not recipe_path.exists():
+                raise FileNotFoundError(
+                    f"bundled stage-definition not found: {defn!r}"
+                )
+            stage_defs[name] = load_yaml_file(recipe_path)
+        elif not isinstance(defn, dict):
+            raise ValueError(f"stage-definition {name!r} must be a dict or gremlins: reference")
+        else:
+            stage_defs[name] = cast(dict[str, Any], defn)
 
     expanded_stages: list[dict[str, Any]] = []
     for entry in cast(list[dict[str, Any]], raw.get("stages") or []):
