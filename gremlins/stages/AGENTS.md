@@ -21,7 +21,7 @@ sequencing logic of their own.
 - `plan.py` — `Plan(Stage)`. Wrapper over `Agent` for the local branch: renders the prompt with `plan_file` / `instructions`, builds `Agent(out_map={"plan": "file://session/plan.md"})`, and delegates. `verify_produced` enforces that the agent wrote a non-empty `plan.md`. The GH branch (`state.engine_ctx.repo` non-empty) keeps a direct `run_agent` call for now; it migrates when `gh://issue/...` artifacts and `extract_gh_url` are replaced in the state-data cutover chunk.
 - `review-code` — Code review stage (recipe: `gremlins/recipes/stages/review_code.yaml`). Reads `plan` artifact, writes model-keyed review file `{name}-{model}.md` to the session directory.
 - `github-request-copilot-review` — Requests Copilot review (recipe: `gremlins/recipes/stages/github_request_copilot_review.yaml`). Runs `gh pr edit` to add `copilot-pull-request-reviewer`.
-- `verify.py` — `Verify(Stage)` + `VerifyFix(Stage)`. `Verify.run` builds `body=[Cmd, VerifyFix]` and delegates to `LoopStage`. `Cmd` runs the configured commands with per-attempt log naming (`verify-attempt-{n}.log`). `VerifyFix` reads the highest-numbered attempt log from `session_dir` and invokes the fix agent; agent streams to `stream-verify-{n}.jsonl`.
+- `verify` — Verify stage (recipe: `gremlins/recipes/stages/verify.yaml`). Runs configured commands; on failure captures git diff and invokes a fix agent; loops up to 3 times.
 - `github_wait_ci.py` — `GitHubWaitCI(Stage)`. Gh pipeline (`ci-gate`). Polls PR CI checks via `utils.github`; re-invokes agent to fix failures; bails on `REVIEW_REQUIRED` or attempt exhaustion.
 - `github_wait_copilot.py` — `GitHubWaitCopilot(Stage)`. Polls until Copilot posts a non-PENDING review.
 
