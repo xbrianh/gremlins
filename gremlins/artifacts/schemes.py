@@ -28,6 +28,23 @@ class IssueInfo:
     url: str
     number: int
 
+    def __str__(self) -> str:
+        return f"gh://issue/{self.number}"
+
+
+@dataclasses.dataclass(frozen=True)
+class RefInfo:
+    """Returned by GitResolver.read for git://ref/<name> URIs."""
+
+    name: str
+
+    @property
+    def path(self) -> str:
+        return self.name
+
+    def __str__(self) -> str:
+        return self.name
+
 
 class FileSessionResolver:
     """Resolves file://session/<name> against a fixed session directory."""
@@ -81,7 +98,8 @@ class GitResolver:
             return commits
         if path.startswith("ref/"):
             name = path.removeprefix("ref/")
-            return proc.run_or_raise(["git", "rev-parse", name], cwd=self._cwd)
+            proc.run_or_raise(["git", "rev-parse", name], cwd=self._cwd)
+            return RefInfo(name=name)
         if path.startswith("commit/"):
             return path.removeprefix("commit/")
         raise ValueError(f"unrecognised git URI path: {uri}")
@@ -124,7 +142,7 @@ class GitHubResolver:
             n = path.removeprefix("issue/")
             repo = gh_utils.current_repo()
             data = gh_utils.view_issue(n, repo)
-            return data.get("body") or ""
+            return IssueInfo(url=data.get("url", ""), number=int(n))
         raise ValueError(f"unrecognised gh URI path: {uri}")
 
     def verify_produced(self, uri: Uri) -> None:
