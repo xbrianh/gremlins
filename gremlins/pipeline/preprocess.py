@@ -200,9 +200,8 @@ def _expand_entry(
                 expanded_parallel.append(expanded[0])
             else:
                 name = include_name or f"sequence-{len(expanded_parallel)}"
-                expanded_parallel.append(
-                    {"name": name, "type": "sequence", "body": expanded}
-                )
+                seq = {"name": name, "type": "sequence", "body": expanded}
+                expanded_parallel.append(seq)
         entry["parallel"] = expanded_parallel
 
     if "body" in entry and isinstance(entry["body"], list):
