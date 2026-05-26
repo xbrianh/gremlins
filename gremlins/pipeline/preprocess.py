@@ -20,6 +20,20 @@ def expand_pipeline(
     return _expand(yaml_path, project_root, chain=[])
 
 
+def _load_bundled_recipe(raw_name: str) -> dict[str, Any]:
+    name = raw_name.replace("-", "_")
+    recipe_path = (BUNDLED_STAGE_DEF_DIR / f"{name}.yaml").resolve()
+    if not recipe_path.is_relative_to(BUNDLED_STAGE_DEF_DIR.resolve()):
+        raise ValueError(f"invalid bundled recipe name: {raw_name!r}")
+    if not recipe_path.exists():
+        available = sorted(p.stem for p in BUNDLED_STAGE_DEF_DIR.glob("*.yaml"))
+        raise FileNotFoundError(
+            f"bundled recipe not found: {GREMLINS_PREFIX}{raw_name!r}; "
+            f"available: {', '.join(available)}"
+        )
+    return load_yaml_file(recipe_path)
+
+
 def _expand(
     yaml_path: pathlib.Path,
     project_root: pathlib.Path,
@@ -57,14 +71,10 @@ def _expand(
                 raise ValueError(
                     f"stage-definition {name!r}: missing name after {GREMLINS_PREFIX!r}"
                 )
-            recipe_path = (BUNDLED_STAGE_DEF_DIR / f"{recipe_name}.yaml").resolve()
-            if not recipe_path.is_relative_to(BUNDLED_STAGE_DEF_DIR.resolve()):
-                raise ValueError(
-                    f"stage-definition {name!r}: invalid recipe name {recipe_name!r}"
-                )
-            if not recipe_path.exists():
-                raise FileNotFoundError(f"bundled stage-definition not found: {defn!r}")
-            stage_defs[name] = load_yaml_file(recipe_path)
+            try:
+                stage_defs[name] = _load_bundled_recipe(recipe_name)
+            except (ValueError, FileNotFoundError) as e:
+                raise type(e)(f"stage-definition {name!r}: {e}") from e
         elif not isinstance(defn, dict):
             raise ValueError(
                 f"stage-definition {name!r} must be a dict or gremlins: reference"
@@ -113,6 +123,20 @@ def _expand_entry(
                 entry,
                 stage_type,
                 stage_defs,
+                prompt_dir,
+                project_root,
+                chain,
+                named_prompts,
+                seen_defs,
+            )
+        if stage_type.startswith(GREMLINS_PREFIX):
+            recipe_name = stage_type[len(GREMLINS_PREFIX) :]
+            recipe_def = _load_bundled_recipe(recipe_name)
+            direct_defs = {**stage_defs, stage_type: recipe_def}
+            return _expand_stage_def(
+                entry,
+                stage_type,
+                direct_defs,
                 prompt_dir,
                 project_root,
                 chain,
