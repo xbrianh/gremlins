@@ -345,6 +345,73 @@ def test_stage_definitions_non_mapping_rejected(tmp_path: pathlib.Path) -> None:
         expand_pipeline(p)
 
 
+def test_stage_definition_gremlins_recipe_expands(tmp_path: pathlib.Path) -> None:
+    p = _write_pipeline(
+        tmp_path,
+        """\
+        default_client: claude:sonnet
+        stage-definitions:
+          implement: gremlins:implement
+        stages:
+          - { type: implement, name: impl-step }
+        """,
+    )
+    expanded = expand_pipeline(p)
+    assert len(expanded["stages"]) > 0
+    assert expanded["stages"][0]["name"] == "impl-step"
+
+
+def test_stage_definition_gremlins_recipe_missing_name_raises(
+    tmp_path: pathlib.Path,
+) -> None:
+    p = _write_pipeline(
+        tmp_path,
+        """\
+        default_client: claude:sonnet
+        stage-definitions:
+          bad: "gremlins:"
+        stages:
+          - { type: bad }
+        """,
+    )
+    with pytest.raises(ValueError, match="missing name after"):
+        expand_pipeline(p)
+
+
+def test_stage_definition_gremlins_recipe_not_found_raises(
+    tmp_path: pathlib.Path,
+) -> None:
+    p = _write_pipeline(
+        tmp_path,
+        """\
+        default_client: claude:sonnet
+        stage-definitions:
+          bad: "gremlins:no-such-recipe"
+        stages:
+          - { type: bad }
+        """,
+    )
+    with pytest.raises(FileNotFoundError, match="bundled stage-definition not found"):
+        expand_pipeline(p)
+
+
+def test_stage_definition_gremlins_recipe_path_traversal_raises(
+    tmp_path: pathlib.Path,
+) -> None:
+    p = _write_pipeline(
+        tmp_path,
+        """\
+        default_client: claude:sonnet
+        stage-definitions:
+          bad: "gremlins:../../etc/passwd"
+        stages:
+          - { type: bad }
+        """,
+    )
+    with pytest.raises(ValueError, match="invalid recipe name"):
+        expand_pipeline(p)
+
+
 # --- type: <pipeline-name> tests ---
 
 

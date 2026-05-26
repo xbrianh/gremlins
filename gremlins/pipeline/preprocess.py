@@ -3,7 +3,7 @@ from __future__ import annotations
 import pathlib
 from typing import Any, cast
 
-from gremlins.pipeline import BUNDLED_PROMPT_PREFIX
+from gremlins.pipeline import GREMLINS_PREFIX
 from gremlins.pipeline.discovery import resolve_pipeline_name
 from gremlins.prompts import BUNDLED_PROMPT_DIR
 from gremlins.recipes import BUNDLED_STAGE_DEF_DIR
@@ -51,13 +51,15 @@ def _expand(
         )
     stage_defs: dict[str, dict[str, Any]] = {}
     for name, defn in cast(dict[str, Any], raw_stage_defs or {}).items():
-        if isinstance(defn, str) and defn.startswith(BUNDLED_PROMPT_PREFIX):
-            recipe_name = defn[len(BUNDLED_PROMPT_PREFIX) :]
+        if isinstance(defn, str) and defn.startswith(GREMLINS_PREFIX):
+            recipe_name = defn[len(GREMLINS_PREFIX) :]
             if not recipe_name:
                 raise ValueError(
-                    f"stage-definition {name!r}: missing name after {BUNDLED_PROMPT_PREFIX!r}"
+                    f"stage-definition {name!r}: missing name after {GREMLINS_PREFIX!r}"
                 )
             recipe_path = (BUNDLED_STAGE_DEF_DIR / f"{recipe_name}.yaml").resolve()
+            if not recipe_path.is_relative_to(BUNDLED_STAGE_DEF_DIR.resolve()):
+                raise ValueError(f"stage-definition {name!r}: invalid recipe name {recipe_name!r}")
             if not recipe_path.exists():
                 raise FileNotFoundError(f"bundled stage-definition not found: {defn!r}")
             stage_defs[name] = load_yaml_file(recipe_path)
@@ -285,11 +287,11 @@ def _read_prompts(
     for p in raw:
         if p in named_prompts:
             texts.extend(named_prompts[p])
-        elif p.startswith(BUNDLED_PROMPT_PREFIX):
-            name = p[len(BUNDLED_PROMPT_PREFIX) :]
+        elif p.startswith(GREMLINS_PREFIX):
+            name = p[len(GREMLINS_PREFIX) :]
             if not name:
                 raise ValueError(
-                    f"prompt {p!r} is missing a name after {BUNDLED_PROMPT_PREFIX!r}"
+                    f"prompt {p!r} is missing a name after {GREMLINS_PREFIX!r}"
                 )
             texts.append(_read_prompt_file((BUNDLED_PROMPT_DIR / name).resolve()))
         else:
