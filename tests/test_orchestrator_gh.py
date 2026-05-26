@@ -19,7 +19,7 @@ from conftest import MINIMAL_EVENTS
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.run import _parse_args as _parse_gh_args
 from gremlins.executor.run import run_pipeline
-from gremlins.pipeline import Pipeline  # noqa: F401
+from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.utils.github import parse_issue_ref as _parse_issue_ref
 
@@ -730,9 +730,6 @@ def test_resume_from_github_review_pull_request(tmp_path, monkeypatch):
 
     data = json.loads(state_file.read_text())
     data["issue_url"] = "https://github.com/owner/repo/issues/5"
-    data.setdefault("artifacts", []).append(
-        {"type": "pr", "url": "https://github.com/owner/repo/pull/200", "branch": ""}
-    )
     state_file.write_text(json.dumps(data))
 
     registry_path = tmp_path / "registry.json"

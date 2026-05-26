@@ -15,6 +15,7 @@ escaped as `{{owner}}` in the template source.
 | `{verify_output}` | Captured stdout+stderr of the failed check/test run | `verify.py` | Multi-line |
 | `{failure_output}` | Captured CI check failure logs from the PR | `github_wait_ci.py` | Multi-line |
 | `{commands_section}` | Markdown-formatted list of commands that were run | `verify.py` | Single or multi-line |
+| `{pr}` | Full GitHub PR URL | `type: agent` stages via `in: {pr: pr}` | e.g. `https://github.com/owner/repo/pull/N` |
 | `{instructions}` | User-supplied task instructions | `plan.py`, `ghplan.py` | Multi-line |
 | `{plan_file}` | Absolute path where the plan should be written | `plan.py` | File path string |
 | `{ref}` | Optional issue/PR reference passed to the plan stage | `ghplan.py` | May be empty string |
