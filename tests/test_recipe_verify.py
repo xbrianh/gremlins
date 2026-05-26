@@ -1,4 +1,5 @@
 """Tests for the verify YAML recipe."""
+
 from __future__ import annotations
 
 import pathlib

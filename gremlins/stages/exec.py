@@ -45,7 +45,7 @@ class Exec(Stage):
         if not isinstance(raw_out, dict):
             raise ValueError(f"stage {name!r}: 'out' must be a mapping")
         _FRAMEWORK_KEYS = frozenset(["name", "model", "session_dir", "repo", "cwd"])
-        for k in (d.get("options") or {}):
+        for k in d.get("options") or {}:
             if k in _FRAMEWORK_KEYS:
                 raise ValueError(
                     f"stage {name!r}: option key {k!r} collides with framework substitution variable"

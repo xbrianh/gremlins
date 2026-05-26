@@ -276,7 +276,9 @@ def _expand_stage_def(
                             new_body.append(body_stage)
                             continue
                         body_stage = dict(body_stage)
-                        b_opts = dict(cast(dict[str, Any], body_stage.get("options") or {}))
+                        b_opts = dict(
+                            cast(dict[str, Any], body_stage.get("options") or {})
+                        )
                         body_stage["options"] = {**cs_opts, **b_opts}
                         new_body.append(body_stage)
                     inner["body"] = new_body
@@ -293,7 +295,9 @@ def _expand_stage_def(
                         cs_prompts = [cs_prompts]
                     # Call-site prompts first so recipe's closing instructions remain last.
                     inner["prompt"] = cs_prompts + recipe_prompts
-                    if inner.get("type") == "loop" and isinstance(inner.get("body"), list):
+                    if inner.get("type") == "loop" and isinstance(
+                        inner.get("body"), list
+                    ):
                         cs_prompts_for_body = cs_prompts
                         new_body = []
                         for body_stage in cast(list[dict[str, Any]], inner["body"]):
