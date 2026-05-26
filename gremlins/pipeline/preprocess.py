@@ -228,7 +228,9 @@ def _resolve_placeholder(key: str, ctx: dict[str, Any]) -> Any:
     val: Any = ctx
     for part in key.split("."):
         if not isinstance(val, dict) or part not in val:
-            raise ValueError(f"placeholder {{{{{key}}}}}: key {part!r} not found in context")
+            raise ValueError(
+                f"placeholder {{{{{key}}}}}: key {part!r} not found in context"
+            )
         val = val[part]
     return val
 
