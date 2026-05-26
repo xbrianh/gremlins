@@ -422,8 +422,9 @@ def test_gremlins_prefix_type_resolves_directly(tmp_path: pathlib.Path) -> None:
         """,
     )
     expanded = expand_pipeline(p)
-    assert len(expanded["stages"]) > 0
+    assert len(expanded["stages"]) == 2
     assert expanded["stages"][0]["name"] == "impl-step"
+    assert expanded["stages"][0]["type"] == "agent"
 
 
 def test_gremlins_prefix_type_accepts_dashes(tmp_path: pathlib.Path) -> None:
@@ -436,7 +437,8 @@ def test_gremlins_prefix_type_accepts_dashes(tmp_path: pathlib.Path) -> None:
         """,
     )
     expanded = expand_pipeline(p)
-    assert len(expanded["stages"]) > 0
+    assert len(expanded["stages"]) == 1
+    assert expanded["stages"][0]["type"] == "exec"
 
 
 def test_gremlins_prefix_type_unknown_raises(tmp_path: pathlib.Path) -> None:

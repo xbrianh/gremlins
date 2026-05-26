@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import pathlib
 from typing import Any, cast
 
@@ -20,6 +21,7 @@ def expand_pipeline(
     return _expand(yaml_path, project_root, chain=[])
 
 
+@functools.lru_cache(maxsize=None)
 def _load_bundled_recipe(raw_name: str) -> dict[str, Any]:
     name = raw_name.replace("-", "_")
     recipe_path = (BUNDLED_STAGE_DEF_DIR / f"{name}.yaml").resolve()
@@ -28,7 +30,7 @@ def _load_bundled_recipe(raw_name: str) -> dict[str, Any]:
     if not recipe_path.exists():
         available = sorted(p.stem for p in BUNDLED_STAGE_DEF_DIR.glob("*.yaml"))
         raise FileNotFoundError(
-            f"bundled recipe not found: {GREMLINS_PREFIX}{raw_name!r}; "
+            f"bundled recipe not found: {GREMLINS_PREFIX}{raw_name}; "
             f"available: {', '.join(available)}"
         )
     return load_yaml_file(recipe_path)
@@ -131,6 +133,8 @@ def _expand_entry(
             )
         if stage_type.startswith(GREMLINS_PREFIX):
             recipe_name = stage_type[len(GREMLINS_PREFIX) :]
+            if not recipe_name:
+                raise ValueError(f"missing name after {GREMLINS_PREFIX!r}")
             recipe_def = _load_bundled_recipe(recipe_name)
             direct_defs = {**stage_defs, stage_type: recipe_def}
             return _expand_stage_def(
