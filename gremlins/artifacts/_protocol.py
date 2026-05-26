@@ -1,4 +1,4 @@
-"""SchemeResolver protocol and CapturingSchemeResolver extension."""
+"""SchemeResolver protocol."""
 
 from __future__ import annotations
 
@@ -11,10 +11,3 @@ from gremlins.artifacts.uri import Uri
 class SchemeResolver(Protocol):
     def read(self, uri: Uri) -> Any: ...
     def verify_produced(self, uri: Uri) -> None: ...
-
-
-@runtime_checkable
-class CapturingSchemeResolver(SchemeResolver, Protocol):
-    """SchemeResolver that can derive its URI from command stdout/stderr."""
-
-    def capture(self, stdout: str, stderr: str) -> Uri: ...

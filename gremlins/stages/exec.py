@@ -8,7 +8,7 @@ import re
 from typing import Any, cast
 
 from gremlins.artifacts.resolve import resolve_in_map
-from gremlins.artifacts.schemes import GitHubResolver, snapshot_head_before
+from gremlins.artifacts.schemes import snapshot_head_before
 from gremlins.artifacts.uri import Uri
 from gremlins.executor.state import State
 from gremlins.stages._passthrough import Passthrough as _Passthrough
@@ -17,7 +17,15 @@ from gremlins.stages.outcome import Bail, Done, NeedsFix, Outcome
 from gremlins.utils import proc as _proc
 
 _CMD_SUB = re.compile(r"\{(\w+)\}")
+_READ_SUB = re.compile(r"\{read:([-\w]+)\}")
 _FRAMEWORK_KEYS = frozenset(["name", "model", "session_dir", "repo", "cwd"])
+
+
+def _sub_reads(s: str, artifacts) -> str:
+    def _r(m):
+        raw = artifacts.read(m.group(1))
+        return (raw.decode() if isinstance(raw, bytes) else str(raw)).strip()
+    return _READ_SUB.sub(_r, s)
 
 
 class Exec(Stage):
@@ -107,7 +115,7 @@ class Exec(Stage):
 
         for raw_key, raw_uri_str in self.out_map.items():
             key = raw_key.format_map(_pt)
-            uri_str = raw_uri_str.format_map(_pt)
+            uri_str = _sub_reads(raw_uri_str, state.artifacts).format_map(_pt)
             if uri_str == "git://range":
                 if needs_fix:
                     continue
@@ -116,15 +124,6 @@ class Exec(Stage):
                         f"exec {self.name}: git://range requires pre-snapshot"
                     )
                 state.artifacts.bind_git_commit_range(key, pre_sha)
-            elif uri_str == "gh://pr":
-                if needs_fix:
-                    continue
-                resolver = cast(GitHubResolver, state.artifacts.resolver("gh"))
-                try:
-                    captured = resolver.capture(stdout_str, stderr_str)
-                except ValueError as exc:
-                    raise Bail(str(exc)) from exc
-                state.artifacts.bind(key, captured)
             else:
                 uri = Uri.parse(uri_str)
                 state.artifacts.bind(key, uri)

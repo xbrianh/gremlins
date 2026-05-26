@@ -58,17 +58,6 @@ base = snapshot_head_before(cwd=state.cwd)
 bind_range_after(registry, "normalize-commits", base, cwd=state.cwd)
 ```
 
-## gh://pr capture
-
-```python
-from gremlins.artifacts._protocol import CapturingSchemeResolver
-
-gh_resolver = registry.resolver("gh")
-if isinstance(gh_resolver, CapturingSchemeResolver):
-    uri = gh_resolver.capture(stdout, stderr)
-    registry.bind("pr", uri)
-```
-
 ## Typed read returns
 
 `GitHubResolver.read()` returns typed objects rather than plain dicts:

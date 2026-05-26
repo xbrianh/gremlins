@@ -10,7 +10,6 @@ import pytest
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.schemes import (
     FileSessionResolver,
-    GitHubResolver,
     GitResolver,
     snapshot_head_before,
 )
@@ -99,22 +98,6 @@ def test_git_resolver_read_range(tmp_path: pathlib.Path) -> None:
     assert len(commits) == 1
     assert commits[0]["subject"] == "second"
     assert "sha" in commits[0]
-
-
-# GitHubResolver tests
-
-
-def test_gh_resolver_capture(tmp_path: pathlib.Path) -> None:
-    resolver = GitHubResolver(cwd=tmp_path)
-    stdout = "https://github.com/acme/repo/pull/42\n"
-    uri = resolver.capture(stdout, "")
-    assert uri == Uri.parse("gh://pr/42")
-
-
-def test_gh_resolver_capture_no_url_raises(tmp_path: pathlib.Path) -> None:
-    resolver = GitHubResolver(cwd=tmp_path)
-    with pytest.raises(ValueError):
-        resolver.capture("no url here", "")
 
 
 # snapshot_head_before and bind_git_commit_range tests
