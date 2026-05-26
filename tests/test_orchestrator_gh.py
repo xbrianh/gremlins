@@ -20,13 +20,6 @@ from gremlins.executor.run import _parse_args as _parse_gh_args
 from gremlins.executor.run import run_pipeline
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
-from gremlins.utils.git import (
-    DivergentHead,
-    EmptyImpl,
-    HeadAdvanced,
-    classify_impl_outcome,
-    record_pre_impl_state,
-)
 from gremlins.utils.github import parse_issue_ref as _parse_issue_ref
 
 
@@ -243,85 +236,6 @@ def _make_gh_subprocess(
 
 
 # ---------------------------------------------------------------------------
-# classify_impl_outcome — all four branches (pure git, real temp repo)
-# ---------------------------------------------------------------------------
-
-
-def _init_git_repo(path: pathlib.Path) -> None:
-    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "config", "user.email", "test@test.com"],
-        cwd=path,
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Test"],
-        cwd=path,
-        check=True,
-        capture_output=True,
-    )
-    (path / "README.md").write_text("init\n")
-    subprocess.run(
-        ["git", "add", "README.md"], cwd=path, check=True, capture_output=True
-    )
-    subprocess.run(
-        ["git", "commit", "-m", "init"], cwd=path, check=True, capture_output=True
-    )
-
-
-def test_classify_empty_impl(tmp_path):
-    _init_git_repo(tmp_path)
-    pre = record_pre_impl_state(cwd=str(tmp_path))
-    outcome = classify_impl_outcome(pre, cwd=str(tmp_path))
-    assert isinstance(outcome, EmptyImpl)
-
-
-def test_classify_head_advanced(tmp_path):
-    _init_git_repo(tmp_path)
-    pre = record_pre_impl_state(cwd=str(tmp_path))
-    (tmp_path / "feat.txt").write_text("feature\n")
-    subprocess.run(
-        ["git", "add", "feat.txt"], cwd=tmp_path, check=True, capture_output=True
-    )
-    subprocess.run(
-        ["git", "commit", "-m", "feat"], cwd=tmp_path, check=True, capture_output=True
-    )
-    outcome = classify_impl_outcome(pre, cwd=str(tmp_path))
-    assert isinstance(outcome, HeadAdvanced)
-    assert outcome.commit_count == 1
-
-
-def test_classify_divergent_head(tmp_path):
-    _init_git_repo(tmp_path)
-    pre = record_pre_impl_state(cwd=str(tmp_path))
-
-    # Create an orphan branch (diverges from the init commit)
-    subprocess.run(
-        ["git", "checkout", "--orphan", "orphan"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "rm", "-rf", "."], cwd=tmp_path, check=True, capture_output=True
-    )
-    (tmp_path / "orphan.txt").write_text("orphan\n")
-    subprocess.run(
-        ["git", "add", "orphan.txt"], cwd=tmp_path, check=True, capture_output=True
-    )
-    subprocess.run(
-        ["git", "commit", "-m", "orphan commit"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-    )
-
-    outcome = classify_impl_outcome(pre, cwd=str(tmp_path))
-    assert isinstance(outcome, DivergentHead)
-
-
-# ---------------------------------------------------------------------------
 # _parse_gh_args — arg parsing unit tests
 # ---------------------------------------------------------------------------
 
@@ -395,6 +309,7 @@ def test_gh_pipeline_stage_names(tmp_path):
     assert names == [
         "plan",
         "implement",
+        "require-impl-progress",
         "normalize",
         "verify",
         "open-pr",
