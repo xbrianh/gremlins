@@ -68,7 +68,16 @@ class ArtifactRegistry:
             raise MissingArtifact(key) from None
 
     def read(self, key: str) -> Any:
-        uri = self.resolve(key)
+        try:
+            uri = self.resolve(key)
+        except MissingArtifact:
+            env_res = self._resolvers.get("env")
+            if env_res is not None:
+                try:
+                    return env_res.read(Uri.parse(f"env://{key}"))
+                except KeyError:
+                    pass
+            raise
         return self._resolvers[uri.scheme].read(uri)
 
     def produced(self, key: str) -> bool:

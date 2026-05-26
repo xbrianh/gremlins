@@ -189,6 +189,18 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
     monkeypatch.setattr(
         "gremlins.executor.run.resolve_state_file", lambda gremlin_id=None: state_file
     )
+
+    from gremlins.utils import proc as _proc_mod
+    import subprocess as _subprocess_mod
+
+    _orig_shell = _proc_mod.run_shell_async
+
+    async def _noop_gh_shell(cmd, *, cwd=None, env=None):
+        if isinstance(cmd, str) and cmd.lstrip().startswith("gh "):
+            return _subprocess_mod.CompletedProcess(cmd, 0, "", "")
+        return await _orig_shell(cmd, cwd=cwd, env=env)
+
+    monkeypatch.setattr(_proc_mod, "run_shell_async", _noop_gh_shell)
     monkeypatch.setattr(
         "gremlins.executor.state.resolve_state_file", lambda gremlin_id=None: state_file
     )
@@ -405,10 +417,6 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
     )
     monkeypatch.setattr(
@@ -452,10 +460,6 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
         _async(lambda self, pipe: "APPROVED"),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
@@ -505,10 +509,6 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
         _async(lambda self, pipe: "APPROVED"),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
@@ -564,10 +564,6 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
     )
     monkeypatch.setattr(
@@ -618,10 +614,6 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
         _async(lambda self, pipe: "APPROVED"),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
@@ -685,10 +677,6 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
     )
     monkeypatch.setattr(
@@ -740,10 +728,6 @@ def test_resume_from_github_review_pull_request(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
         _async(lambda self, pipe: "APPROVED"),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
@@ -837,10 +821,6 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
         _async(lambda self, pipe: "APPROVED"),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
@@ -961,10 +941,6 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
         _async(lambda self, pipe: None),
     )
@@ -1017,10 +993,6 @@ def test_github_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
     )
     monkeypatch.setattr(
@@ -1061,7 +1033,7 @@ def test_github_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
     )
     assert result == 0
 
-    assert captured_stage["state"].repo == "owner/repo"
+    assert captured_stage["state"].artifacts.read("repo") == "owner/repo"
     assert captured_stage["state"].session_dir == session_dir
     # pr is written to registry.json by GitHubOpenPullRequest
     registry_path = tmp_path / "registry.json"
@@ -1089,10 +1061,6 @@ def test_github_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
         _async(lambda self, pipe: "APPROVED"),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
@@ -1163,10 +1131,6 @@ def test_github_wait_ci_stage_ordering(tmp_path, monkeypatch):
         _async(lambda self, pipe: order.append("github-wait-copilot") or "APPROVED"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: order.append("github-request-copilot-review")),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
         _async(lambda self, pipe: order.append("ci-gate")),
     )
@@ -1225,12 +1189,6 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(
-            lambda self, pipe: earlier_called.append("github-request-copilot-review")
-        ),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
         _async(lambda self, pipe: ci_stages.append(self)),
     )
@@ -1279,10 +1237,6 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
         _async(lambda self, pipe: "APPROVED"),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
@@ -1359,10 +1313,6 @@ def test_resume_from_verify(tmp_path, monkeypatch):
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
         _async(lambda self, pipe: None),
     )
@@ -1404,10 +1354,6 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
         _async(lambda self, pipe: "APPROVED"),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
@@ -1459,10 +1405,6 @@ def test_gh_main_state_client_tracks_effective_model(
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
         _async(lambda self, pipe: "APPROVED"),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
@@ -1541,10 +1483,6 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
     )
     monkeypatch.setattr(
@@ -1596,10 +1534,6 @@ def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
         _async(lambda self, pipe: "APPROVED"),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
         "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
