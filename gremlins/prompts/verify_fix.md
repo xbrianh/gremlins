@@ -1,7 +1,5 @@
-<!-- placeholders: commands_section, verify_output, diff_text -->
+<!-- placeholders: verify_output, diff_text -->
 The verify step failed. Read the captured output below, then fix the code so the commands exit 0.
-
-{commands_section}
 
 **Important constraints:**
 - Do not skip or disable linting rules, formatter directives, or type-check annotations to make the check pass — fix the actual violation.

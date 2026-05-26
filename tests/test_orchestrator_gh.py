@@ -418,7 +418,7 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
+        "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
@@ -463,7 +463,7 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
+        "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
@@ -512,7 +512,7 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
+        "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
@@ -565,7 +565,7 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
+        "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
@@ -617,7 +617,7 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
+        "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
@@ -678,7 +678,7 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
+        "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
@@ -824,7 +824,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
+        "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
@@ -994,7 +994,7 @@ def test_github_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
+        "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
@@ -1064,7 +1064,7 @@ def test_github_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
+        "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
     )
 
     captured_stage = {}
@@ -1124,7 +1124,7 @@ def test_github_wait_ci_stage_ordering(tmp_path, monkeypatch):
     order: list[str] = []
 
     monkeypatch.setattr(
-        "gremlins.stages.verify.Verify.run",
+        "gremlins.stages.loop.LoopStage.run",
         _async(lambda self, pipe: order.append("verify")),
     )
     monkeypatch.setattr(
@@ -1250,7 +1250,7 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
         captured_stage["stage"] = self
         captured_stage["state"] = state
 
-    monkeypatch.setattr("gremlins.stages.verify.Verify.run", record_verify)
+    monkeypatch.setattr("gremlins.stages.loop.LoopStage.run", record_verify)
 
     client = _CommittingClient(
         git_dir=tmp_path,
@@ -1276,7 +1276,9 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
 
     stage = captured_stage["stage"]
     assert stage.client.model == "claude-opus-4-7"
-    assert stage.options.get("cmds") == ["make check", "make test"]
+    # cmds are on the cmd exec stage inside the loop body
+    cmd_stage = stage.body[0]
+    assert cmd_stage.options.get("cmds") == ["make check", "make test"]
     assert captured_stage["state"].session_dir == session_dir
 
 
@@ -1306,7 +1308,7 @@ def test_resume_from_verify(tmp_path, monkeypatch):
     verify_calls = []
 
     monkeypatch.setattr(
-        "gremlins.stages.verify.Verify.run",
+        "gremlins.stages.loop.LoopStage.run",
         _async(lambda self, pipe: verify_calls.append(self)),
     )
     monkeypatch.setattr(
@@ -1357,7 +1359,7 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch):
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
+        "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
@@ -1408,7 +1410,7 @@ def test_gh_main_state_client_tracks_effective_model(
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
+        "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
@@ -1484,7 +1486,7 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
+        "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
@@ -1537,7 +1539,7 @@ def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.verify.Verify.run", _async(lambda self, pipe: None)
+        "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run",

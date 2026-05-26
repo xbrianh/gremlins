@@ -87,12 +87,29 @@ class LoopStage(Stage):
         if not isinstance(raw_options, dict):
             raise ValueError(f"stage {name!r}: 'options' must be a mapping")
         options = cast(dict[str, Any], raw_options)
-        max_iterations: int = int(options.get("max_iterations", 3))
+        max_iterations: int = int(d.get("max-iterations") or options.get("max_iterations", 3))
         pr_stack: bool = bool(options.get("pr_stack", False))
+
+        raw_prompt: list = []
+        if "prompt" in d:
+            p = d["prompt"]
+            raw_prompt = p if isinstance(p, list) else ([p] if p else [])
+
         raw_children: object = d.get("body") or []
         if not isinstance(raw_children, list):
             raise ValueError(f"stage {name!r}: 'body' must be a list")
-        body = parse_stages(cast(list[dict[str, Any]], raw_children), depth=depth)
+
+        processed_children: list[dict] = []
+        for child_d in cast(list[dict[str, Any]], raw_children):
+            if raw_prompt and child_d.get("type") == "agent":
+                child_d = dict(child_d)
+                existing = child_d.get("prompt") or []
+                if not isinstance(existing, list):
+                    existing = [existing] if existing else []
+                child_d["prompt"] = raw_prompt + existing
+            processed_children.append(child_d)
+
+        body = parse_stages(processed_children, depth=depth)
         on_iter = detach_to_pr_base if pr_stack else None
         stage = cls(
             name,

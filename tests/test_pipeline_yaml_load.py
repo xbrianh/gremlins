@@ -117,7 +117,7 @@ def test_pipeline_name_optional_defaults_to_type(tmp_path: pathlib.Path) -> None
         stages:
           - { type: plan }
           - { type: agent, prompt: [] }
-          - { type: verify }
+          - { type: verify, options: { cmds: ['true'] } }
         """,
     )
     pipeline = Pipeline.from_yaml(p)
@@ -133,17 +133,17 @@ def test_pipeline_duplicate_unnamed_stages_auto_numbered(
         default_client: claude:sonnet
         stages:
           - { type: plan }
-          - { type: verify }
-          - { type: verify }
-          - { type: verify }
+          - { type: exec, options: { cmds: ['true'] } }
+          - { type: exec, options: { cmds: ['true'] } }
+          - { type: exec, options: { cmds: ['true'] } }
         """,
     )
     pipeline = Pipeline.from_yaml(p)
     assert [s.name for s in pipeline.stages] == [
         "plan",
-        "verify",
-        "verify-2",
-        "verify-3",
+        "exec",
+        "exec-2",
+        "exec-3",
     ]
 
 
@@ -170,18 +170,18 @@ def test_pipeline_nested_scopes_disambiguate_independently(
         """\
         default_client: claude:sonnet
         stages:
-          - { type: verify }
+          - { type: exec, options: { cmds: ['true'] } }
           - name: checks
             parallel:
-              - { type: verify }
-              - { type: verify }
+              - { type: exec, options: { cmds: ['true'] } }
+              - { type: exec, options: { cmds: ['true'] } }
         """,
     )
     pipeline = Pipeline.from_yaml(p)
-    assert pipeline.stages[0].name == "verify"
+    assert pipeline.stages[0].name == "exec"
     parallel = pipeline.stages[1]
     assert parallel.name == "checks"
-    assert [c.name for c in parallel.body] == ["verify", "verify-2"]
+    assert [c.name for c in parallel.body] == ["exec", "exec-2"]
 
 
 # --- stage-definitions tests ---

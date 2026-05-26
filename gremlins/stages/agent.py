@@ -54,6 +54,12 @@ class Agent(Stage):
             raise ValueError(f"stage {name!r}: 'in' must be a mapping")
         if not isinstance(raw_out, dict):
             raise ValueError(f"stage {name!r}: 'out' must be a mapping")
+        _FRAMEWORK_KEYS = frozenset(["name", "model", "session_dir"])
+        for k in (d.get("options") or {}):
+            if k in _FRAMEWORK_KEYS:
+                raise ValueError(
+                    f"stage {name!r}: option key {k!r} collides with framework substitution variable"
+                )
         stage = cls(
             name,
             d.get("prompt") or [],
@@ -77,6 +83,9 @@ class Agent(Stage):
             model=state.stage_model or state.client.model,
             session_dir=str(state.session_dir),
         )
+        for k, v in opts.items():
+            if k not in subs and isinstance(v, str):
+                subs[k] = v
 
         out_map = {
             k.format_map(_Passthrough(subs)): v.format_map(_Passthrough(subs))

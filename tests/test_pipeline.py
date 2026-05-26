@@ -52,7 +52,7 @@ def test_pipeline_constructs_from_local_yaml(tmp_path: pathlib.Path) -> None:
     assert "plan" in stage_names
     assert "implement" in stage_names
     assert "plan" in STAGE_TYPES
-    assert "verify" in STAGE_TYPES
+    assert "loop" in STAGE_TYPES  # verify is now a recipe that expands to a loop
 
 
 def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
@@ -320,7 +320,7 @@ def test_needs_gh_false_for_local_stage_in_loop_body() -> None:
 def test_stage_builders_registry_covers_all_known_types() -> None:
     expected = {
         "plan",
-        "verify",
+        "loop",
         "github-open-pull-request",
         "github-wait-copilot",
         "github-wait-ci",

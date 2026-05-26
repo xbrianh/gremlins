@@ -703,8 +703,8 @@ stages:
     cancel_on_bail: true
     bail_policy: all
     parallel:
-      - {name: r1, type: verify}
-      - {name: r2, type: verify}
+      - {name: r1, type: verify, options: {cmds: ['true']}}
+      - {name: r2, type: verify, options: {cmds: ['true']}}
 """
     p = tmp_path / "pipeline.yaml"
     p.write_text(yaml_content)
@@ -723,7 +723,7 @@ stages:
   - name: reviews
     bail_policy: bogus
     parallel:
-      - {name: r1, type: verify}
+      - {name: r1, type: verify, options: {cmds: ['true']}}
 """
     p = tmp_path / "pipeline.yaml"
     p.write_text(yaml_content)

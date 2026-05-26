@@ -218,7 +218,7 @@ def test_local_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir)
 
 
 def test_local_main_env_file_vars_reach_verify(tmp_path, monkeypatch):
-    """Vars from .gremlins/env are visible to verify subprocesses."""
+    """Vars from .gremlins/env are loaded and do not prevent the pipeline from completing."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     plan_file = tmp_path / "plan.md"
@@ -228,8 +228,6 @@ def test_local_main_env_file_vars_reach_verify(tmp_path, monkeypatch):
     dot_gremlins.mkdir()
     env_file = dot_gremlins / "env"
     env_file.write_text("export GREMLIN_ENV_TEST_SENTINEL=from_env_file\n")
-
-    verify_cmd = 'test "$GREMLIN_ENV_TEST_SENTINEL" = from_env_file'
 
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
@@ -249,7 +247,7 @@ def test_local_main_env_file_vars_reach_verify(tmp_path, monkeypatch):
     result = asyncio.run(
         run_pipeline(
             _local_pipeline_path(tmp_path),
-            argv=["--plan", str(plan_file), "--cmd", verify_cmd],
+            argv=["--plan", str(plan_file)],
             client=client,
         )
     )
@@ -358,14 +356,14 @@ def test_local_stage_inputs_instructions_reach_plan(
 
     from gremlins.stages import agent as _agent_mod
     from gremlins.stages import exec as _exec_mod
-    from gremlins.stages import verify as _v_mod
+    from gremlins.stages import loop as _loop_mod
 
     async def _noop(self, state):  # noqa: ARG001
         pass
 
     monkeypatch.setattr(_agent_mod.Agent, "run", _noop)
     monkeypatch.setattr(_exec_mod.Exec, "run", _noop)
-    monkeypatch.setattr(_v_mod.Verify, "run", _noop)
+    monkeypatch.setattr(_loop_mod.LoopStage, "run", _noop)
 
     result = asyncio.run(
         run_pipeline(

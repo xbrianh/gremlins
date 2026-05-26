@@ -49,8 +49,9 @@ def _init_git_repo(path: pathlib.Path, *, with_origin: bool = False) -> None:
         capture_output=True,
     )
     (path / "README.md").write_text("init\n")
+    (path / "Makefile").write_text("check:\n\t@true\ntest:\n\t@true\n")
     subprocess.run(
-        ["git", "add", "README.md"], cwd=path, check=True, capture_output=True
+        ["git", "add", "README.md", "Makefile"], cwd=path, check=True, capture_output=True
     )
     subprocess.run(
         ["git", "commit", "-m", "init"], cwd=path, check=True, capture_output=True
@@ -297,7 +298,7 @@ def common_local_patches(monkeypatch):
     )
 
     async def _noop_shell(cmd, **kwargs):
-        return _subprocess.CompletedProcess(cmd, 0, "", "")
+        return _subprocess.CompletedProcess(cmd, 0, "(noop)\n", "")
 
     monkeypatch.setattr("gremlins.stages.exec._proc.run_shell_async", _noop_shell)
 

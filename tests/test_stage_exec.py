@@ -187,3 +187,11 @@ def test_on_fail_needs_fix_returns_needs_fix(tmp_path):
     result = asyncio.run(stage.run(state))
     assert isinstance(result, NeedsFix)
     assert result.returncode == 2
+
+
+def test_success_writes_log(tmp_path):
+    state = _make_state(tmp_path)
+    stage = _exec("myname", cmds=["echo hello"])
+    result = asyncio.run(stage.run(state))
+    assert isinstance(result, Done)
+    assert (state.session_dir / "exec-myname.log").exists()
