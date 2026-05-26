@@ -13,7 +13,6 @@ import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.pipeline import Pipeline
-from gremlins.stages.github_open_pull_request import GitHubOpenPullRequest
 
 os.environ.setdefault("GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME", "main")
 
@@ -239,14 +238,6 @@ def child_sandbox(sandbox, request):
 
 
 TESTS_DIR = pathlib.Path(__file__).resolve().parent
-
-
-def gh_pipeline() -> Pipeline:
-    return Pipeline(
-        name="test",
-        path=pathlib.Path("."),
-        stages=[GitHubOpenPullRequest("github-open-pull-request", [], {})],
-    )
 
 
 if str(TESTS_DIR) not in sys.path:

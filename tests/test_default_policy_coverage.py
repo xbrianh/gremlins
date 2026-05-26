@@ -37,4 +37,4 @@ def test_gh_terse_pipeline_loads() -> None:
     stage_types = [s.type for s in pipeline.stages]
     assert "plan" in stage_types
     assert "implement" in stage_names
-    assert "github-open-pull-request" in stage_types
+    assert "push-and-open" in stage_names

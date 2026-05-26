@@ -1,1 +1,7 @@
-You are on a detached HEAD. Compute a branch name as 'issue-<N>-<short-slug>' if there is an issue number, otherwise a short descriptive slug. Push with 'git push origin HEAD:refs/heads/<branch-name>' then open a PR against '{base_ref}' with 'gh pr create --head <branch-name> --base {base_ref} --title "<title>" --body "<body>"'. You MUST pass an explicit --body so the close-link below lands in the PR description (do not rely on `gh pr create` auto-generating a body, and do not use `--fill`). Print ONLY the PR URL on the final line of your response.
+You are composing a GitHub pull request for changes on a detached HEAD. Write three files:
+
+- `{session_dir}/pr-branch.txt`: one line — the branch name to push. If `{plan_uri}` matches `gh://issue/N`, use `issue-N-<short-slug>`; otherwise use a short descriptive slug based on the changes.
+- `{session_dir}/pr-title.txt`: one line — the PR title.
+- `{session_dir}/pr-body.md`: the PR body in markdown. If `{plan_uri}` matches `gh://issue/N`, include `Closes #N` on its own line. If `{plan_uri}` is empty, do NOT include any 'Closes' or 'Fixes' line.
+
+The PR will target `{base_ref}` (or `{prev_branch}` when non-empty, for stacked PRs). Do NOT push or call `gh pr create` — another stage handles that.

@@ -1,0 +1,27 @@
+stages:
+  - name: compose-pr
+    type: agent
+    in:
+      prev_branch: pr.branch?
+      base_ref:    base_ref.path?main
+      plan_uri:    plan?
+    out:
+      pr_title:  "file://session/pr-title.txt"
+      pr_body:   "file://session/pr-body.md"
+      pr_branch: "file://session/pr-branch.txt"
+    prompt:
+      - gremlins:github_open_pull_request.md
+
+  - name: push-and-open
+    type: exec
+    in:
+      prev_branch: pr.branch?
+      base_ref:    base_ref.path?main
+    out:
+      pr: "gh://pr"
+    options:
+      cmds:
+        - 'BASE="${prev_branch:-$base_ref}"'
+        - 'BRANCH="$(cat "{session_dir}/pr-branch.txt")"'
+        - 'git push -f origin "HEAD:refs/heads/$BRANCH"'
+        - 'gh pr create --head "$BRANCH" --base "$BASE" --title "$(cat "{session_dir}/pr-title.txt")" --body-file "{session_dir}/pr-body.md"'
