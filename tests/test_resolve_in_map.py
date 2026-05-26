@@ -97,6 +97,7 @@ def test_nested_dotted_path(tmp_path):
         return Outer(inner=Inner(value="deep"))
 
     import gremlins.artifacts.schemes as schemes
+
     orig = schemes.GitHubResolver.read
 
     reg.bind("obj", Uri.parse("gh://pr/1"))
