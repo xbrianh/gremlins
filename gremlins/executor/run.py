@@ -66,10 +66,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--resume-from", dest="resume_from", default=None)
     parser.add_argument("--plan", dest="plan", default=None)
     parser.add_argument("--spec", default=None)
-    parser.add_argument("--cmd", dest="cmds", action="append", default=None)
-    parser.add_argument(
-        "--test-max-attempts", dest="test_max_attempts", type=int, default=3
-    )
     parser.add_argument("--client", dest="client", default=None)
     parser.add_argument("instructions", nargs="*")
     args = parser.parse_args(argv)
@@ -79,12 +75,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         die("--plan and positional instructions are mutually exclusive")
     if not args.resume_from and not args.plan and not args.instructions:
         die("one of --plan, --resume-from, or positional instructions is required")
-    if args.test_max_attempts <= 0:
-        die("--test-max-attempts must be a positive integer")
-    if args.cmds is not None:
-        for c in args.cmds:
-            if not c.strip():
-                die("--cmd: command must be a non-empty string")
     return args
 
 
@@ -192,8 +182,6 @@ async def run_pipeline(
             resume_from=args.resume_from,
             spec=args.spec,
             plan=args.plan,
-            cmds=args.cmds,
-            test_max_attempts=args.test_max_attempts,
             worktree_dir=worktree_dir,
             project_root=project_root,
             base_ref_sha=base_ref_sha,

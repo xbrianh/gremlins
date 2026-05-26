@@ -17,6 +17,7 @@ from gremlins.stages.outcome import Bail, Done, NeedsFix, Outcome
 from gremlins.utils import proc as _proc
 
 _CMD_SUB = re.compile(r"\{(\w+)\}")
+_FRAMEWORK_KEYS = frozenset(["name", "model", "session_dir", "repo", "cwd"])
 
 
 class Exec(Stage):
@@ -44,6 +45,11 @@ class Exec(Stage):
             raise ValueError(f"stage {name!r}: 'in' must be a mapping")
         if not isinstance(raw_out, dict):
             raise ValueError(f"stage {name!r}: 'out' must be a mapping")
+        for k in cast(dict[str, Any], d.get("options") or {}):
+            if k in _FRAMEWORK_KEYS:
+                raise ValueError(
+                    f"stage {name!r}: option key {k!r} collides with framework substitution variable"
+                )
         return cls(
             name,
             d.get("options") or {},
@@ -64,6 +70,9 @@ class Exec(Stage):
             repo=state.engine_ctx.repo,
             cwd=state.engine_ctx.cwd,
         )
+        for k, v in self.options.items():
+            if k not in subs and isinstance(v, str):
+                subs[k] = v
         _pt = _Passthrough(subs)
 
         pre_sha: str | None = None
@@ -77,6 +86,8 @@ class Exec(Stage):
         ]
         stdout_str = ""
         stderr_str = ""
+        needs_fix = False
+        exit_code = 0
         if cmds:
             result = await _proc.run_shell_async(
                 " && ".join(cmds),
@@ -85,23 +96,29 @@ class Exec(Stage):
             )
             stdout_str = result.stdout
             stderr_str = result.stderr
-            if result.returncode != 0:
-                log_path = state.session_dir / f"exec-{self.name}.log"
-                log_path.write_text(stdout_str + stderr_str, encoding="utf-8")
+            exit_code = result.returncode
+            log_path = state.session_dir / f"exec-{self.name}.log"
+            log_path.write_text(stdout_str + stderr_str, encoding="utf-8")
+            if exit_code != 0:
                 if self.options.get("on_fail") == "needs_fix":
-                    return NeedsFix(stdout_str + stderr_str, result.returncode)
-                raise Bail(f"exec {self.name}: exited {result.returncode}")
+                    needs_fix = True
+                else:
+                    raise Bail(f"exec {self.name}: exited {exit_code}")
 
         for raw_key, raw_uri_str in self.out_map.items():
             key = raw_key.format_map(_pt)
             uri_str = raw_uri_str.format_map(_pt)
             if uri_str == "git://range":
+                if needs_fix:
+                    continue
                 if pre_sha is None:
                     raise RuntimeError(
                         f"exec {self.name}: git://range requires pre-snapshot"
                     )
                 state.artifacts.bind_git_commit_range(key, pre_sha)
             elif uri_str == "gh://pr":
+                if needs_fix:
+                    continue
                 resolver = cast(GitHubResolver, state.artifacts.resolver("gh"))
                 try:
                     captured = resolver.capture(stdout_str, stderr_str)
@@ -113,4 +130,6 @@ class Exec(Stage):
                 state.artifacts.bind(key, uri)
                 state.artifacts.resolver(uri.scheme).verify_produced(uri)
 
+        if needs_fix:
+            return NeedsFix(stdout_str + stderr_str, exit_code)
         return Done()

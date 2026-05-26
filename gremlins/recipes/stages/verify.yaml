@@ -1,0 +1,26 @@
+required-options:
+  - cmds
+
+stages:
+  - name: verify
+    type: loop
+    max-iterations: 3
+    body:
+      - name: cmd
+        type: exec
+        out:
+          verify_log: "file://session/exec-{name}.log"
+        options:
+          on_fail: needs_fix
+      - name: verify-diff
+        type: exec
+        out:
+          verify_diff: "file://session/verify-diff.txt"
+        options:
+          cmds:
+            - 'git diff HEAD > "{session_dir}/verify-diff.txt"; [ -s "{session_dir}/verify-diff.txt" ] || printf "(no uncommitted changes)\n" > "{session_dir}/verify-diff.txt"'
+      - name: fix
+        type: agent
+        in:
+          verify_output: verify_log
+          diff_text: verify_diff

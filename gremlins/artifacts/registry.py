@@ -55,8 +55,11 @@ class ArtifactRegistry:
                 self._bindings[k] = Uri.parse(v)
 
     def bind(self, key: str, uri: Uri, *, override: bool = False) -> None:
-        if key in self._bindings and not override:
-            raise DuplicateArtifact(key, self._bindings[key], uri)
+        if key in self._bindings:
+            if self._bindings[key] == uri:
+                return
+            if not override:
+                raise DuplicateArtifact(key, self._bindings[key], uri)
         self._bindings[key] = uri
         path = self.registry_path
         data = {k: str(v) for k, v in self._bindings.items()}

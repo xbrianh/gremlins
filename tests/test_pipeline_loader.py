@@ -120,7 +120,7 @@ def test_missing_prompt_file_raises(tmp_path: pathlib.Path) -> None:
         """\
 name: bad
 stages:
-  - {name: s1, type: verify, prompt: does_not_exist.md}
+  - {name: s1, type: plan, prompt: does_not_exist.md}
 """,
     )
     with pytest.raises(FileNotFoundError):
@@ -138,7 +138,7 @@ def test_bundled_prefix_resolves_to_package(tmp_path: pathlib.Path) -> None:
 name: p
 stages:
   - name: s1
-    type: verify
+    type: plan
     prompt: [gremlins:code_style.md]
 """,
     )
@@ -156,7 +156,7 @@ name: p
 prompt_dir: .
 stages:
   - name: s1
-    type: verify
+    type: plan
     prompt: [code_style.md]
 """,
     )
@@ -174,7 +174,7 @@ name: p
 prompt_dir: .
 stages:
   - name: s1
-    type: verify
+    type: plan
     prompt: [gremlins:code_style.md, {local.name}]
 """,
     )
@@ -191,7 +191,7 @@ def test_bundled_prefix_without_name_raises(tmp_path: pathlib.Path) -> None:
 name: p
 stages:
   - name: s1
-    type: verify
+    type: plan
     prompt: ["gremlins:"]
 """,
     )
@@ -213,7 +213,7 @@ prompts:
   base: base.md
 stages:
   - name: s1
-    type: verify
+    type: plan
     prompt: base
 """,
     )
@@ -233,7 +233,7 @@ prompts:
   combo: [a.md, b.md]
 stages:
   - name: s1
-    type: verify
+    type: plan
     prompt: combo
 """,
     )
@@ -253,7 +253,7 @@ prompts:
   base: base.md
 stages:
   - name: s1
-    type: verify
+    type: plan
     prompt: [base, extra.md]
 """,
     )
@@ -272,7 +272,7 @@ prompts:
   local-base: local.md
 stages:
   - name: s1
-    type: verify
+    type: plan
     prompt: [local-base, gremlins:code_style.md]
 """,
     )
@@ -293,10 +293,10 @@ prompts:
   shared: shared.md
 stages:
   - name: s1
-    type: verify
+    type: plan
     prompt: shared
   - name: s2
-    type: verify
+    type: plan
     prompt: shared
 """,
     )
@@ -314,7 +314,7 @@ prompts:
   style: gremlins:code_style.md
 stages:
   - name: s1
-    type: verify
+    type: plan
     prompt: style
 """,
     )
@@ -336,10 +336,10 @@ stages:
   - name: group
     parallel:
       - name: s1
-        type: verify
+        type: plan
         prompt: shared
       - name: s2
-        type: verify
+        type: plan
         prompt: shared
 """,
     )
@@ -361,7 +361,7 @@ name: p
 prompt_dir: .
 stages:
   - name: s1
-    type: verify
+    type: plan
     prompt: [a.md, b.md]
 """,
     )
@@ -378,16 +378,16 @@ def test_repeated_type_distinct_names(tmp_path: pathlib.Path) -> None:
         """\
 name: p
 stages:
-  - {name: test-pre, type: verify}
-  - {name: test-post, type: verify}
+  - {name: test-pre, type: exec}
+  - {name: test-post, type: exec}
 """,
     )
     pipeline = Pipeline.from_yaml(tmp_path / "pipeline.yaml")
     assert len(pipeline.stages) == 2
     assert pipeline.stages[0].name == "test-pre"
     assert pipeline.stages[1].name == "test-post"
-    assert pipeline.stages[0].type == "verify"
-    assert pipeline.stages[1].type == "verify"
+    assert pipeline.stages[0].type == "exec"
+    assert pipeline.stages[1].type == "exec"
 
 
 # ---- parallel group validation --------------------------------------------
@@ -401,8 +401,8 @@ name: p
 stages:
   - name: reviews
     parallel:
-      - {name: r1, type: verify}
-      - {name: r1, type: verify}
+      - {name: r1, type: exec}
+      - {name: r1, type: exec}
 """,
     )
     with pytest.raises(ValueError, match="duplicate child name"):
@@ -419,7 +419,7 @@ stages:
     parallel:
       - name: inner
         parallel:
-          - {name: leaf, type: verify}
+          - {name: leaf, type: exec}
 """,
     )
     with pytest.raises(ValueError, match="nested parallel"):
@@ -437,8 +437,8 @@ stages:
     body:
       - name: inner
         parallel:
-          - {name: leaf-a, type: verify}
-          - {name: leaf-b, type: verify}
+          - {name: leaf-a, type: exec}
+          - {name: leaf-b, type: exec}
 """,
     )
     pipeline = Pipeline.from_yaml(yaml_path)
@@ -509,7 +509,7 @@ stages:
   - name: reviews
     parallel:
       - name: r1
-        type: verify
+        type: exec
 """,
     )
     pipeline = Pipeline.from_yaml(yaml_path)
@@ -590,8 +590,8 @@ def test_parallel_include_multi_stage_wraps_as_sequence(
         """\
 name: sub
 stages:
-  - {name: request-x, type: verify}
-  - {name: wait-x, type: verify}
+  - {name: request-x, type: exec}
+  - {name: wait-x, type: exec}
 """,
     )
     yaml_path = _write_yaml(
@@ -601,7 +601,7 @@ name: p
 stages:
   - name: reviews
     parallel:
-      - {name: review, type: verify}
+      - {name: review, type: exec}
       - {include: sub}
 """,
     )
@@ -611,7 +611,7 @@ stages:
     assert len(group.body) == 2
     review_child = group.body[0]
     assert review_child.name == "review"
-    assert review_child.type == "verify"
+    assert review_child.type == "exec"
     seq_child = group.body[1]
     assert seq_child.name == "sub"
     assert seq_child.type == "sequence"
@@ -656,7 +656,7 @@ def test_parallel_include_single_stage_no_sequence_wrap(
         """\
 name: single
 stages:
-  - {name: only, type: verify}
+  - {name: only, type: exec}
 """,
     )
     yaml_path = _write_yaml(
@@ -673,7 +673,7 @@ stages:
     group = pipeline.stages[0]
     child = group.body[0]
     assert child.name == "only"
-    assert child.type == "verify"
+    assert child.type == "exec"
 
 
 def test_toplevel_sequence_stage_loads(tmp_path: pathlib.Path) -> None:
@@ -686,8 +686,8 @@ stages:
   - name: my-seq
     type: sequence
     body:
-      - {name: step-a, type: verify}
-      - {name: step-b, type: verify}
+      - {name: step-a, type: exec}
+      - {name: step-b, type: exec}
 """,
     )
     pipeline = Pipeline.from_yaml(yaml_path)

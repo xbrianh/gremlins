@@ -218,7 +218,9 @@ def test_local_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir)
 
 
 def test_local_main_env_file_vars_reach_verify(tmp_path, monkeypatch):
-    """Vars from .gremlins/env are visible to verify subprocesses."""
+    """Vars from .gremlins/env are passed to exec subprocess environments."""
+    import subprocess as _subprocess
+
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     plan_file = tmp_path / "plan.md"
@@ -226,10 +228,9 @@ def test_local_main_env_file_vars_reach_verify(tmp_path, monkeypatch):
 
     dot_gremlins = tmp_path / ".gremlins"
     dot_gremlins.mkdir()
-    env_file = dot_gremlins / "env"
-    env_file.write_text("export GREMLIN_ENV_TEST_SENTINEL=from_env_file\n")
-
-    verify_cmd = 'test "$GREMLIN_ENV_TEST_SENTINEL" = from_env_file'
+    (dot_gremlins / "env").write_text(
+        "export GREMLIN_ENV_TEST_SENTINEL=from_env_file\n"
+    )
 
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
@@ -237,6 +238,16 @@ def test_local_main_env_file_vars_reach_verify(tmp_path, monkeypatch):
         "gremlins.executor.run.resolve_session_dir",
         lambda gremlin_id=None: session_dir,
     )
+
+    captured_envs: list[dict] = []
+
+    async def _capturing_shell(cmd, env=None, **kwargs):
+        if env is not None:
+            captured_envs.append(dict(env))
+        return _subprocess.CompletedProcess(cmd, 0, "(noop)\n", "")
+
+    monkeypatch.setattr("gremlins.stages.exec._proc.run_shell_async", _capturing_shell)
+
     client = _ReviewCreatingClient(
         fixtures={
             "implement": MINIMAL_EVENTS,
@@ -244,16 +255,18 @@ def test_local_main_env_file_vars_reach_verify(tmp_path, monkeypatch):
             "address-code": MINIMAL_EVENTS,
         }
     )
-
     monkeypatch.delenv("GREMLIN_ENV_TEST_SENTINEL", raising=False)
     result = asyncio.run(
         run_pipeline(
             _local_pipeline_path(tmp_path),
-            argv=["--plan", str(plan_file), "--cmd", verify_cmd],
+            argv=["--plan", str(plan_file)],
             client=client,
         )
     )
     assert result == 0
+    assert any(
+        e.get("GREMLIN_ENV_TEST_SENTINEL") == "from_env_file" for e in captured_envs
+    )
 
 
 def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
@@ -358,14 +371,14 @@ def test_local_stage_inputs_instructions_reach_plan(
 
     from gremlins.stages import agent as _agent_mod
     from gremlins.stages import exec as _exec_mod
-    from gremlins.stages import verify as _v_mod
+    from gremlins.stages import loop as _loop_mod
 
     async def _noop(self, state):  # noqa: ARG001
         pass
 
     monkeypatch.setattr(_agent_mod.Agent, "run", _noop)
     monkeypatch.setattr(_exec_mod.Exec, "run", _noop)
-    monkeypatch.setattr(_v_mod.Verify, "run", _noop)
+    monkeypatch.setattr(_loop_mod.LoopStage, "run", _noop)
 
     result = asyncio.run(
         run_pipeline(

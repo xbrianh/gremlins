@@ -87,11 +87,15 @@ class LoopStage(Stage):
         if not isinstance(raw_options, dict):
             raise ValueError(f"stage {name!r}: 'options' must be a mapping")
         options = cast(dict[str, Any], raw_options)
-        max_iterations: int = int(options.get("max_iterations", 3))
+        max_iterations: int = int(
+            d.get("max-iterations") or options.get("max_iterations", 3)
+        )
         pr_stack: bool = bool(options.get("pr_stack", False))
+
         raw_children: object = d.get("body") or []
         if not isinstance(raw_children, list):
             raise ValueError(f"stage {name!r}: 'body' must be a list")
+
         body = parse_stages(cast(list[dict[str, Any]], raw_children), depth=depth)
         on_iter = detach_to_pr_base if pr_stack else None
         stage = cls(

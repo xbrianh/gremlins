@@ -21,4 +21,4 @@ stages:
         - "git diff --cached --quiet || git commit -m 'normalize'"
     out:
       normalize-commits: git://range
-  - { type: verify, prompt: verify }
+  - { type: verify, options: { cmds: ["make check", "make test"] }, prompt: verify }

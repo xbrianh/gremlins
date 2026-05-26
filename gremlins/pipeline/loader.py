@@ -13,12 +13,10 @@ from gremlins.stages.loop import LoopStage
 from gremlins.stages.parallel import ParallelStage
 from gremlins.stages.plan import Plan
 from gremlins.stages.sequence import SequenceStage
-from gremlins.stages.verify import Verify
 
 STAGE_TYPES: dict[str, type[Stage]] = {
     "agent": Agent,
     "plan": Plan,
-    "verify": Verify,
     "github-open-pull-request": GitHubOpenPullRequest,
     "github-wait-copilot": GitHubWaitCopilot,
     "github-wait-ci": GitHubWaitCI,
