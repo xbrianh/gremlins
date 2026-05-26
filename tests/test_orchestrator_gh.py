@@ -14,6 +14,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.run import _parse_args as _parse_gh_args
@@ -400,19 +401,11 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
     )
 
     monkeypatch.setattr(
-        "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -428,6 +421,8 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
         fixtures={
             "implement": IMPL_EVENTS,
             "github-open-pull-request": _pr_events(),
+            "github-review-pull-request": MINIMAL_EVENTS,
+            "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },
     )
 
@@ -455,19 +450,11 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -485,6 +472,8 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
             "github-open-pull-request": _pr_events(),
+            "github-review-pull-request": MINIMAL_EVENTS,
+            "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },
     )
 
@@ -514,19 +503,11 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -543,6 +524,8 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
             "github-open-pull-request": _pr_events(),
+            "github-review-pull-request": MINIMAL_EVENTS,
+            "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },
     )
 
@@ -577,19 +560,11 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -606,6 +581,8 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
             "github-open-pull-request": _pr_events(),
+            "github-review-pull-request": MINIMAL_EVENTS,
+            "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },
     )
 
@@ -639,19 +616,11 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -668,6 +637,8 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
             "github-open-pull-request": _pr_events(),
+            "github-review-pull-request": MINIMAL_EVENTS,
+            "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },
     )
 
@@ -710,19 +681,11 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Resumed Plan\nDo more stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -739,6 +702,8 @@ def test_resume_from_implement(tmp_path, monkeypatch):
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
             "github-open-pull-request": _pr_events(),
+            "github-review-pull-request": MINIMAL_EVENTS,
+            "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },
     )
 
@@ -765,30 +730,13 @@ def test_resume_from_github_review_pull_request(tmp_path, monkeypatch):
 
     data = json.loads(state_file.read_text())
     data["issue_url"] = "https://github.com/owner/repo/issues/5"
-    data.setdefault("artifacts", []).append(
-        {"type": "pr", "url": "https://github.com/owner/repo/pull/200", "branch": ""}
-    )
     state_file.write_text(json.dumps(data))
 
-    gh_review_called = []
-    monkeypatch.setattr(
-        "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        _async(
-            lambda self, pipe: gh_review_called.append(
-                self.pr_url
-                or next(
-                    (
-                        a["url"]
-                        for a in reversed(
-                            json.loads(state_file.read_text()).get("artifacts", [])
-                        )
-                        if a.get("type") == "pr"
-                    ),
-                    "",
-                )
-            )
-        ),
-    )
+    registry_path = tmp_path / "registry.json"
+    reg_data = json.loads(registry_path.read_text())
+    reg_data["pr"] = "gh://pr/200"
+    registry_path.write_text(json.dumps(reg_data))
+
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
         _async(lambda self, pipe: "APPROVED"),
@@ -798,16 +746,17 @@ def test_resume_from_github_review_pull_request(tmp_path, monkeypatch):
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
-        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
 
-    client = FakeClaudeClient(fixtures={})
+    client = FakeClaudeClient(
+        fixtures={
+            "github-review-pull-request": MINIMAL_EVENTS,
+            "github-address-pull-request-reviews": MINIMAL_EVENTS,
+        }
+    )
 
     result = asyncio.run(
         run_pipeline(
@@ -818,9 +767,9 @@ def test_resume_from_github_review_pull_request(tmp_path, monkeypatch):
     )
     assert result == 0
 
-    # No client.run calls (plan/implement/commit/open-pr all skipped)
-    assert client.calls == []
-    assert gh_review_called == ["https://github.com/owner/repo/pull/200"]
+    review_calls = [c for c in client.calls if c.label == "github-review-pull-request"]
+    assert len(review_calls) == 1
+    assert "https://github.com/owner/repo/pull/200" in review_calls[0].prompt
 
 
 def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch):
@@ -886,19 +835,11 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
     monkeypatch.setattr("gremlins.stages.plan.proc.run_async", fake_gh_run_async)
 
     monkeypatch.setattr(
-        "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -954,6 +895,8 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
             },
             {"type": "result", "subtype": "success", "total_cost_usd": 0.02},
         ],
+        "github-review-pull-request": MINIMAL_EVENTS,
+        "github-address-pull-request-reviews": MINIMAL_EVENTS,
     }
 
     client = _CommittingClient(
@@ -1013,23 +956,6 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
     state_file.write_text(json.dumps(data))
 
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
-    gh_review_called = []
-
-    def _gh_review_run(self, pipe):
-        registry_path = tmp_path / "registry.json"
-        pr_url = self.pr_url
-        if not pr_url and registry_path.exists():
-            reg = json.loads(registry_path.read_text())
-            uri_str = reg.get("pr") or ""
-            if uri_str:
-                n = uri_str.removeprefix("gh://pr/")
-                pr_url = f"https://github.com/owner/repo/pull/{n}"
-        gh_review_called.append(pr_url or "")
-
-    monkeypatch.setattr(
-        "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        _async(_gh_review_run),
-    )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
         _async(lambda self, pipe: "APPROVED"),
@@ -1039,15 +965,17 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
-        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
         _async(lambda self, pipe: None),
     )
 
-    client = FakeClaudeClient(fixtures={"github-open-pull-request": _pr_events()})
+    client = FakeClaudeClient(
+        fixtures={
+            "github-open-pull-request": _pr_events(),
+            "github-review-pull-request": MINIMAL_EVENTS,
+            "github-address-pull-request-reviews": MINIMAL_EVENTS,
+        }
+    )
 
     result = asyncio.run(
         run_pipeline(
@@ -1062,7 +990,9 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
     assert "implement" not in labels, "implement must not run on open-pr resume"
     assert "github-open-pull-request" in labels
 
-    assert gh_review_called == ["https://github.com/owner/repo/pull/101"]
+    review_calls = [c for c in client.calls if c.label == "github-review-pull-request"]
+    assert len(review_calls) == 1
+    assert "https://github.com/owner/repo/pull/101" in review_calls[0].prompt
     # Verify GitHubOpenPullRequest wrote pr to registry.json
     registry_path = tmp_path / "registry.json"
     assert registry_path.exists(), "registry.json should have been written"
@@ -1087,15 +1017,7 @@ def test_github_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -1125,6 +1047,8 @@ def test_github_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
             "github-open-pull-request": _pr_events(
                 "https://github.com/owner/repo/pull/77"
             ),
+            "github-review-pull-request": MINIMAL_EVENTS,
+            "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },
     )
 
@@ -1163,19 +1087,11 @@ def test_github_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -1200,6 +1116,8 @@ def test_github_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
             "github-open-pull-request": _pr_events(
                 "https://github.com/owner/repo/pull/77"
             ),
+            "github-review-pull-request": MINIMAL_EVENTS,
+            "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },
     )
 
@@ -1241,20 +1159,12 @@ def test_github_wait_ci_stage_ordering(tmp_path, monkeypatch):
         _async(lambda self, pipe: order.append("verify")),
     )
     monkeypatch.setattr(
-        "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        _async(lambda self, pipe: order.append("github-review-pull-request")),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
         _async(lambda self, pipe: order.append("github-wait-copilot") or "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
         _async(lambda self, pipe: order.append("github-request-copilot-review")),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
-        _async(lambda self, pipe: order.append("github-address-pull-request-reviews")),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
@@ -1267,6 +1177,8 @@ def test_github_wait_ci_stage_ordering(tmp_path, monkeypatch):
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
             "github-open-pull-request": _pr_events(),
+            "github-review-pull-request": MINIMAL_EVENTS,
+            "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },
     )
 
@@ -1276,9 +1188,15 @@ def test_github_wait_ci_stage_ordering(tmp_path, monkeypatch):
     assert result == 0
 
     assert order[0] == "verify", "verify must run before other tracked stages"
-    assert order[-2:] == ["github-address-pull-request-reviews", "ci-gate"]
+    assert order[-1] == "ci-gate"
     assert order.count("verify") == 1
     assert order.count("ci-gate") == 1
+    labels = [c.label for c in client.calls]
+    assert "github-review-pull-request" in labels
+    assert "github-address-pull-request-reviews" in labels
+    review_idx = labels.index("github-review-pull-request")
+    addr_idx = labels.index("github-address-pull-request-reviews")
+    assert review_idx < addr_idx
 
 
 def test_resume_from_ci_gate(tmp_path, monkeypatch):
@@ -1299,10 +1217,6 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
     ci_stages = []
 
     monkeypatch.setattr(
-        "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        _async(lambda self, pipe: earlier_called.append("github-review-pull-request")),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
         _async(
             lambda self, pipe: (
@@ -1314,14 +1228,6 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
         _async(
             lambda self, pipe: earlier_called.append("github-request-copilot-review")
-        ),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
-        _async(
-            lambda self, pipe: earlier_called.append(
-                "github-address-pull-request-reviews"
-            )
         ),
     )
     monkeypatch.setattr(
@@ -1371,19 +1277,11 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
     monkeypatch.setattr(
-        "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -1407,6 +1305,8 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
             "github-open-pull-request": _pr_events(
                 "https://github.com/owner/repo/pull/77"
             ),
+            "github-review-pull-request": MINIMAL_EVENTS,
+            "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },
     )
 
@@ -1448,16 +1348,11 @@ def test_resume_from_verify(tmp_path, monkeypatch):
     data["issue_url"] = "https://github.com/owner/repo/issues/5"
     state_file.write_text(json.dumps(data))
 
-    earlier_called: list[str] = []
     verify_calls = []
 
     monkeypatch.setattr(
         "gremlins.stages.verify.Verify.run",
         _async(lambda self, pipe: verify_calls.append(self)),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        _async(lambda self, pipe: earlier_called.append("github-review-pull-request")),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
@@ -1468,16 +1363,18 @@ def test_resume_from_verify(tmp_path, monkeypatch):
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
-        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
 
-    client = FakeClaudeClient(fixtures={"github-open-pull-request": _pr_events()})
+    client = FakeClaudeClient(
+        fixtures={
+            "github-open-pull-request": _pr_events(),
+            "github-review-pull-request": MINIMAL_EVENTS,
+            "github-address-pull-request-reviews": MINIMAL_EVENTS,
+        }
+    )
 
     result = asyncio.run(
         run_pipeline(
@@ -1505,19 +1402,11 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch):
         subprocess, "run", _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n")
     )
     monkeypatch.setattr(
-        "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -1534,6 +1423,8 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch):
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
             "github-open-pull-request": _pr_events(),
+            "github-review-pull-request": MINIMAL_EVENTS,
+            "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },
     )
 
@@ -1566,19 +1457,11 @@ def test_gh_main_state_client_tracks_effective_model(
         subprocess, "run", _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n")
     )
     monkeypatch.setattr(
-        "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -1595,6 +1478,8 @@ def test_gh_main_state_client_tracks_effective_model(
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
             "github-open-pull-request": _pr_events(),
+            "github-review-pull-request": MINIMAL_EVENTS,
+            "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },
     )
 
@@ -1652,19 +1537,11 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
         subprocess, "run", _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n")
     )
     monkeypatch.setattr(
-        "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -1681,6 +1558,8 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
             "github-open-pull-request": _pr_events(),
+            "github-review-pull-request": MINIMAL_EVENTS,
+            "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },
     )
 
@@ -1715,19 +1594,11 @@ def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
     monkeypatch.setattr(
-        "gremlins.stages.review_code.GitHubReviewPullRequest.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
         "gremlins.stages.github_wait_copilot.GitHubWaitCopilot.run",
         _async(lambda self, pipe: "APPROVED"),
     )
     monkeypatch.setattr(
         "gremlins.stages.github_request_copilot_review.GitHubRequestCopilotReview.run",
-        _async(lambda self, pipe: None),
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -1745,6 +1616,8 @@ def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
             "github-open-pull-request": _pr_events(),
+            "github-review-pull-request": MINIMAL_EVENTS,
+            "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },
     )
 

@@ -1,26 +1,26 @@
-<!-- placeholders: pr_url -->
+<!-- placeholder: {pr} (the PR URL, resolved from the `pr` artifact via `in: {{pr: pr}}`) -->
 # Review a GitHub PR and post inline comments
 
-Review the pull request at `{pr_url}` and post the review directly to GitHub as a PR review with inline line comments.
+Review the pull request at `{pr}` and post the review directly to GitHub as a PR review with inline line comments.
 
 ## Step 1: Gather PR information
 
 Fetch PR metadata:
 
 ```
-gh pr view {pr_url} --json number,title,body,author,baseRefName,headRefName
+gh pr view {pr} --json number,title,body,author,baseRefName,headRefName
 ```
 
 Fetch the diff. Check the size first to pick the right strategy:
 
 ```
-gh pr diff {pr_url} | wc -c
+gh pr diff {pr} | wc -c
 ```
 
 **If the diff is ≤ 80 000 bytes**, read it whole:
 
 ```
-gh pr diff {pr_url}
+gh pr diff {pr}
 ```
 
 **If the diff is > 80 000 bytes**, fetch per-file instead using the GitHub API, which returns each file's patch directly:

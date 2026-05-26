@@ -1,11 +1,11 @@
-<!-- placeholders: pr_url -->
+<!-- placeholder: {pr} (the PR URL, resolved from the `pr` artifact via `in: {{pr: pr}}`) -->
 You are addressing review comments on a GitHub pull request. Your job is to fix the issues raised by reviewers and reply to each comment thread.
 
 ## Pull Request
 
-{pr_url}
+{pr}
 
-Fetch PR metadata: `gh pr view {pr_url} --json number,title,body,author,baseRefName,headRefName`. Store the PR number for use in API calls below.
+Fetch PR metadata: `gh pr view {pr} --json number,title,body,author,baseRefName,headRefName`. Store the PR number for use in API calls below.
 
 ## Review comments
 

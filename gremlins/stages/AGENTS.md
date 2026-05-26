@@ -19,8 +19,7 @@ sequencing logic of their own.
 - `parallel.py` — `ParallelStage(Stage)`. Constructed by the orchestrator with pre-built child runners; call `build_runtime_stages()` to get the three `(name, fn)` pairs (`<group>-fanout`, `<group>`, `<group>-fanin`) that implement fan-out/fan-in execution.
 - `handoff.py` — `Handoff(Stage)` plus the full handoff agent implementation (`run`, `build_prompt`, `collect_git_context`, `sanitize_rolling_plan`, etc.). `Handoff` runs the agent once per boss-loop iteration: returns `Done()` on "chain-done" (loop exits via HEAD-stable), returns `NeedsFix(...)` on "next-plan" (writes child plan to `plan.md`, loop continues), raises `RuntimeError` on "bail". Preserves the original boss spec in `boss-spec.md` and restores it to `plan.md` on "chain-done" so post-loop stages see the original spec. Stage type `"handoff"`.
 - `plan.py` — `Plan(Stage)`. Wrapper over `Agent` for the local branch: renders the prompt with `plan_file` / `instructions`, builds `Agent(out_map={"plan": "file://session/plan.md"})`, and delegates. `verify_produced` enforces that the agent wrote a non-empty `plan.md`. The GH branch (`state.repo` set) keeps a direct `run_agent` call for now; it migrates when `gh://issue/...` artifacts and `extract_gh_url` are replaced in the state-data cutover chunk.
-- `review_code.py` — `ReviewCode(Stage)` (type `"review-code"`): local pipeline only (single-detail-reviewer post-collapse). `GitHubReviewPullRequest(Stage)` (type `"github-review-pull-request"`): posts a PR review to GitHub.
-- `github_address_pull_request_reviews.py` — `GitHubAddressPullRequestReviews(Stage)` (type `"github-address-pull-request-reviews"`): addresses PR review comments on GitHub.
+- `review_code.py` — `ReviewCode(Stage)` (type `"review-code"`): local pipeline only (single-detail-reviewer post-collapse).
 - `github_request_copilot_review.py` — `GitHubRequestCopilotReview(Stage)`. Requests Copilot review by adding `copilot-pull-request-reviewer` to the PR's reviewer list.
 - `verify.py` — `Verify(Stage)` + `VerifyFix(Stage)`. `Verify.run` builds `body=[Cmd, VerifyFix]` and delegates to `LoopStage`. `Cmd` runs the configured commands with per-attempt log naming (`verify-attempt-{n}.log`). `VerifyFix` reads the highest-numbered attempt log from `session_dir` and invokes the fix agent; agent streams to `stream-verify-{n}.jsonl`.
 - `github_wait_ci.py` — `GitHubWaitCI(Stage)`. Gh pipeline (`ci-gate`). Polls PR CI checks via `utils.github`; re-invokes agent to fix failures; bails on `REVIEW_REQUIRED` or attempt exhaustion.
@@ -53,5 +52,4 @@ Any new `gremlins/stages/introspect.py` (planned for #258) must import only `ins
   exec stage in the `implement` stage-definition (gh.yaml). It runs two shell
   checks: HEAD must be a fast-forward from `base_sha`, and at least one commit
   must exist since `base_sha`. Either failure raises `Bail`. This is the
-  firewall that keeps no-op runs out of `github-review-pull-request`. Don't
-  soften it.
+  firewall that keeps no-op runs out of the review stage. Don't soften it.

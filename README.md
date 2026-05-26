@@ -289,9 +289,7 @@ For `local` stages, model options (`plan_model`, `impl_model`, `address_model`,
 | `github-open-pull-request` | Opens a pull request on GitHub |
 | `github-push-to-pr-branch` | Pushes local commits to the PR branch recorded in state |
 | `github-request-copilot-review` | Requests a Copilot review on the open PR |
-| `github-review-pull-request` | Runs the `/ghreview` skill against the open PR |
 | `github-wait-copilot` | Polls until Copilot posts its review |
-| `github-address-pull-request-reviews` | Runs the `/ghaddress` skill to address PR review comments |
 | `github-wait-ci` | Polls PR CI checks until they pass or exhaust attempts |
 
 ### Parallel groups
