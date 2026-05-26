@@ -12,7 +12,6 @@ from gremlins.stages.github_request_copilot_review import GitHubRequestCopilotRe
 from gremlins.stages.github_wait_ci import GitHubWaitCI
 from gremlins.stages.github_wait_copilot import GitHubWaitCopilot
 from gremlins.stages.handoff import Handoff
-from gremlins.stages.implement import Implement
 from gremlins.stages.loop import LoopStage
 from gremlins.stages.parallel import ParallelStage
 from gremlins.stages.plan import Plan
@@ -23,7 +22,6 @@ from gremlins.stages.verify import Verify
 STAGE_TYPES: dict[str, type[Stage]] = {
     "agent": Agent,
     "plan": Plan,
-    "implement": Implement,
     "verify": Verify,
     "github-open-pull-request": GitHubOpenPullRequest,
     "github-push-to-pr-branch": GitHubPushToPrBranch,
