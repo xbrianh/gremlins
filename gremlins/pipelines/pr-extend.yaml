@@ -12,12 +12,14 @@ prompts:
 stage-definitions:
   implement:
     stages:
-      - type: agent
+      - name: implement
+        type: agent
         in: { spec: spec, plan: plan }
         options:
           idle_timeout: 600
           capture_events: true
-      - type: exec
+      - name: require-impl-progress
+        type: exec
         in: { base_sha: base_sha }
         options:
           cmds:
