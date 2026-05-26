@@ -1,277 +1,167 @@
-"""Tests for gremlins.stages.implement."""
+"""Tests for the YAML-based implement stage-definition.
+
+Covers:
+- Pipeline shape: type: implement expands to implement (agent) + require-impl-progress (exec)
+- The exec validator passes when commits exist since base_sha and HEAD is a fast-forward
+- The exec validator raises Bail when no commits since base_sha (empty impl)
+- The exec validator raises Bail when HEAD diverges from base_sha
+- Resume regression: running the validator with prior commits passes
+"""
 
 from __future__ import annotations
 
 import asyncio
 import pathlib
-from unittest.mock import patch
+import subprocess
+from typing import Any
 
 import pytest
-from conftest import MINIMAL_EVENTS
 
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData, build_state
-from gremlins.stages.implement import Implement
-from gremlins.utils.git import (
-    DivergentHead,
-    EmptyImpl,
-    HeadAdvanced,
-    PreImplState,
-)
-
-_TEMPLATE_LOCAL = "plan: {plan_text}{spec_block}"
-_TEMPLATE_GH = "{spec_block}{plan_source_label}{plan_text}{plan_location_note}"
+from gremlins.pipeline import Pipeline
+from gremlins.pipeline.discovery import resolve_pipeline_path
+from gremlins.stages.exec import Exec
+from gremlins.stages.outcome import Bail
 
 
-@pytest.fixture(autouse=True)
-def _mock_rev_parse(monkeypatch):
-    monkeypatch.setattr(
-        "gremlins.stages.implement.proc.run_or_raise",
-        lambda cmd, **kwargs: cmd[-1],
-    )
-    monkeypatch.setattr(
-        "gremlins.stages.implement.snapshot_head_before",
-        lambda **kwargs: "pre-sha",
-    )
-    monkeypatch.setattr(
-        "gremlins.artifacts.registry.git_utils.head_sha",
-        lambda *args, **kwargs: "post-sha",
-    )
-
-
-def _make_state(
-    tmp_path: pathlib.Path,
-    *,
-    plan_text: str = "do the thing",
-    spec_text: str = "",
-    prompts: list[str] | None = None,
-    issue_num: str = "",
-    base_ref_sha: str = "abc123",
-) -> tuple[Implement, RuntimeState]:
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    stage = Implement("implement", prompts or [], {})
-    client = FakeClaudeClient(fixtures={"implement": MINIMAL_EVENTS})
-    registry = ArtifactRegistry(session_dir, cwd=tmp_path)
-    if issue_num:
-        registry.bind("issue", Uri.parse(f"gh://issue/{issue_num}"))
-    registry.bind("base_sha", Uri.parse(f"git://commit/{base_ref_sha}"))
-    state = build_state(
+def _make_state(project: pathlib.Path, base_sha: str):
+    session_dir = project / "session"
+    session_dir.mkdir(exist_ok=True)
+    registry = ArtifactRegistry(session_dir, cwd=project)
+    registry.bind("base_sha", Uri.parse(f"git://commit/{base_sha}"))
+    return build_state(
         data=StateData(),
-        client=client,
+        client=FakeClaudeClient(),
         session_dir=session_dir,
         artifacts=registry,
-    )
-    (session_dir / "plan.md").write_text(plan_text, encoding="utf-8")
-    if spec_text:
-        (session_dir / "spec.md").write_text(spec_text, encoding="utf-8")
-    return stage, state
-
-
-def test_local_git_succeeds_on_head_advanced(
-    tmp_path: pathlib.Path, monkeypatch
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    stage, state = _make_state(tmp_path, prompts=[_TEMPLATE_LOCAL])
-    with patch(
-        "gremlins.stages.implement.classify_impl_outcome",
-        return_value=HeadAdvanced(commit_count=2),
-    ):
-        asyncio.run(stage.run(state))
-    assert len(state.client.calls) == 1
-
-
-def test_local_git_raises_on_empty_impl(tmp_path: pathlib.Path, monkeypatch) -> None:
-    monkeypatch.chdir(tmp_path)
-    stage, state = _make_state(tmp_path, prompts=[_TEMPLATE_LOCAL])
-    with (
-        patch(
-            "gremlins.stages.implement.classify_impl_outcome",
-            return_value=EmptyImpl(),
-        ),
-        pytest.raises(RuntimeError, match="no committed work"),
-    ):
-        asyncio.run(stage.run(state))
-
-
-def test_gh_calls_claude_with_plan_text(tmp_path: pathlib.Path) -> None:
-    stage, state = _make_state(
-        tmp_path, plan_text="issue body here", prompts=[_TEMPLATE_GH]
-    )
-    with patch(
-        "gremlins.stages.implement.classify_impl_outcome",
-        return_value=HeadAdvanced(commit_count=1),
-    ):
-        asyncio.run(stage.run(state))
-    assert len(state.client.calls) == 1
-    call = state.client.calls[0]
-    assert call.label == "implement"
-    assert "issue body here" in call.prompt
-
-
-def test_gh_plan_source_label_with_issue_num(tmp_path: pathlib.Path) -> None:
-    stage, state = _make_state(
-        tmp_path, plan_text="body", prompts=[_TEMPLATE_GH], issue_num="99"
-    )
-    with patch(
-        "gremlins.stages.implement.classify_impl_outcome",
-        return_value=HeadAdvanced(commit_count=1),
-    ):
-        asyncio.run(stage.run(state))
-    prompt = state.client.calls[0].prompt
-    assert "from the GitHub issue" in prompt
-
-
-def test_gh_plan_source_label_without_issue_num(tmp_path: pathlib.Path) -> None:
-    stage, state = _make_state(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH])
-    with patch(
-        "gremlins.stages.implement.classify_impl_outcome",
-        return_value=HeadAdvanced(commit_count=1),
-    ):
-        asyncio.run(stage.run(state))
-    prompt = state.client.calls[0].prompt
-    assert "below" in prompt
-
-
-def test_local_git_raises_on_divergent_head(
-    tmp_path: pathlib.Path, monkeypatch
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    stage, state = _make_state(tmp_path, prompts=[_TEMPLATE_LOCAL])
-    with (
-        patch(
-            "gremlins.stages.implement.classify_impl_outcome",
-            return_value=DivergentHead(pre_head="abc123", post_head="def456"),
-        ),
-        pytest.raises(RuntimeError, match="diverged"),
-    ):
-        asyncio.run(stage.run(state))
-
-
-def test_raises_on_empty_impl(tmp_path: pathlib.Path) -> None:
-    stage, state = _make_state(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH])
-    with (
-        patch(
-            "gremlins.stages.implement.classify_impl_outcome",
-            return_value=EmptyImpl(),
-        ),
-        pytest.raises(RuntimeError, match="no committed work"),
-    ):
-        asyncio.run(stage.run(state))
-
-
-def test_raises_on_divergent_head(tmp_path: pathlib.Path) -> None:
-    stage, state = _make_state(tmp_path, plan_text="body", prompts=[_TEMPLATE_GH])
-    with (
-        patch(
-            "gremlins.stages.implement.classify_impl_outcome",
-            return_value=DivergentHead(pre_head="abc123", post_head="def456"),
-        ),
-        pytest.raises(RuntimeError, match="diverged"),
-    ):
-        asyncio.run(stage.run(state))
-
-
-def test_base_ref_sha_used_as_baseline(tmp_path: pathlib.Path) -> None:
-    """base_ref_sha is the pre-impl baseline; resume works without pre_impl_head."""
-    stage, state = _make_state(
-        tmp_path, plan_text="body", prompts=[_TEMPLATE_GH], base_ref_sha="deadbeef"
-    )
-    captured: list[PreImplState] = []
-
-    def _capture(pre: PreImplState, **kwargs: object) -> HeadAdvanced:
-        captured.append(pre)
-        return HeadAdvanced(commit_count=3)
-
-    with patch("gremlins.stages.implement.classify_impl_outcome", _capture):
-        asyncio.run(stage.run(state))
-
-    assert len(captured) == 1
-    assert captured[0].head == "deadbeef"
-
-
-def test_run_does_not_access_pipeline_data(tmp_path: pathlib.Path) -> None:
-    stage, state = _make_state(tmp_path, prompts=[_TEMPLATE_LOCAL])
-
-    def _raise(self: object) -> None:
-        raise AssertionError("pipeline_data accessed")
-
-    with (
-        patch.object(type(state), "pipeline_data", property(_raise)),
-        patch(
-            "gremlins.stages.implement.classify_impl_outcome",
-            return_value=HeadAdvanced(commit_count=1),
-        ),
-    ):
-        asyncio.run(stage.run(state))
-
-
-def test_binds_commit_range_on_head_advanced(tmp_path: pathlib.Path) -> None:
-    stage, state = _make_state(tmp_path, prompts=[_TEMPLATE_GH])
-    with patch(
-        "gremlins.stages.implement.classify_impl_outcome",
-        return_value=HeadAdvanced(commit_count=3),
-    ):
-        asyncio.run(stage.run(state))
-    assert (
-        str(state.artifacts.resolve("impl-commits")) == "git://range/pre-sha..post-sha"
+        worktree=project,
     )
 
 
-def test_no_commit_range_bound_on_empty_impl_without_prior(
-    tmp_path: pathlib.Path,
-) -> None:
-    stage, state = _make_state(tmp_path, prompts=[_TEMPLATE_GH])
-    with (
-        patch(
-            "gremlins.stages.implement.classify_impl_outcome",
-            return_value=EmptyImpl(),
-        ),
-        pytest.raises(RuntimeError, match="no committed work"),
-    ):
-        asyncio.run(stage.run(state))
-    assert not state.artifacts.produced("impl-commits")
+def _base_sha(project: pathlib.Path) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=project,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
 
 
-def test_binds_commit_range_with_worktree(tmp_path: pathlib.Path) -> None:
-    stage, state = _make_state(tmp_path, prompts=[_TEMPLATE_GH])
-    state.worktree = tmp_path
-    with patch(
-        "gremlins.stages.implement.classify_impl_outcome",
-        return_value=HeadAdvanced(commit_count=1),
-    ):
-        asyncio.run(stage.run(state))
-    assert (
-        str(state.artifacts.resolve("impl-commits")) == "git://range/pre-sha..post-sha"
+def _make_commit(project: pathlib.Path, filename: str, content: str, message: str):
+    (project / filename).write_text(content)
+    subprocess.run(
+        ["git", "add", filename], cwd=project, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", message], cwd=project, check=True, capture_output=True
     )
 
 
-def test_empty_impl_with_prior_commit_range_does_not_raise(
-    tmp_path: pathlib.Path,
-) -> None:
-    from gremlins.artifacts.uri import Uri
+def _require_impl_progress_exec() -> Exec:
+    cmds = [
+        'git merge-base --is-ancestor "$base_sha" HEAD || { echo "implement diverged from $base_sha; expected fast-forward" >&2; exit 1; }',
+        'test "$(git rev-list --count "$base_sha"..HEAD)" -gt 0 || { echo "implement produced no commits since $base_sha" >&2; exit 1; }',
+    ]
+    return Exec(
+        "require-impl-progress",
+        {"cmds": cmds},
+        in_map={"base_sha": "base_sha"},
+    )
 
-    stage, state = _make_state(tmp_path, prompts=[_TEMPLATE_GH])
-    state.artifacts.bind("impl-commits", Uri.parse("git://range/aaa..bbb"))
-    with patch(
-        "gremlins.stages.implement.classify_impl_outcome",
-        return_value=EmptyImpl(),
-    ):
+
+# ---------------------------------------------------------------------------
+# Pipeline shape
+# ---------------------------------------------------------------------------
+
+
+def test_gh_pipeline_implement_expands_to_two_stages(tmp_path: pathlib.Path) -> None:
+    """type: implement in gh.yaml expands to implement (agent) + require-impl-progress (exec)."""
+    pipeline = Pipeline.from_yaml(resolve_pipeline_path("gh", tmp_path))
+    names = [s.name for s in pipeline.stages]
+    impl_idx = names.index("implement")
+    assert names[impl_idx] == "implement"
+    assert names[impl_idx + 1] == "require-impl-progress"
+
+
+# ---------------------------------------------------------------------------
+# Exec validator happy path
+# ---------------------------------------------------------------------------
+
+
+def test_validator_passes_when_commits_exist(sandbox: Any) -> None:
+    """Validator passes when HEAD is a fast-forward with commits since base_sha."""
+    base_sha = _base_sha(sandbox.project)
+    _make_commit(sandbox.project, "impl.txt", "impl\n", "feat: implement something")
+
+    state = _make_state(sandbox.project, base_sha)
+    stage = _require_impl_progress_exec()
+    result = asyncio.run(stage.run(state))
+    from gremlins.stages.outcome import Done
+
+    assert isinstance(result, Done)
+
+
+# ---------------------------------------------------------------------------
+# Exec validator: empty impl
+# ---------------------------------------------------------------------------
+
+
+def test_validator_raises_bail_when_no_commits(sandbox: Any) -> None:
+    """Validator raises Bail when no commits since base_sha."""
+    base_sha = _base_sha(sandbox.project)
+    # No new commits — HEAD == base_sha.
+    state = _make_state(sandbox.project, base_sha)
+    stage = _require_impl_progress_exec()
+    with pytest.raises(Bail, match="exec require-impl-progress: exited 1"):
         asyncio.run(stage.run(state))
 
 
-def test_implement_forwards_options_via_agent(tmp_path: pathlib.Path) -> None:
-    """capture_events is forwarded to run_agent via Agent."""
-    stage, state = _make_state(tmp_path, prompts=[_TEMPLATE_LOCAL])
-    with patch(
-        "gremlins.stages.implement.classify_impl_outcome",
-        return_value=HeadAdvanced(commit_count=1),
-    ):
+# ---------------------------------------------------------------------------
+# Exec validator: divergent HEAD
+# ---------------------------------------------------------------------------
+
+
+def test_validator_raises_bail_when_head_diverges(sandbox: Any) -> None:
+    """Validator raises Bail when HEAD is not a descendant of base_sha."""
+    base_sha = _base_sha(sandbox.project)
+
+    # Create an orphan branch — its history diverges from base_sha.
+    subprocess.run(
+        ["git", "checkout", "--orphan", "orphan"],
+        cwd=sandbox.project,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "rm", "-rf", "."], cwd=sandbox.project, check=True, capture_output=True
+    )
+    _make_commit(sandbox.project, "orphan.txt", "orphan\n", "orphan commit")
+
+    state = _make_state(sandbox.project, base_sha)
+    stage = _require_impl_progress_exec()
+    with pytest.raises(Bail, match="exec require-impl-progress: exited 1"):
         asyncio.run(stage.run(state))
-    assert len(state.client.calls) == 1
-    call = state.client.calls[0]
-    assert call.label == "implement"
-    assert call.capture_events is True
+
+
+# ---------------------------------------------------------------------------
+# Resume regression: validator with prior commits passes
+# ---------------------------------------------------------------------------
+
+
+def test_validator_passes_on_resume_with_prior_commits(sandbox: Any) -> None:
+    """Resume at require-impl-progress with existing impl commits passes."""
+    base_sha = _base_sha(sandbox.project)
+    # Simulate implement having already run: one commit above base.
+    _make_commit(sandbox.project, "impl.txt", "impl\n", "feat: implement something")
+
+    # State uses the original base_sha (before the impl commit).
+    state = _make_state(sandbox.project, base_sha)
+    stage = _require_impl_progress_exec()
+    result = asyncio.run(stage.run(state))
+    from gremlins.stages.outcome import Done
+
+    assert isinstance(result, Done)

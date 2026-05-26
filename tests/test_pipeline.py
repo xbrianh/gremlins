@@ -48,11 +48,10 @@ def test_pipeline_constructs_from_local_yaml(tmp_path: pathlib.Path) -> None:
 
     assert len(gremlin.stages) > 0
     assert all(isinstance(s, Stage) for s in gremlin.stages)
-    stage_types = [s.type for s in gremlin.stages]
-    assert "plan" in stage_types
-    assert "implement" in stage_types
+    stage_names = [s.name for s in gremlin.stages]
+    assert "plan" in stage_names
+    assert "implement" in stage_names
     assert "plan" in STAGE_TYPES
-    assert "implement" in STAGE_TYPES
     assert "review-code" in STAGE_TYPES
     assert "address-code" in STAGE_TYPES
     assert "verify" in STAGE_TYPES
@@ -74,11 +73,10 @@ def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
 
     assert len(gremlin.stages) > 0
     assert all(isinstance(s, Stage) for s in gremlin.stages)
-    stage_types = [s.type for s in gremlin.stages]
-    assert "plan" in stage_types
-    assert "implement" in stage_types
+    stage_names = [s.name for s in gremlin.stages]
+    assert "plan" in stage_names
+    assert "implement" in stage_names
     assert "plan" in STAGE_TYPES
-    assert "implement" in STAGE_TYPES
     assert "github-open-pull-request" in STAGE_TYPES
     assert "github-request-copilot-review" in STAGE_TYPES
     assert "github-review-pull-request" in STAGE_TYPES
@@ -327,7 +325,6 @@ def test_needs_gh_false_for_local_stage_in_loop_body() -> None:
 def test_stage_builders_registry_covers_all_known_types() -> None:
     expected = {
         "plan",
-        "implement",
         "verify",
         "github-open-pull-request",
         "github-request-copilot-review",

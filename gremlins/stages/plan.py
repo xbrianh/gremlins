@@ -75,11 +75,13 @@ class Plan(Stage):
         plan_md = state.session_dir / "plan.md"
 
         if plan_md.exists() and plan_md.stat().st_size > 0:
-            if state.artifacts.produced("issue"):
-                _n = state.artifacts.resolve("issue").path.removeprefix("issue/")
-                label = f" (issue #{_n})"
+            label = ""
+            if state.artifacts.produced("plan"):
+                _uri = state.artifacts.resolve("plan")
+                if _uri.path.startswith("issue/"):
+                    label = f" (issue #{_uri.path.removeprefix('issue/')})"
             else:
-                label = ""
+                state.artifacts.bind("plan", Uri.parse("file://session/plan.md"))
             logger.info("[1/8] plan resumed from snapshot: %s%s", plan_md, label)
             return Done()
 
@@ -127,7 +129,7 @@ class Plan(Stage):
             logger.info("issue: %s", issue_url)
             if issue_num:
                 state.artifacts.bind(
-                    "issue", Uri.parse(f"gh://issue/{issue_num}"), override=True
+                    "plan", Uri.parse(f"gh://issue/{issue_num}"), override=True
                 )
             issue_body = _fetch_issue_body(issue_num, state.repo)
             plan_md.write_text(issue_body, encoding="utf-8")
@@ -163,7 +165,7 @@ class Plan(Stage):
         issue_num = issue_url.split("/")[-1]
         shutil.copyfile(src, plan_md)
         state.artifacts.bind(
-            "issue", Uri.parse(f"gh://issue/{issue_num}"), override=True
+            "plan", Uri.parse(f"gh://issue/{issue_num}"), override=True
         )
         self._update_description(plan_md, issue_title=issue_title, state=state)
 
@@ -206,10 +208,12 @@ class Plan(Stage):
         )
         if issue_num:
             state.artifacts.bind(
-                "issue", Uri.parse(f"gh://issue/{issue_num}"), override=True
+                "plan", Uri.parse(f"gh://issue/{issue_num}"), override=True
             )
         else:
-            state.artifacts.unbind("issue")
+            state.artifacts.bind(
+                "plan", Uri.parse("file://session/plan.md"), override=True
+            )
         self._update_description(plan_md, issue_title=issue_title, state=state)
 
     def _update_description(

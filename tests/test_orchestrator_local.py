@@ -173,6 +173,7 @@ def test_local_pipeline_stage_names(tmp_path):
     assert names == [
         "plan",
         "implement",
+        "require-impl-progress",
         "review-code",
         "address-code",
         "normalize",
@@ -358,14 +359,16 @@ def test_local_stage_inputs_instructions_reach_plan(
     monkeypatch.setattr(_plan_mod.Plan, "run", _capturing_plan_run)
 
     from gremlins.stages import address_code as _ac_mod
-    from gremlins.stages import implement as _impl_mod
+    from gremlins.stages import agent as _agent_mod
+    from gremlins.stages import exec as _exec_mod
     from gremlins.stages import review_code as _rc_mod
     from gremlins.stages import verify as _v_mod
 
     async def _noop(self, state):  # noqa: ARG001
         pass
 
-    monkeypatch.setattr(_impl_mod.Implement, "run", _noop)
+    monkeypatch.setattr(_agent_mod.Agent, "run", _noop)
+    monkeypatch.setattr(_exec_mod.Exec, "run", _noop)
     monkeypatch.setattr(_rc_mod.ReviewCode, "run", _noop)
     monkeypatch.setattr(_ac_mod.AddressCode, "run", _noop)
     monkeypatch.setattr(_v_mod.Verify, "run", _noop)

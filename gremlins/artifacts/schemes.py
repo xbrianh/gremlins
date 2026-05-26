@@ -47,7 +47,10 @@ class FileSessionResolver:
         return p
 
     def read(self, uri: Uri) -> bytes:
-        return self._path(uri).read_bytes()
+        try:
+            return self._path(uri).read_bytes()
+        except FileNotFoundError:
+            return b""
 
     def verify_produced(self, uri: Uri) -> None:
         p = self._path(uri)
@@ -77,17 +80,7 @@ class GitResolver:
             name = path.removeprefix("ref/")
             return proc.run_or_raise(["git", "rev-parse", name], cwd=self._cwd)
         if path.startswith("commit/"):
-            sha = path.removeprefix("commit/")
-            out = proc.run_or_raise(
-                ["git", "log", "-1", "--format=%H%n%an%n%ae%n%s", sha], cwd=self._cwd
-            )
-            lines = out.splitlines()
-            return {
-                "sha": lines[0],
-                "author": lines[1],
-                "email": lines[2],
-                "subject": lines[3],
-            }
+            return path.removeprefix("commit/")
         raise ValueError(f"unrecognised git URI path: {uri}")
 
     def verify_produced(self, uri: Uri) -> None:
@@ -128,13 +121,13 @@ class GitHubResolver:
             n = path.removeprefix("issue/")
             repo = gh_utils.current_repo()
             data = gh_utils.view_issue(n, repo)
-            return IssueInfo(url=data["url"], number=data["number"])
+            return data.get("body") or ""
         raise ValueError(f"unrecognised gh URI path: {uri}")
 
     def verify_produced(self, uri: Uri) -> None:
         self.read(uri)
 
-    def capture(self, stdout: str, _stderr: str) -> Uri:
+    def capture(self, stdout: str, _: str) -> Uri:
         """Parse a gh://pr/<n> URI from `gh pr create` stdout."""
         m = _PR_URL_RE.search(stdout)
         if not m:

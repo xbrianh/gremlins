@@ -283,69 +283,6 @@ def commits_since(
     return result
 
 
-@dataclasses.dataclass
-class PreImplState:
-    """Git state captured before the implement stage runs."""
-
-    head: str
-
-
-@dataclasses.dataclass
-class EmptyImpl:
-    """HEAD unchanged and worktree clean — no implementation work produced."""
-
-
-@dataclasses.dataclass
-class HeadAdvanced:
-    """HEAD advanced fast-forward from pre-impl state."""
-
-    commit_count: int
-
-
-@dataclasses.dataclass
-class DivergentHead:
-    """HEAD changed but is not a fast-forward of the pre-impl HEAD."""
-
-    pre_head: str
-    post_head: str
-
-
-ImplOutcome = EmptyImpl | HeadAdvanced | DivergentHead
-
-
-def record_pre_impl_state(cwd: str | None = None) -> PreImplState:
-    """Capture HEAD commit before running the implement stage."""
-    head_r = proc.run(["git", "rev-parse", "HEAD"], cwd=cwd)
-    head = head_r.stdout.strip() if head_r.returncode == 0 else ""
-    if not head:
-        raise RuntimeError("could not resolve HEAD before implement stage")
-    return PreImplState(head=head)
-
-
-def classify_impl_outcome(pre: PreImplState, cwd: str | None = None) -> ImplOutcome:
-    """Classify post-implement git state into one of three outcome types."""
-    head_r = proc.run(["git", "rev-parse", "HEAD"], cwd=cwd)
-    post_head = head_r.stdout.strip() if head_r.returncode == 0 else ""
-
-    if post_head and post_head != pre.head:
-        if proc.run_ok(
-            ["git", "merge-base", "--is-ancestor", pre.head, post_head], cwd=cwd
-        ):
-            count_r = proc.run(
-                ["git", "rev-list", "--count", f"{pre.head}..HEAD"], cwd=cwd
-            )
-            count = int(count_r.stdout.strip() or "0") if count_r.returncode == 0 else 0
-            return HeadAdvanced(commit_count=count)
-        return DivergentHead(pre_head=pre.head, post_head=post_head)
-
-    if has_dirty_worktree(cwd=cwd):
-        raise RuntimeError(
-            "implement left uncommitted changes but made no commits — "
-            "stage all changes and commit before proceeding"
-        )
-    return EmptyImpl()
-
-
 def checkout_detach(ref: str, *, cwd: str | os.PathLike[str] | None = None) -> None:
     """Detach HEAD to <ref>. Raises GitError on failure."""
     _run_git(["checkout", "--detach", ref], cwd=cwd)

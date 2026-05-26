@@ -54,7 +54,8 @@ stages:
   - name: plan
     type: plan
   - name: implement
-    type: implement
+    type: agent
+    prompt: []
 """,
         encoding="utf-8",
     )

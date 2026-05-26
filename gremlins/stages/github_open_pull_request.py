@@ -57,8 +57,9 @@ class GitHubOpenPullRequest(Stage):
         )
         base_ref = prev_branch or self.base_ref or _default_base
         issue_num = (
-            state.artifacts.resolve("issue").path.removeprefix("issue/")
-            if state.artifacts.produced("issue")
+            state.artifacts.resolve("plan").path.removeprefix("issue/")
+            if state.artifacts.produced("plan")
+            and state.artifacts.resolve("plan").scheme == "gh"
             else ""
         )
 

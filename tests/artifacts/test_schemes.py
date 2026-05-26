@@ -139,10 +139,10 @@ def test_snapshot_and_bind_range(tmp_path: pathlib.Path) -> None:
     ).stdout.strip()
 
     registry = ArtifactRegistry(session_dir=tmp_path, cwd=tmp_path)
-    registry.bind_git_commit_range("impl-commits", base)
+    registry.bind_git_commit_range("test-range", base)
 
-    assert registry.produced("impl-commits")
-    uri = registry.resolve("impl-commits")
+    assert registry.produced("test-range")
+    uri = registry.resolve("test-range")
     assert uri.scheme == "git"
     assert base in uri.path
     assert new_head in uri.path

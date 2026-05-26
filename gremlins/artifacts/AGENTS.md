@@ -55,7 +55,7 @@ from gremlins.artifacts.schemes import snapshot_head_before, bind_range_after
 
 base = snapshot_head_before(cwd=state.cwd)
 # ... run stage ...
-bind_range_after(registry, "impl-commits", base, cwd=state.cwd)
+bind_range_after(registry, "normalize-commits", base, cwd=state.cwd)
 ```
 
 ## gh://pr capture

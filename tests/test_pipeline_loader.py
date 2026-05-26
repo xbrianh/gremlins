@@ -57,10 +57,10 @@ def test_per_stage_client_override(tmp_path: pathlib.Path) -> None:
 name: p
 default_client: claude:sonnet
 stages:
-  - name: implement
-    type: implement
-  - name: review
-    type: implement
+  - name: step-a
+    type: plan
+  - name: step-b
+    type: plan
     client: copilot:gpt-5.4
 """,
     )
@@ -460,7 +460,7 @@ name: p
 default_client: claude:sonnet
 stages:
   - name: s1
-    type: implement
+    type: plan
 """,
     )
     pipeline = Pipeline.from_yaml(yaml_path)
@@ -475,7 +475,7 @@ name: p
 default_client: claude:sonnet
 stages:
   - name: s1
-    type: implement
+    type: plan
     client: copilot:gpt-5.4
 """,
     )
@@ -490,7 +490,7 @@ def test_client_spec_falls_back_to_package_default(tmp_path: pathlib.Path) -> No
 name: p
 stages:
   - name: s1
-    type: implement
+    type: plan
 """,
     )
     pipeline = Pipeline.from_yaml(yaml_path)
@@ -533,10 +533,10 @@ stages:
 """,
     )
     pipeline = Pipeline.from_yaml(yaml_path)
-    stage_types = [s.type for s in pipeline.stages]
-    assert "plan" in stage_types
-    assert "implement" in stage_types
-    assert "verify" in stage_types
+    stage_names = [s.name for s in pipeline.stages]
+    assert "plan" in stage_names
+    assert "implement" in stage_names
+    assert "verify" in stage_names
 
 
 def test_include_unknown_pipeline_raises(tmp_path: pathlib.Path) -> None:
@@ -571,9 +571,9 @@ stages:
     loop = pipeline.stages[0]
     assert loop.type == "loop"
     assert loop.body[0].type == "handoff"
-    body_types = [b.type for b in loop.body]
-    assert "plan" in body_types
-    assert "implement" in body_types
+    body_names = [b.name for b in loop.body]
+    assert "plan" in body_names
+    assert "implement" in body_names
 
 
 # ---- sequence stage type --------------------------------------------------
@@ -707,6 +707,6 @@ def test_boss_yaml_loads() -> None:
     assert names == ["chain", "review-chain", "address-chain"]
     chain_entry = pipeline.stages[0]
     assert chain_entry.type == "loop"
-    body_types = [b.type for b in chain_entry.body]
-    assert body_types[0] == "handoff"
-    assert "implement" in body_types
+    body_names = [b.name for b in chain_entry.body]
+    assert chain_entry.body[0].type == "handoff"
+    assert "implement" in body_names

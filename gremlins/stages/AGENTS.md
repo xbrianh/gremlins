@@ -19,7 +19,6 @@ sequencing logic of their own.
 - `parallel.py` — `ParallelStage(Stage)`. Constructed by the orchestrator with pre-built child runners; call `build_runtime_stages()` to get the three `(name, fn)` pairs (`<group>-fanout`, `<group>`, `<group>-fanin`) that implement fan-out/fan-in execution.
 - `handoff.py` — `Handoff(Stage)` plus the full handoff agent implementation (`run`, `build_prompt`, `collect_git_context`, `sanitize_rolling_plan`, etc.). `Handoff` runs the agent once per boss-loop iteration: returns `Done()` on "chain-done" (loop exits via HEAD-stable), returns `NeedsFix(...)` on "next-plan" (writes child plan to `plan.md`, loop continues), raises `RuntimeError` on "bail". Preserves the original boss spec in `boss-spec.md` and restores it to `plan.md` on "chain-done" so post-loop stages see the original spec. Stage type `"handoff"`.
 - `plan.py` — `Plan(Stage)`. Wrapper over `Agent` for the local branch: renders the prompt with `plan_file` / `instructions`, builds `Agent(out_map={"plan": "file://session/plan.md"})`, and delegates. `verify_produced` enforces that the agent wrote a non-empty `plan.md`. The GH branch (`state.repo` set) keeps a direct `run_agent` call for now; it migrates when `gh://issue/...` artifacts and `extract_gh_url` are replaced in the state-data cutover chunk.
-- `implement.py` — `Implement(Stage)`. Wrapper over `Agent`: renders the prompt, builds `Agent(options={idle_timeout, capture_events})`, and delegates. Pre-impl snapshot and `classify_impl_outcome` stay around the delegated call. `idle_timeout` and `capture_events` are forwarded to `run_agent` via `Agent`'s `**opts` pass-through.
 - `review_code.py` — `ReviewCode(Stage)` (type `"review-code"`): local pipeline only (single-detail-reviewer post-collapse). `GitHubReviewPullRequest(Stage)` (type `"github-review-pull-request"`): posts a PR review to GitHub.
 - `address_code.py` — `AddressCode(Stage)` (type `"address-code"`): local pipeline only. `GitHubAddressPullRequestReviews(Stage)` (type `"github-address-pull-request-reviews"`): addresses PR review comments on GitHub.
 - `github_request_copilot_review.py` — `GitHubRequestCopilotReview(Stage)`. Requests Copilot review by adding `copilot-pull-request-reviewer` to the PR's reviewer list.
@@ -38,9 +37,7 @@ sequencing logic of their own.
   from `gremlins.utils.yaml_io`. Bundled prompt files live under `gremlins/prompts/`. See
   `gremlins/prompts/README.md` for the runtime placeholder inventory.
 - Stages that should respect a bail marker call `run_agent` from `agent_runner`, which parses the agent's final transcript message for a `BAIL: <class>: <detail>` sentinel line and raises `Bail` if found.
-- Most stages return `None`. Stages that produce information the
-  orchestrator needs (`implement.py` → `ImplStageResult`) return it; the orchestrator threads
-  it into later stages.
+- Most stages return `None`.
 - The `label=` argument passed to `client.run(...)` is the stream-event
   prefix and the `FakeClaudeClient` fixture key. Stages that re-enter the
   same logical step within one process (e.g. resumed implement) must use
@@ -52,7 +49,9 @@ Any new `gremlins/stages/introspect.py` (planned for #258) must import only `ins
 
 ## Load-bearing invariants
 
-- `implement.py` enforces the empty-implementation invariant: an empty
-  impl in the gh pipeline raises `EmptyImpl` and the runner bails. This
-  is the firewall that keeps no-op runs out of `github-review-pull-request`.
-  Don't soften it.
+- The empty-implementation invariant is enforced by the `require-impl-progress`
+  exec stage in the `implement` stage-definition (gh.yaml). It runs two shell
+  checks: HEAD must be a fast-forward from `base_sha`, and at least one commit
+  must exist since `base_sha`. Either failure raises `Bail`. This is the
+  firewall that keeps no-op runs out of `github-review-pull-request`. Don't
+  soften it.

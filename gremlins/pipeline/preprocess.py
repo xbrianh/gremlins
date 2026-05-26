@@ -177,6 +177,53 @@ def _expand_stage_def(
     if def_name in seen_defs:
         raise ValueError(f"stage-definition cycle: {def_name!r}")
     definition = stage_defs[def_name]
+    new_seen = seen_defs | {def_name}
+
+    inner_list = definition.get("stages")
+    if inner_list is not None:
+        if not isinstance(inner_list, list) or not inner_list:
+            raise ValueError(
+                f"stage-definition {def_name!r}: 'stages' must be a non-empty list"
+            )
+        if "out" in definition:
+            raise ValueError(
+                f"stage-definition {def_name!r} must not declare 'out:' keys; "
+                "declare them at each call site instead"
+            )
+        inner_list = cast(list[dict[str, Any]], inner_list)
+        last_idx = len(inner_list) - 1
+        result: list[dict[str, Any]] = []
+        for i, raw_inner in enumerate(inner_list):
+            if "out" in raw_inner:
+                raise ValueError(
+                    f"stage-definition {def_name!r}: inner stage {i} must not declare 'out:'; "
+                    "declare it at the call site instead"
+                )
+            inner = dict(raw_inner)
+            if i == 0:
+                for key in ("name", "prompt", "client"):
+                    if key in call_site:
+                        inner[key] = call_site[key]
+                if "in" in call_site:
+                    merged_in = dict(cast(dict[str, Any], inner.get("in") or {}))
+                    merged_in.update(cast(dict[str, Any], call_site["in"]))
+                    inner["in"] = merged_in
+            if i == last_idx and "out" in call_site:
+                inner["out"] = call_site["out"]
+            result.extend(
+                _expand_entry(
+                    inner,
+                    prompt_dir,
+                    project_root,
+                    chain,
+                    named_prompts,
+                    stage_defs,
+                    new_seen,
+                )
+            )
+        return result
+
+    # Single-primitive definition (existing behavior)
     if "out" in definition:
         raise ValueError(
             f"stage-definition {def_name!r} must not declare 'out:' keys; "
@@ -187,13 +234,7 @@ def _expand_stage_def(
         if key in call_site:
             merged[key] = call_site[key]
     return _expand_entry(
-        merged,
-        prompt_dir,
-        project_root,
-        chain,
-        named_prompts,
-        stage_defs,
-        seen_defs | {def_name},
+        merged, prompt_dir, project_root, chain, named_prompts, stage_defs, new_seen
     )
 
 

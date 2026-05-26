@@ -224,7 +224,7 @@ name: custom
 default_client: copilot:gpt-5.4
 stages:
   - name: implement
-    type: implement
+    type: plan
 """,
         encoding="utf-8",
     )
@@ -1243,7 +1243,7 @@ def test_launch_plan_issue_ref_writes_issue_url_and_num(lenv, monkeypatch):
     registry_data = json.loads(
         (_gremlins_state_root(lenv) / gremlin_id / "registry.json").read_text()
     )
-    assert registry_data.get("issue") == "gh://issue/378"
+    assert registry_data.get("plan") == "gh://issue/378"
 
 
 # ---------------------------------------------------------------------------

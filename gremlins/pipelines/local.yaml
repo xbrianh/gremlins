@@ -6,6 +6,31 @@ prompts:
   code-style: gremlins:code_style.md
   verify: [gremlins:verify_fix.md, gremlins:bail_section_fix.md]
 
+stage-definitions:
+  implement:
+    stages:
+      - name: implement
+        type: agent
+        in: { spec: spec, plan: plan }
+        options:
+          idle_timeout: 600
+          capture_events: true
+      - name: require-impl-progress
+        type: exec
+        in: { base_sha: base_sha }
+        options:
+          cmds:
+            - |
+              git merge-base --is-ancestor "$base_sha" HEAD || {
+                echo "implement diverged from $base_sha; expected fast-forward" >&2
+                exit 1
+              }
+            - |
+              test "$(git rev-list --count "$base_sha"..HEAD)" -gt 0 || {
+                echo "implement produced no commits since $base_sha" >&2
+                exit 1
+              }
+
 stages:
   - { type: plan,         prompt: [code-style, gremlins:plan.md] }
   - { type: implement,    prompt: [code-style, gremlins:implement_local.md] }

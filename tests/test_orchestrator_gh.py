@@ -20,14 +20,33 @@ from gremlins.executor.run import _parse_args as _parse_gh_args
 from gremlins.executor.run import run_pipeline
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
-from gremlins.utils.git import (
-    DivergentHead,
-    EmptyImpl,
-    HeadAdvanced,
-    classify_impl_outcome,
-    record_pre_impl_state,
-)
 from gremlins.utils.github import parse_issue_ref as _parse_issue_ref
+
+
+def _init_git_repo(path: pathlib.Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
+    (path / "README.md").write_text("init\n")
+    subprocess.run(
+        ["git", "add", "README.md"], cwd=path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "init"], cwd=path, check=True, capture_output=True
+    )
 
 
 def _async(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -153,11 +172,19 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         initial.update(state_data)
     state_file.write_text(json.dumps(initial))
     # base_ref_sha is now stored in registry.json, not state.json
+    # spec and plan are always bound at launch; bind them here so the implement
+    # agent stage can resolve both even when the plan stage is skipped.
+    registry_data: dict = {
+        "spec": "file://session/spec.md",
+        "plan": "file://session/plan.md",
+    }
     if base_ref_sha:
-        registry_file = tmp_path / "registry.json"
-        registry_file.write_text(
-            json.dumps({"base_sha": f"git://commit/{base_ref_sha}"})
-        )
+        registry_data["base_sha"] = f"git://commit/{base_ref_sha}"
+    registry_file = tmp_path / "registry.json"
+    registry_file.write_text(json.dumps(registry_data))
+    # Create placeholder artifact files so file resolvers find them.
+    (session_dir / "spec.md").write_text("", encoding="utf-8")
+    (session_dir / "plan.md").write_text("", encoding="utf-8")
     monkeypatch.setattr(
         "gremlins.executor.run.resolve_state_file", lambda gremlin_id=None: state_file
     )
@@ -243,85 +270,6 @@ def _make_gh_subprocess(
 
 
 # ---------------------------------------------------------------------------
-# classify_impl_outcome — all four branches (pure git, real temp repo)
-# ---------------------------------------------------------------------------
-
-
-def _init_git_repo(path: pathlib.Path) -> None:
-    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "config", "user.email", "test@test.com"],
-        cwd=path,
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Test"],
-        cwd=path,
-        check=True,
-        capture_output=True,
-    )
-    (path / "README.md").write_text("init\n")
-    subprocess.run(
-        ["git", "add", "README.md"], cwd=path, check=True, capture_output=True
-    )
-    subprocess.run(
-        ["git", "commit", "-m", "init"], cwd=path, check=True, capture_output=True
-    )
-
-
-def test_classify_empty_impl(tmp_path):
-    _init_git_repo(tmp_path)
-    pre = record_pre_impl_state(cwd=str(tmp_path))
-    outcome = classify_impl_outcome(pre, cwd=str(tmp_path))
-    assert isinstance(outcome, EmptyImpl)
-
-
-def test_classify_head_advanced(tmp_path):
-    _init_git_repo(tmp_path)
-    pre = record_pre_impl_state(cwd=str(tmp_path))
-    (tmp_path / "feat.txt").write_text("feature\n")
-    subprocess.run(
-        ["git", "add", "feat.txt"], cwd=tmp_path, check=True, capture_output=True
-    )
-    subprocess.run(
-        ["git", "commit", "-m", "feat"], cwd=tmp_path, check=True, capture_output=True
-    )
-    outcome = classify_impl_outcome(pre, cwd=str(tmp_path))
-    assert isinstance(outcome, HeadAdvanced)
-    assert outcome.commit_count == 1
-
-
-def test_classify_divergent_head(tmp_path):
-    _init_git_repo(tmp_path)
-    pre = record_pre_impl_state(cwd=str(tmp_path))
-
-    # Create an orphan branch (diverges from the init commit)
-    subprocess.run(
-        ["git", "checkout", "--orphan", "orphan"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "rm", "-rf", "."], cwd=tmp_path, check=True, capture_output=True
-    )
-    (tmp_path / "orphan.txt").write_text("orphan\n")
-    subprocess.run(
-        ["git", "add", "orphan.txt"], cwd=tmp_path, check=True, capture_output=True
-    )
-    subprocess.run(
-        ["git", "commit", "-m", "orphan commit"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-    )
-
-    outcome = classify_impl_outcome(pre, cwd=str(tmp_path))
-    assert isinstance(outcome, DivergentHead)
-
-
-# ---------------------------------------------------------------------------
 # _parse_gh_args — arg parsing unit tests
 # ---------------------------------------------------------------------------
 
@@ -395,6 +343,7 @@ def test_gh_pipeline_stage_names(tmp_path):
     assert names == [
         "plan",
         "implement",
+        "require-impl-progress",
         "normalize",
         "verify",
         "open-pr",
@@ -908,6 +857,16 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
             return subprocess.CompletedProcess(
                 cmd, 0, stdout="https://github.com/owner/repo/issues/42\n", stderr=""
             )
+        if sub == "issue" and "view" in cmd and "--json" in cmd:
+            data = json.dumps(
+                {
+                    "number": 42,
+                    "url": "https://github.com/owner/repo/issues/42",
+                    "body": "# Feature\nDo the thing.\n",
+                    "title": "Feature: Do the thing",
+                }
+            )
+            return subprocess.CompletedProcess(cmd, 0, stdout=data, stderr="")
         if sub == "pr" and "view" in cmd and "--json" in cmd:
             num = cmd[3] if len(cmd) > 3 else "101"
             data = json.dumps(

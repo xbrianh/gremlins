@@ -38,7 +38,7 @@ def _make_state(
     if issue_url:
         m = _re.search(r"/issues/(\d+)", issue_url)
         if m:
-            registry.bind("issue", Uri.parse(f"gh://issue/{m.group(1)}"))
+            registry.bind("plan", Uri.parse(f"gh://issue/{m.group(1)}"))
     state = build_state(
         data=StateData(gremlin_id=gremlin_id),
         client=client,
@@ -156,7 +156,7 @@ def _make_state_with_gr(
     if issue_url:
         m = _re.search(r"/issues/(\d+)", issue_url)
         if m:
-            registry.bind("issue", Uri.parse(f"gh://issue/{m.group(1)}"))
+            registry.bind("plan", Uri.parse(f"gh://issue/{m.group(1)}"))
     state = build_state(
         data=StateData(gremlin_id=gremlin_id),
         client=client,
