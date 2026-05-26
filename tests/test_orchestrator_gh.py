@@ -190,8 +190,9 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         "gremlins.executor.run.resolve_state_file", lambda gremlin_id=None: state_file
     )
 
-    from gremlins.utils import proc as _proc_mod
     import subprocess as _subprocess_mod
+
+    from gremlins.utils import proc as _proc_mod
 
     _orig_shell = _proc_mod.run_shell_async
 
