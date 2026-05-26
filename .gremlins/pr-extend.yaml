@@ -36,12 +36,12 @@ stages:
       cmds:
         - 'git push origin "HEAD:refs/heads/$(gh pr view "$PR_NUM" --json headRefName --jq .headRefName)"'
 
-  - { type: gremlins:github-request-copilot-review }
+  - { type: gremlins:github-request-copilot-review,  in: {pr: pr} }
 
   - parallel:
-      - { type: github-wait-copilot }
+      - { type: github-wait-copilot,                  in: {pr: pr} }
       - { name: github-review-pull-request,          type: agent, in: {pr: pr}, prompt: [code-style, terse, gremlins:github_review_pull_request.md] }
       - { name: github-review-pull-request-complexity, type: agent, client: claude:sonnet, in: {pr: pr}, prompt: [code-style, terse, complexity_review.md] }
 
   - { name: github-address-pull-request-reviews, type: agent, in: {pr: pr}, prompt: [code-style, terse, gremlins:github_address_pull_request_reviews.md, gremlins:bail_section.md] }
-  - { type: github-wait-ci, prompt: [terse, gremlins:ci_fix.md, gremlins:bail_section_fix.md] }
+  - { type: github-wait-ci, in: {pr: pr}, prompt: [terse, gremlins:ci_fix.md, gremlins:bail_section_fix.md] }
