@@ -22,7 +22,7 @@ review / address pipelines, the fleet manager
 - `pipeline/` — `Pipeline` dataclass + `Pipeline.from_yaml(path)` classmethod; `resolve_pipeline_path`; supports parallel stage groups. `pipeline/loader.py` holds `STAGE_TYPES`, the explicit dispatch table mapping type-name strings to Stage classes. `pipeline/preprocess.py` handles YAML expansion: resolves `include:`, `prompt:`, and `type: <name>` macros before the pipeline reaches the loader.
 - `pipelines/` — bundled YAML pipeline files (`local.yaml`, `gh.yaml`); lookup target for `resolve_pipeline_path`.
 - `stages/base.py` — `Stage` Protocol + `StageContext` dataclass: shared `client`, `session_dir`, `gremlin_id` threaded into every stage.
-- `stages/` — per-stage bodies: `plan`, `implement`, `review_code`, `address_code`, `verify`, `test`, `github_request_copilot_review`, `github_wait_copilot`, `github_wait_ci`, `handoff`.
+- `stages/` — per-stage bodies: `plan`, `review_code`, `address_code`, `verify`, `test`, `github_request_copilot_review`, `github_wait_copilot`, `github_wait_ci`, `handoff`.
 - `executor/state.py` — `State` class: execution context + `state.json` I/O.
 - `executor/run.py` — `run_main`. Drives the local pipeline.
 - `executor/pipeline.py` — `StageRunner`. Sequences stages for a pipeline run.
@@ -76,7 +76,7 @@ stages:
 2. Inline `stage-definitions:` in the current file
 3. Discoverable pipeline files (`resolve_pipeline_name`) — expands the same way as `include:`
 
-**Call-site-owns-IO rule**: definitions must not declare `out:` keys. Each call site declares its own `out:` (and `in:`, `name:`), exactly as if writing a bare primitive stage. The preprocessor merges `name`, `in`, and `out` from the call site onto the definition's stage dict.
+**Call-site-owns-IO rule**: definitions must not declare `out:` keys. Each call site declares its own `out:` (and `in:`, `name:`), exactly as if writing a bare primitive stage. The preprocessor merges `name`, `in`, and `out` from the call site onto the definition's stage dict. For multi-primitive definitions (those with a `stages:` list, e.g. `implement`), the call-site `in:` is applied to the first inner stage and `out:` to the last inner stage.
 
 **No parameters yet**: definitions contribute only fixed fields (`type`, `options`, `prompt`, etc.). There is no mechanism to pass options into a definition from the call site; add that only when a real use case demands it.
 
