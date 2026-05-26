@@ -1,0 +1,8 @@
+stages:
+  - name: review-code
+    type: agent
+    in: { plan: plan }
+    out: { "{name}": "file://session/{name}-{model}.md" }
+    options: {}
+    prompt:
+      - gremlins:review/recipe.md

@@ -1,5 +1,4 @@
 import asyncio
-import json
 import pathlib
 import subprocess
 
@@ -13,7 +12,7 @@ from gremlins.executor.state import StateData, build_state
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.stages import plan
-from gremlins.stages.review_code import ReviewCode
+from gremlins.stages.agent import Agent
 
 _BUNDLED_PROMPTS = (
     pathlib.Path(__file__).resolve().parent.parent / "gremlins" / "prompts"
@@ -125,22 +124,17 @@ def test_plan_stage_succeeds_when_file_exists(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _make_review_code_stage(
-    client: ReviewCreatingClient,
-    session_dir,
-    *,
-    model: str = "sonnet",
-    gremlin_id=None,
-) -> ReviewCode:
-    stage = ReviewCode(
+def _make_review_code_stage(client: ReviewCreatingClient) -> Agent:
+    return Agent(
         "review-code",
         [
             (_BUNDLED_PROMPTS / "code_style.md").read_text(encoding="utf-8"),
             (_BUNDLED_PROMPTS / "review" / "detail.md").read_text(encoding="utf-8"),
+            "`{session_dir}/{name}-{model}.md` is the canonical and required location.",
         ],
         {},
+        out_map={"review-code": "file://session/{name}-{model}.md"},
     )
-    return stage
 
 
 # ---------------------------------------------------------------------------
@@ -170,12 +164,12 @@ def test_plan_stage_includes_style_from_prompts(tmp_path):
 def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
     """When state.worktree is set (parallel child), client.run gets cwd=worktree
     so claude -p reads/writes the isolated worktree, not the parent process cwd."""
-    client = ReviewCreatingClient(fixtures={"review-code-fake": MINIMAL_EVENTS})
+    client = ReviewCreatingClient(fixtures={"review-code": MINIMAL_EVENTS})
     worktree = tmp_path / "wt"
     worktree.mkdir()
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    stage = _make_review_code_stage(client, session_dir)
+    stage = _make_review_code_stage(client)
     state = build_state(
         data=StateData(),
         client=client,
@@ -188,30 +182,19 @@ def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
 
 
 def test_review_code_stage_includes_style_from_prompts(tmp_path):
-    client = ReviewCreatingClient(fixtures={"review-code-fake": MINIMAL_EVENTS})
-    stage = ReviewCode(
+    client = ReviewCreatingClient(fixtures={"review-code": MINIMAL_EVENTS})
+    stage = Agent(
         "review-code",
         [
             "Be good.",
             (_BUNDLED_PROMPTS / "review" / "detail.md").read_text(encoding="utf-8"),
+            "`{session_dir}/{name}-{model}.md` is the canonical and required location.",
         ],
         {},
+        out_map={"review-code": "file://session/{name}-{model}.md"},
     )
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     state = _make_state(client, session_dir)
     asyncio.run(stage.run(state))
     assert "Be good." in client.calls[0].prompt
-
-
-def test_review_code_stage_writes_stage_to_state(tmp_path, make_state_dir):
-    gremlin_id = "test-gr-id"
-    state_dir = make_state_dir(gremlin_id)
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    client = ReviewCreatingClient(fixtures={"review-code-fake": MINIMAL_EVENTS})
-    stage = _make_review_code_stage(client, session_dir, gremlin_id=gremlin_id)
-    state = _make_state(client, session_dir, gremlin_id=gremlin_id)
-    asyncio.run(stage.run(state))
-    data = json.loads((state_dir / "state.json").read_text())
-    assert data.get("stage") == "review-code"

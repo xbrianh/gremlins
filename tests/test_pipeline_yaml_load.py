@@ -437,9 +437,11 @@ def test_type_resolves_to_pipeline_file(tmp_path: pathlib.Path) -> None:
         """,
     )
     expanded = expand_pipeline(p, project_root=tmp_path)
-    assert len(expanded["stages"]) == 2
+    assert len(expanded["stages"]) == 3
     assert expanded["stages"][0]["type"] == "plan"
-    assert expanded["stages"][1]["type"] == "implement"
+    assert expanded["stages"][1]["type"] == "agent"
+    assert expanded["stages"][1]["name"] == "implement"
+    assert expanded["stages"][2]["name"] == "require-impl-progress"
 
 
 def test_type_self_referencing_pipeline_does_not_recurse(

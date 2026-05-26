@@ -119,6 +119,20 @@ def _expand_entry(
                 named_prompts,
                 seen_defs,
             )
+        # Auto-resolve bundled stage-definitions by type name (hyphens → underscores).
+        recipe_path = BUNDLED_STAGE_DEF_DIR / f"{stage_type.replace('-', '_')}.yaml"
+        if recipe_path.exists():
+            auto_defs = {**stage_defs, stage_type: load_yaml_file(recipe_path)}
+            return _expand_stage_def(
+                entry,
+                stage_type,
+                auto_defs,
+                prompt_dir,
+                project_root,
+                chain,
+                named_prompts,
+                seen_defs,
+            )
         try:
             included_path = resolve_pipeline_name(stage_type, project_root)
         except FileNotFoundError:
@@ -212,21 +226,30 @@ def _expand_stage_def(
         last_idx = len(inner_list) - 1
         result: list[dict[str, Any]] = []
         for i, raw_inner in enumerate(inner_list):
-            if "out" in raw_inner:
-                raise ValueError(
-                    f"stage-definition {def_name!r}: inner stage {i} must not declare 'out:'; "
-                    "declare it at the call site instead"
-                )
             inner = dict(raw_inner)
             if i == 0:
-                for key in ("name", "prompt", "client"):
+                for key in ("name", "client"):
                     if key in call_site:
                         inner[key] = call_site[key]
+                if "prompt" in call_site:
+                    recipe_prompts: Any = inner.get("prompt") or []
+                    cs_prompts = call_site["prompt"]
+                    if not isinstance(recipe_prompts, list):
+                        recipe_prompts = [recipe_prompts] if recipe_prompts else []
+                    if not isinstance(cs_prompts, list):
+                        cs_prompts = [cs_prompts]
+                    # Call-site prompts first so recipe's closing instructions remain last.
+                    inner["prompt"] = cs_prompts + recipe_prompts
                 if "in" in call_site:
                     merged_in = dict(cast(dict[str, Any], inner.get("in") or {}))
                     merged_in.update(cast(dict[str, Any], call_site["in"]))
                     inner["in"] = merged_in
             if i == last_idx and "out" in call_site:
+                if "out" in inner:
+                    raise ValueError(
+                        f"stage-definition {def_name!r}: inner stage {i} declares 'out:'; "
+                        "call-site must not also declare 'out:'"
+                    )
                 inner["out"] = call_site["out"]
             result.extend(
                 _expand_entry(
@@ -296,6 +319,10 @@ def _read_prompts(
                     f"prompt {p!r} is missing a name after {GREMLINS_PREFIX!r}"
                 )
             texts.append(_read_prompt_file((BUNDLED_PROMPT_DIR / name).resolve()))
+        elif "\n" in p:
+            # Inline text. YAML block scalars always include a trailing \n,
+            # so this heuristic is reliable for recipe-sourced content.
+            texts.append(p)
         else:
             path = (prompt_dir / p).resolve()
             if not path.exists() and named_prompts:
