@@ -13,11 +13,13 @@ from __future__ import annotations
 import asyncio
 import pathlib
 import subprocess
+from typing import Any
 
 import pytest
 
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
+from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import StateData, build_state
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
@@ -32,7 +34,7 @@ def _make_state(project: pathlib.Path, base_sha: str):
     registry.bind("base_sha", Uri.parse(f"git://commit/{base_sha}"))
     return build_state(
         data=StateData(),
-        client=None,
+        client=FakeClaudeClient(),
         session_dir=session_dir,
         artifacts=registry,
         worktree=project,
@@ -74,7 +76,7 @@ def _require_impl_progress_exec() -> Exec:
 # ---------------------------------------------------------------------------
 
 
-def test_gh_pipeline_implement_expands_to_two_stages(tmp_path):
+def test_gh_pipeline_implement_expands_to_two_stages(tmp_path: pathlib.Path) -> None:
     """type: implement in gh.yaml expands to implement (agent) + require-impl-progress (exec)."""
     pipeline = Pipeline.from_yaml(resolve_pipeline_path("gh", tmp_path))
     names = [s.name for s in pipeline.stages]
@@ -88,7 +90,7 @@ def test_gh_pipeline_implement_expands_to_two_stages(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_validator_passes_when_commits_exist(sandbox):
+def test_validator_passes_when_commits_exist(sandbox: Any) -> None:
     """Validator passes when HEAD is a fast-forward with commits since base_sha."""
     base_sha = _base_sha(sandbox.project)
     _make_commit(sandbox.project, "impl.txt", "impl\n", "feat: implement something")
@@ -105,7 +107,7 @@ def test_validator_passes_when_commits_exist(sandbox):
 # ---------------------------------------------------------------------------
 
 
-def test_validator_raises_bail_when_no_commits(sandbox):
+def test_validator_raises_bail_when_no_commits(sandbox: Any) -> None:
     """Validator raises Bail when no commits since base_sha."""
     base_sha = _base_sha(sandbox.project)
     # No new commits — HEAD == base_sha.
@@ -120,7 +122,7 @@ def test_validator_raises_bail_when_no_commits(sandbox):
 # ---------------------------------------------------------------------------
 
 
-def test_validator_raises_bail_when_head_diverges(sandbox):
+def test_validator_raises_bail_when_head_diverges(sandbox: Any) -> None:
     """Validator raises Bail when HEAD is not a descendant of base_sha."""
     base_sha = _base_sha(sandbox.project)
 
@@ -147,7 +149,7 @@ def test_validator_raises_bail_when_head_diverges(sandbox):
 # ---------------------------------------------------------------------------
 
 
-def test_validator_passes_on_resume_with_prior_commits(sandbox):
+def test_validator_passes_on_resume_with_prior_commits(sandbox: Any) -> None:
     """Resume at require-impl-progress with existing impl commits passes."""
     base_sha = _base_sha(sandbox.project)
     # Simulate implement having already run: one commit above base.
