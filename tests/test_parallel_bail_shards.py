@@ -698,13 +698,16 @@ def test_pipeline_cancel_on_bail_and_bail_policy_parsed(tmp_path):
 
     yaml_content = """\
 name: p
+prompts:
+  fix: |
+    Fix it.
 stages:
   - name: reviews
     cancel_on_bail: true
     bail_policy: all
     parallel:
-      - {name: r1, type: verify, options: {cmds: ['true']}}
-      - {name: r2, type: verify, options: {cmds: ['true']}}
+      - {name: r1, type: verify, options: {cmds: ['true']}, prompt: fix}
+      - {name: r2, type: verify, options: {cmds: ['true']}, prompt: fix}
 """
     p = tmp_path / "pipeline.yaml"
     p.write_text(yaml_content)
@@ -719,11 +722,14 @@ def test_pipeline_bail_policy_invalid_raises(tmp_path):
 
     yaml_content = """\
 name: p
+prompts:
+  fix: |
+    Fix it.
 stages:
   - name: reviews
     bail_policy: bogus
     parallel:
-      - {name: r1, type: verify, options: {cmds: ['true']}}
+      - {name: r1, type: verify, options: {cmds: ['true']}, prompt: fix}
 """
     p = tmp_path / "pipeline.yaml"
     p.write_text(yaml_content)

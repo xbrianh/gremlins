@@ -276,6 +276,27 @@ def handle_plan_title(prompt: str) -> int:
     return 0
 
 
+def handle_fix(prompt: str) -> int:
+    # Create a minimal passing test so make test succeeds on the next verify iteration.
+    tests_dir = pathlib.Path("tests")
+    tests_dir.mkdir(exist_ok=True)
+    placeholder = tests_dir / "test_placeholder.py"
+    if not placeholder.exists():
+        placeholder.write_text("def test_placeholder():\n    pass\n", encoding="utf-8")
+    in_git = (
+        subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            capture_output=True,
+            check=False,
+        ).returncode
+        == 0
+    )
+    if in_git:
+        git_commit_changes("Fix failing checks")
+    emit_minimal_stream()
+    return 0
+
+
 def handle_rescue_diagnosis(prompt: str) -> int:
     """Rescue diagnosis-step prompt: write the marker file with status from env.
 
@@ -331,6 +352,8 @@ def classify_stage(prompt: str) -> str:
         return "implement-local"
     if "Implement the plan above by making the code changes" in prompt:
         return "implement-gh"
+    if "The verify step failed." in prompt:
+        return "fix"
     return "unknown"
 
 
@@ -386,6 +409,7 @@ def main(argv):
         "github-review-pull-request": lambda p: (emit_minimal_stream(), 0)[1],
         "github-address-pull-request-reviews": lambda p: (emit_minimal_stream(), 0)[1],
         "rescue-diagnosis": handle_rescue_diagnosis,
+        "fix": handle_fix,
     }
     h = handlers.get(stage)
     if h is None:

@@ -1,7 +1,11 @@
+required-prompt: true
+
 stages:
   - name: implement
     type: agent
     in: { spec: spec, plan: plan }
+    prompt:
+      - "{{prompt}}"
     options:
       idle_timeout: 600
       capture_events: true
