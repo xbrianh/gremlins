@@ -98,8 +98,6 @@ class Gremlin:
         instructions: str = "",
         spec: str | None = None,
         plan: str | None = None,
-        cmds: list[str] | None = None,
-        test_max_attempts: int = 3,
         repo: str = "",
         state_file: pathlib.Path | None = None,
         test_client: Client | None = None,
@@ -132,8 +130,6 @@ class Gremlin:
         self.instructions = instructions
         self.spec = spec
         self.plan = plan
-        self.cmds = cmds
-        self.test_max_attempts = test_max_attempts
         self.repo = repo
         self.state_file = state_file
         self.test_client = test_client
@@ -156,8 +152,6 @@ class Gremlin:
     ) -> list[tuple[str, Callable[[], Awaitable[Any]]]]:
         args = argparse.Namespace(
             plan=self.plan,
-            cmds=self.cmds,
-            test_max_attempts=self.test_max_attempts,
             resume_from=self.resume_from,
             spec=self.spec,
             instructions=[self.instructions] if self.instructions else [],
@@ -226,8 +220,6 @@ class Gremlin:
         resume_from: str | None = None,
         plan: str | None = None,
         spec: str | None = None,
-        cmds: list[str] | None = None,
-        test_max_attempts: int = 3,
         test_client: Client | None = None,
         project_root: str = "",
         base_ref_sha: str = "",
@@ -257,8 +249,6 @@ class Gremlin:
             instructions=instructions,
             spec=spec,
             plan=plan,
-            cmds=cmds,
-            test_max_attempts=test_max_attempts,
             test_client=test_client,
             project_root=project_root,
             base_ref_sha=base_ref_sha,
