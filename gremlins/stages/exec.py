@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import re
 from typing import Any, cast
 
 from gremlins.artifacts.resolve import resolve_in_map
@@ -14,6 +15,8 @@ from gremlins.stages._passthrough import Passthrough as _Passthrough
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, NeedsFix, Outcome
 from gremlins.utils import proc as _proc
+
+_CMD_SUB = re.compile(r"\{(\w+)\}")
 
 
 class Exec(Stage):
@@ -54,22 +57,21 @@ class Exec(Stage):
         except ValueError as exc:
             raise Bail(f"exec {self.name}: {exc}") from exc
 
-        _pt = _Passthrough(
-            dict(
-                name=self.name,
-                model=state.stage_model or state.client.model,
-                session_dir=str(state.session_dir),
-                repo=state.engine_ctx.repo,
-                cwd=state.engine_ctx.cwd,
-            )
+        subs = dict(
+            name=self.name,
+            model=state.stage_model or state.client.model,
+            session_dir=str(state.session_dir),
+            repo=state.engine_ctx.repo,
+            cwd=state.engine_ctx.cwd,
         )
+        _pt = _Passthrough(subs)
 
         pre_sha: str | None = None
         if any(v == "git://range" for v in self.out_map.values()):
             pre_sha = snapshot_head_before(cwd=pathlib.Path(state.engine_ctx.cwd))
 
         cmds = [
-            c.rstrip().format_map(_pt)
+            _CMD_SUB.sub(lambda m: subs.get(m.group(1), m.group(0)), c.rstrip())
             for c in self.options.get("cmds", [])
             if c.strip()
         ]
