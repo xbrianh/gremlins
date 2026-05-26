@@ -12,7 +12,9 @@ from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData, build_state
-from gremlins.stages.github_address_pull_request_reviews import GitHubAddressPullRequestReviews
+from gremlins.stages.github_address_pull_request_reviews import (
+    GitHubAddressPullRequestReviews,
+)
 
 PR_URL = "https://github.com/owner/repo/pull/99"
 

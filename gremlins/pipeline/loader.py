@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from gremlins.stages.github_address_pull_request_reviews import GitHubAddressPullRequestReviews
+from gremlins.stages.github_address_pull_request_reviews import (
+    GitHubAddressPullRequestReviews,
+)
 from gremlins.stages.agent import Agent
 from gremlins.stages.base import Stage
 from gremlins.stages.exec import Exec
