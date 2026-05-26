@@ -212,7 +212,13 @@ def _expand_stage_def(
                 inner["out"] = call_site["out"]
             result.extend(
                 _expand_entry(
-                    inner, prompt_dir, project_root, chain, named_prompts, stage_defs, new_seen
+                    inner,
+                    prompt_dir,
+                    project_root,
+                    chain,
+                    named_prompts,
+                    stage_defs,
+                    new_seen,
                 )
             )
         return result

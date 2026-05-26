@@ -53,7 +53,9 @@ def _base_sha(project: pathlib.Path) -> str:
 
 def _make_commit(project: pathlib.Path, filename: str, content: str, message: str):
     (project / filename).write_text(content)
-    subprocess.run(["git", "add", filename], cwd=project, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "add", filename], cwd=project, check=True, capture_output=True
+    )
     subprocess.run(
         ["git", "commit", "-m", message], cwd=project, check=True, capture_output=True
     )
@@ -99,6 +101,7 @@ def test_validator_passes_when_commits_exist(sandbox: Any) -> None:
     stage = _require_impl_progress_exec()
     result = asyncio.run(stage.run(state))
     from gremlins.stages.outcome import Done
+
     assert isinstance(result, Done)
 
 
@@ -160,4 +163,5 @@ def test_validator_passes_on_resume_with_prior_commits(sandbox: Any) -> None:
     stage = _require_impl_progress_exec()
     result = asyncio.run(stage.run(state))
     from gremlins.stages.outcome import Done
+
     assert isinstance(result, Done)

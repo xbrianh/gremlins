@@ -25,7 +25,9 @@ from gremlins.utils.github import parse_issue_ref as _parse_issue_ref
 
 def _init_git_repo(path: pathlib.Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True
+    )
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
         cwd=path,
@@ -39,8 +41,12 @@ def _init_git_repo(path: pathlib.Path) -> None:
         capture_output=True,
     )
     (path / "README.md").write_text("init\n")
-    subprocess.run(["git", "add", "README.md"], cwd=path, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "add", "README.md"], cwd=path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "init"], cwd=path, check=True, capture_output=True
+    )
 
 
 def _async(fn: Callable[..., Any]) -> Callable[..., Any]:
