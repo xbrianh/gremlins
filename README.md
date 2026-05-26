@@ -287,7 +287,6 @@ For `local` stages, model options (`plan_model`, `impl_model`, `address_model`,
 | `loop` | Iterates body stages until a termination predicate or max iterations |
 | `sequence` | Runs body stages sequentially using child state |
 | `github-open-pull-request` | Opens a pull request on GitHub |
-| `github-push-to-pr-branch` | Pushes local commits to the PR branch recorded in state |
 | `github-request-copilot-review` | Requests a Copilot review on the open PR |
 | `github-wait-copilot` | Polls until Copilot posts its review |
 | `github-wait-ci` | Polls PR CI checks until they pass or exhaust attempts |
@@ -365,6 +364,20 @@ stages:
 
 Note: `review-code` does not currently support per-stage prompt overrides
 via YAML — both passes use the built-in detail lens.
+
+### Stage definitions and bundled recipes
+
+Some stage types are not built-in — they are provided as bundled YAML recipes and must be wired in via `stage-definitions:` before use:
+
+```yaml
+stage-definitions:
+  github-push-to-pr-branch: gremlins:github_push_to_pr_branch
+
+stages:
+  - { name: push, type: github-push-to-pr-branch }
+```
+
+`gremlins:NAME` resolves the recipe from the bundled package (`gremlins/recipes/stages/NAME.yaml`). A bare path resolves relative to the pipeline file.
 
 ### Bundled pipelines
 

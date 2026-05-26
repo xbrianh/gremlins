@@ -5,13 +5,13 @@ from __future__ import annotations
 import os
 from typing import Any, cast
 
+from gremlins.artifacts.resolve import resolve_in_map
 from gremlins.artifacts.schemes import GitHubResolver, snapshot_head_before
 from gremlins.artifacts.uri import Uri
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, NeedsFix, Outcome
 from gremlins.utils import proc as _proc
-from gremlins.utils.text import to_str
 
 
 class Exec(Stage):
@@ -47,9 +47,10 @@ class Exec(Stage):
         )
 
     async def run(self, state: State) -> Outcome:
-        extra_env: dict[str, str] = {}
-        for var, key in self.in_map.items():
-            extra_env[var] = to_str(state.artifacts.read(key))
+        try:
+            extra_env = resolve_in_map(state.artifacts, self.in_map)
+        except ValueError as exc:
+            raise Bail(f"exec {self.name}: {exc}") from exc
 
         pre_sha: str | None = None
         if any(v == "git://range" for v in self.out_map.values()):

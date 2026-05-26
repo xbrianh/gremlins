@@ -7,7 +7,7 @@ sequencing logic of their own.
 ## Modules
 
 - `agent.py` — `Agent(Stage)` (type `"agent"`). The generic agentic primitive. Declared in YAML with `in:` / `out:` maps:
-  - `in: {var_name: registry_key}` — resolves each `registry_key` from `state.artifacts`, converts to string, and substitutes `{var_name}` into the rendered prompt. Raises `MissingArtifact` if a key is not bound.
+  - `in: {var_name: registry_key}` — resolves each `registry_key` from `state.artifacts`, converts to string, and substitutes `{var_name}` into the rendered prompt. Dotted paths like `pr.branch` walk attributes on the resolved value before stringifying. Raises `MissingArtifact` if a key is not bound.
   - `out: {registry_key: uri_string}` — binds each URI in `state.artifacts` before the agent runs, then calls `resolver.verify_produced(uri)` post-run to assert the artifact was written.
   - Invokes the agent via `agent_runner.run_agent`; the `label` is the stage name.
   - Prompt template is `"\n\n".join(self.prompts)`; if `in:` produces substitution vars, `str.format(**subs)` is applied.
