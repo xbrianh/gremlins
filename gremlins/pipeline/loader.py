@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from gremlins.stages.address_code import AddressCode, GitHubAddressPullRequestReviews
+from gremlins.stages.address_code import GitHubAddressPullRequestReviews
 from gremlins.stages.agent import Agent
 from gremlins.stages.base import Stage
 from gremlins.stages.exec import Exec
@@ -30,7 +30,6 @@ STAGE_TYPES: dict[str, type[Stage]] = {
     "github-wait-ci": GitHubWaitCI,
     "review-code": ReviewCode,
     "github-review-pull-request": GitHubReviewPullRequest,
-    "address-code": AddressCode,
     "github-address-pull-request-reviews": GitHubAddressPullRequestReviews,
     "handoff": Handoff,
     "loop": LoopStage,

@@ -6,14 +6,13 @@ import subprocess
 import pytest
 from conftest import MINIMAL_EVENTS, ReviewCreatingClient
 
-from gremlins.artifacts.registry import ArtifactRegistry, MissingArtifact
+from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import StateData, build_state
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.stages import plan
-from gremlins.stages.address_code import AddressCode
 from gremlins.stages.review_code import ReviewCode
 
 _BUNDLED_PROMPTS = (
@@ -144,46 +143,6 @@ def _make_review_code_stage(
     return stage
 
 
-# address-code stage
-# ---------------------------------------------------------------------------
-
-
-def _make_address_code_stage(
-    client: FakeClaudeClient,
-    session_dir,
-    *,
-    model: str = "sonnet",
-    gremlin_id=None,
-) -> AddressCode:
-    stage = AddressCode(
-        "address-code",
-        [(_BUNDLED_PROMPTS / "address.md").read_text(encoding="utf-8")],
-        {},
-        in_map={"text": "review-code"},
-    )
-    return stage
-
-
-def test_address_code_stage_calls_client_with_review_content(tmp_path):
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    review_text = "# Detail Review\n\n## Findings\nLooks good.\n"
-    (session_dir / "review-code-sonnet.md").write_text(review_text)
-
-    client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
-    stage = _make_address_code_stage(client, session_dir)
-    state = _make_state(client, session_dir)
-    state.artifacts.bind(
-        "review-code", Uri.parse("file://session/review-code-sonnet.md")
-    )
-    asyncio.run(stage.run(state))
-
-    assert len(client.calls) == 1
-    call = client.calls[0]
-    assert call.label == "address-code"
-    assert "Detail Review" in call.prompt
-
-
 # ---------------------------------------------------------------------------
 # code_style block appears in plan, review, and address prompts
 # ---------------------------------------------------------------------------
@@ -245,30 +204,6 @@ def test_review_code_stage_includes_style_from_prompts(tmp_path):
     assert "Be good." in client.calls[0].prompt
 
 
-def test_address_code_stage_includes_style_from_prompts(tmp_path):
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    (session_dir / "review-code-sonnet.md").write_text(
-        "# Detail Review\n\n## Findings\nNone.\n"
-    )
-    client = FakeClaudeClient(fixtures={"address-code": MINIMAL_EVENTS})
-    stage = AddressCode(
-        "address-code",
-        [
-            "Be good.",
-            (_BUNDLED_PROMPTS / "address.md").read_text(encoding="utf-8"),
-        ],
-        {},
-        in_map={"text": "review-code"},
-    )
-    state = _make_state(client, session_dir)
-    state.artifacts.bind(
-        "review-code", Uri.parse("file://session/review-code-sonnet.md")
-    )
-    asyncio.run(stage.run(state))
-    assert "Be good." in client.calls[0].prompt
-
-
 def test_review_code_stage_writes_stage_to_state(tmp_path, make_state_dir):
     gremlin_id = "test-gr-id"
     state_dir = make_state_dir(gremlin_id)
@@ -280,15 +215,3 @@ def test_review_code_stage_writes_stage_to_state(tmp_path, make_state_dir):
     asyncio.run(stage.run(state))
     data = json.loads((state_dir / "state.json").read_text())
     assert data.get("stage") == "review-code"
-
-
-def test_address_code_stage_raises_on_missing_review_files(tmp_path, make_state_dir):
-    gremlin_id = "test-gr-id"
-    make_state_dir(gremlin_id)
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    client = FakeClaudeClient(fixtures={})
-    stage = _make_address_code_stage(client, session_dir, gremlin_id=gremlin_id)
-    state = _make_state(client, session_dir, gremlin_id=gremlin_id)
-    with pytest.raises(MissingArtifact):
-        asyncio.run(stage.run(state))

@@ -19,6 +19,6 @@ stages:
     prompt: [code-style, gremlins:review/chain.md]
 
   - name: address-chain
-    type: address-code
+    type: agent
     prompt: [code-style, gremlins:address.md, gremlins:bail_section.md]
     in: {text: review-chain}

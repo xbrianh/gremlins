@@ -53,7 +53,6 @@ def test_pipeline_constructs_from_local_yaml(tmp_path: pathlib.Path) -> None:
     assert "implement" in stage_names
     assert "plan" in STAGE_TYPES
     assert "review-code" in STAGE_TYPES
-    assert "address-code" in STAGE_TYPES
     assert "verify" in STAGE_TYPES
 
 
@@ -333,7 +332,6 @@ def test_stage_builders_registry_covers_all_known_types() -> None:
         "github-address-pull-request-reviews",
         "github-wait-ci",
         "review-code",
-        "address-code",
         "handoff",
         "parallel",
     }
