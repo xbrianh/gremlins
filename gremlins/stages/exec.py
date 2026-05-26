@@ -55,7 +55,7 @@ class Exec(Stage):
         if any(v == "git://range" for v in self.out_map.values()):
             pre_sha = snapshot_head_before(cwd=state.cwd)
 
-        cmds = [c for c in self.options.get("cmds", []) if c.strip()]
+        cmds = [c.rstrip() for c in self.options.get("cmds", []) if c.strip()]
         stdout_str = ""
         stderr_str = ""
         if cmds:

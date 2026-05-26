@@ -23,6 +23,26 @@ from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.utils.github import parse_issue_ref as _parse_issue_ref
 
 
+def _init_git_repo(path: pathlib.Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
+    (path / "README.md").write_text("init\n")
+    subprocess.run(["git", "add", "README.md"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=path, check=True, capture_output=True)
+
+
 def _async(fn: Callable[..., Any]) -> Callable[..., Any]:
     async def _w(*a: Any, **kw: Any) -> Any:
         return fn(*a, **kw)
@@ -146,11 +166,19 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
         initial.update(state_data)
     state_file.write_text(json.dumps(initial))
     # base_ref_sha is now stored in registry.json, not state.json
+    # spec and plan are always bound at launch; bind them here so the implement
+    # agent stage can resolve both even when the plan stage is skipped.
+    registry_data: dict = {
+        "spec": "file://session/spec.md",
+        "plan": "file://session/plan.md",
+    }
     if base_ref_sha:
-        registry_file = tmp_path / "registry.json"
-        registry_file.write_text(
-            json.dumps({"base_sha": f"git://commit/{base_ref_sha}"})
-        )
+        registry_data["base_sha"] = f"git://commit/{base_ref_sha}"
+    registry_file = tmp_path / "registry.json"
+    registry_file.write_text(json.dumps(registry_data))
+    # Create placeholder artifact files so file resolvers find them.
+    (session_dir / "spec.md").write_text("", encoding="utf-8")
+    (session_dir / "plan.md").write_text("", encoding="utf-8")
     monkeypatch.setattr(
         "gremlins.executor.run.resolve_state_file", lambda gremlin_id=None: state_file
     )
@@ -823,6 +851,16 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
             return subprocess.CompletedProcess(
                 cmd, 0, stdout="https://github.com/owner/repo/issues/42\n", stderr=""
             )
+        if sub == "issue" and "view" in cmd and "--json" in cmd:
+            data = json.dumps(
+                {
+                    "number": 42,
+                    "url": "https://github.com/owner/repo/issues/42",
+                    "body": "# Feature\nDo the thing.\n",
+                    "title": "Feature: Do the thing",
+                }
+            )
+            return subprocess.CompletedProcess(cmd, 0, stdout=data, stderr="")
         if sub == "pr" and "view" in cmd and "--json" in cmd:
             num = cmd[3] if len(cmd) > 3 else "101"
             data = json.dumps(
