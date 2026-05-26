@@ -9,14 +9,9 @@ prompts:
   code-style: gremlins:code_style.md
   verify: [gremlins:verify_fix.md, gremlins:bail_section_fix.md]
 
-stage-definitions:
-  implement: gremlins:implement
-  github-push-to-pr-branch: gremlins:github_push_to_pr_branch
-  github-request-copilot-review: gremlins:github_request_copilot_review
-
 stages:
-  - { type: plan,      prompt: [code-style, gremlins:plan_gh.md] }
-  - { type: implement, prompt: [code-style, gremlins:implement_gh.md] }
+  - { type: plan,                               prompt: [code-style, gremlins:plan_gh.md] }
+  - { type: gremlins:implement,                 prompt: [code-style, gremlins:implement_gh.md] }
   - name: normalize
     type: exec
     options:
@@ -28,8 +23,8 @@ stages:
     out:
       normalize-commits: git://range
   - { type: verify,    options: { cmds: ["make check", "make test"] }, prompt: verify }
-  - { name: push,      type: github-push-to-pr-branch }
-  - { type: github-request-copilot-review,                          in: {pr: pr} }
+  - { name: push,      type: gremlins:github-push-to-pr-branch }
+  - { type: gremlins:github-request-copilot-review,                 in: {pr: pr} }
   - { name: github-review-pull-request,                             type: agent, in: {pr: pr}, prompt: [code-style, gremlins:github_review_pull_request.md] }
   - { type: github-wait-copilot,                                    in: {pr: pr} }
   - { name: github-address-pull-request-reviews,                    type: agent, in: {pr: pr}, prompt: [code-style, gremlins:github_address_pull_request_reviews.md, gremlins:bail_section.md] }

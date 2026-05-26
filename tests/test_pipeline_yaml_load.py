@@ -391,7 +391,7 @@ def test_stage_definition_gremlins_recipe_not_found_raises(
           - { type: bad }
         """,
     )
-    with pytest.raises(FileNotFoundError, match="bundled stage-definition not found"):
+    with pytest.raises(FileNotFoundError, match="bundled recipe not found"):
         expand_pipeline(p)
 
 
@@ -408,7 +408,62 @@ def test_stage_definition_gremlins_recipe_path_traversal_raises(
           - { type: bad }
         """,
     )
-    with pytest.raises(ValueError, match="invalid recipe name"):
+    with pytest.raises(ValueError, match="invalid bundled recipe name"):
+        expand_pipeline(p)
+
+
+def test_gremlins_prefix_type_resolves_directly(tmp_path: pathlib.Path) -> None:
+    p = _write_pipeline(
+        tmp_path,
+        """\
+        default_client: claude:sonnet
+        stages:
+          - { type: gremlins:implement, name: impl-step }
+        """,
+    )
+    expanded = expand_pipeline(p)
+    assert len(expanded["stages"]) == 2
+    assert expanded["stages"][0]["name"] == "impl-step"
+    assert expanded["stages"][0]["type"] == "agent"
+
+
+def test_gremlins_prefix_type_accepts_dashes(tmp_path: pathlib.Path) -> None:
+    p = _write_pipeline(
+        tmp_path,
+        """\
+        default_client: claude:sonnet
+        stages:
+          - { type: gremlins:github-request-copilot-review }
+        """,
+    )
+    expanded = expand_pipeline(p)
+    assert len(expanded["stages"]) == 1
+    assert expanded["stages"][0]["type"] == "exec"
+
+
+def test_gremlins_prefix_type_unknown_raises(tmp_path: pathlib.Path) -> None:
+    p = _write_pipeline(
+        tmp_path,
+        """\
+        default_client: claude:sonnet
+        stages:
+          - { type: gremlins:no-such-recipe }
+        """,
+    )
+    with pytest.raises(FileNotFoundError, match="bundled recipe not found"):
+        expand_pipeline(p)
+
+
+def test_gremlins_prefix_type_path_traversal_raises(tmp_path: pathlib.Path) -> None:
+    p = _write_pipeline(
+        tmp_path,
+        """\
+        default_client: claude:sonnet
+        stages:
+          - { type: "gremlins:../../etc/passwd" }
+        """,
+    )
+    with pytest.raises(ValueError, match="invalid bundled recipe name"):
         expand_pipeline(p)
 
 
