@@ -81,7 +81,10 @@ class Agent(Stage):
             session_dir=str(state.session_dir),
         )
 
-        out_map = {k.format_map(_Passthrough(subs)): v.format_map(_Passthrough(subs)) for k, v in self.out_map.items()}
+        out_map = {
+            k.format_map(_Passthrough(subs)): v.format_map(_Passthrough(subs))
+            for k, v in self.out_map.items()
+        }
         for key, uri_str in out_map.items():
             state.artifacts.bind(key, Uri.parse(uri_str))
 
