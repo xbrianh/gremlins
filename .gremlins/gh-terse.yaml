@@ -8,8 +8,6 @@ prompts:
   verify: [gremlins:verify_fix.md, gremlins:bail_section_fix.md]
 
 stage-definitions:
-  implement: gremlins:implement
-  github-request-copilot-review: gremlins:github_request_copilot_review
   normalize:
     type: exec
     options:
@@ -19,12 +17,12 @@ stage-definitions:
         - "git diff --cached --quiet || git commit -m 'normalize'"
 
 stages:
-  - { type: plan,      prompt: [code-style, terse, gremlins:plan_gh.md] }
-  - { type: implement, prompt: [code-style, terse, gremlins:implement_gh.md] }
+  - { type: plan,                              prompt: [code-style, terse, gremlins:plan_gh.md] }
+  - { type: gremlins:implement,                prompt: [code-style, terse, gremlins:implement_gh.md] }
   - { type: normalize }
   - { type: verify,    options: { cmds: ["make check", "make test"] }, prompt: verify }
   - { type: github-open-pull-request }
-  - { type: github-request-copilot-review }
+  - { type: gremlins:github-request-copilot-review }
 
   - parallel:
       - { type: github-wait-copilot }
