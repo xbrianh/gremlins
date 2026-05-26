@@ -22,7 +22,7 @@ stages:
   - { type: gremlins:implement,                prompt: [code-style, terse, gremlins:implement_gh.md] }
   - { type: normalize }
   - { type: verify,    options: { cmds: ["make check", "make test"] }, prompt: verify }
-  - { type: gremlins:github-open-pull-request }
+  - { type: gremlins:github-open-pr }
   - { type: gremlins:github-request-copilot-review }
 
   - parallel:

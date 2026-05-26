@@ -20,7 +20,7 @@ stages:
     out:
       normalize-commits: git://range
   - { type: verify,     options: { cmds: ["make check", "make test"] }, prompt: verify }
-  - { name: open-pr,    type: gremlins:github-open-pull-request }
+  - { name: open-pr,    type: github-open-pull-request }
   - { type: gremlins:github-request-copilot-review }
   - { name: github-review-pull-request,                 type: agent, in: {pr: pr}, prompt: [code-style, gremlins:github_review_pull_request.md] }
   - { type: github-wait-copilot,                        in: {pr: pr} }
