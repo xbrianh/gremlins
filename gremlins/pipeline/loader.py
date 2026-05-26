@@ -6,7 +6,6 @@ from gremlins.stages.agent import Agent
 from gremlins.stages.base import Stage
 from gremlins.stages.exec import Exec
 from gremlins.stages.github_open_pull_request import GitHubOpenPullRequest
-from gremlins.stages.github_push_to_pr_branch import GitHubPushToPrBranch
 from gremlins.stages.github_request_copilot_review import GitHubRequestCopilotReview
 from gremlins.stages.github_wait_ci import GitHubWaitCI
 from gremlins.stages.github_wait_copilot import GitHubWaitCopilot
@@ -23,7 +22,6 @@ STAGE_TYPES: dict[str, type[Stage]] = {
     "plan": Plan,
     "verify": Verify,
     "github-open-pull-request": GitHubOpenPullRequest,
-    "github-push-to-pr-branch": GitHubPushToPrBranch,
     "github-request-copilot-review": GitHubRequestCopilotReview,
     "github-wait-copilot": GitHubWaitCopilot,
     "github-wait-ci": GitHubWaitCI,

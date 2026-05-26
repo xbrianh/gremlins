@@ -11,6 +11,7 @@ prompts:
 
 stage-definitions:
   implement: gremlins:implement
+  github-push-to-pr-branch: gremlins:github_push_to_pr_branch
 
 stages:
   - { type: plan,      prompt: [code-style, gremlins:plan_gh.md] }
@@ -26,7 +27,7 @@ stages:
     out:
       normalize-commits: git://range
   - { type: verify,    options: { cmds: ["make check", "make test"] }, prompt: verify }
-  - { name: push,      type: github-push-to-pr-branch,              in: {pr: pr} }
+  - { name: push,      type: github-push-to-pr-branch }
   - { type: github-request-copilot-review,                          in: {pr: pr} }
   - { name: github-review-pull-request,                             type: agent, in: {pr: pr}, prompt: [code-style, gremlins:github_review_pull_request.md] }
   - { type: github-wait-copilot,                                    in: {pr: pr} }

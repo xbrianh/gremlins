@@ -287,7 +287,6 @@ For `local` stages, model options (`plan_model`, `impl_model`, `address_model`,
 | `loop` | Iterates body stages until a termination predicate or max iterations |
 | `sequence` | Runs body stages sequentially using child state |
 | `github-open-pull-request` | Opens a pull request on GitHub |
-| `github-push-to-pr-branch` | Pushes local commits to the PR branch recorded in state |
 | `github-request-copilot-review` | Requests a Copilot review on the open PR |
 | `github-wait-copilot` | Polls until Copilot posts its review |
 | `github-wait-ci` | Polls PR CI checks until they pass or exhaust attempts |
