@@ -21,10 +21,11 @@ def resolve_in_map(
                 raise ValueError(
                     f"in: path {path!r}: private attribute {attr!r} not accessible"
                 )
-            if not hasattr(value, attr):
+            try:
+                value = getattr(value, attr)
+            except AttributeError:
                 raise ValueError(
                     f"in: path {path!r}: {type(value).__name__} has no attribute {attr!r}"
                 )
-            value = getattr(value, attr)
         result[var] = to_str(value)
     return result

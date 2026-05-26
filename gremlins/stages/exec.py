@@ -47,7 +47,10 @@ class Exec(Stage):
         )
 
     async def run(self, state: State) -> Outcome:
-        extra_env = resolve_in_map(state.artifacts, self.in_map)
+        try:
+            extra_env = resolve_in_map(state.artifacts, self.in_map)
+        except ValueError as exc:
+            raise Bail(f"exec {self.name}: {exc}") from exc
 
         pre_sha: str | None = None
         if any(v == "git://range" for v in self.out_map.values()):

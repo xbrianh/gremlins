@@ -365,6 +365,20 @@ stages:
 Note: `review-code` does not currently support per-stage prompt overrides
 via YAML — both passes use the built-in detail lens.
 
+### Stage definitions and bundled recipes
+
+Some stage types are not built-in — they are provided as bundled YAML recipes and must be wired in via `stage-definitions:` before use:
+
+```yaml
+stage-definitions:
+  github-push-to-pr-branch: gremlins:github_push_to_pr_branch
+
+stages:
+  - { name: push, type: github-push-to-pr-branch }
+```
+
+`gremlins:NAME` resolves the recipe from the bundled package (`gremlins/recipes/stages/NAME.yaml`). A bare path resolves relative to the pipeline file.
+
 ### Bundled pipelines
 
 The canonical reference pipelines:

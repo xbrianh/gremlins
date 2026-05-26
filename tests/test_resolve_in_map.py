@@ -8,6 +8,8 @@ import pathlib
 
 import pytest
 
+import gremlins.artifacts.schemes as schemes
+from conftest import MINIMAL_EVENTS
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.resolve import resolve_in_map
 from gremlins.artifacts.schemes import PrInfo
@@ -79,7 +81,7 @@ def test_dotted_key_url_attribute(tmp_path, monkeypatch):
     assert result == {"url": "https://github.com/o/r/pull/3"}
 
 
-def test_nested_dotted_path(tmp_path):
+def test_nested_dotted_path(tmp_path, monkeypatch):
     @dataclasses.dataclass
     class Inner:
         value: str
@@ -96,17 +98,9 @@ def test_nested_dotted_path(tmp_path):
     def fake_read(self, uri):
         return Outer(inner=Inner(value="deep"))
 
-    import gremlins.artifacts.schemes as schemes
-
-    orig = schemes.GitHubResolver.read
-
+    monkeypatch.setattr(schemes.GitHubResolver, "read", fake_read)
     reg.bind("obj", Uri.parse("gh://pr/1"))
-    try:
-        schemes.GitHubResolver.read = fake_read
-        result = resolve_in_map(reg, {"v": "obj.inner.value"})
-    finally:
-        schemes.GitHubResolver.read = orig
-
+    result = resolve_in_map(reg, {"v": "obj.inner.value"})
     assert result == {"v": "deep"}
 
 
@@ -159,8 +153,6 @@ def test_exec_dotted_key_injects_env_var(tmp_path, monkeypatch):
 
 
 def test_agent_dotted_key_substituted_into_prompt(tmp_path, monkeypatch):
-    from conftest import MINIMAL_EVENTS
-
     pr = PrInfo(url="https://github.com/o/r/pull/9", number=9, branch="agent-branch")
     monkeypatch.setattr(
         "gremlins.artifacts.schemes.GitHubResolver.read",

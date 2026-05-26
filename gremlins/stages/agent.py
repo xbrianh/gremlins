@@ -9,7 +9,7 @@ from gremlins.artifacts.uri import Uri
 from gremlins.executor.state import State
 from gremlins.stages.agent_runner import run_agent
 from gremlins.stages.base import Stage, get_client_from_dict
-from gremlins.stages.outcome import Done, Outcome
+from gremlins.stages.outcome import Bail, Done, Outcome
 
 
 class Agent(Stage):
@@ -59,7 +59,10 @@ class Agent(Stage):
         if self.in_map or self.out_map:
             for key, uri_str in self.out_map.items():
                 state.artifacts.bind(key, Uri.parse(uri_str))
-        subs = resolve_in_map(state.artifacts, self.in_map)
+        try:
+            subs = resolve_in_map(state.artifacts, self.in_map)
+        except ValueError as exc:
+            raise Bail(f"agent {self.name}: {exc}") from exc
 
         template = "\n\n".join(self.prompts).rstrip()
         prompt = template.format(**subs) if subs else template
