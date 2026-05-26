@@ -19,6 +19,9 @@ class PrInfo:
     number: int
     branch: str
 
+    def __str__(self) -> str:
+        return self.url
+
 
 @dataclasses.dataclass(frozen=True)
 class IssueInfo:
