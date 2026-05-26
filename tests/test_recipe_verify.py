@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import pathlib
 import textwrap
+from typing import Any
 
 import pytest
 
 from gremlins.pipeline.preprocess import expand_pipeline
 
 
-def _make_pipeline(tmp_path: pathlib.Path, verify_entry: str) -> dict:
+def _make_pipeline(tmp_path: pathlib.Path, verify_entry: str) -> dict[str, Any]:
     p = tmp_path / "pipeline.yaml"
     p.write_text(
         textwrap.dedent(f"""\
@@ -24,7 +25,7 @@ def _make_pipeline(tmp_path: pathlib.Path, verify_entry: str) -> dict:
     return expand_pipeline(p)
 
 
-def test_verify_recipe_expands_to_loop(tmp_path):
+def test_verify_recipe_expands_to_loop(tmp_path: pathlib.Path) -> None:
     result = _make_pipeline(
         tmp_path,
         "- { type: verify, options: { cmds: ['make check'] }, prompt: verify }",
@@ -36,7 +37,7 @@ def test_verify_recipe_expands_to_loop(tmp_path):
     assert loop["name"] == "verify"
 
 
-def test_verify_recipe_body_has_three_stages(tmp_path):
+def test_verify_recipe_body_has_three_stages(tmp_path: pathlib.Path) -> None:
     result = _make_pipeline(
         tmp_path,
         "- { type: verify, options: { cmds: ['make check'] }, prompt: verify }",
@@ -51,7 +52,7 @@ def test_verify_recipe_body_has_three_stages(tmp_path):
     assert body[2]["type"] == "agent"
 
 
-def test_verify_cmds_propagated_to_cmd_stage(tmp_path):
+def test_verify_cmds_propagated_to_cmd_stage(tmp_path: pathlib.Path) -> None:
     result = _make_pipeline(
         tmp_path,
         "- { type: verify, options: { cmds: ['make check', 'make test'] }, prompt: verify }",
@@ -60,7 +61,7 @@ def test_verify_cmds_propagated_to_cmd_stage(tmp_path):
     assert cmd_stage["options"]["cmds"] == ["make check", "make test"]
 
 
-def test_verify_diff_keeps_own_cmds(tmp_path):
+def test_verify_diff_keeps_own_cmds(tmp_path: pathlib.Path) -> None:
     result = _make_pipeline(
         tmp_path,
         "- { type: verify, options: { cmds: ['make check'] }, prompt: verify }",
@@ -69,7 +70,7 @@ def test_verify_diff_keeps_own_cmds(tmp_path):
     assert any("git diff HEAD" in c for c in diff_stage["options"]["cmds"])
 
 
-def test_verify_empty_cmds_raises(tmp_path):
+def test_verify_empty_cmds_raises(tmp_path: pathlib.Path) -> None:
     with pytest.raises(ValueError, match="cmds"):
         _make_pipeline(
             tmp_path,
@@ -77,7 +78,7 @@ def test_verify_empty_cmds_raises(tmp_path):
         )
 
 
-def test_verify_missing_cmds_raises(tmp_path):
+def test_verify_missing_cmds_raises(tmp_path: pathlib.Path) -> None:
     with pytest.raises(ValueError, match="cmds"):
         _make_pipeline(
             tmp_path,
@@ -85,7 +86,7 @@ def test_verify_missing_cmds_raises(tmp_path):
         )
 
 
-def test_verify_prompt_reaches_fix_agent(tmp_path):
+def test_verify_prompt_reaches_fix_agent(tmp_path: pathlib.Path) -> None:
     result = _make_pipeline(
         tmp_path,
         "- { type: verify, options: { cmds: ['make check'] }, prompt: verify }",
