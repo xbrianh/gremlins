@@ -21,7 +21,7 @@ def expand_pipeline(
     return _expand(yaml_path, project_root, chain=[])
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _load_bundled_recipe(raw_name: str) -> dict[str, Any]:
     name = raw_name.replace("-", "_")
     recipe_path = (BUNDLED_STAGE_DEF_DIR / f"{name}.yaml").resolve()
