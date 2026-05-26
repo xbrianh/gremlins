@@ -50,7 +50,7 @@ class _CopilotPollStage(Stage):
             await asyncio.sleep(self._interval)
         self._poll_count += 1
 
-        repo = state.artifacts.read("env").repo
+        repo = state.engine_ctx.repo
         pr_num = self._pr_num or str(state.artifacts.read("pr").number)
 
         try:

@@ -11,7 +11,6 @@ from typing import Any
 
 from gremlins.artifacts._protocol import SchemeResolver
 from gremlins.artifacts.schemes import (
-    EnvResolver,
     FileSessionResolver,
     GitHubResolver,
     GitResolver,
@@ -48,7 +47,6 @@ class ArtifactRegistry:
             "file": FileSessionResolver(session_dir),
             "git": GitResolver(cwd),
             "gh": GitHubResolver(cwd),
-            "env": EnvResolver({}),
             **(resolvers or {}),
         }
         if self.registry_path.exists():

@@ -1034,7 +1034,7 @@ def test_github_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
     )
     assert result == 0
 
-    assert captured_stage["state"].artifacts.read("env").repo == "owner/repo"
+    assert captured_stage["state"].engine_ctx.repo == "owner/repo"
     assert captured_stage["state"].session_dir == session_dir
     # pr is written to registry.json by GitHubOpenPullRequest
     registry_path = tmp_path / "registry.json"

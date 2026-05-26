@@ -18,7 +18,6 @@ from typing import Any
 import pytest
 
 from gremlins.artifacts.registry import ArtifactRegistry
-from gremlins.artifacts.schemes import EnvResolver
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import StateData, build_state
@@ -31,10 +30,7 @@ from gremlins.stages.outcome import Bail
 def _make_state(project: pathlib.Path, base_sha: str):
     session_dir = project / "session"
     session_dir.mkdir(exist_ok=True)
-    registry = ArtifactRegistry(
-        session_dir, cwd=project, resolvers={"env": EnvResolver({"cwd": str(project)})}
-    )
-    registry.bind("env", Uri.parse("env://"))
+    registry = ArtifactRegistry(session_dir, cwd=project)
     registry.bind("base_sha", Uri.parse(f"git://commit/{base_sha}"))
     return build_state(
         data=StateData(),

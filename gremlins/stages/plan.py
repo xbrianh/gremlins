@@ -10,7 +10,6 @@ import shutil
 import sys
 from typing import Any
 
-from gremlins.artifacts.registry import MissingArtifact
 from gremlins.artifacts.uri import Uri
 from gremlins.errors import die
 from gremlins.executor.state import State
@@ -29,10 +28,7 @@ def _fmt_escape(s: str) -> str:
 
 
 def _read_repo(state: State) -> str:
-    try:
-        return state.artifacts.read("env").repo or ""
-    except (MissingArtifact, AttributeError):
-        return ""
+    return state.engine_ctx.repo
 
 
 class Plan(Stage):

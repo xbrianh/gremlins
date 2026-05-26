@@ -13,7 +13,6 @@ from typing import Any
 
 from gremlins.artifacts.engine import EngineContext
 from gremlins.artifacts.registry import ArtifactRegistry
-from gremlins.artifacts.schemes import EnvResolver
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
 from gremlins.executor.state import State, StateData, build_state
@@ -164,7 +163,8 @@ class Gremlin:
             instructions=[self.instructions] if self.instructions else [],
         )
         # attempt is always "" here; the loop patches it per-iteration via dataclasses.replace.
-        engine_ctx = EngineContext(loop_iteration=1, attempt="", current_scope=())
+        cwd = str(self.worktree_dir) if self.worktree_dir is not None else (self.project_root or str(pathlib.Path.cwd()))
+        engine_ctx = EngineContext(loop_iteration=1, attempt="", current_scope=(), repo=self.repo, cwd=cwd)
         built: list[tuple[str, Callable[[], Awaitable[Any]]]] = []
         for e in stages:
             stage_client = e.client or PACKAGE_DEFAULT
@@ -314,16 +314,6 @@ class Gremlin:
             self.registry = ArtifactRegistry(
                 session_dir=self.session_dir,
                 cwd=self.worktree_dir,
-                resolvers={
-                    "env": EnvResolver(
-                        {
-                            "repo": self.repo,
-                            "cwd": str(self.worktree_dir)
-                            if self.worktree_dir is not None
-                            else str(project_dir),
-                        }
-                    )
-                },
             )
             if not self.registry.produced("spec"):
                 self.registry.bind("spec", Uri.parse("file://session/spec.md"))
@@ -331,8 +321,6 @@ class Gremlin:
                 sha = _git_mod.head_sha(cwd=self.worktree_dir)
                 if sha:
                     self.registry.bind("base_sha", Uri.parse(f"git://commit/{sha}"))
-            if not self.registry.produced("env"):
-                self.registry.bind("env", Uri.parse("env://"))
             if not self.registry.produced("plan"):
                 if (self.session_dir / "plan.md").exists():
                     self.registry.bind("plan", Uri.parse("file://session/plan.md"))

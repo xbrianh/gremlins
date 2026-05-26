@@ -5,7 +5,6 @@ from __future__ import annotations
 import dataclasses
 import pathlib
 import re
-import types
 from typing import Any
 
 from gremlins.artifacts.uri import Uri
@@ -140,14 +139,3 @@ class GitHubResolver:
         return Uri.parse(f"gh://pr/{n}")
 
 
-class EnvResolver:
-    """Resolves env://<key> to ambient session strings (repo, cwd, etc.)."""
-
-    def __init__(self, values: dict[str, str]) -> None:
-        self._values = values
-
-    def read(self, uri: Uri) -> types.SimpleNamespace:  # noqa: ARG002
-        return types.SimpleNamespace(**self._values)
-
-    def verify_produced(self, uri: Uri) -> None:  # noqa: ARG002
-        pass
