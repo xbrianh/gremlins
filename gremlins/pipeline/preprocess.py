@@ -301,14 +301,14 @@ def _expand_stage_def(
                 raise ValueError(
                     f"stage {stage_display!r}: required option {opt!r} is missing or empty"
                 )
-        if definition.get("required-prompt") and "prompt" not in call_site:
-            stage_display = call_site.get("name") or def_name
-            raise ValueError(f"stage {stage_display!r}: required prompt is missing")
         cs_prompts: list[Any] = (
             _read_prompts(call_site["prompt"], prompt_dir, named_prompts)
             if "prompt" in call_site
             else []
         )
+        if definition.get("required-prompt") and not cs_prompts:
+            stage_display = call_site.get("name") or def_name
+            raise ValueError(f"stage {stage_display!r}: required prompt is missing or empty")
         ctx: dict[str, Any] = {"options": cs_opts, "prompt": cs_prompts}
         substituted = [
             cast(dict[str, Any], _substitute_recipe(s, ctx)) for s in inner_list

@@ -1,3 +1,5 @@
+required-prompt: true
+
 stages:
   - name: implement
     type: agent

@@ -21,11 +21,15 @@ def test_persist_expanded_pipeline_writes_file(tmp_path):
     pipeline_yaml = tmp_path / "proj.yaml"
     pipeline_yaml.write_text(
         """\
+prompts:
+  impl-prompt: |
+    Do the implementation.
 stages:
   - name: plan
     type: plan
   - name: implement
     type: implement
+    prompt: impl-prompt
 """,
         encoding="utf-8",
     )

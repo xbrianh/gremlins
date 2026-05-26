@@ -353,15 +353,44 @@ def test_stage_definition_gremlins_recipe_expands(tmp_path: pathlib.Path) -> Non
         tmp_path,
         """\
         default_client: claude:sonnet
+        prompts:
+          impl-prompt: |
+            Do the implementation.
         stage-definitions:
           implement: gremlins:implement
         stages:
-          - { type: implement, name: impl-step }
+          - { type: implement, name: impl-step, prompt: impl-prompt }
         """,
     )
     expanded = expand_pipeline(p)
     assert len(expanded["stages"]) > 0
     assert expanded["stages"][0]["name"] == "impl-step"
+
+
+def test_required_prompt_missing_raises(tmp_path: pathlib.Path) -> None:
+    p = _write_pipeline(
+        tmp_path,
+        """\
+        default_client: claude:sonnet
+        stages:
+          - { type: verify, options: { cmds: ['true'] } }
+        """,
+    )
+    with pytest.raises(ValueError, match="required prompt is missing or empty"):
+        expand_pipeline(p)
+
+
+def test_required_prompt_empty_raises(tmp_path: pathlib.Path) -> None:
+    p = _write_pipeline(
+        tmp_path,
+        """\
+        default_client: claude:sonnet
+        stages:
+          - { type: verify, options: { cmds: ['true'] }, prompt: [] }
+        """,
+    )
+    with pytest.raises(ValueError, match="required prompt is missing or empty"):
+        expand_pipeline(p)
 
 
 def test_stage_definition_gremlins_recipe_missing_name_raises(
@@ -420,8 +449,11 @@ def test_gremlins_prefix_type_resolves_directly(tmp_path: pathlib.Path) -> None:
         tmp_path,
         """\
         default_client: claude:sonnet
+        prompts:
+          impl-prompt: |
+            Do the implementation.
         stages:
-          - { type: gremlins:implement, name: impl-step }
+          - { type: gremlins:implement, name: impl-step, prompt: impl-prompt }
         """,
     )
     expanded = expand_pipeline(p)
@@ -480,9 +512,12 @@ def test_type_resolves_to_pipeline_file(tmp_path: pathlib.Path) -> None:
     sub.write_text(
         textwrap.dedent("""\
         default_client: claude:sonnet
+        prompts:
+          impl-prompt: |
+            Do the implementation.
         stages:
           - { type: plan }
-          - { type: implement }
+          - { type: implement, prompt: impl-prompt }
         """),
         encoding="utf-8",
     )

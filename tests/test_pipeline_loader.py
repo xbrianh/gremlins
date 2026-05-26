@@ -92,7 +92,7 @@ def test_unknown_provider_raises(tmp_path: pathlib.Path) -> None:
 name: bad
 default_client: unknown:model
 stages:
-  - {name: s1, type: implement}
+  - {name: s1, type: plan}
 """,
     )
     with pytest.raises(ValueError, match="unknown provider"):
@@ -106,7 +106,7 @@ def test_invalid_client_format_raises(tmp_path: pathlib.Path) -> None:
 name: bad
 stages:
   - name: s1
-    type: implement
+    type: plan
     client: notaspecifier
 """,
     )
