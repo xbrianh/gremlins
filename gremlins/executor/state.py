@@ -18,8 +18,6 @@ from typing import TYPE_CHECKING, Any, cast
 from gremlins import paths as _paths
 from gremlins.artifacts.engine import EngineContext
 from gremlins.artifacts.registry import ArtifactRegistry
-from gremlins.artifacts.schemes import EnvResolver
-from gremlins.artifacts.uri import Uri
 from gremlins.clients.client import Client
 from gremlins.utils.state_file import locked_update
 
@@ -610,22 +608,7 @@ def build_state(
     child_key: str | None = None,
     parent_stage: str = "",
 ) -> State:
-    reg = ArtifactRegistry(
-        session_dir=session_dir,
-        cwd=worktree,
-        resolvers={
-            "env": EnvResolver(
-                {
-                    "repo": repo,
-                    "cwd": str(worktree)
-                    if worktree is not None
-                    else str(_paths.project_root()),
-                }
-            )
-        },
-    )
-    if not reg.produced("env"):
-        reg.mount("env", Uri.parse("env://"))
+    reg = ArtifactRegistry(session_dir=session_dir, cwd=worktree)
     return State(
         data=data,
         client=client,
@@ -636,6 +619,8 @@ def build_state(
             loop_iteration=data.loop_iteration,
             attempt=data.attempt,
             current_scope=(),
+            repo=repo,
+            cwd=str(worktree) if worktree is not None else str(_paths.project_root()),
         ),
         args=args if args is not None else argparse.Namespace(),
         pipeline_data=pipeline_data,

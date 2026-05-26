@@ -586,9 +586,7 @@ class Handoff(Stage):
         return exit_state, sig_data
 
     async def _resolve_base_ref(self, state: State) -> str:
-        r = await proc.run_async(
-            ["git", "rev-parse", "HEAD"], cwd=state.artifacts.read("env").cwd
-        )
+        r = await proc.run_async(["git", "rev-parse", "HEAD"], cwd=state.engine_ctx.cwd)
         return r.stdout.strip() if r.returncode == 0 else "HEAD"
 
     @staticmethod

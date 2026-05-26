@@ -6,7 +6,6 @@ import logging
 import pathlib
 from typing import Any
 
-from gremlins.artifacts.registry import MissingArtifact
 from gremlins.executor.state import State
 from gremlins.stages.agent_runner import run_agent
 from gremlins.stages.base import Stage
@@ -19,10 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 def _read_repo(state: State) -> str:
-    try:
-        return state.artifacts.read("env").repo or ""
-    except (MissingArtifact, AttributeError):
-        return ""
+    return state.engine_ctx.repo
 
 
 def _diff_text(cwd: pathlib.Path) -> str:
@@ -50,7 +46,7 @@ class VerifyFix(Stage):
         if not log_path.exists():
             return Done()
         log_text = log_path.read_text(encoding="utf-8")
-        diff = _diff_text(pathlib.Path(state.artifacts.read("env").cwd))
+        diff = _diff_text(pathlib.Path(state.engine_ctx.cwd))
         template = "\n\n".join(self.prompts).rstrip()
         fix_prompt = template.format(
             commands_section=self._commands_section,

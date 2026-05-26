@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import re
 from typing import Any, cast
 
 from gremlins.artifacts.resolve import resolve_in_map
@@ -14,6 +15,8 @@ from gremlins.stages._passthrough import Passthrough as _Passthrough
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, NeedsFix, Outcome
 from gremlins.utils import proc as _proc
+
+_CMD_SUB = re.compile(r"\{(\w+)\}")
 
 
 class Exec(Stage):
@@ -54,25 +57,30 @@ class Exec(Stage):
         except ValueError as exc:
             raise Bail(f"exec {self.name}: {exc}") from exc
 
-        stage_subs = dict(
+        subs = dict(
             name=self.name,
             model=state.stage_model or state.client.model,
             session_dir=str(state.session_dir),
+            repo=state.engine_ctx.repo,
+            cwd=state.engine_ctx.cwd,
         )
+        _pt = _Passthrough(subs)
 
         pre_sha: str | None = None
         if any(v == "git://range" for v in self.out_map.values()):
-            pre_sha = snapshot_head_before(
-                cwd=pathlib.Path(state.artifacts.read("env").cwd)
-            )
+            pre_sha = snapshot_head_before(cwd=pathlib.Path(state.engine_ctx.cwd))
 
-        cmds = [c.rstrip() for c in self.options.get("cmds", []) if c.strip()]
+        cmds = [
+            _CMD_SUB.sub(lambda m: subs.get(m.group(1), m.group(0)), c.rstrip())
+            for c in self.options.get("cmds", [])
+            if c.strip()
+        ]
         stdout_str = ""
         stderr_str = ""
         if cmds:
             result = await _proc.run_shell_async(
                 " && ".join(cmds),
-                cwd=pathlib.Path(state.artifacts.read("env").cwd),
+                cwd=pathlib.Path(state.engine_ctx.cwd),
                 env={**os.environ, **extra_env},
             )
             stdout_str = result.stdout
@@ -84,7 +92,6 @@ class Exec(Stage):
                     return NeedsFix(stdout_str + stderr_str, result.returncode)
                 raise Bail(f"exec {self.name}: exited {result.returncode}")
 
-        _pt = _Passthrough(stage_subs)
         for raw_key, raw_uri_str in self.out_map.items():
             key = raw_key.format_map(_pt)
             uri_str = raw_uri_str.format_map(_pt)
