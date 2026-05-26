@@ -254,33 +254,24 @@ MINIMAL_EVENTS = [
     {"type": "result", "subtype": "success"},
 ]
 
-# Label the detail reviewer emits (default sonnet model). Shared so the
-# orchestrator smoke tests and the GREMLIN_ID-isolation regression tests stay
-# in sync if the label scheme changes.
-REVIEW_LABELS = {
-    "review-code-sonnet",
-    "review-code-fake",
-}
+# Label the review stage emits. Shared so orchestrator smoke tests stay in sync.
+REVIEW_LABELS = {"review-code"}
 
 
 class ReviewCreatingClient(FakeClaudeClient):
-    """FakeClaudeClient that writes the review output file when a review-code
-    label is called. Extracts the output path from the prompt so it lands at
-    exactly the path run_review_code_stage expects to exist after the reviewer
-    finishes. Shared between test_orchestrator_local and test_state_isolation."""
+    """FakeClaudeClient that writes the review output file for review-code stages.
+    Extracts the output path from the prompt so it lands at the path the artifact
+    binding expects to exist after the reviewer finishes. Shared between
+    test_orchestrator_local and test_state_isolation."""
 
     async def run(self, prompt, *, label, **kwargs):
-        if label.startswith("review-code-"):
+        if label == "review-code":
             m = re.search(r"`([^`]+\.md)`\s+is the canonical", prompt)
             assert m, f"regex did not match review-code prompt for label {label!r}"
             out = pathlib.Path(m.group(1))
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text("# Review\n\n## Findings\nNone.\n")
             if label not in self._fixtures:
-                assert label in REVIEW_LABELS, (
-                    f"unexpected review-code label: {label!r}; "
-                    f"expected one of {sorted(REVIEW_LABELS)}"
-                )
                 self._fixtures[label] = MINIMAL_EVENTS
         return await super().run(prompt, label=label, **kwargs)
 

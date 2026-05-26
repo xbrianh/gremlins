@@ -56,7 +56,7 @@ def test_local_main_plan_mode(tmp_path, monkeypatch):
 
     labels = [c.label for c in client.calls]
     assert labels[0] == "implement"
-    assert labels[1] == "review-code-sonnet"
+    assert labels[1] == "review-code"
     assert labels[2] == "address-code"
 
 
@@ -113,7 +113,7 @@ def test_local_main_resume_from_review_code_allows_existing_git_changes(
 
     client = _ReviewCreatingClient(
         fixtures={
-            "review-code-sonnet": MINIMAL_EVENTS,
+            "review-code": MINIMAL_EVENTS,
             "address-code": MINIMAL_EVENTS,
         }
     )
@@ -128,7 +128,7 @@ def test_local_main_resume_from_review_code_allows_existing_git_changes(
 
     assert result == 0
     assert [call.label for call in client.calls] == [
-        "review-code-sonnet",
+        "review-code",
         "address-code",
     ]
 
@@ -146,11 +146,10 @@ def test_local_main_client_specifier_model(tmp_path, monkeypatch):
         "gremlins.executor.run.resolve_session_dir",
         lambda gremlin_id=None: session_dir,
     )
-    review_label = "review-code-gpt-4o"
     client = _ReviewCreatingClient(
         fixtures={
             "implement": MINIMAL_EVENTS,
-            review_label: MINIMAL_EVENTS,
+            "review-code": MINIMAL_EVENTS,
             "address-code": MINIMAL_EVENTS,
         }
     )
@@ -164,7 +163,7 @@ def test_local_main_client_specifier_model(tmp_path, monkeypatch):
     )
     assert result == 0
     assert client.calls[0].model == "gpt-4o"  # implement stage
-    assert client.calls[1].label == review_label
+    assert client.calls[1].label == "review-code"
 
 
 def test_local_pipeline_stage_names(tmp_path):
@@ -298,11 +297,10 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
         "gremlins.pipeline.Pipeline.from_yaml", _from_yaml_copilot_default
     )
 
-    review_label = "review-code-gpt-5.4"
     client = _ReviewCreatingClient(
         fixtures={
             "implement": MINIMAL_EVENTS,
-            review_label: MINIMAL_EVENTS,
+            "review-code": MINIMAL_EVENTS,
             "address-code": MINIMAL_EVENTS,
         }
     )
@@ -316,7 +314,7 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
     )
     assert result == 0
     assert client.calls[0].model == "gpt-5.4"  # implement
-    assert client.calls[1].label == review_label
+    assert client.calls[1].label == "review-code"
     assert client.calls[1].model == "gpt-5.4"  # review
 
 
@@ -360,7 +358,6 @@ def test_local_stage_inputs_instructions_reach_plan(
 
     from gremlins.stages import agent as _agent_mod
     from gremlins.stages import exec as _exec_mod
-    from gremlins.stages import review_code as _rc_mod
     from gremlins.stages import verify as _v_mod
 
     async def _noop(self, state):  # noqa: ARG001
@@ -368,7 +365,6 @@ def test_local_stage_inputs_instructions_reach_plan(
 
     monkeypatch.setattr(_agent_mod.Agent, "run", _noop)
     monkeypatch.setattr(_exec_mod.Exec, "run", _noop)
-    monkeypatch.setattr(_rc_mod.ReviewCode, "run", _noop)
     monkeypatch.setattr(_v_mod.Verify, "run", _noop)
 
     result = asyncio.run(
