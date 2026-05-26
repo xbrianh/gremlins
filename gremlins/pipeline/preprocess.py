@@ -59,7 +59,9 @@ def _expand(
                 )
             recipe_path = (BUNDLED_STAGE_DEF_DIR / f"{recipe_name}.yaml").resolve()
             if not recipe_path.is_relative_to(BUNDLED_STAGE_DEF_DIR.resolve()):
-                raise ValueError(f"stage-definition {name!r}: invalid recipe name {recipe_name!r}")
+                raise ValueError(
+                    f"stage-definition {name!r}: invalid recipe name {recipe_name!r}"
+                )
             if not recipe_path.exists():
                 raise FileNotFoundError(f"bundled stage-definition not found: {defn!r}")
             stage_defs[name] = load_yaml_file(recipe_path)
