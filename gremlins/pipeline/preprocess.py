@@ -52,19 +52,19 @@ def _expand(
     stage_defs: dict[str, dict[str, Any]] = {}
     for name, defn in cast(dict[str, Any], raw_stage_defs or {}).items():
         if isinstance(defn, str) and defn.startswith(BUNDLED_PROMPT_PREFIX):
-            recipe_name = defn[len(BUNDLED_PROMPT_PREFIX):]
+            recipe_name = defn[len(BUNDLED_PROMPT_PREFIX) :]
             if not recipe_name:
                 raise ValueError(
                     f"stage-definition {name!r}: missing name after {BUNDLED_PROMPT_PREFIX!r}"
                 )
             recipe_path = (BUNDLED_STAGE_DEF_DIR / f"{recipe_name}.yaml").resolve()
             if not recipe_path.exists():
-                raise FileNotFoundError(
-                    f"bundled stage-definition not found: {defn!r}"
-                )
+                raise FileNotFoundError(f"bundled stage-definition not found: {defn!r}")
             stage_defs[name] = load_yaml_file(recipe_path)
         elif not isinstance(defn, dict):
-            raise ValueError(f"stage-definition {name!r} must be a dict or gremlins: reference")
+            raise ValueError(
+                f"stage-definition {name!r} must be a dict or gremlins: reference"
+            )
         else:
             stage_defs[name] = cast(dict[str, Any], defn)
 
