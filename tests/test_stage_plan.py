@@ -9,7 +9,6 @@ import pathlib
 import pytest
 from conftest import MINIMAL_EVENTS
 
-from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
@@ -17,21 +16,23 @@ from gremlins.executor.state import StateData, build_state
 from gremlins.stages.plan import Plan
 
 
-def _state(session_dir: pathlib.Path, client: FakeClaudeClient) -> RuntimeState:
-    return build_state(data=StateData(), client=client, session_dir=session_dir)
+def _state(
+    session_dir: pathlib.Path, client: FakeClaudeClient, *, repo: str = ""
+) -> RuntimeState:
+    return build_state(
+        data=StateData(), client=client, session_dir=session_dir, repo=repo
+    )
 
 
 def _state_with_artifacts(
-    session_dir: pathlib.Path, client: FakeClaudeClient
+    session_dir: pathlib.Path, client: FakeClaudeClient, *, repo: str = ""
 ) -> RuntimeState:
     # Ensure registry_path (derived from session_dir.parent) lands in an
     # isolated per-test directory: caller passes tmp_path, we use a subdir
     # so tmp_path acts as the "state_dir" parent.
     sd = session_dir / "session"
     sd.mkdir(parents=True, exist_ok=True)
-    state = build_state(data=StateData(), client=client, session_dir=sd)
-    state.artifacts = ArtifactRegistry(sd)
-    return state
+    return build_state(data=StateData(), client=client, session_dir=sd, repo=repo)
 
 
 class _PlanWritingClient(FakeClaudeClient):
@@ -129,9 +130,8 @@ def test_plan_source_file_github(
     client = FakeClaudeClient(fixtures=fixtures)
 
     stage = Plan("plan", [], {})
-    state = _state(tmp_path, client)
+    state = _state(tmp_path, client, repo="owner/repo")
     state.args = argparse.Namespace(plan=str(plan_src))
-    state.repo = "owner/repo"
     asyncio.run(stage.run(state))
 
     plan_md = tmp_path / "plan.md"
@@ -162,9 +162,8 @@ def test_plan_source_issue_ref_github(
 
     stage = Plan("plan", [], {})
     client = FakeClaudeClient(fixtures={})
-    state = _state(tmp_path, client)
+    state = _state(tmp_path, client, repo="owner/repo")
     state.args = argparse.Namespace(plan="#99")
-    state.repo = "owner/repo"
     asyncio.run(stage.run(state))
 
     plan_md = tmp_path / "plan.md"
@@ -222,7 +221,6 @@ def test_resolve_issue_source_empty_repo_writes_url(
     client = FakeClaudeClient(fixtures={})
     state = _state_with_artifacts(tmp_path, client)
     state.args = argparse.Namespace(plan="#355")
-    state.repo = ""
     asyncio.run(stage.run(state))
     assert state.artifacts.produced("plan")
     assert state.artifacts.resolve("plan") == Uri.parse("gh://issue/355")
@@ -235,9 +233,8 @@ def test_resolve_issue_source_matching_repo_writes_url(
     _issue_source_mocks(monkeypatch, pr_repo="owner/repo")
     stage = Plan("plan", [], {})
     client = FakeClaudeClient(fixtures={})
-    state = _state_with_artifacts(tmp_path, client)
+    state = _state_with_artifacts(tmp_path, client, repo="owner/repo")
     state.args = argparse.Namespace(plan="#355")
-    state.repo = "owner/repo"
     asyncio.run(stage.run(state))
     assert state.artifacts.produced("plan")
     assert state.artifacts.resolve("plan") == Uri.parse("gh://issue/355")
@@ -250,9 +247,8 @@ def test_resolve_issue_source_cross_repo_clears_url(
     _issue_source_mocks(monkeypatch, pr_repo="owner/a")
     stage = Plan("plan", [], {})
     client = FakeClaudeClient(fixtures={})
-    state = _state_with_artifacts(tmp_path, client)
+    state = _state_with_artifacts(tmp_path, client, repo="owner/a")
     state.args = argparse.Namespace(plan="owner/b#355")
-    state.repo = "owner/a"
     asyncio.run(stage.run(state))
     assert state.artifacts.resolve("plan") == Uri.parse("file://session/plan.md")
 

@@ -10,6 +10,7 @@ import shutil
 import sys
 from typing import Any
 
+from gremlins.artifacts.registry import MissingArtifact
 from gremlins.artifacts.uri import Uri
 from gremlins.errors import die
 from gremlins.executor.state import State
@@ -25,6 +26,13 @@ logger = logging.getLogger(__name__)
 
 def _fmt_escape(s: str) -> str:
     return s.replace("{", "{{").replace("}", "}}")
+
+
+def _read_repo(state: State) -> str:
+    try:
+        return state.artifacts.read("env").repo or ""
+    except (MissingArtifact, AttributeError):
+        return ""
 
 
 class Plan(Stage):
@@ -97,7 +105,8 @@ class Plan(Stage):
         return Done()
 
     async def _run_agent(self, plan_md: pathlib.Path, state: State) -> None:
-        if state.repo:
+        repo = _read_repo(state)
+        if repo:
             base_ref_name = (
                 state.artifacts.resolve("base_ref").path.removeprefix("ref/")
                 if state.artifacts.produced("base_ref")
@@ -131,7 +140,7 @@ class Plan(Stage):
                 state.artifacts.bind(
                     "plan", Uri.parse(f"gh://issue/{issue_num}"), override=True
                 )
-            issue_body = _fetch_issue_body(issue_num, state.repo)
+            issue_body = _fetch_issue_body(issue_num, repo)
             plan_md.write_text(issue_body, encoding="utf-8")
         else:
             template = "\n\n".join(self.prompts).rstrip()
@@ -155,7 +164,7 @@ class Plan(Stage):
             sys.stderr.write(f"error: --plan: file is empty: {path}\n")
             sys.stderr.flush()
             sys.exit(1)
-        if not state.repo:
+        if not _read_repo(state):
             shutil.copyfile(src, plan_md)
             return
         logger.info(
@@ -172,14 +181,15 @@ class Plan(Stage):
     def _resolve_issue_source(
         self, ref: str, plan_md: pathlib.Path, state: State
     ) -> None:
-        target_repo, issue_ref = parse_issue_ref(ref, state.repo or "")
+        repo = _read_repo(state)
+        target_repo, issue_ref = parse_issue_ref(ref, repo or "")
         if issue_ref is None:
             sys.stderr.write(
                 f"error: --plan: not a readable file or recognized issue reference: {ref}\n"
             )
             sys.stderr.flush()
             sys.exit(1)
-        pr_repo = state.repo
+        pr_repo = repo
         if not pr_repo:
             try:
                 pr_repo = get_repo()
@@ -243,6 +253,7 @@ class Plan(Stage):
 
 async def _post_file_as_github_issue(path: str, state: State) -> tuple[str, str]:
     """Post a local file as a GitHub issue. Returns (issue_url, issue_title)."""
+    repo = _read_repo(state)
     issue_body = pathlib.Path(path).read_text(encoding="utf-8")
     title_prompt = (
         "Produce a concise GitHub issue title (under 80 characters) "
@@ -267,7 +278,7 @@ async def _post_file_as_github_issue(path: str, state: State) -> tuple[str, str]
             "issue",
             "create",
             "--repo",
-            state.repo,
+            repo,
             "--title",
             issue_title,
             "--body-file",

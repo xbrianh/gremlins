@@ -6,11 +6,16 @@ import json
 import os
 import pathlib
 import secrets
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from gremlins.artifacts._protocol import SchemeResolver
-from gremlins.artifacts.schemes import FileSessionResolver, GitHubResolver, GitResolver
+from gremlins.artifacts.schemes import (
+    EnvResolver,
+    FileSessionResolver,
+    GitHubResolver,
+    GitResolver,
+)
 from gremlins.artifacts.uri import Uri
 from gremlins.utils import git as git_utils
 
@@ -34,6 +39,7 @@ class ArtifactRegistry:
         self,
         session_dir: pathlib.Path,
         cwd: pathlib.Path | None = None,
+        resolvers: Mapping[str, SchemeResolver] | None = None,
     ) -> None:
         self._cwd = cwd
         self.registry_path = session_dir.parent / "registry.json"
@@ -42,6 +48,8 @@ class ArtifactRegistry:
             "file": FileSessionResolver(session_dir),
             "git": GitResolver(cwd),
             "gh": GitHubResolver(cwd),
+            "env": EnvResolver({}),
+            **(resolvers or {}),
         }
         if self.registry_path.exists():
             data = json.loads(self.registry_path.read_text(encoding="utf-8"))
@@ -58,6 +66,10 @@ class ArtifactRegistry:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp.write_text(json.dumps(data), encoding="utf-8")
         os.replace(tmp, path)
+
+    def mount(self, key: str, uri: Uri) -> None:
+        """Register a binding in-memory only; not persisted to disk."""
+        self._bindings[key] = uri
 
     def resolve(self, key: str) -> Uri:
         try:

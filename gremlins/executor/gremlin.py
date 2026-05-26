@@ -13,6 +13,7 @@ from typing import Any
 
 from gremlins.artifacts.engine import EngineContext
 from gremlins.artifacts.registry import ArtifactRegistry
+from gremlins.artifacts.schemes import EnvResolver
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
 from gremlins.executor.state import State, StateData, build_state
@@ -174,7 +175,6 @@ class Gremlin:
                 session_dir=self.session_dir,
                 args=args,
                 pipeline_data=self.pipeline_data,
-                repo=self.repo,
                 instructions=self.instructions,
                 test_client=self.test_client,
                 stage_model=stage_client.model if self.test_client else "",
@@ -228,6 +228,7 @@ class Gremlin:
         setup_kind: str = "worktree-branch",
         worktree_dir: pathlib.Path | None = None,
         client_label: str = "",
+        repo: str = "",
     ) -> Gremlin:
         try:
             pipeline_path = resolve_pipeline_path(pipeline_ref, project_dir)
@@ -256,6 +257,7 @@ class Gremlin:
             project_root=project_root,
             base_ref_sha=base_ref_sha,
             setup_kind=setup_kind,
+            repo=repo,
         )
 
         State.setup_dirs(
@@ -312,6 +314,16 @@ class Gremlin:
             self.registry = ArtifactRegistry(
                 session_dir=self.session_dir,
                 cwd=self.worktree_dir,
+                resolvers={
+                    "env": EnvResolver(
+                        {
+                            "repo": self.repo,
+                            "cwd": str(self.worktree_dir)
+                            if self.worktree_dir is not None
+                            else str(project_dir),
+                        }
+                    )
+                },
             )
             if not self.registry.produced("spec"):
                 self.registry.bind("spec", Uri.parse("file://session/spec.md"))
@@ -319,6 +331,8 @@ class Gremlin:
                 sha = _git_mod.head_sha(cwd=self.worktree_dir)
                 if sha:
                     self.registry.bind("base_sha", Uri.parse(f"git://commit/{sha}"))
+            if not self.registry.produced("env"):
+                self.registry.bind("env", Uri.parse("env://"))
         except Exception:
             if worktree_created:
                 _git_mod.remove_worktree(self.project_root, worktree_created)

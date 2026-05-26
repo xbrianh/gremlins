@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import pathlib
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
@@ -21,7 +22,7 @@ UntilFn = Callable[[State, int, str], bool]
 
 def head_stable(state: State, iteration: int, head_before: str) -> bool:
     """Exit when HEAD hasn't changed across this iteration."""
-    return _git.head_sha(state.cwd) == head_before
+    return _git.head_sha(pathlib.Path(state.artifacts.read("env").cwd)) == head_before
 
 
 def max_iters(n: int) -> UntilFn:
@@ -130,7 +131,9 @@ class LoopStage(Stage):
             iter_state = dataclasses.replace(state, engine_ctx=iter_ctx)
             if self._on_iteration_start:
                 self._on_iteration_start(iter_state)
-            head_before = _git.head_sha(iter_state.cwd)
+            head_before = _git.head_sha(
+                pathlib.Path(iter_state.artifacts.read("env").cwd)
+            )
             # Rebuild each iteration so body stages inherit the per-iteration engine_ctx.
             runners = (
                 self._body_runners
@@ -162,4 +165,4 @@ def detach_to_pr_base(state: State) -> None:
     except MissingArtifact:
         return
     logger.info("detaching worktree to previous PR branch: %s", branch)
-    _git.git_detach_to_branch(branch, cwd=state.cwd)
+    _git.git_detach_to_branch(branch, cwd=pathlib.Path(state.artifacts.read("env").cwd))

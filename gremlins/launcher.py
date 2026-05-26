@@ -544,6 +544,7 @@ def launch(
         if inputs.base_ref_sha:
             registry.bind("base_sha", Uri.parse(f"git://commit/{inputs.base_ref_sha}"))
         registry.bind("spec", Uri.parse("file://session/spec.md"))
+        registry.bind("env", Uri.parse("env://"))
         if inputs.issue_data:
             _issue_num = str(inputs.issue_data.get("number", ""))
             if _issue_num:

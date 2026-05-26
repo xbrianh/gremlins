@@ -134,7 +134,7 @@ def test_build_state_propagates_repo_and_instructions(
             "instructions": "do the thing",
         }
     )
-    assert state.repo == "owner/myrepo"
+    assert state.artifacts.read("env").repo == "owner/myrepo"
     assert state.instructions == "do the thing"
 
 
@@ -145,7 +145,7 @@ def test_build_state_repo_defaults_to_empty(tmp_path: pathlib.Path) -> None:
             "session_dir": str(tmp_path / "artifacts"),
         }
     )
-    assert state.repo == ""
+    assert state.artifacts.read("env").repo == ""
     assert state.instructions == ""
 
 

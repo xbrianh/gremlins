@@ -178,6 +178,7 @@ async def run_pipeline(
 
     logger.info("session: %s", session_dir)
 
+    gh_repo = get_repo() if gh else ""
     try:
         gremlin = Gremlin.initialize_with_runtime(
             gremlin_id=gremlin_id,
@@ -199,6 +200,7 @@ async def run_pipeline(
             setup_kind=setup_kind,
             client_label=args.client or "",
             test_client=client,
+            repo=gh_repo,
         )
         gremlin.validate_resume_target()
     except ValueError as exc:
@@ -214,7 +216,6 @@ async def run_pipeline(
     _apply_policy_to_stages(gremlin.stages, policy)
 
     if gh:
-        gremlin.repo = get_repo()
         gremlin.state_file = resolve_state_file(gremlin_id)
 
     _stage_clients = _unique_clients(gremlin.stages)

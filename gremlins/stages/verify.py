@@ -6,6 +6,7 @@ import logging
 import pathlib
 from typing import Any
 
+from gremlins.artifacts.registry import MissingArtifact
 from gremlins.executor.state import State
 from gremlins.stages.agent_runner import run_agent
 from gremlins.stages.base import Stage
@@ -15,6 +16,13 @@ from gremlins.stages.outcome import Done, Outcome
 from gremlins.utils import git as _git_mod
 
 logger = logging.getLogger(__name__)
+
+
+def _read_repo(state: State) -> str:
+    try:
+        return state.artifacts.read("env").repo or ""
+    except (MissingArtifact, AttributeError):
+        return ""
 
 
 def _diff_text(cwd: pathlib.Path) -> str:
@@ -42,7 +50,7 @@ class VerifyFix(Stage):
         if not log_path.exists():
             return Done()
         log_text = log_path.read_text(encoding="utf-8")
-        diff = _diff_text(state.cwd)
+        diff = _diff_text(pathlib.Path(state.artifacts.read("env").cwd))
         template = "\n\n".join(self.prompts).rstrip()
         fix_prompt = template.format(
             commands_section=self._commands_section,
@@ -68,7 +76,7 @@ class Verify(Stage):
 
     async def run(self, state: State) -> Outcome:
         options = dict(self.options)
-        if not state.repo:
+        if not _read_repo(state):
             cmds_arg = getattr(state.args, "cmds", None)
             if cmds_arg is not None:
                 options["cmds"] = cmds_arg

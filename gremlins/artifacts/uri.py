@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 
-_BUILTIN_SCHEMES: frozenset[str] = frozenset({"file", "git", "gh"})
+_BUILTIN_SCHEMES: frozenset[str] = frozenset({"file", "git", "gh", "env"})
 
 
 @dataclasses.dataclass(frozen=True)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import pathlib
 import time
 from collections.abc import Callable
 from typing import Any
@@ -257,7 +258,7 @@ class _CIFixStage(Stage):
         self._fix_sha[0] = (
             self._fix_sha_getter()
             if self._fix_sha_getter is not None
-            else head_sha(cwd=state.cwd)
+            else head_sha(cwd=pathlib.Path(state.artifacts.read("env").cwd))
         )
         return Done()
 
