@@ -237,7 +237,9 @@ def _resolve_placeholder(key: str, ctx: dict[str, Any]) -> Any:
 
 def _substitute_recipe(node: Any, ctx: dict[str, Any]) -> Any:
     if isinstance(node, dict):
-        return {k: _substitute_recipe(v, ctx) for k, v in cast(dict[str, Any], node).items()}
+        return {
+            k: _substitute_recipe(v, ctx) for k, v in cast(dict[str, Any], node).items()
+        }
     if isinstance(node, list):
         out: list[Any] = []
         for item in cast(list[Any], node):
