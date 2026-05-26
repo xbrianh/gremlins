@@ -12,7 +12,7 @@ from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.outcome import Bail, Done, Outcome
 
 
-class _Passthrough(dict):
+class _Passthrough(dict[str, str]):
     """format_map helper: unknown {key} passes through unchanged."""
 
     def __missing__(self, key: str) -> str:

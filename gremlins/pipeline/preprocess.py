@@ -232,7 +232,7 @@ def _expand_stage_def(
                     if key in call_site:
                         inner[key] = call_site[key]
                 if "prompt" in call_site:
-                    recipe_prompts: list[Any] = inner.get("prompt") or []
+                    recipe_prompts: Any = inner.get("prompt") or []
                     cs_prompts = call_site["prompt"]
                     if not isinstance(recipe_prompts, list):
                         recipe_prompts = [recipe_prompts] if recipe_prompts else []
