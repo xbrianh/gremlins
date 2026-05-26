@@ -53,6 +53,12 @@ class Exec(Stage):
         except ValueError as exc:
             raise Bail(f"exec {self.name}: {exc}") from exc
 
+        stage_subs = dict(
+            name=self.name,
+            model=state.stage_model or state.client.model,
+            session_dir=str(state.session_dir),
+        )
+
         pre_sha: str | None = None
         if any(v == "git://range" for v in self.out_map.values()):
             pre_sha = snapshot_head_before(
@@ -77,7 +83,9 @@ class Exec(Stage):
                     return NeedsFix(stdout_str + stderr_str, result.returncode)
                 raise Bail(f"exec {self.name}: exited {result.returncode}")
 
-        for key, uri_str in self.out_map.items():
+        for raw_key, raw_uri_str in self.out_map.items():
+            key = raw_key.format_map(stage_subs)
+            uri_str = raw_uri_str.format_map(stage_subs)
             if uri_str == "git://range":
                 if pre_sha is None:
                     raise RuntimeError(

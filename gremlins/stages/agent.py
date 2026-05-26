@@ -12,11 +12,23 @@ from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.outcome import Bail, Done, Outcome
 
 
+class _Passthrough(dict):
+    """format_map helper: unknown {key} passes through unchanged."""
+
+    def __missing__(self, key: str) -> str:
+        return "{" + key + "}"
+
+
 class Agent(Stage):
     """YAML type: agent.
 
     in:  var_name -> registry_key   (resolved content substituted into prompt)
     out: registry_key -> uri_string (bound before run, verified after)
+
+    Per-stage substitution vars available in prompts and out: URIs:
+      {name}        — this stage's name
+      {model}       — effective model (state.stage_model or state.client.model)
+      {session_dir} — absolute path to the session directory
     """
 
     type = "agent"
@@ -56,25 +68,33 @@ class Agent(Stage):
         return stage
 
     async def run(self, state: State) -> Outcome:
-        if self.in_map or self.out_map:
-            for key, uri_str in self.out_map.items():
-                state.artifacts.bind(key, Uri.parse(uri_str))
+        opts = dict(self.options)
+        raw_model = cast(str | None, opts.pop("model", None))
+
         try:
             subs = resolve_in_map(state.artifacts, self.in_map)
         except ValueError as exc:
             raise Bail(f"agent {self.name}: {exc}") from exc
+        subs.update(
+            name=self.name,
+            model=state.stage_model or state.client.model,
+            session_dir=str(state.session_dir),
+        )
+
+        out_map = {k.format_map(_Passthrough(subs)): v.format_map(_Passthrough(subs)) for k, v in self.out_map.items()}
+        for key, uri_str in out_map.items():
+            state.artifacts.bind(key, Uri.parse(uri_str))
 
         template = "\n\n".join(self.prompts).rstrip()
-        prompt = template.format(**subs) if subs else template
+        prompt = template.format_map(_Passthrough(subs))
 
         raw_path = state.session_dir / f"stream-{self.name}.jsonl"
-        opts = dict(self.options)
-        model = cast(str | None, opts.pop("model", None))
+        model = raw_model.format_map(_Passthrough(subs)) if raw_model else None
         await run_agent(
             state, prompt, label=self.name, raw_path=raw_path, model=model, **opts
         )
 
-        for key, uri_str in self.out_map.items():
+        for key, uri_str in out_map.items():
             uri = Uri.parse(uri_str)
             state.artifacts.resolver(uri.scheme).verify_produced(uri)
 
