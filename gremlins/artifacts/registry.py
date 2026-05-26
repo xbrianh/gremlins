@@ -10,7 +10,12 @@ from collections.abc import Iterable
 from typing import Any
 
 from gremlins.artifacts._protocol import SchemeResolver
-from gremlins.artifacts.schemes import EnvResolver, FileSessionResolver, GitHubResolver, GitResolver
+from gremlins.artifacts.schemes import (
+    EnvResolver,
+    FileSessionResolver,
+    GitHubResolver,
+    GitResolver,
+)
 from gremlins.artifacts.uri import Uri
 from gremlins.utils import git as git_utils
 

@@ -55,7 +55,9 @@ class Exec(Stage):
 
         pre_sha: str | None = None
         if any(v == "git://range" for v in self.out_map.values()):
-            pre_sha = snapshot_head_before(cwd=pathlib.Path(state.artifacts.read("cwd")))
+            pre_sha = snapshot_head_before(
+                cwd=pathlib.Path(state.artifacts.read("cwd"))
+            )
 
         cmds = [c.rstrip() for c in self.options.get("cmds", []) if c.strip()]
         stdout_str = ""

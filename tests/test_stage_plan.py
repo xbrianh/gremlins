@@ -16,8 +16,12 @@ from gremlins.executor.state import StateData, build_state
 from gremlins.stages.plan import Plan
 
 
-def _state(session_dir: pathlib.Path, client: FakeClaudeClient, *, repo: str = "") -> RuntimeState:
-    return build_state(data=StateData(), client=client, session_dir=session_dir, repo=repo)
+def _state(
+    session_dir: pathlib.Path, client: FakeClaudeClient, *, repo: str = ""
+) -> RuntimeState:
+    return build_state(
+        data=StateData(), client=client, session_dir=session_dir, repo=repo
+    )
 
 
 def _state_with_artifacts(

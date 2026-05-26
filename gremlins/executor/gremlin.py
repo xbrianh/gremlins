@@ -313,7 +313,12 @@ class Gremlin:
             self.registry = ArtifactRegistry(
                 session_dir=self.session_dir,
                 cwd=self.worktree_dir,
-                env_vars={"repo": self.repo, "cwd": str(self.worktree_dir) if self.worktree_dir is not None else ""},
+                env_vars={
+                    "repo": self.repo,
+                    "cwd": str(self.worktree_dir)
+                    if self.worktree_dir is not None
+                    else "",
+                },
             )
             if not self.registry.produced("spec"):
                 self.registry.bind("spec", Uri.parse("file://session/spec.md"))

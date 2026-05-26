@@ -612,10 +612,16 @@ def build_state(
         data=data,
         client=client,
         session_dir=session_dir,
-        artifacts=artifacts or ArtifactRegistry(
+        artifacts=artifacts
+        or ArtifactRegistry(
             session_dir=session_dir,
             cwd=worktree,
-            env_vars={"repo": repo, "cwd": str(worktree) if worktree is not None else str(_paths.project_root())},
+            env_vars={
+                "repo": repo,
+                "cwd": str(worktree)
+                if worktree is not None
+                else str(_paths.project_root()),
+            },
         ),
         engine_ctx=engine_ctx
         or EngineContext(
