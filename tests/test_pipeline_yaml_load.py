@@ -114,10 +114,13 @@ def test_pipeline_name_optional_defaults_to_type(tmp_path: pathlib.Path) -> None
         tmp_path,
         """\
         default_client: claude:sonnet
+        prompts:
+          fix: |
+            Fix the issue.
         stages:
           - { type: plan }
           - { type: agent, prompt: [] }
-          - { type: verify, options: { cmds: ['true'] } }
+          - { type: verify, options: { cmds: ['true'] }, prompt: fix }
         """,
     )
     pipeline = Pipeline.from_yaml(p)

@@ -1,5 +1,6 @@
 required-options:
   - cmds
+required-prompt: true
 
 stages:
   - name: verify
@@ -11,6 +12,7 @@ stages:
         out:
           verify_log: "file://session/exec-{name}.log"
         options:
+          cmds: "{{options.cmds}}"
           on_fail: needs_fix
       - name: verify-diff
         type: exec
@@ -21,6 +23,8 @@ stages:
             - 'git diff HEAD > "{session_dir}/verify-diff.txt"; [ -s "{session_dir}/verify-diff.txt" ] || printf "(no uncommitted changes)\n" > "{session_dir}/verify-diff.txt"'
       - name: fix
         type: agent
+        prompt:
+          - "{{prompt}}"
         in:
           verify_output: verify_log
           diff_text: verify_diff

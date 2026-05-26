@@ -224,28 +224,40 @@ def _expand_entry(
     return [entry]
 
 
-def _merge_loop_body(
-    body: list[dict[str, Any]],
-    cs_opts: dict[str, Any],
-    cs_prompts: list[Any],
-) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    for stage in body:
-        stage = dict(stage)
-        if stage.get("type") == "agent":
-            if cs_prompts:
-                _bp: Any = stage.get("prompt") or []
-                existing: list[Any] = cast(
-                    list[Any],
-                    _bp if isinstance(_bp, list) else ([_bp] if _bp else []),
-                )
-                stage["prompt"] = cs_prompts + existing
-        else:
-            if cs_opts:
-                b_opts = dict(cast(dict[str, Any], stage.get("options") or {}))
-                stage["options"] = {**cs_opts, **b_opts}
-        result.append(stage)
-    return result
+def _resolve_placeholder(key: str, ctx: dict[str, Any]) -> Any:
+    val: Any = ctx
+    for part in key.split("."):
+        if not isinstance(val, dict) or part not in val:
+            raise ValueError(f"placeholder {{{{{key}}}}}: key {part!r} not found in context")
+        val = val[part]
+    return val
+
+
+def _substitute_recipe(node: Any, ctx: dict[str, Any]) -> Any:
+    if isinstance(node, dict):
+        return {k: _substitute_recipe(v, ctx) for k, v in node.items()}
+    if isinstance(node, list):
+        out: list[Any] = []
+        for item in node:
+            if (
+                isinstance(item, str)
+                and item.startswith("{{")
+                and item.endswith("}}")
+                and item.count("{{") == 1
+            ):
+                resolved = _resolve_placeholder(item[2:-2].strip(), ctx)
+                if isinstance(resolved, list):
+                    out.extend(resolved)
+                else:
+                    out.append(resolved)
+            else:
+                out.append(_substitute_recipe(item, ctx))
+        return out
+    if isinstance(node, str):
+        if node.startswith("{{") and node.endswith("}}") and node.count("{{") == 1:
+            return _resolve_placeholder(node[2:-2].strip(), ctx)
+        return node
+    return node
 
 
 def _expand_stage_def(
@@ -285,34 +297,29 @@ def _expand_stage_def(
                 raise ValueError(
                     f"stage {stage_display!r}: required option {opt!r} is missing or empty"
                 )
+        if definition.get("required-prompt") and "prompt" not in call_site:
+            stage_display = call_site.get("name") or def_name
+            raise ValueError(f"stage {stage_display!r}: required prompt is missing")
+        cs_prompts: list[Any] = (
+            _read_prompts(call_site["prompt"], prompt_dir, named_prompts)
+            if "prompt" in call_site
+            else []
+        )
+        ctx: dict[str, Any] = {"options": cs_opts, "prompt": cs_prompts}
+        substituted = [
+            cast(dict[str, Any], _substitute_recipe(s, ctx)) for s in inner_list
+        ]
         result: list[dict[str, Any]] = []
-        for i, raw_inner in enumerate(inner_list):
+        for i, raw_inner in enumerate(substituted):
             inner = dict(raw_inner)
-            if cs_opts:
-                inner_opts = dict(cast(dict[str, Any], inner.get("options") or {}))
-                inner["options"] = {**cs_opts, **inner_opts}
-            cs_prompts: list[Any] = []
             if i == 0:
                 for key in ("name", "client"):
                     if key in call_site:
                         inner[key] = call_site[key]
-                if "prompt" in call_site:
-                    recipe_prompts: Any = inner.get("prompt") or []
-                    cs_prompts_raw = call_site["prompt"]
-                    if not isinstance(recipe_prompts, list):
-                        recipe_prompts = [recipe_prompts] if recipe_prompts else []
-                    if not isinstance(cs_prompts_raw, list):
-                        cs_prompts_raw = [cs_prompts_raw]
-                    inner["prompt"] = cs_prompts_raw + recipe_prompts
-                    cs_prompts = cast(list[Any], cs_prompts_raw)
                 if "in" in call_site:
                     merged_in = dict(cast(dict[str, Any], inner.get("in") or {}))
                     merged_in.update(cast(dict[str, Any], call_site["in"]))
                     inner["in"] = merged_in
-            if inner.get("type") == "loop" and isinstance(inner.get("body"), list):
-                inner["body"] = _merge_loop_body(
-                    cast(list[dict[str, Any]], inner["body"]), cs_opts, cs_prompts
-                )
             if i == last_idx and "out" in call_site:
                 if "out" in inner:
                     raise ValueError(
