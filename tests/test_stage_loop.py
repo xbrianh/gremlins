@@ -446,6 +446,34 @@ def test_loop_patches_loop_iteration_to_state(tmp_path, make_state_dir):
     assert seen_iterations == [1, 2, 3]
 
 
+def test_loop_unbinds_out_keys_between_iterations(tmp_path):
+    """out_map keys are unbound at iteration start so exec can rebind without override."""
+    from gremlins.artifacts.uri import Uri
+    from gremlins.stages.exec import Exec
+
+    (tmp_path / "artifacts").mkdir(exist_ok=True)
+    state = _loop_state(tmp_path)
+
+    bound_count = [0]
+
+    async def binder() -> Done | NeedsFix:
+        state.artifacts.bind("loop-out", Uri.parse("file://session/out.txt"))
+        bound_count[0] += 1
+        if bound_count[0] < 2:
+            return NeedsFix("go again")
+        return Done()
+
+    exec_stage = Exec("stage", {}, out_map={"loop-out": "file://session/out.txt"})
+    loop = LoopStage(
+        "loop",
+        body=[exec_stage],
+        body_runners=[binder],
+        max_iterations=3,
+    )
+    asyncio.run(loop.run(state))
+    assert bound_count[0] == 2
+
+
 def test_pr_stack_iter2_detaches_to_iter1_branch(tmp_path, make_state_dir, monkeypatch):
     """Detach fires at start of iter2 using the artifact written during iter1."""
     gremlin_id = "pr-stack-two-iter"
