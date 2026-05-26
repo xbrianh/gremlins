@@ -13,7 +13,7 @@ prompts:
 # Use when reviewer comments on an existing PR need another pass.
 
 stages:
-  - { type: github-address-pull-request-reviews, prompt: [code-style, terse, gremlins:github_address_pull_request_reviews.md, gremlins:bail_section.md] }
+  - { name: github-address-pull-request-reviews, type: agent, in: {pr: pr}, prompt: [code-style, terse, gremlins:github_address_pull_request_reviews.md, gremlins:bail_section.md] }
   - type: exec
     options:
       cmds:
