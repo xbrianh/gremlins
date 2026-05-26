@@ -270,7 +270,7 @@ def _expand_stage_def(
                 # Propagate call-site options into loop body exec stages (body stage's own options win).
                 # Agent stages are intentionally excluded — they don't consume exec options like cmds.
                 if inner.get("type") == "loop" and isinstance(inner.get("body"), list):
-                    new_body = []
+                    new_body: list[dict[str, Any]] = []
                     for body_stage in cast(list[dict[str, Any]], inner["body"]):
                         if body_stage.get("type") == "agent":
                             new_body.append(body_stage)
@@ -298,17 +298,21 @@ def _expand_stage_def(
                     if inner.get("type") == "loop" and isinstance(
                         inner.get("body"), list
                     ):
-                        cs_prompts_for_body = cs_prompts
-                        new_body = []
+                        cs_prompts_for_body: list[Any] = cast(list[Any], cs_prompts)
+                        new_body2: list[dict[str, Any]] = []
                         for body_stage in cast(list[dict[str, Any]], inner["body"]):
                             if body_stage.get("type") == "agent":
                                 body_stage = dict(body_stage)
-                                bp = body_stage.get("prompt") or []
-                                if not isinstance(bp, list):
-                                    bp = [bp] if bp else []
+                                _bp: Any = body_stage.get("prompt") or []
+                                bp: list[Any] = cast(
+                                    list[Any],
+                                    _bp
+                                    if isinstance(_bp, list)
+                                    else ([_bp] if _bp else []),
+                                )
                                 body_stage["prompt"] = cs_prompts_for_body + bp
-                            new_body.append(body_stage)
-                        inner["body"] = new_body
+                            new_body2.append(body_stage)
+                        inner["body"] = new_body2
                 if "in" in call_site:
                     merged_in = dict(cast(dict[str, Any], inner.get("in") or {}))
                     merged_in.update(cast(dict[str, Any], call_site["in"]))
