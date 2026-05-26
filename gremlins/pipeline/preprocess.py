@@ -231,16 +231,16 @@ def _resolve_placeholder(key: str, ctx: dict[str, Any]) -> Any:
             raise ValueError(
                 f"placeholder {{{{{key}}}}}: key {part!r} not found in context"
             )
-        val = val[part]
+        val = cast(dict[str, Any], val)[part]
     return val
 
 
 def _substitute_recipe(node: Any, ctx: dict[str, Any]) -> Any:
     if isinstance(node, dict):
-        return {k: _substitute_recipe(v, ctx) for k, v in node.items()}
+        return {k: _substitute_recipe(v, ctx) for k, v in cast(dict[str, Any], node).items()}
     if isinstance(node, list):
         out: list[Any] = []
-        for item in node:
+        for item in cast(list[Any], node):
             if (
                 isinstance(item, str)
                 and item.startswith("{{")
@@ -249,7 +249,7 @@ def _substitute_recipe(node: Any, ctx: dict[str, Any]) -> Any:
             ):
                 resolved = _resolve_placeholder(item[2:-2].strip(), ctx)
                 if isinstance(resolved, list):
-                    out.extend(resolved)
+                    out.extend(cast(list[Any], resolved))
                 else:
                     out.append(resolved)
             else:
