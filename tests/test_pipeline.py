@@ -77,7 +77,6 @@ def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
     assert "implement" in stage_names
     assert "plan" in STAGE_TYPES
     assert "github-open-pull-request" in STAGE_TYPES
-    assert "github-request-copilot-review" in STAGE_TYPES
     assert "github-wait-ci" in STAGE_TYPES
     assert "github-wait-copilot" in STAGE_TYPES
 
@@ -324,7 +323,6 @@ def test_stage_builders_registry_covers_all_known_types() -> None:
         "plan",
         "verify",
         "github-open-pull-request",
-        "github-request-copilot-review",
         "github-wait-copilot",
         "github-wait-ci",
         "review-code",
