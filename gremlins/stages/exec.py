@@ -10,6 +10,7 @@ from gremlins.artifacts.resolve import resolve_in_map
 from gremlins.artifacts.schemes import GitHubResolver, snapshot_head_before
 from gremlins.artifacts.uri import Uri
 from gremlins.executor.state import State
+from gremlins.stages._passthrough import Passthrough as _Passthrough
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, NeedsFix, Outcome
 from gremlins.utils import proc as _proc
@@ -83,9 +84,10 @@ class Exec(Stage):
                     return NeedsFix(stdout_str + stderr_str, result.returncode)
                 raise Bail(f"exec {self.name}: exited {result.returncode}")
 
+        _pt = _Passthrough(stage_subs)
         for raw_key, raw_uri_str in self.out_map.items():
-            key = raw_key.format_map(stage_subs)
-            uri_str = raw_uri_str.format_map(stage_subs)
+            key = raw_key.format_map(_pt)
+            uri_str = raw_uri_str.format_map(_pt)
             if uri_str == "git://range":
                 if pre_sha is None:
                     raise RuntimeError(

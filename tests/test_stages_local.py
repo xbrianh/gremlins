@@ -124,13 +124,7 @@ def test_plan_stage_succeeds_when_file_exists(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _make_review_code_stage(
-    client: ReviewCreatingClient,
-    session_dir,
-    *,
-    model: str = "sonnet",
-    gremlin_id=None,
-) -> Agent:
+def _make_review_code_stage(client: ReviewCreatingClient) -> Agent:
     return Agent(
         "review-code",
         [
@@ -175,7 +169,7 @@ def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
     worktree.mkdir()
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    stage = _make_review_code_stage(client, session_dir)
+    stage = _make_review_code_stage(client)
     state = build_state(
         data=StateData(),
         client=client,

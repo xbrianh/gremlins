@@ -238,12 +238,18 @@ def _expand_stage_def(
                         recipe_prompts = [recipe_prompts] if recipe_prompts else []
                     if not isinstance(cs_prompts, list):
                         cs_prompts = [cs_prompts]
-                    inner["prompt"] = recipe_prompts + cs_prompts
+                    # Call-site prompts first so recipe's closing instructions remain last.
+                    inner["prompt"] = cs_prompts + recipe_prompts
                 if "in" in call_site:
                     merged_in = dict(cast(dict[str, Any], inner.get("in") or {}))
                     merged_in.update(cast(dict[str, Any], call_site["in"]))
                     inner["in"] = merged_in
             if i == last_idx and "out" in call_site:
+                if "out" in inner:
+                    raise ValueError(
+                        f"stage-definition {def_name!r}: inner stage {i} declares 'out:'; "
+                        "call-site must not also declare 'out:'"
+                    )
                 inner["out"] = call_site["out"]
             result.extend(
                 _expand_entry(
@@ -314,7 +320,8 @@ def _read_prompts(
                 )
             texts.append(_read_prompt_file((BUNDLED_PROMPT_DIR / name).resolve()))
         elif "\n" in p:
-            # Inline text (YAML block scalar) — not a file reference.
+            # Inline text. YAML block scalars always include a trailing \n,
+            # so this heuristic is reliable for recipe-sourced content.
             texts.append(p)
         else:
             path = (prompt_dir / p).resolve()
