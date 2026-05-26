@@ -92,29 +92,11 @@ class LoopStage(Stage):
         )
         pr_stack: bool = bool(options.get("pr_stack", False))
 
-        raw_prompt: list[Any] = []
-        if "prompt" in d:
-            p = d["prompt"]
-            raw_prompt = (
-                cast(list[Any], p) if isinstance(p, list) else ([p] if p else [])
-            )
-
         raw_children: object = d.get("body") or []
         if not isinstance(raw_children, list):
             raise ValueError(f"stage {name!r}: 'body' must be a list")
 
-        processed_children: list[dict[str, Any]] = []
-        for child_d in cast(list[dict[str, Any]], raw_children):
-            if raw_prompt and child_d.get("type") == "agent":
-                child_d = dict(child_d)
-                _ep: Any = child_d.get("prompt") or []
-                existing: list[Any] = cast(
-                    list[Any], _ep if isinstance(_ep, list) else ([_ep] if _ep else [])
-                )
-                child_d["prompt"] = raw_prompt + existing
-            processed_children.append(child_d)
-
-        body = parse_stages(processed_children, depth=depth)
+        body = parse_stages(cast(list[dict[str, Any]], raw_children), depth=depth)
         on_iter = detach_to_pr_base if pr_stack else None
         stage = cls(
             name,

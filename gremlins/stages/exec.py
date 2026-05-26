@@ -17,6 +17,7 @@ from gremlins.stages.outcome import Bail, Done, NeedsFix, Outcome
 from gremlins.utils import proc as _proc
 
 _CMD_SUB = re.compile(r"\{(\w+)\}")
+_FRAMEWORK_KEYS = frozenset(["name", "model", "session_dir", "repo", "cwd"])
 
 
 class Exec(Stage):
@@ -44,7 +45,6 @@ class Exec(Stage):
             raise ValueError(f"stage {name!r}: 'in' must be a mapping")
         if not isinstance(raw_out, dict):
             raise ValueError(f"stage {name!r}: 'out' must be a mapping")
-        _FRAMEWORK_KEYS = frozenset(["name", "model", "session_dir", "repo", "cwd"])
         for k in cast(dict[str, Any], d.get("options") or {}):
             if k in _FRAMEWORK_KEYS:
                 raise ValueError(

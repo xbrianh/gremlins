@@ -224,6 +224,30 @@ def _expand_entry(
     return [entry]
 
 
+def _merge_loop_body(
+    body: list[dict[str, Any]],
+    cs_opts: dict[str, Any],
+    cs_prompts: list[Any],
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for stage in body:
+        stage = dict(stage)
+        if stage.get("type") == "agent":
+            if cs_prompts:
+                _bp: Any = stage.get("prompt") or []
+                existing: list[Any] = cast(
+                    list[Any],
+                    _bp if isinstance(_bp, list) else ([_bp] if _bp else []),
+                )
+                stage["prompt"] = cs_prompts + existing
+        else:
+            if cs_opts:
+                b_opts = dict(cast(dict[str, Any], stage.get("options") or {}))
+                stage["options"] = {**cs_opts, **b_opts}
+        result.append(stage)
+    return result
+
+
 def _expand_stage_def(
     call_site: dict[str, Any],
     def_name: str,
@@ -256,7 +280,7 @@ def _expand_stage_def(
         cs_opts = dict(cast(dict[str, Any], call_site.get("options") or {}))
         for opt in required_opts:
             val = cs_opts.get(opt)
-            if not val:
+            if val is None or val == []:
                 stage_display = call_site.get("name") or def_name
                 raise ValueError(
                     f"stage {stage_display!r}: required option {opt!r} is missing or empty"
@@ -267,56 +291,28 @@ def _expand_stage_def(
             if cs_opts:
                 inner_opts = dict(cast(dict[str, Any], inner.get("options") or {}))
                 inner["options"] = {**cs_opts, **inner_opts}
-                # Propagate call-site options into loop body exec stages (body stage's own options win).
-                # Agent stages are intentionally excluded — they don't consume exec options like cmds.
-                if inner.get("type") == "loop" and isinstance(inner.get("body"), list):
-                    new_body: list[dict[str, Any]] = []
-                    for body_stage in cast(list[dict[str, Any]], inner["body"]):
-                        if body_stage.get("type") == "agent":
-                            new_body.append(body_stage)
-                            continue
-                        body_stage = dict(body_stage)
-                        b_opts = dict(
-                            cast(dict[str, Any], body_stage.get("options") or {})
-                        )
-                        body_stage["options"] = {**cs_opts, **b_opts}
-                        new_body.append(body_stage)
-                    inner["body"] = new_body
+            cs_prompts: list[Any] = []
             if i == 0:
                 for key in ("name", "client"):
                     if key in call_site:
                         inner[key] = call_site[key]
                 if "prompt" in call_site:
                     recipe_prompts: Any = inner.get("prompt") or []
-                    cs_prompts = call_site["prompt"]
+                    cs_prompts_raw = call_site["prompt"]
                     if not isinstance(recipe_prompts, list):
                         recipe_prompts = [recipe_prompts] if recipe_prompts else []
-                    if not isinstance(cs_prompts, list):
-                        cs_prompts = [cs_prompts]
-                    # Call-site prompts first so recipe's closing instructions remain last.
-                    inner["prompt"] = cs_prompts + recipe_prompts
-                    if inner.get("type") == "loop" and isinstance(
-                        inner.get("body"), list
-                    ):
-                        cs_prompts_for_body: list[Any] = cast(list[Any], cs_prompts)
-                        new_body2: list[dict[str, Any]] = []
-                        for body_stage in cast(list[dict[str, Any]], inner["body"]):
-                            if body_stage.get("type") == "agent":
-                                body_stage = dict(body_stage)
-                                _bp: Any = body_stage.get("prompt") or []
-                                bp: list[Any] = cast(
-                                    list[Any],
-                                    _bp
-                                    if isinstance(_bp, list)
-                                    else ([_bp] if _bp else []),
-                                )
-                                body_stage["prompt"] = cs_prompts_for_body + bp
-                            new_body2.append(body_stage)
-                        inner["body"] = new_body2
+                    if not isinstance(cs_prompts_raw, list):
+                        cs_prompts_raw = [cs_prompts_raw]
+                    inner["prompt"] = cs_prompts_raw + recipe_prompts
+                    cs_prompts = cast(list[Any], cs_prompts_raw)
                 if "in" in call_site:
                     merged_in = dict(cast(dict[str, Any], inner.get("in") or {}))
                     merged_in.update(cast(dict[str, Any], call_site["in"]))
                     inner["in"] = merged_in
+            if inner.get("type") == "loop" and isinstance(inner.get("body"), list):
+                inner["body"] = _merge_loop_body(
+                    cast(list[dict[str, Any]], inner["body"]), cs_opts, cs_prompts
+                )
             if i == last_idx and "out" in call_site:
                 if "out" in inner:
                     raise ValueError(

@@ -12,6 +12,8 @@ from gremlins.stages.agent_runner import run_agent
 from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.outcome import Bail, Done, Outcome
 
+_FRAMEWORK_KEYS = frozenset(["name", "session_dir"])
+
 
 class Agent(Stage):
     """YAML type: agent.
@@ -54,7 +56,6 @@ class Agent(Stage):
             raise ValueError(f"stage {name!r}: 'in' must be a mapping")
         if not isinstance(raw_out, dict):
             raise ValueError(f"stage {name!r}: 'out' must be a mapping")
-        _FRAMEWORK_KEYS = frozenset(["name", "model", "session_dir"])
         for k in cast(dict[str, Any], d.get("options") or {}):
             if k in _FRAMEWORK_KEYS:
                 raise ValueError(
