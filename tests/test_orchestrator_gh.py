@@ -412,7 +412,7 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
+        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -467,7 +467,7 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
+        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -526,7 +526,7 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
+        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -589,7 +589,7 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
+        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -651,7 +651,7 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
+        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -722,7 +722,7 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
+        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -798,7 +798,7 @@ def test_resume_from_github_review_pull_request(tmp_path, monkeypatch):
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
+        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -898,7 +898,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
+        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -1039,7 +1039,7 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
+        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -1095,7 +1095,7 @@ def test_github_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
+        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -1175,7 +1175,7 @@ def test_github_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
+        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -1253,7 +1253,7 @@ def test_github_wait_ci_stage_ordering(tmp_path, monkeypatch):
         _async(lambda self, pipe: order.append("github-request-copilot-review")),
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
+        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: order.append("github-address-pull-request-reviews")),
     )
     monkeypatch.setattr(
@@ -1317,7 +1317,7 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
+        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(
             lambda self, pipe: earlier_called.append(
                 "github-address-pull-request-reviews"
@@ -1383,7 +1383,7 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
+        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -1468,7 +1468,7 @@ def test_resume_from_verify(tmp_path, monkeypatch):
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
+        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -1517,7 +1517,7 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch):
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
+        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -1578,7 +1578,7 @@ def test_gh_main_state_client_tracks_effective_model(
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
+        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -1664,7 +1664,7 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
+        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
@@ -1727,7 +1727,7 @@ def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(
-        "gremlins.stages.address_code.GitHubAddressPullRequestReviews.run",
+        "gremlins.stages.github_address_pull_request_reviews.GitHubAddressPullRequestReviews.run",
         _async(lambda self, pipe: None),
     )
     monkeypatch.setattr(

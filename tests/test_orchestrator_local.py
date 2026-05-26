@@ -358,7 +358,6 @@ def test_local_stage_inputs_instructions_reach_plan(
 
     monkeypatch.setattr(_plan_mod.Plan, "run", _capturing_plan_run)
 
-    from gremlins.stages import address_code as _ac_mod
     from gremlins.stages import agent as _agent_mod
     from gremlins.stages import exec as _exec_mod
     from gremlins.stages import review_code as _rc_mod
@@ -370,7 +369,6 @@ def test_local_stage_inputs_instructions_reach_plan(
     monkeypatch.setattr(_agent_mod.Agent, "run", _noop)
     monkeypatch.setattr(_exec_mod.Exec, "run", _noop)
     monkeypatch.setattr(_rc_mod.ReviewCode, "run", _noop)
-    monkeypatch.setattr(_ac_mod.AddressCode, "run", _noop)
     monkeypatch.setattr(_v_mod.Verify, "run", _noop)
 
     result = asyncio.run(
