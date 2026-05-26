@@ -10,6 +10,7 @@ import shutil
 import sys
 from typing import Any
 
+from gremlins.artifacts.registry import MissingArtifact
 from gremlins.artifacts.uri import Uri
 from gremlins.errors import die
 from gremlins.executor.state import State
@@ -25,6 +26,13 @@ logger = logging.getLogger(__name__)
 
 def _fmt_escape(s: str) -> str:
     return s.replace("{", "{{").replace("}", "}}")
+
+
+def _read_repo(state: State) -> str:
+    try:
+        return state.artifacts.read("repo") or ""
+    except MissingArtifact:
+        return ""
 
 
 class Plan(Stage):
@@ -97,7 +105,7 @@ class Plan(Stage):
         return Done()
 
     async def _run_agent(self, plan_md: pathlib.Path, state: State) -> None:
-        repo = state.artifacts.read("repo")
+        repo = _read_repo(state)
         if repo:
             base_ref_name = (
                 state.artifacts.resolve("base_ref").path.removeprefix("ref/")
@@ -156,7 +164,7 @@ class Plan(Stage):
             sys.stderr.write(f"error: --plan: file is empty: {path}\n")
             sys.stderr.flush()
             sys.exit(1)
-        if not state.artifacts.read("repo"):
+        if not _read_repo(state):
             shutil.copyfile(src, plan_md)
             return
         logger.info(
@@ -173,7 +181,7 @@ class Plan(Stage):
     def _resolve_issue_source(
         self, ref: str, plan_md: pathlib.Path, state: State
     ) -> None:
-        repo = state.artifacts.read("repo")
+        repo = _read_repo(state)
         target_repo, issue_ref = parse_issue_ref(ref, repo or "")
         if issue_ref is None:
             sys.stderr.write(
@@ -245,7 +253,7 @@ class Plan(Stage):
 
 async def _post_file_as_github_issue(path: str, state: State) -> tuple[str, str]:
     """Post a local file as a GitHub issue. Returns (issue_url, issue_title)."""
-    repo = state.artifacts.read("repo")
+    repo = _read_repo(state)
     issue_body = pathlib.Path(path).read_text(encoding="utf-8")
     title_prompt = (
         "Produce a concise GitHub issue title (under 80 characters) "
