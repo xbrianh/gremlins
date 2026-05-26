@@ -308,7 +308,9 @@ def _expand_stage_def(
         )
         if definition.get("required-prompt") and not cs_prompts:
             stage_display = call_site.get("name") or def_name
-            raise ValueError(f"stage {stage_display!r}: required prompt is missing or empty")
+            raise ValueError(
+                f"stage {stage_display!r}: required prompt is missing or empty"
+            )
         ctx: dict[str, Any] = {"options": cs_opts, "prompt": cs_prompts}
         substituted = [
             cast(dict[str, Any], _substitute_recipe(s, ctx)) for s in inner_list
