@@ -282,7 +282,7 @@ def _build_child_spec_dict(
         "child_key": child_key,
         "attempt": attempt,
         "parent_stage": child_st.parent_stage,
-        "repo": child_st.artifacts.read("repo"),
+        "repo": child_st.artifacts.read("env").repo,
         "instructions": child_st.instructions,
         "test_client": str(child_st.test_client) if child_st.test_client else None,
         "stage_model": child_st.stage_model,

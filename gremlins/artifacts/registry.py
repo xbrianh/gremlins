@@ -6,7 +6,7 @@ import json
 import os
 import pathlib
 import secrets
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from gremlins.artifacts._protocol import SchemeResolver
@@ -39,7 +39,7 @@ class ArtifactRegistry:
         self,
         session_dir: pathlib.Path,
         cwd: pathlib.Path | None = None,
-        env_vars: dict[str, str] | None = None,
+        resolvers: Mapping[str, SchemeResolver] | None = None,
     ) -> None:
         self._cwd = cwd
         self.registry_path = session_dir.parent / "registry.json"
@@ -48,7 +48,8 @@ class ArtifactRegistry:
             "file": FileSessionResolver(session_dir),
             "git": GitResolver(cwd),
             "gh": GitHubResolver(cwd),
-            "env": EnvResolver(env_vars or {}),
+            "env": EnvResolver({}),
+            **(resolvers or {}),
         }
         if self.registry_path.exists():
             data = json.loads(self.registry_path.read_text(encoding="utf-8"))
@@ -73,16 +74,7 @@ class ArtifactRegistry:
             raise MissingArtifact(key) from None
 
     def read(self, key: str) -> Any:
-        try:
-            uri = self.resolve(key)
-        except MissingArtifact:
-            env_res = self._resolvers.get("env")
-            if env_res is not None:
-                try:
-                    return env_res.read(Uri.parse(f"env://{key}"))
-                except KeyError:
-                    pass
-            raise
+        uri = self.resolve(key)
         return self._resolvers[uri.scheme].read(uri)
 
     def produced(self, key: str) -> bool:

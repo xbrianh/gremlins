@@ -56,7 +56,7 @@ class Exec(Stage):
         pre_sha: str | None = None
         if any(v == "git://range" for v in self.out_map.values()):
             pre_sha = snapshot_head_before(
-                cwd=pathlib.Path(state.artifacts.read("cwd"))
+                cwd=pathlib.Path(state.artifacts.read("env").cwd)
             )
 
         cmds = [c.rstrip() for c in self.options.get("cmds", []) if c.strip()]
@@ -65,7 +65,7 @@ class Exec(Stage):
         if cmds:
             result = await _proc.run_shell_async(
                 " && ".join(cmds),
-                cwd=pathlib.Path(state.artifacts.read("cwd")),
+                cwd=pathlib.Path(state.artifacts.read("env").cwd),
                 env={**os.environ, **extra_env},
             )
             stdout_str = result.stdout

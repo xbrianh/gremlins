@@ -30,8 +30,8 @@ def _fmt_escape(s: str) -> str:
 
 def _read_repo(state: State) -> str:
     try:
-        return state.artifacts.read("repo") or ""
-    except MissingArtifact:
+        return state.artifacts.read("env").repo or ""
+    except (MissingArtifact, AttributeError):
         return ""
 
 

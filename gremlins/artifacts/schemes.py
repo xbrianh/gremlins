@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import pathlib
 import re
+import types
 from typing import Any
 
 from gremlins.artifacts.uri import Uri
@@ -145,11 +146,8 @@ class EnvResolver:
     def __init__(self, values: dict[str, str]) -> None:
         self._values = values
 
-    def read(self, uri: Uri) -> str:
-        key = uri.path
-        if key not in self._values:
-            raise KeyError(f"env://{key!r} not set")
-        return self._values[key]
+    def read(self, uri: Uri) -> types.SimpleNamespace:  # noqa: ARG002
+        return types.SimpleNamespace(**self._values)
 
-    def verify_produced(self, uri: Uri) -> None:
+    def verify_produced(self, uri: Uri) -> None:  # noqa: ARG002
         pass

@@ -12,6 +12,7 @@ prompts:
 stage-definitions:
   implement: gremlins:implement
   github-push-to-pr-branch: gremlins:github_push_to_pr_branch
+  github-request-copilot-review: gremlins:github_request_copilot_review
 
 stages:
   - { type: plan,      prompt: [code-style, gremlins:plan_gh.md] }

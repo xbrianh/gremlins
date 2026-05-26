@@ -3,7 +3,7 @@ stages:
     type: exec
     in:
       pr_number: pr.number
-      repo: repo
+      repo: env.repo
     options:
       cmds:
         - 'gh pr edit "$pr_number" --repo "$repo" --add-reviewer copilot-pull-request-reviewer'
