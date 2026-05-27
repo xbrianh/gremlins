@@ -1161,6 +1161,10 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
     ci_stages = []
 
     monkeypatch.setattr(
+        "gremlins.stages.loop.LoopStage.run",
+        _async(lambda self, pipe: earlier_called.append(self.name)),
+    )
+    monkeypatch.setattr(
         "gremlins.stages.github_wait_ci.GitHubWaitCI.run",
         _async(lambda self, pipe: ci_stages.append(self)),
     )
