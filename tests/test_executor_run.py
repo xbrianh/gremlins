@@ -28,7 +28,9 @@ def _restore_signals():
         signal.signal(s, h)
 
 
-@pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT])
+@pytest.mark.parametrize(
+    "sig", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT]
+)
 def test_signal_handler_reaps_and_redelivers(sig):
     client = _TrackingClient()
     _install_signal_handlers([client], gremlin_id=None)
