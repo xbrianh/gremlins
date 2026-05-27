@@ -8,7 +8,7 @@ from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.discovery import resolve_pipeline_name, resolve_pipeline_path
 from gremlins.pipeline.loader import STAGE_TYPES
 from gremlins.stages.base import Stage
-from gremlins.stages.github_wait_copilot import GitHubWaitCopilot
+from gremlins.stages.github_wait_ci import GitHubWaitCI
 from gremlins.stages.loop import LoopStage
 from gremlins.stages.parallel import ParallelStage
 from gremlins.stages.plan import Plan
@@ -76,7 +76,6 @@ def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
     assert "implement" in stage_names
     assert "plan" in STAGE_TYPES
     assert "github-wait-ci" in STAGE_TYPES
-    assert "github-wait-copilot" in STAGE_TYPES
 
 
 # ---------------------------------------------------------------------------
@@ -280,8 +279,8 @@ def test_parallel_expansion_in_constructor(tmp_path: pathlib.Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _gh_stage(name: str = "gh-wait") -> GitHubWaitCopilot:
-    return GitHubWaitCopilot(name, [], {})
+def _gh_stage(name: str = "gh-wait") -> GitHubWaitCI:
+    return GitHubWaitCI(name, [], {})
 
 
 def _local_stage(name: str = "plan") -> Plan:
@@ -320,7 +319,6 @@ def test_stage_builders_registry_covers_all_known_types() -> None:
     expected = {
         "plan",
         "loop",
-        "github-wait-copilot",
         "github-wait-ci",
         "handoff",
         "parallel",
