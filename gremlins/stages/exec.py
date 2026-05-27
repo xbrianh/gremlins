@@ -19,7 +19,7 @@ from gremlins.utils import proc as _proc
 
 _CMD_SUB = re.compile(r"\{(\w+)\}")
 _READ_SUB = re.compile(r"\{read:([-\w]+)\}")
-_FRAMEWORK_KEYS = frozenset(["name", "model", "session_dir", "repo", "cwd"])
+_FRAMEWORK_KEYS = frozenset(["name", "model", "session_dir", "repo", "cwd", "base_ref"])
 
 
 def _sub_reads(s: str, artifacts: ArtifactRegistry) -> str:
@@ -84,6 +84,7 @@ class Exec(Stage):
             session_dir=str(state.session_dir),
             repo=state.engine_ctx.repo,
             cwd=state.engine_ctx.cwd,
+            base_ref=state.engine_ctx.base_ref,
         )
         for k, v in self.options.items():
             if k not in subs and isinstance(v, str):

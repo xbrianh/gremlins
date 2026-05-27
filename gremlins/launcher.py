@@ -384,6 +384,7 @@ def _initial_state_data(inputs: _Inputs) -> StateData:
         stage="starting",
         pid=None,
         stage_inputs=inputs.stage_inputs,
+        base_ref_name=inputs.base_ref_name,
     )
 
 
@@ -539,8 +540,6 @@ def launch(
         registry = ArtifactRegistry(session_dir=session_dir)
         if inputs.pr_num:
             registry.bind("pr", Uri.parse(f"gh://pr/{inputs.pr_num}"))
-        if inputs.base_ref_name:
-            registry.bind("base_ref", Uri.parse(f"git://ref/{inputs.base_ref_name}"))
         if inputs.base_ref_sha:
             registry.bind("base_sha", Uri.parse(f"git://commit/{inputs.base_ref_sha}"))
         registry.bind("spec", Uri.parse("file://session/spec.md"))

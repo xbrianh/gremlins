@@ -155,6 +155,8 @@ async def run_pipeline(
         except Exception:
             logger.warning("failed to read base_sha from registry.json", exc_info=True)
 
+    base_ref = state_json.get("base_ref_name") or ""
+
     project_dir = pathlib.Path(project_root) if project_root else paths.project_root()
     try:
         _pipeline_preview = _PipelineData.from_yaml(
@@ -185,6 +187,7 @@ async def run_pipeline(
             worktree_dir=worktree_dir,
             project_root=project_root,
             base_ref_sha=base_ref_sha,
+            base_ref=base_ref,
             setup_kind=setup_kind,
             client_label=args.client or "",
             test_client=client,

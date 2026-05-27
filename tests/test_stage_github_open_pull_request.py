@@ -7,6 +7,7 @@ import dataclasses
 import pathlib
 from unittest.mock import patch
 
+from gremlins.artifacts.engine import EngineContext
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.schemes import PrInfo
 from gremlins.artifacts.uri import Uri
@@ -22,7 +23,7 @@ def _state(
     *,
     plan_issue: int | None = None,
     prev_pr_branch: str | None = None,
-    base_ref: str | None = None,
+    base_ref: str = "",
     loop_iteration: int = 1,
 ):
     session_dir = tmp_path / "artifacts"
@@ -30,8 +31,6 @@ def _state(
     registry = ArtifactRegistry(session_dir)
     if plan_issue is not None:
         registry.bind("plan", Uri.parse(f"gh://issue/{plan_issue}"))
-    if base_ref is not None:
-        registry.bind("base_ref", Uri.parse(f"git://ref/{base_ref}"))
     if prev_pr_branch is not None:
         registry.bind("pr", Uri.parse("gh://pr/1"))
         registry._resolvers["gh"].read = (  # type: ignore[attr-defined]
@@ -39,11 +38,15 @@ def _state(
                 url="https://github.com/x/r/pull/1", number=1, branch=_b
             )
         )
+    engine_ctx = EngineContext(
+        loop_iteration=loop_iteration, attempt="", current_scope=(), base_ref=base_ref
+    )
     return build_state(
         data=dataclasses.replace(StateData(), loop_iteration=loop_iteration),
         client=None,
         session_dir=session_dir,
         artifacts=registry,
+        engine_ctx=engine_ctx,
     )
 
 
