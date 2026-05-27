@@ -148,6 +148,7 @@ class StateData:
     permissions_file: str = ""
     group_name: str = ""
     child_key: str = ""
+    base_ref_name: str = ""
 
     @classmethod
     def load(cls, gremlin_id: str | None) -> StateData:
@@ -179,6 +180,7 @@ class StateData:
             permissions_file=sd.get("permissions_file") or "",
             group_name=sd.get("group_name") or "",
             child_key=sd.get("child_key") or "",
+            base_ref_name=sd.get("base_ref_name") or "",
         )
 
     def persist(self, state_dir: pathlib.Path) -> None:
@@ -209,6 +211,7 @@ class StateData:
             "permissions_file": self.permissions_file,
             "group_name": self.group_name,
             "child_key": self.child_key,
+            "base_ref_name": self.base_ref_name,
         }
         write_state(state_dir, data)
         self.state_file = state_dir / "state.json"
