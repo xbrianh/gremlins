@@ -66,18 +66,8 @@ def build_row(
         else:
             stage_disp = leader[:22]
 
-    rescue_count = state.get("rescue_count") or 0
-    try:
-        rescue_count = int(rescue_count)
-    except (ValueError, TypeError):
-        rescue_count = 0
-
     stage_trim = stage_disp[:22]
     live_trim = live[:28]
-    if rescue_count == 1:
-        live_trim = f"{live_trim} (rescue)"
-    elif rescue_count > 1:
-        live_trim = f"{live_trim} (rescue x{rescue_count})"
     closed = os.path.isfile(os.path.join(wdir, "closed"))
     if closed:
         desc_trim = desc[:51] + " [closed]"
