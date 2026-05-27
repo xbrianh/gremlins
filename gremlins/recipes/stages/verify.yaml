@@ -11,9 +11,17 @@ stages:
         type: exec
         out:
           verify_log: "file://session/exec-{name}.log"
+          status: "file://session/exec-{name}.status"
         options:
-          cmds: "{{options.cmds}}"
-          on_fail: needs_fix
+          cmds:
+            - "{{options.cmds}}"
+            - |
+              _rc=$?
+              case $_rc in
+                0) echo pass > "{session_dir}/exec-{name}.status" ;;
+                1) echo needs_fix > "{session_dir}/exec-{name}.status" ;;
+                *) exit $_rc ;;
+              esac
       - name: verify-diff
         type: exec
         out:
