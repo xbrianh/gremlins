@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import os
 import pathlib
 import re
@@ -38,6 +39,10 @@ class SubprocessCopilotClient:
         self._bypass = bypass
         self._native_block: dict[str, Any] = (
             native_block if native_block is not None else {}
+        )
+        # Per-task storage — see comment in SubprocessClaudeClient.__init__.
+        self._ctx: contextvars.ContextVar[dict[str, Any] | None] = (
+            contextvars.ContextVar("copilot_ctx", default=None)
         )
 
     def _track(self, p: asyncio.subprocess.Process) -> None:
@@ -115,7 +120,22 @@ class SubprocessCopilotClient:
         idle_timeout: float | None = None,
         extra_env: dict[str, str] | None = None,
     ) -> CompletedRun:
-        del idle_timeout  # copilot reads stdout to EOF; no streaming idle concept
+        del (
+            idle_timeout,
+            on_timeout_prompt,
+            max_retries,
+        )  # copilot reads stdout to EOF; no streaming idle concept
+        self._ctx.set(
+            {
+                "prompt": prompt,
+                "label": label,
+                "model": model,
+                "raw_path": raw_path,
+                "capture_events": capture_events,
+                "cwd": cwd,
+                "extra_env": extra_env,
+            }
+        )
         argv = self._build_argv(model, prompt)
         p = await self._spawn(argv, cwd=cwd, extra_env=extra_env)
         try:
@@ -150,4 +170,18 @@ class SubprocessCopilotClient:
             text_result=_strip_footer(stdout),
             events=None,
             cost_usd=None,
+        )
+
+    async def resume(self) -> CompletedRun:
+        ctx = self._ctx.get()
+        if ctx is None:
+            raise RuntimeError("resume() called before run()")
+        return await self.run(
+            ctx["prompt"],
+            label=ctx["label"],
+            model=ctx["model"],
+            raw_path=ctx["raw_path"],
+            capture_events=ctx["capture_events"],
+            cwd=ctx["cwd"],
+            extra_env=ctx["extra_env"],
         )

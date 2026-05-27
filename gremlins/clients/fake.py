@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import pathlib
 from dataclasses import dataclass
@@ -46,6 +47,10 @@ class FakeClaudeClient(Client):
         self._native_block: dict[str, Any] = (
             native_block if native_block is not None else {}
         )
+        # Per-task storage — see comment in SubprocessClaudeClient.__init__.
+        self._ctx: contextvars.ContextVar[dict[str, Any] | None] = (
+            contextvars.ContextVar("fake_ctx", default=None)
+        )
 
     @property  # type: ignore[override]
     def total_cost_usd(self) -> float:
@@ -84,6 +89,16 @@ class FakeClaudeClient(Client):
         extra_env: dict[str, str] | None = None,
     ) -> CompletedRun:
         del on_timeout_prompt, max_retries, idle_timeout, extra_env
+        self._ctx.set(
+            {
+                "prompt": prompt,
+                "label": label,
+                "model": model,
+                "raw_path": raw_path,
+                "capture_events": capture_events,
+                "cwd": cwd,
+            }
+        )
         self.calls.append(
             RecordedCall(
                 prompt=prompt,
@@ -123,4 +138,17 @@ class FakeClaudeClient(Client):
             text_result=result_text,
             events=events if capture_events else None,
             cost_usd=cost_usd,
+        )
+
+    async def resume(self) -> CompletedRun:
+        ctx = self._ctx.get()
+        if ctx is None:
+            raise RuntimeError("resume() called before run()")
+        return await self.run(
+            ctx["prompt"],
+            label=ctx["label"],
+            model=ctx["model"],
+            raw_path=ctx["raw_path"],
+            capture_events=ctx["capture_events"],
+            cwd=ctx["cwd"],
         )

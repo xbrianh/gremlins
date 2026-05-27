@@ -84,6 +84,9 @@ class Client:
             extra_env=extra_env,
         )
 
+    async def resume(self) -> CompletedRun:
+        return await self._get_impl().resume()
+
     def reap_all(self) -> None:
         if self._impl is not None:
             self._impl.reap_all()
