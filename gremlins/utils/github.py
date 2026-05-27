@@ -70,9 +70,6 @@ def parse_issue_ref(plan_source: str, repo: str) -> tuple[str | None, str | None
 VIEW_ISSUE_TIMEOUT = 30  # seconds; bounds `gh issue view` shell-out
 GET_PR_CI_STATUS_TIMEOUT = 30  # seconds; bounds `gh pr view` shell-out in poll loop
 VIEW_PR_TIMEOUT = 30  # seconds; bounds `gh pr view` shell-out
-GET_COPILOT_REVIEW_TIMEOUT = (
-    30  # seconds; bounds `gh api reviews` shell-out in poll loop
-)
 
 
 def view_pr(pr: str, *, project_root: str | None = None) -> dict[str, Any]:
@@ -282,29 +279,3 @@ def resolve_default_branch(project_root: str) -> str:
     if r.returncode != 0 or not r.stdout.strip():
         raise RuntimeError(f"gh repo view failed: {r.stderr.strip() or 'empty output'}")
     return r.stdout.strip()
-
-
-async def check_copilot_review_async(repo: str, pr_num: str) -> str | None:
-    try:
-        r = await proc.run_async(
-            [
-                "gh",
-                "api",
-                f"repos/{repo}/pulls/{pr_num}/reviews",
-                "--jq",
-                '.[] | select(.user.login | test("[Cc]opilot")) | .state',
-            ],
-            timeout=GET_COPILOT_REVIEW_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
-            f"timed out after {GET_COPILOT_REVIEW_TIMEOUT}s fetching Copilot review for "
-            f"{repo}#{pr_num} via `gh api`; check GitHub CLI authentication and network"
-        ) from exc
-    if r.returncode != 0:
-        raise RuntimeError(
-            f"gh api reviews failed for {repo}#{pr_num} (exit {r.returncode}): "
-            f"{r.stderr.strip() or r.stdout.strip() or '(no output)'}"
-        )
-    lines = [ln for ln in r.stdout.splitlines() if ln and ln != "PENDING"]
-    return lines[0] if lines else None
