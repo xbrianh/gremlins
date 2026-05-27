@@ -76,6 +76,11 @@ class FileSessionResolver:
         except FileNotFoundError:
             return b""
 
+    def write(self, uri: Uri, content: bytes) -> None:
+        p = self._path(uri)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(content)
+
     def verify_produced(self, uri: Uri) -> None:
         p = self._path(uri)
         if not p.exists() or p.stat().st_size == 0:

@@ -9,7 +9,7 @@ from typing import Any, cast
 
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.resolve import resolve_in_map
-from gremlins.artifacts.schemes import snapshot_head_before
+from gremlins.artifacts.schemes import FileSessionResolver, snapshot_head_before
 from gremlins.artifacts.uri import Uri
 from gremlins.executor.state import State
 from gremlins.stages._passthrough import Passthrough as _Passthrough
@@ -20,6 +20,7 @@ from gremlins.utils import proc as _proc
 _CMD_SUB = re.compile(r"\{(\w+)\}")
 _READ_SUB = re.compile(r"\{read:([-\w]+)\}")
 _FRAMEWORK_KEYS = frozenset(["name", "model", "session_dir", "repo", "cwd", "base_ref"])
+_STATUS_KEY = "status"
 
 
 def _sub_reads(s: str, artifacts: ArtifactRegistry) -> str:
@@ -100,6 +101,7 @@ class Exec(Stage):
             for c in self.options.get("cmds", [])
             if c.strip()
         ]
+        needs_fix = False
         if cmds:
             result = await _proc.run_shell_async(
                 "\n".join(cmds),
@@ -111,7 +113,10 @@ class Exec(Stage):
                 result.stdout + result.stderr or "(no output)\n", encoding="utf-8"
             )
             if result.returncode != 0:
-                raise Bail(f"exec {self.name}: exited {result.returncode}")
+                if result.returncode == 1 and _STATUS_KEY in self.out_map:
+                    needs_fix = True
+                else:
+                    raise Bail(f"exec {self.name}: exited {result.returncode}")
 
         for raw_key, raw_uri_str in self.out_map.items():
             key = raw_key.format_map(_pt)
@@ -124,6 +129,10 @@ class Exec(Stage):
                 state.artifacts.bind_git_commit_range(key, pre_sha)
             else:
                 uri = Uri.parse(uri_str)
+                if key == _STATUS_KEY and uri.scheme == "file":
+                    resolver = state.artifacts.resolver(uri.scheme)
+                    if isinstance(resolver, FileSessionResolver):
+                        resolver.write(uri, b"needs_fix\n" if needs_fix else b"pass\n")
                 state.artifacts.bind(key, uri)
                 state.artifacts.resolver(uri.scheme).verify_produced(uri)
 
