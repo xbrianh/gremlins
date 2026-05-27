@@ -156,13 +156,13 @@ def test_pipeline_explicit_name_overrides_default(tmp_path: pathlib.Path) -> Non
         """\
         default_client: claude:sonnet
         stages:
-          - { name: ci-gate, type: github-wait-ci }
-          - { type: plan }
+          - { name: step-a, type: exec, options: { cmds: ['true'] } }
+          - { name: step-b, type: exec, options: { cmds: ['true'] } }
         """,
     )
     pipeline = Pipeline.from_yaml(p)
-    assert pipeline.stages[0].name == "ci-gate"
-    assert pipeline.stages[1].name == "plan"
+    assert pipeline.stages[0].name == "step-a"
+    assert pipeline.stages[1].name == "step-b"
 
 
 def test_pipeline_nested_scopes_disambiguate_independently(
