@@ -438,7 +438,6 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
         "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
     )
 
-
     client = _CommittingClient(
         git_dir=tmp_path,
         fixtures={
@@ -475,7 +474,6 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
     monkeypatch.setattr(
         "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
     )
-
 
     client = _CommittingClient(
         git_dir=tmp_path,
@@ -517,7 +515,6 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
     )
-
 
     client = _CommittingClient(
         git_dir=tmp_path,
@@ -564,7 +561,6 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
         "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
     )
 
-
     client = _CommittingClient(
         git_dir=tmp_path,
         fixtures={
@@ -608,7 +604,6 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
     )
-
 
     client = _CommittingClient(
         git_dir=tmp_path,
@@ -662,7 +657,6 @@ def test_resume_from_implement(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
     )
-
 
     client = _CommittingClient(
         git_dir=tmp_path,
@@ -798,7 +792,6 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
         "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
     )
 
-
     # Each fixture carries a distinct non-zero cost so a regression that drops
     # any one stage shows up as the total being short by exactly that amount.
     fixtures = {
@@ -909,7 +902,6 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
         "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
     )
 
-
     client = FakeClaudeClient(
         fixtures={
             "compose-pr": MINIMAL_EVENTS,
@@ -962,7 +954,6 @@ def test_github_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
         "run",
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
-
 
     captured_stages: dict = {}
 
@@ -1167,7 +1158,6 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
         _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
     )
 
-
     captured_stage = {}
 
     async def record_verify(self, state):
@@ -1317,7 +1307,6 @@ def test_gh_main_state_client_tracks_effective_model(
         "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
     )
 
-
     client = _CommittingClient(
         git_dir=tmp_path,
         fixtures={
@@ -1386,7 +1375,6 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
         "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
     )
 
-
     client = _CommittingClient(
         git_dir=tmp_path,
         fixtures={
@@ -1431,7 +1419,6 @@ def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
     )
-
 
     client = _CommittingClient(
         git_dir=tmp_path,

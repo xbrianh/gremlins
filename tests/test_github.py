@@ -42,5 +42,3 @@ def test_fetch_issue_explicit_repo():
 def test_fetch_issue_view_error_returns_none():
     with patch("gremlins.utils.github.view_issue", side_effect=RuntimeError("fail")):
         assert fetch_issue("owner/repo#42") is None
-
-
