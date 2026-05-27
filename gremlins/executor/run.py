@@ -110,7 +110,9 @@ async def run_pipeline(
     """Load pipeline YAML, build Gremlin, run. Sole internal pipeline entry point."""
     configure_logging()
     args = _parse_args(argv)
-    resume_from = args.resume_from or os.environ.pop("GREMLINS_RESUME_FROM", None) or None
+    resume_from = (
+        args.resume_from or os.environ.pop("GREMLINS_RESUME_FROM", None) or None
+    )
 
     os.environ.pop("GREMLINS_PROJECT_ROOT", None)
     _project_root = paths.project_root()
