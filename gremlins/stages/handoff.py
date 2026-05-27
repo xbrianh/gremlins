@@ -457,7 +457,7 @@ class Handoff(Stage):
         if not boss_spec.exists():
             shutil.copyfile(plan_md, boss_spec)
 
-        base_ref = state.engine_ctx.base_ref or await self._resolve_base_ref(state)
+        base_ref = state.data.base_ref_name or await self._resolve_base_ref(state)
         handoff_n = self._next_handoff_index(session_dir)
 
         prev_rolling = (
@@ -586,7 +586,7 @@ class Handoff(Stage):
         return exit_state, sig_data
 
     async def _resolve_base_ref(self, state: State) -> str:
-        r = await proc.run_async(["git", "rev-parse", "HEAD"], cwd=state.engine_ctx.cwd)
+        r = await proc.run_async(["git", "rev-parse", "HEAD"], cwd=state.cwd)
         return r.stdout.strip() if r.returncode == 0 else "HEAD"
 
     @staticmethod

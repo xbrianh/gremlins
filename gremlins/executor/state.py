@@ -16,7 +16,6 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from gremlins import paths as _paths
-from gremlins.artifacts.engine import EngineContext
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.clients.client import Client
 from gremlins.utils.state_file import locked_update
@@ -509,7 +508,8 @@ class State:
     client: Client
     session_dir: pathlib.Path
     artifacts: ArtifactRegistry
-    engine_ctx: EngineContext
+    repo: str = ""
+    cwd: str = ""
     test_client: Client | None = None
     stage_model: str = ""
     args: argparse.Namespace = dataclasses.field(default_factory=argparse.Namespace)
@@ -535,6 +535,17 @@ class State:
         sf = state_dir / "state.json"
         if gremlin_id and not sf.exists():
             write_state(state_dir, {"id": gremlin_id})
+
+    def format(self, template: str) -> str:
+        scope = "/".join(s.name for s in self.current_scope)
+        return template.format(
+            n=self.data.loop_iteration,
+            attempt=self.data.attempt,
+            scope=scope,
+            repo=self.repo,
+            cwd=self.cwd,
+            base_ref=self.data.base_ref_name,
+        )
 
     def done_for(self, path: str) -> set[str]:
         return self.data.done_for(path)
@@ -601,13 +612,13 @@ def build_state(
     args: argparse.Namespace | None = None,
     pipeline_data: Pipeline | None = None,
     repo: str = "",
+    cwd: str = "",
     instructions: str = "",
     test_client: Client | None = None,
     stage_model: str = "",
     worktree: pathlib.Path | None = None,
     worktree_parent: pathlib.Path | None = None,
     artifacts: ArtifactRegistry | None = None,
-    engine_ctx: EngineContext | None = None,
     child_key: str | None = None,
     parent_stage: str = "",
 ) -> State:
@@ -617,15 +628,8 @@ def build_state(
         client=client,
         session_dir=session_dir,
         artifacts=artifacts or reg,
-        engine_ctx=engine_ctx
-        or EngineContext(
-            loop_iteration=data.loop_iteration,
-            attempt=data.attempt,
-            current_scope=(),
-            repo=repo,
-            cwd=str(worktree) if worktree is not None else str(_paths.project_root()),
-            base_ref=data.base_ref_name,
-        ),
+        repo=repo,
+        cwd=cwd or (str(worktree) if worktree is not None else str(_paths.project_root())),
         args=args if args is not None else argparse.Namespace(),
         pipeline_data=pipeline_data,
         instructions=instructions,

@@ -83,9 +83,9 @@ class Exec(Stage):
             name=self.name,
             model=state.stage_model or state.client.model,
             session_dir=str(state.session_dir),
-            repo=state.engine_ctx.repo,
-            cwd=state.engine_ctx.cwd,
-            base_ref=state.engine_ctx.base_ref,
+            repo=state.repo,
+            cwd=state.cwd,
+            base_ref=state.data.base_ref_name,
         )
         for k, v in self.options.items():
             if k not in subs and isinstance(v, str):
@@ -94,7 +94,7 @@ class Exec(Stage):
 
         pre_sha: str | None = None
         if any(v == "git://range" for v in self.out_map.values()):
-            pre_sha = snapshot_head_before(cwd=pathlib.Path(state.engine_ctx.cwd))
+            pre_sha = snapshot_head_before(cwd=pathlib.Path(state.cwd))
 
         cmds = [
             _CMD_SUB.sub(lambda m: subs.get(m.group(1), m.group(0)), c.rstrip())
@@ -105,7 +105,7 @@ class Exec(Stage):
         if cmds:
             result = await _proc.run_shell_async(
                 " && ".join(cmds),
-                cwd=pathlib.Path(state.engine_ctx.cwd),
+                cwd=pathlib.Path(state.cwd),
                 env={**os.environ, **extra_env},
             )
             log_path = state.session_dir / f"exec-{self.name}.log"

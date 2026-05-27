@@ -262,7 +262,7 @@ class _CIFixStage(Stage):
         self._fix_sha[0] = (
             self._fix_sha_getter()
             if self._fix_sha_getter is not None
-            else head_sha(cwd=pathlib.Path(state.engine_ctx.cwd))
+            else head_sha(cwd=pathlib.Path(state.cwd))
         )
         return Done()
 

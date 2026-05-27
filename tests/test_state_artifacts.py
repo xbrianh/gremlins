@@ -4,7 +4,6 @@ import json
 import pathlib
 
 import gremlins.executor.state as state_mod
-from gremlins.artifacts.engine import EngineContext
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.clients.client import Client
 from gremlins.executor.state import StateData, build_state
@@ -257,17 +256,18 @@ def test_append_artifact_stamps_child_attempt(sandbox):
 # ---------------------------------------------------------------------------
 
 
-def test_build_state_defaults_artifacts_and_engine_ctx(sandbox):
+def test_build_state_defaults_artifacts(sandbox):
     state = build_state(
         data=StateData.load(None),
         client=Client("fake", "model"),
         session_dir=sandbox.state,
     )
     assert state.artifacts is not None
-    assert state.engine_ctx is not None
+    assert state.repo == ""
+    assert state.cwd != ""
 
 
-def test_build_state_engine_ctx_mirrors_state_data(sandbox):
+def test_build_state_data_fields(sandbox):
     import dataclasses
 
     data = dataclasses.replace(
@@ -275,19 +275,16 @@ def test_build_state_engine_ctx_mirrors_state_data(sandbox):
     )
     client = Client("fake", "model")
     state = build_state(data=data, client=client, session_dir=sandbox.state)
-    assert state.engine_ctx.loop_iteration == 3
-    assert state.engine_ctx.attempt == "implement-aabb"
+    assert state.data.loop_iteration == 3
+    assert state.data.attempt == "implement-aabb"
 
 
 def test_build_state_preserves_explicit_registry(sandbox):
     registry = ArtifactRegistry(session_dir=sandbox.state, cwd=None)
-    ctx = EngineContext(loop_iteration=7, attempt="review-1111", current_scope=())
     state = build_state(
         data=StateData.load(None),
         client=Client("fake", "model"),
         session_dir=sandbox.state,
         artifacts=registry,
-        engine_ctx=ctx,
     )
     assert state.artifacts is registry
-    assert state.engine_ctx is ctx

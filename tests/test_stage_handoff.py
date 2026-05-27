@@ -11,7 +11,6 @@ from typing import Any
 import pytest
 
 import gremlins.executor.state as state_mod
-from gremlins.artifacts.engine import EngineContext
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
@@ -378,11 +377,8 @@ def test_base_ref_from_state(tmp_path, monkeypatch, sandbox):
 
     monkeypatch.setattr(Agent, "run", fake_agent_run)
 
-    engine_ctx = EngineContext(
-        loop_iteration=1, attempt="", current_scope=(), base_ref="deadbeef1234"
-    )
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
-    state = dataclasses.replace(state, engine_ctx=engine_ctx)
+    state = dataclasses.replace(state, data=dataclasses.replace(state.data, base_ref_name="deadbeef1234"))
     asyncio.run(h.run(state))
 
     assert captured_base == ["deadbeef1234"]
