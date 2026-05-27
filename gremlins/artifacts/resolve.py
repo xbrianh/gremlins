@@ -23,16 +23,22 @@ def resolve_in_map(
                 raise
             result[var] = default
             continue
-        for attr in attrs:
-            if attr.startswith("_"):
-                raise ValueError(
-                    f"in: path {path!r}: private attribute {attr!r} not accessible"
-                )
-            try:
-                value = getattr(value, attr)
-            except AttributeError:
-                raise ValueError(
-                    f"in: path {path!r}: {type(value).__name__} has no attribute {attr!r}"
-                )
+        try:
+            for attr in attrs:
+                if attr.startswith("_"):
+                    raise ValueError(
+                        f"in: path {path!r}: private attribute {attr!r} not accessible"
+                    )
+                try:
+                    value = value[attr]
+                except (KeyError, TypeError):
+                    raise ValueError(
+                        f"in: path {path!r}: value has no key {attr!r}"
+                    )
+        except ValueError:
+            if not sep:
+                raise
+            result[var] = default
+            continue
         result[var] = to_str(value)
     return result
