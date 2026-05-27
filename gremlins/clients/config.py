@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+import os
 import time
 from collections.abc import Callable
 from typing import Any, ParamSpec, TypeVar
@@ -10,7 +11,7 @@ from typing import Any, ParamSpec, TypeVar
 P = ParamSpec("P")
 R = TypeVar("R")
 
-STREAM_IDLE_TIMEOUT = 120
+STREAM_IDLE_TIMEOUT = int(os.environ.get("GREMLINS_STREAM_IDLE_TIMEOUT") or 600)
 STREAM_IDLE_BACKOFF = (60, 300, 600)
 OPENAI_AGENTS_MAX_TURNS = 100
 
