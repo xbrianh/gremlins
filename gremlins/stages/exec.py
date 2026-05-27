@@ -7,8 +7,9 @@ import pathlib
 import re
 from typing import Any, cast
 
+from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.resolve import resolve_in_map
-from gremlins.artifacts.schemes import GitHubResolver, snapshot_head_before
+from gremlins.artifacts.schemes import snapshot_head_before
 from gremlins.artifacts.uri import Uri
 from gremlins.executor.state import State
 from gremlins.stages._passthrough import Passthrough as _Passthrough
@@ -17,7 +18,21 @@ from gremlins.stages.outcome import Bail, Done, NeedsFix, Outcome
 from gremlins.utils import proc as _proc
 
 _CMD_SUB = re.compile(r"\{(\w+)\}")
+_READ_SUB = re.compile(r"\{read:([-\w]+)\}")
 _FRAMEWORK_KEYS = frozenset(["name", "model", "session_dir", "repo", "cwd"])
+
+
+def _sub_reads(s: str, artifacts: ArtifactRegistry) -> str:
+    def _r(m: re.Match[str]) -> str:
+        key = m.group(1)
+        raw = artifacts.read(key)
+        if not isinstance(raw, bytes):
+            raise TypeError(
+                f"{{read:{key}}}: expected bytes artifact, got {type(raw).__name__}"
+            )
+        return raw.decode().strip()
+
+    return _READ_SUB.sub(_r, s)
 
 
 class Exec(Stage):
@@ -106,25 +121,16 @@ class Exec(Stage):
                     raise Bail(f"exec {self.name}: exited {exit_code}")
 
         for raw_key, raw_uri_str in self.out_map.items():
+            if needs_fix:
+                continue
             key = raw_key.format_map(_pt)
-            uri_str = raw_uri_str.format_map(_pt)
+            uri_str = _sub_reads(raw_uri_str, state.artifacts).format_map(_pt)
             if uri_str == "git://range":
-                if needs_fix:
-                    continue
                 if pre_sha is None:
                     raise RuntimeError(
                         f"exec {self.name}: git://range requires pre-snapshot"
                     )
                 state.artifacts.bind_git_commit_range(key, pre_sha)
-            elif uri_str == "gh://pr":
-                if needs_fix:
-                    continue
-                resolver = cast(GitHubResolver, state.artifacts.resolver("gh"))
-                try:
-                    captured = resolver.capture(stdout_str, stderr_str)
-                except ValueError as exc:
-                    raise Bail(str(exc)) from exc
-                state.artifacts.bind(key, captured)
             else:
                 uri = Uri.parse(uri_str)
                 state.artifacts.bind(key, uri)

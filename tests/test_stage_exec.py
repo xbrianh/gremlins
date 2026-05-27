@@ -140,24 +140,46 @@ def test_out_git_range_empty_diff_still_binds(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# out: gh://pr
+# out: {read:KEY} URI substitution
 # ---------------------------------------------------------------------------
 
 
-def test_out_gh_pr_captures_from_stdout(tmp_path, monkeypatch):
+def test_out_read_sub_resolves_uri(tmp_path, monkeypatch):
     state = _make_state(tmp_path)
-    pr_url = "https://github.com/owner/repo/pull/42"
-    stage = _exec(cmds=[f"echo '{pr_url}'"], out_map={"pr": "gh://pr"})
+    monkeypatch.setattr(
+        "gremlins.artifacts.schemes.GitHubResolver.verify_produced",
+        lambda self, uri: None,
+    )
+    foo_file = state.session_dir / "foo.txt"
+    stage = _exec(
+        cmds=[f'echo 42 > "{foo_file}"'],
+        out_map={
+            "foo": "file://session/foo.txt",
+            "bar": "gh://pr/{read:foo}",
+        },
+    )
     result = asyncio.run(stage.run(state))
     assert isinstance(result, Done)
-    assert state.artifacts.produced("pr")
-    assert state.artifacts.resolve("pr") == Uri.parse("gh://pr/42")
+    assert state.artifacts.resolve("bar") == Uri.parse("gh://pr/42")
 
 
-def test_out_gh_pr_no_url_raises_bail(tmp_path):
+def test_out_read_sub_backward_ref_raises(tmp_path):
     state = _make_state(tmp_path)
-    stage = _exec(cmds=["echo 'no url here'"], out_map={"pr": "gh://pr"})
-    with pytest.raises(Bail):
+    stage = _exec(
+        cmds=["true"],
+        out_map={
+            "bar": "gh://pr/{read:foo}",
+            "foo": "file://session/foo.txt",
+        },
+    )
+    with pytest.raises(MissingArtifact):
+        asyncio.run(stage.run(state))
+
+
+def test_out_read_sub_unbound_key_raises(tmp_path):
+    state = _make_state(tmp_path)
+    stage = _exec(cmds=["true"], out_map={"bar": "gh://pr/{read:nonexistent}"})
+    with pytest.raises(MissingArtifact):
         asyncio.run(stage.run(state))
 
 

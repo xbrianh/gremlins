@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import dataclasses
 import pathlib
-import re
 from typing import Any
 
 from gremlins.artifacts.uri import Uri
@@ -99,9 +98,6 @@ def snapshot_head_before(cwd: pathlib.Path | None = None) -> str:
     return sha
 
 
-_PR_URL_RE = re.compile(r"https://github\.com/[^/]+/[^/]+/pull/(\d+)")
-
-
 class GitHubResolver:
     """Resolves gh://pr/<n> and gh://issue/<n> via `gh` CLI."""
 
@@ -129,11 +125,3 @@ class GitHubResolver:
 
     def verify_produced(self, uri: Uri) -> None:
         self.read(uri)
-
-    def capture(self, stdout: str, _: str) -> Uri:
-        """Parse a gh://pr/<n> URI from `gh pr create` stdout."""
-        m = _PR_URL_RE.search(stdout)
-        if not m:
-            raise ValueError(f"no PR URL found in gh pr create output: {stdout!r}")
-        n = m.group(1)
-        return Uri.parse(f"gh://pr/{n}")

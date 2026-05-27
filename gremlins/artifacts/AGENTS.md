@@ -58,16 +58,17 @@ base = snapshot_head_before(cwd=state.cwd)
 bind_range_after(registry, "normalize-commits", base, cwd=state.cwd)
 ```
 
-## gh://pr capture
+## `{read:KEY}` URI substitution in `out:` maps
 
-```python
-from gremlins.artifacts._protocol import CapturingSchemeResolver
+Any `out:` URI value may contain `{read:KEY}` tokens. Before the URI is parsed, each token is replaced with the stripped content of the already-bound artifact at `KEY`:
 
-gh_resolver = registry.resolver("gh")
-if isinstance(gh_resolver, CapturingSchemeResolver):
-    uri = gh_resolver.capture(stdout, stderr)
-    registry.bind("pr", uri)
+```yaml
+out:
+  pr-number: file://session/pr-number.txt   # bound first
+  pr: gh://pr/{read:pr-number}              # reads pr-number, expands to gh://pr/42
 ```
+
+The referenced key must appear **earlier** in the `out:` map; forward references raise `MissingArtifact`. Only `file://session/...` artifacts (returning `bytes`) are supported — passing a non-bytes artifact raises `TypeError`.
 
 ## Typed read returns
 
