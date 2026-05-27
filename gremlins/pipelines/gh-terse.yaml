@@ -22,4 +22,4 @@ stages:
       normalize-commits: git://range
   - { type: verify,    options: { cmds: ["make check && make test"] }, prompt: verify }
   - { name: open-pr,   type: gremlins:github-open-pr }
-  - { name: ci-gate,   type: github-wait-ci,           in: {pr: pr}, prompt: [gremlins:ci_fix.md, gremlins:bail_section_fix.md] }
+  - { name: ci-gate,   type: gremlins:github-wait-ci,  in: {pr: pr}, prompt: [gremlins:ci_fix.md, gremlins:bail_section_fix.md] }

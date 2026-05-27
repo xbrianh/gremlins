@@ -20,4 +20,4 @@ stages:
         - "ruff format ."
         - "git add -A"
         - "git diff --cached --quiet || git commit -m 'normalize'"
-  - { type: github-wait-ci, prompt: [terse, gremlins:ci_fix.md, gremlins:bail_section_fix.md] }
+  - { type: gremlins:github-wait-ci, prompt: [terse, gremlins:ci_fix.md, gremlins:bail_section_fix.md] }

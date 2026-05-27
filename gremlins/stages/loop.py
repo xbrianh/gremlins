@@ -21,6 +21,7 @@ UntilFn = Callable[[State, int, str], bool]
 
 _MARKER_KEY = "status"
 _MARKER_VALUE = "needs_fix"
+_BAIL_KEY = "bail"
 
 
 def _is_marker_set(artifacts: ArtifactRegistry) -> bool:
@@ -28,6 +29,18 @@ def _is_marker_set(artifacts: ArtifactRegistry) -> bool:
         artifacts.produced(_MARKER_KEY)
         and artifacts.read(_MARKER_KEY).strip() == _MARKER_VALUE
     )
+
+
+def _is_bail_set(artifacts: ArtifactRegistry) -> bool:
+    return artifacts.produced(_BAIL_KEY)
+
+
+def _do_bail(state: State, artifacts: ArtifactRegistry) -> None:
+    reason = artifacts.read(_BAIL_KEY)
+    if not isinstance(reason, str):
+        reason = str(reason)
+    state.record_bail(reason)
+    raise Bail(reason)
 
 
 def head_stable(state: State, iteration: int, head_before: str) -> bool:
@@ -51,6 +64,8 @@ async def _dispatch_runners(
         if i > 0 and (not had_failure or iteration == max_iterations):
             continue
         await runner()
+        if _is_bail_set(artifacts):
+            return had_failure
         if not had_failure and _is_marker_set(artifacts):
             had_failure = True
     return had_failure
@@ -144,7 +159,10 @@ class LoopStage(Stage):
             state.record_state_field(loop_iteration=iteration)
             if self._on_iteration_start:
                 self._on_iteration_start(state)
+            if _is_bail_set(state.artifacts):
+                _do_bail(state, state.artifacts)
             state.artifacts.unbind(_MARKER_KEY)
+            state.artifacts.unbind(_BAIL_KEY)
             for child in self.body:
                 for key in getattr(child, "out_map", {}):
                     state.artifacts.unbind(key)
@@ -157,6 +175,8 @@ class LoopStage(Stage):
             had_failure = await _dispatch_runners(
                 runners, iteration, self._max_iterations, state.artifacts
             )
+            if _is_bail_set(state.artifacts):
+                _do_bail(state, state.artifacts)
 
             if not had_failure:
                 if self._until(state, iteration, head_before):

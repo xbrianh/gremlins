@@ -1,0 +1,157 @@
+# Loop body: poll → fix → capture-head.
+# Iteration-1 detection: {session_dir}/fix-head absent means no prior fix push.
+# Post-fix SHA verification: fix-head present → wait for headRefOid to match.
+
+required-prompt: true
+
+stages:
+  - name: github-wait-ci
+    type: loop
+    needs_gh: true
+    max-iterations: 4
+    in:
+      pr_url: pr.url
+      pr_branch: pr.branch
+    body:
+      - name: poll
+        type: exec
+        in:
+          pr_url: pr.url
+        out:
+          status: "file://session/status"
+          bail: "file://session/bail"
+          ci_log: "file://session/exec-poll.log"
+        options:
+          poll_timeout: "1200"
+          poll_interval: "30"
+          startup_grace_secs: "60"
+          cmds:
+            - |
+              set -euo pipefail
+
+              # Post-fix path: fix-head written by capture-head on prior iteration.
+              fix_head=""
+              if [ -f "{session_dir}/fix-head" ]; then
+                  fix_head=$(cat "{session_dir}/fix-head")
+              fi
+
+              fetch_status() {
+                  gh pr view "$pr_url" \
+                      --json statusCheckRollup,reviewDecision,headRefOid \
+                      2>/dev/null
+              }
+
+              check_bail_review_required() {
+                  local decision="$1"
+                  if [ "$decision" = "REVIEW_REQUIRED" ]; then
+                      printf 'ci-gate: PR blocked by required human review\n' \
+                          > "{session_dir}/bail"
+                      exit 2
+                  fi
+              }
+
+              # Iteration 1 startup grace: wait for any check-runs to appear.
+              if [ -z "$fix_head" ]; then
+                  grace_deadline=$(( $(date +%s) + {startup_grace_secs} ))
+                  rollup_len=0
+                  while true; do
+                      status_json=$(fetch_status)
+                      decision=$(printf '%s' "$status_json" | jq -r '.reviewDecision // ""')
+                      check_bail_review_required "$decision"
+                      rollup_len=$(printf '%s' "$status_json" | jq '.statusCheckRollup | length')
+                      if [ "$rollup_len" -gt 0 ] || [ "$(date +%s)" -ge "$grace_deadline" ]; then
+                          break
+                      fi
+                      sleep {poll_interval}
+                  done
+                  if [ "$rollup_len" -eq 0 ]; then
+                      printf 'ci-gate: no check-runs after %ss grace; skipping\n' {startup_grace_secs}
+                      exit 0
+                  fi
+              else
+                  # Post-fix: wait for GitHub to reflect the pushed commit SHA.
+                  push_deadline=$(( $(date +%s) + {poll_timeout} ))
+                  while true; do
+                      status_json=$(fetch_status)
+                      decision=$(printf '%s' "$status_json" | jq -r '.reviewDecision // ""')
+                      check_bail_review_required "$decision"
+                      head_oid=$(printf '%s' "$status_json" | jq -r '.headRefOid // ""')
+                      if [ "$head_oid" = "$fix_head" ]; then
+                          break
+                      fi
+                      if [ "$(date +%s)" -ge "$push_deadline" ]; then
+                          printf 'ci-gate: timed out waiting for GitHub to reflect pushed SHA\n' >&2
+                          break
+                      fi
+                      sleep {poll_interval}
+                  done
+              fi
+
+              # Poll until all checks complete or timeout.
+              poll_deadline=$(( $(date +%s) + {poll_timeout} ))
+              while true; do
+                  status_json=$(fetch_status)
+                  decision=$(printf '%s' "$status_json" | jq -r '.reviewDecision // ""')
+                  check_bail_review_required "$decision"
+
+                  all_done=$(printf '%s' "$status_json" | jq '
+                      if (.statusCheckRollup | length) == 0 then true
+                      else [.statusCheckRollup[] |
+                          if .__typename == "StatusContext"
+                          then (.state != "EXPECTED" and .state != "PENDING")
+                          else .status == "COMPLETED"
+                          end] | all
+                      end')
+                  if [ "$all_done" = "true" ]; then break; fi
+                  if [ "$(date +%s)" -ge "$poll_deadline" ]; then
+                      printf 'ci-gate: poll timed out after %ss\n' {poll_timeout} >&2
+                      break
+                  fi
+                  sleep {poll_interval}
+              done
+
+              failed_json=$(printf '%s' "$status_json" | jq '
+                  [.statusCheckRollup[] |
+                      if .__typename == "StatusContext"
+                      then select(.state == "FAILURE" or .state == "ERROR")
+                      else select(.conclusion == "FAILURE" or .conclusion == "ERROR"
+                                  or .conclusion == "TIMED_OUT" or .conclusion == "CANCELLED")
+                      end]')
+              failed_count=$(printf '%s' "$failed_json" | jq 'length')
+
+              if [ "$failed_count" -eq 0 ]; then
+                  printf 'ci-gate: all checks passed\n'
+                  exit 0
+              fi
+
+              # Collect failure logs for the fix agent.
+              printf '%s' "$failed_json" | jq -r '.[] | @json' | while read -r check_json; do
+                  check_name=$(printf '%s' "$check_json" | jq -r '.name // .context // "unknown"')
+                  details_url=$(printf '%s' "$check_json" | jq -r '.detailsUrl // .targetUrl // ""')
+                  printf '\n## Check: %s\n\n' "$check_name"
+                  run_id=$(printf '%s' "$details_url" \
+                      | sed -n 's|.*/actions/runs/\([0-9]*\).*|\1|p')
+                  if [ -n "$run_id" ]; then
+                      gh run view "$run_id" --log-failed 2>/dev/null | head -c 10000 \
+                          || printf '(could not fetch run logs)\n'
+                  else
+                      printf '(no action run URL; details: %s)\n' "$details_url"
+                  fi
+              done
+              exit 1
+
+      - name: fix
+        type: agent
+        prompt:
+          - "{{prompt}}"
+        in:
+          failure_output: ci_log
+          pr_branch: pr.branch
+
+      - name: capture-head
+        type: exec
+        out:
+          fix_head: "file://session/fix-head"
+        options:
+          cmds:
+            - 'git rev-parse HEAD > "{session_dir}/fix-head"'
