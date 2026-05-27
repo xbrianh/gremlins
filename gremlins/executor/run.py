@@ -155,7 +155,7 @@ async def run_pipeline(
         except Exception:
             logger.warning("failed to read base_sha from registry.json", exc_info=True)
 
-    base_ref = str(state_json.get("base_ref_name") or "")
+    base_ref = state_json.get("base_ref_name") or ""
 
     project_dir = pathlib.Path(project_root) if project_root else paths.project_root()
     try:

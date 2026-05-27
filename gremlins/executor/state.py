@@ -624,6 +624,7 @@ def build_state(
             current_scope=(),
             repo=repo,
             cwd=str(worktree) if worktree is not None else str(_paths.project_root()),
+            base_ref=data.base_ref_name,
         ),
         args=args if args is not None else argparse.Namespace(),
         pipeline_data=pipeline_data,
