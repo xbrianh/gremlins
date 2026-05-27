@@ -14,7 +14,6 @@ import threading
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar, cast
 
-from gremlins.artifacts.uri import Uri
 from gremlins.clients.client import Client
 from gremlins.executor.state import State
 from gremlins.stages.agent import Agent
@@ -497,9 +496,7 @@ class Handoff(Stage):
                 f"handoff returned next-plan but child_plan not found: {child_plan_path!r}"
             )
         shutil.copyfile(child_plan_path, plan_md)
-        marker_path = state.session_dir / "status"
-        marker_path.write_text("needs_fix", encoding="utf-8")
-        state.artifacts.bind("status", Uri.parse("file://session/status"))
+        state.artifacts.write("status", "needs_fix")
         return Done()
 
     async def _run_handoff(

@@ -10,7 +10,6 @@ from collections.abc import Callable
 from typing import Any
 
 from gremlins.artifacts.registry import MissingArtifact
-from gremlins.artifacts.uri import Uri
 from gremlins.executor.state import State
 from gremlins.stages.agent_runner import run_agent
 from gremlins.stages.base import Stage
@@ -163,7 +162,7 @@ class _CIPollStage(Stage):
         self._first = True
 
     async def run(self, state: State) -> Outcome:
-        pr_url = self._pr_url or state.artifacts.read("pr").url
+        pr_url = self._pr_url or state.artifacts.read("pr")["url"]
         required_sha = ""
 
         if self._first:
@@ -208,9 +207,7 @@ class _CIPollStage(Stage):
         (state.session_dir / f"ci-attempt-{n}.log").write_text(
             failure_output, encoding="utf-8"
         )
-        marker_path = state.session_dir / "status"
-        marker_path.write_text("needs_fix", encoding="utf-8")
-        state.artifacts.bind("status", Uri.parse("file://session/status"))
+        state.artifacts.write("status", "needs_fix")
         return Done()
 
 
@@ -241,7 +238,7 @@ class _CIFixStage(Stage):
         )
 
         try:
-            pr_branch = state.artifacts.read("pr").branch
+            pr_branch = state.artifacts.read("pr")["branch"]
         except MissingArtifact:
             state.record_bail("ci-fix: pr not in registry, cannot push")
             raise Bail("ci-fix: pr not in registry, cannot push")
