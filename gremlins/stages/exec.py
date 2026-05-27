@@ -27,7 +27,9 @@ def _sub_reads(s: str, artifacts: ArtifactRegistry) -> str:
         key = m.group(1)
         raw = artifacts.read(key)
         if not isinstance(raw, bytes):
-            raise TypeError(f"{{read:{key}}}: expected bytes artifact, got {type(raw).__name__}")
+            raise TypeError(
+                f"{{read:{key}}}: expected bytes artifact, got {type(raw).__name__}"
+            )
         return raw.decode().strip()
 
     return _READ_SUB.sub(_r, s)
