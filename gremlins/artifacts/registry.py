@@ -78,13 +78,8 @@ class ArtifactRegistry:
         except KeyError:
             raise MissingArtifact(key) from None
 
-    def read(self, key: str, default: str | None = None) -> Any:
-        try:
-            uri = self.resolve(key)
-        except MissingArtifact:
-            if default is not None:
-                return default
-            raise
+    def read(self, key: str) -> Any:
+        uri = self.resolve(key)
         return self._resolvers[uri.scheme].read(uri)
 
     def produced(self, key: str) -> bool:

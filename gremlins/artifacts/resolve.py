@@ -11,30 +11,28 @@ def resolve_in_map(
 ) -> dict[str, str]:
     result: dict[str, str] = {}
     for var, raw_path in in_map.items():
-        default: str | None = None
-        path = raw_path
-        if "?" in raw_path:
-            path, default = raw_path.split("?", 1)
+        path, sep, default = raw_path.partition("?")
         parts = path.split(".")
         if any(not p for p in parts):
             raise ValueError(f"in: path {path!r} has empty segment")
         key, *attrs = parts
         try:
             value = artifacts.read(key)
-            for attr in attrs:
-                if attr.startswith("_"):
-                    raise ValueError(
-                        f"in: path {path!r}: private attribute {attr!r} not accessible"
-                    )
-                try:
-                    value = getattr(value, attr)
-                except AttributeError:
-                    raise ValueError(
-                        f"in: path {path!r}: {type(value).__name__} has no attribute {attr!r}"
-                    )
-            result[var] = to_str(value)
         except MissingArtifact:
-            if default is None:
+            if not sep:
                 raise
             result[var] = default
+            continue
+        for attr in attrs:
+            if attr.startswith("_"):
+                raise ValueError(
+                    f"in: path {path!r}: private attribute {attr!r} not accessible"
+                )
+            try:
+                value = getattr(value, attr)
+            except AttributeError:
+                raise ValueError(
+                    f"in: path {path!r}: {type(value).__name__} has no attribute {attr!r}"
+                )
+        result[var] = to_str(value)
     return result
