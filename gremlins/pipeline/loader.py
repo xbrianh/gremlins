@@ -6,7 +6,6 @@ from gremlins.stages.agent import Agent
 from gremlins.stages.base import Stage
 from gremlins.stages.exec import Exec
 from gremlins.stages.github_wait_ci import GitHubWaitCI
-from gremlins.stages.github_wait_copilot import GitHubWaitCopilot
 from gremlins.stages.handoff import Handoff
 from gremlins.stages.loop import LoopStage
 from gremlins.stages.parallel import ParallelStage
@@ -16,7 +15,6 @@ from gremlins.stages.sequence import SequenceStage
 STAGE_TYPES: dict[str, type[Stage]] = {
     "agent": Agent,
     "plan": Plan,
-    "github-wait-copilot": GitHubWaitCopilot,
     "github-wait-ci": GitHubWaitCI,
     "handoff": Handoff,
     "loop": LoopStage,

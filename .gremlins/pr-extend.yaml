@@ -39,7 +39,7 @@ stages:
   - { type: gremlins:github-request-copilot-review,  in: {pr: pr} }
 
   - parallel:
-      - { type: github-wait-copilot,                  in: {pr: pr} }
+      - { type: gremlins:github-wait-copilot,          in: {pr: pr} }
       - { name: github-review-pull-request,          type: agent, in: {pr: pr}, prompt: [code-style, terse, gremlins:github_review_pull_request.md] }
       - { name: github-review-pull-request-complexity, type: agent, client: claude:sonnet, in: {pr: pr}, prompt: [code-style, terse, complexity_review.md] }
 

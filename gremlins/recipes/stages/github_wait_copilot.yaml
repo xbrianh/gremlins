@@ -1,0 +1,25 @@
+# Defaults: interval=20s between polls, max-iterations=40 (~10 min at 20s/poll).
+# Relies on LoopStage's head_stable exit predicate — only use in pipeline
+# positions where HEAD does not move between poll iterations.
+
+stages:
+  - name: github-wait-copilot
+    type: loop
+    max-iterations: 40
+    body:
+      - name: poll
+        type: exec
+        in:
+          pr_number: pr.number
+        out:
+          status: "file://session/status"
+        options:
+          interval: "20"
+          cmds:
+            - |
+              review=$(gh api "repos/{repo}/pulls/$pr_number/reviews" \
+                --jq '.[] | select(.user.login | test("[Cc]opilot")) | .state | select(. != "PENDING")' \
+                2>/dev/null || true)
+              [ -n "$review" ] && exit 0
+              sleep {interval}
+              exit 1
