@@ -66,6 +66,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--plan", dest="plan", default=None)
     parser.add_argument("--spec", default=None)
     parser.add_argument("--client", dest="client", default=None)
+    parser.add_argument("--resume-from", dest="resume_from", default=None)
     parser.add_argument("instructions", nargs="*")
     args = parser.parse_args(argv)
     if args.plan and args.instructions:
