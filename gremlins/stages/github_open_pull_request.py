@@ -58,12 +58,7 @@ class GitHubOpenPullRequest(Stage):
         prev_branch = (
             state.artifacts.read("pr").branch if state.artifacts.produced("pr") else ""
         )
-        _default_base = (
-            state.artifacts.resolve("base_ref").path.removeprefix("ref/")
-            if state.artifacts.produced("base_ref")
-            else "main"
-        )
-        base_ref = prev_branch or self.base_ref or _default_base
+        base_ref = prev_branch or self.base_ref or state.engine_ctx.base_ref or "main"
         issue_num = (
             state.artifacts.resolve("plan").path.removeprefix("issue/")
             if state.artifacts.produced("plan")

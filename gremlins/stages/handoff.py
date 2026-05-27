@@ -456,11 +456,7 @@ class Handoff(Stage):
         if not boss_spec.exists():
             shutil.copyfile(plan_md, boss_spec)
 
-        base_ref = (
-            state.artifacts.resolve("base_ref").path.removeprefix("ref/")
-            if state.artifacts.produced("base_ref")
-            else await self._resolve_base_ref(state)
-        )
+        base_ref = state.engine_ctx.base_ref or await self._resolve_base_ref(state)
         handoff_n = self._next_handoff_index(session_dir)
 
         prev_rolling = (

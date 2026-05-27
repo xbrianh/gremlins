@@ -103,11 +103,7 @@ class Plan(Stage):
     async def _run_agent(self, plan_md: pathlib.Path, state: State) -> None:
         repo = _read_repo(state)
         if repo:
-            base_ref_name = (
-                state.artifacts.resolve("base_ref").path.removeprefix("ref/")
-                if state.artifacts.produced("base_ref")
-                else ""
-            )
+            base_ref_name = state.engine_ctx.base_ref
             plan_prompt = (
                 "\n\n".join(self.prompts)
                 .rstrip()
