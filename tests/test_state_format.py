@@ -11,6 +11,7 @@ from gremlins.stages.base import Stage
 
 
 def _make_state(
+    session_dir: pathlib.Path,
     *,
     loop_iteration: int = 1,
     attempt: str = "",
@@ -28,7 +29,7 @@ def _make_state(
     state = build_state(
         data=data,
         client=FakeClaudeClient(),
-        session_dir=pathlib.Path("/tmp"),
+        session_dir=session_dir,
         repo=repo,
         cwd=cwd,
     )
@@ -38,34 +39,34 @@ def _make_state(
     return state
 
 
-def test_format_n():
+def test_format_n(tmp_path):
     s = _make_state(
-        loop_iteration=3, attempt="abc", scope_names=["implement", "verify"]
+        tmp_path, loop_iteration=3, attempt="abc", scope_names=["implement", "verify"]
     )
     assert s.format("handoff-{n}.md") == "handoff-3.md"
 
 
-def test_format_attempt():
+def test_format_attempt(tmp_path):
     s = _make_state(
-        loop_iteration=3, attempt="abc", scope_names=["implement", "verify"]
+        tmp_path, loop_iteration=3, attempt="abc", scope_names=["implement", "verify"]
     )
     assert s.format("{attempt}") == "abc"
 
 
-def test_format_scope():
+def test_format_scope(tmp_path):
     s = _make_state(
-        loop_iteration=3, attempt="abc", scope_names=["implement", "verify"]
+        tmp_path, loop_iteration=3, attempt="abc", scope_names=["implement", "verify"]
     )
     assert s.format("{scope}") == "implement/verify"
 
 
-def test_format_combined():
+def test_format_combined(tmp_path):
     s = _make_state(
-        loop_iteration=3, attempt="abc", scope_names=["implement", "verify"]
+        tmp_path, loop_iteration=3, attempt="abc", scope_names=["implement", "verify"]
     )
     assert s.format("{n}-{attempt}-{scope}") == "3-abc-implement/verify"
 
 
-def test_format_empty_scope():
-    s = _make_state(loop_iteration=1, attempt="x")
+def test_format_empty_scope(tmp_path):
+    s = _make_state(tmp_path, loop_iteration=1, attempt="x")
     assert s.format("{scope}") == ""
