@@ -313,6 +313,236 @@ def test_backoff_schedule_matches_stream_idle_backoff(tmp_path, monkeypatch):
     assert sleep_calls == list(STREAM_IDLE_BACKOFF)
 
 
+# ---------------------------------------------------------------------------
+# Resume + progress-aware backoff
+# ---------------------------------------------------------------------------
+
+_RESUME_STUB_SRC = """\
+import json, os, sys
+
+count_file = os.environ.get("STUB_COUNT_FILE")
+fail_times = int(os.environ.get("STUB_FAIL_TIMES", "0"))
+
+count = 0
+if count_file:
+    try:
+        count = int(open(count_file).read().strip())
+    except Exception:
+        pass
+    with open(count_file, "w") as f:
+        f.write(str(count + 1))
+
+argv_dir = os.environ.get("STUB_ARGV_DIR")
+if argv_dir:
+    with open(os.path.join(argv_dir, f"argv-{count}.json"), "w") as f:
+        json.dump(sys.argv[1:], f)
+
+if count < fail_times:
+    sys.stdout.write(
+        json.dumps({"type": "system", "subtype": "init", "session_id": "sess-abc"})
+        + "\\n"
+    )
+    sys.stdout.write(
+        json.dumps(
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "x"}]}}
+        )
+        + "\\n"
+    )
+    sys.stdout.flush()
+    sys.stdout.write("Stream idle timeout\\n")
+    sys.stdout.flush()
+    sys.exit(1)
+
+sys.stdout.write(
+    json.dumps({"type": "system", "subtype": "init", "session_id": "sess-abc"}) + "\\n"
+)
+sys.stdout.write(
+    json.dumps(
+        {"type": "result", "subtype": "success", "num_turns": 1, "total_cost_usd": 0.0}
+    )
+    + "\\n"
+)
+sys.stdout.flush()
+"""
+
+
+def _install_resume_stub(bin_dir: pathlib.Path) -> None:
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    stub = bin_dir / "claude"
+    stub.write_text(f"#!{sys.executable}\n" + _RESUME_STUB_SRC, encoding="utf-8")
+    stub.chmod(0o755)
+
+
+def test_session_id_passed_via_resume_on_retry(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    _install_resume_stub(bin_dir)
+    count_file = tmp_path / "count.txt"
+    count_file.write_text("0")
+    argv_dir = tmp_path / "argv"
+    argv_dir.mkdir()
+
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("STUB_COUNT_FILE", str(count_file))
+    monkeypatch.setenv("STUB_FAIL_TIMES", "1")
+    monkeypatch.setenv("STUB_ARGV_DIR", str(argv_dir))
+
+    async def _noop_sleep(_: float) -> None:
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", _noop_sleep)
+
+    client = SubprocessClaudeClient()
+    result = asyncio.run(client.run("hello", label="test", max_retries=2))
+    assert result.exit_code == 0
+
+    argv_0 = json.loads((argv_dir / "argv-0.json").read_text())
+    argv_1 = json.loads((argv_dir / "argv-1.json").read_text())
+    assert "--resume" not in argv_0
+    assert "--resume" in argv_1
+    idx = argv_1.index("--resume")
+    assert argv_1[idx + 1] == "sess-abc"
+
+
+def test_resume_retry_sends_continuation_prompt_via_stdin(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    count_file = tmp_path / "count.txt"
+    count_file.write_text("0")
+    stdin_dir = tmp_path / "stdin"
+    stdin_dir.mkdir()
+
+    src = _RESUME_STUB_SRC.replace(
+        "import json, os, sys\n",
+        'import json, os, sys\n'
+        'stdin_dir = os.environ.get("STUB_STDIN_DIR")\n'
+        '_pending_stdin = sys.stdin.read() if stdin_dir else None\n',
+    )
+    src = src.replace(
+        'argv_dir = os.environ.get("STUB_ARGV_DIR")\n',
+        'argv_dir = os.environ.get("STUB_ARGV_DIR")\n'
+        'if stdin_dir is not None and _pending_stdin is not None:\n'
+        '    with open(os.path.join(stdin_dir, f"stdin-{count}.txt"), "w") as f:\n'
+        '        f.write(_pending_stdin)\n',
+    )
+    stub = bin_dir / "claude"
+    stub.write_text(f"#!{sys.executable}\n" + src, encoding="utf-8")
+    stub.chmod(0o755)
+
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("STUB_COUNT_FILE", str(count_file))
+    monkeypatch.setenv("STUB_FAIL_TIMES", "1")
+    monkeypatch.setenv("STUB_STDIN_DIR", str(stdin_dir))
+
+    async def _noop_sleep(_: float) -> None:
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", _noop_sleep)
+
+    client = SubprocessClaudeClient()
+    asyncio.run(client.run("original-prompt", label="test", max_retries=2))
+
+    assert (stdin_dir / "stdin-0.txt").read_text() == "original-prompt"
+    assert (stdin_dir / "stdin-1.txt").read_text() == "Please continue."
+
+
+def test_resume_retry_prefers_on_timeout_prompt(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    count_file = tmp_path / "count.txt"
+    count_file.write_text("0")
+    stdin_dir = tmp_path / "stdin"
+    stdin_dir.mkdir()
+
+    src = _RESUME_STUB_SRC.replace(
+        "import json, os, sys\n",
+        'import json, os, sys\n'
+        'stdin_dir = os.environ.get("STUB_STDIN_DIR")\n'
+        '_pending_stdin = sys.stdin.read() if stdin_dir else None\n',
+    )
+    src = src.replace(
+        'argv_dir = os.environ.get("STUB_ARGV_DIR")\n',
+        'argv_dir = os.environ.get("STUB_ARGV_DIR")\n'
+        'if stdin_dir is not None and _pending_stdin is not None:\n'
+        '    with open(os.path.join(stdin_dir, f"stdin-{count}.txt"), "w") as f:\n'
+        '        f.write(_pending_stdin)\n',
+    )
+    stub = bin_dir / "claude"
+    stub.write_text(f"#!{sys.executable}\n" + src, encoding="utf-8")
+    stub.chmod(0o755)
+
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("STUB_COUNT_FILE", str(count_file))
+    monkeypatch.setenv("STUB_FAIL_TIMES", "1")
+    monkeypatch.setenv("STUB_STDIN_DIR", str(stdin_dir))
+
+    async def _noop_sleep(_: float) -> None:
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", _noop_sleep)
+
+    client = SubprocessClaudeClient()
+    asyncio.run(
+        client.run(
+            "original",
+            label="test",
+            on_timeout_prompt="resume-please",
+            max_retries=2,
+        )
+    )
+
+    assert (stdin_dir / "stdin-1.txt").read_text() == "resume-please"
+
+
+def test_backoff_resets_on_forward_progress(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    count_file = tmp_path / "count.txt"
+    count_file.write_text("0")
+
+    src = """\
+import json, os, sys
+
+count_file = os.environ.get("STUB_COUNT_FILE")
+count = 0
+if count_file:
+    try:
+        count = int(open(count_file).read().strip())
+    except Exception:
+        pass
+    with open(count_file, "w") as f:
+        f.write(str(count + 1))
+
+sys.stdout.write(json.dumps({"type": "system", "subtype": "init", "session_id": "s"}) + "\\n")
+sys.stdout.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "x"}]}}) + "\\n")
+sys.stdout.flush()
+sys.stdout.write("Stream idle timeout\\n")
+sys.stdout.flush()
+sys.exit(1)
+"""
+    stub = bin_dir / "claude"
+    stub.write_text(f"#!{sys.executable}\n" + src, encoding="utf-8")
+    stub.chmod(0o755)
+
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("STUB_COUNT_FILE", str(count_file))
+
+    sleep_calls: list[float] = []
+
+    async def _record(t: float) -> None:
+        sleep_calls.append(t)
+
+    monkeypatch.setattr("asyncio.sleep", _record)
+
+    client = SubprocessClaudeClient()
+    with pytest.raises(StreamTimeoutError):
+        asyncio.run(client.run("hi", label="test", max_retries=3))
+
+    # Each attempt made forward progress, so the backoff index never advanced
+    # past 0 — every retry waits the shortest slot rather than the [60,300,600]
+    # exhaustion schedule.
+    assert sleep_calls == [STREAM_IDLE_BACKOFF[0]] * 3
+
+
 def test_max_retries_exceeds_schedule_raises_value_error():
     client = SubprocessClaudeClient()
     with pytest.raises(ValueError, match="max_retries"):

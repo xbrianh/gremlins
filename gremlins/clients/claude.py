@@ -11,7 +11,6 @@ from typing import Any
 from gremlins.clients.config import (
     STREAM_IDLE_BACKOFF,
     STREAM_IDLE_TIMEOUT,
-    retry,
     validate_max_retries,
 )
 from gremlins.clients.protocol import CompletedRun
@@ -21,7 +20,16 @@ from gremlins.utils.proc import iter_lines, terminate_with_grace
 
 
 class StreamTimeoutError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        msg: str,
+        *,
+        session_id: str | None = None,
+        made_progress: bool = False,
+    ) -> None:
+        super().__init__(msg)
+        self.session_id = session_id
+        self.made_progress = made_progress
 
 
 class SubprocessClaudeClient:
@@ -85,13 +93,17 @@ class SubprocessClaudeClient:
     def total_cost_usd(self) -> float:
         return self._total_cost_usd
 
-    def _build_argv(self, model: str | None) -> list[str]:
+    def _build_argv(
+        self, model: str | None, *, resume_session_id: str | None = None
+    ) -> list[str]:
         cmd = ["claude", "-p"]
         if model is not None:
             cmd += ["--model", model]
         mode = "bypassPermissions" if self._bypass else "default"
         cmd += ["--permission-mode", mode, "--verbose"]
         cmd += ["--output-format", "stream-json"]
+        if resume_session_id is not None:
+            cmd += ["--resume", resume_session_id]
         return cmd
 
     async def _spawn(
@@ -134,7 +146,12 @@ class SubprocessClaudeClient:
         idle_timeout: float,
     ) -> tuple[dict[str, Any], list[dict[str, Any]] | None, bool]:
         assert p.stdout is not None
-        state: dict[str, Any] = {"cost_usd": None, "result_text": None}
+        state: dict[str, Any] = {
+            "cost_usd": None,
+            "result_text": None,
+            "session_id": None,
+            "made_progress": False,
+        }
         events: list[dict[str, Any]] | None = [] if capture_events else None
         timed_out = False
         raw = open(raw_path, "ab") if raw_path is not None else None
@@ -150,6 +167,12 @@ class SubprocessClaudeClient:
                     if evt is None:
                         continue
                     extract_state(evt, state)
+                    if state["session_id"] is None:
+                        sid = evt.get("session_id")
+                        if isinstance(sid, str):
+                            state["session_id"] = sid
+                    if evt.get("type") != "system":
+                        state["made_progress"] = True
                     if events is not None:
                         events.append(evt)
                     try:
@@ -179,7 +202,11 @@ class SubprocessClaudeClient:
             self._untrack(p)
         if timed_out:
             await terminate_with_grace(p, grace_s=5.0)
-            raise StreamTimeoutError("claude -p stream idle timeout")
+            raise StreamTimeoutError(
+                "claude -p stream idle timeout",
+                session_id=state["session_id"],
+                made_progress=state["made_progress"],
+            )
         rc = await p.wait()
         cost_usd = state["cost_usd"]
         if cost_usd is not None:
@@ -209,31 +236,48 @@ class SubprocessClaudeClient:
         validate_max_retries(max_retries)
         if idle_timeout is None:
             idle_timeout = STREAM_IDLE_TIMEOUT
-        argv = self._build_argv(model)
         prefix = f"[{label}] " if label else ""
+        backoff = STREAM_IDLE_BACKOFF[:max_retries]
+
         active_prompt = prompt
+        resume_session_id: str | None = None
+        backoff_idx = 0
+        attempts_failed = 0
 
-        def _on_retry(attempt: int, _exc: BaseException, wait: float) -> None:
-            nonlocal active_prompt
-            sys.stderr.write(
-                f"{ts()} {prefix}stream idle timeout, retrying in {wait}s"
-                f" ({attempt + 1}/{max_retries})...\n"
-            )
-            if on_timeout_prompt is not None:
-                active_prompt = on_timeout_prompt
+        while True:
+            argv = self._build_argv(model, resume_session_id=resume_session_id)
+            try:
+                p = await self._spawn(
+                    argv, active_prompt, cwd=cwd, extra_env=extra_env
+                )
+                result = await self._consume(
+                    p, prefix, raw_path, capture_events, idle_timeout
+                )
+                break
+            except StreamTimeoutError as exc:
+                attempts_failed += 1
+                if attempts_failed > max_retries:
+                    raise
+                # Forward progress: don't burn the longer backoff slots.
+                if exc.made_progress:
+                    backoff_idx = 0
+                wait = backoff[backoff_idx]
+                sys.stderr.write(
+                    f"{ts()} {prefix}stream idle timeout, retrying in {wait}s"
+                    f" ({attempts_failed}/{max_retries})...\n"
+                )
+                if exc.session_id is not None:
+                    # --resume avoids re-paying for the already-streamed prefix.
+                    resume_session_id = exc.session_id
+                    active_prompt = on_timeout_prompt or "Please continue."
+                else:
+                    resume_session_id = None
+                    if on_timeout_prompt is not None:
+                        active_prompt = on_timeout_prompt
+                if backoff_idx + 1 < len(backoff):
+                    backoff_idx += 1
+                await asyncio.sleep(wait)
 
-        @retry(
-            StreamTimeoutError,
-            backoff=STREAM_IDLE_BACKOFF[:max_retries],
-            on_retry=_on_retry,
-        )
-        async def _run_once() -> CompletedRun:
-            p = await self._spawn(argv, active_prompt, cwd=cwd, extra_env=extra_env)
-            return await self._consume(
-                p, prefix, raw_path, capture_events, idle_timeout
-            )
-
-        result = await _run_once()
         if result.exit_code != 0:
             raise RuntimeError(
                 f"claude -p (model={model}, label={label}) exited {result.exit_code}"
