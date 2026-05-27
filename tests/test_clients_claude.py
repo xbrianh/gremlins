@@ -219,8 +219,8 @@ def test_retry_exhaustion_raises_stream_timeout_error(tmp_path, monkeypatch):
     with pytest.raises(StreamTimeoutError):
         asyncio.run(client.run("hello", label="test", max_retries=2))
     assert (
-        int(count_file.read_text()) == 4
-    )  # initial + 3 resume attempts (backoff[:2] → 3 tries)
+        int(count_file.read_text()) == 3
+    )  # max_retries=2 → 3 total attempts (initial + 2 resumes)
 
 
 _SLEEP_FOREVER_STUB_SRC = """\
@@ -351,7 +351,11 @@ def test_backoff_schedule_matches_stream_idle_backoff(tmp_path, monkeypatch):
     with pytest.raises(StreamTimeoutError):
         asyncio.run(client.run("hello", label="test", max_retries=3))
 
-    assert sleep_calls == list(STREAM_IDLE_BACKOFF)
+    # max_retries=3 → 4 total attempts (initial + 3 resumes) with 3 sleeps
+    # between them. The initial attempt in run() is unconditional and consumes
+    # no backoff entry; resume() then schedules backoff[:max(0, max_retries-1)]
+    # = backoff[:2] sleeps between its 3 attempts. Total sleeps == 2.
+    assert sleep_calls == list(STREAM_IDLE_BACKOFF[:2])
 
 
 def test_max_retries_exceeds_schedule_raises_value_error():

@@ -209,7 +209,8 @@ class SubprocessClaudeClient:
 
     async def _attempt(self, prompt: str, session_id: str | None) -> CompletedRun:
         ctx = self._ctx
-        assert ctx is not None
+        if ctx is None:
+            raise RuntimeError("_attempt() called before run()")
         argv = self._build_argv(ctx["model"], session_id=session_id)
         p = await self._spawn(argv, prompt, cwd=ctx["cwd"], extra_env=ctx["extra_env"])
         return await self._consume(
@@ -222,7 +223,8 @@ class SubprocessClaudeClient:
 
     def _continue_prompt(self) -> str:
         ctx = self._ctx
-        assert ctx is not None
+        if ctx is None:
+            raise RuntimeError("_continue_prompt() called before run()")
         return (
             ctx["on_timeout_prompt"]
             if ctx["on_timeout_prompt"] is not None
@@ -231,8 +233,14 @@ class SubprocessClaudeClient:
 
     async def resume(self) -> CompletedRun:
         ctx = self._ctx
-        assert ctx is not None
-        backoff = STREAM_IDLE_BACKOFF[: ctx["max_retries"]]
+        if ctx is None:
+            raise RuntimeError("resume() called before run()")
+        # max_retries is the caller-visible budget (initial attempt + N retries =
+        # N+1 total tries). When resume() is invoked from run() after the
+        # initial attempt timed out, one attempt has already been spent, so the
+        # remaining budget is max_retries - 1. The max(0, …) guards against
+        # max_retries=0 (no retries at all).
+        backoff = STREAM_IDLE_BACKOFF[: max(0, ctx["max_retries"] - 1)]
 
         def _on_retry(attempt: int, _: BaseException, wait: float) -> None:
             sys.stderr.write(
@@ -262,6 +270,12 @@ class SubprocessClaudeClient:
         idle_timeout: float | None = None,
         extra_env: dict[str, str] | None = None,
     ) -> CompletedRun:
+        """Spawn ``claude -p`` and stream its output.
+
+        ``max_retries`` is the caller-visible budget: total attempts on idle
+        timeout = ``max_retries + 1`` (one initial run, then up to
+        ``max_retries`` ``--resume <session-id>`` retries via ``resume()``).
+        """
         validate_max_retries(max_retries)
         if idle_timeout is None:
             idle_timeout = STREAM_IDLE_TIMEOUT

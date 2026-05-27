@@ -332,8 +332,13 @@ class AnthropicSdkClient:
             raise
 
     async def resume(self) -> CompletedRun:
+        # Note: this backend has no session-id concept, so resume() is a full
+        # re-run of run() — including run()'s internal retry loop (up to
+        # max_retries + 1 attempts). It is not a single-shot retry like
+        # SubprocessClaudeClient.resume().
         ctx = self._ctx
-        assert ctx is not None
+        if ctx is None:
+            raise RuntimeError("resume() called before run()")
         return await self.run(
             ctx["prompt"],
             label=ctx["label"],
