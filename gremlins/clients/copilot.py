@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import os
 import pathlib
 import re
@@ -39,7 +40,10 @@ class SubprocessCopilotClient:
         self._native_block: dict[str, Any] = (
             native_block if native_block is not None else {}
         )
-        self._ctx: dict[str, Any] | None = None
+        # Per-task storage — see comment in SubprocessClaudeClient.__init__.
+        self._ctx: contextvars.ContextVar[dict[str, Any] | None] = (
+            contextvars.ContextVar("copilot_ctx", default=None)
+        )
 
     def _track(self, p: asyncio.subprocess.Process) -> None:
         with self._lock:
@@ -121,15 +125,17 @@ class SubprocessCopilotClient:
             on_timeout_prompt,
             max_retries,
         )  # copilot reads stdout to EOF; no streaming idle concept
-        self._ctx = {
-            "prompt": prompt,
-            "label": label,
-            "model": model,
-            "raw_path": raw_path,
-            "capture_events": capture_events,
-            "cwd": cwd,
-            "extra_env": extra_env,
-        }
+        self._ctx.set(
+            {
+                "prompt": prompt,
+                "label": label,
+                "model": model,
+                "raw_path": raw_path,
+                "capture_events": capture_events,
+                "cwd": cwd,
+                "extra_env": extra_env,
+            }
+        )
         argv = self._build_argv(model, prompt)
         p = await self._spawn(argv, cwd=cwd, extra_env=extra_env)
         try:
@@ -167,8 +173,9 @@ class SubprocessCopilotClient:
         )
 
     async def resume(self) -> CompletedRun:
-        ctx = self._ctx
-        assert ctx is not None
+        ctx = self._ctx.get()
+        if ctx is None:
+            raise RuntimeError("resume() called before run()")
         return await self.run(
             ctx["prompt"],
             label=ctx["label"],

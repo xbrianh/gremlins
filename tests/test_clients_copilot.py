@@ -294,18 +294,35 @@ def test_copilot_empty_block_runs_with_no_extra_flags(tmp_path, monkeypatch):
 
 def test_copilot_resume_replays_original_call(tmp_path, monkeypatch):
     bin_dir = tmp_path / "bin"
-    _install_stub(bin_dir, _STUB_COPILOT_SRC)
+    # Stub variant that appends each call's argv to a JSONL counter file so
+    # we can assert resume() actually re-spawns the subprocess rather than
+    # returning a cached CompletedRun.
+    counter_stub = """\
+import os, sys, json
+calls_path = os.environ["STUB_CALLS_OUT"]
+with open(calls_path, "a") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\\n")
+sys.stdout.write(os.environ.get("STUB_OUTPUT", "hello from copilot"))
+sys.stdout.flush()
+"""
+    _install_stub(bin_dir, counter_stub)
+    calls_path = tmp_path / "calls.jsonl"
 
-    async def _noop_sleep(_: float) -> None:
-        pass
-
-    monkeypatch.setattr("asyncio.sleep", _noop_sleep)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     monkeypatch.setenv("STUB_OUTPUT", "copilot response")
+    monkeypatch.setenv("STUB_CALLS_OUT", str(calls_path))
 
-    client = SubprocessCopilotClient()
-    asyncio.run(client.run("first-prompt", label="test"))
-    result = asyncio.run(client.resume())
+    # run() and resume() must share the same asyncio task so the per-task
+    # ContextVar holding the resume payload survives between them.
+    async def _drive() -> object:
+        client = SubprocessCopilotClient()
+        await client.run("first-prompt", label="test")
+        return await client.resume()
+
+    result = asyncio.run(_drive())
 
     assert result.exit_code == 0
     assert result.text_result == "copilot response"
+    calls = [json.loads(line) for line in calls_path.read_text().splitlines() if line]
+    assert len(calls) == 2, f"expected resume() to spawn a second copilot, got {calls}"
+    assert calls[0] == calls[1], "resume() must replay the original argv"

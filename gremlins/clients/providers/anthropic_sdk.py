@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import os
 import pathlib
@@ -153,7 +154,12 @@ class AnthropicSdkClient:
         self._native_block: dict[str, Any] = (
             native_block if native_block is not None else {}
         )
-        self._ctx: dict[str, Any] | None = None
+        # Per-task storage so parallel stages sharing one client instance
+        # don't race on resume context (see comment in
+        # SubprocessClaudeClient.__init__).
+        self._ctx: contextvars.ContextVar[dict[str, Any] | None] = (
+            contextvars.ContextVar("anthropic_sdk_ctx", default=None)
+        )
 
     async def _execute(
         self,
@@ -266,18 +272,20 @@ class AnthropicSdkClient:
         idle_timeout: float | None = None,
         extra_env: dict[str, str] | None = None,
     ) -> CompletedRun:
-        self._ctx = {
-            "prompt": prompt,
-            "label": label,
-            "model": model,
-            "raw_path": raw_path,
-            "capture_events": capture_events,
-            "on_timeout_prompt": on_timeout_prompt,
-            "max_retries": max_retries,
-            "cwd": cwd,
-            "idle_timeout": idle_timeout,
-            "extra_env": extra_env,
-        }
+        self._ctx.set(
+            {
+                "prompt": prompt,
+                "label": label,
+                "model": model,
+                "raw_path": raw_path,
+                "capture_events": capture_events,
+                "on_timeout_prompt": on_timeout_prompt,
+                "max_retries": max_retries,
+                "cwd": cwd,
+                "idle_timeout": idle_timeout,
+                "extra_env": extra_env,
+            }
+        )
         validate_max_retries(max_retries)
         if idle_timeout is None:
             idle_timeout = STREAM_IDLE_TIMEOUT
@@ -336,7 +344,7 @@ class AnthropicSdkClient:
         # re-run of run() — including run()'s internal retry loop (up to
         # max_retries + 1 attempts). It is not a single-shot retry like
         # SubprocessClaudeClient.resume().
-        ctx = self._ctx
+        ctx = self._ctx.get()
         if ctx is None:
             raise RuntimeError("resume() called before run()")
         return await self.run(

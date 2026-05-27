@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import os
 import pathlib
 import signal
@@ -56,8 +57,16 @@ class SubprocessClaudeClient:
         self._native_block: dict[str, Any] = (
             native_block if native_block is not None else {}
         )
-        self._ctx: dict[str, Any] | None = None
-        self._last_session_id: str | None = None
+        # Per-task storage so parallel stages sharing one client instance
+        # (gremlins/stages/composite.py shares parent.client across child
+        # states) don't race on resume context. ContextVars are copied per
+        # asyncio.Task at creation, so each fan-out task has its own slot.
+        self._ctx: contextvars.ContextVar[dict[str, Any] | None] = (
+            contextvars.ContextVar("claude_ctx", default=None)
+        )
+        self._last_session_id: contextvars.ContextVar[str | None] = (
+            contextvars.ContextVar("claude_last_session_id", default=None)
+        )
 
     def _track(self, p: asyncio.subprocess.Process) -> None:
         with self._lock:
@@ -189,7 +198,7 @@ class SubprocessClaudeClient:
         finally:
             self._untrack(p)
         if session_id is not None:
-            self._last_session_id = session_id
+            self._last_session_id.set(session_id)
         if timed_out:
             await terminate_with_grace(p, grace_s=5.0)
             raise StreamTimeoutError(
@@ -208,7 +217,7 @@ class SubprocessClaudeClient:
         )
 
     async def _attempt(self, prompt: str, session_id: str | None) -> CompletedRun:
-        ctx = self._ctx
+        ctx = self._ctx.get()
         if ctx is None:
             raise RuntimeError("_attempt() called before run()")
         argv = self._build_argv(ctx["model"], session_id=session_id)
@@ -222,7 +231,7 @@ class SubprocessClaudeClient:
         )
 
     def _continue_prompt(self) -> str:
-        ctx = self._ctx
+        ctx = self._ctx.get()
         if ctx is None:
             raise RuntimeError("_continue_prompt() called before run()")
         return (
@@ -232,7 +241,7 @@ class SubprocessClaudeClient:
         )
 
     async def resume(self) -> CompletedRun:
-        ctx = self._ctx
+        ctx = self._ctx.get()
         if ctx is None:
             raise RuntimeError("resume() called before run()")
         # max_retries is the caller-visible budget (initial attempt + N retries =
@@ -251,7 +260,7 @@ class SubprocessClaudeClient:
         @retry(StreamTimeoutError, backoff=backoff, on_retry=_on_retry)
         async def _attempt_resume() -> CompletedRun:
             return await self._attempt(
-                self._continue_prompt(), session_id=self._last_session_id
+                self._continue_prompt(), session_id=self._last_session_id.get()
             )
 
         return await _attempt_resume()
@@ -280,20 +289,22 @@ class SubprocessClaudeClient:
         if idle_timeout is None:
             idle_timeout = STREAM_IDLE_TIMEOUT
         prefix = f"[{label}] " if label else ""
-        self._ctx = {
-            "prompt": prompt,
-            "on_timeout_prompt": on_timeout_prompt,
-            "label": label,
-            "model": model,
-            "raw_path": raw_path,
-            "capture_events": capture_events,
-            "idle_timeout": idle_timeout,
-            "cwd": cwd,
-            "extra_env": extra_env,
-            "prefix": prefix,
-            "max_retries": max_retries,
-        }
-        self._last_session_id = None
+        self._ctx.set(
+            {
+                "prompt": prompt,
+                "on_timeout_prompt": on_timeout_prompt,
+                "label": label,
+                "model": model,
+                "raw_path": raw_path,
+                "capture_events": capture_events,
+                "idle_timeout": idle_timeout,
+                "cwd": cwd,
+                "extra_env": extra_env,
+                "prefix": prefix,
+                "max_retries": max_retries,
+            }
+        )
+        self._last_session_id.set(None)
 
         try:
             result = await self._attempt(prompt, session_id=None)
