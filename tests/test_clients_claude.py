@@ -413,16 +413,16 @@ def test_resume_retry_sends_continuation_prompt_via_stdin(tmp_path, monkeypatch)
 
     src = _RESUME_STUB_SRC.replace(
         "import json, os, sys\n",
-        'import json, os, sys\n'
+        "import json, os, sys\n"
         'stdin_dir = os.environ.get("STUB_STDIN_DIR")\n'
-        '_pending_stdin = sys.stdin.read() if stdin_dir else None\n',
+        "_pending_stdin = sys.stdin.read() if stdin_dir else None\n",
     )
     src = src.replace(
         'argv_dir = os.environ.get("STUB_ARGV_DIR")\n',
         'argv_dir = os.environ.get("STUB_ARGV_DIR")\n'
-        'if stdin_dir is not None and _pending_stdin is not None:\n'
+        "if stdin_dir is not None and _pending_stdin is not None:\n"
         '    with open(os.path.join(stdin_dir, f"stdin-{count}.txt"), "w") as f:\n'
-        '        f.write(_pending_stdin)\n',
+        "        f.write(_pending_stdin)\n",
     )
     stub = bin_dir / "claude"
     stub.write_text(f"#!{sys.executable}\n" + src, encoding="utf-8")
@@ -455,16 +455,16 @@ def test_resume_retry_prefers_on_timeout_prompt(tmp_path, monkeypatch):
 
     src = _RESUME_STUB_SRC.replace(
         "import json, os, sys\n",
-        'import json, os, sys\n'
+        "import json, os, sys\n"
         'stdin_dir = os.environ.get("STUB_STDIN_DIR")\n'
-        '_pending_stdin = sys.stdin.read() if stdin_dir else None\n',
+        "_pending_stdin = sys.stdin.read() if stdin_dir else None\n",
     )
     src = src.replace(
         'argv_dir = os.environ.get("STUB_ARGV_DIR")\n',
         'argv_dir = os.environ.get("STUB_ARGV_DIR")\n'
-        'if stdin_dir is not None and _pending_stdin is not None:\n'
+        "if stdin_dir is not None and _pending_stdin is not None:\n"
         '    with open(os.path.join(stdin_dir, f"stdin-{count}.txt"), "w") as f:\n'
-        '        f.write(_pending_stdin)\n',
+        "        f.write(_pending_stdin)\n",
     )
     stub = bin_dir / "claude"
     stub.write_text(f"#!{sys.executable}\n" + src, encoding="utf-8")

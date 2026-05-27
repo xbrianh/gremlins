@@ -251,9 +251,7 @@ class SubprocessClaudeClient:
         while True:
             argv = self._build_argv(model, resume_session_id=resume_session_id)
             try:
-                p = await self._spawn(
-                    argv, active_prompt, cwd=cwd, extra_env=extra_env
-                )
+                p = await self._spawn(argv, active_prompt, cwd=cwd, extra_env=extra_env)
                 result = await self._consume(
                     p, prefix, raw_path, capture_events, idle_timeout
                 )
