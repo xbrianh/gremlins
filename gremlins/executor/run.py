@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import logging
 import math
@@ -48,17 +49,49 @@ def _apply_policy_to_stages(stages: list[Stage], policy: Policy) -> None:
             _apply_policy_to_stages(stage.body, policy)
 
 
-def _install_signal_handlers(clients: Sequence[Client]) -> None:
-    def handler(_signum: int, _frame: types.FrameType | None) -> None:  # pyright: ignore[reportUnusedParameter]
+def _load_stage_attempt(gremlin_id: str | None) -> tuple[str, str]:
+    try:
+        sd = StateData.load(gremlin_id)
+        return sd.stage or "", sd.attempt or ""
+    except Exception:
+        return "", ""
+
+
+def _install_signal_handlers(clients: Sequence[Client], gremlin_id: str | None) -> None:
+    def handler(signum: int, _frame: types.FrameType | None) -> None:  # pyright: ignore[reportUnusedParameter]
+        stage, attempt = _load_stage_attempt(gremlin_id)
+        logger.warning(
+            "received %s at stage=%s attempt=%s",
+            signal.Signals(signum).name,
+            stage or "(none)",
+            attempt or "(none)",
+        )
+        for h in logging.getLogger().handlers:
+            h.flush()
         for c in clients:
             try:
                 c.reap_all()
             except Exception:
-                pass  # best-effort; don't let a broken client block shutdown
-        sys.exit(130)  # 128 + SIGINT(2), conventional signal-interrupted exit
+                pass
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
 
-    signal.signal(signal.SIGINT, handler)
-    signal.signal(signal.SIGTERM, handler)
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT):
+        signal.signal(sig, handler)
+
+    def _atexit_log() -> None:
+        stage, attempt = _load_stage_attempt(gremlin_id)
+        exc = getattr(sys, "last_exc", None) or getattr(sys, "last_value", None)
+        logger.warning(
+            "exiting via atexit at stage=%s attempt=%s exc=%s",
+            stage or "(none)",
+            attempt or "(none)",
+            exc,
+        )
+        for h in logging.getLogger().handlers:
+            h.flush()
+
+    atexit.register(_atexit_log)
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -250,7 +283,7 @@ async def run_pipeline(
                     f"--resume-from {resume_from} requires implementation changes in the worktree"
                 )
 
-    _install_signal_handlers(_signal_clients)
+    _install_signal_handlers(_signal_clients, gremlin_id)
     try:
         await gremlin.run()
     except Bail as b:
