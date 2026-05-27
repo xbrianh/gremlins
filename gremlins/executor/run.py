@@ -66,6 +66,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--plan", dest="plan", default=None)
     parser.add_argument("--spec", default=None)
     parser.add_argument("--client", dest="client", default=None)
+    parser.add_argument("--resume-from", dest="resume_from", default=None)
     parser.add_argument("instructions", nargs="*")
     args = parser.parse_args(argv)
     if args.plan and args.instructions:
@@ -73,6 +74,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     if (
         not args.plan
         and not args.instructions
+        and not args.resume_from
         and not os.environ.get("GREMLINS_RESUME_FROM")
     ):
         die("one of --plan or positional instructions is required")
@@ -113,7 +115,7 @@ async def run_pipeline(
     """Load pipeline YAML, build Gremlin, run. Sole internal pipeline entry point."""
     configure_logging()
     args = _parse_args(argv)
-    resume_from = os.environ.pop("GREMLINS_RESUME_FROM", None) or None
+    resume_from = os.environ.pop("GREMLINS_RESUME_FROM", None) or args.resume_from or None
 
     os.environ.pop("GREMLINS_PROJECT_ROOT", None)
     _project_root = paths.project_root()
@@ -239,11 +241,11 @@ async def run_pipeline(
         )
         if start_idx >= _name_idx("implement"):
             if not plan_file.exists() or plan_file.stat().st_size == 0:
-                die(f"resume from {resume_from!r} requires existing {plan_file}")
+                die(f"--resume-from {resume_from} requires existing {plan_file}")
         if start_idx >= _name_idx("review-code"):
             if not has_dirty_worktree() and not has_commits():
                 die(
-                    f"resume from {resume_from!r} requires implementation changes in the worktree"
+                    f"--resume-from {resume_from} requires implementation changes in the worktree"
                 )
 
     _install_signal_handlers(_signal_clients)

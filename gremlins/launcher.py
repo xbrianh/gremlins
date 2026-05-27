@@ -732,7 +732,6 @@ def _spawn_resume(
             spawn_args.append(instructions)
 
     env = _build_spawn_env(gremlin_id)
-    env["GREMLINS_RESUME_FROM"] = stage
 
     cmd = [
         sys.executable,
@@ -740,6 +739,8 @@ def _spawn_resume(
         "gremlins.spawn.pipeline",
         gremlin_id,
         pipeline_path,
+        "--resume-from",
+        stage,
         *spawn_args,
     ]
     return _spawn_logged_process(

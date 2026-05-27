@@ -35,11 +35,13 @@ def run_ok(cmd: list[str], *, cwd: str | os.PathLike[str] | None = None) -> bool
     return r.returncode == 0
 
 
-def run_quiet(cmd: list[str], *, cwd: str | os.PathLike[str] | None = None) -> int:
+def run_quiet(
+    cmd: list[str], *, cwd: str | os.PathLike[str] | None = None
+) -> subprocess.CompletedProcess[str]:
     r = subprocess.run(
         cmd, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
-    return r.returncode
+    return subprocess.CompletedProcess(cmd, r.returncode)
 
 
 def run_or_raise(cmd: list[str], *, cwd: str | os.PathLike[str] | None = None) -> str:
