@@ -171,6 +171,10 @@ class SubprocessClaudeClient:
                         sid = evt.get("session_id")
                         if isinstance(sid, str):
                             state["session_id"] = sid
+                    # "made_progress" = any non-`system` event observed. The
+                    # `system/init` arrives almost immediately, so this is
+                    # effectively "got past handshake"; revisit if other
+                    # `system` subtypes start carrying real progress.
                     if evt.get("type") != "system":
                         state["made_progress"] = True
                     if events is not None:
@@ -271,9 +275,10 @@ class SubprocessClaudeClient:
                     resume_session_id = exc.session_id
                     active_prompt = on_timeout_prompt or "Please continue."
                 else:
+                    # Fresh spawn: restore the original prompt so we don't
+                    # carry a continuation nudge from a prior resume attempt.
                     resume_session_id = None
-                    if on_timeout_prompt is not None:
-                        active_prompt = on_timeout_prompt
+                    active_prompt = on_timeout_prompt or prompt
                 if backoff_idx + 1 < len(backoff):
                     backoff_idx += 1
                 await asyncio.sleep(wait)
