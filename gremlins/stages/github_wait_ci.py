@@ -10,11 +10,12 @@ from collections.abc import Callable
 from typing import Any
 
 from gremlins.artifacts.registry import MissingArtifact
+from gremlins.artifacts.uri import Uri
 from gremlins.executor.state import State
 from gremlins.stages.agent_runner import run_agent
 from gremlins.stages.base import Stage
 from gremlins.stages.loop import LoopStage
-from gremlins.stages.outcome import Bail, Done, NeedsFix, Outcome
+from gremlins.stages.outcome import Bail, Done, Outcome
 from gremlins.utils.git import head_sha
 from gremlins.utils.github import fetch_check_run_logs_async, get_pr_ci_status_async
 
@@ -134,7 +135,7 @@ async def _collect_failure_output(failed: list[dict[str, Any]]) -> str:
 
 
 class _CIPollStage(Stage):
-    """Polls CI for one attempt; returns Done on pass, NeedsFix on failure."""
+    """Polls CI for one attempt; sets status=needs_fix marker on failure, returns Done."""
 
     type = "_ci_poll"
 
@@ -207,7 +208,10 @@ class _CIPollStage(Stage):
         (state.session_dir / f"ci-attempt-{n}.log").write_text(
             failure_output, encoding="utf-8"
         )
-        return NeedsFix(failure_output, 1)
+        marker_path = state.session_dir / "status"
+        marker_path.write_text("needs_fix", encoding="utf-8")
+        state.artifacts.bind("status", Uri.parse("file://session/status"))
+        return Done()
 
 
 class _CIFixStage(Stage):

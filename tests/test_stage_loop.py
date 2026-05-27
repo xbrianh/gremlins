@@ -8,11 +8,12 @@ from typing import Any
 
 import pytest
 
+from gremlins.artifacts.uri import Uri
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData, build_state
 from gremlins.stages.exec import Exec as Cmd
 from gremlins.stages.loop import LoopStage, detach_to_pr_base, head_stable, max_iters
-from gremlins.stages.outcome import Bail, Done, NeedsFix
+from gremlins.stages.outcome import Bail, Done
 
 
 def _fake_client() -> Any:
@@ -29,6 +30,13 @@ def _loop_state(tmp_path: Any) -> RuntimeState:
         session_dir=tmp_path / "artifacts",
         worktree=tmp_path,
     )
+
+
+def _set_marker(state: RuntimeState) -> None:
+    """Write the status=needs_fix marker artifact to signal loop failure."""
+    marker = state.session_dir / "status"
+    marker.write_text("needs_fix", encoding="utf-8")
+    state.artifacts.bind("status", Uri.parse("file://session/status"))
 
 
 # ---------------------------------------------------------------------------
@@ -51,24 +59,25 @@ def test_loop_head_stable_exits_cleanly(tmp_path):
 
 
 def test_loop_cmd_failure_then_fix_then_green(tmp_path):
-    """NeedsFix on iter 1 allows fix runner; clean on iter 2."""
-    state = {"attempt": 0, "fixed": False}
+    """Marker on iter 1 allows fix runner; clean on iter 2."""
+    loop_state = _loop_state(tmp_path)
+    attempt = {"attempt": 0, "fixed": False}
 
-    async def check() -> Done | NeedsFix:
-        state["attempt"] += 1
-        if not state["fixed"]:
-            return NeedsFix("commands failed")
+    async def check() -> Done:
+        attempt["attempt"] += 1
+        if not attempt["fixed"]:
+            _set_marker(loop_state)
         return Done()
 
     async def fix() -> Done:
-        state["fixed"] = True
+        attempt["fixed"] = True
         return Done()
 
     loop = LoopStage("loop", body_runners=[check, fix], max_iterations=3)
-    asyncio.run(loop.run(_loop_state(tmp_path)))
+    asyncio.run(loop.run(loop_state))
 
-    assert state["attempt"] == 2
-    assert state["fixed"]
+    assert attempt["attempt"] == 2
+    assert attempt["fixed"]
 
 
 def test_loop_fix_skipped_on_success(tmp_path):
@@ -89,25 +98,30 @@ def test_loop_fix_skipped_on_success(tmp_path):
 
 
 def test_loop_exhausted_returns_bail(tmp_path):
-    async def check() -> NeedsFix:
-        return NeedsFix("always fails")
+    loop_state = _loop_state(tmp_path)
+
+    async def check() -> Done:
+        _set_marker(loop_state)
+        return Done()
 
     async def fix() -> Done:
         return Done()
 
     loop = LoopStage("loop", body_runners=[check, fix], max_iterations=3)
     with pytest.raises(Bail):
-        asyncio.run(loop.run(_loop_state(tmp_path)))
+        asyncio.run(loop.run(loop_state))
 
 
 def test_loop_fix_skipped_on_final_iteration(tmp_path):
     """Fix runner must not execute on the last failed attempt."""
     fix_calls: list[int] = []
     attempt = [0]
+    loop_state = _loop_state(tmp_path)
 
-    async def check() -> NeedsFix:
+    async def check() -> Done:
         attempt[0] += 1
-        return NeedsFix("fail")
+        _set_marker(loop_state)
+        return Done()
 
     async def fix() -> Done:
         fix_calls.append(attempt[0])
@@ -115,7 +129,7 @@ def test_loop_fix_skipped_on_final_iteration(tmp_path):
 
     loop = LoopStage("loop", body_runners=[check, fix], max_iterations=3)
     with pytest.raises(Bail):
-        asyncio.run(loop.run(_loop_state(tmp_path)))
+        asyncio.run(loop.run(loop_state))
     # fix ran for iterations 1 and 2, NOT 3
     assert fix_calls == [1, 2]
 
@@ -140,12 +154,6 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
     attempt = "loop-test-attempt"
     state_mod.StateData.load(gremlin_id).patch(attempt=attempt)
 
-    async def check() -> NeedsFix:
-        return NeedsFix("fail")
-
-    async def fix() -> Done:
-        return Done()
-
     (tmp_path / "artifacts").mkdir(exist_ok=True)
     loop_state = build_state(
         data=StateData(gremlin_id=gremlin_id, attempt=attempt),
@@ -153,6 +161,14 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
         session_dir=tmp_path / "artifacts",
         worktree=tmp_path,
     )
+
+    async def check() -> Done:
+        _set_marker(loop_state)
+        return Done()
+
+    async def fix() -> Done:
+        return Done()
+
     loop = LoopStage("loop", body_runners=[check, fix], max_iterations=2)
     with pytest.raises(Bail):
         asyncio.run(loop.run(loop_state))
@@ -208,14 +224,15 @@ def test_on_iteration_start_called_each_iteration(tmp_path):
     """on_iteration_start fires once per iteration."""
     calls: list[int] = []
     iter_counter = [0]
+    loop_state = _loop_state(tmp_path)
 
     def on_start(state: RuntimeState) -> None:
         calls.append(1)
 
-    async def runner() -> Done | NeedsFix:
+    async def runner() -> Done:
         iter_counter[0] += 1
         if iter_counter[0] < 2:
-            return NeedsFix("keep going")
+            _set_marker(loop_state)
         return Done()
 
     loop = LoopStage(
@@ -224,7 +241,7 @@ def test_on_iteration_start_called_each_iteration(tmp_path):
         max_iterations=3,
         on_iteration_start=on_start,
     )
-    asyncio.run(loop.run(_loop_state(tmp_path)))
+    asyncio.run(loop.run(loop_state))
     assert len(calls) == 2  # fired for iteration 1 and 2
 
 
@@ -235,7 +252,7 @@ def test_on_iteration_start_called_each_iteration(tmp_path):
 
 def _run_cmd_stage(tmp_path: Any, cmds: list[str]) -> tuple[Cmd, RuntimeState]:
     (tmp_path / "artifacts").mkdir(exist_ok=True)
-    stage = Cmd("cmd", {"cmds": cmds, "on_fail": "needs_fix"})
+    stage = Cmd("cmd", {"cmds": cmds})
     state = build_state(
         data=StateData(),
         client=_fake_client(),
@@ -251,16 +268,16 @@ def test_run_cmd_success(tmp_path):
     assert outcome == Done()
 
 
-def test_run_cmd_failure_returns_needs_fix(tmp_path):
+def test_run_cmd_failure_raises_bail(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, ["false"])
-    outcome = asyncio.run(stage.run(state))
-    assert isinstance(outcome, NeedsFix)
+    with pytest.raises(Bail):
+        asyncio.run(stage.run(state))
 
 
 def test_run_cmd_failure_writes_log(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, ["echo boom >&2; false"])
-    outcome = asyncio.run(stage.run(state))
-    assert isinstance(outcome, NeedsFix)
+    with pytest.raises(Bail):
+        asyncio.run(stage.run(state))
     log = tmp_path / "artifacts" / "exec-cmd.log"
     assert log.exists()
 
@@ -272,11 +289,12 @@ def test_run_cmd_empty_cmds_is_noop(tmp_path):
     assert not (tmp_path / "artifacts" / "exec-cmd.log").exists()
 
 
-def test_run_cmd_output_in_needs_fix(tmp_path):
+def test_run_cmd_output_written_to_log(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, ["echo hello_output; false"])
-    outcome = asyncio.run(stage.run(state))
-    assert isinstance(outcome, NeedsFix)
-    assert "hello_output" in outcome.detail
+    with pytest.raises(Bail):
+        asyncio.run(stage.run(state))
+    log = tmp_path / "artifacts" / "exec-cmd.log"
+    assert "hello_output" in log.read_text()
 
 
 # ---------------------------------------------------------------------------
@@ -427,11 +445,6 @@ def test_loop_patches_loop_iteration_to_state(tmp_path, make_state_dir):
     state_dir = make_state_dir(gremlin_id)
     seen_iterations: list[int] = []
 
-    async def runner() -> NeedsFix:
-        data = json.loads((state_dir / "state.json").read_text())
-        seen_iterations.append(int(data.get("loop_iteration") or 0))
-        return NeedsFix("keep going")
-
     (tmp_path / "artifacts").mkdir(exist_ok=True)
     loop_state = build_state(
         data=StateData(gremlin_id=gremlin_id),
@@ -439,6 +452,13 @@ def test_loop_patches_loop_iteration_to_state(tmp_path, make_state_dir):
         session_dir=tmp_path / "artifacts",
         worktree=tmp_path,
     )
+
+    async def runner() -> Done:
+        data = json.loads((state_dir / "state.json").read_text())
+        seen_iterations.append(int(data.get("loop_iteration") or 0))
+        _set_marker(loop_state)
+        return Done()
+
     loop = LoopStage("loop", body_runners=[runner], max_iterations=3)
     with pytest.raises(Bail):
         asyncio.run(loop.run(loop_state))
@@ -448,7 +468,6 @@ def test_loop_patches_loop_iteration_to_state(tmp_path, make_state_dir):
 
 def test_loop_unbinds_out_keys_between_iterations(tmp_path):
     """out_map keys unbound each iteration so exec can rebind to a different URI."""
-    from gremlins.artifacts.uri import Uri
     from gremlins.stages.exec import Exec
 
     (tmp_path / "artifacts").mkdir(exist_ok=True)
@@ -456,13 +475,13 @@ def test_loop_unbinds_out_keys_between_iterations(tmp_path):
 
     bound_count = [0]
 
-    async def binder() -> Done | NeedsFix:
+    async def binder() -> Done:
         # Bind a different URI each iteration; without unbind the second bind raises DuplicateArtifact.
         uri = Uri.parse(f"file://session/out-{bound_count[0]}.txt")
         state.artifacts.bind("loop-out", uri)
         bound_count[0] += 1
         if bound_count[0] < 2:
-            return NeedsFix("go again")
+            _set_marker(state)
         return Done()
 
     exec_stage = Exec("stage", {}, out_map={"loop-out": "file://session/out-0.txt"})
@@ -499,7 +518,7 @@ def test_pr_stack_unbind_fires_after_on_iteration_start(
     state = _loop_state_with_gr(tmp_path, gremlin_id)
     count = [0]
 
-    async def runner() -> Done | NeedsFix:
+    async def runner() -> Done:
         count[0] += 1
         if count[0] == 1:
             state.artifacts.bind("pr", Uri.parse("gh://pr/1"))
@@ -508,7 +527,7 @@ def test_pr_stack_unbind_fires_after_on_iteration_start(
                     url="https://github.com/x/r/pull/1", number=1, branch="feat-iter1"
                 )
             )
-            return NeedsFix("next")
+            _set_marker(state)
         return Done()
 
     exec_stage = Exec("stage", {}, out_map={"pr": "gh://pr"})
@@ -542,7 +561,7 @@ def test_pr_stack_iter2_detaches_to_iter1_branch(tmp_path, make_state_dir, monke
     state = _loop_state_with_gr(tmp_path, gremlin_id)
     count = 0
 
-    async def runner() -> Done | NeedsFix:
+    async def runner() -> Done:
         nonlocal count
         count += 1
         if count == 1:
@@ -557,7 +576,7 @@ def test_pr_stack_iter2_detaches_to_iter1_branch(tmp_path, make_state_dir, monke
                     branch="feat-iter1",
                 )
             )
-            return NeedsFix("next-plan")
+            _set_marker(state)
         return Done()
 
     loop = LoopStage(

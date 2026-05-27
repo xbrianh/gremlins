@@ -11,9 +11,10 @@ stages:
         type: exec
         out:
           verify_log: "file://session/exec-{name}.log"
+          status: "file://session/exec-{name}.status"
         options:
-          cmds: "{{options.cmds}}"
-          on_fail: needs_fix
+          cmds:
+            - "{{options.cmds}}"
       - name: verify-diff
         type: exec
         out:

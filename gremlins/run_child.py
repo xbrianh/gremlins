@@ -17,9 +17,9 @@ Spec file schema (JSON):
 
 Result file schema (written to <spec_path>.result):
     {
-        "status":     "done" | "needs_fix" | "bail" | "error"
-        "detail":     <str>        reason for needs_fix / bail / error
-        "returncode": <int|null>   NeedsFix.returncode or null
+        "status":     "done" | "bail" | "error"
+        "detail":     <str>        reason for bail / error
+        "returncode": <int|null>   always null
         "cost_usd":   <float>      total client cost accumulated during the stage
     }
 
@@ -47,7 +47,7 @@ from gremlins.permissions.loader import load_policy
 from gremlins.permissions.validation import validate_policy_against_registry
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.loader import parse_stage
-from gremlins.stages.outcome import Bail, Done
+from gremlins.stages.outcome import Bail
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +166,7 @@ async def _run(spec_path: pathlib.Path) -> int:
         stage.client = state.client
 
     try:
-        outcome = await stage.run(state)
+        await stage.run(state)
     except Bail as b:
         cost = getattr(state.client, "total_cost_usd", 0.0) or 0.0
         _write_result(
@@ -194,23 +194,11 @@ async def _run(spec_path: pathlib.Path) -> int:
         return 2
 
     cost = getattr(state.client, "total_cost_usd", 0.0) or 0.0
-    if isinstance(outcome, Done):
-        _write_result(
-            result_path,
-            {"status": "done", "detail": "", "returncode": None, "cost_usd": cost},
-        )
-        return 0
-
     _write_result(
         result_path,
-        {
-            "status": "needs_fix",
-            "detail": outcome.detail,
-            "returncode": outcome.returncode,
-            "cost_usd": cost,
-        },
+        {"status": "done", "detail": "", "returncode": None, "cost_usd": cost},
     )
-    return 1
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

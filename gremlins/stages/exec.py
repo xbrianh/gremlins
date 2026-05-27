@@ -9,17 +9,18 @@ from typing import Any, cast
 
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.resolve import resolve_in_map
-from gremlins.artifacts.schemes import snapshot_head_before
+from gremlins.artifacts.schemes import FileSessionResolver, snapshot_head_before
 from gremlins.artifacts.uri import Uri
 from gremlins.executor.state import State
 from gremlins.stages._passthrough import Passthrough as _Passthrough
 from gremlins.stages.base import Stage
-from gremlins.stages.outcome import Bail, Done, NeedsFix, Outcome
+from gremlins.stages.outcome import Bail, Done, Outcome
 from gremlins.utils import proc as _proc
 
 _CMD_SUB = re.compile(r"\{(\w+)\}")
 _READ_SUB = re.compile(r"\{read:([-\w]+)\}")
 _FRAMEWORK_KEYS = frozenset(["name", "model", "session_dir", "repo", "cwd", "base_ref"])
+_STATUS_KEY = "status"
 
 
 def _sub_reads(s: str, artifacts: ArtifactRegistry) -> str:
@@ -100,28 +101,22 @@ class Exec(Stage):
             for c in self.options.get("cmds", [])
             if c.strip()
         ]
-        stdout_str = ""
-        stderr_str = ""
         needs_fix = False
-        exit_code = 0
         if cmds:
             result = await _proc.run_shell_async(
                 " && ".join(cmds),
                 cwd=pathlib.Path(state.engine_ctx.cwd),
                 env={**os.environ, **extra_env},
             )
-            stdout_str = result.stdout
-            stderr_str = result.stderr
-            exit_code = result.returncode
             log_path = state.session_dir / f"exec-{self.name}.log"
             log_path.write_text(
-                stdout_str + stderr_str or "(no output)\n", encoding="utf-8"
+                result.stdout + result.stderr or "(no output)\n", encoding="utf-8"
             )
-            if exit_code != 0:
-                if self.options.get("on_fail") == "needs_fix":
+            if result.returncode != 0:
+                if _STATUS_KEY in self.out_map:
                     needs_fix = True
                 else:
-                    raise Bail(f"exec {self.name}: exited {exit_code}")
+                    raise Bail(f"exec {self.name}: exited {result.returncode}")
 
         for raw_key, raw_uri_str in self.out_map.items():
             key = raw_key.format_map(_pt)
@@ -134,10 +129,11 @@ class Exec(Stage):
                 state.artifacts.bind_git_commit_range(key, pre_sha)
             else:
                 uri = Uri.parse(uri_str)
+                if key == _STATUS_KEY and uri.scheme == "file":
+                    resolver = state.artifacts.resolver(uri.scheme)
+                    if isinstance(resolver, FileSessionResolver):
+                        resolver.write(uri, b"needs_fix\n" if needs_fix else b"pass\n")
                 state.artifacts.bind(key, uri)
-                if not needs_fix:
-                    state.artifacts.resolver(uri.scheme).verify_produced(uri)
+                state.artifacts.resolver(uri.scheme).verify_produced(uri)
 
-        if needs_fix:
-            return NeedsFix(stdout_str + stderr_str, exit_code)
         return Done()
