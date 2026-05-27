@@ -629,7 +629,8 @@ def build_state(
         session_dir=session_dir,
         artifacts=artifacts or reg,
         repo=repo,
-        cwd=cwd or (str(worktree) if worktree is not None else str(_paths.project_root())),
+        cwd=cwd
+        or (str(worktree) if worktree is not None else str(_paths.project_root())),
         args=args if args is not None else argparse.Namespace(),
         pipeline_data=pipeline_data,
         instructions=instructions,

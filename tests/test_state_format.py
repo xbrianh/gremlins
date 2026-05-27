@@ -10,7 +10,15 @@ from gremlins.executor.state import StateData, build_state
 from gremlins.stages.base import Stage
 
 
-def _make_state(*, loop_iteration: int = 1, attempt: str = "", scope_names: list[str] | None = None, repo: str = "", cwd: str = "", base_ref: str = ""):
+def _make_state(
+    *,
+    loop_iteration: int = 1,
+    attempt: str = "",
+    scope_names: list[str] | None = None,
+    repo: str = "",
+    cwd: str = "",
+    base_ref: str = "",
+):
     data = dataclasses.replace(
         StateData.load(None),
         loop_iteration=loop_iteration,
@@ -31,22 +39,30 @@ def _make_state(*, loop_iteration: int = 1, attempt: str = "", scope_names: list
 
 
 def test_format_n():
-    s = _make_state(loop_iteration=3, attempt="abc", scope_names=["implement", "verify"])
+    s = _make_state(
+        loop_iteration=3, attempt="abc", scope_names=["implement", "verify"]
+    )
     assert s.format("handoff-{n}.md") == "handoff-3.md"
 
 
 def test_format_attempt():
-    s = _make_state(loop_iteration=3, attempt="abc", scope_names=["implement", "verify"])
+    s = _make_state(
+        loop_iteration=3, attempt="abc", scope_names=["implement", "verify"]
+    )
     assert s.format("{attempt}") == "abc"
 
 
 def test_format_scope():
-    s = _make_state(loop_iteration=3, attempt="abc", scope_names=["implement", "verify"])
+    s = _make_state(
+        loop_iteration=3, attempt="abc", scope_names=["implement", "verify"]
+    )
     assert s.format("{scope}") == "implement/verify"
 
 
 def test_format_combined():
-    s = _make_state(loop_iteration=3, attempt="abc", scope_names=["implement", "verify"])
+    s = _make_state(
+        loop_iteration=3, attempt="abc", scope_names=["implement", "verify"]
+    )
     assert s.format("{n}-{attempt}-{scope}") == "3-abc-implement/verify"
 
 

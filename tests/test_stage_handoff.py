@@ -378,7 +378,9 @@ def test_base_ref_from_state(tmp_path, monkeypatch, sandbox):
     monkeypatch.setattr(Agent, "run", fake_agent_run)
 
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
-    state = dataclasses.replace(state, data=dataclasses.replace(state.data, base_ref_name="deadbeef1234"))
+    state = dataclasses.replace(
+        state, data=dataclasses.replace(state.data, base_ref_name="deadbeef1234")
+    )
     asyncio.run(h.run(state))
 
     assert captured_base == ["deadbeef1234"]
