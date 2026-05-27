@@ -4,7 +4,7 @@ stages:
     in:
       prev_branch: pr.branch?
       base_ref:    base_ref.path?main
-      plan_uri:    plan?
+      plan_uri:    plan.uri?
     out:
       pr_title:  "file://session/pr-title.txt"
       pr_body:   "file://session/pr-body.md"
@@ -23,5 +23,5 @@ stages:
       cmds:
         - 'BASE="${prev_branch:-$base_ref}"'
         - 'BRANCH="$(cat "{session_dir}/pr-branch.txt")"'
-        - 'git push -f origin "HEAD:refs/heads/$BRANCH"'
+        - 'git push origin "HEAD:refs/heads/$BRANCH"'
         - 'gh pr create --head "$BRANCH" --base "$BASE" --title "$(cat "{session_dir}/pr-title.txt")" --body-file "{session_dir}/pr-body.md"'

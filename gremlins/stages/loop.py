@@ -133,11 +133,11 @@ class LoopStage(Stage):
             state.record_state_field(loop_iteration=iteration)
             iter_ctx = dataclasses.replace(state.engine_ctx, loop_iteration=iteration)
             iter_state = dataclasses.replace(state, engine_ctx=iter_ctx)
+            if self._on_iteration_start:
+                self._on_iteration_start(iter_state)
             for child in self.body:
                 for key in getattr(child, "out_map", {}):
                     iter_state.artifacts.unbind(key)
-            if self._on_iteration_start:
-                self._on_iteration_start(iter_state)
             head_before = _git.head_sha(pathlib.Path(iter_state.engine_ctx.cwd))
             # Rebuild each iteration so body stages inherit the per-iteration engine_ctx.
             runners = (

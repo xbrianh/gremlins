@@ -1,9 +1,4 @@
-"""Resolve in: map entries against the artifact registry, supporting dotted attribute paths.
-
-Path syntax: ``key.attr.attr2`` — read artifact ``key``, traverse attributes.
-Optional default: append ``?`` (empty default) or ``?value`` (literal default).
-The default fires only on ``MissingArtifact``; attribute-access failures still raise.
-"""
+"""Resolve in: map entries against the artifact registry."""
 
 from __future__ import annotations
 
@@ -26,21 +21,20 @@ def resolve_in_map(
         key, *attrs = parts
         try:
             value = artifacts.read(key)
+            for attr in attrs:
+                if attr.startswith("_"):
+                    raise ValueError(
+                        f"in: path {path!r}: private attribute {attr!r} not accessible"
+                    )
+                try:
+                    value = getattr(value, attr)
+                except AttributeError:
+                    raise ValueError(
+                        f"in: path {path!r}: {type(value).__name__} has no attribute {attr!r}"
+                    )
+            result[var] = to_str(value)
         except MissingArtifact:
-            if default is not None:
-                result[var] = default
-                continue
-            raise
-        for attr in attrs:
-            if attr.startswith("_"):
-                raise ValueError(
-                    f"in: path {path!r}: private attribute {attr!r} not accessible"
-                )
-            try:
-                value = getattr(value, attr)
-            except AttributeError:
-                raise ValueError(
-                    f"in: path {path!r}: {type(value).__name__} has no attribute {attr!r}"
-                )
-        result[var] = to_str(value)
+            if default is None:
+                raise
+            result[var] = default
     return result

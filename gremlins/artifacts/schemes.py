@@ -27,9 +27,14 @@ class PrInfo:
 class IssueInfo:
     url: str
     number: int
+    body: str
+
+    @property
+    def uri(self) -> str:
+        return f"gh://issue/{self.number}"
 
     def __str__(self) -> str:
-        return f"gh://issue/{self.number}"
+        return self.body
 
 
 @dataclasses.dataclass(frozen=True)
@@ -142,7 +147,7 @@ class GitHubResolver:
             n = path.removeprefix("issue/")
             repo = gh_utils.current_repo()
             data = gh_utils.view_issue(n, repo)
-            return IssueInfo(url=data.get("url", ""), number=int(n))
+            return IssueInfo(url=data.get("url", ""), number=int(n), body=data.get("body", ""))
         raise ValueError(f"unrecognised gh URI path: {uri}")
 
     def verify_produced(self, uri: Uri) -> None:

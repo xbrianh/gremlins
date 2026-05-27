@@ -17,9 +17,11 @@ logger = logging.getLogger(__name__)
 
 _PROMPT = (
     "You are creating a GitHub pull request for changes on a detached HEAD.\n\n"
-    "Push the current HEAD to a new branch and create a pull request targeting"
-    " `{base_ref}` using `gh pr create`."
-    " Choose a descriptive branch name, write a clear title and body.{closes}{iter}"
+    "Choose a descriptive branch name, write a clear title and body.{closes}{iter}\n\n"
+    "Run exactly these two commands:\n"
+    "1. `git push origin HEAD:refs/heads/<branch>`\n"
+    "2. `gh pr create --head <branch> --base {base_ref} --title <title> --body <body>`\n\n"
+    "Do NOT use `--fill`. Print ONLY the PR URL on the final line."
 )
 
 
