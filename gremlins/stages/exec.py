@@ -122,8 +122,6 @@ class Exec(Stage):
                     raise Bail(f"exec {self.name}: exited {exit_code}")
 
         for raw_key, raw_uri_str in self.out_map.items():
-            if needs_fix:
-                continue
             key = raw_key.format_map(_pt)
             uri_str = _sub_reads(raw_uri_str, state.artifacts).format_map(_pt)
             if uri_str == "git://range":
@@ -135,7 +133,8 @@ class Exec(Stage):
             else:
                 uri = Uri.parse(uri_str)
                 state.artifacts.bind(key, uri)
-                state.artifacts.resolver(uri.scheme).verify_produced(uri)
+                if not needs_fix:
+                    state.artifacts.resolver(uri.scheme).verify_produced(uri)
 
         if needs_fix:
             return NeedsFix(stdout_str + stderr_str, exit_code)
