@@ -11,9 +11,8 @@ import os
 import pathlib
 import shutil
 import signal
-import sys
 import types
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from gremlins import paths
@@ -40,6 +39,13 @@ from gremlins.utils.yaml_io import YamlLoadError as _YamlLoadError
 
 logger = logging.getLogger(__name__)
 
+_HANDLED_SIGS = tuple(
+    getattr(signal, name)
+    for name in ("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT")
+    if hasattr(signal, name)
+)
+_atexit_log_fn: Callable[[], None] | None = None
+
 
 def _apply_policy_to_stages(stages: list[Stage], policy: Policy) -> None:
     for stage in stages:
@@ -58,6 +64,8 @@ def _load_stage_attempt(gremlin_id: str | None) -> tuple[str, str]:
 
 
 def _install_signal_handlers(clients: Sequence[Client], gremlin_id: str | None) -> None:
+    global _atexit_log_fn
+
     def handler(signum: int, _frame: types.FrameType | None) -> None:  # pyright: ignore[reportUnusedParameter]
         stage, attempt = _load_stage_attempt(gremlin_id)
         logger.warning(
@@ -67,7 +75,10 @@ def _install_signal_handlers(clients: Sequence[Client], gremlin_id: str | None) 
             attempt or "(none)",
         )
         for h in logging.getLogger().handlers:
-            h.flush()
+            try:
+                h.flush()
+            except Exception:
+                pass
         for c in clients:
             try:
                 c.reap_all()
@@ -76,21 +87,27 @@ def _install_signal_handlers(clients: Sequence[Client], gremlin_id: str | None) 
         signal.signal(signum, signal.SIG_DFL)
         os.kill(os.getpid(), signum)
 
-    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT):
+    for sig in _HANDLED_SIGS:
         signal.signal(sig, handler)
 
     def _atexit_log() -> None:
         stage, attempt = _load_stage_attempt(gremlin_id)
-        exc = getattr(sys, "last_exc", None) or getattr(sys, "last_value", None)
+        if not stage:
+            return
         logger.warning(
-            "exiting via atexit at stage=%s attempt=%s exc=%s",
-            stage or "(none)",
+            "exiting via atexit at stage=%s attempt=%s",
+            stage,
             attempt or "(none)",
-            exc,
         )
         for h in logging.getLogger().handlers:
-            h.flush()
+            try:
+                h.flush()
+            except Exception:
+                pass
 
+    if _atexit_log_fn is not None:
+        atexit.unregister(_atexit_log_fn)
+    _atexit_log_fn = _atexit_log
     atexit.register(_atexit_log)
 
 
