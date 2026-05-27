@@ -7,8 +7,6 @@ import dataclasses
 import pathlib
 from unittest.mock import patch
 
-import dataclasses
-
 from gremlins.artifacts.engine import EngineContext
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.schemes import PrInfo

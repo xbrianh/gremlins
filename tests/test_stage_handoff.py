@@ -13,7 +13,6 @@ import pytest
 import gremlins.executor.state as state_mod
 from gremlins.artifacts.engine import EngineContext
 from gremlins.artifacts.registry import ArtifactRegistry
-from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData, build_state
