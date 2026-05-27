@@ -21,8 +21,8 @@ from gremlins.artifacts.uri import Uri
 | `git://range/<base>..<head>` | `git://range/abc123..def456` | Commit range (SHAs) |
 | `git://ref/<name>` | `git://ref/main` | Git ref name (string) |
 | `git://commit/<sha>` | `git://commit/abc123` | Single commit SHA (string) |
-| `gh://pr/<n>` | `gh://pr/42` | GitHub PR → `{"url", "number", "branch"}` |
-| `gh://issue/<n>` | `gh://issue/7` | GitHub issue → `{"url", "number", "body"}` |
+| `gh://pr/<n>` | `gh://pr/42` | GitHub PR → `{"url", "number", "branch", "uri"}` |
+| `gh://issue/<n>` | `gh://issue/7` | GitHub issue → `{"url", "number", "body", "uri"}` |
 
 ## Registry API
 
@@ -64,8 +64,8 @@ URI strings stored as values (e.g. `"gh://pr/42"`) are resolved automatically on
 
 Scheme resolvers return plain JSON-compatible values:
 
-- `gh://pr/<n>` → `{"url": str, "number": int, "branch": str}`
-- `gh://issue/<n>` → `{"url": str, "number": int, "body": str}`
+- `gh://pr/<n>` → `{"url": str, "number": int, "branch": str, "uri": str}`
+- `gh://issue/<n>` → `{"url": str, "number": int, "body": str, "uri": str}`
 - `git://range/<base>..<head>` → `[{"sha": str, "subject": str}, ...]`
 - `git://ref/<name>` → `name` (string)
 - `git://commit/<sha>` → sha (string)

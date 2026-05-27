@@ -56,3 +56,9 @@ def test_bound_attr_access_works():
 def test_bound_attr_with_default_returns_attr():
     reg = _registry({"base_ref": {"path": "main"}})
     assert resolve_in_map(reg, {"v": "base_ref.path?other"}) == {"v": "main"}
+
+
+def test_private_attr_raises_even_with_default():
+    reg = _registry({"pr": {"branch": "feat"}})
+    with pytest.raises(ValueError, match="private attribute"):
+        resolve_in_map(reg, {"v": "pr.__class__?fallback"})
