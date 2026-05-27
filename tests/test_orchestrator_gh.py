@@ -142,7 +142,9 @@ IMPL_EVENTS = [
 # ---------------------------------------------------------------------------
 
 
-def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None, fake_pr_number: str = "101"):
+def _patch_common(
+    monkeypatch, tmp_path, *, state_data: dict = None, fake_pr_number: str = "101"
+):
     """Apply standard monkeypatches for gh_main smoke tests."""
     monkeypatch.setattr(
         shutil,
@@ -209,6 +211,12 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None, fake_pr_num
                 p = pathlib.Path(m.group(1))
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(f"{fake_pr_number}\n")
+                return _subprocess_mod.CompletedProcess(cmd, 0, "", "")
+            m2 = re.search(r'"([^"]+/pr-base-ref\.txt)"', cmd)
+            if m2:
+                p = pathlib.Path(m2.group(1))
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text("main\n")
                 return _subprocess_mod.CompletedProcess(cmd, 0, "", "")
         return await _orig_shell(cmd, cwd=cwd, env=env)
 

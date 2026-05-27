@@ -23,6 +23,7 @@ def resolve_in_map(
                 raise
             result[var] = default
             continue
+        resolved = True
         for attr in attrs:
             if attr.startswith("_"):
                 raise ValueError(
@@ -31,8 +32,13 @@ def resolve_in_map(
             try:
                 value = getattr(value, attr)
             except AttributeError:
+                if sep:
+                    result[var] = default
+                    resolved = False
+                    break
                 raise ValueError(
                     f"in: path {path!r}: {type(value).__name__} has no attribute {attr!r}"
                 )
-        result[var] = to_str(value)
+        if resolved:
+            result[var] = to_str(value)
     return result
