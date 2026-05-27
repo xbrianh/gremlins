@@ -402,7 +402,7 @@ def test_startup_fails_in_non_git_dir(tmp_path, monkeypatch, capsys):
         shutil, "which", lambda n: f"/fake/{n}" if n in ("claude", "git") else None
     )
     monkeypatch.setattr(
-        "gremlins.executor.run._install_signal_handlers", lambda c: None
+        "gremlins.executor.run._install_signal_handlers", lambda c, gid: None
     )
     monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: False)
     with pytest.raises(SystemExit):
@@ -427,7 +427,7 @@ def test_claude_probe_conditional_on_provider(tmp_path, monkeypatch, capsys):
         lambda n: None if n == "claude" else f"/fake/{n}" if n == "git" else None,
     )
     monkeypatch.setattr(
-        "gremlins.executor.run._install_signal_handlers", lambda c: None
+        "gremlins.executor.run._install_signal_handlers", lambda c, gid: None
     )
     monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: True)
     monkeypatch.setenv("GREMLINS_TEST_NOOP_PIPELINE", "1")
