@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import pathlib
 from typing import Any
@@ -10,6 +11,7 @@ from typing import Any
 import pytest
 
 import gremlins.executor.state as state_mod
+from gremlins.artifacts.engine import EngineContext
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
@@ -376,8 +378,11 @@ def test_base_ref_from_state(tmp_path, monkeypatch, sandbox):
 
     monkeypatch.setattr(Agent, "run", fake_agent_run)
 
+    engine_ctx = EngineContext(
+        loop_iteration=1, attempt="", current_scope=(), base_ref="deadbeef1234"
+    )
     h, state = _make_handoff(tmp_path, gremlin_id=gremlin_id)
-    state.artifacts.bind("base_ref", Uri.parse("git://ref/deadbeef1234"))
+    state = dataclasses.replace(state, engine_ctx=engine_ctx)
     asyncio.run(h.run(state))
 
     assert captured_base == ["deadbeef1234"]

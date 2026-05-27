@@ -815,11 +815,14 @@ def test_launch_ghgremlin_state_layout(lenv_with_gh):
     assert state["setup_kind"] == "worktree", (
         f"ghgremlin should use detached worktree, got: {state['setup_kind']!r}"
     )
+    assert state.get("base_ref_name") == "main", (
+        f"base_ref_name should be 'main' in state.json, got: {state.get('base_ref_name')!r}"
+    )
     registry_data = json.loads(
         (_gremlins_state_root(lenv) / gremlin_id / "registry.json").read_text()
     )
-    assert registry_data.get("base_ref") == "git://ref/main", (
-        f"base_ref should be 'git://ref/main', got: {registry_data.get('base_ref')!r}"
+    assert "base_ref" not in registry_data, (
+        f"base_ref should not be in registry (moved to EngineContext), got: {registry_data.get('base_ref')!r}"
     )
     _sha_uri = registry_data.get("base_sha", "")
     assert (
