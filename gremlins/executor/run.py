@@ -70,7 +70,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.plan and args.instructions:
         die("--plan and positional instructions are mutually exclusive")
-    if not args.plan and not args.instructions and not os.environ.get("GREMLINS_RESUME_FROM"):
+    if (
+        not args.plan
+        and not args.instructions
+        and not os.environ.get("GREMLINS_RESUME_FROM")
+    ):
         die("one of --plan or positional instructions is required")
     return args
 
