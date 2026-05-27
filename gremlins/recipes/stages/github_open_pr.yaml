@@ -1,10 +1,19 @@
 stages:
+  - name: resolve-pr-base
+    type: exec
+    in:
+      prev_branch: pr.branch?
+    out:
+      base_ref_to_open_pr: "file://session/pr-base-ref.txt"
+    options:
+      cmds:
+        - 'printf "%s" "${prev_branch:-{base_ref}}" > "{session_dir}/pr-base-ref.txt"'
+
   - name: compose-pr
     type: agent
     in:
-      prev_branch: pr.branch?
-      base_ref:    base_ref.path?main
-      plan_uri:    plan.uri?
+      base_ref_to_open_pr: base_ref_to_open_pr
+      plan_uri:            plan.uri?
     out:
       pr_title:  "file://session/pr-title.txt"
       pr_body:   "file://session/pr-body.md"
@@ -15,15 +24,13 @@ stages:
   - name: push-and-open
     type: exec
     in:
-      prev_branch: pr.branch?
-      base_ref:    base_ref.path?main
+      base_ref_to_open_pr: base_ref_to_open_pr
     out:
       pr-number: "file://session/pr-number.txt"
       pr: "gh://pr/{read:pr-number}"
     options:
       cmds:
-        - 'BASE="${prev_branch:-$base_ref}"'
         - 'BRANCH="$(cat "{session_dir}/pr-branch.txt")"'
         - 'git push origin "HEAD:refs/heads/$BRANCH"'
-        - 'URL="$(gh pr create --head "$BRANCH" --base "$BASE" --title "$(cat "{session_dir}/pr-title.txt")" --body-file "{session_dir}/pr-body.md")"'
+        - 'URL="$(gh pr create --head "$BRANCH" --base "$base_ref_to_open_pr" --title "$(cat "{session_dir}/pr-title.txt")" --body-file "{session_dir}/pr-body.md")"'
         - 'printf "%s" "${URL##*/}" > "{session_dir}/pr-number.txt"'
