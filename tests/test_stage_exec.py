@@ -211,6 +211,22 @@ def test_on_fail_needs_fix_returns_needs_fix(tmp_path):
     assert result.returncode == 2
 
 
+def test_on_fail_needs_fix_binds_log_output(tmp_path):
+    state = _make_state(tmp_path)
+    stage = _exec(
+        "cmd",
+        cmds=["echo boom; exit 1"],
+        on_fail="needs_fix",
+        out_map={"verify_log": "file://session/exec-{name}.log"},
+    )
+    result = asyncio.run(stage.run(state))
+    assert isinstance(result, NeedsFix)
+    assert state.artifacts.produced("verify_log")
+    assert state.artifacts.resolve("verify_log") == Uri.parse(
+        "file://session/exec-cmd.log"
+    )
+
+
 def test_success_writes_log(tmp_path):
     state = _make_state(tmp_path)
     stage = _exec("myname", cmds=["echo hello"])
