@@ -334,6 +334,7 @@ class Gremlin:
             # resume_from skips that stage (plan.uri? in compose-pr would otherwise fail).
             if self.plan and self.pipeline_data.needs_gh():
                 from gremlins.utils.github import parse_issue_ref as _parse_issue_ref
+
                 _, _issue_num = _parse_issue_ref(self.plan, "")
                 if _issue_num and self.registry.produced("plan"):
                     _plan_uri = self.registry.resolve("plan")
