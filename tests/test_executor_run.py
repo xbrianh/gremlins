@@ -1,4 +1,3 @@
-import atexit
 import os
 import signal
 from unittest.mock import patch
@@ -52,7 +51,8 @@ def test_atexit_log_logs_when_stage_set(caplog):
     atexit_fn = registered[0]
 
     with patch(
-        "gremlins.executor.run._load_stage_attempt", return_value=("my-stage", "attempt-1")
+        "gremlins.executor.run._load_stage_attempt",
+        return_value=("my-stage", "attempt-1"),
     ):
         with caplog.at_level("WARNING"):
             atexit_fn()
@@ -69,9 +69,7 @@ def test_atexit_log_silent_on_clean_exit(caplog):
 
     atexit_fn = registered[0]
 
-    with patch(
-        "gremlins.executor.run._load_stage_attempt", return_value=("", "")
-    ):
+    with patch("gremlins.executor.run._load_stage_attempt", return_value=("", "")):
         with caplog.at_level("WARNING"):
             atexit_fn()
 
