@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 UntilFn = Callable[[State, int, str], bool]
 
 _MARKER_KEY = "status"
-_MARKER_VALUE = b"needs_fix"
+_MARKER_VALUE = "needs_fix"
 
 
 def _is_marker_set(artifacts: ArtifactRegistry) -> bool:
@@ -175,7 +175,7 @@ def detach_to_pr_base(state: State) -> None:
     from gremlins.artifacts.registry import MissingArtifact
 
     try:
-        branch = state.artifacts.read("pr").branch
+        branch = state.artifacts.read("pr")["branch"]
     except MissingArtifact:
         return
     logger.info("detaching worktree to previous PR branch: %s", branch)

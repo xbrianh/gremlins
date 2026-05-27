@@ -61,10 +61,10 @@ def make_git_repo(tmp_path: pathlib.Path) -> tuple[str, str]:
 
 
 def test_file_resolver_read(tmp_path: pathlib.Path) -> None:
-    (tmp_path / "out.txt").write_bytes(b"content")
+    (tmp_path / "out.txt").write_text("content", encoding="utf-8")
     resolver = FileSessionResolver(tmp_path)
     uri = Uri(scheme="file", path="session/out.txt")
-    assert resolver.read(uri) == b"content"
+    assert resolver.read(uri) == "content"
 
 
 def test_file_resolver_verify_produced_raises_when_absent(

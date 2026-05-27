@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import pathlib
 from typing import Any
 
@@ -10,44 +9,6 @@ from gremlins.artifacts.uri import Uri
 from gremlins.utils import git as git_utils
 from gremlins.utils import github as gh_utils
 from gremlins.utils import proc
-
-
-@dataclasses.dataclass(frozen=True)
-class PrInfo:
-    url: str
-    number: int
-    branch: str
-
-    def __str__(self) -> str:
-        return self.url
-
-
-@dataclasses.dataclass(frozen=True)
-class IssueInfo:
-    url: str
-    number: int
-    body: str
-
-    @property
-    def uri(self) -> str:
-        return f"gh://issue/{self.number}"
-
-    def __str__(self) -> str:
-        return self.body
-
-
-@dataclasses.dataclass(frozen=True)
-class RefInfo:
-    """Returned by GitResolver.read for git://ref/<name> URIs."""
-
-    name: str
-
-    @property
-    def path(self) -> str:
-        return self.name
-
-    def __str__(self) -> str:
-        return self.name
 
 
 class FileSessionResolver:
@@ -70,16 +31,16 @@ class FileSessionResolver:
             raise ValueError(f"path escapes session directory: {uri}") from None
         return p
 
-    def read(self, uri: Uri) -> bytes:
+    def read(self, uri: Uri) -> str:
         try:
-            return self._path(uri).read_bytes()
+            return self._path(uri).read_text(encoding="utf-8")
         except FileNotFoundError:
-            return b""
+            return ""
 
-    def write(self, uri: Uri, content: bytes) -> None:
+    def write(self, uri: Uri, content: str) -> None:
         p = self._path(uri)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(content)
+        p.write_text(content, encoding="utf-8")
 
     def verify_produced(self, uri: Uri) -> None:
         p = self._path(uri)
@@ -108,13 +69,12 @@ class GitResolver:
         if path.startswith("ref/"):
             name = path.removeprefix("ref/")
             proc.run_or_raise(["git", "rev-parse", name], cwd=self._cwd)
-            return RefInfo(name=name)
+            return name
         if path.startswith("commit/"):
             return path.removeprefix("commit/")
         raise ValueError(f"unrecognised git URI path: {uri}")
 
     def verify_produced(self, uri: Uri) -> None:
-        # Raises on subprocess error if ref/sha/range doesn't exist
         self.read(uri)
 
 
@@ -139,18 +99,22 @@ class GitHubResolver:
             data = gh_utils.view_pr(
                 n, project_root=str(self._cwd) if self._cwd else None
             )
-            return PrInfo(
-                url=data["url"],
-                number=data["number"],
-                branch=data["headRefName"],
-            )
+            return {
+                "url": data["url"],
+                "number": data["number"],
+                "branch": data["headRefName"],
+                "uri": str(uri),
+            }
         if path.startswith("issue/"):
             n = path.removeprefix("issue/")
             repo = gh_utils.current_repo()
             data = gh_utils.view_issue(n, repo)
-            return IssueInfo(
-                url=data.get("url", ""), number=int(n), body=data.get("body", "")
-            )
+            return {
+                "url": data.get("url", ""),
+                "number": int(n),
+                "body": data.get("body", ""),
+                "uri": str(uri),
+            }
         raise ValueError(f"unrecognised gh URI path: {uri}")
 
     def verify_produced(self, uri: Uri) -> None:

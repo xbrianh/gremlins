@@ -66,13 +66,13 @@ def test_bind_duplicate_raises(tmp_path: pathlib.Path) -> None:
     assert str(second) in str(exc_info.value)
 
 
-def test_read_returns_file_bytes(tmp_path: pathlib.Path) -> None:
+def test_read_returns_file_content(tmp_path: pathlib.Path) -> None:
     session_dir = tmp_path / "artifacts"
     session_dir.mkdir()
-    (session_dir / "plan.md").write_bytes(b"hello")
+    (session_dir / "plan.md").write_text("hello", encoding="utf-8")
     r = ArtifactRegistry(session_dir=session_dir)
     r.bind("plan", Uri(scheme="file", path="session/plan.md"))
-    assert r.read("plan") == b"hello"
+    assert r.read("plan") == "hello"
 
 
 def test_registry_path_derives_from_session_dir(tmp_path: pathlib.Path) -> None:
@@ -135,3 +135,28 @@ def test_bind_still_raises_duplicate_after_unbind_rebind(
     r.bind("x", first)  # clean re-bind after unbind
     with pytest.raises(DuplicateArtifact):
         r.bind("x", second)  # bind() is still strict
+
+
+def test_write_stores_plain_value(tmp_path: pathlib.Path) -> None:
+    r = make_registry(tmp_path)
+    r.write("status", "needs_fix")
+    assert r.read("status") == "needs_fix"
+
+
+def test_write_persists_to_file(tmp_path: pathlib.Path) -> None:
+    r = make_registry(tmp_path)
+    r.write("meta", {"count": 3, "flag": True})
+    data = json.loads(r.registry_path.read_text())
+    assert data["meta"] == {"count": 3, "flag": True}
+
+
+def test_write_fails_on_non_serializable(tmp_path: pathlib.Path) -> None:
+    r = make_registry(tmp_path)
+    with pytest.raises(TypeError):
+        r.write("bad", object())
+
+
+def test_read_returns_dict_as_is(tmp_path: pathlib.Path) -> None:
+    r = make_registry(tmp_path)
+    r.write("meta", {"key": "value", "num": 42})
+    assert r.read("meta") == {"key": "value", "num": 42}

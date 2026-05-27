@@ -8,7 +8,6 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from gremlins.artifacts.uri import Uri
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
 from gremlins.stages.loop import LoopStage
@@ -52,7 +51,7 @@ class _CopilotPollStage(Stage):
         self._poll_count += 1
 
         repo = state.repo
-        pr_num = self._pr_num or str(state.artifacts.read("pr").number)
+        pr_num = self._pr_num or str(state.artifacts.read("pr")["number"])
 
         try:
             if self._review_checker is not None:
@@ -82,9 +81,7 @@ class _CopilotPollStage(Stage):
             context = f"polls={self._poll_count}, last_error={self._last_error!r}"
             raise Bail(f"Copilot review timed out after {self._timeout}s ({context})")
 
-        marker_path = state.session_dir / "status"
-        marker_path.write_text("needs_fix", encoding="utf-8")
-        state.artifacts.bind("status", Uri.parse("file://session/status"))
+        state.artifacts.write("status", "needs_fix")
         return Done()
 
 

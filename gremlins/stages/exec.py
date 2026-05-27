@@ -9,7 +9,7 @@ from typing import Any, cast
 
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.resolve import resolve_in_map
-from gremlins.artifacts.schemes import FileSessionResolver, snapshot_head_before
+from gremlins.artifacts.schemes import snapshot_head_before
 from gremlins.artifacts.uri import Uri
 from gremlins.executor.state import State
 from gremlins.stages._passthrough import Passthrough as _Passthrough
@@ -27,11 +27,11 @@ def _sub_reads(s: str, artifacts: ArtifactRegistry) -> str:
     def _r(m: re.Match[str]) -> str:
         key = m.group(1)
         raw = artifacts.read(key)
-        if not isinstance(raw, bytes):
+        if not isinstance(raw, str):
             raise TypeError(
-                f"{{read:{key}}}: expected bytes artifact, got {type(raw).__name__}"
+                f"{{read:{key}}}: expected string artifact, got {type(raw).__name__}"
             )
-        return raw.decode().strip()
+        return raw.strip()
 
     return _READ_SUB.sub(_r, s)
 
@@ -120,6 +120,9 @@ class Exec(Stage):
 
         for raw_key, raw_uri_str in self.out_map.items():
             key = raw_key.format_map(_pt)
+            if key == _STATUS_KEY:
+                state.artifacts.write(_STATUS_KEY, "needs_fix" if needs_fix else "pass")
+                continue
             uri_str = _sub_reads(raw_uri_str, state.artifacts).format_map(_pt)
             if uri_str == "git://range":
                 if pre_sha is None:
@@ -129,10 +132,6 @@ class Exec(Stage):
                 state.artifacts.bind_git_commit_range(key, pre_sha)
             else:
                 uri = Uri.parse(uri_str)
-                if key == _STATUS_KEY and uri.scheme == "file":
-                    resolver = state.artifacts.resolver(uri.scheme)
-                    if isinstance(resolver, FileSessionResolver):
-                        resolver.write(uri, b"needs_fix\n" if needs_fix else b"pass\n")
                 state.artifacts.bind(key, uri)
                 state.artifacts.resolver(uri.scheme).verify_produced(uri)
 

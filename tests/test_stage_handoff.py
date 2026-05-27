@@ -169,7 +169,7 @@ def test_next_plan_writes_plan_and_raises(tmp_path, monkeypatch, sandbox):
     outcome = asyncio.run(h.run(state))
     assert isinstance(outcome, Done)
     assert state.artifacts.produced("status")
-    assert state.artifacts.read("status").strip() == b"needs_fix"
+    assert state.artifacts.read("status") == "needs_fix"
     assert (tmp_path / "plan.md").read_text(encoding="utf-8") == "# Child Plan\n"
 
 
