@@ -8,6 +8,7 @@ import asyncio
 import dataclasses
 import json
 import pathlib
+import re
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -141,7 +142,9 @@ IMPL_EVENTS = [
 # ---------------------------------------------------------------------------
 
 
-def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
+def _patch_common(
+    monkeypatch, tmp_path, *, state_data: dict = None, fake_pr_number: str = "101"
+):
     """Apply standard monkeypatches for gh_main smoke tests."""
     monkeypatch.setattr(
         shutil,
@@ -186,6 +189,9 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
     # Create placeholder artifact files so file resolvers find them.
     (session_dir / "spec.md").write_text("", encoding="utf-8")
     (session_dir / "plan.md").write_text("", encoding="utf-8")
+    (session_dir / "pr-title.txt").write_text("Fake PR Title\n")
+    (session_dir / "pr-body.md").write_text("Fake PR body.\n")
+    (session_dir / "pr-branch.txt").write_text("issue-42-fake-slug\n")
     monkeypatch.setattr(
         "gremlins.executor.run.resolve_state_file", lambda gremlin_id=None: state_file
     )
@@ -197,8 +203,21 @@ def _patch_common(monkeypatch, tmp_path, *, state_data: dict = None):
     _orig_shell = _proc_mod.run_shell_async
 
     async def _noop_gh_shell(cmd, *, cwd=None, env=None):
-        if isinstance(cmd, str) and cmd.lstrip().startswith("gh "):
-            return _subprocess_mod.CompletedProcess(cmd, 0, "", "")
+        if isinstance(cmd, str):
+            if cmd.lstrip().startswith("gh "):
+                return _subprocess_mod.CompletedProcess(cmd, 0, "", "")
+            m = re.search(r'"([^"]+/pr-number\.txt)"', cmd)
+            if m:
+                p = pathlib.Path(m.group(1))
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(f"{fake_pr_number}\n")
+                return _subprocess_mod.CompletedProcess(cmd, 0, "", "")
+            m2 = re.search(r'"([^"]+/pr-base-ref\.txt)"', cmd)
+            if m2:
+                p = pathlib.Path(m2.group(1))
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text("main\n")
+                return _subprocess_mod.CompletedProcess(cmd, 0, "", "")
         return await _orig_shell(cmd, cwd=cwd, env=env)
 
     monkeypatch.setattr(_proc_mod, "run_shell_async", _noop_gh_shell)
@@ -361,6 +380,8 @@ def test_gh_pipeline_stage_names(tmp_path):
         "normalize",
         "verify",
         "open-pr",
+        "compose-pr",
+        "push-and-open",
         "github-request-copilot-review",
         "github-review-pull-request",
         "github-wait-copilot",
@@ -429,7 +450,7 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
         git_dir=tmp_path,
         fixtures={
             "implement": IMPL_EVENTS,
-            "github-open-pull-request": _pr_events(),
+            "compose-pr": MINIMAL_EVENTS,
             "github-review-pull-request": MINIMAL_EVENTS,
             "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },
@@ -476,7 +497,7 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
             "plan": _issue_events(),
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "github-open-pull-request": _pr_events(),
+            "compose-pr": MINIMAL_EVENTS,
             "github-review-pull-request": MINIMAL_EVENTS,
             "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },
@@ -524,7 +545,7 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
         fixtures={
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "github-open-pull-request": _pr_events(),
+            "compose-pr": MINIMAL_EVENTS,
             "github-review-pull-request": MINIMAL_EVENTS,
             "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },
@@ -577,7 +598,7 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
         fixtures={
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "github-open-pull-request": _pr_events(),
+            "compose-pr": MINIMAL_EVENTS,
             "github-review-pull-request": MINIMAL_EVENTS,
             "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },
@@ -629,7 +650,7 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
         fixtures={
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "github-open-pull-request": _pr_events(),
+            "compose-pr": MINIMAL_EVENTS,
             "github-review-pull-request": MINIMAL_EVENTS,
             "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },
@@ -690,7 +711,7 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         fixtures={
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "github-open-pull-request": _pr_events(),
+            "compose-pr": MINIMAL_EVENTS,
             "github-review-pull-request": MINIMAL_EVENTS,
             "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },
@@ -847,7 +868,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
             {"type": "system", "subtype": "init"},
             {"type": "result", "subtype": "success", "total_cost_usd": 0.07},
         ],
-        "github-open-pull-request": [
+        "compose-pr": [
             {"type": "system", "subtype": "init"},
             {
                 "type": "assistant",
@@ -894,7 +915,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
     labels = [c.label for c in client.calls]
     assert "plan-title" in labels
     assert "implement" in labels
-    assert "github-open-pull-request" in labels
+    assert "compose-pr" in labels
 
     # Read on-disk state.json — verifies both the accumulation and the persistence step.
     state = json.loads(state_file.read_text())
@@ -914,7 +935,7 @@ def test_parse_resume_from_open_pr(capsys):
 
 
 def test_resume_from_open_pr(tmp_path, monkeypatch):
-    """--resume-from open-pr skips plan/implement and runs github-open-pull-request onward."""
+    """--resume-from open-pr skips plan/implement and runs open-pr/compose-pr/push-and-open onward."""
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
@@ -948,7 +969,7 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
 
     client = FakeClaudeClient(
         fixtures={
-            "github-open-pull-request": _pr_events(),
+            "compose-pr": MINIMAL_EVENTS,
             "github-review-pull-request": MINIMAL_EVENTS,
             "github-address-pull-request-reviews": MINIMAL_EVENTS,
         }
@@ -965,12 +986,17 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
 
     labels = [c.label for c in client.calls]
     assert "implement" not in labels, "implement must not run on open-pr resume"
-    assert "github-open-pull-request" in labels
+    assert "compose-pr" in labels
+
+    compose_pr_call = next(c for c in client.calls if c.label == "compose-pr")
+    assert "gh://issue/42" in compose_pr_call.prompt, (
+        "compose-pr must receive upgraded gh:// plan URI, not a file:// path"
+    )
 
     review_calls = [c for c in client.calls if c.label == "github-review-pull-request"]
     assert len(review_calls) == 1
     assert "https://github.com/owner/repo/pull/101" in review_calls[0].prompt
-    # Verify GitHubOpenPullRequest wrote pr to registry.json
+    # Verify push-and-open wrote pr to registry.json
     registry_path = tmp_path / "registry.json"
     assert registry_path.exists(), "registry.json should have been written"
     assert json.loads(registry_path.read_text()).get("pr") == "gh://pr/101"
@@ -986,7 +1012,7 @@ def test_github_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+    session_dir, state_file = _patch_common(monkeypatch, tmp_path, fake_pr_number="77")
 
     monkeypatch.setattr(
         subprocess,
@@ -1017,9 +1043,7 @@ def test_github_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
         fixtures={
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "github-open-pull-request": _pr_events(
-                "https://github.com/owner/repo/pull/77"
-            ),
+            "compose-pr": MINIMAL_EVENTS,
             "github-review-pull-request": MINIMAL_EVENTS,
             "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },
@@ -1036,7 +1060,7 @@ def test_github_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
 
     assert captured_stage["state"].engine_ctx.repo == "owner/repo"
     assert captured_stage["state"].session_dir == session_dir
-    # pr is written to registry.json by GitHubOpenPullRequest
+    # pr is written to registry.json by push-and-open
     registry_path = tmp_path / "registry.json"
     assert registry_path.exists(), "registry.json should have been written"
     assert json.loads(registry_path.read_text()).get("pr") == "gh://pr/77"
@@ -1052,7 +1076,7 @@ def test_github_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+    session_dir, state_file = _patch_common(monkeypatch, tmp_path, fake_pr_number="77")
 
     monkeypatch.setattr(
         subprocess,
@@ -1082,9 +1106,7 @@ def test_github_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
         fixtures={
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "github-open-pull-request": _pr_events(
-                "https://github.com/owner/repo/pull/77"
-            ),
+            "compose-pr": MINIMAL_EVENTS,
             "github-review-pull-request": MINIMAL_EVENTS,
             "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },
@@ -1102,7 +1124,7 @@ def test_github_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
     stage = captured_stage["stage"]
     assert stage.client.model == "claude-opus-4-7"
     assert captured_stage["state"].session_dir == session_dir
-    # pr is written to registry.json by GitHubOpenPullRequest
+    # pr is written to registry.json by push-and-open
     registry_path = tmp_path / "registry.json"
     assert registry_path.exists(), "registry.json should have been written"
     assert json.loads(registry_path.read_text()).get("pr") == "gh://pr/77"
@@ -1141,7 +1163,7 @@ def test_github_wait_ci_stage_ordering(tmp_path, monkeypatch):
         fixtures={
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "github-open-pull-request": _pr_events(),
+            "compose-pr": MINIMAL_EVENTS,
             "github-review-pull-request": MINIMAL_EVENTS,
             "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },
@@ -1228,7 +1250,7 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    session_dir, _state_file = _patch_common(monkeypatch, tmp_path)
+    session_dir, _state_file = _patch_common(monkeypatch, tmp_path, fake_pr_number="77")
 
     monkeypatch.setattr(
         subprocess,
@@ -1257,9 +1279,7 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
         fixtures={
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "github-open-pull-request": _pr_events(
-                "https://github.com/owner/repo/pull/77"
-            ),
+            "compose-pr": MINIMAL_EVENTS,
             "github-review-pull-request": MINIMAL_EVENTS,
             "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },
@@ -1323,7 +1343,7 @@ def test_resume_from_verify(tmp_path, monkeypatch):
 
     client = FakeClaudeClient(
         fixtures={
-            "github-open-pull-request": _pr_events(),
+            "compose-pr": MINIMAL_EVENTS,
             "github-review-pull-request": MINIMAL_EVENTS,
             "github-address-pull-request-reviews": MINIMAL_EVENTS,
         }
@@ -1371,7 +1391,7 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch):
         fixtures={
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "github-open-pull-request": _pr_events(),
+            "compose-pr": MINIMAL_EVENTS,
             "github-review-pull-request": MINIMAL_EVENTS,
             "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },
@@ -1422,7 +1442,7 @@ def test_gh_main_state_client_tracks_effective_model(
         fixtures={
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "github-open-pull-request": _pr_events(),
+            "compose-pr": MINIMAL_EVENTS,
             "github-review-pull-request": MINIMAL_EVENTS,
             "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },
@@ -1498,7 +1518,7 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
         fixtures={
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "github-open-pull-request": _pr_events(),
+            "compose-pr": MINIMAL_EVENTS,
             "github-review-pull-request": MINIMAL_EVENTS,
             "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },
@@ -1552,7 +1572,7 @@ def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
             "plan": _issue_events(),
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
-            "github-open-pull-request": _pr_events(),
+            "compose-pr": MINIMAL_EVENTS,
             "github-review-pull-request": MINIMAL_EVENTS,
             "github-address-pull-request-reviews": MINIMAL_EVENTS,
         },

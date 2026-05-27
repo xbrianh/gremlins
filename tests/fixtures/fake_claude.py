@@ -238,11 +238,15 @@ def handle_address(prompt: str) -> int:
     return 0
 
 
-def handle_github_open_pull_request(prompt: str) -> int:
-    pr_url = os.environ.get(
-        "FAKE_CLAUDE_PR_URL", "https://github.com/owner/repo/pull/101"
-    )
-    emit_pr_create_stream(pr_url)
+def handle_compose_pr(prompt: str) -> int:
+    m = re.search(r"- `(/[^`]+)/pr-branch\.txt`", prompt)
+    if m:
+        session = pathlib.Path(m.group(1))
+        session.mkdir(parents=True, exist_ok=True)
+        (session / "pr-branch.txt").write_text("issue-42-test-slug\n")
+        (session / "pr-title.txt").write_text("Test PR Title\n")
+        (session / "pr-body.md").write_text("Test PR body.\n")
+    emit_minimal_stream()
     return 0
 
 
@@ -329,8 +333,8 @@ def classify_stage(prompt: str) -> str:
         return "rescue-diagnosis"
     if "Produce a concise GitHub issue title" in prompt:
         return "plan-title"
-    if "Print ONLY the PR URL on the final line" in prompt:
-        return "github-open-pull-request"
+    if "Do NOT push or call" in prompt:
+        return "compose-pr"
     if (
         "stage all changes, and commit" in prompt
         or "Rename the current branch" in prompt
@@ -404,7 +408,7 @@ def main(argv):
         "review": handle_review,
         "address": handle_address,
         "commit": lambda p: (emit_minimal_stream(), 0)[1],
-        "github-open-pull-request": handle_github_open_pull_request,
+        "compose-pr": handle_compose_pr,
         "ghplan": handle_ghplan,
         "github-review-pull-request": lambda p: (emit_minimal_stream(), 0)[1],
         "github-address-pull-request-reviews": lambda p: (emit_minimal_stream(), 0)[1],
