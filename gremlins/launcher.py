@@ -667,8 +667,6 @@ def _patch_state_for_resume(
     stage: str,
     pipeline_args: list[str],
     pipeline_path: str,
-    *,
-    is_rescue: bool = False,
 ) -> None:
     for marker in ("finished", "summarized"):
         try:
@@ -698,7 +696,7 @@ def _patch_state_for_resume(
         stage=stage,
         rescued_at=now_iso,
         resumed_from_stage=stage,
-        rescue_count=rescue_count + 1 if is_rescue else rescue_count,
+        rescue_count=rescue_count,
         pid=None,
         pipeline_args=pipeline_args,
         pipeline_path=pipeline_path,
@@ -724,7 +722,6 @@ def _spawn_resume(
     has_plan = any(a == "--plan" or str(a).startswith("--plan=") for a in pipeline_args)
 
     spawn_args: list[str] = list(pipeline_args)
-    spawn_args.extend(["--resume-from", str(stage)])
     if not has_plan:
         instr_file = state_dir / "instructions.txt"
         if instr_file.is_file():
@@ -733,6 +730,9 @@ def _spawn_resume(
             instructions = str(state.get("instructions") or "")
         if instructions:
             spawn_args.append(instructions)
+
+    env = _build_spawn_env(gremlin_id)
+    env["GREMLINS_RESUME_FROM"] = str(stage)
 
     cmd = [
         sys.executable,
@@ -743,12 +743,12 @@ def _spawn_resume(
         *spawn_args,
     ]
     return _spawn_logged_process(
-        cmd, project_root, _build_spawn_env(gremlin_id), state_dir / "log", log_mode="a"
+        cmd, project_root, env, state_dir / "log", log_mode="a"
     )
 
 
 def resume(
-    gremlin_id: str, *, graft: str | None = None, is_rescue: bool = False
+    gremlin_id: str, *, graft: str | None = None
 ) -> None:
     state_dir, state = _load_resume_state(gremlin_id)
     _check_resume_preconditions(gremlin_id, state_dir, state, graft)
@@ -768,7 +768,6 @@ def resume(
         stage,
         pipeline_args,
         pipeline_path,
-        is_rescue=is_rescue,
     )
     p = _spawn_resume(
         gremlin_id, state_dir, state, pipeline_path, pipeline_args, stage, project_root

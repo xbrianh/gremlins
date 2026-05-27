@@ -10,7 +10,6 @@ from gremlins.fleet.ack import do_ack, do_skip
 from gremlins.fleet.close import do_close
 from gremlins.fleet.land import do_land, do_rm
 from gremlins.fleet.log import do_log
-from gremlins.fleet.rescue import do_rescue
 from gremlins.fleet.state import git_toplevel
 from gremlins.fleet.stop import do_stop
 from gremlins.fleet.views import (
@@ -131,26 +130,6 @@ def stop_main(argv: list[str]) -> int:
     if _no_state_root():
         return 0
     return 0 if do_stop(args.id_prefix) else 1
-
-
-def rescue_main(argv: list[str]) -> int:
-    p = argparse.ArgumentParser(
-        prog="gremlins rescue",
-        description="Diagnose and resume a dead or stalled gremlin.",
-    )
-    p.add_argument("id_prefix", metavar="id-prefix")
-    p.add_argument(
-        "--headless", action="store_true", help="Run end-to-end with no TTY."
-    )
-    p.add_argument("--from-boss", action="store_true", help="Called from a boss chain.")
-    args = p.parse_args(argv)
-    if _no_state_root():
-        return 0
-    return (
-        0
-        if do_rescue(args.id_prefix, headless=args.headless, from_boss=args.from_boss)
-        else 1
-    )
 
 
 def rm_main(argv: list[str]) -> int:

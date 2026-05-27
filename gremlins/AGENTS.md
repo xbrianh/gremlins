@@ -14,7 +14,7 @@ review / address pipelines, the fleet manager
 - `state.py` — session-dir resolution, `set_stage` / `write_bail_file` / `patch_state` / `check_bail`.
 - `utils/git.py` — `in_git_repo`, `head_sha`, branch / worktree helpers.
 - `utils/github.py` — `gh` CLI wrappers and stream-json URL extractors used by the gh orchestrator.
-- `fleet/` — fleet manager package: status listing + `stop` / `rescue` / `land` / `close` / `rm` / `log` ops. See [`fleet/AGENTS.md`](fleet/AGENTS.md) for the per-module breakdown.
+- `fleet/` — fleet manager package: status listing + `stop` / `land` / `close` / `rm` / `log` ops. See [`fleet/AGENTS.md`](fleet/AGENTS.md) for the per-module breakdown.
 - `clients/protocol.py` — `ClaudeClient` Protocol + `CompletedRun` dataclass.
 - `clients/stream.py` — `stream_events` + `_emit_event` (stream-json parser and stderr renderer).
 - `clients/claude.py` — `SubprocessClaudeClient` (production subprocess runner).
@@ -87,7 +87,7 @@ stages:
 | `launch local` / `launch gh` / `launch boss` | `cli.launch.launch_main` → `executor.run.run_pipeline` |
 | `resume` | `cli.resume.resume_main` |
 | `launch` | `cli.launch.launch_main` |
-| `stop` / `rescue` / `land` / `rm` / `close` / `log` | `cli.fleet.*_main` |
+| `stop` / `land` / `rm` / `close` / `log` | `cli.fleet.*_main` |
 | (bare / id-prefix) | `cli.fleet.fleet_main` |
 
 ## Testability seam: `ClaudeClient`
@@ -145,19 +145,19 @@ child's `state.json` to decide what to do — no `gh` calls, no git inspection.
 ```sh
 # Keep this child going: address the PR review manually, then:
 gremlins resume <child-id>
-gremlins rescue <boss-id>
+gremlins resume <boss-id>
 
 # Manually merged the PR:
 gh pr merge <pr> --squash
 gremlins ack <child-id>
-gremlins rescue <boss-id>
+gremlins resume <boss-id>
 
 # Give up on this child's work, re-plan:
 gremlins skip <child-id>
-gremlins rescue <boss-id>
+gremlins resume <boss-id>
 ```
 
-Two commands per recovery. If the boss was rescued with no operator decision
+Two commands per recovery. If the boss was resumed with no operator decision
 recorded, it prints the three options above and exits non-zero — it never
 silently re-handoffs and spawns a near-duplicate child.
 

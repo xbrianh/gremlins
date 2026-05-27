@@ -210,16 +210,6 @@ def test_stop_dispatches_to_stop_main(tmp_path, monkeypatch):
     assert called == [["abc123"]]
 
 
-def test_rescue_dispatches_to_rescue_main(tmp_path, monkeypatch):
-    called = []
-    monkeypatch.setitem(
-        cli_mod._DISPATCH, "rescue", ("", lambda argv: called.append(argv) or 0)
-    )
-    rc = main(["rescue", "--headless", "abc123"])
-    assert rc == 0
-    assert called == [["--headless", "abc123"]]
-
-
 def test_land_dispatches_to_land_main(tmp_path, monkeypatch):
     called = []
     monkeypatch.setitem(

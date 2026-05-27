@@ -1,6 +1,6 @@
 # `gremlins/fleet/`
 
-Fleet manager package for background gremlins. Reads every gremlin state file under `gremlins.paths.state_root()`, applies the shared liveness classifier inline, and prints one scannable line per gremlin. Fleet ops (`ack`, `skip`, `stop`, `rescue`, `land`, `rm`, `close`, `log`) are exposed as top-level `gremlins` subcommands via `gremlins/cli/fleet.py`.
+Fleet manager package for background gremlins. Reads every gremlin state file under `gremlins.paths.state_root()`, applies the shared liveness classifier inline, and prints one scannable line per gremlin. Fleet ops (`ack`, `skip`, `stop`, `land`, `rm`, `close`, `log`) are exposed as top-level `gremlins` subcommands via `gremlins/cli/fleet.py`.
 
 ## Module map
 
@@ -13,7 +13,6 @@ Fleet manager package for background gremlins. Reads every gremlin state file un
 | `resolve.py` | `GREMLIN_STAGES`, `resolve_gremlin` |
 | `ack.py` | `do_ack`, `do_skip` |
 | `stop.py` | `do_stop` |
-| `rescue.py` | `build_rescue_prompt`, `_write_bail`, `write_rescue_report`, `_read_rescue_marker`, `_run_headless_diagnosis`, `do_rescue` |
 | `log.py` | `do_log` |
 | `close.py` | `do_close` |
 | `land.py` | All land helpers + `do_rm`, `do_land`, `expected_branch`, `_print_cost`, `_persist_land_cost`, `_resolve_landing_cwd`, `_fast_forward_main`, `_cleanup_gremlin` |
