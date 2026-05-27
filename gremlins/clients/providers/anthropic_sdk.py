@@ -267,7 +267,7 @@ class AnthropicSdkClient:
         raw_path: pathlib.Path | None = None,
         capture_events: bool = False,
         on_timeout_prompt: str | None = None,
-        max_retries: int = 2,
+        max_retries: int = 3,
         cwd: pathlib.Path | None = None,
         idle_timeout: float | None = None,
         extra_env: dict[str, str] | None = None,
