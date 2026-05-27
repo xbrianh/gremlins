@@ -12,9 +12,17 @@ from gremlins.stages.agent_runner import run_agent
 from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.outcome import Done, Outcome
 from gremlins.utils.github import extract_gh_url
-from gremlins.utils.yaml_io import render_bundled_prompt
 
 logger = logging.getLogger(__name__)
+
+_PROMPT = (
+    "You are creating a GitHub pull request for changes on a detached HEAD.\n\n"
+    "Choose a descriptive branch name, write a clear title and body.{closes}{iter}\n\n"
+    "Run exactly these two commands:\n"
+    "1. `git push origin HEAD:refs/heads/<branch>`\n"
+    "2. `gh pr create --head <branch> --base {base_ref} --title <title> --body <body>`\n\n"
+    "Do NOT use `--fill`. Print ONLY the PR URL on the final line."
+)
 
 
 class GitHubOpenPullRequest(Stage):
@@ -64,26 +72,25 @@ class GitHubOpenPullRequest(Stage):
         )
 
         if issue_num:
-            closes_clause = f"Include 'Closes #{issue_num}' in the PR body."
+            closes_clause = f" Include 'Closes #{issue_num}' in the PR body."
         else:
             closes_clause = (
-                "Do NOT include any 'Closes #N' or 'Fixes #N' link in the PR body."
+                " Do NOT include any 'Closes #N' or 'Fixes #N' link in the PR body."
             )
-
-        base_prompt = render_bundled_prompt(
-            "github_open_pull_request.md", base_ref=base_ref
-        ).rstrip()
 
         n = state.data.loop_iteration
         iter_clause = (
             f" This is loop iteration {n}; append '-iter{n}' to the branch slug"
-            f" to avoid colliding with a prior iteration's branch"
             f" (e.g. 'issue-NNN-some-slug-iter{n}')."
             if n > 1
             else ""
         )
 
-        prompt = f"{base_prompt} {closes_clause}{iter_clause}"
+        prompt = _PROMPT.format(
+            base_ref=base_ref,
+            closes=closes_clause,
+            iter=iter_clause,
+        )
 
         completed: CompletedRun = await run_agent(
             state,

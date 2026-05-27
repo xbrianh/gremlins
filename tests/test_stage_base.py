@@ -10,14 +10,14 @@ import pytest
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state
 from gremlins.pipeline import Pipeline
+from gremlins.stages.agent import Agent
 from gremlins.stages.base import Stage
-from gremlins.stages.github_open_pull_request import GitHubOpenPullRequest
 from gremlins.stages.outcome import Done, Outcome
 
 _PIPELINE = Pipeline(
     name="test",
     path=pathlib.Path("."),
-    stages=[GitHubOpenPullRequest("github-open-pull-request", [], {})],
+    stages=[Agent("stub", [], {})],
 )
 
 

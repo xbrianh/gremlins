@@ -1,8 +1,8 @@
-"""Resolve in: map entries against the artifact registry, supporting dotted attribute paths."""
+"""Resolve in: map entries against the artifact registry."""
 
 from __future__ import annotations
 
-from gremlins.artifacts.registry import ArtifactRegistry
+from gremlins.artifacts.registry import ArtifactRegistry, MissingArtifact
 from gremlins.utils.text import to_str
 
 
@@ -10,12 +10,19 @@ def resolve_in_map(
     artifacts: ArtifactRegistry, in_map: dict[str, str]
 ) -> dict[str, str]:
     result: dict[str, str] = {}
-    for var, path in in_map.items():
+    for var, raw_path in in_map.items():
+        path, sep, default = raw_path.partition("?")
         parts = path.split(".")
         if any(not p for p in parts):
             raise ValueError(f"in: path {path!r} has empty segment")
         key, *attrs = parts
-        value = artifacts.read(key)
+        try:
+            value = artifacts.read(key)
+        except MissingArtifact:
+            if not sep:
+                raise
+            result[var] = default
+            continue
         for attr in attrs:
             if attr.startswith("_"):
                 raise ValueError(

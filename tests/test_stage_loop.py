@@ -446,6 +446,85 @@ def test_loop_patches_loop_iteration_to_state(tmp_path, make_state_dir):
     assert seen_iterations == [1, 2, 3]
 
 
+def test_loop_unbinds_out_keys_between_iterations(tmp_path):
+    """out_map keys unbound each iteration so exec can rebind to a different URI."""
+    from gremlins.artifacts.uri import Uri
+    from gremlins.stages.exec import Exec
+
+    (tmp_path / "artifacts").mkdir(exist_ok=True)
+    state = _loop_state(tmp_path)
+
+    bound_count = [0]
+
+    async def binder() -> Done | NeedsFix:
+        # Bind a different URI each iteration; without unbind the second bind raises DuplicateArtifact.
+        uri = Uri.parse(f"file://session/out-{bound_count[0]}.txt")
+        state.artifacts.bind("loop-out", uri)
+        bound_count[0] += 1
+        if bound_count[0] < 2:
+            return NeedsFix("go again")
+        return Done()
+
+    exec_stage = Exec("stage", {}, out_map={"loop-out": "file://session/out-0.txt"})
+    loop = LoopStage(
+        "loop",
+        body=[exec_stage],
+        body_runners=[binder],
+        max_iterations=3,
+    )
+    asyncio.run(loop.run(state))
+    assert bound_count[0] == 2
+
+
+def test_pr_stack_unbind_fires_after_on_iteration_start(
+    tmp_path, make_state_dir, monkeypatch
+):
+    """Unbind runs after on_iteration_start so detach_to_pr_base can read the pr artifact."""
+    from gremlins.artifacts.schemes import PrInfo
+    from gremlins.artifacts.uri import Uri
+    from gremlins.stages.exec import Exec
+
+    gremlin_id = "pr-stack-order-test"
+    make_state_dir(gremlin_id)
+
+    detach_calls: list[str] = []
+    from gremlins.stages import loop as _loop_mod
+
+    monkeypatch.setattr(
+        _loop_mod._git,
+        "git_detach_to_branch",
+        lambda branch, cwd=None: detach_calls.append(branch),
+    )
+
+    state = _loop_state_with_gr(tmp_path, gremlin_id)
+    count = [0]
+
+    async def runner() -> Done | NeedsFix:
+        count[0] += 1
+        if count[0] == 1:
+            state.artifacts.bind("pr", Uri.parse("gh://pr/1"))
+            state.artifacts._resolvers["gh"].read = (  # type: ignore[attr-defined]
+                lambda uri: PrInfo(
+                    url="https://github.com/x/r/pull/1", number=1, branch="feat-iter1"
+                )
+            )
+            return NeedsFix("next")
+        return Done()
+
+    exec_stage = Exec("stage", {}, out_map={"pr": "gh://pr"})
+    loop = LoopStage(
+        "test",
+        body=[exec_stage],
+        body_runners=[runner],
+        max_iterations=2,
+        on_iteration_start=detach_to_pr_base,
+    )
+    asyncio.run(loop.run(state))
+
+    # on_iteration_start fires before unbind, so detach_to_pr_base sees pr on iter 2
+    assert detach_calls == ["feat-iter1"]
+
+
 def test_pr_stack_iter2_detaches_to_iter1_branch(tmp_path, make_state_dir, monkeypatch):
     """Detach fires at start of iter2 using the artifact written during iter1."""
     gremlin_id = "pr-stack-two-iter"
