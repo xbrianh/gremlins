@@ -1276,9 +1276,9 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
 
     stage = captured_stage["stage"]
     assert stage.client.model == "claude-opus-4-7"
-    # cmds are on the cmd exec stage inside the loop body
+    # cmds are on the cmd exec stage inside the loop body; first cmd is the user cmd
     cmd_stage = stage.body[0]
-    assert cmd_stage.options.get("cmds") == ["make check", "make test"]
+    assert cmd_stage.options.get("cmds")[0] == "make check && make test"
     assert captured_stage["state"].session_dir == session_dir
 
 

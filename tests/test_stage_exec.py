@@ -12,7 +12,7 @@ from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import StateData, build_state
 from gremlins.stages.exec import Exec
-from gremlins.stages.outcome import Bail, Done, NeedsFix
+from gremlins.stages.outcome import Bail, Done
 
 
 def _make_state(tmp_path: pathlib.Path, **kw):
@@ -27,12 +27,10 @@ def _make_state(tmp_path: pathlib.Path, **kw):
     )
 
 
-def _exec(name: str = "test", cmds=None, *, in_map=None, out_map=None, on_fail=None):
+def _exec(name: str = "test", cmds=None, *, in_map=None, out_map=None):
     options = {}
     if cmds is not None:
         options["cmds"] = cmds
-    if on_fail:
-        options["on_fail"] = on_fail
     return Exec(name, options, in_map=in_map, out_map=out_map)
 
 
@@ -201,30 +199,6 @@ def test_nonzero_exit_writes_log(tmp_path):
     with pytest.raises(Bail):
         asyncio.run(stage.run(state))
     assert (state.session_dir / "exec-myname.log").exists()
-
-
-def test_on_fail_needs_fix_returns_needs_fix(tmp_path):
-    state = _make_state(tmp_path)
-    stage = _exec(cmds=["exit 2"], on_fail="needs_fix")
-    result = asyncio.run(stage.run(state))
-    assert isinstance(result, NeedsFix)
-    assert result.returncode == 2
-
-
-def test_on_fail_needs_fix_binds_log_output(tmp_path):
-    state = _make_state(tmp_path)
-    stage = _exec(
-        "cmd",
-        cmds=["echo boom; exit 1"],
-        on_fail="needs_fix",
-        out_map={"verify_log": "file://session/exec-{name}.log"},
-    )
-    result = asyncio.run(stage.run(state))
-    assert isinstance(result, NeedsFix)
-    assert state.artifacts.produced("verify_log")
-    assert state.artifacts.resolve("verify_log") == Uri.parse(
-        "file://session/exec-cmd.log"
-    )
 
 
 def test_success_writes_log(tmp_path):

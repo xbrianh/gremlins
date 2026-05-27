@@ -8,16 +8,30 @@ import pathlib
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
+from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.composite import child_state as _child_state
-from gremlins.stages.outcome import Bail, Done, NeedsFix, Outcome
+from gremlins.stages.outcome import Bail, Done, Outcome
 from gremlins.utils import git as _git
 
 logger = logging.getLogger(__name__)
 
-# Called after a clean (no NeedsFix) iteration; returns True to exit the loop.
+# Called after a clean (no marker) iteration; returns True to exit the loop.
 UntilFn = Callable[[State, int, str], bool]
+
+_MARKER_KEY = "status"
+_MARKER_VALUE = b"needs_fix"
+
+
+def _is_marker_set(artifacts: ArtifactRegistry) -> bool:
+    if not artifacts.produced(_MARKER_KEY):
+        return False
+    try:
+        content = artifacts.read(_MARKER_KEY)
+        return isinstance(content, bytes) and content.strip() == _MARKER_VALUE
+    except Exception:
+        return False
 
 
 def head_stable(state: State, iteration: int, head_before: str) -> bool:
@@ -34,13 +48,14 @@ async def _dispatch_runners(
     runners: list[Callable[[], Awaitable[Outcome]]],
     iteration: int,
     max_iterations: int,
+    artifacts: ArtifactRegistry,
 ) -> bool:
     had_failure = False
     for i, runner in enumerate(runners):
         if i > 0 and (not had_failure or iteration == max_iterations):
             continue
-        outcome = await runner()
-        if isinstance(outcome, NeedsFix):
+        await runner()
+        if not had_failure and _is_marker_set(artifacts):
             had_failure = True
     return had_failure
 
@@ -49,9 +64,9 @@ class LoopStage(Stage):
     """Iterate body runners until a termination predicate fires or max_iterations is reached.
 
     Body runners execute in order each iteration. Subsequent runners only run
-    when a preceding runner returned NeedsFix — on a clean iteration all
-    remaining runners are skipped. Fix runners are also skipped on the final
-    iteration so the stage bails without retrying.
+    when a preceding runner set the status=needs_fix marker artifact — on a
+    clean iteration all remaining runners are skipped. Fix runners are also
+    skipped on the final iteration so the stage bails without retrying.
 
     Resume granularity: resuming targets the loop by name; resuming
     restarts from iteration 1, picking up file-based state from session_dir.
@@ -135,6 +150,7 @@ class LoopStage(Stage):
             iter_state = dataclasses.replace(state, engine_ctx=iter_ctx)
             if self._on_iteration_start:
                 self._on_iteration_start(iter_state)
+            iter_state.artifacts.unbind(_MARKER_KEY)
             for child in self.body:
                 for key in getattr(child, "out_map", {}):
                     iter_state.artifacts.unbind(key)
@@ -146,7 +162,7 @@ class LoopStage(Stage):
                 else self._build_runners(iter_state)
             )
             had_failure = await _dispatch_runners(
-                runners, iteration, self._max_iterations
+                runners, iteration, self._max_iterations, iter_state.artifacts
             )
 
             if not had_failure:

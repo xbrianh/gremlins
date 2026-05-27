@@ -18,7 +18,7 @@ from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData, build_state
 from gremlins.stages.agent import Agent
 from gremlins.stages.handoff import Handoff
-from gremlins.stages.outcome import Bail, Done, NeedsFix
+from gremlins.stages.outcome import Bail, Done
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -168,8 +168,9 @@ def test_next_plan_writes_plan_and_raises(tmp_path, monkeypatch, sandbox):
     monkeypatch.setattr(h, "_resolve_base_ref", _fake_resolve_base_ref)
 
     outcome = asyncio.run(h.run(state))
-    assert isinstance(outcome, NeedsFix)
-    assert "next-plan" in outcome.detail
+    assert isinstance(outcome, Done)
+    assert state.artifacts.produced("status")
+    assert state.artifacts.read("status").strip() == b"needs_fix"
     assert (tmp_path / "plan.md").read_text(encoding="utf-8") == "# Child Plan\n"
 
 

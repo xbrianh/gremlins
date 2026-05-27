@@ -16,7 +16,7 @@ from gremlins.clients.registry import CLIENT_FACTORIES, register_client_factory
 from gremlins.executor.state import State
 from gremlins.pipeline.loader import STAGE_TYPES
 from gremlins.stages.base import Stage
-from gremlins.stages.outcome import Bail, Done, NeedsFix, Outcome
+from gremlins.stages.outcome import Bail, Done, Outcome
 
 # ---------------------------------------------------------------------------
 # Test stage stubs
@@ -36,13 +36,6 @@ class _DoneStage(_SimpleStage):
 
     async def run(self, state: State) -> Outcome:
         return Done()
-
-
-class _NeedsFixStage(_SimpleStage):
-    type = "_test_needs_fix"
-
-    async def run(self, state: State) -> Outcome:
-        return NeedsFix("broken", returncode=3)
 
 
 class _BailStage(_SimpleStage):
@@ -77,7 +70,6 @@ def _register_test_stages(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Generator[None, None, None]:
     monkeypatch.setitem(STAGE_TYPES, "_test_done", _DoneStage)
-    monkeypatch.setitem(STAGE_TYPES, "_test_needs_fix", _NeedsFixStage)
     monkeypatch.setitem(STAGE_TYPES, "_test_bail", _BailStage)
     monkeypatch.setitem(STAGE_TYPES, "_test_raise", _RaiseStage)
     monkeypatch.setitem(STAGE_TYPES, "_test_artifact", _ArtifactStage)
@@ -167,21 +159,6 @@ def test_run_done(tmp_path: pathlib.Path) -> None:
     assert result["status"] == "done"
     assert result["detail"] == ""
     assert result["returncode"] is None
-
-
-# ---------------------------------------------------------------------------
-# _run: NeedsFix
-# ---------------------------------------------------------------------------
-
-
-def test_run_needs_fix(tmp_path: pathlib.Path) -> None:
-    spec_path = _write_spec(tmp_path, "_test_needs_fix")
-    rc = asyncio.run(_rc._run(spec_path))
-    assert rc == 1
-    result = _read_result(spec_path)
-    assert result["status"] == "needs_fix"
-    assert result["detail"] == "broken"
-    assert result["returncode"] == 3
 
 
 # ---------------------------------------------------------------------------
