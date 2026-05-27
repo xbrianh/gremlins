@@ -11,7 +11,6 @@ applies to the main `Gremlin` executor path; subprocess child paths
 ```python
 from gremlins.artifacts.registry import ArtifactRegistry, MissingArtifact
 from gremlins.artifacts.uri import Uri
-from gremlins.artifacts.engine import EngineContext
 ```
 
 ## URI schemes
@@ -20,47 +19,79 @@ from gremlins.artifacts.engine import EngineContext
 |---|---|---|
 | `file://session/<name>` | `file://session/handoff-1.md` | File in the run's session dir |
 | `git://range/<base>..<head>` | `git://range/abc123..def456` | Commit range (SHAs) |
-| `git://ref/<name>` | `git://ref/main` | Git ref → resolved SHA |
-| `git://commit/<sha>` | `git://commit/abc123` | Single commit metadata |
-| `gh://pr/<n>` | `gh://pr/42` | GitHub PR (url, number, branch) via `gh pr view` |
-| `gh://issue/<n>` | `gh://issue/7` | GitHub issue (url, number) via `gh issue view` |
+| `git://ref/<name>` | `git://ref/main` | Git ref name (string) |
+| `git://commit/<sha>` | `git://commit/abc123` | Single commit SHA (string) |
+| `gh://pr/<n>` | `gh://pr/42` | GitHub PR → `{"url", "number", "branch"}` |
+| `gh://issue/<n>` | `gh://issue/7` | GitHub issue → `{"url", "number", "body"}` |
 
 ## Registry API
 
 ```python
 r = ArtifactRegistry(session_dir=state.session_dir, cwd=state.cwd)
+
+# Store a URI pointer (auto-resolved on read)
 r.bind("plan", Uri.parse("file://session/plan.md"))
+
+# Store a plain JSON value directly
+r.write("status", "needs_fix")
+r.write("meta", {"count": 3})
+
 r.produced("plan")          # True
 r.resolve("plan")           # Uri(scheme="file", path="session/plan.md")
-r.read("plan")              # bytes from disk
+r.read("plan")              # resolved value — file content as str, or dict for gh://
 r.keys()                    # iterable of bound keys
 ```
+
+`read()` resolves URI strings (at any nesting depth) automatically. A non-URI string or
+scalar passes through untouched. Resolution is recursive: if a resolved value itself
+contains URI strings, those are resolved too.
 
 `read()` on an unbound key raises `MissingArtifact(key)`.
 
 In normal pipeline runs `state.artifacts` is already constructed — use it directly
 rather than constructing a new registry.
 
-## EngineContext vs artifacts
+## Values and JSON
 
-`EngineContext` carries loop identity (`loop_iteration`, `attempt`, `current_scope`)
-for URI template substitution — it is **not** an artifact channel and does not read
-or write files. Use `EngineContext.format(template)` to expand `{n}`, `{attempt}`,
-`{scope}` in URI strings before passing them to `Uri.parse()`.
+All values stored in the registry must be JSON-serializable. `write()` validates this
+at write time via `json.dumps`. Producers and consumers own their pairwise contracts —
+the registry enforces nothing beyond serializability.
+
+URI strings stored as values (e.g. `"gh://pr/42"`) are resolved automatically on
+`read()`. Consumers see the resolved content (a dict or string) rather than the raw URI.
+
+## Read returns
+
+Scheme resolvers return plain JSON-compatible values:
+
+- `gh://pr/<n>` → `{"url": str, "number": int, "branch": str}`
+- `gh://issue/<n>` → `{"url": str, "number": int, "body": str}`
+- `git://range/<base>..<head>` → `[{"sha": str, "subject": str}, ...]`
+- `git://ref/<name>` → `name` (string)
+- `git://commit/<sha>` → sha (string)
+- `file://session/<name>` → file content (string, UTF-8)
+
+```python
+pr = state.artifacts.read("pr")
+pr["url"]     # https://github.com/…/pull/42
+pr["number"]  # 42
+pr["branch"]  # issue-42-some-slug
+```
 
 ## git://range helpers
 
 ```python
-from gremlins.artifacts.schemes import snapshot_head_before, bind_range_after
+from gremlins.artifacts.schemes import snapshot_head_before
 
 base = snapshot_head_before(cwd=state.cwd)
 # ... run stage ...
-bind_range_after(registry, "normalize-commits", base, cwd=state.cwd)
+state.artifacts.bind_git_commit_range("normalize-commits", base)
 ```
 
 ## `{read:KEY}` URI substitution in `out:` maps
 
-Any `out:` URI value may contain `{read:KEY}` tokens. Before the URI is parsed, each token is replaced with the stripped content of the already-bound artifact at `KEY`:
+Any `out:` URI value may contain `{read:KEY}` tokens. Before the URI is parsed, each
+token is replaced with the stripped content of the already-bound artifact at `KEY`:
 
 ```yaml
 out:
@@ -68,23 +99,9 @@ out:
   pr: gh://pr/{read:pr-number}              # reads pr-number, expands to gh://pr/42
 ```
 
-The referenced key must appear **earlier** in the `out:` map; forward references raise `MissingArtifact`. Only `file://session/...` artifacts (returning `bytes`) are supported — passing a non-bytes artifact raises `TypeError`.
-
-## Typed read returns
-
-`GitHubResolver.read()` returns typed objects rather than plain dicts:
-
-- `gh://pr/<n>` → `PrInfo(url: str, number: int, branch: str)`
-- `gh://issue/<n>` → `IssueInfo(url: str, number: int)`
-
-```python
-from gremlins.artifacts.schemes import PrInfo, IssueInfo
-
-pr: PrInfo = state.artifacts.read("pr")
-pr.url     # https://github.com/…/pull/42
-pr.number  # 42
-pr.branch  # issue-42-some-slug
-```
+The referenced key must appear **earlier** in the `out:` map; forward references raise
+`MissingArtifact`. Only `file://session/...` artifacts (resolving to a string) are
+supported — passing a non-string artifact raises `TypeError`.
 
 ## Registry persistence
 
