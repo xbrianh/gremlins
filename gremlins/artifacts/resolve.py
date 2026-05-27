@@ -32,9 +32,7 @@ def resolve_in_map(
                 try:
                     value = value[attr]
                 except (KeyError, TypeError):
-                    raise ValueError(
-                        f"in: path {path!r}: value has no key {attr!r}"
-                    )
+                    raise ValueError(f"in: path {path!r}: value has no key {attr!r}")
         except ValueError:
             if not sep:
                 raise

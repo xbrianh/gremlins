@@ -85,9 +85,7 @@ class ArtifactRegistry:
             raise MissingArtifact(key)
         value = self._data[key]
         if not isinstance(value, str):
-            raise ValueError(
-                f"artifact {key!r} is not a URI (stored value: {value!r})"
-            )
+            raise ValueError(f"artifact {key!r} is not a URI (stored value: {value!r})")
         return Uri.parse(value)
 
     def _resolve_value(self, value: Any) -> Any:
