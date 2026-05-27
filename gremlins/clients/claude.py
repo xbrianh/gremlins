@@ -89,7 +89,9 @@ class SubprocessClaudeClient:
     def total_cost_usd(self) -> float:
         return self._total_cost_usd
 
-    def _build_argv(self, model: str | None, session_id: str | None = None) -> list[str]:
+    def _build_argv(
+        self, model: str | None, session_id: str | None = None
+    ) -> list[str]:
         cmd = ["claude", "-p"]
         if model is not None:
             cmd += ["--model", model]
@@ -190,7 +192,9 @@ class SubprocessClaudeClient:
             self._last_session_id = session_id
         if timed_out:
             await terminate_with_grace(p, grace_s=5.0)
-            raise StreamTimeoutError("claude -p stream idle timeout", session_id=session_id)
+            raise StreamTimeoutError(
+                "claude -p stream idle timeout", session_id=session_id
+            )
         rc = await p.wait()
         cost_usd = state["cost_usd"]
         if cost_usd is not None:
@@ -209,7 +213,11 @@ class SubprocessClaudeClient:
         argv = self._build_argv(ctx["model"], session_id=session_id)
         p = await self._spawn(argv, prompt, cwd=ctx["cwd"], extra_env=ctx["extra_env"])
         return await self._consume(
-            p, ctx["prefix"], ctx["raw_path"], ctx["capture_events"], ctx["idle_timeout"]
+            p,
+            ctx["prefix"],
+            ctx["raw_path"],
+            ctx["capture_events"],
+            ctx["idle_timeout"],
         )
 
     def _continue_prompt(self) -> str:

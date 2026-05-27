@@ -218,7 +218,9 @@ def test_retry_exhaustion_raises_stream_timeout_error(tmp_path, monkeypatch):
     client = SubprocessClaudeClient()
     with pytest.raises(StreamTimeoutError):
         asyncio.run(client.run("hello", label="test", max_retries=2))
-    assert int(count_file.read_text()) == 4  # initial + 3 resume attempts (backoff[:2] → 3 tries)
+    assert (
+        int(count_file.read_text()) == 4
+    )  # initial + 3 resume attempts (backoff[:2] → 3 tries)
 
 
 _SLEEP_FOREVER_STUB_SRC = """\

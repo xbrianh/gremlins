@@ -116,7 +116,11 @@ class SubprocessCopilotClient:
         idle_timeout: float | None = None,
         extra_env: dict[str, str] | None = None,
     ) -> CompletedRun:
-        del idle_timeout, on_timeout_prompt, max_retries  # copilot reads stdout to EOF; no streaming idle concept
+        del (
+            idle_timeout,
+            on_timeout_prompt,
+            max_retries,
+        )  # copilot reads stdout to EOF; no streaming idle concept
         self._ctx = {
             "prompt": prompt,
             "label": label,
