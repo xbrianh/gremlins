@@ -329,6 +329,20 @@ class Gremlin:
             if not self.registry.produced("plan"):
                 if (self.session_dir / "plan.md").exists():
                     self.registry.bind("plan", Uri.parse("file://session/plan.md"))
+            # When --plan is a GH issue ref and plan is bound as file://, upgrade to
+            # gh://issue/{N}. This mirrors what the plan stage does, but is needed when
+            # resume_from skips that stage (plan.uri? in compose-pr would otherwise fail).
+            if self.plan and self.pipeline_data.needs_gh():
+                from gremlins.utils.github import parse_issue_ref as _parse_issue_ref
+                _, _issue_num = _parse_issue_ref(self.plan, "")
+                if _issue_num and self.registry.produced("plan"):
+                    _plan_uri = self.registry.resolve("plan")
+                    if _plan_uri.scheme == "file":
+                        self.registry.bind(
+                            "plan",
+                            Uri.parse(f"gh://issue/{_issue_num}"),
+                            override=True,
+                        )
         except Exception:
             if worktree_created:
                 _git_mod.remove_worktree(self.project_root, worktree_created)
