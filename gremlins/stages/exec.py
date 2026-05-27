@@ -114,7 +114,9 @@ class Exec(Stage):
             stderr_str = result.stderr
             exit_code = result.returncode
             log_path = state.session_dir / f"exec-{self.name}.log"
-            log_path.write_text(stdout_str + stderr_str or "(no output)\n", encoding="utf-8")
+            log_path.write_text(
+                stdout_str + stderr_str or "(no output)\n", encoding="utf-8"
+            )
             if exit_code != 0:
                 if self.options.get("on_fail") == "needs_fix":
                     needs_fix = True
