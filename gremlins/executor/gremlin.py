@@ -103,6 +103,7 @@ class Gremlin:
         test_client: Client | None = None,
         project_root: str = "",
         base_ref_sha: str = "",
+        base_ref: str = "",
         setup_kind: str = "worktree-branch",
     ) -> None:
         unknown: list[str] = []
@@ -135,6 +136,7 @@ class Gremlin:
         self.test_client = test_client
         self.project_root = project_root
         self.base_ref_sha = base_ref_sha
+        self.base_ref = base_ref
         self.setup_kind = setup_kind
 
     def validate_resume_target(self) -> None:
@@ -163,7 +165,12 @@ class Gremlin:
             else (self.project_root or str(pathlib.Path.cwd()))
         )
         engine_ctx = EngineContext(
-            loop_iteration=1, attempt="", current_scope=(), repo=self.repo, cwd=cwd
+            loop_iteration=1,
+            attempt="",
+            current_scope=(),
+            repo=self.repo,
+            cwd=cwd,
+            base_ref=self.base_ref,
         )
         built: list[tuple[str, Callable[[], Awaitable[Any]]]] = []
         for e in stages:
@@ -223,6 +230,7 @@ class Gremlin:
         test_client: Client | None = None,
         project_root: str = "",
         base_ref_sha: str = "",
+        base_ref: str = "",
         setup_kind: str = "worktree-branch",
         worktree_dir: pathlib.Path | None = None,
         client_label: str = "",
@@ -252,6 +260,7 @@ class Gremlin:
             test_client=test_client,
             project_root=project_root,
             base_ref_sha=base_ref_sha,
+            base_ref=base_ref,
             setup_kind=setup_kind,
             repo=repo,
         )

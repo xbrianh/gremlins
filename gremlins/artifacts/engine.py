@@ -19,6 +19,7 @@ class EngineContext:
     current_scope: tuple[str, ...]
     repo: str = ""
     cwd: str = ""
+    base_ref: str = ""
 
     def format(self, template: str) -> str:
         scope = "/".join(self.current_scope)
@@ -28,4 +29,5 @@ class EngineContext:
             scope=scope,
             repo=self.repo,
             cwd=self.cwd,
+            base_ref=self.base_ref,
         )
