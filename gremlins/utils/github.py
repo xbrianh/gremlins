@@ -71,6 +71,7 @@ VIEW_ISSUE_TIMEOUT = 30  # seconds; bounds `gh issue view` shell-out
 GET_PR_CI_STATUS_TIMEOUT = 30  # seconds; bounds `gh pr view` shell-out in poll loop
 VIEW_PR_TIMEOUT = 30  # seconds; bounds `gh pr view` shell-out
 
+
 def view_pr(pr: str, *, project_root: str | None = None) -> dict[str, Any]:
     """Fetch url and headRefName for a PR via gh pr view."""
     try:
@@ -278,5 +279,3 @@ def resolve_default_branch(project_root: str) -> str:
     if r.returncode != 0 or not r.stdout.strip():
         raise RuntimeError(f"gh repo view failed: {r.stderr.strip() or 'empty output'}")
     return r.stdout.strip()
-
-
