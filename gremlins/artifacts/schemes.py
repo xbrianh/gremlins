@@ -147,7 +147,9 @@ class GitHubResolver:
             n = path.removeprefix("issue/")
             repo = gh_utils.current_repo()
             data = gh_utils.view_issue(n, repo)
-            return IssueInfo(url=data.get("url", ""), number=int(n), body=data.get("body", ""))
+            return IssueInfo(
+                url=data.get("url", ""), number=int(n), body=data.get("body", "")
+            )
         raise ValueError(f"unrecognised gh URI path: {uri}")
 
     def verify_produced(self, uri: Uri) -> None:

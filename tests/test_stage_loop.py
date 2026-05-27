@@ -476,7 +476,9 @@ def test_loop_unbinds_out_keys_between_iterations(tmp_path):
     assert bound_count[0] == 2
 
 
-def test_pr_stack_unbind_fires_after_on_iteration_start(tmp_path, make_state_dir, monkeypatch):
+def test_pr_stack_unbind_fires_after_on_iteration_start(
+    tmp_path, make_state_dir, monkeypatch
+):
     """Unbind runs after on_iteration_start so detach_to_pr_base can read the pr artifact."""
     from gremlins.artifacts.schemes import PrInfo
     from gremlins.artifacts.uri import Uri
@@ -502,7 +504,9 @@ def test_pr_stack_unbind_fires_after_on_iteration_start(tmp_path, make_state_dir
         if count[0] == 1:
             state.artifacts.bind("pr", Uri.parse("gh://pr/1"))
             state.artifacts._resolvers["gh"].read = (  # type: ignore[attr-defined]
-                lambda uri: PrInfo(url="https://github.com/x/r/pull/1", number=1, branch="feat-iter1")
+                lambda uri: PrInfo(
+                    url="https://github.com/x/r/pull/1", number=1, branch="feat-iter1"
+                )
             )
             return NeedsFix("next")
         return Done()
