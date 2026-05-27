@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -38,11 +37,9 @@ def test_unbound_key_literal_default():
     assert resolve_in_map(reg, {"v": "missing?main"}) == {"v": "main"}
 
 
-def test_attr_typo_raises_even_with_default():
-    obj = SimpleNamespace(branch="feat")
-    reg = _registry({"pr": obj})
-    with pytest.raises(ValueError, match="has no attribute"):
-        resolve_in_map(reg, {"v": "pr.brnch?fallback"})
+def test_attr_typo_with_default_returns_default():
+    reg = _registry({"pr": {"branch": "feat"}})
+    assert resolve_in_map(reg, {"v": "pr.brnch?fallback"}) == {"v": "fallback"}
 
 
 def test_no_default_missing_artifact_raises():
@@ -52,12 +49,10 @@ def test_no_default_missing_artifact_raises():
 
 
 def test_bound_attr_access_works():
-    obj = SimpleNamespace(name="main")
-    reg = _registry({"ref": obj})
+    reg = _registry({"ref": {"name": "main"}})
     assert resolve_in_map(reg, {"v": "ref.name"}) == {"v": "main"}
 
 
 def test_bound_attr_with_default_returns_attr():
-    obj = SimpleNamespace(path="main")
-    reg = _registry({"base_ref": obj})
+    reg = _registry({"base_ref": {"path": "main"}})
     assert resolve_in_map(reg, {"v": "base_ref.path?other"}) == {"v": "main"}

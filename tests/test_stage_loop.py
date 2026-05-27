@@ -34,9 +34,7 @@ def _loop_state(tmp_path: Any) -> RuntimeState:
 
 def _set_marker(state: RuntimeState) -> None:
     """Write the status=needs_fix marker artifact to signal loop failure."""
-    marker = state.session_dir / "status"
-    marker.write_text("needs_fix", encoding="utf-8")
-    state.artifacts.bind("status", Uri.parse("file://session/status"))
+    state.artifacts.write("status", "needs_fix")
 
 
 # ---------------------------------------------------------------------------
@@ -313,14 +311,15 @@ def _loop_state_with_gr(
         worktree=tmp_path,
     )
     if pr_branch is not None:
-        from gremlins.artifacts.schemes import PrInfo
         from gremlins.artifacts.uri import Uri
 
         state.artifacts.bind("pr", Uri.parse("gh://pr/1"))
         state.artifacts._resolvers["gh"].read = (  # type: ignore[attr-defined]
-            lambda uri, _b=pr_branch: PrInfo(
-                url="https://github.com/x/r/pull/1", number=1, branch=_b
-            )
+            lambda uri, _b=pr_branch: {
+                "url": "https://github.com/x/r/pull/1",
+                "number": 1,
+                "branch": _b,
+            }
         )
     return state
 
@@ -499,7 +498,6 @@ def test_pr_stack_unbind_fires_after_on_iteration_start(
     tmp_path, make_state_dir, monkeypatch
 ):
     """Unbind runs after on_iteration_start so detach_to_pr_base can read the pr artifact."""
-    from gremlins.artifacts.schemes import PrInfo
     from gremlins.artifacts.uri import Uri
     from gremlins.stages.exec import Exec
 
@@ -523,9 +521,11 @@ def test_pr_stack_unbind_fires_after_on_iteration_start(
         if count[0] == 1:
             state.artifacts.bind("pr", Uri.parse("gh://pr/1"))
             state.artifacts._resolvers["gh"].read = (  # type: ignore[attr-defined]
-                lambda uri: PrInfo(
-                    url="https://github.com/x/r/pull/1", number=1, branch="feat-iter1"
-                )
+                lambda uri: {
+                    "url": "https://github.com/x/r/pull/1",
+                    "number": 1,
+                    "branch": "feat-iter1",
+                }
             )
             _set_marker(state)
         return Done()
@@ -565,16 +565,15 @@ def test_pr_stack_iter2_detaches_to_iter1_branch(tmp_path, make_state_dir, monke
         nonlocal count
         count += 1
         if count == 1:
-            from gremlins.artifacts.schemes import PrInfo
             from gremlins.artifacts.uri import Uri
 
             state.artifacts.bind("pr", Uri.parse("gh://pr/1"))
             state.artifacts._resolvers["gh"].read = (  # type: ignore[attr-defined]
-                lambda uri: PrInfo(
-                    url="https://github.com/x/r/pull/1",
-                    number=1,
-                    branch="feat-iter1",
-                )
+                lambda uri: {
+                    "url": "https://github.com/x/r/pull/1",
+                    "number": 1,
+                    "branch": "feat-iter1",
+                }
             )
             _set_marker(state)
         return Done()

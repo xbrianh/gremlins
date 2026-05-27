@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import pathlib
 
 import pytest
@@ -12,7 +11,6 @@ from conftest import MINIMAL_EVENTS
 import gremlins.artifacts.schemes as schemes
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.resolve import resolve_in_map
-from gremlins.artifacts.schemes import PrInfo
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import StateData, build_state
@@ -38,7 +36,7 @@ def _make_state(tmp_path: pathlib.Path, client=None):
     )
 
 
-def _bind_pr(registry: ArtifactRegistry, monkeypatch, pr: PrInfo) -> None:
+def _bind_pr(registry: ArtifactRegistry, monkeypatch, pr: dict) -> None:
     monkeypatch.setattr(
         "gremlins.artifacts.schemes.GitHubResolver.read",
         lambda self, uri: pr,
@@ -59,7 +57,7 @@ def test_simple_key_no_dots(tmp_path):
 
 def test_dotted_key_reads_attribute(tmp_path, monkeypatch):
     reg = _make_registry(tmp_path)
-    pr = PrInfo(url="https://github.com/o/r/pull/7", number=7, branch="feat-x")
+    pr = {"url": "https://github.com/o/r/pull/7", "number": 7, "branch": "feat-x"}
     _bind_pr(reg, monkeypatch, pr)
     result = resolve_in_map(reg, {"branch": "pr.branch"})
     assert result == {"branch": "feat-x"}
@@ -67,7 +65,7 @@ def test_dotted_key_reads_attribute(tmp_path, monkeypatch):
 
 def test_dotted_key_number_attribute(tmp_path, monkeypatch):
     reg = _make_registry(tmp_path)
-    pr = PrInfo(url="https://github.com/o/r/pull/42", number=42, branch="main")
+    pr = {"url": "https://github.com/o/r/pull/42", "number": 42, "branch": "main"}
     _bind_pr(reg, monkeypatch, pr)
     result = resolve_in_map(reg, {"num": "pr.number"})
     assert result == {"num": "42"}
@@ -75,28 +73,17 @@ def test_dotted_key_number_attribute(tmp_path, monkeypatch):
 
 def test_dotted_key_url_attribute(tmp_path, monkeypatch):
     reg = _make_registry(tmp_path)
-    pr = PrInfo(url="https://github.com/o/r/pull/3", number=3, branch="fix")
+    pr = {"url": "https://github.com/o/r/pull/3", "number": 3, "branch": "fix"}
     _bind_pr(reg, monkeypatch, pr)
     result = resolve_in_map(reg, {"url": "pr.url"})
     assert result == {"url": "https://github.com/o/r/pull/3"}
 
 
 def test_nested_dotted_path(tmp_path, monkeypatch):
-    @dataclasses.dataclass
-    class Inner:
-        value: str
-
-    @dataclasses.dataclass
-    class Outer:
-        inner: Inner
-
-        def __str__(self) -> str:
-            return "outer"
-
     reg = _make_registry(tmp_path)
 
     def fake_read(self, uri):
-        return Outer(inner=Inner(value="deep"))
+        return {"inner": {"value": "deep"}}
 
     monkeypatch.setattr(schemes.GitHubResolver, "read", fake_read)
     reg.bind("obj", Uri.parse("gh://pr/1"))
@@ -106,15 +93,15 @@ def test_nested_dotted_path(tmp_path, monkeypatch):
 
 def test_unknown_attribute_raises(tmp_path, monkeypatch):
     reg = _make_registry(tmp_path)
-    pr = PrInfo(url="https://github.com/o/r/pull/1", number=1, branch="b")
+    pr = {"url": "https://github.com/o/r/pull/1", "number": 1, "branch": "b"}
     _bind_pr(reg, monkeypatch, pr)
-    with pytest.raises(ValueError, match="has no attribute 'nonexistent'"):
+    with pytest.raises(ValueError, match="has no key"):
         resolve_in_map(reg, {"x": "pr.nonexistent"})
 
 
 def test_private_attribute_raises(tmp_path, monkeypatch):
     reg = _make_registry(tmp_path)
-    pr = PrInfo(url="https://github.com/o/r/pull/1", number=1, branch="b")
+    pr = {"url": "https://github.com/o/r/pull/1", "number": 1, "branch": "b"}
     _bind_pr(reg, monkeypatch, pr)
     with pytest.raises(ValueError, match="private attribute"):
         resolve_in_map(reg, {"x": "pr.__class__"})
@@ -131,7 +118,7 @@ def test_empty_segment_raises(tmp_path):
 
 def test_exec_dotted_key_injects_env_var(tmp_path, monkeypatch):
     state = _make_state(tmp_path)
-    pr = PrInfo(url="https://github.com/o/r/pull/5", number=5, branch="my-branch")
+    pr = {"url": "https://github.com/o/r/pull/5", "number": 5, "branch": "my-branch"}
     monkeypatch.setattr(
         "gremlins.artifacts.schemes.GitHubResolver.read",
         lambda self, uri: pr,
@@ -153,7 +140,7 @@ def test_exec_dotted_key_injects_env_var(tmp_path, monkeypatch):
 
 
 def test_agent_dotted_key_substituted_into_prompt(tmp_path, monkeypatch):
-    pr = PrInfo(url="https://github.com/o/r/pull/9", number=9, branch="agent-branch")
+    pr = {"url": "https://github.com/o/r/pull/9", "number": 9, "branch": "agent-branch"}
     monkeypatch.setattr(
         "gremlins.artifacts.schemes.GitHubResolver.read",
         lambda self, uri: pr,

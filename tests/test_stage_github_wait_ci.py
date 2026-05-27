@@ -9,7 +9,6 @@ from typing import Any
 import pytest
 from conftest import MINIMAL_EVENTS
 
-from gremlins.artifacts.schemes import PrInfo
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
@@ -68,7 +67,7 @@ def _make_stage(
     if pr_branch is not None:
         state.artifacts.bind("pr", Uri.parse("gh://pr/42"))
         state.artifacts._resolvers["gh"].read = (  # type: ignore[attr-defined]
-            lambda uri, _b=pr_branch: PrInfo(url=PR_URL, number=42, branch=_b)
+            lambda uri, _b=pr_branch: {"url": PR_URL, "number": 42, "branch": _b}
         )
     return stage, state
 

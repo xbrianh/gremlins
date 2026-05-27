@@ -48,7 +48,7 @@ def test_file_resolver_absolute_path_read(tmp_path: pathlib.Path) -> None:
     session_dir.mkdir()
     resolver = FileSessionResolver(session_dir)
     uri = Uri.parse(f"file://{target}")
-    assert resolver.read(uri) == b"binary content"
+    assert resolver.read(uri) == "binary content"
 
 
 def test_file_resolver_absolute_path_verify_produced(tmp_path: pathlib.Path) -> None:
@@ -261,4 +261,4 @@ def test_child_reads_parent_artifact_via_registry(sandbox) -> None:
     child_resolver = FileSessionResolver(child_session)
     uri = Uri.parse(child_reg_data["result"])
     content = child_resolver.read(uri)
-    assert content == b"parent result"
+    assert content == "parent result"
