@@ -12,7 +12,6 @@ from gremlins.cli.fleet import (
     fleet_main,
     land_main,
     log_main,
-    rescue_main,
     rm_main,
     skip_main,
     stop_main,
@@ -26,7 +25,6 @@ _DISPATCH: dict[str, tuple[str, Callable[[list[str]], int]]] = {
     "launch": ("Launch a background gremlin by pipeline name.", launch_main),
     "resume": ("Re-spawn an existing gremlin from its recorded stage.", resume_main),
     "stop": ("Send SIGTERM to a running gremlin and wait for it to exit.", stop_main),
-    "rescue": ("Diagnose and resume a dead or stalled gremlin.", rescue_main),
     "land": (
         "Land a finished gremlin onto the current branch, then clean up.",
         land_main,

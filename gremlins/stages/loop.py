@@ -53,7 +53,7 @@ class LoopStage(Stage):
     remaining runners are skipped. Fix runners are also skipped on the final
     iteration so the stage bails without retrying.
 
-    Resume granularity: --resume-from targets the loop by name; resuming
+    Resume granularity: resuming targets the loop by name; resuming
     restarts from iteration 1, picking up file-based state from session_dir.
     """
 

@@ -63,18 +63,21 @@ def _install_signal_handlers(clients: Sequence[Client]) -> None:
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--resume-from", dest="resume_from", default=None)
     parser.add_argument("--plan", dest="plan", default=None)
     parser.add_argument("--spec", default=None)
     parser.add_argument("--client", dest="client", default=None)
+    parser.add_argument("--resume-from", dest="resume_from", default=None)
     parser.add_argument("instructions", nargs="*")
     args = parser.parse_args(argv)
-    if args.resume_from:
-        args.instructions = [s for s in args.instructions if s]
     if args.plan and args.instructions:
         die("--plan and positional instructions are mutually exclusive")
-    if not args.resume_from and not args.plan and not args.instructions:
-        die("one of --plan, --resume-from, or positional instructions is required")
+    if (
+        not args.plan
+        and not args.instructions
+        and not args.resume_from
+        and not os.environ.get("GREMLINS_RESUME_FROM")
+    ):
+        die("one of --plan or positional instructions is required")
     return args
 
 
@@ -112,6 +115,9 @@ async def run_pipeline(
     """Load pipeline YAML, build Gremlin, run. Sole internal pipeline entry point."""
     configure_logging()
     args = _parse_args(argv)
+    resume_from = (
+        os.environ.pop("GREMLINS_RESUME_FROM", None) or args.resume_from or None
+    )
 
     os.environ.pop("GREMLINS_PROJECT_ROOT", None)
     _project_root = paths.project_root()
@@ -181,7 +187,7 @@ async def run_pipeline(
             else paths.project_root(),
             pipeline_ref=str(pipeline_path),
             instructions=instructions,
-            resume_from=args.resume_from,
+            resume_from=resume_from,
             spec=args.spec,
             plan=args.plan,
             worktree_dir=worktree_dir,
@@ -221,7 +227,7 @@ async def run_pipeline(
 
     plan_file = session_dir / "plan.md"
 
-    if not gh and args.resume_from:
+    if not gh and resume_from:
         _expanded_stage_names = [s.name for s in gremlin.stages]
 
         def _name_idx(stage_name: str) -> int:
@@ -231,17 +237,17 @@ async def run_pipeline(
             return len(gremlin.stages)
 
         start_idx = (
-            _expanded_stage_names.index(args.resume_from)
-            if args.resume_from in _expanded_stage_names
+            _expanded_stage_names.index(resume_from)
+            if resume_from in _expanded_stage_names
             else 0
         )
         if start_idx >= _name_idx("implement"):
             if not plan_file.exists() or plan_file.stat().st_size == 0:
-                die(f"--resume-from {args.resume_from} requires existing {plan_file}")
+                die(f"--resume-from {resume_from} requires existing {plan_file}")
         if start_idx >= _name_idx("review-code"):
             if not has_dirty_worktree() and not has_commits():
                 die(
-                    f"--resume-from {args.resume_from} requires implementation changes in the worktree"
+                    f"--resume-from {resume_from} requires implementation changes in the worktree"
                 )
 
     _install_signal_handlers(_signal_clients)

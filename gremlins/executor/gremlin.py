@@ -145,7 +145,7 @@ class Gremlin:
         valid_names = [entry.name for entry in self.stages]
         if self.resume_from not in valid_names:
             raise ValueError(
-                f"--resume-from {self.resume_from!r} is not a valid stage; "
+                f"resume from {self.resume_from!r} is not a valid stage; "
                 f"valid: {valid_names}"
             )
 
