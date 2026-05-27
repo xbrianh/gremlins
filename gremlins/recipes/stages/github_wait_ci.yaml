@@ -8,7 +8,7 @@ stages:
   - name: github-wait-ci
     type: loop
     needs_gh: true
-    max-iterations: 4
+    max-iterations: 3
     in:
       pr_url: pr.url
       pr_branch: pr.branch
@@ -37,8 +37,7 @@ stages:
 
               fetch_status() {
                   gh pr view "$pr_url" \
-                      --json statusCheckRollup,reviewDecision,headRefOid \
-                      2>/dev/null
+                      --json statusCheckRollup,reviewDecision,headRefOid
               }
 
               check_bail_review_required() {
@@ -80,8 +79,9 @@ stages:
                           break
                       fi
                       if [ "$(date +%s)" -ge "$push_deadline" ]; then
-                          printf 'ci-gate: timed out waiting for GitHub to reflect pushed SHA\n' >&2
-                          break
+                          printf 'ci-gate: timed out waiting for GitHub to reflect pushed SHA\n' \
+                              > "{session_dir}/bail"
+                          exit 2
                       fi
                       sleep {poll_interval}
                   done
@@ -95,7 +95,7 @@ stages:
                   check_bail_review_required "$decision"
 
                   all_done=$(printf '%s' "$status_json" | jq '
-                      if (.statusCheckRollup | length) == 0 then true
+                      if (.statusCheckRollup | length) == 0 then false
                       else [.statusCheckRollup[] |
                           if .__typename == "StatusContext"
                           then (.state != "EXPECTED" and .state != "PENDING")

@@ -157,12 +157,12 @@ def test_pipeline_explicit_name_overrides_default(tmp_path: pathlib.Path) -> Non
         default_client: claude:sonnet
         stages:
           - { name: step-a, type: exec, options: { cmds: ['true'] } }
-          - { name: step-b, type: exec, options: { cmds: ['true'] } }
+          - { type: exec, options: { cmds: ['true'] } }
         """,
     )
     pipeline = Pipeline.from_yaml(p)
     assert pipeline.stages[0].name == "step-a"
-    assert pipeline.stages[1].name == "step-b"
+    assert pipeline.stages[1].name == "exec"
 
 
 def test_pipeline_nested_scopes_disambiguate_independently(

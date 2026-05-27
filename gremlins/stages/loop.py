@@ -36,9 +36,7 @@ def _is_bail_set(artifacts: ArtifactRegistry) -> bool:
 
 
 def _do_bail(state: State, artifacts: ArtifactRegistry) -> None:
-    reason = artifacts.read(_BAIL_KEY)
-    if not isinstance(reason, str):
-        reason = str(reason)
+    reason = str(artifacts.read(_BAIL_KEY)).strip()
     state.record_bail(reason)
     raise Bail(reason)
 
@@ -159,8 +157,6 @@ class LoopStage(Stage):
             state.record_state_field(loop_iteration=iteration)
             if self._on_iteration_start:
                 self._on_iteration_start(state)
-            if _is_bail_set(state.artifacts):
-                _do_bail(state, state.artifacts)
             state.artifacts.unbind(_MARKER_KEY)
             state.artifacts.unbind(_BAIL_KEY)
             for child in self.body:
