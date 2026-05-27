@@ -988,6 +988,11 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
     assert "implement" not in labels, "implement must not run on open-pr resume"
     assert "compose-pr" in labels
 
+    compose_pr_call = next(c for c in client.calls if c.label == "compose-pr")
+    assert "gh://issue/42" in compose_pr_call.prompt, (
+        "compose-pr must receive upgraded gh:// plan URI, not a file:// path"
+    )
+
     review_calls = [c for c in client.calls if c.label == "github-review-pull-request"]
     assert len(review_calls) == 1
     assert "https://github.com/owner/repo/pull/101" in review_calls[0].prompt

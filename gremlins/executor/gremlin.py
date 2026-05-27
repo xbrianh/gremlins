@@ -21,6 +21,7 @@ from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.pipeline.loader import STAGE_TYPES
 from gremlins.stages.base import Stage
 from gremlins.utils import git as _git_mod
+from gremlins.utils.github import current_repo, parse_issue_ref
 from gremlins.utils.yaml_io import YamlLoadError as _YamlLoadError
 
 logger = logging.getLogger(__name__)
@@ -333,15 +334,14 @@ class Gremlin:
             # gh://issue/{N}. This mirrors what the plan stage does, but is needed when
             # resume_from skips that stage (plan.uri? in compose-pr would otherwise fail).
             if self.plan and self.pipeline_data.needs_gh():
-                from gremlins.utils.github import parse_issue_ref as _parse_issue_ref
-
-                _, _issue_num = _parse_issue_ref(self.plan, "")
-                if _issue_num and self.registry.produced("plan"):
-                    _plan_uri = self.registry.resolve("plan")
-                    if _plan_uri.scheme == "file":
+                target_repo, issue_num = parse_issue_ref(self.plan, "")
+                if issue_num and self.registry.produced("plan"):
+                    plan_uri = self.registry.resolve("plan")
+                    same_repo = not target_repo or target_repo == current_repo()
+                    if plan_uri.scheme == "file" and same_repo:
                         self.registry.bind(
                             "plan",
-                            Uri.parse(f"gh://issue/{_issue_num}"),
+                            Uri.parse(f"gh://issue/{issue_num}"),
                             override=True,
                         )
         except Exception:
