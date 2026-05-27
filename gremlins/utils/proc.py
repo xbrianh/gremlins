@@ -396,7 +396,7 @@ async def run_child_subprocess(
     except (ValueError, TypeError):
         cost = 0.0
     status = result.get("status")
-    if status in ("done", "needs_fix"):
+    if status == "done":
         return "done", cost
     if status == "bail":
         on_bail(result.get("detail") or "")

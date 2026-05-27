@@ -25,13 +25,10 @@ _MARKER_VALUE = b"needs_fix"
 
 
 def _is_marker_set(artifacts: ArtifactRegistry) -> bool:
-    if not artifacts.produced(_MARKER_KEY):
-        return False
-    try:
-        content = artifacts.read(_MARKER_KEY)
-        return isinstance(content, bytes) and content.strip() == _MARKER_VALUE
-    except Exception:
-        return False
+    return (
+        artifacts.produced(_MARKER_KEY)
+        and artifacts.read(_MARKER_KEY).strip() == _MARKER_VALUE
+    )
 
 
 def head_stable(state: State, iteration: int, head_before: str) -> bool:

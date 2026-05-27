@@ -104,7 +104,7 @@ class Exec(Stage):
         needs_fix = False
         if cmds:
             result = await _proc.run_shell_async(
-                "\n".join(cmds),
+                " && ".join(cmds),
                 cwd=pathlib.Path(state.engine_ctx.cwd),
                 env={**os.environ, **extra_env},
             )
@@ -113,7 +113,7 @@ class Exec(Stage):
                 result.stdout + result.stderr or "(no output)\n", encoding="utf-8"
             )
             if result.returncode != 0:
-                if result.returncode == 1 and _STATUS_KEY in self.out_map:
+                if _STATUS_KEY in self.out_map:
                     needs_fix = True
                 else:
                     raise Bail(f"exec {self.name}: exited {result.returncode}")
