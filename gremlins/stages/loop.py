@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import logging
 import pathlib
 from collections.abc import Awaitable, Callable
@@ -33,7 +32,7 @@ def _is_marker_set(artifacts: ArtifactRegistry) -> bool:
 
 def head_stable(state: State, iteration: int, head_before: str) -> bool:
     """Exit when HEAD hasn't changed across this iteration."""
-    return _git.head_sha(pathlib.Path(state.engine_ctx.cwd)) == head_before
+    return _git.head_sha(pathlib.Path(state.cwd)) == head_before
 
 
 def max_iters(n: int) -> UntilFn:
@@ -143,27 +142,24 @@ class LoopStage(Stage):
     async def run(self, state: State) -> Outcome:
         for iteration in range(1, self._max_iterations + 1):
             state.record_state_field(loop_iteration=iteration)
-            iter_ctx = dataclasses.replace(state.engine_ctx, loop_iteration=iteration)
-            iter_state = dataclasses.replace(state, engine_ctx=iter_ctx)
             if self._on_iteration_start:
-                self._on_iteration_start(iter_state)
-            iter_state.artifacts.unbind(_MARKER_KEY)
+                self._on_iteration_start(state)
+            state.artifacts.unbind(_MARKER_KEY)
             for child in self.body:
                 for key in getattr(child, "out_map", {}):
-                    iter_state.artifacts.unbind(key)
-            head_before = _git.head_sha(pathlib.Path(iter_state.engine_ctx.cwd))
-            # Rebuild each iteration so body stages inherit the per-iteration engine_ctx.
+                    state.artifacts.unbind(key)
+            head_before = _git.head_sha(pathlib.Path(state.cwd))
             runners = (
                 self._body_runners
                 if self._body_runners is not None
-                else self._build_runners(iter_state)
+                else self._build_runners(state)
             )
             had_failure = await _dispatch_runners(
-                runners, iteration, self._max_iterations, iter_state.artifacts
+                runners, iteration, self._max_iterations, state.artifacts
             )
 
             if not had_failure:
-                if self._until(iter_state, iteration, head_before):
+                if self._until(state, iteration, head_before):
                     return Done()
                 logger.info("loop iteration %d: continuing", iteration)
                 if iteration == self._max_iterations:
@@ -183,4 +179,4 @@ def detach_to_pr_base(state: State) -> None:
     except MissingArtifact:
         return
     logger.info("detaching worktree to previous PR branch: %s", branch)
-    _git.git_detach_to_branch(branch, cwd=pathlib.Path(state.engine_ctx.cwd))
+    _git.git_detach_to_branch(branch, cwd=pathlib.Path(state.cwd))

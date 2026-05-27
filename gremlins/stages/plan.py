@@ -28,7 +28,7 @@ def _fmt_escape(s: str) -> str:
 
 
 def _read_repo(state: State) -> str:
-    return state.engine_ctx.repo
+    return state.repo
 
 
 class Plan(Stage):
@@ -103,7 +103,7 @@ class Plan(Stage):
     async def _run_agent(self, plan_md: pathlib.Path, state: State) -> None:
         repo = _read_repo(state)
         if repo:
-            base_ref_name = state.engine_ctx.base_ref
+            base_ref_name = state.data.base_ref_name
             plan_prompt = (
                 "\n\n".join(self.prompts)
                 .rstrip()

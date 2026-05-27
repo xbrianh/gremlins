@@ -11,7 +11,6 @@ import shutil
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
-from gremlins.artifacts.engine import EngineContext
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
@@ -159,19 +158,10 @@ class Gremlin:
             spec=self.spec,
             instructions=[self.instructions] if self.instructions else [],
         )
-        # attempt is always "" here; the loop patches it per-iteration via dataclasses.replace.
         cwd = (
             str(self.worktree_dir)
             if self.worktree_dir is not None
             else (self.project_root or str(pathlib.Path.cwd()))
-        )
-        engine_ctx = EngineContext(
-            loop_iteration=1,
-            attempt="",
-            current_scope=(),
-            repo=self.repo,
-            cwd=cwd,
-            base_ref=self.base_ref,
         )
         built: list[tuple[str, Callable[[], Awaitable[Any]]]] = []
         for e in stages:
@@ -183,13 +173,14 @@ class Gremlin:
                 session_dir=self.session_dir,
                 args=args,
                 pipeline_data=self.pipeline_data,
+                repo=self.repo,
+                cwd=cwd,
                 instructions=self.instructions,
                 test_client=self.test_client,
                 stage_model=stage_client.model if self.test_client else "",
                 worktree=self.worktree_dir,
                 worktree_parent=self.worktree_parent,
                 artifacts=self.registry,
-                engine_ctx=engine_ctx,
             )
             built.append((e.name, stage_state.make_runner(e, scope=stages)))
         return built
