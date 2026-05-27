@@ -24,8 +24,11 @@ _FRAMEWORK_KEYS = frozenset(["name", "model", "session_dir", "repo", "cwd"])
 
 def _sub_reads(s: str, artifacts: ArtifactRegistry) -> str:
     def _r(m: re.Match[str]) -> str:
-        raw = artifacts.read(m.group(1))
-        return (raw.decode() if isinstance(raw, bytes) else str(raw)).strip()
+        key = m.group(1)
+        raw = artifacts.read(key)
+        if not isinstance(raw, bytes):
+            raise TypeError(f"{{read:{key}}}: expected bytes artifact, got {type(raw).__name__}")
+        return raw.decode().strip()
 
     return _READ_SUB.sub(_r, s)
 
@@ -116,11 +119,11 @@ class Exec(Stage):
                     raise Bail(f"exec {self.name}: exited {exit_code}")
 
         for raw_key, raw_uri_str in self.out_map.items():
+            if needs_fix:
+                continue
             key = raw_key.format_map(_pt)
             uri_str = _sub_reads(raw_uri_str, state.artifacts).format_map(_pt)
             if uri_str == "git://range":
-                if needs_fix:
-                    continue
                 if pre_sha is None:
                     raise RuntimeError(
                         f"exec {self.name}: git://range requires pre-snapshot"
