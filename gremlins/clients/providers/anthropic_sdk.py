@@ -153,6 +153,7 @@ class AnthropicSdkClient:
         self._native_block: dict[str, Any] = (
             native_block if native_block is not None else {}
         )
+        self._ctx: dict[str, Any] | None = None
 
     async def _execute(
         self,
@@ -265,6 +266,18 @@ class AnthropicSdkClient:
         idle_timeout: float | None = None,
         extra_env: dict[str, str] | None = None,
     ) -> CompletedRun:
+        self._ctx = {
+            "prompt": prompt,
+            "label": label,
+            "model": model,
+            "raw_path": raw_path,
+            "capture_events": capture_events,
+            "on_timeout_prompt": on_timeout_prompt,
+            "max_retries": max_retries,
+            "cwd": cwd,
+            "idle_timeout": idle_timeout,
+            "extra_env": extra_env,
+        }
         validate_max_retries(max_retries)
         if idle_timeout is None:
             idle_timeout = STREAM_IDLE_TIMEOUT
@@ -317,6 +330,22 @@ class AnthropicSdkClient:
                 f"{ts()} {prefix}stream transient-error, retries exhausted, failing\n"
             )
             raise
+
+    async def resume(self) -> CompletedRun:
+        ctx = self._ctx
+        assert ctx is not None
+        return await self.run(
+            ctx["prompt"],
+            label=ctx["label"],
+            model=ctx["model"],
+            raw_path=ctx["raw_path"],
+            capture_events=ctx["capture_events"],
+            on_timeout_prompt=ctx["on_timeout_prompt"],
+            max_retries=ctx["max_retries"],
+            cwd=ctx["cwd"],
+            idle_timeout=ctx["idle_timeout"],
+            extra_env=ctx["extra_env"],
+        )
 
     def reap_all(self) -> None:
         pass

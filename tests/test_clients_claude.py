@@ -218,7 +218,7 @@ def test_retry_exhaustion_raises_stream_timeout_error(tmp_path, monkeypatch):
     client = SubprocessClaudeClient()
     with pytest.raises(StreamTimeoutError):
         asyncio.run(client.run("hello", label="test", max_retries=2))
-    assert int(count_file.read_text()) == 3  # initial + 2 retries
+    assert int(count_file.read_text()) == 4  # initial + 3 resume attempts (backoff[:2] → 3 tries)
 
 
 _SLEEP_FOREVER_STUB_SRC = """\
@@ -234,6 +234,45 @@ def _install_sleep_forever_stub(bin_dir: pathlib.Path) -> None:
     bin_dir.mkdir(parents=True, exist_ok=True)
     stub = bin_dir / "claude"
     stub.write_text(f"#!{sys.executable}\n" + _SLEEP_FOREVER_STUB_SRC, encoding="utf-8")
+    stub.chmod(0o755)
+
+
+_RESUME_STUB_SRC = """\
+import json, os, sys
+
+SESSION_ID = "stub-session-id-abc"
+
+argv = sys.argv[1:]
+
+argv_out = os.environ.get("STUB_ARGV_OUT")
+if argv_out:
+    with open(argv_out, "w") as f:
+        json.dump(argv, f)
+
+stdin_out = os.environ.get("STUB_STDIN_OUT")
+if stdin_out:
+    with open(stdin_out, "w") as f:
+        f.write(sys.stdin.read())
+
+if "--resume" in argv:
+    # resume path: succeed
+    sys.stdout.write(json.dumps({"type": "system", "subtype": "init", "session_id": SESSION_ID}) + "\\n")
+    sys.stdout.write(json.dumps({"type": "result", "subtype": "success", "num_turns": 1, "total_cost_usd": 0.0}) + "\\n")
+    sys.stdout.flush()
+else:
+    # initial path: emit session_id then time out
+    sys.stdout.write(json.dumps({"type": "system", "subtype": "init", "session_id": SESSION_ID}) + "\\n")
+    sys.stdout.flush()
+    sys.stdout.write("API Error: Stream idle timeout\\n")
+    sys.stdout.flush()
+    sys.exit(1)
+"""
+
+
+def _install_resume_stub(bin_dir: pathlib.Path) -> None:
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    stub = bin_dir / "claude"
+    stub.write_text(f"#!{sys.executable}\n" + _RESUME_STUB_SRC, encoding="utf-8")
     stub.chmod(0o755)
 
 
@@ -355,3 +394,90 @@ def test_claude_config_dir_not_set_regardless_of_native_block(
 
     child_env = json.loads(env_out.read_text(encoding="utf-8"))
     assert "CLAUDE_CONFIG_DIR" not in child_env
+
+
+def test_resume_uses_session_id_on_retry(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    _install_resume_stub(bin_dir)
+    argv_out = tmp_path / "last_argv.json"
+
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("STUB_ARGV_OUT", str(argv_out))
+
+    async def _noop_sleep(_: float) -> None:
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", _noop_sleep)
+
+    client = SubprocessClaudeClient()
+    result = asyncio.run(client.run("hello", label="test", max_retries=1))
+    assert result.exit_code == 0
+
+    argv = json.loads(argv_out.read_text(encoding="utf-8"))
+    assert "--resume" in argv
+    resume_idx = argv.index("--resume")
+    assert argv[resume_idx + 1] == "stub-session-id-abc"
+
+
+def test_resume_sends_continue_prompt(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    _install_resume_stub(bin_dir)
+    stdin_out = tmp_path / "last_stdin.txt"
+
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("STUB_STDIN_OUT", str(stdin_out))
+
+    async def _noop_sleep(_: float) -> None:
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", _noop_sleep)
+
+    client = SubprocessClaudeClient()
+    asyncio.run(
+        client.run(
+            "original-prompt",
+            label="test",
+            on_timeout_prompt="continue-nudge",
+            max_retries=1,
+        )
+    )
+    assert stdin_out.read_text(encoding="utf-8") == "continue-nudge"
+
+
+def test_resume_without_session_id_replays_original(tmp_path, monkeypatch):
+    """When no session_id is captured (stub doesn't emit system/init), resume replays."""
+    bin_dir = tmp_path / "bin"
+    _install_timeout_stub(bin_dir)
+    count_file = tmp_path / "count.txt"
+    count_file.write_text("0")
+    stdin_out = tmp_path / "last_stdin.txt"
+
+    # Patch timeout stub to also capture stdin
+    stub = bin_dir / "claude"
+    extra = """
+stdin_out = os.environ.get("STUB_STDIN_OUT")
+if stdin_out:
+    with open(stdin_out, "w") as f:
+        f.write(sys.stdin.read())
+"""
+    src = _TIMEOUT_STUB_SRC.replace(
+        "import json, os, sys\n",
+        "import json, os, sys\n" + extra,
+    )
+    stub.write_text(f"#!{sys.executable}\n" + src, encoding="utf-8")
+    stub.chmod(0o755)
+
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("STUB_COUNT_FILE", str(count_file))
+    monkeypatch.setenv("STUB_FAIL_TIMES", "1")
+    monkeypatch.setenv("STUB_STDIN_OUT", str(stdin_out))
+
+    async def _noop_sleep(_: float) -> None:
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", _noop_sleep)
+
+    client = SubprocessClaudeClient()
+    asyncio.run(client.run("original-prompt", label="test", max_retries=1))
+    # No on_timeout_prompt, so _continue_prompt() returns original
+    assert stdin_out.read_text(encoding="utf-8") == "original-prompt"

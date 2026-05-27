@@ -46,6 +46,7 @@ class FakeClaudeClient(Client):
         self._native_block: dict[str, Any] = (
             native_block if native_block is not None else {}
         )
+        self._ctx: dict[str, Any] | None = None
 
     @property  # type: ignore[override]
     def total_cost_usd(self) -> float:
@@ -84,6 +85,14 @@ class FakeClaudeClient(Client):
         extra_env: dict[str, str] | None = None,
     ) -> CompletedRun:
         del on_timeout_prompt, max_retries, idle_timeout, extra_env
+        self._ctx = {
+            "prompt": prompt,
+            "label": label,
+            "model": model,
+            "raw_path": raw_path,
+            "capture_events": capture_events,
+            "cwd": cwd,
+        }
         self.calls.append(
             RecordedCall(
                 prompt=prompt,
@@ -123,4 +132,16 @@ class FakeClaudeClient(Client):
             text_result=result_text,
             events=events if capture_events else None,
             cost_usd=cost_usd,
+        )
+
+    async def resume(self) -> CompletedRun:
+        ctx = self._ctx
+        assert ctx is not None
+        return await self.run(
+            ctx["prompt"],
+            label=ctx["label"],
+            model=ctx["model"],
+            raw_path=ctx["raw_path"],
+            capture_events=ctx["capture_events"],
+            cwd=ctx["cwd"],
         )

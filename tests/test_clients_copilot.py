@@ -290,3 +290,22 @@ def test_copilot_empty_block_runs_with_no_extra_flags(tmp_path, monkeypatch):
 
     argv = json.loads(argv_out.read_text(encoding="utf-8"))
     assert argv == ["-p", "the-prompt"]
+
+
+def test_copilot_resume_replays_original_call(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    _install_stub(bin_dir, _STUB_COPILOT_SRC)
+
+    async def _noop_sleep(_: float) -> None:
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", _noop_sleep)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("STUB_OUTPUT", "copilot response")
+
+    client = SubprocessCopilotClient()
+    asyncio.run(client.run("first-prompt", label="test"))
+    result = asyncio.run(client.resume())
+
+    assert result.exit_code == 0
+    assert result.text_result == "copilot response"
