@@ -267,7 +267,9 @@ def _make_fake_pipeline():
     from gremlins.stages.exec import Exec
     from gremlins.stages.plan import Plan
 
-    inputs_stage = Exec.with_dict({"name": "inputs", "in": {"INSTRUCTIONS": "instructions?"}})
+    inputs_stage = Exec.with_dict(
+        {"name": "inputs", "in": {"INSTRUCTIONS": "instructions?"}}
+    )
     stage = Plan("plan", [], {})
     return Pipeline(
         name="local",

@@ -10,8 +10,8 @@ from gremlins.cli.launch import (
     _self_background_main,  # type: ignore[reportPrivateUsage]
     build_launch_parser,  # type: ignore[reportPrivateUsage]
 )
-from gremlins.stages.exec import Exec
 from gremlins.pipeline import Pipeline
+from gremlins.stages.exec import Exec
 
 
 def _pipeline_with_inputs(in_map: dict[str, str] | None) -> Pipeline:

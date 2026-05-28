@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pathlib
 from unittest.mock import MagicMock
 
 import pytest
@@ -53,7 +52,9 @@ def test_pipeline_input_exposes_flag() -> None:
 
 
 def test_flag_name_kebab_cased() -> None:
-    p = build_launch_parser("mypipe", _pipeline_with_inputs({"PLAN_FILE": "plan_file?"}))
+    p = build_launch_parser(
+        "mypipe", _pipeline_with_inputs({"PLAN_FILE": "plan_file?"})
+    )
     flags = [s for a in p._actions for s in a.option_strings]
     assert "--plan-file" in flags
     assert "--plan_file" not in flags
@@ -66,7 +67,9 @@ def test_required_flag_marked_required() -> None:
 
 
 def test_optional_flag_not_required() -> None:
-    p = build_launch_parser("mypipe", _pipeline_with_inputs({"TOPIC": "topic?default_val"}))
+    p = build_launch_parser(
+        "mypipe", _pipeline_with_inputs({"TOPIC": "topic?default_val"})
+    )
     optional = {
         a.option_strings[0]: a
         for a in p._actions
@@ -76,7 +79,9 @@ def test_optional_flag_not_required() -> None:
 
 
 def test_optional_flag_default_value() -> None:
-    p = build_launch_parser("mypipe", _pipeline_with_inputs({"TOPIC": "topic?mydefault"}))
+    p = build_launch_parser(
+        "mypipe", _pipeline_with_inputs({"TOPIC": "topic?mydefault"})
+    )
     assert p.parse_args([]).topic == "mydefault"
 
 
@@ -87,7 +92,9 @@ def test_optional_flag_no_default_is_none() -> None:
 
 def test_infra_flag_collision_raises() -> None:
     with pytest.raises(ValueError, match="description"):
-        build_launch_parser("mypipe", _pipeline_with_inputs({"DESCRIPTION": "description?"}))
+        build_launch_parser(
+            "mypipe", _pipeline_with_inputs({"DESCRIPTION": "description?"})
+        )
 
 
 def test_client_collision_raises() -> None:

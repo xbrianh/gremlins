@@ -1011,7 +1011,9 @@ def _land_with_stage(
     if setup_kind in ("worktree-detached", "worktree-detached-from-ref"):
         _fast_forward_main(cwd)
 
-    _finalize_cleanup(gremlin_id, wdir, state, cwd, delete_branch=False, remove_state_dir=False)
+    _finalize_cleanup(
+        gremlin_id, wdir, state, cwd, delete_branch=False, remove_state_dir=False
+    )
     return True
 
 
@@ -1058,7 +1060,9 @@ def do_land(
             return False
         land_stage = _load_pipeline_land_stage(cast(dict[str, Any], state))
         if land_stage is not None:
-            return _land_with_stage(gremlin_id, wdir, cast(dict[str, Any], state), land_stage)
+            return _land_with_stage(
+                gremlin_id, wdir, cast(dict[str, Any], state), land_stage
+            )
         return _land_gh(gremlin_id, wdir, state, force=force)
 
     if shape == "one_branch":
