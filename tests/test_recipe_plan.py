@@ -6,11 +6,11 @@ import pathlib
 import gremlins.launcher as _launcher
 
 
-def _make_inputs(**overrides) -> _launcher._Inputs:
-    defaults = dict(
+def _make_inputs(*, plan: str | None = None) -> _launcher._Inputs:  # type: ignore[reportPrivateUsage]
+    return _launcher._Inputs(  # type: ignore[reportPrivateUsage]
         gremlin_id="test-abc123",
         kind="local",
-        plan=None,
+        plan=plan,
         instructions="",
         description="",
         description_explicit=False,
@@ -25,13 +25,11 @@ def _make_inputs(**overrides) -> _launcher._Inputs:
         stage_inputs={},
         pr_num="",
     )
-    defaults.update(overrides)
-    return _launcher._Inputs(**defaults)
 
 
 def test_prepare_state_dir_writes_plan_arg_file(tmp_path: pathlib.Path) -> None:
     inputs = _make_inputs(plan="#42")
-    _launcher._prepare_state_dir(tmp_path, inputs)
+    _launcher._prepare_state_dir(tmp_path, inputs)  # type: ignore[attr-defined]
     plan_arg_file = tmp_path / "artifacts" / "plan-arg.txt"
     assert plan_arg_file.exists()
     assert plan_arg_file.read_text() == "#42"
@@ -39,7 +37,7 @@ def test_prepare_state_dir_writes_plan_arg_file(tmp_path: pathlib.Path) -> None:
 
 def test_prepare_state_dir_writes_empty_plan_arg_when_no_plan(tmp_path: pathlib.Path) -> None:
     inputs = _make_inputs(plan=None)
-    _launcher._prepare_state_dir(tmp_path, inputs)
+    _launcher._prepare_state_dir(tmp_path, inputs)  # type: ignore[attr-defined]
     plan_arg_file = tmp_path / "artifacts" / "plan-arg.txt"
     assert plan_arg_file.exists()
     assert plan_arg_file.read_text() == ""

@@ -611,9 +611,7 @@ def _resolve_resume_pipeline(
     return pipeline_args, pipeline_path, project_root
 
 
-def _load_pipeline_and_check_gh(
-    gremlin_id: str, state_dir: pathlib.Path, project_root: str, pipeline_path: str
-) -> Any:
+def _load_pipeline_and_check_gh(project_root: str, pipeline_path: str) -> Any:
     pipeline_data = None
     if pipeline_path:
         try:
@@ -740,9 +738,7 @@ def resume(gremlin_id: str, *, graft: str | None = None) -> None:
     pipeline_args, pipeline_path, project_root = _resolve_resume_pipeline(
         state, state_dir
     )
-    pipeline_data = _load_pipeline_and_check_gh(
-        gremlin_id, state_dir, project_root, pipeline_path
-    )
+    pipeline_data = _load_pipeline_and_check_gh(project_root, pipeline_path)
     stage = _determine_stage(state, pipeline_data)
     if graft is not None:
         stage = _append_graft(state_dir, graft, project_root)
