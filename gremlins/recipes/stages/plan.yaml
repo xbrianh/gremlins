@@ -22,6 +22,7 @@ stages:
 
   - name: plan
     type: agent
+    skip_if_exists: plan
     prompt:
       - "{{prompt}}"
     out:

@@ -491,6 +491,103 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
     assert "implement" in labels
 
 
+def test_plan_skip_if_exists_on_resume(tmp_path, monkeypatch):
+    """Resume: plan stage skipped when plan artifact is already verified."""
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+    # Overwrite with non-empty content so verified("plan") is True.
+    (session_dir / "plan.md").write_text("# Plan\nDo stuff.\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
+    )
+
+    client = _CommittingClient(
+        git_dir=tmp_path,
+        session_dir=session_dir,
+        fixtures={
+            "implement": IMPL_EVENTS,
+            "compose-pr": MINIMAL_EVENTS,
+            "github-review-pull-request": MINIMAL_EVENTS,
+            "github-address-pull-request-reviews": MINIMAL_EVENTS,
+        },
+    )
+
+    result = asyncio.run(
+        run_pipeline(
+            _gh_pipeline_path(tmp_path), argv=["add foo feature"], client=client
+        )
+    )
+    assert result == 0
+    labels = [c.label for c in client.calls]
+    assert "plan" not in labels
+    assert "implement" in labels
+
+
+def test_publish_as_issue_skip_if_exists(tmp_path, monkeypatch):
+    """publish-as-issue skipped when plan-issue-number artifact is already verified."""
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+    (session_dir / "plan.md").write_text("# Plan\nDo stuff.\n", encoding="utf-8")
+    (session_dir / "plan-issue-number.txt").write_text("42", encoding="utf-8")
+
+    # Add plan-issue-number to registry so skip_if_exists fires.
+    registry_path = tmp_path / "registry.json"
+    reg = json.loads(registry_path.read_text())
+    reg["plan-issue-number"] = "file://session/plan-issue-number.txt"
+    registry_path.write_text(json.dumps(reg))
+
+    shell_cmds: list[str] = []
+    from gremlins.utils import proc as _proc_mod
+
+    _orig_shell = _proc_mod.run_shell_async
+
+    async def _recording_shell(cmd, **kwargs):
+        if isinstance(cmd, str):
+            shell_cmds.append(cmd)
+        return await _orig_shell(cmd, **kwargs)
+
+    monkeypatch.setattr(_proc_mod, "run_shell_async", _recording_shell)
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
+    )
+
+    client = _CommittingClient(
+        git_dir=tmp_path,
+        session_dir=session_dir,
+        fixtures={
+            "implement": IMPL_EVENTS,
+            "compose-pr": MINIMAL_EVENTS,
+            "github-review-pull-request": MINIMAL_EVENTS,
+            "github-address-pull-request-reviews": MINIMAL_EVENTS,
+        },
+    )
+
+    result = asyncio.run(
+        run_pipeline(
+            _gh_pipeline_path(tmp_path), argv=["add foo feature"], client=client
+        )
+    )
+    assert result == 0
+    assert not any("gh issue create" in cmd for cmd in shell_cmds)
+    assert "implement" in [c.label for c in client.calls]
+
+
 def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch):
     """Plan stage builds a real prompt from the bundled ghplan.md, not /ghplan."""
     _init_git_repo(tmp_path)

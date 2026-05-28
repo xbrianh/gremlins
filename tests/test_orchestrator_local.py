@@ -39,7 +39,6 @@ def test_local_main_plan_mode(tmp_path, monkeypatch):
     )
     client = _ReviewCreatingClient(
         fixtures={
-            "plan": MINIMAL_EVENTS,
             "implement": MINIMAL_EVENTS,
             **{lbl: MINIMAL_EVENTS for lbl in _REVIEW_LABELS},
             "address-code": MINIMAL_EVENTS,
@@ -56,10 +55,10 @@ def test_local_main_plan_mode(tmp_path, monkeypatch):
     assert result == 0
 
     labels = [c.label for c in client.calls]
-    assert labels[0] == "plan"
-    assert labels[1] == "implement"
-    assert labels[2] == "review-code"
-    assert labels[3] == "address-code"
+    assert "plan" not in labels
+    assert labels[0] == "implement"
+    assert labels[1] == "review-code"
+    assert labels[2] == "address-code"
 
 
 def test_local_main_resume_from_review_code_requires_git_changes(
@@ -150,7 +149,6 @@ def test_local_main_client_specifier_model(tmp_path, monkeypatch):
     )
     client = _ReviewCreatingClient(
         fixtures={
-            "plan": MINIMAL_EVENTS,
             "implement": MINIMAL_EVENTS,
             "review-code": MINIMAL_EVENTS,
             "address-code": MINIMAL_EVENTS,
@@ -165,10 +163,10 @@ def test_local_main_client_specifier_model(tmp_path, monkeypatch):
         )
     )
     assert result == 0
-    assert client.calls[0].label == "plan"
+    assert client.calls[0].label == "implement"
     assert client.calls[0].model == "gpt-4o"
-    assert client.calls[1].model == "gpt-4o"  # implement stage
-    assert client.calls[2].label == "review-code"
+    assert client.calls[1].label == "review-code"
+    assert client.calls[1].model == "gpt-4o"
 
 
 def test_local_pipeline_stage_names(tmp_path):
@@ -322,7 +320,6 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
 
     client = _ReviewCreatingClient(
         fixtures={
-            "plan": MINIMAL_EVENTS,
             "implement": MINIMAL_EVENTS,
             "review-code": MINIMAL_EVENTS,
             "address-code": MINIMAL_EVENTS,
@@ -337,11 +334,10 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
         )
     )
     assert result == 0
-    assert client.calls[0].label == "plan"
+    assert client.calls[0].label == "implement"
     assert client.calls[0].model == "gpt-5.4"
-    assert client.calls[1].model == "gpt-5.4"  # implement
-    assert client.calls[2].label == "review-code"
-    assert client.calls[2].model == "gpt-5.4"  # review
+    assert client.calls[1].label == "review-code"
+    assert client.calls[1].model == "gpt-5.4"
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +389,42 @@ def test_local_stage_inputs_instructions_reach_plan(
     assert result == 0
     plan_call = next(c for c in client.calls if c.label == "plan")
     assert "instr from state" in plan_call.prompt
+
+
+def test_plan_skip_if_exists_on_resume(tmp_path, monkeypatch):
+    """Resume: plan stage is skipped when plan artifact is already verified."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    (session_dir / "plan.md").write_text("# Plan\nDo stuff.\n", encoding="utf-8")
+    (tmp_path / "registry.json").write_text(
+        json.dumps({"plan": "file://session/plan.md"})
+    )
+
+    monkeypatch.chdir(tmp_path)
+    _common_patches(monkeypatch)
+    monkeypatch.setattr(
+        "gremlins.executor.run.resolve_session_dir",
+        lambda gremlin_id=None: session_dir,
+    )
+    client = _ReviewCreatingClient(
+        fixtures={
+            "implement": MINIMAL_EVENTS,
+            **{lbl: MINIMAL_EVENTS for lbl in _REVIEW_LABELS},
+            "address-code": MINIMAL_EVENTS,
+        }
+    )
+
+    result = asyncio.run(
+        run_pipeline(
+            _local_pipeline_path(tmp_path),
+            argv=["implement this feature"],
+            client=client,
+        )
+    )
+    assert result == 0
+    labels = [c.label for c in client.calls]
+    assert "plan" not in labels
+    assert "implement" in labels
 
 
 def test_startup_fails_in_non_git_dir(tmp_path, monkeypatch, capsys):

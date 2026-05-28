@@ -23,8 +23,8 @@ sequencing logic of their own.
 
 Bundled stage recipes live under `gremlins/recipes/stages/`. Each recipe is a multi-primitive YAML pipeline fragment that expands in-place wherever its `gremlins:<name>` type is referenced.
 
-- `plan` — local planning: `resolve-plan-input` → `plan` (agent) → `update-description`. Out: `plan: file://session/plan.md`.
-- `plan_gh` — GitHub planning: `resolve-plan-input` → `plan` (agent) → `publish-as-issue` → `update-description`. Out: `plan: gh://issue/{read:plan-issue-number}`.
+- `plan` — local planning: `resolve-plan-input` → `plan` (agent) → `update-description`. Out: `plan: file://session/plan.md`. The `plan` agent stage has `skip_if_exists: plan`, so a resumed run skips the LLM if a non-empty `plan.md` already exists. Any pipeline using this recipe must declare `inputs: { PLAN: plan?, INSTRUCTIONS: instructions? }` — that block is the canonical source of the `--plan`/`--instructions` flags the recipe depends on (the launcher binds the raw arg as `plan_arg`, which `resolve-plan-input` consumes; `plan` is a distinct output key).
+- `plan_gh` — GitHub planning: `resolve-plan-input` → `plan` (agent) → `publish-as-issue` → `update-description`. Out: `plan: gh://issue/{read:plan-issue-number}`. Same `skip_if_exists: plan` on the agent; `publish-as-issue` has `skip_if_exists: plan-issue-number` (idempotency guard against duplicate issues on resume). Same `inputs:` requirement as `plan`.
 - `implement` — implementation + progress guard.
 - `verify` — run commands, fix loop, bail on exhaustion.
 - `review-code` — code review agent, writes `{name}-{model}.md`.

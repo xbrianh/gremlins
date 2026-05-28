@@ -27,6 +27,7 @@ stages:
 
   - name: plan
     type: agent
+    skip_if_exists: plan
     prompt:
       - "{{prompt}}"
     out:
@@ -36,10 +37,10 @@ stages:
 
   - name: publish-as-issue
     type: exec
+    skip_if_exists: plan-issue-number
     options:
       cmds:
         - |
-          if [ -s "{session_dir}/plan-issue-number.txt" ]; then exit 0; fi
           if ! [ -s "{session_dir}/plan.md" ]; then
               printf 'publish-as-issue: plan.md is empty\n' >&2; exit 1
           fi
