@@ -49,15 +49,25 @@ stages:
                   fi
               }
 
+              # JSON helpers using python3 (no jq dependency).
+              _field() { python3 -c "import json,sys,os; d=json.load(sys.stdin); print(d.get(os.environ['F']) or '')" F="$1"; }
+              _rollup_len() { python3 -c "import json,sys; print(len(json.load(sys.stdin).get('statusCheckRollup') or []))"; }
+              _all_done() {
+                  python3 -c "import json,sys; d=json.load(sys.stdin); r=d.get('statusCheckRollup') or []; print('false' if not r else 'true' if all((c.get('state') not in ('EXPECTED','PENDING') if c.get('__typename')=='StatusContext' else c.get('status')=='COMPLETED') for c in r) else 'false')"
+              }
+              _failed_json() {
+                  python3 -c "import json,sys; d=json.load(sys.stdin); r=d.get('statusCheckRollup') or []; print(json.dumps([c for c in r if (c.get('__typename')=='StatusContext' and c.get('state') in ('FAILURE','ERROR')) or (c.get('__typename')!='StatusContext' and c.get('conclusion') in ('FAILURE','ERROR','TIMED_OUT','CANCELLED'))]))"
+              }
+
               # Iteration 1 startup grace: wait for any check-runs to appear.
               if [ -z "$fix_head" ]; then
                   grace_deadline=$(( $(date +%s) + {startup_grace_secs} ))
                   rollup_len=0
                   while true; do
                       status_json=$(fetch_status)
-                      decision=$(printf '%s' "$status_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('reviewDecision') or '')")
+                      decision=$(printf '%s' "$status_json" | _field reviewDecision)
                       check_bail_review_required "$decision"
-                      rollup_len=$(printf '%s' "$status_json" | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('statusCheckRollup') or []))")
+                      rollup_len=$(printf '%s' "$status_json" | _rollup_len)
                       if [ "$rollup_len" -gt 0 ] || [ "$(date +%s)" -ge "$grace_deadline" ]; then
                           break
                       fi
@@ -72,9 +82,9 @@ stages:
                   push_deadline=$(( $(date +%s) + {poll_timeout} ))
                   while true; do
                       status_json=$(fetch_status)
-                      decision=$(printf '%s' "$status_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('reviewDecision') or '')")
+                      decision=$(printf '%s' "$status_json" | _field reviewDecision)
                       check_bail_review_required "$decision"
-                      head_oid=$(printf '%s' "$status_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('headRefOid') or '')")
+                      head_oid=$(printf '%s' "$status_json" | _field headRefOid)
                       if [ "$head_oid" = "$fix_head" ]; then
                           break
                       fi
@@ -91,9 +101,10 @@ stages:
               poll_deadline=$(( $(date +%s) + {poll_timeout} ))
               while true; do
                   status_json=$(fetch_status)
-                  decision=$(printf '%s' "$status_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('reviewDecision') or '')")
+                  decision=$(printf '%s' "$status_json" | _field reviewDecision)
                   check_bail_review_required "$decision"
-                  all_done=$(printf '%s' "$status_json" | python3 -c "import json,sys; d=json.load(sys.stdin); r=d.get('statusCheckRollup') or []; print('false' if not r else ('true' if all((i['state'] not in ('EXPECTED','PENDING') if i.get('__typename')=='StatusContext' else i.get('status')=='COMPLETED') for i in r) else 'false'))")
+
+                  all_done=$(printf '%s' "$status_json" | _all_done)
                   if [ "$all_done" = "true" ]; then break; fi
                   if [ "$(date +%s)" -ge "$poll_deadline" ]; then
                       printf 'ci-gate: poll timed out after %ss\n' {poll_timeout} >&2
@@ -102,7 +113,7 @@ stages:
                   sleep {poll_interval}
               done
 
-              failed_json=$(printf '%s' "$status_json" | python3 -c "import json,sys; d=json.load(sys.stdin); r=d.get('statusCheckRollup') or []; print(json.dumps([i for i in r if (i.get('__typename')=='StatusContext' and i.get('state') in ('FAILURE','ERROR')) or (i.get('__typename')!='StatusContext' and i.get('conclusion') in ('FAILURE','ERROR','TIMED_OUT','CANCELLED'))]))")
+              failed_json=$(printf '%s' "$status_json" | _failed_json)
               failed_count=$(printf '%s' "$failed_json" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
 
               if [ "$failed_count" -eq 0 ]; then
