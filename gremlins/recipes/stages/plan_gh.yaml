@@ -1,0 +1,65 @@
+required-prompt: true
+
+stages:
+  - name: resolve-plan-input
+    type: exec
+    in: { plan_arg: plan_arg? }
+    options:
+      cmds:
+        - |
+          if [ -s "{session_dir}/plan.md" ]; then exit 0; fi
+          if [ -z "$plan_arg" ]; then exit 0; fi
+          if [ -f "$plan_arg" ]; then
+              cp "$plan_arg" "{session_dir}/plan.md"
+          elif echo "$plan_arg" | grep -qE '^([^/]+/[^#]+)?#[0-9]+$'; then
+              gh issue view "$plan_arg" --json body --jq .body \
+                > "{session_dir}/plan.md"
+              gh issue view "$plan_arg" --json number --jq .number \
+                > "{session_dir}/plan-issue-number.txt"
+          else
+              printf 'resolve-plan-input: unrecognized plan_arg: %s\n' "$plan_arg" >&2
+              exit 1
+          fi
+
+  - name: plan
+    type: agent
+    prompt:
+      - "{{prompt}}"
+    out:
+      plan_file: "file://session/plan.md"
+    options:
+      idle_timeout: 600
+
+  - name: publish-as-issue
+    type: exec
+    options:
+      cmds:
+        - |
+          if [ -s "{session_dir}/plan-issue-number.txt" ]; then exit 0; fi
+          if ! [ -s "{session_dir}/plan.md" ]; then
+              printf 'publish-as-issue: plan.md is empty\n' >&2; exit 1
+          fi
+          title=$(head -1 "{session_dir}/plan.md" | sed 's/^#\+ *//' | cut -c1-80)
+          if [ -z "$title" ]; then
+              printf 'publish-as-issue: plan.md has no H1 title\n' >&2; exit 1
+          fi
+          url=$(gh issue create \
+              --body-file "{session_dir}/plan.md" \
+              --title "$title")
+          printf '%s' "${url##*/}" > "{session_dir}/plan-issue-number.txt"
+    out:
+      plan-issue-number: "file://session/plan-issue-number.txt"
+      plan: "gh://issue/{read:plan-issue-number}"
+
+  - name: update-description
+    type: exec
+    options:
+      cmds:
+        - |
+          STATE_JSON="{session_dir}/../state.json"
+          if ! [ -f "$STATE_JSON" ]; then exit 0; fi
+          if jq -e '.description_explicit' "$STATE_JSON" >/dev/null 2>&1; then exit 0; fi
+          title=$(head -1 "{session_dir}/plan.md" | sed 's/^#\+ *//' | cut -c1-60)
+          [ -z "$title" ] && exit 0
+          tmp=$(mktemp) && jq --arg t "$title" '.description = $t' \
+            "$STATE_JSON" > "$tmp" && mv "$tmp" "$STATE_JSON"
