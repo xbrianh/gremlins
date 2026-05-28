@@ -224,7 +224,7 @@ name: custom
 default_client: copilot:gpt-5.4
 stages:
   - name: implement
-    type: plan
+    type: agent
 """,
         encoding="utf-8",
     )
@@ -412,7 +412,7 @@ name: old
 default_client: copilot:gpt-5.4
 stages:
   - name: plan
-    type: plan
+    type: agent
   - name: implement
     type: implement
     client: claude:opus

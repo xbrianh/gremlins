@@ -16,7 +16,9 @@ _BUNDLED_LOCAL = (
 
 _LOCAL_STAGE_NAMES = [
     "inputs",
+    "resolve-plan-input",
     "plan",
+    "update-description",
     "implement",
     "require-impl-progress",
     "review-code",
@@ -40,7 +42,7 @@ def test_bad_default_client_rejected(tmp_path: pathlib.Path) -> None:
         textwrap.dedent("""\
             default_client: bogus:foo
             stages:
-              - { name: plan, type: plan }
+              - { name: plan, type: agent }
         """),
         encoding="utf-8",
     )
@@ -119,13 +121,13 @@ def test_pipeline_name_optional_defaults_to_type(tmp_path: pathlib.Path) -> None
           fix: |
             Fix the issue.
         stages:
-          - { type: plan }
+          - { type: agent }
           - { type: agent, prompt: [] }
           - { type: verify, options: { cmds: ['true'] }, prompt: fix }
         """,
     )
     pipeline = Pipeline.from_yaml(p)
-    assert [s.name for s in pipeline.stages] == ["plan", "agent", "verify"]
+    assert [s.name for s in pipeline.stages] == ["agent", "agent-2", "verify"]
 
 
 def test_pipeline_duplicate_unnamed_stages_auto_numbered(
@@ -136,7 +138,7 @@ def test_pipeline_duplicate_unnamed_stages_auto_numbered(
         """\
         default_client: claude:sonnet
         stages:
-          - { type: plan }
+          - { type: agent }
           - { type: exec, options: { cmds: ['true'] } }
           - { type: exec, options: { cmds: ['true'] } }
           - { type: exec, options: { cmds: ['true'] } }
@@ -144,7 +146,7 @@ def test_pipeline_duplicate_unnamed_stages_auto_numbered(
     )
     pipeline = Pipeline.from_yaml(p)
     assert [s.name for s in pipeline.stages] == [
-        "plan",
+        "agent",
         "exec",
         "exec-2",
         "exec-3",
@@ -202,7 +204,7 @@ def test_stage_definition_expands_to_primitive(tmp_path: pathlib.Path) -> None:
             options:
               cmds: ["ruff format ."]
         stages:
-          - { type: plan }
+          - { type: agent }
           - { type: normalize }
         """,
     )
@@ -342,7 +344,7 @@ def test_stage_definitions_non_mapping_rejected(tmp_path: pathlib.Path) -> None:
         stage-definitions:
           - normalize
         stages:
-          - { type: plan }
+          - { type: agent }
         """,
     )
     with pytest.raises(ValueError, match="stage-definitions must be a mapping"):
@@ -517,7 +519,7 @@ def test_type_resolves_to_pipeline_file(tmp_path: pathlib.Path) -> None:
           impl-prompt: |
             Do the implementation.
         stages:
-          - { type: plan }
+          - { type: agent }
           - { type: implement, prompt: impl-prompt }
         """),
         encoding="utf-8",
@@ -532,7 +534,7 @@ def test_type_resolves_to_pipeline_file(tmp_path: pathlib.Path) -> None:
     )
     expanded = expand_pipeline(p, project_root=tmp_path)
     assert len(expanded["stages"]) == 3
-    assert expanded["stages"][0]["type"] == "plan"
+    assert expanded["stages"][0]["type"] == "agent"
     assert expanded["stages"][1]["type"] == "agent"
     assert expanded["stages"][1]["name"] == "implement"
     assert expanded["stages"][2]["name"] == "require-impl-progress"

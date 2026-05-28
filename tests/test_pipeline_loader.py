@@ -32,7 +32,7 @@ default_client: claude:sonnet
 prompt_dir: .
 stages:
   - name: plan
-    type: plan
+    type: agent
     prompt: {prompt.name}
 """,
     )
@@ -42,7 +42,7 @@ stages:
     assert str(pipeline.default_client) == "claude:sonnet"
     assert len(pipeline.stages) == 1
     assert pipeline.stages[0].name == "plan"
-    assert pipeline.stages[0].type == "plan"
+    assert pipeline.stages[0].type == "agent"
     assert str(pipeline.stages[0].client) == "claude:sonnet"
     assert pipeline.stages[0].prompts == ["prompt content"]
 
@@ -58,9 +58,9 @@ name: p
 default_client: claude:sonnet
 stages:
   - name: step-a
-    type: plan
+    type: agent
   - name: step-b
-    type: plan
+    type: agent
     client: copilot:gpt-5.4
 """,
     )
@@ -92,7 +92,7 @@ def test_unknown_provider_raises(tmp_path: pathlib.Path) -> None:
 name: bad
 default_client: unknown:model
 stages:
-  - {name: s1, type: plan}
+  - {name: s1, type: agent}
 """,
     )
     with pytest.raises(ValueError, match="unknown provider"):
@@ -106,7 +106,7 @@ def test_invalid_client_format_raises(tmp_path: pathlib.Path) -> None:
 name: bad
 stages:
   - name: s1
-    type: plan
+    type: agent
     client: notaspecifier
 """,
     )
@@ -120,7 +120,7 @@ def test_missing_prompt_file_raises(tmp_path: pathlib.Path) -> None:
         """\
 name: bad
 stages:
-  - {name: s1, type: plan, prompt: does_not_exist.md}
+  - {name: s1, type: agent, prompt: does_not_exist.md}
 """,
     )
     with pytest.raises(FileNotFoundError):
@@ -138,7 +138,7 @@ def test_bundled_prefix_resolves_to_package(tmp_path: pathlib.Path) -> None:
 name: p
 stages:
   - name: s1
-    type: plan
+    type: agent
     prompt: [gremlins:code_style.md]
 """,
     )
@@ -156,7 +156,7 @@ name: p
 prompt_dir: .
 stages:
   - name: s1
-    type: plan
+    type: agent
     prompt: [code_style.md]
 """,
     )
@@ -174,7 +174,7 @@ name: p
 prompt_dir: .
 stages:
   - name: s1
-    type: plan
+    type: agent
     prompt: [gremlins:code_style.md, {local.name}]
 """,
     )
@@ -191,7 +191,7 @@ def test_bundled_prefix_without_name_raises(tmp_path: pathlib.Path) -> None:
 name: p
 stages:
   - name: s1
-    type: plan
+    type: agent
     prompt: ["gremlins:"]
 """,
     )
@@ -213,7 +213,7 @@ prompts:
   base: base.md
 stages:
   - name: s1
-    type: plan
+    type: agent
     prompt: base
 """,
     )
@@ -233,7 +233,7 @@ prompts:
   combo: [a.md, b.md]
 stages:
   - name: s1
-    type: plan
+    type: agent
     prompt: combo
 """,
     )
@@ -253,7 +253,7 @@ prompts:
   base: base.md
 stages:
   - name: s1
-    type: plan
+    type: agent
     prompt: [base, extra.md]
 """,
     )
@@ -272,7 +272,7 @@ prompts:
   local-base: local.md
 stages:
   - name: s1
-    type: plan
+    type: agent
     prompt: [local-base, gremlins:code_style.md]
 """,
     )
@@ -293,10 +293,10 @@ prompts:
   shared: shared.md
 stages:
   - name: s1
-    type: plan
+    type: agent
     prompt: shared
   - name: s2
-    type: plan
+    type: agent
     prompt: shared
 """,
     )
@@ -314,7 +314,7 @@ prompts:
   style: gremlins:code_style.md
 stages:
   - name: s1
-    type: plan
+    type: agent
     prompt: style
 """,
     )
@@ -336,10 +336,10 @@ stages:
   - name: group
     parallel:
       - name: s1
-        type: plan
+        type: agent
         prompt: shared
       - name: s2
-        type: plan
+        type: agent
         prompt: shared
 """,
     )
@@ -361,7 +361,7 @@ name: p
 prompt_dir: .
 stages:
   - name: s1
-    type: plan
+    type: agent
     prompt: [a.md, b.md]
 """,
     )
@@ -460,7 +460,7 @@ name: p
 default_client: claude:sonnet
 stages:
   - name: s1
-    type: plan
+    type: agent
 """,
     )
     pipeline = Pipeline.from_yaml(yaml_path)
@@ -475,7 +475,7 @@ name: p
 default_client: claude:sonnet
 stages:
   - name: s1
-    type: plan
+    type: agent
     client: copilot:gpt-5.4
 """,
     )
@@ -490,7 +490,7 @@ def test_client_spec_falls_back_to_package_default(tmp_path: pathlib.Path) -> No
 name: p
 stages:
   - name: s1
-    type: plan
+    type: agent
 """,
     )
     pipeline = Pipeline.from_yaml(yaml_path)

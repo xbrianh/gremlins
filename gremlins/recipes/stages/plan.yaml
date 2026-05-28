@@ -3,7 +3,8 @@ required-prompt: true
 stages:
   - name: resolve-plan-input
     type: exec
-    in: { plan_arg: plan_arg? }
+    in:
+      plan_arg: "plan_arg?"
     options:
       cmds:
         - |
