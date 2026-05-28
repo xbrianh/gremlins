@@ -25,7 +25,7 @@ stages:
     prompt:
       - "{{prompt}}"
     out:
-      plan_file: "file://session/plan.md"
+      plan: "file://session/plan.md"
     options:
       idle_timeout: 600
 
@@ -34,6 +34,7 @@ stages:
     options:
       cmds:
         - |
+          command -v jq >/dev/null 2>&1 || exit 0
           STATE_JSON="{session_dir}/../state.json"
           if ! [ -f "$STATE_JSON" ]; then exit 0; fi
           if jq -e '.description_explicit' "$STATE_JSON" >/dev/null 2>&1; then exit 0; fi

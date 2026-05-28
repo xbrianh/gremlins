@@ -12,7 +12,7 @@ from gremlins.stages.agent_runner import run_agent
 from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.outcome import Bail, Done, Outcome
 
-_FRAMEWORK_KEYS = frozenset(["name", "session_dir"])
+_FRAMEWORK_KEYS = frozenset(["name", "session_dir", "instructions", "base_ref"])
 
 
 class Agent(Stage):
@@ -83,6 +83,8 @@ class Agent(Stage):
             name=self.name,
             model=state.stage_model or state.client.model,
             session_dir=str(state.session_dir),
+            instructions=state.instructions,
+            base_ref=state.data.base_ref_name,
         )
         for k, v in opts.items():
             if k not in subs and isinstance(v, str):
@@ -93,7 +95,8 @@ class Agent(Stage):
             for k, v in self.out_map.items()
         }
         for key, uri_str in out_map.items():
-            state.artifacts.bind(key, Uri.parse(uri_str))
+            if not state.artifacts.produced(key):
+                state.artifacts.bind(key, Uri.parse(uri_str))
 
         template = "\n\n".join(self.prompts).rstrip()
         prompt = template.format_map(_Passthrough(subs))
