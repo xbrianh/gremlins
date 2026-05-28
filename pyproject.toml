@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.18.0"]
+requires = ["hatchling>=1.18.0", "hatch-requirements-txt"]
 build-backend = "hatchling.build"
 
 [project]
@@ -8,20 +8,18 @@ version = "0.0.0"
 description = "Background coding-agent pipelines that plan, implement, review, and land work end-to-end"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = [
-    "claude-agent-sdk>=0.1.59",  # used in rollout 2/3 of #626
-    "openai-agents",
-    "platformdirs",
-    "pyyaml",
-]
+dynamic = ["dependencies", "optional-dependencies"]
+
+[tool.hatch.metadata.hooks.requirements_txt]
+files = ["requirements.txt"]
+
+[tool.hatch.metadata.hooks.requirements_txt.optional-dependencies]
+dev = ["requirements.dev.txt"]
 
 [project.urls]
 Homepage = "https://github.com/amorphous-industries/gremlins"
 Repository = "https://github.com/amorphous-industries/gremlins"
 Issues = "https://github.com/amorphous-industries/gremlins/issues"
-
-[project.optional-dependencies]
-dev = ["pytest", "ruff", "pyright"]
 
 [project.scripts]
 gremlins = "gremlins.cli:main"
@@ -49,9 +47,4 @@ ban-relative-imports = "all"
 typeCheckingMode = "strict"
 include = [
     "gremlins",
-]
-
-[dependency-groups]
-dev = [
-    "pytest>=9.0.3",
 ]

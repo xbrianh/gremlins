@@ -1,0 +1,4 @@
+claude-agent-sdk>=0.1.59
+openai-agents
+platformdirs
+pyyaml

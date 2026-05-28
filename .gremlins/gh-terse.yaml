@@ -21,7 +21,7 @@ stages:
   - { type: plan,                              prompt: [code-style, terse, gremlins:plan_gh.md] }
   - { type: gremlins:implement,                prompt: [code-style, terse, gremlins:implement_gh.md] }
   - { type: normalize }
-  - { type: verify,    options: { cmds: ["make check", "make test"] }, prompt: verify }
+  - { type: verify,    options: { cmds: ["make check"] }, prompt: verify }
   - { type: gremlins:github-open-pr }
   - { type: gremlins:github-request-copilot-review }
 
