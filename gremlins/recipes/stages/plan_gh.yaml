@@ -60,11 +60,9 @@ stages:
     options:
       cmds:
         - |
-          command -v jq >/dev/null 2>&1 || exit 0
           STATE_JSON="{session_dir}/../state.json"
           if ! [ -f "$STATE_JSON" ]; then exit 0; fi
-          if jq -e '.description_explicit' "$STATE_JSON" >/dev/null 2>&1; then exit 0; fi
+          if python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get('description_explicit') else 1)" "$STATE_JSON" >/dev/null 2>&1; then exit 0; fi
           title=$(awk '/^# /{sub(/^#+ */,""); print; exit}' "{session_dir}/plan.md" | cut -c1-60)
           [ -z "$title" ] && exit 0
-          tmp=$(mktemp) && jq --arg t "$title" '.description = $t' \
-            "$STATE_JSON" > "$tmp" && mv "$tmp" "$STATE_JSON"
+          tmp=$(mktemp) && python3 -c "import json,sys; d=json.load(open(sys.argv[1])); d['description']=sys.argv[2]; print(json.dumps(d))" "$STATE_JSON" "$title" > "$tmp" && mv "$tmp" "$STATE_JSON"
