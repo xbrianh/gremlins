@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from typing import Any, cast
+from typing import Any
 
 from gremlins.utils import proc
 
@@ -131,82 +131,6 @@ def view_issue(issue_ref: str, repo: str) -> dict[str, Any]:
             f"gh issue view returned invalid JSON for {issue_ref!r} in {repo!r}. "
             f"stdout: {r.stdout.strip()} stderr: {r.stderr.strip()}"
         ) from exc
-
-
-def extract_gh_url(
-    events: list[dict[str, Any]],
-    url_pattern: str,
-    cmd_pattern: str,
-    label: str,
-    text_result: str | None = None,
-) -> str:
-    """Extract a GitHub URL from a claude stream-json event list.
-
-    Searches ``Bash`` tool_use events whose ``command`` matches ``cmd_pattern``
-    (regex), finds their paired ``tool_result`` events, and returns the last
-    URL matching ``url_pattern`` found in those results. Falls back to scanning
-    the final ``result`` event's text if no tool_result match is found.
-
-    Raises ``RuntimeError`` when no URL is found.
-    """
-    # Collect tool_use IDs for Bash commands matching cmd_pattern.
-    matching_ids: set[str] = set()
-    for evt in events:
-        if evt.get("type") != "assistant":
-            continue
-        msg = cast(dict[str, Any], evt.get("message") or {})
-        for c in cast(list[dict[str, Any]], msg.get("content") or []):
-            inp = cast(dict[str, Any], c.get("input") or {})
-            if (
-                c.get("type") == "tool_use"
-                and c.get("name") == "Bash"
-                and re.search(cmd_pattern, str(inp.get("command") or ""))
-            ):
-                matching_ids.add(str(c.get("id") or ""))
-
-    # Scan tool_result events for those IDs.
-    last_tool_url: str | None = None
-    for evt in events:
-        if evt.get("type") != "user":
-            continue
-        msg = cast(dict[str, Any], evt.get("message") or {})
-        for c in cast(list[dict[str, Any]], msg.get("content") or []):
-            if c.get("type") != "tool_result":
-                continue
-            if c.get("tool_use_id") not in matching_ids:
-                continue
-            body = c.get("content")
-            if isinstance(body, list):
-                text = "\n".join(
-                    str(cast(dict[str, Any], p).get("text") or "")
-                    for p in cast(list[Any], body)
-                    if isinstance(p, dict)
-                )
-            elif isinstance(body, str):
-                text = body
-            else:
-                text = str(body) if body is not None else ""
-            matches = re.findall(url_pattern, text)
-            if matches:
-                last_tool_url = matches[-1]
-
-    if last_tool_url:
-        return last_tool_url
-
-    # Fallback: scan the last result event's text.
-    for evt in reversed(events):
-        if evt.get("type") == "result":
-            result_text = evt.get("result") or ""
-            matches = re.findall(url_pattern, result_text)
-            if matches:
-                return matches[-1]
-
-    if text_result:
-        matches = re.findall(url_pattern, text_result)
-        if matches:
-            return matches[-1]
-
-    raise RuntimeError(f"failed to extract {label} URL from claude output events")
 
 
 def resolve_default_branch(project_root: str) -> str:

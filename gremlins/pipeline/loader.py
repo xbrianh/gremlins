@@ -8,12 +8,10 @@ from gremlins.stages.exec import Exec
 from gremlins.stages.handoff import Handoff
 from gremlins.stages.loop import LoopStage
 from gremlins.stages.parallel import ParallelStage
-from gremlins.stages.plan import Plan
 from gremlins.stages.sequence import SequenceStage
 
 STAGE_TYPES: dict[str, type[Stage]] = {
     "agent": Agent,
-    "plan": Plan,
     "handoff": Handoff,
     "loop": LoopStage,
     "parallel": ParallelStage,
