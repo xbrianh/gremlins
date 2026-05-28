@@ -31,6 +31,7 @@ class Stage:
     type: str = ""
     needs_gh: bool = False
     body: list[Stage] = []
+    skip_if_exists: str = ""
 
     def __init__(self, name: str) -> None:
         self.name = name

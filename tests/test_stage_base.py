@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import pathlib
 from typing import Any
 
 import pytest
 
+from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state
 from gremlins.pipeline import Pipeline
@@ -84,3 +86,56 @@ def test_deleted_helpers_not_on_stage() -> None:
     assert not hasattr(stage, "run_claude")
     assert not hasattr(stage, "bail_command")
     assert not hasattr(stage, "run_subprocess")
+
+
+def test_skip_if_exists_skips_when_key_produced(tmp_path: pathlib.Path) -> None:
+    ran: list[bool] = []
+
+    class _TrackingStage(_SimpleStage):
+        async def run(self, state: State) -> Outcome:
+            ran.append(True)
+            return Done()
+
+    stage = _TrackingStage("s", [], {})
+    stage.skip_if_exists = "my-key"
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    state = build_state(
+        data=StateData(gremlin_id=None),
+        client=FakeClaudeClient(fixtures={}),
+        session_dir=session_dir,
+        pipeline_data=_PIPELINE,
+    )
+    state.artifacts.bind("my-key", Uri.parse("file://session/plan.md"))
+
+    runner = state.make_runner(stage, record_stage=False)
+    asyncio.run(runner())
+
+    assert ran == []
+
+
+def test_skip_if_exists_runs_when_key_absent(tmp_path: pathlib.Path) -> None:
+    ran: list[bool] = []
+
+    class _TrackingStage(_SimpleStage):
+        async def run(self, state: State) -> Outcome:
+            ran.append(True)
+            return Done()
+
+    stage = _TrackingStage("s", [], {})
+    stage.skip_if_exists = "my-key"
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    state = build_state(
+        data=StateData(gremlin_id=None),
+        client=FakeClaudeClient(fixtures={}),
+        session_dir=session_dir,
+        pipeline_data=_PIPELINE,
+    )
+
+    runner = state.make_runner(stage, record_stage=False)
+    asyncio.run(runner())
+
+    assert ran == [True]

@@ -53,6 +53,7 @@ def parse_stage(d: dict[str, Any], depth: int = 0) -> Stage:
     if "parallel" in d:
         stage = ParallelStage.with_dict(d, depth=depth)
         stage.raw_dict = d
+        stage.skip_if_exists = d.get("skip_if_exists") or ""
         return stage
 
     name = d.get("name") or ""
@@ -69,4 +70,5 @@ def parse_stage(d: dict[str, Any], depth: int = 0) -> Stage:
     stage.raw_dict = d
     if d.get("needs_gh"):
         stage.needs_gh = True
+    stage.skip_if_exists = d.get("skip_if_exists") or ""
     return stage

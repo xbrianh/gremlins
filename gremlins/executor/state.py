@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, cast
 from gremlins import paths as _paths
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.clients.client import Client
+from gremlins.stages.outcome import Done
 from gremlins.utils.state_file import locked_update
 
 if TYPE_CHECKING:
@@ -599,7 +600,10 @@ class State:
             )
 
         async def _run_async() -> Any:
-            return await entry.run(_prepare())
+            prepared = _prepare()
+            if entry.skip_if_exists and base_state.artifacts.produced(entry.skip_if_exists):
+                return Done()
+            return await entry.run(prepared)
 
         return _run_async
 
