@@ -601,12 +601,11 @@ class State:
             )
 
         async def _run_async() -> Any:
-            prepared = _prepare()
-            if entry.skip_if_exists and base_state.artifacts.produced(
+            if entry.skip_if_exists and base_state.artifacts.verified(
                 entry.skip_if_exists
             ):
                 return Done()
-            return await entry.run(prepared)
+            return await entry.run(_prepare())
 
         return _run_async
 

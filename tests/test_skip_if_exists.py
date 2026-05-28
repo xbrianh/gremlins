@@ -49,7 +49,8 @@ def _make_state(tmp_path: pathlib.Path) -> tuple[State, ArtifactRegistry]:
 
 def test_skip_if_exists_skips_when_key_produced(tmp_path: pathlib.Path) -> None:
     state, reg = _make_state(tmp_path)
-    reg.mount("my-artifact", Uri.parse("file://session/out.txt"))
+    (tmp_path / "out.txt").write_text("content", encoding="utf-8")
+    reg.bind("my-artifact", Uri.parse("file://session/out.txt"))
 
     stage = _CountingStage("s", [], {})
     stage.skip_if_exists = "my-artifact"

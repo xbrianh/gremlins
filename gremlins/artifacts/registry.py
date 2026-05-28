@@ -108,6 +108,24 @@ class ArtifactRegistry:
     def produced(self, key: str) -> bool:
         return key in self._data
 
+    def verified(self, key: str) -> bool:
+        if key not in self._data:
+            return False
+        value = self._data[key]
+        if not isinstance(value, str):
+            return True
+        try:
+            uri = Uri.parse(value)
+        except ValueError:
+            return True
+        if uri.scheme not in self._resolvers:
+            return True
+        try:
+            self._resolvers[uri.scheme].verify_produced(uri)
+            return True
+        except Exception:
+            return False
+
     def keys(self) -> Iterable[str]:
         return self._data.keys()
 
