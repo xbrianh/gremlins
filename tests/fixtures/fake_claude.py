@@ -178,7 +178,10 @@ def handle_plan(prompt: str) -> int:
     )
     if plan_file:
         pathlib.Path(plan_file).parent.mkdir(parents=True, exist_ok=True)
-        if not pathlib.Path(plan_file).exists() or pathlib.Path(plan_file).stat().st_size == 0:
+        if (
+            not pathlib.Path(plan_file).exists()
+            or pathlib.Path(plan_file).stat().st_size == 0
+        ):
             pathlib.Path(plan_file).write_text(
                 "# Test Plan\n\n## Context\nFake claude generated plan.\n\n"
                 "## Tasks\n- [ ] Touch a file\n",

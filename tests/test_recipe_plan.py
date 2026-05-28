@@ -1,4 +1,5 @@
 """Tests for plan_arg launcher binding (prereq for plan recipe)."""
+
 from __future__ import annotations
 
 import pathlib
@@ -35,7 +36,9 @@ def test_prepare_state_dir_writes_plan_arg_file(tmp_path: pathlib.Path) -> None:
     assert plan_arg_file.read_text() == "#42"
 
 
-def test_prepare_state_dir_writes_empty_plan_arg_when_no_plan(tmp_path: pathlib.Path) -> None:
+def test_prepare_state_dir_writes_empty_plan_arg_when_no_plan(
+    tmp_path: pathlib.Path,
+) -> None:
     inputs = _make_inputs(plan=None)
     _launcher._prepare_state_dir(tmp_path, inputs)  # type: ignore[attr-defined]
     plan_arg_file = tmp_path / "artifacts" / "plan-arg.txt"

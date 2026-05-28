@@ -414,7 +414,13 @@ class _CommittingClient(FakeClaudeClient):
     the plan recipe's out: { plan_file: file://session/plan.md } binding.
     """
 
-    def __init__(self, *args, git_dir: pathlib.Path = None, session_dir: pathlib.Path = None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        git_dir: pathlib.Path = None,
+        session_dir: pathlib.Path = None,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self._git_dir = git_dir
         self._session_dir = session_dir
