@@ -2,6 +2,13 @@ default_client: claude:sonnet
 base_ref: main
 prompt_dir: prompts
 
+land:
+  in:
+    PR_URL: pr.url
+  options:
+    cmds:
+      - gh pr merge --squash --delete-branch "$PR_URL"
+
 prompts:
   code-style: gremlins:code_style.md
   terse: terse_style.md

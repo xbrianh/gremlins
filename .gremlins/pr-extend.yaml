@@ -4,37 +4,38 @@ base_ref: main
 
 prompt_dir: prompts
 
+inputs:
+  in:
+    INSTRUCTIONS: instructions?
+    PLAN: plan?
+    PR: pr
+
+land:
+  in:
+    PR_URL: pr.url
+  options:
+    cmds:
+      - gh pr merge --squash --delete-branch "$PR_URL"
+
 prompts:
   code-style: gremlins:code_style.md
   terse: terse_style.md
   verify: [gremlins:verify_fix.md, gremlins:bail_section_fix.md]
 
 # Usage:
-#   PR_NUM=697 gremlins launch pr-extend --plan '#694'
+#   gremlins launch pr-extend --pr <num|url> --plan '#<issue>'
 #
-# PR_NUM is the PR to extend. --plan supplies the acceptance criteria (the
-# issue the PR is meant to fully satisfy). The pipeline fetches the PR head
-# into the gremlin's detached worktree, adds new commits on top, and pushes
-# back to the PR's branch (no rebase, no history rewrite — additive only).
-# Same-repo PRs only; fork PRs would need push access to the fork.
+# --pr is the PR to extend; its head is checked out in the gremlin's detached
+# worktree. --plan supplies the acceptance criteria (the issue the PR is meant
+# to fully satisfy). The pipeline adds new commits on top and pushes back to
+# the PR's branch (no rebase, no history rewrite — additive only). Same-repo
+# PRs only; fork PRs would need push access to the fork.
 
 stages:
   - { type: plan, prompt: [code-style, terse, gremlins:plan_gh.md] }
-
-  - type: exec
-    options:
-      cmds:
-        - 'test -n "${PR_NUM:-}" || { echo "PR_NUM env var required" >&2; exit 1; }'
-        - 'git fetch origin "pull/${PR_NUM}/head"'
-        - 'git reset --hard FETCH_HEAD'
-
   - { type: gremlins:implement, prompt: [code-style, terse, implement_pr_extension.md] }
   - { type: verify,             options: { cmds: ["make check", "make test"] }, prompt: verify }
-
-  - type: exec
-    options:
-      cmds:
-        - 'git push origin "HEAD:refs/heads/$(gh pr view "$PR_NUM" --json headRefName --jq .headRefName)"'
+  - { name: push, type: gremlins:github-push-to-pr-branch }
 
   - { type: gremlins:github-request-copilot-review,  in: {pr: pr} }
 

@@ -1206,7 +1206,7 @@ def test_launch_explicit_gremlin_id_stale_dir_refused(lenv, monkeypatch):
 
 
 def test_launch_pr_kwarg_sets_state_fields(lenv, monkeypatch):
-    """launch(pr=...) persists setup_kind=worktree-detached-from-ref and the pull/<N>/head ref."""
+    """stage_inputs['pr'] persists setup_kind=worktree-detached-from-ref and the pull/<N>/head ref."""
     launcher = _launcher()
     monkeypatch.setattr(launcher, "_spawn_logged_process", lambda *a, **kw: _FakeProc())
     import gremlins.utils.github as gh
@@ -1222,8 +1222,7 @@ def test_launch_pr_kwarg_sets_state_fields(lenv, monkeypatch):
     )
     gremlin_id, _ = launcher.launch(
         "local",
-        stage_inputs={"instructions": "pr kwarg test"},
-        pr="697",
+        stage_inputs={"instructions": "pr kwarg test", "pr": "697"},
         project_root=str(lenv.repo),
     )
     state = _read_state(_gremlins_state_root(lenv) / gremlin_id)

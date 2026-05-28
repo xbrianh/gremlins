@@ -15,8 +15,6 @@ from gremlins.permissions.loader import load_policy
 from gremlins.permissions.validation import validate_policy_against_registry
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import list_pipelines, resolve_pipeline_name
-from gremlins.pipeline.loader import STAGE_TYPES
-from gremlins.stages.base import Stage
 from gremlins.utils.yaml_io import YamlLoadError
 
 _INFRA_ARGS = frozenset(
@@ -29,7 +27,6 @@ _INFRA_ARGS = frozenset(
         "client",
         "gremlin_id",
         "wait",
-        "pr",
         "bypass",
         "permissions_file",
     }
@@ -44,7 +41,6 @@ _INFRA_FLAG_NAMES = frozenset(
         "client",
         "gremlin-id",
         "wait",
-        "pr",
         "bypass",
         "permissions-file",
     }
@@ -53,16 +49,8 @@ _LAUNCH_BRIEF = "usage: gremlins launch <name> [opts]\nLaunch a background greml
 _LOG_TAIL_BYTES = 4096
 
 
-def _parse_bool(v: str) -> bool:
-    if v.lower() in ("1", "true", "yes"):
-        return True
-    if v.lower() in ("0", "false", "no"):
-        return False
-    raise argparse.ArgumentTypeError(f"invalid bool value: {v!r}")
-
-
 def build_launch_parser(
-    pipeline_name: str, stage_cls: type[Stage]
+    pipeline_name: str, pipeline: Pipeline | None = None
 ) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog=f"gremlins launch {pipeline_name}")
     p.add_argument("--description", default=None)
@@ -84,14 +72,7 @@ def build_launch_parser(
         action="store_true",
         help="Block until the spawned gremlin exits; return its exit code. No timeout — a hung gremlin blocks indefinitely.",
     )
-    ref_group = p.add_mutually_exclusive_group()
-    ref_group.add_argument("--base-ref", default=None)
-    ref_group.add_argument(
-        "--pr",
-        default=None,
-        metavar="PR",
-        help="PR number or URL (e.g. 697 or https://github.com/.../pull/697). Checks out the PR head in a detached worktree.",
-    )
+    p.add_argument("--base-ref", default=None)
     p.add_argument("--client", default=None)
     p.add_argument(
         "--bypass",
@@ -107,27 +88,27 @@ def build_launch_parser(
         metavar="PATH",
         help="Path to a permissions YAML file to load instead of the project default.",
     )
-    for si in stage_cls.orchestration_args():
-        flag = "--" + si.name.replace("_", "-")
-        if flag.lstrip("-") in _INFRA_FLAG_NAMES:
-            raise ValueError(
-                f"stage input {si.name!r} conflicts with infra flag {flag!r}"
-            )
-        kwargs: dict[str, Any] = {"help": si.help}
-        if si.type is bool:
-            if si.required:
-                kwargs["type"] = _parse_bool
-                kwargs["required"] = True
+    if pipeline is not None and pipeline.inputs is not None:
+        seen: set[str] = set()
+        for path in pipeline.inputs.in_map.values():
+            key, sep, default = path.partition("?")
+            registry_key = key.split(".")[0]
+            if registry_key in seen:
+                raise ValueError(
+                    f"pipeline inputs produce duplicate flag --{registry_key.replace('_', '-')}"
+                )
+            seen.add(registry_key)
+            flag = "--" + registry_key.replace("_", "-")
+            if flag.lstrip("-") in _INFRA_FLAG_NAMES:
+                raise ValueError(
+                    f"pipeline input {registry_key!r} conflicts with infra flag {flag!r}"
+                )
+            kwargs: dict[str, Any] = {}
+            if sep:
+                kwargs["default"] = default or None
             else:
-                kwargs["action"] = argparse.BooleanOptionalAction
-                kwargs["default"] = si.default
-        else:
-            kwargs["type"] = si.type
-            if si.required:
                 kwargs["required"] = True
-            else:
-                kwargs["default"] = si.default
-        p.add_argument(flag, **kwargs)
+            p.add_argument(flag, dest=registry_key, type=str, **kwargs)
     return p
 
 
@@ -162,12 +143,7 @@ def launch_main(argv: list[str]) -> int:
         )
         return 1
 
-    first = next((s for s in pipeline.stages if s.type != "parallel"), None)
-    try:
-        stage_cls = STAGE_TYPES[first.type] if first is not None else Stage
-        parser = build_launch_parser(name, stage_cls)
-    except (KeyError, TypeError):
-        parser = build_launch_parser(name, Stage)
+    parser = build_launch_parser(name, pipeline)
 
     try:
         args = parser.parse_args(argv[1:])
@@ -175,6 +151,9 @@ def launch_main(argv: list[str]) -> int:
         return exc.code if isinstance(exc.code, int) else 1
 
     stage_inputs = {k: v for k, v in vars(args).items() if k not in _INFRA_ARGS}
+    if stage_inputs.get("pr") and args.base_ref:
+        sys.stderr.write("error: --pr and --base-ref are mutually exclusive\n")
+        return 1
     return _self_background_main(name, args, stage_inputs)
 
 
@@ -208,7 +187,6 @@ def _self_background_main(
             base_ref=args.base_ref,
             pipeline_args=pipeline_args,
             gremlin_id=args.gremlin_id,
-            pr=args.pr,
             bypass=policy.bypass,
             permissions_file=str(args.permissions_file.resolve())
             if args.permissions_file

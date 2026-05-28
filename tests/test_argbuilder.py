@@ -2,29 +2,29 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from gremlins.cli.launch import build_launch_parser
-from gremlins.stages.base import Stage, StageInput
+from gremlins.pipeline import Pipeline
+from gremlins.stages.exec import Exec
 
 
-def _stage_with(*inputs: StageInput) -> type[Stage]:
-    class _Stage(Stage):
-        def __init__(self) -> None:  # type: ignore[override]
-            pass
-
-        @classmethod
-        def orchestration_args(cls) -> list[StageInput]:
-            return list(inputs)
-
-    return _Stage
+def _pipeline_with_inputs(in_map: dict[str, str] | None) -> Pipeline:
+    inputs_stage = None
+    if in_map is not None:
+        inputs_stage = Exec("inputs", {}, in_map=in_map)
+    p = MagicMock(spec=Pipeline)
+    p.inputs = inputs_stage
+    return p
 
 
-_empty_stage = _stage_with()
+_empty_pipeline = _pipeline_with_inputs(None)
 
 
 def test_infra_flags_always_present() -> None:
-    p = build_launch_parser("mypipe", _empty_stage)
+    p = build_launch_parser("mypipe", _empty_pipeline)
     dests = {a.dest for a in p._actions}
     assert "description" in dests
     assert "parent_id" in dests
@@ -33,47 +33,43 @@ def test_infra_flags_always_present() -> None:
     assert "client" in dests
 
 
-def test_empty_orchestration_args_produces_no_extra_flags() -> None:
-    p = build_launch_parser("mypipe", _empty_stage)
+def test_empty_inputs_produces_no_extra_flags() -> None:
+    p = build_launch_parser("mypipe", _empty_pipeline)
     flags = [s for a in p._actions for s in a.option_strings]
     assert "--plan" not in flags
     assert "--instructions" not in flags
 
 
 def test_prog_includes_pipeline_name() -> None:
-    p = build_launch_parser("local", _empty_stage)
+    p = build_launch_parser("local", _empty_pipeline)
     assert p.prog == "gremlins launch local"
 
 
-def test_stage_input_exposes_flag() -> None:
-    stage = _stage_with(
-        StageInput("plan", str, required=False, default=None, help="plan path")
-    )
-    p = build_launch_parser("mypipe", stage)
+def test_pipeline_input_exposes_flag() -> None:
+    p = build_launch_parser("mypipe", _pipeline_with_inputs({"PLAN": "plan?"}))
     flags = [s for a in p._actions for s in a.option_strings]
     assert "--plan" in flags
 
 
 def test_flag_name_kebab_cased() -> None:
-    stage = _stage_with(
-        StageInput("plan_file", str, required=False, default=None, help="")
+    p = build_launch_parser(
+        "mypipe", _pipeline_with_inputs({"PLAN_FILE": "plan_file?"})
     )
-    p = build_launch_parser("mypipe", stage)
     flags = [s for a in p._actions for s in a.option_strings]
     assert "--plan-file" in flags
     assert "--plan_file" not in flags
 
 
 def test_required_flag_marked_required() -> None:
-    stage = _stage_with(StageInput("topic", str, required=True, default=None, help=""))
-    p = build_launch_parser("mypipe", stage)
+    p = build_launch_parser("mypipe", _pipeline_with_inputs({"TOPIC": "topic"}))
     required_flags = [a.option_strings[0] for a in p._actions if a.required]
     assert "--topic" in required_flags
 
 
 def test_optional_flag_not_required() -> None:
-    stage = _stage_with(StageInput("topic", str, required=False, default="x", help=""))
-    p = build_launch_parser("mypipe", stage)
+    p = build_launch_parser(
+        "mypipe", _pipeline_with_inputs({"TOPIC": "topic?default_val"})
+    )
     optional = {
         a.option_strings[0]: a
         for a in p._actions
@@ -82,44 +78,39 @@ def test_optional_flag_not_required() -> None:
     assert "--topic" in optional
 
 
-def test_bool_optional_uses_boolean_optional_action() -> None:
-    stage = _stage_with(
-        StageInput("verbose", bool, required=False, default=False, help="")
+def test_optional_flag_default_value() -> None:
+    p = build_launch_parser(
+        "mypipe", _pipeline_with_inputs({"TOPIC": "topic?mydefault"})
     )
-    p = build_launch_parser("mypipe", stage)
-    assert p.parse_args([]).verbose is False
-    assert p.parse_args(["--verbose"]).verbose is True
-    assert p.parse_args(["--no-verbose"]).verbose is False
+    assert p.parse_args([]).topic == "mydefault"
 
 
-def test_bool_required_parsed_from_string() -> None:
-    stage = _stage_with(StageInput("flag", bool, required=True, default=None, help=""))
-    p = build_launch_parser("mypipe", stage)
-    assert p.parse_args(["--flag", "true"]).flag is True
-    assert p.parse_args(["--flag", "false"]).flag is False
+def test_optional_flag_no_default_is_none() -> None:
+    p = build_launch_parser("mypipe", _pipeline_with_inputs({"TOPIC": "topic?"}))
+    assert p.parse_args([]).topic is None
 
 
 def test_infra_flag_collision_raises() -> None:
-    stage = _stage_with(
-        StageInput("description", str, required=False, default=None, help="")
-    )
     with pytest.raises(ValueError, match="description"):
-        build_launch_parser("mypipe", stage)
+        build_launch_parser(
+            "mypipe", _pipeline_with_inputs({"DESCRIPTION": "description?"})
+        )
 
 
 def test_client_collision_raises() -> None:
-    stage = _stage_with(
-        StageInput("client", str, required=False, default=None, help="")
-    )
     with pytest.raises(ValueError, match="client"):
-        build_launch_parser("mypipe", stage)
+        build_launch_parser("mypipe", _pipeline_with_inputs({"CLIENT": "client?"}))
 
 
-def test_plan_stage_inputs_expose_expected_flags() -> None:
-    from gremlins.stages.plan import Plan
+def test_none_pipeline_produces_only_infra_flags() -> None:
+    p = build_launch_parser("mypipe", None)
+    dests = {a.dest for a in p._actions}
+    assert "description" in dests
+    assert "base_ref" in dests
 
-    p = build_launch_parser("local", Plan)
+
+def test_pipeline_with_dotted_path_uses_registry_key() -> None:
+    # pr.url -> registry key is "pr", flag is --pr
+    p = build_launch_parser("mypipe", _pipeline_with_inputs({"PR_URL": "pr.url?"}))
     flags = [s for a in p._actions for s in a.option_strings]
-    assert "--instructions" in flags
-    assert "--plan" in flags
-    assert "--repo" in flags
+    assert "--pr" in flags

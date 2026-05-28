@@ -248,6 +248,7 @@ async def run_pipeline(
             client_label=args.client or "",
             test_client=client,
             repo=gh_repo,
+            stage_inputs=stage_inputs,
         )
         gremlin.validate_resume_target()
     except ValueError as exc:
