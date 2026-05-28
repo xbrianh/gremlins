@@ -49,10 +49,20 @@ def parse_stages(raw: list[dict[str, Any]], depth: int = 0) -> list[Stage]:
     return [parse_stage(d, depth=depth) for d in raw]
 
 
+def _parse_skip_if_exists(d: dict[str, Any], name: str) -> str:
+    value = d.get("skip_if_exists") or ""
+    if value and not isinstance(value, str):
+        raise ValueError(
+            f"stage {name!r}: 'skip_if_exists' must be a string, got {type(value).__name__!r}"
+        )
+    return value
+
+
 def parse_stage(d: dict[str, Any], depth: int = 0) -> Stage:
     if "parallel" in d:
         stage = ParallelStage.with_dict(d, depth=depth)
         stage.raw_dict = d
+        stage.skip_if_exists = _parse_skip_if_exists(d, d.get("name") or "<parallel>")
         return stage
 
     name = d.get("name") or ""
@@ -67,6 +77,7 @@ def parse_stage(d: dict[str, Any], depth: int = 0) -> Stage:
         raise ValueError(f"stage {name!r}: unknown type {stage_type!r}")
     stage = STAGE_TYPES[stage_type].with_dict(d, depth=depth)
     stage.raw_dict = d
+    stage.skip_if_exists = _parse_skip_if_exists(d, name)
     if d.get("needs_gh"):
         stage.needs_gh = True
     return stage

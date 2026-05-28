@@ -24,6 +24,8 @@ if TYPE_CHECKING:
     from gremlins.pipeline import Pipeline
     from gremlins.stages.base import Stage
 
+from gremlins.stages.outcome import Done
+
 logger = logging.getLogger(__name__)
 
 _GREMLIN_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -599,6 +601,10 @@ class State:
             )
 
         async def _run_async() -> Any:
+            if entry.skip_if_exists and base_state.artifacts.verified(
+                entry.skip_if_exists
+            ):
+                return Done()
             return await entry.run(_prepare())
 
         return _run_async
