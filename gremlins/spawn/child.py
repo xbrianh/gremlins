@@ -195,6 +195,11 @@ async def _run(spec_path: pathlib.Path) -> int:
     if stage.client is None:
         stage.client = state.client
 
+    if stage.skip_if_exists and state.artifacts.produced(stage.skip_if_exists):
+        _write_result(result_path, {"status": "done", "detail": "", "returncode": None, "cost_usd": 0.0})
+        _try_write_terminal(state, 0)
+        return 0
+
     try:
         await stage.run(state)
     except Bail as b:
