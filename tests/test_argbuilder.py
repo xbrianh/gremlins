@@ -111,6 +111,6 @@ def test_none_pipeline_produces_only_infra_flags() -> None:
 
 def test_pipeline_with_dotted_path_uses_registry_key() -> None:
     # pr.url -> registry key is "pr", flag is --pr
-    p = build_launch_parser("mypipe", _pipeline_with_inputs({"PR_URL": "pr?"}))
+    p = build_launch_parser("mypipe", _pipeline_with_inputs({"PR_URL": "pr.url?"}))
     flags = [s for a in p._actions for s in a.option_strings]
     assert "--pr" in flags

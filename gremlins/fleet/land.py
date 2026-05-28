@@ -7,6 +7,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import sys
 import time
 from typing import Any, cast
 
@@ -943,7 +944,8 @@ def _load_pipeline_land_stage(state: dict[str, Any]):
         p = resolve_pipeline_path(pipeline_path, project_dir)
         pipeline = Pipeline.from_yaml(p)
         return pipeline.land
-    except Exception:
+    except Exception as exc:
+        sys.stderr.write(f"warning: failed to load land stage: {exc}\n")
         return None
 
 

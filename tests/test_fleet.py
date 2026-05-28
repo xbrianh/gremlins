@@ -1445,3 +1445,36 @@ def test_cli_fleet_json_drill_in(sandbox, tmp_path, monkeypatch, capsys):
     obj = json.loads(capsys.readouterr().out)
     assert obj["id"] == "test-cli-drill01"
     assert isinstance(obj["liveness"], dict)
+
+
+# ---------------------------------------------------------------------------
+# _exec_land_stage
+# ---------------------------------------------------------------------------
+
+
+def test_exec_land_stage_success(tmp_path, monkeypatch):
+    import gremlins.executor.state as _state_mod
+    from unittest.mock import MagicMock
+
+    class _OkStage:
+        async def run(self, state):
+            pass
+
+    monkeypatch.setattr(_state_mod, "build_state", lambda **_: object())
+    result = _land._exec_land_stage(_OkStage(), MagicMock(), "", tmp_path)
+    assert result is True
+
+
+def test_exec_land_stage_bail(tmp_path, monkeypatch, capsys):
+    import gremlins.executor.state as _state_mod
+    from gremlins.stages.outcome import Bail
+    from unittest.mock import MagicMock
+
+    class _BailStage:
+        async def run(self, state):
+            raise Bail("structural")
+
+    monkeypatch.setattr(_state_mod, "build_state", lambda **_: object())
+    result = _land._exec_land_stage(_BailStage(), MagicMock(), "", tmp_path)
+    assert result is False
+    assert "structural" in capsys.readouterr().out

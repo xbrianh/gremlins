@@ -89,9 +89,13 @@ def build_launch_parser(
         help="Path to a permissions YAML file to load instead of the project default.",
     )
     if pipeline is not None and pipeline.inputs is not None:
+        seen: set[str] = set()
         for path in pipeline.inputs.in_map.values():
             key, sep, default = path.partition("?")
             registry_key = key.split(".")[0]
+            if registry_key in seen:
+                raise ValueError(f"pipeline inputs produce duplicate flag --{registry_key.replace('_', '-')}")
+            seen.add(registry_key)
             flag = "--" + registry_key.replace("_", "-")
             if flag.lstrip("-") in _INFRA_FLAG_NAMES:
                 raise ValueError(
@@ -145,6 +149,9 @@ def launch_main(argv: list[str]) -> int:
         return exc.code if isinstance(exc.code, int) else 1
 
     stage_inputs = {k: v for k, v in vars(args).items() if k not in _INFRA_ARGS}
+    if stage_inputs.get("pr") and args.base_ref:
+        sys.stderr.write("error: --pr and --base-ref are mutually exclusive\n")
+        return 1
     return _self_background_main(name, args, stage_inputs)
 
 
