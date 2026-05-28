@@ -27,7 +27,7 @@ stages:
           startup_grace_secs: "60"
           cmds:
             - |
-              set -euo pipefail
+              set -eu
 
               # Post-fix path: fix-head written by capture-head on prior iteration.
               fix_head=""
