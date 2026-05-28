@@ -9,6 +9,7 @@ from gremlins.clients.client import PACKAGE_DEFAULT, Client
 
 if TYPE_CHECKING:
     from gremlins.stages.base import Stage
+    from gremlins.stages.exec import Exec
 
 GREMLINS_PREFIX = "gremlins:"
 
@@ -33,6 +34,8 @@ class Pipeline:
     stages: list[Stage]
     default_client: Client | None = None
     base_ref: str = "current"
+    inputs: Exec | None = None
+    land: Exec | None = None
 
     def uses_loop_handoff(self) -> bool:
         first = self.stages[0] if self.stages else None
@@ -81,7 +84,26 @@ class Pipeline:
         else:
             pipeline_base_ref = "current"
 
+        from gremlins.stages.exec import Exec
+
         stages = parse_stages(cast(list[dict[str, Any]], raw.get("stages") or []))
+
+        inputs_stage: Exec | None = None
+        inputs_raw = raw.get("inputs")
+        if inputs_raw is not None:
+            if not isinstance(inputs_raw, dict):
+                raise ValueError("'inputs' must be a mapping")
+            inputs_stage = Exec.with_dict({"name": "inputs", **inputs_raw})
+
+        land_stage: Exec | None = None
+        land_raw = raw.get("land")
+        if land_raw is not None:
+            if not isinstance(land_raw, dict):
+                raise ValueError("'land' must be a mapping")
+            land_stage = Exec.with_dict({"name": "land", **land_raw})
+
+        if inputs_stage is not None:
+            stages = [inputs_stage, *stages]
 
         _fill_stage_clients(stages, default_client or PACKAGE_DEFAULT)
 
@@ -91,4 +113,6 @@ class Pipeline:
             stages=stages,
             default_client=default_client,
             base_ref=pipeline_base_ref,
+            inputs=inputs_stage,
+            land=land_stage,
         )

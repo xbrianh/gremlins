@@ -10,7 +10,17 @@ from gremlins.cli.launch import (
     _self_background_main,  # type: ignore[reportPrivateUsage]
     build_launch_parser,  # type: ignore[reportPrivateUsage]
 )
-from gremlins.stages.base import Stage
+from gremlins.stages.exec import Exec
+from gremlins.pipeline import Pipeline
+
+
+def _pipeline_with_inputs(in_map: dict[str, str] | None) -> Pipeline:
+    inputs_stage = None
+    if in_map is not None:
+        inputs_stage = Exec("inputs", {}, in_map=in_map)
+    p = MagicMock(spec=Pipeline)
+    p.inputs = inputs_stage
+    return p
 
 
 def test_wait_blocks_and_returns_exit_code():
@@ -27,7 +37,6 @@ def test_wait_blocks_and_returns_exit_code():
         print_id_only=False,
         print_id=False,
         wait=True,
-        pr=None,
         bypass=False,
         permissions_file=None,
     )
@@ -42,11 +51,13 @@ def test_wait_blocks_and_returns_exit_code():
 
 
 def test_pr_flag_forwarded_to_launch():
+    """PR passed via --pr lands in stage_inputs, which launch reads from."""
     fake_proc = MagicMock()
     fake_proc.poll.return_value = None
     fake_id = "gr-prtest1"
-    parser = build_launch_parser("some-pipeline", Stage)
+    parser = build_launch_parser("some-pipeline", _pipeline_with_inputs({"PR": "pr?"}))
     args = parser.parse_args(["--pr", "697"])
+    stage_inputs = {"pr": args.pr}
     with (
         patch(
             "gremlins.cli.launch.launch", return_value=(fake_id, fake_proc)
@@ -54,9 +65,9 @@ def test_pr_flag_forwarded_to_launch():
         patch("gremlins.cli.launch.time.sleep"),
         patch("gremlins.cli.launch.time.time", side_effect=[0, 100]),
     ):
-        _self_background_main("some-pipeline", args, {})
+        _self_background_main("some-pipeline", args, stage_inputs)
     mock_launch.assert_called_once()
-    assert mock_launch.call_args.kwargs.get("pr") == "697"
+    assert mock_launch.call_args.kwargs.get("stage_inputs", {}).get("pr") == "697"
     assert mock_launch.call_args.kwargs.get("base_ref") is None
 
 
@@ -73,7 +84,6 @@ def test_no_wait_returns_zero():
         print_id_only=False,
         print_id=False,
         wait=False,
-        pr=None,
         bypass=False,
         permissions_file=None,
     )
@@ -100,7 +110,6 @@ def test_early_death_returns_exit_code(capsys):
         print_id_only=False,
         print_id=False,
         wait=False,
-        pr=None,
         bypass=False,
         permissions_file=None,
     )
@@ -132,7 +141,6 @@ def test_self_background_main_populates_registry_before_validation(monkeypatch):
         print_id_only=False,
         print_id=False,
         wait=False,
-        pr=None,
         bypass=False,
         permissions_file=None,
     )

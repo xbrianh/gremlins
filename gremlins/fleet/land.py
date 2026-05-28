@@ -929,6 +929,90 @@ def _land_gh(
     return True
 
 
+def _load_pipeline_land_stage(state: dict[str, Any]):
+    """Load and return the pipeline's land: exec stage, or None if not present."""
+    from gremlins.pipeline import Pipeline
+    from gremlins.pipeline.discovery import resolve_pipeline_path
+
+    pipeline_path = str(state.get("pipeline_path") or "")
+    project_root = str(state.get("project_root") or "")
+    if not pipeline_path:
+        return None
+    project_dir = pathlib.Path(project_root) if project_root else paths.project_root()
+    try:
+        p = resolve_pipeline_path(pipeline_path, project_dir)
+        pipeline = Pipeline.from_yaml(p)
+        return pipeline.land
+    except Exception:
+        return None
+
+
+def _exec_land_stage(land_stage, registry, cwd: str, session_dir) -> bool:
+    """Run an exec land stage against the given registry. Returns True on success."""
+    import asyncio
+
+    from gremlins.clients.client import PACKAGE_DEFAULT
+    from gremlins.executor.state import StateData, build_state
+    from gremlins.stages.outcome import Bail
+
+    state = build_state(
+        data=StateData(),
+        client=PACKAGE_DEFAULT,
+        session_dir=session_dir,
+        cwd=cwd,
+        artifacts=registry,
+    )
+    try:
+        asyncio.run(land_stage.run(state))
+        return True
+    except Bail as b:
+        print(f"error: land: {b.reason}")
+        return False
+    except Exception as e:
+        print(f"error: land stage failed: {e}")
+        return False
+
+
+def _land_with_stage(
+    gremlin_id: str,
+    sf: str,
+    wdir: str,
+    state: dict[str, Any],
+    land_stage,
+    *,
+    force: bool = False,
+) -> bool:
+    """Run the pipeline's land: stage as the merge step, with shared teardown."""
+    project_root = _resolve_landing_cwd(state)
+    cwd = project_root if project_root and os.path.isdir(project_root) else None
+
+    workdir = state.get("workdir") or ""
+    if _inside_worktree(workdir):
+        print("you are inside this gremlin's worktree — cd elsewhere before landing")
+        return False
+
+    session_dir = resolve_session_dir(gremlin_id)
+    registry = ArtifactRegistry(
+        session_dir=session_dir,
+        cwd=pathlib.Path(cwd) if cwd else None,
+    )
+
+    _remove_worktree(wdir, state, cwd)
+
+    if not _exec_land_stage(land_stage, registry, cwd or "", session_dir):
+        return False
+
+    print("Landed.")
+    _print_cost(state)
+
+    setup_kind = state.get("setup_kind", "")
+    if setup_kind in ("worktree-detached", "worktree-detached-from-ref"):
+        _fast_forward_main(cwd)
+
+    _finalize_cleanup(gremlin_id, wdir, state, cwd, delete_branch=False, remove_state_dir=False)
+    return True
+
+
 def do_land(
     target: str, force: bool = False, mode: str | None = None, into_dir: str = ""
 ) -> bool:
@@ -970,6 +1054,9 @@ def do_land(
                 "error: --squash/--ff are not applicable to gh gremlins (merged via PR)"
             )
             return False
+        land_stage = _load_pipeline_land_stage(cast(dict[str, Any], state))
+        if land_stage is not None:
+            return _land_with_stage(gremlin_id, sf, wdir, cast(dict[str, Any], state), land_stage, force=force)
         return _land_gh(gremlin_id, wdir, state, force=force)
 
     if shape == "one_branch":

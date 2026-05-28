@@ -2,6 +2,11 @@ default_client: claude:sonnet
 
 base_ref: current
 
+inputs:
+  in:
+    INSTRUCTIONS: instructions?
+    PLAN: plan?
+
 prompts:
   code-style: gremlins:code_style.md
   verify: [gremlins:verify_fix.md, gremlins:bail_section_fix.md]

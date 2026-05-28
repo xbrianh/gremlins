@@ -2,6 +2,19 @@ default_client: claude:sonnet
 
 base_ref: main
 
+inputs:
+  in:
+    INSTRUCTIONS: instructions?
+    PLAN: plan?
+    PR: pr?
+
+land:
+  in:
+    PR_URL: pr.url
+  options:
+    cmds:
+      - gh pr merge --squash --delete-branch "$PR_URL"
+
 prompts:
   code-style: gremlins:code_style.md
   verify: [gremlins:verify_fix.md, gremlins:bail_section_fix.md]

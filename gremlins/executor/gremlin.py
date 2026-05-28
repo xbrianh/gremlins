@@ -227,6 +227,7 @@ class Gremlin:
         worktree_dir: pathlib.Path | None = None,
         client_label: str = "",
         repo: str = "",
+        stage_inputs: dict[str, Any] | None = None,
     ) -> Gremlin:
         try:
             pipeline_path = resolve_pipeline_path(pipeline_ref, project_dir)
@@ -312,6 +313,9 @@ class Gremlin:
                 session_dir=self.session_dir,
                 cwd=self.worktree_dir,
             )
+            for key, value in (stage_inputs or {}).items():
+                if value is not None and not self.registry.produced(key):
+                    self.registry.write(key, value)
             if not self.registry.produced("spec"):
                 self.registry.bind("spec", Uri.parse("file://session/spec.md"))
             if not self.registry.produced("base_sha"):

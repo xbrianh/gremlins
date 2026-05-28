@@ -9,7 +9,6 @@ import pytest
 from gremlins.cli.launch import _self_background_main, build_launch_parser
 from gremlins.executor.state import StateData
 from gremlins.permissions.policy import Policy
-from gremlins.stages.base import Stage
 
 
 def _fake_proc(poll_return=None):
@@ -28,7 +27,6 @@ def _args(**overrides):
         print_id_only=False,
         print_id=False,
         wait=False,
-        pr=None,
         bypass=False,
         permissions_file=None,
     )
@@ -53,7 +51,7 @@ def _run(args, *, fake_id="gr-perm01"):
 
 
 def test_bypass_flag_parsed_by_build_launch_parser():
-    parser = build_launch_parser("some-pipeline", Stage)
+    parser = build_launch_parser("some-pipeline")
     args = parser.parse_args(["--bypass"])
     assert args.bypass is True
 
@@ -61,7 +59,7 @@ def test_bypass_flag_parsed_by_build_launch_parser():
 def test_permissions_file_flag_parsed_by_build_launch_parser(tmp_path):
     perm_file = tmp_path / "perms.yaml"
     perm_file.write_text("blocks: {}\n")
-    parser = build_launch_parser("some-pipeline", Stage)
+    parser = build_launch_parser("some-pipeline")
     args = parser.parse_args(["--permissions-file", str(perm_file)])
     assert args.permissions_file == perm_file
 

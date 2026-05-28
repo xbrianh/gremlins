@@ -4,7 +4,7 @@ Public API:
     launch(kind, *, stage_inputs=None, plan=None, description=None,
            parent_id=None, project_root=None, base_ref="HEAD",
            pipeline_args=()) -> tuple[str, subprocess.Popen[bytes]]
-    resume(gremlin_id, *, graft=None, is_rescue=False) -> None
+    resume(gremlin_id, *, graft=None) -> None
 """
 
 from __future__ import annotations
@@ -247,10 +247,10 @@ def _resolve_inputs(
     pipeline_args: tuple[str, ...],
     spec_path: str | None,
     gremlin_id: str | None,
-    pr: str | None = None,
 ) -> _Inputs:
     from gremlins.cli.pipeline_args import launch_client_label, resolve_pipeline
 
+    pr = stage_inputs.pop("pr", None) or None
     instructions: str | None = stage_inputs.get("instructions")
     if plan is None:
         plan = stage_inputs.pop("plan", None)
@@ -502,15 +502,15 @@ def launch(
     pipeline_args: tuple[str, ...] = (),
     spec_path: str | None = None,
     gremlin_id: str | None = None,
-    pr: str | None = None,
     bypass: bool = False,
     permissions_file: str = "",
 ) -> tuple[str, subprocess.Popen[bytes]]:
-    """Set up state dir, spawn the pipeline detached, return gremlin id and process.
+    """Set up state dir, spawn the pipeline detached, return (gremlin_id, process).
 
     Worktree setup is deferred to the child process via Gremlin.initialize_with_runtime().
     Synchronous through spawn; does not wait for the pipeline to finish.
     Raises ValueError on bad arguments, RuntimeError on infrastructure failure.
+    stage_inputs may contain a 'pr' key to trigger a detached-from-ref checkout.
     """
     inputs = _resolve_inputs(
         kind,
@@ -523,7 +523,6 @@ def launch(
         pipeline_args,
         spec_path,
         gremlin_id,
-        pr,
     )
     state_dir = _state_root() / inputs.gremlin_id
     try:
