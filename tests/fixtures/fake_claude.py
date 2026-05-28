@@ -171,14 +171,19 @@ def git_commit_changes(message: str) -> bool:
 
 
 def handle_plan(prompt: str) -> int:
-    plan_file = find_path_in_prompt(prompt, r"write it to the file `([^`]+)`")
+    plan_file = (
+        find_path_in_prompt(prompt, r"write it to the file `([^`]+)`")
+        or find_path_in_prompt(prompt, r"Write the plan to `([^`]+)`")
+        or find_path_in_prompt(prompt, r"(/[^\s`]+/plan\.md)")
+    )
     if plan_file:
         pathlib.Path(plan_file).parent.mkdir(parents=True, exist_ok=True)
-        pathlib.Path(plan_file).write_text(
-            "# Test Plan\n\n## Context\nFake claude generated plan.\n\n"
-            "## Tasks\n- [ ] Touch a file\n",
-            encoding="utf-8",
-        )
+        if not pathlib.Path(plan_file).exists() or pathlib.Path(plan_file).stat().st_size == 0:
+            pathlib.Path(plan_file).write_text(
+                "# Test Plan\n\n## Context\nFake claude generated plan.\n\n"
+                "## Tasks\n- [ ] Touch a file\n",
+                encoding="utf-8",
+            )
     emit_minimal_stream()
     return 0
 
@@ -346,7 +351,10 @@ def classify_stage(prompt: str) -> str:
         return "github-address-pull-request-reviews"
     if prompt.startswith("/ghplan") or "/ghplan" in prompt[:20]:
         return "ghplan"
-    if "Create a detailed implementation plan" in prompt:
+    if (
+        "create a detailed implementation plan" in prompt.lower()
+        or "You are creating an implementation plan" in prompt
+    ):
         return "plan"
     if "A code review of the most recent implementation follows" in prompt:
         return "address"

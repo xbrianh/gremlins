@@ -146,6 +146,7 @@ def test_local_main_does_not_clobber_external_state(tmp_path, monkeypatch, sandb
     )
     client = _ReviewCreatingClient(
         fixtures={
+            "plan": MINIMAL_EVENTS,
             "implement": MINIMAL_EVENTS,
             **{lbl: MINIMAL_EVENTS for lbl in _REVIEW_LABELS},
             "address-code": MINIMAL_EVENTS,

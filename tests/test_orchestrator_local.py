@@ -39,6 +39,7 @@ def test_local_main_plan_mode(tmp_path, monkeypatch):
     )
     client = _ReviewCreatingClient(
         fixtures={
+            "plan": MINIMAL_EVENTS,
             "implement": MINIMAL_EVENTS,
             **{lbl: MINIMAL_EVENTS for lbl in _REVIEW_LABELS},
             "address-code": MINIMAL_EVENTS,
@@ -55,9 +56,10 @@ def test_local_main_plan_mode(tmp_path, monkeypatch):
     assert result == 0
 
     labels = [c.label for c in client.calls]
-    assert labels[0] == "implement"
-    assert labels[1] == "review-code"
-    assert labels[2] == "address-code"
+    assert labels[0] == "plan"
+    assert labels[1] == "implement"
+    assert labels[2] == "review-code"
+    assert labels[3] == "address-code"
 
 
 def test_local_main_resume_from_review_code_requires_git_changes(
@@ -148,6 +150,7 @@ def test_local_main_client_specifier_model(tmp_path, monkeypatch):
     )
     client = _ReviewCreatingClient(
         fixtures={
+            "plan": MINIMAL_EVENTS,
             "implement": MINIMAL_EVENTS,
             "review-code": MINIMAL_EVENTS,
             "address-code": MINIMAL_EVENTS,
@@ -162,8 +165,10 @@ def test_local_main_client_specifier_model(tmp_path, monkeypatch):
         )
     )
     assert result == 0
-    assert client.calls[0].model == "gpt-4o"  # implement stage
-    assert client.calls[1].label == "review-code"
+    assert client.calls[0].label == "plan"
+    assert client.calls[0].model == "gpt-4o"
+    assert client.calls[1].model == "gpt-4o"  # implement stage
+    assert client.calls[2].label == "review-code"
 
 
 def test_local_pipeline_stage_names(tmp_path):
@@ -171,7 +176,9 @@ def test_local_pipeline_stage_names(tmp_path):
     names = [s.name for s in pipeline.stages]
     assert names == [
         "inputs",
+        "resolve-plan-input",
         "plan",
+        "update-description",
         "implement",
         "require-impl-progress",
         "review-code",
@@ -198,6 +205,7 @@ def test_local_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir)
     )
     client = _ReviewCreatingClient(
         fixtures={
+            "plan": MINIMAL_EVENTS,
             "implement": MINIMAL_EVENTS,
             **{lbl: MINIMAL_EVENTS for lbl in _REVIEW_LABELS},
             "address-code": MINIMAL_EVENTS,
@@ -251,6 +259,7 @@ def test_local_main_env_file_vars_reach_verify(tmp_path, monkeypatch):
 
     client = _ReviewCreatingClient(
         fixtures={
+            "plan": MINIMAL_EVENTS,
             "implement": MINIMAL_EVENTS,
             **{lbl: MINIMAL_EVENTS for lbl in _REVIEW_LABELS},
             "address-code": MINIMAL_EVENTS,
@@ -313,6 +322,7 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
 
     client = _ReviewCreatingClient(
         fixtures={
+            "plan": MINIMAL_EVENTS,
             "implement": MINIMAL_EVENTS,
             "review-code": MINIMAL_EVENTS,
             "address-code": MINIMAL_EVENTS,
@@ -327,9 +337,11 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
         )
     )
     assert result == 0
-    assert client.calls[0].model == "gpt-5.4"  # implement
-    assert client.calls[1].label == "review-code"
-    assert client.calls[1].model == "gpt-5.4"  # review
+    assert client.calls[0].label == "plan"
+    assert client.calls[0].model == "gpt-5.4"
+    assert client.calls[1].model == "gpt-5.4"  # implement
+    assert client.calls[2].label == "review-code"
+    assert client.calls[2].model == "gpt-5.4"  # review
 
 
 # ---------------------------------------------------------------------------
@@ -340,8 +352,8 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
 def test_local_stage_inputs_instructions_reach_plan(
     tmp_path, monkeypatch, make_state_dir
 ):
-    """stage_inputs["instructions"] from state.json is passed to plan.Plan, and
-    takes precedence over the CLI positional argument."""
+    """stage_inputs["instructions"] from state.json is passed to the plan agent stage
+    and takes precedence over the CLI positional argument."""
     gremlin_id = "test-si-local"
     state_dir = make_state_dir(gremlin_id)
 
@@ -352,8 +364,6 @@ def test_local_stage_inputs_instructions_reach_plan(
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    # Pre-create plan.md so the implement stage can read it after the (no-op) plan stage.
-    (session_dir / "plan.md").write_text("# Plan\nDo stuff.\n")
 
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
@@ -361,37 +371,28 @@ def test_local_stage_inputs_instructions_reach_plan(
         "gremlins.executor.run.resolve_session_dir",
         lambda gremlin_id=None: session_dir,
     )
-    received: list[str] = []
 
-    from gremlins.stages import plan as _plan_mod
-
-    async def _capturing_plan_run(self, state):
-        received.append(state.instructions)
-
-    monkeypatch.setattr(_plan_mod.Plan, "run", _capturing_plan_run)
-
-    from gremlins.stages import agent as _agent_mod
-    from gremlins.stages import exec as _exec_mod
-    from gremlins.stages import loop as _loop_mod
-
-    async def _noop(self, state):  # noqa: ARG001
-        pass
-
-    monkeypatch.setattr(_agent_mod.Agent, "run", _noop)
-    monkeypatch.setattr(_exec_mod.Exec, "run", _noop)
-    monkeypatch.setattr(_loop_mod.LoopStage, "run", _noop)
+    client = _ReviewCreatingClient(
+        fixtures={
+            "plan": MINIMAL_EVENTS,
+            "implement": MINIMAL_EVENTS,
+            **{lbl: MINIMAL_EVENTS for lbl in _REVIEW_LABELS},
+            "address-code": MINIMAL_EVENTS,
+        }
+    )
 
     result = asyncio.run(
         run_pipeline(
             _local_pipeline_path(tmp_path),
             argv=["instr from cli"],
-            client=FakeClaudeClient(fixtures={}),
+            client=client,
             gremlin_id=gremlin_id,
         )
     )
 
     assert result == 0
-    assert received == ["instr from state"]
+    plan_call = next(c for c in client.calls if c.label == "plan")
+    assert "instr from state" in plan_call.prompt
 
 
 def test_startup_fails_in_non_git_dir(tmp_path, monkeypatch, capsys):
