@@ -1,6 +1,4 @@
 <!-- placeholders: base_ref, instructions, session_dir -->
-If `{session_dir}/plan.md` already has content, output a brief confirmation ("plan already written") and stop without modifying the file.
-
 You are creating an implementation plan. Write the plan to `{session_dir}/plan.md`.
 
 ## Base branch
