@@ -68,7 +68,6 @@ def parse_issue_ref(plan_source: str, repo: str) -> tuple[str | None, str | None
 
 
 VIEW_ISSUE_TIMEOUT = 30  # seconds; bounds `gh issue view` shell-out
-GET_PR_CI_STATUS_TIMEOUT = 30  # seconds; bounds `gh pr view` shell-out in poll loop
 VIEW_PR_TIMEOUT = 30  # seconds; bounds `gh pr view` shell-out
 
 
@@ -208,52 +207,6 @@ def extract_gh_url(
             return matches[-1]
 
     raise RuntimeError(f"failed to extract {label} URL from claude output events")
-
-
-def parse_ci_status_response(stdout: str) -> dict[str, Any]:
-    try:
-        data = json.loads(stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"could not parse PR CI status response: {exc}") from exc
-    return {
-        "checks": cast(list[dict[str, Any]], data.get("statusCheckRollup") or []),
-        "review_decision": data.get("reviewDecision") or "",
-        "head_sha": data.get("headRefOid") or "",
-    }
-
-
-async def get_pr_ci_status_async(pr_url: str) -> dict[str, Any]:
-    try:
-        r = await proc.run_async(
-            [
-                "gh",
-                "pr",
-                "view",
-                pr_url,
-                "--json",
-                "statusCheckRollup,reviewDecision,headRefOid",
-            ],
-            timeout=GET_PR_CI_STATUS_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
-            f"timed out after {GET_PR_CI_STATUS_TIMEOUT}s fetching CI status for "
-            f"{pr_url!r} via `gh pr view`; check GitHub CLI authentication and network"
-        ) from exc
-    if r.returncode != 0:
-        raise RuntimeError(f"could not fetch PR CI status: {r.stderr.strip()}")
-    return parse_ci_status_response(r.stdout)
-
-
-async def fetch_check_run_logs_async(details_url: str) -> str:
-    m = re.search(r"/actions/runs/(\d+)", details_url or "")
-    if not m:
-        return ""
-    run_id = m.group(1)
-    r = await proc.run_async(["gh", "run", "view", run_id, "--log-failed"], timeout=30)
-    if r.returncode == 0:
-        return r.stdout.strip()[:10000]
-    return ""
 
 
 def resolve_default_branch(project_root: str) -> str:

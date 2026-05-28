@@ -1,14 +1,7 @@
-import json
-import subprocess
 from unittest.mock import patch
 
-import pytest
-
 from gremlins.utils.github import (
-    GET_PR_CI_STATUS_TIMEOUT,
     fetch_issue,
-    get_pr_ci_status_async,
-    parse_ci_status_response,
 )
 
 PR_URL = "https://github.com/owner/repo/pull/42"
@@ -49,94 +42,3 @@ def test_fetch_issue_explicit_repo():
 def test_fetch_issue_view_error_returns_none():
     with patch("gremlins.utils.github.view_issue", side_effect=RuntimeError("fail")):
         assert fetch_issue("owner/repo#42") is None
-
-
-def test_get_pr_ci_status_async_timeout_raises_runtime_error():
-    import asyncio
-
-    async def _run():
-        with patch(
-            "gremlins.utils.github.proc.run_async",
-            side_effect=subprocess.TimeoutExpired(
-                cmd="gh", timeout=GET_PR_CI_STATUS_TIMEOUT
-            ),
-        ):
-            await get_pr_ci_status_async(PR_URL)
-
-    with pytest.raises(RuntimeError) as exc_info:
-        asyncio.run(_run())
-
-    msg = str(exc_info.value)
-    assert str(GET_PR_CI_STATUS_TIMEOUT) in msg
-    assert PR_URL in msg
-
-
-def test_parse_ci_status_returns_full_rollup():
-    """All check-runs in statusCheckRollup are returned, regardless of required status."""
-    rollup = [
-        {
-            "__typename": "CheckRun",
-            "name": "required-check",
-            "status": "COMPLETED",
-            "conclusion": "SUCCESS",
-        },
-        {
-            "__typename": "CheckRun",
-            "name": "optional-check",
-            "status": "COMPLETED",
-            "conclusion": "FAILURE",
-        },
-    ]
-    result = parse_ci_status_response(
-        json.dumps({"statusCheckRollup": rollup, "reviewDecision": ""})
-    )
-
-    assert len(result["checks"]) == 2
-    names = {c["name"] for c in result["checks"]}
-    assert names == {"required-check", "optional-check"}
-
-
-def test_parse_ci_status_failing_non_required_check_included():
-    """A failing non-required check is included so ci-gate enters its fix loop."""
-    rollup = [
-        {
-            "__typename": "CheckRun",
-            "name": "check",
-            "status": "COMPLETED",
-            "conclusion": "FAILURE",
-        },
-    ]
-    result = parse_ci_status_response(
-        json.dumps({"statusCheckRollup": rollup, "reviewDecision": ""})
-    )
-
-    assert len(result["checks"]) == 1
-    assert result["checks"][0]["conclusion"] == "FAILURE"
-
-
-def test_parse_ci_status_empty_rollup_returns_empty_checks():
-    """PR with no check-runs returns an empty checks list."""
-    result = parse_ci_status_response(
-        json.dumps({"statusCheckRollup": [], "reviewDecision": ""})
-    )
-    assert result["checks"] == []
-
-
-def test_parse_ci_status_returns_review_decision_and_head_sha():
-    rollup = [
-        {
-            "__typename": "CheckRun",
-            "name": "ci",
-            "status": "COMPLETED",
-            "conclusion": "SUCCESS",
-        }
-    ]
-    payload = {
-        "statusCheckRollup": rollup,
-        "reviewDecision": "APPROVED",
-        "headRefOid": "abc123",
-    }
-    result = parse_ci_status_response(json.dumps(payload))
-
-    assert result["review_decision"] == "APPROVED"
-    assert result["head_sha"] == "abc123"

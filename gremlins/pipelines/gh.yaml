@@ -22,4 +22,4 @@ stages:
   - { name: github-review-pull-request,                 type: agent, in: {pr: pr}, prompt: [code-style, gremlins:github_review_pull_request.md] }
   - { type: gremlins:github-wait-copilot,                in: {pr: pr} }
   - { name: github-address-pull-request-reviews,        type: agent, in: {pr: pr}, prompt: [code-style, gremlins:github_address_pull_request_reviews.md, gremlins:bail_section.md] }
-  - { name: ci-gate,    type: github-wait-ci,           in: {pr: pr}, prompt: [gremlins:ci_fix.md, gremlins:bail_section_fix.md] }
+  - { name: ci-gate,    type: gremlins:github-wait-ci,  in: {pr: pr}, prompt: [gremlins:ci_fix.md, gremlins:bail_section_fix.md] }

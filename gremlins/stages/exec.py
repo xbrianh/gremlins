@@ -21,6 +21,7 @@ _CMD_SUB = re.compile(r"\{(\w+)\}")
 _READ_SUB = re.compile(r"\{read:([-\w]+)\}")
 _FRAMEWORK_KEYS = frozenset(["name", "model", "session_dir", "repo", "cwd", "base_ref"])
 _STATUS_KEY = "status"
+_BAIL_KEY = "bail"
 
 
 def _sub_reads(s: str, artifacts: ArtifactRegistry) -> str:
@@ -102,6 +103,7 @@ class Exec(Stage):
             if c.strip()
         ]
         needs_fix = False
+        bail_triggered = False
         if cmds:
             result = await _proc.run_shell_async(
                 " && ".join(cmds),
@@ -113,13 +115,17 @@ class Exec(Stage):
                 result.stdout + result.stderr or "(no output)\n", encoding="utf-8"
             )
             if result.returncode != 0:
-                if _STATUS_KEY in self.out_map:
+                if result.returncode == 2 and _BAIL_KEY in self.out_map:
+                    bail_triggered = True
+                elif _STATUS_KEY in self.out_map:
                     needs_fix = True
                 else:
                     raise Bail(f"exec {self.name}: exited {result.returncode}")
 
         for raw_key, raw_uri_str in self.out_map.items():
             key = raw_key.format_map(_pt)
+            if key == _BAIL_KEY and not bail_triggered:
+                continue
             if key == _STATUS_KEY:
                 state.artifacts.write(_STATUS_KEY, "needs_fix" if needs_fix else "pass")
                 continue

@@ -36,7 +36,7 @@ Before shelling out to `subprocess`, `git`, or `gh`, check `gremlins/utils/`:
 
 - `utils/proc.py` — `run`, `run_or_raise`, `run_async`, etc. Use instead of `subprocess.run`.
 - `utils/git.py` — `head_sha`, `current_branch`, worktree helpers, etc. Use instead of shelling `git` directly.
-- `utils/github.py` — `view_pr`, `view_issue`, `get_pr_ci_status_async`, etc. Use instead of ad-hoc `gh pr view` / `gh api` calls.
+- `utils/github.py` — `view_pr`, `view_issue`, `fetch_issue`, etc. Use instead of ad-hoc `gh pr view` / `gh api` calls.
 
 If a helper is missing, add it to `utils/` rather than duplicating subprocess plumbing in the consumer.
 

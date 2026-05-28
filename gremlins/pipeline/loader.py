@@ -5,7 +5,6 @@ from typing import Any
 from gremlins.stages.agent import Agent
 from gremlins.stages.base import Stage
 from gremlins.stages.exec import Exec
-from gremlins.stages.github_wait_ci import GitHubWaitCI
 from gremlins.stages.handoff import Handoff
 from gremlins.stages.loop import LoopStage
 from gremlins.stages.parallel import ParallelStage
@@ -15,7 +14,6 @@ from gremlins.stages.sequence import SequenceStage
 STAGE_TYPES: dict[str, type[Stage]] = {
     "agent": Agent,
     "plan": Plan,
-    "github-wait-ci": GitHubWaitCI,
     "handoff": Handoff,
     "loop": LoopStage,
     "parallel": ParallelStage,
@@ -69,4 +67,6 @@ def parse_stage(d: dict[str, Any], depth: int = 0) -> Stage:
         raise ValueError(f"stage {name!r}: unknown type {stage_type!r}")
     stage = STAGE_TYPES[stage_type].with_dict(d, depth=depth)
     stage.raw_dict = d
+    if d.get("needs_gh"):
+        stage.needs_gh = True
     return stage
