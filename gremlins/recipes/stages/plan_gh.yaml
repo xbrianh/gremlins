@@ -1,0 +1,13 @@
+required-prompt: true
+
+stages:
+  - name: plan
+    type: agent
+    skip_if_exists: plan
+    out:
+      plan: "file://session/plan.md"
+    prompt:
+      - "{{prompt}}"
+    options:
+      capture_events: true
+      idle_timeout: 600
