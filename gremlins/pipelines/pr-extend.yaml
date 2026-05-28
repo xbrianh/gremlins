@@ -10,7 +10,7 @@ prompts:
   verify: [gremlins:verify_fix.md, gremlins:bail_section_fix.md]
 
 stages:
-  - { type: plan,                               prompt: [code-style, gremlins:plan_gh.md] }
+  - { type: gremlins:plan-gh,                    prompt: [code-style, gremlins:plan_gh.md] }
   - { type: gremlins:implement,                 prompt: [code-style, gremlins:implement_gh.md] }
   - name: normalize
     type: exec

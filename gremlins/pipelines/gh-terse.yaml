@@ -27,7 +27,7 @@ stage-definitions:
         - "ruff format . && ruff check --fix . && git add -A && (git diff --cached --quiet || git commit -m 'normalize')"
 
 stages:
-  - { type: plan,      prompt: [code-style, gremlins:plan_gh.md] }
+  - { type: gremlins:plan-gh, prompt: [code-style, gremlins:plan_gh.md] }
   - { type: gremlins:implement, prompt: [code-style, gremlins:implement_gh.md] }
   - name: normalize
     type: normalize

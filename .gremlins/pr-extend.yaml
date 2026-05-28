@@ -32,7 +32,7 @@ prompts:
 # PRs only; fork PRs would need push access to the fork.
 
 stages:
-  - { type: plan, prompt: [code-style, terse, gremlins:plan_gh.md] }
+  - { type: gremlins:plan-gh, prompt: [code-style, terse, gremlins:plan_gh.md] }
   - { type: gremlins:implement, prompt: [code-style, terse, implement_pr_extension.md] }
   - { type: verify,             options: { cmds: ["make check", "make test"] }, prompt: verify }
   - { name: push, type: gremlins:github-push-to-pr-branch }

@@ -12,7 +12,7 @@ prompts:
   verify: [gremlins:verify_fix.md, gremlins:bail_section_fix.md]
 
 stages:
-  - { type: plan,                prompt: [code-style, gremlins:plan.md] }
+  - { type: gremlins:plan,       prompt: [code-style, gremlins:plan.md] }
   - { type: gremlins:implement,  prompt: [code-style, gremlins:implement_local.md] }
   - { type: review-code,  prompt: [code-style, gremlins:review/detail.md] }
   - { name: address-code, type: agent, prompt: [code-style, gremlins:address.md, gremlins:bail_section.md], in: {text: review-code} }
