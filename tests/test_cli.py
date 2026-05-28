@@ -262,28 +262,19 @@ def test_launch_unknown_kind_exits_nonzero_with_error(monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 
 
-class _FakePlanStage:
-    def __init__(self, entry, model, *, instructions: str) -> None:
-        pass
-
-    @classmethod
-    def orchestration_args(cls):
-        from gremlins.stages.base import StageInput
-
-        return [
-            StageInput(
-                "instructions", str, required=False, default="", help="instructions"
-            )
-        ]
-
-
-def _make_fake_pipeline(stage_type: str = "plan"):
+def _make_fake_pipeline():
     from gremlins.pipeline import Pipeline
+    from gremlins.stages.exec import Exec
     from gremlins.stages.plan import Plan
 
+    inputs_stage = Exec.with_dict({"name": "inputs", "in": {"INSTRUCTIONS": "instructions?"}})
     stage = Plan("plan", [], {})
-    stage.type = stage_type
-    return Pipeline(name="local", path=pathlib.Path("/fake/local.yaml"), stages=[stage])
+    return Pipeline(
+        name="local",
+        path=pathlib.Path("/fake/local.yaml"),
+        stages=[inputs_stage, stage],
+        inputs=inputs_stage,
+    )
 
 
 def test_launch_unified_dispatch_calls_launch(monkeypatch):
@@ -294,7 +285,6 @@ def test_launch_unified_dispatch_calls_launch(monkeypatch):
     monkeypatch.setattr(
         "gremlins.cli.launch.Pipeline.from_yaml", lambda path: _make_fake_pipeline()
     )
-    monkeypatch.setattr("gremlins.cli.launch.STAGE_TYPES", {"plan": _FakePlanStage})
     launched = []
     fake_proc = MagicMock()
     fake_proc.poll.return_value = None
@@ -390,7 +380,6 @@ def test_launch_unified_dispatch_help_for_resolved_pipeline(monkeypatch, capsys)
     monkeypatch.setattr(
         "gremlins.cli.launch.Pipeline.from_yaml", lambda path: _make_fake_pipeline()
     )
-    monkeypatch.setattr("gremlins.cli.launch.STAGE_TYPES", {"plan": _FakePlanStage})
     rc = main(["launch", "local", "--help"])
     assert rc == 0
     out = capsys.readouterr().out

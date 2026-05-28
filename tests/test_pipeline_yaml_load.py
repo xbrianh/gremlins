@@ -15,6 +15,7 @@ _BUNDLED_LOCAL = (
 )
 
 _LOCAL_STAGE_NAMES = [
+    "inputs",
     "plan",
     "implement",
     "require-impl-progress",

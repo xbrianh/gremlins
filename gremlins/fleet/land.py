@@ -947,7 +947,12 @@ def _load_pipeline_land_stage(state: dict[str, Any]):
         return None
 
 
-def _exec_land_stage(land_stage, registry, cwd: str, session_dir) -> bool:
+def _exec_land_stage(
+    land_stage: Any,
+    registry: ArtifactRegistry,
+    cwd: str,
+    session_dir: pathlib.Path,
+) -> bool:
     """Run an exec land stage against the given registry. Returns True on success."""
     import asyncio
 
@@ -975,12 +980,9 @@ def _exec_land_stage(land_stage, registry, cwd: str, session_dir) -> bool:
 
 def _land_with_stage(
     gremlin_id: str,
-    sf: str,
     wdir: str,
     state: dict[str, Any],
-    land_stage,
-    *,
-    force: bool = False,
+    land_stage: Any,
 ) -> bool:
     """Run the pipeline's land: stage as the merge step, with shared teardown."""
     project_root = _resolve_landing_cwd(state)
@@ -1056,7 +1058,7 @@ def do_land(
             return False
         land_stage = _load_pipeline_land_stage(cast(dict[str, Any], state))
         if land_stage is not None:
-            return _land_with_stage(gremlin_id, sf, wdir, cast(dict[str, Any], state), land_stage, force=force)
+            return _land_with_stage(gremlin_id, wdir, cast(dict[str, Any], state), land_stage)
         return _land_gh(gremlin_id, wdir, state, force=force)
 
     if shape == "one_branch":

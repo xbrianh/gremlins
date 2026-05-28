@@ -49,14 +49,6 @@ _LAUNCH_BRIEF = "usage: gremlins launch <name> [opts]\nLaunch a background greml
 _LOG_TAIL_BYTES = 4096
 
 
-def _parse_bool(v: str) -> bool:
-    if v.lower() in ("1", "true", "yes"):
-        return True
-    if v.lower() in ("0", "false", "no"):
-        return False
-    raise argparse.ArgumentTypeError(f"invalid bool value: {v!r}")
-
-
 def build_launch_parser(
     pipeline_name: str, pipeline: Pipeline | None = None
 ) -> argparse.ArgumentParser:
@@ -97,7 +89,7 @@ def build_launch_parser(
         help="Path to a permissions YAML file to load instead of the project default.",
     )
     if pipeline is not None and pipeline.inputs is not None:
-        for var, path in pipeline.inputs.in_map.items():
+        for path in pipeline.inputs.in_map.values():
             key, sep, default = path.partition("?")
             registry_key = key.split(".")[0]
             flag = "--" + registry_key.replace("_", "-")
