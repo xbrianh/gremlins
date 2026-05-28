@@ -104,6 +104,8 @@ class Exec(Stage):
         ]
         needs_fix = False
         bail_triggered = False
+        shell_output = ""
+        shell_rc = 0
         if cmds:
             result = await _proc.run_shell_async(
                 " && ".join(cmds),
@@ -114,6 +116,8 @@ class Exec(Stage):
             log_path.write_text(
                 result.stdout + result.stderr or "(no output)\n", encoding="utf-8"
             )
+            shell_output = (result.stdout + result.stderr).strip()
+            shell_rc = result.returncode
             if result.returncode != 0:
                 if result.returncode == 2 and _BAIL_KEY in self.out_map:
                     bail_triggered = True
@@ -139,6 +143,14 @@ class Exec(Stage):
             else:
                 uri = Uri.parse(uri_str)
                 state.artifacts.bind(key, uri)
-                state.artifacts.resolver(uri.scheme).verify_produced(uri)
+                try:
+                    state.artifacts.resolver(uri.scheme).verify_produced(uri)
+                except FileNotFoundError:
+                    if key == _BAIL_KEY:
+                        msg = f"exec {self.name}: exited {shell_rc}"
+                        if shell_output:
+                            msg += f"\n{shell_output}"
+                        raise Bail(msg) from None
+                    raise
 
         return Done()
