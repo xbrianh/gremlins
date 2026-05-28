@@ -22,9 +22,11 @@ class Agent(Stage):
     out: registry_key -> uri_string (bound before run, verified after)
 
     Per-stage substitution vars available in prompts and out: URIs:
-      {name}        — this stage's name
-      {model}       — effective model (state.stage_model or state.client.model)
-      {session_dir} — absolute path to the session directory
+      {name}         — this stage's name
+      {model}        — effective model (state.stage_model or state.client.model)
+      {session_dir}  — absolute path to the session directory
+      {instructions} — launch-time instructions string
+      {base_ref}     — base branch name from state
 
     Unknown {keys} pass through unchanged (so code examples with braces work),
     but this also means typos like {plann} produce no error.

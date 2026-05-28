@@ -23,7 +23,7 @@ sequencing logic of their own.
 
 Bundled stage recipes live under `gremlins/recipes/stages/`. Each recipe is a multi-primitive YAML pipeline fragment that expands in-place wherever its `gremlins:<name>` type is referenced.
 
-- `plan` — local planning: `resolve-plan-input` → `plan` (agent) → `update-description`. Out: `plan_file: file://session/plan.md`.
+- `plan` — local planning: `resolve-plan-input` → `plan` (agent) → `update-description`. Out: `plan: file://session/plan.md`.
 - `plan_gh` — GitHub planning: `resolve-plan-input` → `plan` (agent) → `publish-as-issue` → `update-description`. Out: `plan: gh://issue/{read:plan-issue-number}`.
 - `implement` — implementation + progress guard.
 - `verify` — run commands, fix loop, bail on exhaustion.

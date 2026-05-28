@@ -38,7 +38,7 @@ stages:
           STATE_JSON="{session_dir}/../state.json"
           if ! [ -f "$STATE_JSON" ]; then exit 0; fi
           if jq -e '.description_explicit' "$STATE_JSON" >/dev/null 2>&1; then exit 0; fi
-          title=$(head -1 "{session_dir}/plan.md" | sed 's/^#\+ *//' | cut -c1-60)
+          title=$(awk '/^# /{sub(/^#+ */,""); print; exit}' "{session_dir}/plan.md" | cut -c1-60)
           [ -z "$title" ] && exit 0
           tmp=$(mktemp) && jq --arg t "$title" '.description = $t' \
             "$STATE_JSON" > "$tmp" && mv "$tmp" "$STATE_JSON"
