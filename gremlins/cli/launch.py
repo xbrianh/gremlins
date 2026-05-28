@@ -94,7 +94,9 @@ def build_launch_parser(
             key, sep, default = path.partition("?")
             registry_key = key.split(".")[0]
             if registry_key in seen:
-                raise ValueError(f"pipeline inputs produce duplicate flag --{registry_key.replace('_', '-')}")
+                raise ValueError(
+                    f"pipeline inputs produce duplicate flag --{registry_key.replace('_', '-')}"
+                )
             seen.add(registry_key)
             flag = "--" + registry_key.replace("_", "-")
             if flag.lstrip("-") in _INFRA_FLAG_NAMES:

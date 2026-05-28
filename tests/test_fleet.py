@@ -1453,8 +1453,9 @@ def test_cli_fleet_json_drill_in(sandbox, tmp_path, monkeypatch, capsys):
 
 
 def test_exec_land_stage_success(tmp_path, monkeypatch):
-    import gremlins.executor.state as _state_mod
     from unittest.mock import MagicMock
+
+    import gremlins.executor.state as _state_mod
 
     class _OkStage:
         async def run(self, state):
@@ -1466,9 +1467,10 @@ def test_exec_land_stage_success(tmp_path, monkeypatch):
 
 
 def test_exec_land_stage_bail(tmp_path, monkeypatch, capsys):
+    from unittest.mock import MagicMock
+
     import gremlins.executor.state as _state_mod
     from gremlins.stages.outcome import Bail
-    from unittest.mock import MagicMock
 
     class _BailStage:
         async def run(self, state):
