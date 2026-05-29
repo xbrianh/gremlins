@@ -524,7 +524,16 @@ class State:
     worktree_parent: pathlib.Path | None = None
 
     FRAMEWORK_KEYS: ClassVar[frozenset[str]] = frozenset(
-        {"name", "model", "session_dir", "instructions", "repo", "cwd", "base_ref", "loop_iteration"}
+        {
+            "name",
+            "model",
+            "session_dir",
+            "instructions",
+            "repo",
+            "cwd",
+            "base_ref",
+            "loop_iteration",
+        }
     )
 
     def framework_subs(self, stage: Stage) -> dict[str, str]:

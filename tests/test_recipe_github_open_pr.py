@@ -42,8 +42,14 @@ def test_branch_name_unchanged_on_first_iteration(tmp_path: pathlib.Path) -> Non
 
 
 def test_branch_name_appends_iter2_on_second_iteration(tmp_path: pathlib.Path) -> None:
-    assert _run_branch_cmd(tmp_path, loop_iteration=2, base="fix-thing") == "fix-thing-iter2"
+    assert (
+        _run_branch_cmd(tmp_path, loop_iteration=2, base="fix-thing")
+        == "fix-thing-iter2"
+    )
 
 
 def test_branch_name_appends_iterN_on_later_iterations(tmp_path: pathlib.Path) -> None:
-    assert _run_branch_cmd(tmp_path, loop_iteration=5, base="fix-thing") == "fix-thing-iter5"
+    assert (
+        _run_branch_cmd(tmp_path, loop_iteration=5, base="fix-thing")
+        == "fix-thing-iter5"
+    )
