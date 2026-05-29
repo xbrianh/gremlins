@@ -31,6 +31,13 @@ def test_key_present_with_default_returns_value_not_default() -> None:
     assert _resolve_placeholder("options.max_iterations | default(40)", ctx) == "10"
 
 
+def test_key_present_with_int_returns_str() -> None:
+    assert (
+        _resolve_placeholder("options.interval | default(20)", {"options": {"interval": 5}})
+        == "5"
+    )
+
+
 def test_key_absent_no_default_raises() -> None:
     with pytest.raises(ValueError, match="not found in context"):
         _resolve_placeholder("options.missing", {"options": {}})

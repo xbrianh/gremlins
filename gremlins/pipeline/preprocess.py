@@ -234,17 +234,18 @@ def _resolve_placeholder(key: str, ctx: dict[str, Any]) -> Any:
     dotted_key, _, raw_default = key.partition(" | default(")
     has_default = bool(raw_default)
     default_val = _parse_default(raw_default) if has_default else None
+    dotted_key = dotted_key.strip()
 
     val: Any = ctx
-    for part in dotted_key.strip().split("."):
+    for part in dotted_key.split("."):
         if not isinstance(val, dict) or part not in val:
             if has_default:
                 return default_val
             raise ValueError(
-                f"placeholder {{{{{dotted_key.strip()}}}}}: key {part!r} not found in context"
+                f"placeholder {{{{{dotted_key}}}}}: key {part!r} not found in context"
             )
         val = cast(dict[str, Any], val)[part]
-    return val
+    return val if isinstance(val, (dict, list)) else str(val)
 
 
 def _substitute_recipe(node: Any, ctx: dict[str, Any]) -> Any:
