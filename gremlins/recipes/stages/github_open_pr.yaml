@@ -2,7 +2,7 @@ stages:
   - name: resolve-pr-base
     type: exec
     in:
-      prev_branch: pr.branch?
+      prev_branch: pr-branch?
     out:
       base_ref_to_open_pr: "file://session/pr-base-ref.txt"
     options:
@@ -27,6 +27,8 @@ stages:
       base_ref_to_open_pr: base_ref_to_open_pr
     out:
       pr-number: "file://session/pr-number.txt"
+      pr-url:    "file://session/pr-url.txt"
+      pr-branch: "file://session/pr-branch.txt"
       pr: "gh://pr/{read:pr-number}"
     options:
       cmds:
@@ -36,4 +38,6 @@ stages:
           BRANCH="${BASE}${SUFFIX}" &&
           git push origin "HEAD:refs/heads/$BRANCH" &&
           URL="$(gh pr create --head "$BRANCH" --base "$base_ref_to_open_pr" --title "$(cat "{session_dir}/pr-title.txt")" --body-file "{session_dir}/pr-body.md")" &&
-          printf "%s" "${URL##*/}" > "{session_dir}/pr-number.txt"
+          printf "%s" "${URL##*/}" > "{session_dir}/pr-number.txt" &&
+          printf "%s" "$URL" > "{session_dir}/pr-url.txt" &&
+          printf "%s" "$BRANCH" > "{session_dir}/pr-branch.txt"

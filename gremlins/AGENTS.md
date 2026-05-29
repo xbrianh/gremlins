@@ -13,7 +13,6 @@ review / address pipelines, the fleet manager
 - `runner.py` — `run_stages` sequencer (with `resume_from`) + SIGINT/SIGTERM handlers that reap `claude -p` children.
 - `state.py` — session-dir resolution, `set_stage` / `write_bail_file` / `patch_state` / `check_bail`.
 - `utils/git.py` — `in_git_repo`, `head_sha`, branch / worktree helpers.
-- `utils/github.py` — `gh` CLI wrappers and stream-json URL extractors used by the gh orchestrator.
 - `fleet/` — fleet manager package: status listing + `stop` / `land` / `close` / `rm` / `log` ops. See [`fleet/AGENTS.md`](fleet/AGENTS.md) for the per-module breakdown.
 - `clients/protocol.py` — `ClaudeClient` Protocol + `CompletedRun` dataclass.
 - `clients/stream.py` — `stream_events` + `_emit_event` (stream-json parser and stderr renderer).
@@ -36,9 +35,8 @@ Before shelling out to `subprocess`, `git`, or `gh`, check `gremlins/utils/`:
 
 - `utils/proc.py` — `run`, `run_or_raise`, `run_async`, etc. Use instead of `subprocess.run`.
 - `utils/git.py` — `head_sha`, `current_branch`, worktree helpers, etc. Use instead of shelling `git` directly.
-- `utils/github.py` — `view_pr`, `view_issue`, `fetch_issue`, etc. Use instead of ad-hoc `gh pr view` / `gh api` calls.
 
-If a helper is missing, add it to `utils/` rather than duplicating subprocess plumbing in the consumer.
+GitHub calls belong in exec/shell stages (YAML `cmds:`), not in Python. Add reusable GitHub shell interactions to `gremlins/recipes/stages/` rather than Python. For non-GitHub helpers, add to `utils/` rather than duplicating subprocess plumbing in the consumer.
 
 ### No module-level globals or registration side-effects
 

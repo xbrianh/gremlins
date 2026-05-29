@@ -2,6 +2,8 @@ default_client: claude:sonnet
 
 base_ref: main
 
+github_integration: true
+
 inputs:
   in:
     INSTRUCTIONS: instructions?
@@ -10,7 +12,7 @@ inputs:
 
 land:
   in:
-    PR_URL: pr.url
+    PR_URL: pr-url
   options:
     cmds:
       - gh pr merge --squash --delete-branch "$PR_URL"
@@ -35,4 +37,4 @@ stages:
       normalize-commits: git://range
   - { type: verify,    options: { cmds: ["make check && make test"] }, prompt: verify }
   - { name: open-pr,   type: gremlins:github-open-pr }
-  - { name: ci-gate,   type: gremlins:github-wait-ci,  in: {pr: pr}, prompt: [gremlins:ci_fix.md, gremlins:bail_section_fix.md] }
+  - { name: ci-gate,   type: gremlins:github-wait-ci,  prompt: [gremlins:ci_fix.md, gremlins:bail_section_fix.md] }

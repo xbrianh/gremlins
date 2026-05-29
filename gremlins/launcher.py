@@ -14,6 +14,7 @@ import datetime
 import json
 import os
 import pathlib
+import re
 import secrets
 import shutil
 import subprocess
@@ -29,7 +30,6 @@ from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.discovery import list_pipelines, resolve_pipeline_path
 from gremlins.utils import git as _git_mod
 from gremlins.utils import proc
-from gremlins.utils.github import fetch_issue, parse_issue_ref
 from gremlins.utils.spawn_logged_process import (
     spawn_logged_process as _spawn_logged_process,
 )
@@ -75,13 +75,8 @@ def _resolve_description_and_slug(
         return "", False, slug
 
     if plan:
-        # Non-file plan arg (issue ref); try to fetch the issue title for a
-        # meaningful slug. Best-effort: fall back to slug-from-ref on any error.
+        # Non-file plan arg (issue ref); derive slug from the ref string directly.
         title = issue_title
-        if not title:
-            data = fetch_issue(plan)
-            if data:
-                title = str(data.get("title") or "")
         if title:
             slug = slugify(title) or "gremlin"
             return title[:60], False, slug
@@ -153,8 +148,10 @@ def _validate_plan_args(
     if plan and not os.path.isfile(plan):
         if os.sep in plan or plan.endswith(".md"):
             raise ValueError(f"--plan: file not found: {plan}")
-        _, _issue_ref = parse_issue_ref(plan, "")
-        if _issue_ref is None:
+        _is_issue_ref = re.match(r"^#([0-9]+)$", plan) or re.match(
+            r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+$", plan
+        )
+        if not _is_issue_ref:
             raise ValueError(
                 f"--plan: not a file or recognized issue ref (use #N or owner/repo#N): {plan}"
             )
@@ -219,7 +216,7 @@ def _resolve_base_ref(
     )
     effective_base_ref = base_ref if base_ref is not None else _pipeline_base_ref
     if _git_mod.in_git_repo(cwd=project_root):
-        if loaded_pipeline is not None and loaded_pipeline.needs_gh():
+        if loaded_pipeline is not None and loaded_pipeline.github_integration:
             _branch = effective_base_ref.removeprefix("origin/")
             if _branch and _branch not in ("current", "HEAD"):
                 try:
@@ -233,6 +230,17 @@ def _resolve_base_ref(
         except _git_mod.GitError as exc:
             raise RuntimeError(f"--base-ref: {exc}") from exc
     return effective_base_ref, ""
+
+
+def _parse_pr_num(pr_arg: str) -> str:
+    """Extract a PR number string from a --pr arg (number, #N, or .../pull/N URL)."""
+    m = re.search(r"/pull/(\d+)(?:[/#?]|$)", pr_arg)
+    if m:
+        return m.group(1)
+    stripped = pr_arg.strip().lstrip("#")
+    if re.fullmatch(r"\d+", stripped):
+        return stripped
+    raise ValueError(f"cannot parse PR number from arg: {pr_arg!r}")
 
 
 def _resolve_inputs(
@@ -285,27 +293,19 @@ def _resolve_inputs(
 
     if (
         loaded_pipeline is not None
-        and loaded_pipeline.needs_gh()
+        and loaded_pipeline.github_integration
         and shutil.which("gh") is None
     ):
         raise RuntimeError("gh CLI not found on PATH (required for gh pipeline)")
 
     if pr is not None:
-        from gremlins.utils.github import view_pr
         from gremlins.utils.pr import pr_arg_to_ref
 
-        pr_ref = pr_arg_to_ref(pr)
+        pr_ref = pr_arg_to_ref(pr.strip().lstrip("#"))
         base_ref_name = ""
         base_ref_sha = pr_ref
         setup_kind = "worktree-detached-from-ref"
-        pr_data = view_pr(pr, project_root=project_root)
-        pr_url = pr_data.get("url") or ""
-        pr_num_raw = pr_data.get("number")
-        if not pr_url or pr_num_raw is None:
-            raise RuntimeError(
-                f"gh pr view returned empty url or number for {pr!r}: {pr_data!r}"
-            )
-        pr_num = str(pr_num_raw)
+        pr_num = _parse_pr_num(pr)
     else:
         base_ref_name, base_ref_sha = _resolve_base_ref(
             base_ref, project_root, loaded_pipeline
@@ -623,7 +623,7 @@ def _load_pipeline_and_check_gh(project_root: str, pipeline_path: str) -> Any:
 
     if (
         pipeline_data is not None
-        and pipeline_data.needs_gh()
+        and pipeline_data.github_integration
         and shutil.which("gh") is None
     ):
         raise RuntimeError("gh CLI not found on PATH (required for gh pipeline)")

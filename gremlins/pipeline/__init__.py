@@ -23,10 +23,6 @@ def _fill_stage_clients(stages: list[Stage], default: Client) -> None:
             _fill_stage_clients(body, default)
 
 
-def _stages_need_gh(stages: list[Stage]) -> bool:
-    return any(s.needs_gh or _stages_need_gh(getattr(s, "body", [])) for s in stages)
-
-
 @dataclasses.dataclass
 class Pipeline:
     name: str
@@ -36,6 +32,7 @@ class Pipeline:
     base_ref: str = "current"
     inputs: Exec | None = None
     land: Exec | None = None
+    github_integration: bool = False
 
     def uses_loop_handoff(self) -> bool:
         first = self.stages[0] if self.stages else None
@@ -45,11 +42,8 @@ class Pipeline:
             and any(b.name == "handoff" for b in (first.body or []))
         )
 
-    def needs_gh(self) -> bool:
-        return _stages_need_gh(self.stages)
-
     def setup_kind(self) -> str:
-        if self.needs_gh() or self.uses_loop_handoff():
+        if self.github_integration or self.uses_loop_handoff():
             return "worktree-detached"
         return "worktree-branch"
 
@@ -84,6 +78,8 @@ class Pipeline:
         else:
             pipeline_base_ref = "current"
 
+        github_integration = bool(raw.get("github_integration", False))
+
         from gremlins.stages.exec import Exec
 
         stages = parse_stages(cast(list[dict[str, Any]], raw.get("stages") or []))
@@ -115,4 +111,5 @@ class Pipeline:
             base_ref=pipeline_base_ref,
             inputs=inputs_stage,
             land=land_stage,
+            github_integration=github_integration,
         )

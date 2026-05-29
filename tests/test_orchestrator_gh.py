@@ -22,7 +22,6 @@ from gremlins.executor.run import _parse_args as _parse_gh_args
 from gremlins.executor.run import run_pipeline
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
-from gremlins.utils.github import parse_issue_ref as _parse_issue_ref
 
 
 def _init_git_repo(path: pathlib.Path) -> None:
@@ -154,7 +153,7 @@ def _patch_common(
     monkeypatch.setattr(
         "gremlins.executor.run._install_signal_handlers", lambda c, gid: None
     )
-    monkeypatch.setattr("gremlins.executor.run.get_repo", lambda: "owner/repo")
+    monkeypatch.setattr("gremlins.executor.run._get_repo", lambda: "owner/repo")
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -181,6 +180,9 @@ def _patch_common(
     registry_data: dict = {
         "spec": "file://session/spec.md",
         "plan": "file://session/plan.md",
+        "pr-url": "file://session/pr-url.txt",
+        "pr-branch": "file://session/pr-branch.txt",
+        "pr-number": "file://session/pr-number.txt",
     }
     if base_ref_sha:
         registry_data["base_sha"] = f"git://commit/{base_ref_sha}"
@@ -191,7 +193,11 @@ def _patch_common(
     (session_dir / "plan.md").write_text("", encoding="utf-8")
     (session_dir / "pr-title.txt").write_text("Fake PR Title\n")
     (session_dir / "pr-body.md").write_text("Fake PR body.\n")
+    (session_dir / "pr-url.txt").write_text(
+        f"https://github.com/owner/repo/pull/{fake_pr_number}\n"
+    )
     (session_dir / "pr-branch.txt").write_text("issue-42-fake-slug\n")
+    (session_dir / "pr-number.txt").write_text(f"{fake_pr_number}\n")
     monkeypatch.setattr(
         "gremlins.executor.run.resolve_state_file", lambda gremlin_id=None: state_file
     )
@@ -211,6 +217,15 @@ def _patch_common(
                 p = pathlib.Path(m.group(1))
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(f"{fake_pr_number}\n")
+                # Also write pr-url.txt and pr-branch.txt produced by push-and-open.
+                url_p = p.parent / "pr-url.txt"
+                url_p.write_text(
+                    f"https://github.com/owner/repo/pull/{fake_pr_number}\n"
+                )
+                # pr-branch.txt already written by compose-pr; ensure it's non-empty.
+                branch_p = p.parent / "pr-branch.txt"
+                if not branch_p.exists() or branch_p.stat().st_size == 0:
+                    branch_p.write_text("issue-42-fake-slug\n")
                 return _subprocess_mod.CompletedProcess(cmd, 0, "", "")
             m2 = re.search(r'"([^"]+/pr-base-ref\.txt)"', cmd)
             if m2:
@@ -339,43 +354,6 @@ def test_parse_resume_from_commit(capsys):
 def test_parse_plan_and_instructions_mutual_exclusion():
     with pytest.raises(SystemExit):
         _parse_gh_args(["--plan", "#42", "also some instructions"])
-
-
-# ---------------------------------------------------------------------------
-# _parse_issue_ref unit tests
-# ---------------------------------------------------------------------------
-
-
-def test_parse_issue_ref_numeric():
-    repo, ref = _parse_issue_ref("42", "owner/repo")
-    assert repo is None
-    assert ref is None
-
-
-def test_parse_issue_ref_hash_prefix():
-    repo, ref = _parse_issue_ref("#42", "owner/repo")
-    assert repo == "owner/repo"
-    assert ref == "42"
-
-
-def test_parse_issue_ref_cross_repo():
-    repo, ref = _parse_issue_ref("other/repo#7", "owner/repo")
-    assert repo == "other/repo"
-    assert ref == "7"
-
-
-def test_parse_issue_ref_full_url():
-    repo, ref = _parse_issue_ref(
-        "https://github.com/owner/repo/issues/123", "owner/repo"
-    )
-    assert repo is None
-    assert ref is None
-
-
-def test_parse_issue_ref_invalid():
-    repo, ref = _parse_issue_ref("not-a-ref", "owner/repo")
-    assert repo is None
-    assert ref is None
 
 
 def test_gh_pipeline_stage_names(tmp_path):
@@ -900,16 +878,11 @@ def test_resume_from_github_review_pull_request(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+    session_dir, state_file = _patch_common(monkeypatch, tmp_path, fake_pr_number="200")
 
     data = json.loads(state_file.read_text())
     data["issue_url"] = "https://github.com/owner/repo/issues/5"
     state_file.write_text(json.dumps(data))
-
-    registry_path = tmp_path / "registry.json"
-    reg_data = json.loads(registry_path.read_text())
-    reg_data["pr"] = "gh://pr/200"
-    registry_path.write_text(json.dumps(reg_data))
 
     monkeypatch.setattr(
         "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)

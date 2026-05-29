@@ -12,7 +12,7 @@ from typing import Any
 from gremlins.artifacts._protocol import SchemeResolver
 from gremlins.artifacts.schemes import (
     FileSessionResolver,
-    GitHubResolver,
+    GhOpaqueResolver,
     GitResolver,
 )
 from gremlins.artifacts.uri import Uri
@@ -46,7 +46,7 @@ class ArtifactRegistry:
         self._resolvers: dict[str, SchemeResolver] = {
             "file": FileSessionResolver(session_dir),
             "git": GitResolver(cwd),
-            "gh": GitHubResolver(cwd),
+            "gh": GhOpaqueResolver(),
             **(resolvers or {}),
         }
         if self.registry_path.exists():

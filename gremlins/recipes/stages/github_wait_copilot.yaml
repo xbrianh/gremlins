@@ -9,7 +9,7 @@ stages:
       - name: poll
         type: exec
         in:
-          pr_number: pr.number
+          pr_number: pr-number
         out:
           status: "file://session/status"
         options:

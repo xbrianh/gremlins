@@ -7,7 +7,6 @@ from typing import Any
 
 from gremlins.artifacts.uri import Uri
 from gremlins.utils import git as git_utils
-from gremlins.utils import github as gh_utils
 from gremlins.utils import proc
 
 
@@ -86,36 +85,11 @@ def snapshot_head_before(cwd: pathlib.Path | None = None) -> str:
     return sha
 
 
-class GitHubResolver:
-    """Resolves gh://pr/<n> and gh://issue/<n> via `gh` CLI."""
+class GhOpaqueResolver:
+    """gh:// URIs are opaque identifiers; returns {"uri": <uri-string>} without calling gh."""
 
-    def __init__(self, cwd: pathlib.Path | None = None) -> None:
-        self._cwd = cwd
-
-    def read(self, uri: Uri) -> Any:
-        path = uri.path
-        if path.startswith("pr/"):
-            n = path.removeprefix("pr/")
-            data = gh_utils.view_pr(
-                n, project_root=str(self._cwd) if self._cwd else None
-            )
-            return {
-                "url": data["url"],
-                "number": data["number"],
-                "branch": data["headRefName"],
-                "uri": str(uri),
-            }
-        if path.startswith("issue/"):
-            n = path.removeprefix("issue/")
-            repo = gh_utils.current_repo()
-            data = gh_utils.view_issue(n, repo)
-            return {
-                "url": data.get("url", ""),
-                "number": int(n),
-                "body": data.get("body", ""),
-                "uri": str(uri),
-            }
-        raise ValueError(f"unrecognised gh URI path: {uri}")
+    def read(self, uri: Uri) -> dict[str, str]:
+        return {"uri": str(uri)}
 
     def verify_produced(self, uri: Uri) -> None:
-        self.read(uri)
+        pass

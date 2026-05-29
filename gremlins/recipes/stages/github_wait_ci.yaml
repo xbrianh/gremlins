@@ -7,16 +7,15 @@ required-prompt: true
 stages:
   - name: github-wait-ci
     type: loop
-    needs_gh: true
     max-iterations: 3
     in:
-      pr_url: pr.url
-      pr_branch: pr.branch
+      pr_url: pr-url
+      pr_branch: pr-branch
     body:
       - name: poll
         type: exec
         in:
-          pr_url: pr.url
+          pr_url: pr-url
         out:
           status: "file://session/status"
           bail: "file://session/bail"
@@ -145,7 +144,7 @@ stages:
           - "{{prompt}}"
         in:
           failure_output: ci_log
-          pr_branch: pr.branch
+          pr_branch: pr-branch
 
       - name: capture-head
         type: exec

@@ -33,11 +33,28 @@ from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail
+from gremlins.utils import proc as _proc
 from gremlins.utils.git import has_commits, has_dirty_worktree, in_git_repo
-from gremlins.utils.github import get_repo
 from gremlins.utils.yaml_io import YamlLoadError as _YamlLoadError
 
 logger = logging.getLogger(__name__)
+
+
+def _get_repo() -> str:
+    r = _proc.run(["git", "remote", "get-url", "origin"], timeout=10)
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"cannot read git remote: {r.stderr.strip() or r.stdout.strip()}"
+        )
+    url = r.stdout.strip().removesuffix(".git")
+    # handles https://github.com/owner/repo and git@github.com:owner/repo
+    owner_repo = url.split("github.com")[-1].lstrip(":/")
+    if "/" not in owner_repo:
+        raise RuntimeError(
+            f"cannot parse owner/repo from remote URL: {r.stdout.strip()!r}"
+        )
+    return owner_repo
+
 
 _HANDLED_SIGS = tuple(
     getattr(signal, name)
@@ -220,13 +237,13 @@ async def run_pipeline(
         )
     except (FileNotFoundError, _YamlLoadError, ValueError) as exc:
         die(str(exc))
-    gh = _pipeline_preview.needs_gh()
+    gh = _pipeline_preview.github_integration
     if gh and shutil.which("gh") is None:
         die("gh CLI not found")
 
     logger.info("session: %s", session_dir)
 
-    gh_repo = get_repo() if gh else ""
+    gh_repo = _get_repo() if gh else ""
     try:
         gremlin = Gremlin.initialize_with_runtime(
             gremlin_id=gremlin_id,
@@ -330,7 +347,7 @@ async def run_pipeline(
 
     if gh:
         try:
-            pr_url = gremlin.registry.read("pr")["url"]
+            pr_url = gremlin.registry.read("pr-url")
         except MissingArtifact:
             pr_url = "(unknown)"
         logger.info("done. PR: %s", pr_url)

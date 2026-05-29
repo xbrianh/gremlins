@@ -1194,17 +1194,6 @@ def test_launch_pr_kwarg_sets_state_fields(lenv, monkeypatch):
     """stage_inputs['pr'] persists setup_kind=worktree-detached-from-ref and the pull/<N>/head ref."""
     launcher = _launcher()
     monkeypatch.setattr(launcher, "_spawn_logged_process", lambda *a, **kw: _FakeProc())
-    import gremlins.utils.github as gh
-
-    monkeypatch.setattr(
-        gh,
-        "view_pr",
-        lambda pr, *, project_root=None: {
-            "url": f"https://github.com/x/y/pull/{pr}",
-            "number": int(pr),
-            "headRefName": "feature-branch",
-        },
-    )
     gremlin_id, _ = launcher.launch(
         "local",
         stage_inputs={"instructions": "pr kwarg test", "pr": "697"},

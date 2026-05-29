@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import shutil
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
@@ -20,7 +21,6 @@ from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.pipeline.loader import STAGE_TYPES
 from gremlins.stages.base import Stage
 from gremlins.utils import git as _git_mod
-from gremlins.utils.github import current_repo, parse_issue_ref
 from gremlins.utils.yaml_io import YamlLoadError as _YamlLoadError
 
 logger = logging.getLogger(__name__)
@@ -299,7 +299,7 @@ class Gremlin:
                         raise ValueError(f"--spec: file is empty: {self.spec}")
                     shutil.copyfile(spec_src, spec_file)
 
-            if self.plan and not self.pipeline_data.needs_gh():
+            if self.plan and not self.pipeline_data.github_integration:
                 plan_file = self.session_dir / "plan.md"
                 if not plan_file.exists():
                     src = pathlib.Path(self.plan)
@@ -325,18 +325,20 @@ class Gremlin:
             if not self.registry.produced("plan"):
                 if (self.session_dir / "plan.md").exists():
                     self.registry.bind("plan", Uri.parse("file://session/plan.md"))
-            # When --plan is a GH issue ref and plan is bound as file://, upgrade to
-            # gh://issue/{N}. This mirrors what the plan stage does, but is needed when
-            # resume_from skips that stage (plan.uri? in compose-pr would otherwise fail).
-            if self.plan and self.pipeline_data.needs_gh():
-                target_repo, issue_num = parse_issue_ref(self.plan, "")
-                if issue_num and self.registry.produced("plan"):
+            # When --plan is a GH issue ref and pipeline is github_integration,
+            # upgrade plan binding from file:// to gh://issue/{N} so compose-pr's
+            # plan.uri? accessor returns the opaque issue URI. Needed when
+            # resume_from skips the plan stage.
+            if self.plan and self.pipeline_data.github_integration:
+                m = re.match(
+                    r"^(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#([0-9]+)$", self.plan
+                )
+                if m and self.registry.produced("plan"):
                     plan_uri = self.registry.resolve("plan")
-                    same_repo = not target_repo or target_repo == current_repo()
-                    if plan_uri.scheme == "file" and same_repo:
+                    if plan_uri.scheme == "file":
                         self.registry.bind(
                             "plan",
-                            Uri.parse(f"gh://issue/{issue_num}"),
+                            Uri.parse(f"gh://issue/{m.group(1)}"),
                             override=True,
                         )
         except Exception:

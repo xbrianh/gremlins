@@ -1,7 +1,7 @@
 stages:
   - name: github-push-to-pr-branch
     type: exec
-    in: { branch: pr.branch }
+    in: { branch: pr-branch }
     options:
       cmds:
         - 'git push origin HEAD:"$branch"'
