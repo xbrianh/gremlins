@@ -134,7 +134,6 @@ class LoopStage(Stage):
         stage.client = get_client_from_dict(d)
         return stage
 
-
     def _build_runners(self, state: State) -> list[Callable[[], Awaitable[Outcome]]]:
         result: list[Callable[[], Awaitable[Outcome]]] = []
         for child in self.body:
@@ -189,5 +188,3 @@ class LoopStage(Stage):
 
         state.record_bail(f"loop exhausted {self._max_iterations} iterations")
         raise Bail(f"loop exhausted {self._max_iterations} iterations")
-
-
