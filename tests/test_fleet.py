@@ -1080,7 +1080,9 @@ def test_do_land_branch_with_registry_pr_routes_to_gh(sandbox, tmp_path, monkeyp
         "workdir": str(workdir),
         "project_root": str(tmp_path / "project"),
         "setup_kind": "worktree-branch",
-        "artifacts": [{"type": "branch", "name": "bg/local/custard-pipeline-pr-in-registry"}],
+        "artifacts": [
+            {"type": "branch", "name": "bg/local/custard-pipeline-pr-in-registry"}
+        ],
     }
     _write_state(gr_dir, state, finished=True)
 
