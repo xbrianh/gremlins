@@ -356,7 +356,9 @@ async def run_pipeline(
     if gh:
         from gremlins.artifacts.resolve import resolve_in_map
 
-        pr_url = resolve_in_map(gremlin.registry, {"pr_url": "pr-url?(unknown)"})["pr_url"]
+        pr_url = resolve_in_map(gremlin.registry, {"pr_url": "pr-url?(unknown)"})[
+            "pr_url"
+        ]
         logger.info("done. PR: %s", pr_url)
     else:
         logger.info("done. session artifacts in: %s", session_dir)
