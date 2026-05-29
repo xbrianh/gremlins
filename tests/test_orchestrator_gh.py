@@ -616,7 +616,11 @@ def test_plan_no_h1_issue_body(tmp_path, monkeypatch):
     _base_shell = _proc_mod.run_shell_async
 
     async def _h1_aware_shell(cmd, *, cwd=None, env=None):
-        if isinstance(cmd, str) and "plan-issue-number" in cmd and "gh issue view" not in cmd:
+        if (
+            isinstance(cmd, str)
+            and "plan-issue-number" in cmd
+            and "gh issue view" not in cmd
+        ):
             plan_md = session_dir / "plan.md"
             content = plan_md.read_text(encoding="utf-8") if plan_md.exists() else ""
             if any(line.startswith("# ") for line in content.splitlines()):
