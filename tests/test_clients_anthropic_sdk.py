@@ -296,7 +296,9 @@ def _capturing_query(captured: list[Any]):
     return _query
 
 
-def test_hermeticity_scrubs_claude_vars(monkeypatch, mock_sdk):
+def test_sdk_env_is_overlay_only(monkeypatch, mock_sdk):
+    # options.env should be just the SDK overlay (empty without the file) —
+    # no os.environ copy, no prefix-stripping.
     monkeypatch.setenv("ANTHROPIC_API_KEY", "valid-key")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "junk")
     monkeypatch.setenv("CLAUDE_FOO", "1")
@@ -309,9 +311,10 @@ def test_hermeticity_scrubs_claude_vars(monkeypatch, mock_sdk):
 
     assert captured, "query was not called"
     env = captured[0].env
+    # No os.environ copy — none of these keys appear in the overlay.
     assert "CLAUDE_FOO" not in env
     assert "ANTHROPIC_BASE_URL" not in env
-    assert env.get("ANTHROPIC_API_KEY") == "valid-key"
+    assert "ANTHROPIC_API_KEY" not in env
 
 
 def test_hermeticity_extra_env_layered(monkeypatch, mock_sdk):

@@ -91,7 +91,8 @@ def _resolve_description_and_slug(
 
 
 def _build_spawn_env(gremlin_id: str) -> dict[str, str]:
-    env = os.environ.copy()
+    minimal_base = os.environ
+    env = dict(minimal_base)
     pkg_root = str(pathlib.Path(__file__).resolve().parent.parent)
     existing_pp = env.get("PYTHONPATH", "")
     parts = [p for p in [pkg_root, existing_pp] if p]
