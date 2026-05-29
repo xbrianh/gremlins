@@ -320,7 +320,7 @@ class SubprocessClaudeClient:
 
         try:
             result = await self._attempt(prompt, session_id=None)
-        except StreamTimeoutError:
+        except (StreamTimeoutError, ApiServerError):
             result = await self.resume()
 
         if result.exit_code != 0:
