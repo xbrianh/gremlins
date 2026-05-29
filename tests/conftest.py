@@ -259,6 +259,14 @@ class ReviewCreatingClient(FakeClaudeClient):
     test_orchestrator_local and test_state_isolation."""
 
     async def run(self, prompt, *, label, **kwargs):
+        if label == "plan":
+            # Write plan.md so verify_produced passes for the plan recipe stage.
+            m = re.search(r"(/[^\s`]+/plan\.md)", prompt)
+            if m:
+                plan_path = pathlib.Path(m.group(1))
+                plan_path.parent.mkdir(parents=True, exist_ok=True)
+                if not plan_path.exists() or plan_path.stat().st_size == 0:
+                    plan_path.write_text("# Plan\nDo stuff.\n", encoding="utf-8")
         if label == "review-code":
             m = re.search(r"`([^`]+\.md)`\s+is the canonical", prompt)
             assert m, f"regex did not match review-code prompt for label {label!r}"

@@ -177,7 +177,7 @@ def test_append_graft_existing_parallel_child_blocks_graft_name(tmp_path):
     graft_yaml.parent.mkdir()
     # Graft top-level stage collides with existing parallel child name.
     graft_yaml.write_text(
-        yaml.dump({"stages": [{"name": "check", "type": "plan"}]}),
+        yaml.dump({"stages": [{"name": "check", "type": "exec"}]}),
         encoding="utf-8",
     )
 
@@ -234,7 +234,7 @@ def _write_graft_pipeline(repo: pathlib.Path, name: str, stage_name: str) -> Non
     gremlins_dir = repo / ".gremlins"
     gremlins_dir.mkdir(exist_ok=True)
     (gremlins_dir / f"{name}.yaml").write_text(
-        yaml.dump({"stages": [{"name": stage_name, "type": "plan"}]}),
+        yaml.dump({"stages": [{"name": stage_name, "type": "exec"}]}),
         encoding="utf-8",
     )
 
@@ -319,7 +319,7 @@ def test_graft_appends_flat_stages(lenv, monkeypatch):
     top = pipeline["stages"]
     appended = top[-1]
     assert appended["name"] == "address-code"
-    assert appended["type"] == "plan"
+    assert appended["type"] == "exec"
     assert "body" not in appended
 
 

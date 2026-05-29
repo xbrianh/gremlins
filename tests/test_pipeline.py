@@ -7,10 +7,10 @@ from gremlins.executor.gremlin import Gremlin
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.discovery import resolve_pipeline_name, resolve_pipeline_path
 from gremlins.pipeline.loader import STAGE_TYPES
+from gremlins.stages.agent import Agent
 from gremlins.stages.base import Stage
 from gremlins.stages.loop import LoopStage
 from gremlins.stages.parallel import ParallelStage
-from gremlins.stages.plan import Plan
 
 
 def _pipeline_data(stages: list[Stage] | None = None) -> _PipelineData:
@@ -50,7 +50,6 @@ def test_pipeline_constructs_from_local_yaml(tmp_path: pathlib.Path) -> None:
     stage_names = [s.name for s in gremlin.stages]
     assert "plan" in stage_names
     assert "implement" in stage_names
-    assert "plan" in STAGE_TYPES
     assert "loop" in STAGE_TYPES  # verify is now a recipe that expands to a loop
 
 
@@ -73,7 +72,6 @@ def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
     stage_names = [s.name for s in gremlin.stages]
     assert "plan" in stage_names
     assert "implement" in stage_names
-    assert "plan" in STAGE_TYPES
     assert any(s.name == "ci-gate" for s in gremlin.stages)
 
 
@@ -83,11 +81,11 @@ def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
 
 
 def _make_stages(*names: str) -> list[Stage]:
-    return [Plan(n, [], {}) for n in names]
+    return [Agent(n, [], {}) for n in names]
 
 
 def _make_parallel_stage(name: str, children: list[str]) -> ParallelStage:
-    child_stages: list[Stage] = [Plan(c, [], {}) for c in children]
+    child_stages: list[Stage] = [Agent(c, [], {}) for c in children]
     return ParallelStage(name, child_stages)
 
 
@@ -161,7 +159,7 @@ def test_validate_resume_target_child_name_rejected(tmp_path: pathlib.Path) -> N
 
 
 def test_pipeline_rejects_unknown_stage_type(tmp_path: pathlib.Path) -> None:
-    s = Plan("s", [], {})
+    s = Agent("s", [], {})
     s.type = "nonexistent"
     with pytest.raises(ValueError, match="nonexistent"):
         _local([s], tmp_path=tmp_path)
@@ -174,7 +172,7 @@ def test_pipeline_rejects_unknown_stage_type(tmp_path: pathlib.Path) -> None:
 _SAMPLE_YAML = """\
 stages:
   - name: plan
-    type: plan
+    type: agent
 """
 
 
@@ -263,7 +261,7 @@ def test_resolve_pipeline_path_no_overlay_env_falls_through(
 
 def test_parallel_expansion_in_constructor(tmp_path: pathlib.Path) -> None:
     parallel = _make_parallel_stage("reviews", ["review-a", "review-b"])
-    plan_entry = Plan("plan", [], {})
+    plan_entry = Agent("plan", [], {})
     gremlin = _local([plan_entry, parallel], tmp_path=tmp_path)
 
     stage_names = [s.name for s in gremlin.stages]
@@ -284,8 +282,8 @@ def _gh_stage(name: str = "gh-wait") -> LoopStage:
     return stage
 
 
-def _local_stage(name: str = "plan") -> Plan:
-    return Plan(name, [], {})
+def _local_stage(name: str = "plan") -> Agent:
+    return Agent(name, [], {})
 
 
 def _pipeline(*stages: Stage) -> _PipelineData:
@@ -318,7 +316,6 @@ def test_needs_gh_false_for_local_stage_in_loop_body() -> None:
 
 def test_stage_builders_registry_covers_all_known_types() -> None:
     expected = {
-        "plan",
         "loop",
         "handoff",
         "parallel",

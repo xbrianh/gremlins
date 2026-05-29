@@ -224,7 +224,7 @@ name: custom
 default_client: copilot:gpt-5.4
 stages:
   - name: implement
-    type: plan
+    type: agent
 """,
         encoding="utf-8",
     )
@@ -412,7 +412,7 @@ name: old
 default_client: copilot:gpt-5.4
 stages:
   - name: plan
-    type: plan
+    type: agent
   - name: implement
     type: implement
     client: claude:opus
@@ -1071,15 +1071,11 @@ def test_stage_inputs_survives_resume(lenv, monkeypatch):
 
 
 def test_launch_boss_plan_issue_ref_materializes_plan_md(lenv, monkeypatch):
-    """Boss + --plan #N writes the issue body to artifacts/plan.md before chain runs."""
-    launcher = _launcher()
+    """Boss + --plan #N writes the issue ref to artifacts/plan-arg.txt before chain runs.
 
-    issue_body = "# My Plan\n\nDo the thing."
-    monkeypatch.setattr(
-        launcher,
-        "fetch_issue",
-        lambda plan: {"title": "My Plan", "body": issue_body, "number": 317, "url": ""},
-    )
+    The actual issue body is fetched at runtime by resolve-plan-input, not at launch time.
+    """
+    launcher = _launcher()
 
     monkeypatch.setattr(
         launcher, "_spawn_logged_process", lambda *args, **kwargs: _FakeProc()
@@ -1087,25 +1083,15 @@ def test_launch_boss_plan_issue_ref_materializes_plan_md(lenv, monkeypatch):
 
     gremlin_id, _ = launcher.launch("boss", plan="#317", project_root=str(lenv.repo))
     state_dir = _gremlins_state_root(lenv) / gremlin_id
-    plan_md = state_dir / "artifacts" / "plan.md"
+    plan_arg_txt = state_dir / "artifacts" / "plan-arg.txt"
 
-    assert plan_md.exists(), f"plan.md not found at {plan_md}"
-    assert plan_md.read_text(encoding="utf-8").strip() == issue_body.strip()
+    assert plan_arg_txt.exists(), f"plan-arg.txt not found at {plan_arg_txt}"
+    assert plan_arg_txt.read_text(encoding="utf-8").strip() == "#317"
 
 
 def test_launch_plan_issue_ref_writes_issue_url_and_num(lenv, monkeypatch):
+    """Boss + --plan #N stores the issue ref in plan-arg.txt for the recipe to resolve."""
     launcher = _launcher()
-
-    monkeypatch.setattr(
-        launcher,
-        "fetch_issue",
-        lambda plan: {
-            "title": "My Plan",
-            "body": "# My Plan\n\nDo the thing.",
-            "number": 378,
-            "url": "https://github.com/owner/repo/issues/378",
-        },
-    )
 
     monkeypatch.setattr(
         launcher, "_spawn_logged_process", lambda *args, **kwargs: _FakeProc()
@@ -1113,10 +1099,15 @@ def test_launch_plan_issue_ref_writes_issue_url_and_num(lenv, monkeypatch):
 
     gremlin_id, _ = launcher.launch("boss", plan="#378", project_root=str(lenv.repo))
 
+    state_dir = _gremlins_state_root(lenv) / gremlin_id
+    plan_arg_txt = state_dir / "artifacts" / "plan-arg.txt"
+    assert plan_arg_txt.exists(), f"plan-arg.txt not found at {plan_arg_txt}"
+    assert plan_arg_txt.read_text(encoding="utf-8").strip() == "#378"
+
     registry_data = json.loads(
         (_gremlins_state_root(lenv) / gremlin_id / "registry.json").read_text()
     )
-    assert registry_data.get("plan") == "gh://issue/378"
+    assert registry_data.get("plan_arg") == "file://session/plan-arg.txt"
 
 
 # ---------------------------------------------------------------------------

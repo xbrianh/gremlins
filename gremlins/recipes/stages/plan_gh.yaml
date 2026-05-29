@@ -1,0 +1,69 @@
+required-prompt: true
+
+stages:
+  - name: resolve-plan-input
+    type: exec
+    in:
+      plan_arg: "plan_arg?"
+    options:
+      cmds:
+        - |
+          if [ -s "{session_dir}/plan.md" ]; then exit 0; fi
+          if [ -z "$plan_arg" ]; then exit 0; fi
+          if [ -f "$plan_arg" ]; then
+              cp "$plan_arg" "{session_dir}/plan.md"
+          elif echo "$plan_arg" | grep -qE '^#[0-9]+$'; then
+              gh issue view "$plan_arg" --json body --jq .body \
+                > "{session_dir}/plan.md"
+              gh issue view "$plan_arg" --json number --jq .number \
+                > "{session_dir}/plan-issue-number.txt"
+          elif echo "$plan_arg" | grep -qE '^[^/]+/[^#]+#[0-9]+$'; then
+              gh issue view "$plan_arg" --json body --jq .body \
+                > "{session_dir}/plan.md"
+          else
+              printf 'resolve-plan-input: unrecognized plan_arg: %s\n' "$plan_arg" >&2
+              exit 1
+          fi
+
+  - name: plan
+    type: agent
+    skip_if_exists: plan
+    prompt:
+      - "{{prompt}}"
+    out:
+      plan: "file://session/plan.md"
+    options:
+      idle_timeout: 600
+
+  - name: publish-as-issue
+    type: exec
+    skip_if_exists: plan-issue-number
+    options:
+      cmds:
+        - |
+          if ! [ -s "{session_dir}/plan.md" ]; then
+              printf 'publish-as-issue: plan.md is empty\n' >&2; exit 1
+          fi
+          title=$(awk '/^# /{sub(/^#+ */,""); print; exit}' "{session_dir}/plan.md" | cut -c1-80)
+          if [ -z "$title" ]; then
+              printf 'publish-as-issue: plan.md has no H1 title\n' >&2; exit 1
+          fi
+          url=$(gh issue create \
+              --body-file "{session_dir}/plan.md" \
+              --title "$title")
+          printf '%s' "${url##*/}" > "{session_dir}/plan-issue-number.txt"
+    out:
+      plan-issue-number: "file://session/plan-issue-number.txt"
+      plan: "gh://issue/{read:plan-issue-number}"
+
+  - name: update-description
+    type: exec
+    options:
+      cmds:
+        - |
+          STATE_JSON="{session_dir}/../state.json"
+          if ! [ -f "$STATE_JSON" ]; then exit 0; fi
+          if python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get('description_explicit') else 1)" "$STATE_JSON" >/dev/null 2>&1; then exit 0; fi
+          title=$(awk '/^# /{sub(/^#+ */,""); print; exit}' "{session_dir}/plan.md" | cut -c1-60)
+          [ -z "$title" ] && exit 0
+          tmp=$(mktemp) && python3 -c "import json,sys; d=json.load(open(sys.argv[1])); d['description']=sys.argv[2]; print(json.dumps(d))" "$STATE_JSON" "$title" > "$tmp" && mv "$tmp" "$STATE_JSON"

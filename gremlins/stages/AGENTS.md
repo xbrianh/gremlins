@@ -16,15 +16,23 @@ sequencing logic of their own.
 - `loop.py` — `LoopStage(Stage)`. Iterates a `body: list[Stage]` (or raw `body_runners` callables) until a termination predicate fires or `max_iterations` is exhausted. Body stages execute in order; subsequent stages only run when a preceding stage set the `status=needs_fix` marker artifact (a file at `session_dir/status` containing `needs_fix`, bound under key `"status"`), except on the final iteration where fix stages are skipped. Termination is controlled by an `until: UntilFn` predicate (default `head_stable`); `max_iters(n)` is a factory for count-bounded loops. `on_iteration_start` callback runs at the top of each iteration (used by `with_dict` to express `pr_stack` detach-to-prior-PR logic). The marker is unbound at the start of each iteration.
 - `cmd.py` — `Cmd(Stage)`. Runs `options["cmds"]` joined with `&&`; writes output to disk on every invocation. On non-zero exit raises `Bail`. Supports `log_path` option with `{n}` interpolation for per-invocation naming (e.g. `verify-attempt-{n}.log`); falls back to `cmd.log`. Stage type `"cmd"`.
 - `exec.py` — `Exec(Stage)`. Runs `options["cmds"]` joined with `&&`; writes combined stdout+stderr to `exec-{name}.log`. On non-zero exit: if `"status"` is in the `out:` map, writes the `needs_fix` marker and returns `Done()` (loop will gate subsequent fix stages); otherwise raises `Bail`. Supports `in:`/`out:` artifact substitution and `git://range` out-URIs. Stage type `"exec"`.
-- `apply.py` — `Apply(Stage)`. Runs `options["cmds"]` sequentially in cwd; on non-zero writes output to apply.log and raises Bail. Then git add -A and commits (name or commit_message) iff staged diff non-empty; skips empty commit. For deterministic post-impl normalizers (e.g. ruff) before verify. Stage type `"apply"`.
 - `parallel.py` — `ParallelStage(Stage)`. Constructed by the orchestrator with pre-built child runners; call `build_runtime_stages()` to get the three `(name, fn)` pairs (`<group>-fanout`, `<group>`, `<group>-fanin`) that implement fan-out/fan-in execution.
 - `handoff.py` — `Handoff(Stage)` plus the full handoff agent implementation (`run`, `build_prompt`, `collect_git_context`, `sanitize_rolling_plan`, etc.). `Handoff` runs the agent once per boss-loop iteration: returns `Done()` on "chain-done" (loop exits via HEAD-stable), sets the `status=needs_fix` marker artifact and returns `Done()` on "next-plan" (writes child plan to `plan.md`, loop continues), raises `Bail` on "bail". Preserves the original boss spec in `boss-spec.md` and restores it to `plan.md` on "chain-done" so post-loop stages see the original spec. Stage type `"handoff"`.
-- `plan.py` — `Plan(Stage)`. Wrapper over `Agent` for the local branch: renders the prompt with `plan_file` / `instructions`, builds `Agent(out_map={"plan": "file://session/plan.md"})`, and delegates. `verify_produced` enforces that the agent wrote a non-empty `plan.md`. The GH branch (`state.engine_ctx.repo` non-empty) keeps a direct `run_agent` call for now; it migrates when `gh://issue/...` artifacts and `extract_gh_url` are replaced in the state-data cutover chunk.
-- `review-code` — Code review stage (recipe: `gremlins/recipes/stages/review_code.yaml`). Reads `plan` artifact, writes model-keyed review file `{name}-{model}.md` to the session directory.
-- `github-request-copilot-review` — Requests Copilot review (recipe: `gremlins/recipes/stages/github_request_copilot_review.yaml`). Runs `gh pr edit` to add `copilot-pull-request-reviewer`.
-- `verify` — Verify stage (recipe: `gremlins/recipes/stages/verify.yaml`). Runs configured commands; on failure captures git diff and invokes a fix agent; loops up to 3 times.
-- `github_wait_ci.py` — `GitHubWaitCI(Stage)`. Gh pipeline (`ci-gate`). Polls PR CI checks via `utils.github`; re-invokes agent to fix failures; bails on `REVIEW_REQUIRED` or attempt exhaustion.
-- `github_wait_copilot.py` — `GitHubWaitCopilot(Stage)`. Polls until Copilot posts a non-PENDING review.
+
+## Recipes
+
+Bundled stage recipes live under `gremlins/recipes/stages/`. Each recipe is a multi-primitive YAML pipeline fragment that expands in-place wherever its `gremlins:<name>` type is referenced.
+
+- `plan` — local planning: `resolve-plan-input` → `plan` (agent) → `update-description`. Out: `plan: file://session/plan.md`. The `plan` agent stage has `skip_if_exists: plan`, so a resumed run skips the LLM if a non-empty `plan.md` already exists. Any pipeline using this recipe must declare `inputs: { PLAN: plan?, INSTRUCTIONS: instructions? }` — that block is the canonical source of the `--plan`/`--instructions` flags the recipe depends on (the launcher binds the raw arg as `plan_arg`, which `resolve-plan-input` consumes; `plan` is a distinct output key).
+- `plan_gh` — GitHub planning: `resolve-plan-input` → `plan` (agent) → `publish-as-issue` → `update-description`. Out: `plan: gh://issue/{read:plan-issue-number}`. Same `skip_if_exists: plan` on the agent; `publish-as-issue` has `skip_if_exists: plan-issue-number` (idempotency guard against duplicate issues on resume). Same `inputs:` requirement as `plan`.
+- `implement` — implementation + progress guard.
+- `verify` — run commands, fix loop, bail on exhaustion.
+- `review-code` — code review agent, writes `{name}-{model}.md`.
+- `github-open-pr` — compose PR title/body, push branch, open PR.
+- `github-push-to-pr-branch` — push HEAD to existing PR branch.
+- `github-request-copilot-review` — add Copilot as PR reviewer.
+- `github-wait-copilot` — poll until Copilot posts a non-pending review.
+- `github-wait-ci` — poll CI checks, fix loop, bail on `REVIEW_REQUIRED` or exhaustion.
 
 ## Conventions
 

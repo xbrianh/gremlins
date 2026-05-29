@@ -264,13 +264,13 @@ def test_launch_unknown_kind_exits_nonzero_with_error(monkeypatch, capsys):
 
 def _make_fake_pipeline():
     from gremlins.pipeline import Pipeline
+    from gremlins.stages.agent import Agent
     from gremlins.stages.exec import Exec
-    from gremlins.stages.plan import Plan
 
     inputs_stage = Exec.with_dict(
         {"name": "inputs", "in": {"INSTRUCTIONS": "instructions?"}}
     )
-    stage = Plan("plan", [], {})
+    stage = Agent("plan", [], {})
     return Pipeline(
         name="local",
         path=pathlib.Path("/fake/local.yaml"),

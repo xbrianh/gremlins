@@ -218,6 +218,14 @@ def _patch_common(
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text("main\n")
                 return _subprocess_mod.CompletedProcess(cmd, 0, "", "")
+            # publish-as-issue script: intercept to write a fake issue number so
+            # verify_produced passes without a real gh CLI or git remote.
+            m3 = re.search(r'"([^"]+/plan-issue-number\.txt)"', cmd)
+            if m3:
+                p = pathlib.Path(m3.group(1))
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text("42\n")
+                return _subprocess_mod.CompletedProcess(cmd, 0, "", "")
         return await _orig_shell(cmd, cwd=cwd, env=env)
 
     monkeypatch.setattr(_proc_mod, "run_shell_async", _noop_gh_shell)
@@ -375,7 +383,10 @@ def test_gh_pipeline_stage_names(tmp_path):
     names = [s.name for s in pipeline.stages]
     assert names == [
         "inputs",
+        "resolve-plan-input",
         "plan",
+        "publish-as-issue",
+        "update-description",
         "implement",
         "require-impl-progress",
         "normalize",
@@ -397,13 +408,28 @@ def test_gh_pipeline_stage_names(tmp_path):
 
 
 class _CommittingClient(FakeClaudeClient):
-    """FakeClaudeClient that creates a git commit when the implement label runs."""
+    """FakeClaudeClient that creates a git commit when the implement label runs.
 
-    def __init__(self, *args, git_dir: pathlib.Path = None, **kwargs):
+    Also writes plan.md when the plan label runs so verify_produced passes for
+    the plan recipe's out: { plan_file: file://session/plan.md } binding.
+    """
+
+    def __init__(
+        self,
+        *args,
+        git_dir: pathlib.Path = None,
+        session_dir: pathlib.Path = None,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self._git_dir = git_dir
+        self._session_dir = session_dir
 
     def run(self, prompt, *, label, **kwargs):
+        if label == "plan" and self._session_dir is not None:
+            plan_md = self._session_dir / "plan.md"
+            if not plan_md.exists() or plan_md.stat().st_size == 0:
+                plan_md.write_text("# Plan\nDo stuff.\n", encoding="utf-8")
         if label == "implement" and self._git_dir is not None:
             # Simulate implement creating a commit
             (self._git_dir / "impl.txt").write_text("impl\n")
@@ -423,11 +449,16 @@ class _CommittingClient(FakeClaudeClient):
 
 
 def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
-    """--plan <issue-ref> resolves issue body without running the plan stage."""
+    """--plan <issue-ref> pre-populates plan.md; plan agent sees existing content and skips."""
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
     session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+
+    # Pre-populate plan.md and plan-issue-number.txt (simulating what
+    # resolve-plan-input and publish-as-issue do in production).
+    (session_dir / "plan.md").write_text("# Plan\nDo stuff.\n", encoding="utf-8")
+    (session_dir / "plan-issue-number.txt").write_text("42", encoding="utf-8")
 
     monkeypatch.setattr(
         subprocess,
@@ -441,7 +472,9 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
 
     client = _CommittingClient(
         git_dir=tmp_path,
+        session_dir=session_dir,
         fixtures={
+            "plan": MINIMAL_EVENTS,
             "implement": IMPL_EVENTS,
             "compose-pr": MINIMAL_EVENTS,
             "github-review-pull-request": MINIMAL_EVENTS,
@@ -455,9 +488,104 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
     assert result == 0
 
     labels = [c.label for c in client.calls]
-    # plan stage must NOT have been called
+    assert "implement" in labels
+
+
+def test_plan_skip_if_exists_on_resume(tmp_path, monkeypatch):
+    """Resume: plan stage skipped when plan artifact is already verified."""
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+    # Overwrite with non-empty content so verified("plan") is True.
+    (session_dir / "plan.md").write_text("# Plan\nDo stuff.\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
+    )
+
+    client = _CommittingClient(
+        git_dir=tmp_path,
+        session_dir=session_dir,
+        fixtures={
+            "implement": IMPL_EVENTS,
+            "compose-pr": MINIMAL_EVENTS,
+            "github-review-pull-request": MINIMAL_EVENTS,
+            "github-address-pull-request-reviews": MINIMAL_EVENTS,
+        },
+    )
+
+    result = asyncio.run(
+        run_pipeline(
+            _gh_pipeline_path(tmp_path), argv=["add foo feature"], client=client
+        )
+    )
+    assert result == 0
+    labels = [c.label for c in client.calls]
     assert "plan" not in labels
     assert "implement" in labels
+
+
+def test_publish_as_issue_skip_if_exists(tmp_path, monkeypatch):
+    """publish-as-issue skipped when plan-issue-number artifact is already verified."""
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+    (session_dir / "plan.md").write_text("# Plan\nDo stuff.\n", encoding="utf-8")
+    (session_dir / "plan-issue-number.txt").write_text("42", encoding="utf-8")
+
+    # Add plan-issue-number to registry so skip_if_exists fires.
+    registry_path = tmp_path / "registry.json"
+    reg = json.loads(registry_path.read_text())
+    reg["plan-issue-number"] = "file://session/plan-issue-number.txt"
+    registry_path.write_text(json.dumps(reg))
+
+    shell_cmds: list[str] = []
+    from gremlins.utils import proc as _proc_mod
+
+    _orig_shell = _proc_mod.run_shell_async
+
+    async def _recording_shell(cmd, **kwargs):
+        if isinstance(cmd, str):
+            shell_cmds.append(cmd)
+        return await _orig_shell(cmd, **kwargs)
+
+    monkeypatch.setattr(_proc_mod, "run_shell_async", _recording_shell)
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n"),
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
+    )
+
+    client = _CommittingClient(
+        git_dir=tmp_path,
+        session_dir=session_dir,
+        fixtures={
+            "implement": IMPL_EVENTS,
+            "compose-pr": MINIMAL_EVENTS,
+            "github-review-pull-request": MINIMAL_EVENTS,
+            "github-address-pull-request-reviews": MINIMAL_EVENTS,
+        },
+    )
+
+    result = asyncio.run(
+        run_pipeline(
+            _gh_pipeline_path(tmp_path), argv=["add foo feature"], client=client
+        )
+    )
+    assert result == 0
+    assert not any("gh issue create" in cmd for cmd in shell_cmds)
+    assert "implement" in [c.label for c in client.calls]
 
 
 def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch):
@@ -478,6 +606,7 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
 
     client = _CommittingClient(
         git_dir=tmp_path,
+        session_dir=session_dir,
         fixtures={
             "plan": _issue_events(),
             "implement": IMPL_EVENTS,
@@ -519,7 +648,9 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
 
     client = _CommittingClient(
         git_dir=tmp_path,
+        session_dir=session_dir,
         fixtures={
+            "plan": MINIMAL_EVENTS,
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
             "compose-pr": MINIMAL_EVENTS,
@@ -564,7 +695,9 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
 
     client = _CommittingClient(
         git_dir=tmp_path,
+        session_dir=session_dir,
         fixtures={
+            "plan": MINIMAL_EVENTS,
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
             "compose-pr": MINIMAL_EVENTS,
@@ -608,7 +741,9 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
 
     client = _CommittingClient(
         git_dir=tmp_path,
+        session_dir=session_dir,
         fixtures={
+            "plan": MINIMAL_EVENTS,
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
             "compose-pr": MINIMAL_EVENTS,
@@ -787,7 +922,6 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
         return fake_gh_run(cmd, *args, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", fake_gh_run)
-    monkeypatch.setattr("gremlins.stages.plan.proc.run_async", fake_gh_run_async)
 
     monkeypatch.setattr(
         "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
@@ -796,12 +930,11 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
     # Each fixture carries a distinct non-zero cost so a regression that drops
     # any one stage shows up as the total being short by exactly that amount.
     fixtures = {
-        "plan-title": [
+        "plan": [
             {"type": "system", "subtype": "init"},
             {
                 "type": "result",
                 "subtype": "success",
-                "result": "Feature: Do the thing",
                 "total_cost_usd": 0.13,
             },
         ],
@@ -844,6 +977,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
 
     client = _CommittingClient(
         git_dir=tmp_path,
+        session_dir=session_dir,
         fixtures=fixtures,
     )
     result = asyncio.run(
@@ -854,7 +988,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
     assert result == 0
 
     labels = [c.label for c in client.calls]
-    assert "plan-title" in labels
+    assert "plan" in labels
     assert "implement" in labels
     assert "compose-pr" in labels
 
@@ -866,7 +1000,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
     expected = 0.13 + 0.07 + 0.02
     assert total == pytest.approx(expected), (
         f"expected total {expected:.2f}, got {total:.4f}; "
-        f"a regression dropping plan-title cost (0.13) would show total ≈ {expected - 0.13:.2f}"
+        f"a regression dropping plan cost (0.13) would show total ≈ {expected - 0.13:.2f}"
     )
 
 
@@ -965,7 +1099,9 @@ def test_github_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
 
     client = _CommittingClient(
         git_dir=tmp_path,
+        session_dir=session_dir,
         fixtures={
+            "plan": MINIMAL_EVENTS,
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
             "compose-pr": MINIMAL_EVENTS,
@@ -1022,7 +1158,9 @@ def test_github_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
 
     client = _CommittingClient(
         git_dir=tmp_path,
+        session_dir=session_dir,
         fixtures={
+            "plan": MINIMAL_EVENTS,
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
             "compose-pr": MINIMAL_EVENTS,
@@ -1054,7 +1192,7 @@ def test_github_wait_ci_stage_ordering(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    _session_dir, _state_file = _patch_common(monkeypatch, tmp_path)
+    session_dir, _state_file = _patch_common(monkeypatch, tmp_path)
 
     monkeypatch.setattr(
         subprocess,
@@ -1071,7 +1209,9 @@ def test_github_wait_ci_stage_ordering(tmp_path, monkeypatch):
 
     client = _CommittingClient(
         git_dir=tmp_path,
+        session_dir=session_dir,
         fixtures={
+            "plan": MINIMAL_EVENTS,
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
             "compose-pr": MINIMAL_EVENTS,
@@ -1170,7 +1310,9 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
 
     client = _CommittingClient(
         git_dir=tmp_path,
+        session_dir=session_dir,
         fixtures={
+            "plan": MINIMAL_EVENTS,
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
             "compose-pr": MINIMAL_EVENTS,
@@ -1256,7 +1398,7 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
     gremlin_id = "test-gr-id"
-    _session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
     monkeypatch.setattr(
         subprocess, "run", _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n")
@@ -1267,7 +1409,9 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch):
 
     client = _CommittingClient(
         git_dir=tmp_path,
+        session_dir=session_dir,
         fixtures={
+            "plan": MINIMAL_EVENTS,
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
             "compose-pr": MINIMAL_EVENTS,
@@ -1299,7 +1443,7 @@ def test_gh_main_state_client_tracks_effective_model(
     gremlin_id = "test-gr-id"
     state_dir = make_state_dir(gremlin_id)
 
-    _patch_common(monkeypatch, tmp_path)
+    session_dir, _ = _patch_common(monkeypatch, tmp_path)
 
     monkeypatch.setattr(
         subprocess, "run", _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n")
@@ -1310,7 +1454,9 @@ def test_gh_main_state_client_tracks_effective_model(
 
     client = _CommittingClient(
         git_dir=tmp_path,
+        session_dir=session_dir,
         fixtures={
+            "plan": MINIMAL_EVENTS,
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
             "compose-pr": MINIMAL_EVENTS,
@@ -1378,7 +1524,9 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
 
     client = _CommittingClient(
         git_dir=tmp_path,
+        session_dir=session_dir,
         fixtures={
+            "plan": MINIMAL_EVENTS,
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
             "compose-pr": MINIMAL_EVENTS,
@@ -1423,6 +1571,7 @@ def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
 
     client = _CommittingClient(
         git_dir=tmp_path,
+        session_dir=session_dir,
         fixtures={
             "plan": _issue_events(),
             "implement": IMPL_EVENTS,

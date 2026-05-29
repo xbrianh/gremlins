@@ -26,7 +26,7 @@ prompts:
     Do the implementation.
 stages:
   - name: plan
-    type: plan
+    type: agent
   - name: implement
     type: implement
     prompt: impl-prompt
@@ -57,7 +57,7 @@ def test_persist_expanded_pipeline_roundtrips_via_pipeline_from_yaml(tmp_path):
         """\
 stages:
   - name: plan
-    type: plan
+    type: agent
   - name: implement
     type: agent
     prompt: []
@@ -131,7 +131,7 @@ def test_resume_uses_hermetic_pipeline_yaml(lenv, monkeypatch):
         """\
 stages:
   - name: plan
-    type: plan
+    type: agent
   - name: implement
     type: implement
 """,
@@ -144,7 +144,7 @@ stages:
         """\
 stages:
   - name: only-stage
-    type: plan
+    type: agent
 """,
         encoding="utf-8",
     )
@@ -197,7 +197,7 @@ def test_resume_hermetic_copy_isolates_from_project_yaml_edits(lenv, monkeypatch
     original_content = """\
 stages:
   - name: plan
-    type: plan
+    type: agent
 """
     project_yaml.write_text(original_content, encoding="utf-8")
 
@@ -228,7 +228,7 @@ stages:
         """\
 stages:
   - name: plan
-    type: plan
+    type: agent
   - name: extra-stage
     type: implement
 """,

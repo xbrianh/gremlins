@@ -1,5 +1,5 @@
-<!-- placeholders: base_ref, instructions -->
-You are creating an implementation plan and posting it as a new GitHub issue.
+<!-- placeholders: base_ref, instructions, session_dir -->
+You are creating an implementation plan. Write the plan to `{session_dir}/plan.md`.
 
 ## Base branch
 
@@ -13,13 +13,13 @@ This implementation targets branch `{base_ref}`. Read the existing code on this 
 
 Read any relevant source files to understand the existing code and identify what needs to change.
 
-Read any relevant code in the repo to inform the plan.
-
 ## Create the plan
 
 Write a detailed implementation plan structured as:
 
 ```
+# <concise title summarizing the work>
+
 ## Context
 What problem are we solving and why.
 
@@ -35,11 +35,6 @@ High-level strategy. Why this approach over alternatives.
 Anything that needs discussion before implementation.
 ```
 
-## Post to GitHub
+Start the plan with a `# Title` H1 header — the recipe uses `head -1 plan.md` to derive the GitHub issue title. The H1 must be the very first line.
 
-Post the plan as a **new GitHub issue** using `gh issue create`.
-
-- Derive a clear, concise title from the plan
-- If the plan references an existing issue/PR, mention it in the body (e.g. "Ref #123")
-- Add relevant labels if appropriate
-- After creating, output the issue URL so the user can see it
+If the plan references an existing issue or PR, mention it early in the body (e.g., "Ref #123").

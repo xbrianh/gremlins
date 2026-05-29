@@ -142,7 +142,7 @@ class Exec(Stage):
                 state.artifacts.bind_git_commit_range(key, pre_sha)
             else:
                 uri = Uri.parse(uri_str)
-                state.artifacts.bind(key, uri)
+                state.artifacts.bind(key, uri, override=True)
                 try:
                     state.artifacts.resolver(uri.scheme).verify_produced(uri)
                 except FileNotFoundError:

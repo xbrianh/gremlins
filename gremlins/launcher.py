@@ -126,7 +126,6 @@ class _Inputs:
     base_ref_name: str
     base_ref_sha: str
     stage_inputs: dict[str, Any]
-    issue_data: dict[str, Any] | None
     pr_num: str = ""
 
 
@@ -257,15 +256,10 @@ def _resolve_inputs(
 
     plan, spec_path = _validate_plan_args(plan, instructions, spec_path)
 
-    issue_data: dict[str, Any] | None = None
-    if plan and not os.path.isfile(plan):
-        issue_data = fetch_issue(plan)
-
     desc, desc_explicit, slug = _resolve_description_and_slug(
         instructions,
         plan,
         description,
-        issue_title=str((issue_data or {}).get("title") or ""),
     )
 
     if project_root is None:
@@ -347,7 +341,6 @@ def _resolve_inputs(
         base_ref_name=base_ref_name,
         base_ref_sha=base_ref_sha,
         stage_inputs=stage_inputs,
-        issue_data=issue_data,
         pr_num=pr_num,
     )
 
@@ -355,12 +348,9 @@ def _resolve_inputs(
 def _prepare_state_dir(state_dir: pathlib.Path, inputs: _Inputs) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "instructions.txt").write_text(inputs.instructions, encoding="utf-8")
-    if inputs.issue_data and inputs.issue_data.get("body"):
-        artifacts_dir = state_dir / "artifacts"
-        artifacts_dir.mkdir(exist_ok=True)
-        (artifacts_dir / "plan.md").write_text(
-            inputs.issue_data["body"], encoding="utf-8"
-        )
+    artifacts_dir = state_dir / "artifacts"
+    artifacts_dir.mkdir(exist_ok=True)
+    (artifacts_dir / "plan-arg.txt").write_text(inputs.plan or "", encoding="utf-8")
 
 
 def _initial_state_data(inputs: _Inputs) -> StateData:
@@ -542,10 +532,7 @@ def launch(
         if inputs.base_ref_sha:
             registry.bind("base_sha", Uri.parse(f"git://commit/{inputs.base_ref_sha}"))
         registry.bind("spec", Uri.parse("file://session/spec.md"))
-        if inputs.issue_data:
-            _issue_num = str(inputs.issue_data.get("number", ""))
-            if _issue_num:
-                registry.bind("plan", Uri.parse(f"gh://issue/{_issue_num}"))
+        registry.bind("plan_arg", Uri.parse("file://session/plan-arg.txt"))
         p = _spawn(inputs.gremlin_id, inputs, state_dir)
     except Exception:
         shutil.rmtree(state_dir, ignore_errors=True)
@@ -624,9 +611,7 @@ def _resolve_resume_pipeline(
     return pipeline_args, pipeline_path, project_root
 
 
-def _load_pipeline_and_check_gh(
-    gremlin_id: str, state_dir: pathlib.Path, project_root: str, pipeline_path: str
-) -> Any:
+def _load_pipeline_and_check_gh(project_root: str, pipeline_path: str) -> Any:
     pipeline_data = None
     if pipeline_path:
         try:
@@ -753,9 +738,7 @@ def resume(gremlin_id: str, *, graft: str | None = None) -> None:
     pipeline_args, pipeline_path, project_root = _resolve_resume_pipeline(
         state, state_dir
     )
-    pipeline_data = _load_pipeline_and_check_gh(
-        gremlin_id, state_dir, project_root, pipeline_path
-    )
+    pipeline_data = _load_pipeline_and_check_gh(project_root, pipeline_path)
     stage = _determine_stage(state, pipeline_data)
     if graft is not None:
         stage = _append_graft(state_dir, graft, project_root)
