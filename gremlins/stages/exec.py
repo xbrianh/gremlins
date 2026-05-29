@@ -82,7 +82,7 @@ class Exec(Stage):
             pre_sha = snapshot_head_before(cwd=pathlib.Path(state.cwd))
 
         cmds = [
-            self.substitute_vars(c.rstrip(), state)
+            self.substitute_vars(c.rstrip(), state, extra_env)
             for c in self.options.get("cmds", [])
             if c.strip()
         ]
@@ -111,14 +111,14 @@ class Exec(Stage):
                     raise Bail(f"exec {self.name}: exited {result.returncode}")
 
         for raw_key, raw_uri_str in self.out_map.items():
-            key = self.substitute_vars(raw_key, state)
+            key = self.substitute_vars(raw_key, state, extra_env)
             if key == _BAIL_KEY and not bail_triggered:
                 continue
             if key == _STATUS_KEY:
                 state.artifacts.write(_STATUS_KEY, "needs_fix" if needs_fix else "pass")
                 continue
             uri_str = self.substitute_vars(
-                _sub_reads(raw_uri_str, state.artifacts), state
+                _sub_reads(raw_uri_str, state.artifacts), state, extra_env
             )
             if uri_str == "git://range":
                 if pre_sha is None:

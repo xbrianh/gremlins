@@ -18,11 +18,6 @@ class Agent(Stage):
     in:  var_name -> registry_key   (resolved content substituted into prompt)
     out: registry_key -> uri_string (bound before run, verified after)
 
-    Runtime substitution vars available in prompts and out: URIs come from
-    State.framework_subs(): {name} {model} {session_dir} {instructions}
-    {repo} {cwd} {base_ref}. The stage layers its own resolved in: vars and
-    string options underneath; framework vars win on conflict.
-
     Unknown {keys} pass through unchanged (so code examples with braces work),
     but this also means typos like {plann} produce no error.
     """
@@ -54,7 +49,7 @@ class Agent(Stage):
         if not isinstance(raw_out, dict):
             raise ValueError(f"stage {name!r}: 'out' must be a mapping")
         for k in cast(dict[str, Any], d.get("options") or {}):
-            if k in State.FRAMEWORK_KEYS and k != "model":
+            if k in State.FRAMEWORK_KEYS - {"model"}:
                 raise ValueError(
                     f"stage {name!r}: option key {k!r} collides with framework substitution variable"
                 )

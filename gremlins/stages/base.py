@@ -42,6 +42,7 @@ class Stage:
         self._path: str = ""
         self.client: Client | None = None
         self.raw_dict: dict[str, Any] | None = None
+        self.options: dict[str, Any] = {}
 
     def substitute_vars(
         self, text: str, state: State, extra: dict[str, str] | None = None

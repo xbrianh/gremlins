@@ -84,3 +84,50 @@ def test_deleted_helpers_not_on_stage() -> None:
     assert not hasattr(stage, "run_claude")
     assert not hasattr(stage, "bail_command")
     assert not hasattr(stage, "run_subprocess")
+
+
+def _subs_state() -> State:
+    return build_state(
+        data=StateData(gremlin_id=None, base_ref_name="trunk"),
+        client=FakeClaudeClient(fixtures={}),
+        session_dir=pathlib.Path("/tmp/sess"),
+        pipeline_data=_PIPELINE,
+        repo="owner/proj",
+        cwd="/work",
+        instructions="do the thing",
+        stage_model="effective-model",
+    )
+
+
+def test_substitute_vars_renders_shared_framework_keys() -> None:
+    stage = _SimpleStage("st", [], {})
+    state = _subs_state()
+    text = "{name} {model} {session_dir} {instructions} {repo} {cwd} {base_ref}"
+    assert stage.substitute_vars(text, state) == (
+        "st effective-model /tmp/sess do the thing owner/proj /work trunk"
+    )
+
+
+def test_substitute_vars_framework_wins_over_options_and_extra() -> None:
+    stage = _SimpleStage("st", [], {"repo": "from-opt", "x": "opt-x"})
+    state = _subs_state()
+    out = stage.substitute_vars(
+        "{repo} {x} {y}", state, extra={"repo": "from-extra", "y": "extra-y"}
+    )
+    # framework {repo} wins over both option and extra; extra wins over option for {y}.
+    assert out == "owner/proj opt-x extra-y"
+
+
+def test_substitute_vars_extra_wins_over_options() -> None:
+    stage = _SimpleStage("st", [], {"k": "opt"})
+    state = _subs_state()
+    assert stage.substitute_vars("{k}", state, extra={"k": "resolved"}) == "resolved"
+
+
+def test_substitute_vars_unknown_and_nonword_braces_pass_through() -> None:
+    stage = _SimpleStage("st", [], {})
+    state = _subs_state()
+    text = "{unknown} ${shell} {read:k} {{name}}"
+    # unknown tokens, shell ${x}, {read:k}, and doubled braces are left verbatim;
+    # the inner {name} of {{name}} is substituted (regex, not format_map semantics).
+    assert stage.substitute_vars(text, state) == "{unknown} ${shell} {read:k} {st}"
