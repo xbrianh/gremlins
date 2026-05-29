@@ -5,14 +5,12 @@ from typing import Any
 from gremlins.stages.agent import Agent
 from gremlins.stages.base import Stage
 from gremlins.stages.exec import Exec
-from gremlins.stages.handoff import Handoff
 from gremlins.stages.loop import LoopStage
 from gremlins.stages.parallel import ParallelStage
 from gremlins.stages.sequence import SequenceStage
 
 STAGE_TYPES: dict[str, type[Stage]] = {
     "agent": Agent,
-    "handoff": Handoff,
     "loop": LoopStage,
     "parallel": ParallelStage,
     "sequence": SequenceStage,

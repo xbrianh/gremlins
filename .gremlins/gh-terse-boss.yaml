@@ -14,7 +14,7 @@ stages:
       pr_stack: true
       max_iterations: 30
     body:
-      - { type: handoff, client: claude:opus, prompt: [gremlins:handoff.md, small-diffs] }
+      - { name: handoff, type: gremlins:handoff, client: claude:opus }
       - { include: gh-terse }
 
   - name: review-chain

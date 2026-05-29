@@ -42,7 +42,7 @@ class Pipeline:
         return (
             first is not None
             and first.type == "loop"
-            and any(b.type == "handoff" for b in (first.body or []))
+            and any(b.name == "handoff" for b in (first.body or []))
         )
 
     def needs_gh(self) -> bool:

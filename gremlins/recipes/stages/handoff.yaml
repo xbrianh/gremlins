@@ -1,0 +1,97 @@
+stages:
+  - type: sequence
+    body:
+      - name: handoff-init
+        type: exec
+        out:
+          rolling-plan: "file://session/rolling-plan.md"
+          boss-spec: "file://session/boss-spec.md"
+        options:
+          cmds:
+            - |
+              if [ ! -f "{session_dir}/boss-spec.md" ]; then
+                cp "{session_dir}/plan.md" "{session_dir}/boss-spec.md"
+              fi
+              if [ ! -f "{session_dir}/rolling-plan.md" ]; then
+                cp "{session_dir}/plan.md" "{session_dir}/rolling-plan.md"
+              fi
+
+      - name: handoff
+        type: agent
+        prompt:
+          - "gremlins:handoff.md"
+          - "gremlins:code_style.md"
+        in:
+          plan_text: rolling-plan
+          spec_section: "boss-spec?"
+        out:
+          rolling-plan: "file://session/rolling-plan.md"
+        options:
+          idle_timeout: 3600
+
+      - name: translate-signal
+        type: exec
+        out:
+          status: "file://session/handoff-status.txt"
+          bail: "file://session/bail-reason.txt"
+        options:
+          cmds:
+            - |
+              cp "{session_dir}/rolling-plan.md" "{session_dir}/rolling-plan-pre-sanitize.md"
+              SIGNAL="{session_dir}/signal.json"
+              if [ ! -f "$SIGNAL" ]; then
+                printf 'signal.json not written by agent' > "{session_dir}/bail-reason.txt"
+                exit 2
+              fi
+              exit_state=$(jq -r '.exit_state // empty' "$SIGNAL") || {
+                printf 'failed to parse exit_state from signal.json' > "{session_dir}/bail-reason.txt"
+                exit 2
+              }
+              case "$exit_state" in
+                next-plan)
+                  child=$(jq -r '.child_plan // empty' "$SIGNAL")
+                  if [ -z "$child" ] || [ ! -f "$child" ]; then
+                    printf 'next-plan: child_plan not found: %s' "$child" \
+                      > "{session_dir}/bail-reason.txt"
+                    exit 2
+                  fi
+                  cp "$child" "{session_dir}/plan.md"
+                  exit 1
+                  ;;
+                chain-done)
+                  cp "{session_dir}/boss-spec.md" "{session_dir}/plan.md"
+                  exit 0
+                  ;;
+                bail)
+                  jq -r '.reason // "(no reason given)"' "$SIGNAL" \
+                    > "{session_dir}/bail-reason.txt" || \
+                    printf '(jq failed reading bail reason)' > "{session_dir}/bail-reason.txt"
+                  exit 2
+                  ;;
+                *)
+                  printf 'unrecognized exit_state: %s' "$exit_state" \
+                    > "{session_dir}/bail-reason.txt"
+                  exit 2
+                  ;;
+              esac
+
+      - name: sanitize
+        type: agent
+        prompt:
+          - "gremlins:handoff_sanitize.md"
+        in:
+          rolling_plan_text: rolling-plan
+        out:
+          rolling-plan: "file://session/rolling-plan.md"
+        options:
+          model: haiku
+
+      - name: restore-rolling-plan
+        type: exec
+        options:
+          cmds:
+            - |
+              if [ ! -s "{session_dir}/rolling-plan.md" ]; then
+                cp "{session_dir}/rolling-plan-pre-sanitize.md" \
+                  "{session_dir}/rolling-plan.md"
+              fi
