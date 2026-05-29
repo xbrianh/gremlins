@@ -1,4 +1,4 @@
-default_client: claude:sonnet
+default_client: xai:grok-4
 base_ref: main
 github_integration: true
 prompt_dir: prompts
@@ -15,7 +15,8 @@ land:
   options:
     cmds:
       - gh pr merge --squash --delete-branch "$PR_URL"
-      - git fetch origin main:main
+      - git fetch origin
+      - git branch -f main origin/main 2>/dev/null || git merge --ff-only origin/main
 
 prompts:
   code-style: gremlins:code_style.md
