@@ -110,7 +110,7 @@ Prefer **smaller, single-purpose** child plans over bundled ones. A good child p
 7. Write the **signal marker** to: `{session_dir}/signal.json`
    - Valid JSON, exactly this structure:
      ```json
-     {{"exit_state": "next-plan|chain-done|bail", "child_plan": "<absolute path or null>", "reason": "<bail reason or null>", "operator_followups": ["<task>", ...]}}
+     {"exit_state": "next-plan|chain-done|bail", "child_plan": "<absolute path or null>", "reason": "<bail reason or null>", "operator_followups": ["<task>", ...]}
      ```
    - `child_plan`: `{session_dir}/child-plan.md` (as a string) if exit state is `next-plan`, otherwise `null`.
    - `reason`: a short human-readable explanation if exit state is `bail`, otherwise `null`.

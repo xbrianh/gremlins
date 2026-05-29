@@ -15,7 +15,6 @@ stages:
               if [ ! -f "{session_dir}/rolling-plan.md" ]; then
                 cp "{session_dir}/plan.md" "{session_dir}/rolling-plan.md"
               fi
-              cp "{session_dir}/rolling-plan.md" "{session_dir}/rolling-plan-pre-sanitize.md"
 
       - name: handoff
         type: agent
@@ -38,12 +37,16 @@ stages:
         options:
           cmds:
             - |
+              cp "{session_dir}/rolling-plan.md" "{session_dir}/rolling-plan-pre-sanitize.md"
               SIGNAL="{session_dir}/signal.json"
               if [ ! -f "$SIGNAL" ]; then
                 printf 'signal.json not written by agent' > "{session_dir}/bail-reason.txt"
                 exit 2
               fi
-              exit_state=$(jq -r '.exit_state // empty' "$SIGNAL")
+              exit_state=$(jq -r '.exit_state // empty' "$SIGNAL") || {
+                printf 'failed to parse exit_state from signal.json' > "{session_dir}/bail-reason.txt"
+                exit 2
+              }
               case "$exit_state" in
                 next-plan)
                   child=$(jq -r '.child_plan // empty' "$SIGNAL")
@@ -61,7 +64,8 @@ stages:
                   ;;
                 bail)
                   jq -r '.reason // "(no reason given)"' "$SIGNAL" \
-                    > "{session_dir}/bail-reason.txt"
+                    > "{session_dir}/bail-reason.txt" || \
+                    printf '(jq failed reading bail reason)' > "{session_dir}/bail-reason.txt"
                   exit 2
                   ;;
                 *)
