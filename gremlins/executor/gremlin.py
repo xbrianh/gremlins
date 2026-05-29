@@ -337,10 +337,10 @@ class Gremlin:
                 if m and self.registry.produced("plan"):
                     plan_uri = self.registry.resolve("plan")
                     if plan_uri.scheme == "file":
+                        self.registry.unbind("plan")
                         self.registry.bind(
                             "plan",
                             Uri.parse(f"gh://issue/{m.group(1)}"),
-                            override=True,
                         )
         except Exception:
             if worktree_created:
