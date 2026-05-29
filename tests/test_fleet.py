@@ -1030,6 +1030,43 @@ def test_do_land_dispatches_to_correct_helper(
     assert called == [expected_land_fn], f"expected {expected_land_fn}, got {called}"
 
 
+def test_do_land_one_branch_with_registry_pr_routes_to_gh(
+    sandbox, tmp_path, monkeypatch
+):
+    """Branch artifact + registry PR → land_gh, not land_local (regression for #1005)."""
+    gremlin_id = "gh-terse-reg-pr-id"
+    gr_dir = sandbox.state / gremlin_id
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    state = {
+        "id": gremlin_id,
+        "kind": "ghgremlin",
+        "status": "dead",
+        "exit_code": 0,
+        "workdir": str(workdir),
+        "project_root": str(tmp_path / "project"),
+        "setup_kind": "worktree-branch",
+        "artifacts": [{"type": "branch", "name": "bg/local/gh-terse-reg-pr-id"}],
+    }
+    _write_state(gr_dir, state, finished=True)
+
+    (gr_dir / "registry.json").write_text(
+        '{"pr": "gh://pr/1003", "status": "pass"}'
+    )
+
+    called = []
+    monkeypatch.setattr(
+        _land_mod, "_land_local", lambda *a, **kw: called.append("_land_local") or True
+    )
+    monkeypatch.setattr(
+        _land_mod, "_land_gh", lambda *a, **kw: called.append("_land_gh") or True
+    )
+
+    ok = _land_mod.do_land(gremlin_id)
+    assert ok is True
+    assert called == ["_land_gh"], f"expected _land_gh, got {called}"
+
+
 def test_do_land_one_branch_routes_to_local(sandbox, tmp_path, monkeypatch):
     """A gremlin with one branch artifact dispatches to _land_local."""
     gremlin_id = "custard-pipeline-id"

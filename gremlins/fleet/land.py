@@ -1047,7 +1047,7 @@ def do_land(
 
     shape = landable_shape(state)
 
-    if shape == "empty":
+    if shape in ("empty", "one_branch"):
         session_dir = resolve_session_dir(gremlin_id)
         registry = ArtifactRegistry(session_dir=session_dir)
         if registry.produced("pr"):
