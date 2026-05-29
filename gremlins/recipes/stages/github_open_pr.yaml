@@ -31,7 +31,9 @@ stages:
     options:
       cmds:
         - |
-          BRANCH="$(cat "{session_dir}/pr-branch.txt")" &&
+          BASE="$(cat "{session_dir}/pr-branch.txt")" &&
+          SUFFIX=$([ "{loop_iteration}" -gt 1 ] && echo "-iter{loop_iteration}" || echo "") &&
+          BRANCH="${BASE}${SUFFIX}" &&
           git push origin "HEAD:refs/heads/$BRANCH" &&
           URL="$(gh pr create --head "$BRANCH" --base "$base_ref_to_open_pr" --title "$(cat "{session_dir}/pr-title.txt")" --body-file "{session_dir}/pr-body.md")" &&
           printf "%s" "${URL##*/}" > "{session_dir}/pr-number.txt"
