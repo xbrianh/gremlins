@@ -791,7 +791,7 @@ def _land_gh(
         cwd=pathlib.Path(cwd) if cwd else None,
     )
     try:
-        pr_url = resolve_in_map(registry, {"url": "pr-url"})["url"]
+        pr_url = resolve_in_map(registry, {"url": "pr-url"})["url"].strip()
     except MissingArtifact:
         print(f"error: no PR URL recorded for {gremlin_id}")
         return False

@@ -16,6 +16,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from gremlins import paths
+from gremlins.artifacts.resolve import resolve_in_map
 from gremlins.clients.client import Client
 from gremlins.env_file import load_env_file
 from gremlins.errors import die
@@ -354,8 +355,6 @@ async def run_pipeline(
         sd.patch(total_cost_usd=total_cost)
 
     if gh:
-        from gremlins.artifacts.resolve import resolve_in_map
-
         pr_url = resolve_in_map(gremlin.registry, {"pr_url": "pr-url?(unknown)"})[
             "pr_url"
         ]
