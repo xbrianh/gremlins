@@ -16,7 +16,7 @@ stages:
           interval: "{{options.interval | default(\"20\")}}"
           cmds:
             - |
-              review=$(timeout 30 gh api "repos/{repo}/pulls/$pr_number/reviews" \
+              review=$(gh api "repos/{repo}/pulls/$pr_number/reviews" \
                 --jq '.[] | select(.user.login | test("[Cc]opilot")) | .state | select(. != "PENDING")' \
                 2>/dev/null || true)
               [ -n "$review" ] && exit 0
