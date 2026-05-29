@@ -217,9 +217,7 @@ def do_drill_in(target: str) -> None:
         print(f"  started  : {local_start}")
 
     # Surface bail markers (if any) above the raw state dump so they're
-    # immediately visible. bail_class is upstream-set by review/address
-    # stages; bail_reason/bail_detail are headless-rescue-set when it
-    # declined to proceed.
+    # immediately visible. bail_class is upstream-set by review/address stages.
     _gremlin_id_for_bail = str(state.get("id") or "")
     _bail_file = (
         StateData.load(_gremlin_id_for_bail).read_bail_info()
@@ -260,15 +258,6 @@ def do_drill_in(target: str) -> None:
             fpath = os.path.join(artifacts_dir, fname)
             if os.path.isfile(fpath):
                 artifact_paths.append(fpath)
-    rescue_reports: list[str] = []
-    try:
-        for fname in sorted(os.listdir(wdir)):
-            if fname.startswith("rescue-") and fname.endswith(".md"):
-                fpath = os.path.join(wdir, fname)
-                if os.path.isfile(fpath):
-                    rescue_reports.append(fpath)
-    except OSError:
-        pass
     has_log = os.path.isfile(log_path)
     if has_log:
         print(f"    log: {log_path}")
@@ -276,12 +265,8 @@ def do_drill_in(target: str) -> None:
         print("    artifacts:")
         for fpath in artifact_paths:
             print(f"      {fpath}")
-    if rescue_reports:
-        print("    rescue reports:")
-        for fpath in rescue_reports:
-            print(f"      {fpath}")
-    if not has_log and not artifact_paths and not rescue_reports:
-        print("    (no log, artifacts, or rescue reports)")
+    if not has_log and not artifact_paths:
+        print("    (no log or artifacts)")
 
 
 def _gremlin_to_json(
@@ -413,16 +398,6 @@ def do_drill_in_json(target: str) -> None:
             fpath = os.path.join(artifacts_dir, fname)
             if os.path.isfile(fpath):
                 artifact_paths.append(fpath)
-    rescue_reports: list[str] = []
-    try:
-        for fname in sorted(os.listdir(wdir)):
-            if fname.startswith("rescue-") and fname.endswith(".md"):
-                fpath = os.path.join(wdir, fname)
-                if os.path.isfile(fpath):
-                    rescue_reports.append(fpath)
-    except OSError:
-        pass
-
     obj: dict[str, object] = {
         "id": gremlin_id,
         "liveness": parse_liveness(live),
@@ -435,7 +410,6 @@ def do_drill_in_json(target: str) -> None:
         "state_dir": wdir,
         "log_path": log_path if os.path.isfile(log_path) else None,
         "artifact_paths": artifact_paths,
-        "rescue_reports": rescue_reports,
         "state": state,
     }
     print(json.dumps(obj, indent=2))

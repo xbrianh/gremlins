@@ -373,7 +373,7 @@ def test_launch_explicit_project_root(lenv):
 
 
 def test_resume_patches_state(lenv, monkeypatch):
-    """Manual resume() clears markers and patches state.json without bumping rescue_count."""
+    """Manual resume() clears markers and patches state.json."""
     monkeypatch.delenv("GREMLINS_TEST_NOOP_PIPELINE")
     launcher = _launcher()
     monkeypatch.setenv("FAKE_CLAUDE_FAIL_AT", "plan")
@@ -385,16 +385,10 @@ def test_resume_patches_state(lenv, monkeypatch):
         "failed gremlin should terminate quickly"
     )
 
-    pre_state = _read_state(state_dir)
-    pre_rescue_count = pre_state.get("rescue_count", 0)
-
     monkeypatch.setenv("FAKE_CLAUDE_FAIL_AT", "")
     launcher.resume(gremlin_id)
 
     post_state = _read_state(state_dir)
-    assert post_state["rescue_count"] == pre_rescue_count, (
-        "manual resume must not bump rescue_count"
-    )
     assert post_state["status"] == "running"
     assert post_state["resumed_from_stage"] == "plan"
     assert post_state["pipeline_path"].endswith(".yaml")

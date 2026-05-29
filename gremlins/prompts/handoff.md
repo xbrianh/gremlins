@@ -34,7 +34,7 @@ Classify a task as **operator** if executing it inside a child gremlin's worktre
 - **Mutates the user's live config or other shared machine state directly**: hand-edits under `~/.claude/` (or equivalent live config dirs), running a script that mirrors the worktree into shared state, copying built artifacts onto the user's machine. (The child has unmerged code in its worktree; pushing that into live state would suddenly run unmerged code on the user's machine.)
 - **Launches another gremlin**: `/localgremlin`, `/ghgremlin`, `/bossgremlin`, or a smoke-run / end-to-end run that boils down to invoking one. Recursive gremlin launch from a detached worktree is undefined behavior.
 - **Pushes to a remote outside the PR flow**: `git push origin main`, force-pushes, manual `gh pr merge`, direct merges. The child's only remote interaction is opening (and updating) one PR.
-- **Operator commands**: `/gremlins land`, `/gremlins rescue`, `/gremlins stop`, `/gremlins close`, `/gremlins rm`. These are human controls, not workflow steps.
+- **Operator commands**: `/gremlins land`, `/gremlins stop`, `/gremlins close`, `/gremlins rm`. These are human controls, not workflow steps.
 - **Post-merge verification**: "verify the merged PR's CI is green", "confirm the production deploy", "watch the release dashboard". The child finishes before its PR merges.
 
 Classify as **implementation** if it is a code/doc/config change that lands in the child's PR. Examples that *look* operator-adjacent but are implementation:

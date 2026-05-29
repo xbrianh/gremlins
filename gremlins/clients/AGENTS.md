@@ -30,8 +30,8 @@ the `Client` class is the seam tests swap out.
 - `stream.py` — `stream_events` reader and `trunc` helper. Parses the
   `--output-format stream-json` line stream into the formatted log lines
   stages emit (`text:` / `think:` / `tool:` / `result:` / `final:`).
-  `stream_events` is used by `claude.py` and `fleet/rescue.py`; `trunc`
-  is used by `providers/openai_agents.py`.
+  `stream_events` is used by `claude.py`; `trunc` is used by
+  `providers/openai_agents.py`.
 - `__init__.py` — registers the `claude`, `copilot`, `openai`, `xai`, and
   `anthropic` factories with `CLIENT_FACTORIES` at import time. Importing the
   package is what wires the providers up.

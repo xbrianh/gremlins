@@ -49,8 +49,7 @@ queue work against a different repo, prefix the command with `cd`:
 - `gremlins [<id-prefix>] [--json]` — fleet status (no args) or single gremlin status; `--json` for structured output
 - `gremlins log <id-prefix>` — tail a gremlin's log
 - `gremlins land <id-prefix>` — land a finished gremlin onto the current branch
-- `gremlins resume <id-prefix>` — re-spawn from the last recorded stage, skipping re-diagnosis
-- `gremlins rescue <id-prefix>` — diagnose and resume a dead or stalled gremlin
+- `gremlins resume <id-prefix>` — re-spawn from the last recorded stage
 - `gremlins stop <id-prefix>` — send SIGTERM to a running gremlin
 - `gremlins rm <id-prefix>` — delete a dead gremlin's state dir, worktree, and branch
 - `gremlins queue add <cmd…>` — append a command to the default queue

@@ -33,7 +33,6 @@ def do_stop(target: str) -> bool:
         return False
     if live.startswith("dead:"):
         print(f"gremlin {gremlin_id} is already dead ({live})")
-        print("Use 'rescue' to diagnose and continue from the failed stage.")
         return False
 
     stage = state.get("stage") or "-"
