@@ -602,7 +602,7 @@ def test_plan_no_h1_issue_body(tmp_path, monkeypatch):
     gh_bin.write_text(
         "#!/bin/sh\n"
         'for arg in "$@"; do\n'
-        "    case \"$arg\" in\n"
+        '    case "$arg" in\n'
         "        .title) printf 'Issue Title'; exit 0;;\n"
         "        .number) printf '42'; exit 0;;\n"
         "        .body) printf 'No H1 in this body.'; exit 0;;\n"
