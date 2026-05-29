@@ -9,6 +9,7 @@ import sys
 from collections.abc import AsyncGenerator
 from typing import Any, cast
 
+from gremlins import paths
 from gremlins.clients.config import (
     STREAM_IDLE_BACKOFF,
     STREAM_IDLE_TIMEOUT,
@@ -18,6 +19,7 @@ from gremlins.clients.config import (
 )
 from gremlins.clients.protocol import CompletedRun
 from gremlins.clients.stream import emit_event, ts
+from gremlins.env_file import load_env_file
 from gremlins.permissions.loader import load_default_block
 from gremlins.permissions.policy import Policy
 
@@ -49,17 +51,13 @@ def _cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
     return (input_tokens * input_rate + output_tokens * output_rate) / 1_000_000
 
 
-def _scrub_env(extra_env: dict[str, str] | None) -> dict[str, str]:
-    env: dict[str, str] = {}
-    for k, v in os.environ.items():
-        if k.startswith("CLAUDE_"):
-            continue
-        if k.startswith("ANTHROPIC_") and k != "ANTHROPIC_API_KEY":
-            continue
-        env[k] = v
-    if extra_env:
-        env.update(extra_env)
-    return env
+def _load_sdk_env_overlay() -> dict[str, str]:
+    sdk_env_file = (
+        paths.project_overlay_dir(paths.project_root()) / "anthropic_agents_sdk_env"
+    )
+    if not sdk_env_file.is_file():
+        return {}
+    return load_env_file(sdk_env_file, cwd=paths.project_root())
 
 
 def _block_to_dict(block: Any) -> dict[str, Any] | None:
@@ -154,6 +152,7 @@ class AnthropicSdkClient:
         self._native_block: dict[str, Any] = (
             native_block if native_block is not None else {}
         )
+        self._sdk_env_overlay = _load_sdk_env_overlay()
         # Per-task storage so parallel stages sharing one client instance
         # don't race on resume context (see comment in
         # SubprocessClaudeClient.__init__).
@@ -183,7 +182,7 @@ class AnthropicSdkClient:
             "setting_sources": [],
             "mcp_servers": {},
             "hooks": None,
-            "env": _scrub_env(extra_env),
+            "env": {**self._sdk_env_overlay, **(extra_env or {})},
         }
         allowed_tools: list[str] | None = self._native_block.get("allowed_tools")
         if allowed_tools is not None:

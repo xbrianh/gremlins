@@ -12,7 +12,7 @@ inputs:
 
 land:
   in:
-    PR_URL: pr.url
+    PR_URL: pr-url
   options:
     cmds:
       - gh pr merge --squash --delete-branch "$PR_URL"
@@ -32,6 +32,22 @@ prompts:
 # PRs only; fork PRs would need push access to the fork.
 
 stages:
+  - name: fetch-pr-info
+    type: exec
+    in:
+      pr_uri: pr.uri
+    out:
+      pr-url:    "file://session/pr-url.txt"
+      pr-branch: "file://session/pr-branch.txt"
+      pr-number: "file://session/pr-number.txt"
+    options:
+      cmds:
+        - |
+          PR_NUM="${pr_uri##*/}" &&  # gh://pr/N — strip trailing segment to get number
+          PR_JSON="$(gh pr view "$PR_NUM" --json url,headRefName,number)" &&
+          printf "%s" "$(printf '%s' "$PR_JSON" | jq -r '.url')" > "{session_dir}/pr-url.txt" &&
+          printf "%s" "$(printf '%s' "$PR_JSON" | jq -r '.headRefName')" > "{session_dir}/pr-branch.txt" &&
+          printf "%s" "$(printf '%s' "$PR_JSON" | jq -r '.number')" > "{session_dir}/pr-number.txt"
   - { type: gremlins:plan-gh, prompt: [code-style, terse, gremlins:plan_gh.md] }
   - { type: gremlins:implement, prompt: [code-style, terse, implement_pr_extension.md] }
   - { type: verify,             options: { cmds: ["make check", "make test"] }, prompt: verify }
