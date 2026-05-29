@@ -12,7 +12,7 @@ from gremlins.artifacts.uri import Uri
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData, build_state
 from gremlins.stages.exec import Exec as Cmd
-from gremlins.stages.loop import LoopStage, detach_to_pr_base, head_stable, max_iters
+from gremlins.stages.loop import LoopStage, head_stable, max_iters
 from gremlins.stages.outcome import Bail, Done
 
 
@@ -218,31 +218,6 @@ def test_custom_until_predicate(tmp_path):
     assert result == Done()
 
 
-def test_on_iteration_start_called_each_iteration(tmp_path):
-    """on_iteration_start fires once per iteration."""
-    calls: list[int] = []
-    iter_counter = [0]
-    loop_state = _loop_state(tmp_path)
-
-    def on_start(state: RuntimeState) -> None:
-        calls.append(1)
-
-    async def runner() -> Done:
-        iter_counter[0] += 1
-        if iter_counter[0] < 2:
-            _set_marker(loop_state)
-        return Done()
-
-    loop = LoopStage(
-        "loop",
-        body_runners=[runner],
-        max_iterations=3,
-        on_iteration_start=on_start,
-    )
-    asyncio.run(loop.run(loop_state))
-    assert len(calls) == 2  # fired for iteration 1 and 2
-
-
 # ---------------------------------------------------------------------------
 # Exec stage
 # ---------------------------------------------------------------------------
@@ -296,137 +271,6 @@ def test_run_cmd_output_written_to_log(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# on_iteration_start: replaces pr_stack detach-to-prior-PR logic
-# ---------------------------------------------------------------------------
-
-
-def _loop_state_with_gr(
-    tmp_path: Any, gremlin_id: str, *, pr_branch: str | None = None
-) -> RuntimeState:
-    (tmp_path / "artifacts").mkdir(exist_ok=True)
-    state = build_state(
-        data=StateData(gremlin_id=gremlin_id),
-        client=_fake_client(),
-        session_dir=tmp_path / "artifacts",
-        worktree=tmp_path,
-    )
-    if pr_branch is not None:
-        from gremlins.artifacts.uri import Uri
-
-        branch_file = tmp_path / "artifacts" / "pr-branch.txt"
-        branch_file.write_text(pr_branch)
-        state.artifacts.bind("pr-branch", Uri.parse("file://session/pr-branch.txt"))
-    return state
-
-
-def test_pr_stack_detaches_to_prior_pr_branch(tmp_path, make_state_dir, monkeypatch):
-    gremlin_id = "pr-stack-test"
-    state_dir = make_state_dir(gremlin_id)
-    (state_dir / "state.json").write_text(
-        json.dumps(
-            {
-                "id": gremlin_id,
-                "stage": "",
-                "bail_class": "",
-                "artifacts": [
-                    {
-                        "type": "pr",
-                        "url": "https://github.com/x/r/pull/1",
-                        "branch": "feat-abc",
-                    }
-                ],
-            }
-        )
-    )
-
-    detach_calls: list[str] = []
-    from gremlins.stages import loop as _loop_mod
-
-    monkeypatch.setattr(
-        _loop_mod._git,
-        "git_detach_to_branch",
-        lambda branch, cwd=None: detach_calls.append(branch),
-    )
-
-    async def done_runner() -> Done:
-        return Done()
-
-    loop = LoopStage(
-        "test",
-        body_runners=[done_runner],
-        max_iterations=1,
-        on_iteration_start=detach_to_pr_base,
-    )
-    asyncio.run(
-        loop.run(_loop_state_with_gr(tmp_path, gremlin_id, pr_branch="feat-abc"))
-    )
-
-    assert detach_calls == ["feat-abc"]
-
-
-def test_pr_stack_skipped_when_no_prior_pr(tmp_path, make_state_dir, monkeypatch):
-    gremlin_id = "pr-stack-noop-test"
-    make_state_dir(gremlin_id)
-
-    git_calls: list[str] = []
-    from gremlins.stages import loop as _loop_mod
-
-    monkeypatch.setattr(
-        _loop_mod._git,
-        "git_detach_to_branch",
-        lambda branch, cwd=None: git_calls.append(branch),
-    )
-
-    async def done_runner() -> Done:
-        return Done()
-
-    loop = LoopStage(
-        "test",
-        body_runners=[done_runner],
-        max_iterations=1,
-        on_iteration_start=detach_to_pr_base,
-    )
-    asyncio.run(loop.run(_loop_state_with_gr(tmp_path, gremlin_id)))
-
-    assert git_calls == []
-
-
-def test_no_on_iteration_start_skips_detach(tmp_path, make_state_dir, monkeypatch):
-    gremlin_id = "pr-stack-disabled"
-    state_dir = make_state_dir(gremlin_id)
-    (state_dir / "state.json").write_text(
-        json.dumps(
-            {
-                "id": gremlin_id,
-                "stage": "",
-                "bail_class": "",
-                "artifacts": [
-                    {
-                        "type": "pr",
-                        "url": "https://github.com/x/r/pull/1",
-                        "branch": "feat-xyz",
-                    }
-                ],
-            }
-        )
-    )
-
-    git_calls: list[str] = []
-    from gremlins.stages import loop as _loop_mod
-
-    monkeypatch.setattr(
-        _loop_mod._git,
-        "git_detach_to_branch",
-        lambda branch, cwd=None: git_calls.append(branch),
-    )
-
-    async def done_runner() -> Done:
-        return Done()
-
-    loop = LoopStage("test", body_runners=[done_runner], max_iterations=1)
-    asyncio.run(loop.run(_loop_state_with_gr(tmp_path, gremlin_id)))
-
-    assert git_calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -487,94 +331,6 @@ def test_loop_unbinds_out_keys_between_iterations(tmp_path):
     )
     asyncio.run(loop.run(state))
     assert bound_count[0] == 2
-
-
-def test_pr_stack_unbind_fires_after_on_iteration_start(
-    tmp_path, make_state_dir, monkeypatch
-):
-    """Unbind runs after on_iteration_start so detach_to_pr_base can read the pr artifact."""
-    from gremlins.stages.exec import Exec
-
-    gremlin_id = "pr-stack-order-test"
-    make_state_dir(gremlin_id)
-
-    detach_calls: list[str] = []
-    from gremlins.stages import loop as _loop_mod
-
-    monkeypatch.setattr(
-        _loop_mod._git,
-        "git_detach_to_branch",
-        lambda branch, cwd=None: detach_calls.append(branch),
-    )
-
-    state = _loop_state_with_gr(tmp_path, gremlin_id)
-    count = [0]
-
-    async def runner() -> Done:
-        count[0] += 1
-        if count[0] == 1:
-            from gremlins.artifacts.uri import Uri
-
-            branch_file = tmp_path / "artifacts" / "pr-branch.txt"
-            branch_file.write_text("feat-iter1")
-            state.artifacts.bind("pr-branch", Uri.parse("file://session/pr-branch.txt"))
-            _set_marker(state)
-        return Done()
-
-    exec_stage = Exec(
-        "stage", {}, out_map={"pr-branch": "file://session/pr-branch.txt"}
-    )
-    loop = LoopStage(
-        "test",
-        body=[exec_stage],
-        body_runners=[runner],
-        max_iterations=2,
-        on_iteration_start=detach_to_pr_base,
-    )
-    asyncio.run(loop.run(state))
-
-    # on_iteration_start fires before unbind, so detach_to_pr_base sees pr-branch on iter 2
-    assert detach_calls == ["feat-iter1"]
-
-
-def test_pr_stack_iter2_detaches_to_iter1_branch(tmp_path, make_state_dir, monkeypatch):
-    """Detach fires at start of iter2 using the artifact written during iter1."""
-    gremlin_id = "pr-stack-two-iter"
-    make_state_dir(gremlin_id)
-
-    detach_calls: list[str] = []
-    from gremlins.stages import loop as _loop_mod
-
-    monkeypatch.setattr(
-        _loop_mod._git,
-        "git_detach_to_branch",
-        lambda branch, cwd=None: detach_calls.append(branch),
-    )
-
-    state = _loop_state_with_gr(tmp_path, gremlin_id)
-    count = 0
-
-    async def runner() -> Done:
-        nonlocal count
-        count += 1
-        if count == 1:
-            from gremlins.artifacts.uri import Uri
-
-            branch_file = tmp_path / "artifacts" / "pr-branch.txt"
-            branch_file.write_text("feat-iter1")
-            state.artifacts.bind("pr-branch", Uri.parse("file://session/pr-branch.txt"))
-            _set_marker(state)
-        return Done()
-
-    loop = LoopStage(
-        "test",
-        body_runners=[runner],
-        max_iterations=2,
-        on_iteration_start=detach_to_pr_base,
-    )
-    asyncio.run(loop.run(state))
-
-    assert detach_calls == ["feat-iter1"]
 
 
 # ---------------------------------------------------------------------------
