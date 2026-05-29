@@ -43,12 +43,16 @@ logger = logging.getLogger(__name__)
 def _get_repo() -> str:
     r = _proc.run(["git", "remote", "get-url", "origin"], timeout=10)
     if r.returncode != 0:
-        raise RuntimeError(f"cannot read git remote: {r.stderr.strip() or r.stdout.strip()}")
+        raise RuntimeError(
+            f"cannot read git remote: {r.stderr.strip() or r.stdout.strip()}"
+        )
     url = r.stdout.strip().removesuffix(".git")
     # handles https://github.com/owner/repo and git@github.com:owner/repo
     owner_repo = url.split("github.com")[-1].lstrip(":/")
     if "/" not in owner_repo:
-        raise RuntimeError(f"cannot parse owner/repo from remote URL: {r.stdout.strip()!r}")
+        raise RuntimeError(
+            f"cannot parse owner/repo from remote URL: {r.stdout.strip()!r}"
+        )
     return owner_repo
 
 
