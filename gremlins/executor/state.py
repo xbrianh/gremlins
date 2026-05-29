@@ -149,7 +149,6 @@ class StateData:
     permissions_file: str = ""
     group_name: str = ""
     child_key: str = ""
-    base_ref_name: str = ""
 
     @classmethod
     def load(cls, gremlin_id: str | None) -> StateData:
@@ -181,7 +180,6 @@ class StateData:
             permissions_file=sd.get("permissions_file") or "",
             group_name=sd.get("group_name") or "",
             child_key=sd.get("child_key") or "",
-            base_ref_name=sd.get("base_ref_name") or "",
         )
 
     def persist(self, state_dir: pathlib.Path) -> None:
@@ -212,7 +210,6 @@ class StateData:
             "permissions_file": self.permissions_file,
             "group_name": self.group_name,
             "child_key": self.child_key,
-            "base_ref_name": self.base_ref_name,
         }
         write_state(state_dir, data)
         self.state_file = state_dir / "state.json"
@@ -522,6 +519,7 @@ class State:
     parent_stage: str = ""
     worktree: pathlib.Path | None = None
     worktree_parent: pathlib.Path | None = None
+    base_ref: str = ""
 
     FRAMEWORK_KEYS: ClassVar[frozenset[str]] = frozenset(
         {
@@ -545,7 +543,7 @@ class State:
             "instructions": self.instructions,
             "repo": self.repo,
             "cwd": self.cwd,
-            "base_ref": self.data.base_ref_name,
+            "base_ref": self.base_ref,
             "loop_iteration": str(self.data.loop_iteration),
         }
 
@@ -572,7 +570,7 @@ class State:
             scope=scope,
             repo=self.repo,
             cwd=self.cwd,
-            base_ref=self.data.base_ref_name,
+            base_ref=self.base_ref,
         )
 
     def done_for(self, path: str) -> set[str]:
@@ -653,6 +651,7 @@ def build_state(
     artifacts: ArtifactRegistry | None = None,
     child_key: str | None = None,
     parent_stage: str = "",
+    base_ref: str = "",
 ) -> State:
     reg = ArtifactRegistry(session_dir=session_dir, cwd=worktree)
     return State(
@@ -672,4 +671,5 @@ def build_state(
         worktree_parent=worktree_parent,
         child_key=child_key,
         parent_stage=parent_stage,
+        base_ref=base_ref,
     )

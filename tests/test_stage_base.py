@@ -88,7 +88,7 @@ def test_deleted_helpers_not_on_stage() -> None:
 
 def _subs_state() -> State:
     return build_state(
-        data=StateData(gremlin_id=None, base_ref_name="trunk"),
+        data=StateData(gremlin_id=None),
         client=FakeClaudeClient(fixtures={}),
         session_dir=pathlib.Path("/tmp/sess"),
         pipeline_data=_PIPELINE,
@@ -96,6 +96,7 @@ def _subs_state() -> State:
         cwd="/work",
         instructions="do the thing",
         stage_model="effective-model",
+        base_ref="trunk",
     )
 
 

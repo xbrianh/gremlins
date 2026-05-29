@@ -109,7 +109,7 @@ Bindings are atomically persisted to `session_dir.parent / "registry.json"`
 so they survive process restart. On construction, any existing file at that
 path is pre-loaded so resumed runs see prior bindings.
 
-## Rehydration: base_ref_sha on resume
+## Rehydration: base_ref_sha and base_ref on resume
 
 `base_ref_sha` is bound at launch time as `git://commit/<revspec>` under the key
 `"base_sha"`.  The value is a git revspec — either a 40-char SHA (normal branch
@@ -119,3 +119,9 @@ by git commands that consume it.  `run.py` reads this from `registry.json` (not
 can be created on first start.  On resume the worktree already exists (`workdir`
 is set in `state.json`), so `base_ref_sha` is not re-used by `setup_workdir`.
 The binding in `registry.json` is the authoritative source.
+
+`base_ref` (the symbolic ref name, e.g. `main`) is bound at launch time as
+`git://ref/<name>` under the key `"base_ref"`.  `run.py` reads this from
+`registry.json` and passes it to `Gremlin.initialize_with_runtime(base_ref=...)`
+which threads it through `build_state` into `State.base_ref`.  Recipes access it
+via the `{base_ref}` substitution variable.

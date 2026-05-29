@@ -216,19 +216,23 @@ async def run_pipeline(
         stage_inputs.get("instructions") or " ".join(args.instructions or [])
     )
 
-    # base_ref_sha is bound in registry.json at launch time
+    # base_ref_sha and base_ref are bound in registry.json at launch time
     _registry_path = state_dir / "registry.json"
     base_ref_sha = ""
+    base_ref = ""
     if _registry_path.exists():
         try:
             _reg = json.loads(_registry_path.read_text(encoding="utf-8"))
             _sha_uri = str(_reg.get("base_sha") or "")
             if _sha_uri.startswith("git://commit/"):
                 base_ref_sha = _sha_uri.removeprefix("git://commit/")
+            _ref_uri = str(_reg.get("base_ref") or "")
+            if _ref_uri.startswith("git://ref/"):
+                base_ref = _ref_uri.removeprefix("git://ref/")
         except Exception:
-            logger.warning("failed to read base_sha from registry.json", exc_info=True)
-
-    base_ref = state_json.get("base_ref_name") or ""
+            logger.warning(
+                "failed to read base_sha/base_ref from registry.json", exc_info=True
+            )
 
     project_dir = pathlib.Path(project_root) if project_root else paths.project_root()
     try:
