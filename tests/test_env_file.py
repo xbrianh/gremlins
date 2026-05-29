@@ -41,3 +41,12 @@ def test_load_syntax_error_raises(tmp_path):
     env_file.write_text("(((\n")
     with pytest.raises(RuntimeError):
         load_env_file(env_file)
+
+
+def test_load_cwd_sets_working_directory(tmp_path):
+    subdir = tmp_path / "sub"
+    subdir.mkdir()
+    env_file = tmp_path / "env"
+    env_file.write_text("export GREMLIN_TEST_CWD=$(pwd)\n")
+    result = load_env_file(env_file, cwd=subdir)
+    assert result["GREMLIN_TEST_CWD"] == str(subdir)

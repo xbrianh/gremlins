@@ -1,25 +1,25 @@
-"""Regression tests for the GREMLIN_ID-leakage bug captured on PR #140.
+"""Regression tests for the GREMLINS_GREMLIN_ID-leakage bug captured on PR #140.
 
-When `pytest` runs as a subprocess of an implement-stage gremlin, GREMLIN_ID is
-inherited. Without isolation, gremlins.state.set_stage would write the
+When `pytest` runs as a subprocess of an implement-stage gremlin, GREMLINS_GREMLIN_ID
+is inherited. Without isolation, gremlins.state.set_stage would write the
 parent gremlin's state.json and corrupt its `stage` and `sub_stage` fields
 — observable in `/gremlins --watch` and dangerous for any rescue-flow logic
 that branches on `stage`.
 
 The fix is the autouse `_isolate_gremlin_id` fixture in conftest.py, which
-delenv's GREMLIN_ID before every test. These tests verify both layers:
+delenv's GREMLINS_GREMLIN_ID before every test. These tests verify both layers:
 
 - test_autouse_isolate_gremlin_id_unsets_gremlin_id_under_inherited_env: spawns a
-  pytest subprocess with GREMLIN_ID set in its environment and asserts the
+  pytest subprocess with GREMLINS_GREMLIN_ID set in its environment and asserts the
   autouse fixture removes it inside the test body. Without the subprocess
   hop, this test would pass trivially in any clean CI environment (no
-  GREMLIN_ID inherited) regardless of whether the autouse fixture was present.
+  GREMLINS_GREMLIN_ID inherited) regardless of whether the autouse fixture was present.
 - test_*_does_not_clobber_external_state: per-orchestrator end-to-end
   checks that running each entry point does not modify a pre-staged parent
   gremlin's state.json. Each orchestrator is exercised in its own test so a
   regression message names the offender.
 
-Coverage envelope: with GREMLIN_ID unset (the post-fix invariant), set_stage
+Coverage envelope: with GREMLINS_GREMLIN_ID unset (the post-fix invariant), set_stage
 early-returns before touching state.json, so these tests verify that guard
 plus the autouse fixture's delenv. The orchestrator tests also verify
 on-disk contents directly — no fake executables or subprocess interception
@@ -47,11 +47,11 @@ from gremlins.pipeline.discovery import resolve_pipeline_path
 def test_autouse_isolate_gremlin_id_unsets_gremlin_id_under_inherited_env(
     tmp_path, child_sandbox
 ):
-    # Spawn a pytest subprocess with GREMLIN_ID set in env. The autouse fixture
-    # must remove it inside the inner test body. Without the subprocess hop
-    # this would pass trivially in any environment that doesn't already
-    # have GREMLIN_ID set, so removing the autouse fixture wouldn't trip the
-    # regression.
+    # Spawn a pytest subprocess with GREMLINS_GREMLIN_ID set in env. The autouse
+    # fixture must remove it inside the inner test body. Without the subprocess
+    # hop this would pass trivially in any environment that doesn't already
+    # have GREMLINS_GREMLIN_ID set, so removing the autouse fixture wouldn't trip
+    # the regression.
     #
     # Place a conftest.py next to the inner test that loads the real autouse
     # fixture from tests/conftest.py via importlib (keyed by GREMLINS_TESTS_DIR)
@@ -77,16 +77,16 @@ def test_autouse_isolate_gremlin_id_unsets_gremlin_id_under_inherited_env(
         import os
 
         def test_gremlin_id_unset_inside_pytest():
-            assert os.environ.get("GREMLIN_ID") is None, (
+            assert os.environ.get("GREMLINS_GREMLIN_ID") is None, (
                 "autouse _isolate_gremlin_id fixture failed to remove inherited "
-                f"GREMLIN_ID={os.environ.get('GREMLIN_ID')!r}"
+                f"GREMLINS_GREMLIN_ID={os.environ.get('GREMLINS_GREMLIN_ID')!r}"
             )
     """)
     )
     tests_dir = pathlib.Path(__file__).resolve().parent
     repo_root = tests_dir.parent
     env = child_sandbox.share()
-    env["GREMLIN_ID"] = "fake-parent-gremlin-deadbeef"
+    env["GREMLINS_GREMLIN_ID"] = "fake-parent-gremlin-deadbeef"
     env["GREMLINS_TESTS_DIR"] = str(tests_dir)
     env["PYTHONPATH"] = str(repo_root) + os.pathsep + str(tests_dir)
     result = subprocess.run(
@@ -105,7 +105,7 @@ def test_autouse_isolate_gremlin_id_unsets_gremlin_id_under_inherited_env(
         cwd=str(tmp_path),
     )
     assert result.returncode == 0, (
-        f"inner pytest failed (autouse fixture not isolating GREMLIN_ID?):\n"
+        f"inner pytest failed (autouse fixture not isolating GREMLINS_GREMLIN_ID?):\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
 
@@ -179,9 +179,9 @@ def _make_state_dir(state_root, gremlin_id):
 
 
 def test_set_stage_noop_when_gremlin_id_unset(sandbox):
-    """set_stage is a no-op when gremlin_id is None (autouse already clears GREMLIN_ID)."""
+    """set_stage is a no-op when gremlin_id is None (autouse already clears GREMLINS_GREMLIN_ID)."""
     sf = _make_state_dir(sandbox.state, "gr-noop-test")
-    # GREMLIN_ID is already unset via autouse fixture
+    # GREMLINS_GREMLIN_ID is already unset via autouse fixture
     mtime_before = sf.stat().st_mtime_ns
     StateData.load(None).set_stage("running")
     assert sf.stat().st_mtime_ns == mtime_before

@@ -189,12 +189,6 @@ async def run_pipeline(
     os.environ.pop("GREMLINS_PROJECT_ROOT", None)
     _project_root = paths.project_root()
     os.environ["GREMLINS_PROJECT_ROOT"] = str(_project_root)
-    env_file = paths.project_overlay_dir(_project_root) / "env"
-    if env_file.is_file():
-        try:
-            os.environ.update(load_env_file(env_file))
-        except RuntimeError as exc:
-            die(str(exc))
 
     if shutil.which("git") is None:
         die("git not found on PATH")
@@ -274,6 +268,17 @@ async def run_pipeline(
         gremlin.validate_resume_target()
     except ValueError as exc:
         die(str(exc))
+
+    _env_file = paths.project_overlay_dir(_project_root) / "env"
+    if _env_file.is_file():
+        os.environ["GREMLINS_WORKTREE_PATH"] = (
+            str(gremlin.worktree_dir) if gremlin.worktree_dir else ""
+        )
+        os.environ["GREMLINS_SESSION_DIR"] = str(gremlin.session_dir)
+        try:
+            os.environ.update(load_env_file(_env_file, cwd=_project_root))
+        except RuntimeError as exc:
+            die(str(exc))
 
     stored_bypass = bool(state_json.get("bypass", False))
     policy = load_policy(

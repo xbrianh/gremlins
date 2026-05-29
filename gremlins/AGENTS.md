@@ -160,7 +160,7 @@ silently re-handoffs and spawns a near-duplicate child.
 
 `state.set_stage` writes stage info to `state.json` atomically via `patch_state`.
 `state.write_bail_file` writes `bail_{attempt}.json` to the state dir; `check_bail`
-checks for its existence. Both helpers no-op without `GREMLIN_ID` and never raise —
+checks for its existence. Both helpers no-op without `GREMLINS_GREMLIN_ID` and never raise —
 stage / bail bookkeeping must not crash a running gremlin.
 
 ## Tests

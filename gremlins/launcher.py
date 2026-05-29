@@ -97,7 +97,7 @@ def _build_spawn_env(gremlin_id: str) -> dict[str, str]:
     parts = [p for p in [pkg_root, existing_pp] if p]
     env["PYTHONPATH"] = os.pathsep.join(parts)
     env["PYTHONSAFEPATH"] = "1"
-    env["GREMLIN_ID"] = gremlin_id
+    env["GREMLINS_GREMLIN_ID"] = gremlin_id
     env["GREMLINS_OVERLAY_DIR"] = str(
         _state_root() / gremlin_id / _paths.OVERLAY_DIRNAME
     )

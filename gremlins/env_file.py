@@ -20,7 +20,9 @@ _BASH_INTERNALS = frozenset(
 )
 
 
-def load_env_file(path: pathlib.Path) -> dict[str, str]:
+def load_env_file(
+    path: pathlib.Path, cwd: pathlib.Path | None = None
+) -> dict[str, str]:
     before = dict(os.environ)
     # Strip BASH_ENV so bash doesn't auto-source an unrelated file.
     env = {k: v for k, v in os.environ.items() if k != "BASH_ENV"}
@@ -30,6 +32,7 @@ def load_env_file(path: pathlib.Path) -> dict[str, str]:
             capture_output=True,
             check=False,
             env=env,
+            cwd=cwd,
         )
     except FileNotFoundError:
         raise RuntimeError(f"failed to source {path}: bash not found")

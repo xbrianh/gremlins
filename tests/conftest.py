@@ -316,13 +316,13 @@ def _restore_root_logger():
 
 @pytest.fixture(autouse=True)
 def _isolate_gremlin_id(monkeypatch):
-    # If the test process inherits GREMLIN_ID from a parent gremlin (e.g. an
-    # implement stage running `python -m pytest`), gremlins.state.set_stage
+    # If the test process inherits GREMLINS_GREMLIN_ID from a parent gremlin
+    # (e.g. an implement stage running `python -m pytest`), gremlins.state.set_stage
     # would shell out to set-stage.sh against the parent's state.json and
     # corrupt its `stage` / `sub_stage` fields. Default-deny here; tests that
-    # genuinely need GREMLIN_ID set it explicitly via monkeypatch.setenv, which
-    # overrides this delenv.
-    monkeypatch.delenv("GREMLIN_ID", raising=False)
+    # genuinely need GREMLINS_GREMLIN_ID set it explicitly via monkeypatch.setenv,
+    # which overrides this delenv.
+    monkeypatch.delenv("GREMLINS_GREMLIN_ID", raising=False)
 
 
 @pytest.fixture(autouse=True)
