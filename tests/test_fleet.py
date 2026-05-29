@@ -1050,9 +1050,7 @@ def test_do_land_one_branch_with_registry_pr_routes_to_gh(
     }
     _write_state(gr_dir, state, finished=True)
 
-    (gr_dir / "registry.json").write_text(
-        '{"pr": "gh://pr/1003", "status": "pass"}'
-    )
+    (gr_dir / "registry.json").write_text('{"pr": "gh://pr/1003", "status": "pass"}')
 
     called = []
     monkeypatch.setattr(
