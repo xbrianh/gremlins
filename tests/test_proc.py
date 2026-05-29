@@ -43,6 +43,30 @@ def test_run_async_timeout():
         run(proc.run_async(["sleep", "10"], timeout=0.05))
 
 
+# run_shell_async
+
+
+def test_run_shell_async_success():
+    r = run(proc.run_shell_async("true"))
+    assert r.returncode == 0
+
+
+def test_run_shell_async_captures_output():
+    r = run(proc.run_shell_async("echo hello"))
+    assert r.stdout.strip() == "hello"
+
+
+def test_run_shell_async_timeout_returns_rc124():
+    r = run(proc.run_shell_async("sleep 10", timeout=0.05))
+    assert r.returncode == 124
+
+
+def test_run_shell_async_timeout_kills_process():
+    # Without killpg the grandchild keeps the pipe open and the call would hang.
+    r = run(proc.run_shell_async("sleep 60 & sleep 60", timeout=0.1))
+    assert r.returncode == 124
+
+
 def test_run_async_timeout_kills_grandchildren():
     # Shell forks a grandchild that inherits the pipe write end. Without killpg,
     # the grandchild keeps the pipe open after the parent exits and communicate()
