@@ -34,7 +34,7 @@ from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail
 from gremlins.utils import proc as _proc
-from gremlins.utils.git import has_commits, has_dirty_worktree, in_git_repo
+from gremlins.utils.git import has_commits, has_dirty_worktree, in_git_repo, stage_gremlins_overlay
 from gremlins.utils.yaml_io import YamlLoadError as _YamlLoadError
 
 logger = logging.getLogger(__name__)
@@ -268,6 +268,8 @@ async def run_pipeline(
         gremlin.validate_resume_target()
     except ValueError as exc:
         die(str(exc))
+
+    stage_gremlins_overlay(str(_project_root), state_dir)
 
     _env_file = paths.project_overlay_dir(_project_root) / "env"
     if _env_file.is_file():
