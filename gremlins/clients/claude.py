@@ -210,16 +210,16 @@ class SubprocessClaudeClient:
             raise StreamTimeoutError(
                 "claude -p stream idle timeout", session_id=session_id
             )
-        rc = await p.wait()
-        cost_usd = state["cost_usd"]
-        if cost_usd is not None:
-            with self._lock:
-                self._total_cost_usd += cost_usd
         status = state.get("api_error_status")
         if state.get("is_error") and isinstance(status, int) and 500 <= status <= 599:
             raise ApiServerError(
                 f"claude -p api server error {status}", session_id=session_id
             )
+        rc = await p.wait()
+        cost_usd = state["cost_usd"]
+        if cost_usd is not None:
+            with self._lock:
+                self._total_cost_usd += cost_usd
         return CompletedRun(
             exit_code=rc,
             text_result=state["result_text"],
