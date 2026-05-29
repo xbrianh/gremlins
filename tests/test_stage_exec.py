@@ -27,10 +27,12 @@ def _make_state(tmp_path: pathlib.Path, **kw):
     )
 
 
-def _exec(name: str = "test", cmds=None, *, in_map=None, out_map=None):
+def _exec(name: str = "test", cmds=None, *, in_map=None, out_map=None, timeout=None):
     options = {}
     if cmds is not None:
         options["cmds"] = cmds
+    if timeout is not None:
+        options["timeout"] = timeout
     return Exec(name, options, in_map=in_map, out_map=out_map)
 
 
@@ -203,3 +205,27 @@ def test_success_writes_log(tmp_path):
     result = asyncio.run(stage.run(state))
     assert isinstance(result, Done)
     assert (state.session_dir / "exec-myname.log").exists()
+
+
+# ---------------------------------------------------------------------------
+# timeout option
+# ---------------------------------------------------------------------------
+
+
+def test_timeout_with_status_out_yields_needs_fix(tmp_path):
+    state = _make_state(tmp_path)
+    stage = _exec(
+        cmds=["sleep 10"],
+        out_map={"status": "file://session/status"},
+        timeout=0.05,
+    )
+    result = asyncio.run(stage.run(state))
+    assert isinstance(result, Done)
+    assert state.artifacts.read("status") == "needs_fix"
+
+
+def test_timeout_without_status_out_raises_bail(tmp_path):
+    state = _make_state(tmp_path)
+    stage = _exec(cmds=["sleep 10"], timeout=0.05)
+    with pytest.raises(Bail):
+        asyncio.run(stage.run(state))

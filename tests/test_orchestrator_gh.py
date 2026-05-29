@@ -211,7 +211,7 @@ def _patch_common(
 
     _orig_shell = _proc_mod.run_shell_async
 
-    async def _noop_gh_shell(cmd, *, cwd=None, env=None):
+    async def _noop_gh_shell(cmd, *, cwd=None, env=None, timeout=None):
         if isinstance(cmd, str):
             if cmd.lstrip().startswith("gh "):
                 return _subprocess_mod.CompletedProcess(cmd, 0, "", "")
@@ -244,7 +244,7 @@ def _patch_common(
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text("42\n")
                 return _subprocess_mod.CompletedProcess(cmd, 0, "", "")
-        return await _orig_shell(cmd, cwd=cwd, env=env)
+        return await _orig_shell(cmd, cwd=cwd, env=env, timeout=timeout)
 
     monkeypatch.setattr(_proc_mod, "run_shell_async", _noop_gh_shell)
     monkeypatch.setattr(
@@ -618,10 +618,10 @@ def test_plan_no_h1_issue_body(tmp_path, monkeypatch):
 
     # Let resolve-plan-input run for real (fake gh in PATH handles the gh calls);
     # everything else stays with the noop interceptor
-    async def _shell(cmd, *, cwd=None, env=None):
+    async def _shell(cmd, *, cwd=None, env=None, timeout=None):
         if isinstance(cmd, str) and "plan.md" in cmd and "gh issue view" in cmd:
-            return await _real_shell(cmd, cwd=cwd, env=env)
-        return await _noop_shell(cmd, cwd=cwd, env=env)
+            return await _real_shell(cmd, cwd=cwd, env=env, timeout=timeout)
+        return await _noop_shell(cmd, cwd=cwd, env=env, timeout=timeout)
 
     monkeypatch.setattr(_proc_mod, "run_shell_async", _shell)
 

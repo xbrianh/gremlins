@@ -575,3 +575,53 @@ def test_pr_stack_iter2_detaches_to_iter1_branch(tmp_path, make_state_dir, monke
     asyncio.run(loop.run(state))
 
     assert detach_calls == ["feat-iter1"]
+
+
+# ---------------------------------------------------------------------------
+# interval option
+# ---------------------------------------------------------------------------
+
+
+def test_loop_interval_sleeps_between_iterations(tmp_path, monkeypatch):
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(secs: float) -> None:
+        sleep_calls.append(secs)
+
+    import gremlins.stages.loop as _loop_mod
+
+    monkeypatch.setattr(_loop_mod.asyncio, "sleep", fake_sleep)
+
+    loop_state = _loop_state(tmp_path)
+    count = [0]
+
+    async def runner() -> Done:
+        count[0] += 1
+        if count[0] < 2:
+            _set_marker(loop_state)
+        return Done()
+
+    loop = LoopStage("loop", body_runners=[runner], max_iterations=3, interval=5.0)
+    asyncio.run(loop.run(loop_state))
+
+    assert count[0] == 2
+    assert sleep_calls == [5.0]
+
+
+def test_loop_no_interval_no_sleep(tmp_path, monkeypatch):
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(secs: float) -> None:
+        sleep_calls.append(secs)
+
+    import gremlins.stages.loop as _loop_mod
+
+    monkeypatch.setattr(_loop_mod.asyncio, "sleep", fake_sleep)
+
+    async def runner() -> Done:
+        return Done()
+
+    loop = LoopStage("loop", body_runners=[runner], max_iterations=3)
+    asyncio.run(loop.run(_loop_state(tmp_path)))
+
+    assert sleep_calls == []

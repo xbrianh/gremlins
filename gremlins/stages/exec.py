@@ -90,11 +90,14 @@ class Exec(Stage):
         bail_triggered = False
         shell_output = ""
         shell_rc = 0
+        raw_timeout = self.options.get("timeout")
+        timeout: float | None = float(raw_timeout) if raw_timeout is not None else None
         if cmds:
             result = await _proc.run_shell_async(
                 " && ".join(cmds),
                 cwd=pathlib.Path(state.cwd),
                 env={**os.environ, **extra_env},
+                timeout=timeout,
             )
             log_path = state.session_dir / f"exec-{self.name}.log"
             log_path.write_text(

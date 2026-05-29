@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import pathlib
 from collections.abc import Awaitable, Callable
@@ -92,6 +93,7 @@ class LoopStage(Stage):
         max_iterations: int,
         until: UntilFn = head_stable,
         on_iteration_start: Callable[[State], None] | None = None,
+        interval: float | None = None,
     ) -> None:
         super().__init__(name)
         self.body = body or []
@@ -101,6 +103,7 @@ class LoopStage(Stage):
         self._max_iterations = max_iterations
         self._until = until
         self._on_iteration_start = on_iteration_start
+        self._interval = interval
 
     @classmethod
     def with_dict(cls, d: dict[str, Any], depth: int = 0) -> LoopStage:
@@ -115,6 +118,10 @@ class LoopStage(Stage):
             d.get("max-iterations") or options.get("max_iterations", 3)
         )
         pr_stack: bool = bool(options.get("pr_stack", False))
+        raw_interval = options.get("interval")
+        interval: float | None = (
+            float(raw_interval) if raw_interval is not None else None
+        )
 
         raw_children: object = d.get("body") or []
         if not isinstance(raw_children, list):
@@ -127,6 +134,7 @@ class LoopStage(Stage):
             body=body,
             max_iterations=max_iterations,
             on_iteration_start=on_iter,
+            interval=interval,
         )
         stage.client = get_client_from_dict(d)
         return stage
@@ -182,6 +190,8 @@ class LoopStage(Stage):
                     return Done()
             elif iteration == self._max_iterations:
                 break
+            if self._interval is not None:
+                await asyncio.sleep(self._interval)
 
         state.record_bail(f"loop exhausted {self._max_iterations} iterations")
         raise Bail(f"loop exhausted {self._max_iterations} iterations")

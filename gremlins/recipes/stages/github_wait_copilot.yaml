@@ -5,6 +5,8 @@ stages:
   - name: github-wait-copilot
     type: loop
     max-iterations: "{{options.max_iterations | default(40)}}"
+    options:
+      interval: "{{options.interval | default(20)}}"
     body:
       - name: poll
         type: exec
@@ -13,12 +15,10 @@ stages:
         out:
           status: "file://session/status"
         options:
-          interval: "{{options.interval | default(\"20\")}}"
+          timeout: 30
           cmds:
             - |
               review=$(gh api "repos/{repo}/pulls/$pr_number/reviews" \
-                --jq '.[] | select(.user.login | test("[Cc]opilot")) | .state | select(. != "PENDING")' \
-                2>/dev/null || true)
+                --jq '.[] | select(.user.login | test("[Cc]opilot")) | .state | select(. != "PENDING")')
               [ -n "$review" ] && exit 0
-              sleep {interval}
               exit 1

@@ -95,6 +95,7 @@ async def run_shell_async(
     *,
     cwd: str | os.PathLike[str] | None = None,
     env: dict[str, str] | None = None,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     proc = await asyncio.create_subprocess_shell(
         cmd,
@@ -105,7 +106,19 @@ async def run_shell_async(
         start_new_session=True,
     )
     try:
+        stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except TimeoutError:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         stdout_b, stderr_b = await proc.communicate()
+        return subprocess.CompletedProcess(
+            cmd,
+            124,
+            stdout_b.decode(),
+            stderr_b.decode() + f"timed out after {timeout}s\n",
+        )
     except asyncio.CancelledError:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
