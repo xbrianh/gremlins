@@ -11,15 +11,7 @@ from gremlins.stages.sequence import SequenceStage
 
 
 def check_duplicate_producers(stages: list[Stage]) -> None:
-    """Raise ValueError if two distinct stages in the same scope declare the same out: key
-    to different URIs.
-
-    Three rules prevent false positives on legitimate pipeline patterns:
-    - Optional keys (ending in '?') are skipped — they're conditional fallback bindings.
-    - Same key + same URI = idempotent rebind (e.g. handoff's rolling-plan update pattern).
-    - Scoped per body — stages in different composite bodies are not compared; loop
-      boundaries act as unbinding barriers at runtime.
-    """
+    """Raise ValueError if two stages in the same scope bind the same out: key to different URIs."""
     _check_scope(stages)
 
 
@@ -32,7 +24,7 @@ def _check_scope(stages: list[Stage]) -> None:
             existing = seen.get(raw_key)
             if existing is not None:
                 prev_name, prev_uri = existing
-                if prev_name != stage.name and prev_uri != uri_str:
+                if prev_uri != uri_str:
                     raise ValueError(
                         f"duplicate out: key {raw_key!r}: declared by both "
                         f"{prev_name!r} and {stage.name!r}"
@@ -41,7 +33,11 @@ def _check_scope(stages: list[Stage]) -> None:
                 seen[raw_key] = (stage.name, uri_str)
         body = getattr(stage, "body", None)
         if body:
-            _check_scope(body)
+            if isinstance(stage, ParallelStage):
+                for child in body:
+                    _check_scope([child])
+            else:
+                _check_scope(body)
 
 
 STAGE_TYPES: dict[str, type[Stage]] = {

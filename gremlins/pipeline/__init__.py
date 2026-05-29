@@ -83,7 +83,6 @@ class Pipeline:
         from gremlins.stages.exec import Exec
 
         stages = parse_stages(cast(list[dict[str, Any]], raw.get("stages") or []))
-        check_duplicate_producers(stages)
 
         inputs_stage: Exec | None = None
         inputs_raw = raw.get("inputs")
@@ -101,6 +100,8 @@ class Pipeline:
 
         if inputs_stage is not None:
             stages = [inputs_stage, *stages]
+
+        check_duplicate_producers(stages)
 
         _fill_stage_clients(stages, default_client or PACKAGE_DEFAULT)
 
