@@ -239,7 +239,7 @@ def _patch_common(
             # publish-as-issue script: intercept to write a fake issue number so
             # verify_produced passes without a real gh CLI or git remote.
             m3 = re.search(r'"([^"]+/plan-issue-number\.txt)"', cmd)
-            if m3:
+            if m3 and "gh issue create" in cmd:
                 p = pathlib.Path(m3.group(1))
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text("42\n")
@@ -373,6 +373,7 @@ def test_gh_pipeline_stage_names(tmp_path):
     assert names == [
         "inputs",
         "resolve-plan-input",
+        "bind-plan-from-file",
         "plan",
         "publish-as-issue",
         "update-description",

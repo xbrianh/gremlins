@@ -7,7 +7,7 @@ import pathlib
 import re
 from typing import Any, cast
 
-from gremlins.artifacts.registry import ArtifactRegistry
+from gremlins.artifacts.registry import ArtifactRegistry, MissingArtifact
 from gremlins.artifacts.resolve import resolve_in_map
 from gremlins.artifacts.schemes import snapshot_head_before
 from gremlins.artifacts.uri import Uri
@@ -112,14 +112,22 @@ class Exec(Stage):
 
         for raw_key, raw_uri_str in self.out_map.items():
             key = self.substitute_vars(raw_key, state, extra_env)
+            optional = key.endswith("?")
+            if optional:
+                key = key[:-1]
             if key == _BAIL_KEY and not bail_triggered:
                 continue
             if key == _STATUS_KEY:
                 state.artifacts.write(_STATUS_KEY, "needs_fix" if needs_fix else "pass")
                 continue
-            uri_str = self.substitute_vars(
-                _sub_reads(raw_uri_str, state.artifacts), state, extra_env
-            )
+            try:
+                uri_str = self.substitute_vars(
+                    _sub_reads(raw_uri_str, state.artifacts), state, extra_env
+                )
+            except MissingArtifact:
+                if optional:
+                    continue
+                raise
             if uri_str == "git://range":
                 if pre_sha is None:
                     raise RuntimeError(
@@ -128,15 +136,17 @@ class Exec(Stage):
                 state.artifacts.bind_git_commit_range(key, pre_sha)
             else:
                 uri = Uri.parse(uri_str)
-                state.artifacts.bind(key, uri)
                 try:
                     state.artifacts.resolver(uri.scheme).verify_produced(uri)
                 except FileNotFoundError:
+                    if optional:
+                        continue
                     if key == _BAIL_KEY:
                         msg = f"exec {self.name}: exited {shell_rc}"
                         if shell_output:
                             msg += f"\n{shell_output}"
                         raise Bail(msg) from None
                     raise
+                state.artifacts.bind(key, uri)
 
         return Done()
