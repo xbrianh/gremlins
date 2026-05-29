@@ -6,7 +6,7 @@ plan → implement → review-code → address-code cycle unattended, writing
 artifacts to the per-user state directory resolved by
 `platformdirs.user_state_dir("gremlins")` and optionally opening a pull
 request. A fleet manager tracks running, stalled, and finished gremlins and
-provides stop / rescue / land / close operations.
+provides stop / land / close operations.
 
 **Status: brand-new and a bit janky.** This is a fresh project, actively
 shaped by daily use. Expect rough edges — stream timeouts, the occasional
@@ -89,7 +89,6 @@ the dispatch table in [`gremlins/cli/__init__.py`](gremlins/cli/__init__.py).
 | `launch <name>` | Launch a background gremlin by pipeline name (`gremlins launch --list` to see available) |
 | `resume` | Re-spawn an existing gremlin from its recorded stage |
 | `stop` | Send SIGTERM to a running gremlin and wait for it to exit |
-| `rescue` | Diagnose and resume a dead or stalled gremlin |
 | `land` | Land a finished gremlin onto the current branch |
 | `rm` | Delete a dead gremlin's state dir, worktree, and branch |
 | `close` | Mark a dead gremlin as closed |

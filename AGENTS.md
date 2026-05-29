@@ -24,7 +24,7 @@ gremlins/                    Python package — see gremlins/AGENTS.md
   pipeline/                  YAML loader + discovery + schema
   prompts/                   Bundled prompt templates
   executor/                  State class + pipeline.py (StageRunner), run.py
-  fleet/                     Fleet manager (status, stop, rescue, land, close, log) — see gremlins/fleet/AGENTS.md
+  fleet/                     Fleet manager (status, stop, land, close, log) — see gremlins/fleet/AGENTS.md
   utils/                     proc helpers etc.
 .gremlins/                   Project-overlay pipeline YAMLs (project-scoped, win over bundled)
 plans/                       Design notes, in-flight plan documents, per-feature sketches
@@ -58,11 +58,10 @@ make check         # ruff lint + ruff format check + pyright
 
 ## Byte-stable strings — DO NOT change
 
-These values are persisted to `state.json` and read by other writers (the fleet manager, the launcher, the rescue protocol). Renaming any of them silently breaks cross-process consumers.
+These values are persisted to `state.json` and read by other writers (the fleet manager, the launcher). Renaming any of them silently breaks cross-process consumers.
 
 - **Bail classes** (`state.json.bail_class`): `reviewer_requested_changes`, `security`, `secrets`, `other`. Source of truth in `gremlins/state.py`.
 - **Stage names** (`state.json.stage`): defined per-pipeline in YAML. The authoritative list for a pipeline is its YAML file under `gremlins/pipelines/` or `.gremlins/`.
-- **Marker-protocol bail reasons** (used by handoff/rescue): `diagnosis_no_marker`, `diagnosis_bad_marker`, `diagnosis_claude_error`, `diagnosis_timeout`, `excluded_class:<class>`, `attempts_exhausted`, `relaunch_launcher_missing`, `relaunch_failed`.
 
 ## Where to look for…
 

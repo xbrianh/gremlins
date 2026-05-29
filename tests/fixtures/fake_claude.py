@@ -9,7 +9,7 @@ file, etc.), and emits minimal valid stream-json (or text) on stdout.
 Each invocation appends an entry to ``$FAKE_CLAUDE_LOG`` (one JSON line
 per call) so tests can assert what was invoked, with what model, in what
 cwd. ``$FAKE_CLAUDE_FAIL_AT`` (a stage name) makes the matching invocation
-exit non-zero — used to test rescue / resume paths.
+exit non-zero — used to test resume paths.
 """
 
 from __future__ import annotations
@@ -309,36 +309,9 @@ def handle_fix(prompt: str) -> int:
     return 0
 
 
-def handle_rescue_diagnosis(prompt: str) -> int:
-    """Rescue diagnosis-step prompt: write the marker file with status from env.
-
-    The marker path is embedded in the prompt; we extract it and write a JSON
-    object. Default verdict is "fixed" — tests override via env to exercise
-    other branches.
-    """
-    m = re.search(r"`([^`]+\.done)`", prompt) or re.search(
-        r"(/[^\s`]+\.done)\b", prompt
-    )
-    marker_path = m.group(1) if m else ""
-    status = os.environ.get("FAKE_CLAUDE_RESCUE_VERDICT", "fixed")
-    summary = os.environ.get("FAKE_CLAUDE_RESCUE_SUMMARY", "fake diagnosis")
-    if marker_path:
-        try:
-            pathlib.Path(marker_path).parent.mkdir(parents=True, exist_ok=True)
-            pathlib.Path(marker_path).write_text(
-                json.dumps({"status": status, "summary": summary}),
-                encoding="utf-8",
-            )
-        except OSError:
-            pass
-    return 0
-
-
 def classify_stage(prompt: str) -> str:
     """Classify the stage from the prompt string. Order matters — earlier
     matches win when prompts contain overlapping phrases."""
-    if "diagnosing a failed background gremlin" in prompt:
-        return "rescue-diagnosis"
     if "Produce a concise GitHub issue title" in prompt:
         return "plan-title"
     if "Do NOT push or call" in prompt:
@@ -423,7 +396,6 @@ def main(argv):
         "ghplan": handle_ghplan,
         "github-review-pull-request": lambda p: (emit_minimal_stream(), 0)[1],
         "github-address-pull-request-reviews": lambda p: (emit_minimal_stream(), 0)[1],
-        "rescue-diagnosis": handle_rescue_diagnosis,
         "fix": handle_fix,
     }
     h = handlers.get(stage)

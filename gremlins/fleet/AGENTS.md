@@ -6,7 +6,7 @@ Fleet manager package for background gremlins. Reads every gremlin state file un
 
 | File | Contents |
 |---|---|
-| `constants.py` | `BG_STALL_SECS`, `STATE_ROOT`, `FMT`, `RESCUE_CAP`, `HEADLESS_DIAGNOSIS_TIMEOUT_SECS`, `EXCLUDED_BAIL_CLASSES` |
+| `constants.py` | `BG_STALL_SECS`, `STATE_ROOT`, `FMT` |
 | `state.py` | `iso_to_epoch`, `humanize_age`, `display_id`, `render_sub_stage`, `liveness_of_state_file`, `iter_state_files`, `load_state`, `kind_short`, `git_toplevel`, `atomic_patch_state` |
 | `duration.py` | `parse_duration` |
 | `render.py` | `build_row`, `print_table` |
@@ -65,7 +65,7 @@ Each element of `gremlins`:
 | `stalled` | `detail: string` |
 
 ### Drill-in (`gremlins <id> --json`)
-Top-level fields: `id`, `liveness`, `closed`, `age_seconds`, `started_at`, `bail_class`, `bail_reason`, `bail_detail`, `state_dir`, `log_path`, `artifact_paths`, `rescue_reports`, `state` (full state.json object).
+Top-level fields: `id`, `liveness`, `closed`, `age_seconds`, `started_at`, `bail_class`, `bail_reason`, `bail_detail`, `state_dir`, `log_path`, `artifact_paths`, `state` (full state.json object).
 
 ## Monkeypatch design
 

@@ -659,11 +659,6 @@ def _patch_state_for_resume(
             pass
 
     now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    rescue_count = 0
-    try:
-        rescue_count = int(state.get("rescue_count") or 0)
-    except (ValueError, TypeError):
-        pass
 
     StateData.load(gremlin_id).patch(
         _delete=(
@@ -678,9 +673,7 @@ def _patch_state_for_resume(
         ),
         status="running",
         stage=stage,
-        rescued_at=now_iso,
         resumed_from_stage=stage,
-        rescue_count=rescue_count,
         pid=None,
         pipeline_args=pipeline_args,
         pipeline_path=pipeline_path,

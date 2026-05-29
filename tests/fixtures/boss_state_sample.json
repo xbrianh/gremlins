@@ -17,11 +17,11 @@
     },
     {
       "id": "pipeline-phase-2-tests-against-the-new-4d3130",
-      "outcome": "rescued-then-landed"
+      "outcome": "landed"
     },
     {
       "id": "pipeline-phase-3-migrate-ghgremlin-into-f23662",
-      "outcome": "rescued-then-landed"
+      "outcome": "landed"
     }
   ],
   "handoff_records": [
@@ -87,13 +87,11 @@
       "child_plan": "/tmp/gremlins/extract-pipeline-package-via-phased-d04390/handoff-005-child.md",
       "bail_reason": null,
       "operator_followups": [
-        "After Phase 4 lands: Confirm /gremlins rescue <boss-id> works against an in-flight chain",
         "After Phase 4 lands: Run scripts/e2e-bossgremlin.sh against the migrated boss"
       ]
     }
   ],
   "operator_followups": [
-    "After Phase 4 lands: Confirm /gremlins rescue <boss-id> works against an in-flight chain",
     "After Phase 4 lands: Run scripts/e2e-bossgremlin.sh against the migrated boss"
   ]
 }

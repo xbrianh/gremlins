@@ -56,7 +56,6 @@ def _setup_dead_gremlin(
         "status": "dead",
         "exit_code": 2,
         "workdir": str(workdir),
-        "rescue_count": 0,
     }
     state.update(state_overrides)
     _write_state(gr_dir, state, finished=True)
@@ -1341,7 +1340,6 @@ def test_do_drill_in_json_emits_json_object(sandbox, tmp_path, monkeypatch, caps
     assert "state" in obj
     assert obj["state"]["kind"] == "localgremlin"
     assert obj["artifact_paths"] == []
-    assert obj["rescue_reports"] == []
 
 
 def test_do_drill_in_json_no_match(sandbox, tmp_path, monkeypatch, capsys):

@@ -92,10 +92,9 @@ def liveness_of_state_file(sf: str, state: dict[str, object] | None = None) -> s
     gr_bail_reason = state.get("bail_reason")
     is_boss = str(state.get("kind") or "") == "bossgremlin"
 
-    # Terminal: finish.sh (or headless rescue's bail path) wrote the
-    # `finished` marker. A bail_reason takes precedence over the generic
-    # exit code so listings show *why* rescue gave up rather than just
-    # "dead:exit 2".
+    # Terminal: finish.sh wrote the `finished` marker. A bail_reason takes
+    # precedence over the generic exit code so listings show *why* a gremlin
+    # gave up rather than just "dead:exit 2".
     if os.path.isfile(os.path.join(wdir, "finished")):
         if gr_bail_reason:
             return f"dead:bailed:{gr_bail_reason}"

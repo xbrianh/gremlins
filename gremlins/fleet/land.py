@@ -913,7 +913,7 @@ def _land_gh(
                 if verify_err:
                     # Verification was inconclusive (gh pr view failed or returned
                     # unparseable output) — operator should check PR state manually
-                    # before reaching for `rescue` or re-running `land`.
+                    # before re-running `land`.
                     print(
                         f"error: gh pr merge failed: {err}; verification inconclusive: {verify_err}"
                     )

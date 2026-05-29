@@ -109,24 +109,21 @@ distinct labels per phase.
 These values are persisted to `state.json` files and read by other
 writers (`session-summary.sh` hook, `liveness.sh` sourced from
 `session-summary.sh`, the fleet manager that inlines an equivalent
-classifier in [`fleet/state.py`](fleet/state.py), the launcher, the rescue
-protocol). Renaming any of them silently breaks cross-process
+classifier in [`fleet/state.py`](fleet/state.py), the launcher). Renaming any of them silently breaks cross-process
 consumers. Source of truth: bail-class constants live in
 [`state.py`](state.py); stage-name vocab is defined in the pipeline YAML.
 
 - **Bail classes** (`state.json.bail_class`): `reviewer_requested_changes`, `security`, `secrets`, `other`.
 - **Stage names** (`state.json.stage`): stable within a pipeline definition. The authoritative list for any pipeline is its YAML file. `resolve_pipeline_path` checks `.gremlins/pipelines/<name>.yaml` (project-scoped) first, then bundled `gremlins/pipelines/<name>.yaml`; `--pipeline` accepts either a bare name (resolved this way) or a direct path.
-- **Marker-protocol bail reasons**: `diagnosis_no_marker`, `diagnosis_bad_marker`, `diagnosis_claude_error`, `diagnosis_timeout`, `excluded_class:<class>`, `attempts_exhausted`, `relaunch_launcher_missing`, `relaunch_failed`.
-
 ## Recovering from a child bail
 
 When a child bails in a boss chain, the boss halts. The operator must put the
-child into a well-defined state, then rescue the boss. The boss reads only the
+child into a well-defined state, then resume the boss. The boss reads only the
 child's `state.json` to decide what to do — no `gh` calls, no git inspection.
 
 ### Child states the boss recognizes
 
-| Child state | Boss action on rescue |
+| Child state | Boss action on resume |
 |---|---|
 | `status=running` | Adopt as current child, wait for it to finish |
 | `status=bailed`, `external_outcome=landed` | Mark `landed-externally`, next handoff |
