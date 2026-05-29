@@ -14,6 +14,7 @@ import datetime
 import json
 import os
 import pathlib
+import re
 import secrets
 import shutil
 import subprocess
@@ -29,8 +30,6 @@ from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.discovery import list_pipelines, resolve_pipeline_path
 from gremlins.utils import git as _git_mod
 from gremlins.utils import proc
-import re
-
 from gremlins.utils.spawn_logged_process import (
     spawn_logged_process as _spawn_logged_process,
 )

@@ -493,7 +493,6 @@ def test_pr_stack_unbind_fires_after_on_iteration_start(
     tmp_path, make_state_dir, monkeypatch
 ):
     """Unbind runs after on_iteration_start so detach_to_pr_base can read the pr artifact."""
-    from gremlins.artifacts.uri import Uri
     from gremlins.stages.exec import Exec
 
     gremlin_id = "pr-stack-order-test"
@@ -522,7 +521,9 @@ def test_pr_stack_unbind_fires_after_on_iteration_start(
             _set_marker(state)
         return Done()
 
-    exec_stage = Exec("stage", {}, out_map={"pr-branch": "file://session/pr-branch.txt"})
+    exec_stage = Exec(
+        "stage", {}, out_map={"pr-branch": "file://session/pr-branch.txt"}
+    )
     loop = LoopStage(
         "test",
         body=[exec_stage],

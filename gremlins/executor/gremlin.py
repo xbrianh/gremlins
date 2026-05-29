@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import shutil
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
@@ -20,8 +21,6 @@ from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.pipeline.loader import STAGE_TYPES
 from gremlins.stages.base import Stage
 from gremlins.utils import git as _git_mod
-import re
-
 from gremlins.utils.yaml_io import YamlLoadError as _YamlLoadError
 
 logger = logging.getLogger(__name__)
@@ -331,7 +330,9 @@ class Gremlin:
             # plan.uri? accessor returns the opaque issue URI. Needed when
             # resume_from skips the plan stage.
             if self.plan and self.pipeline_data.github_integration:
-                m = re.match(r"^(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#([0-9]+)$", self.plan)
+                m = re.match(
+                    r"^(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#([0-9]+)$", self.plan
+                )
                 if m and self.registry.produced("plan"):
                     plan_uri = self.registry.resolve("plan")
                     if plan_uri.scheme == "file":

@@ -51,6 +51,7 @@ def _get_repo() -> str:
         )
     return r.stdout.strip()
 
+
 _HANDLED_SIGS = tuple(
     getattr(signal, name)
     for name in ("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT")

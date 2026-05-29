@@ -193,7 +193,9 @@ def _patch_common(
     (session_dir / "plan.md").write_text("", encoding="utf-8")
     (session_dir / "pr-title.txt").write_text("Fake PR Title\n")
     (session_dir / "pr-body.md").write_text("Fake PR body.\n")
-    (session_dir / "pr-url.txt").write_text(f"https://github.com/owner/repo/pull/{fake_pr_number}\n")
+    (session_dir / "pr-url.txt").write_text(
+        f"https://github.com/owner/repo/pull/{fake_pr_number}\n"
+    )
     (session_dir / "pr-branch.txt").write_text("issue-42-fake-slug\n")
     (session_dir / "pr-number.txt").write_text(f"{fake_pr_number}\n")
     monkeypatch.setattr(
@@ -217,7 +219,9 @@ def _patch_common(
                 p.write_text(f"{fake_pr_number}\n")
                 # Also write pr-url.txt and pr-branch.txt produced by push-and-open.
                 url_p = p.parent / "pr-url.txt"
-                url_p.write_text(f"https://github.com/owner/repo/pull/{fake_pr_number}\n")
+                url_p.write_text(
+                    f"https://github.com/owner/repo/pull/{fake_pr_number}\n"
+                )
                 # pr-branch.txt already written by compose-pr; ensure it's non-empty.
                 branch_p = p.parent / "pr-branch.txt"
                 if not branch_p.exists() or branch_p.stat().st_size == 0:
@@ -350,7 +354,6 @@ def test_parse_resume_from_commit(capsys):
 def test_parse_plan_and_instructions_mutual_exclusion():
     with pytest.raises(SystemExit):
         _parse_gh_args(["--plan", "#42", "also some instructions"])
-
 
 
 def test_gh_pipeline_stage_names(tmp_path):

@@ -48,21 +48,27 @@ def test_simple_key_no_dots(tmp_path):
 
 def test_dotted_key_reads_attribute(tmp_path):
     reg = _make_registry(tmp_path)
-    reg.write("pr", {"url": "https://github.com/o/r/pull/7", "number": 7, "branch": "feat-x"})
+    reg.write(
+        "pr", {"url": "https://github.com/o/r/pull/7", "number": 7, "branch": "feat-x"}
+    )
     result = resolve_in_map(reg, {"branch": "pr.branch"})
     assert result == {"branch": "feat-x"}
 
 
 def test_dotted_key_number_attribute(tmp_path):
     reg = _make_registry(tmp_path)
-    reg.write("pr", {"url": "https://github.com/o/r/pull/42", "number": 42, "branch": "main"})
+    reg.write(
+        "pr", {"url": "https://github.com/o/r/pull/42", "number": 42, "branch": "main"}
+    )
     result = resolve_in_map(reg, {"num": "pr.number"})
     assert result == {"num": "42"}
 
 
 def test_dotted_key_url_attribute(tmp_path):
     reg = _make_registry(tmp_path)
-    reg.write("pr", {"url": "https://github.com/o/r/pull/3", "number": 3, "branch": "fix"})
+    reg.write(
+        "pr", {"url": "https://github.com/o/r/pull/3", "number": 3, "branch": "fix"}
+    )
     result = resolve_in_map(reg, {"url": "pr.url"})
     assert result == {"url": "https://github.com/o/r/pull/3"}
 
@@ -76,14 +82,18 @@ def test_nested_dotted_path(tmp_path):
 
 def test_unknown_attribute_raises(tmp_path):
     reg = _make_registry(tmp_path)
-    reg.write("pr", {"url": "https://github.com/o/r/pull/1", "number": 1, "branch": "b"})
+    reg.write(
+        "pr", {"url": "https://github.com/o/r/pull/1", "number": 1, "branch": "b"}
+    )
     with pytest.raises(ValueError, match="has no key"):
         resolve_in_map(reg, {"x": "pr.nonexistent"})
 
 
 def test_private_attribute_raises(tmp_path):
     reg = _make_registry(tmp_path)
-    reg.write("pr", {"url": "https://github.com/o/r/pull/1", "number": 1, "branch": "b"})
+    reg.write(
+        "pr", {"url": "https://github.com/o/r/pull/1", "number": 1, "branch": "b"}
+    )
     with pytest.raises(ValueError, match="private attribute"):
         resolve_in_map(reg, {"x": "pr.__class__"})
 
@@ -109,7 +119,10 @@ def test_gh_opaque_uri_attribute(tmp_path):
 
 def test_exec_dotted_key_injects_env_var(tmp_path):
     state = _make_state(tmp_path)
-    state.artifacts.write("pr", {"url": "https://github.com/o/r/pull/5", "number": 5, "branch": "my-branch"})
+    state.artifacts.write(
+        "pr",
+        {"url": "https://github.com/o/r/pull/5", "number": 5, "branch": "my-branch"},
+    )
 
     out_file = tmp_path / "branch.txt"
     stage = Exec(
@@ -128,7 +141,10 @@ def test_exec_dotted_key_injects_env_var(tmp_path):
 def test_agent_dotted_key_substituted_into_prompt(tmp_path):
     client = FakeClaudeClient(fixtures={"push-agent": MINIMAL_EVENTS})
     state = _make_state(tmp_path, client)
-    state.artifacts.write("pr", {"url": "https://github.com/o/r/pull/9", "number": 9, "branch": "agent-branch"})
+    state.artifacts.write(
+        "pr",
+        {"url": "https://github.com/o/r/pull/9", "number": 9, "branch": "agent-branch"},
+    )
 
     agent = Agent(
         "push-agent",

@@ -269,6 +269,7 @@ def test_parallel_expansion_in_constructor(tmp_path: pathlib.Path) -> None:
     by_name = {s.name: s for s in gremlin.stages}
     assert by_name["reviews"].type == "parallel"
 
+
 def test_stage_builders_registry_covers_all_known_types() -> None:
     expected = {
         "loop",
