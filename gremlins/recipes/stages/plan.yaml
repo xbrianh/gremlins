@@ -19,6 +19,8 @@ stages:
               printf 'resolve-plan-input: unrecognized plan_arg: %s\n' "$plan_arg" >&2
               exit 1
           fi
+    out:
+      plan?: "file://session/plan.md"
 
   - name: plan
     type: agent

@@ -34,6 +34,15 @@ stages:
               printf 'resolve-plan-input: unrecognized plan_arg: %s\n' "$plan_arg" >&2
               exit 1
           fi
+    out:
+      plan-issue-number?: "file://session/plan-issue-number.txt"
+      plan?: "gh://issue/{read:plan-issue-number}"
+
+  - name: bind-plan-from-file
+    type: exec
+    skip_if_exists: plan
+    out:
+      plan?: "file://session/plan.md"
 
   - name: plan
     type: agent
