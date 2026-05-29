@@ -330,7 +330,7 @@ async def run_pipeline(
 
     if gh:
         try:
-            pr_url = gremlin.registry.read("pr")["url"]
+            pr_url = gremlin.registry.read("pr-url")
         except MissingArtifact:
             pr_url = "(unknown)"
         logger.info("done. PR: %s", pr_url)

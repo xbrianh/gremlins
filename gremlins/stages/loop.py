@@ -191,7 +191,7 @@ def detach_to_pr_base(state: State) -> None:
     from gremlins.artifacts.registry import MissingArtifact
 
     try:
-        branch = state.artifacts.read("pr")["branch"]
+        branch = state.artifacts.read("pr-branch")
     except MissingArtifact:
         return
     logger.info("detaching worktree to previous PR branch: %s", branch)

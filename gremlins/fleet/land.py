@@ -790,9 +790,9 @@ def _land_gh(
         cwd=pathlib.Path(cwd) if cwd else None,
     )
     try:
-        pr_url = registry.read("pr")["url"]
+        pr_url = registry.read("pr-url")
     except MissingArtifact:
-        print(f"error: no PR recorded for {gremlin_id}")
+        print(f"error: no PR URL recorded for {gremlin_id}")
         return False
 
     print(f"Checking PR: {pr_url}")
