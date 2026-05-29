@@ -66,13 +66,12 @@ class ArtifactRegistry:
         self._data[key] = value
         self._persist()
 
-    def bind(self, key: str, uri: Uri, *, override: bool = False) -> None:
+    def bind(self, key: str, uri: Uri) -> None:
         value = str(uri)
         if key in self._data:
             if self._data[key] == value:
                 return
-            if not override:
-                raise DuplicateArtifact(key, self._data[key], value)
+            raise DuplicateArtifact(key, self._data[key], value)
         self._data[key] = value
         self._persist()
 

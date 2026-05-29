@@ -37,11 +37,11 @@ stages:
 
   - name: plan
     type: agent
-    skip_if_exists: plan
+    skip_if_exists: plan-draft
     prompt:
       - "{{prompt}}"
     out:
-      plan: "file://session/plan.md"
+      plan-draft: "file://session/plan.md"
     options:
       idle_timeout: 600
 
