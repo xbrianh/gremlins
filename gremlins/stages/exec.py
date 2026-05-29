@@ -12,14 +12,11 @@ from gremlins.artifacts.resolve import resolve_in_map
 from gremlins.artifacts.schemes import snapshot_head_before
 from gremlins.artifacts.uri import Uri
 from gremlins.executor.state import State
-from gremlins.stages._passthrough import Passthrough as _Passthrough
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, Outcome
 from gremlins.utils import proc as _proc
 
-_CMD_SUB = re.compile(r"\{(\w+)\}")
 _READ_SUB = re.compile(r"\{read:([-\w]+)\}")
-_FRAMEWORK_KEYS = frozenset(["name", "model", "session_dir", "repo", "cwd", "base_ref"])
 _STATUS_KEY = "status"
 _BAIL_KEY = "bail"
 
@@ -63,7 +60,7 @@ class Exec(Stage):
         if not isinstance(raw_out, dict):
             raise ValueError(f"stage {name!r}: 'out' must be a mapping")
         for k in cast(dict[str, Any], d.get("options") or {}):
-            if k in _FRAMEWORK_KEYS:
+            if k in State.FRAMEWORK_KEYS:
                 raise ValueError(
                     f"stage {name!r}: option key {k!r} collides with framework substitution variable"
                 )
@@ -80,25 +77,12 @@ class Exec(Stage):
         except ValueError as exc:
             raise Bail(f"exec {self.name}: {exc}") from exc
 
-        subs = dict(
-            name=self.name,
-            model=state.stage_model or state.client.model,
-            session_dir=str(state.session_dir),
-            repo=state.repo,
-            cwd=state.cwd,
-            base_ref=state.data.base_ref_name,
-        )
-        for k, v in self.options.items():
-            if k not in subs and isinstance(v, str):
-                subs[k] = v
-        _pt = _Passthrough(subs)
-
         pre_sha: str | None = None
         if any(v == "git://range" for v in self.out_map.values()):
             pre_sha = snapshot_head_before(cwd=pathlib.Path(state.cwd))
 
         cmds = [
-            _CMD_SUB.sub(lambda m: subs.get(m.group(1), m.group(0)), c.rstrip())
+            self.substitute_vars(c.rstrip(), state, extra_env)
             for c in self.options.get("cmds", [])
             if c.strip()
         ]
@@ -127,13 +111,15 @@ class Exec(Stage):
                     raise Bail(f"exec {self.name}: exited {result.returncode}")
 
         for raw_key, raw_uri_str in self.out_map.items():
-            key = raw_key.format_map(_pt)
+            key = self.substitute_vars(raw_key, state, extra_env)
             if key == _BAIL_KEY and not bail_triggered:
                 continue
             if key == _STATUS_KEY:
                 state.artifacts.write(_STATUS_KEY, "needs_fix" if needs_fix else "pass")
                 continue
-            uri_str = _sub_reads(raw_uri_str, state.artifacts).format_map(_pt)
+            uri_str = self.substitute_vars(
+                _sub_reads(raw_uri_str, state.artifacts), state, extra_env
+            )
             if uri_str == "git://range":
                 if pre_sha is None:
                     raise RuntimeError(
