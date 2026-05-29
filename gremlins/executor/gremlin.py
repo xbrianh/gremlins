@@ -181,6 +181,7 @@ class Gremlin:
                 worktree=self.worktree_dir,
                 worktree_parent=self.worktree_parent,
                 artifacts=self.registry,
+                base_ref=self.base_ref,
             )
             built.append((e.name, stage_state.make_runner(e, scope=stages)))
         return built

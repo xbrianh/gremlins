@@ -24,7 +24,6 @@ def _make_state(
         StateData.load(None),
         loop_iteration=loop_iteration,
         attempt=attempt,
-        base_ref_name=base_ref,
     )
     state = build_state(
         data=data,
@@ -32,6 +31,7 @@ def _make_state(
         session_dir=session_dir,
         repo=repo,
         cwd=cwd,
+        base_ref=base_ref,
     )
     if scope_names:
         stages = [Stage(name) for name in scope_names]
