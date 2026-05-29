@@ -13,12 +13,14 @@ stages:
     body:
       - name: detach-prior-pr
         type: exec
-        in: { branch: pr-branch? }
         options:
           cmds:
             - |
-              if [ -n "${branch:-}" ]; then
-                git fetch origin "$branch" && git checkout --detach "origin/$branch"
+              if [ -f "{session_dir}/pr-branch.txt" ]; then
+                branch="$(cat "{session_dir}/pr-branch.txt")"
+                if [ -n "$branch" ]; then
+                  git fetch origin "refs/heads/$branch:refs/remotes/origin/$branch" && git checkout --detach "origin/$branch"
+                fi
               fi
       - { name: handoff, type: gremlins:handoff }
       - { include: gh }
