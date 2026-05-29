@@ -1065,6 +1065,44 @@ def test_do_land_one_branch_routes_to_local(sandbox, tmp_path, monkeypatch):
     assert called == ["_land_local"]
 
 
+def test_do_land_one_branch_with_registry_pr_routes_to_gh(
+    sandbox, tmp_path, monkeypatch
+):
+    """Branch artifact + registry PR promotes shape to one_pr, routing to _land_gh."""
+    gremlin_id = "gh-terse-branch-pr-id"
+    state_root = sandbox.state
+    gr_dir = state_root / gremlin_id
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    state = {
+        "id": gremlin_id,
+        "kind": "ghgremlin",
+        "status": "dead",
+        "exit_code": 0,
+        "workdir": str(workdir),
+        "project_root": str(tmp_path / "project"),
+        "setup_kind": "worktree-branch",
+        "artifacts": [{"type": "branch", "name": "issue-1001-fix"}],
+    }
+    _write_state(gr_dir, state, finished=True)
+    (gr_dir / "registry.json").write_text(json.dumps({"pr": "gh://pr/1003"}))
+
+    called = []
+    monkeypatch.setattr(
+        _land_mod, "_land_local", lambda *a, **kw: called.append("_land_local") or True
+    )
+    monkeypatch.setattr(
+        _land_mod, "_land_boss", lambda *a, **kw: called.append("_land_boss") or True
+    )
+    monkeypatch.setattr(
+        _land_mod, "_land_gh", lambda *a, **kw: called.append("_land_gh") or True
+    )
+
+    ok = _land_mod.do_land(gremlin_id)
+    assert ok is True
+    assert called == ["_land_gh"]
+
+
 def test_land_gh_removes_worktree_before_gh_merge(sandbox, tmp_path, monkeypatch):
     """_remove_worktree must be called before gh pr merge so --delete-branch succeeds."""
     import types
