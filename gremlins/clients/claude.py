@@ -263,7 +263,11 @@ class SubprocessClaudeClient:
         backoff = STREAM_IDLE_BACKOFF[: max(0, ctx["max_retries"] - 1)]
 
         def _on_retry(attempt: int, exc: BaseException, wait: float) -> None:
-            cause = "stream idle timeout" if isinstance(exc, StreamTimeoutError) else "api server error"
+            cause = (
+                "stream idle timeout"
+                if isinstance(exc, StreamTimeoutError)
+                else "api server error"
+            )
             sys.stderr.write(
                 f"{ts()} {ctx['prefix']}{cause}, resuming in {wait}s"
                 f" ({attempt + 1}/{ctx['max_retries']})...\n"
