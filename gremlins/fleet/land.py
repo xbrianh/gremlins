@@ -791,7 +791,12 @@ def _land_gh(
     )
     try:
         pr_artifact = registry.read("pr-url")
-        pr_url = pr_artifact["url"] if isinstance(pr_artifact, dict) else pr_artifact.strip()
+        pr_url: str = cast(
+            str,
+            pr_artifact["url"]
+            if isinstance(pr_artifact, dict)
+            else pr_artifact.strip(),
+        )
     except MissingArtifact:
         print(f"error: no PR URL recorded for {gremlin_id}")
         return False
