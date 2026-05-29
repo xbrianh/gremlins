@@ -198,11 +198,11 @@ class LoopStage(Stage):
 
 
 def detach_to_pr_base(state: State) -> None:
-    from gremlins.artifacts.registry import MissingArtifact
+    from gremlins.artifacts.resolve import resolve_in_map
 
-    try:
-        branch = state.artifacts.read("pr-branch")
-    except MissingArtifact:
+    resolved = resolve_in_map(state.artifacts, {"branch": "pr-branch?"})
+    branch = resolved["branch"]
+    if not branch:
         return
     logger.info("detaching worktree to previous PR branch: %s", branch)
     _git.git_detach_to_branch(branch, cwd=pathlib.Path(state.cwd))

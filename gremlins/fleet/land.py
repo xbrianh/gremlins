@@ -14,6 +14,7 @@ from typing import Any, cast
 import gremlins.utils.git as _git
 from gremlins import paths
 from gremlins.artifacts.registry import ArtifactRegistry, MissingArtifact
+from gremlins.artifacts.resolve import resolve_in_map
 from gremlins.executor.state import landable_shape, resolve_session_dir
 from gremlins.fleet.resolve import resolve_gremlin
 from gremlins.fleet.state import (
@@ -790,13 +791,7 @@ def _land_gh(
         cwd=pathlib.Path(cwd) if cwd else None,
     )
     try:
-        pr_artifact = registry.read("pr-url")
-        pr_url: str = cast(
-            str,
-            pr_artifact["url"]
-            if isinstance(pr_artifact, dict)
-            else pr_artifact.strip(),
-        )
+        pr_url = resolve_in_map(registry, {"url": "pr-url"})["url"]
     except MissingArtifact:
         print(f"error: no PR URL recorded for {gremlin_id}")
         return False

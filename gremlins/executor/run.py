@@ -16,7 +16,6 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from gremlins import paths
-from gremlins.artifacts.registry import MissingArtifact
 from gremlins.clients.client import Client
 from gremlins.env_file import load_env_file
 from gremlins.errors import die
@@ -355,10 +354,9 @@ async def run_pipeline(
         sd.patch(total_cost_usd=total_cost)
 
     if gh:
-        try:
-            pr_url = gremlin.registry.read("pr-url")
-        except MissingArtifact:
-            pr_url = "(unknown)"
+        from gremlins.artifacts.resolve import resolve_in_map
+
+        pr_url = resolve_in_map(gremlin.registry, {"pr_url": "pr-url?(unknown)"})["pr_url"]
         logger.info("done. PR: %s", pr_url)
     else:
         logger.info("done. session artifacts in: %s", session_dir)
