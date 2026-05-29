@@ -223,12 +223,25 @@ def _expand_entry(
     return [entry]
 
 
+def _parse_default(raw: str) -> Any:
+    s = raw.rstrip(")")
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        return s[1:-1]
+    return s
+
+
 def _resolve_placeholder(key: str, ctx: dict[str, Any]) -> Any:
+    dotted_key, _, raw_default = key.partition(" | default(")
+    has_default = bool(raw_default)
+    default_val = _parse_default(raw_default) if has_default else None
+
     val: Any = ctx
-    for part in key.split("."):
+    for part in dotted_key.strip().split("."):
         if not isinstance(val, dict) or part not in val:
+            if has_default:
+                return default_val
             raise ValueError(
-                f"placeholder {{{{{key}}}}}: key {part!r} not found in context"
+                f"placeholder {{{{{dotted_key.strip()}}}}}: key {part!r} not found in context"
             )
         val = cast(dict[str, Any], val)[part]
     return val

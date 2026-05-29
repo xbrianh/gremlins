@@ -4,7 +4,7 @@
 stages:
   - name: github-wait-copilot
     type: loop
-    max-iterations: 40
+    max-iterations: "{{options.max_iterations | default(40)}}"
     body:
       - name: poll
         type: exec
@@ -13,7 +13,7 @@ stages:
         out:
           status: "file://session/status"
         options:
-          interval: "20"
+          interval: "{{options.interval | default(\"20\")}}"
           cmds:
             - |
               review=$(timeout 30 gh api "repos/{repo}/pulls/$pr_number/reviews" \
