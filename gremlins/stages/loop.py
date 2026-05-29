@@ -119,7 +119,9 @@ class LoopStage(Stage):
         )
         pr_stack: bool = bool(options.get("pr_stack", False))
         raw_interval = options.get("interval")
-        interval: float | None = float(raw_interval) if raw_interval is not None else None
+        interval: float | None = (
+            float(raw_interval) if raw_interval is not None else None
+        )
 
         raw_children: object = d.get("body") or []
         if not isinstance(raw_children, list):
