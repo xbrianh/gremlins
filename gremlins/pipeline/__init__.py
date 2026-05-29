@@ -51,7 +51,7 @@ class Pipeline:
     def from_yaml(cls, path: pathlib.Path) -> Pipeline:
         importlib.import_module("gremlins.clients")
 
-        from gremlins.pipeline.loader import parse_stages
+        from gremlins.pipeline.loader import check_duplicate_producers, parse_stages
         from gremlins.pipeline.preprocess import expand_pipeline
 
         path = path.resolve()
@@ -100,6 +100,8 @@ class Pipeline:
 
         if inputs_stage is not None:
             stages = [inputs_stage, *stages]
+
+        check_duplicate_producers(stages)
 
         _fill_stage_clients(stages, default_client or PACKAGE_DEFAULT)
 

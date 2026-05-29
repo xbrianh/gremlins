@@ -9,6 +9,37 @@ from gremlins.stages.loop import LoopStage
 from gremlins.stages.parallel import ParallelStage
 from gremlins.stages.sequence import SequenceStage
 
+
+def check_duplicate_producers(stages: list[Stage]) -> None:
+    """Raise ValueError if two stages in the same scope bind the same out: key to different URIs."""
+    _check_scope(stages)
+
+
+def _check_scope(stages: list[Stage]) -> None:
+    seen: dict[str, tuple[str, str]] = {}  # key -> (stage_name, uri_str)
+    for stage in stages:
+        for raw_key, uri_str in getattr(stage, "out_map", {}).items():
+            if raw_key.endswith("?"):
+                continue
+            existing = seen.get(raw_key)
+            if existing is not None:
+                prev_name, prev_uri = existing
+                if prev_uri != uri_str:
+                    raise ValueError(
+                        f"duplicate out: key {raw_key!r}: declared by both "
+                        f"{prev_name!r} and {stage.name!r}"
+                    )
+            else:
+                seen[raw_key] = (stage.name, uri_str)
+        body = getattr(stage, "body", None)
+        if body:
+            if isinstance(stage, ParallelStage):
+                for child in body:
+                    _check_scope([child])
+            else:
+                _check_scope(body)
+
+
 STAGE_TYPES: dict[str, type[Stage]] = {
     "agent": Agent,
     "loop": LoopStage,

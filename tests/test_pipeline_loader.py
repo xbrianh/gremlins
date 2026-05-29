@@ -699,6 +699,148 @@ stages:
     assert [b.name for b in seq.body] == ["step-a", "step-b"]
 
 
+# ---- duplicate-producer check ---------------------------------------------
+
+
+def test_duplicate_out_key_flat_raises(tmp_path: pathlib.Path) -> None:
+    _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+stages:
+  - name: stage-a
+    type: exec
+    out:
+      plan: "file://session/plan-a.md"
+  - name: stage-b
+    type: exec
+    out:
+      plan: "file://session/plan-b.md"
+""",
+    )
+    with pytest.raises(ValueError, match="duplicate out.*plan.*stage-a.*stage-b"):
+        Pipeline.from_yaml(tmp_path / "pipeline.yaml")
+
+
+def test_duplicate_out_key_same_uri_ok(tmp_path: pathlib.Path) -> None:
+    """Same key + same URI (idempotent rebind) must not be flagged."""
+    yaml_path = _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+stages:
+  - name: stage-a
+    type: exec
+    out:
+      plan: "file://session/plan.md"
+  - name: stage-b
+    type: exec
+    out:
+      plan: "file://session/plan.md"
+""",
+    )
+    pipeline = Pipeline.from_yaml(yaml_path)
+    assert len(pipeline.stages) == 2
+
+
+def test_duplicate_out_key_optional_ok(tmp_path: pathlib.Path) -> None:
+    """Optional keys (?) with different URIs must not be flagged."""
+    yaml_path = _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+stages:
+  - name: stage-a
+    type: exec
+    out:
+      plan?: "file://session/plan-a.md"
+  - name: stage-b
+    type: exec
+    out:
+      plan?: "file://session/plan-b.md"
+""",
+    )
+    pipeline = Pipeline.from_yaml(yaml_path)
+    assert len(pipeline.stages) == 2
+
+
+def test_duplicate_out_key_different_loop_bodies_ok(tmp_path: pathlib.Path) -> None:
+    """Same key with different URIs in different loop bodies must not be flagged."""
+    yaml_path = _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+stages:
+  - name: loop-one
+    type: loop
+    body:
+      - name: check
+        type: exec
+        out:
+          status: "file://session/status-a.txt"
+  - name: loop-two
+    type: loop
+    body:
+      - name: check
+        type: exec
+        out:
+          status: "file://session/status-b.txt"
+""",
+    )
+    pipeline = Pipeline.from_yaml(yaml_path)
+    assert len(pipeline.stages) == 2
+
+
+def test_duplicate_out_key_within_loop_body_raises(tmp_path: pathlib.Path) -> None:
+    """Two distinct stages in the same loop body with the same key must be flagged."""
+    _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+stages:
+  - name: myloop
+    type: loop
+    body:
+      - name: producer-a
+        type: exec
+        out:
+          artifact: "file://session/a.md"
+      - name: producer-b
+        type: exec
+        out:
+          artifact: "file://session/b.md"
+""",
+    )
+    with pytest.raises(
+        ValueError, match="duplicate out.*artifact.*producer-a.*producer-b"
+    ):
+        Pipeline.from_yaml(tmp_path / "pipeline.yaml")
+
+
+def test_duplicate_out_key_in_sequence_body_raises(tmp_path: pathlib.Path) -> None:
+    """Two distinct stages in a sequence body with the same key and different URIs."""
+    _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+stages:
+  - name: my-seq
+    type: sequence
+    body:
+      - name: step-a
+        type: exec
+        out:
+          result: "file://session/result-a.txt"
+      - name: step-b
+        type: exec
+        out:
+          result: "file://session/result-b.txt"
+""",
+    )
+    with pytest.raises(ValueError, match="duplicate out.*result.*step-a.*step-b"):
+        Pipeline.from_yaml(tmp_path / "pipeline.yaml")
+
+
 def test_boss_yaml_loads() -> None:
     """boss.yaml loads with loop/handoff sequence structure."""
     from gremlins.pipeline import Pipeline
