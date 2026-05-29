@@ -112,9 +112,9 @@ async def run_shell_async(
             os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        await proc.communicate()
+        stdout_b, stderr_b = await proc.communicate()
         return subprocess.CompletedProcess(
-            cmd, 124, "", f"timed out after {timeout}s\n"
+            cmd, 124, stdout_b.decode(), stderr_b.decode() + f"timed out after {timeout}s\n"
         )
     except asyncio.CancelledError:
         try:

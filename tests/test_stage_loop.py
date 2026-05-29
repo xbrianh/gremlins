@@ -534,7 +534,7 @@ def test_pr_stack_unbind_fires_after_on_iteration_start(
     asyncio.run(loop.run(state))
 
     # on_iteration_start fires before unbind, so detach_to_pr_base sees pr-branch on iter 2
-    assert detach_calls == ["feat-iter1"]  # order-test
+    assert detach_calls == ["feat-iter1"]
 
 
 def test_pr_stack_iter2_detaches_to_iter1_branch(tmp_path, make_state_dir, monkeypatch):
