@@ -317,7 +317,9 @@ def test_sdk_env_is_overlay_only(monkeypatch, mock_sdk):
 def test_sdk_env_overlay_file_loaded(monkeypatch, mock_sdk, tmp_path):
     overlay_dir = tmp_path / "overlay"
     overlay_dir.mkdir()
-    (overlay_dir / "anthropic_agents_sdk_env").write_text("export SDK_CUSTOM_VAR=hello\n")
+    (overlay_dir / "anthropic_agents_sdk_env").write_text(
+        "export SDK_CUSTOM_VAR=hello\n"
+    )
     monkeypatch.setenv("ANTHROPIC_API_KEY", "valid-key")
     monkeypatch.setenv("GREMLINS_OVERLAY_DIR", str(overlay_dir))
 
