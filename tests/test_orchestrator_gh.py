@@ -181,7 +181,8 @@ def _patch_common(
     # this keeps publish-as-issue's bind idempotent (same URI, no DuplicateArtifact).
     registry_data: dict = {
         "spec": "file://session/spec.md",
-        "plan": "file://session/plan.md",
+        "plan": "gh://issue/42",
+        "plan-draft": "file://session/plan.md",
         "pr-url": "file://session/pr-url.txt",
         "pr-branch": "file://session/pr-branch.txt",
         "pr-number": "file://session/pr-number.txt",
@@ -263,6 +264,14 @@ def _patch_common(
     )
 
     return session_dir, state_file
+
+
+def _prepare_for_plan_stage(tmp_path: pathlib.Path) -> None:
+    """Remove plan-draft so skip_if_exists does not skip the plan stage."""
+    reg_path = tmp_path / "registry.json"
+    reg = json.loads(reg_path.read_text())
+    reg.pop("plan-draft", None)
+    reg_path.write_text(json.dumps(reg))
 
 
 _real_subprocess_run = subprocess.run
@@ -650,14 +659,7 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
     monkeypatch.chdir(tmp_path)
 
     session_dir, state_file = _patch_common(monkeypatch, tmp_path)
-    # Let plan agent run: remove pre-bound plan so skip_if_exists fires correctly.
-    # Skip publish-as-issue via plan-issue-number so it doesn't try to rebind plan.
-    _reg_path = tmp_path / "registry.json"
-    _reg = json.loads(_reg_path.read_text())
-    del _reg["plan"]
-    _reg["plan-issue-number"] = "file://session/plan-issue-number.txt"
-    _reg_path.write_text(json.dumps(_reg))
-    (session_dir / "plan-issue-number.txt").write_text("42", encoding="utf-8")
+    _prepare_for_plan_stage(tmp_path)
 
     monkeypatch.setattr(
         subprocess,
@@ -935,14 +937,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
     plan_file.write_text("# Feature\nDo the thing.\n")
 
     session_dir, state_file = _patch_common(monkeypatch, tmp_path)
-    # Let plan agent run: remove pre-bound plan so skip_if_exists fires correctly.
-    # Skip publish-as-issue via plan-issue-number so it doesn't try to rebind plan.
-    _reg_path = tmp_path / "registry.json"
-    _reg = json.loads(_reg_path.read_text())
-    del _reg["plan"]
-    _reg["plan-issue-number"] = "file://session/plan-issue-number.txt"
-    _reg_path.write_text(json.dumps(_reg))
-    (session_dir / "plan-issue-number.txt").write_text("42", encoding="utf-8")
+    _prepare_for_plan_stage(tmp_path)
 
     # Override State.patch so it actually writes fields to state_file instead of no-op.
     def writing_patch_state(self, _delete=(), **kw):
@@ -1630,14 +1625,7 @@ def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
         tmp_path,
         state_data={"stage_inputs": {"instructions": "instr from state"}},
     )
-    # Let plan agent run: remove pre-bound plan so skip_if_exists fires correctly.
-    # Skip publish-as-issue via plan-issue-number so it doesn't try to rebind plan.
-    _reg_path = tmp_path / "registry.json"
-    _reg = json.loads(_reg_path.read_text())
-    del _reg["plan"]
-    _reg["plan-issue-number"] = "file://session/plan-issue-number.txt"
-    _reg_path.write_text(json.dumps(_reg))
-    (session_dir / "plan-issue-number.txt").write_text("42", encoding="utf-8")
+    _prepare_for_plan_stage(tmp_path)
 
     monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
     monkeypatch.setattr(

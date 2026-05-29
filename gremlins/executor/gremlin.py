@@ -323,25 +323,35 @@ class Gremlin:
                 sha = _git_mod.head_sha(cwd=self.worktree_dir)
                 if sha:
                     self.registry.bind("base_sha", Uri.parse(f"git://commit/{sha}"))
-            if not self.registry.produced("plan"):
-                if (self.session_dir / "plan.md").exists():
-                    self.registry.bind("plan", Uri.parse("file://session/plan.md"))
-            # When --plan is a GH issue ref and pipeline is github_integration,
-            # upgrade plan binding from file:// to gh://issue/{N} so compose-pr's
-            # plan.uri? accessor returns the opaque issue URI. Needed when
-            # resume_from skips the plan stage.
-            if self.plan and self.pipeline_data.github_integration:
+            # When --plan is a GH issue ref on a github_integration pipeline,
+            # the opaque issue URI is what compose-pr's plan.uri? needs.
+            plan_issue_uri: str | None = None
+            if self.pipeline_data.github_integration and self.plan:
                 m = re.match(
                     r"^(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#([0-9]+)$", self.plan
                 )
-                if m and self.registry.produced("plan"):
-                    plan_uri = self.registry.resolve("plan")
-                    if plan_uri.scheme == "file":
-                        self.registry.unbind("plan")
-                        self.registry.bind(
-                            "plan",
-                            Uri.parse(f"gh://issue/{m.group(1)}"),
-                        )
+                if m:
+                    plan_issue_uri = f"gh://issue/{m.group(1)}"
+
+            if not self.registry.produced("plan"):
+                if (self.session_dir / "plan.md").exists():
+                    if not self.pipeline_data.github_integration:
+                        self.registry.bind("plan", Uri.parse("file://session/plan.md"))
+                    elif plan_issue_uri is not None:
+                        self.registry.bind("plan", Uri.parse(plan_issue_uri))
+                    elif self.registry.produced("plan-issue-number"):
+                        n = str(self.registry.read("plan-issue-number")).strip()
+                        self.registry.bind("plan", Uri.parse(f"gh://issue/{n}"))
+                    # else: github_integration with no issue ref/number yet —
+                    # publish-as-issue will bind plan (avoid DuplicateArtifact).
+            elif (
+                plan_issue_uri is not None
+                and self.registry.resolve("plan").scheme == "file"
+            ):
+                # resume: upgrade an existing file:// plan to the issue URI so
+                # compose-pr resolves it even when the plan stage was skipped.
+                self.registry.unbind("plan")
+                self.registry.bind("plan", Uri.parse(plan_issue_uri))
         except Exception:
             if worktree_created:
                 _git_mod.remove_worktree(self.project_root, worktree_created)
