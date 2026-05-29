@@ -92,7 +92,6 @@ class LoopStage(Stage):
         body_runners: list[Callable[[], Awaitable[Outcome]]] | None = None,
         max_iterations: int,
         until: UntilFn = head_stable,
-        on_iteration_start: Callable[[State], None] | None = None,
         interval: float | None = None,
     ) -> None:
         super().__init__(name)
@@ -102,7 +101,6 @@ class LoopStage(Stage):
         self._body_runners = body_runners
         self._max_iterations = max_iterations
         self._until = until
-        self._on_iteration_start = on_iteration_start
         self._interval = interval
 
     @classmethod
@@ -117,7 +115,6 @@ class LoopStage(Stage):
         max_iterations: int = int(
             d.get("max-iterations") or options.get("max_iterations", 3)
         )
-        pr_stack: bool = bool(options.get("pr_stack", False))
         raw_interval = options.get("interval")
         interval: float | None = (
             float(raw_interval) if raw_interval is not None else None
@@ -128,16 +125,15 @@ class LoopStage(Stage):
             raise ValueError(f"stage {name!r}: 'body' must be a list")
 
         body = parse_stages(cast(list[dict[str, Any]], raw_children), depth=depth)
-        on_iter = detach_to_pr_base if pr_stack else None
         stage = cls(
             name,
             body=body,
             max_iterations=max_iterations,
-            on_iteration_start=on_iter,
             interval=interval,
         )
         stage.client = get_client_from_dict(d)
         return stage
+
 
     def _build_runners(self, state: State) -> list[Callable[[], Awaitable[Outcome]]]:
         result: list[Callable[[], Awaitable[Outcome]]] = []
@@ -163,8 +159,6 @@ class LoopStage(Stage):
     async def run(self, state: State) -> Outcome:
         for iteration in range(1, self._max_iterations + 1):
             state.record_state_field(loop_iteration=iteration)
-            if self._on_iteration_start:
-                self._on_iteration_start(state)
             state.artifacts.unbind(_MARKER_KEY)
             state.artifacts.unbind(_BAIL_KEY)
             for child in self.body:
@@ -197,12 +191,3 @@ class LoopStage(Stage):
         raise Bail(f"loop exhausted {self._max_iterations} iterations")
 
 
-def detach_to_pr_base(state: State) -> None:
-    from gremlins.artifacts.resolve import resolve_in_map
-
-    resolved = resolve_in_map(state.artifacts, {"branch": "pr-branch?"})
-    branch = resolved["branch"]
-    if not branch:
-        return
-    logger.info("detaching worktree to previous PR branch: %s", branch)
-    _git.git_detach_to_branch(branch, cwd=pathlib.Path(state.cwd))
