@@ -23,7 +23,7 @@ stages:
     options:
       cmds:
         - |
-          PR_NUM="${pr_uri##*/}" &&
+          PR_NUM="${pr_uri##*/}" &&  # gh://pr/N — strip trailing segment to get number
           PR_JSON="$(gh pr view "$PR_NUM" --json url,headRefName,number)" &&
           printf "%s" "$(printf '%s' "$PR_JSON" | jq -r '.url')" > "{session_dir}/pr-url.txt" &&
           printf "%s" "$(printf '%s' "$PR_JSON" | jq -r '.headRefName')" > "{session_dir}/pr-branch.txt" &&

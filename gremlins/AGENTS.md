@@ -36,7 +36,7 @@ Before shelling out to `subprocess`, `git`, or `gh`, check `gremlins/utils/`:
 - `utils/proc.py` — `run`, `run_or_raise`, `run_async`, etc. Use instead of `subprocess.run`.
 - `utils/git.py` — `head_sha`, `current_branch`, worktree helpers, etc. Use instead of shelling `git` directly.
 
-GitHub calls belong in exec/shell stages (YAML `cmds:`), not in Python. If a helper is missing, add it to `utils/` rather than duplicating subprocess plumbing in the consumer.
+GitHub calls belong in exec/shell stages (YAML `cmds:`), not in Python. Add reusable GitHub shell interactions to `gremlins/recipes/stages/` rather than Python. For non-GitHub helpers, add to `utils/` rather than duplicating subprocess plumbing in the consumer.
 
 ### No module-level globals or registration side-effects
 

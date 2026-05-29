@@ -301,7 +301,7 @@ def _resolve_inputs(
     if pr is not None:
         from gremlins.utils.pr import pr_arg_to_ref
 
-        pr_ref = pr_arg_to_ref(pr)
+        pr_ref = pr_arg_to_ref(pr.strip().lstrip("#"))
         base_ref_name = ""
         base_ref_sha = pr_ref
         setup_kind = "worktree-detached-from-ref"
