@@ -8,14 +8,13 @@ import pathlib
 import textwrap
 from typing import Any
 
-from gremlins.pipeline.preprocess import expand_pipeline
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import StateData, build_state
+from gremlins.pipeline.preprocess import expand_pipeline
 from gremlins.recipes import BUNDLED_STAGE_DEF_DIR
 from gremlins.stages.exec import Exec
 from gremlins.utils.yaml_io import load_yaml_file
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -87,9 +86,7 @@ def _bind_rolling_plan(state: Any) -> None:
 
 
 def _write_signal(session_dir: pathlib.Path, **fields: Any) -> None:
-    (session_dir / "signal.json").write_text(
-        json.dumps(fields), encoding="utf-8"
-    )
+    (session_dir / "signal.json").write_text(json.dumps(fields), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +112,9 @@ def test_recipe_sequence_has_five_stages(tmp_path: pathlib.Path) -> None:
     ]
 
 
-def test_recipe_translate_signal_has_status_and_bail_out(tmp_path: pathlib.Path) -> None:
+def test_recipe_translate_signal_has_status_and_bail_out(
+    tmp_path: pathlib.Path,
+) -> None:
     seq = _handoff_sequence(tmp_path)
     ts = next(s for s in seq["body"] if s["name"] == "translate-signal")
     assert "status" in ts["out"]
