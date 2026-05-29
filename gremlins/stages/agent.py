@@ -12,8 +12,6 @@ from gremlins.stages.agent_runner import run_agent
 from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.outcome import Bail, Done, Outcome
 
-_FRAMEWORK_KEYS = frozenset(["name", "session_dir", "instructions", "base_ref"])
-
 
 class Agent(Stage):
     """YAML type: agent.
@@ -21,12 +19,10 @@ class Agent(Stage):
     in:  var_name -> registry_key   (resolved content substituted into prompt)
     out: registry_key -> uri_string (bound before run, verified after)
 
-    Per-stage substitution vars available in prompts and out: URIs:
-      {name}         — this stage's name
-      {model}        — effective model (state.stage_model or state.client.model)
-      {session_dir}  — absolute path to the session directory
-      {instructions} — launch-time instructions string
-      {base_ref}     — base branch name from state
+    Runtime substitution vars available in prompts and out: URIs come from
+    State.framework_subs(): {name} {model} {session_dir} {instructions}
+    {repo} {cwd} {base_ref}. The stage layers its own resolved in: vars and
+    string options underneath; framework vars win on conflict.
 
     Unknown {keys} pass through unchanged (so code examples with braces work),
     but this also means typos like {plann} produce no error.
@@ -59,7 +55,7 @@ class Agent(Stage):
         if not isinstance(raw_out, dict):
             raise ValueError(f"stage {name!r}: 'out' must be a mapping")
         for k in cast(dict[str, Any], d.get("options") or {}):
-            if k in _FRAMEWORK_KEYS:
+            if k in State.FRAMEWORK_KEYS and k != "model":
                 raise ValueError(
                     f"stage {name!r}: option key {k!r} collides with framework substitution variable"
                 )
@@ -78,19 +74,11 @@ class Agent(Stage):
         raw_model = cast(str | None, opts.pop("model", None))
 
         try:
-            subs = resolve_in_map(state.artifacts, self.in_map)
+            resolved = resolve_in_map(state.artifacts, self.in_map)
         except ValueError as exc:
             raise Bail(f"agent {self.name}: {exc}") from exc
-        subs.update(
-            name=self.name,
-            model=state.stage_model or state.client.model,
-            session_dir=str(state.session_dir),
-            instructions=state.instructions,
-            base_ref=state.data.base_ref_name,
-        )
-        for k, v in opts.items():
-            if k not in subs and isinstance(v, str):
-                subs[k] = v
+        string_opts = {k: v for k, v in opts.items() if isinstance(v, str)}
+        subs = {**string_opts, **resolved, **state.framework_subs(self)}
 
         out_map = {
             k.format_map(_Passthrough(subs)): v.format_map(_Passthrough(subs))

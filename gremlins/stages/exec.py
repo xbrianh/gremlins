@@ -19,7 +19,6 @@ from gremlins.utils import proc as _proc
 
 _CMD_SUB = re.compile(r"\{(\w+)\}")
 _READ_SUB = re.compile(r"\{read:([-\w]+)\}")
-_FRAMEWORK_KEYS = frozenset(["name", "model", "session_dir", "repo", "cwd", "base_ref"])
 _STATUS_KEY = "status"
 _BAIL_KEY = "bail"
 
@@ -63,7 +62,7 @@ class Exec(Stage):
         if not isinstance(raw_out, dict):
             raise ValueError(f"stage {name!r}: 'out' must be a mapping")
         for k in cast(dict[str, Any], d.get("options") or {}):
-            if k in _FRAMEWORK_KEYS:
+            if k in State.FRAMEWORK_KEYS:
                 raise ValueError(
                     f"stage {name!r}: option key {k!r} collides with framework substitution variable"
                 )
@@ -80,17 +79,8 @@ class Exec(Stage):
         except ValueError as exc:
             raise Bail(f"exec {self.name}: {exc}") from exc
 
-        subs = dict(
-            name=self.name,
-            model=state.stage_model or state.client.model,
-            session_dir=str(state.session_dir),
-            repo=state.repo,
-            cwd=state.cwd,
-            base_ref=state.data.base_ref_name,
-        )
-        for k, v in self.options.items():
-            if k not in subs and isinstance(v, str):
-                subs[k] = v
+        string_opts = {k: v for k, v in self.options.items() if isinstance(v, str)}
+        subs = {**string_opts, **state.framework_subs(self)}
         _pt = _Passthrough(subs)
 
         pre_sha: str | None = None

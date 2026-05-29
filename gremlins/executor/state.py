@@ -13,7 +13,7 @@ import pathlib
 import re
 import secrets
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from gremlins import paths as _paths
 from gremlins.artifacts.registry import ArtifactRegistry
@@ -522,6 +522,22 @@ class State:
     parent_stage: str = ""
     worktree: pathlib.Path | None = None
     worktree_parent: pathlib.Path | None = None
+
+    FRAMEWORK_KEYS: ClassVar[frozenset[str]] = frozenset(
+        {"name", "model", "session_dir", "instructions", "repo", "cwd", "base_ref"}
+    )
+
+    def framework_subs(self, stage: Stage) -> dict[str, str]:
+        """Runtime-owned substitution vars. Stages must not assemble these themselves."""
+        return {
+            "name": stage.name,
+            "model": self.stage_model or self.client.model,
+            "session_dir": str(self.session_dir),
+            "instructions": self.instructions,
+            "repo": self.repo,
+            "cwd": self.cwd,
+            "base_ref": self.data.base_ref_name,
+        }
 
     @staticmethod
     def setup_dirs(
