@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from gremlins.pipeline import Pipeline
 from gremlins.pipeline.preprocess import expand_pipeline
 
 
@@ -35,7 +36,8 @@ def test_verify_recipe_expands_to_loop(tmp_path: pathlib.Path) -> None:
     assert len(stages) == 1
     loop = stages[0]
     assert loop["type"] == "loop"
-    assert loop["name"] == "verify"
+    assert loop.get("_auto_name") == "verify"
+    assert "name" not in loop
 
 
 def test_verify_recipe_body_has_three_stages(tmp_path: pathlib.Path) -> None:
@@ -96,3 +98,23 @@ def test_verify_prompt_reaches_fix_agent(tmp_path: pathlib.Path) -> None:
     assert isinstance(fix_stage.get("prompt"), list)
     assert len(fix_stage["prompt"]) >= 1
     assert "verify" in fix_stage["prompt"][0].lower()
+
+
+def test_repeated_verify_recipe_deduplicates_names(tmp_path: pathlib.Path) -> None:
+    """Two recipe invocations without explicit name: produce verify and verify-2."""
+    p = tmp_path / "pipeline.yaml"
+    p.write_text(
+        textwrap.dedent("""\
+            default_client: claude:sonnet
+            prompts:
+              verify: gremlins:verify_fix.md
+            stages:
+              - { type: verify, options: { cmds: ["true"] }, prompt: verify }
+              - { type: verify, options: { cmds: ["true"] }, prompt: verify }
+        """),
+        encoding="utf-8",
+    )
+    pipeline = Pipeline.from_yaml(p)
+    assert len(pipeline.stages) == 2
+    assert pipeline.stages[0].name == "verify"
+    assert pipeline.stages[1].name == "verify-2"

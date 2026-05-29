@@ -318,9 +318,12 @@ def _expand_stage_def(
         for i, raw_inner in enumerate(substituted):
             inner = dict(raw_inner)
             if i == 0:
-                for key in ("name", "client"):
-                    if key in call_site:
-                        inner[key] = call_site[key]
+                if "name" in call_site:
+                    inner["name"] = call_site["name"]
+                elif "name" in inner:
+                    inner["_auto_name"] = inner.pop("name")
+                if "client" in call_site:
+                    inner["client"] = call_site["client"]
                 if "in" in call_site:
                     merged_in = dict(cast(dict[str, Any], inner.get("in") or {}))
                     merged_in.update(cast(dict[str, Any], call_site["in"]))
@@ -355,6 +358,8 @@ def _expand_stage_def(
     for key in ("name", "in", "out"):
         if key in call_site:
             merged[key] = call_site[key]
+    if "name" not in call_site and "name" in merged:
+        merged["_auto_name"] = merged.pop("name")
     return _expand_entry(
         merged, prompt_dir, project_root, chain, named_prompts, stage_defs, new_seen
     )

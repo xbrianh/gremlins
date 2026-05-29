@@ -536,7 +536,7 @@ def test_type_resolves_to_pipeline_file(tmp_path: pathlib.Path) -> None:
     assert len(expanded["stages"]) == 3
     assert expanded["stages"][0]["type"] == "agent"
     assert expanded["stages"][1]["type"] == "agent"
-    assert expanded["stages"][1]["name"] == "implement"
+    assert expanded["stages"][1].get("_auto_name") == "implement"
     assert expanded["stages"][2]["name"] == "require-impl-progress"
 
 
