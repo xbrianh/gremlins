@@ -589,18 +589,51 @@ def test_publish_as_issue_skip_if_exists(tmp_path, monkeypatch):
 
 
 def test_plan_no_h1_issue_body(tmp_path, monkeypatch):
-    """--plan #N with a no-H1 issue body: Layer 2 normalization produces an H1,
-    plan stage is skipped (plan.md non-empty), publish-as-issue succeeds."""
+    """resolve-plan-input prepends an H1 when the fetched issue body lacks one."""
+    import os
+
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
-
-    # Simulate what resolve-plan-input + H1 normalization produces: plan.md has
-    # a leading H1 even though the original issue body did not.
-    (session_dir / "plan.md").write_text(
-        "# Issue Title\n\nNo H1 in original body.\n", encoding="utf-8"
+    # Fake gh binary: dispatches on the --jq selector
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    gh_bin = fake_bin / "gh"
+    gh_bin.write_text(
+        "#!/bin/sh\n"
+        'for arg in "$@"; do\n'
+        "    case \"$arg\" in\n"
+        "        .title) printf 'Issue Title'; exit 0;;\n"
+        "        .number) printf '42'; exit 0;;\n"
+        "        .body) printf 'No H1 in this body.'; exit 0;;\n"
+        "    esac\n"
+        "done\n"
     )
+    gh_bin.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+
+    from gremlins.utils import proc as _proc_mod
+
+    _real_shell = _proc_mod.run_shell_async  # save before _patch_common patches it
+
+    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+    _noop_shell = _proc_mod.run_shell_async  # now points to _noop_gh_shell
+
+    # Wire up plan_arg so resolve-plan-input doesn't exit at the [ -z ] guard
+    registry_path = tmp_path / "registry.json"
+    reg = json.loads(registry_path.read_text())
+    reg["plan_arg"] = "file://session/plan-arg.txt"
+    registry_path.write_text(json.dumps(reg))
+    (session_dir / "plan-arg.txt").write_text("#42", encoding="utf-8")
+
+    # Let resolve-plan-input run for real (fake gh in PATH handles the gh calls);
+    # everything else stays with the noop interceptor
+    async def _shell(cmd, *, cwd=None, env=None):
+        if isinstance(cmd, str) and "plan.md" in cmd and "gh issue view" in cmd:
+            return await _real_shell(cmd, cwd=cwd, env=env)
+        return await _noop_shell(cmd, cwd=cwd, env=env)
+
+    monkeypatch.setattr(_proc_mod, "run_shell_async", _shell)
 
     monkeypatch.setattr(
         subprocess,
@@ -611,32 +644,6 @@ def test_plan_no_h1_issue_body(tmp_path, monkeypatch):
         "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
     )
 
-    from gremlins.utils import proc as _proc_mod
-
-    _base_shell = _proc_mod.run_shell_async
-
-    async def _h1_aware_shell(cmd, *, cwd=None, env=None):
-        if (
-            isinstance(cmd, str)
-            and "plan-issue-number" in cmd
-            and "gh issue view" not in cmd
-        ):
-            plan_md = session_dir / "plan.md"
-            content = plan_md.read_text(encoding="utf-8") if plan_md.exists() else ""
-            if any(line.startswith("# ") for line in content.splitlines()):
-                m = re.search(r'"([^"]+/plan-issue-number\.txt)"', cmd)
-                if m:
-                    p = pathlib.Path(m.group(1))
-                    p.parent.mkdir(parents=True, exist_ok=True)
-                    p.write_text("42\n")
-                    return subprocess.CompletedProcess(cmd, 0, "", "")
-            else:
-                return subprocess.CompletedProcess(cmd, 1, "", "no H1")
-        return await _base_shell(cmd, cwd=cwd, env=env)
-
-    monkeypatch.setattr(_proc_mod, "run_shell_async", _h1_aware_shell)
-
-    # session_dir=None so the client never writes plan.md — agent writes nothing
     client = _CommittingClient(
         git_dir=tmp_path,
         session_dir=None,
@@ -652,6 +659,8 @@ def test_plan_no_h1_issue_body(tmp_path, monkeypatch):
         run_pipeline(_gh_pipeline_path(tmp_path), argv=["--plan", "#42"], client=client)
     )
     assert result == 0
+    plan_content = (session_dir / "plan.md").read_text(encoding="utf-8")
+    assert plan_content.startswith("# ")
     assert (session_dir / "plan-issue-number.txt").exists()
 
 
