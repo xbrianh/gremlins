@@ -588,6 +588,69 @@ def test_publish_as_issue_skip_if_exists(tmp_path, monkeypatch):
     assert "implement" in [c.label for c in client.calls]
 
 
+def test_plan_no_h1_issue_body(tmp_path, monkeypatch):
+    """--plan #N with a no-H1 issue body: Layer 2 normalization produces an H1,
+    plan stage is skipped (plan.md non-empty), publish-as-issue succeeds."""
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+
+    # Simulate what resolve-plan-input + H1 normalization produces: plan.md has
+    # a leading H1 even though the original issue body did not.
+    (session_dir / "plan.md").write_text(
+        "# Issue Title\n\nNo H1 in original body.\n", encoding="utf-8"
+    )
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _make_gh_subprocess(issue_body="No H1 in this body.\n"),
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
+    )
+
+    from gremlins.utils import proc as _proc_mod
+
+    _base_shell = _proc_mod.run_shell_async
+
+    async def _h1_aware_shell(cmd, *, cwd=None, env=None):
+        if isinstance(cmd, str) and "plan-issue-number" in cmd and "gh issue view" not in cmd:
+            plan_md = session_dir / "plan.md"
+            content = plan_md.read_text(encoding="utf-8") if plan_md.exists() else ""
+            if any(line.startswith("# ") for line in content.splitlines()):
+                m = re.search(r'"([^"]+/plan-issue-number\.txt)"', cmd)
+                if m:
+                    p = pathlib.Path(m.group(1))
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    p.write_text("42\n")
+                    return subprocess.CompletedProcess(cmd, 0, "", "")
+            else:
+                return subprocess.CompletedProcess(cmd, 1, "", "no H1")
+        return await _base_shell(cmd, cwd=cwd, env=env)
+
+    monkeypatch.setattr(_proc_mod, "run_shell_async", _h1_aware_shell)
+
+    # session_dir=None so the client never writes plan.md — agent writes nothing
+    client = _CommittingClient(
+        git_dir=tmp_path,
+        session_dir=None,
+        fixtures={
+            "implement": IMPL_EVENTS,
+            "compose-pr": MINIMAL_EVENTS,
+            "github-review-pull-request": MINIMAL_EVENTS,
+            "github-address-pull-request-reviews": MINIMAL_EVENTS,
+        },
+    )
+
+    result = asyncio.run(
+        run_pipeline(_gh_pipeline_path(tmp_path), argv=["--plan", "#42"], client=client)
+    )
+    assert result == 0
+    assert (session_dir / "plan-issue-number.txt").exists()
+
+
 def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch):
     """Plan stage builds a real prompt from the bundled ghplan.md, not /ghplan."""
     _init_git_repo(tmp_path)
