@@ -10,9 +10,16 @@ prompts:
 stages:
   - name: chain
     type: loop
-    options:
-      pr_stack: true
     body:
+      - name: detach-prior-pr
+        type: exec
+        in: { branch: pr-branch? }
+        options:
+          cmds:
+            - |
+              if [ -n "${branch:-}" ]; then
+                git fetch origin "$branch" && git checkout --detach "origin/$branch"
+              fi
       - { name: handoff, type: gremlins:handoff }
       - { include: gh }
 
