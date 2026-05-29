@@ -217,7 +217,7 @@ def _resolve_base_ref(
     )
     effective_base_ref = base_ref if base_ref is not None else _pipeline_base_ref
     if _git_mod.in_git_repo(cwd=project_root):
-        if loaded_pipeline is not None and loaded_pipeline.needs_gh():
+        if loaded_pipeline is not None and loaded_pipeline.github_integration:
             _branch = effective_base_ref.removeprefix("origin/")
             if _branch and _branch not in ("current", "HEAD"):
                 try:
@@ -294,7 +294,7 @@ def _resolve_inputs(
 
     if (
         loaded_pipeline is not None
-        and loaded_pipeline.needs_gh()
+        and loaded_pipeline.github_integration
         and shutil.which("gh") is None
     ):
         raise RuntimeError("gh CLI not found on PATH (required for gh pipeline)")
@@ -624,7 +624,7 @@ def _load_pipeline_and_check_gh(project_root: str, pipeline_path: str) -> Any:
 
     if (
         pipeline_data is not None
-        and pipeline_data.needs_gh()
+        and pipeline_data.github_integration
         and shutil.which("gh") is None
     ):
         raise RuntimeError("gh CLI not found on PATH (required for gh pipeline)")

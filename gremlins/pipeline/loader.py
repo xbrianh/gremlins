@@ -74,6 +74,4 @@ def parse_stage(d: dict[str, Any], depth: int = 0) -> Stage:
     stage = STAGE_TYPES[stage_type].with_dict(d, depth=depth)
     stage.raw_dict = d
     stage.skip_if_exists = _parse_skip_if_exists(d, name)
-    if d.get("needs_gh"):
-        stage.needs_gh = True
     return stage

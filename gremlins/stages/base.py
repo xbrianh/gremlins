@@ -32,7 +32,6 @@ class StageInput(NamedTuple):
 
 class Stage:
     type: str = ""
-    needs_gh: bool = False
     body: list[Stage] = []
     skip_if_exists: str = ""
     options: dict[str, Any]

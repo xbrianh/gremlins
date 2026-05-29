@@ -33,11 +33,23 @@ from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail
+from gremlins.utils import proc as _proc
 from gremlins.utils.git import has_commits, has_dirty_worktree, in_git_repo
-from gremlins.utils.github import get_repo
 from gremlins.utils.yaml_io import YamlLoadError as _YamlLoadError
 
 logger = logging.getLogger(__name__)
+
+
+def _get_repo() -> str:
+    r = _proc.run(
+        ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+        timeout=10,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"not in a gh-recognized repo: {r.stderr.strip() or r.stdout.strip()}"
+        )
+    return r.stdout.strip()
 
 _HANDLED_SIGS = tuple(
     getattr(signal, name)
@@ -220,13 +232,13 @@ async def run_pipeline(
         )
     except (FileNotFoundError, _YamlLoadError, ValueError) as exc:
         die(str(exc))
-    gh = _pipeline_preview.needs_gh()
+    gh = _pipeline_preview.github_integration
     if gh and shutil.which("gh") is None:
         die("gh CLI not found")
 
     logger.info("session: %s", session_dir)
 
-    gh_repo = get_repo() if gh else ""
+    gh_repo = _get_repo() if gh else ""
     try:
         gremlin = Gremlin.initialize_with_runtime(
             gremlin_id=gremlin_id,
