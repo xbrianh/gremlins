@@ -213,7 +213,9 @@ async def run_pipeline(
             if _ref_uri.startswith("git://ref/"):
                 base_ref = _ref_uri.removeprefix("git://ref/")
         except Exception:
-            logger.warning("failed to read base_sha/base_ref from registry.json", exc_info=True)
+            logger.warning(
+                "failed to read base_sha/base_ref from registry.json", exc_info=True
+            )
 
     project_dir = pathlib.Path(project_root) if project_root else paths.project_root()
     try:
