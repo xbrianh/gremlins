@@ -11,7 +11,7 @@ inputs:
 
 land:
   in:
-    PR_URL: pr.url
+    PR_URL: pr-url
   options:
     cmds:
       - gh pr merge --squash --delete-branch "$PR_URL"
