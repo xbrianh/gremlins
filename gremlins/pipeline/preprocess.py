@@ -245,7 +245,9 @@ def _resolve_placeholder(key: str, ctx: dict[str, Any]) -> Any:
                 f"placeholder {{{{{dotted_key}}}}}: key {part!r} not found in context"
             )
         val = cast(dict[str, Any], val)[part]
-    return val if isinstance(val, (dict, list)) else str(val)
+    if isinstance(val, (dict, list)):
+        return cast(dict[str, Any] | list[Any], val)
+    return str(val)
 
 
 def _substitute_recipe(node: Any, ctx: dict[str, Any]) -> Any:
