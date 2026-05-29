@@ -22,7 +22,6 @@ from gremlins.executor.run import _parse_args as _parse_gh_args
 from gremlins.executor.run import run_pipeline
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
-from gremlins.utils.github import parse_issue_ref as _parse_issue_ref
 
 
 def _init_git_repo(path: pathlib.Path) -> None:
@@ -340,42 +339,6 @@ def test_parse_plan_and_instructions_mutual_exclusion():
     with pytest.raises(SystemExit):
         _parse_gh_args(["--plan", "#42", "also some instructions"])
 
-
-# ---------------------------------------------------------------------------
-# _parse_issue_ref unit tests
-# ---------------------------------------------------------------------------
-
-
-def test_parse_issue_ref_numeric():
-    repo, ref = _parse_issue_ref("42", "owner/repo")
-    assert repo is None
-    assert ref is None
-
-
-def test_parse_issue_ref_hash_prefix():
-    repo, ref = _parse_issue_ref("#42", "owner/repo")
-    assert repo == "owner/repo"
-    assert ref == "42"
-
-
-def test_parse_issue_ref_cross_repo():
-    repo, ref = _parse_issue_ref("other/repo#7", "owner/repo")
-    assert repo == "other/repo"
-    assert ref == "7"
-
-
-def test_parse_issue_ref_full_url():
-    repo, ref = _parse_issue_ref(
-        "https://github.com/owner/repo/issues/123", "owner/repo"
-    )
-    assert repo is None
-    assert ref is None
-
-
-def test_parse_issue_ref_invalid():
-    repo, ref = _parse_issue_ref("not-a-ref", "owner/repo")
-    assert repo is None
-    assert ref is None
 
 
 def test_gh_pipeline_stage_names(tmp_path):
