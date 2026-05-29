@@ -1,5 +1,5 @@
-<!-- placeholders: plan_file, instructions -->
-Create a detailed implementation plan for the following task and write it to the file `{plan_file}`. Use this structure:
+<!-- placeholders: session_dir, instructions -->
+Create a detailed implementation plan for the following task and write it to the file `{session_dir}/plan.md`. Use this structure:
 
 ## Context
 What problem are we solving and why.
