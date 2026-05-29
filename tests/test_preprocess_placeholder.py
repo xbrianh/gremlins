@@ -33,7 +33,9 @@ def test_key_present_with_default_returns_value_not_default() -> None:
 
 def test_key_present_with_int_returns_str() -> None:
     assert (
-        _resolve_placeholder("options.interval | default(20)", {"options": {"interval": 5}})
+        _resolve_placeholder(
+            "options.interval | default(20)", {"options": {"interval": 5}}
+        )
         == "5"
     )
 
