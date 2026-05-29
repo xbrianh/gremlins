@@ -128,6 +128,8 @@ def extract_state(evt: dict[str, Any], state: dict[str, Any]) -> None:
         raw_result = evt.get("result")
         if isinstance(raw_result, str):
             state["result_text"] = raw_result
+        state["is_error"] = evt.get("is_error")
+        state["api_error_status"] = evt.get("api_error_status")
 
 
 def stream_events(
