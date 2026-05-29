@@ -1065,7 +1065,9 @@ def test_do_land_one_branch_routes_to_local(sandbox, tmp_path, monkeypatch):
     assert called == ["_land_local"]
 
 
-def test_do_land_one_branch_with_registry_pr_routes_to_gh(sandbox, tmp_path, monkeypatch):
+def test_do_land_one_branch_with_registry_pr_routes_to_gh(
+    sandbox, tmp_path, monkeypatch
+):
     """Branch artifact + registry PR promotes shape to one_pr, routing to _land_gh."""
     gremlin_id = "gh-terse-branch-pr-id"
     state_root = sandbox.state
