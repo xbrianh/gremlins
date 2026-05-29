@@ -262,13 +262,14 @@ class SubprocessClaudeClient:
         # max_retries=0 (no retries at all).
         backoff = STREAM_IDLE_BACKOFF[: max(0, ctx["max_retries"] - 1)]
 
-        def _on_retry(attempt: int, _: BaseException, wait: float) -> None:
+        def _on_retry(attempt: int, exc: BaseException, wait: float) -> None:
+            cause = "stream idle timeout" if isinstance(exc, StreamTimeoutError) else "api server error"
             sys.stderr.write(
-                f"{ts()} {ctx['prefix']}stream idle timeout, resuming in {wait}s"
+                f"{ts()} {ctx['prefix']}{cause}, resuming in {wait}s"
                 f" ({attempt + 1}/{ctx['max_retries']})...\n"
             )
 
-        @retry(StreamTimeoutError, backoff=backoff, on_retry=_on_retry)
+        @retry(StreamTimeoutError, ApiServerError, backoff=backoff, on_retry=_on_retry)
         async def _attempt_resume() -> CompletedRun:
             return await self._attempt(
                 self._continue_prompt(), session_id=self._last_session_id.get()
