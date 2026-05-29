@@ -562,7 +562,9 @@ stages:
   - name: myloop
     type: loop
     body:
-      - { name: handoff, type: handoff }
+      - name: handoff
+        type: sequence
+        body: []
       - { include: local }
 """,
     )
@@ -570,7 +572,7 @@ stages:
     assert len(pipeline.stages) == 1
     loop = pipeline.stages[0]
     assert loop.type == "loop"
-    assert loop.body[0].type == "handoff"
+    assert loop.body[0].type == "sequence"
     body_names = [b.name for b in loop.body]
     assert "plan" in body_names
     assert "implement" in body_names
@@ -698,7 +700,7 @@ stages:
 
 
 def test_boss_yaml_loads() -> None:
-    """boss.yaml loads with loop/handoff structure replacing the old chain stage."""
+    """boss.yaml loads with loop/handoff sequence structure."""
     from gremlins.pipeline import Pipeline
     from gremlins.pipeline.discovery import resolve_pipeline_path
 
@@ -707,6 +709,7 @@ def test_boss_yaml_loads() -> None:
     assert names == ["chain", "review-chain", "address-chain"]
     chain_entry = pipeline.stages[0]
     assert chain_entry.type == "loop"
+    assert chain_entry.body[0].type == "sequence"
+    assert chain_entry.body[0].name == "handoff"
     body_names = [b.name for b in chain_entry.body]
-    assert chain_entry.body[0].type == "handoff"
     assert "implement" in body_names

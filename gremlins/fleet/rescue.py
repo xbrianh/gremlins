@@ -109,8 +109,8 @@ def build_rescue_prompt(
             "",
             f"- **Parent boss state dir** (this gremlin is a child of boss `{parent_id}`):",
             f"    - `{parent_state_dir}/boss_state.json` — chain progress, prior children",
-            f"    - `{parent_state_dir}/handoff-*.md` — rolling plan documents",
-            f"    - `{parent_state_dir}/handoff-*-child.md` — sibling child plans (the",
+            f"    - `{parent_state_dir}/rolling-plan.md` — rolling plan document",
+            f"    - `{parent_state_dir}/child-plan.md` — child plan handed to current gremlin (the",
             "      plan handed to *this* child may itself be the source of the failure)",
             f"    - `{parent_state_dir}/log` — boss lifecycle events",
         ]

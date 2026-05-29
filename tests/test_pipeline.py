@@ -317,7 +317,6 @@ def test_needs_gh_false_for_local_stage_in_loop_body() -> None:
 def test_stage_builders_registry_covers_all_known_types() -> None:
     expected = {
         "loop",
-        "handoff",
         "parallel",
     }
     assert expected <= set(STAGE_TYPES)

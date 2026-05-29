@@ -11,7 +11,7 @@ stages:
     options:
       pr_stack: true
     body:
-      - { type: handoff }
+      - { name: handoff, type: gremlins:handoff }
       - { include: gh }
 
   - name: review-chain

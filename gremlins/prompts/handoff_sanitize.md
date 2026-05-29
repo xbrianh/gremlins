@@ -14,7 +14,7 @@ Keep all remaining task lists (`- [ ] ...`), open questions, context relevant to
 
 ## Output
 
-Write ONLY the rewritten document to: {out_path}
+Write ONLY the rewritten document to: `{session_dir}/rolling-plan.md`
 Do not print the document to stdout. Do not explain what you changed.
 
 ## Rolling plan to rewrite
