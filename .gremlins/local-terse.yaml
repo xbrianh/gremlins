@@ -1,0 +1,35 @@
+default_client: claude:sonnet
+base_ref: current
+prompt_dir: prompts
+
+inputs:
+  in:
+    INSTRUCTIONS: instructions?
+    PLAN: plan?
+
+prompts:
+  code-style: gremlins:code_style.md
+  terse: terse_style.md
+  verify: [gremlins:verify_fix.md, gremlins:bail_section_fix.md]
+
+stage-definitions:
+  normalize:
+    type: exec
+    options:
+      cmds:
+        - "ruff format ."
+        - "ruff check --fix ."
+        - "git add -A"
+        - "git diff --cached --quiet || git commit -m 'normalize'"
+
+stages:
+  - { type: plan,               prompt: [code-style, terse, gremlins:plan.md] }
+  - { type: gremlins:implement, prompt: [code-style, terse, gremlins:implement_local.md] }
+  - { type: normalize }
+  - { name: check, type: verify, options: { cmds: ["make check"] }, prompt: verify }
+
+  - { type: review-code,  prompt: [code-style, terse, gremlins:review/detail.md] }
+  - { name: address-code, type: agent, in: {text: review-code}, prompt: [code-style, terse, gremlins:address.md, gremlins:bail_section.md] }
+
+  - { type: normalize }
+  - { type: verify, options: { cmds: ["make check && make test"] }, prompt: verify }
