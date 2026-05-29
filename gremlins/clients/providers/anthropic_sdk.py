@@ -9,6 +9,7 @@ import sys
 from collections.abc import AsyncGenerator
 from typing import Any, cast
 
+from gremlins import paths
 from gremlins.clients.config import (
     STREAM_IDLE_BACKOFF,
     STREAM_IDLE_TIMEOUT,
@@ -18,6 +19,7 @@ from gremlins.clients.config import (
 )
 from gremlins.clients.protocol import CompletedRun
 from gremlins.clients.stream import emit_event, ts
+from gremlins.env_file import load_env_file
 from gremlins.permissions.loader import load_default_block
 from gremlins.permissions.policy import Policy
 
@@ -50,9 +52,6 @@ def _cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
 
 
 def _load_sdk_env_overlay() -> dict[str, str]:
-    from gremlins import paths
-    from gremlins.env_file import load_env_file
-
     sdk_env_file = (
         paths.project_overlay_dir(paths.project_root()) / "anthropic_agents_sdk_env"
     )

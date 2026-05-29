@@ -297,8 +297,6 @@ def _capturing_query(captured: list[Any]):
 
 
 def test_sdk_env_is_overlay_only(monkeypatch, mock_sdk):
-    # options.env should be just the SDK overlay (empty without the file) —
-    # no os.environ copy, no prefix-stripping.
     monkeypatch.setenv("ANTHROPIC_API_KEY", "valid-key")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "junk")
     monkeypatch.setenv("CLAUDE_FOO", "1")
@@ -311,10 +309,25 @@ def test_sdk_env_is_overlay_only(monkeypatch, mock_sdk):
 
     assert captured, "query was not called"
     env = captured[0].env
-    # No os.environ copy — none of these keys appear in the overlay.
     assert "CLAUDE_FOO" not in env
     assert "ANTHROPIC_BASE_URL" not in env
     assert "ANTHROPIC_API_KEY" not in env
+
+
+def test_sdk_env_overlay_file_loaded(monkeypatch, mock_sdk, tmp_path):
+    overlay_dir = tmp_path / "overlay"
+    overlay_dir.mkdir()
+    (overlay_dir / "anthropic_agents_sdk_env").write_text("export SDK_CUSTOM_VAR=hello\n")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "valid-key")
+    monkeypatch.setenv("GREMLINS_OVERLAY_DIR", str(overlay_dir))
+
+    captured: list[Any] = []
+    mock_sdk.query = _capturing_query(captured)
+
+    client = AnthropicSdkClient("claude-sonnet-4-6")
+    asyncio.run(client.run("hi", label="t"))
+
+    assert captured[0].env.get("SDK_CUSTOM_VAR") == "hello"
 
 
 def test_hermeticity_extra_env_layered(monkeypatch, mock_sdk):
