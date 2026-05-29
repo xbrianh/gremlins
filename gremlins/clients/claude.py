@@ -27,6 +27,12 @@ class StreamTimeoutError(RuntimeError):
         self.session_id = session_id
 
 
+class ApiServerError(RuntimeError):
+    def __init__(self, msg: str, *, session_id: str | None = None) -> None:
+        super().__init__(msg)
+        self.session_id = session_id
+
+
 class SubprocessClaudeClient:
     """Production ClaudeClient: spawns ``claude -p`` subprocesses.
 
