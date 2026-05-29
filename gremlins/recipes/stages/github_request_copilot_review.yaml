@@ -2,7 +2,7 @@ stages:
   - name: github-request-copilot-review
     type: exec
     in:
-      pr_number: pr.number
+      pr_number: pr-number
     options:
       cmds:
         - 'gh pr edit "$pr_number" --repo "{repo}" --add-reviewer copilot-pull-request-reviewer'

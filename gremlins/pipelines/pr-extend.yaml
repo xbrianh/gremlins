@@ -5,11 +5,29 @@ default_client: claude:sonnet
 
 base_ref: main
 
+github_integration: true
+
 prompts:
   code-style: gremlins:code_style.md
   verify: [gremlins:verify_fix.md, gremlins:bail_section_fix.md]
 
 stages:
+  - name: fetch-pr-info
+    type: exec
+    in:
+      pr_uri: pr.uri
+    out:
+      pr-url:    "file://session/pr-url.txt"
+      pr-branch: "file://session/pr-branch.txt"
+      pr-number: "file://session/pr-number.txt"
+    options:
+      cmds:
+        - |
+          PR_NUM="${pr_uri##*/}" &&
+          PR_JSON="$(gh pr view "$PR_NUM" --json url,headRefName,number)" &&
+          printf "%s" "$(printf '%s' "$PR_JSON" | jq -r '.url')" > "{session_dir}/pr-url.txt" &&
+          printf "%s" "$(printf '%s' "$PR_JSON" | jq -r '.headRefName')" > "{session_dir}/pr-branch.txt" &&
+          printf "%s" "$(printf '%s' "$PR_JSON" | jq -r '.number')" > "{session_dir}/pr-number.txt"
   - { type: gremlins:plan-gh,                    prompt: [code-style, gremlins:plan_gh.md] }
   - { type: gremlins:implement,                 prompt: [code-style, gremlins:implement_gh.md] }
   - name: normalize
@@ -21,8 +39,8 @@ stages:
       normalize-commits: git://range
   - { type: verify,    options: { cmds: ["make check && make test"] }, prompt: verify }
   - { name: push,      type: gremlins:github-push-to-pr-branch }
-  - { type: gremlins:github-request-copilot-review,                 in: {pr: pr} }
-  - { name: github-review-pull-request,                             type: agent, in: {pr: pr}, prompt: [code-style, gremlins:github_review_pull_request.md] }
-  - { type: gremlins:github-wait-copilot,                            in: {pr: pr} }
-  - { name: github-address-pull-request-reviews,                    type: agent, in: {pr: pr}, prompt: [code-style, gremlins:github_address_pull_request_reviews.md, gremlins:bail_section.md] }
-  - { name: ci-gate,   type: gremlins:github-wait-ci,               in: {pr: pr}, prompt: [gremlins:ci_fix.md, gremlins:bail_section_fix.md] }
+  - { type: gremlins:github-request-copilot-review }
+  - { name: github-review-pull-request,                             type: agent, in: {pr: pr-url}, prompt: [code-style, gremlins:github_review_pull_request.md] }
+  - { type: gremlins:github-wait-copilot }
+  - { name: github-address-pull-request-reviews,                    type: agent, in: {pr: pr-url}, prompt: [code-style, gremlins:github_address_pull_request_reviews.md, gremlins:bail_section.md] }
+  - { name: ci-gate,   type: gremlins:github-wait-ci,               prompt: [gremlins:ci_fix.md, gremlins:bail_section_fix.md] }

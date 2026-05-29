@@ -2,6 +2,8 @@ default_client: claude:sonnet
 
 base_ref: current
 
+github_integration: true
+
 prompts:
   code-style: gremlins:code_style.md
 

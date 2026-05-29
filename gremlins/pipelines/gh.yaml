@@ -2,6 +2,8 @@ default_client: claude:sonnet
 
 base_ref: main
 
+github_integration: true
+
 inputs:
   in:
     INSTRUCTIONS: instructions?
@@ -10,7 +12,7 @@ inputs:
 
 land:
   in:
-    PR_URL: pr.url
+    PR_URL: pr-url
   options:
     cmds:
       - gh pr merge --squash --delete-branch "$PR_URL"
@@ -32,7 +34,7 @@ stages:
   - { type: verify,     options: { cmds: ["make check && make test"] }, prompt: verify }
   - { name: open-pr,    type: gremlins:github-open-pr }
   - { type: gremlins:github-request-copilot-review }
-  - { name: github-review-pull-request,                 type: agent, in: {pr: pr}, prompt: [code-style, gremlins:github_review_pull_request.md] }
-  - { type: gremlins:github-wait-copilot,                in: {pr: pr} }
-  - { name: github-address-pull-request-reviews,        type: agent, in: {pr: pr}, prompt: [code-style, gremlins:github_address_pull_request_reviews.md, gremlins:bail_section.md] }
-  - { name: ci-gate,    type: gremlins:github-wait-ci,  in: {pr: pr}, prompt: [gremlins:ci_fix.md, gremlins:bail_section_fix.md] }
+  - { name: github-review-pull-request,                 type: agent, in: {pr: pr-url}, prompt: [code-style, gremlins:github_review_pull_request.md] }
+  - { type: gremlins:github-wait-copilot }
+  - { name: github-address-pull-request-reviews,        type: agent, in: {pr: pr-url}, prompt: [code-style, gremlins:github_address_pull_request_reviews.md, gremlins:bail_section.md] }
+  - { name: ci-gate,    type: gremlins:github-wait-ci,  prompt: [gremlins:ci_fix.md, gremlins:bail_section_fix.md] }
