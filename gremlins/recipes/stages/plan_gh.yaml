@@ -36,7 +36,7 @@ stages:
           fi
     out:
       plan-issue-number?: "file://session/plan-issue-number.txt"
-      plan?: "gh://issue/{read:plan-issue-number}"
+      plan?: "gh://issue/{read:plan-issue-number}"  # must follow plan-issue-number? — {read:plan-issue-number} interpolates it
 
   - name: bind-plan-from-file
     type: exec

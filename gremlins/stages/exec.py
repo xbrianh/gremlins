@@ -136,12 +136,10 @@ class Exec(Stage):
                 state.artifacts.bind_git_commit_range(key, pre_sha)
             else:
                 uri = Uri.parse(uri_str)
-                state.artifacts.bind(key, uri)
                 try:
                     state.artifacts.resolver(uri.scheme).verify_produced(uri)
                 except FileNotFoundError:
                     if optional:
-                        state.artifacts.unbind(key)
                         continue
                     if key == _BAIL_KEY:
                         msg = f"exec {self.name}: exited {shell_rc}"
@@ -149,5 +147,6 @@ class Exec(Stage):
                             msg += f"\n{shell_output}"
                         raise Bail(msg) from None
                     raise
+                state.artifacts.bind(key, uri)
 
         return Done()
