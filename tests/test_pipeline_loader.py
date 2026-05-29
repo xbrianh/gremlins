@@ -811,7 +811,9 @@ stages:
           artifact: "file://session/b.md"
 """,
     )
-    with pytest.raises(ValueError, match="duplicate out.*artifact.*producer-a.*producer-b"):
+    with pytest.raises(
+        ValueError, match="duplicate out.*artifact.*producer-a.*producer-b"
+    ):
         Pipeline.from_yaml(tmp_path / "pipeline.yaml")
 
 

@@ -43,6 +43,7 @@ def _check_scope(stages: list[Stage]) -> None:
         if body:
             _check_scope(body)
 
+
 STAGE_TYPES: dict[str, type[Stage]] = {
     "agent": Agent,
     "loop": LoopStage,
