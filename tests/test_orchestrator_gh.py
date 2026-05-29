@@ -588,6 +588,82 @@ def test_publish_as_issue_skip_if_exists(tmp_path, monkeypatch):
     assert "implement" in [c.label for c in client.calls]
 
 
+def test_plan_no_h1_issue_body(tmp_path, monkeypatch):
+    """resolve-plan-input prepends an H1 when the fetched issue body lacks one."""
+    import os
+
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    # Fake gh binary: dispatches on the --jq selector
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    gh_bin = fake_bin / "gh"
+    gh_bin.write_text(
+        "#!/bin/sh\n"
+        'for arg in "$@"; do\n'
+        '    case "$arg" in\n'
+        "        .title) printf 'Issue Title'; exit 0;;\n"
+        "        .number) printf '42'; exit 0;;\n"
+        "        .body) printf 'No H1 in this body.'; exit 0;;\n"
+        "    esac\n"
+        "done\n"
+    )
+    gh_bin.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+
+    from gremlins.utils import proc as _proc_mod
+
+    _real_shell = _proc_mod.run_shell_async  # save before _patch_common patches it
+
+    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+    _noop_shell = _proc_mod.run_shell_async  # now points to _noop_gh_shell
+
+    # Wire up plan_arg so resolve-plan-input doesn't exit at the [ -z ] guard
+    registry_path = tmp_path / "registry.json"
+    reg = json.loads(registry_path.read_text())
+    reg["plan_arg"] = "file://session/plan-arg.txt"
+    registry_path.write_text(json.dumps(reg))
+    (session_dir / "plan-arg.txt").write_text("#42", encoding="utf-8")
+
+    # Let resolve-plan-input run for real (fake gh in PATH handles the gh calls);
+    # everything else stays with the noop interceptor
+    async def _shell(cmd, *, cwd=None, env=None):
+        if isinstance(cmd, str) and "plan.md" in cmd and "gh issue view" in cmd:
+            return await _real_shell(cmd, cwd=cwd, env=env)
+        return await _noop_shell(cmd, cwd=cwd, env=env)
+
+    monkeypatch.setattr(_proc_mod, "run_shell_async", _shell)
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _make_gh_subprocess(issue_body="No H1 in this body.\n"),
+    )
+    monkeypatch.setattr(
+        "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
+    )
+
+    client = _CommittingClient(
+        git_dir=tmp_path,
+        session_dir=None,
+        fixtures={
+            "implement": IMPL_EVENTS,
+            "compose-pr": MINIMAL_EVENTS,
+            "github-review-pull-request": MINIMAL_EVENTS,
+            "github-address-pull-request-reviews": MINIMAL_EVENTS,
+        },
+    )
+
+    result = asyncio.run(
+        run_pipeline(_gh_pipeline_path(tmp_path), argv=["--plan", "#42"], client=client)
+    )
+    assert result == 0
+    plan_content = (session_dir / "plan.md").read_text(encoding="utf-8")
+    assert plan_content.startswith("# ")
+    assert (session_dir / "plan-issue-number.txt").exists()
+
+
 def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch):
     """Plan stage builds a real prompt from the bundled ghplan.md, not /ghplan."""
     _init_git_repo(tmp_path)

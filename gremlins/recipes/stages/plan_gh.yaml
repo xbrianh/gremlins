@@ -15,11 +15,21 @@ stages:
           elif echo "$plan_arg" | grep -qE '^#[0-9]+$'; then
               gh issue view "$plan_arg" --json body --jq .body \
                 > "{session_dir}/plan.md"
+              if ! head -1 "{session_dir}/plan.md" | grep -q '^# '; then
+                  title=$(gh issue view "$plan_arg" --json title --jq .title)
+                  { printf '# %s\n\n' "$title"; cat "{session_dir}/plan.md"; } > "{session_dir}/plan.md.tmp"
+                  mv "{session_dir}/plan.md.tmp" "{session_dir}/plan.md"
+              fi
               gh issue view "$plan_arg" --json number --jq .number \
                 > "{session_dir}/plan-issue-number.txt"
           elif echo "$plan_arg" | grep -qE '^[^/]+/[^#]+#[0-9]+$'; then
               gh issue view "$plan_arg" --json body --jq .body \
                 > "{session_dir}/plan.md"
+              if ! head -1 "{session_dir}/plan.md" | grep -q '^# '; then
+                  title=$(gh issue view "$plan_arg" --json title --jq .title)
+                  { printf '# %s\n\n' "$title"; cat "{session_dir}/plan.md"; } > "{session_dir}/plan.md.tmp"
+                  mv "{session_dir}/plan.md.tmp" "{session_dir}/plan.md"
+              fi
           else
               printf 'resolve-plan-input: unrecognized plan_arg: %s\n' "$plan_arg" >&2
               exit 1
