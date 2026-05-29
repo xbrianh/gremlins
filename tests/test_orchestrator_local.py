@@ -277,6 +277,72 @@ def test_local_main_env_file_vars_reach_verify(tmp_path, monkeypatch):
     )
 
 
+def test_local_main_env_file_sourced_with_overlay_dir_set(tmp_path, monkeypatch):
+    """Env vars from .gremlins/env are loaded even when GREMLINS_OVERLAY_DIR points to an unstaged path.
+
+    Regression: stage_gremlins_overlay used paths.project_overlay_dir() as its source, which
+    respects GREMLINS_OVERLAY_DIR. When the launcher pre-sets that to state_dir/.gremlins (before
+    staging), the source path didn't exist yet, the copy was skipped, and the env file was silently
+    ignored.
+    """
+    import subprocess as _subprocess
+
+    proj_dir = tmp_path / "proj"
+    proj_dir.mkdir()
+    plan_file = proj_dir / "plan.md"
+    plan_file.write_text("# Plan\nDo stuff.\n")
+    (proj_dir / ".gremlins").mkdir()
+    (proj_dir / ".gremlins" / "env").write_text(
+        "export GREMLIN_ENV_TEST_SENTINEL=from_env_file\n"
+    )
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    session_dir = state_dir / "session"
+    session_dir.mkdir()
+
+    # Simulate the launcher: GREMLINS_OVERLAY_DIR points to state_dir/.gremlins, which
+    # does not yet exist when run_pipeline starts.
+    monkeypatch.setenv("GREMLINS_OVERLAY_DIR", str(state_dir / ".gremlins"))
+
+    monkeypatch.chdir(proj_dir)
+    _common_patches(monkeypatch)
+    monkeypatch.setattr(
+        "gremlins.executor.run.resolve_session_dir",
+        lambda gremlin_id=None: session_dir,
+    )
+
+    captured_envs: list[dict] = []
+
+    async def _capturing_shell(cmd, env=None, **kwargs):
+        if env is not None:
+            captured_envs.append(dict(env))
+        return _subprocess.CompletedProcess(cmd, 0, "(noop)\n", "")
+
+    monkeypatch.setattr("gremlins.stages.exec._proc.run_shell_async", _capturing_shell)
+
+    client = _ReviewCreatingClient(
+        fixtures={
+            "plan": MINIMAL_EVENTS,
+            "implement": MINIMAL_EVENTS,
+            **{lbl: MINIMAL_EVENTS for lbl in _REVIEW_LABELS},
+            "address-code": MINIMAL_EVENTS,
+        }
+    )
+    monkeypatch.delenv("GREMLIN_ENV_TEST_SENTINEL", raising=False)
+    result = asyncio.run(
+        run_pipeline(
+            _local_pipeline_path(proj_dir),
+            argv=["--plan", str(plan_file)],
+            client=client,
+        )
+    )
+    assert result == 0
+    assert any(
+        e.get("GREMLIN_ENV_TEST_SENTINEL") == "from_env_file" for e in captured_envs
+    )
+
+
 def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
     """pipeline.default_client_spec model used when --model and --client are absent.
 

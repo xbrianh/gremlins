@@ -348,7 +348,7 @@ def remove_worktree(project_root: str, workdir: str) -> None:
 
 
 def stage_gremlins_overlay(project_root: str, state_dir: os.PathLike[str]) -> None:
-    src = paths.project_overlay_dir(pathlib.Path(project_root))
+    src = pathlib.Path(project_root) / paths.OVERLAY_DIRNAME
     if src.is_dir():
         shutil.copytree(
             src, pathlib.Path(state_dir) / paths.OVERLAY_DIRNAME, dirs_exist_ok=True
