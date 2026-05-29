@@ -313,14 +313,9 @@ def _loop_state_with_gr(
     if pr_branch is not None:
         from gremlins.artifacts.uri import Uri
 
-        state.artifacts.bind("pr", Uri.parse("gh://pr/1"))
-        state.artifacts._resolvers["gh"].read = (  # type: ignore[attr-defined]
-            lambda uri, _b=pr_branch: {
-                "url": "https://github.com/x/r/pull/1",
-                "number": 1,
-                "branch": _b,
-            }
-        )
+        branch_file = tmp_path / "artifacts" / "pr-branch.txt"
+        branch_file.write_text(pr_branch)
+        state.artifacts.bind("pr-branch", Uri.parse("file://session/pr-branch.txt"))
     return state
 
 
@@ -519,18 +514,15 @@ def test_pr_stack_unbind_fires_after_on_iteration_start(
     async def runner() -> Done:
         count[0] += 1
         if count[0] == 1:
-            state.artifacts.bind("pr", Uri.parse("gh://pr/1"))
-            state.artifacts._resolvers["gh"].read = (  # type: ignore[attr-defined]
-                lambda uri: {
-                    "url": "https://github.com/x/r/pull/1",
-                    "number": 1,
-                    "branch": "feat-iter1",
-                }
-            )
+            from gremlins.artifacts.uri import Uri
+
+            branch_file = tmp_path / "artifacts" / "pr-branch.txt"
+            branch_file.write_text("feat-iter1")
+            state.artifacts.bind("pr-branch", Uri.parse("file://session/pr-branch.txt"))
             _set_marker(state)
         return Done()
 
-    exec_stage = Exec("stage", {}, out_map={"pr": "gh://pr"})
+    exec_stage = Exec("stage", {}, out_map={"pr-branch": "file://session/pr-branch.txt"})
     loop = LoopStage(
         "test",
         body=[exec_stage],
@@ -540,7 +532,7 @@ def test_pr_stack_unbind_fires_after_on_iteration_start(
     )
     asyncio.run(loop.run(state))
 
-    # on_iteration_start fires before unbind, so detach_to_pr_base sees pr on iter 2
+    # on_iteration_start fires before unbind, so detach_to_pr_base sees pr-branch on iter 2
     assert detach_calls == ["feat-iter1"]
 
 
@@ -567,14 +559,9 @@ def test_pr_stack_iter2_detaches_to_iter1_branch(tmp_path, make_state_dir, monke
         if count == 1:
             from gremlins.artifacts.uri import Uri
 
-            state.artifacts.bind("pr", Uri.parse("gh://pr/1"))
-            state.artifacts._resolvers["gh"].read = (  # type: ignore[attr-defined]
-                lambda uri: {
-                    "url": "https://github.com/x/r/pull/1",
-                    "number": 1,
-                    "branch": "feat-iter1",
-                }
-            )
+            branch_file = tmp_path / "artifacts" / "pr-branch.txt"
+            branch_file.write_text("feat-iter1")
+            state.artifacts.bind("pr-branch", Uri.parse("file://session/pr-branch.txt"))
             _set_marker(state)
         return Done()
 

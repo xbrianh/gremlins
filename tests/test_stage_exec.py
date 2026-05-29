@@ -142,12 +142,8 @@ def test_out_git_range_empty_diff_still_binds(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_out_read_sub_resolves_uri(tmp_path, monkeypatch):
+def test_out_read_sub_resolves_uri(tmp_path):
     state = _make_state(tmp_path)
-    monkeypatch.setattr(
-        "gremlins.artifacts.schemes.GitHubResolver.verify_produced",
-        lambda self, uri: None,
-    )
     foo_file = state.session_dir / "foo.txt"
     stage = _exec(
         cmds=[f'echo 42 > "{foo_file}"'],
