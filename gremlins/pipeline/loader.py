@@ -29,7 +29,9 @@ def fill_names(raw_stages: list[dict[str, Any]]) -> None:
         if isinstance(d.get("name"), str) and d["name"]:
             continue
         auto = d.pop("_auto_name", None)
-        stage_type = auto or ("parallel" if "parallel" in d else str(d.get("type") or ""))
+        stage_type = auto or (
+            "parallel" if "parallel" in d else str(d.get("type") or "")
+        )
         counts[stage_type] = counts.get(stage_type, 0) + 1
         n = counts[stage_type]
         candidate = stage_type if n == 1 else f"{stage_type}-{n}"
