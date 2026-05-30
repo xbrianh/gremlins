@@ -40,6 +40,7 @@ _DISPATCH: dict[str, tuple[str, Callable[[list[str]], int]]] = {
         prompt_for_assistant_main,
     ),
     "queue": ("Manage the gremlin launch queue.", queue_main),
+    "artifacts": ("Inspect artifact keys and bindings.", artifacts_main),
 }
 
 
