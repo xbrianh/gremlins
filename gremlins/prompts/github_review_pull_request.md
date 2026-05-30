@@ -45,7 +45,7 @@ Analyze every file in the diff thoroughly. For each change, evaluate:
 - **Readability**: Unclear naming, missing context, overly clever code
 - **Testing**: Adequate coverage for new/changed behavior
 
-Read surrounding code in the repo as needed for full context — don't review the diff in isolation.
+Read surrounding code in the repo as needed for full context — don't review the diff in isolation. **Do not switch branches or fetch remote refs.** The worktree is on the base branch; read the PR's changes from the diff and the GitHub API, and read base-branch files directly with the Read tool.
 
 ## Step 3: Build the review
 
