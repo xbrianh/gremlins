@@ -33,7 +33,7 @@ def artifacts_main(argv: list[str]) -> int:
 
 
 def _print_static(pipe: Pipeline) -> None:
-    info: dict[str, dict[str, list[str]]] = {}
+    info: dict[str, dict[str, Any]] = {}
     _walk(pipe.stages, info)
     if pipe.land is not None:
         _walk([pipe.land], info)
@@ -47,15 +47,15 @@ def _print_static(pipe: Pipeline) -> None:
         print(f"  {k} {uri}({sch}) p={ps} c={cs}")
 
 
-def _walk(stages: list, info: dict[str, dict[str, list[str]]]) -> None:
+def _walk(stages: list[Any], info: dict[str, dict[str, Any]]) -> None:
     for st in stages:
         _collect(st, info)
-        body = getattr(st, "body", None) or []
+        body: list[Any] = getattr(st, "body", None) or []
         if body:
             _walk(body, info)
 
 
-def _collect(st: Any, info: dict[str, dict[str, list[str]]]) -> None:
+def _collect(st: Any, info: dict[str, dict[str, Any]]) -> None:
     nm = getattr(st, "name", "?")
     for k, u in getattr(st, "out_map", {}).items():
         if k.endswith("?"):
@@ -63,7 +63,7 @@ def _collect(st: Any, info: dict[str, dict[str, list[str]]]) -> None:
         if k not in info:
             info[k] = {"uri": u, "scheme": _sch(u), "producers": [], "consumers": []}
         d = info[k]
-        if d["uri"] == "?":
+        if d.get("uri") == "?":
             d["uri"] = u
             d["scheme"] = _sch(u)
         if nm not in d["producers"]:
@@ -84,8 +84,10 @@ def _sch(u: str) -> str:
 
 
 def _print_live(reg: ArtifactRegistry) -> None:
-    print(f"live:{reg.registry_path}")
-    for k in sorted(reg._data):
-        v = reg._data[k]
+    rpath = getattr(reg, "registry_path", "?")
+    data: dict[str, Any] = getattr(reg, "_data", {})
+    print(f"live:{rpath}")
+    for k in sorted(data):
+        v = data[k]
         sch = v.split("://", 1)[0] if isinstance(v, str) and "://" in v else "?"
         print(f"  {k} {v}({sch})")
