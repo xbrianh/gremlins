@@ -21,6 +21,8 @@ class CleanItem:
 
 
 def _is_pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
     try:
         os.kill(pid, 0)
         return True
@@ -46,7 +48,8 @@ def _scan_state(failed: bool, finished: bool) -> list[CleanItem]:
     root = paths.state_root()
     if not root.is_dir():
         return items
-    for entry in os.scandir(root):
+    entries = list(os.scandir(root))
+    for entry in entries:
         if not entry.is_dir(follow_symlinks=False):
             continue
         name = entry.name
@@ -66,10 +69,13 @@ def _scan_state(failed: bool, finished: bool) -> list[CleanItem]:
                 or (isinstance(exit_code, int) and exit_code != 0)
             ):
                 continue
+        elif finished:
+            if not (isinstance(exit_code, int) and exit_code == 0):
+                continue
         size = _dir_size(pathlib.Path(entry.path))
         items.append(CleanItem(pathlib.Path(entry.path), name, size))
         prefix = f"{name}--"
-        for child in os.scandir(root):
+        for child in entries:
             if not child.name.startswith(prefix):
                 continue
             csf = pathlib.Path(child.path) / "state.json"
@@ -84,6 +90,9 @@ def _scan_state(failed: bool, finished: bool) -> list[CleanItem]:
                 if not (
                     clive.startswith("dead:") or (isinstance(cexit, int) and cexit != 0)
                 ):
+                    continue
+            elif finished:
+                if not (isinstance(cexit, int) and cexit == 0):
                     continue
             csize = _dir_size(pathlib.Path(child.path))
             items.append(CleanItem(pathlib.Path(child.path), child.name, csize))
@@ -124,18 +133,10 @@ def _scan_queue(failed: bool, finished: bool) -> list[CleanItem]:
     qroot = paths.state_root() / "queues" / "default"
     if not qroot.is_dir():
         return items
-    rpid = qroot / "runner.pid"
-    runner_live = False
-    if rpid.is_file():
-        try:
-            pid = int(rpid.read_text().strip())
-            runner_live = _is_pid_alive(pid)
-        except Exception:
-            pass
-    if runner_live:
-        buckets: list[str] = []
-    elif failed:
+    if failed:
         buckets = ["failed"]
+    elif finished:
+        buckets = ["done"]
     else:
         buckets = ["done", "failed"]
     for sub in buckets:
@@ -162,12 +163,26 @@ def _scan_locks() -> list[CleanItem]:
         try:
             state = load_state(str(sf)) or {}
             pid = state.get("pid")
-            if isinstance(pid, int) and not _is_pid_alive(pid):
-                sz = lf.stat().st_size
-                items.append(CleanItem(lf, str(lf.relative_to(root)), sz))
+            if isinstance(pid, (int, str)):
+                try:
+                    if not _is_pid_alive(int(pid)):
+                        sz = lf.stat().st_size
+                        items.append(CleanItem(lf, str(lf.relative_to(root)), sz))
+                except (ValueError, TypeError):
+                    pass
         except Exception:
             pass
     for pf in root.rglob("*.pid"):
+        try:
+            pid = int(pf.read_text().strip())
+            if not _is_pid_alive(pid):
+                sz = pf.stat().st_size
+                items.append(CleanItem(pf, str(pf.relative_to(root)), sz))
+        except Exception:
+            pass
+    for pf in root.rglob("pid"):
+        if pf.name != "pid":
+            continue
         try:
             pid = int(pf.read_text().strip())
             if not _is_pid_alive(pid):
