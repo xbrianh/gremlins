@@ -7,6 +7,7 @@ import sys
 from collections.abc import Callable
 
 from gremlins.cli.artifacts import artifacts_main
+from gremlins.cli.clean import clean_main
 from gremlins.cli.fleet import (
     ack_main,
     close_main,
@@ -21,7 +22,6 @@ from gremlins.cli.launch import launch_main
 from gremlins.cli.prompt_for_assistant import prompt_for_assistant_main
 from gremlins.cli.queue import queue_main
 from gremlins.cli.resume import resume_main
-from gremlins.cli.clean import clean_main
 
 _DISPATCH: dict[str, tuple[str, Callable[[list[str]], int]]] = {
     "launch": ("Launch a background gremlin by pipeline name.", launch_main),
