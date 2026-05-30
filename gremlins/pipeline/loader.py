@@ -24,7 +24,7 @@ def _check_scope(stages: list[Stage]) -> None:
             existing = seen.get(raw_key)
             if existing is not None:
                 prev_name, prev_uri = existing
-                if prev_uri != uri_str:
+                if prev_uri != uri_str and not getattr(stage, "skip_if_exists", None):
                     raise ValueError(
                         f"duplicate out: key {raw_key!r}: declared by both "
                         f"{prev_name!r} and {stage.name!r}"

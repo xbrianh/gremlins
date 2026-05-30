@@ -7,7 +7,7 @@ import pathlib
 import re
 from typing import Any, cast
 
-from gremlins.artifacts.registry import ArtifactRegistry, MissingArtifact
+from gremlins.artifacts.registry import ArtifactRegistry, DuplicateArtifact, MissingArtifact
 from gremlins.artifacts.resolve import resolve_in_map
 from gremlins.artifacts.schemes import snapshot_head_before
 from gremlins.artifacts.uri import Uri
@@ -150,6 +150,11 @@ class Exec(Stage):
                             msg += f"\n{shell_output}"
                         raise Bail(msg) from None
                     raise
-                state.artifacts.bind(key, uri)
+                try:
+                    state.artifacts.bind(key, uri)
+                except DuplicateArtifact:
+                    if optional:
+                        continue
+                    raise
 
         return Done()

@@ -62,7 +62,7 @@ stages:
           printf '%s' "${url##*/}" > "{session_dir}/plan-issue-number.txt"
     out:
       plan-issue-number: "file://session/plan-issue-number.txt"
-      plan: "gh://issue/{read:plan-issue-number}"
+      plan?: "gh://issue/{read:plan-issue-number}"
 
   - name: update-description
     type: exec

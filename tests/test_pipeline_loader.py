@@ -764,6 +764,28 @@ stages:
     assert len(pipeline.stages) == 2
 
 
+def test_duplicate_out_key_skip_if_exists_ok(tmp_path: pathlib.Path) -> None:
+    """A stage with skip_if_exists may rebind a key to a different URI (sequential upgrade)."""
+    yaml_path = _write_yaml(
+        tmp_path / "pipeline.yaml",
+        """\
+name: p
+stages:
+  - name: plan
+    type: exec
+    out:
+      plan: "file://session/plan.md"
+  - name: publish-as-issue
+    type: exec
+    skip_if_exists: plan-issue-number
+    out:
+      plan: "gh://issue/123"
+""",
+    )
+    pipeline = Pipeline.from_yaml(yaml_path)
+    assert len(pipeline.stages) == 2
+
+
 def test_duplicate_out_key_different_loop_bodies_ok(tmp_path: pathlib.Path) -> None:
     """Same key with different URIs in different loop bodies must not be flagged."""
     yaml_path = _write_yaml(

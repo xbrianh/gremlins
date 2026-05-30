@@ -193,7 +193,7 @@ def _patch_common(
     registry_file.write_text(json.dumps(registry_data))
     # Create placeholder artifact files so file resolvers find them.
     (session_dir / "spec.md").write_text("", encoding="utf-8")
-    (session_dir / "plan.md").write_text("", encoding="utf-8")
+    (session_dir / "plan.md").write_text("# Plan\nDo stuff.\n", encoding="utf-8")
     (session_dir / "pr-title.txt").write_text("Fake PR Title\n")
     (session_dir / "pr-body.md").write_text("Fake PR body.\n")
     (session_dir / "pr-url.txt").write_text(
@@ -267,10 +267,10 @@ def _patch_common(
 
 
 def _prepare_for_plan_stage(tmp_path: pathlib.Path) -> None:
-    """Remove plan-draft so skip_if_exists does not skip the plan stage."""
+    """Remove plan so skip_if_exists does not skip the plan stage."""
     reg_path = tmp_path / "registry.json"
     reg = json.loads(reg_path.read_text())
-    reg.pop("plan-draft", None)
+    reg.pop("plan", None)
     reg_path.write_text(json.dumps(reg))
 
 
@@ -373,7 +373,6 @@ def test_gh_pipeline_stage_names(tmp_path):
     assert names == [
         "inputs",
         "resolve-plan-input",
-        "bind-plan-from-file",
         "plan",
         "publish-as-issue",
         "update-description",
@@ -608,6 +607,9 @@ def test_plan_no_h1_issue_body(tmp_path, monkeypatch):
 
     session_dir, state_file = _patch_common(monkeypatch, tmp_path)
     _noop_shell = _proc_mod.run_shell_async  # now points to _noop_gh_shell
+
+    # Clear plan.md so resolve-plan-input actually fetches the issue (tests H1 prepend logic).
+    (session_dir / "plan.md").write_text("", encoding="utf-8")
 
     # Wire up plan_arg so resolve-plan-input doesn't exit at the [ -z ] guard
     registry_path = tmp_path / "registry.json"
