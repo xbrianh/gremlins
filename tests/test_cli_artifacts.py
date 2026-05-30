@@ -58,7 +58,10 @@ def test_static_path(capsys, monkeypatch):
 
 
 def test_error_file_not_found(capsys, monkeypatch):
-    with patch("gremlins.cli.artifacts.resolve_pipeline_name", side_effect=FileNotFoundError("nf")):
+    with patch(
+        "gremlins.cli.artifacts.resolve_pipeline_name",
+        side_effect=FileNotFoundError("nf"),
+    ):
         rc = mod.artifacts_main(["bad"])
     assert rc == 1
     err = capsys.readouterr().err
@@ -66,7 +69,9 @@ def test_error_file_not_found(capsys, monkeypatch):
 
 
 def test_error_value(capsys, monkeypatch):
-    with patch("gremlins.cli.artifacts.resolve_pipeline_name", side_effect=ValueError("ve")):
+    with patch(
+        "gremlins.cli.artifacts.resolve_pipeline_name", side_effect=ValueError("ve")
+    ):
         rc = mod.artifacts_main(["bad"])
     assert rc == 1
     err = capsys.readouterr().err
@@ -74,7 +79,9 @@ def test_error_value(capsys, monkeypatch):
 
 
 def test_error_yaml(capsys, monkeypatch):
-    with patch("gremlins.cli.artifacts.resolve_pipeline_name", side_effect=YamlLoadError("yl")):
+    with patch(
+        "gremlins.cli.artifacts.resolve_pipeline_name", side_effect=YamlLoadError("yl")
+    ):
         rc = mod.artifacts_main(["bad"])
     assert rc == 1
     err = capsys.readouterr().err
@@ -89,7 +96,9 @@ def test_argparse_positional():
 
 def test_cli_dispatch(monkeypatch):
     calls = []
-    monkeypatch.setattr(cli, "_DISPATCH", {"artifacts": ("d", lambda a: calls.append(a) or 0)})
+    monkeypatch.setattr(
+        cli, "_DISPATCH", {"artifacts": ("d", lambda a: calls.append(a) or 0)}
+    )
     rc = cli.main(["artifacts", "t"])
     assert rc == 0
     assert calls == [["t"]]
