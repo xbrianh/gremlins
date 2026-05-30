@@ -61,7 +61,10 @@ def _scan_state(failed: bool, finished: bool) -> list[CleanItem]:
         state = load_state(str(sf)) or {}
         exit_code = state.get("exit_code")
         if failed:
-            if not (live.startswith("dead:") or (isinstance(exit_code, int) and exit_code != 0)):
+            if not (
+                live.startswith("dead:")
+                or (isinstance(exit_code, int) and exit_code != 0)
+            ):
                 continue
         size = _dir_size(pathlib.Path(entry.path))
         items.append(CleanItem(pathlib.Path(entry.path), name, size))
@@ -78,7 +81,9 @@ def _scan_state(failed: bool, finished: bool) -> list[CleanItem]:
             cstate = load_state(str(csf)) or {}
             cexit = cstate.get("exit_code")
             if failed:
-                if not (clive.startswith("dead:") or (isinstance(cexit, int) and cexit != 0)):
+                if not (
+                    clive.startswith("dead:") or (isinstance(cexit, int) and cexit != 0)
+                ):
                     continue
             csize = _dir_size(pathlib.Path(child.path))
             items.append(CleanItem(pathlib.Path(child.path), child.name, csize))
@@ -268,7 +273,12 @@ def clean_main(argv: list[str]) -> int:
     work_items = _scan_worktrees() if do_work else []
     queue_items = _scan_queue(args.failed, args.finished) if do_queue else []
     lock_items = _scan_locks() if do_locks else []
-    groups = {"worktrees": work_items, "state": state_items, "queue": queue_items, "locks": lock_items}
+    groups = {
+        "worktrees": work_items,
+        "state": state_items,
+        "queue": queue_items,
+        "locks": lock_items,
+    }
     total_n = sum(len(v) for v in groups.values())
     if total_n == 0:
         print("nothing to clean")
