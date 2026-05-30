@@ -381,8 +381,8 @@ def _parse_commit_output(text: str) -> tuple[str, str]:
     lines = text.strip().splitlines()
     if lines and lines[0].strip().startswith("```"):
         lines = lines[1:]
-        if lines and lines[-1].strip().startswith("```"):
-            lines = lines[:-1]
+    if lines and lines[-1].strip().startswith("```"):
+        lines = lines[:-1]
     subject = ""
     body_lines: list[str] = []
     past_blank = False

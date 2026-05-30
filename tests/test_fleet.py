@@ -910,6 +910,14 @@ def test_parse_duration_invalid():
         _duration.parse_duration("abc")
 
 
+def test_parse_commit_output_strips_fences():
+    assert _land._parse_commit_output("```\nfoo\n\nbar\n```") == ("foo", "bar")
+    assert _land._parse_commit_output("```python\nfoo\n```") == ("foo", "")
+    assert _land._parse_commit_output("foo\n\nbar") == ("foo", "bar")
+    assert _land._parse_commit_output("```\nfoo\n```") == ("foo", "")
+    assert _land._parse_commit_output("```") == ("", "")
+
+
 # ---------------------------------------------------------------------------
 # liveness — dead:host-terminated (pid gone + workdir missing)
 # ---------------------------------------------------------------------------
