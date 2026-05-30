@@ -6,6 +6,7 @@ import argparse
 import sys
 from collections.abc import Callable
 
+from gremlins.cli.artifacts import artifacts_main
 from gremlins.cli.fleet import (
     ack_main,
     close_main,
@@ -16,7 +17,6 @@ from gremlins.cli.fleet import (
     skip_main,
     stop_main,
 )
-from gremlins.cli.artifacts import artifacts_main
 from gremlins.cli.launch import launch_main
 from gremlins.cli.prompt_for_assistant import prompt_for_assistant_main
 from gremlins.cli.queue import queue_main
