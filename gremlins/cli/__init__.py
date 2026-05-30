@@ -21,6 +21,7 @@ from gremlins.cli.launch import launch_main
 from gremlins.cli.prompt_for_assistant import prompt_for_assistant_main
 from gremlins.cli.queue import queue_main
 from gremlins.cli.resume import resume_main
+from gremlins.cli.clean import clean_main
 
 _DISPATCH: dict[str, tuple[str, Callable[[list[str]], int]]] = {
     "launch": ("Launch a background gremlin by pipeline name.", launch_main),
@@ -31,6 +32,7 @@ _DISPATCH: dict[str, tuple[str, Callable[[list[str]], int]]] = {
         land_main,
     ),
     "rm": ("Delete a gremlin's state directory, worktree, and branch.", rm_main),
+    "clean": ("Clean up finished gremlin state directories.", clean_main),
     "close": ("Mark a gremlin as closed (hidden from default view).", close_main),
     "log": ("Tail the gremlin's log file (tail -F). Ctrl-C exits.", log_main),
     "ack": ("Acknowledge a gremlin waiting for human input.", ack_main),
