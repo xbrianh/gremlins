@@ -27,6 +27,12 @@ class StreamTimeoutError(RuntimeError):
         self.session_id = session_id
 
 
+class ApiServerError(RuntimeError):
+    def __init__(self, msg: str, *, session_id: str | None = None) -> None:
+        super().__init__(msg)
+        self.session_id = session_id
+
+
 class SubprocessClaudeClient:
     """Production ClaudeClient: spawns ``claude -p`` subprocesses.
 
@@ -204,6 +210,11 @@ class SubprocessClaudeClient:
             raise StreamTimeoutError(
                 "claude -p stream idle timeout", session_id=session_id
             )
+        status = state.get("api_error_status")
+        if state.get("is_error") and isinstance(status, int) and 500 <= status <= 599:
+            raise ApiServerError(
+                f"claude -p api server error {status}", session_id=session_id
+            )
         rc = await p.wait()
         cost_usd = state["cost_usd"]
         if cost_usd is not None:
@@ -251,13 +262,18 @@ class SubprocessClaudeClient:
         # max_retries=0 (no retries at all).
         backoff = STREAM_IDLE_BACKOFF[: max(0, ctx["max_retries"] - 1)]
 
-        def _on_retry(attempt: int, _: BaseException, wait: float) -> None:
+        def _on_retry(attempt: int, exc: BaseException, wait: float) -> None:
+            cause = (
+                "stream idle timeout"
+                if isinstance(exc, StreamTimeoutError)
+                else "api server error"
+            )
             sys.stderr.write(
-                f"{ts()} {ctx['prefix']}stream idle timeout, resuming in {wait}s"
+                f"{ts()} {ctx['prefix']}{cause}, resuming in {wait}s"
                 f" ({attempt + 1}/{ctx['max_retries']})...\n"
             )
 
-        @retry(StreamTimeoutError, backoff=backoff, on_retry=_on_retry)
+        @retry(StreamTimeoutError, ApiServerError, backoff=backoff, on_retry=_on_retry)
         async def _attempt_resume() -> CompletedRun:
             return await self._attempt(
                 self._continue_prompt(), session_id=self._last_session_id.get()
@@ -308,7 +324,7 @@ class SubprocessClaudeClient:
 
         try:
             result = await self._attempt(prompt, session_id=None)
-        except StreamTimeoutError:
+        except (StreamTimeoutError, ApiServerError):
             result = await self.resume()
 
         if result.exit_code != 0:

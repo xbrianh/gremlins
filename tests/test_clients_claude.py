@@ -10,7 +10,10 @@ import sys
 
 import pytest
 
-from gremlins.clients.claude import StreamTimeoutError, SubprocessClaudeClient
+from gremlins.clients.claude import (
+    StreamTimeoutError,
+    SubprocessClaudeClient,
+)
 from gremlins.clients.config import STREAM_IDLE_BACKOFF
 
 TESTS_DIR = pathlib.Path(__file__).resolve().parent
