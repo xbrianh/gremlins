@@ -59,6 +59,9 @@ def _scan_state(failed: bool = False, finished: bool = False) -> list[CleanItem]
             )
             if not is_failed:
                 continue
+        if finished:
+            if live != "finished":
+                continue
         size = _dir_size(pathlib.Path(entry.path))
         items.append(CleanItem(pathlib.Path(entry.path), name, size))
         prefix = f"{name}--"
@@ -78,6 +81,9 @@ def _scan_state(failed: bool = False, finished: bool = False) -> list[CleanItem]
                     cexit is not None and cexit != 0 and cexit != "null"
                 )
                 if not cif:
+                    continue
+            if finished:
+                if clive != "finished":
                     continue
             csize = _dir_size(pathlib.Path(child.path))
             items.append(CleanItem(pathlib.Path(child.path), child.name, csize))
@@ -108,7 +114,7 @@ def clean_main(argv: list[str]) -> int:
         n = len(its)
         b = sum(i.size_bytes for i in its)
         print(f"{cat}: {n} items, {b} bytes")
-    if args.dry_run:
+    if args.dry_run or not (args.state or args.all):
         return 0
     if not args.assume_yes:
         try:
