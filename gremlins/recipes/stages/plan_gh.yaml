@@ -9,7 +9,10 @@ stages:
       cmds:
         - |
           if [ -s "{session_dir}/plan.md" ]; then exit 0; fi
-          if [ -z "$plan_arg" ]; then exit 0; fi
+          if [ -z "$plan_arg" ]; then
+              printf 'resolve-plan-input: no plan_arg provided and plan.md does not exist\n' >&2
+              exit 1
+          fi
           if [ -f "$plan_arg" ]; then
               cp "$plan_arg" "{session_dir}/plan.md"
           elif echo "$plan_arg" | grep -qE '^#[0-9]+$'; then
@@ -22,14 +25,6 @@ stages:
               fi
               gh issue view "$plan_arg" --json number --jq .number \
                 > "{session_dir}/plan-issue-number.txt"
-          elif echo "$plan_arg" | grep -qE '^[^/]+/[^#]+#[0-9]+$'; then
-              gh issue view "$plan_arg" --json body --jq .body \
-                > "{session_dir}/plan.md"
-              if ! head -1 "{session_dir}/plan.md" | grep -q '^# '; then
-                  title=$(gh issue view "$plan_arg" --json title --jq .title)
-                  { printf '# %s\n\n' "$title"; cat "{session_dir}/plan.md"; } > "{session_dir}/plan.md.tmp"
-                  mv "{session_dir}/plan.md.tmp" "{session_dir}/plan.md"
-              fi
           else
               printf 'resolve-plan-input: unrecognized plan_arg: %s\n' "$plan_arg" >&2
               exit 1
@@ -38,19 +33,13 @@ stages:
       plan-issue-number?: "file://session/plan-issue-number.txt"
       plan?: "gh://issue/{read:plan-issue-number}"  # must follow plan-issue-number? — {read:plan-issue-number} interpolates it
 
-  - name: bind-plan-from-file
-    type: exec
-    skip_if_exists: plan
-    out:
-      plan?: "file://session/plan.md"
-
   - name: plan
     type: agent
-    skip_if_exists: plan-draft
+    skip_if_exists: plan
     prompt:
       - "{{prompt}}"
     out:
-      plan-draft: "file://session/plan.md"
+      plan: "file://session/plan.md"
     options:
       idle_timeout: 600
 
