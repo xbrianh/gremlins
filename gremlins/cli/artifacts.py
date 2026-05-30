@@ -89,7 +89,7 @@ def extract_scheme(u: str) -> str:
 
 def _print_live(reg: ArtifactRegistry) -> None:
     rpath = reg.registry_path
-    data: dict[str, Any] = reg._data
+    data: dict[str, Any] = reg.data
     print(f"live:{rpath}")
     for k in sorted(data):
         v = data[k]
