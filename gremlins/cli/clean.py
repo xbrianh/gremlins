@@ -7,7 +7,7 @@ import sys
 from dataclasses import dataclass
 
 from gremlins import paths
-from gremlins.fleet.land import _cleanup_gremlin
+from gremlins.fleet.land import cleanup_gremlin
 from gremlins.fleet.state import liveness_of_state_file, load_state
 
 
@@ -16,14 +16,6 @@ class CleanItem:
     path: pathlib.Path
     label: str
     size_bytes: int
-
-
-def _is_pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
 
 
 def _dir_size(p: pathlib.Path) -> int:
@@ -139,7 +131,7 @@ def clean_main(argv: list[str]) -> int:
             pr = str(st.get("project_root") or "")
             cg = pr if pr and os.path.isdir(pr) else None
             try:
-                _cleanup_gremlin(gid, wdir, st, cg, delete_branch=True)
+                cleanup_gremlin(gid, wdir, st, cg, delete_branch=True)
                 print(f"clean: {gid} removed")
                 rcount += 1
                 crec += item.size_bytes
