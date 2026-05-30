@@ -33,18 +33,30 @@ stage-definitions:
         - "git add -A"
         - "git diff --cached --quiet || git commit -m 'normalize'"
 
+  normalize-and-verify:
+    stages:
+      - { type: normalize }
+      - { type: verify, options: { cmds: ["make check", "make test"] }, prompt: verify }
+
 stages:
-  - { type: gremlins:plan-gh,                   prompt: [code-style, terse, gremlins:plan_gh.md] }
-  - { type: gremlins:implement,                prompt: [code-style, terse, gremlins:implement_gh.md] }
-  - { type: normalize }
-  - { type: verify,    options: { cmds: ["make check"] }, prompt: verify }
+  - { type: gremlins:plan-gh, prompt: [code-style, terse, gremlins:plan_gh.md] }
+  - { type: gremlins:implement, prompt: [code-style, terse, gremlins:implement_gh.md] }
+  - { type: normalize-and-verify }
+
+  - parallel:
+      - { name: local-review, type: agent, prompt: [code-style, terse, local_review.md, gremlins:bail_section.md] }
+      - { name: local-review-complexity, type: agent, prompt: [code-style, terse, local_review_complexity.md, gremlins:bail_section.md] }
+
+  - { name: local-address, type: agent, prompt: [code-style, terse, gremlins:address.md, gremlins:bail_section.md], in: {reviews: local-review, complexity: local-review-complexity} }
+  - { type: normalize-and-verify }
+
   - { type: gremlins:github-open-pr }
   - { type: gremlins:github-request-copilot-review }
 
   - parallel:
-      - { type: gremlins:github-wait-copilot,          in: {pr: pr} }
-      - { name: github-review-pull-request,          type: agent, in: {pr: pr}, prompt: [code-style, terse, gremlins:github_review_pull_request.md] }
-      - { name: github-review-pull-request-complexity, type: agent, client: claude:sonnet, in: {pr: pr}, prompt: [code-style, terse, complexity_review.md] }
+      - { type: gremlins:github-wait-copilot, in: {pr: pr} }
+      - { name: github-review-pull-request, type: agent, in: {pr: pr}, prompt: [code-style, terse, gremlins:github_review_pull_request.md] }
+      - { name: github-review-pull-request-complexity, type: agent, in: {pr: pr}, prompt: [code-style, terse, complexity_review.md], client: claude:sonnet }
 
   - { name: github-address-pull-request-reviews, type: agent, in: {pr: pr}, prompt: [code-style, terse, gremlins:github_address_pull_request_reviews.md, gremlins:bail_section.md] }
   - { type: normalize }
