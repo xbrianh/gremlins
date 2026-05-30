@@ -60,7 +60,12 @@ def _collect(st: Any, info: dict[str, dict[str, Any]]) -> None:
     for k, u in getattr(st, "out_map", {}).items():
         k = k[:-1] if k.endswith("?") else k
         if k not in info:
-            info[k] = {"uri": u, "scheme": extract_scheme(u), "producers": [], "consumers": []}
+            info[k] = {
+                "uri": u,
+                "scheme": extract_scheme(u),
+                "producers": [],
+                "consumers": [],
+            }
         d = info[k]
         if d.get("uri") == "?":
             d["uri"] = u
