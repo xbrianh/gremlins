@@ -58,14 +58,13 @@ def _walk(stages: list[Any], info: dict[str, dict[str, Any]]) -> None:
 def _collect(st: Any, info: dict[str, dict[str, Any]]) -> None:
     nm = getattr(st, "name", "?")
     for k, u in getattr(st, "out_map", {}).items():
-        if k.endswith("?"):
-            continue
+        k = k[:-1] if k.endswith("?") else k
         if k not in info:
-            info[k] = {"uri": u, "scheme": _sch(u), "producers": [], "consumers": []}
+            info[k] = {"uri": u, "scheme": extract_scheme(u), "producers": [], "consumers": []}
         d = info[k]
         if d.get("uri") == "?":
             d["uri"] = u
-            d["scheme"] = _sch(u)
+            d["scheme"] = extract_scheme(u)
         if nm not in d["producers"]:
             d["producers"].append(nm)
     for ref in getattr(st, "in_map", {}).values():
@@ -79,13 +78,13 @@ def _collect(st: Any, info: dict[str, dict[str, Any]]) -> None:
             d["consumers"].append(nm)
 
 
-def _sch(u: str) -> str:
+def extract_scheme(u: str) -> str:
     return u.split("://", 1)[0] if "://" in u else "?"
 
 
 def _print_live(reg: ArtifactRegistry) -> None:
-    rpath = getattr(reg, "registry_path", "?")
-    data: dict[str, Any] = getattr(reg, "_data", {})
+    rpath = reg.registry_path
+    data: dict[str, Any] = reg._data
     print(f"live:{rpath}")
     for k in sorted(data):
         v = data[k]
