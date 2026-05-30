@@ -8,7 +8,7 @@ import sys
 from dataclasses import dataclass
 
 from gremlins import paths
-from gremlins.fleet.land import _cleanup_gremlin
+from gremlins.fleet.land import cleanup_gremlin
 from gremlins.fleet.state import liveness_of_state_file, load_state
 from gremlins.utils import proc
 
@@ -189,7 +189,7 @@ def _delete_state(items: list[CleanItem]) -> tuple[int, int]:
         pr = str(state.get("project_root") or "")
         cwdg = pr if pr and os.path.isdir(pr) else None
         try:
-            _cleanup_gremlin(gid, wdir, state, cwdg, delete_branch=True)
+            cleanup_gremlin(gid, wdir, state, cwdg, delete_branch=True)
             print(f"clean: removed state {gid}")
             rec += it.size_bytes
             count += 1
