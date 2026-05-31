@@ -186,7 +186,7 @@ def _finalize_cleanup(
             print(f"warning: could not remove state directory {wdir}: {e}")
 
 
-def _cleanup_gremlin(
+def cleanup_gremlin(
     gremlin_id: str,
     wdir: str,
     state: dict[str, Any],
@@ -243,7 +243,7 @@ def _rm_parallel_children(gremlin_id: str, cwd_for_git: str | None) -> None:
         if live == "running" or (live and live.startswith("stalled:")):
             print(f"rm: skipping live child {name} ({live}) — stop it first")
             continue
-        _cleanup_gremlin(
+        cleanup_gremlin(
             name,
             wdir,
             cast(dict[str, Any], child_state),
@@ -279,7 +279,7 @@ def do_rm(target: str) -> bool:
     project_root = str(state.get("project_root") or "")
     cwd_for_git = project_root if project_root and os.path.isdir(project_root) else None
 
-    if not _cleanup_gremlin(
+    if not cleanup_gremlin(
         gremlin_id,
         wdir,
         cast(dict[str, Any], state),
@@ -570,7 +570,7 @@ def _squash_land(
         return False
     if commit_count < 1:
         print(f"{current} is already up to date with {source_label}.")
-        _cleanup_gremlin(
+        cleanup_gremlin(
             gremlin_id,
             wdir,
             state,
@@ -611,7 +611,7 @@ def _squash_land(
     print(f"Landed {source_label} onto {current}.")
     _persist_land_cost(sf, state, land_cost)
     _print_cost(state)
-    _cleanup_gremlin(
+    cleanup_gremlin(
         gremlin_id,
         wdir,
         state,
@@ -647,7 +647,7 @@ def _ff_land(
         return False
     if commit_count < 1:
         print(f"{current} is already up to date with {source_label}.")
-        _cleanup_gremlin(
+        cleanup_gremlin(
             gremlin_id,
             wdir,
             state,
@@ -667,7 +667,7 @@ def _ff_land(
 
     print(f"Landed {source_label} onto {current}.")
     _print_cost(state)
-    _cleanup_gremlin(
+    cleanup_gremlin(
         gremlin_id,
         wdir,
         state,

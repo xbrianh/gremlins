@@ -7,6 +7,7 @@ import sys
 from collections.abc import Callable
 
 from gremlins.cli.artifacts import artifacts_main
+from gremlins.cli.clean import clean_main
 from gremlins.cli.fleet import (
     ack_main,
     close_main,
@@ -41,6 +42,7 @@ _DISPATCH: dict[str, tuple[str, Callable[[list[str]], int]]] = {
     ),
     "queue": ("Manage the gremlin launch queue.", queue_main),
     "artifacts": ("Inspect artifact keys and bindings.", artifacts_main),
+    "clean": ("Clean finished gremlin state directories.", clean_main),
 }
 
 
