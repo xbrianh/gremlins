@@ -47,7 +47,7 @@ stages:
       - { name: local-review, type: agent, out: { "{name}": "file://session/{name}.md" }, prompt: [code-style, terse, local_review.md, gremlins:bail_section.md] }
       - { name: local-review-complexity, type: agent, out: { "{name}": "file://session/{name}.md" }, prompt: [code-style, terse, local_review_complexity.md, gremlins:bail_section.md] }
 
-  - { name: local-address, type: agent, prompt: [code-style, terse, local_address.md, gremlins:bail_section.md], in: {reviews: local-review, complexity: local-review-complexity} }
+  - { name: local-address, type: agent, prompt: [code-style, terse, local_address.md, gremlins:bail_section.md], in: {review: local-review, complexity: local-review-complexity} }
   - { type: normalize-and-verify }
 
   - { type: gremlins:github-open-pr }
