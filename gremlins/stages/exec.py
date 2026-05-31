@@ -1,5 +1,3 @@
-"""Exec primitive stage: runs shell commands with in:/out: artifact bindings."""
-
 from __future__ import annotations
 
 import os
