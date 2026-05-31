@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import logging
 import os
@@ -140,6 +141,71 @@ class Gremlin:
     @property
     def artifact_dir(self) -> pathlib.Path:
         return self.state_dir / "artifacts"
+
+    async def fork(self, state: State, target_id: str) -> State:
+        """Create an independent copy of a running gremlin.
+
+        Copies artifact directory, registry, and optionally creates a fresh
+        worktree at the same commit SHA.
+        """
+        child_state_dir = self.state_dir.parent / target_id
+        child_artifact_dir = child_state_dir / "artifacts"
+
+        # Copy artifact directory
+        child_artifact_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(state.artifact_dir, child_artifact_dir)
+
+        # Copy registry.json
+        src_registry = self.state_dir / "registry.json"
+        if src_registry.exists():
+            shutil.copy2(
+                src_registry, child_state_dir / "registry.json"
+            )
+
+        # Create new worktree if needed
+        child_worktree = None
+        if state.worktree is not None:
+            sha = _git_mod.head_sha(cwd=state.worktree)
+            if not sha:
+                raise RuntimeError(
+                    f"could not resolve HEAD in {state.worktree}"
+                )
+            child_worktree_path = await _git_mod.setup_detached_worktree_async(
+                self.project_root, sha, worktree_parent=state.worktree_parent
+            )
+            child_worktree = pathlib.Path(child_worktree_path)
+
+        # Load fresh registry from child's registry.json
+        child_registry = ArtifactRegistry(
+            artifact_dir=child_artifact_dir,
+            cwd=child_worktree,
+        )
+
+        # Build new state with updated values
+        child_data = dataclasses.replace(state.data, gremlin_id=target_id)
+        child_cwd = state.cwd
+        if child_worktree is not None and state.worktree is not None:
+            child_cwd = str(child_worktree)
+        child_state = build_state(
+            data=child_data,
+            client=state.client,
+            artifact_dir=child_artifact_dir,
+            args=state.args,
+            pipeline_data=state.pipeline_data,
+            repo=state.repo,
+            cwd=child_cwd,
+            instructions=state.instructions,
+            test_client=state.test_client,
+            stage_model=state.stage_model,
+            worktree=child_worktree,
+            worktree_parent=state.worktree_parent,
+            artifacts=child_registry,
+            child_key=state.child_key,
+            parent_stage=state.parent_stage,
+            base_ref=state.base_ref,
+        )
+
+        return child_state
 
     def validate_resume_target(self) -> None:
         if not self.resume_from:
