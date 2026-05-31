@@ -12,7 +12,9 @@ def test_clean_state_skips_live_gremlin(capsys):
     gid = "live123"
     sd = Path(os.environ["GREMLINS_SANDBOX_ROOT"]) / "state" / gid
     sd.mkdir(parents=True)
-    (sd / "state.json").write_text(json.dumps({"status": "running", "pid": os.getpid()}))
+    (sd / "state.json").write_text(
+        json.dumps({"status": "running", "pid": os.getpid()})
+    )
     (sd / "log").touch()
     items = _scan_state()
     assert items == []

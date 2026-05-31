@@ -7,7 +7,11 @@ import pathlib
 import re
 from typing import Any, cast
 
-from gremlins.artifacts.registry import ArtifactRegistry, DuplicateArtifact, MissingArtifact
+from gremlins.artifacts.registry import (
+    ArtifactRegistry,
+    DuplicateArtifact,
+    MissingArtifact,
+)
 from gremlins.artifacts.resolve import resolve_in_map
 from gremlins.artifacts.schemes import snapshot_head_before
 from gremlins.artifacts.uri import Uri

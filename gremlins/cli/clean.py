@@ -4,7 +4,6 @@ import argparse
 import os
 import pathlib
 from dataclasses import dataclass
-from typing import Any
 
 from gremlins import paths
 from gremlins.fleet.land import _cleanup_gremlin
@@ -60,7 +59,9 @@ def _scan_state(failed: bool = False, finished: bool = False) -> list[CleanItem]
         state = load_state(str(sf)) or {}
         exit_code = state.get("exit_code")
         if failed:
-            if not (live.startswith("dead:") or (exit_code is not None and exit_code != 0)):
+            if not (
+                live.startswith("dead:") or (exit_code is not None and exit_code != 0)
+            ):
                 continue
         size = _dir_size(wdir)
         items.append(CleanItem(wdir, entry.name, size))
@@ -78,7 +79,9 @@ def _scan_state(failed: bool = False, finished: bool = False) -> list[CleanItem]
             cstate = load_state(str(csf)) or {}
             cexit = cstate.get("exit_code")
             if failed:
-                if not (clive.startswith("dead:") or (cexit is not None and cexit != 0)):
+                if not (
+                    clive.startswith("dead:") or (cexit is not None and cexit != 0)
+                ):
                     continue
             csize = _dir_size(cwdir)
             items.append(CleanItem(cwdir, child.name, csize))
@@ -129,8 +132,12 @@ def clean_main(argv: list[str]) -> int:
             state_file = str(item.path / "state.json")
             state = load_state(state_file) or {}
             project_root = str(state.get("project_root") or "")
-            cwd_for_git = project_root if project_root and os.path.isdir(project_root) else None
-            _cleanup_gremlin(item.label, str(item.path), state, cwd_for_git, delete_branch=True)
+            cwd_for_git = (
+                project_root if project_root and os.path.isdir(project_root) else None
+            )
+            _cleanup_gremlin(
+                item.label, str(item.path), state, cwd_for_git, delete_branch=True
+            )
             print(f"removed {item.label}")
             reclaimed += item.size_bytes
         except Exception:
