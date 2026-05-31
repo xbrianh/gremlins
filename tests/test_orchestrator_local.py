@@ -26,7 +26,7 @@ def _local_pipeline_path(cwd):
 
 
 def test_local_main_plan_mode(tmp_path, monkeypatch):
-    session_dir = tmp_path / "session"
+    session_dir = tmp_path / "artifacts"
     session_dir.mkdir()
     plan_file = tmp_path / "plan.md"
     plan_file.write_text("# Plan\nDo stuff.\n")
@@ -64,7 +64,7 @@ def test_local_main_plan_mode(tmp_path, monkeypatch):
 def test_local_main_resume_from_review_code_requires_git_changes(
     tmp_path, monkeypatch, capsys
 ):
-    session_dir = tmp_path / "session"
+    session_dir = tmp_path / "artifacts"
     session_dir.mkdir()
     plan_file = tmp_path / "plan.md"
     plan_file.write_text("# Plan\nDo stuff.\n")
@@ -97,7 +97,7 @@ def test_local_main_resume_from_review_code_requires_git_changes(
 def test_local_main_resume_from_review_code_allows_existing_git_changes(
     tmp_path, monkeypatch
 ):
-    session_dir = tmp_path / "session"
+    session_dir = tmp_path / "artifacts"
     session_dir.mkdir()
     plan_file = tmp_path / "plan.md"
     plan_file.write_text("# Plan\nDo stuff.\n")
@@ -136,7 +136,7 @@ def test_local_main_resume_from_review_code_allows_existing_git_changes(
 
 def test_local_main_client_specifier_model(tmp_path, monkeypatch):
     """Model from --client provider:model flows into stage run() calls."""
-    session_dir = tmp_path / "session"
+    session_dir = tmp_path / "artifacts"
     session_dir.mkdir()
     plan_file = tmp_path / "plan.md"
     plan_file.write_text("# Plan\nDo stuff.\n")
@@ -190,7 +190,7 @@ def test_local_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir)
     gremlin_id = "test-gr-id"
     state_dir = make_state_dir(gremlin_id)
 
-    session_dir = tmp_path / "session"
+    session_dir = tmp_path / "artifacts"
     session_dir.mkdir()
     plan_file = tmp_path / "plan.md"
     plan_file.write_text("# Plan\nDo stuff.\n")
@@ -228,7 +228,7 @@ def test_local_main_env_file_vars_reach_verify(tmp_path, monkeypatch):
     """Vars from .gremlins/env are passed to exec subprocess environments."""
     import subprocess as _subprocess
 
-    session_dir = tmp_path / "session"
+    session_dir = tmp_path / "artifacts"
     session_dir.mkdir()
     plan_file = tmp_path / "plan.md"
     plan_file.write_text("# Plan\nDo stuff.\n")
@@ -350,7 +350,7 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
     default_client_spec model was never consulted. A pipeline with
     default_client: copilot:gpt-5.4 produced model=sonnet.
     """
-    session_dir = tmp_path / "session"
+    session_dir = tmp_path / "artifacts"
     session_dir.mkdir()
     plan_file = tmp_path / "plan.md"
     plan_file.write_text("# Plan\nDo stuff.\n")
@@ -424,7 +424,7 @@ def test_local_stage_inputs_instructions_reach_plan(
     state["stage_inputs"] = {"instructions": "instr from state"}
     sf.write_text(json.dumps(state))
 
-    session_dir = tmp_path / "session"
+    session_dir = tmp_path / "artifacts"
     session_dir.mkdir()
 
     monkeypatch.chdir(tmp_path)
@@ -459,7 +459,7 @@ def test_local_stage_inputs_instructions_reach_plan(
 
 def test_plan_skip_if_exists_on_resume(tmp_path, monkeypatch):
     """Resume: plan stage is skipped when plan artifact is already verified."""
-    session_dir = tmp_path / "session"
+    session_dir = tmp_path / "artifacts"
     session_dir.mkdir()
     (session_dir / "plan.md").write_text("# Plan\nDo stuff.\n", encoding="utf-8")
     (tmp_path / "registry.json").write_text(

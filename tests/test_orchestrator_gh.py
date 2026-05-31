@@ -155,7 +155,7 @@ def _patch_common(
     )
     monkeypatch.setattr("gremlins.executor.run._get_repo", lambda: "owner/repo")
 
-    session_dir = tmp_path / "session"
+    session_dir = tmp_path / "artifacts"
     session_dir.mkdir()
     monkeypatch.setattr(
         "gremlins.executor.run.resolve_session_dir", lambda gremlin_id=None: session_dir

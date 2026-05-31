@@ -89,7 +89,6 @@ class Gremlin:
         stages: list[Stage],
         *,
         state_dir: pathlib.Path,
-        session_dir: pathlib.Path,
         gremlin_id: str | None,
         pipeline_data: _PipelineData,
         worktree_dir: pathlib.Path | None = None,
@@ -122,7 +121,6 @@ class Gremlin:
             if not s.path:
                 s.path = s.name
         self.state_dir = state_dir
-        self.session_dir = session_dir
         self.gremlin_id = gremlin_id
         self.pipeline_data = pipeline_data
         self.worktree_dir = worktree_dir
@@ -138,6 +136,10 @@ class Gremlin:
         self.base_ref_sha = base_ref_sha
         self.base_ref = base_ref
         self.setup_kind = setup_kind
+
+    @property
+    def session_dir(self) -> pathlib.Path:
+        return self.state_dir / "artifacts"
 
     def validate_resume_target(self) -> None:
         if not self.resume_from:
@@ -214,7 +216,6 @@ class Gremlin:
         state_dir: pathlib.Path,
         project_dir: pathlib.Path,
         pipeline_ref: str,
-        session_dir: pathlib.Path | None = None,
         worktree_parent: pathlib.Path | None = None,
         instructions: str = "",
         resume_from: str | None = None,
@@ -240,9 +241,6 @@ class Gremlin:
         self = cls(
             pipeline.stages,
             state_dir=state_dir,
-            session_dir=session_dir
-            if session_dir is not None
-            else state_dir / "artifacts",
             gremlin_id=gremlin_id,
             pipeline_data=pipeline,
             worktree_dir=worktree_dir,

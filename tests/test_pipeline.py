@@ -25,7 +25,6 @@ def _local(
     return Gremlin(
         stages,
         state_dir=tmp_path,
-        session_dir=tmp_path,
         gremlin_id=None,
         pipeline_data=_pipeline_data(stages),
         resume_from=resume_from,
@@ -39,7 +38,6 @@ def test_pipeline_constructs_from_local_yaml(tmp_path: pathlib.Path) -> None:
     gremlin = Gremlin(
         pipeline_data.stages,
         state_dir=tmp_path,
-        session_dir=tmp_path,
         gremlin_id=None,
         pipeline_data=pipeline_data,
     )
@@ -59,7 +57,6 @@ def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
     gremlin = Gremlin(
         pipeline_data.stages,
         state_dir=tmp_path,
-        session_dir=tmp_path,
         gremlin_id=None,
         pipeline_data=pipeline_data,
         repo="",
