@@ -9,7 +9,6 @@ import subprocess
 import pytest
 
 from gremlins.executor.gremlin import Gremlin
-from gremlins.pipeline import Pipeline
 
 
 def _init_git_repo(path: pathlib.Path) -> None:

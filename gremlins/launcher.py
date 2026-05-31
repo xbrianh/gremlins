@@ -715,7 +715,9 @@ def resume(gremlin_id: str, *, graft: str | None = None) -> None:
         from gremlins.cli.pipeline_args import resolve_pipeline
 
         try:
-            _, pipeline_path = resolve_pipeline(kind, tuple(pipeline_args), project_root)
+            _, pipeline_path = resolve_pipeline(
+                kind, tuple(pipeline_args), project_root
+            )
         except FileNotFoundError:
             pass
 
