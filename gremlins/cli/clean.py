@@ -126,9 +126,7 @@ def clean_main(argv: list[str]) -> int:
             cwd_for_git = (
                 project_root if project_root and os.path.isdir(project_root) else None
             )
-            cleanup_gremlin(
-                item.label, str(item.path), state, cwd_for_git, delete_branch=True
-            )
+            cleanup_gremlin(item.label, str(item.path), state, cwd_for_git)
             if not item.path.exists():
                 print(f"removed {item.label}")
                 reclaimed += item.size_bytes

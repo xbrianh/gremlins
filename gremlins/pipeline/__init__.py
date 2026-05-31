@@ -42,11 +42,6 @@ class Pipeline:
             and any(b.name == "handoff" for b in (first.body or []))
         )
 
-    def setup_kind(self) -> str:
-        if self.github_integration or self.uses_loop_handoff():
-            return "worktree-detached"
-        return "worktree-branch"
-
     @classmethod
     def from_yaml(cls, path: pathlib.Path) -> Pipeline:
         importlib.import_module("gremlins.clients")

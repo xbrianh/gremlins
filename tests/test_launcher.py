@@ -123,7 +123,7 @@ def test_launch_creates_state_layout(lenv):
     state = _read_state(state_dir)
     assert state["id"] == gremlin_id
     assert state["kind"] == "local"
-    assert state["setup_kind"] == "worktree-branch"
+    assert state["setup_kind"] == "worktree-detached"
     assert state["pipeline_path"].endswith(".yaml")
     assert "test instructions" in state["instructions"]
     assert "workdir" in state and state["workdir"]
@@ -609,7 +609,7 @@ def test_write_terminal_state_preserves_worktree_for_boss(lenv, monkeypatch, tmp
     state_json = {
         "project_root": str(lenv.repo),
         "workdir": str(fake_workdir),
-        "setup_kind": "worktree",
+        "setup_kind": "worktree-detached",
     }
     (state_dir / "state.json").write_text(json.dumps(state_json), encoding="utf-8")
 
@@ -676,7 +676,7 @@ def test_launch_ghgremlin_state_layout(lenv_with_gh):
     state = _read_state(state_dir)
     assert state["id"] == gremlin_id
     assert state["kind"] == "gh"
-    assert state["setup_kind"] == "worktree", (
+    assert state["setup_kind"] == "worktree-detached", (
         f"ghgremlin should use detached worktree, got: {state['setup_kind']!r}"
     )
     assert "base_ref_name" not in state, (
@@ -824,9 +824,7 @@ def test_setup_workdir_overlay_goes_to_state_dir(lenv):
     state_dir = lenv.state_root / gremlin_id
     state_dir.mkdir(parents=True)
 
-    workdir, _branch, _wt_base, _kind = git_mod.setup_workdir(
-        "local", str(lenv.repo), "HEAD", gremlin_id, state_dir
-    )
+    workdir = git_mod.setup_workdir(str(lenv.repo), "HEAD", state_dir=state_dir)
 
     try:
         assert (state_dir / ".gremlins" / "custom-local.yaml").exists()
@@ -842,65 +840,8 @@ def test_setup_workdir_overlay_goes_to_state_dir(lenv):
         git_mod.remove_worktree(str(lenv.repo), workdir)
 
 
-# ---------------------------------------------------------------------------
-# worktree-detached-from-ref
-# ---------------------------------------------------------------------------
-
-
-def test_setup_detached_from_remote_ref(tmp_path):
-    """setup_detached_from_remote_ref fetches an arbitrary ref and creates a detached worktree at it."""
-    # Create a local repo with a bare origin so fetch works without a network.
-    repo = tmp_path / "repo"
-    _init_git_repo(repo, with_origin=True)
-
-    # Add a second commit on a feature branch and push it to origin.
-    feature = "feature/test-ref"
-    subprocess.run(
-        ["git", "checkout", "-b", feature], cwd=repo, check=True, capture_output=True
-    )
-    (repo / "feature.txt").write_text("feature\n")
-    subprocess.run(
-        ["git", "add", "feature.txt"], cwd=repo, check=True, capture_output=True
-    )
-    subprocess.run(
-        ["git", "commit", "-m", "feature commit"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "push", "origin", feature], cwd=repo, check=True, capture_output=True
-    )
-    feature_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-
-    # Switch back to main so the worktree is added from a different HEAD.
-    subprocess.run(
-        ["git", "checkout", "main"], cwd=repo, check=True, capture_output=True
-    )
-
-    workdir = git_mod.setup_detached_from_remote_ref(str(repo), feature)
-    try:
-        wt_sha = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=workdir,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        assert wt_sha == feature_sha
-        assert (pathlib.Path(workdir) / "feature.txt").exists()
-    finally:
-        git_mod.remove_worktree(str(repo), workdir)
-
-
-def test_setup_workdir_detached_from_ref(tmp_path):
-    """setup_workdir with setup_kind='worktree-detached-from-ref' uses fetch+detach."""
+def test_setup_workdir_detached_with_fetch(tmp_path):
+    """setup_workdir with fetch=True fetches the ref from origin and creates detached worktree."""
     repo = tmp_path / "repo"
     _init_git_repo(repo, with_origin=True)
 
@@ -935,13 +876,8 @@ def test_setup_workdir_detached_from_ref(tmp_path):
     state_dir = tmp_path / "state"
     state_dir.mkdir()
 
-    workdir, branch, wt_base, kind = git_mod.setup_workdir(
-        "worktree-detached-from-ref", str(repo), feature, "test-gremlin", state_dir
-    )
+    workdir = git_mod.setup_workdir(str(repo), feature, fetch=True, state_dir=state_dir)
     try:
-        assert kind == "worktree-detached-from-ref"
-        assert branch == ""
-        assert wt_base == feature
         wt_sha = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             cwd=workdir,
@@ -962,7 +898,7 @@ def test_setup_workdir_non_git_raises(tmp_path):
     state_dir.mkdir()
 
     with pytest.raises(git_mod.GitError) as exc_info:
-        git_mod.setup_workdir("local", str(non_repo), "HEAD", "test-gremlin", state_dir)
+        git_mod.setup_workdir(str(non_repo), "HEAD", state_dir=state_dir)
 
     assert exc_info.value.returncode == 128
     assert "is not a git repository" in exc_info.value.stderr
@@ -1205,7 +1141,7 @@ def test_launch_explicit_gremlin_id_stale_dir_refused(lenv, monkeypatch):
 
 
 def test_launch_pr_kwarg_sets_state_fields(lenv, monkeypatch):
-    """stage_inputs['pr'] persists setup_kind=worktree-detached-from-ref and the pull/<N>/head ref."""
+    """stage_inputs['pr'] sets fetch_worktree=True and persists the PR artifact."""
     launcher = _launcher()
     monkeypatch.setattr(launcher, "_spawn_logged_process", lambda *a, **kw: _FakeProc())
     gremlin_id, _ = launcher.launch(
@@ -1214,7 +1150,7 @@ def test_launch_pr_kwarg_sets_state_fields(lenv, monkeypatch):
         project_root=str(lenv.repo),
     )
     state = _read_state(_gremlins_state_root(lenv) / gremlin_id)
-    assert state["setup_kind"] == "worktree-detached-from-ref"
+    assert state["setup_kind"] == "worktree-detached"
     registry_path = _gremlins_state_root(lenv) / gremlin_id / "registry.json"
     assert registry_path.exists(), "registry.json should have been written"
     registry_data = json.loads(registry_path.read_text())
