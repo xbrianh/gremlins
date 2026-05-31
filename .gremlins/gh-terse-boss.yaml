@@ -18,8 +18,8 @@ stages:
         options:
           cmds:
             - |
-              if [ -f "{session_dir}/pr-branch.txt" ]; then
-                branch="$(cat "{session_dir}/pr-branch.txt")"
+              if [ -f "{artifact_dir}/pr-branch.txt" ]; then
+                branch="$(cat "{artifact_dir}/pr-branch.txt")"
                 if [ -n "$branch" ]; then
                   git fetch origin "refs/heads/$branch:refs/remotes/origin/$branch" && git checkout --detach "origin/$branch"
                 fi

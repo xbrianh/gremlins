@@ -46,7 +46,7 @@ Read surrounding code in the repo as needed for full context — don't review th
 
 ## Step 3: Output the review
 
-Write findings as markdown to `{session_dir}/{name}.md`. For each issue, include the file path and line number. Keep the overall summary to 2–4 sentences. If there are no issues worth noting, say so explicitly.
+Write findings as markdown to `{artifact_dir}/{name}.md`. For each issue, include the file path and line number. Keep the overall summary to 2–4 sentences. If there are no issues worth noting, say so explicitly.
 
 ## Emit a bail marker (running under a gremlin pipeline)
 

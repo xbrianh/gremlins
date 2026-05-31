@@ -246,7 +246,7 @@ async def run_pipeline(
     if gh and shutil.which("gh") is None:
         die("gh CLI not found")
 
-    logger.info("session: %s", artifact_dir)
+    logger.info("artifact: %s", artifact_dir)
 
     gh_repo = _get_repo() if gh else ""
     try:
@@ -368,7 +368,7 @@ async def run_pipeline(
         ]
         logger.info("done. PR: %s", pr_url)
     else:
-        logger.info("done. session artifacts in: %s", artifact_dir)
+        logger.info("done. artifacts in: %s", artifact_dir)
     if total_cost > 0:
         logger.info("total cost: $%.4f", total_cost)
 

@@ -11,7 +11,7 @@ from gremlins.utils import proc
 
 
 class FileArtifactResolver:
-    """Resolves file://session/<name> against a fixed session directory."""
+    """Resolves file://session/<name> against a fixed artifact directory."""
 
     def __init__(self, artifact_dir: pathlib.Path) -> None:
         self._artifact_dir = artifact_dir
@@ -27,7 +27,7 @@ class FileArtifactResolver:
         try:
             p.relative_to(base)
         except ValueError:
-            raise ValueError(f"path escapes session directory: {uri}") from None
+            raise ValueError(f"path escapes artifact directory: {uri}") from None
         return p
 
     def read(self, uri: Uri) -> str:
