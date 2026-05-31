@@ -584,30 +584,6 @@ def _check_resume_preconditions(
         raise RuntimeError(f"worktree missing: {workdir}")
 
 
-def _resolve_resume_pipeline(
-    state: dict[str, Any], state_dir: pathlib.Path
-) -> tuple[list[str], str, str]:
-    from gremlins.cli.pipeline_args import resolve_pipeline
-
-    kind = state.get("kind", "")
-    pipeline_args = cast(list[str], state.get("pipeline_args") or [])
-    pipeline_path = str(state.get("pipeline_path") or "")
-    project_root = str(state.get("project_root") or _paths.project_root())
-
-    try:
-        pipeline_args, pipeline_path = resolve_pipeline(
-            kind, tuple(pipeline_args), project_root
-        )
-    except FileNotFoundError:
-        pass
-
-    hermetic = state_dir / "pipeline.yaml"
-    if hermetic.is_file():
-        pipeline_path = str(hermetic)
-
-    return pipeline_args, pipeline_path, project_root
-
-
 def _load_pipeline_and_check_gh(project_root: str, pipeline_path: str) -> Any:
     pipeline_data = None
     if pipeline_path:
@@ -725,9 +701,24 @@ def _spawn_resume(
 def resume(gremlin_id: str, *, graft: str | None = None) -> None:
     state_dir, state = _load_resume_state(gremlin_id)
     _check_resume_preconditions(gremlin_id, state_dir, state, graft)
-    pipeline_args, pipeline_path, project_root = _resolve_resume_pipeline(
-        state, state_dir
-    )
+
+    # Resolve pipeline path (hermetic first, then fallback)
+    kind = state.get("kind", "")
+    pipeline_args = cast(list[str], state.get("pipeline_args") or [])
+    pipeline_path = str(state.get("pipeline_path") or "")
+    project_root = str(state.get("project_root") or _paths.project_root())
+
+    hermetic = state_dir / "pipeline.yaml"
+    if hermetic.is_file():
+        pipeline_path = str(hermetic)
+    elif kind:
+        from gremlins.cli.pipeline_args import resolve_pipeline
+
+        try:
+            _, pipeline_path = resolve_pipeline(kind, tuple(pipeline_args), project_root)
+        except FileNotFoundError:
+            pass
+
     pipeline_data = _load_pipeline_and_check_gh(project_root, pipeline_path)
     stage = _determine_stage(state, pipeline_data)
     if graft is not None:

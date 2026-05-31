@@ -14,6 +14,7 @@ import shutil
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
+from gremlins import paths as _paths
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
@@ -272,6 +273,100 @@ class Gremlin:
             self._unbind_stale_exec_artifacts()
         built = self._collect_stages(self.stages)
         await run_stages(built, resume_from=self.resume_from)
+
+    @classmethod
+    def open(cls, gremlin_id: str) -> Gremlin:
+        """Reconstruct a Gremlin from a persisted state directory.
+
+        Loads state.json, resolves the pipeline, and returns a Gremlin instance
+        without any side effects (no directory creation, no worktree setup).
+        Raises FileNotFoundError if state directory is missing, ValueError if
+        state.json is malformed.
+        """
+        from gremlins.cli.pipeline_args import resolve_pipeline
+
+        state_dir = _paths.state_root() / gremlin_id
+        sf = state_dir / "state.json"
+
+        if not state_dir.is_dir():
+            raise FileNotFoundError(f"no state at {state_dir}")
+        if not sf.is_file():
+            raise FileNotFoundError(f"no state.json at {sf}")
+
+        try:
+            state_raw = json.loads(sf.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise ValueError(f"could not parse state.json: {exc}") from exc
+
+        # Extract persisted fields
+        kind = str(state_raw.get("kind") or "")
+        project_root = str(state_raw.get("project_root") or "")
+        pipeline_args = list(state_raw.get("pipeline_args") or [])
+        pipeline_path = str(state_raw.get("pipeline_path") or "")
+        worktree_dir_str = str(state_raw.get("workdir") or "")
+        worktree_parent_str = str(state_raw.get("worktree_parent") or "")
+        resume_from = state_raw.get("resume_from")
+        instructions = str(state_raw.get("instructions") or "")
+        spec = state_raw.get("spec")
+        plan = state_raw.get("plan")
+        repo = str(state_raw.get("repo") or "")
+        base_ref_sha = str(state_raw.get("base_ref_sha") or "")
+        base_ref = str(state_raw.get("base_ref") or "")
+
+        # Resolve pipeline (hermetic check first, then fallback)
+        hermetic = state_dir / "pipeline.yaml"
+        if hermetic.is_file():
+            pipeline_path = str(hermetic)
+        elif kind:
+            try:
+                _, resolved = resolve_pipeline(
+                    kind, tuple(pipeline_args), project_root or "."
+                )
+                pipeline_path = resolved
+            except FileNotFoundError:
+                pass
+
+        # Load pipeline
+        pipeline = None
+        if pipeline_path or kind:
+            try:
+                pipeline = _PipelineData.from_yaml(
+                    resolve_pipeline_path(
+                        pipeline_path or kind, pathlib.Path(project_root or ".")
+                    )
+                )
+            except Exception as exc:
+                # Pipeline loading errors (parse errors, validation errors, missing files)
+                # don't prevent reconstruction for resume scenarios.
+                # The actual pipeline validation happens during spawn.
+                logger.debug(f"failed to load pipeline for {gremlin_id}: {exc}")
+                pipeline = None
+
+        if pipeline is None:
+            raise ValueError(f"could not load pipeline for {gremlin_id}")
+
+        # Construct Gremlin
+        worktree_dir = pathlib.Path(worktree_dir_str) if worktree_dir_str else None
+        worktree_parent = (
+            pathlib.Path(worktree_parent_str) if worktree_parent_str else None
+        )
+
+        return cls(
+            pipeline.stages,
+            state_dir=state_dir,
+            gremlin_id=gremlin_id,
+            pipeline_data=pipeline,
+            worktree_dir=worktree_dir,
+            worktree_parent=worktree_parent,
+            resume_from=resume_from,
+            instructions=instructions,
+            spec=spec,
+            plan=plan,
+            repo=repo,
+            project_root=project_root,
+            base_ref_sha=base_ref_sha,
+            base_ref=base_ref,
+        )
 
     @classmethod
     def initialize_with_runtime(
