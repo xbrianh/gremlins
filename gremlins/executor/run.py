@@ -209,7 +209,6 @@ async def run_pipeline(
     _workdir = str(state_json.get("workdir") or "")
     worktree_dir = pathlib.Path(_workdir) if _workdir else None
     project_root = str(state_json.get("project_root") or "")
-    fetch_worktree = state_json.get("setup_kind") == "worktree-detached-from-ref"
     stage_inputs: dict[str, Any] = dict(state_json.get("stage_inputs") or {})
     instructions: str = str(
         stage_inputs.get("instructions") or " ".join(args.instructions or [])
@@ -232,6 +231,9 @@ async def run_pipeline(
             logger.warning(
                 "failed to read base_sha/base_ref from registry.json", exc_info=True
             )
+
+    # PR refs like pull/<N>/head need to be fetched from the remote
+    fetch_worktree = base_ref.startswith("pull/") and base_ref.endswith("/head")
 
     project_dir = pathlib.Path(project_root) if project_root else paths.project_root()
     try:
