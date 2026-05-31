@@ -281,7 +281,7 @@ class Gremlin:
         Loads state.json, resolves the pipeline, and returns a Gremlin instance
         without any side effects (no directory creation, no worktree setup).
         Raises FileNotFoundError if state directory is missing, ValueError if
-        state.json is malformed.
+        state.json is malformed or pipeline cannot be loaded.
         """
         from gremlins.cli.pipeline_args import resolve_pipeline
 
@@ -298,20 +298,18 @@ class Gremlin:
         except Exception as exc:
             raise ValueError(f"could not parse state.json: {exc}") from exc
 
-        # Extract persisted fields
+        if not isinstance(state_raw, dict):
+            raise ValueError(
+                f"state.json must be a JSON object, not {type(state_raw).__name__}"
+            )
+
+        # Extract persisted fields from state.json
         kind = str(state_raw.get("kind") or "")
-        project_root = str(state_raw.get("project_root") or "")
+        project_root = str(state_raw.get("project_root") or _paths.project_root())
         pipeline_args = list(state_raw.get("pipeline_args") or [])
         pipeline_path = str(state_raw.get("pipeline_path") or "")
         worktree_dir_str = str(state_raw.get("workdir") or "")
-        worktree_parent_str = str(state_raw.get("worktree_parent") or "")
-        resume_from = state_raw.get("resume_from")
         instructions = str(state_raw.get("instructions") or "")
-        spec = state_raw.get("spec")
-        plan = state_raw.get("plan")
-        repo = str(state_raw.get("repo") or "")
-        base_ref_sha = str(state_raw.get("base_ref_sha") or "")
-        base_ref = str(state_raw.get("base_ref") or "")
 
         # Resolve pipeline (hermetic check first, then fallback)
         hermetic = state_dir / "pipeline.yaml"
@@ -319,37 +317,31 @@ class Gremlin:
             pipeline_path = str(hermetic)
         elif kind:
             try:
-                _, resolved = resolve_pipeline(
-                    kind, tuple(pipeline_args), project_root or "."
+                filtered, resolved = resolve_pipeline(
+                    kind, tuple(pipeline_args), project_root
                 )
+                pipeline_args = filtered
                 pipeline_path = resolved
             except FileNotFoundError:
                 pass
 
-        # Load pipeline
+        # Load pipeline (required for reconstruction)
         pipeline = None
         if pipeline_path or kind:
             try:
                 pipeline = _PipelineData.from_yaml(
                     resolve_pipeline_path(
-                        pipeline_path or kind, pathlib.Path(project_root or ".")
+                        pipeline_path or kind, pathlib.Path(project_root)
                     )
                 )
             except Exception as exc:
-                # Pipeline loading errors (parse errors, validation errors, missing files)
-                # don't prevent reconstruction for resume scenarios.
-                # The actual pipeline validation happens during spawn.
                 logger.debug(f"failed to load pipeline for {gremlin_id}: {exc}")
-                pipeline = None
 
         if pipeline is None:
             raise ValueError(f"could not load pipeline for {gremlin_id}")
 
         # Construct Gremlin
         worktree_dir = pathlib.Path(worktree_dir_str) if worktree_dir_str else None
-        worktree_parent = (
-            pathlib.Path(worktree_parent_str) if worktree_parent_str else None
-        )
 
         return cls(
             pipeline.stages,
@@ -357,15 +349,8 @@ class Gremlin:
             gremlin_id=gremlin_id,
             pipeline_data=pipeline,
             worktree_dir=worktree_dir,
-            worktree_parent=worktree_parent,
-            resume_from=resume_from,
             instructions=instructions,
-            spec=spec,
-            plan=plan,
-            repo=repo,
             project_root=project_root,
-            base_ref_sha=base_ref_sha,
-            base_ref=base_ref,
         )
 
     @classmethod
