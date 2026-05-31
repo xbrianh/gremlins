@@ -35,7 +35,7 @@ def test_clean_state_collects_dead_gremlin(capsys):
 
 
 @pytest.mark.usefixtures("sandbox")
-def test_clean_state_failed_filter_excludes_succeeded(capsys):
+def test_clean_state_failed_filter(capsys):
     root = Path(os.environ["GREMLINS_SANDBOX_ROOT"]) / "state"
     for gid, ec in [("fail1", 1), ("succ1", 0)]:
         sd = root / gid
@@ -43,20 +43,8 @@ def test_clean_state_failed_filter_excludes_succeeded(capsys):
         (sd / "state.json").write_text(json.dumps({"exit_code": ec}))
         (sd / "finished").touch()
     items = _scan_state(failed=True)
-    assert len(items) == 1
-    assert items[0].label == "fail1"
-
-
-@pytest.mark.usefixtures("sandbox")
-def test_clean_state_failed_filter_includes_failed(capsys):
-    root = Path(os.environ["GREMLINS_SANDBOX_ROOT"]) / "state"
-    for gid, ec in [("fail1", 1), ("succ1", 0)]:
-        sd = root / gid
-        sd.mkdir()
-        (sd / "state.json").write_text(json.dumps({"exit_code": ec}))
-        (sd / "finished").touch()
-    items = _scan_state(failed=True)
-    assert any(i.label == "fail1" for i in items)
+    labels = {i.label for i in items}
+    assert labels == {"fail1"}
 
 
 @pytest.mark.usefixtures("sandbox")

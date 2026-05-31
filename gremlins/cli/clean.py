@@ -38,45 +38,41 @@ def _scan_state(failed: bool = False, finished: bool = False) -> list[CleanItem]
     root = paths.state_root()
     if not root.is_dir():
         return items
+    candidates: list[tuple[str, pathlib.Path, int]] = []
     for entry in os.scandir(root):
-        if "--" in entry.name or not entry.is_dir():
+        if not entry.is_dir():
             continue
+        name = entry.name
         wdir = pathlib.Path(entry.path)
         sf = wdir / "state.json"
         if not sf.is_file():
             continue
         live = liveness_of_state_file(str(sf))
-        if live == "running" or live.startswith("stalled:"):
+        if live == "running" or live.startswith("stalled:") or live.startswith("waiting"):
             continue
         state = load_state(str(sf)) or {}
         exit_code = state.get("exit_code")
+        include = True
         if failed:
             if not (
                 live.startswith("dead:") or (exit_code is not None and exit_code != 0)
             ):
-                continue
+                include = False
+        if finished:
+            if not (live == "finished" or (exit_code is not None and exit_code == 0)):
+                include = False
+        if not include:
+            continue
         size = _dir_size(wdir)
-        items.append(CleanItem(wdir, entry.name, size))
-        prefix = entry.name + "--"
-        for child in os.scandir(root):
-            if not child.name.startswith(prefix) or not child.is_dir():
-                continue
-            cwdir = pathlib.Path(child.path)
-            csf = cwdir / "state.json"
-            if not csf.is_file():
-                continue
-            clive = liveness_of_state_file(str(csf))
-            if clive == "running" or clive.startswith("stalled:"):
-                continue
-            cstate = load_state(str(csf)) or {}
-            cexit = cstate.get("exit_code")
-            if failed:
-                if not (
-                    clive.startswith("dead:") or (cexit is not None and cexit != 0)
-                ):
-                    continue
-            csize = _dir_size(cwdir)
-            items.append(CleanItem(cwdir, child.name, csize))
+        candidates.append((name, wdir, size))
+    for name, wdir, size in candidates:
+        if "--" in name:
+            continue
+        items.append(CleanItem(wdir, name, size))
+        prefix = name + "--"
+        for cname, cwdir, csize in candidates:
+            if cname.startswith(prefix):
+                items.append(CleanItem(cwdir, cname, csize))
     return items
 
 
@@ -98,17 +94,15 @@ def clean_main(argv: list[str]) -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--yes", "-y", action="store_true")
     args = parser.parse_args(argv)
-    do_state = args.state or args.all or args.failed or args.finished
-    if not do_state:
+    if args.failed or args.finished:
+        items = _scan_state(args.failed, args.finished)
+    else:
         items = _scan_state()
-        _print_summary("state", items)
-        if not items:
-            print("nothing to clean")
-        return 0
-    items = _scan_state(args.failed, args.finished)
     _print_summary("state", items)
     if not items:
         print("nothing to clean")
+        return 0
+    if not (args.state or args.all or args.failed or args.finished):
         return 0
     if args.dry_run:
         return 0
@@ -119,6 +113,7 @@ def clean_main(argv: list[str]) -> int:
         except (EOFError, KeyboardInterrupt):
             return 0
     reclaimed = 0
+    deleted: list[CleanItem] = []
     for item in items:
         try:
             state_file = str(item.path / "state.json")
@@ -130,10 +125,15 @@ def clean_main(argv: list[str]) -> int:
             cleanup_gremlin(
                 item.label, str(item.path), state, cwd_for_git, delete_branch=True
             )
-            print(f"removed {item.label}")
-            reclaimed += item.size_bytes
-        except Exception:
+            if not item.path.exists():
+                print(f"removed {item.label}")
+                reclaimed += item.size_bytes
+                deleted.append(item)
+            else:
+                print(f"failed to remove {item.label}")
+        except Exception as exc:
+            print(f"failed to remove {item.label}: {exc}")
             continue
-    _print_summary("state", items)
+    _print_summary("state", deleted)
     print(f"reclaimed {reclaimed} bytes")
     return 0
