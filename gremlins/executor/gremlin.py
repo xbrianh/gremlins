@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import dataclasses
 import json
 import logging
@@ -151,14 +152,14 @@ class Gremlin:
         child_state_dir = self.state_dir.parent / target_id
         child_artifact_dir = child_state_dir / "artifacts"
 
-        # Copy artifact directory
+        # Copy artifact directory and registry in thread to avoid blocking event loop
         child_artifact_dir.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(state.artifact_dir, child_artifact_dir)
+        await asyncio.to_thread(shutil.copytree, state.artifact_dir, child_artifact_dir)
 
-        # Copy registry.json
-        src_registry = self.state_dir / "registry.json"
+        # Copy registry.json from the same directory as source artifacts
+        src_registry = state.artifact_dir.parent / "registry.json"
         if src_registry.exists():
-            shutil.copy2(src_registry, child_state_dir / "registry.json")
+            await asyncio.to_thread(shutil.copy2, src_registry, child_state_dir / "registry.json")
 
         # Create new worktree if needed
         child_worktree = None
