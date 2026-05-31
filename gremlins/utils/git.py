@@ -330,8 +330,6 @@ def stage_gremlins_overlay(project_root: str, state_dir: os.PathLike[str]) -> No
         shutil.copytree(src, dst, dirs_exist_ok=True)
 
 
-
-
 async def in_git_repo_async(cwd: str | os.PathLike[str] | None = None) -> bool:
     try:
         return await proc.run_ok_async(["git", "rev-parse", "--git-dir"], cwd=cwd)
@@ -361,7 +359,9 @@ async def setup_detached_worktree_async(
 ) -> str:
     """Add a detached worktree at base_ref. Returns the worktree path."""
     if fetch:
-        r = await proc.run_async(["git", "fetch", "origin", "--", base_ref], cwd=project_root)
+        r = await proc.run_async(
+            ["git", "fetch", "origin", "--", base_ref], cwd=project_root
+        )
         if r.returncode != 0:
             raise GitError(r.returncode, r.stderr.strip())
         base_ref = "FETCH_HEAD"

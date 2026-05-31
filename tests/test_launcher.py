@@ -824,9 +824,7 @@ def test_setup_workdir_overlay_goes_to_state_dir(lenv):
     state_dir = lenv.state_root / gremlin_id
     state_dir.mkdir(parents=True)
 
-    workdir = git_mod.setup_workdir(
-        str(lenv.repo), "HEAD", state_dir=state_dir
-    )
+    workdir = git_mod.setup_workdir(str(lenv.repo), "HEAD", state_dir=state_dir)
 
     try:
         assert (state_dir / ".gremlins" / "custom-local.yaml").exists()
@@ -878,9 +876,7 @@ def test_setup_workdir_detached_with_fetch(tmp_path):
     state_dir = tmp_path / "state"
     state_dir.mkdir()
 
-    workdir = git_mod.setup_workdir(
-        str(repo), feature, fetch=True, state_dir=state_dir
-    )
+    workdir = git_mod.setup_workdir(str(repo), feature, fetch=True, state_dir=state_dir)
     try:
         wt_sha = subprocess.run(
             ["git", "rev-parse", "HEAD"],

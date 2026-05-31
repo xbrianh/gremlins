@@ -691,8 +691,7 @@ def _land_boss(
             label,
             current,
         )
-    return _ff_land(
-        gremlin_id, wdir, state, cwd, boss_head, label, current)
+    return _ff_land(gremlin_id, wdir, state, cwd, boss_head, label, current)
 
 
 def _land_gh(
@@ -744,9 +743,7 @@ def _land_gh(
         print("PR already merged.")
         _fast_forward_main(cwd)
         _remove_worktree(wdir, state, cwd)
-        _finalize_cleanup(
-            gremlin_id, wdir, state, cwd, remove_state_dir=False
-        )
+        _finalize_cleanup(gremlin_id, wdir, state, cwd, remove_state_dir=False)
         return True
 
     if pr_state == "CLOSED":
@@ -841,9 +838,7 @@ def _land_gh(
         print("PR merged.")
 
     _fast_forward_main(cwd)
-    _finalize_cleanup(
-        gremlin_id, wdir, state, cwd, remove_state_dir=False
-    )
+    _finalize_cleanup(gremlin_id, wdir, state, cwd, remove_state_dir=False)
     return True
 
 
@@ -930,9 +925,7 @@ def _land_with_stage(
     if setup_kind in ("worktree-detached", "worktree-detached-from-ref"):
         _fast_forward_main(cwd)
 
-    _finalize_cleanup(
-        gremlin_id, wdir, state, cwd, remove_state_dir=False
-    )
+    _finalize_cleanup(gremlin_id, wdir, state, cwd, remove_state_dir=False)
     return True
 
 

@@ -390,8 +390,6 @@ def test_skip_on_completed_child_refuses(sandbox, tmp_path, monkeypatch, capsys)
     assert "external_outcome" not in state
 
 
-
-
 def test_print_table_header_and_row_shape(capsys):
     state = {
         "kind": "localgremlin",
