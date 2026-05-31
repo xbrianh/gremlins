@@ -159,7 +159,9 @@ class Gremlin:
         # Copy registry.json from the same directory as source artifacts
         src_registry = state.artifact_dir.parent / "registry.json"
         if src_registry.exists():
-            await asyncio.to_thread(shutil.copy2, src_registry, child_state_dir / "registry.json")
+            await asyncio.to_thread(
+                shutil.copy2, src_registry, child_state_dir / "registry.json"
+            )
 
         # Create new worktree if needed
         child_worktree = None
