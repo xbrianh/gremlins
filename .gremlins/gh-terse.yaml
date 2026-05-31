@@ -21,7 +21,6 @@ land:
 prompts:
   code-style: gremlins:code_style.md
   terse: terse_style.md
-  verify: [gremlins:verify_fix.md, gremlins:bail_section_fix.md]
 
 stage-definitions:
   normalize:
@@ -33,23 +32,39 @@ stage-definitions:
         - "git add -A"
         - "git diff --cached --quiet || git commit -m 'normalize'"
 
-  normalize-and-verify:
+  run-checks-and-fix:
+    required-options:
+      - cmds
+    stages:
+      - name: verify
+        type: loop
+        max-iterations: 7
+        body:
+          - name: cmd
+            type: exec
+            out:
+              verify_log: "file://session/exec-{name}.log"
+              status: "file://session/exec-{name}.status"
+            options:
+              cmds:
+                - "{{options.cmds}}"
+          - name: fix
+            type: agent
+            prompt:
+              - gremlins:verify_fix.md
+              - gremlins:bail_section_fix.md
+            in:
+              verify_output: verify_log
+
+  normalize-and-fix:
     stages:
       - { type: normalize }
-      - { type: verify, options: { cmds: ["make check", "make test"] }, prompt: verify }
+      - { type: run-checks-and-fix, options: { cmds: ["make check", "make test"] } }
 
 stages:
   - { type: gremlins:plan-gh, prompt: [code-style, terse, gremlins:plan_gh.md] }
   - { type: gremlins:implement, prompt: [code-style, terse, gremlins:implement_gh.md] }
-  - { type: normalize-and-verify }
-
-  - parallel:
-      - { name: local-review, type: agent, out: { "{name}": "file://session/{name}.md" }, prompt: [code-style, terse, local_review.md, gremlins:bail_section.md] }
-      - { name: local-review-complexity, type: agent, out: { "{name}": "file://session/{name}.md" }, prompt: [code-style, terse, local_review_complexity.md, gremlins:bail_section.md] }
-
-  - { name: local-address, type: agent, prompt: [code-style, terse, local_address.md, gremlins:bail_section.md], in: {review: local-review, complexity: local-review-complexity} }
-  - { type: normalize-and-verify }
-
+  - { type: normalize-and-fix }
   - { type: gremlins:github-open-pr }
   - { type: gremlins:github-request-copilot-review }
 
@@ -59,5 +74,5 @@ stages:
       - { name: github-review-pull-request-complexity, type: agent, in: {pr: pr}, prompt: [code-style, terse, complexity_review.md], client: claude:sonnet }
 
   - { name: github-address-pull-request-reviews, type: agent, in: {pr: pr}, prompt: [code-style, terse, gremlins:github_address_pull_request_reviews.md, gremlins:bail_section.md] }
-  - { type: normalize-and-verify }
+  - { type: normalize-and-fix }
   - { type: gremlins:github-wait-ci, in: {pr: pr}, prompt: [terse, gremlins:ci_fix.md, gremlins:bail_section_fix.md] }
