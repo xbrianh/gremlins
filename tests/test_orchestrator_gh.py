@@ -158,7 +158,8 @@ def _patch_common(
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()
     monkeypatch.setattr(
-        "gremlins.executor.run.resolve_artifact_dir", lambda gremlin_id=None: artifact_dir
+        "gremlins.executor.run.resolve_artifact_dir",
+        lambda gremlin_id=None: artifact_dir,
     )
 
     state_file = tmp_path / "state.json"
@@ -893,7 +894,9 @@ def test_resume_from_github_review_pull_request(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    artifact_dir, state_file = _patch_common(monkeypatch, tmp_path, fake_pr_number="200")
+    artifact_dir, state_file = _patch_common(
+        monkeypatch, tmp_path, fake_pr_number="200"
+    )
 
     data = json.loads(state_file.read_text())
     data["issue_url"] = "https://github.com/owner/repo/issues/5"
@@ -1356,7 +1359,9 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    artifact_dir, _state_file = _patch_common(monkeypatch, tmp_path, fake_pr_number="77")
+    artifact_dir, _state_file = _patch_common(
+        monkeypatch, tmp_path, fake_pr_number="77"
+    )
 
     monkeypatch.setattr(
         subprocess,
