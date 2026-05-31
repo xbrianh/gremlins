@@ -1,4 +1,4 @@
-default_client: xai:grok-4
+default_client: claude:haiku
 base_ref: main
 github_integration: true
 prompt_dir: prompts
@@ -59,5 +59,5 @@ stages:
       - { name: github-review-pull-request-complexity, type: agent, in: {pr: pr}, prompt: [code-style, terse, complexity_review.md], client: claude:sonnet }
 
   - { name: github-address-pull-request-reviews, type: agent, in: {pr: pr}, prompt: [code-style, terse, gremlins:github_address_pull_request_reviews.md, gremlins:bail_section.md] }
-  - { type: normalize }
+  - { type: normalize-and-verify }
   - { type: gremlins:github-wait-ci, in: {pr: pr}, prompt: [terse, gremlins:ci_fix.md, gremlins:bail_section_fix.md] }
