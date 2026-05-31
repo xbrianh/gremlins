@@ -1,0 +1,137 @@
+from __future__ import annotations
+
+import argparse
+import os
+import pathlib
+from dataclasses import dataclass
+from typing import Any
+
+from gremlins import paths
+from gremlins.fleet.land import _cleanup_gremlin
+from gremlins.fleet.state import liveness_of_state_file, load_state
+
+
+@dataclass
+class CleanItem:
+    path: pathlib.Path
+    label: str
+    size_bytes: int
+
+
+def _is_pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _dir_size(path: pathlib.Path) -> int:
+    total = 0
+    try:
+        for entry in os.scandir(path):
+            if entry.is_dir(follow_symlinks=False):
+                total += _dir_size(pathlib.Path(entry.path))
+            elif entry.is_file(follow_symlinks=False):
+                total += entry.stat().st_size
+    except OSError:
+        return 0
+    return total
+
+
+def _scan_state(failed: bool = False, finished: bool = False) -> list[CleanItem]:
+    items: list[CleanItem] = []
+    root = paths.state_root()
+    if not root.is_dir():
+        return items
+    for entry in os.scandir(root):
+        if "--" in entry.name or not entry.is_dir():
+            continue
+        wdir = pathlib.Path(entry.path)
+        sf = wdir / "state.json"
+        if not sf.is_file():
+            continue
+        live = liveness_of_state_file(str(sf))
+        if live == "running" or live.startswith("stalled:"):
+            continue
+        state = load_state(str(sf)) or {}
+        exit_code = state.get("exit_code")
+        if failed:
+            if not (live.startswith("dead:") or (exit_code is not None and exit_code != 0)):
+                continue
+        size = _dir_size(wdir)
+        items.append(CleanItem(wdir, entry.name, size))
+        prefix = entry.name + "--"
+        for child in os.scandir(root):
+            if not child.name.startswith(prefix) or not child.is_dir():
+                continue
+            cwdir = pathlib.Path(child.path)
+            csf = cwdir / "state.json"
+            if not csf.is_file():
+                continue
+            clive = liveness_of_state_file(str(csf))
+            if clive == "running" or clive.startswith("stalled:"):
+                continue
+            cstate = load_state(str(csf)) or {}
+            cexit = cstate.get("exit_code")
+            if failed:
+                if not (clive.startswith("dead:") or (cexit is not None and cexit != 0)):
+                    continue
+            csize = _dir_size(cwdir)
+            items.append(CleanItem(cwdir, child.name, csize))
+    return items
+
+
+def _print_summary(cat: str, items: list[CleanItem]) -> None:
+    if not items:
+        return
+    n = len(items)
+    b = sum(i.size_bytes for i in items)
+    print(f"{cat}: {n} ({b} bytes)")
+
+
+def clean_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="gremlins clean")
+    parser.add_argument("--state", action="store_true")
+    parser.add_argument("--all", action="store_true")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--failed", action="store_true")
+    group.add_argument("--finished", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--yes", "-y", action="store_true")
+    args = parser.parse_args(argv)
+    do_state = args.state or args.all or args.failed or args.finished
+    if not do_state:
+        items = _scan_state()
+        _print_summary("state", items)
+        if not items:
+            print("nothing to clean")
+        return 0
+    items = _scan_state(args.failed, args.finished)
+    _print_summary("state", items)
+    if not items:
+        print("nothing to clean")
+        return 0
+    if args.dry_run:
+        return 0
+    if not args.yes:
+        try:
+            if input("Delete? [y/N] ").strip().lower() not in {"y", "yes"}:
+                return 0
+        except (EOFError, KeyboardInterrupt):
+            return 0
+    reclaimed = 0
+    for item in items:
+        try:
+            state_file = str(item.path / "state.json")
+            state = load_state(state_file) or {}
+            project_root = str(state.get("project_root") or "")
+            cwd_for_git = project_root if project_root and os.path.isdir(project_root) else None
+            _cleanup_gremlin(item.label, str(item.path), state, cwd_for_git, delete_branch=True)
+            print(f"removed {item.label}")
+            reclaimed += item.size_bytes
+        except Exception:
+            continue
+    _print_summary("state", items)
+    print(f"reclaimed {reclaimed} bytes")
+    return 0
