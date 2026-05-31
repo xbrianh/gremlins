@@ -298,9 +298,10 @@ class Gremlin:
         except Exception as exc:
             raise ValueError(f"could not parse state.json: {exc}") from exc
 
-        assert isinstance(state_raw, dict), (
-            f"state.json must be a JSON object, not {type(state_raw).__name__}"
-        )
+        if not isinstance(state_raw, dict):
+            raise ValueError(
+                f"state.json must be a JSON object, not {type(state_raw).__name__}"
+            )
         state_raw = cast(dict[str, Any], state_raw)
 
         # Extract persisted fields from state.json
