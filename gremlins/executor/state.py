@@ -129,6 +129,7 @@ class StateData:
     permissions_file: str = ""
     group_name: str = ""
     child_key: str = ""
+    exit_code: int | None = None
 
     @classmethod
     def load(cls, gremlin_id: str | None) -> StateData:
@@ -160,6 +161,7 @@ class StateData:
             permissions_file=sd.get("permissions_file") or "",
             group_name=sd.get("group_name") or "",
             child_key=sd.get("child_key") or "",
+            exit_code=int(sd["exit_code"]) if "exit_code" in sd else None,
         )
 
     def persist(self, state_dir: pathlib.Path) -> None:

@@ -152,6 +152,10 @@ class Gremlin:
     def state_data(self) -> StateData:
         return StateData.load(self.gremlin_id)
 
+    @property
+    def finished(self) -> bool:
+        return (self.state_dir / "finished").is_file()
+
     async def fork(self, state: State, target_id: str) -> State:
         """Create an independent copy of a running gremlin.
 

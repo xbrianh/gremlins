@@ -542,13 +542,12 @@ def launch(
     return inputs.gremlin_id, p
 
 
-def _check_resume_preconditions(
-    gremlin_id: str, state_dir: pathlib.Path, graft: str | None
-) -> None:
-    state_data = StateData.load(gremlin_id)
+def _check_resume_preconditions(gremlin: Gremlin, graft: str | None) -> None:
+    state_data = gremlin.state_data
     status = state_data.status
     old_pid = state_data.pid
     workdir = state_data.workdir
+    gremlin_id = gremlin.gremlin_id
 
     if status == "running":
         if graft is not None:
@@ -564,18 +563,11 @@ def _check_resume_preconditions(
             except (OSError, ValueError):
                 pass
 
-    if graft is None and (state_dir / "finished").is_file():
-        sf = state_dir / "state.json"
-        if sf.is_file():
-            try:
-                state_raw = json.loads(sf.read_text(encoding="utf-8"))
-                exit_code = state_raw.get("exit_code")
-                if exit_code == 0:
-                    raise RuntimeError(
-                        f"gremlin {gremlin_id} finished successfully — nothing to resume"
-                    )
-            except (OSError, ValueError):
-                pass
+    if graft is None and gremlin.finished:
+        if state_data.exit_code == 0:
+            raise RuntimeError(
+                f"gremlin {gremlin_id} finished successfully — nothing to resume"
+            )
 
     if workdir and not os.path.isdir(workdir):
         raise RuntimeError(f"worktree missing: {workdir}")
@@ -663,10 +655,8 @@ def _spawn_resume(
 
 
 def resume(gremlin_id: str, *, graft: str | None = None) -> None:
-    state_dir = _state_root() / gremlin_id
-    _check_resume_preconditions(gremlin_id, state_dir, graft)
-
     gremlin = Gremlin.open(gremlin_id)
+    _check_resume_preconditions(gremlin, graft)
     project_root = gremlin.project_root or str(_paths.project_root())
     if gremlin.pipeline_data.github_integration and shutil.which("gh") is None:
         raise RuntimeError("gh CLI not found on PATH (required for gh pipeline)")
