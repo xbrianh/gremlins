@@ -1,10 +1,7 @@
 """Tests for Gremlin.fork() method."""
 
 import asyncio
-import json
-import pathlib
 import subprocess
-import tempfile
 
 import pytest
 
@@ -12,7 +9,7 @@ from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.gremlin import Gremlin
-from gremlins.executor.state import State, StateData, build_state
+from gremlins.executor.state import StateData, build_state
 from gremlins.pipeline import Pipeline
 
 
@@ -39,13 +36,17 @@ def tmp_repo(tmp_path):
         ["git", "add", "file.txt"], cwd=repo_dir, check=True, capture_output=True
     )
     subprocess.run(
-        ["git", "commit", "-m", "initial"], cwd=repo_dir, check=True, capture_output=True
+        ["git", "commit", "-m", "initial"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
     )
     return repo_dir
 
 
 def test_fork_without_worktree(tmp_path, tmp_repo):
     """Test forking a state without a worktree."""
+
     async def _test():
         # Setup source gremlin and state
         state_dir = tmp_path / "state" / "gr-1"
@@ -99,6 +100,7 @@ def test_fork_without_worktree(tmp_path, tmp_repo):
 
 def test_fork_with_worktree(tmp_path, tmp_repo):
     """Test forking a state with a worktree."""
+
     async def _test():
         # Create a worktree for the source
         worktree_parent = tmp_path / "worktrees"
@@ -199,6 +201,7 @@ def test_fork_with_worktree(tmp_path, tmp_repo):
 
 def test_fork_preserves_registry(tmp_path, tmp_repo):
     """Test that fork preserves registry.json content."""
+
     async def _test():
         # Setup source gremlin and state
         state_dir = tmp_path / "state" / "gr-1"

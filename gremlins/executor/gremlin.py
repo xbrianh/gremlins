@@ -158,18 +158,14 @@ class Gremlin:
         # Copy registry.json
         src_registry = self.state_dir / "registry.json"
         if src_registry.exists():
-            shutil.copy2(
-                src_registry, child_state_dir / "registry.json"
-            )
+            shutil.copy2(src_registry, child_state_dir / "registry.json")
 
         # Create new worktree if needed
         child_worktree = None
         if state.worktree is not None:
             sha = _git_mod.head_sha(cwd=state.worktree)
             if not sha:
-                raise RuntimeError(
-                    f"could not resolve HEAD in {state.worktree}"
-                )
+                raise RuntimeError(f"could not resolve HEAD in {state.worktree}")
             child_worktree_path = await _git_mod.setup_detached_worktree_async(
                 self.project_root, sha, worktree_parent=state.worktree_parent
             )
