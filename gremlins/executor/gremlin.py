@@ -148,6 +148,10 @@ class Gremlin:
     def artifact_dir(self) -> pathlib.Path:
         return self.state_dir / "artifacts"
 
+    @property
+    def state_data(self) -> StateData:
+        return StateData.load(self.gremlin_id)
+
     async def fork(self, state: State, target_id: str) -> State:
         """Create an independent copy of a running gremlin.
 
