@@ -222,7 +222,7 @@ def _make_state(state_dir: pathlib.Path, repo: pathlib.Path, **extra) -> None:
 
 def _write_hermetic(state_dir: pathlib.Path, stages: list | None = None) -> None:
     if stages is None:
-        stages = [{"name": "plan", "type": "plan"}, {"name": "ci-gate", "type": "plan"}]
+        stages = [{"name": "plan", "type": "agent"}, {"name": "ci-gate", "type": "agent"}]
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "pipeline.yaml").write_text(
         yaml.dump({"__gremlins_expanded__": True, "stages": stages}),
@@ -370,8 +370,8 @@ def test_resume_without_graft_after_graft_uses_updated_pipeline(lenv, monkeypatc
     _write_hermetic(
         state_dir,
         [
-            {"name": "plan", "type": "plan"},
-            {"name": "address-code", "type": "plan"},
+            {"name": "plan", "type": "agent"},
+            {"name": "address-code", "type": "agent"},
         ],
     )
 
