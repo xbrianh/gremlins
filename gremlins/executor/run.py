@@ -23,7 +23,7 @@ from gremlins.errors import die
 from gremlins.executor.gremlin import Gremlin
 from gremlins.executor.state import (
     StateData,
-    resolve_session_dir,
+    resolve_artifact_dir,
     resolve_state_file,
 )
 from gremlins.logging_setup import configure_logging
@@ -204,8 +204,8 @@ async def run_pipeline(
         )
 
     state_json = _read_state_json(gremlin_id)
-    session_dir = resolve_session_dir(gremlin_id)
-    state_dir = session_dir.parent
+    artifact_dir = resolve_artifact_dir(gremlin_id)
+    state_dir = artifact_dir.parent
     _workdir = str(state_json.get("workdir") or "")
     worktree_dir = pathlib.Path(_workdir) if _workdir else None
     project_root = str(state_json.get("project_root") or "")
@@ -246,7 +246,7 @@ async def run_pipeline(
     if gh and shutil.which("gh") is None:
         die("gh CLI not found")
 
-    logger.info("session: %s", session_dir)
+    logger.info("artifact: %s", artifact_dir)
 
     gh_repo = _get_repo() if gh else ""
     try:
@@ -282,7 +282,7 @@ async def run_pipeline(
         os.environ["GREMLINS_WORKTREE_PATH"] = (
             str(gremlin.worktree_dir) if gremlin.worktree_dir else ""
         )
-        os.environ["GREMLINS_SESSION_DIR"] = str(gremlin.session_dir)
+        os.environ["GREMLINS_ARTIFACT_DIR"] = str(gremlin.artifact_dir)
         try:
             os.environ.update(load_env_file(_env_file, cwd=_project_root))
         except RuntimeError as exc:
@@ -310,7 +310,7 @@ async def run_pipeline(
     if os.environ.get("GREMLINS_TEST_NOOP_PIPELINE"):
         return 0
 
-    plan_file = session_dir / "plan.md"
+    plan_file = artifact_dir / "plan.md"
 
     if not gh and resume_from:
         _expanded_stage_names = [s.name for s in gremlin.stages]
@@ -368,7 +368,7 @@ async def run_pipeline(
         ]
         logger.info("done. PR: %s", pr_url)
     else:
-        logger.info("done. session artifacts in: %s", session_dir)
+        logger.info("done. artifacts in: %s", artifact_dir)
     if total_cost > 0:
         logger.info("total cost: $%.4f", total_cost)
 

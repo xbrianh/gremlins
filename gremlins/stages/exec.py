@@ -101,7 +101,7 @@ class Exec(Stage):
                 env={**os.environ, **extra_env},
                 timeout=timeout,
             )
-            log_path = state.session_dir / f"exec-{self.name}.log"
+            log_path = state.artifact_dir / f"exec-{self.name}.log"
             log_path.write_text(
                 result.stdout + result.stderr or "(no output)\n", encoding="utf-8"
             )

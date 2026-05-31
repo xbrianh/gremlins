@@ -15,7 +15,7 @@ import gremlins.utils.git as _git
 from gremlins import paths
 from gremlins.artifacts.registry import ArtifactRegistry, MissingArtifact
 from gremlins.artifacts.resolve import resolve_in_map
-from gremlins.executor.state import landable_shape, resolve_session_dir
+from gremlins.executor.state import landable_shape, resolve_artifact_dir
 from gremlins.fleet.resolve import resolve_gremlin
 from gremlins.fleet.state import (
     liveness_of_state_file,
@@ -701,9 +701,9 @@ def _land_gh(
     project_root = _resolve_landing_cwd(state)
     cwd = project_root if project_root and os.path.isdir(project_root) else None
 
-    session_dir = resolve_session_dir(gremlin_id)
+    artifact_dir = resolve_artifact_dir(gremlin_id)
     registry = ArtifactRegistry(
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         cwd=pathlib.Path(cwd) if cwd else None,
     )
     try:
@@ -865,7 +865,7 @@ def _exec_land_stage(
     land_stage: Any,
     registry: ArtifactRegistry,
     cwd: str,
-    session_dir: pathlib.Path,
+    artifact_dir: pathlib.Path,
 ) -> bool:
     """Run an exec land stage against the given registry. Returns True on success."""
     import asyncio
@@ -877,7 +877,7 @@ def _exec_land_stage(
     state = build_state(
         data=StateData(),
         client=PACKAGE_DEFAULT,
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         cwd=cwd,
         artifacts=registry,
     )
@@ -907,15 +907,15 @@ def _land_with_stage(
         print("you are inside this gremlin's worktree — cd elsewhere before landing")
         return False
 
-    session_dir = resolve_session_dir(gremlin_id)
+    artifact_dir = resolve_artifact_dir(gremlin_id)
     registry = ArtifactRegistry(
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         cwd=pathlib.Path(cwd) if cwd else None,
     )
 
     _remove_worktree(wdir, state, cwd)
 
-    if not _exec_land_stage(land_stage, registry, cwd or "", session_dir):
+    if not _exec_land_stage(land_stage, registry, cwd or "", artifact_dir):
         return False
 
     print("Landed.")
@@ -951,9 +951,9 @@ def do_land(
 
     shape = landable_shape(state)
 
-    if shape == "empty":
-        session_dir = resolve_session_dir(gremlin_id)
-        registry = ArtifactRegistry(session_dir=session_dir)
+    if shape in ("empty", "one_branch"):
+        artifact_dir = resolve_artifact_dir(gremlin_id)
+        registry = ArtifactRegistry(artifact_dir=artifact_dir)
         if registry.produced("pr"):
             shape = "one_pr"
 

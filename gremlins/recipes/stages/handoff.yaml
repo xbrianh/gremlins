@@ -6,8 +6,8 @@ stages:
         options:
           cmds:
             - |
-              if [ -f "{session_dir}/pr-branch.txt" ]; then
-                branch="$(cat "{session_dir}/pr-branch.txt")"
+              if [ -f "{artifact_dir}/pr-branch.txt" ]; then
+                branch="$(cat "{artifact_dir}/pr-branch.txt")"
                 if [ -n "$branch" ]; then
                   git fetch origin "refs/heads/$branch:refs/remotes/origin/$branch" && git checkout --detach "origin/$branch"
                 fi
@@ -20,11 +20,11 @@ stages:
         options:
           cmds:
             - |
-              if [ ! -f "{session_dir}/boss-spec.md" ]; then
-                cp "{session_dir}/plan.md" "{session_dir}/boss-spec.md"
+              if [ ! -f "{artifact_dir}/boss-spec.md" ]; then
+                cp "{artifact_dir}/plan.md" "{artifact_dir}/boss-spec.md"
               fi
-              if [ ! -f "{session_dir}/rolling-plan.md" ]; then
-                cp "{session_dir}/plan.md" "{session_dir}/rolling-plan.md"
+              if [ ! -f "{artifact_dir}/rolling-plan.md" ]; then
+                cp "{artifact_dir}/plan.md" "{artifact_dir}/rolling-plan.md"
               fi
 
       - name: handoff
@@ -48,14 +48,14 @@ stages:
         options:
           cmds:
             - |
-              cp "{session_dir}/rolling-plan.md" "{session_dir}/rolling-plan-pre-sanitize.md"
-              SIGNAL="{session_dir}/signal.json"
+              cp "{artifact_dir}/rolling-plan.md" "{artifact_dir}/rolling-plan-pre-sanitize.md"
+              SIGNAL="{artifact_dir}/signal.json"
               if [ ! -f "$SIGNAL" ]; then
-                printf 'signal.json not written by agent' > "{session_dir}/bail-reason.txt"
+                printf 'signal.json not written by agent' > "{artifact_dir}/bail-reason.txt"
                 exit 2
               fi
               exit_state=$(jq -r '.exit_state // empty' "$SIGNAL") || {
-                printf 'failed to parse exit_state from signal.json' > "{session_dir}/bail-reason.txt"
+                printf 'failed to parse exit_state from signal.json' > "{artifact_dir}/bail-reason.txt"
                 exit 2
               }
               case "$exit_state" in
@@ -63,25 +63,25 @@ stages:
                   child=$(jq -r '.child_plan // empty' "$SIGNAL")
                   if [ -z "$child" ] || [ ! -f "$child" ]; then
                     printf 'next-plan: child_plan not found: %s' "$child" \
-                      > "{session_dir}/bail-reason.txt"
+                      > "{artifact_dir}/bail-reason.txt"
                     exit 2
                   fi
-                  cp "$child" "{session_dir}/plan.md"
+                  cp "$child" "{artifact_dir}/plan.md"
                   exit 1
                   ;;
                 chain-done)
-                  cp "{session_dir}/boss-spec.md" "{session_dir}/plan.md"
+                  cp "{artifact_dir}/boss-spec.md" "{artifact_dir}/plan.md"
                   exit 0
                   ;;
                 bail)
                   jq -r '.reason // "(no reason given)"' "$SIGNAL" \
-                    > "{session_dir}/bail-reason.txt" || \
-                    printf '(jq failed reading bail reason)' > "{session_dir}/bail-reason.txt"
+                    > "{artifact_dir}/bail-reason.txt" || \
+                    printf '(jq failed reading bail reason)' > "{artifact_dir}/bail-reason.txt"
                   exit 2
                   ;;
                 *)
                   printf 'unrecognized exit_state: %s' "$exit_state" \
-                    > "{session_dir}/bail-reason.txt"
+                    > "{artifact_dir}/bail-reason.txt"
                   exit 2
                   ;;
               esac
@@ -102,7 +102,7 @@ stages:
         options:
           cmds:
             - |
-              if [ ! -s "{session_dir}/rolling-plan.md" ]; then
-                cp "{session_dir}/rolling-plan-pre-sanitize.md" \
-                  "{session_dir}/rolling-plan.md"
+              if [ ! -s "{artifact_dir}/rolling-plan.md" ]; then
+                cp "{artifact_dir}/rolling-plan-pre-sanitize.md" \
+                  "{artifact_dir}/rolling-plan.md"
               fi

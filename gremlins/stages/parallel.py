@@ -38,7 +38,7 @@ def _noop_set_stage(_n: str) -> None:
 def _snapshot_registry(
     src: pathlib.Path,
     dst: pathlib.Path,
-    parent_session_dir: pathlib.Path,
+    parent_artifact_dir: pathlib.Path,
 ) -> None:
     """Copy parent's registry.json to child, rewriting file://session/ URIs to absolute paths."""
     if not src.exists():
@@ -52,7 +52,7 @@ def _snapshot_registry(
     for k, v in data.items():
         if v.startswith("file://session/"):
             name = v[len("file://session/") :]
-            abs_path = (parent_session_dir / name).resolve()
+            abs_path = (parent_artifact_dir / name).resolve()
             rewritten[k] = f"file://{abs_path}"
         else:
             rewritten[k] = v
@@ -90,7 +90,7 @@ def _init_child_dir(
 
     parent_registry = parent_state.artifacts.registry_path
     child_registry = child_state_dir / "registry.json"
-    _snapshot_registry(parent_registry, child_registry, parent_state.session_dir)
+    _snapshot_registry(parent_registry, child_registry, parent_state.artifact_dir)
 
     (child_state_dir / "log").touch()
 
@@ -484,7 +484,7 @@ class _ParallelExecutor:
                         logger.warning("child artifact missing: %s", src)
                         continue
                     dest_name = f"{child_key}/{name}" if multi else name
-                    dest = parent_state.session_dir / dest_name
+                    dest = parent_state.artifact_dir / dest_name
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(src, dest)
                     parent_state.artifacts.bind(

@@ -134,15 +134,15 @@ def _assert_no_state_clobber(parent_state_file, original_content, parent_mtime):
 def test_local_main_does_not_clobber_external_state(tmp_path, monkeypatch, sandbox):
     parent_state_file, original_content, parent_mtime = _stage_parent_state(sandbox)
 
-    session_dir = tmp_path / "session-local"
-    session_dir.mkdir()
+    artifact_dir = tmp_path / "session-local"
+    artifact_dir.mkdir()
     plan_file = tmp_path / "plan.md"
     plan_file.write_text("# Plan\nDo stuff.\n")
 
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.executor.run.resolve_session_dir",
-        lambda gremlin_id=None: session_dir,
+        "gremlins.executor.run.resolve_artifact_dir",
+        lambda gremlin_id=None: artifact_dir,
     )
     client = _ReviewCreatingClient(
         fixtures={

@@ -28,7 +28,7 @@ def _make_state(
     return build_state(
         data=StateData(),
         client=client,
-        session_dir=tmp_path / "artifacts",
+        artifact_dir=tmp_path / "artifacts",
         worktree=tmp_path,
         artifacts=reg,
     )

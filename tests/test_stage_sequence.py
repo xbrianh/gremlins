@@ -17,7 +17,7 @@ from gremlins.stages.sequence import SequenceStage
 
 
 def _state(**kw) -> RuntimeState:
-    kw.setdefault("session_dir", pathlib.Path("/tmp"))
+    kw.setdefault("artifact_dir", pathlib.Path("/tmp"))
     return build_state(data=StateData(), client=FakeClaudeClient(), **kw)
 
 
@@ -94,13 +94,13 @@ def test_sequence_propagates_child_key() -> None:
     assert child.received.child_key == "my-child"
 
 
-def test_sequence_propagates_session_dir() -> None:
+def test_sequence_propagates_artifact_dir() -> None:
     shard_dir = pathlib.Path("/tmp/shard-session")
     child = _FakeStage("child")
     stage = SequenceStage("seq", body=[child])
-    asyncio.run(stage.run(_state(session_dir=shard_dir)))
+    asyncio.run(stage.run(_state(artifact_dir=shard_dir)))
     assert child.received is not None
-    assert child.received.session_dir == shard_dir
+    assert child.received.artifact_dir == shard_dir
 
 
 def _stateful(state_root: pathlib.Path, gremlin_id: str) -> RuntimeState:
@@ -111,7 +111,7 @@ def _stateful(state_root: pathlib.Path, gremlin_id: str) -> RuntimeState:
     return build_state(
         data=StateData(gremlin_id=gremlin_id, state_file=sf),
         client=FakeClaudeClient(),
-        session_dir=state_dir,
+        artifact_dir=state_dir,
     )
 
 

@@ -9,7 +9,7 @@ import pytest
 
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.schemes import (
-    FileSessionResolver,
+    FileArtifactResolver,
     GitResolver,
     snapshot_head_before,
 )
@@ -57,12 +57,12 @@ def make_git_repo(tmp_path: pathlib.Path) -> tuple[str, str]:
     return first, head
 
 
-# FileSessionResolver tests
+# FileArtifactResolver tests
 
 
 def test_file_resolver_read(tmp_path: pathlib.Path) -> None:
     (tmp_path / "out.txt").write_text("content", encoding="utf-8")
-    resolver = FileSessionResolver(tmp_path)
+    resolver = FileArtifactResolver(tmp_path)
     uri = Uri(scheme="file", path="session/out.txt")
     assert resolver.read(uri) == "content"
 
@@ -70,7 +70,7 @@ def test_file_resolver_read(tmp_path: pathlib.Path) -> None:
 def test_file_resolver_verify_produced_raises_when_absent(
     tmp_path: pathlib.Path,
 ) -> None:
-    resolver = FileSessionResolver(tmp_path)
+    resolver = FileArtifactResolver(tmp_path)
     uri = Uri(scheme="file", path="session/missing.txt")
     with pytest.raises(FileNotFoundError):
         resolver.verify_produced(uri)
@@ -80,7 +80,7 @@ def test_file_resolver_verify_produced_raises_when_empty(
     tmp_path: pathlib.Path,
 ) -> None:
     (tmp_path / "empty.txt").write_bytes(b"")
-    resolver = FileSessionResolver(tmp_path)
+    resolver = FileArtifactResolver(tmp_path)
     uri = Uri(scheme="file", path="session/empty.txt")
     with pytest.raises(FileNotFoundError):
         resolver.verify_produced(uri)
@@ -121,7 +121,7 @@ def test_snapshot_and_bind_range(tmp_path: pathlib.Path) -> None:
         check=True,
     ).stdout.strip()
 
-    registry = ArtifactRegistry(session_dir=tmp_path, cwd=tmp_path)
+    registry = ArtifactRegistry(artifact_dir=tmp_path, cwd=tmp_path)
     registry.bind_git_commit_range("test-range", base)
 
     assert registry.produced("test-range")

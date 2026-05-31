@@ -34,7 +34,7 @@ def _make_state(
     return build_state(
         data=StateData(attempt=attempt, state_file=state_file),
         client=client,
-        session_dir=tmp_path,
+        artifact_dir=tmp_path,
         worktree=tmp_path,
     )
 
@@ -107,7 +107,7 @@ def test_stage_model_forwarded_when_set(tmp_path):
     state = build_state(
         data=StateData(),
         client=client,
-        session_dir=tmp_path,
+        artifact_dir=tmp_path,
         stage_model="sonnet",
     )
     asyncio.run(run_agent(state, "hello", label="test-label"))
@@ -120,7 +120,7 @@ def test_stage_model_overridden_by_kwarg(tmp_path):
     state = build_state(
         data=StateData(),
         client=client,
-        session_dir=tmp_path,
+        artifact_dir=tmp_path,
         stage_model="sonnet",
     )
     asyncio.run(run_agent(state, "hello", label="test-label", model="haiku"))

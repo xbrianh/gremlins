@@ -27,7 +27,7 @@ from gremlins.artifacts.uri import Uri
 ## Registry API
 
 ```python
-r = ArtifactRegistry(session_dir=state.session_dir, cwd=state.cwd)
+r = ArtifactRegistry(artifact_dir=state.artifact_dir, cwd=state.cwd)
 
 # Store a URI pointer (auto-resolved on read)
 r.bind("plan", Uri.parse("file://session/plan.md"))
@@ -105,7 +105,7 @@ supported — passing a non-string artifact raises `TypeError`.
 
 ## Registry persistence
 
-Bindings are atomically persisted to `session_dir.parent / "registry.json"`
+Bindings are atomically persisted to `artifact_dir.parent / "registry.json"`
 so they survive process restart. On construction, any existing file at that
 path is pre-loaded so resumed runs see prior bindings.
 

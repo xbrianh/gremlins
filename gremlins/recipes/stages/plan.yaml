@@ -8,13 +8,13 @@ stages:
     options:
       cmds:
         - |
-          if [ -s "{session_dir}/plan.md" ]; then exit 0; fi
+          if [ -s "{artifact_dir}/plan.md" ]; then exit 0; fi
           if [ -z "$plan_arg" ]; then exit 0; fi
           if [ -f "$plan_arg" ]; then
-              cp "$plan_arg" "{session_dir}/plan.md"
+              cp "$plan_arg" "{artifact_dir}/plan.md"
           elif echo "$plan_arg" | grep -qE '^([^/]+/[^#]+)?#[0-9]+$'; then
               gh issue view "$plan_arg" --json body --jq .body \
-                > "{session_dir}/plan.md"
+                > "{artifact_dir}/plan.md"
           else
               printf 'resolve-plan-input: unrecognized plan_arg: %s\n' "$plan_arg" >&2
               exit 1
@@ -37,9 +37,9 @@ stages:
     options:
       cmds:
         - |
-          STATE_JSON="{session_dir}/../state.json"
+          STATE_JSON="{artifact_dir}/../state.json"
           if ! [ -f "$STATE_JSON" ]; then exit 0; fi
           if python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get('description_explicit') else 1)" "$STATE_JSON" >/dev/null 2>&1; then exit 0; fi
-          title=$(awk '/^# /{sub(/^#+ */,""); print; exit}' "{session_dir}/plan.md" | cut -c1-60)
+          title=$(awk '/^# /{sub(/^#+ */,""); print; exit}' "{artifact_dir}/plan.md" | cut -c1-60)
           [ -z "$title" ] && exit 0
           tmp=$(mktemp) && python3 -c "import json,sys; d=json.load(open(sys.argv[1])); d['description']=sys.argv[2]; print(json.dumps(d))" "$STATE_JSON" "$title" > "$tmp" && mv "$tmp" "$STATE_JSON"

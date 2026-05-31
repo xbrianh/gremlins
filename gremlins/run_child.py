@@ -4,7 +4,7 @@ Spec file schema (JSON):
     {
         "stage_dict":      <dict>       parsed YAML dict; passed to parse_stage()
         "client":          <str>        "provider:model"
-        "session_dir":     <str>        absolute path to artifacts directory
+        "artifact_dir":     <str>        absolute path to artifacts directory
         "gremlin_id":      <str|null>   load StateData from disk when present
         "worktree":        <str|null>   absolute path to git worktree or null
         "worktree_parent": <str|null>   absolute path to worktree parent or null
@@ -69,12 +69,12 @@ def _build_state(spec: dict[str, Any]) -> State:
     if not isinstance(client_label, str) or not client_label:
         raise ValueError("spec missing required 'client' field")
 
-    raw_session = spec.get("session_dir")
+    raw_session = spec.get("artifact_dir")
     if not isinstance(raw_session, str) or not raw_session:
-        raise ValueError("spec missing required 'session_dir' field")
-    session_dir = pathlib.Path(raw_session)
+        raise ValueError("spec missing required 'artifact_dir' field")
+    artifact_dir = pathlib.Path(raw_session)
 
-    session_dir.mkdir(parents=True, exist_ok=True)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
 
     gremlin_id = spec.get("gremlin_id") or None
     if gremlin_id:
@@ -114,7 +114,7 @@ def _build_state(spec: dict[str, Any]) -> State:
     return build_state(
         data=data,
         client=client,
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         pipeline_data=pipeline_data,
         repo=str(spec.get("repo") or ""),
         instructions=str(spec.get("instructions") or ""),

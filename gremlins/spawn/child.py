@@ -76,15 +76,15 @@ def _build_state(spec: dict[str, Any]) -> State:
     child_id = spec.get("child_id") or None
     if child_id:
         validate_gremlin_id(child_id)
-        session_dir = paths.state_root() / child_id / "artifacts"
-        session_dir.mkdir(parents=True, exist_ok=True)
+        artifact_dir = paths.state_root() / child_id / "artifacts"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
         data = StateData.load(child_id)
     else:
-        raw_session = spec.get("session_dir")
+        raw_session = spec.get("artifact_dir")
         if not isinstance(raw_session, str) or not raw_session:
-            raise ValueError("spec missing required 'session_dir' field")
-        session_dir = pathlib.Path(raw_session)
-        session_dir.mkdir(parents=True, exist_ok=True)
+            raise ValueError("spec missing required 'artifact_dir' field")
+        artifact_dir = pathlib.Path(raw_session)
+        artifact_dir.mkdir(parents=True, exist_ok=True)
         gremlin_id = spec.get("gremlin_id") or None
         if gremlin_id:
             validate_gremlin_id(gremlin_id)
@@ -135,7 +135,7 @@ def _build_state(spec: dict[str, Any]) -> State:
     return build_state(
         data=data,
         client=client,
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         pipeline_data=pipeline_data,
         child_key=spec.get("child_key") or None,
         parent_stage=str(spec.get("parent_stage") or ""),

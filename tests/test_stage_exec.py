@@ -17,12 +17,12 @@ from gremlins.stages.outcome import Bail, Done
 
 def _make_state(tmp_path: pathlib.Path, **kw):
     kw.setdefault("worktree", tmp_path)
-    session_dir = tmp_path / "artifacts"
-    session_dir.mkdir(exist_ok=True)
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir(exist_ok=True)
     return build_state(
         data=StateData(),
         client=FakeClaudeClient(),
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         **kw,
     )
 
@@ -62,7 +62,7 @@ def test_no_cmds_returns_done(tmp_path):
 
 def test_in_map_injects_env_var(tmp_path):
     state = _make_state(tmp_path)
-    (state.session_dir / "value.txt").write_text("hello")
+    (state.artifact_dir / "value.txt").write_text("hello")
     state.artifacts.bind("my-key", Uri.parse("file://session/value.txt"))
 
     out_file = tmp_path / "captured.txt"
@@ -88,7 +88,7 @@ def test_in_map_missing_artifact_raises(tmp_path):
 
 def test_out_file_scheme_binds_and_verifies(tmp_path):
     state = _make_state(tmp_path)
-    (state.session_dir / "out.txt").write_text("data")
+    (state.artifact_dir / "out.txt").write_text("data")
     stage = _exec(cmds=["true"], out_map={"result": "file://session/out.txt"})
     result = asyncio.run(stage.run(state))
     assert isinstance(result, Done)
@@ -146,7 +146,7 @@ def test_out_git_range_empty_diff_still_binds(tmp_path, monkeypatch):
 
 def test_out_read_sub_resolves_uri(tmp_path):
     state = _make_state(tmp_path)
-    foo_file = state.session_dir / "foo.txt"
+    foo_file = state.artifact_dir / "foo.txt"
     stage = _exec(
         cmds=[f'echo 42 > "{foo_file}"'],
         out_map={
@@ -196,7 +196,7 @@ def test_nonzero_exit_writes_log(tmp_path):
     stage = _exec("myname", cmds=["echo oops; exit 1"])
     with pytest.raises(Bail):
         asyncio.run(stage.run(state))
-    assert (state.session_dir / "exec-myname.log").exists()
+    assert (state.artifact_dir / "exec-myname.log").exists()
 
 
 def test_success_writes_log(tmp_path):
@@ -204,7 +204,7 @@ def test_success_writes_log(tmp_path):
     stage = _exec("myname", cmds=["echo hello"])
     result = asyncio.run(stage.run(state))
     assert isinstance(result, Done)
-    assert (state.session_dir / "exec-myname.log").exists()
+    assert (state.artifact_dir / "exec-myname.log").exists()
 
 
 # ---------------------------------------------------------------------------

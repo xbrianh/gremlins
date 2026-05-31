@@ -16,7 +16,7 @@ from gremlins.artifacts.uri import Uri
 
 
 def make_registry(tmp_path: pathlib.Path) -> ArtifactRegistry:
-    return ArtifactRegistry(session_dir=tmp_path / "artifacts")
+    return ArtifactRegistry(artifact_dir=tmp_path / "artifacts")
 
 
 def test_bind_resolve_roundtrip(tmp_path: pathlib.Path) -> None:
@@ -67,21 +67,21 @@ def test_bind_duplicate_raises(tmp_path: pathlib.Path) -> None:
 
 
 def test_read_returns_file_content(tmp_path: pathlib.Path) -> None:
-    session_dir = tmp_path / "artifacts"
-    session_dir.mkdir()
-    (session_dir / "plan.md").write_text("hello", encoding="utf-8")
-    r = ArtifactRegistry(session_dir=session_dir)
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    (artifact_dir / "plan.md").write_text("hello", encoding="utf-8")
+    r = ArtifactRegistry(artifact_dir=artifact_dir)
     r.bind("plan", Uri(scheme="file", path="session/plan.md"))
     assert r.read("plan") == "hello"
 
 
-def test_registry_path_derives_from_session_dir(tmp_path: pathlib.Path) -> None:
-    r = ArtifactRegistry(session_dir=tmp_path / "artifacts")
+def test_registry_path_derives_from_artifact_dir(tmp_path: pathlib.Path) -> None:
+    r = ArtifactRegistry(artifact_dir=tmp_path / "artifacts")
     assert r.registry_path == tmp_path / "registry.json"
 
 
 def test_bind_persists_to_file(tmp_path: pathlib.Path) -> None:
-    r = ArtifactRegistry(session_dir=tmp_path / "artifacts")
+    r = ArtifactRegistry(artifact_dir=tmp_path / "artifacts")
     r.bind("plan", Uri.parse("file://session/plan.md"))
     data = json.loads(r.registry_path.read_text())
     assert data["plan"] == "file://session/plan.md"
@@ -91,15 +91,15 @@ def test_init_loads_from_persist_file(tmp_path: pathlib.Path) -> None:
     (tmp_path / "registry.json").write_text(
         json.dumps({"plan": "file://session/plan.md"})
     )
-    r = ArtifactRegistry(session_dir=tmp_path / "artifacts")
+    r = ArtifactRegistry(artifact_dir=tmp_path / "artifacts")
     assert r.resolve("plan") == Uri.parse("file://session/plan.md")
 
 
 def test_persist_survives_roundtrip(tmp_path: pathlib.Path) -> None:
-    session_dir = tmp_path / "artifacts"
-    r1 = ArtifactRegistry(session_dir=session_dir)
+    artifact_dir = tmp_path / "artifacts"
+    r1 = ArtifactRegistry(artifact_dir=artifact_dir)
     r1.bind("pr", Uri.parse("gh://pr/42"))
-    r2 = ArtifactRegistry(session_dir=session_dir)
+    r2 = ArtifactRegistry(artifact_dir=artifact_dir)
     assert r2.resolve("pr") == Uri.parse("gh://pr/42")
 
 

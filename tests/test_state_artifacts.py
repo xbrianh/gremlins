@@ -15,43 +15,43 @@ from gremlins.executor.state import StateData, build_state
 
 def test_setup_dirs_creates_directories(tmp_path):
     state_dir = tmp_path / "state" / "gr-1"
-    session_dir = state_dir / "artifacts"
-    state_mod.State.setup_dirs(state_dir, session_dir, gremlin_id=None)
+    artifact_dir = state_dir / "artifacts"
+    state_mod.State.setup_dirs(state_dir, artifact_dir, gremlin_id=None)
     assert state_dir.is_dir()
-    assert session_dir.is_dir()
+    assert artifact_dir.is_dir()
 
 
 def test_setup_dirs_writes_instructions(tmp_path):
     state_dir = tmp_path / "state" / "gr-1"
-    session_dir = state_dir / "artifacts"
+    artifact_dir = state_dir / "artifacts"
     state_mod.State.setup_dirs(
-        state_dir, session_dir, gremlin_id=None, instructions="do x"
+        state_dir, artifact_dir, gremlin_id=None, instructions="do x"
     )
     assert (state_dir / "instructions.txt").read_text() == "do x"
 
 
 def test_setup_dirs_no_gremlin_id_skips_state_json(tmp_path):
     state_dir = tmp_path / "state" / "gr-1"
-    session_dir = state_dir / "artifacts"
-    state_mod.State.setup_dirs(state_dir, session_dir, gremlin_id=None)
+    artifact_dir = state_dir / "artifacts"
+    state_mod.State.setup_dirs(state_dir, artifact_dir, gremlin_id=None)
     assert not (state_dir / "state.json").exists()
 
 
 def test_setup_dirs_with_gremlin_id_bootstraps_state_json(tmp_path):
     state_dir = tmp_path / "state" / "gr-2"
-    session_dir = state_dir / "artifacts"
-    state_mod.State.setup_dirs(state_dir, session_dir, gremlin_id="gr-2")
+    artifact_dir = state_dir / "artifacts"
+    state_mod.State.setup_dirs(state_dir, artifact_dir, gremlin_id="gr-2")
     data = json.loads((state_dir / "state.json").read_text())
     assert data["id"] == "gr-2"
 
 
 def test_setup_dirs_with_gremlin_id_does_not_overwrite_existing_state_json(tmp_path):
     state_dir = tmp_path / "state" / "gr-3"
-    session_dir = state_dir / "artifacts"
+    artifact_dir = state_dir / "artifacts"
     state_dir.mkdir(parents=True)
     existing = {"id": "gr-3", "stage": "implement", "extra": True}
     (state_dir / "state.json").write_text(json.dumps(existing))
-    state_mod.State.setup_dirs(state_dir, session_dir, gremlin_id="gr-3")
+    state_mod.State.setup_dirs(state_dir, artifact_dir, gremlin_id="gr-3")
     assert json.loads((state_dir / "state.json").read_text()) == existing
 
 
@@ -260,7 +260,7 @@ def test_build_state_defaults_artifacts(sandbox):
     state = build_state(
         data=StateData.load(None),
         client=Client("fake", "model"),
-        session_dir=sandbox.state,
+        artifact_dir=sandbox.state,
     )
     assert state.artifacts is not None
     assert state.repo == ""
@@ -274,17 +274,17 @@ def test_build_state_data_fields(sandbox):
         StateData.load(None), loop_iteration=3, attempt="implement-aabb"
     )
     client = Client("fake", "model")
-    state = build_state(data=data, client=client, session_dir=sandbox.state)
+    state = build_state(data=data, client=client, artifact_dir=sandbox.state)
     assert state.data.loop_iteration == 3
     assert state.data.attempt == "implement-aabb"
 
 
 def test_build_state_preserves_explicit_registry(sandbox):
-    registry = ArtifactRegistry(session_dir=sandbox.state, cwd=None)
+    registry = ArtifactRegistry(artifact_dir=sandbox.state, cwd=None)
     state = build_state(
         data=StateData.load(None),
         client=Client("fake", "model"),
-        session_dir=sandbox.state,
+        artifact_dir=sandbox.state,
         artifacts=registry,
     )
     assert state.artifacts is registry

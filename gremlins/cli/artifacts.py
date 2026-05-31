@@ -19,7 +19,7 @@ def artifacts_main(argv: list[str]) -> int:
     gdir = state_root() / target
     if gdir.exists():
         sdir = gdir / "artifacts"
-        reg = ArtifactRegistry(session_dir=sdir)
+        reg = ArtifactRegistry(artifact_dir=sdir)
         _print_live(reg)
         return 0
     try:

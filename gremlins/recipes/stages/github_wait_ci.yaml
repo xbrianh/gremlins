@@ -1,5 +1,5 @@
 # Loop body: poll → fix → capture-head.
-# Iteration-1 detection: {session_dir}/fix-head absent means no prior fix push.
+# Iteration-1 detection: {artifact_dir}/fix-head absent means no prior fix push.
 # Post-fix SHA verification: fix-head present → wait for headRefOid to match.
 
 required-prompt: true
@@ -30,8 +30,8 @@ stages:
 
               # Post-fix path: fix-head written by capture-head on prior iteration.
               fix_head=""
-              if [ -f "{session_dir}/fix-head" ]; then
-                  fix_head=$(cat "{session_dir}/fix-head")
+              if [ -f "{artifact_dir}/fix-head" ]; then
+                  fix_head=$(cat "{artifact_dir}/fix-head")
               fi
 
               fetch_status() {
@@ -43,7 +43,7 @@ stages:
                   local decision="$1"
                   if [ "$decision" = "REVIEW_REQUIRED" ]; then
                       printf 'ci-gate: PR blocked by required human review\n' \
-                          > "{session_dir}/bail"
+                          > "{artifact_dir}/bail"
                       exit 2
                   fi
               }
@@ -79,7 +79,7 @@ stages:
                       fi
                       if [ "$(date +%s)" -ge "$push_deadline" ]; then
                           printf 'ci-gate: timed out waiting for GitHub to reflect pushed SHA\n' \
-                              > "{session_dir}/bail"
+                              > "{artifact_dir}/bail"
                           exit 2
                       fi
                       sleep {poll_interval}
@@ -152,4 +152,4 @@ stages:
           fix_head: "file://session/fix-head"
         options:
           cmds:
-            - 'git rev-parse HEAD > "{session_dir}/fix-head"'
+            - 'git rev-parse HEAD > "{artifact_dir}/fix-head"'

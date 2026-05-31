@@ -11,7 +11,7 @@ from gremlins.stages.base import Stage
 
 
 def _make_state(
-    session_dir: pathlib.Path,
+    artifact_dir: pathlib.Path,
     *,
     loop_iteration: int = 1,
     attempt: str = "",
@@ -28,7 +28,7 @@ def _make_state(
     state = build_state(
         data=data,
         client=FakeClaudeClient(),
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         repo=repo,
         cwd=cwd,
         base_ref=base_ref,

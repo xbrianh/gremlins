@@ -115,12 +115,12 @@ def _child_stage(name: str) -> Stage:
     return s
 
 
-def _child_state(session_dir: pathlib.Path) -> State:
-    session_dir.mkdir(parents=True, exist_ok=True)
+def _child_state(artifact_dir: pathlib.Path) -> State:
+    artifact_dir.mkdir(parents=True, exist_ok=True)
     return build_state(
         data=StateData(),
         client=FakeClaudeClient(),
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
     )
 
 
@@ -391,7 +391,7 @@ def test_subprocess_cost_accumulated_in_state(
                 StateData(gremlin_id="test-gremlin"), state_file=sf
             ),
             client=FakeClaudeClient(),
-            session_dir=session,
+            artifact_dir=session,
         )
 
     runners: list[tuple[str, State, Callable[[], Any]]] = [

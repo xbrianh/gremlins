@@ -45,9 +45,9 @@ stages:
         - |
           PR_NUM="${pr_uri##*/}" &&  # gh://pr/N — strip trailing segment to get number
           PR_JSON="$(gh pr view "$PR_NUM" --json url,headRefName,number)" &&
-          printf "%s" "$(printf '%s' "$PR_JSON" | jq -r '.url')" > "{session_dir}/pr-url.txt" &&
-          printf "%s" "$(printf '%s' "$PR_JSON" | jq -r '.headRefName')" > "{session_dir}/pr-branch.txt" &&
-          printf "%s" "$(printf '%s' "$PR_JSON" | jq -r '.number')" > "{session_dir}/pr-number.txt"
+          printf "%s" "$(printf '%s' "$PR_JSON" | jq -r '.url')" > "{artifact_dir}/pr-url.txt" &&
+          printf "%s" "$(printf '%s' "$PR_JSON" | jq -r '.headRefName')" > "{artifact_dir}/pr-branch.txt" &&
+          printf "%s" "$(printf '%s' "$PR_JSON" | jq -r '.number')" > "{artifact_dir}/pr-number.txt"
   - { type: gremlins:plan-gh, prompt: [code-style, terse, gremlins:plan_gh.md] }
   - { type: gremlins:implement, prompt: [code-style, terse, implement_pr_extension.md] }
   - { type: verify,             options: { cmds: ["make check", "make test"] }, prompt: verify }

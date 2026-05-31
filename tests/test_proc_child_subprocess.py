@@ -81,12 +81,12 @@ def _stage(name: str, timeout: float | None = None) -> Stage:
     return s
 
 
-def _state(session_dir: pathlib.Path) -> State:
-    session_dir.mkdir(parents=True, exist_ok=True)
+def _state(artifact_dir: pathlib.Path) -> State:
+    artifact_dir.mkdir(parents=True, exist_ok=True)
     return build_state(
         data=StateData(),
         client=FakeClaudeClient(),
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
     )
 
 
@@ -378,13 +378,13 @@ def test_build_child_spec_dict_no_test_client(tmp_path: pathlib.Path) -> None:
 
 
 def test_build_child_spec_dict_with_test_client(tmp_path: pathlib.Path) -> None:
-    session_dir = tmp_path / "c"
-    session_dir.mkdir(parents=True, exist_ok=True)
+    artifact_dir = tmp_path / "c"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
     test_client = FakeClaudeClient()
     child_st = build_state(
         data=StateData(),
         client=test_client,
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         test_client=test_client,
         stage_model="real-model",
     )

@@ -22,15 +22,15 @@ def child_state(
     if not fan_out:
         return dataclasses.replace(parent, client=client, stage_model=stage_model)
     if child_id:
-        session_dir = _paths.state_root() / child_id / "artifacts"
-        session_dir.mkdir(parents=True, exist_ok=True)
+        artifact_dir = _paths.state_root() / child_id / "artifacts"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
     else:
-        session_dir = parent.session_dir / child.name
-        session_dir.mkdir(parents=True, exist_ok=True)
+        artifact_dir = parent.artifact_dir / child.name
+        artifact_dir.mkdir(parents=True, exist_ok=True)
     return dataclasses.replace(
         parent,
         client=client,
         stage_model=stage_model,
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         child_key=child.name,
     )

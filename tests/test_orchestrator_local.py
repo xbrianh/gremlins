@@ -26,16 +26,16 @@ def _local_pipeline_path(cwd):
 
 
 def test_local_main_plan_mode(tmp_path, monkeypatch):
-    session_dir = tmp_path / "artifacts"
-    session_dir.mkdir()
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
     plan_file = tmp_path / "plan.md"
     plan_file.write_text("# Plan\nDo stuff.\n")
 
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.executor.run.resolve_session_dir",
-        lambda gremlin_id=None: session_dir,
+        "gremlins.executor.run.resolve_artifact_dir",
+        lambda gremlin_id=None: artifact_dir,
     )
     client = _ReviewCreatingClient(
         fixtures={
@@ -64,16 +64,16 @@ def test_local_main_plan_mode(tmp_path, monkeypatch):
 def test_local_main_resume_from_review_code_requires_git_changes(
     tmp_path, monkeypatch, capsys
 ):
-    session_dir = tmp_path / "artifacts"
-    session_dir.mkdir()
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
     plan_file = tmp_path / "plan.md"
     plan_file.write_text("# Plan\nDo stuff.\n")
 
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.executor.run.resolve_session_dir",
-        lambda gremlin_id=None: session_dir,
+        "gremlins.executor.run.resolve_artifact_dir",
+        lambda gremlin_id=None: artifact_dir,
     )
     monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: True)
     monkeypatch.setattr("gremlins.executor.run.has_dirty_worktree", lambda: False)
@@ -97,16 +97,16 @@ def test_local_main_resume_from_review_code_requires_git_changes(
 def test_local_main_resume_from_review_code_allows_existing_git_changes(
     tmp_path, monkeypatch
 ):
-    session_dir = tmp_path / "artifacts"
-    session_dir.mkdir()
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
     plan_file = tmp_path / "plan.md"
     plan_file.write_text("# Plan\nDo stuff.\n")
 
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.executor.run.resolve_session_dir",
-        lambda gremlin_id=None: session_dir,
+        "gremlins.executor.run.resolve_artifact_dir",
+        lambda gremlin_id=None: artifact_dir,
     )
     monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: True)
     monkeypatch.setattr("gremlins.executor.run.has_dirty_worktree", lambda: False)
@@ -136,16 +136,16 @@ def test_local_main_resume_from_review_code_allows_existing_git_changes(
 
 def test_local_main_client_specifier_model(tmp_path, monkeypatch):
     """Model from --client provider:model flows into stage run() calls."""
-    session_dir = tmp_path / "artifacts"
-    session_dir.mkdir()
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
     plan_file = tmp_path / "plan.md"
     plan_file.write_text("# Plan\nDo stuff.\n")
 
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.executor.run.resolve_session_dir",
-        lambda gremlin_id=None: session_dir,
+        "gremlins.executor.run.resolve_artifact_dir",
+        lambda gremlin_id=None: artifact_dir,
     )
     client = _ReviewCreatingClient(
         fixtures={
@@ -190,16 +190,16 @@ def test_local_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir)
     gremlin_id = "test-gr-id"
     state_dir = make_state_dir(gremlin_id)
 
-    session_dir = tmp_path / "artifacts"
-    session_dir.mkdir()
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
     plan_file = tmp_path / "plan.md"
     plan_file.write_text("# Plan\nDo stuff.\n")
 
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.executor.run.resolve_session_dir",
-        lambda gremlin_id=None: session_dir,
+        "gremlins.executor.run.resolve_artifact_dir",
+        lambda gremlin_id=None: artifact_dir,
     )
     client = _ReviewCreatingClient(
         fixtures={
@@ -228,8 +228,8 @@ def test_local_main_env_file_vars_reach_verify(tmp_path, monkeypatch):
     """Vars from .gremlins/env are passed to exec subprocess environments."""
     import subprocess as _subprocess
 
-    session_dir = tmp_path / "artifacts"
-    session_dir.mkdir()
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
     plan_file = tmp_path / "plan.md"
     plan_file.write_text("# Plan\nDo stuff.\n")
 
@@ -242,8 +242,8 @@ def test_local_main_env_file_vars_reach_verify(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.executor.run.resolve_session_dir",
-        lambda gremlin_id=None: session_dir,
+        "gremlins.executor.run.resolve_artifact_dir",
+        lambda gremlin_id=None: artifact_dir,
     )
 
     captured_envs: list[dict] = []
@@ -298,8 +298,8 @@ def test_local_main_env_file_sourced_with_overlay_dir_set(tmp_path, monkeypatch)
 
     state_dir = tmp_path / "state"
     state_dir.mkdir()
-    session_dir = state_dir / "session"
-    session_dir.mkdir()
+    artifact_dir = state_dir / "session"
+    artifact_dir.mkdir()
 
     # Simulate the launcher: GREMLINS_OVERLAY_DIR points to state_dir/.gremlins, which
     # does not yet exist when run_pipeline starts.
@@ -308,8 +308,8 @@ def test_local_main_env_file_sourced_with_overlay_dir_set(tmp_path, monkeypatch)
     monkeypatch.chdir(proj_dir)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.executor.run.resolve_session_dir",
-        lambda gremlin_id=None: session_dir,
+        "gremlins.executor.run.resolve_artifact_dir",
+        lambda gremlin_id=None: artifact_dir,
     )
 
     captured_envs: list[dict] = []
@@ -350,16 +350,16 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
     default_client_spec model was never consulted. A pipeline with
     default_client: copilot:gpt-5.4 produced model=sonnet.
     """
-    session_dir = tmp_path / "artifacts"
-    session_dir.mkdir()
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
     plan_file = tmp_path / "plan.md"
     plan_file.write_text("# Plan\nDo stuff.\n")
 
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.executor.run.resolve_session_dir",
-        lambda gremlin_id=None: session_dir,
+        "gremlins.executor.run.resolve_artifact_dir",
+        lambda gremlin_id=None: artifact_dir,
     )
     # Override Pipeline.from_yaml to inject default_client: copilot:gpt-5.4 and
     # re-fill stage clients so every stage inherits that model.
@@ -424,14 +424,14 @@ def test_local_stage_inputs_instructions_reach_plan(
     state["stage_inputs"] = {"instructions": "instr from state"}
     sf.write_text(json.dumps(state))
 
-    session_dir = tmp_path / "artifacts"
-    session_dir.mkdir()
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
 
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.executor.run.resolve_session_dir",
-        lambda gremlin_id=None: session_dir,
+        "gremlins.executor.run.resolve_artifact_dir",
+        lambda gremlin_id=None: artifact_dir,
     )
 
     client = _ReviewCreatingClient(
@@ -459,9 +459,9 @@ def test_local_stage_inputs_instructions_reach_plan(
 
 def test_plan_skip_if_exists_on_resume(tmp_path, monkeypatch):
     """Resume: plan stage is skipped when plan artifact is already verified."""
-    session_dir = tmp_path / "artifacts"
-    session_dir.mkdir()
-    (session_dir / "plan.md").write_text("# Plan\nDo stuff.\n", encoding="utf-8")
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    (artifact_dir / "plan.md").write_text("# Plan\nDo stuff.\n", encoding="utf-8")
     (tmp_path / "registry.json").write_text(
         json.dumps({"plan": "file://session/plan.md"})
     )
@@ -469,8 +469,8 @@ def test_plan_skip_if_exists_on_resume(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.executor.run.resolve_session_dir",
-        lambda gremlin_id=None: session_dir,
+        "gremlins.executor.run.resolve_artifact_dir",
+        lambda gremlin_id=None: artifact_dir,
     )
     client = _ReviewCreatingClient(
         fixtures={

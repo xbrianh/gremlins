@@ -1,5 +1,5 @@
-<!-- placeholders: base_ref, instructions, session_dir -->
-You are creating an implementation plan. Write the plan to `{session_dir}/plan.md`.
+<!-- placeholders: base_ref, instructions, artifact_dir -->
+You are creating an implementation plan. Write the plan to `{artifact_dir}/plan.md`.
 
 ## Base branch
 
@@ -15,7 +15,7 @@ Read any relevant source files to understand the existing code and identify what
 
 ## If plan.md already exists
 
-If `{session_dir}/plan.md` already exists and is non-empty, read it as source material. Refine its content into a proper implementation plan following the structure below. The file must begin with a `# Title` H1 on the very first line — if the existing content has no leading H1, derive a concise title from the content and add it as the first line.
+If `{artifact_dir}/plan.md` already exists and is non-empty, read it as source material. Refine its content into a proper implementation plan following the structure below. The file must begin with a `# Title` H1 on the very first line — if the existing content has no leading H1, derive a concise title from the content and add it as the first line.
 
 ## Create the plan
 

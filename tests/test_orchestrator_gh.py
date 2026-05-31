@@ -155,10 +155,11 @@ def _patch_common(
     )
     monkeypatch.setattr("gremlins.executor.run._get_repo", lambda: "owner/repo")
 
-    session_dir = tmp_path / "artifacts"
-    session_dir.mkdir()
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
     monkeypatch.setattr(
-        "gremlins.executor.run.resolve_session_dir", lambda gremlin_id=None: session_dir
+        "gremlins.executor.run.resolve_artifact_dir",
+        lambda gremlin_id=None: artifact_dir,
     )
 
     state_file = tmp_path / "state.json"
@@ -192,15 +193,15 @@ def _patch_common(
     registry_file = tmp_path / "registry.json"
     registry_file.write_text(json.dumps(registry_data))
     # Create placeholder artifact files so file resolvers find them.
-    (session_dir / "spec.md").write_text("", encoding="utf-8")
-    (session_dir / "plan.md").write_text("# Plan\nDo stuff.\n", encoding="utf-8")
-    (session_dir / "pr-title.txt").write_text("Fake PR Title\n")
-    (session_dir / "pr-body.md").write_text("Fake PR body.\n")
-    (session_dir / "pr-url.txt").write_text(
+    (artifact_dir / "spec.md").write_text("", encoding="utf-8")
+    (artifact_dir / "plan.md").write_text("# Plan\nDo stuff.\n", encoding="utf-8")
+    (artifact_dir / "pr-title.txt").write_text("Fake PR Title\n")
+    (artifact_dir / "pr-body.md").write_text("Fake PR body.\n")
+    (artifact_dir / "pr-url.txt").write_text(
         f"https://github.com/owner/repo/pull/{fake_pr_number}\n"
     )
-    (session_dir / "pr-branch.txt").write_text("issue-42-fake-slug\n")
-    (session_dir / "pr-number.txt").write_text(f"{fake_pr_number}\n")
+    (artifact_dir / "pr-branch.txt").write_text("issue-42-fake-slug\n")
+    (artifact_dir / "pr-number.txt").write_text(f"{fake_pr_number}\n")
     monkeypatch.setattr(
         "gremlins.executor.run.resolve_state_file", lambda gremlin_id=None: state_file
     )
@@ -263,7 +264,7 @@ def _patch_common(
         "gremlins.executor.state.StateData.append_artifact", _append_artifact
     )
 
-    return session_dir, state_file
+    return artifact_dir, state_file
 
 
 def _prepare_for_plan_stage(tmp_path: pathlib.Path) -> None:
@@ -407,16 +408,16 @@ class _CommittingClient(FakeClaudeClient):
         self,
         *args,
         git_dir: pathlib.Path = None,
-        session_dir: pathlib.Path = None,
+        artifact_dir: pathlib.Path = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self._git_dir = git_dir
-        self._session_dir = session_dir
+        self._artifact_dir = artifact_dir
 
     def run(self, prompt, *, label, **kwargs):
-        if label == "plan" and self._session_dir is not None:
-            plan_md = self._session_dir / "plan.md"
+        if label == "plan" and self._artifact_dir is not None:
+            plan_md = self._artifact_dir / "plan.md"
             if not plan_md.exists() or plan_md.stat().st_size == 0:
                 plan_md.write_text("# Plan\nDo stuff.\n", encoding="utf-8")
         if label == "implement" and self._git_dir is not None:
@@ -442,12 +443,12 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+    artifact_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
     # Pre-populate plan.md and plan-issue-number.txt (simulating what
     # resolve-plan-input and publish-as-issue do in production).
-    (session_dir / "plan.md").write_text("# Plan\nDo stuff.\n", encoding="utf-8")
-    (session_dir / "plan-issue-number.txt").write_text("42", encoding="utf-8")
+    (artifact_dir / "plan.md").write_text("# Plan\nDo stuff.\n", encoding="utf-8")
+    (artifact_dir / "plan-issue-number.txt").write_text("42", encoding="utf-8")
 
     monkeypatch.setattr(
         subprocess,
@@ -461,7 +462,7 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
 
     client = _CommittingClient(
         git_dir=tmp_path,
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         fixtures={
             "plan": MINIMAL_EVENTS,
             "implement": IMPL_EVENTS,
@@ -485,9 +486,9 @@ def test_plan_skip_if_exists_on_resume(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+    artifact_dir, state_file = _patch_common(monkeypatch, tmp_path)
     # Overwrite with non-empty content so verified("plan") is True.
-    (session_dir / "plan.md").write_text("# Plan\nDo stuff.\n", encoding="utf-8")
+    (artifact_dir / "plan.md").write_text("# Plan\nDo stuff.\n", encoding="utf-8")
 
     monkeypatch.setattr(
         subprocess,
@@ -500,7 +501,7 @@ def test_plan_skip_if_exists_on_resume(tmp_path, monkeypatch):
 
     client = _CommittingClient(
         git_dir=tmp_path,
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         fixtures={
             "implement": IMPL_EVENTS,
             "compose-pr": MINIMAL_EVENTS,
@@ -525,9 +526,9 @@ def test_publish_as_issue_skip_if_exists(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
-    (session_dir / "plan.md").write_text("# Plan\nDo stuff.\n", encoding="utf-8")
-    (session_dir / "plan-issue-number.txt").write_text("42", encoding="utf-8")
+    artifact_dir, state_file = _patch_common(monkeypatch, tmp_path)
+    (artifact_dir / "plan.md").write_text("# Plan\nDo stuff.\n", encoding="utf-8")
+    (artifact_dir / "plan-issue-number.txt").write_text("42", encoding="utf-8")
 
     # Add plan-issue-number to registry so skip_if_exists fires.
     registry_path = tmp_path / "registry.json"
@@ -558,7 +559,7 @@ def test_publish_as_issue_skip_if_exists(tmp_path, monkeypatch):
 
     client = _CommittingClient(
         git_dir=tmp_path,
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         fixtures={
             "implement": IMPL_EVENTS,
             "compose-pr": MINIMAL_EVENTS,
@@ -605,18 +606,18 @@ def test_plan_no_h1_issue_body(tmp_path, monkeypatch):
 
     _real_shell = _proc_mod.run_shell_async  # save before _patch_common patches it
 
-    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+    artifact_dir, state_file = _patch_common(monkeypatch, tmp_path)
     _noop_shell = _proc_mod.run_shell_async  # now points to _noop_gh_shell
 
     # Clear plan.md so resolve-plan-input actually fetches the issue (tests H1 prepend logic).
-    (session_dir / "plan.md").write_text("", encoding="utf-8")
+    (artifact_dir / "plan.md").write_text("", encoding="utf-8")
 
     # Wire up plan_arg so resolve-plan-input doesn't exit at the [ -z ] guard
     registry_path = tmp_path / "registry.json"
     reg = json.loads(registry_path.read_text())
     reg["plan_arg"] = "file://session/plan-arg.txt"
     registry_path.write_text(json.dumps(reg))
-    (session_dir / "plan-arg.txt").write_text("#42", encoding="utf-8")
+    (artifact_dir / "plan-arg.txt").write_text("#42", encoding="utf-8")
 
     # Let resolve-plan-input run for real (fake gh in PATH handles the gh calls);
     # everything else stays with the noop interceptor
@@ -638,7 +639,7 @@ def test_plan_no_h1_issue_body(tmp_path, monkeypatch):
 
     client = _CommittingClient(
         git_dir=tmp_path,
-        session_dir=None,
+        artifact_dir=None,
         fixtures={
             "implement": IMPL_EVENTS,
             "compose-pr": MINIMAL_EVENTS,
@@ -651,9 +652,9 @@ def test_plan_no_h1_issue_body(tmp_path, monkeypatch):
         run_pipeline(_gh_pipeline_path(tmp_path), argv=["--plan", "#42"], client=client)
     )
     assert result == 0
-    plan_content = (session_dir / "plan.md").read_text(encoding="utf-8")
+    plan_content = (artifact_dir / "plan.md").read_text(encoding="utf-8")
     assert plan_content.startswith("# ")
-    assert (session_dir / "plan-issue-number.txt").exists()
+    assert (artifact_dir / "plan-issue-number.txt").exists()
 
 
 def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch):
@@ -661,7 +662,7 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+    artifact_dir, state_file = _patch_common(monkeypatch, tmp_path)
     _prepare_for_plan_stage(tmp_path)
 
     monkeypatch.setattr(
@@ -675,7 +676,7 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
 
     client = _CommittingClient(
         git_dir=tmp_path,
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         fixtures={
             "plan": _issue_events(),
             "implement": IMPL_EVENTS,
@@ -704,7 +705,7 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+    artifact_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
     monkeypatch.setattr(
         subprocess,
@@ -717,7 +718,7 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
 
     client = _CommittingClient(
         git_dir=tmp_path,
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         fixtures={
             "plan": MINIMAL_EVENTS,
             "implement": IMPL_EVENTS,
@@ -751,7 +752,7 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+    artifact_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
     monkeypatch.setattr(
         subprocess,
@@ -764,7 +765,7 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
 
     client = _CommittingClient(
         git_dir=tmp_path,
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         fixtures={
             "plan": MINIMAL_EVENTS,
             "implement": IMPL_EVENTS,
@@ -797,7 +798,7 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+    artifact_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
     monkeypatch.setattr(
         subprocess,
@@ -810,7 +811,7 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
 
     client = _CommittingClient(
         git_dir=tmp_path,
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         fixtures={
             "plan": MINIMAL_EVENTS,
             "implement": IMPL_EVENTS,
@@ -839,7 +840,7 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
 
 
 def test_resume_from_implement(tmp_path, monkeypatch):
-    """--resume-from implement reads plan.md from session_dir and runs implement onward."""
+    """--resume-from implement reads plan.md from artifact_dir and runs implement onward."""
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
@@ -847,10 +848,10 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         "issue_url": "https://github.com/owner/repo/issues/99",
         "issue_num": "99",
     }
-    session_dir, state_file = _patch_common(
+    artifact_dir, state_file = _patch_common(
         monkeypatch, tmp_path, state_data=state_data
     )
-    (session_dir / "plan.md").write_text(
+    (artifact_dir / "plan.md").write_text(
         "# Resumed Plan\nDo stuff.\n", encoding="utf-8"
     )
 
@@ -893,7 +894,9 @@ def test_resume_from_github_review_pull_request(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    session_dir, state_file = _patch_common(monkeypatch, tmp_path, fake_pr_number="200")
+    artifact_dir, state_file = _patch_common(
+        monkeypatch, tmp_path, fake_pr_number="200"
+    )
 
     data = json.loads(state_file.read_text())
     data["issue_url"] = "https://github.com/owner/repo/issues/5"
@@ -939,7 +942,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
     plan_file = tmp_path / "my-plan.md"
     plan_file.write_text("# Feature\nDo the thing.\n")
 
-    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+    artifact_dir, state_file = _patch_common(monkeypatch, tmp_path)
     _prepare_for_plan_stage(tmp_path)
 
     # Override State.patch so it actually writes fields to state_file instead of no-op.
@@ -1042,7 +1045,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
 
     client = _CommittingClient(
         git_dir=tmp_path,
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         fixtures=fixtures,
     )
     result = asyncio.run(
@@ -1091,7 +1094,7 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
         capture_output=True,
     )
 
-    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+    artifact_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
     data = json.loads(state_file.read_text())
     data["issue_url"] = "https://github.com/owner/repo/issues/42"
@@ -1143,11 +1146,11 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
 
 
 def test_github_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
-    """github-wait-copilot loop receives repo and session_dir; pr_url is written to state by GitHubOpenPullRequest."""
+    """github-wait-copilot loop receives repo and artifact_dir; pr_url is written to state by GitHubOpenPullRequest."""
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    session_dir, state_file = _patch_common(monkeypatch, tmp_path, fake_pr_number="77")
+    artifact_dir, state_file = _patch_common(monkeypatch, tmp_path, fake_pr_number="77")
 
     monkeypatch.setattr(
         subprocess,
@@ -1164,7 +1167,7 @@ def test_github_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
 
     client = _CommittingClient(
         git_dir=tmp_path,
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         fixtures={
             "plan": MINIMAL_EVENTS,
             "implement": IMPL_EVENTS,
@@ -1187,7 +1190,7 @@ def test_github_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
     assert "github-wait-copilot" in captured_stages
     _, copilot_state = captured_stages["github-wait-copilot"]
     assert copilot_state.repo == "owner/repo"
-    assert copilot_state.session_dir == session_dir
+    assert copilot_state.artifact_dir == artifact_dir
     # pr is written to registry.json by push-and-open
     registry_path = tmp_path / "registry.json"
     assert registry_path.exists(), "registry.json should have been written"
@@ -1200,11 +1203,11 @@ def test_github_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
 
 
 def test_github_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
-    """ci-gate LoopStage receives model and session_dir; pr_url is written to state by GitHubOpenPullRequest."""
+    """ci-gate LoopStage receives model and artifact_dir; pr_url is written to state by GitHubOpenPullRequest."""
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    session_dir, state_file = _patch_common(monkeypatch, tmp_path, fake_pr_number="77")
+    artifact_dir, state_file = _patch_common(monkeypatch, tmp_path, fake_pr_number="77")
 
     monkeypatch.setattr(
         subprocess,
@@ -1223,7 +1226,7 @@ def test_github_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
 
     client = _CommittingClient(
         git_dir=tmp_path,
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         fixtures={
             "plan": MINIMAL_EVENTS,
             "implement": IMPL_EVENTS,
@@ -1245,7 +1248,7 @@ def test_github_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
 
     stage = captured_stage["stage"]
     assert stage.client.model == "claude-opus-4-7"
-    assert captured_stage["state"].session_dir == session_dir
+    assert captured_stage["state"].artifact_dir == artifact_dir
     # pr is written to registry.json by push-and-open
     registry_path = tmp_path / "registry.json"
     assert registry_path.exists(), "registry.json should have been written"
@@ -1257,7 +1260,7 @@ def test_github_wait_ci_stage_ordering(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    session_dir, _state_file = _patch_common(monkeypatch, tmp_path)
+    artifact_dir, _state_file = _patch_common(monkeypatch, tmp_path)
 
     monkeypatch.setattr(
         subprocess,
@@ -1274,7 +1277,7 @@ def test_github_wait_ci_stage_ordering(tmp_path, monkeypatch):
 
     client = _CommittingClient(
         git_dir=tmp_path,
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         fixtures={
             "plan": MINIMAL_EVENTS,
             "implement": IMPL_EVENTS,
@@ -1307,7 +1310,7 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    _session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+    _artifact_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
     data = json.loads(state_file.read_text())
     data["issue_url"] = "https://github.com/owner/repo/issues/5"
@@ -1352,11 +1355,13 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
 
 
 def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
-    """verify.run receives fix_model, cwd via options, session_dir via ctx."""
+    """verify.run receives fix_model, cwd via options, artifact_dir via ctx."""
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    session_dir, _state_file = _patch_common(monkeypatch, tmp_path, fake_pr_number="77")
+    artifact_dir, _state_file = _patch_common(
+        monkeypatch, tmp_path, fake_pr_number="77"
+    )
 
     monkeypatch.setattr(
         subprocess,
@@ -1375,7 +1380,7 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
 
     client = _CommittingClient(
         git_dir=tmp_path,
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         fixtures={
             "plan": MINIMAL_EVENTS,
             "implement": IMPL_EVENTS,
@@ -1400,7 +1405,7 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
     # cmds are on the cmd exec stage inside the loop body; first cmd is the user cmd
     cmd_stage = stage.body[0]
     assert cmd_stage.options.get("cmds")[0] == "make check && make test"
-    assert captured_stage["state"].session_dir == session_dir
+    assert captured_stage["state"].artifact_dir == artifact_dir
 
 
 def test_resume_from_verify(tmp_path, monkeypatch):
@@ -1420,7 +1425,7 @@ def test_resume_from_verify(tmp_path, monkeypatch):
         capture_output=True,
     )
 
-    _session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+    _artifact_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
     data = json.loads(state_file.read_text())
     data["issue_url"] = "https://github.com/owner/repo/issues/5"
@@ -1463,7 +1468,7 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
     gremlin_id = "test-gr-id"
-    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+    artifact_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
     monkeypatch.setattr(
         subprocess, "run", _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n")
@@ -1474,7 +1479,7 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch):
 
     client = _CommittingClient(
         git_dir=tmp_path,
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         fixtures={
             "plan": MINIMAL_EVENTS,
             "implement": IMPL_EVENTS,
@@ -1508,7 +1513,7 @@ def test_gh_main_state_client_tracks_effective_model(
     gremlin_id = "test-gr-id"
     state_dir = make_state_dir(gremlin_id)
 
-    session_dir, _ = _patch_common(monkeypatch, tmp_path)
+    artifact_dir, _ = _patch_common(monkeypatch, tmp_path)
 
     monkeypatch.setattr(
         subprocess, "run", _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n")
@@ -1519,7 +1524,7 @@ def test_gh_main_state_client_tracks_effective_model(
 
     client = _CommittingClient(
         git_dir=tmp_path,
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         fixtures={
             "plan": MINIMAL_EVENTS,
             "implement": IMPL_EVENTS,
@@ -1554,7 +1559,7 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    session_dir, state_file = _patch_common(monkeypatch, tmp_path)
+    artifact_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
     # Override Pipeline.from_yaml to inject default_client: copilot:gpt-5.4 and
     # re-fill stage clients so every stage inherits that model.
@@ -1589,7 +1594,7 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
 
     client = _CommittingClient(
         git_dir=tmp_path,
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         fixtures={
             "plan": MINIMAL_EVENTS,
             "implement": IMPL_EVENTS,
@@ -1623,7 +1628,7 @@ def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    session_dir, state_file = _patch_common(
+    artifact_dir, state_file = _patch_common(
         monkeypatch,
         tmp_path,
         state_data={"stage_inputs": {"instructions": "instr from state"}},
@@ -1637,7 +1642,7 @@ def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
 
     client = _CommittingClient(
         git_dir=tmp_path,
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         fixtures={
             "plan": _issue_events(),
             "implement": IMPL_EVENTS,

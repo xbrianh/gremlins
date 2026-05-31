@@ -55,7 +55,7 @@ def test_agent_stage_e2e_reads_artifact_and_writes_output(tmp_path):
     state = build_state(
         data=StateData(),
         client=client,
-        session_dir=tmp_path,
+        artifact_dir=tmp_path,
         worktree=tmp_path,
         artifacts=registry,
     )

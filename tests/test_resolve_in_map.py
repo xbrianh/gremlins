@@ -19,18 +19,18 @@ from gremlins.stages.outcome import Done
 
 
 def _make_registry(tmp_path: pathlib.Path) -> ArtifactRegistry:
-    session_dir = tmp_path / "artifacts"
-    session_dir.mkdir(exist_ok=True)
-    return ArtifactRegistry(session_dir, cwd=tmp_path)
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir(exist_ok=True)
+    return ArtifactRegistry(artifact_dir, cwd=tmp_path)
 
 
 def _make_state(tmp_path: pathlib.Path, client=None):
-    session_dir = tmp_path / "artifacts"
-    session_dir.mkdir(exist_ok=True)
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir(exist_ok=True)
     return build_state(
         data=StateData(),
         client=client or FakeClaudeClient(),
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         worktree=tmp_path,
     )
 
