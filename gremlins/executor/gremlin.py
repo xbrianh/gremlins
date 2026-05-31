@@ -107,6 +107,8 @@ class Gremlin:
         base_ref_sha: str = "",
         base_ref: str = "",
         fetch_worktree: bool = False,
+        pipeline_path: str = "",
+        pipeline_args: list[str] | None = None,
     ) -> None:
         unknown: list[str] = []
         for s in stages:
@@ -139,6 +141,8 @@ class Gremlin:
         self.base_ref_sha = base_ref_sha
         self.base_ref = base_ref
         self.fetch_worktree = fetch_worktree
+        self.pipeline_path = pipeline_path
+        self.pipeline_args = pipeline_args or []
 
     @property
     def artifact_dir(self) -> pathlib.Path:
@@ -336,7 +340,7 @@ class Gremlin:
                     )
                 )
             except Exception as exc:
-                logger.debug(f"failed to load pipeline for {gremlin_id}: {exc}")
+                raise ValueError(f"could not load pipeline for {gremlin_id}: {exc}") from exc
 
         if pipeline is None:
             raise ValueError(f"could not load pipeline for {gremlin_id}")
@@ -352,6 +356,8 @@ class Gremlin:
             worktree_dir=worktree_dir,
             instructions=instructions,
             project_root=project_root,
+            pipeline_path=pipeline_path,
+            pipeline_args=pipeline_args,
         )
 
     @classmethod

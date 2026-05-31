@@ -25,6 +25,7 @@ from gremlins import paths as _paths
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.client import PACKAGE_DEFAULT
+from gremlins.executor.gremlin import Gremlin
 from gremlins.executor.state import StateData, validate_gremlin_id
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.discovery import list_pipelines, resolve_pipeline_path
@@ -702,28 +703,11 @@ def resume(gremlin_id: str, *, graft: str | None = None) -> None:
     state_dir, state = _load_resume_state(gremlin_id)
     _check_resume_preconditions(gremlin_id, state_dir, state, graft)
 
-    # Resolve pipeline path (hermetic first, then fallback)
-    kind = state.get("kind", "")
-    pipeline_args = cast(list[str], state.get("pipeline_args") or [])
-    pipeline_path = str(state.get("pipeline_path") or "")
-    project_root = str(state.get("project_root") or _paths.project_root())
+    gremlin = Gremlin.open(gremlin_id)
+    project_root = gremlin.project_root or str(_paths.project_root())
+    _load_pipeline_and_check_gh(project_root, gremlin.pipeline_path)
 
-    hermetic = state_dir / "pipeline.yaml"
-    if hermetic.is_file():
-        pipeline_path = str(hermetic)
-    elif kind:
-        from gremlins.cli.pipeline_args import resolve_pipeline
-
-        try:
-            filtered, pipeline_path = resolve_pipeline(
-                kind, tuple(pipeline_args), project_root
-            )
-            pipeline_args = filtered
-        except FileNotFoundError:
-            pass
-
-    pipeline_data = _load_pipeline_and_check_gh(project_root, pipeline_path)
-    stage = _determine_stage(state, pipeline_data)
+    stage = _determine_stage(state, gremlin.pipeline_data)
     if graft is not None:
         stage = _append_graft(state_dir, graft, project_root)
     _patch_state_for_resume(
@@ -731,11 +715,11 @@ def resume(gremlin_id: str, *, graft: str | None = None) -> None:
         state_dir,
         state,
         stage,
-        pipeline_args,
-        pipeline_path,
+        gremlin.pipeline_args,
+        gremlin.pipeline_path,
     )
     p = _spawn_resume(
-        gremlin_id, state_dir, state, pipeline_path, pipeline_args, stage, project_root
+        gremlin_id, state_dir, state, gremlin.pipeline_path, gremlin.pipeline_args, stage, project_root
     )
     (state_dir / "pid").write_text(str(p.pid), encoding="utf-8")
     StateData.load(gremlin_id).patch(pid=p.pid)
