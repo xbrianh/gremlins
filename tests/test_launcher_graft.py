@@ -222,7 +222,10 @@ def _make_state(state_dir: pathlib.Path, repo: pathlib.Path, **extra) -> None:
 
 def _write_hermetic(state_dir: pathlib.Path, stages: list | None = None) -> None:
     if stages is None:
-        stages = [{"name": "plan", "type": "agent"}, {"name": "ci-gate", "type": "agent"}]
+        stages = [
+            {"name": "plan", "type": "agent"},
+            {"name": "ci-gate", "type": "agent"},
+        ]
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "pipeline.yaml").write_text(
         yaml.dump({"__gremlins_expanded__": True, "stages": stages}),
