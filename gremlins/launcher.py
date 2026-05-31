@@ -719,7 +719,13 @@ def resume(gremlin_id: str, *, graft: str | None = None) -> None:
         gremlin.pipeline_path,
     )
     p = _spawn_resume(
-        gremlin_id, state_dir, state, gremlin.pipeline_path, gremlin.pipeline_args, stage, project_root
+        gremlin_id,
+        state_dir,
+        state,
+        gremlin.pipeline_path,
+        gremlin.pipeline_args,
+        stage,
+        project_root,
     )
     (state_dir / "pid").write_text(str(p.pid), encoding="utf-8")
     StateData.load(gremlin_id).patch(pid=p.pid)

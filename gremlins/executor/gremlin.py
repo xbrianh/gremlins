@@ -340,7 +340,9 @@ class Gremlin:
                     )
                 )
             except Exception as exc:
-                raise ValueError(f"could not load pipeline for {gremlin_id}: {exc}") from exc
+                raise ValueError(
+                    f"could not load pipeline for {gremlin_id}: {exc}"
+                ) from exc
 
         if pipeline is None:
             raise ValueError(f"could not load pipeline for {gremlin_id}")
