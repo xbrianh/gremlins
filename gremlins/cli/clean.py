@@ -33,7 +33,10 @@ def _dir_size(path: pathlib.Path) -> int:
             if entry.is_dir(follow_symlinks=False):
                 total += _dir_size(pathlib.Path(entry.path))
             elif entry.is_file(follow_symlinks=False):
-                total += entry.stat().st_size
+                try:
+                    total += entry.stat().st_size
+                except OSError:
+                    pass
     except OSError:
         return 0
     return total
