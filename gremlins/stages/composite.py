@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import dataclasses
 
-from gremlins import paths as _paths
 from gremlins.executor.state import State
 from gremlins.stages.base import Stage
 
@@ -19,18 +18,17 @@ def child_state(
         if child.client and parent.test_client
         else parent.stage_model
     )
-    if not fan_out:
-        return dataclasses.replace(parent, client=client, stage_model=stage_model)
-    if child_id:
-        artifact_dir = _paths.state_root() / child_id / "artifacts"
-        artifact_dir.mkdir(parents=True, exist_ok=True)
-    else:
+    # Old layout (no gremlin_id): child artifact_dir = parent.artifact_dir / child.name
+    if fan_out and not child_id:
         artifact_dir = parent.artifact_dir / child.name
         artifact_dir.mkdir(parents=True, exist_ok=True)
+        return dataclasses.replace(
+            parent,
+            client=client,
+            stage_model=stage_model,
+            artifact_dir=artifact_dir,
+            child_key=child.name,
+        )
     return dataclasses.replace(
-        parent,
-        client=client,
-        stage_model=stage_model,
-        artifact_dir=artifact_dir,
-        child_key=child.name,
+        parent, client=client, stage_model=stage_model, child_key=child.name
     )

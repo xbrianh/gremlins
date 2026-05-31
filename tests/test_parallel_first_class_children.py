@@ -2,7 +2,7 @@
 
 Covers:
 - FileArtifactResolver._path handles file:///absolute/path URIs
-- _snapshot_registry rewrites file://session/ URIs to absolute paths
+- fork_state copies artifact directory and registry verbatim
 - ParallelStage.run creates <state_root>/<child_id>/state.json for each child
 - A child can read a parent-bound file://session/ artifact via the inherited registry
 """
@@ -21,7 +21,7 @@ from gremlins.artifacts.schemes import FileArtifactResolver
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state
-from gremlins.stages.parallel import ParallelStage, _snapshot_registry
+from gremlins.stages.parallel import ParallelStage
 
 # ---------------------------------------------------------------------------
 # FileArtifactResolver._path: absolute path URIs
@@ -78,60 +78,6 @@ def test_file_resolver_session_relative_still_works(tmp_path: pathlib.Path) -> N
     resolver = FileArtifactResolver(artifact_dir)
     uri = Uri.parse("file://session/output.txt")
     assert resolver._path(uri) == target.resolve()
-
-
-# ---------------------------------------------------------------------------
-# _snapshot_registry: rewriting file://session/ URIs
-# ---------------------------------------------------------------------------
-
-
-def test_snapshot_registry_rewrites_session_uris(tmp_path: pathlib.Path) -> None:
-    parent_session = tmp_path / "parent" / "artifacts"
-    parent_session.mkdir(parents=True)
-
-    src = tmp_path / "parent" / "registry.json"
-    src.write_text(
-        json.dumps(
-            {
-                "my-artifact": "file://session/output.md",
-                "other-artifact": "git://ref/HEAD",
-                "gh-artifact": "gh://pr/42",
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    dst = tmp_path / "child" / "registry.json"
-    dst.parent.mkdir(parents=True)
-
-    _snapshot_registry(src, dst, parent_session)
-
-    data = json.loads(dst.read_text(encoding="utf-8"))
-    expected_abs = str((parent_session / "output.md").resolve())
-    assert data["my-artifact"] == f"file://{expected_abs}"
-    # Non-file:// URIs are copied as-is
-    assert data["other-artifact"] == "git://ref/HEAD"
-    assert data["gh-artifact"] == "gh://pr/42"
-
-
-def test_snapshot_registry_missing_src_is_noop(tmp_path: pathlib.Path) -> None:
-    src = tmp_path / "nonexistent.json"
-    dst = tmp_path / "dst.json"
-    parent_session = tmp_path / "session"
-
-    _snapshot_registry(src, dst, parent_session)
-
-    assert not dst.exists()
-
-
-def test_snapshot_registry_empty_src(tmp_path: pathlib.Path) -> None:
-    src = tmp_path / "registry.json"
-    src.write_text("{}", encoding="utf-8")
-    dst = tmp_path / "dst.json"
-    parent_session = tmp_path / "session"
-
-    _snapshot_registry(src, dst, parent_session)
-    assert json.loads(dst.read_text(encoding="utf-8")) == {}
 
 
 # ---------------------------------------------------------------------------
@@ -213,52 +159,64 @@ def test_parallel_run_no_gremlin_id_uses_old_layout(sandbox) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_child_reads_parent_artifact_via_registry(sandbox) -> None:
-    """After _init_child_dir, child's registry has absolute URIs for parent session files."""
-    from gremlins.stages.parallel import _init_child_dir
+def test_child_reads_parent_artifact_via_fork(sandbox) -> None:
+    """After fork_state, child can read parent artifacts via copied artifact dir."""
 
-    gremlin_id = "parent-reg-test"
-    state_root = paths.state_root()
-    parent_state_dir = state_root / gremlin_id
-    parent_state_dir.mkdir(parents=True, exist_ok=True)
-    parent_session = parent_state_dir / "artifacts"
-    parent_session.mkdir(parents=True, exist_ok=True)
+    async def _test():
+        from gremlins.executor.fork import fork_state
 
-    # Write a file the parent "produced" into its session dir
-    artifact_file = parent_session / "result.md"
-    artifact_file.write_text("parent result")
+        gremlin_id = "parent-reg-test"
+        state_root = paths.state_root()
+        parent_state_dir = state_root / gremlin_id
+        parent_state_dir.mkdir(parents=True, exist_ok=True)
+        parent_session = parent_state_dir / "artifacts"
+        parent_session.mkdir(parents=True, exist_ok=True)
 
-    # Set up parent registry pointing at it via file://session/ URI
-    parent_registry = parent_state_dir / "registry.json"
-    parent_registry.write_text(
-        json.dumps({"result": "file://session/result.md"}), encoding="utf-8"
-    )
+        # Write a file the parent "produced" into its session dir
+        artifact_file = parent_session / "result.md"
+        artifact_file.write_text("parent result")
 
-    state_file = parent_state_dir / "state.json"
-    state_file.write_text(json.dumps({"id": gremlin_id}), encoding="utf-8")
-    data = StateData(gremlin_id=gremlin_id, state_file=state_file)
-    parent_artifacts = ArtifactRegistry(artifact_dir=parent_session)
-    parent = build_state(
-        data=data,
-        client=FakeClaudeClient(),
-        artifact_dir=parent_session,
-        artifacts=parent_artifacts,
-    )
+        # Set up parent registry pointing at it via file://session/ URI
+        parent_registry = parent_state_dir / "registry.json"
+        parent_registry.write_text(
+            json.dumps({"result": "file://session/result.md"}), encoding="utf-8"
+        )
 
-    child_id = f"{gremlin_id}--mygrp--child-z"
-    _init_child_dir(parent, child_id, gremlin_id, "mygrp", "child-z")
+        state_file = parent_state_dir / "state.json"
+        state_file.write_text(json.dumps({"id": gremlin_id}), encoding="utf-8")
+        data = StateData(gremlin_id=gremlin_id, state_file=state_file)
+        parent_artifacts = ArtifactRegistry(artifact_dir=parent_session)
+        parent = build_state(
+            data=data,
+            client=FakeClaudeClient(),
+            artifact_dir=parent_session,
+            artifacts=parent_artifacts,
+        )
 
-    child_registry_path = state_root / child_id / "registry.json"
-    assert child_registry_path.exists()
-    child_reg_data = json.loads(child_registry_path.read_text(encoding="utf-8"))
+        child_id = f"{gremlin_id}--mygrp--child-z"
+        forked = await fork_state(
+            parent,
+            child_id,
+            project_root=".",
+            state_root=state_root,
+            parent_id=gremlin_id,
+            group_name="mygrp",
+            child_key="child-z",
+        )
 
-    # URI must be rewritten to absolute form
-    expected_abs = str(artifact_file.resolve())
-    assert child_reg_data["result"] == f"file://{expected_abs}"
+        # Child registry is copied verbatim
+        child_registry_path = state_root / child_id / "registry.json"
+        assert child_registry_path.exists()
+        child_reg_data = json.loads(child_registry_path.read_text(encoding="utf-8"))
 
-    # And the child resolver can actually read the file
-    child_session = state_root / child_id / "artifacts"
-    child_resolver = FileArtifactResolver(child_session)
-    uri = Uri.parse(child_reg_data["result"])
-    content = child_resolver.read(uri)
-    assert content == "parent result"
+        # URI is still file://session/ because artifacts are copied
+        assert child_reg_data["result"] == "file://session/result.md"
+
+        # And the child resolver can actually read the file via the copied artifact dir
+        child_session = state_root / child_id / "artifacts"
+        child_resolver = FileArtifactResolver(child_session)
+        uri = Uri.parse(child_reg_data["result"])
+        content = child_resolver.read(uri)
+        assert content == "parent result"
+
+    asyncio.run(_test())

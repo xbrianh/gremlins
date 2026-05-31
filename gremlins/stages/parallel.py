@@ -7,7 +7,6 @@ import dataclasses
 import json
 import logging
 import math
-import os
 import pathlib
 import re
 import secrets
@@ -17,6 +16,7 @@ from typing import Any, cast
 
 from gremlins import paths
 from gremlins.artifacts.uri import Uri
+from gremlins.executor.fork import fork_state
 from gremlins.executor.parallel_state import ParallelGroupState
 from gremlins.executor.state import State, StateData
 from gremlins.stages.base import Stage
@@ -33,66 +33,6 @@ _Stage = tuple[str, Callable[[], Any]]
 
 def _noop_set_stage(_n: str) -> None:
     pass
-
-
-def _snapshot_registry(
-    src: pathlib.Path,
-    dst: pathlib.Path,
-    parent_artifact_dir: pathlib.Path,
-) -> None:
-    """Copy parent's registry.json to child, rewriting file://session/ URIs to absolute paths."""
-    if not src.exists():
-        return
-    try:
-        data: dict[str, str] = json.loads(src.read_text(encoding="utf-8"))
-    except Exception:
-        logger.warning("_snapshot_registry: failed to parse %s", src, exc_info=True)
-        return
-    rewritten: dict[str, str] = {}
-    for k, v in data.items():
-        if v.startswith("file://session/"):
-            name = v[len("file://session/") :]
-            abs_path = (parent_artifact_dir / name).resolve()
-            rewritten[k] = f"file://{abs_path}"
-        else:
-            rewritten[k] = v
-    tmp = dst.with_name(dst.name + f".{os.getpid()}.{secrets.token_hex(4)}.tmp")
-    tmp.write_text(json.dumps(rewritten), encoding="utf-8")
-    os.replace(tmp, dst)
-
-
-def _init_child_dir(
-    parent_state: State,
-    child_id: str,
-    parent_id: str,
-    group_name: str,
-    child_key: str,
-) -> None:
-    """Set up <state_root>/<child_id>/ with state.json, artifacts/, registry.json, log."""
-    state_root = paths.state_root()
-    child_state_dir = state_root / child_id
-    child_state_dir.mkdir(parents=True, exist_ok=True)
-    (child_state_dir / "artifacts").mkdir(parents=True, exist_ok=True)
-
-    child_data = StateData(
-        gremlin_id=child_id,
-        parent_id=parent_id,
-        group_name=group_name,
-        child_key=child_key,
-        project_root=parent_state.data.project_root,
-        permissions_file=parent_state.data.permissions_file,
-        bypass=parent_state.data.bypass,
-        setup_kind=parent_state.data.setup_kind,
-        pipeline_path=parent_state.data.pipeline_path,
-        kind=parent_state.data.kind,
-    )
-    child_data.persist(child_state_dir)
-
-    parent_registry = parent_state.artifacts.registry_path
-    child_registry = child_state_dir / "registry.json"
-    _snapshot_registry(parent_registry, child_registry, parent_state.artifact_dir)
-
-    (child_state_dir / "log").touch()
 
 
 class ParallelStage(Stage):
@@ -221,10 +161,11 @@ class ParallelStage(Stage):
             if child.name in done:
                 continue
             child_id = f"{parent_id}--{self.name}--{child.name}" if parent_id else ""
-            if child_id:
-                _init_child_dir(state, child_id, parent_id, self.name, child.name)
             cs = _child_state(
-                group_state, child, fan_out=True, child_id=child_id or None
+                group_state,
+                child,
+                fan_out=not bool(parent_id),
+                child_id=child_id or None,
             )
             runner = cs.make_runner(child, scope=self.body)
             child_runners.append((child.name, cs, runner))
@@ -278,6 +219,7 @@ class _ParallelExecutor:
         self._sem: asyncio.Semaphore | None = (
             asyncio.Semaphore(max_concurrent) if max_concurrent is not None else None
         )
+        self._child_worktrees: dict[str, pathlib.Path] = {}
 
     def runtime_stages(self) -> list[_Stage]:
         fanout_name = f"{self._group_name}-fanout"
@@ -300,6 +242,7 @@ class _ParallelExecutor:
                 str(self._project_root), [str(p) for p in prior]
             )
         gs.clear()
+        self._child_worktrees.clear()
 
         if not await git.in_git_repo_async(cwd=str(self._project_root)):
             return
@@ -307,29 +250,69 @@ class _ParallelExecutor:
         await git.prune_worktrees_async(str(self._project_root))
         gs.base_head = await git.head_sha_async(cwd=str(self._project_root))
 
-        try:
-            for child_key, child_state, _ in self._child_runners:
-                wt_dir = await git.setup_detached_worktree_async(
+        parent_id = self._parent_data.gremlin_id or ""
+        if self._parent_state is None or not parent_id:
+            # No parent state or no parent_id: just create worktrees for each child
+            try:
+                for child_key, child_state, _ in self._child_runners:
+                    wt_dir = await git.setup_detached_worktree_async(
+                        str(self._project_root),
+                        "HEAD",
+                        worktree_parent=self._worktree_parent,
+                    )
+                    wt_path = pathlib.Path(wt_dir)
+                    self._child_worktrees[child_key] = wt_path
+                    gs.worktree_paths[child_key] = wt_path
+                    child_state.worktree = wt_path
+            except Exception:
+                await git.remove_worktrees_async(
                     str(self._project_root),
-                    "HEAD",
-                    worktree_parent=self._worktree_parent,
+                    [str(p) for p in self._child_worktrees.values()],
                 )
-                wt_path = pathlib.Path(wt_dir)
-                gs.worktree_paths[child_key] = wt_path
-                child_state.worktree = wt_path
-        except Exception:
-            await git.remove_worktrees_async(
-                str(self._project_root), [str(p) for p in gs.worktree_paths.values()]
-            )
-            gs.worktree_paths.clear()
-            raise
+                self._child_worktrees.clear()
+                gs.worktree_paths.clear()
+                raise
+        else:
+            # Have parent state and parent_id: fork it for each child
+            try:
+                for child_key, child_state, _ in self._child_runners:
+                    child_id = f"{parent_id}--{self._group_name}--{child_key}"
+                    forked = await fork_state(
+                        self._parent_state,
+                        child_id,
+                        project_root=str(self._project_root),
+                        parent_id=parent_id,
+                        group_name=self._group_name,
+                        child_key=child_key,
+                    )
+                    # Update child_state in-place with forked values
+                    child_state.artifact_dir = forked.artifact_dir
+                    child_state.artifacts = forked.artifacts
+                    child_state.worktree = forked.worktree
+                    child_state.cwd = forked.cwd
+                    if forked.worktree:
+                        self._child_worktrees[child_key] = forked.worktree
+                        gs.worktree_paths[child_key] = forked.worktree
+            except Exception:
+                await git.remove_worktrees_async(
+                    str(self._project_root),
+                    [str(p) for p in self._child_worktrees.values()],
+                )
+                self._child_worktrees.clear()
+                gs.worktree_paths.clear()
+                raise
         gs.persist()
 
     async def _teardown_worktrees(self) -> None:
         gs = self._group_state
-        await git.remove_worktrees_async(
-            str(self._project_root), [str(p) for p in gs.worktree_paths.values()]
+        worktrees = list(self._child_worktrees.values()) or list(
+            gs.worktree_paths.values()
         )
+        if worktrees:
+            await git.remove_worktrees_async(
+                str(self._project_root), [str(p) for p in worktrees]
+            )
+        self._child_worktrees.clear()
         gs.clear()
 
     # --- parallel execution ---
@@ -344,11 +327,6 @@ class _ParallelExecutor:
         active = [(k, s, fn) for k, s, fn in self._child_runners if k not in done]
         if not active:
             return
-
-        for child_key, child_state, _ in active:
-            wt = self._group_state.worktree_paths.get(child_key)
-            if wt is not None and child_state.worktree is None:
-                child_state.worktree = wt
 
         # Snapshot of all dispatched keys; not updated per-task as children finish.
         self._parent_data.patch(active_children=[k for k, _, _ in active])

@@ -1,4 +1,4 @@
-"""Tests for Gremlin.fork() method."""
+"""Tests for fork_state function."""
 
 import asyncio
 import subprocess
@@ -8,7 +8,7 @@ import pytest
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.gremlin import Gremlin
+from gremlins.executor.fork import fork_state
 from gremlins.executor.state import StateData, build_state
 from gremlins.pipeline import Pipeline
 
@@ -48,7 +48,7 @@ def test_fork_without_worktree(tmp_path, tmp_repo):
     """Test forking a state without a worktree."""
 
     async def _test():
-        # Setup source gremlin and state
+        # Setup source state
         state_dir = tmp_path / "state" / "gr-1"
         artifact_dir = state_dir / "artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -70,18 +70,13 @@ def test_fork_without_worktree(tmp_path, tmp_repo):
             artifacts=registry,
         )
 
-        # Create minimal gremlin
-        gremlin = Gremlin(
-            stages=[],
-            state_dir=state_dir,
-            gremlin_id="gr-1",
-            pipeline_data=Pipeline(name="test", path=tmp_path, stages=[]),
-            project_root=str(tmp_repo),
-        )
-        gremlin.registry = registry
-
         # Fork the state
-        forked = await gremlin.fork(state, "gr-2")
+        forked = await fork_state(
+            state,
+            "gr-2",
+            project_root=str(tmp_repo),
+            state_root=state_dir.parent,
+        )
 
         # Verify the fork
         assert forked.data.gremlin_id == "gr-2"
@@ -113,7 +108,7 @@ def test_fork_with_worktree(tmp_path, tmp_repo):
             capture_output=True,
         )
 
-        # Setup source gremlin and state
+        # Setup source state
         state_dir = tmp_path / "state" / "gr-1"
         artifact_dir = state_dir / "artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -136,18 +131,14 @@ def test_fork_with_worktree(tmp_path, tmp_repo):
             artifacts=registry,
         )
 
-        # Create minimal gremlin
-        gremlin = Gremlin(
-            stages=[],
-            state_dir=state_dir,
-            gremlin_id="gr-1",
-            pipeline_data=Pipeline(name="test", path=tmp_path, stages=[]),
-            project_root=str(tmp_repo),
-        )
-        gremlin.registry = registry
-
         # Fork the state
-        forked = await gremlin.fork(state, "gr-2")
+        forked = await fork_state(
+            state,
+            "gr-2",
+            project_root=str(tmp_repo),
+            state_root=state_dir.parent,
+            worktree_parent=worktree_parent,
+        )
 
         try:
             # Verify the fork
@@ -203,7 +194,7 @@ def test_fork_preserves_registry(tmp_path, tmp_repo):
     """Test that fork preserves registry.json content."""
 
     async def _test():
-        # Setup source gremlin and state
+        # Setup source state
         state_dir = tmp_path / "state" / "gr-1"
         artifact_dir = state_dir / "artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -226,23 +217,70 @@ def test_fork_preserves_registry(tmp_path, tmp_repo):
             artifacts=registry,
         )
 
-        # Create minimal gremlin
-        gremlin = Gremlin(
-            stages=[],
-            state_dir=state_dir,
-            gremlin_id="gr-1",
-            pipeline_data=Pipeline(name="test", path=tmp_path, stages=[]),
-            project_root=str(tmp_repo),
-        )
-        gremlin.registry = registry
-
         # Fork the state
-        forked = await gremlin.fork(state, "gr-2")
+        forked = await fork_state(
+            state,
+            "gr-2",
+            project_root=str(tmp_repo),
+            state_root=state_dir.parent,
+        )
 
         # Verify registry is preserved
         assert "spec" in forked.artifacts.data
         assert "plan" in forked.artifacts.data
         assert "some_key" in forked.artifacts.data
         assert forked.artifacts.read("some_key") == {"data": "value"}
+
+    asyncio.run(_test())
+
+
+def test_fork_copies_artifacts(tmp_path, tmp_repo):
+    """Test that fork creates a full copy of parent artifacts."""
+
+    async def _test():
+        # Setup source state with multiple artifacts
+        state_dir = tmp_path / "state" / "gr-1"
+        artifact_dir = state_dir / "artifacts"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create nested artifact structure
+        (artifact_dir / "spec.md").write_text("# Spec\n")
+        (artifact_dir / "subdir").mkdir()
+        (artifact_dir / "subdir" / "file.txt").write_text("nested content\n")
+
+        registry = ArtifactRegistry(artifact_dir=artifact_dir, cwd=None)
+        registry.bind("spec", Uri.parse("file://session/spec.md"))
+        registry.bind("nested", Uri.parse("file://session/subdir/file.txt"))
+
+        # Create state
+        state_data = StateData(gremlin_id="gr-1")
+        state = build_state(
+            data=state_data,
+            client=FakeClaudeClient(),
+            artifact_dir=artifact_dir,
+            repo="test-repo",
+            cwd=str(tmp_repo),
+            worktree=None,
+            artifacts=registry,
+        )
+
+        # Fork the state
+        forked = await fork_state(
+            state,
+            "gr-2",
+            project_root=str(tmp_repo),
+            state_root=state_dir.parent,
+        )
+
+        # Verify artifact directory was fully copied
+        assert (forked.artifact_dir / "spec.md").exists()
+        assert (forked.artifact_dir / "spec.md").read_text() == "# Spec\n"
+        assert (forked.artifact_dir / "subdir" / "file.txt").exists()
+        assert (forked.artifact_dir / "subdir" / "file.txt").read_text() == "nested content\n"
+
+        # Verify child artifact dir is independent from parent
+        parent_file = artifact_dir / "new_file.txt"
+        parent_file.write_text("parent only\n")
+        assert not (forked.artifact_dir / "new_file.txt").exists()
 
     asyncio.run(_test())
