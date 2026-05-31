@@ -48,7 +48,11 @@ def _scan_state(failed: bool = False, finished: bool = False) -> list[CleanItem]
         if not sf.is_file():
             continue
         live = liveness_of_state_file(str(sf))
-        if live == "running" or live.startswith("stalled:") or live.startswith("waiting"):
+        if (
+            live == "running"
+            or live.startswith("stalled:")
+            or live.startswith("waiting")
+        ):
             continue
         state = load_state(str(sf)) or {}
         exit_code = state.get("exit_code")
