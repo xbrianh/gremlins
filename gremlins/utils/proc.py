@@ -196,7 +196,7 @@ async def terminate_with_grace(
     """
     try:
         os.killpg(p.pid, signal.SIGTERM)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         return
     cancelled = False
     try:
