@@ -117,7 +117,7 @@ class _Inputs:
     pipeline_path: str
     pipeline_args: list[str]
     client_label: str
-    setup_kind: str
+    fetch_worktree: bool
     base_ref_name: str
     base_ref_sha: str
     stage_inputs: dict[str, Any]
@@ -304,17 +304,13 @@ def _resolve_inputs(
         pr_ref = pr_arg_to_ref(pr.strip().lstrip("#"))
         base_ref_name = ""
         base_ref_sha = pr_ref
-        setup_kind = "worktree-detached-from-ref"
+        fetch_worktree = True
         pr_num = _parse_pr_num(pr)
     else:
         base_ref_name, base_ref_sha = _resolve_base_ref(
             base_ref, project_root, loaded_pipeline
         )
-        setup_kind = (
-            loaded_pipeline.setup_kind()
-            if loaded_pipeline is not None
-            else "worktree-branch"
-        )
+        fetch_worktree = False
         pr_num = ""
 
     stored_args = list(resolved_pipeline_args)
@@ -337,7 +333,7 @@ def _resolve_inputs(
         pipeline_path=pipeline_path,
         pipeline_args=stored_args,
         client_label=client_label,
-        setup_kind=setup_kind,
+        fetch_worktree=fetch_worktree,
         base_ref_name=base_ref_name,
         base_ref_sha=base_ref_sha,
         stage_inputs=stage_inputs,
@@ -360,7 +356,7 @@ def _initial_state_data(inputs: _Inputs) -> StateData:
         kind=inputs.kind,
         project_root=inputs.project_root,
         workdir="",
-        setup_kind=inputs.setup_kind,
+        setup_kind="worktree-detached",
         worktree_base="",
         status="running",
         started_at=now_iso,

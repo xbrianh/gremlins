@@ -209,7 +209,7 @@ async def run_pipeline(
     _workdir = str(state_json.get("workdir") or "")
     worktree_dir = pathlib.Path(_workdir) if _workdir else None
     project_root = str(state_json.get("project_root") or "")
-    setup_kind = str(state_json.get("setup_kind") or "worktree-branch")
+    fetch_worktree = state_json.get("setup_kind") == "worktree-detached-from-ref"
     stage_inputs: dict[str, Any] = dict(state_json.get("stage_inputs") or {})
     instructions: str = str(
         stage_inputs.get("instructions") or " ".join(args.instructions or [])
@@ -263,7 +263,7 @@ async def run_pipeline(
             project_root=project_root,
             base_ref_sha=base_ref_sha,
             base_ref=base_ref,
-            setup_kind=setup_kind,
+            fetch_worktree=fetch_worktree,
             client_label=args.client or "",
             test_client=client,
             repo=gh_repo,

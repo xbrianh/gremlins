@@ -292,27 +292,18 @@ def setup_detached_worktree(
     project_root: str,
     base_ref: str,
     *,
+    fetch: bool = False,
     worktree_parent: pathlib.Path | None = None,
 ) -> str:
     """Add a detached worktree at base_ref. Returns the worktree path."""
+    if fetch:
+        _run_git(["fetch", "origin", "--", base_ref], cwd=project_root)
+        base_ref = "FETCH_HEAD"
     parent = worktree_parent if worktree_parent is not None else paths.work_root()
     parent.mkdir(parents=True, exist_ok=True)
     workdir = str(parent / f"aibg-gremlin.{secrets.token_hex(6)}")
     _run_git(["worktree", "add", "--detach", workdir, base_ref], cwd=project_root)
     return workdir
-
-
-def setup_detached_from_remote_ref(
-    project_root: str,
-    ref: str,
-    *,
-    worktree_parent: pathlib.Path | None = None,
-) -> str:
-    """Fetch <ref> from origin and add a detached worktree at FETCH_HEAD. Returns the worktree path."""
-    _run_git(["fetch", "origin", "--", ref], cwd=project_root)
-    return setup_detached_worktree(
-        project_root, "FETCH_HEAD", worktree_parent=worktree_parent
-    )
 
 
 def toplevel(cwd: str | os.PathLike[str] | None = None) -> str:
@@ -339,22 +330,6 @@ def stage_gremlins_overlay(project_root: str, state_dir: os.PathLike[str]) -> No
         shutil.copytree(src, dst, dirs_exist_ok=True)
 
 
-def setup_named_worktree(
-    project_root: str,
-    gremlin_id: str,
-    base_ref_sha: str,
-    *,
-    worktree_parent: pathlib.Path | None = None,
-) -> tuple[str, str]:
-    parent = worktree_parent if worktree_parent is not None else paths.work_root()
-    parent.mkdir(parents=True, exist_ok=True)
-    workdir = str(parent / gremlin_id)
-    branch = f"bg/local/{gremlin_id}"
-    _run_git(
-        ["worktree", "add", "-b", branch, workdir, base_ref_sha or "HEAD"],
-        cwd=project_root,
-    )
-    return workdir, branch
 
 
 async def in_git_repo_async(cwd: str | os.PathLike[str] | None = None) -> bool:
@@ -381,9 +356,15 @@ async def setup_detached_worktree_async(
     project_root: str,
     base_ref: str,
     *,
+    fetch: bool = False,
     worktree_parent: pathlib.Path | None = None,
 ) -> str:
     """Add a detached worktree at base_ref. Returns the worktree path."""
+    if fetch:
+        r = await proc.run_async(["git", "fetch", "origin", "--", base_ref], cwd=project_root)
+        if r.returncode != 0:
+            raise GitError(r.returncode, r.stderr.strip())
+        base_ref = "FETCH_HEAD"
     parent = worktree_parent if worktree_parent is not None else paths.work_root()
     parent.mkdir(parents=True, exist_ok=True)
     workdir = str(parent / f"aibg-gremlin.{secrets.token_hex(6)}")
@@ -425,36 +406,22 @@ async def prune_worktrees_async(project_root: str) -> None:
 
 
 def setup_workdir(
-    setup_kind: str,
     project_root: str,
-    base_ref_sha: str,
-    gremlin_id: str,
-    state_dir: os.PathLike[str],
+    base_ref: str,
     *,
+    fetch: bool = False,
+    state_dir: os.PathLike[str],
     worktree_parent: pathlib.Path | None = None,
-) -> tuple[str, str, str, str]:
+) -> str:
+    """Set up a detached worktree. Optionally fetches base_ref from origin first.
+
+    Returns the worktree path.
+    """
     if not in_git_repo(cwd=project_root):
         raise GitError(128, f"{project_root!r} is not a git repository")
 
-    if setup_kind == "worktree-branch":
-        workdir, branch = setup_named_worktree(
-            project_root, gremlin_id, base_ref_sha, worktree_parent=worktree_parent
-        )
-        stage_gremlins_overlay(project_root, state_dir)
-        return workdir, branch, "", "worktree-branch"
-
-    if setup_kind == "worktree-detached-from-ref":
-        workdir = setup_detached_from_remote_ref(
-            project_root, base_ref_sha, worktree_parent=worktree_parent
-        )
-        stage_gremlins_overlay(project_root, state_dir)
-        return workdir, "", base_ref_sha, "worktree-detached-from-ref"
-
-    if setup_kind not in ("worktree", "worktree-detached", "local"):
-        raise ValueError(f"unknown setup_kind: {setup_kind!r}")
-
     workdir = setup_detached_worktree(
-        project_root, base_ref_sha or "HEAD", worktree_parent=worktree_parent
+        project_root, base_ref or "HEAD", fetch=fetch, worktree_parent=worktree_parent
     )
     stage_gremlins_overlay(project_root, state_dir)
-    return workdir, "", base_ref_sha, "worktree"
+    return workdir

@@ -103,7 +103,7 @@ class Gremlin:
         project_root: str = "",
         base_ref_sha: str = "",
         base_ref: str = "",
-        setup_kind: str = "worktree-branch",
+        fetch_worktree: bool = False,
     ) -> None:
         unknown: list[str] = []
         for s in stages:
@@ -135,7 +135,7 @@ class Gremlin:
         self.project_root = project_root
         self.base_ref_sha = base_ref_sha
         self.base_ref = base_ref
-        self.setup_kind = setup_kind
+        self.fetch_worktree = fetch_worktree
 
     @property
     def session_dir(self) -> pathlib.Path:
@@ -225,7 +225,7 @@ class Gremlin:
         project_root: str = "",
         base_ref_sha: str = "",
         base_ref: str = "",
-        setup_kind: str = "worktree-branch",
+        fetch_worktree: bool = False,
         worktree_dir: pathlib.Path | None = None,
         client_label: str = "",
         repo: str = "",
@@ -253,7 +253,7 @@ class Gremlin:
             project_root=project_root,
             base_ref_sha=base_ref_sha,
             base_ref=base_ref,
-            setup_kind=setup_kind,
+            fetch_worktree=fetch_worktree,
             repo=repo,
         )
 
@@ -267,26 +267,20 @@ class Gremlin:
         worktree_created: str | None = None
         try:
             if self.worktree_dir is None and self.project_root and self.gremlin_id:
-                workdir, branch, worktree_base, actual_setup_kind = (
-                    _git_mod.setup_workdir(
-                        self.setup_kind,
-                        self.project_root,
-                        self.base_ref_sha,
-                        self.gremlin_id,
-                        self.state_dir,
-                        worktree_parent=self.worktree_parent,
-                    )
+                workdir = _git_mod.setup_workdir(
+                    self.project_root,
+                    self.base_ref_sha,
+                    fetch=self.fetch_worktree,
+                    state_dir=self.state_dir,
+                    worktree_parent=self.worktree_parent,
                 )
                 worktree_created = workdir
                 self.worktree_dir = pathlib.Path(workdir)
                 st = StateData.load(self.gremlin_id)
                 st.patch(
                     workdir=workdir,
-                    worktree_base=worktree_base,
-                    setup_kind=actual_setup_kind,
+                    setup_kind="worktree-detached",
                 )
-                if actual_setup_kind == "worktree-branch" and branch:
-                    st.append_artifact({"type": "branch", "name": branch})
 
             if self.spec:
                 spec_file = self.session_dir / "spec.md"
