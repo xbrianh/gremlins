@@ -674,9 +674,9 @@ def resume(gremlin_id: str, *, graft: str | None = None) -> None:
     stage = gremlin.state_data.stage
     if not stage or stage == "starting":
         stage = "plan"
-    if (
-        gremlin.pipeline_data.uses_loop_handoff()
-        and stage not in ("review-chain", "address-chain")
+    if gremlin.pipeline_data.uses_loop_handoff() and stage not in (
+        "review-chain",
+        "address-chain",
     ):
         stage = "chain"
 
