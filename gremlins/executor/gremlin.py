@@ -338,7 +338,7 @@ class Gremlin:
             except FileNotFoundError:
                 pass
 
-        # Load pipeline (required for reconstruction)
+        # Load pipeline (optional for status checks, required for execution)
         pipeline = None
         if pipeline_path or kind:
             try:
@@ -346,6 +346,16 @@ class Gremlin:
                     resolve_pipeline_path(
                         pipeline_path or kind, pathlib.Path(project_root)
                     )
+                )
+            except FileNotFoundError:
+                # Pipeline not found (e.g., test or recovery scenario)
+                # Create minimal stub pipeline to allow status checks
+                pipeline = _PipelineData(
+                    name=kind or "unknown",
+                    path=pathlib.Path(pipeline_path)
+                    if pipeline_path
+                    else pathlib.Path("."),
+                    stages=[],
                 )
             except Exception as exc:
                 raise ValueError(
