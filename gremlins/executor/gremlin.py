@@ -305,12 +305,12 @@ class Gremlin:
         state_raw = cast(dict[str, Any], state_raw)
 
         # Extract persisted fields from state.json
-        kind = str(state_raw.get("kind") or "")
-        project_root = str(state_raw.get("project_root") or _paths.project_root())
-        pipeline_args = list(state_raw.get("pipeline_args") or [])
-        pipeline_path = str(state_raw.get("pipeline_path") or "")
-        worktree_dir_str = str(state_raw.get("workdir") or "")
-        instructions = str(state_raw.get("instructions") or "")
+        kind = cast(str, state_raw.get("kind") or "")
+        project_root = cast(str, state_raw.get("project_root") or _paths.project_root())
+        pipeline_args = cast(list[str], state_raw.get("pipeline_args") or [])
+        pipeline_path = cast(str, state_raw.get("pipeline_path") or "")
+        worktree_dir_str = cast(str, state_raw.get("workdir") or "")
+        instructions = cast(str, state_raw.get("instructions") or "")
 
         # Resolve pipeline (hermetic check first, then fallback)
         hermetic = state_dir / "pipeline.yaml"
