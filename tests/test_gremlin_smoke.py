@@ -99,7 +99,7 @@ def test_gremlin_run_in_process(project_dir, pipeline_yaml, sandbox):
 
 
 def test_resume_unbinds_stale_exec_out_keys(tmp_path):
-    session_dir = tmp_path / "artifacts"
+    artifact_dir = tmp_path / "artifacts"
     state_dir = tmp_path / "state"
     state_dir.mkdir()
 
@@ -112,7 +112,7 @@ def test_resume_unbinds_stale_exec_out_keys(tmp_path):
         pipeline_data=pipeline,
         resume_from="normalize",
     )
-    gremlin.registry = ArtifactRegistry(session_dir=session_dir)
+    gremlin.registry = ArtifactRegistry(artifact_dir=artifact_dir)
     gremlin.registry.bind("normalize-commits", Uri.parse("git://range/old..stale"))
 
     assert gremlin.registry.produced("normalize-commits")
@@ -121,7 +121,7 @@ def test_resume_unbinds_stale_exec_out_keys(tmp_path):
 
 
 def test_resume_unbind_only_affects_exec_stages(tmp_path):
-    session_dir = tmp_path / "artifacts"
+    artifact_dir = tmp_path / "artifacts"
     state_dir = tmp_path / "state"
     state_dir.mkdir()
 
@@ -134,7 +134,7 @@ def test_resume_unbind_only_affects_exec_stages(tmp_path):
         pipeline_data=pipeline,
         resume_from="work",
     )
-    gremlin.registry = ArtifactRegistry(session_dir=session_dir)
+    gremlin.registry = ArtifactRegistry(artifact_dir=artifact_dir)
     gremlin.registry.bind("work-out", Uri.parse("git://range/a..b"))
     gremlin.registry.bind("non-exec-artifact", Uri.parse("git://range/x..y"))
 

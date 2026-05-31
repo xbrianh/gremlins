@@ -49,17 +49,17 @@ def resolve_state_file(gremlin_id: str | None) -> pathlib.Path | None:
     return _paths.state_root() / gremlin_id / "state.json"
 
 
-def resolve_session_dir(gremlin_id: str | None = None) -> pathlib.Path:
+def resolve_artifact_dir(gremlin_id: str | None = None) -> pathlib.Path:
     """Resolve the artifacts directory for the current run."""
     state_root = _paths.state_root()
     if gremlin_id:
-        session_dir = state_root / gremlin_id / "artifacts"
+        artifact_dir = state_root / gremlin_id / "artifacts"
     else:
         ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         rand = secrets.token_hex(3)
-        session_dir = state_root / "direct" / f"{ts}-{rand}" / "artifacts"
-    session_dir.mkdir(parents=True, exist_ok=True)
-    return session_dir
+        artifact_dir = state_root / "direct" / f"{ts}-{rand}" / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    return artifact_dir
 
 
 def write_state(state_dir: pathlib.Path, data: dict[str, Any]) -> None:
@@ -485,7 +485,7 @@ class StateData:
 class State:
     data: StateData
     client: Client
-    session_dir: pathlib.Path
+    artifact_dir: pathlib.Path
     artifacts: ArtifactRegistry
     repo: str = ""
     cwd: str = ""
@@ -505,7 +505,7 @@ class State:
         {
             "name",
             "model",
-            "session_dir",
+            "artifact_dir",
             "instructions",
             "repo",
             "cwd",
@@ -519,7 +519,7 @@ class State:
         return {
             "name": stage.name,
             "model": self.stage_model or self.client.model,
-            "session_dir": str(self.session_dir),
+            "artifact_dir": str(self.artifact_dir),
             "instructions": self.instructions,
             "repo": self.repo,
             "cwd": self.cwd,
@@ -530,13 +530,13 @@ class State:
     @staticmethod
     def setup_dirs(
         state_dir: pathlib.Path,
-        session_dir: pathlib.Path,
+        artifact_dir: pathlib.Path,
         gremlin_id: str | None,
         *,
         instructions: str = "",
     ) -> None:
         state_dir.mkdir(parents=True, exist_ok=True)
-        session_dir.mkdir(parents=True, exist_ok=True)
+        artifact_dir.mkdir(parents=True, exist_ok=True)
         (state_dir / "instructions.txt").write_text(instructions, encoding="utf-8")
         sf = state_dir / "state.json"
         if gremlin_id and not sf.exists():
@@ -617,7 +617,7 @@ class State:
 def build_state(
     data: StateData,
     client: Client,
-    session_dir: pathlib.Path,
+    artifact_dir: pathlib.Path,
     *,
     args: argparse.Namespace | None = None,
     pipeline_data: Pipeline | None = None,
@@ -633,11 +633,11 @@ def build_state(
     parent_stage: str = "",
     base_ref: str = "",
 ) -> State:
-    reg = ArtifactRegistry(session_dir=session_dir, cwd=worktree)
+    reg = ArtifactRegistry(artifact_dir=artifact_dir, cwd=worktree)
     return State(
         data=data,
         client=client,
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         artifacts=artifacts or reg,
         repo=repo,
         cwd=cwd

@@ -81,7 +81,7 @@ def _write_spec(
     spec: dict[str, Any] = {
         "stage_dict": {"name": "test-stage", "type": stage_type},
         "client": "fake:fake",
-        "session_dir": str(tmp_path / "artifacts"),
+        "artifact_dir": str(tmp_path / "artifacts"),
     }
     if extra:
         spec.update(extra)
@@ -121,7 +121,7 @@ def test_build_state_propagates_repo_and_instructions(
     state = _rc._build_state(
         {
             "client": "fake:fake",
-            "session_dir": str(tmp_path / "artifacts"),
+            "artifact_dir": str(tmp_path / "artifacts"),
             "repo": "owner/myrepo",
             "instructions": "do the thing",
         }
@@ -134,7 +134,7 @@ def test_build_state_repo_defaults_to_empty(tmp_path: pathlib.Path) -> None:
     state = _rc._build_state(
         {
             "client": "fake:fake",
-            "session_dir": str(tmp_path / "artifacts"),
+            "artifact_dir": str(tmp_path / "artifacts"),
         }
     )
     assert state.repo == ""
@@ -143,11 +143,11 @@ def test_build_state_repo_defaults_to_empty(tmp_path: pathlib.Path) -> None:
 
 def test_build_state_missing_client() -> None:
     with pytest.raises(ValueError, match="client"):
-        _rc._build_state({"session_dir": "/tmp/x"})
+        _rc._build_state({"artifact_dir": "/tmp/x"})
 
 
-def test_build_state_missing_session_dir() -> None:
-    with pytest.raises(ValueError, match="session_dir"):
+def test_build_state_missing_artifact_dir() -> None:
+    with pytest.raises(ValueError, match="artifact_dir"):
         _rc._build_state({"client": "fake:fake"})
 
 
@@ -155,7 +155,7 @@ def test_build_state_propagates_test_client(tmp_path: pathlib.Path) -> None:
     state = _rc._build_state(
         {
             "client": "fake:fake",
-            "session_dir": str(tmp_path / "artifacts"),
+            "artifact_dir": str(tmp_path / "artifacts"),
             "test_client": "fake:fake",
             "stage_model": "real-model",
         }
@@ -169,7 +169,7 @@ def test_build_state_no_test_client_defaults(tmp_path: pathlib.Path) -> None:
     state = _rc._build_state(
         {
             "client": "fake:fake",
-            "session_dir": str(tmp_path / "artifacts"),
+            "artifact_dir": str(tmp_path / "artifacts"),
         }
     )
     assert state.test_client is None
@@ -239,7 +239,7 @@ def test_run_artifact_stage(
 def test_run_bad_spec_missing_stage_dict(tmp_path: pathlib.Path) -> None:
     spec_path = tmp_path / "spec.json"
     spec_path.write_text(
-        json.dumps({"client": "fake:fake", "session_dir": str(tmp_path)}),
+        json.dumps({"client": "fake:fake", "artifact_dir": str(tmp_path)}),
         encoding="utf-8",
     )
     rc = asyncio.run(_rc._run(spec_path))

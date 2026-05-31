@@ -79,7 +79,7 @@ class LoopStage(Stage):
     skipped on the final iteration so the stage bails without retrying.
 
     Resume granularity: resuming targets the loop by name; resuming
-    restarts from iteration 1, picking up file-based state from session_dir.
+    restarts from iteration 1, picking up file-based state from artifact_dir.
     """
 
     type = "loop"

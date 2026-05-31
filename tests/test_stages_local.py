@@ -34,14 +34,14 @@ def test_local_yaml_loads_and_validates(tmp_path):
     ]
 
 
-def _make_state(client, session_dir, *, gremlin_id=None, base_ref_sha=""):
-    registry = ArtifactRegistry(session_dir)
+def _make_state(client, artifact_dir, *, gremlin_id=None, base_ref_sha=""):
+    registry = ArtifactRegistry(artifact_dir)
     if base_ref_sha:
         registry.bind("base_sha", Uri.parse(f"git://commit/{base_ref_sha}"))
     state = build_state(
         data=StateData(gremlin_id=gremlin_id),
         client=client,
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         artifacts=registry,
     )
     return state
@@ -85,7 +85,7 @@ def _make_review_code_stage(client: ReviewCreatingClient) -> Agent:
         [
             (_BUNDLED_PROMPTS / "code_style.md").read_text(encoding="utf-8"),
             (_BUNDLED_PROMPTS / "review" / "detail.md").read_text(encoding="utf-8"),
-            "`{session_dir}/{name}-{model}.md` is the canonical and required location.",
+            "`{artifact_dir}/{name}-{model}.md` is the canonical and required location.",
         ],
         {},
         out_map={"review-code": "file://session/{name}-{model}.md"},
@@ -98,15 +98,15 @@ def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
     client = ReviewCreatingClient(fixtures={"review-code": MINIMAL_EVENTS})
     worktree = tmp_path / "wt"
     worktree.mkdir()
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
+    artifact_dir = tmp_path / "session"
+    artifact_dir.mkdir()
     stage = _make_review_code_stage(client)
     state = build_state(
         data=StateData(),
         client=client,
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         worktree=worktree,
-        artifacts=ArtifactRegistry(session_dir),
+        artifacts=ArtifactRegistry(artifact_dir),
     )
     asyncio.run(stage.run(state))
     assert client.calls[0].cwd == worktree
@@ -119,13 +119,13 @@ def test_review_code_stage_includes_style_from_prompts(tmp_path):
         [
             "Be good.",
             (_BUNDLED_PROMPTS / "review" / "detail.md").read_text(encoding="utf-8"),
-            "`{session_dir}/{name}-{model}.md` is the canonical and required location.",
+            "`{artifact_dir}/{name}-{model}.md` is the canonical and required location.",
         ],
         {},
         out_map={"review-code": "file://session/{name}-{model}.md"},
     )
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    state = _make_state(client, session_dir)
+    artifact_dir = tmp_path / "session"
+    artifact_dir.mkdir()
+    state = _make_state(client, artifact_dir)
     asyncio.run(stage.run(state))
     assert "Be good." in client.calls[0].prompt

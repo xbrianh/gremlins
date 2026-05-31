@@ -15,10 +15,10 @@ from gremlins.stages.parallel import _ParallelExecutor
 
 
 def _make_parent(tmp_path: pathlib.Path, gremlin_id: str) -> State:
-    session_dir = tmp_path / "state" / gremlin_id / "artifacts"
-    session_dir.mkdir(parents=True, exist_ok=True)
+    artifact_dir = tmp_path / "state" / gremlin_id / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
     data = StateData(gremlin_id=gremlin_id)
-    return build_state(data=data, client=FakeClaudeClient(), session_dir=session_dir)
+    return build_state(data=data, client=FakeClaudeClient(), artifact_dir=artifact_dir)
 
 
 def _make_child_dir(
@@ -80,7 +80,7 @@ def test_single_child_file_artifact_copied(tmp_path: pathlib.Path) -> None:
     assert parent.artifacts.produced("review-code")
     content = parent.artifacts.read("review-code")
     assert content == "# review"
-    dest = parent.session_dir / "review.md"
+    dest = parent.artifact_dir / "review.md"
     assert dest.exists()
 
 
@@ -122,7 +122,7 @@ def test_multi_child_same_key_disambiguated(tmp_path: pathlib.Path) -> None:
 
 def test_snapshotted_parent_keys_skipped(tmp_path: pathlib.Path) -> None:
     parent = _make_parent(tmp_path, "p3")
-    parent_file = parent.session_dir / "existing.txt"
+    parent_file = parent.artifact_dir / "existing.txt"
     parent_file.write_bytes(b"existing")
     parent.artifacts.bind("existing-key", Uri.parse("file://session/existing.txt"))
 

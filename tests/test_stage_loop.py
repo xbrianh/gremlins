@@ -27,7 +27,7 @@ def _loop_state(tmp_path: Any) -> RuntimeState:
     return build_state(
         data=StateData(),
         client=_fake_client(),
-        session_dir=tmp_path / "artifacts",
+        artifact_dir=tmp_path / "artifacts",
         worktree=tmp_path,
     )
 
@@ -156,7 +156,7 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
     loop_state = build_state(
         data=StateData(gremlin_id=gremlin_id, attempt=attempt),
         client=_fake_client(),
-        session_dir=tmp_path / "artifacts",
+        artifact_dir=tmp_path / "artifacts",
         worktree=tmp_path,
     )
 
@@ -229,7 +229,7 @@ def _run_cmd_stage(tmp_path: Any, cmds: list[str]) -> tuple[Cmd, RuntimeState]:
     state = build_state(
         data=StateData(),
         client=_fake_client(),
-        session_dir=tmp_path / "artifacts",
+        artifact_dir=tmp_path / "artifacts",
         worktree=tmp_path,
     )
     return stage, state
@@ -287,7 +287,7 @@ def test_loop_patches_loop_iteration_to_state(tmp_path, make_state_dir):
     loop_state = build_state(
         data=StateData(gremlin_id=gremlin_id),
         client=_fake_client(),
-        session_dir=tmp_path / "artifacts",
+        artifact_dir=tmp_path / "artifacts",
         worktree=tmp_path,
     )
 

@@ -48,7 +48,7 @@ def test_stage_run_raises_not_implemented() -> None:
     state = build_state(
         data=StateData(gremlin_id=None),
         client=client,
-        session_dir=pathlib.Path("."),
+        artifact_dir=pathlib.Path("."),
         pipeline_data=_PIPELINE,
     )
     with pytest.raises(NotImplementedError):
@@ -90,7 +90,7 @@ def _subs_state() -> State:
     return build_state(
         data=StateData(gremlin_id=None),
         client=FakeClaudeClient(fixtures={}),
-        session_dir=pathlib.Path("/tmp/sess"),
+        artifact_dir=pathlib.Path("/tmp/sess"),
         pipeline_data=_PIPELINE,
         repo="owner/proj",
         cwd="/work",
@@ -103,7 +103,7 @@ def _subs_state() -> State:
 def test_substitute_vars_renders_shared_framework_keys() -> None:
     stage = _SimpleStage("st", [], {})
     state = _subs_state()
-    text = "{name} {model} {session_dir} {instructions} {repo} {cwd} {base_ref}"
+    text = "{name} {model} {artifact_dir} {instructions} {repo} {cwd} {base_ref}"
     assert stage.substitute_vars(text, state) == (
         "st effective-model /tmp/sess do the thing owner/proj /work trunk"
     )

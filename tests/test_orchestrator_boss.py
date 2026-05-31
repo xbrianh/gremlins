@@ -32,33 +32,33 @@ _CHAIN_YAML = textwrap.dedent("""\
 class _SignalClient(FakeClaudeClient):
     """Writes signal.json when the handoff agent runs."""
 
-    def __init__(self, signal: dict, session_dir: pathlib.Path) -> None:
+    def __init__(self, signal: dict, artifact_dir: pathlib.Path) -> None:
         super().__init__(fixtures={"handoff": _MINIMAL, "sanitize": _MINIMAL})
         self._signal = signal
-        self._session_dir = session_dir
+        self._artifact_dir = artifact_dir
 
     async def run(self, prompt, *, label, **kwargs):
         if label == "handoff":
-            (self._session_dir / "signal.json").write_text(
+            (self._artifact_dir / "signal.json").write_text(
                 json.dumps(self._signal), encoding="utf-8"
             )
         return await super().run(prompt, label=label, **kwargs)
 
 
 def _make_loop(tmp_path: pathlib.Path, worktree: pathlib.Path, signal: dict):
-    session_dir = tmp_path / "artifacts"
-    session_dir.mkdir(parents=True, exist_ok=True)
-    (session_dir / "plan.md").write_text("# Plan\n", encoding="utf-8")
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "plan.md").write_text("# Plan\n", encoding="utf-8")
 
     pipeline_file = tmp_path / "boss-test.yaml"
     pipeline_file.write_text(_CHAIN_YAML, encoding="utf-8")
 
-    client = _SignalClient(signal=signal, session_dir=session_dir)
+    client = _SignalClient(signal=signal, artifact_dir=artifact_dir)
     loop_stage = Pipeline.from_yaml(pipeline_file).stages[0]
     state = build_state(
         data=StateData(),
         client=client,
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         worktree=worktree,
         test_client=client,
     )
@@ -78,9 +78,9 @@ def test_boss_chain_done_exits_loop(sandbox, tmp_path):
 
 
 def test_boss_next_plan_needs_fix_and_plan_swap(sandbox, tmp_path):
-    session_dir = tmp_path / "artifacts"
-    session_dir.mkdir(parents=True, exist_ok=True)
-    child_plan = session_dir / "child-plan.md"
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    child_plan = artifact_dir / "child-plan.md"
     child_plan.write_text("# Next\n", encoding="utf-8")
     signal = {
         "exit_state": "next-plan",
@@ -92,7 +92,7 @@ def test_boss_next_plan_needs_fix_and_plan_swap(sandbox, tmp_path):
     with pytest.raises(Bail):
         asyncio.run(loop.run(state))
     assert state.artifacts.read("status") == "needs_fix"
-    assert (session_dir / "plan.md").read_text(encoding="utf-8") == "# Next\n"
+    assert (artifact_dir / "plan.md").read_text(encoding="utf-8") == "# Next\n"
 
 
 def test_boss_bail_raises_with_reason(sandbox, tmp_path):

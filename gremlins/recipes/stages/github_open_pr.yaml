@@ -7,7 +7,7 @@ stages:
       base_ref_to_open_pr: "file://session/pr-base-ref.txt"
     options:
       cmds:
-        - 'printf "%s" "${prev_branch:-{base_ref}}" > "{session_dir}/pr-base-ref.txt"'
+        - 'printf "%s" "${prev_branch:-{base_ref}}" > "{artifact_dir}/pr-base-ref.txt"'
 
   - name: compose-pr
     type: agent
@@ -33,11 +33,11 @@ stages:
     options:
       cmds:
         - |
-          BASE="$(cat "{session_dir}/pr-branch.txt")" &&
+          BASE="$(cat "{artifact_dir}/pr-branch.txt")" &&
           SUFFIX=$([ "{loop_iteration}" -gt 1 ] && echo "-iter{loop_iteration}" || echo "") &&
           BRANCH="${BASE}${SUFFIX}" &&
           git push origin "HEAD:refs/heads/$BRANCH" &&
-          URL="$(gh pr create --head "$BRANCH" --base "$base_ref_to_open_pr" --title "$(cat "{session_dir}/pr-title.txt")" --body-file "{session_dir}/pr-body.md")" &&
-          printf "%s" "${URL##*/}" > "{session_dir}/pr-number.txt" &&
-          printf "%s" "$URL" > "{session_dir}/pr-url.txt" &&
-          printf "%s" "$BRANCH" > "{session_dir}/pr-branch.txt"
+          URL="$(gh pr create --head "$BRANCH" --base "$base_ref_to_open_pr" --title "$(cat "{artifact_dir}/pr-title.txt")" --body-file "{artifact_dir}/pr-body.md")" &&
+          printf "%s" "${URL##*/}" > "{artifact_dir}/pr-number.txt" &&
+          printf "%s" "$URL" > "{artifact_dir}/pr-url.txt" &&
+          printf "%s" "$BRANCH" > "{artifact_dir}/pr-branch.txt"

@@ -11,7 +11,7 @@ from typing import Any
 
 from gremlins.artifacts._protocol import SchemeResolver
 from gremlins.artifacts.schemes import (
-    FileSessionResolver,
+    FileArtifactResolver,
     GhOpaqueResolver,
     GitResolver,
 )
@@ -36,15 +36,15 @@ class DuplicateArtifact(ValueError):
 class ArtifactRegistry:
     def __init__(
         self,
-        session_dir: pathlib.Path,
+        artifact_dir: pathlib.Path,
         cwd: pathlib.Path | None = None,
         resolvers: Mapping[str, SchemeResolver] | None = None,
     ) -> None:
         self._cwd = cwd
-        self.registry_path = session_dir.parent / "registry.json"
+        self.registry_path = artifact_dir.parent / "registry.json"
         self.data: dict[str, Any] = {}
         self._resolvers: dict[str, SchemeResolver] = {
-            "file": FileSessionResolver(session_dir),
+            "file": FileArtifactResolver(artifact_dir),
             "git": GitResolver(cwd),
             "gh": GhOpaqueResolver(),
             **(resolvers or {}),

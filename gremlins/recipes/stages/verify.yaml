@@ -21,7 +21,7 @@ stages:
           verify_diff: "file://session/verify-diff.txt"
         options:
           cmds:
-            - 'git diff HEAD > "{session_dir}/verify-diff.txt"; [ -s "{session_dir}/verify-diff.txt" ] || printf "(no uncommitted changes)\n" > "{session_dir}/verify-diff.txt"'
+            - 'git diff HEAD > "{artifact_dir}/verify-diff.txt"; [ -s "{artifact_dir}/verify-diff.txt" ] || printf "(no uncommitted changes)\n" > "{artifact_dir}/verify-diff.txt"'
       - name: fix
         type: agent
         prompt:

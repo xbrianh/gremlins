@@ -10,11 +10,11 @@ from gremlins.utils import git as git_utils
 from gremlins.utils import proc
 
 
-class FileSessionResolver:
+class FileArtifactResolver:
     """Resolves file://session/<name> against a fixed session directory."""
 
-    def __init__(self, session_dir: pathlib.Path) -> None:
-        self._session_dir = session_dir
+    def __init__(self, artifact_dir: pathlib.Path) -> None:
+        self._artifact_dir = artifact_dir
 
     def _path(self, uri: Uri) -> pathlib.Path:
         if uri.path.startswith("/"):
@@ -22,8 +22,8 @@ class FileSessionResolver:
         if not uri.path.startswith("session/"):
             raise ValueError(f"file:// URI must start with 'session/': {uri}")
         name = uri.path[len("session/") :]
-        p = (self._session_dir / name).resolve()
-        base = self._session_dir.resolve()
+        p = (self._artifact_dir / name).resolve()
+        base = self._artifact_dir.resolve()
         try:
             p.relative_to(base)
         except ValueError:

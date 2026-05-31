@@ -28,14 +28,14 @@ from gremlins.stages.outcome import Bail
 
 
 def _make_state(project: pathlib.Path, base_sha: str):
-    session_dir = project / "session"
-    session_dir.mkdir(exist_ok=True)
-    registry = ArtifactRegistry(session_dir, cwd=project)
+    artifact_dir = project / "session"
+    artifact_dir.mkdir(exist_ok=True)
+    registry = ArtifactRegistry(artifact_dir, cwd=project)
     registry.bind("base_sha", Uri.parse(f"git://commit/{base_sha}"))
     return build_state(
         data=StateData(),
         client=FakeClaudeClient(),
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         artifacts=registry,
         worktree=project,
     )

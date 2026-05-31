@@ -248,8 +248,8 @@ _CHILD_MODULES = [
 
 def _make_child_spec(mod_path: str, tmp_path: pathlib.Path) -> dict:
     """Build a minimal spec dict appropriate for the given child module."""
-    session_dir = tmp_path / "session"
-    session_dir.mkdir(exist_ok=True)
+    artifact_dir = tmp_path / "session"
+    artifact_dir.mkdir(exist_ok=True)
     if mod_path == "gremlins.spawn.child":
         # New schema: child_id required; StateData.load and paths.state_root are mocked.
         return {
@@ -259,14 +259,14 @@ def _make_child_spec(mod_path: str, tmp_path: pathlib.Path) -> dict:
     # Legacy gremlins.run_child schema
     return {
         "client": "claude:claude-haiku-4-5-20251001",
-        "session_dir": str(session_dir),
+        "artifact_dir": str(artifact_dir),
     }
 
 
 def _child_module_patches(mod_path: str, tmp_path: pathlib.Path) -> list:
     """Return extra patches needed for the given child module."""
     if mod_path == "gremlins.spawn.child":
-        # Patch paths.state_root so session_dir mkdir goes under tmp_path.
+        # Patch paths.state_root so artifact_dir mkdir goes under tmp_path.
         import gremlins.spawn.child as _cm
 
         return [patch.object(_cm, "paths", **{"state_root.return_value": tmp_path})]

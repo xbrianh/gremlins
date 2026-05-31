@@ -519,9 +519,9 @@ def launch(
         sd.bypass = bypass
         sd.permissions_file = permissions_file
         sd.persist(state_dir)
-        session_dir = state_dir / "artifacts"
-        session_dir.mkdir(parents=True, exist_ok=True)
-        registry = ArtifactRegistry(session_dir=session_dir)
+        artifact_dir = state_dir / "artifacts"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        registry = ArtifactRegistry(artifact_dir=artifact_dir)
         if inputs.pr_num:
             registry.bind("pr", Uri.parse(f"gh://pr/{inputs.pr_num}"))
         if inputs.base_ref_sha:

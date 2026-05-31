@@ -184,7 +184,7 @@ def _make_simple_ctx(tmp_path: pathlib.Path, child_key: str) -> State:
     return build_state(
         data=StateData(),
         client=FakeClaudeClient(),
-        session_dir=tmp_path / child_key,
+        artifact_dir=tmp_path / child_key,
         child_key=child_key,
     )
 
@@ -301,19 +301,19 @@ def test_cancel_on_bail_skips_unstarted_children():
     ctx_a = build_state(
         data=StateData(),
         client=FakeClaudeClient(),
-        session_dir=pathlib.Path("/tmp"),
+        artifact_dir=pathlib.Path("/tmp"),
         child_key="a",
     )
     ctx_b = build_state(
         data=StateData(),
         client=FakeClaudeClient(),
-        session_dir=pathlib.Path("/tmp"),
+        artifact_dir=pathlib.Path("/tmp"),
         child_key="b",
     )
     ctx_c = build_state(
         data=StateData(),
         client=FakeClaudeClient(),
-        session_dir=pathlib.Path("/tmp"),
+        artifact_dir=pathlib.Path("/tmp"),
         child_key="c",
     )
 
@@ -436,13 +436,13 @@ def test_worktree_lifecycle_fanout_creates_and_fanin_removes(tmp_path):
     ctx_a = build_state(
         data=StateData(),
         client=FakeClaudeClient(),
-        session_dir=tmp_path / "a",
+        artifact_dir=tmp_path / "a",
         child_key="a",
     )
     ctx_b = build_state(
         data=StateData(),
         client=FakeClaudeClient(),
-        session_dir=tmp_path / "b",
+        artifact_dir=tmp_path / "b",
         child_key="b",
     )
 
@@ -518,7 +518,7 @@ def test_fanout_persists_worktrees_and_fresh_fanin_can_clean_up(tmp_path, sandbo
         return build_state(
             data=StateData(gremlin_id=gremlin_id),
             client=FakeClaudeClient(),
-            session_dir=tmp_path / name,
+            artifact_dir=tmp_path / name,
             child_key=name,
         )
 
@@ -583,7 +583,7 @@ def test_fanout_resume_tears_down_prior_worktrees(tmp_path, sandbox):
         return build_state(
             data=StateData(gremlin_id=gremlin_id),
             client=FakeClaudeClient(),
-            session_dir=tmp_path / name,
+            artifact_dir=tmp_path / name,
             child_key=name,
         )
 
@@ -637,7 +637,7 @@ def test_build_parallel_stages_returns_three_named_stages():
     ctx = build_state(
         data=StateData(),
         client=FakeClaudeClient(),
-        session_dir=pathlib.Path("/tmp"),
+        artifact_dir=pathlib.Path("/tmp"),
         child_key="r1",
     )
     stages = _make_parallel_stages(
@@ -658,13 +658,13 @@ def test_parallel_all_children_complete_with_defaults():
     ctx_a = build_state(
         data=StateData(),
         client=FakeClaudeClient(),
-        session_dir=pathlib.Path("/tmp"),
+        artifact_dir=pathlib.Path("/tmp"),
         child_key="a",
     )
     ctx_b = build_state(
         data=StateData(),
         client=FakeClaudeClient(),
-        session_dir=pathlib.Path("/tmp"),
+        artifact_dir=pathlib.Path("/tmp"),
         child_key="b",
     )
 
@@ -749,7 +749,7 @@ def test_parallel_child_set_stage_writes_parent_as_stage(tmp_path, sandbox):
     state = build_state(
         data=StateData(gremlin_id=gremlin_id),
         client=FakeClaudeClient(),
-        session_dir=tmp_path,
+        artifact_dir=tmp_path,
         parent_stage="reviews",
     )
 
@@ -785,7 +785,7 @@ def test_parallel_child_set_stage_with_sub_stage_payload_writes_parent_as_stage(
     state = build_state(
         data=StateData(gremlin_id=gremlin_id),
         client=FakeClaudeClient(),
-        session_dir=tmp_path,
+        artifact_dir=tmp_path,
         parent_stage="reviews",
     )
 

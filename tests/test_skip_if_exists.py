@@ -35,12 +35,12 @@ class _CountingStage(Stage):
 
 
 def _make_state(tmp_path: pathlib.Path) -> tuple[State, ArtifactRegistry]:
-    reg = ArtifactRegistry(session_dir=tmp_path)
+    reg = ArtifactRegistry(artifact_dir=tmp_path)
     client = FakeClaudeClient(fixtures={})
     state = build_state(
         data=StateData(gremlin_id=None),
         client=client,
-        session_dir=tmp_path,
+        artifact_dir=tmp_path,
         pipeline_data=_PIPELINE,
         artifacts=reg,
     )

@@ -1,7 +1,7 @@
 """Tests for the 'parallel children are first-class gremlins' feature.
 
 Covers:
-- FileSessionResolver._path handles file:///absolute/path URIs
+- FileArtifactResolver._path handles file:///absolute/path URIs
 - _snapshot_registry rewrites file://session/ URIs to absolute paths
 - ParallelStage.run creates <state_root>/<child_id>/state.json for each child
 - A child can read a parent-bound file://session/ artifact via the inherited registry
@@ -17,14 +17,14 @@ import pytest
 
 from gremlins import paths
 from gremlins.artifacts.registry import ArtifactRegistry
-from gremlins.artifacts.schemes import FileSessionResolver
+from gremlins.artifacts.schemes import FileArtifactResolver
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state
 from gremlins.stages.parallel import ParallelStage, _snapshot_registry
 
 # ---------------------------------------------------------------------------
-# FileSessionResolver._path: absolute path URIs
+# FileArtifactResolver._path: absolute path URIs
 # ---------------------------------------------------------------------------
 
 
@@ -33,7 +33,7 @@ def test_file_resolver_absolute_path_uri(tmp_path: pathlib.Path) -> None:
     target = tmp_path / "some_file.txt"
     target.write_text("hello")
 
-    resolver = FileSessionResolver(tmp_path / "session")
+    resolver = FileArtifactResolver(tmp_path / "session")
     uri = Uri.parse(f"file://{target}")
     result = resolver._path(uri)
     assert result == target.resolve()
@@ -44,9 +44,9 @@ def test_file_resolver_absolute_path_read(tmp_path: pathlib.Path) -> None:
     target = tmp_path / "data.bin"
     target.write_bytes(b"binary content")
 
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    resolver = FileSessionResolver(session_dir)
+    artifact_dir = tmp_path / "session"
+    artifact_dir.mkdir()
+    resolver = FileArtifactResolver(artifact_dir)
     uri = Uri.parse(f"file://{target}")
     assert resolver.read(uri) == "binary content"
 
@@ -56,9 +56,9 @@ def test_file_resolver_absolute_path_verify_produced(tmp_path: pathlib.Path) -> 
     target = tmp_path / "output.txt"
     target.write_text("done")
 
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    resolver = FileSessionResolver(session_dir)
+    artifact_dir = tmp_path / "session"
+    artifact_dir.mkdir()
+    resolver = FileArtifactResolver(artifact_dir)
     uri = Uri.parse(f"file://{target}")
     resolver.verify_produced(uri)  # should not raise
 
@@ -70,12 +70,12 @@ def test_file_resolver_absolute_path_verify_produced(tmp_path: pathlib.Path) -> 
 
 def test_file_resolver_session_relative_still_works(tmp_path: pathlib.Path) -> None:
     """Existing file://session/<name> URIs still resolve correctly."""
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    target = session_dir / "output.txt"
+    artifact_dir = tmp_path / "session"
+    artifact_dir.mkdir()
+    target = artifact_dir / "output.txt"
     target.write_text("data")
 
-    resolver = FileSessionResolver(session_dir)
+    resolver = FileArtifactResolver(artifact_dir)
     uri = Uri.parse("file://session/output.txt")
     assert resolver._path(uri) == target.resolve()
 
@@ -143,13 +143,13 @@ def _make_parent_state(sandbox, gremlin_id: str) -> State:
     state_root = paths.state_root()
     state_dir = state_root / gremlin_id
     state_dir.mkdir(parents=True, exist_ok=True)
-    session_dir = state_dir / "artifacts"
-    session_dir.mkdir(parents=True, exist_ok=True)
+    artifact_dir = state_dir / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
     state_file = state_dir / "state.json"
     state_file.write_text(json.dumps({"id": gremlin_id}), encoding="utf-8")
 
     data = StateData(gremlin_id=gremlin_id, state_file=state_file)
-    return build_state(data=data, client=FakeClaudeClient(), session_dir=session_dir)
+    return build_state(data=data, client=FakeClaudeClient(), artifact_dir=artifact_dir)
 
 
 def test_parallel_run_cleans_up_child_state_dirs(sandbox) -> None:
@@ -181,14 +181,14 @@ def test_parallel_run_cleans_up_child_state_dirs(sandbox) -> None:
 
 
 def test_parallel_run_no_gremlin_id_uses_old_layout(sandbox) -> None:
-    """When parent has no gremlin_id, child state lives under parent session_dir/<child>."""
-    session_dir = paths.state_root() / "direct" / "some-run" / "artifacts"
-    session_dir.mkdir(parents=True, exist_ok=True)
+    """When parent has no gremlin_id, child state lives under parent artifact_dir/<child>."""
+    artifact_dir = paths.state_root() / "direct" / "some-run" / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
 
     parent = build_state(
         data=StateData(),
         client=FakeClaudeClient(),
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
     )
 
     from gremlins.stages.base import Stage
@@ -204,8 +204,8 @@ def test_parallel_run_no_gremlin_id_uses_old_layout(sandbox) -> None:
     stage = ParallelStage("grp", [child])
     asyncio.run(stage.run(parent))
 
-    # Old layout: child session_dir = parent.session_dir / child.name
-    assert (session_dir / "child-x").is_dir()
+    # Old layout: child artifact_dir = parent.artifact_dir / child.name
+    assert (artifact_dir / "child-x").is_dir()
 
 
 # ---------------------------------------------------------------------------
@@ -237,11 +237,11 @@ def test_child_reads_parent_artifact_via_registry(sandbox) -> None:
     state_file = parent_state_dir / "state.json"
     state_file.write_text(json.dumps({"id": gremlin_id}), encoding="utf-8")
     data = StateData(gremlin_id=gremlin_id, state_file=state_file)
-    parent_artifacts = ArtifactRegistry(session_dir=parent_session)
+    parent_artifacts = ArtifactRegistry(artifact_dir=parent_session)
     parent = build_state(
         data=data,
         client=FakeClaudeClient(),
-        session_dir=parent_session,
+        artifact_dir=parent_session,
         artifacts=parent_artifacts,
     )
 
@@ -258,7 +258,7 @@ def test_child_reads_parent_artifact_via_registry(sandbox) -> None:
 
     # And the child resolver can actually read the file
     child_session = state_root / child_id / "artifacts"
-    child_resolver = FileSessionResolver(child_session)
+    child_resolver = FileArtifactResolver(child_session)
     uri = Uri.parse(child_reg_data["result"])
     content = child_resolver.read(uri)
     assert content == "parent result"

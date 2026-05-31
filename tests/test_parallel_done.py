@@ -29,7 +29,7 @@ def _ctx(gremlin_id: str, sf: pathlib.Path, child_key: str) -> State:
     return build_state(
         data=StateData(gremlin_id=gremlin_id, state_file=sf),
         client=FakeClaudeClient(),
-        session_dir=sf.parent,
+        artifact_dir=sf.parent,
         child_key=child_key,
     )
 

@@ -16,8 +16,8 @@ from gremlins.stages.outcome import Bail
 
 
 def _make_state(tmp_path: pathlib.Path):
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
+    artifact_dir = tmp_path / "session"
+    artifact_dir.mkdir()
     subprocess.run(
         ["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True
     )
@@ -43,7 +43,7 @@ def _make_state(tmp_path: pathlib.Path):
     return build_state(
         data=StateData(gremlin_id=None),
         client=FakeClaudeClient(fixtures={}),
-        session_dir=session_dir,
+        artifact_dir=artifact_dir,
         worktree=tmp_path,
     )
 
@@ -52,7 +52,7 @@ def test_bail_in_body_exec_terminates_loop(tmp_path: pathlib.Path) -> None:
     state = _make_state(tmp_path)
     exec_stage = Exec(
         "check",
-        {"cmds": ["printf 'bail reason' > '{session_dir}/bail'", "exit 2"]},
+        {"cmds": ["printf 'bail reason' > '{artifact_dir}/bail'", "exit 2"]},
         out_map={"bail": "file://session/bail"},
     )
     loop = LoopStage("loop", body=[exec_stage], max_iterations=3)
@@ -69,7 +69,7 @@ def test_bail_message_matches_file_contents(tmp_path: pathlib.Path) -> None:
         "check",
         {
             "cmds": [
-                "printf 'specific: assertion broken' > '{session_dir}/bail'",
+                "printf 'specific: assertion broken' > '{artifact_dir}/bail'",
                 "exit 2",
             ]
         },
@@ -87,7 +87,7 @@ def test_bail_wins_over_needs_fix(tmp_path: pathlib.Path) -> None:
     state = _make_state(tmp_path)
     exec_stage = Exec(
         "check",
-        {"cmds": ["printf 'hard stop' > '{session_dir}/bail'", "exit 2"]},
+        {"cmds": ["printf 'hard stop' > '{artifact_dir}/bail'", "exit 2"]},
         out_map={
             "bail": "file://session/bail",
             "status": "file://session/status",

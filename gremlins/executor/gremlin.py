@@ -138,7 +138,7 @@ class Gremlin:
         self.fetch_worktree = fetch_worktree
 
     @property
-    def session_dir(self) -> pathlib.Path:
+    def artifact_dir(self) -> pathlib.Path:
         return self.state_dir / "artifacts"
 
     def validate_resume_target(self) -> None:
@@ -172,7 +172,7 @@ class Gremlin:
             stage_state = build_state(
                 data=StateData(gremlin_id=self.gremlin_id, state_file=self.state_file),
                 client=resolved,
-                session_dir=self.session_dir,
+                artifact_dir=self.artifact_dir,
                 args=args,
                 pipeline_data=self.pipeline_data,
                 repo=self.repo,
@@ -259,7 +259,7 @@ class Gremlin:
 
         State.setup_dirs(
             self.state_dir,
-            self.session_dir,
+            self.artifact_dir,
             self.gremlin_id,
             instructions=self.instructions or "",
         )
@@ -284,7 +284,7 @@ class Gremlin:
                 )
 
             if self.spec:
-                spec_file = self.session_dir / "spec.md"
+                spec_file = self.artifact_dir / "spec.md"
                 if not spec_file.exists():
                     spec_src = pathlib.Path(self.spec)
                     if not spec_src.is_file():
@@ -294,7 +294,7 @@ class Gremlin:
                     shutil.copyfile(spec_src, spec_file)
 
             if self.plan and not self.pipeline_data.github_integration:
-                plan_file = self.session_dir / "plan.md"
+                plan_file = self.artifact_dir / "plan.md"
                 if not plan_file.exists():
                     src = pathlib.Path(self.plan)
                     if src.is_file():
@@ -304,7 +304,7 @@ class Gremlin:
                 os.chdir(self.worktree_dir)
 
             self.registry = ArtifactRegistry(
-                session_dir=self.session_dir,
+                artifact_dir=self.artifact_dir,
                 cwd=self.worktree_dir,
             )
             for key, value in (stage_inputs or {}).items():
@@ -327,7 +327,7 @@ class Gremlin:
                     plan_issue_uri = f"gh://issue/{m.group(1)}"
 
             if not self.registry.produced("plan"):
-                if (self.session_dir / "plan.md").exists():
+                if (self.artifact_dir / "plan.md").exists():
                     if not self.pipeline_data.github_integration:
                         self.registry.bind("plan", Uri.parse("file://session/plan.md"))
                     elif plan_issue_uri is not None:

@@ -39,7 +39,7 @@ def _make_ctx(child_key: str) -> State:
     return build_state(
         data=StateData(),
         client=FakeClaudeClient(),
-        session_dir=pathlib.Path("/tmp"),
+        artifact_dir=pathlib.Path("/tmp"),
         child_key=child_key,
     )
 
@@ -358,7 +358,7 @@ def test_parallel_sequence_child_worktree_flows() -> None:
     seq_ctx = build_state(
         data=StateData(),
         client=FakeClaudeClient(),
-        session_dir=pathlib.Path("/tmp"),
+        artifact_dir=pathlib.Path("/tmp"),
         child_key="seq",
     )
 
@@ -411,7 +411,7 @@ def test_make_runner_returns_async_for_any_stage() -> None:
             return Done()
 
     state = build_state(
-        data=StateData(), client=FakeClaudeClient(), session_dir=pathlib.Path("/tmp")
+        data=StateData(), client=FakeClaudeClient(), artifact_dir=pathlib.Path("/tmp")
     )
     runner = state.make_runner(AStage("a"))
     assert inspect.iscoroutinefunction(runner)
@@ -438,7 +438,7 @@ def test_stages_run_in_order_via_make_runner() -> None:
             return Done()
 
     base_state = build_state(
-        data=StateData(), client=FakeClaudeClient(), session_dir=pathlib.Path("/tmp")
+        data=StateData(), client=FakeClaudeClient(), artifact_dir=pathlib.Path("/tmp")
     )
     stages = [
         ("a", base_state.make_runner(StageA("a"))),

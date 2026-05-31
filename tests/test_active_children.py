@@ -26,7 +26,7 @@ def _stateful(tmp_path: pathlib.Path, gid: str = "test-id") -> State:
     return build_state(
         data=StateData(gremlin_id=gid, state_file=sf),
         client=FakeClaudeClient(),
-        session_dir=tmp_path,
+        artifact_dir=tmp_path,
     )
 
 
@@ -186,7 +186,7 @@ def _parallel_execute_stage(
             build_state(
                 data=StateData(),
                 client=FakeClaudeClient(),
-                session_dir=tmp_path,
+                artifact_dir=tmp_path,
                 child_key=k,
             ),
             fn,

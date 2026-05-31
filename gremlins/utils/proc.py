@@ -367,7 +367,7 @@ async def run_child_subprocess(
     or error status. Propagates CancelledError after cleaning up the child process.
     on_bail is called with the bail detail string when status == "bail".
     """
-    spec_path = child_st.session_dir / f"spec_{attempt}.json"
+    spec_path = child_st.artifact_dir / f"spec_{attempt}.json"
     spec_path.write_text(
         json.dumps(
             _build_child_spec_dict(
@@ -377,7 +377,7 @@ async def run_child_subprocess(
         encoding="utf-8",
     )
     timeout_s = _parse_child_timeout(stage_obj, child_key)
-    log_path = child_st.session_dir.parent / "log"
+    log_path = child_st.artifact_dir.parent / "log"
     log_file = None
     if log_path.parent.exists():
         try:
