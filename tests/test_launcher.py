@@ -954,6 +954,20 @@ def test_setup_workdir_detached_from_ref(tmp_path):
         git_mod.remove_worktree(str(repo), workdir)
 
 
+def test_setup_workdir_non_git_raises(tmp_path):
+    """setup_workdir raises GitError when project_root is not a git repository."""
+    non_repo = tmp_path / "not-a-git-repo"
+    non_repo.mkdir()
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    with pytest.raises(git_mod.GitError) as exc_info:
+        git_mod.setup_workdir("local", str(non_repo), "HEAD", "test-gremlin", state_dir)
+
+    assert exc_info.value.returncode == 128
+    assert "is not a git repository" in exc_info.value.stderr
+
+
 # ---------------------------------------------------------------------------
 # spec_path forwarding
 # ---------------------------------------------------------------------------

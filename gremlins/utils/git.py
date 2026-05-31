@@ -315,14 +315,6 @@ def setup_detached_from_remote_ref(
     )
 
 
-def setup_copy(project_root: str) -> str:
-    """Non-git fallback: copy project root into a fresh temp dir. Returns workdir path."""
-    work_root = paths.work_root()
-    workdir = work_root / f"aibg-gremlin.{secrets.token_hex(6)}"
-    shutil.copytree(project_root, workdir, dirs_exist_ok=True)
-    return str(workdir)
-
-
 def toplevel(cwd: str | os.PathLike[str] | None = None) -> str:
     """Return the absolute path of the git toplevel. Raises GitError on failure."""
     r = _run_git(["rev-parse", "--show-toplevel"], cwd=cwd)
@@ -442,7 +434,7 @@ def setup_workdir(
     worktree_parent: pathlib.Path | None = None,
 ) -> tuple[str, str, str, str]:
     if not in_git_repo(cwd=project_root):
-        return setup_copy(project_root), "", "", "copy"
+        raise GitError(128, f"{project_root!r} is not a git repository")
 
     if setup_kind == "worktree-branch":
         workdir, branch = setup_named_worktree(
