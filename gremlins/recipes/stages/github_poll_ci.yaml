@@ -27,7 +27,7 @@ stages:
           }
 
           check_bail_review_required() {
-              local decision="$1"
+              decision="$1"
               if [ "$decision" = "REVIEW_REQUIRED" ]; then
                   printf 'ci-gate: PR blocked by required human review\n' \
                       > "{session_dir}/bail"
@@ -117,8 +117,7 @@ stages:
               run_id=$(printf '%s' "$details_url" \
                   | sed -n 's|.*/actions/runs/\([0-9]*\).*|\1|p')
               if [ -n "$run_id" ]; then
-                  gh run view "$run_id" --log-failed 2>/dev/null | head -c 10000 \
-                      || printf '(could not fetch run logs)\n'
+                  { gh run view "$run_id" --log-failed 2>/dev/null || printf '(could not fetch run logs)\n' ; } | head -c 10000
               else
                   printf '(no action run URL; details: %s)\n' "$details_url"
               fi

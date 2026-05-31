@@ -52,6 +52,7 @@ stage-definitions:
             prompt: ["{{prompt}}"]
             in: { failure_output: ci_log, pr_branch: pr-branch }
           - { type: normalize-and-verify }
+          - { type: gremlins:github-push-to-pr-branch, in: { branch: pr-branch } }
           - name: capture-head
             type: exec
             out: { fix_head: "file://session/fix-head" }
