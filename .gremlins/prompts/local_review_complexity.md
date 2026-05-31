@@ -18,3 +18,5 @@ Flag:
 Get the diff with `git diff {base_ref}...HEAD`. Read surrounding code as needed — do not switch branches.
 
 If the changes are already tight, say so explicitly and output no findings. Do not invent findings to look thorough.
+
+Write all findings to `{session_dir}/{name}.md`.
