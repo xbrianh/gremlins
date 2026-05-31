@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import shutil
+import subprocess
 
 import pytest
 
@@ -28,10 +29,35 @@ stages:
 
 @pytest.fixture()
 def project_dir(tmp_path):
-    """Non-git directory so initialize_runtime() uses setup_copy."""
+    """Git repository for testing."""
     d = tmp_path / "project"
     d.mkdir()
     (d / "file.txt").write_text("hello")
+    subprocess.run(["git", "init"], cwd=str(d), check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=str(d),
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=str(d),
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "add", "file.txt"],
+        cwd=str(d),
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=str(d),
+        check=True,
+        capture_output=True,
+    )
     return d
 
 

@@ -7,7 +7,7 @@ import pathlib
 import subprocess
 
 from gremlins import paths
-from gremlins.utils.git import setup_copy, setup_detached_worktree, setup_named_worktree
+from gremlins.utils.git import setup_detached_worktree, setup_named_worktree
 
 _GIT_ENV = {
     **os.environ,
@@ -56,16 +56,3 @@ def test_setup_named_worktree_defaults_to_work_root(tmp_path: pathlib.Path) -> N
             cwd=str(repo),
             capture_output=True,
         )
-
-
-def test_setup_copy_defaults_to_work_root(tmp_path: pathlib.Path) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _init_repo(repo)
-    workdir = setup_copy(str(repo))
-    try:
-        assert pathlib.Path(workdir).parent == paths.work_root()
-    finally:
-        import shutil
-
-        shutil.rmtree(workdir, ignore_errors=True)
