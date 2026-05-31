@@ -127,7 +127,7 @@ def clean_main(argv: list[str]) -> int:
                 project_root if project_root and os.path.isdir(project_root) else None
             )
             cleanup_gremlin(
-                item.label, str(item.path), state, cwd_for_git, delete_branch=True
+                item.label, str(item.path), state, cwd_for_git
             )
             if not item.path.exists():
                 print(f"removed {item.label}")
