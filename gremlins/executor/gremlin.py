@@ -279,6 +279,7 @@ class Gremlin:
                 st = StateData.load(self.gremlin_id)
                 st.patch(
                     workdir=workdir,
+                    worktree_base=self.base_ref_sha,
                     setup_kind="worktree-detached",
                 )
 
