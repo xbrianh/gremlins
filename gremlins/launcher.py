@@ -542,25 +542,12 @@ def launch(
     return inputs.gremlin_id, p
 
 
-def _load_resume_state(gremlin_id: str) -> tuple[pathlib.Path, dict[str, Any]]:
-    state_dir = _state_root() / gremlin_id
-    sf = state_dir / "state.json"
-    if not state_dir.is_dir() or not sf.is_file():
-        raise RuntimeError(f"no state at {state_dir}")
-    try:
-        state = json.loads(sf.read_text(encoding="utf-8"))
-    except Exception as exc:
-        raise RuntimeError(f"could not read state.json: {exc}") from exc
-    return state_dir, state
-
-
-def _check_resume_preconditions(
-    gremlin_id: str, state_dir: pathlib.Path, state: dict[str, Any], graft: str | None
-) -> None:
-    status = state.get("status", "")
-    old_pid = state.get("pid")
-    exit_code = state.get("exit_code")
-    workdir = state.get("workdir", "")
+def _check_resume_preconditions(gremlin: Gremlin, graft: str | None) -> None:
+    state_data = gremlin.state_data
+    status = state_data.status
+    old_pid = state_data.pid
+    workdir = state_data.workdir
+    gremlin_id = gremlin.gremlin_id
 
     if status == "running":
         if graft is not None:
@@ -576,46 +563,14 @@ def _check_resume_preconditions(
             except (OSError, ValueError):
                 pass
 
-    if graft is None and (state_dir / "finished").is_file() and exit_code == 0:
-        raise RuntimeError(
-            f"gremlin {gremlin_id} finished successfully — nothing to resume"
-        )
+    if graft is None and gremlin.finished:
+        if state_data.exit_code == 0:
+            raise RuntimeError(
+                f"gremlin {gremlin_id} finished successfully — nothing to resume"
+            )
 
     if workdir and not os.path.isdir(workdir):
         raise RuntimeError(f"worktree missing: {workdir}")
-
-
-def _load_pipeline_and_check_gh(project_root: str, pipeline_path: str) -> Any:
-    pipeline_data = None
-    if pipeline_path:
-        try:
-            pipeline_data = _PipelineData.from_yaml(
-                resolve_pipeline_path(pipeline_path, pathlib.Path(project_root))
-            )
-        except (FileNotFoundError, OSError, ValueError):
-            pass
-
-    if (
-        pipeline_data is not None
-        and pipeline_data.github_integration
-        and shutil.which("gh") is None
-    ):
-        raise RuntimeError("gh CLI not found on PATH (required for gh pipeline)")
-
-    return pipeline_data
-
-
-def _determine_stage(state: dict[str, Any], pipeline_data: Any) -> str:
-    stage = str(state.get("stage", ""))
-    if not stage or stage == "starting":
-        stage = "plan"
-    if (
-        pipeline_data is not None
-        and pipeline_data.uses_loop_handoff()
-        and stage not in ("review-chain", "address-chain")
-    ):
-        stage = "chain"
-    return stage
 
 
 def _patch_state_for_resume(
@@ -700,32 +655,46 @@ def _spawn_resume(
 
 
 def resume(gremlin_id: str, *, graft: str | None = None) -> None:
-    state_dir, state = _load_resume_state(gremlin_id)
-    _check_resume_preconditions(gremlin_id, state_dir, state, graft)
-
     gremlin = Gremlin.open(gremlin_id)
+    _check_resume_preconditions(gremlin, graft)
     project_root = gremlin.project_root or str(_paths.project_root())
-    _load_pipeline_and_check_gh(project_root, gremlin.pipeline_path)
+    if gremlin.pipeline_data.github_integration and shutil.which("gh") is None:
+        raise RuntimeError("gh CLI not found on PATH (required for gh pipeline)")
 
-    stage = _determine_stage(state, gremlin.pipeline_data)
+    stage = gremlin.state_data.stage
+    if not stage or stage == "starting":
+        stage = "plan"
+    if gremlin.pipeline_data.uses_loop_handoff() and stage not in (
+        "review-chain",
+        "address-chain",
+    ):
+        stage = "chain"
+
     if graft is not None:
-        stage = _append_graft(state_dir, graft, project_root)
+        stage = _append_graft(gremlin.state_dir, graft, project_root)
+
+    state_data = gremlin.state_data
     _patch_state_for_resume(
         gremlin_id,
-        state_dir,
-        state,
+        gremlin.state_dir,
+        {
+            "status": state_data.status,
+            "client": state_data.client,
+        },
         stage,
         gremlin.pipeline_args,
         gremlin.pipeline_path,
     )
     p = _spawn_resume(
         gremlin_id,
-        state_dir,
-        state,
+        gremlin.state_dir,
+        {
+            "instructions": state_data.instructions,
+        },
         gremlin.pipeline_path,
         gremlin.pipeline_args,
         stage,
         project_root,
     )
-    (state_dir / "pid").write_text(str(p.pid), encoding="utf-8")
+    (gremlin.state_dir / "pid").write_text(str(p.pid), encoding="utf-8")
     StateData.load(gremlin_id).patch(pid=p.pid)

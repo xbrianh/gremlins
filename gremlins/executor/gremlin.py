@@ -148,6 +148,14 @@ class Gremlin:
     def artifact_dir(self) -> pathlib.Path:
         return self.state_dir / "artifacts"
 
+    @property
+    def state_data(self) -> StateData:
+        return StateData.load(self.gremlin_id)
+
+    @property
+    def finished(self) -> bool:
+        return (self.state_dir / "finished").is_file()
+
     async def fork(self, state: State, target_id: str) -> State:
         """Create an independent copy of a running gremlin.
 
@@ -330,7 +338,7 @@ class Gremlin:
             except FileNotFoundError:
                 pass
 
-        # Load pipeline (required for reconstruction)
+        # Load pipeline (optional for status checks, required for execution)
         pipeline = None
         if pipeline_path or kind:
             try:
@@ -338,6 +346,16 @@ class Gremlin:
                     resolve_pipeline_path(
                         pipeline_path or kind, pathlib.Path(project_root)
                     )
+                )
+            except FileNotFoundError:
+                # Pipeline not found (e.g., test or recovery scenario)
+                # Create minimal stub pipeline to allow status checks
+                pipeline = _PipelineData(
+                    name=kind or "unknown",
+                    path=pathlib.Path(pipeline_path)
+                    if pipeline_path
+                    else pathlib.Path("."),
+                    stages=[],
                 )
             except Exception as exc:
                 raise ValueError(
