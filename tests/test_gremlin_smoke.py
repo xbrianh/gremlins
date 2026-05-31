@@ -82,7 +82,6 @@ def test_resume_unbinds_stale_exec_out_keys(tmp_path):
     gremlin = Gremlin(
         [stage],
         state_dir=state_dir,
-        session_dir=session_dir,
         gremlin_id=None,
         pipeline_data=pipeline,
         resume_from="normalize",
@@ -105,7 +104,6 @@ def test_resume_unbind_only_affects_exec_stages(tmp_path):
     gremlin = Gremlin(
         [exec_stage],
         state_dir=state_dir,
-        session_dir=session_dir,
         gremlin_id=None,
         pipeline_data=pipeline,
         resume_from="work",

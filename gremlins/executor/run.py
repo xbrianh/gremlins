@@ -251,7 +251,6 @@ async def run_pipeline(
         gremlin = Gremlin.initialize_with_runtime(
             gremlin_id=gremlin_id,
             state_dir=state_dir,
-            session_dir=session_dir,
             project_dir=pathlib.Path(project_root)
             if project_root
             else paths.project_root(),
