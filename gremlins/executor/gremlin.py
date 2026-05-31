@@ -12,8 +12,9 @@ import pathlib
 import re
 import shutil
 from collections.abc import Awaitable, Callable, Sequence
-from typing import Any
+from typing import Any, cast
 
+from gremlins import paths as _paths
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
@@ -106,6 +107,8 @@ class Gremlin:
         base_ref_sha: str = "",
         base_ref: str = "",
         fetch_worktree: bool = False,
+        pipeline_path: str = "",
+        pipeline_args: list[str] | None = None,
     ) -> None:
         unknown: list[str] = []
         for s in stages:
@@ -138,6 +141,8 @@ class Gremlin:
         self.base_ref_sha = base_ref_sha
         self.base_ref = base_ref
         self.fetch_worktree = fetch_worktree
+        self.pipeline_path = pipeline_path
+        self.pipeline_args = pipeline_args or []
 
     @property
     def artifact_dir(self) -> pathlib.Path:
@@ -272,6 +277,90 @@ class Gremlin:
             self._unbind_stale_exec_artifacts()
         built = self._collect_stages(self.stages)
         await run_stages(built, resume_from=self.resume_from)
+
+    @classmethod
+    def open(cls, gremlin_id: str) -> Gremlin:
+        """Reconstruct a Gremlin from a persisted state directory.
+
+        Loads state.json, resolves the pipeline, and returns a Gremlin instance
+        without any side effects (no directory creation, no worktree setup).
+        Raises FileNotFoundError if state directory is missing, ValueError if
+        state.json is malformed or pipeline cannot be loaded.
+        """
+        from gremlins.cli.pipeline_args import resolve_pipeline
+
+        state_dir = _paths.state_root() / gremlin_id
+        sf = state_dir / "state.json"
+
+        if not state_dir.is_dir():
+            raise FileNotFoundError(f"no state at {state_dir}")
+        if not sf.is_file():
+            raise FileNotFoundError(f"no state.json at {sf}")
+
+        try:
+            state_raw = json.loads(sf.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise ValueError(f"could not parse state.json: {exc}") from exc
+
+        if not isinstance(state_raw, dict):
+            raise ValueError(
+                f"state.json must be a JSON object, not {type(state_raw).__name__}"
+            )
+        state_raw = cast(dict[str, Any], state_raw)
+
+        # Extract persisted fields from state.json
+        kind = cast(str, state_raw.get("kind") or "")
+        project_root = cast(str, state_raw.get("project_root") or _paths.project_root())
+        pipeline_args = cast(list[str], state_raw.get("pipeline_args") or [])
+        pipeline_path = cast(str, state_raw.get("pipeline_path") or "")
+        worktree_dir_str = cast(str, state_raw.get("workdir") or "")
+        instructions = cast(str, state_raw.get("instructions") or "")
+
+        # Resolve pipeline (hermetic check first, then fallback)
+        hermetic = state_dir / "pipeline.yaml"
+        if hermetic.is_file():
+            pipeline_path = str(hermetic)
+        elif kind:
+            try:
+                filtered, resolved = resolve_pipeline(
+                    kind, tuple(pipeline_args), project_root
+                )
+                pipeline_args = filtered
+                pipeline_path = resolved
+            except FileNotFoundError:
+                pass
+
+        # Load pipeline (required for reconstruction)
+        pipeline = None
+        if pipeline_path or kind:
+            try:
+                pipeline = _PipelineData.from_yaml(
+                    resolve_pipeline_path(
+                        pipeline_path or kind, pathlib.Path(project_root)
+                    )
+                )
+            except Exception as exc:
+                raise ValueError(
+                    f"could not load pipeline for {gremlin_id}: {exc}"
+                ) from exc
+
+        if pipeline is None:
+            raise ValueError(f"could not load pipeline for {gremlin_id}")
+
+        # Construct Gremlin
+        worktree_dir = pathlib.Path(worktree_dir_str) if worktree_dir_str else None
+
+        return cls(
+            pipeline.stages,
+            state_dir=state_dir,
+            gremlin_id=gremlin_id,
+            pipeline_data=pipeline,
+            worktree_dir=worktree_dir,
+            instructions=instructions,
+            project_root=project_root,
+            pipeline_path=pipeline_path,
+            pipeline_args=pipeline_args,
+        )
 
     @classmethod
     def initialize_with_runtime(

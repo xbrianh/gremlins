@@ -408,7 +408,7 @@ stages:
   - name: plan
     type: agent
   - name: implement
-    type: implement
+    type: agent
     client: claude:opus
 """,
         encoding="utf-8",
@@ -978,6 +978,10 @@ def test_stage_inputs_survives_resume(lenv, monkeypatch):
     (state_dir / "finished").touch()
     (state_dir / "instructions.txt").write_text("do the thing", encoding="utf-8")
     saved_stage_inputs = {"instructions": "do the thing", "flag": "value"}
+    pipeline_yaml = lenv.repo / "pipeline.yaml"
+    pipeline_yaml.write_text(
+        "stages:\n  - name: plan\n    type: agent\n", encoding="utf-8"
+    )
     (state_dir / "state.json").write_text(
         json.dumps(
             {
@@ -988,8 +992,8 @@ def test_stage_inputs_survives_resume(lenv, monkeypatch):
                 "stage": "plan",
                 "status": "stopped",
                 "exit_code": 1,
-                "pipeline_args": ["--pipeline", str(lenv.repo / "pipeline.yaml")],
-                "pipeline_path": str(lenv.repo / "pipeline.yaml"),
+                "pipeline_args": ["--pipeline", str(pipeline_yaml)],
+                "pipeline_path": str(pipeline_yaml),
                 "stage_inputs": saved_stage_inputs,
             }
         ),
