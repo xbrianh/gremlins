@@ -251,7 +251,7 @@ class _ParallelExecutor:
         parent_gremlin = None
         if parent_gid:
             try:
-                parent_gremlin = Gremlin.open(cast(str, parent_gid))
+                parent_gremlin = Gremlin.open(parent_gid)
                 parent_gremlin.registry = cast(State, parent_state).artifacts
             except (ValueError, FileNotFoundError):
                 parent_gremlin = None
