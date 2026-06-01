@@ -265,24 +265,19 @@ class _ParallelExecutor:
 
         await git.prune_worktrees_async(str(self._project_root))
 
-        # base_head must come from the parent's implementation worktree, not the
-        # project root.  GREMLINS_PROJECT_ROOT is set to the original repo root
-        # before the worktree is created, so paths.project_root() (and therefore
-        # self._project_root) always points to the original repo.  fork() creates
-        # child worktrees at HEAD(pstate.worktree), which diverges from the
-        # original repo HEAD once implement commits.  Using the wrong reference
-        # causes _validate_no_mutations to fire a false-positive on every run.
-        _pstate_wt = (
+        # base_head must come from the parent worktree, not project_root:
+        # GREMLINS_PROJECT_ROOT points to the original repo, which diverges from the fork once implement commits.
+        pstate_wt = (
             self._parent_state.worktree if self._parent_state is not None else None
         )
-        _base_ref = (
-            str(_pstate_wt) if _pstate_wt is not None else str(self._project_root)
+        base_ref = (
+            str(pstate_wt) if pstate_wt is not None else str(self._project_root)
         )
-        gs.base_head = await git.head_sha_async(cwd=_base_ref)
+        gs.base_head = await git.head_sha_async(cwd=base_ref)
         logger.debug(
             "parallel fan-out: base_head=%s base_ref=%s",
             gs.base_head,
-            _base_ref,
+            base_ref,
         )
 
         parent_gid = self._parent_data.gremlin_id
@@ -322,7 +317,6 @@ class _ParallelExecutor:
                             child_key,
                         )
                 else:
-                    # No parent gremlin identity — create a plain worktree.
                     wt_dir = await git.setup_detached_worktree_async(
                         str(self._project_root),
                         gs.base_head or "HEAD",
