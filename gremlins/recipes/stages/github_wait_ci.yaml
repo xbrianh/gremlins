@@ -67,14 +67,14 @@ stages:
                       exit 0
                   fi
               else
-                  # Post-fix: wait for GitHub to reflect the pushed commit SHA.
+                  # Post-fix: wait for GitHub to reflect the pushed commit SHA or its descendants.
                   push_deadline=$(( $(date +%s) + {poll_timeout} ))
                   while true; do
                       status_json=$(fetch_status)
                       decision=$(printf '%s' "$status_json" | jq -r '.reviewDecision // empty')
                       check_bail_review_required "$decision"
                       head_oid=$(printf '%s' "$status_json" | jq -r '.headRefOid // empty')
-                      if [ "$head_oid" = "$fix_head" ]; then
+                      if [ "$head_oid" = "$fix_head" ] || git merge-base --is-ancestor "$fix_head" "$head_oid" 2>/dev/null; then
                           break
                       fi
                       if [ "$(date +%s)" -ge "$push_deadline" ]; then
