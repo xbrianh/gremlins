@@ -156,18 +156,29 @@ class Gremlin:
     def finished(self) -> bool:
         return (self.state_dir / "finished").is_file()
 
-    async def fork(self, state: State, target_id: str) -> State:
+    async def fork(
+        self,
+        state: State,
+        target_id: str,
+        *,
+        parent_id: str = "",
+        group_name: str = "",
+        child_key: str = "",
+    ) -> State:
         """Create an independent copy of a running gremlin.
 
         Copies artifact directory, registry, and optionally creates a fresh
-        worktree at the same commit SHA.
+        worktree at the same commit SHA. Persists state.json with child identity
+        fields if provided.
         """
         child_state_dir = self.state_dir.parent / target_id
         child_artifact_dir = child_state_dir / "artifacts"
 
         # Copy artifact directory and registry in thread to avoid blocking event loop
         child_artifact_dir.parent.mkdir(parents=True, exist_ok=True)
-        await asyncio.to_thread(shutil.copytree, state.artifact_dir, child_artifact_dir)
+        await asyncio.to_thread(
+            shutil.copytree, state.artifact_dir, child_artifact_dir, dirs_exist_ok=True
+        )
 
         # Copy registry.json from the same directory as source artifacts
         src_registry = state.artifact_dir.parent / "registry.json"
@@ -194,7 +205,13 @@ class Gremlin:
         )
 
         # Build new state with updated values
-        child_data = dataclasses.replace(state.data, gremlin_id=target_id)
+        child_data = dataclasses.replace(
+            state.data,
+            gremlin_id=target_id,
+            parent_id=parent_id or state.data.parent_id,
+            group_name=group_name or state.data.group_name,
+            child_key=child_key or state.data.child_key,
+        )
         child_cwd = state.cwd
         if child_worktree is not None and state.worktree is not None:
             child_cwd = str(child_worktree)
@@ -212,10 +229,14 @@ class Gremlin:
             worktree=child_worktree,
             worktree_parent=state.worktree_parent,
             artifacts=child_registry,
-            child_key=state.child_key,
+            child_key=child_key or state.data.child_key,
             parent_stage=state.parent_stage,
             base_ref=state.base_ref,
         )
+
+        # Persist state.json with child identity fields
+        child_data.persist(child_state_dir)
+        (child_state_dir / "log").touch()
 
         return child_state
 

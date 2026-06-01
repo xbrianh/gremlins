@@ -7,7 +7,6 @@ import dataclasses
 import json
 import logging
 import math
-import os
 import pathlib
 import re
 import secrets
@@ -31,68 +30,8 @@ logger = logging.getLogger(__name__)
 _Stage = tuple[str, Callable[[], Any]]
 
 
-def _noop_set_stage(_n: str) -> None:
+def _noop_set_stage(_: str) -> None:
     pass
-
-
-def _snapshot_registry(
-    src: pathlib.Path,
-    dst: pathlib.Path,
-    parent_artifact_dir: pathlib.Path,
-) -> None:
-    """Copy parent's registry.json to child, rewriting file://session/ URIs to absolute paths."""
-    if not src.exists():
-        return
-    try:
-        data: dict[str, str] = json.loads(src.read_text(encoding="utf-8"))
-    except Exception:
-        logger.warning("_snapshot_registry: failed to parse %s", src, exc_info=True)
-        return
-    rewritten: dict[str, str] = {}
-    for k, v in data.items():
-        if v.startswith("file://session/"):
-            name = v[len("file://session/") :]
-            abs_path = (parent_artifact_dir / name).resolve()
-            rewritten[k] = f"file://{abs_path}"
-        else:
-            rewritten[k] = v
-    tmp = dst.with_name(dst.name + f".{os.getpid()}.{secrets.token_hex(4)}.tmp")
-    tmp.write_text(json.dumps(rewritten), encoding="utf-8")
-    os.replace(tmp, dst)
-
-
-def _init_child_dir(
-    parent_state: State,
-    child_id: str,
-    parent_id: str,
-    group_name: str,
-    child_key: str,
-) -> None:
-    """Set up <state_root>/<child_id>/ with state.json, artifacts/, registry.json, log."""
-    state_root = paths.state_root()
-    child_state_dir = state_root / child_id
-    child_state_dir.mkdir(parents=True, exist_ok=True)
-    (child_state_dir / "artifacts").mkdir(parents=True, exist_ok=True)
-
-    child_data = StateData(
-        gremlin_id=child_id,
-        parent_id=parent_id,
-        group_name=group_name,
-        child_key=child_key,
-        project_root=parent_state.data.project_root,
-        permissions_file=parent_state.data.permissions_file,
-        bypass=parent_state.data.bypass,
-        setup_kind=parent_state.data.setup_kind,
-        pipeline_path=parent_state.data.pipeline_path,
-        kind=parent_state.data.kind,
-    )
-    child_data.persist(child_state_dir)
-
-    parent_registry = parent_state.artifacts.registry_path
-    child_registry = child_state_dir / "registry.json"
-    _snapshot_registry(parent_registry, child_registry, parent_state.artifact_dir)
-
-    (child_state_dir / "log").touch()
 
 
 class ParallelStage(Stage):
@@ -221,8 +160,6 @@ class ParallelStage(Stage):
             if child.name in done:
                 continue
             child_id = f"{parent_id}--{self.name}--{child.name}" if parent_id else ""
-            if child_id:
-                _init_child_dir(state, child_id, parent_id, self.name, child.name)
             cs = _child_state(
                 group_state, child, fan_out=True, child_id=child_id or None
             )
@@ -291,6 +228,8 @@ class _ParallelExecutor:
     # --- worktree lifecycle ---
 
     async def _fan_out(self) -> None:
+        from gremlins.executor.gremlin import Gremlin
+
         self._set_stage(f"{self._group_name}-fanout")
         gs = self._group_state
         gs.hydrate()
@@ -307,16 +246,41 @@ class _ParallelExecutor:
         await git.prune_worktrees_async(str(self._project_root))
         gs.base_head = await git.head_sha_async(cwd=str(self._project_root))
 
+        parent_gid = self._parent_data.gremlin_id
+        parent_state = self._parent_state
+        parent_gremlin = None
+        if parent_gid:
+            try:
+                parent_gremlin = Gremlin.open(parent_gid)
+                parent_gremlin.registry = cast(State, parent_state).artifacts
+            except (ValueError, FileNotFoundError):
+                parent_gremlin = None
+
         try:
             for child_key, child_state, _ in self._child_runners:
-                wt_dir = await git.setup_detached_worktree_async(
-                    str(self._project_root),
-                    "HEAD",
-                    worktree_parent=self._worktree_parent,
-                )
-                wt_path = pathlib.Path(wt_dir)
-                gs.worktree_paths[child_key] = wt_path
-                child_state.worktree = wt_path
+                if parent_gremlin is not None:
+                    gid = cast(str, parent_gid)
+                    pstate = cast(State, parent_state)
+                    child_id = f"{gid}--{self._group_name}--{child_key}"
+                    forked_state = await parent_gremlin.fork(
+                        pstate,
+                        child_id,
+                        parent_id=gid,
+                        group_name=self._group_name,
+                        child_key=child_key,
+                    )
+                    if forked_state.worktree is not None:
+                        child_state.worktree = forked_state.worktree
+                        gs.worktree_paths[child_key] = forked_state.worktree
+                else:
+                    wt_dir = await git.setup_detached_worktree_async(
+                        str(self._project_root),
+                        "HEAD",
+                        worktree_parent=self._worktree_parent,
+                    )
+                    wt_path = pathlib.Path(wt_dir)
+                    gs.worktree_paths[child_key] = wt_path
+                    child_state.worktree = wt_path
         except Exception:
             await git.remove_worktrees_async(
                 str(self._project_root), [str(p) for p in gs.worktree_paths.values()]

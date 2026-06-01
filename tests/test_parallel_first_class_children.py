@@ -21,7 +21,7 @@ from gremlins.artifacts.schemes import FileArtifactResolver
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state
-from gremlins.stages.parallel import ParallelStage, _snapshot_registry
+from gremlins.stages.parallel import ParallelStage
 
 # ---------------------------------------------------------------------------
 # FileArtifactResolver._path: absolute path URIs
@@ -78,60 +78,6 @@ def test_file_resolver_session_relative_still_works(tmp_path: pathlib.Path) -> N
     resolver = FileArtifactResolver(artifact_dir)
     uri = Uri.parse("file://session/output.txt")
     assert resolver._path(uri) == target.resolve()
-
-
-# ---------------------------------------------------------------------------
-# _snapshot_registry: rewriting file://session/ URIs
-# ---------------------------------------------------------------------------
-
-
-def test_snapshot_registry_rewrites_session_uris(tmp_path: pathlib.Path) -> None:
-    parent_session = tmp_path / "parent" / "artifacts"
-    parent_session.mkdir(parents=True)
-
-    src = tmp_path / "parent" / "registry.json"
-    src.write_text(
-        json.dumps(
-            {
-                "my-artifact": "file://session/output.md",
-                "other-artifact": "git://ref/HEAD",
-                "gh-artifact": "gh://pr/42",
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    dst = tmp_path / "child" / "registry.json"
-    dst.parent.mkdir(parents=True)
-
-    _snapshot_registry(src, dst, parent_session)
-
-    data = json.loads(dst.read_text(encoding="utf-8"))
-    expected_abs = str((parent_session / "output.md").resolve())
-    assert data["my-artifact"] == f"file://{expected_abs}"
-    # Non-file:// URIs are copied as-is
-    assert data["other-artifact"] == "git://ref/HEAD"
-    assert data["gh-artifact"] == "gh://pr/42"
-
-
-def test_snapshot_registry_missing_src_is_noop(tmp_path: pathlib.Path) -> None:
-    src = tmp_path / "nonexistent.json"
-    dst = tmp_path / "dst.json"
-    parent_session = tmp_path / "session"
-
-    _snapshot_registry(src, dst, parent_session)
-
-    assert not dst.exists()
-
-
-def test_snapshot_registry_empty_src(tmp_path: pathlib.Path) -> None:
-    src = tmp_path / "registry.json"
-    src.write_text("{}", encoding="utf-8")
-    dst = tmp_path / "dst.json"
-    parent_session = tmp_path / "session"
-
-    _snapshot_registry(src, dst, parent_session)
-    assert json.loads(dst.read_text(encoding="utf-8")) == {}
 
 
 # ---------------------------------------------------------------------------
@@ -209,56 +155,125 @@ def test_parallel_run_no_gremlin_id_uses_old_layout(sandbox) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Child can read parent artifacts via rewritten absolute URIs in registry
+# Child artifact dir is a full copy of parent artifacts via fork()
 # ---------------------------------------------------------------------------
 
 
-def test_child_reads_parent_artifact_via_registry(sandbox) -> None:
-    """After _init_child_dir, child's registry has absolute URIs for parent session files."""
-    from gremlins.stages.parallel import _init_child_dir
+def test_parallel_child_artifact_dir_is_full_copy(sandbox) -> None:
+    """Child's artifact dir contains a full copy of parent's artifacts."""
+    import subprocess
 
-    gremlin_id = "parent-reg-test"
+    from gremlins.executor.gremlin import Gremlin
+    from gremlins.pipeline import Pipeline
+
+    # Create a temporary git repo
+    tmp_repo = sandbox.root / "repo"
+    tmp_repo.mkdir()
+    subprocess.run(["git", "init"], cwd=tmp_repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"],
+        cwd=tmp_repo,
+        check=True,
+        capture_output=True,
+    )
+    (tmp_repo / "file.txt").write_text("initial")
+    subprocess.run(
+        ["git", "add", "file.txt"], cwd=tmp_repo, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "initial"],
+        cwd=tmp_repo,
+        check=True,
+        capture_output=True,
+    )
+
+    gremlin_id = "parent-fork-test"
     state_root = paths.state_root()
     parent_state_dir = state_root / gremlin_id
     parent_state_dir.mkdir(parents=True, exist_ok=True)
-    parent_session = parent_state_dir / "artifacts"
-    parent_session.mkdir(parents=True, exist_ok=True)
+    parent_artifact_dir = parent_state_dir / "artifacts"
+    parent_artifact_dir.mkdir(parents=True, exist_ok=True)
 
-    # Write a file the parent "produced" into its session dir
-    artifact_file = parent_session / "result.md"
-    artifact_file.write_text("parent result")
+    # Create parent artifacts
+    (parent_artifact_dir / "file1.txt").write_text("content1")
+    (parent_artifact_dir / "file2.txt").write_text("content2")
+    (parent_artifact_dir / "subdir").mkdir()
+    (parent_artifact_dir / "subdir" / "file3.txt").write_text("content3")
 
-    # Set up parent registry pointing at it via file://session/ URI
+    # Set up parent registry
     parent_registry = parent_state_dir / "registry.json"
     parent_registry.write_text(
-        json.dumps({"result": "file://session/result.md"}), encoding="utf-8"
+        json.dumps(
+            {
+                "artifact1": "file://session/file1.txt",
+                "artifact2": "file://session/file2.txt",
+            }
+        ),
+        encoding="utf-8",
     )
 
     state_file = parent_state_dir / "state.json"
     state_file.write_text(json.dumps({"id": gremlin_id}), encoding="utf-8")
     data = StateData(gremlin_id=gremlin_id, state_file=state_file)
-    parent_artifacts = ArtifactRegistry(artifact_dir=parent_session)
+    parent_artifacts = ArtifactRegistry(artifact_dir=parent_artifact_dir)
+    parent_artifacts.bind("artifact1", Uri.parse("file://session/file1.txt"))
+    parent_artifacts.bind("artifact2", Uri.parse("file://session/file2.txt"))
+
     parent = build_state(
         data=data,
         client=FakeClaudeClient(),
-        artifact_dir=parent_session,
+        artifact_dir=parent_artifact_dir,
         artifacts=parent_artifacts,
+        cwd=str(tmp_repo),
+        worktree=tmp_repo,
     )
 
-    child_id = f"{gremlin_id}--mygrp--child-z"
-    _init_child_dir(parent, child_id, gremlin_id, "mygrp", "child-z")
+    # Fork the parent state
+    gremlin = Gremlin(
+        stages=[],
+        state_dir=parent_state_dir,
+        gremlin_id=gremlin_id,
+        pipeline_data=Pipeline(name="test", path=tmp_repo, stages=[]),
+        project_root=str(tmp_repo),
+    )
+    gremlin.registry = parent_artifacts
 
+    child_id = f"{gremlin_id}--mygrp--child-z"
+
+    async def test_fork():
+        return await gremlin.fork(
+            parent,
+            child_id,
+            parent_id=gremlin_id,
+            group_name="mygrp",
+            child_key="child-z",
+        )
+
+    forked = asyncio.run(test_fork())
+
+    # Verify child artifact dir is a full copy
+    child_artifact_dir = forked.artifact_dir
+    assert (child_artifact_dir / "file1.txt").read_text() == "content1"
+    assert (child_artifact_dir / "file2.txt").read_text() == "content2"
+    assert (child_artifact_dir / "subdir" / "file3.txt").read_text() == "content3"
+
+    # Verify child registry is copied verbatim
     child_registry_path = state_root / child_id / "registry.json"
     assert child_registry_path.exists()
     child_reg_data = json.loads(child_registry_path.read_text(encoding="utf-8"))
+    assert child_reg_data["artifact1"] == "file://session/file1.txt"
+    assert child_reg_data["artifact2"] == "file://session/file2.txt"
 
-    # URI must be rewritten to absolute form
-    expected_abs = str(artifact_file.resolve())
-    assert child_reg_data["result"] == f"file://{expected_abs}"
-
-    # And the child resolver can actually read the file
-    child_session = state_root / child_id / "artifacts"
-    child_resolver = FileArtifactResolver(child_session)
-    uri = Uri.parse(child_reg_data["result"])
-    content = child_resolver.read(uri)
-    assert content == "parent result"
+    # Cleanup
+    if forked.worktree and forked.worktree.exists():
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(forked.worktree)],
+            cwd=tmp_repo,
+            capture_output=True,
+        )
