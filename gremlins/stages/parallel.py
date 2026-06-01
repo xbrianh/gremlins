@@ -277,7 +277,7 @@ class _ParallelExecutor:
         try:
             for child_key, child_state, _ in self._child_runners:
                 if parent_gremlin is not None:
-                    gid = parent_gid or ""
+                    gid = parent_gid
                     pstate = cast(State, parent_state)
                     child_id = f"{gid}--{self._group_name}--{child_key}"
                     branch_stage = self._stages_by_key.get(child_key)
