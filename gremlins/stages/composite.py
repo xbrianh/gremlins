@@ -30,5 +30,5 @@ def child_state(
             child_key=child.name,
         )
     return dataclasses.replace(
-        parent, client=client, stage_model=stage_model, child_key=child.name
+        parent, client=client, stage_model=stage_model
     )
