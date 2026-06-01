@@ -265,6 +265,11 @@ class _ParallelExecutor:
 
         await git.prune_worktrees_async(str(self._project_root))
         gs.base_head = await git.head_sha_async(cwd=str(self._project_root))
+        logger.warning(
+            "parallel fan-out: base_head=%s project_root=%s",
+            gs.base_head,
+            self._project_root,
+        )
 
         parent_gid = self._parent_data.gremlin_id
         parent_state = self._parent_state
@@ -295,6 +300,16 @@ class _ParallelExecutor:
                     if forked_state.worktree is not None:
                         child_state.worktree = forked_state.worktree
                         gs.worktree_paths[child_key] = forked_state.worktree
+                        logger.warning(
+                            "parallel fan-out: forked child=%s worktree=%s",
+                            child_key,
+                            forked_state.worktree,
+                        )
+                    else:
+                        logger.warning(
+                            "parallel fan-out: forked child=%s worktree=None (no worktree created)",
+                            child_key,
+                        )
                 else:
                     wt_dir = await git.setup_detached_worktree_async(
                         str(self._project_root),
@@ -304,6 +319,12 @@ class _ParallelExecutor:
                     wt_path = pathlib.Path(wt_dir)
                     gs.worktree_paths[child_key] = wt_path
                     child_state.worktree = wt_path
+                    logger.warning(
+                        "parallel fan-out: else-branch child=%s worktree=%s (parent_gremlin=%s)",
+                        child_key,
+                        wt_path,
+                        parent_gremlin,
+                    )
         except Exception:
             await git.remove_worktrees_async(
                 str(self._project_root), [str(p) for p in gs.worktree_paths.values()]
@@ -505,6 +526,13 @@ class _ParallelExecutor:
             if wt is None or not wt.is_dir():
                 continue
             child_head = await git.head_sha_async(cwd=str(wt))
+            logger.warning(
+                "parallel validate: child=%s worktree=%s child_head=%s base_head=%s",
+                child_key,
+                wt,
+                child_head,
+                gs.base_head,
+            )
             if child_head and child_head != gs.base_head:
                 raise NotImplementedError(
                     f"parallel child {child_key!r} mutated its worktree "
