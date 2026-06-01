@@ -401,7 +401,7 @@ class Gremlin:
                 ) from exc
 
         if pipeline is None:
-            raise ValueError(f"could not load pipeline for {gremlin_id}")
+            pipeline = _PipelineData(name="unknown", path=pathlib.Path("."), stages=[])
 
         # Construct Gremlin
         worktree_dir = pathlib.Path(worktree_dir_str) if worktree_dir_str else None
