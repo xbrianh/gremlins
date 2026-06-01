@@ -279,7 +279,7 @@ class _ParallelExecutor:
             str(_pstate_wt) if _pstate_wt is not None else str(self._project_root)
         )
         gs.base_head = await git.head_sha_async(cwd=_base_ref)
-        logger.warning(
+        logger.debug(
             "parallel fan-out: base_head=%s base_ref=%s",
             gs.base_head,
             _base_ref,
@@ -311,13 +311,13 @@ class _ParallelExecutor:
                     if forked_state.worktree is not None:
                         child_state.worktree = forked_state.worktree
                         gs.worktree_paths[child_key] = forked_state.worktree
-                        logger.warning(
+                        logger.debug(
                             "parallel fan-out: forked child=%s worktree=%s",
                             child_key,
                             forked_state.worktree,
                         )
                     else:
-                        logger.warning(
+                        logger.debug(
                             "parallel fan-out: forked child=%s worktree=None (no worktree created)",
                             child_key,
                         )
@@ -331,7 +331,7 @@ class _ParallelExecutor:
                     wt_path = pathlib.Path(wt_dir)
                     gs.worktree_paths[child_key] = wt_path
                     child_state.worktree = wt_path
-                    logger.warning(
+                    logger.debug(
                         "parallel fan-out: no-parent child=%s worktree=%s",
                         child_key,
                         wt_path,
@@ -537,7 +537,7 @@ class _ParallelExecutor:
             if wt is None or not wt.is_dir():
                 continue
             child_head = await git.head_sha_async(cwd=str(wt))
-            logger.warning(
+            logger.debug(
                 "parallel validate: child=%s worktree=%s child_head=%s base_head=%s",
                 child_key,
                 wt,
