@@ -19,8 +19,9 @@ if TYPE_CHECKING:
 
 from gremlins import paths
 from gremlins.artifacts.uri import Uri
+from gremlins.clients.client import PACKAGE_DEFAULT
 from gremlins.executor.parallel_state import ParallelGroupState
-from gremlins.executor.state import State, StateData
+from gremlins.executor.state import State, StateData, build_state
 from gremlins.stages.base import Stage
 from gremlins.stages.composite import child_state as _child_state
 from gremlins.stages.outcome import Bail, Done, Outcome
@@ -292,10 +293,8 @@ class _ParallelExecutor:
             parent_gremlin = Gremlin.open(parent_gid)
             if parent_state is not None:
                 parent_gremlin.registry = parent_state.artifacts
-            elif parent_gremlin is not None:
+            else:
                 # Resume scenario: reconstruct parent state from disk if not provided
-                from gremlins.executor.state import StateData, build_state
-                from gremlins.clients.client import PACKAGE_DEFAULT
                 parent_data = StateData.load(parent_gid)
                 parent_state = build_state(
                     data=parent_data,
@@ -306,22 +305,19 @@ class _ParallelExecutor:
 
         try:
             for child_key, child_state, _ in self._child_runners:
-                should_fork = (
+                if (
                     parent_gremlin is not None
                     and parent_gid
                     and parent_state is not None
                     and parent_state.artifact_dir.exists()
-                )
-                if should_fork:
-                    gid = parent_gid
-                    pstate = parent_state
-                    child_id = f"{gid}--{self._group_name}--{child_key}"
+                ):
+                    child_id = f"{parent_gid}--{self._group_name}--{child_key}"
                     branch_stage = self._stages_by_key.get(child_key)
-                    branch_pipeline = _branch_pipeline(branch_stage, pstate)
+                    branch_pipeline = _branch_pipeline(branch_stage, parent_state)
                     forked_state = await parent_gremlin.fork(
-                        pstate,
+                        parent_state,
                         child_id,
-                        parent_id=gid,
+                        parent_id=parent_gid,
                         group_name=self._group_name,
                         child_key=child_key,
                         pipeline=branch_pipeline,
