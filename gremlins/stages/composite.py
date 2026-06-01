@@ -29,6 +29,4 @@ def child_state(
             artifact_dir=artifact_dir,
             child_key=child.name,
         )
-    return dataclasses.replace(
-        parent, client=client, stage_model=stage_model
-    )
+    return dataclasses.replace(parent, client=client, stage_model=stage_model)
