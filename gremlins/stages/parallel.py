@@ -253,6 +253,8 @@ class _ParallelExecutor:
 
             parent_gremlin = None
             if use_fork:
+                assert isinstance(parent_gid, str)
+                assert parent_state is not None
                 try:
                     parent_gremlin = Gremlin.open(parent_gid)
                     parent_gremlin.registry = parent_state.artifacts
@@ -263,6 +265,9 @@ class _ParallelExecutor:
 
             for child_key, child_state, _ in self._child_runners:
                 if use_fork:
+                    assert isinstance(parent_gid, str)
+                    assert parent_state is not None
+                    assert parent_gremlin is not None
                     child_id = f"{parent_gid}--{self._group_name}--{child_key}"
                     forked_state = await parent_gremlin.fork(
                         parent_state,
