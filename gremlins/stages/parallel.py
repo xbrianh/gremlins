@@ -246,27 +246,41 @@ class _ParallelExecutor:
         await git.prune_worktrees_async(str(self._project_root))
         gs.base_head = await git.head_sha_async(cwd=str(self._project_root))
 
-        try:
-            parent_gid = self._parent_data.gremlin_id
-            parent_state = self._parent_state
-            parent_gremlin = Gremlin.open(cast(str, parent_gid))
-            parent_gremlin.registry = cast(State, parent_state).artifacts
+        parent_gid = self._parent_data.gremlin_id
+        parent_state = self._parent_state
+        parent_gremlin = None
+        if parent_gid:
+            try:
+                parent_gremlin = Gremlin.open(cast(str, parent_gid))
+                parent_gremlin.registry = cast(State, parent_state).artifacts
+            except (ValueError, FileNotFoundError):
+                parent_gremlin = None
 
+        try:
             for child_key, child_state, _ in self._child_runners:
-                gid = cast(str, parent_gid)
-                pstate = cast(State, parent_state)
-                child_id = f"{gid}--{self._group_name}--{child_key}"
-                forked_state = await parent_gremlin.fork(
-                    pstate,
-                    child_id,
-                    parent_id=gid,
-                    group_name=self._group_name,
-                    child_key=child_key,
-                )
-                # Update child_state with the forked worktree
-                if forked_state.worktree is not None:
-                    child_state.worktree = forked_state.worktree
-                    gs.worktree_paths[child_key] = forked_state.worktree
+                if parent_gremlin is not None:
+                    gid = cast(str, parent_gid)
+                    pstate = cast(State, parent_state)
+                    child_id = f"{gid}--{self._group_name}--{child_key}"
+                    forked_state = await parent_gremlin.fork(
+                        pstate,
+                        child_id,
+                        parent_id=gid,
+                        group_name=self._group_name,
+                        child_key=child_key,
+                    )
+                    if forked_state.worktree is not None:
+                        child_state.worktree = forked_state.worktree
+                        gs.worktree_paths[child_key] = forked_state.worktree
+                else:
+                    wt_dir = await git.setup_detached_worktree_async(
+                        str(self._project_root),
+                        "HEAD",
+                        worktree_parent=self._worktree_parent,
+                    )
+                    wt_path = pathlib.Path(wt_dir)
+                    gs.worktree_paths[child_key] = wt_path
+                    child_state.worktree = wt_path
         except Exception:
             await git.remove_worktrees_async(
                 str(self._project_root), [str(p) for p in gs.worktree_paths.values()]
