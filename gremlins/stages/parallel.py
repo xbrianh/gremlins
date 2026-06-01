@@ -302,6 +302,7 @@ class _ParallelExecutor:
                     artifact_dir=parent_gremlin.artifact_dir,
                     worktree_parent=self._worktree_parent,
                 )
+                parent_gremlin.registry = parent_state.artifacts
 
         try:
             for child_key, child_state, _ in self._child_runners:
