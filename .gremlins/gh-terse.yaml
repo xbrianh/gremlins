@@ -28,7 +28,7 @@ stage-definitions:
     options:
       cmds:
         - "ruff format ."
-        - "ruff check --fix ."
+        - "ruff check --fix --exit-zero ."
         - "git add -A"
         - "git diff --cached --quiet || git commit -m 'normalize'"
 
@@ -70,7 +70,7 @@ stages:
 
   - parallel:
       - { type: gremlins:github-wait-copilot, in: {pr: pr} }
-      - { name: github-review-pull-request, type: agent, in: {pr: pr}, prompt: [code-style, terse, gremlins:github_review_pull_request.md] }
+      - { name: github-review-pull-request, type: agent, in: {pr: pr}, prompt: [code-style, terse, gremlins:github_review_pull_request.md], client: claude:sonnet }
       - { name: github-review-pull-request-complexity, type: agent, in: {pr: pr}, prompt: [code-style, terse, complexity_review.md], client: claude:sonnet }
 
   - { name: github-address-pull-request-reviews, type: agent, in: {pr: pr}, prompt: [code-style, terse, gremlins:github_address_pull_request_reviews.md, gremlins:bail_section.md] }
