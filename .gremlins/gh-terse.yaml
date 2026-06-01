@@ -31,6 +31,7 @@ stage-definitions:
         - "ruff check --fix --exit-zero ."
         - "git add -A"
         - "git diff --cached --quiet || git commit -m 'normalize'"
+        - "git push 2>/dev/null || true"
 
   run-checks-and-fix:
     required-options:
@@ -64,7 +65,28 @@ stage-definitions:
 stages:
   - { type: gremlins:plan-gh, prompt: [code-style, terse, gremlins:plan_gh.md] }
   - { type: gremlins:implement, prompt: [code-style, terse, gremlins:implement_gh.md] }
+
+  - parallel:
+      - name: local-review
+        type: agent
+        prompt: [code-style, terse, local_review.md]
+        out:
+          local-review: "file://session/local-review.md"
+      - name: local-review-complexity
+        type: agent
+        prompt: [code-style, terse, local_review_complexity.md]
+        out:
+          local-review-complexity: "file://session/local-review-complexity.md"
+
+  - name: local-address
+    type: agent
+    prompt: [code-style, terse, local_address.md, gremlins:bail_section.md]
+    in:
+      review: local-review
+      complexity: local-review-complexity
+
   - { type: normalize-and-fix }
+
   - { type: gremlins:github-open-pr }
   - { type: gremlins:github-request-copilot-review }
 
