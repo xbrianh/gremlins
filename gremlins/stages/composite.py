@@ -23,7 +23,8 @@ def child_state(
         return dataclasses.replace(parent, client=client, stage_model=stage_model)
     if child_id:
         artifact_dir = _paths.state_root() / child_id / "artifacts"
-        artifact_dir.mkdir(parents=True, exist_ok=True)
+        if not artifact_dir.exists():
+            artifact_dir.mkdir(parents=True, exist_ok=True)
     else:
         artifact_dir = parent.artifact_dir / child.name
         artifact_dir.mkdir(parents=True, exist_ok=True)
