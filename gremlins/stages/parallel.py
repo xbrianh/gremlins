@@ -292,14 +292,27 @@ class _ParallelExecutor:
             parent_gremlin = Gremlin.open(parent_gid)
             if parent_state is not None:
                 parent_gremlin.registry = parent_state.artifacts
+            elif parent_gremlin is not None:
+                # Resume scenario: reconstruct parent state from disk if not provided
+                from gremlins.executor.state import StateData, build_state
+                from gremlins.clients.client import PACKAGE_DEFAULT
+                parent_data = StateData.load(parent_gid)
+                parent_state = build_state(
+                    data=parent_data,
+                    client=parent_gremlin.test_client or PACKAGE_DEFAULT,
+                    artifact_dir=parent_gremlin.artifact_dir,
+                    worktree_parent=self._worktree_parent,
+                )
 
         try:
             for child_key, child_state, _ in self._child_runners:
-                if (
+                should_fork = (
                     parent_gremlin is not None
                     and parent_gid
                     and parent_state is not None
-                ):
+                    and parent_state.artifact_dir.exists()
+                )
+                if should_fork:
                     gid = parent_gid
                     pstate = parent_state
                     child_id = f"{gid}--{self._group_name}--{child_key}"
