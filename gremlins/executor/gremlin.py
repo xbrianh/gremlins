@@ -25,6 +25,7 @@ from gremlins.pipeline.loader import STAGE_TYPES
 from gremlins.stages.base import Stage
 from gremlins.utils import git as _git_mod
 from gremlins.utils.yaml_io import YamlLoadError as _YamlLoadError
+from gremlins.utils.yaml_io import dump_yaml_text
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +165,7 @@ class Gremlin:
         parent_id: str = "",
         group_name: str = "",
         child_key: str = "",
+        pipeline: _PipelineData | None = None,
     ) -> State:
         """Create an independent copy of a running gremlin.
 
@@ -205,12 +207,23 @@ class Gremlin:
         )
 
         # Build new state with updated values
+        effective_pipeline = pipeline or state.pipeline_data
+        child_pipeline_path = state.data.pipeline_path
+        if pipeline is not None:
+            branch_yaml_path = child_state_dir / "pipeline.yaml"
+            stage_dicts = [s.raw_dict for s in pipeline.stages if s.raw_dict is not None]
+            branch_yaml_path.write_text(
+                dump_yaml_text({"stages": stage_dicts}), encoding="utf-8"
+            )
+            child_pipeline_path = str(branch_yaml_path)
+
         child_data = dataclasses.replace(
             state.data,
             gremlin_id=target_id,
             parent_id=parent_id or state.data.parent_id,
             group_name=group_name or state.data.group_name,
             child_key=child_key or state.data.child_key,
+            pipeline_path=child_pipeline_path,
         )
         child_cwd = state.cwd
         if child_worktree is not None and state.worktree is not None:
@@ -220,7 +233,7 @@ class Gremlin:
             client=state.client,
             artifact_dir=child_artifact_dir,
             args=state.args,
-            pipeline_data=state.pipeline_data,
+            pipeline_data=effective_pipeline,
             repo=state.repo,
             cwd=child_cwd,
             instructions=state.instructions,
