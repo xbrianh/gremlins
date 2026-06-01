@@ -255,7 +255,9 @@ def test_fork_with_branch_pipeline_scopes_child(tmp_path, tmp_repo):
 
     async def _test():
         parent_pipeline_path = tmp_path / "parent.yaml"
-        parent_pipeline_path.write_text("stages:\n  - name: implement\n    type: exec\n")
+        parent_pipeline_path.write_text(
+            "stages:\n  - name: implement\n    type: exec\n"
+        )
         parent_pipeline = Pipeline.from_yaml(parent_pipeline_path)
 
         branch_stage = Exec.with_dict({"name": "poll", "type": "exec", "run": "true"})
@@ -272,7 +274,9 @@ def test_fork_with_branch_pipeline_scopes_child(tmp_path, tmp_repo):
         artifact_dir = state_dir / "artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
 
-        state_data = StateData(gremlin_id="gr-parent", pipeline_path=str(parent_pipeline_path))
+        state_data = StateData(
+            gremlin_id="gr-parent", pipeline_path=str(parent_pipeline_path)
+        )
         state = build_state(
             data=state_data,
             client=FakeClaudeClient(),
@@ -305,6 +309,7 @@ def test_fork_with_branch_pipeline_scopes_child(tmp_path, tmp_repo):
 
         # The written YAML contains only the branch stage
         import yaml
+
         written = yaml.safe_load((child_state_dir / "pipeline.yaml").read_text())
         assert written == {"stages": [{"name": "poll", "type": "exec", "run": "true"}]}
 

@@ -37,7 +37,9 @@ def _noop_set_stage(_: str) -> None:
     pass
 
 
-def _branch_pipeline(branch_stage: Stage | None, parent_state: State) -> Pipeline | None:
+def _branch_pipeline(
+    branch_stage: Stage | None, parent_state: State
+) -> Pipeline | None:
     from gremlins.pipeline import Pipeline
 
     if branch_stage is None or branch_stage.raw_dict is None:
@@ -276,7 +278,7 @@ class _ParallelExecutor:
 
         try:
             for child_key, child_state, _ in self._child_runners:
-                if parent_gremlin is not None:
+                if parent_gremlin is not None and parent_gid:
                     gid = parent_gid
                     pstate = cast(State, parent_state)
                     child_id = f"{gid}--{self._group_name}--{child_key}"

@@ -211,7 +211,9 @@ class Gremlin:
         child_pipeline_path = state.data.pipeline_path
         if pipeline is not None:
             branch_yaml_path = child_state_dir / "pipeline.yaml"
-            stage_dicts = [s.raw_dict for s in pipeline.stages if s.raw_dict is not None]
+            stage_dicts = [
+                s.raw_dict for s in pipeline.stages if s.raw_dict is not None
+            ]
             await asyncio.to_thread(
                 branch_yaml_path.write_text,
                 dump_yaml_text({"stages": stage_dicts}),
