@@ -12,7 +12,10 @@ import re
 import secrets
 import shutil
 from collections.abc import Callable
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from gremlins.pipeline import Pipeline
 
 from gremlins import paths
 from gremlins.artifacts.uri import Uri
@@ -32,6 +35,23 @@ _Stage = tuple[str, Callable[[], Any]]
 
 def _noop_set_stage(_: str) -> None:
     pass
+
+
+def _branch_pipeline(
+    branch_stage: Stage | None, parent_state: State
+) -> Pipeline | None:
+    from gremlins.pipeline import Pipeline
+
+    if branch_stage is None or branch_stage.raw_dict is None:
+        return None
+    parent_pipeline = parent_state.pipeline_data
+    return Pipeline(
+        name=branch_stage.name,
+        path=parent_pipeline.path if parent_pipeline else pathlib.Path("."),
+        stages=[branch_stage],
+        default_client=parent_pipeline.default_client if parent_pipeline else None,
+        base_ref=parent_pipeline.base_ref if parent_pipeline else "current",
+    )
 
 
 class ParallelStage(Stage):
@@ -258,16 +278,19 @@ class _ParallelExecutor:
 
         try:
             for child_key, child_state, _ in self._child_runners:
-                if parent_gremlin is not None:
-                    gid = cast(str, parent_gid)
+                if parent_gremlin is not None and parent_gid:
+                    gid = parent_gid
                     pstate = cast(State, parent_state)
                     child_id = f"{gid}--{self._group_name}--{child_key}"
+                    branch_stage = self._stages_by_key.get(child_key)
+                    branch_pipeline = _branch_pipeline(branch_stage, pstate)
                     forked_state = await parent_gremlin.fork(
                         pstate,
                         child_id,
                         parent_id=gid,
                         group_name=self._group_name,
                         child_key=child_key,
+                        pipeline=branch_pipeline,
                     )
                     if forked_state.worktree is not None:
                         child_state.worktree = forked_state.worktree

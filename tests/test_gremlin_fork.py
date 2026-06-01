@@ -11,6 +11,7 @@ from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.gremlin import Gremlin
 from gremlins.executor.state import StateData, build_state
 from gremlins.pipeline import Pipeline
+from gremlins.stages.exec import Exec
 
 
 @pytest.fixture
@@ -244,5 +245,75 @@ def test_fork_preserves_registry(tmp_path, tmp_repo):
         assert "plan" in forked.artifacts.data
         assert "some_key" in forked.artifacts.data
         assert forked.artifacts.read("some_key") == {"data": "value"}
+
+    asyncio.run(_test())
+
+
+def test_fork_with_branch_pipeline_scopes_child(tmp_path, tmp_repo):
+    """fork(pipeline=...) writes a branch-scoped pipeline.yaml into the child
+    state dir and sets pipeline_path/pipeline_data to it, not the parent's."""
+
+    async def _test():
+        parent_pipeline_path = tmp_path / "parent.yaml"
+        parent_pipeline_path.write_text(
+            "stages:\n  - name: implement\n    type: exec\n"
+        )
+        parent_pipeline = Pipeline.from_yaml(parent_pipeline_path)
+
+        branch_stage = Exec.with_dict({"name": "poll", "type": "exec", "run": "true"})
+        branch_stage.raw_dict = {"name": "poll", "type": "exec", "run": "true"}
+        branch_pipeline = Pipeline(
+            name="poll",
+            path=parent_pipeline_path,
+            stages=[branch_stage],
+            default_client=None,
+            base_ref="current",
+        )
+
+        state_dir = tmp_path / "state" / "gr-parent"
+        artifact_dir = state_dir / "artifacts"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+
+        state_data = StateData(
+            gremlin_id="gr-parent", pipeline_path=str(parent_pipeline_path)
+        )
+        state = build_state(
+            data=state_data,
+            client=FakeClaudeClient(),
+            artifact_dir=artifact_dir,
+            repo="test-repo",
+            cwd=str(tmp_repo),
+            pipeline_data=parent_pipeline,
+        )
+
+        gremlin = Gremlin(
+            stages=[],
+            state_dir=state_dir,
+            gremlin_id="gr-parent",
+            pipeline_data=parent_pipeline,
+            project_root=str(tmp_repo),
+        )
+
+        forked = await gremlin.fork(state, "gr-child", pipeline=branch_pipeline)
+
+        # Child's in-memory pipeline_data is the branch pipeline, not the parent's
+        assert forked.pipeline_data is not None
+        assert forked.pipeline_data.name == "poll"
+        assert len(forked.pipeline_data.stages) == 1
+        assert forked.pipeline_data.stages[0].name == "poll"
+
+        # Child's pipeline_path points into its own state dir, not the parent pipeline
+        child_state_dir = state_dir.parent / "gr-child"
+        assert forked.data.pipeline_path == str(child_state_dir / "pipeline.yaml")
+        assert (child_state_dir / "pipeline.yaml").exists()
+
+        # The written YAML contains only the branch stage
+        import yaml
+
+        written = yaml.safe_load((child_state_dir / "pipeline.yaml").read_text())
+        assert written == {"stages": [{"name": "poll", "type": "exec", "run": "true"}]}
+
+        # Parent state is not mutated
+        assert state.data.pipeline_path == str(parent_pipeline_path)
 
     asyncio.run(_test())
