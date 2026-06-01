@@ -253,11 +253,9 @@ class _ParallelExecutor:
 
             parent_gremlin = None
             if use_fork:
-                assert isinstance(parent_gid, str)
-                assert parent_state is not None
                 try:
-                    parent_gremlin = Gremlin.open(parent_gid)
-                    parent_gremlin.registry = parent_state.artifacts
+                    parent_gremlin = Gremlin.open(cast(str, parent_gid))
+                    parent_gremlin.registry = cast(State, parent_state).artifacts
                 except (FileNotFoundError, ValueError):
                     # Gremlin.open failed (e.g., incomplete state.json in tests)
                     # Fall back to direct worktree setup
@@ -265,14 +263,14 @@ class _ParallelExecutor:
 
             for child_key, child_state, _ in self._child_runners:
                 if use_fork:
-                    assert isinstance(parent_gid, str)
-                    assert parent_state is not None
-                    assert parent_gremlin is not None
-                    child_id = f"{parent_gid}--{self._group_name}--{child_key}"
-                    forked_state = await parent_gremlin.fork(
-                        parent_state,
+                    gid = cast(str, parent_gid)
+                    pstate = cast(State, parent_state)
+                    pgrem = cast(Any, parent_gremlin)
+                    child_id = f"{gid}--{self._group_name}--{child_key}"
+                    forked_state = await pgrem.fork(
+                        pstate,
                         child_id,
-                        parent_id=parent_gid,
+                        parent_id=gid,
                         group_name=self._group_name,
                         child_key=child_key,
                     )
