@@ -400,7 +400,6 @@ class Gremlin:
                     f"could not load pipeline for {gremlin_id}: {exc}"
                 ) from exc
         else:
-            # No pipeline specification; create a minimal stub for basic operations
             pipeline = _PipelineData(
                 name="unknown",
                 path=pathlib.Path(project_root),

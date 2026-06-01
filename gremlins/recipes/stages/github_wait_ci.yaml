@@ -74,7 +74,7 @@ stages:
                       decision=$(printf '%s' "$status_json" | jq -r '.reviewDecision // empty')
                       check_bail_review_required "$decision"
                       head_oid=$(printf '%s' "$status_json" | jq -r '.headRefOid // empty')
-                      if [ "$head_oid" = "$fix_head" ] || git merge-base --is-ancestor "$fix_head" "$head_oid" 2>/dev/null; then
+                      if [ "$head_oid" = "$fix_head" ] || (git fetch origin "$pr_branch" 2>/dev/null && git merge-base --is-ancestor "$fix_head" "$head_oid" 2>/dev/null); then
                           break
                       fi
                       if [ "$(date +%s)" -ge "$push_deadline" ]; then
