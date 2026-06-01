@@ -194,7 +194,7 @@ def test_child_reads_parent_artifact_via_fork(sandbox) -> None:
         )
 
         child_id = f"{gremlin_id}--mygrp--child-z"
-        forked = await fork_state(
+        await fork_state(
             parent,
             child_id,
             project_root=".",

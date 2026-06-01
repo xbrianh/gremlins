@@ -10,7 +10,6 @@ from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.fork import fork_state
 from gremlins.executor.state import StateData, build_state
-from gremlins.pipeline import Pipeline
 
 
 @pytest.fixture
@@ -276,7 +275,9 @@ def test_fork_copies_artifacts(tmp_path, tmp_repo):
         assert (forked.artifact_dir / "spec.md").exists()
         assert (forked.artifact_dir / "spec.md").read_text() == "# Spec\n"
         assert (forked.artifact_dir / "subdir" / "file.txt").exists()
-        assert (forked.artifact_dir / "subdir" / "file.txt").read_text() == "nested content\n"
+        assert (
+            forked.artifact_dir / "subdir" / "file.txt"
+        ).read_text() == "nested content\n"
 
         # Verify child artifact dir is independent from parent
         parent_file = artifact_dir / "new_file.txt"
