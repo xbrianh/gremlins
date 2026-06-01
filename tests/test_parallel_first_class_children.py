@@ -209,10 +209,12 @@ def test_parallel_child_artifact_dir_is_full_copy(sandbox) -> None:
     # Set up parent registry
     parent_registry = parent_state_dir / "registry.json"
     parent_registry.write_text(
-        json.dumps({
-            "artifact1": "file://session/file1.txt",
-            "artifact2": "file://session/file2.txt",
-        }),
+        json.dumps(
+            {
+                "artifact1": "file://session/file1.txt",
+                "artifact2": "file://session/file2.txt",
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -245,7 +247,13 @@ def test_parallel_child_artifact_dir_is_full_copy(sandbox) -> None:
     child_id = f"{gremlin_id}--mygrp--child-z"
 
     async def test_fork():
-        return await gremlin.fork(parent, child_id, parent_id=gremlin_id, group_name="mygrp", child_key="child-z")
+        return await gremlin.fork(
+            parent,
+            child_id,
+            parent_id=gremlin_id,
+            group_name="mygrp",
+            child_key="child-z",
+        )
 
     forked = asyncio.run(test_fork())
 
