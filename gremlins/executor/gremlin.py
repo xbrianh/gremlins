@@ -176,7 +176,9 @@ class Gremlin:
 
         # Copy artifact directory and registry in thread to avoid blocking event loop
         child_artifact_dir.parent.mkdir(parents=True, exist_ok=True)
-        await asyncio.to_thread(shutil.copytree, state.artifact_dir, child_artifact_dir)
+        await asyncio.to_thread(
+            shutil.copytree, state.artifact_dir, child_artifact_dir, dirs_exist_ok=True
+        )
 
         # Copy registry.json from the same directory as source artifacts
         src_registry = state.artifact_dir.parent / "registry.json"
