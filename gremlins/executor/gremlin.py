@@ -399,9 +399,13 @@ class Gremlin:
                 raise ValueError(
                     f"could not load pipeline for {gremlin_id}: {exc}"
                 ) from exc
-
-        if pipeline is None:
-            raise ValueError(f"could not load pipeline for {gremlin_id}")
+        else:
+            # No pipeline specification; create a minimal stub for basic operations
+            pipeline = _PipelineData(
+                name="unknown",
+                path=pathlib.Path(project_root),
+                stages=[],
+            )
 
         # Construct Gremlin
         worktree_dir = pathlib.Path(worktree_dir_str) if worktree_dir_str else None

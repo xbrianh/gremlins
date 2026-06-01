@@ -290,13 +290,18 @@ class _ParallelExecutor:
         parent_gremlin: Gremlin | None = None
         if parent_gid:
             parent_gremlin = Gremlin.open(parent_gid)
-            parent_gremlin.registry = cast(State, parent_state).artifacts
+            if parent_state is not None:
+                parent_gremlin.registry = parent_state.artifacts
 
         try:
             for child_key, child_state, _ in self._child_runners:
-                if parent_gremlin is not None and parent_gid:
+                if (
+                    parent_gremlin is not None
+                    and parent_gid
+                    and parent_state is not None
+                ):
                     gid = parent_gid
-                    pstate = cast(State, parent_state)
+                    pstate = parent_state
                     child_id = f"{gid}--{self._group_name}--{child_key}"
                     branch_stage = self._stages_by_key.get(child_key)
                     branch_pipeline = _branch_pipeline(branch_stage, pstate)
