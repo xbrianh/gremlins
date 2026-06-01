@@ -287,13 +287,10 @@ class _ParallelExecutor:
 
         parent_gid = self._parent_data.gremlin_id
         parent_state = self._parent_state
-        parent_gremlin = None
+        parent_gremlin: Gremlin | None = None
         if parent_gid:
-            try:
-                parent_gremlin = Gremlin.open(parent_gid)
-                parent_gremlin.registry = cast(State, parent_state).artifacts
-            except (ValueError, FileNotFoundError):
-                parent_gremlin = None
+            parent_gremlin = Gremlin.open(parent_gid)
+            parent_gremlin.registry = cast(State, parent_state).artifacts
 
         try:
             for child_key, child_state, _ in self._child_runners:
@@ -325,8 +322,7 @@ class _ParallelExecutor:
                             child_key,
                         )
                 else:
-                    # Fallback when Gremlin.open() fails: create worktrees at the
-                    # same base_head so _validate_no_mutations stays consistent.
+                    # No parent gremlin identity — create a plain worktree.
                     wt_dir = await git.setup_detached_worktree_async(
                         str(self._project_root),
                         gs.base_head or "HEAD",
@@ -336,10 +332,9 @@ class _ParallelExecutor:
                     gs.worktree_paths[child_key] = wt_path
                     child_state.worktree = wt_path
                     logger.warning(
-                        "parallel fan-out: else-branch child=%s worktree=%s (parent_gremlin=%s)",
+                        "parallel fan-out: no-parent child=%s worktree=%s",
                         child_key,
                         wt_path,
-                        parent_gremlin,
                     )
         except Exception:
             await git.remove_worktrees_async(
