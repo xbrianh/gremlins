@@ -270,9 +270,7 @@ class _ParallelExecutor:
         pstate_wt = (
             self._parent_state.worktree if self._parent_state is not None else None
         )
-        base_ref = (
-            str(pstate_wt) if pstate_wt is not None else str(self._project_root)
-        )
+        base_ref = str(pstate_wt) if pstate_wt is not None else str(self._project_root)
         gs.base_head = await git.head_sha_async(cwd=base_ref)
         logger.debug(
             "parallel fan-out: base_head=%s base_ref=%s",
@@ -283,9 +281,9 @@ class _ParallelExecutor:
         parent_gid = self._parent_data.gremlin_id
         parent_state = self._parent_state
         parent_gremlin: Gremlin | None = None
-        if parent_gid:
+        if parent_gid and parent_state is not None:
             parent_gremlin = Gremlin.open(parent_gid)
-            parent_gremlin.registry = cast(State, parent_state).artifacts
+            parent_gremlin.registry = parent_state.artifacts
 
         try:
             for child_key, child_state, _ in self._child_runners:
