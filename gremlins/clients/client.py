@@ -92,6 +92,10 @@ class Client:
             self._impl.reap_all()
 
     @property
+    def policy(self) -> Policy:
+        return self._policy
+
+    @property
     def total_cost_usd(self) -> float | None:
         if self._impl is None:
             return None
