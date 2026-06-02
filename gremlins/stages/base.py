@@ -5,6 +5,7 @@ from typing import Any, NamedTuple
 
 from gremlins.clients.client import Client
 from gremlins.executor.state import State
+from gremlins.protocols import GremlinProtocol
 from gremlins.stages.outcome import Outcome
 
 _VAR_SUB = re.compile(r"\{(\w+)\}")
@@ -35,6 +36,8 @@ class Stage:
     body: list[Stage] = []
     skip_if_exists: str = ""
     options: dict[str, Any]
+    out_map: dict[str, str]
+    gremlin: GremlinProtocol | None
 
     def __init__(self, name: str) -> None:
         self.name = name
@@ -42,6 +45,8 @@ class Stage:
         self.client: Client | None = None
         self.raw_dict: dict[str, Any] | None = None
         self.options: dict[str, Any] = {}
+        self.out_map = {}
+        self.gremlin = None
 
     def substitute_vars(
         self, text: str, state: State, extra: dict[str, str] | None = None
@@ -50,7 +55,7 @@ class Stage:
         string options (framework wins on conflict). Unknown tokens and
         non-word braces (shell ${x}, {read:k}, brace expansion) are left as-is."""
         string_opts = {k: v for k, v in self.options.items() if isinstance(v, str)}
-        subs = {**string_opts, **(extra or {}), **state.framework_subs(self)}
+        subs = {**string_opts, **(extra or {}), **state.framework_subs(self)}  # type: ignore
         return _VAR_SUB.sub(lambda m: subs.get(m.group(1), m.group(0)), text)
 
     @property

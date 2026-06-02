@@ -11,7 +11,7 @@ import pytest
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state
-from gremlins.stages.parallel import _ParallelExecutor
+from gremlins.stages.parallel import _ParallelExecutor, ParallelStage
 
 
 def _make_parent(tmp_path: pathlib.Path, gremlin_id: str) -> State:
@@ -41,8 +41,9 @@ def _executor(
     group_name: str = "grp",
 ) -> _ParallelExecutor:
     child_runners = [(k, parent_state, lambda: None) for k in child_keys]
+    parallel_stage = ParallelStage(group_name, [])
     return _ParallelExecutor(
-        group_name,
+        parallel_stage,
         child_runners,  # type: ignore[arg-type]
         max_concurrent=None,
         set_stage_fn=lambda _: None,

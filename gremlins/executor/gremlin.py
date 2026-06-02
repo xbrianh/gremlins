@@ -12,7 +12,7 @@ import pathlib
 import re
 import shutil
 from collections.abc import Awaitable, Callable, Sequence
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from gremlins import paths as _paths
 from gremlins.artifacts.registry import ArtifactRegistry
@@ -22,15 +22,18 @@ from gremlins.executor.state import State, StateData, build_state
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.pipeline.loader import STAGE_TYPES
-from gremlins.stages.base import Stage
+from gremlins.protocols import StageProtocol
 from gremlins.utils import git as _git_mod
 from gremlins.utils.yaml_io import YamlLoadError as _YamlLoadError
 from gremlins.utils.yaml_io import dump_yaml_text
 
+if TYPE_CHECKING:
+    from gremlins.stages.base import Stage
+
 logger = logging.getLogger(__name__)
 
 
-def _apply_client_override(stages: list[Stage], cli: Client) -> None:
+def _apply_client_override(stages: Sequence[StageProtocol], cli: Client) -> None:
     for stage in stages:
         stage.client = cli
         body = getattr(stage, "body", [])
@@ -48,11 +51,11 @@ def read_stage_inputs(sf: pathlib.Path | None) -> dict[str, Any]:
         return {}
 
 
-def _expand_stage_entries(raw_stages: list[Stage]) -> list[Stage]:
+def _expand_stage_entries(raw_stages: Sequence[StageProtocol]) -> list[StageProtocol]:
     top_level_names = {e.name for e in raw_stages}
     child_names: set[str] = set()
     seen: set[str] = set()
-    result: list[Stage] = []
+    result: list[StageProtocol] = []
 
     for entry in raw_stages:
         if entry.type == "parallel":
@@ -268,7 +271,7 @@ class Gremlin:
             )
 
     def _collect_stages(
-        self, stages: list[Stage]
+        self, stages: Sequence[StageProtocol]
     ) -> list[tuple[str, Callable[[], Awaitable[Any]]]]:
         args = argparse.Namespace(
             plan=self.plan,
@@ -283,6 +286,7 @@ class Gremlin:
         )
         built: list[tuple[str, Callable[[], Awaitable[Any]]]] = []
         for e in stages:
+            e.gremlin = self
             stage_client = e.client or PACKAGE_DEFAULT
             resolved = self.test_client or stage_client
             stage_state = build_state(
@@ -305,13 +309,11 @@ class Gremlin:
         return built
 
     def _unbind_stale_exec_artifacts(self) -> None:
-        from gremlins.stages.exec import Exec
-
         assert self.resume_from is not None
         names = [s.name for s in self.stages]
         start_idx = names.index(self.resume_from)
         for stage in self.stages[start_idx:]:
-            if isinstance(stage, Exec):
+            if stage.out_map:
                 for key in stage.out_map:
                     if self.registry.produced(key):
                         self.registry.unbind(key)
