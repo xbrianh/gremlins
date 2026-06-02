@@ -17,6 +17,7 @@ Spec file schema (JSON):
         "instructions":    <str>        freeform instructions forwarded from parent
         "test_client":     <str|null>   "provider:model" of the test client, or null in production
         "stage_model":     <str>        real model name when test_client overrides execution; empty string in production
+        "base_ref":        <str|null>   base branch/ref name for prompt template substitution (e.g. "main"); omitted or null → ""
     }
 
 Result file schema (written to <spec_path>.result):
@@ -145,6 +146,7 @@ def _build_state(spec: dict[str, Any]) -> State:
         instructions=str(spec.get("instructions") or ""),
         test_client=test_client,
         stage_model=str(spec.get("stage_model") or ""),
+        base_ref=str(spec.get("base_ref") or ""),
     )
 
 
