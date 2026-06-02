@@ -260,64 +260,11 @@ def test_launch_ghgremlin_persists_cli_client_override(lenv_with_gh):
     assert state["client"] == "copilot:gpt-5.4"
 
 
-def test_launch_plan_normalized_to_absolute(lenv):
-    """A relative --plan path is resolved to absolute in state.json."""
-    plan_file = lenv.repo / "my-plan.md"
-    plan_file.write_text("# My Plan Heading\n\nBody.\n", encoding="utf-8")
-    launcher = _launcher()
-    gremlin_id, _ = launcher.launch("local", plan=str(plan_file.name))
-    state = _read_state(_gremlins_state_root(lenv) / gremlin_id)
-    idx = state["pipeline_args"].index("--plan")
-    persisted = state["pipeline_args"][idx + 1]
-    assert os.path.isabs(persisted), f"expected absolute path, got: {persisted!r}"
-    assert pathlib.Path(persisted).name == "my-plan.md"
-    assert state["description"].startswith("My Plan Heading")
-
-
-def test_launch_h1_as_description(lenv):
-    """H1 from --plan file becomes the gremlin description."""
-    plan_file = lenv.repo / "plan-with-h1.md"
-    plan_file.write_text(
-        "# Hello World Feature\n\n## Tasks\n- [ ] Do it\n", encoding="utf-8"
-    )
-    launcher = _launcher()
-    gremlin_id, _ = launcher.launch("local", plan=str(plan_file))
-    state = _read_state(_gremlins_state_root(lenv) / gremlin_id)
-    assert state["description"].startswith("Hello World Feature")
-
-
 def test_launch_invalid_pipeline_name_raises(lenv):
     """launch() raises FileNotFoundError for an unresolvable pipeline name."""
     launcher = _launcher()
     with pytest.raises(FileNotFoundError):
         launcher.launch("notapipeline", stage_inputs={"instructions": "test"})
-
-
-def test_launch_plan_and_instructions_mutex(lenv):
-    """launch() raises ValueError when both plan and instructions are given."""
-    plan_file = lenv.repo / "plan.md"
-    plan_file.write_text("# X\n", encoding="utf-8")
-    launcher = _launcher()
-    with pytest.raises(ValueError, match="mutually exclusive"):
-        launcher.launch(
-            "local", plan=str(plan_file), stage_inputs={"instructions": "extra"}
-        )
-
-
-def test_launch_empty_plan_file_rejected(lenv):
-    """localgremlin rejects an empty --plan file before creating state."""
-    empty = lenv.repo / "empty-plan.md"
-    empty.write_text("", encoding="utf-8")
-    launcher = _launcher()
-    with pytest.raises(ValueError, match="empty"):
-        launcher.launch("local", plan=str(empty))
-    # No state dir should have been created
-    dirs = (
-        list((_gremlins_state_root(lenv)).glob("*"))
-        if _gremlins_state_root(lenv).exists()
-        else []
-    )
-    assert dirs == [], f"empty-plan failure must not create state: {dirs}"
 
 
 def test_launch_spawned_process_detached(lenv):
@@ -515,7 +462,7 @@ def test_run_pipeline_writes_terminal_state_on_success(lenv, monkeypatch):
         "# Test Plan\n\n## Tasks\n- [ ] Touch a file\n", encoding="utf-8"
     )
     launcher = _launcher()
-    gremlin_id, _ = launcher.launch("local", plan=str(plan_file))
+    gremlin_id, _ = launcher.launch("local", stage_inputs={"plan": str(plan_file)})
     state_dir = _gremlins_state_root(lenv) / gremlin_id
     assert _wait_for_finished(state_dir, timeout=120), (
         f"pipeline did not finish; log:\n{(state_dir / 'log').read_text(errors='replace')[-2000:]}"
@@ -694,20 +641,6 @@ def test_launch_ghgremlin_state_layout(lenv_with_gh):
     )
     workdir = pathlib.Path(state["workdir"])
     assert workdir.is_dir(), f"worktree directory should exist: {workdir}"
-
-
-def test_launch_gh_plan_issue_ref_not_snapshotted(lenv_with_gh):
-    """gh pipeline with --plan <issue-ref> keeps the raw ref without snapshotting."""
-    lenv = lenv_with_gh
-    launcher = _launcher()
-    gremlin_id, _ = launcher.launch("gh", plan="#42")
-    state_dir = _gremlins_state_root(lenv) / gremlin_id
-    state = _read_state(state_dir)
-
-    idx = state["pipeline_args"].index("--plan")
-    persisted = state["pipeline_args"][idx + 1]
-    assert persisted == "#42", f"expected raw issue ref '#42', got: {persisted!r}"
-    assert not (state_dir / "plan-from-issue.md").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -898,14 +831,14 @@ def test_setup_workdir_non_git_raises(tmp_path):
 
 def test_launch_threads_spec_path_into_pipeline_args(lenv):
     """launch(spec_path=<abs>) puts --spec <abs> into state.json pipeline_args."""
-    plan_file = lenv.repo / "plan.md"
-    plan_file.write_text("# Plan\n\nDo stuff.\n", encoding="utf-8")
     spec_file = lenv.repo / "spec.md"
     spec_file.write_text("the overall spec", encoding="utf-8")
 
     launcher = _launcher()
     gremlin_id, _ = launcher.launch(
-        "local", plan=str(plan_file), spec_path=str(spec_file)
+        "local",
+        stage_inputs={"instructions": "test spec threading"},
+        spec_path=str(spec_file),
     )
     state = _read_state(_gremlins_state_root(lenv) / gremlin_id)
     assert "--spec" in state["pipeline_args"]
@@ -915,11 +848,9 @@ def test_launch_threads_spec_path_into_pipeline_args(lenv):
 
 def test_launch_rejects_missing_spec_path(lenv):
     """spec_path that doesn't exist raises ValueError before any state-dir setup."""
-    plan_file = lenv.repo / "plan.md"
-    plan_file.write_text("# Plan\n", encoding="utf-8")
     launcher = _launcher()
     with pytest.raises(ValueError, match="--spec"):
-        launcher.launch("local", plan=str(plan_file), spec_path="/nonexistent/spec.md")
+        launcher.launch("local", spec_path="/nonexistent/spec.md")
     dirs = (
         list(_gremlins_state_root(lenv).glob("*"))
         if _gremlins_state_root(lenv).exists()
@@ -930,13 +861,11 @@ def test_launch_rejects_missing_spec_path(lenv):
 
 def test_launch_rejects_empty_spec_path(lenv):
     """spec_path pointing to an empty file raises ValueError."""
-    plan_file = lenv.repo / "plan.md"
-    plan_file.write_text("# Plan\n", encoding="utf-8")
     spec_file = lenv.repo / "empty-spec.md"
     spec_file.write_text("", encoding="utf-8")
     launcher = _launcher()
     with pytest.raises(ValueError, match="--spec"):
-        launcher.launch("local", plan=str(plan_file), spec_path=str(spec_file))
+        launcher.launch("local", spec_path=str(spec_file))
 
 
 # ---------------------------------------------------------------------------
@@ -998,51 +927,6 @@ def test_stage_inputs_survives_resume(lenv, monkeypatch):
 
     post_state = _read_state(state_dir)
     assert post_state["stage_inputs"] == saved_stage_inputs
-
-
-# ---------------------------------------------------------------------------
-# Boss pipeline + issue-ref plan materializes plan.md
-# ---------------------------------------------------------------------------
-
-
-def test_launch_boss_plan_issue_ref_materializes_plan_md(lenv, monkeypatch):
-    """Boss + --plan #N writes the issue ref to artifacts/plan-arg.txt before chain runs.
-
-    The actual issue body is fetched at runtime by resolve-plan-input, not at launch time.
-    """
-    launcher = _launcher()
-
-    monkeypatch.setattr(
-        launcher, "_spawn_logged_process", lambda *args, **kwargs: _FakeProc()
-    )
-
-    gremlin_id, _ = launcher.launch("boss", plan="#317", project_root=str(lenv.repo))
-    state_dir = _gremlins_state_root(lenv) / gremlin_id
-    plan_arg_txt = state_dir / "artifacts" / "plan-arg.txt"
-
-    assert plan_arg_txt.exists(), f"plan-arg.txt not found at {plan_arg_txt}"
-    assert plan_arg_txt.read_text(encoding="utf-8").strip() == "#317"
-
-
-def test_launch_plan_issue_ref_writes_issue_url_and_num(lenv, monkeypatch):
-    """Boss + --plan #N stores the issue ref in plan-arg.txt for the recipe to resolve."""
-    launcher = _launcher()
-
-    monkeypatch.setattr(
-        launcher, "_spawn_logged_process", lambda *args, **kwargs: _FakeProc()
-    )
-
-    gremlin_id, _ = launcher.launch("boss", plan="#378", project_root=str(lenv.repo))
-
-    state_dir = _gremlins_state_root(lenv) / gremlin_id
-    plan_arg_txt = state_dir / "artifacts" / "plan-arg.txt"
-    assert plan_arg_txt.exists(), f"plan-arg.txt not found at {plan_arg_txt}"
-    assert plan_arg_txt.read_text(encoding="utf-8").strip() == "#378"
-
-    registry_data = json.loads(
-        (_gremlins_state_root(lenv) / gremlin_id / "registry.json").read_text()
-    )
-    assert registry_data.get("plan_arg") == "file://session/plan-arg.txt"
 
 
 # ---------------------------------------------------------------------------

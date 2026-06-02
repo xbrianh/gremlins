@@ -1,7 +1,7 @@
 """Launcher for background gremlins.
 
 Public API:
-    launch(kind, *, stage_inputs=None, plan=None, description=None,
+    launch(kind, *, stage_inputs=None, description=None,
            parent_id=None, project_root=None, base_ref="HEAD",
            pipeline_args=()) -> tuple[str, subprocess.Popen[bytes]]
     resume(gremlin_id, *, graft=None) -> None
@@ -34,7 +34,7 @@ from gremlins.utils import proc
 from gremlins.utils.spawn_logged_process import (
     spawn_logged_process as _spawn_logged_process,
 )
-from gremlins.utils.text import read_markdown_title, slugify
+from gremlins.utils.text import slugify
 
 
 class GremlinAlreadyRunning(RuntimeError):
@@ -51,38 +51,12 @@ def _state_root() -> pathlib.Path:
 
 def _resolve_description_and_slug(
     instructions: str | None,
-    plan: str | None,
     description: str | None,
-    *,
-    issue_title: str = "",
 ) -> tuple[str, bool, str]:
-    """Return (description, description_explicit, slug) from available inputs.
-
-    ``issue_title`` is an optional pre-fetched title for an issue-ref ``plan``
-    so callers that already resolved the issue (e.g. boss pipeline) don't trigger
-    a second ``gh`` round-trip here.
-    """
+    """Return (description, description_explicit, slug) from available inputs."""
     if description:
         slug = slugify(description) or "gremlin"
         return description[:60], True, slug
-
-    if plan and os.path.isfile(plan):
-        h1 = read_markdown_title(plan)
-        if h1:
-            slug = slugify(h1) or "gremlin"
-            return h1[:60], False, slug
-        base = os.path.splitext(os.path.basename(plan))[0]
-        slug = slugify(base) or "gremlin"
-        return "", False, slug
-
-    if plan:
-        # Non-file plan arg (issue ref); derive slug from the ref string directly.
-        title = issue_title
-        if title:
-            slug = slugify(title) or "gremlin"
-            return title[:60], False, slug
-        slug = slugify(plan) or "gremlin"
-        return "", False, slug
 
     if instructions:
         slug = slugify(instructions[:80]) or "gremlin"
@@ -109,7 +83,6 @@ def _build_spawn_env(gremlin_id: str) -> dict[str, str]:
 class _Inputs:
     gremlin_id: str
     kind: str
-    plan: str | None
     instructions: str
     description: str
     description_explicit: bool
@@ -126,39 +99,14 @@ class _Inputs:
     pr_num: str = ""
 
 
-def _validate_plan_args(
-    plan: str | None,
-    instructions: str | None,
-    spec_path: str | None,
-) -> tuple[str | None, str | None]:
-    if plan and instructions:
-        raise ValueError("--plan and instructions are mutually exclusive")
-
-    if plan and os.path.isfile(plan) and os.path.getsize(plan) == 0:
-        raise ValueError(f"--plan: file is empty: {plan}")
-
+def _validate_spec(spec_path: str | None) -> str | None:
     if spec_path is not None:
         if not os.path.isfile(spec_path):
             raise ValueError(f"--spec: file not found: {spec_path}")
         if os.path.getsize(spec_path) == 0:
             raise ValueError(f"--spec: file is empty: {spec_path}")
-        spec_path = str(pathlib.Path(spec_path).resolve())
-
-    if plan and os.path.isfile(plan):
-        plan = str(pathlib.Path(plan).resolve())
-
-    if plan and not os.path.isfile(plan):
-        if os.sep in plan or plan.endswith(".md"):
-            raise ValueError(f"--plan: file not found: {plan}")
-        _is_issue_ref = re.match(r"^#([0-9]+)$", plan) or re.match(
-            r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+$", plan
-        )
-        if not _is_issue_ref:
-            raise ValueError(
-                f"--plan: not a file or recognized issue ref (use #N or owner/repo#N): {plan}"
-            )
-
-    return plan, spec_path
+        return str(pathlib.Path(spec_path).resolve())
+    return None
 
 
 def _reject_pipeline_collision(gremlin_id: str) -> None:
@@ -248,7 +196,6 @@ def _parse_pr_num(pr_arg: str) -> str:
 def _resolve_inputs(
     kind: str,
     stage_inputs: dict[str, Any],
-    plan: str | None,
     description: str | None,
     parent_id: str | None,
     project_root: str | None,
@@ -261,16 +208,9 @@ def _resolve_inputs(
 
     pr = stage_inputs.pop("pr", None) or None
     instructions: str | None = stage_inputs.get("instructions")
-    if plan is None:
-        plan = stage_inputs.pop("plan", None)
+    spec_path = _validate_spec(spec_path)
 
-    plan, spec_path = _validate_plan_args(plan, instructions, spec_path)
-
-    desc, desc_explicit, slug = _resolve_description_and_slug(
-        instructions,
-        plan,
-        description,
-    )
+    desc, desc_explicit, slug = _resolve_description_and_slug(instructions, description)
 
     if project_root is None:
         r = proc.run(["git", "rev-parse", "--show-toplevel"])
@@ -318,15 +258,12 @@ def _resolve_inputs(
     stored_args = list(resolved_pipeline_args)
     if spec_path and "--spec" not in stored_args:
         stored_args = ["--spec", spec_path] + stored_args
-    if plan and "--plan" not in stored_args:
-        stored_args = ["--plan", plan] + stored_args
 
     client_label = launch_client_label(stored_args, loaded_pipeline)
 
     return _Inputs(
         gremlin_id=resolved_gremlin_id,
         kind=kind,
-        plan=plan,
         instructions=instructions or "",
         description=desc,
         description_explicit=desc_explicit,
@@ -347,9 +284,7 @@ def _resolve_inputs(
 def _prepare_state_dir(state_dir: pathlib.Path, inputs: _Inputs) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "instructions.txt").write_text(inputs.instructions, encoding="utf-8")
-    artifacts_dir = state_dir / "artifacts"
-    artifacts_dir.mkdir(exist_ok=True)
-    (artifacts_dir / "plan-arg.txt").write_text(inputs.plan or "", encoding="utf-8")
+    (state_dir / "artifacts").mkdir(exist_ok=True)
 
 
 def _initial_state_data(inputs: _Inputs) -> StateData:
@@ -512,7 +447,6 @@ def launch(
     kind: str,
     *,
     stage_inputs: dict[str, Any] | None = None,
-    plan: str | None = None,
     description: str | None = None,
     parent_id: str | None = None,
     project_root: str | None = None,
@@ -533,7 +467,6 @@ def launch(
     inputs = _resolve_inputs(
         kind,
         {} if stage_inputs is None else dict(stage_inputs),
-        plan,
         description,
         parent_id,
         project_root,
@@ -562,14 +495,10 @@ def launch(
         if inputs.base_ref_name:
             registry.bind("base_ref", Uri.parse(f"git://ref/{inputs.base_ref_name}"))
         registry.bind("spec", Uri.parse("file://session/spec.md"))
-        if inputs.plan:
-            registry.bind("plan_arg", Uri.parse("file://session/plan-arg.txt"))
         if inputs.loaded_pipeline is not None and inputs.loaded_pipeline.input_sources is not None:
-            input_values: dict[str, str] = {}
-            if inputs.plan:
-                input_values["plan"] = inputs.plan
-            if inputs.instructions:
-                input_values["instructions"] = inputs.instructions
+            input_values = {
+                k: v for k, v in inputs.stage_inputs.items() if isinstance(v, str) and v
+            }
             _seed_registry_from_sources(
                 registry,
                 input_values,
@@ -670,17 +599,14 @@ def _spawn_resume(
     stage: str,
     project_root: str,
 ) -> Any:
-    has_plan = any(a == "--plan" or str(a).startswith("--plan=") for a in pipeline_args)
-
     spawn_args: list[str] = list(pipeline_args)
-    if not has_plan:
-        instr_file = state_dir / "instructions.txt"
-        if instr_file.is_file():
-            instructions = instr_file.read_text(encoding="utf-8")
-        else:
-            instructions = str(state.get("instructions") or "")
-        if instructions:
-            spawn_args.append(instructions)
+    instr_file = state_dir / "instructions.txt"
+    if instr_file.is_file():
+        instructions = instr_file.read_text(encoding="utf-8")
+    else:
+        instructions = str(state.get("instructions") or "")
+    if instructions:
+        spawn_args.append(instructions)
 
     env = _build_spawn_env(gremlin_id)
 
