@@ -50,18 +50,12 @@ def _state_root() -> pathlib.Path:
 
 
 def _resolve_description_and_slug(
-    instructions: str | None,
     description: str | None,
 ) -> tuple[str, bool, str]:
     """Return (description, description_explicit, slug) from available inputs."""
     if description:
         slug = slugify(description) or "gremlin"
         return description[:60], True, slug
-
-    if instructions:
-        slug = slugify(instructions[:80]) or "gremlin"
-        return instructions[:60], False, slug
-
     return "", False, "gremlin"
 
 
@@ -83,7 +77,6 @@ def _build_spawn_env(gremlin_id: str) -> dict[str, str]:
 class _Inputs:
     gremlin_id: str
     kind: str
-    instructions: str
     description: str
     description_explicit: bool
     parent_id: str
@@ -207,10 +200,9 @@ def _resolve_inputs(
     from gremlins.cli.pipeline_args import launch_client_label, resolve_pipeline
 
     pr = stage_inputs.pop("pr", None) or None
-    instructions: str | None = stage_inputs.get("instructions")
     spec_path = _validate_spec(spec_path)
 
-    desc, desc_explicit, slug = _resolve_description_and_slug(instructions, description)
+    desc, desc_explicit, slug = _resolve_description_and_slug(description)
 
     if project_root is None:
         r = proc.run(["git", "rev-parse", "--show-toplevel"])
@@ -264,7 +256,6 @@ def _resolve_inputs(
     return _Inputs(
         gremlin_id=resolved_gremlin_id,
         kind=kind,
-        instructions=instructions or "",
         description=desc,
         description_explicit=desc_explicit,
         parent_id=parent_id or "",
@@ -281,9 +272,8 @@ def _resolve_inputs(
     )
 
 
-def _prepare_state_dir(state_dir: pathlib.Path, inputs: _Inputs) -> None:
+def _prepare_state_dir(state_dir: pathlib.Path) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
-    (state_dir / "instructions.txt").write_text(inputs.instructions, encoding="utf-8")
     (state_dir / "artifacts").mkdir(exist_ok=True)
 
 
@@ -298,7 +288,6 @@ def _initial_state_data(inputs: _Inputs) -> StateData:
         worktree_base="",
         status="running",
         started_at=now_iso,
-        instructions=inputs.instructions[:200],
         description=inputs.description,
         description_explicit=inputs.description_explicit,
         parent_id=inputs.parent_id,
@@ -398,8 +387,6 @@ def _persist_expanded_pipeline(state_dir: pathlib.Path, pipeline_path: str) -> s
 
 def _spawn(gremlin_id: str, inputs: _Inputs, state_dir: pathlib.Path) -> Any:
     spawn_args = list(inputs.pipeline_args)
-    if inputs.instructions:
-        spawn_args.append(inputs.instructions)
     cmd = [
         sys.executable,
         "-m",
@@ -477,7 +464,7 @@ def launch(
     )
     state_dir = _state_root() / inputs.gremlin_id
     try:
-        _prepare_state_dir(state_dir, inputs)
+        _prepare_state_dir(state_dir)
         inputs.pipeline_path = _persist_expanded_pipeline(
             state_dir, inputs.pipeline_path
         )
@@ -593,20 +580,12 @@ def _patch_state_for_resume(
 def _spawn_resume(
     gremlin_id: str,
     state_dir: pathlib.Path,
-    state: dict[str, Any],
     pipeline_path: str,
     pipeline_args: list[str],
     stage: str,
     project_root: str,
 ) -> Any:
     spawn_args: list[str] = list(pipeline_args)
-    instr_file = state_dir / "instructions.txt"
-    if instr_file.is_file():
-        instructions = instr_file.read_text(encoding="utf-8")
-    else:
-        instructions = str(state.get("instructions") or "")
-    if instructions:
-        spawn_args.append(instructions)
 
     env = _build_spawn_env(gremlin_id)
 
@@ -659,9 +638,6 @@ def resume(gremlin_id: str, *, graft: str | None = None) -> None:
     p = _spawn_resume(
         gremlin_id,
         gremlin.state_dir,
-        {
-            "instructions": state_data.instructions,
-        },
         gremlin.pipeline_path,
         gremlin.pipeline_args,
         stage,

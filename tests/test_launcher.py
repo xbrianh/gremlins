@@ -115,17 +115,11 @@ def test_launch_creates_state_layout(lenv):
         f"pipeline did not finish; log:\n{(state_dir / 'log').read_text(errors='replace')[-2000:]}"
     )
 
-    assert (state_dir / "instructions.txt").exists()
-    assert (state_dir / "instructions.txt").read_text(
-        encoding="utf-8"
-    ) == "test instructions"
-
     state = _read_state(state_dir)
     assert state["id"] == gremlin_id
     assert state["kind"] == "local"
     assert state["setup_kind"] == "worktree-detached"
     assert state["pipeline_path"].endswith(".yaml")
-    assert "test instructions" in state["instructions"]
     assert "workdir" in state and state["workdir"]
 
 
@@ -365,7 +359,6 @@ stages:
     state_dir.mkdir(parents=True)
     (state_dir / "log").write_text("", encoding="utf-8")
     (state_dir / "finished").touch()
-    (state_dir / "instructions.txt").write_text("test resume refresh", encoding="utf-8")
     (state_dir / "state.json").write_text(
         json.dumps(
             {
@@ -419,7 +412,6 @@ def test_resume_refuses_running_gremlin(lenv):
         "pipeline_args": [],
     }
     (state_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
-    (state_dir / "instructions.txt").write_text("foo", encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="still running"):
         launcher.resume(gremlin_id)
@@ -444,7 +436,6 @@ def test_resume_refuses_finished_success(lenv):
     }
     (state_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
     (state_dir / "finished").touch()
-    (state_dir / "instructions.txt").write_text("foo", encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="finished successfully"):
         launcher.resume(gremlin_id)
@@ -892,7 +883,6 @@ def test_stage_inputs_survives_resume(lenv, monkeypatch):
     state_dir.mkdir(parents=True)
     (state_dir / "log").write_text("", encoding="utf-8")
     (state_dir / "finished").touch()
-    (state_dir / "instructions.txt").write_text("do the thing", encoding="utf-8")
     saved_stage_inputs = {"instructions": "do the thing", "flag": "value"}
     pipeline_yaml = lenv.repo / "pipeline.yaml"
     pipeline_yaml.write_text(
