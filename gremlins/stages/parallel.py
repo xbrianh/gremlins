@@ -155,7 +155,7 @@ class ParallelStage(Stage):
     ) -> list[_Stage]:
         """Return the three runtime stages for this parallel block."""
         return _ParallelExecutor(
-            self.name,
+            self,
             child_runners,
             max_concurrent=self._max_concurrent,
             set_stage_fn=set_stage_fn or _noop_set_stage,
@@ -203,7 +203,7 @@ class _ParallelExecutor:
 
     def __init__(
         self,
-        group_name: str,
+        parallel_stage: ParallelStage,
         child_runners: list[tuple[str, State, Callable[[], Any]]],
         *,
         max_concurrent: int | None,
@@ -217,7 +217,8 @@ class _ParallelExecutor:
         stage_path: str = "",
         child_stages: list[Stage] | None = None,
     ) -> None:
-        self._group_name = group_name
+        self._parallel_stage = parallel_stage
+        self._group_name = parallel_stage.name
         self._child_runners = child_runners
         self._set_stage = set_stage_fn
         self._cancel_on_bail = cancel_on_bail
@@ -230,7 +231,7 @@ class _ParallelExecutor:
         self._stages_by_key: dict[str, Stage] = (
             {st.name: st for st in child_stages} if child_stages else {}
         )
-        self._group_state = ParallelGroupState(group_name, parent_data)
+        self._group_state = ParallelGroupState(self._group_name, parent_data)
         self._tasks: list[asyncio.Task[None]] = []
         self._sem: asyncio.Semaphore | None = (
             asyncio.Semaphore(max_concurrent) if max_concurrent is not None else None
@@ -248,8 +249,6 @@ class _ParallelExecutor:
     # --- worktree lifecycle ---
 
     async def _fan_out(self) -> None:
-        from gremlins.executor.gremlin import Gremlin
-
         self._set_stage(f"{self._group_name}-fanout")
         gs = self._group_state
         gs.hydrate()
@@ -280,16 +279,17 @@ class _ParallelExecutor:
 
         parent_gid = self._parent_data.gremlin_id
         parent_state = self._parent_state
-        parent_gremlin: Gremlin | None = None
-        if parent_gid and parent_state is not None:
-            parent_gremlin = Gremlin.open(parent_gid)
-            parent_gremlin.registry = parent_state.artifacts
+        parent_gremlin = self._parallel_stage.gremlin
 
         try:
             for child_key, child_state, _ in self._child_runners:
-                if parent_gremlin is not None and parent_gid:
+                if (
+                    parent_gremlin is not None
+                    and parent_gid
+                    and parent_state is not None
+                ):
                     gid = parent_gid
-                    pstate = cast(State, parent_state)
+                    pstate = parent_state
                     child_id = f"{gid}--{self._group_name}--{child_key}"
                     branch_stage = self._stages_by_key.get(child_key)
                     branch_pipeline = _branch_pipeline(branch_stage, pstate)

@@ -31,7 +31,7 @@ from gremlins.permissions.loader import load_policy
 from gremlins.permissions.policy import Policy
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.discovery import resolve_pipeline_path
-from gremlins.stages.base import Stage
+from gremlins.protocols import StageProtocol
 from gremlins.stages.outcome import Bail
 from gremlins.utils import proc as _proc
 from gremlins.utils.git import (
@@ -69,7 +69,7 @@ _HANDLED_SIGS = tuple(
 _atexit_log_fn: Callable[[], None] | None = None
 
 
-def _apply_policy_to_stages(stages: list[Stage], policy: Policy) -> None:
+def _apply_policy_to_stages(stages: Sequence[StageProtocol], policy: Policy) -> None:
     for stage in stages:
         if stage.client is not None:
             stage.client.set_policy(policy)
@@ -153,7 +153,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
-def _unique_clients(stages: list[Stage]) -> list[Client]:
+def _unique_clients(stages: Sequence[StageProtocol]) -> list[Client]:
     seen: set[int] = set()
     result: list[Client] = []
     for stage in stages:
