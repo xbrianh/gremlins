@@ -1,9 +1,9 @@
 """Launcher for background gremlins.
 
 Public API:
-    launch(kind, *, stage_inputs=None, description=None,
-           parent_id=None, project_root=None, base_ref="HEAD",
-           pipeline_args=()) -> tuple[str, subprocess.Popen[bytes]]
+    launch(kind, *, stage_inputs=None, description=None, parent_id=None,
+           project_root=None, base_ref=None, pipeline_args=(),
+           gremlin_id=None) -> tuple[str, subprocess.Popen[bytes]]
     resume(gremlin_id, *, graft=None) -> None
 """
 
@@ -92,14 +92,6 @@ class _Inputs:
     pr_num: str = ""
 
 
-def _validate_spec(spec_path: str | None) -> str | None:
-    if spec_path is not None:
-        if not os.path.isfile(spec_path):
-            raise ValueError(f"--spec: file not found: {spec_path}")
-        if os.path.getsize(spec_path) == 0:
-            raise ValueError(f"--spec: file is empty: {spec_path}")
-        return str(pathlib.Path(spec_path).resolve())
-    return None
 
 
 def _reject_pipeline_collision(gremlin_id: str) -> None:
@@ -194,13 +186,11 @@ def _resolve_inputs(
     project_root: str | None,
     base_ref: str | None,
     pipeline_args: tuple[str, ...],
-    spec_path: str | None,
     gremlin_id: str | None,
 ) -> _Inputs:
     from gremlins.cli.pipeline_args import launch_client_label, resolve_pipeline
 
     pr = stage_inputs.pop("pr", None) or None
-    spec_path = _validate_spec(spec_path)
 
     desc, desc_explicit, slug = _resolve_description_and_slug(description)
 
@@ -248,8 +238,6 @@ def _resolve_inputs(
         pr_num = ""
 
     stored_args = list(resolved_pipeline_args)
-    if spec_path and "--spec" not in stored_args:
-        stored_args = ["--spec", spec_path] + stored_args
 
     client_label = launch_client_label(stored_args, loaded_pipeline)
 
@@ -439,7 +427,6 @@ def launch(
     project_root: str | None = None,
     base_ref: str | None = None,
     pipeline_args: tuple[str, ...] = (),
-    spec_path: str | None = None,
     gremlin_id: str | None = None,
     bypass: bool = False,
     permissions_file: str = "",
@@ -459,7 +446,6 @@ def launch(
         project_root,
         base_ref,
         pipeline_args,
-        spec_path,
         gremlin_id,
     )
     state_dir = _state_root() / inputs.gremlin_id
@@ -481,7 +467,6 @@ def launch(
             registry.bind("base_sha", Uri.parse(f"git://commit/{inputs.base_ref_sha}"))
         if inputs.base_ref_name:
             registry.bind("base_ref", Uri.parse(f"git://ref/{inputs.base_ref_name}"))
-        registry.bind("spec", Uri.parse("file://session/spec.md"))
         if inputs.loaded_pipeline is not None and inputs.loaded_pipeline.input_sources is not None:
             input_values = {
                 k: v for k, v in inputs.stage_inputs.items() if isinstance(v, str) and v

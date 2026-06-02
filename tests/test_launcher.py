@@ -816,50 +816,6 @@ def test_setup_workdir_non_git_raises(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# spec_path forwarding
-# ---------------------------------------------------------------------------
-
-
-def test_launch_threads_spec_path_into_pipeline_args(lenv):
-    """launch(spec_path=<abs>) puts --spec <abs> into state.json pipeline_args."""
-    spec_file = lenv.repo / "spec.md"
-    spec_file.write_text("the overall spec", encoding="utf-8")
-
-    launcher = _launcher()
-    gremlin_id, _ = launcher.launch(
-        "local",
-        stage_inputs={"instructions": "test spec threading"},
-        spec_path=str(spec_file),
-    )
-    state = _read_state(_gremlins_state_root(lenv) / gremlin_id)
-    assert "--spec" in state["pipeline_args"]
-    idx = state["pipeline_args"].index("--spec")
-    assert state["pipeline_args"][idx + 1] == str(spec_file.resolve())
-
-
-def test_launch_rejects_missing_spec_path(lenv):
-    """spec_path that doesn't exist raises ValueError before any state-dir setup."""
-    launcher = _launcher()
-    with pytest.raises(ValueError, match="--spec"):
-        launcher.launch("local", spec_path="/nonexistent/spec.md")
-    dirs = (
-        list(_gremlins_state_root(lenv).glob("*"))
-        if _gremlins_state_root(lenv).exists()
-        else []
-    )
-    assert dirs == [], f"missing-spec failure must not create state: {dirs}"
-
-
-def test_launch_rejects_empty_spec_path(lenv):
-    """spec_path pointing to an empty file raises ValueError."""
-    spec_file = lenv.repo / "empty-spec.md"
-    spec_file.write_text("", encoding="utf-8")
-    launcher = _launcher()
-    with pytest.raises(ValueError, match="--spec"):
-        launcher.launch("local", spec_path=str(spec_file))
-
-
-# ---------------------------------------------------------------------------
 # stage_inputs persistence
 # ---------------------------------------------------------------------------
 
