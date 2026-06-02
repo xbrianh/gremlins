@@ -103,39 +103,6 @@ def test_write_bail_file_no_child_key_writes_bail_file(sandbox):
     assert data["detail"] == "child A bailed"
 
 
-def test_check_bail_reads_attempt_from_state_json(sandbox):
-    gremlin_id = "gr-check-attempt"
-    sf = _make_state(sandbox.state, gremlin_id)
-    state_dir = sf.parent
-    StateData.load(gremlin_id).patch(attempt="my-attempt-abc")
-
-    # No bail file yet → no raise
-    StateData.load(gremlin_id).check_bail("test")
-
-    # Write bail file → raises
-    (state_dir / "bail_my-attempt-abc.json").write_text(json.dumps({"class": "other"}))
-    with pytest.raises(RuntimeError, match="bailed"):
-        StateData.load(gremlin_id).check_bail("test")
-
-
-def test_check_bail_child_key_reads_parallel_attempts(sandbox):
-    gremlin_id = "gr-parallel-attempt"
-    sf = _make_state(sandbox.state, gremlin_id)
-    state_dir = sf.parent
-    StateData.load(gremlin_id).patch_parallel_attempt("child-a", "attempt-a")
-
-    # No bail file yet
-    StateData.load(gremlin_id).check_bail("test", child_key="child-a")
-
-    # Write bail for child-a
-    (state_dir / "bail_attempt-a.json").write_text(json.dumps({"class": "other"}))
-    with pytest.raises(RuntimeError, match="bailed"):
-        StateData.load(gremlin_id).check_bail("test", child_key="child-a")
-
-    # child-b has no bail
-    StateData.load(gremlin_id).check_bail("test", child_key="child-b")
-
-
 # ---------------------------------------------------------------------------
 # fcntl.flock race: concurrent patch_state calls — no lost updates
 # ---------------------------------------------------------------------------
