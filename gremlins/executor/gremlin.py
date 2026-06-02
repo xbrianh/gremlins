@@ -452,7 +452,24 @@ class Gremlin:
         if client_label:
             _apply_client_override(list(pipeline.stages), Client.parse(client_label))
         elif client:
-            _apply_client_override(list(pipeline.stages), client)
+            if client.provider == "fake":
+                def collect_models(stages: list[StageProtocol]) -> str | None:
+                    for stage in stages:
+                        if stage.client and stage.client.model and stage.client.model != "fake":
+                            return stage.client.model
+                        body = getattr(stage, "body", [])
+                        if body:
+                            m = collect_models(body)
+                            if m:
+                                return m
+                    return None
+
+                model_from_pipeline = collect_models(list(pipeline.stages))
+                if model_from_pipeline:
+                    client.model = model_from_pipeline
+                _apply_client_override(list(pipeline.stages), client)
+            else:
+                _apply_client_override(list(pipeline.stages), client)
         self = cls(
             pipeline.stages,
             state_dir=state_dir,
