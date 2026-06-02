@@ -267,7 +267,6 @@ async def run_pipeline(
             base_ref=base_ref,
             fetch_worktree=fetch_worktree,
             client_label=args.client or "",
-            test_client=client,
             repo=gh_repo,
             stage_inputs=stage_inputs,
         )
