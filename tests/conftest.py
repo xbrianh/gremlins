@@ -12,12 +12,26 @@ import types
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
+from gremlins.clients.registry import register_client_factory
+from gremlins.permissions.policy import Policy
 
 os.environ.setdefault("GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME", "main")
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 FIXTURES_DIR = pathlib.Path(__file__).resolve().parent / "fixtures"
 FAKE_CLAUDE = FIXTURES_DIR / "fake_claude.py"
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    def _make_fake_client(model: str | None, policy: Policy) -> object:
+        return FakeClaudeClient(
+            fixtures={},
+            model=model or "fake",
+            bypass=policy.bypass,
+            native_block=policy.block_for("fake"),
+        )
+
+    register_client_factory("fake", _make_fake_client)
 
 
 def _setup_claude_home(home: pathlib.Path) -> None:
