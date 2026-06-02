@@ -2,7 +2,6 @@ import asyncio
 import dataclasses
 import json
 import shutil
-import sys
 
 import pytest
 from conftest import MINIMAL_EVENTS
