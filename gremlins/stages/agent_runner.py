@@ -33,7 +33,7 @@ async def run_agent(
     model: str | None = None,
     **kw: Any,
 ) -> CompletedRun:
-    resolved_model = model or state.stage_model or state.client.model
+    resolved_model = model or state.client.model
     completed = await state.client.run(
         prompt,
         label=label,

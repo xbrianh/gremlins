@@ -15,8 +15,6 @@ Spec file schema (JSON):
         "parent_stage":    <str>        parent stage name for sub-stage tracking
         "repo":            <str>        "owner/repo" for gh API calls (from parent)
         "instructions":    <str>        freeform instructions forwarded from parent
-        "test_client":     <str|null>   "provider:model" of the test client, or null in production
-        "stage_model":     <str>        real model name when test_client overrides execution; empty string in production
         "base_ref":        <str|null>   base branch/ref name for prompt template substitution (e.g. "main"); omitted or null → ""
     }
 
