@@ -480,63 +480,32 @@ def _spawn(gremlin_id: str, inputs: _Inputs, state_dir: pathlib.Path) -> Any:
 
 def _seed_registry_from_sources(
     registry: ArtifactRegistry,
-    loaded_pipeline: _PipelineData | None,
-    inputs: _Inputs,
+    input_values: dict[str, str],
+    sources: dict[str, Any],
     artifacts_dir: pathlib.Path,
 ) -> None:
-    """Pre-seed registry with external sources based on pipeline.input_sources."""
-    # Legacy fallback: if no input_sources defined, register plan_arg if plan is provided
-    if loaded_pipeline is None or loaded_pipeline.input_sources is None:
-        if inputs.plan:
-            uri = Uri.parse("file://session/plan-arg.txt")
-            registry.bind("plan_arg", uri)
-        return
-
-    sources = loaded_pipeline.input_sources.sources
-
-    # Always seed plan_arg if plan is provided, even when input_sources is present
-    if inputs.plan:
-        uri = Uri.parse("file://session/plan-arg.txt")
-        registry.bind("plan_arg", uri)
-
     for key, source in sources.items():
-        value: str | None = None
-        resolved_type: str | None = None
-
-        if key == "plan":
-            if inputs.plan:
-                if "filepath" in source.types and os.path.isfile(inputs.plan):
-                    value = inputs.plan
-                    resolved_type = "filepath"
-                elif "string" in source.types:
-                    value = inputs.plan
-                    resolved_type = "string"
-        elif key == "issue":
-            if inputs.plan and "string" in source.types:
-                if not os.path.isfile(inputs.plan):
-                    value = inputs.plan
-                    resolved_type = "string"
-        elif key == "instructions":
-            if inputs.instructions and "string" in source.types:
-                value = inputs.instructions
-                resolved_type = "string"
-
-        if value is None and not source.optional:
-            raise ValueError(
-                f"required input source {key!r} (type: {source.types}) is not available"
-            )
-
-        if value is None:
+        value = input_values.get(key) or None
+        if not value:
+            if not source.optional:
+                raise ValueError(
+                    f"required input source {key!r} (type: {source.types}) is not available"
+                )
             continue
-
-        if resolved_type == "filepath":
-            uri = Uri.parse(f"file://{value}")
-            registry.bind(key, uri)
-        elif resolved_type == "string":
-            source_file = artifacts_dir / f"{key}.txt"
-            source_file.write_text(value, encoding="utf-8")
-            uri = Uri.parse(f"file://session/{key}.txt")
-            registry.bind(key, uri)
+        for t in source.types:
+            if t == "filepath" and os.path.isfile(value):
+                registry.bind(key, Uri.parse(f"file://{value}"))
+                break
+            elif t == "string":
+                dest = artifacts_dir / f"{key}.txt"
+                dest.write_text(value, encoding="utf-8")
+                registry.bind(key, Uri.parse(f"file://session/{key}.txt"))
+                break
+        else:
+            if not source.optional:
+                raise ValueError(
+                    f"required input source {key!r} (type: {source.types}) could not be resolved"
+                )
 
 
 def launch(
@@ -593,9 +562,20 @@ def launch(
         if inputs.base_ref_name:
             registry.bind("base_ref", Uri.parse(f"git://ref/{inputs.base_ref_name}"))
         registry.bind("spec", Uri.parse("file://session/spec.md"))
-        _seed_registry_from_sources(
-            registry, inputs.loaded_pipeline, inputs, artifact_dir
-        )
+        if inputs.plan:
+            registry.bind("plan_arg", Uri.parse("file://session/plan-arg.txt"))
+        if inputs.loaded_pipeline is not None and inputs.loaded_pipeline.input_sources is not None:
+            input_values: dict[str, str] = {}
+            if inputs.plan:
+                input_values["plan"] = inputs.plan
+            if inputs.instructions:
+                input_values["instructions"] = inputs.instructions
+            _seed_registry_from_sources(
+                registry,
+                input_values,
+                inputs.loaded_pipeline.input_sources.sources,
+                artifact_dir,
+            )
         p = _spawn(inputs.gremlin_id, inputs, state_dir)
     except Exception:
         shutil.rmtree(state_dir, ignore_errors=True)

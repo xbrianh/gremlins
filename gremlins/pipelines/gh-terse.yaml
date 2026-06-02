@@ -10,9 +10,6 @@ inputs:
     PLAN: plan?
     PR: pr?
   sources:
-    issue:
-      type: string
-      optional: true
     plan:
       type: [filepath, string]
       optional: true
