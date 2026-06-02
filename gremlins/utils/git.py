@@ -420,8 +420,9 @@ def setup_workdir(
     if not in_git_repo(cwd=project_root):
         raise GitError(128, f"{project_root!r} is not a git repository")
 
+    effective_ref = base_ref if base_ref else "HEAD"
     workdir = setup_detached_worktree(
-        project_root, base_ref or "HEAD", fetch=fetch, worktree_parent=worktree_parent
+        project_root, effective_ref, fetch=fetch, worktree_parent=worktree_parent
     )
     stage_gremlins_overlay(project_root, state_dir)
     return workdir

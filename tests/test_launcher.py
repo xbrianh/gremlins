@@ -742,17 +742,9 @@ def test_launch_passes_base_ref_to_worktree_setup(lenv):
     assert registry_data.get("base_sha") == f"git://commit/{head_sha}", (
         f"expected base_sha=git://commit/{head_sha!r}, got {registry_data.get('base_sha')!r}"
     )
-    workdir = state.get("workdir", "")
-    assert workdir, "workdir should be set after initialize_runtime"
-    branch_base = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        capture_output=True,
-        text=True,
-        cwd=workdir,
-        check=True,
-    ).stdout.strip()
-    assert branch_base == head_sha, (
-        f"worktree branch should be based on {head_sha!r}, got {branch_base!r}"
+    workdir_base = state.get("worktree_base", "")
+    assert workdir_base == head_sha, (
+        f"worktree should be created at base_ref_sha={head_sha!r}, got {workdir_base!r}"
     )
 
 
