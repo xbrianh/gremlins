@@ -348,6 +348,7 @@ def _prepare_state_dir(state_dir: pathlib.Path, inputs: _Inputs) -> None:
     artifacts_dir = state_dir / "artifacts"
     artifacts_dir.mkdir(exist_ok=True)
     (artifacts_dir / "plan-arg.txt").write_text(inputs.plan or "", encoding="utf-8")
+    (artifacts_dir / "instructions.txt").write_text(inputs.instructions, encoding="utf-8")
 
 
 def _initial_state_data(inputs: _Inputs) -> StateData:
@@ -476,6 +477,74 @@ def _spawn(gremlin_id: str, inputs: _Inputs, state_dir: pathlib.Path) -> Any:
     )
 
 
+
+def _seed_registry_from_sources(
+    registry: ArtifactRegistry,
+    loaded_pipeline: Any,
+    inputs: _Inputs,
+    artifacts_dir: pathlib.Path,
+) -> None:
+    """Pre-seed registry with external sources based on pipeline.input_sources.
+
+    If the pipeline has an input_sources block, use it to drive registry pre-seeding.
+    Otherwise, fall back to legacy hardcoded seeding for backward compatibility.
+    """
+    if loaded_pipeline is None or loaded_pipeline.input_sources is None:
+        # Legacy path: hardcoded seeding
+        registry.bind("plan_arg", Uri.parse("file://session/plan-arg.txt"))
+        return
+
+    sources = loaded_pipeline.input_sources.all_sources()
+    for key, source in sources.items():
+        # Determine which type to use and resolve the value
+        value: str | None = None
+        resolved_type: str | None = None
+
+        # Try filepath first if it's in the union
+        if "filepath" in source.types:
+            if inputs.plan and os.path.isfile(inputs.plan):
+                value = inputs.plan
+                resolved_type = "filepath"
+            elif key == "plan" and inputs.plan and os.path.isfile(inputs.plan):
+                value = inputs.plan
+                resolved_type = "filepath"
+
+        # Fall back to string type if filepath didn't resolve
+        if resolved_type is None and "string" in source.types:
+            if key == "plan" and inputs.plan:
+                value = inputs.plan
+                resolved_type = "string"
+            elif key == "instructions" and inputs.instructions:
+                value = inputs.instructions
+                resolved_type = "string"
+            elif key == "issue" and inputs.plan:
+                # Issue is typically a string (issue ref like #123)
+                if not os.path.isfile(inputs.plan):
+                    value = inputs.plan
+                    resolved_type = "string"
+
+        # Check if the source is required and missing
+        if value is None and not source.optional:
+            raise ValueError(
+                f"required input source {key!r} (type: {source.types}) "
+                f"is not available"
+            )
+
+        # Register if we found a value
+        if value is None:
+            continue
+
+        if resolved_type == "filepath":
+            # Bind to the actual file path
+            uri = Uri.parse(f"file://{value}")
+            registry.bind(key, uri)
+        elif resolved_type == "string":
+            # Write to a file and register it
+            source_file = artifacts_dir / f"{key}.txt"
+            source_file.write_text(value, encoding="utf-8")
+            uri = Uri.parse(f"file://session/{key}.txt")
+            registry.bind(key, uri)
+
 def launch(
     kind: str,
     *,
@@ -530,7 +599,15 @@ def launch(
         if inputs.base_ref_name:
             registry.bind("base_ref", Uri.parse(f"git://ref/{inputs.base_ref_name}"))
         registry.bind("spec", Uri.parse("file://session/spec.md"))
-        registry.bind("plan_arg", Uri.parse("file://session/plan-arg.txt"))
+        # Load pipeline to access input_sources for registry pre-seeding
+        loaded_pipeline = None
+        try:
+            loaded_pipeline = _PipelineData.from_yaml(
+                resolve_pipeline_path(inputs.pipeline_path, pathlib.Path(inputs.project_root))
+            )
+        except (FileNotFoundError, OSError, ValueError):
+            pass
+        _seed_registry_from_sources(registry, loaded_pipeline, inputs, artifact_dir)
         p = _spawn(inputs.gremlin_id, inputs, state_dir)
     except Exception:
         shutil.rmtree(state_dir, ignore_errors=True)
