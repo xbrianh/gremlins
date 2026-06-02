@@ -305,7 +305,7 @@ class Gremlin:
             built.append((e.name, stage_state.make_runner(e, scope=stages)))
         return built
 
-    def _unbind_stale_exec_artifacts(self) -> None:
+    def _unbind_stale_artifacts(self) -> None:
         assert self.resume_from is not None
         names = [s.name for s in self.stages]
         start_idx = names.index(self.resume_from)
@@ -319,7 +319,7 @@ class Gremlin:
         if not hasattr(self, "registry"):
             raise RuntimeError("call initialize_with_runtime() before run()")
         if self.resume_from is not None:
-            self._unbind_stale_exec_artifacts()
+            self._unbind_stale_artifacts()
         built = self._collect_stages(self.stages)
         await run_stages(built, resume_from=self.resume_from)
 

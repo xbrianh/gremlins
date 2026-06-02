@@ -1,18 +1,13 @@
-"""Protocol definitions for dependency inversion between stages and executor."""
-
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from gremlins.executor.state import State
     from gremlins.stages.outcome import Outcome
 
 
-@runtime_checkable
 class GremlinProtocol(Protocol):
-    """Protocol for Gremlin interface used by stages."""
-
     registry: Any
 
     async def fork(
@@ -25,14 +20,10 @@ class GremlinProtocol(Protocol):
         child_key: str = "",
         pipeline: Any = None,
     ) -> State:
-        """Fork the gremlin for a parallel child."""
         ...
 
 
-@runtime_checkable
 class StageProtocol(Protocol):
-    """Protocol for Stage interface used by executor."""
-
     name: str
     type: str
     skip_if_exists: str
@@ -40,5 +31,4 @@ class StageProtocol(Protocol):
     gremlin: GremlinProtocol | None
 
     async def run(self, state: State) -> Outcome:
-        """Execute the stage."""
         ...
