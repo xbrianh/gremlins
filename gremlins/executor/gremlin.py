@@ -270,6 +270,12 @@ class Gremlin:
                 f"valid: {valid_names}"
             )
 
+    def _set_gremlin_recursive(self, stage: StageProtocol) -> None:
+        stage.gremlin = self
+        body = getattr(stage, "body", [])
+        for nested in body:
+            self._set_gremlin_recursive(nested)
+
     def _collect_stages(
         self, stages: Sequence[StageProtocol]
     ) -> list[tuple[str, Callable[[], Awaitable[Any]]]]:
@@ -286,7 +292,7 @@ class Gremlin:
         )
         built: list[tuple[str, Callable[[], Awaitable[Any]]]] = []
         for e in stages:
-            e.gremlin = self
+            self._set_gremlin_recursive(e)
             stage_client = e.client or PACKAGE_DEFAULT
             resolved = self.test_client or stage_client
             stage_state = build_state(
@@ -313,7 +319,7 @@ class Gremlin:
         names = [s.name for s in self.stages]
         start_idx = names.index(self.resume_from)
         for stage in self.stages[start_idx:]:
-            if stage.out_map:
+            if stage.type == "exec":
                 for key in stage.out_map:
                     if self.registry.produced(key):
                         self.registry.unbind(key)

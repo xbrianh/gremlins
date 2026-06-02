@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any
-
-from typing_extensions import Protocol, runtime_checkable
+from typing import Any, Protocol
 
 
-@runtime_checkable
 class GremlinProtocol(Protocol):
     """What stages need from a Gremlin."""
 
@@ -27,7 +24,6 @@ class GremlinProtocol(Protocol):
         ...
 
 
-@runtime_checkable
 class StageProtocol(Protocol):
     """What executor/* needs from a stage."""
 

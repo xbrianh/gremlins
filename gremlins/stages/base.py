@@ -55,7 +55,7 @@ class Stage:
         string options (framework wins on conflict). Unknown tokens and
         non-word braces (shell ${x}, {read:k}, brace expansion) are left as-is."""
         string_opts = {k: v for k, v in self.options.items() if isinstance(v, str)}
-        subs = {**string_opts, **(extra or {}), **state.framework_subs(self)}  # type: ignore
+        subs = {**string_opts, **(extra or {}), **state.framework_subs(self)}  # type: ignore[arg-type]
         return _VAR_SUB.sub(lambda m: subs.get(m.group(1), m.group(0)), text)
 
     @property
