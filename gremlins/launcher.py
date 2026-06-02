@@ -122,7 +122,7 @@ class _Inputs:
     base_ref_name: str
     base_ref_sha: str
     stage_inputs: dict[str, Any]
-    loaded_pipeline: Any = None
+    loaded_pipeline: _PipelineData | None = None
     pr_num: str = ""
 
 
@@ -350,9 +350,6 @@ def _prepare_state_dir(state_dir: pathlib.Path, inputs: _Inputs) -> None:
     artifacts_dir = state_dir / "artifacts"
     artifacts_dir.mkdir(exist_ok=True)
     (artifacts_dir / "plan-arg.txt").write_text(inputs.plan or "", encoding="utf-8")
-    (artifacts_dir / "instructions.txt").write_text(
-        inputs.instructions, encoding="utf-8"
-    )
 
 
 def _initial_state_data(inputs: _Inputs) -> StateData:
@@ -483,7 +480,7 @@ def _spawn(gremlin_id: str, inputs: _Inputs, state_dir: pathlib.Path) -> Any:
 
 def _seed_registry_from_sources(
     registry: ArtifactRegistry,
-    loaded_pipeline: Any,
+    loaded_pipeline: _PipelineData | None,
     inputs: _Inputs,
     artifacts_dir: pathlib.Path,
 ) -> None:
@@ -491,13 +488,17 @@ def _seed_registry_from_sources(
     # Legacy fallback: if no input_sources defined, register plan_arg if plan is provided
     if loaded_pipeline is None or loaded_pipeline.input_sources is None:
         if inputs.plan:
-            source_file = artifacts_dir / "plan-arg.txt"
-            source_file.write_text(inputs.plan, encoding="utf-8")
             uri = Uri.parse("file://session/plan-arg.txt")
             registry.bind("plan_arg", uri)
         return
 
     sources = loaded_pipeline.input_sources.sources
+
+    # Always seed plan_arg if plan is provided, even when input_sources is present
+    if inputs.plan:
+        uri = Uri.parse("file://session/plan-arg.txt")
+        registry.bind("plan_arg", uri)
+
     for key, source in sources.items():
         value: str | None = None
         resolved_type: str | None = None

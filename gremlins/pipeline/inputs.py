@@ -37,14 +37,8 @@ class InputSources:
     @classmethod
     def from_yaml(cls, raw: dict[str, Any]) -> InputSources:
         """Parse sources: block from YAML."""
-        allowed_keys = {"plan", "issue", "instructions"}
         sources: dict[str, InputSource] = {}
         for key, entry in raw.items():
-            if key not in allowed_keys:
-                raise ValueError(
-                    f"input source {key!r}: unrecognized key. "
-                    f"Allowed keys: {', '.join(sorted(allowed_keys))}"
-                )
             if not isinstance(entry, dict):
                 raise ValueError(
                     f"input source {key!r}: expected a mapping, got {type(entry).__name__}"
@@ -76,8 +70,13 @@ class InputSources:
                     f"got {type(type_raw).__name__}"
                 )
 
-            optional = bool(entry.get("optional", False))
-            sources[key] = InputSource(name=key, types=types, optional=optional)
+            optional_raw = entry.get("optional", False)
+            if not isinstance(optional_raw, bool):
+                raise ValueError(
+                    f"input source {key!r}: 'optional' must be a boolean, "
+                    f"got {type(optional_raw).__name__}"
+                )
+            sources[key] = InputSource(name=key, types=types, optional=optional_raw)
 
         return cls(sources)
 

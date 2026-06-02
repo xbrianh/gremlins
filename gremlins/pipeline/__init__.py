@@ -6,9 +6,9 @@ import pathlib
 from typing import TYPE_CHECKING, Any, cast
 
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
-from gremlins.pipeline.inputs import InputSources
 
 if TYPE_CHECKING:
+    from gremlins.pipeline.inputs import InputSources
     from gremlins.stages.base import Stage
     from gremlins.stages.exec import Exec
 
