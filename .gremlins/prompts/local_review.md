@@ -62,15 +62,3 @@ Write findings as markdown to `{artifact_dir}/{name}.md` using this structure:
 - If there are no issues worth noting, say so explicitly with an empty findings list
 
 End with a 2–4 sentence overall summary.
-
-## Emit a bail marker (running under a gremlin pipeline)
-
-The only question that matters: **can the implement stage fix this without asking anyone?** If yes, do not bail — note it and move on.
-
-- **Security blocker** (auth gaps, injection, credential exposure, OWASP top 10): end your final message with `BAIL: security: <one-line summary>`
-- **Unfixable blocker** — the approach is fundamentally wrong or the required behavior is a judgment call not pinned down by the issue: end your final message with `BAIL: reviewer_requested_changes: <one-line summary>`
-- **Everything else**: do not bail. Flag it and let the pipeline continue.
-
-If the review has no blocker-severity findings, exit normally. The bail marker must be the last non-empty line of your final message.
-
-**30-second rule**: if a competent developer could fix it in under 30 seconds — missing import, wrong identifier, off-by-one, trivial rename — do not bail.
