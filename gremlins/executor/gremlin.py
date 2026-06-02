@@ -283,6 +283,7 @@ class Gremlin:
         )
         built: list[tuple[str, Callable[[], Awaitable[Any]]]] = []
         for e in stages:
+            e.gremlin = self
             stage_client = e.client or PACKAGE_DEFAULT
             resolved = self.test_client or stage_client
             stage_state = build_state(
@@ -305,13 +306,11 @@ class Gremlin:
         return built
 
     def _unbind_stale_exec_artifacts(self) -> None:
-        from gremlins.stages.exec import Exec
-
         assert self.resume_from is not None
         names = [s.name for s in self.stages]
         start_idx = names.index(self.resume_from)
         for stage in self.stages[start_idx:]:
-            if isinstance(stage, Exec):
+            if stage.out_map:
                 for key in stage.out_map:
                     if self.registry.produced(key):
                         self.registry.unbind(key)

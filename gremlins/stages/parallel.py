@@ -167,6 +167,7 @@ class ParallelStage(Stage):
             worktree_parent=worktree_parent,
             stage_path=self.path or self.name,
             child_stages=child_stages,
+            parallel_stage=self,
         ).runtime_stages()
 
     async def run(self, state: State) -> Outcome:
@@ -216,6 +217,7 @@ class _ParallelExecutor:
         worktree_parent: pathlib.Path | None = None,
         stage_path: str = "",
         child_stages: list[Stage] | None = None,
+        parallel_stage: Stage | None = None,
     ) -> None:
         self._group_name = group_name
         self._child_runners = child_runners
@@ -227,6 +229,7 @@ class _ParallelExecutor:
         self._project_root = project_root
         self._worktree_parent = worktree_parent
         self._stage_path = stage_path
+        self._parallel_stage = parallel_stage
         self._stages_by_key: dict[str, Stage] = (
             {st.name: st for st in child_stages} if child_stages else {}
         )
@@ -248,8 +251,6 @@ class _ParallelExecutor:
     # --- worktree lifecycle ---
 
     async def _fan_out(self) -> None:
-        from gremlins.executor.gremlin import Gremlin
-
         self._set_stage(f"{self._group_name}-fanout")
         gs = self._group_state
         gs.hydrate()
@@ -278,12 +279,13 @@ class _ParallelExecutor:
             base_ref,
         )
 
+        parent_gremlin = (
+            self._parallel_stage.gremlin
+            if self._parallel_stage is not None
+            else None
+        )
         parent_gid = self._parent_data.gremlin_id
         parent_state = self._parent_state
-        parent_gremlin: Gremlin | None = None
-        if parent_gid and parent_state is not None:
-            parent_gremlin = Gremlin.open(parent_gid)
-            parent_gremlin.registry = parent_state.artifacts
 
         try:
             for child_key, child_state, _ in self._child_runners:

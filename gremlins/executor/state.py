@@ -12,7 +12,7 @@ import os
 import pathlib
 import re
 import secrets
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from gremlins import paths as _paths
@@ -22,7 +22,7 @@ from gremlins.utils.state_file import locked_update
 
 if TYPE_CHECKING:
     from gremlins.pipeline import Pipeline
-    from gremlins.stages.base import Stage
+    from gremlins.protocols import StageProtocol
 
 from gremlins.stages.outcome import Done
 
@@ -82,7 +82,7 @@ def landable_shape(state: dict[str, Any]) -> str:
     return "many_prs"
 
 
-def _stage_list() -> list[Stage]:
+def _stage_list() -> list[StageProtocol]:
     return []
 
 
@@ -497,7 +497,7 @@ class State:
     args: argparse.Namespace = dataclasses.field(default_factory=argparse.Namespace)
     pipeline_data: Pipeline | None = None
     instructions: str = ""
-    current_scope: list[Stage] = dataclasses.field(default_factory=_stage_list)
+    current_scope: list[StageProtocol] = dataclasses.field(default_factory=_stage_list)
     child_key: str | None = None
     parent_stage: str = ""
     worktree: pathlib.Path | None = None
@@ -517,7 +517,7 @@ class State:
         }
     )
 
-    def framework_subs(self, stage: Stage) -> dict[str, str]:
+    def framework_subs(self, stage: StageProtocol) -> dict[str, str]:
         """Runtime-owned substitution vars. Stages must not assemble these themselves."""
         return {
             "name": stage.name,
@@ -578,8 +578,8 @@ class State:
 
     def make_runner(
         self,
-        entry: Stage,
-        scope: list[Stage] | None = None,
+        entry: StageProtocol,
+        scope: Sequence[StageProtocol] | None = None,
         *,
         record_stage: bool = True,
     ) -> Callable[[], Any]:
