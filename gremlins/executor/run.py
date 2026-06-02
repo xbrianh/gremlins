@@ -267,9 +267,9 @@ async def run_pipeline(
             base_ref=base_ref,
             fetch_worktree=fetch_worktree,
             client_label=args.client or "",
-            test_client=client,
             repo=gh_repo,
             stage_inputs=stage_inputs,
+            client=client,
         )
         gremlin.validate_resume_target()
     except ValueError as exc:
@@ -306,9 +306,6 @@ async def run_pipeline(
     if any(c.provider == "claude" for c in _signal_clients):
         if shutil.which("claude") is None:
             die("claude not found on PATH")
-
-    if os.environ.get("GREMLINS_TEST_NOOP_PIPELINE"):
-        return 0
 
     plan_file = artifact_dir / "plan.md"
 

@@ -492,8 +492,6 @@ class State:
     artifacts: ArtifactRegistry
     repo: str = ""
     cwd: str = ""
-    test_client: Client | None = None
-    stage_model: str = ""
     args: argparse.Namespace = dataclasses.field(default_factory=argparse.Namespace)
     pipeline_data: Pipeline | None = None
     instructions: str = ""
@@ -521,7 +519,7 @@ class State:
         """Runtime-owned substitution vars. Stages must not assemble these themselves."""
         return {
             "name": stage.name,
-            "model": self.stage_model or self.client.model,
+            "model": self.client.model,
             "artifact_dir": str(self.artifact_dir),
             "instructions": self.instructions,
             "repo": self.repo,
@@ -627,8 +625,6 @@ def build_state(
     repo: str = "",
     cwd: str = "",
     instructions: str = "",
-    test_client: Client | None = None,
-    stage_model: str = "",
     worktree: pathlib.Path | None = None,
     worktree_parent: pathlib.Path | None = None,
     artifacts: ArtifactRegistry | None = None,
@@ -648,8 +644,6 @@ def build_state(
         args=args if args is not None else argparse.Namespace(),
         pipeline_data=pipeline_data,
         instructions=instructions,
-        test_client=test_client,
-        stage_model=stage_model,
         worktree=worktree,
         worktree_parent=worktree_parent,
         child_key=child_key,

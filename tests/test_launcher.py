@@ -374,7 +374,6 @@ def test_launch_explicit_project_root(lenv):
 
 def test_resume_patches_state(lenv, monkeypatch):
     """Manual resume() clears markers and patches state.json."""
-    monkeypatch.delenv("GREMLINS_TEST_NOOP_PIPELINE")
     launcher = _launcher()
     monkeypatch.setenv("FAKE_CLAUDE_FAIL_AT", "plan")
     gremlin_id, _ = launcher.launch(
@@ -511,7 +510,6 @@ def test_resume_refuses_finished_success(lenv):
 
 def test_run_pipeline_writes_terminal_state_on_success(lenv, monkeypatch):
     """_run-pipeline writes exit_code=0 + status=done + finished marker on success."""
-    monkeypatch.delenv("GREMLINS_TEST_NOOP_PIPELINE")
     plan_file = lenv.repo / "plan.md"
     plan_file.write_text(
         "# Test Plan\n\n## Tasks\n- [ ] Touch a file\n", encoding="utf-8"
@@ -530,7 +528,6 @@ def test_run_pipeline_writes_terminal_state_on_success(lenv, monkeypatch):
 
 def test_run_pipeline_writes_terminal_state_on_failure(lenv, monkeypatch):
     """_run-pipeline writes exit_code!=0 + status=stopped + finished marker on failure."""
-    monkeypatch.delenv("GREMLINS_TEST_NOOP_PIPELINE")
     monkeypatch.setenv("FAKE_CLAUDE_FAIL_AT", "plan")
     launcher = _launcher()
     gremlin_id, _ = launcher.launch("local", stage_inputs={"instructions": "fail test"})
@@ -625,7 +622,6 @@ def test_write_terminal_state_preserves_worktree_for_boss(lenv, monkeypatch, tmp
 
 def test_full_localgremlin_pipeline(lenv, monkeypatch):
     """plan → implement → review → address all run once in order."""
-    monkeypatch.delenv("GREMLINS_TEST_NOOP_PIPELINE")
     launcher = _launcher()
     gremlin_id, _ = launcher.launch(
         "local", stage_inputs={"instructions": "test full pipeline"}
@@ -746,17 +742,9 @@ def test_launch_passes_base_ref_to_worktree_setup(lenv):
     assert registry_data.get("base_sha") == f"git://commit/{head_sha}", (
         f"expected base_sha=git://commit/{head_sha!r}, got {registry_data.get('base_sha')!r}"
     )
-    workdir = state.get("workdir", "")
-    assert workdir, "workdir should be set after initialize_runtime"
-    branch_base = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        capture_output=True,
-        text=True,
-        cwd=workdir,
-        check=True,
-    ).stdout.strip()
-    assert branch_base == head_sha, (
-        f"worktree branch should be based on {head_sha!r}, got {branch_base!r}"
+    workdir_base = state.get("worktree_base", "")
+    assert workdir_base == head_sha, (
+        f"worktree should be created at base_ref_sha={head_sha!r}, got {workdir_base!r}"
     )
 
 
@@ -769,7 +757,6 @@ def test_pipeline_survives_worktree_pipeline_rename(lenv, monkeypatch):
     With the fix, python loads gremlins from the install root (derived via __file__)
     and the worktree rename is harmless.
     """
-    monkeypatch.delenv("GREMLINS_TEST_NOOP_PIPELINE")
     # Add a gremlins/ stub to the repo so the worktree cwd shadows the install root.
     pipeline_stub = lenv.repo / "gremlins"
     pipeline_stub.mkdir()

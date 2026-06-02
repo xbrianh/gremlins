@@ -60,7 +60,6 @@ def _make_loop(tmp_path: pathlib.Path, worktree: pathlib.Path, signal: dict):
         client=client,
         artifact_dir=artifact_dir,
         worktree=worktree,
-        test_client=client,
     )
     return state, loop_stage
 

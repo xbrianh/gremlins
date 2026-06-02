@@ -15,8 +15,6 @@ Spec file schema (JSON):
         "parent_stage":    <str>        parent stage name for sub-stage tracking
         "repo":            <str>        "owner/repo" for gh API calls (from parent)
         "instructions":    <str>        freeform instructions forwarded from parent
-        "test_client":     <str|null>   "provider:model" of the test client, or null in production
-        "stage_model":     <str>        real model name when test_client overrides execution; empty string in production
         "base_ref":        <str|null>   base branch/ref name for prompt template substitution (e.g. "main"); omitted or null → ""
     }
 
@@ -124,15 +122,6 @@ def _build_state(spec: dict[str, Any]) -> State:
                 "failed to load pipeline from %s", spec["pipeline_path"], exc_info=True
             )
 
-    test_client: Client | None = None
-    test_client_label = spec.get("test_client") or ""
-    if test_client_label:
-        if not isinstance(test_client_label, str):
-            raise ValueError(
-                f"'test_client' must be a string, got {type(test_client_label).__name__}"
-            )
-        test_client = Client.parse(test_client_label, policy=policy)
-
     return build_state(
         data=data,
         client=client,
@@ -144,8 +133,6 @@ def _build_state(spec: dict[str, Any]) -> State:
         worktree_parent=worktree_parent,
         repo=str(spec.get("repo") or ""),
         instructions=str(spec.get("instructions") or ""),
-        test_client=test_client,
-        stage_model=str(spec.get("stage_model") or ""),
         base_ref=str(spec.get("base_ref") or ""),
     )
 

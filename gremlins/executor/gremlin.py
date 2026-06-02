@@ -41,6 +41,19 @@ def _apply_client_override(stages: Sequence[StageProtocol], cli: Client) -> None
             _apply_client_override(body, cli)
 
 
+def _collect_pipeline_model(stages: list[StageProtocol]) -> str | None:
+    """Recursively collect a non-fake model from the pipeline stages."""
+    for stage in stages:
+        if stage.client and stage.client.model and stage.client.model != "fake":
+            return stage.client.model
+        body = getattr(stage, "body", [])
+        if body:
+            m = _collect_pipeline_model(body)
+            if m:
+                return m
+    return None
+
+
 def read_stage_inputs(sf: pathlib.Path | None) -> dict[str, Any]:
     if sf is None or not sf.exists():
         return {}
@@ -106,7 +119,6 @@ class Gremlin:
         plan: str | None = None,
         repo: str = "",
         state_file: pathlib.Path | None = None,
-        test_client: Client | None = None,
         project_root: str = "",
         base_ref_sha: str = "",
         base_ref: str = "",
@@ -140,7 +152,6 @@ class Gremlin:
         self.plan = plan
         self.repo = repo
         self.state_file = state_file
-        self.test_client = test_client
         self.project_root = project_root
         self.base_ref_sha = base_ref_sha
         self.base_ref = base_ref
@@ -244,8 +255,6 @@ class Gremlin:
             repo=state.repo,
             cwd=child_cwd,
             instructions=state.instructions,
-            test_client=state.test_client,
-            stage_model=state.stage_model,
             worktree=child_worktree,
             worktree_parent=state.worktree_parent,
             artifacts=child_registry,
@@ -294,18 +303,15 @@ class Gremlin:
         for e in stages:
             self._set_gremlin_recursive(e)
             stage_client = e.client or PACKAGE_DEFAULT
-            resolved = self.test_client or stage_client
             stage_state = build_state(
                 data=StateData(gremlin_id=self.gremlin_id, state_file=self.state_file),
-                client=resolved,
+                client=stage_client,
                 artifact_dir=self.artifact_dir,
                 args=args,
                 pipeline_data=self.pipeline_data,
                 repo=self.repo,
                 cwd=cwd,
                 instructions=self.instructions,
-                test_client=self.test_client,
-                stage_model=stage_client.model if self.test_client else "",
                 worktree=self.worktree_dir,
                 worktree_parent=self.worktree_parent,
                 artifacts=self.registry,
@@ -439,7 +445,6 @@ class Gremlin:
         resume_from: str | None = None,
         plan: str | None = None,
         spec: str | None = None,
-        test_client: Client | None = None,
         project_root: str = "",
         base_ref_sha: str = "",
         base_ref: str = "",
@@ -448,14 +453,31 @@ class Gremlin:
         client_label: str = "",
         repo: str = "",
         stage_inputs: dict[str, Any] | None = None,
+        client: Client | None = None,
     ) -> Gremlin:
         try:
             pipeline_path = resolve_pipeline_path(pipeline_ref, project_dir)
             pipeline = _PipelineData.from_yaml(pipeline_path)
         except (FileNotFoundError, _YamlLoadError) as exc:
             raise ValueError(str(exc)) from exc
-        if client_label:
-            _apply_client_override(list(pipeline.stages), Client.parse(client_label))
+        resolved_client = None
+        if client_label and client and client.provider == "fake":
+            parsed = Client.parse(client_label)
+            client.model = parsed.model
+            resolved_client = client
+        elif client_label:
+            resolved_client = Client.parse(client_label)
+        elif client:
+            if client.provider == "fake":
+                model_from_pipeline = _collect_pipeline_model(list(pipeline.stages))
+                if model_from_pipeline and model_from_pipeline != client.model:
+                    client.model = model_from_pipeline
+                resolved_client = client
+            else:
+                resolved_client = client
+
+        if resolved_client:
+            _apply_client_override(list(pipeline.stages), resolved_client)
         self = cls(
             pipeline.stages,
             state_dir=state_dir,
@@ -467,7 +489,6 @@ class Gremlin:
             instructions=instructions,
             spec=spec,
             plan=plan,
-            test_client=test_client,
             project_root=project_root,
             base_ref_sha=base_ref_sha,
             base_ref=base_ref,

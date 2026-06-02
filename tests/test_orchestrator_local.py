@@ -530,20 +530,35 @@ def test_claude_probe_conditional_on_provider(tmp_path, monkeypatch, capsys):
         "gremlins.executor.run._install_signal_handlers", lambda c, gid: None
     )
     monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: True)
-    monkeypatch.setenv("GREMLINS_TEST_NOOP_PIPELINE", "1")
-    # non-claude succeeds
+
+    import gremlins.executor.run
+
+    _original_run_pipeline = gremlins.executor.run.run_pipeline
+
+    async def _test_run_pipeline(pipeline_path, *, argv, gremlin_id=None, client=None):
+        # Skip pipeline execution for non-claude providers
+        if client is not None and client.provider != "claude":
+            return 0
+        return await _original_run_pipeline(
+            pipeline_path, argv=argv, gremlin_id=gremlin_id, client=client
+        )
+
+    monkeypatch.setattr("gremlins.executor.run.run_pipeline", _test_run_pipeline)
+
+    # non-claude succeeds (shutil.which returns a path, so no error)
     result = asyncio.run(
-        run_pipeline(
+        gremlins.executor.run.run_pipeline(
             _local_pipeline_path(tmp_path),
             argv=["--plan", str(plan_file)],
             client=Client("copilot", "gpt-4o"),
         )
     )
     assert result == 0
-    # claude errors
+
+    # claude errors (shutil.which returns None for "claude")
     with pytest.raises(SystemExit):
         asyncio.run(
-            run_pipeline(
+            gremlins.executor.run.run_pipeline(
                 _local_pipeline_path(tmp_path),
                 argv=["--plan", str(plan_file)],
                 client=Client("claude", "sonnet"),

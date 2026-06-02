@@ -38,8 +38,9 @@ class FakeClaudeClient(Client):
         fixtures: dict[str, object] | None = None,
         bypass: bool = False,
         native_block: dict[str, Any] | None = None,
+        model: str = "fake",
     ) -> None:
-        super().__init__("fake", "fake")
+        super().__init__("fake", model)
         self.calls: list[RecordedCall] = []
         self._fixtures: dict[str, object] = dict(fixtures or {})
         self._total_cost_usd: float = 0.0
