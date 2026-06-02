@@ -290,7 +290,7 @@ def _resolve_inputs(
         loaded_pipeline = _PipelineData.from_yaml(
             resolve_pipeline_path(pipeline_path, pathlib.Path(project_root))
         )
-    except (FileNotFoundError, OSError):
+    except (FileNotFoundError, OSError, ValueError):
         pass
 
     if (
