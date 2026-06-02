@@ -280,9 +280,7 @@ class _ParallelExecutor:
         )
 
         parent_gremlin = (
-            self._parallel_stage.gremlin
-            if self._parallel_stage is not None
-            else None
+            self._parallel_stage.gremlin if self._parallel_stage is not None else None
         )
         parent_gid = self._parent_data.gremlin_id
         parent_state = self._parent_state
