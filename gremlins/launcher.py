@@ -500,28 +500,28 @@ def _seed_registry_from_sources(
         value: str | None = None
         resolved_type: str | None = None
 
-        # Try filepath first if it's in the union
-        if "filepath" in source.types:
-            if inputs.plan and os.path.isfile(inputs.plan):
-                value = inputs.plan
-                resolved_type = "filepath"
-            elif key == "plan" and inputs.plan and os.path.isfile(inputs.plan):
-                value = inputs.plan
-                resolved_type = "filepath"
-
-        # Fall back to string type if filepath didn't resolve
-        if resolved_type is None and "string" in source.types:
-            if key == "plan" and inputs.plan:
-                value = inputs.plan
-                resolved_type = "string"
-            elif key == "instructions" and inputs.instructions:
-                value = inputs.instructions
-                resolved_type = "string"
-            elif key == "issue" and inputs.plan:
-                # Issue is typically a string (issue ref like #123)
+        # Resolve the value based on the source key
+        if key == "plan":
+            # Plan can be a file path or a string (issue ref or plain text)
+            if inputs.plan:
+                if "filepath" in source.types and os.path.isfile(inputs.plan):
+                    value = inputs.plan
+                    resolved_type = "filepath"
+                elif "string" in source.types:
+                    value = inputs.plan
+                    resolved_type = "string"
+        elif key == "issue":
+            # Issue is typically a string (issue ref like #123 or owner/repo#123)
+            # Only use inputs.plan if it's NOT a file (i.e., it's an issue reference)
+            if inputs.plan and "string" in source.types:
                 if not os.path.isfile(inputs.plan):
                     value = inputs.plan
                     resolved_type = "string"
+        elif key == "instructions":
+            # Instructions comes from inputs.instructions
+            if inputs.instructions and "string" in source.types:
+                value = inputs.instructions
+                resolved_type = "string"
 
         # Check if the source is required and missing
         if value is None and not source.optional:
@@ -544,6 +544,7 @@ def _seed_registry_from_sources(
             source_file.write_text(value, encoding="utf-8")
             uri = Uri.parse(f"file://session/{key}.txt")
             registry.bind(key, uri)
+
 
 def launch(
     kind: str,
