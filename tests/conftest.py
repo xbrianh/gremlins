@@ -166,7 +166,6 @@ def lenv(sandbox, monkeypatch):
 
     monkeypatch.setenv("FAKE_CLAUDE_LOG", str(sandbox.root / "fake_claude.log"))
     monkeypatch.setenv("GIT_OPTIONAL_LOCKS", "0")
-    monkeypatch.setenv("GREMLINS_TEST_NOOP_PIPELINE", "1")
     old_path = os.environ.get("PATH", "")
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{old_path}")
     monkeypatch.delenv("PYTHONPATH", raising=False)

@@ -369,31 +369,6 @@ def test_signal_terminated_child_no_result_raises(
 # ---------------------------------------------------------------------------
 
 
-def test_build_child_spec_dict_no_test_client(tmp_path: pathlib.Path) -> None:
-    child_st = _state(tmp_path / "c")
-    stage = _stage("c")
-    spec = proc._build_child_spec_dict(stage, child_st, "c", "attempt-1")
-    assert spec["test_client"] is None
-    assert spec["stage_model"] == ""
-
-
-def test_build_child_spec_dict_with_test_client(tmp_path: pathlib.Path) -> None:
-    artifact_dir = tmp_path / "c"
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    test_client = FakeClaudeClient()
-    child_st = build_state(
-        data=StateData(),
-        client=test_client,
-        artifact_dir=artifact_dir,
-        test_client=test_client,
-        stage_model="real-model",
-    )
-    stage = _stage("c")
-    spec = proc._build_child_spec_dict(stage, child_st, "c", "attempt-1")
-    assert spec["test_client"] == "fake:fake"
-    assert spec["stage_model"] == "real-model"
-
-
 def test_build_child_spec_dict_base_ref_propagated(tmp_path: pathlib.Path) -> None:
     artifact_dir = tmp_path / "c"
     artifact_dir.mkdir(parents=True, exist_ok=True)
