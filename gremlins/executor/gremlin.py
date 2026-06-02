@@ -41,6 +41,8 @@ def _apply_client_override(stages: Sequence[StageProtocol], cli: Client) -> None
             _apply_client_override(body, cli)
 
 
+
+
 def read_stage_inputs(sf: pathlib.Path | None) -> dict[str, Any]:
     if sf is None or not sf.exists():
         return {}
@@ -440,6 +442,7 @@ class Gremlin:
         client_label: str = "",
         repo: str = "",
         stage_inputs: dict[str, Any] | None = None,
+        client: Client | None = None,
     ) -> Gremlin:
         try:
             pipeline_path = resolve_pipeline_path(pipeline_ref, project_dir)
@@ -448,6 +451,8 @@ class Gremlin:
             raise ValueError(str(exc)) from exc
         if client_label:
             _apply_client_override(list(pipeline.stages), Client.parse(client_label))
+        elif client:
+            _apply_client_override(list(pipeline.stages), client)
         self = cls(
             pipeline.stages,
             state_dir=state_dir,
