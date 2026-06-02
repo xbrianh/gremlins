@@ -22,9 +22,14 @@ FIXTURES_DIR = pathlib.Path(__file__).resolve().parent / "fixtures"
 FAKE_CLAUDE = FIXTURES_DIR / "fake_claude.py"
 
 
-def pytest_configure(config) -> None:  # type: ignore[no-untyped-def]
-    def _make_fake_client(_model: str | None, _policy: Policy) -> object:
-        return FakeClaudeClient(fixtures={})
+def pytest_configure(config: pytest.Config) -> None:
+    def _make_fake_client(model: str | None, policy: Policy) -> object:
+        return FakeClaudeClient(
+            fixtures={},
+            model=model or "fake",
+            bypass=policy.bypass,
+            native_block=policy.block_for("fake"),
+        )
 
     register_client_factory("fake", _make_fake_client)
 
