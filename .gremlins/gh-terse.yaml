@@ -70,11 +70,13 @@ stages:
       - name: local-review
         type: agent
         prompt: [code-style, terse, local_review.md]
+        client: claude:sonnet
         out:
           local-review: "file://session/local-review.md"
       - name: local-review-complexity
         type: agent
         prompt: [code-style, terse, local_review_complexity.md]
+        client: claude:sonnet
         out:
           local-review-complexity: "file://session/local-review-complexity.md"
 
