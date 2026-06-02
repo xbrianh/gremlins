@@ -301,6 +301,7 @@ def _build_child_spec_dict(
         "instructions": child_st.instructions,
         "test_client": str(child_st.test_client) if child_st.test_client else None,
         "stage_model": child_st.stage_model,
+        "base_ref": child_st.base_ref,
     }
 
 
