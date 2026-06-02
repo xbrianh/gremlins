@@ -84,3 +84,11 @@ class InputSources:
     def get(self, key: str) -> InputSource | None:
         """Retrieve a source by name, or None if not defined."""
         return self.sources.get(key)
+
+    def all_sources(self) -> list[str]:
+        """Return list of all source names."""
+        return list(self.sources.keys())
+
+    def required_sources(self) -> list[str]:
+        """Return list of required source names (optional=False)."""
+        return [name for name, src in self.sources.items() if not src.optional]

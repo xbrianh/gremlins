@@ -488,7 +488,13 @@ def _seed_registry_from_sources(
     artifacts_dir: pathlib.Path,
 ) -> None:
     """Pre-seed registry with external sources based on pipeline.input_sources."""
+    # Legacy fallback: if no input_sources defined, register plan_arg if plan is provided
     if loaded_pipeline is None or loaded_pipeline.input_sources is None:
+        if inputs.plan:
+            source_file = artifacts_dir / "plan-arg.txt"
+            source_file.write_text(inputs.plan, encoding="utf-8")
+            uri = Uri.parse("file://session/plan-arg.txt")
+            registry.bind("plan_arg", uri)
         return
 
     sources = loaded_pipeline.input_sources.sources
