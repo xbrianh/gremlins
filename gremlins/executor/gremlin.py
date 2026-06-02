@@ -41,8 +41,6 @@ def _apply_client_override(stages: Sequence[StageProtocol], cli: Client) -> None
             _apply_client_override(body, cli)
 
 
-
-
 def read_stage_inputs(sf: pathlib.Path | None) -> dict[str, Any]:
     if sf is None or not sf.exists():
         return {}
@@ -457,9 +455,14 @@ class Gremlin:
             _apply_client_override(list(pipeline.stages), Client.parse(client_label))
         elif client:
             if client.provider == "fake":
+
                 def collect_models(stages: list[StageProtocol]) -> str | None:
                     for stage in stages:
-                        if stage.client and stage.client.model and stage.client.model != "fake":
+                        if (
+                            stage.client
+                            and stage.client.model
+                            and stage.client.model != "fake"
+                        ):
                             return stage.client.model
                         body = getattr(stage, "body", [])
                         if body:
