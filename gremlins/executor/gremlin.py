@@ -449,7 +449,11 @@ class Gremlin:
             pipeline = _PipelineData.from_yaml(pipeline_path)
         except (FileNotFoundError, _YamlLoadError) as exc:
             raise ValueError(str(exc)) from exc
-        if client_label:
+        if client_label and client and client.provider == "fake":
+            parsed = Client.parse(client_label)
+            client.model = parsed.model
+            _apply_client_override(list(pipeline.stages), client)
+        elif client_label:
             _apply_client_override(list(pipeline.stages), Client.parse(client_label))
         elif client:
             if client.provider == "fake":
