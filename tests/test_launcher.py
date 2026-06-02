@@ -975,5 +975,4 @@ def test_launch_pr_kwarg_sets_state_fields(lenv, monkeypatch):
     registry_path = _gremlins_state_root(lenv) / gremlin_id / "registry.json"
     assert registry_path.exists(), "registry.json should have been written"
     registry_data = json.loads(registry_path.read_text())
-    assert registry_data.get("pr") == "gh://pr/697"
     assert registry_data.get("base_sha") == "git://commit/pull/697/head"

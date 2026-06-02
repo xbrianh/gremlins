@@ -14,7 +14,6 @@ import datetime
 import json
 import os
 import pathlib
-import re
 import secrets
 import shutil
 import subprocess
@@ -89,7 +88,6 @@ class _Inputs:
     base_ref_sha: str
     stage_inputs: dict[str, Any]
     loaded_pipeline: _PipelineData | None = None
-    pr_num: str = ""
 
 
 
@@ -167,16 +165,6 @@ def _resolve_base_ref(
     return effective_base_ref, ""
 
 
-def _parse_pr_num(pr_arg: str) -> str:
-    """Extract a PR number string from a --pr arg (number, #N, or .../pull/N URL)."""
-    m = re.search(r"/pull/(\d+)(?:[/#?]|$)", pr_arg)
-    if m:
-        return m.group(1)
-    stripped = pr_arg.strip().lstrip("#")
-    if re.fullmatch(r"\d+", stripped):
-        return stripped
-    raise ValueError(f"cannot parse PR number from arg: {pr_arg!r}")
-
 
 def _resolve_inputs(
     kind: str,
@@ -229,13 +217,11 @@ def _resolve_inputs(
         base_ref_name = ""
         base_ref_sha = pr_ref
         fetch_worktree = True
-        pr_num = _parse_pr_num(pr)
     else:
         base_ref_name, base_ref_sha = _resolve_base_ref(
             base_ref, project_root, loaded_pipeline
         )
         fetch_worktree = False
-        pr_num = ""
 
     stored_args = list(resolved_pipeline_args)
 
@@ -256,7 +242,6 @@ def _resolve_inputs(
         base_ref_sha=base_ref_sha,
         stage_inputs=stage_inputs,
         loaded_pipeline=loaded_pipeline,
-        pr_num=pr_num,
     )
 
 
@@ -461,8 +446,6 @@ def launch(
         artifact_dir = state_dir / "artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         registry = ArtifactRegistry(artifact_dir=artifact_dir)
-        if inputs.pr_num:
-            registry.bind("pr", Uri.parse(f"gh://pr/{inputs.pr_num}"))
         if inputs.base_ref_sha:
             registry.bind("base_sha", Uri.parse(f"git://commit/{inputs.base_ref_sha}"))
         if inputs.base_ref_name:
