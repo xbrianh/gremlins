@@ -392,3 +392,24 @@ def test_build_child_spec_dict_with_test_client(tmp_path: pathlib.Path) -> None:
     spec = proc._build_child_spec_dict(stage, child_st, "c", "attempt-1")
     assert spec["test_client"] == "fake:fake"
     assert spec["stage_model"] == "real-model"
+
+
+def test_build_child_spec_dict_base_ref_propagated(tmp_path: pathlib.Path) -> None:
+    artifact_dir = tmp_path / "c"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    child_st = build_state(
+        data=StateData(),
+        client=FakeClaudeClient(),
+        artifact_dir=artifact_dir,
+        base_ref="main",
+    )
+    stage = _stage("c")
+    spec = proc._build_child_spec_dict(stage, child_st, "c", "attempt-1")
+    assert spec["base_ref"] == "main"
+
+
+def test_build_child_spec_dict_base_ref_empty_by_default(tmp_path: pathlib.Path) -> None:
+    child_st = _state(tmp_path / "c")
+    stage = _stage("c")
+    spec = proc._build_child_spec_dict(stage, child_st, "c", "attempt-1")
+    assert spec["base_ref"] == ""
