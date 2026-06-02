@@ -23,7 +23,6 @@ FAKE_CLAUDE = FIXTURES_DIR / "fake_claude.py"
 
 
 def pytest_configure(config) -> None:  # type: ignore[no-untyped-def]
-    """Register the fake client factory for tests."""
     def _make_fake_client(_model: str | None, _policy: Policy) -> object:
         return FakeClaudeClient(fixtures={})
 
