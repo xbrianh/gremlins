@@ -11,7 +11,7 @@ import pytest
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state
-from gremlins.stages.parallel import _ParallelExecutor, ParallelStage
+from gremlins.stages.parallel import ParallelStage, _ParallelExecutor
 
 
 def _make_parent(tmp_path: pathlib.Path, gremlin_id: str) -> State:

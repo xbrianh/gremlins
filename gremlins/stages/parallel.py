@@ -283,7 +283,11 @@ class _ParallelExecutor:
 
         try:
             for child_key, child_state, _ in self._child_runners:
-                if parent_gremlin is not None and parent_gid and parent_state is not None:
+                if (
+                    parent_gremlin is not None
+                    and parent_gid
+                    and parent_state is not None
+                ):
                     gid = parent_gid
                     pstate = parent_state
                     child_id = f"{gid}--{self._group_name}--{child_key}"

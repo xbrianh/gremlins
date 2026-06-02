@@ -12,15 +12,13 @@ import os
 import pathlib
 import re
 import secrets
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from gremlins import paths as _paths
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.clients.client import Client
 from gremlins.utils.state_file import locked_update
-
-from typing import Sequence
 
 if TYPE_CHECKING:
     from gremlins.pipeline import Pipeline
