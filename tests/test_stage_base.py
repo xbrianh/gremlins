@@ -95,7 +95,6 @@ def _subs_state() -> State:
         repo="owner/proj",
         cwd="/work",
         instructions="do the thing",
-        stage_model="effective-model",
         base_ref="trunk",
     )
 
@@ -105,7 +104,7 @@ def test_substitute_vars_renders_shared_framework_keys() -> None:
     state = _subs_state()
     text = "{name} {model} {artifact_dir} {instructions} {repo} {cwd} {base_ref}"
     assert stage.substitute_vars(text, state) == (
-        "st effective-model /tmp/sess do the thing owner/proj /work trunk"
+        "st fake /tmp/sess do the thing owner/proj /work trunk"
     )
 
 

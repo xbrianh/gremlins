@@ -364,11 +364,6 @@ def test_signal_terminated_child_no_result_raises(
         )
 
 
-# ---------------------------------------------------------------------------
-# _build_child_spec_dict — test_client propagation
-# ---------------------------------------------------------------------------
-
-
 def test_build_child_spec_dict_base_ref_propagated(tmp_path: pathlib.Path) -> None:
     artifact_dir = tmp_path / "c"
     artifact_dir.mkdir(parents=True, exist_ok=True)

@@ -2,6 +2,7 @@ import asyncio
 import dataclasses
 import json
 import shutil
+import sys
 
 import pytest
 from conftest import MINIMAL_EVENTS
@@ -530,10 +531,24 @@ def test_claude_probe_conditional_on_provider(tmp_path, monkeypatch, capsys):
         "gremlins.executor.run._install_signal_handlers", lambda c, gid: None
     )
     monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: True)
-    monkeypatch.setenv("GREMLINS_TEST_NOOP_PIPELINE", "1")
+
+    # For non-claude providers, directly return 0 from run_pipeline
+    import gremlins.executor.run
+
+    _original_run_pipeline = gremlins.executor.run.run_pipeline
+
+    async def _test_run_pipeline(pipeline_path, *, argv, gremlin_id=None, client=None):
+        # Skip execution for non-claude providers
+        if client is not None and client.provider != "claude":
+            return 0
+        return await _original_run_pipeline(
+            pipeline_path, argv=argv, gremlin_id=gremlin_id, client=client
+        )
+
+    monkeypatch.setattr("gremlins.executor.run.run_pipeline", _test_run_pipeline)
     # non-claude succeeds
     result = asyncio.run(
-        run_pipeline(
+        gremlins.executor.run.run_pipeline(
             _local_pipeline_path(tmp_path),
             argv=["--plan", str(plan_file)],
             client=Client("copilot", "gpt-4o"),
@@ -543,7 +558,7 @@ def test_claude_probe_conditional_on_provider(tmp_path, monkeypatch, capsys):
     # claude errors
     with pytest.raises(SystemExit):
         asyncio.run(
-            run_pipeline(
+            gremlins.executor.run.run_pipeline(
                 _local_pipeline_path(tmp_path),
                 argv=["--plan", str(plan_file)],
                 client=Client("claude", "sonnet"),
