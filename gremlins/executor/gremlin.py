@@ -41,6 +41,23 @@ def _apply_client_override(stages: Sequence[StageProtocol], cli: Client) -> None
             _apply_client_override(body, cli)
 
 
+def _collect_pipeline_model(stages: list[StageProtocol]) -> str | None:
+    """Recursively collect a non-fake model from the pipeline stages."""
+    for stage in stages:
+        if (
+            stage.client
+            and stage.client.model
+            and stage.client.model != "fake"
+        ):
+            return stage.client.model
+        body = getattr(stage, "body", [])
+        if body:
+            m = _collect_pipeline_model(body)
+            if m:
+                return m
+    return None
+
+
 def read_stage_inputs(sf: pathlib.Path | None) -> dict[str, Any]:
     if sf is None or not sf.exists():
         return {}
@@ -447,36 +464,24 @@ class Gremlin:
             pipeline = _PipelineData.from_yaml(pipeline_path)
         except (FileNotFoundError, _YamlLoadError) as exc:
             raise ValueError(str(exc)) from exc
+        resolved_client = None
         if client_label and client and client.provider == "fake":
             parsed = Client.parse(client_label)
-            client.model = parsed.model
-            _apply_client_override(list(pipeline.stages), client)
+            resolved_client = Client(client.provider, parsed.model, client._policy)
         elif client_label:
-            _apply_client_override(list(pipeline.stages), Client.parse(client_label))
+            resolved_client = Client.parse(client_label)
         elif client:
             if client.provider == "fake":
-
-                def collect_models(stages: list[StageProtocol]) -> str | None:
-                    for stage in stages:
-                        if (
-                            stage.client
-                            and stage.client.model
-                            and stage.client.model != "fake"
-                        ):
-                            return stage.client.model
-                        body = getattr(stage, "body", [])
-                        if body:
-                            m = collect_models(body)
-                            if m:
-                                return m
-                    return None
-
-                model_from_pipeline = collect_models(list(pipeline.stages))
+                model_from_pipeline = _collect_pipeline_model(list(pipeline.stages))
                 if model_from_pipeline:
-                    client.model = model_from_pipeline
-                _apply_client_override(list(pipeline.stages), client)
+                    resolved_client = Client(client.provider, model_from_pipeline, client._policy)
+                else:
+                    resolved_client = client
             else:
-                _apply_client_override(list(pipeline.stages), client)
+                resolved_client = client
+
+        if resolved_client:
+            _apply_client_override(list(pipeline.stages), resolved_client)
         self = cls(
             pipeline.stages,
             state_dir=state_dir,
