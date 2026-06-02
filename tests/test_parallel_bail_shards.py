@@ -24,6 +24,7 @@ import gremlins.executor.state as state_mod
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.gremlin import run_stages
 from gremlins.executor.state import State, StateData, build_state
+from gremlins.stages.outcome import Bail
 from gremlins.stages.parallel import ParallelStage
 from gremlins.utils.state_file import locked_update as _state_locked_update
 
@@ -101,39 +102,6 @@ def test_write_bail_file_no_child_key_writes_bail_file(sandbox):
     data = json.loads(bail_path.read_text())
     assert data["class"] == "other"
     assert data["detail"] == "child A bailed"
-
-
-def test_check_bail_reads_attempt_from_state_json(sandbox):
-    gremlin_id = "gr-check-attempt"
-    sf = _make_state(sandbox.state, gremlin_id)
-    state_dir = sf.parent
-    StateData.load(gremlin_id).patch(attempt="my-attempt-abc")
-
-    # No bail file yet → no raise
-    StateData.load(gremlin_id).check_bail("test")
-
-    # Write bail file → raises
-    (state_dir / "bail_my-attempt-abc.json").write_text(json.dumps({"class": "other"}))
-    with pytest.raises(RuntimeError, match="bailed"):
-        StateData.load(gremlin_id).check_bail("test")
-
-
-def test_check_bail_child_key_reads_parallel_attempts(sandbox):
-    gremlin_id = "gr-parallel-attempt"
-    sf = _make_state(sandbox.state, gremlin_id)
-    state_dir = sf.parent
-    StateData.load(gremlin_id).patch_parallel_attempt("child-a", "attempt-a")
-
-    # No bail file yet
-    StateData.load(gremlin_id).check_bail("test", child_key="child-a")
-
-    # Write bail for child-a
-    (state_dir / "bail_attempt-a.json").write_text(json.dumps({"class": "other"}))
-    with pytest.raises(RuntimeError, match="bailed"):
-        StateData.load(gremlin_id).check_bail("test", child_key="child-a")
-
-    # child-b has no bail
-    StateData.load(gremlin_id).check_bail("test", child_key="child-b")
 
 
 # ---------------------------------------------------------------------------
@@ -239,7 +207,7 @@ def test_bail_policy_any_one_bailed_sets_parent_bail(tmp_path, sandbox):
     sf, stages = _build_fanin_test(tmp_path, sandbox.state, gremlin_id, shards, "any")
 
     # Run just the fanin stage.
-    with pytest.raises(RuntimeError, match="bailed"):
+    with pytest.raises(Bail, match="bailed"):
         asyncio.run(stages[2][1]())  # fanin is index 2
 
     state_dir = sf.parent
@@ -270,7 +238,7 @@ def test_bail_policy_all_both_bailed_sets_parent_bail(tmp_path, sandbox):
     shards = {"child-a": "other", "child-b": "reviewer_requested_changes"}
     sf, stages = _build_fanin_test(tmp_path, sandbox.state, gremlin_id, shards, "all")
 
-    with pytest.raises(RuntimeError, match="bailed"):
+    with pytest.raises(Bail, match="bailed"):
         asyncio.run(stages[2][1]())
 
     state_dir = sf.parent
@@ -349,7 +317,7 @@ def test_fanin_resume_aggregates_existing_shards(tmp_path, sandbox):
 
     # Simulate resuming from fanin: only run the fanin stage.
     # Fanin raises because one child bailed; state must still be written.
-    with pytest.raises(RuntimeError, match="bailed"):
+    with pytest.raises(Bail, match="bailed"):
         asyncio.run(run_stages(stages[2:], resume_from="reviews-fanin"))
 
     state_dir = sf.parent
@@ -390,7 +358,7 @@ def test_run_stages_resume_from_fanin_name(tmp_path, sandbox):
     assert names == ["reviews-fanout", "reviews", "reviews-fanin"]
 
     # run_stages with resume_from=reviews-fanin skips fanout and parallel.
-    with pytest.raises(RuntimeError, match="bailed"):
+    with pytest.raises(Bail, match="bailed"):
         asyncio.run(run_stages(stages, resume_from="reviews-fanin"))
 
     assert (state_dir / "bail_fanin-resume-parent.json").exists()

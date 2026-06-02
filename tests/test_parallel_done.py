@@ -10,6 +10,7 @@ import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state
+from gremlins.stages.outcome import Bail
 from gremlins.stages.parallel import ParallelStage
 
 
@@ -199,7 +200,7 @@ def test_bail_aggregation_unaffected_by_done_tracking(sandbox):
     state = _read_state(sf)
     assert "ok-child" in state.get("done_children", {}).get("grp", [])
 
-    with pytest.raises(RuntimeError, match="bailed"):
+    with pytest.raises(Bail, match="bailed"):
         asyncio.run(fanin_fn())
 
 

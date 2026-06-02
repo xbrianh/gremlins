@@ -102,39 +102,6 @@ def test_write_bail_file_noop_without_attempt(sandbox):
     assert not bail_files
 
 
-def test_check_bail_detects_bail_file(sandbox):
-    gremlin_id = "gr-check-bail-file"
-    state_dir = sandbox.state / gremlin_id
-    state_dir.mkdir(parents=True)
-    sf = state_dir / "state.json"
-    sf.write_text(json.dumps({"id": gremlin_id, "attempt": "my-attempt"}))
-    (state_dir / "bail_my-attempt.json").write_text(json.dumps({"class": "other"}))
-
-    with pytest.raises(RuntimeError, match="bailed"):
-        state_mod.StateData.load(gremlin_id).check_bail("test")
-
-
-def test_check_bail_no_bail_file(sandbox):
-    gremlin_id = "gr-check-no-bail"
-    state_dir = sandbox.state / gremlin_id
-    state_dir.mkdir(parents=True)
-    sf = state_dir / "state.json"
-    sf.write_text(json.dumps({"id": gremlin_id, "attempt": "my-attempt"}))
-    state_mod.StateData.load(gremlin_id).check_bail("test")  # should not raise
-
-
-def test_check_bail_stale_attempt_not_detected(sandbox):
-    gremlin_id = "gr-stale-bail"
-    state_dir = sandbox.state / gremlin_id
-    state_dir.mkdir(parents=True)
-    sf = state_dir / "state.json"
-    sf.write_text(json.dumps({"id": gremlin_id, "attempt": "current-attempt"}))
-    (state_dir / "bail_old-attempt.json").write_text(json.dumps({"class": "other"}))
-    state_mod.StateData.load(gremlin_id).check_bail(
-        "test"
-    )  # stale bail should not raise
-
-
 # ---------------------------------------------------------------------------
 # run_pipeline_main — gremlins/spawn/pipeline.py
 # ---------------------------------------------------------------------------

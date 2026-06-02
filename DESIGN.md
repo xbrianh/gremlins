@@ -137,20 +137,19 @@ we don't expect a third.
 
 ### 2.3 Bail as a control-flow channel
 
-A stage can halt the pipeline two ways. The first is to raise:
-`runner.run_stages` does not catch, so any unhandled exception ends the
-run. The second is to call `state.emit_bail`, which writes a
-`bail_class` (and optional `bail_detail`) to `state.json`.
+A stage can halt the pipeline by raising a `Bail` exception or by calling
+`state.emit_bail`, which writes a `bail_class` (and optional `bail_detail`)
+to `state.json`.
 
-The two routes do different jobs:
+The two routes serve different jobs:
 
-- **Raising** is for ordinary stage failure. The traceback goes to the
-  log; the operator reads it and decides what to do.
-- **`emit_bail`** records a *structured*, *persistent* halt reason.
-  `bail_class` is one of a small set of byte-stable strings
-  (`reviewer_requested_changes`, `security`, `secrets`, `other`);
-  `bail_detail` is a one-line human note. Both live in `state.json`
-  after the process exits.
+- **`Bail` exception** is raised when a structured bail condition is detected.
+  A `Bail` exception includes the `bail_class` (one of
+  `reviewer_requested_changes`, `security`, `secrets`, `other`). The exception
+  propagates up and halts the pipeline.
+- **`emit_bail`** records a *structured*, *persistent* halt reason
+  in `state.json`. Both `bail_class` and `bail_detail` (a one-line human note)
+  live in `state.json` after the process exits.
 
 The persistence is the point. `bail_class` is read by the rescue
 protocol (§4.3), the fleet manager, the boss recovery table, and shell
@@ -159,27 +158,24 @@ byte-stable strings rather than prose. A stage that only raises tells a
 human; a stage that calls `emit_bail` first also tells a *script*.
 
 `emit_bail` does not itself halt the pipeline. It writes the marker and
-returns; the caller raises immediately afterward, or an in-stage agent
+returns; the caller raises immediately afterward (either explicitly or by
+allowing a `Bail` exception to propagate), or an in-stage agent
 invokes `python -m gremlins.bail` and the stage's normal exit-code
 handling raises on its behalf. The pairing — write the marker, then
 raise — is the pattern. The marker outlives the raise.
 
-`state.check_bail` is the read side. It raises `RuntimeError` if
-`state.json` already has a `bail_class` recorded. It is called at the
-*entry* of stages that follow a soft-failure point — `github-address-pull-request-reviews` and
-`github-review-pull-request` call it before posting anything to GitHub, and the
-self-healing stages (§2.2) call it inside the retry loop after each
-fixer agent runs, so an agent that bails via `python -m gremlins.bail`
-halts the loop without the stage having to inspect agent output.
-`run_stages` itself does not call `check_bail`; it doesn't need to,
-because every emitter that wants the pipeline to stop also raises.
+`Bail` is raised when a structured bail condition is detected (e.g., when
+checking `state.json` for a recorded `bail_class` in stages that follow
+soft-failure points like `github-address-pull-request-reviews` and
+`github-review-pull-request`, or in the self-healing stages (§2.2) after
+each fixer agent runs). This allows a stage to halt cleanly when an agent
+has already bailed via `python -m gremlins.bail` without the stage having
+to inspect agent output.
 
-Why not replace this with a typed exception the orchestrator catches?
-Because a typed exception is process-local, and by the time the rescue
-protocol runs, the original process is gone. The bail class has to
-survive the process boundary, and `state.json` is already the
-cross-process contract for everything else about a gremlin. A typed
-exception would duplicate that channel without replacing it.
+`run_stages` does not explicitly catch `Bail`; any unhandled exception ends
+the run and is logged. `Bail` exceptions are caught in specific contexts
+(e.g., parallel fan-in) to aggregate and handle multiple concurrent bails
+before re-raising.
 
 ## 3. Context management
 
@@ -263,10 +259,11 @@ deterministic-vs-agentic line intact:
   `check_bail` called with a `child_key` reads only that child's shard.
 - **`<group>-fanin`** (deterministic). Reads `parallel_bails`, applies the
   block's `bail_policy`, promotes a bail to the top-level `bail_class` if
-  warranted, clears `parallel_bails`, and tears down all per-child
-  worktrees with `git worktree remove --force` + `git worktree prune`.
-  Fan-in is also responsible for cleanup on crash — it runs teardown in a
-  `try/finally` so worktrees don't accumulate from aborted runs.
+  warranted, raises `Bail` if needed, clears `parallel_bails`, and tears
+  down all per-child worktrees with `git worktree remove --force` +
+  `git worktree prune`. Fan-in is also responsible for cleanup on crash —
+  it runs teardown in a `try/finally` so worktrees don't accumulate from
+  aborted runs.
 
 This decomposition fixes two latent bugs in the prior single-stage
 parallel wrapper:
@@ -276,10 +273,10 @@ parallel wrapper:
   `patch_state` now holds an exclusive `fcntl.flock` on a per-`state.json`
   lock file for the duration of each read-modify-write, and child bails go
   into `parallel_bails[child_key]` rather than the shared top-level slot.
-- **Bail cross-contamination.** `check_bail` read the global top-level
-  `bail_class`. A parallel child completing after a sibling bailed would
-  falsely report itself as bailed. `check_bail` is now parameterised by
-  `child_key` and reads only `parallel_bails[child_key]`.
+- **Bail cross-contamination.** Bail exceptions are scoped to per-child
+  bails stored in `parallel_bails[child_key]`. A parallel child completing
+  after a sibling bailed would not falsely report itself as bailed because
+  bail detection is child-specific.
 
 Both fixes are backward-compatible: `child_key=None` (the default, used by
 all sequential stages) preserves existing top-level bail semantics.

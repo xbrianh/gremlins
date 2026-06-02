@@ -266,29 +266,6 @@ class StateData:
         except Exception:
             pass
 
-    def check_bail(
-        self,
-        label: str = "stage",
-        *,
-        child_key: str | None = None,
-    ) -> None:
-        sf = self.state_file or resolve_state_file(self.gremlin_id)
-        if sf is None or not sf.exists():
-            return
-        try:
-            data: dict[str, Any] = json.loads(sf.read_text(encoding="utf-8"))
-            if child_key is None:
-                attempt = data.get("attempt") or ""
-            else:
-                pa: dict[str, Any] = data.get("parallel_attempts") or {}
-                attempt = pa.get(child_key) or ""
-            if attempt and (sf.parent / f"bail_{attempt}.json").exists():
-                raise RuntimeError(f"{label} bailed (see bail_{attempt}.json)")
-        except RuntimeError:
-            raise
-        except Exception:
-            pass
-
     def append_artifact(self, artifact: dict[str, Any]) -> None:
         sf = self.state_file or resolve_state_file(self.gremlin_id)
         if sf is None or not sf.exists():

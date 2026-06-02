@@ -574,7 +574,7 @@ class _ParallelExecutor:
         if not decision.should_bail:
             self._parent_data.clear_done(self._stage_path)
         if decision.should_bail:
-            raise RuntimeError(
+            raise Bail(
                 f"parallel group {self._group_name!r} bailed "
                 f"({len(bailed)} child(ren), policy={self._bail_policy!r})"
             )
