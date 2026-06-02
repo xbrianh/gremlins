@@ -77,6 +77,7 @@ class Pipeline:
 
         github_integration = bool(raw.get("github_integration", False))
 
+        from gremlins.pipeline.inputs import InputSources
         from gremlins.stages.exec import Exec
 
         stages = parse_stages(cast(list[dict[str, Any]], raw.get("stages") or []))
