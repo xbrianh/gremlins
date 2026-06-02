@@ -408,7 +408,9 @@ def test_build_child_spec_dict_base_ref_propagated(tmp_path: pathlib.Path) -> No
     assert spec["base_ref"] == "main"
 
 
-def test_build_child_spec_dict_base_ref_empty_by_default(tmp_path: pathlib.Path) -> None:
+def test_build_child_spec_dict_base_ref_empty_by_default(
+    tmp_path: pathlib.Path,
+) -> None:
     child_st = _state(tmp_path / "c")
     stage = _stage("c")
     spec = proc._build_child_spec_dict(stage, child_st, "c", "attempt-1")
