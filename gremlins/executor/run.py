@@ -307,9 +307,6 @@ async def run_pipeline(
         if shutil.which("claude") is None:
             die("claude not found on PATH")
 
-    if os.environ.get("GREMLINS_TEST_NOOP_PIPELINE"):
-        return 0
-
     plan_file = artifact_dir / "plan.md"
 
     if not gh and resume_from:

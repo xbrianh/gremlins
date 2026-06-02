@@ -106,7 +106,6 @@ class Gremlin:
         plan: str | None = None,
         repo: str = "",
         state_file: pathlib.Path | None = None,
-        test_client: Client | None = None,
         project_root: str = "",
         base_ref_sha: str = "",
         base_ref: str = "",
@@ -140,7 +139,6 @@ class Gremlin:
         self.plan = plan
         self.repo = repo
         self.state_file = state_file
-        self.test_client = test_client
         self.project_root = project_root
         self.base_ref_sha = base_ref_sha
         self.base_ref = base_ref
@@ -244,8 +242,6 @@ class Gremlin:
             repo=state.repo,
             cwd=child_cwd,
             instructions=state.instructions,
-            test_client=state.test_client,
-            stage_model=state.stage_model,
             worktree=child_worktree,
             worktree_parent=state.worktree_parent,
             artifacts=child_registry,
@@ -294,18 +290,15 @@ class Gremlin:
         for e in stages:
             self._set_gremlin_recursive(e)
             stage_client = e.client or PACKAGE_DEFAULT
-            resolved = self.test_client or stage_client
             stage_state = build_state(
                 data=StateData(gremlin_id=self.gremlin_id, state_file=self.state_file),
-                client=resolved,
+                client=stage_client,
                 artifact_dir=self.artifact_dir,
                 args=args,
                 pipeline_data=self.pipeline_data,
                 repo=self.repo,
                 cwd=cwd,
                 instructions=self.instructions,
-                test_client=self.test_client,
-                stage_model=stage_client.model if self.test_client else "",
                 worktree=self.worktree_dir,
                 worktree_parent=self.worktree_parent,
                 artifacts=self.registry,
@@ -439,7 +432,6 @@ class Gremlin:
         resume_from: str | None = None,
         plan: str | None = None,
         spec: str | None = None,
-        test_client: Client | None = None,
         project_root: str = "",
         base_ref_sha: str = "",
         base_ref: str = "",
@@ -467,7 +459,6 @@ class Gremlin:
             instructions=instructions,
             spec=spec,
             plan=plan,
-            test_client=test_client,
             project_root=project_root,
             base_ref_sha=base_ref_sha,
             base_ref=base_ref,
