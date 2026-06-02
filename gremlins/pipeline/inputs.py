@@ -49,6 +49,7 @@ class InputSources:
                 raise ValueError(
                     f"input source {key!r}: expected a mapping, got {type(entry).__name__}"
                 )
+            entry = cast(dict[str, Any], entry)
 
             # Parse type field: can be a string or list of strings
             type_raw = entry.get("type")
@@ -58,15 +59,17 @@ class InputSources:
             if isinstance(type_raw, str):
                 types = [type_raw]
             elif isinstance(type_raw, list):
-                types = cast(list[str], type_raw)
-                if not types:
+                type_raw = cast(list[Any], type_raw)
+                if not type_raw:
                     raise ValueError(
                         f"input source {key!r}: type list must not be empty"
                     )
-                if not all(isinstance(t, str) for t in types):
-                    raise ValueError(
-                        f"input source {key!r}: all type entries must be strings"
-                    )
+                for t in type_raw:
+                    if not isinstance(t, str):
+                        raise ValueError(
+                            f"input source {key!r}: all type entries must be strings"
+                        )
+                types = cast(list[str], type_raw)
             else:
                 raise ValueError(
                     f"input source {key!r}: 'type' must be a string or list of strings, "

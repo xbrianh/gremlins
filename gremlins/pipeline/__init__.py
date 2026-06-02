@@ -87,11 +87,14 @@ class Pipeline:
         if inputs_raw is not None:
             if not isinstance(inputs_raw, dict):
                 raise ValueError("'inputs' must be a mapping")
+            inputs_raw = cast(dict[str, Any], inputs_raw)
             sources_raw = inputs_raw.get("sources")
             if sources_raw is not None:
                 if not isinstance(sources_raw, dict):
                     raise ValueError("'inputs.sources' must be a mapping")
-                input_sources = InputSources.from_yaml(sources_raw)
+                input_sources = InputSources.from_yaml(
+                    cast(dict[str, Any], sources_raw)
+                )
             inputs_stage = Exec.with_dict({"name": "inputs", **inputs_raw})
 
         land_stage: Exec | None = None
