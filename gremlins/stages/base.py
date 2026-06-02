@@ -38,8 +38,8 @@ class Stage:
     body: list[Stage] = []
     skip_if_exists: str = ""
     options: dict[str, Any]
-    out_map: dict[str, str] = {}
-    gremlin: GremlinProtocol | None = None
+    out_map: dict[str, str]
+    gremlin: GremlinProtocol | None
 
     def __init__(self, name: str) -> None:
         self.name = name
