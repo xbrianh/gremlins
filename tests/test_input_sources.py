@@ -6,7 +6,7 @@ import textwrap
 import pytest
 
 from gremlins.pipeline import Pipeline
-from gremlins.pipeline.inputs import InputSources, InputSource
+from gremlins.pipeline.inputs import InputSource, InputSources
 
 
 class TestInputSource:
@@ -168,9 +168,7 @@ class TestPipelineInputSources:
         assert plan.types == ["filepath", "string"]
         assert plan.optional is True
 
-    def test_parse_pipeline_without_input_sources(
-        self, tmp_path: pathlib.Path
-    ) -> None:
+    def test_parse_pipeline_without_input_sources(self, tmp_path: pathlib.Path) -> None:
         p = self._write_pipeline(
             tmp_path,
             """\

@@ -16,7 +16,9 @@ class InputSource:
 
     def __post_init__(self) -> None:
         if not self.types:
-            raise ValueError(f"input source {self.name!r}: types list must not be empty")
+            raise ValueError(
+                f"input source {self.name!r}: types list must not be empty"
+            )
         valid_types = {"filepath", "string"}
         for t in self.types:
             if t not in valid_types:

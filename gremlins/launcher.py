@@ -350,7 +350,9 @@ def _prepare_state_dir(state_dir: pathlib.Path, inputs: _Inputs) -> None:
     artifacts_dir = state_dir / "artifacts"
     artifacts_dir.mkdir(exist_ok=True)
     (artifacts_dir / "plan-arg.txt").write_text(inputs.plan or "", encoding="utf-8")
-    (artifacts_dir / "instructions.txt").write_text(inputs.instructions, encoding="utf-8")
+    (artifacts_dir / "instructions.txt").write_text(
+        inputs.instructions, encoding="utf-8"
+    )
 
 
 def _initial_state_data(inputs: _Inputs) -> StateData:
@@ -479,7 +481,6 @@ def _spawn(gremlin_id: str, inputs: _Inputs, state_dir: pathlib.Path) -> Any:
     )
 
 
-
 def _seed_registry_from_sources(
     registry: ArtifactRegistry,
     loaded_pipeline: Any,
@@ -515,8 +516,7 @@ def _seed_registry_from_sources(
 
         if value is None and not source.optional:
             raise ValueError(
-                f"required input source {key!r} (type: {source.types}) "
-                f"is not available"
+                f"required input source {key!r} (type: {source.types}) is not available"
             )
 
         if value is None:
@@ -586,7 +586,9 @@ def launch(
         if inputs.base_ref_name:
             registry.bind("base_ref", Uri.parse(f"git://ref/{inputs.base_ref_name}"))
         registry.bind("spec", Uri.parse("file://session/spec.md"))
-        _seed_registry_from_sources(registry, inputs.loaded_pipeline, inputs, artifact_dir)
+        _seed_registry_from_sources(
+            registry, inputs.loaded_pipeline, inputs, artifact_dir
+        )
         p = _spawn(inputs.gremlin_id, inputs, state_dir)
     except Exception:
         shutil.rmtree(state_dir, ignore_errors=True)

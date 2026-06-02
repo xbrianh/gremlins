@@ -1,13 +1,12 @@
 """Tests for launcher registry seeding from input sources."""
 
 import pathlib
-import tempfile
 import textwrap
 
 import pytest
 
-from gremlins.launcher import _seed_registry_from_sources, _Inputs
 from gremlins.artifacts.registry import ArtifactRegistry
+from gremlins.launcher import _Inputs, _seed_registry_from_sources
 from gremlins.pipeline import Pipeline
 
 
@@ -317,9 +316,7 @@ class TestSeedRegistryFromSources:
         with pytest.raises(ValueError, match="required input source"):
             _seed_registry_from_sources(registry, pipeline, inputs, artifact_dir)
 
-    def test_multiple_sources_partially_satisfied(
-        self, tmp_path: pathlib.Path
-    ) -> None:
+    def test_multiple_sources_partially_satisfied(self, tmp_path: pathlib.Path) -> None:
         """Multiple sources with mixed required/optional - only instructions absent."""
         artifact_dir = tmp_path / "artifacts"
         artifact_dir.mkdir()
