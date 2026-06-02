@@ -122,6 +122,7 @@ class _Inputs:
     base_ref_name: str
     base_ref_sha: str
     stage_inputs: dict[str, Any]
+    loaded_pipeline: Any = None
     pr_num: str = ""
 
 
@@ -289,7 +290,7 @@ def _resolve_inputs(
         loaded_pipeline = _PipelineData.from_yaml(
             resolve_pipeline_path(pipeline_path, pathlib.Path(project_root))
         )
-    except (FileNotFoundError, OSError, ValueError):
+    except (FileNotFoundError, OSError):
         pass
 
     if (
@@ -338,6 +339,7 @@ def _resolve_inputs(
         base_ref_name=base_ref_name,
         base_ref_sha=base_ref_sha,
         stage_inputs=stage_inputs,
+        loaded_pipeline=loaded_pipeline,
         pr_num=pr_num,
     )
 
@@ -484,25 +486,16 @@ def _seed_registry_from_sources(
     inputs: _Inputs,
     artifacts_dir: pathlib.Path,
 ) -> None:
-    """Pre-seed registry with external sources based on pipeline.input_sources.
-
-    If the pipeline has an input_sources block, use it to drive registry pre-seeding.
-    Otherwise, fall back to legacy hardcoded seeding for backward compatibility.
-    """
+    """Pre-seed registry with external sources based on pipeline.input_sources."""
     if loaded_pipeline is None or loaded_pipeline.input_sources is None:
-        # Legacy path: hardcoded seeding
-        registry.bind("plan_arg", Uri.parse("file://session/plan-arg.txt"))
         return
 
-    sources = loaded_pipeline.input_sources.all_sources()
+    sources = loaded_pipeline.input_sources.sources
     for key, source in sources.items():
-        # Determine which type to use and resolve the value
         value: str | None = None
         resolved_type: str | None = None
 
-        # Resolve the value based on the source key
         if key == "plan":
-            # Plan can be a file path or a string (issue ref or plain text)
             if inputs.plan:
                 if "filepath" in source.types and os.path.isfile(inputs.plan):
                     value = inputs.plan
@@ -511,35 +504,28 @@ def _seed_registry_from_sources(
                     value = inputs.plan
                     resolved_type = "string"
         elif key == "issue":
-            # Issue is typically a string (issue ref like #123 or owner/repo#123)
-            # Only use inputs.plan if it's NOT a file (i.e., it's an issue reference)
             if inputs.plan and "string" in source.types:
                 if not os.path.isfile(inputs.plan):
                     value = inputs.plan
                     resolved_type = "string"
         elif key == "instructions":
-            # Instructions comes from inputs.instructions
             if inputs.instructions and "string" in source.types:
                 value = inputs.instructions
                 resolved_type = "string"
 
-        # Check if the source is required and missing
         if value is None and not source.optional:
             raise ValueError(
                 f"required input source {key!r} (type: {source.types}) "
                 f"is not available"
             )
 
-        # Register if we found a value
         if value is None:
             continue
 
         if resolved_type == "filepath":
-            # Bind to the actual file path
             uri = Uri.parse(f"file://{value}")
             registry.bind(key, uri)
         elif resolved_type == "string":
-            # Write to a file and register it
             source_file = artifacts_dir / f"{key}.txt"
             source_file.write_text(value, encoding="utf-8")
             uri = Uri.parse(f"file://session/{key}.txt")
@@ -600,15 +586,7 @@ def launch(
         if inputs.base_ref_name:
             registry.bind("base_ref", Uri.parse(f"git://ref/{inputs.base_ref_name}"))
         registry.bind("spec", Uri.parse("file://session/spec.md"))
-        # Load pipeline to access input_sources for registry pre-seeding
-        loaded_pipeline = None
-        try:
-            loaded_pipeline = _PipelineData.from_yaml(
-                resolve_pipeline_path(inputs.pipeline_path, pathlib.Path(inputs.project_root))
-            )
-        except (FileNotFoundError, OSError, ValueError):
-            pass
-        _seed_registry_from_sources(registry, loaded_pipeline, inputs, artifact_dir)
+        _seed_registry_from_sources(registry, inputs.loaded_pipeline, inputs, artifact_dir)
         p = _spawn(inputs.gremlin_id, inputs, state_dir)
     except Exception:
         shutil.rmtree(state_dir, ignore_errors=True)

@@ -87,7 +87,6 @@ class Pipeline:
         if inputs_raw is not None:
             if not isinstance(inputs_raw, dict):
                 raise ValueError("'inputs' must be a mapping")
-            # Parse sources: block if present
             sources_raw = inputs_raw.get("sources")
             if sources_raw is not None:
                 if not isinstance(sources_raw, dict):
