@@ -387,7 +387,9 @@ def _init_git_repo(path: pathlib.Path) -> None:
     )
     (path / "README.md").write_text("init")
     subprocess.run(
-        ["git", "-C", str(path), "add", "."], check=True, capture_output=True
+        ["git", "-C", str(path), "add", "README.md"],
+        check=True,
+        capture_output=True,
     )
     subprocess.run(
         ["git", "-C", str(path), "commit", "-m", "init"],
@@ -781,16 +783,6 @@ def test_fanin_allows_child_worktree_mutations(tmp_path, sandbox, caplog):
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_git_repo(repo)
-    subprocess.run(
-        ["git", "-C", str(repo), "add", "README.md"],
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(repo), "commit", "-m", "init"],
-        check=True,
-        capture_output=True,
-    )
 
     def _make_ctx(name: str) -> State:
         return build_state(
