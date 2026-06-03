@@ -11,22 +11,22 @@ from gremlins.stages.base import Stage
 
 
 def child_state(
-    parent: State, child: Stage, *, fan_out: bool = False, child_id: str | None = None
+    parent_state: State, child: Stage, *, fan_out: bool = False, child_id: str | None = None
 ) -> State:
     """Derive a child State from parent."""
-    client = parent.client
+    client = parent_state.client
     if child.client is not None and child.client != PACKAGE_DEFAULT:
         client = child.client
     if not fan_out:
-        return dataclasses.replace(parent, client=client)
+        return dataclasses.replace(parent_state, client=client)
     if child_id:
         artifact_dir = _paths.state_root() / child_id / "artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
     else:
-        artifact_dir = parent.artifact_dir / child.name
+        artifact_dir = parent_state.artifact_dir / child.name
         artifact_dir.mkdir(parents=True, exist_ok=True)
     return dataclasses.replace(
-        parent,
+        parent_state,
         client=client,
         artifact_dir=artifact_dir,
         child_key=child.name,

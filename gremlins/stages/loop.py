@@ -6,10 +6,11 @@ import asyncio
 import logging
 import pathlib
 from collections.abc import Awaitable, Callable
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.executor.state import State
+from gremlins.protocols import GremlinProtocol
 from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.composite import child_state as _child_state
 from gremlins.stages.outcome import Bail, Done, Outcome
@@ -19,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 # Called after a clean (no marker) iteration; returns True to exit the loop.
 UntilFn = Callable[[State, int, str], bool]
+
+if TYPE_CHECKING:
+    pass
 
 _MARKER_KEY = "status"
 _MARKER_VALUE = "needs_fix"
@@ -134,12 +138,12 @@ class LoopStage(Stage):
         stage.client = get_client_from_dict(d)
         return stage
 
-    def _build_runners(self, state: State) -> list[Callable[[], Awaitable[Outcome]]]:
+    def _build_runners(self, state: State, gremlin: GremlinProtocol) -> list[Callable[[], Awaitable[Outcome]]]:
         result: list[Callable[[], Awaitable[Outcome]]] = []
         for child in self.body:
             cs = _child_state(state, child)
             base: Callable[[], Awaitable[Any]] = cs.make_runner(
-                child, scope=self.body, record_stage=False
+                child, scope=self.body, record_stage=False, gremlin=gremlin
             )
             name = child.name
 
@@ -155,7 +159,8 @@ class LoopStage(Stage):
             result.append(cast(Callable[[], Awaitable[Outcome]], _tracked))
         return result
 
-    async def run(self, state: State) -> Outcome:
+    async def run(self, gremlin: GremlinProtocol) -> Outcome:
+        state = gremlin.state
         for iteration in range(1, self._max_iterations + 1):
             state.record_state_field(loop_iteration=iteration)
             state.artifacts.unbind(_MARKER_KEY)
@@ -167,7 +172,7 @@ class LoopStage(Stage):
             runners = (
                 self._body_runners
                 if self._body_runners is not None
-                else self._build_runners(state)
+                else self._build_runners(state, gremlin)
             )
             had_failure = await _dispatch_runners(
                 runners, iteration, self._max_iterations, state.artifacts

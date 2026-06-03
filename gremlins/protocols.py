@@ -9,6 +9,7 @@ class GremlinProtocol(Protocol):
     """What stages need from a Gremlin."""
 
     registry: Any
+    state: Any
 
     async def fork(
         self,
@@ -36,6 +37,6 @@ class StageProtocol(Protocol):
     client: Any
     skip_if_exists: str
 
-    async def run(self, state: Any) -> Any:
-        """Run this stage with the given execution state."""
+    async def run(self, gremlin: GremlinProtocol) -> Any:
+        """Run this stage with the given gremlin."""
         ...

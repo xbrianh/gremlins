@@ -21,6 +21,7 @@ from gremlins import paths
 from gremlins.artifacts.uri import Uri
 from gremlins.executor.parallel_state import ParallelGroupState
 from gremlins.executor.state import State, StateData
+from gremlins.protocols import GremlinProtocol
 from gremlins.stages.base import Stage
 from gremlins.stages.composite import child_state as _child_state
 from gremlins.stages.outcome import Bail, Done, Outcome
@@ -169,7 +170,8 @@ class ParallelStage(Stage):
             child_stages=child_stages,
         ).runtime_stages()
 
-    async def run(self, state: State) -> Outcome:
+    async def run(self, gremlin: GremlinProtocol) -> Outcome:
+        state = gremlin.state
         parent_id = state.data.gremlin_id or ""
         group_state = dataclasses.replace(
             state, parent_stage=state.parent_stage or self.name
@@ -183,7 +185,7 @@ class ParallelStage(Stage):
             cs = _child_state(
                 group_state, child, fan_out=True, child_id=child_id or None
             )
-            runner = cs.make_runner(child, scope=self.body)
+            runner = cs.make_runner(child, scope=self.body, gremlin=gremlin)
             child_runners.append((child.name, cs, runner))
         for _, fn in self.build_runtime_stages(
             child_runners,

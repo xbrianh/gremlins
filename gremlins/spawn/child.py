@@ -140,6 +140,26 @@ def _write_result(result_path: pathlib.Path, payload: dict[str, Any]) -> None:
     result_path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+class _GremlinWrapper:
+    """Minimal Gremlin-like wrapper for spawn child subprocess."""
+
+    def __init__(self, state: State) -> None:
+        self.state = state
+        self.registry = state.artifacts
+
+    async def fork(
+        self,
+        state: State,
+        target_id: str,
+        *,
+        parent_id: str = "",
+        group_name: str = "",
+        child_key: str = "",
+        pipeline: Any | None = None,
+    ) -> State:
+        raise NotImplementedError("fork not supported in spawn child")
+
+
 def _try_write_terminal(state: State, rc: int) -> None:
     try:
         state.data.write_terminal_state(rc)
@@ -182,8 +202,9 @@ async def _run(spec_path: pathlib.Path) -> int:
     if stage.client is None:
         stage.client = state.client
 
+    gremlin = _GremlinWrapper(state)
     try:
-        await stage.run(state)
+        await stage.run(gremlin)
     except Bail as b:
         cost = getattr(state.client, "total_cost_usd", 0.0) or 0.0
         _write_result(

@@ -548,6 +548,7 @@ class State:
         scope: Sequence[StageProtocol] | None = None,
         *,
         record_stage: bool = True,
+        gremlin: Any | None = None,
     ) -> Callable[[], Any]:
         base_state = self
         gremlin_id = self.data.gremlin_id
@@ -578,7 +579,10 @@ class State:
                 entry.skip_if_exists
             ):
                 return Done()
-            return await entry.run(_prepare())
+            prepared_state = _prepare()
+            if gremlin is not None:
+                gremlin.state = prepared_state
+            return await entry.run(gremlin if gremlin is not None else prepared_state)
 
         return _run_async
 

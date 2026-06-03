@@ -14,6 +14,7 @@ from gremlins.artifacts.resolve import resolve_in_map
 from gremlins.artifacts.schemes import snapshot_head_before
 from gremlins.artifacts.uri import Uri
 from gremlins.executor.state import State
+from gremlins.protocols import GremlinProtocol
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, Outcome
 from gremlins.utils import proc as _proc
@@ -73,7 +74,8 @@ class Exec(Stage):
             out_map=dict(cast(dict[str, str], raw_out)),
         )
 
-    async def run(self, state: State) -> Outcome:
+    async def run(self, gremlin: GremlinProtocol) -> Outcome:
+        state = gremlin.state
         try:
             extra_env = resolve_in_map(state.artifacts, self.in_map)
         except ValueError as exc:
@@ -84,7 +86,7 @@ class Exec(Stage):
             pre_sha = snapshot_head_before(cwd=pathlib.Path(state.cwd))
 
         cmds = [
-            self.substitute_vars(c.rstrip(), state, extra_env)
+            self.substitute_vars(c.rstrip(), gremlin, extra_env)
             for c in self.options.get("cmds", [])
             if c.strip()
         ]
@@ -116,7 +118,7 @@ class Exec(Stage):
                     raise Bail(f"exec {self.name}: exited {result.returncode}")
 
         for raw_key, raw_uri_str in self.out_map.items():
-            key = self.substitute_vars(raw_key, state, extra_env)
+            key = self.substitute_vars(raw_key, gremlin, extra_env)
             optional = key.endswith("?")
             if optional:
                 key = key[:-1]
@@ -127,7 +129,7 @@ class Exec(Stage):
                 continue
             try:
                 uri_str = self.substitute_vars(
-                    _sub_reads(raw_uri_str, state.artifacts), state, extra_env
+                    _sub_reads(raw_uri_str, state.artifacts), gremlin, extra_env
                 )
             except MissingArtifact:
                 if optional:

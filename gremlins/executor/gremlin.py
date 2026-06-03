@@ -101,6 +101,7 @@ async def run_stages(
 
 class Gremlin:
     registry: ArtifactRegistry
+    state: State | None
 
     def __init__(
         self,
@@ -150,6 +151,7 @@ class Gremlin:
         self.fetch_worktree = fetch_worktree
         self.pipeline_path = pipeline_path
         self.pipeline_args = pipeline_args or []
+        self.state = None
 
     @property
     def artifact_dir(self) -> pathlib.Path:
@@ -300,7 +302,7 @@ class Gremlin:
                 artifacts=self.registry,
                 base_ref=self.base_ref,
             )
-            built.append((e.name, stage_state.make_runner(e, scope=stages)))
+            built.append((e.name, stage_state.make_runner(e, scope=stages, gremlin=self)))
         return built
 
     def _unbind_stale_exec_artifacts(self) -> None:
