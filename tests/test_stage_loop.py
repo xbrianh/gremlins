@@ -9,8 +9,8 @@ from typing import Any
 import pytest
 
 from gremlins.artifacts.uri import Uri
-from gremlins.executor.state import GremlinWrapper, State as RuntimeState
-from gremlins.executor.state import StateData, build_state
+from gremlins.executor.state import GremlinWrapper, StateData, build_state
+from gremlins.executor.state import State as RuntimeState
 from gremlins.stages.exec import Exec as Cmd
 from gremlins.stages.loop import LoopStage, head_stable, max_iters
 from gremlins.stages.outcome import Bail, Done
