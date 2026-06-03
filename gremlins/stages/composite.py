@@ -11,7 +11,11 @@ from gremlins.stages.base import Stage
 
 
 def child_state(
-    parent_state: State, child: Stage, *, fan_out: bool = False, child_id: str | None = None
+    parent_state: State,
+    child: Stage,
+    *,
+    fan_out: bool = False,
+    child_id: str | None = None,
 ) -> State:
     """Derive a child State from parent."""
     client = parent_state.client

@@ -302,7 +302,9 @@ class Gremlin:
                 artifacts=self.registry,
                 base_ref=self.base_ref,
             )
-            built.append((e.name, stage_state.make_runner(e, scope=stages, gremlin=self)))
+            built.append(
+                (e.name, stage_state.make_runner(e, scope=stages, gremlin=self))
+            )
         return built
 
     def _unbind_stale_exec_artifacts(self) -> None:

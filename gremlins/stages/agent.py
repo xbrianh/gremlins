@@ -88,7 +88,9 @@ class Agent(Stage):
         prompt = self.substitute_vars(template, gremlin, resolved)
 
         raw_path = state.artifact_dir / f"stream-{self.name}.jsonl"
-        model = self.substitute_vars(raw_model, gremlin, resolved) if raw_model else None
+        model = (
+            self.substitute_vars(raw_model, gremlin, resolved) if raw_model else None
+        )
         await run_agent(
             state, prompt, label=self.name, raw_path=raw_path, model=model, **opts
         )

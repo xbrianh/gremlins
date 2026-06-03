@@ -17,10 +17,7 @@ from gremlins import paths as _paths
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.clients.client import Client
 from gremlins.executor.state_utils import (
-    landable_shape,
-    resolve_artifact_dir,
     resolve_state_file,
-    validate_gremlin_id,
 )
 from gremlins.utils.state_file import locked_update
 
