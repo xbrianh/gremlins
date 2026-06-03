@@ -183,8 +183,18 @@ class ParallelStage(Stage):
             cs = _child_state(
                 group_state, child, fan_out=True, child_id=child_id or None
             )
-            runner = cs.make_runner(child, scope=self.body)
-            child_runners.append((child.name, cs, runner))
+            base_runner = cs.make_runner(child, scope=self.body)
+
+            async def _set_state_and_run(
+                runner: Callable[[], Any] = base_runner,
+                child_stage: Stage = child,
+                child_state: State = cs,
+            ) -> Any:
+                if child_stage.gremlin is not None:
+                    child_stage.gremlin.state = child_state
+                return await runner()
+
+            child_runners.append((child.name, cs, _set_state_and_run))
         for _, fn in self.build_runtime_stages(
             child_runners,
             parent_data=state.data,

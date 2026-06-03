@@ -9,6 +9,7 @@ class GremlinProtocol(Protocol):
     """What stages need from a Gremlin."""
 
     registry: Any
+    state: Any
 
     async def fork(
         self,

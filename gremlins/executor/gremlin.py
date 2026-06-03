@@ -526,23 +526,23 @@ class Gremlin:
                 sha = _git_mod.head_sha(cwd=self.worktree_dir)
                 if sha:
                     self.registry.bind("base_sha", Uri.parse(f"git://commit/{sha}"))
+
+            cwd = self._resolve_cwd()
+            self.state = build_state(
+                data=StateData(gremlin_id=self.gremlin_id, state_file=self.state_file),
+                client=resolved_client or PACKAGE_DEFAULT,
+                artifact_dir=self.artifact_dir,
+                pipeline_data=self.pipeline_data,
+                repo=self.repo,
+                cwd=cwd,
+                worktree=self.worktree_dir,
+                worktree_parent=self.worktree_parent,
+                artifacts=self.registry,
+                base_ref=self.base_ref,
+            )
         except Exception:
             if worktree_created:
                 _git_mod.remove_worktree(self.project_root, worktree_created)
             raise
-
-        cwd = self._resolve_cwd()
-        self.state = build_state(
-            data=StateData(gremlin_id=self.gremlin_id, state_file=self.state_file),
-            client=resolved_client or PACKAGE_DEFAULT,
-            artifact_dir=self.artifact_dir,
-            pipeline_data=self.pipeline_data,
-            repo=self.repo,
-            cwd=cwd,
-            worktree=self.worktree_dir,
-            worktree_parent=self.worktree_parent,
-            artifacts=self.registry,
-            base_ref=self.base_ref,
-        )
 
         return self

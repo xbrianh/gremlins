@@ -143,12 +143,12 @@ class LoopStage(Stage):
             )
             name = child.name
 
-            async def _tracked(
-                r: Callable[[], Awaitable[Any]] = base, n: str = name
-            ) -> Outcome:
-                state.data.patch(active_children=[n])
+            async def _tracked() -> Outcome:
+                state.data.patch(active_children=[name])
                 try:
-                    return cast(Outcome, await r())
+                    if child.gremlin is not None:
+                        child.gremlin.state = cs
+                    return cast(Outcome, await base())
                 finally:
                     state.data.patch(_delete=("active_children",))
 

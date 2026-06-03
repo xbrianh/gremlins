@@ -41,11 +41,18 @@ class SequenceStage(Stage):
             if child.name in done:
                 continue
             state.data.patch(active_children=[child.name])
-            runner = _child_state(state, child).make_runner(
+            child_state = _child_state(state, child)
+            base_runner = child_state.make_runner(
                 child, scope=self.body, record_stage=False
             )
+
+            async def _set_state_and_run() -> Any:
+                if child.gremlin is not None:
+                    child.gremlin.state = child_state
+                return await base_runner()
+
             try:
-                await runner()
+                await _set_state_and_run()
             finally:
                 state.data.patch(_delete=("active_children",))
             state.mark_done(key, child.name)
