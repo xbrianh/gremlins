@@ -115,7 +115,6 @@ class StateData:
     worktree_base: str = ""
     status: str = ""
     started_at: str = ""
-    instructions: str = ""
     description: str = ""
     description_explicit: bool = False
     parent_id: str = ""
@@ -147,7 +146,6 @@ class StateData:
             worktree_base=sd.get("worktree_base") or "",
             status=sd.get("status") or "",
             started_at=sd.get("started_at") or "",
-            instructions=sd.get("instructions") or "",
             description=sd.get("description") or "",
             description_explicit=bool(sd.get("description_explicit")),
             parent_id=sd.get("parent_id") or "",
@@ -178,7 +176,6 @@ class StateData:
             "worktree_base": self.worktree_base,
             "status": self.status,
             "started_at": self.started_at,
-            "instructions": self.instructions,
             "description": self.description,
             "description_explicit": self.description_explicit,
             "parent_id": self.parent_id,
@@ -494,7 +491,6 @@ class State:
     cwd: str = ""
     args: argparse.Namespace = dataclasses.field(default_factory=argparse.Namespace)
     pipeline_data: Pipeline | None = None
-    instructions: str = ""
     current_scope: list[StageProtocol] = dataclasses.field(default_factory=_stage_list)
     child_key: str | None = None
     parent_stage: str = ""
@@ -507,7 +503,6 @@ class State:
             "name",
             "model",
             "artifact_dir",
-            "instructions",
             "repo",
             "cwd",
             "base_ref",
@@ -521,7 +516,6 @@ class State:
             "name": stage.name,
             "model": self.client.model,
             "artifact_dir": str(self.artifact_dir),
-            "instructions": self.instructions,
             "repo": self.repo,
             "cwd": self.cwd,
             "base_ref": self.base_ref,
@@ -533,12 +527,9 @@ class State:
         state_dir: pathlib.Path,
         artifact_dir: pathlib.Path,
         gremlin_id: str | None,
-        *,
-        instructions: str = "",
     ) -> None:
         state_dir.mkdir(parents=True, exist_ok=True)
         artifact_dir.mkdir(parents=True, exist_ok=True)
-        (state_dir / "instructions.txt").write_text(instructions, encoding="utf-8")
         sf = state_dir / "state.json"
         if gremlin_id and not sf.exists():
             write_state(state_dir, {"id": gremlin_id})
@@ -624,7 +615,6 @@ def build_state(
     pipeline_data: Pipeline | None = None,
     repo: str = "",
     cwd: str = "",
-    instructions: str = "",
     worktree: pathlib.Path | None = None,
     worktree_parent: pathlib.Path | None = None,
     artifacts: ArtifactRegistry | None = None,
@@ -643,7 +633,6 @@ def build_state(
         or (str(worktree) if worktree is not None else str(_paths.project_root())),
         args=args if args is not None else argparse.Namespace(),
         pipeline_data=pipeline_data,
-        instructions=instructions,
         worktree=worktree,
         worktree_parent=worktree_parent,
         child_key=child_key,

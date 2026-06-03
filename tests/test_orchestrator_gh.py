@@ -338,34 +338,9 @@ def _make_gh_subprocess(
 
 
 # ---------------------------------------------------------------------------
-# _parse_gh_args — arg parsing unit tests
-# ---------------------------------------------------------------------------
-
-
-def test_parse_instructions():
-    args = _parse_gh_args(["add a login page"])
-    # A single quoted string arrives as one element in argv
-    assert args.instructions == ["add a login page"]
-    assert args.plan is None
-    assert args.resume_from is None
-
-
-def test_parse_plan_source():
-    args = _parse_gh_args(["--plan", "#42"])
-    assert args.plan == "#42"
-    assert args.instructions == []
-
-
-def test_parse_resume_from_commit(capsys):
-    args = _parse_gh_args(["--plan", "#42", "--resume-from", "commit"])
+def test_parse_resume_from_commit():
+    args = _parse_gh_args(["--resume-from", "commit"])
     assert args.resume_from == "commit"
-    captured = capsys.readouterr()
-    assert "rewinding" not in captured.err
-
-
-def test_parse_plan_and_instructions_mutual_exclusion():
-    with pytest.raises(SystemExit):
-        _parse_gh_args(["--plan", "#42", "also some instructions"])
 
 
 def test_gh_pipeline_stage_names(tmp_path):
@@ -473,7 +448,7 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
     )
 
     result = asyncio.run(
-        run_pipeline(_gh_pipeline_path(tmp_path), argv=["--plan", "#42"], client=client)
+        run_pipeline(_gh_pipeline_path(tmp_path), argv=[], client=client)
     )
     assert result == 0
 
@@ -511,9 +486,7 @@ def test_plan_skip_if_exists_on_resume(tmp_path, monkeypatch):
     )
 
     result = asyncio.run(
-        run_pipeline(
-            _gh_pipeline_path(tmp_path), argv=["add foo feature"], client=client
-        )
+        run_pipeline(_gh_pipeline_path(tmp_path), argv=[], client=client)
     )
     assert result == 0
     labels = [c.label for c in client.calls]
@@ -569,9 +542,7 @@ def test_publish_as_issue_skip_if_exists(tmp_path, monkeypatch):
     )
 
     result = asyncio.run(
-        run_pipeline(
-            _gh_pipeline_path(tmp_path), argv=["add foo feature"], client=client
-        )
+        run_pipeline(_gh_pipeline_path(tmp_path), argv=[], client=client)
     )
     assert result == 0
     assert not any("gh issue create" in cmd for cmd in shell_cmds)
@@ -649,7 +620,7 @@ def test_plan_no_h1_issue_body(tmp_path, monkeypatch):
     )
 
     result = asyncio.run(
-        run_pipeline(_gh_pipeline_path(tmp_path), argv=["--plan", "#42"], client=client)
+        run_pipeline(_gh_pipeline_path(tmp_path), argv=[], client=client)
     )
     assert result == 0
     plan_content = (artifact_dir / "plan.md").read_text(encoding="utf-8")
@@ -688,14 +659,11 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
     )
 
     result = asyncio.run(
-        run_pipeline(
-            _gh_pipeline_path(tmp_path), argv=["add foo feature"], client=client
-        )
+        run_pipeline(_gh_pipeline_path(tmp_path), argv=[], client=client)
     )
     assert result == 0
 
     plan_call = next(c for c in client.calls if c.label == "plan")
-    assert "add foo feature" in plan_call.prompt
     assert not plan_call.prompt.startswith("/ghplan")
     assert "/ghplan" not in plan_call.prompt
 
@@ -732,7 +700,7 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
     result = asyncio.run(
         run_pipeline(
             _gh_pipeline_path(tmp_path),
-            argv=["--plan", "#42", "--client", "claude:claude-opus-4-7"],
+            argv=["--client", "claude:claude-opus-4-7"],
             client=client,
         )
     )
@@ -778,7 +746,7 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
 
     # Invoke with NO --model.
     result = asyncio.run(
-        run_pipeline(_gh_pipeline_path(tmp_path), argv=["--plan", "#42"], client=client)
+        run_pipeline(_gh_pipeline_path(tmp_path), argv=[], client=client)
     )
     assert result == 0
 
@@ -825,7 +793,7 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
     result = asyncio.run(
         run_pipeline(
             _gh_pipeline_path(tmp_path),
-            argv=["--plan", "#42", "--client", "copilot:gpt-4o"],
+            argv=["--client", "copilot:gpt-4o"],
             client=client,
         )
     )
@@ -878,7 +846,7 @@ def test_resume_from_implement(tmp_path, monkeypatch):
     result = asyncio.run(
         run_pipeline(
             _gh_pipeline_path(tmp_path),
-            argv=["--plan", "#99", "--resume-from", "implement"],
+            argv=["--resume-from", "implement"],
             client=client,
         )
     )
@@ -918,7 +886,7 @@ def test_resume_from_github_review_pull_request(tmp_path, monkeypatch):
     result = asyncio.run(
         run_pipeline(
             _gh_pipeline_path(tmp_path),
-            argv=["--plan", "#5", "--resume-from", "github-review-pull-request"],
+            argv=["--resume-from", "github-review-pull-request"],
             client=client,
         )
     )
@@ -930,7 +898,7 @@ def test_resume_from_github_review_pull_request(tmp_path, monkeypatch):
 
 
 def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch):
-    """gh_main with --plan <file> aggregates plan-title's cost into the persisted total_cost_usd.
+    """Plan stage cost is aggregated into the persisted total_cost_usd.
 
     Regression guard for #157 (missing plan-title cost) and #164 (plan-title
     moved to stream-json mode for cost capture). Reads total_cost_usd from the
@@ -938,9 +906,6 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
     """
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
-
-    plan_file = tmp_path / "my-plan.md"
-    plan_file.write_text("# Feature\nDo the thing.\n")
 
     artifact_dir, state_file = _patch_common(monkeypatch, tmp_path)
     _prepare_for_plan_stage(tmp_path)
@@ -1049,9 +1014,7 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
         fixtures=fixtures,
     )
     result = asyncio.run(
-        run_pipeline(
-            _gh_pipeline_path(tmp_path), argv=["--plan", str(plan_file)], client=client
-        )
+        run_pipeline(_gh_pipeline_path(tmp_path), argv=[], client=client)
     )
     assert result == 0
 
@@ -1072,8 +1035,8 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
     )
 
 
-def test_parse_resume_from_open_pr(capsys):
-    args = _parse_gh_args(["--plan", "#42", "--resume-from", "open-pr"])
+def test_parse_resume_from_open_pr():
+    args = _parse_gh_args(["--resume-from", "open-pr"])
     assert args.resume_from == "open-pr"
 
 
@@ -1116,7 +1079,7 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
     result = asyncio.run(
         run_pipeline(
             _gh_pipeline_path(tmp_path),
-            argv=["--plan", "#42", "--resume-from", "open-pr"],
+            argv=["--resume-from", "open-pr"],
             client=client,
         )
     )
@@ -1181,7 +1144,7 @@ def test_github_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
     result = asyncio.run(
         run_pipeline(
             _gh_pipeline_path(tmp_path),
-            argv=["--plan", "#42", "--client", "claude:claude-opus-4-7"],
+            argv=["--client", "claude:claude-opus-4-7"],
             client=client,
         )
     )
@@ -1240,7 +1203,7 @@ def test_github_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
     result = asyncio.run(
         run_pipeline(
             _gh_pipeline_path(tmp_path),
-            argv=["--plan", "#42", "--client", "claude:claude-opus-4-7"],
+            argv=["--client", "claude:claude-opus-4-7"],
             client=client,
         )
     )
@@ -1289,7 +1252,7 @@ def test_github_wait_ci_stage_ordering(tmp_path, monkeypatch):
     )
 
     result = asyncio.run(
-        run_pipeline(_gh_pipeline_path(tmp_path), argv=["--plan", "#42"], client=client)
+        run_pipeline(_gh_pipeline_path(tmp_path), argv=[], client=client)
     )
     assert result == 0
 
@@ -1332,7 +1295,7 @@ def test_resume_from_ci_gate(tmp_path, monkeypatch):
     result = asyncio.run(
         run_pipeline(
             _gh_pipeline_path(tmp_path),
-            argv=["--plan", "#5", "--resume-from", "ci-gate"],
+            argv=["--resume-from", "ci-gate"],
             client=client,
         )
     )
@@ -1394,7 +1357,7 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
     result = asyncio.run(
         run_pipeline(
             _gh_pipeline_path(tmp_path),
-            argv=["--plan", "#42", "--client", "claude:claude-opus-4-7"],
+            argv=["--client", "claude:claude-opus-4-7"],
             client=client,
         )
     )
@@ -1451,7 +1414,7 @@ def test_resume_from_verify(tmp_path, monkeypatch):
     result = asyncio.run(
         run_pipeline(
             _gh_pipeline_path(tmp_path),
-            argv=["--plan", "#5", "--resume-from", "verify"],
+            argv=["--resume-from", "verify"],
             client=client,
         )
     )
@@ -1493,7 +1456,7 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch):
     result = asyncio.run(
         run_pipeline(
             _gh_pipeline_path(tmp_path),
-            argv=["--plan", "#42"],
+            argv=[],
             gremlin_id=gremlin_id,
             client=client,
         )
@@ -1538,7 +1501,7 @@ def test_gh_main_state_client_tracks_effective_model(
     result = asyncio.run(
         run_pipeline(
             _gh_pipeline_path(tmp_path),
-            argv=["--plan", "#42", "--client", "copilot:gpt-5.4"],
+            argv=["--client", "copilot:gpt-5.4"],
             gremlin_id=gremlin_id,
             client=client,
         )
@@ -1606,7 +1569,7 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
     )
 
     result = asyncio.run(
-        run_pipeline(_gh_pipeline_path(tmp_path), argv=["--plan", "#42"], client=client)
+        run_pipeline(_gh_pipeline_path(tmp_path), argv=[], client=client)
     )
     assert result == 0
 
@@ -1615,51 +1578,3 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
     assert not bad, (
         f"{len(bad)} stage(s) used wrong model: {[(c.label, c.model) for c in bad]}"
     )
-
-
-# ---------------------------------------------------------------------------
-# stage_inputs wiring: gh pipeline reads instructions from state.json
-# ---------------------------------------------------------------------------
-
-
-def test_gh_stage_inputs_instructions_reach_plan(tmp_path, monkeypatch):
-    """stage_inputs["instructions"] from state.json is passed to plan.Plan, and
-    takes precedence over the CLI positional argument."""
-    _init_git_repo(tmp_path)
-    monkeypatch.chdir(tmp_path)
-
-    artifact_dir, state_file = _patch_common(
-        monkeypatch,
-        tmp_path,
-        state_data={"stage_inputs": {"instructions": "instr from state"}},
-    )
-    _prepare_for_plan_stage(tmp_path)
-
-    monkeypatch.setattr(subprocess, "run", _make_gh_subprocess())
-    monkeypatch.setattr(
-        "gremlins.stages.loop.LoopStage.run", _async(lambda self, pipe: None)
-    )
-
-    client = _CommittingClient(
-        git_dir=tmp_path,
-        artifact_dir=artifact_dir,
-        fixtures={
-            "plan": _issue_events(),
-            "implement": IMPL_EVENTS,
-            "commit": IMPL_EVENTS,
-            "compose-pr": MINIMAL_EVENTS,
-            "github-review-pull-request": MINIMAL_EVENTS,
-            "github-address-pull-request-reviews": MINIMAL_EVENTS,
-        },
-    )
-
-    result = asyncio.run(
-        run_pipeline(
-            _gh_pipeline_path(tmp_path), argv=["instr from cli"], client=client
-        )
-    )
-    assert result == 0
-
-    plan_call = next(c for c in client.calls if c.label == "plan")
-    assert "instr from state" in plan_call.prompt
-    assert "instr from cli" not in plan_call.prompt

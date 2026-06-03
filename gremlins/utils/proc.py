@@ -298,7 +298,6 @@ def _build_child_spec_dict(
         "attempt": attempt,
         "parent_stage": child_st.parent_stage,
         "repo": child_st.repo,
-        "instructions": child_st.instructions,
         "base_ref": child_st.base_ref,
     }
 

@@ -21,15 +21,6 @@ def test_setup_dirs_creates_directories(tmp_path):
     assert artifact_dir.is_dir()
 
 
-def test_setup_dirs_writes_instructions(tmp_path):
-    state_dir = tmp_path / "state" / "gr-1"
-    artifact_dir = state_dir / "artifacts"
-    state_mod.State.setup_dirs(
-        state_dir, artifact_dir, gremlin_id=None, instructions="do x"
-    )
-    assert (state_dir / "instructions.txt").read_text() == "do x"
-
-
 def test_setup_dirs_no_gremlin_id_skips_state_json(tmp_path):
     state_dir = tmp_path / "state" / "gr-1"
     artifact_dir = state_dir / "artifacts"

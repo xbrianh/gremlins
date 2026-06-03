@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import dataclasses
 import json
 import logging
 import os
 import pathlib
-import re
 import shutil
 from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Any, cast
@@ -114,9 +112,6 @@ class Gremlin:
         worktree_dir: pathlib.Path | None = None,
         worktree_parent: pathlib.Path | None = None,
         resume_from: str | None = None,
-        instructions: str = "",
-        spec: str | None = None,
-        plan: str | None = None,
         repo: str = "",
         state_file: pathlib.Path | None = None,
         project_root: str = "",
@@ -147,9 +142,6 @@ class Gremlin:
         self.worktree_dir = worktree_dir
         self.worktree_parent = worktree_parent
         self.resume_from = resume_from
-        self.instructions = instructions
-        self.spec = spec
-        self.plan = plan
         self.repo = repo
         self.state_file = state_file
         self.project_root = project_root
@@ -254,7 +246,6 @@ class Gremlin:
             pipeline_data=effective_pipeline,
             repo=state.repo,
             cwd=child_cwd,
-            instructions=state.instructions,
             worktree=child_worktree,
             worktree_parent=state.worktree_parent,
             artifacts=child_registry,
@@ -288,12 +279,6 @@ class Gremlin:
     def _collect_stages(
         self, stages: Sequence[StageProtocol]
     ) -> list[tuple[str, Callable[[], Awaitable[Any]]]]:
-        args = argparse.Namespace(
-            plan=self.plan,
-            resume_from=self.resume_from,
-            spec=self.spec,
-            instructions=[self.instructions] if self.instructions else [],
-        )
         cwd = (
             str(self.worktree_dir)
             if self.worktree_dir is not None
@@ -307,11 +292,9 @@ class Gremlin:
                 data=StateData(gremlin_id=self.gremlin_id, state_file=self.state_file),
                 client=stage_client,
                 artifact_dir=self.artifact_dir,
-                args=args,
                 pipeline_data=self.pipeline_data,
                 repo=self.repo,
                 cwd=cwd,
-                instructions=self.instructions,
                 worktree=self.worktree_dir,
                 worktree_parent=self.worktree_parent,
                 artifacts=self.registry,
@@ -374,7 +357,6 @@ class Gremlin:
         pipeline_args = cast(list[str], state_raw.get("pipeline_args") or [])
         pipeline_path = cast(str, state_raw.get("pipeline_path") or "")
         worktree_dir_str = cast(str, state_raw.get("workdir") or "")
-        instructions = cast(str, state_raw.get("instructions") or "")
 
         # Resolve pipeline (hermetic check first, then fallback)
         hermetic = state_dir / "pipeline.yaml"
@@ -426,7 +408,6 @@ class Gremlin:
             gremlin_id=gremlin_id,
             pipeline_data=pipeline,
             worktree_dir=worktree_dir,
-            instructions=instructions,
             project_root=project_root,
             pipeline_path=pipeline_path,
             pipeline_args=pipeline_args,
@@ -441,10 +422,7 @@ class Gremlin:
         project_dir: pathlib.Path,
         pipeline_ref: str,
         worktree_parent: pathlib.Path | None = None,
-        instructions: str = "",
         resume_from: str | None = None,
-        plan: str | None = None,
-        spec: str | None = None,
         project_root: str = "",
         base_ref_sha: str = "",
         base_ref: str = "",
@@ -486,9 +464,6 @@ class Gremlin:
             worktree_dir=worktree_dir,
             worktree_parent=worktree_parent,
             resume_from=resume_from,
-            instructions=instructions,
-            spec=spec,
-            plan=plan,
             project_root=project_root,
             base_ref_sha=base_ref_sha,
             base_ref=base_ref,
@@ -500,7 +475,6 @@ class Gremlin:
             self.state_dir,
             self.artifact_dir,
             self.gremlin_id,
-            instructions=self.instructions or "",
         )
 
         worktree_created: str | None = None
@@ -522,23 +496,6 @@ class Gremlin:
                     setup_kind="worktree-detached",
                 )
 
-            if self.spec:
-                spec_file = self.artifact_dir / "spec.md"
-                if not spec_file.exists():
-                    spec_src = pathlib.Path(self.spec)
-                    if not spec_src.is_file():
-                        raise ValueError(f"--spec: file not found: {self.spec}")
-                    if spec_src.stat().st_size == 0:
-                        raise ValueError(f"--spec: file is empty: {self.spec}")
-                    shutil.copyfile(spec_src, spec_file)
-
-            if self.plan and not self.pipeline_data.github_integration:
-                plan_file = self.artifact_dir / "plan.md"
-                if not plan_file.exists():
-                    src = pathlib.Path(self.plan)
-                    if src.is_file():
-                        shutil.copyfile(src, plan_file)
-
             if self.worktree_dir is not None:
                 os.chdir(self.worktree_dir)
 
@@ -555,35 +512,6 @@ class Gremlin:
                 sha = _git_mod.head_sha(cwd=self.worktree_dir)
                 if sha:
                     self.registry.bind("base_sha", Uri.parse(f"git://commit/{sha}"))
-            # When --plan is a GH issue ref on a github_integration pipeline,
-            # the opaque issue URI is what compose-pr's plan.uri? needs.
-            plan_issue_uri: str | None = None
-            if self.pipeline_data.github_integration and self.plan:
-                m = re.match(
-                    r"^(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#([0-9]+)$", self.plan
-                )
-                if m:
-                    plan_issue_uri = f"gh://issue/{m.group(1)}"
-
-            if not self.registry.produced("plan"):
-                if (self.artifact_dir / "plan.md").exists():
-                    if not self.pipeline_data.github_integration:
-                        self.registry.bind("plan", Uri.parse("file://session/plan.md"))
-                    elif plan_issue_uri is not None:
-                        self.registry.bind("plan", Uri.parse(plan_issue_uri))
-                    elif self.registry.produced("plan-issue-number"):
-                        n = str(self.registry.read("plan-issue-number")).strip()
-                        self.registry.bind("plan", Uri.parse(f"gh://issue/{n}"))
-                    # else: github_integration with no issue ref/number yet —
-                    # publish-as-issue will bind plan (avoid DuplicateArtifact).
-            elif (
-                plan_issue_uri is not None
-                and self.registry.resolve("plan").scheme == "file"
-            ):
-                # resume: upgrade an existing file:// plan to the issue URI so
-                # compose-pr resolves it even when the plan stage was skipped.
-                self.registry.unbind("plan")
-                self.registry.bind("plan", Uri.parse(plan_issue_uri))
         except Exception:
             if worktree_created:
                 _git_mod.remove_worktree(self.project_root, worktree_created)

@@ -90,8 +90,6 @@ class _Inputs:
     loaded_pipeline: _PipelineData | None = None
 
 
-
-
 def _reject_pipeline_collision(gremlin_id: str) -> None:
     pipeline_names = {name for name, _ in list_pipelines(_paths.project_root())}
     if gremlin_id in pipeline_names:
@@ -163,7 +161,6 @@ def _resolve_base_ref(
         except _git_mod.GitError as exc:
             raise RuntimeError(f"--base-ref: {exc}") from exc
     return effective_base_ref, ""
-
 
 
 def _resolve_inputs(
@@ -450,7 +447,10 @@ def launch(
             registry.bind("base_sha", Uri.parse(f"git://commit/{inputs.base_ref_sha}"))
         if inputs.base_ref_name:
             registry.bind("base_ref", Uri.parse(f"git://ref/{inputs.base_ref_name}"))
-        if inputs.loaded_pipeline is not None and inputs.loaded_pipeline.input_sources is not None:
+        if (
+            inputs.loaded_pipeline is not None
+            and inputs.loaded_pipeline.input_sources is not None
+        ):
             input_values = {
                 k: v for k, v in inputs.stage_inputs.items() if isinstance(v, str) and v
             }

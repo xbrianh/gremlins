@@ -136,8 +136,6 @@ def test_local_main_does_not_clobber_external_state(tmp_path, monkeypatch, sandb
 
     artifact_dir = tmp_path / "session-local"
     artifact_dir.mkdir()
-    plan_file = tmp_path / "plan.md"
-    plan_file.write_text("# Plan\nDo stuff.\n")
 
     _common_patches(monkeypatch)
     monkeypatch.setattr(
@@ -156,7 +154,7 @@ def test_local_main_does_not_clobber_external_state(tmp_path, monkeypatch, sandb
         asyncio.run(
             run_pipeline(
                 resolve_pipeline_path("local", tmp_path),
-                argv=["--plan", str(plan_file)],
+                argv=[],
                 client=client,
             )
         )

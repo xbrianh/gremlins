@@ -77,7 +77,6 @@ def test_gremlin_open_valid_state(sandbox, project_dir, pipeline_yaml):
         "project_root": str(project_dir),
         "pipeline_path": str(pipeline_yaml),
         "pipeline_args": [],
-        "instructions": "test instructions",
         "workdir": "/tmp/worktree",
     }
     (state_dir / "state.json").write_text(json.dumps(state_data), encoding="utf-8")
@@ -86,7 +85,6 @@ def test_gremlin_open_valid_state(sandbox, project_dir, pipeline_yaml):
 
     assert gremlin.gremlin_id == gremlin_id
     assert gremlin.project_root == str(project_dir)
-    assert gremlin.instructions == "test instructions"
     assert gremlin.worktree_dir == pathlib.Path("/tmp/worktree")
     assert gremlin.pipeline_data is not None
 
@@ -155,7 +153,6 @@ stages:
         "project_root": str(project_dir),
         "pipeline_path": "/some/other/path.yaml",
         "pipeline_args": [],
-        "instructions": "",
     }
     (state_dir / "state.json").write_text(json.dumps(state_data), encoding="utf-8")
 
@@ -178,7 +175,6 @@ def test_gremlin_open_filters_pipeline_args(sandbox, project_dir, pipeline_yaml)
         "project_root": str(project_dir),
         "pipeline_path": str(pipeline_yaml),
         "pipeline_args": ["--pipeline", str(pipeline_yaml), "--other", "val"],
-        "instructions": "",
     }
     (state_dir / "state.json").write_text(json.dumps(state_data), encoding="utf-8")
 

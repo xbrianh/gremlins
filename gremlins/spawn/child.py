@@ -132,7 +132,6 @@ def _build_state(spec: dict[str, Any]) -> State:
         worktree=worktree,
         worktree_parent=worktree_parent,
         repo=str(spec.get("repo") or ""),
-        instructions=str(spec.get("instructions") or ""),
         base_ref=str(spec.get("base_ref") or ""),
     )
 

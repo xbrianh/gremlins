@@ -1,13 +1,12 @@
 """Tests for launcher registry seeding from input sources."""
 
 import pathlib
-import textwrap
 
 import pytest
 
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.launcher import _seed_registry_from_sources
-from gremlins.pipeline.inputs import InputSource, InputSources
+from gremlins.pipeline.inputs import InputSource
 
 
 def _make_registry(tmp_path: pathlib.Path) -> tuple[ArtifactRegistry, pathlib.Path]:
@@ -47,7 +46,9 @@ class TestSeedRegistryFromSources:
 
         assert registry.data["plan"] == f"file://{plan_file}"
 
-    def test_union_type_filepath_wins_when_file_exists(self, tmp_path: pathlib.Path) -> None:
+    def test_union_type_filepath_wins_when_file_exists(
+        self, tmp_path: pathlib.Path
+    ) -> None:
         registry, artifact_dir = _make_registry(tmp_path)
         plan_file = tmp_path / "plan.md"
         plan_file.write_text("# Plan", encoding="utf-8")
@@ -64,9 +65,7 @@ class TestSeedRegistryFromSources:
         registry, artifact_dir = _make_registry(tmp_path)
         sources = _sources(("plan", ["filepath", "string"], True))
 
-        _seed_registry_from_sources(
-            registry, {"plan": "#123"}, sources, artifact_dir
-        )
+        _seed_registry_from_sources(registry, {"plan": "#123"}, sources, artifact_dir)
 
         assert registry.data["plan"] == "file://session/plan.txt"
         assert (artifact_dir / "plan.txt").read_text() == "#123"
@@ -102,9 +101,7 @@ class TestSeedRegistryFromSources:
             ("instructions", ["string"], True),
         )
 
-        _seed_registry_from_sources(
-            registry, {"plan": "#456"}, sources, artifact_dir
-        )
+        _seed_registry_from_sources(registry, {"plan": "#456"}, sources, artifact_dir)
 
         assert "plan" in registry.data
         assert "instructions" not in registry.data
