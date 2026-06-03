@@ -8,7 +8,8 @@ import logging
 import pathlib
 from typing import Any
 
-from gremlins.executor.state import StateData, resolve_state_file
+from gremlins.executor.state import StateData
+from gremlins.executor.state_utils import resolve_state_file
 
 logger = logging.getLogger(__name__)
 

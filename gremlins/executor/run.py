@@ -21,8 +21,8 @@ from gremlins.clients.client import Client
 from gremlins.env_file import load_env_file
 from gremlins.errors import die
 from gremlins.executor.gremlin import Gremlin
-from gremlins.executor.state import (
-    StateData,
+from gremlins.executor.state import StateData
+from gremlins.executor.state_utils import (
     resolve_artifact_dir,
     resolve_state_file,
 )

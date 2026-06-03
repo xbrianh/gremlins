@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
-import datetime
 import json
 import logging
 import math
 import os
 import pathlib
-import re
 import secrets
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, cast
@@ -18,6 +16,12 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 from gremlins import paths as _paths
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.clients.client import Client
+from gremlins.executor.state_utils import (
+    landable_shape,
+    resolve_artifact_dir,
+    resolve_state_file,
+    validate_gremlin_id,
+)
 from gremlins.utils.state_file import locked_update
 
 if TYPE_CHECKING:
@@ -28,38 +32,10 @@ from gremlins.stages.outcome import Done
 
 logger = logging.getLogger(__name__)
 
-_GREMLIN_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
-
 BAIL_CLASS_REVIEWER_REQUESTED_CHANGES = "reviewer_requested_changes"
 BAIL_CLASS_SECURITY = "security"
 BAIL_CLASS_SECRETS = "secrets"
 BAIL_CLASS_OTHER = "other"
-
-
-def validate_gremlin_id(gremlin_id: str) -> None:
-    """Raise ValueError if gremlin_id is not a safe, non-path-traversing identifier."""
-    if ".." in gremlin_id or not _GREMLIN_ID_RE.match(gremlin_id):
-        raise ValueError(f"gremlin_id contains illegal characters: {gremlin_id!r}")
-
-
-def resolve_state_file(gremlin_id: str | None) -> pathlib.Path | None:
-    """Return path to state.json for gremlin_id, or None when gremlin_id is absent."""
-    if not gremlin_id:
-        return None
-    return _paths.state_root() / gremlin_id / "state.json"
-
-
-def resolve_artifact_dir(gremlin_id: str | None = None) -> pathlib.Path:
-    """Resolve the artifacts directory for the current run."""
-    state_root = _paths.state_root()
-    if gremlin_id:
-        artifact_dir = state_root / gremlin_id / "artifacts"
-    else:
-        ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        rand = secrets.token_hex(3)
-        artifact_dir = state_root / "direct" / f"{ts}-{rand}" / "artifacts"
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    return artifact_dir
 
 
 def write_state(state_dir: pathlib.Path, data: dict[str, Any]) -> None:
@@ -68,18 +44,6 @@ def write_state(state_dir: pathlib.Path, data: dict[str, Any]) -> None:
     tmp = state_dir / f"state.json.{os.getpid()}.{secrets.token_hex(4)}.tmp"
     tmp.write_text(json.dumps(data), encoding="utf-8")
     os.replace(tmp, sf)
-
-
-def landable_shape(state: dict[str, Any]) -> str:
-    """Classify artifact shape for land dispatch."""
-    artifacts = list(state.get("artifacts") or [])
-    prs = [art for art in artifacts if art.get("type") == "pr"]
-
-    if not prs:
-        return "empty"
-    if len(prs) == 1:
-        return "one_pr"
-    return "many_prs"
 
 
 def _stage_list() -> list[StageProtocol]:

@@ -45,7 +45,8 @@ from typing import Any, cast
 from gremlins import paths
 from gremlins.clients.client import Client
 from gremlins.clients.registry import CLIENT_FACTORIES
-from gremlins.executor.state import State, StateData, build_state, validate_gremlin_id
+from gremlins.executor.state import State, StateData, build_state
+from gremlins.executor.state_utils import validate_gremlin_id
 from gremlins.logging_setup import configure_logging
 from gremlins.permissions.loader import load_policy
 from gremlins.permissions.validation import validate_policy_against_registry

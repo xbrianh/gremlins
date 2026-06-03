@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from gremlins.executor.state import validate_gremlin_id
+from gremlins.executor.state_utils import validate_gremlin_id
 from gremlins.launcher import resume
 
 

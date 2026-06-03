@@ -15,7 +15,7 @@ import gremlins.utils.git as _git
 from gremlins import paths
 from gremlins.artifacts.registry import ArtifactRegistry, MissingArtifact
 from gremlins.artifacts.resolve import resolve_in_map
-from gremlins.executor.state import landable_shape, resolve_artifact_dir
+from gremlins.executor.state_utils import landable_shape, resolve_artifact_dir
 from gremlins.fleet.resolve import resolve_gremlin
 from gremlins.fleet.state import (
     liveness_of_state_file,
@@ -881,8 +881,15 @@ def _exec_land_stage(
         cwd=cwd,
         artifacts=registry,
     )
+
+    class _LandGremlinWrapper:
+        def __init__(self, st: Any) -> None:
+            self.state = st
+            self.registry = st.artifacts
+
+    wrapper = _LandGremlinWrapper(state)
     try:
-        asyncio.run(land_stage.run(state))
+        asyncio.run(land_stage.run(wrapper))
         return True
     except Bail as b:
         print(f"error: land: {b.reason}")

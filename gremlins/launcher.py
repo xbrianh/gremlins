@@ -25,7 +25,8 @@ from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.client import PACKAGE_DEFAULT
 from gremlins.executor.gremlin import Gremlin
-from gremlins.executor.state import StateData, validate_gremlin_id
+from gremlins.executor.state import StateData
+from gremlins.executor.state_utils import validate_gremlin_id
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.discovery import list_pipelines, resolve_pipeline_path
 from gremlins.utils import git as _git_mod

@@ -12,7 +12,8 @@ import pathlib
 import sys
 import traceback
 
-from gremlins.executor.state import StateData, validate_gremlin_id
+from gremlins.executor.state import StateData
+from gremlins.executor.state_utils import validate_gremlin_id
 
 
 def main(argv: list[str] | None = None) -> int:
