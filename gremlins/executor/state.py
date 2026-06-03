@@ -567,6 +567,10 @@ class GremlinWrapper:
         self.state = state
         self.registry = state.artifacts
 
+    @property
+    def data(self) -> StateData:
+        return self.state.data
+
     async def fork(
         self,
         state: State,

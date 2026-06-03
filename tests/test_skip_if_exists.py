@@ -9,7 +9,7 @@ from typing import Any
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State, StateData, _GremlinWrapper, build_state
+from gremlins.executor.state import State, StateData, GremlinWrapper, build_state
 from gremlins.pipeline import Pipeline
 from gremlins.protocols import GremlinProtocol
 from gremlins.stages.agent import Agent
@@ -56,7 +56,7 @@ def test_skip_if_exists_skips_when_key_produced(tmp_path: pathlib.Path) -> None:
     stage = _CountingStage("s", [], {})
     stage.skip_if_exists = "my-artifact"
 
-    gremlin = _GremlinWrapper(state)
+    gremlin = GremlinWrapper(state)
     runner = state.make_runner(stage, record_stage=False, gremlin=gremlin)
     asyncio.run(runner())
 
@@ -69,7 +69,7 @@ def test_skip_if_exists_runs_when_key_absent(tmp_path: pathlib.Path) -> None:
     stage = _CountingStage("s", [], {})
     stage.skip_if_exists = "my-artifact"
 
-    gremlin = _GremlinWrapper(state)
+    gremlin = GremlinWrapper(state)
     runner = state.make_runner(stage, record_stage=False, gremlin=gremlin)
     asyncio.run(runner())
 
@@ -83,7 +83,7 @@ def test_no_skip_if_exists_always_runs(tmp_path: pathlib.Path) -> None:
     stage = _CountingStage("s", [], {})
     # skip_if_exists is "" by default — should not skip even when key is produced
 
-    gremlin = _GremlinWrapper(state)
+    gremlin = GremlinWrapper(state)
     runner = state.make_runner(stage, record_stage=False, gremlin=gremlin)
     asyncio.run(runner())
 
