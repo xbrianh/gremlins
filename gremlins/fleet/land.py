@@ -885,7 +885,7 @@ def _exec_land_stage(
     class _LandGremlinWrapper:
         def __init__(self, st: Any) -> None:
             self.state = st
-            self.registry = st.artifacts
+            self.registry = getattr(st, "artifacts", None)
 
         async def fork(self) -> None:
             raise NotImplementedError("fork not supported in land context")

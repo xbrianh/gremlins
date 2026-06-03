@@ -339,7 +339,7 @@ def test_build_parallel_stages_names() -> None:
 
 def test_parallel_sequence_child_worktree_flows() -> None:
     """SequenceStage inside a parallel group sees the fanout worktree in all sub-stages."""
-    from gremlins.executor.state import _GremlinWrapper
+    from gremlins.executor.state import GremlinWrapper
     from gremlins.protocols import GremlinProtocol
     from gremlins.stages.base import Stage
     from gremlins.stages.outcome import Done, Outcome
@@ -365,7 +365,7 @@ def test_parallel_sequence_child_worktree_flows() -> None:
     )
 
     async def seq_runner() -> None:
-        gremlin = _GremlinWrapper(seq_ctx)
+        gremlin = GremlinWrapper(seq_ctx)
         await seq_stage.run(gremlin)
 
     project_root = pathlib.Path.cwd()
@@ -404,7 +404,7 @@ def test_run_stages_async_callable_executes() -> None:
 
 
 def test_make_runner_returns_async_for_any_stage() -> None:
-    from gremlins.executor.state import _GremlinWrapper
+    from gremlins.executor.state import GremlinWrapper
     from gremlins.protocols import GremlinProtocol
     from gremlins.stages.base import Stage
     from gremlins.stages.outcome import Done, Outcome
@@ -418,13 +418,13 @@ def test_make_runner_returns_async_for_any_stage() -> None:
     state = build_state(
         data=StateData(), client=FakeClaudeClient(), artifact_dir=pathlib.Path("/tmp")
     )
-    gremlin = _GremlinWrapper(state)
+    gremlin = GremlinWrapper(state)
     runner = state.make_runner(AStage("a"), gremlin=gremlin)
     assert inspect.iscoroutinefunction(runner)
 
 
 def test_stages_run_in_order_via_make_runner() -> None:
-    from gremlins.executor.state import _GremlinWrapper
+    from gremlins.executor.state import GremlinWrapper
     from gremlins.protocols import GremlinProtocol
     from gremlins.stages.base import Stage
     from gremlins.stages.outcome import Done, Outcome
@@ -448,7 +448,7 @@ def test_stages_run_in_order_via_make_runner() -> None:
     base_state = build_state(
         data=StateData(), client=FakeClaudeClient(), artifact_dir=pathlib.Path("/tmp")
     )
-    gremlin = _GremlinWrapper(base_state)
+    gremlin = GremlinWrapper(base_state)
     stages = [
         ("a", base_state.make_runner(StageA("a"), gremlin=gremlin)),
         ("b", base_state.make_runner(StageB("b"), gremlin=gremlin)),
