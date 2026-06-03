@@ -9,7 +9,7 @@ from typing import Any
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State, StateData, GremlinWrapper, build_state
+from gremlins.executor.state import GremlinWrapper, State, StateData, build_state
 from gremlins.pipeline import Pipeline
 from gremlins.protocols import GremlinProtocol
 from gremlins.stages.agent import Agent
