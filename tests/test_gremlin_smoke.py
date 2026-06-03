@@ -172,3 +172,41 @@ def test_gremlin_state_delegates_after_initialize(project_dir, pipeline_yaml, sa
     assert gremlin.repo == "test/repo"
     assert gremlin.loop_iteration == 1
     assert gremlin.attempt == ""
+
+
+def test_gremlin_state_unchanged_after_run(project_dir, pipeline_yaml, sandbox):
+    gremlin_id = "state-run-abc123"
+    sd = sandbox.state / gremlin_id
+
+    saved_cwd = os.getcwd()
+    worktree = None
+    rc = 1
+    try:
+        gremlin = Gremlin.initialize_with_runtime(
+            gremlin_id=gremlin_id,
+            state_dir=sd,
+            project_dir=project_dir,
+            pipeline_ref=str(pipeline_yaml),
+            project_root=str(project_dir),
+            base_ref="main",
+            repo="test/repo",
+        )
+        worktree = gremlin.worktree_dir
+
+        # Capture state values before run()
+        initial_client = gremlin.client
+        initial_base_ref = gremlin.base_ref
+        initial_repo = gremlin.repo
+
+        asyncio.run(gremlin.run())
+        rc = 0
+
+        # Assert state still reflects canonical values after run()
+        assert gremlin.client == initial_client
+        assert gremlin.base_ref == initial_base_ref
+        assert gremlin.repo == initial_repo
+    finally:
+        os.chdir(saved_cwd)
+        StateData.load(gremlin_id).write_terminal_state(rc)
+        if worktree and worktree.is_dir():
+            shutil.rmtree(worktree, ignore_errors=True)

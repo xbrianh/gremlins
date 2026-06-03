@@ -166,83 +166,61 @@ class Gremlin:
         return (self.state_dir / "finished").is_file()
 
     @property
-    def client(self) -> Client:
+    def _s(self) -> State:
         if self.state is None:
             raise RuntimeError("state not yet initialized")
-        return self.state.client
+        return self.state
+
+    @property
+    def client(self) -> Client:
+        return self._s.client
 
     @property
     def artifacts(self) -> ArtifactRegistry:
-        if self.state is None:
-            raise RuntimeError("state not yet initialized")
-        return self.state.artifacts
+        return self._s.artifacts
 
     @property
     def cwd(self) -> str:
-        if self.state is None:
-            raise RuntimeError("state not yet initialized")
-        return self.state.cwd
+        return self._s.cwd
 
     @property
     def worktree(self) -> pathlib.Path | None:
-        if self.state is None:
-            raise RuntimeError("state not yet initialized")
-        return self.state.worktree
+        return self._s.worktree
 
     @property
     def base_ref(self) -> str:
-        if self.state is None:
-            raise RuntimeError("state not yet initialized")
-        return self.state.base_ref
+        return self._s.base_ref
 
     @property
     def loop_iteration(self) -> int:
-        if self.state is None:
-            raise RuntimeError("state not yet initialized")
-        return self.state.data.loop_iteration
+        return self._s.data.loop_iteration
 
     @property
     def attempt(self) -> str:
-        if self.state is None:
-            raise RuntimeError("state not yet initialized")
-        return self.state.data.attempt
+        return self._s.data.attempt
 
     def framework_subs(self, stage: StageProtocol) -> dict[str, str]:
-        if self.state is None:
-            raise RuntimeError("state not yet initialized")
-        return self.state.framework_subs(stage)
+        return self._s.framework_subs(stage)
 
     def done_for(self, path: str) -> set[str]:
-        if self.state is None:
-            raise RuntimeError("state not yet initialized")
-        return self.state.done_for(path)
+        return self._s.done_for(path)
 
     def mark_done(self, path: str, child_name: str) -> None:
-        if self.state is None:
-            raise RuntimeError("state not yet initialized")
-        self.state.mark_done(path, child_name)
+        self._s.mark_done(path, child_name)
 
     def clear_done(self, path: str) -> None:
-        if self.state is None:
-            raise RuntimeError("state not yet initialized")
-        self.state.clear_done(path)
+        self._s.clear_done(path)
 
     def record_bail(self, reason: str, *, kind: str = "other") -> None:
-        if self.state is None:
-            raise RuntimeError("state not yet initialized")
-        self.state.record_bail(reason, kind=kind)
+        self._s.record_bail(reason, kind=kind)
 
     def record_stage_progress(
         self, name: str, sub_stage: object = None, *, parent_stage: str = ""
     ) -> None:
-        if self.state is None:
-            raise RuntimeError("state not yet initialized")
-        self.state.record_stage_progress(name, sub_stage, parent_stage=parent_stage)
+        self._s.record_stage_progress(name, sub_stage, parent_stage=parent_stage)
 
     def record_state_field(self, **fields: Any) -> None:
-        if self.state is None:
-            raise RuntimeError("state not yet initialized")
-        self.state.record_state_field(**fields)
+        self._s.record_state_field(**fields)
 
     async def fork(
         self,
@@ -351,6 +329,14 @@ class Gremlin:
                 f"valid: {valid_names}"
             )
 
+    @property
+    def _resolved_cwd(self) -> str:
+        return (
+            str(self.worktree_dir)
+            if self.worktree_dir is not None
+            else (self.project_root or str(pathlib.Path.cwd()))
+        )
+
     def _set_gremlin_recursive(self, stage: StageProtocol) -> None:
         stage.gremlin = self
         body = getattr(stage, "body", [])
@@ -360,11 +346,6 @@ class Gremlin:
     def _collect_stages(
         self, stages: Sequence[StageProtocol]
     ) -> list[tuple[str, Callable[[], Awaitable[Any]]]]:
-        cwd = (
-            str(self.worktree_dir)
-            if self.worktree_dir is not None
-            else (self.project_root or str(pathlib.Path.cwd()))
-        )
         built: list[tuple[str, Callable[[], Awaitable[Any]]]] = []
         for e in stages:
             self._set_gremlin_recursive(e)
@@ -375,13 +356,12 @@ class Gremlin:
                 artifact_dir=self.artifact_dir,
                 pipeline_data=self.pipeline_data,
                 repo=self.repo,
-                cwd=cwd,
+                cwd=self._resolved_cwd,
                 worktree=self.worktree_dir,
                 worktree_parent=self.worktree_parent,
                 artifacts=self.registry,
                 base_ref=self._base_ref_init,
             )
-            self.state = stage_state
             built.append((e.name, stage_state.make_runner(e, scope=stages)))
         return built
 
@@ -595,18 +575,13 @@ class Gremlin:
                 if sha:
                     self.registry.bind("base_sha", Uri.parse(f"git://commit/{sha}"))
 
-            cwd = (
-                str(self.worktree_dir)
-                if self.worktree_dir is not None
-                else (self.project_root or str(pathlib.Path.cwd()))
-            )
             self.state = build_state(
                 data=StateData(gremlin_id=self.gremlin_id, state_file=None),
                 client=resolved_client or PACKAGE_DEFAULT,
                 artifact_dir=self.artifact_dir,
                 pipeline_data=self.pipeline_data,
                 repo=self.repo,
-                cwd=cwd,
+                cwd=self._resolved_cwd,
                 worktree=self.worktree_dir,
                 worktree_parent=self.worktree_parent,
                 artifacts=self.registry,
