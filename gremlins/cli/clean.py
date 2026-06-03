@@ -89,14 +89,39 @@ def _print_summary(cat: str, items: list[CleanItem]) -> None:
 
 
 def clean_main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(prog="gremlins clean")
-    parser.add_argument("--state", action="store_true")
-    parser.add_argument("--all", action="store_true")
+    parser = argparse.ArgumentParser(
+        prog="gremlins clean",
+        description="Delete completed gremlin state and artifacts.",
+    )
+    parser.add_argument(
+        "--state",
+        action="store_true",
+        help="required to enable deletion when no filter (--all/--failed/--finished) is given",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="allow deletion of all non-running gremlins (default scope when no filter is given)",
+    )
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("--failed", action="store_true")
-    group.add_argument("--finished", action="store_true")
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--yes", "-y", action="store_true")
+    group.add_argument(
+        "--failed",
+        action="store_true",
+        help="restrict to gremlins that exited non-zero or died",
+    )
+    group.add_argument(
+        "--finished",
+        action="store_true",
+        help="restrict to gremlins that completed successfully (exit 0)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print a summary of what would be deleted without deleting anything",
+    )
+    parser.add_argument(
+        "--yes", "-y", action="store_true", help="skip the confirmation prompt"
+    )
     args = parser.parse_args(argv)
     if args.failed or args.finished:
         items = _scan_state(args.failed, args.finished)
