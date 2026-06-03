@@ -865,9 +865,7 @@ def test_fanin_allows_child_worktree_mutations(tmp_path, sandbox, caplog):
 
     # Verify mutations were logged.
     assert any("child a mutated its worktree" in r.message for r in caplog.records)
-    assert any(
-        "child b has uncommitted changes" in r.message for r in caplog.records
-    )
+    assert any("child b has uncommitted changes" in r.message for r in caplog.records)
 
     # Verify worktrees were torn down.
     for p in paths.values():
