@@ -319,8 +319,8 @@ stages:
 3. **Fan-in** — when all children finish or any child bails, the group halts
 
 If any child fails (raises `Bail`), the pipeline halts after the group finishes —
-siblings are not cancelled mid-run. Subsequent stages receive the bailed group
-name and can decide whether to skip or resume.
+siblings are not cancelled mid-run. Subsequent stages are skipped; the operator
+can resume or ack the group via CLI.
 
 **State isolation:** Each child gets its own state directory and subprocess. 
 Client overrides, worktree paths, and artifact bindings are isolated per-child.
@@ -389,7 +389,7 @@ YAML `stage-definitions:` lets you name and reuse stage patterns within a pipeli
 
 ```yaml
 stage-definitions:
-  review-base:
+  review-base: &review-base
     type: review-code
     client: claude:sonnet
     prompt: gremlins:code_style.md
@@ -422,12 +422,12 @@ stages:
     options:
       cmds: ["python scan.py > report.json"]
     out:
-      findings: git://HEAD:report.json
+      findings: session://findings
 
   - name: analyze
     type: agent
     in:
-      findings: <findings>
+      findings: session://findings
     prompt: |
       The scanning report is in {{findings}}.
       Propose fixes.
@@ -499,10 +499,10 @@ when the bailed condition is acceptable (e.g., the review found minor style
 issues that don't block landing, or external work was already completed). The
 gremlin marks the bailed stage as complete and proceeds to subsequent stages.
 
-**`gremlins skip <id>`** — Abandon the current gremlin and launch a new attempt
-with the same parameters. Use this for transient failures (timeouts, CI hangs)
-that won't self-resolve. `skip` does not delete the failed gremlin; it creates
-a sibling attempt with a new ID that begins from the start.
+**`gremlins skip <id>`** — Create a new sibling attempt with the same parameters
+and a fresh ID, leaving the failed gremlin in place. Use this for transient
+failures (timeouts, CI hangs) that won't self-resolve. Both attempts are visible
+in the fleet; the new attempt begins from the start.
 
 ### Handling parallel group failures
 
