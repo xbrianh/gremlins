@@ -449,6 +449,18 @@ class State:
         }
     )
 
+    @property
+    def state(self) -> State:
+        return self
+
+    @state.setter
+    def state(self, value: State) -> None:
+        pass
+
+    @property
+    def registry(self) -> ArtifactRegistry:
+        return self.artifacts
+
     def framework_subs(self, stage: StageProtocol) -> dict[str, str]:
         """Runtime-owned substitution vars. Stages must not assemble these themselves."""
         return {
