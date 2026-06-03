@@ -13,6 +13,7 @@ from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state
 from gremlins.fleet.render import build_row
 from gremlins.fleet.views import _gremlin_to_json  # type: ignore[reportPrivateUsage]
+from gremlins.protocols import GremlinProtocol
 from gremlins.stages.base import Stage
 from gremlins.stages.loop import LoopStage
 from gremlins.stages.outcome import Done, Outcome
@@ -20,14 +21,35 @@ from gremlins.stages.parallel import ParallelStage
 from gremlins.stages.sequence import SequenceStage
 
 
-def _stateful(tmp_path: pathlib.Path, gid: str = "test-id") -> State:
+class _GremlinWrapper:
+    """Minimal wrapper to satisfy GremlinProtocol for testing."""
+
+    def __init__(self, state: State) -> None:
+        self.state = state
+        self.registry = state.artifacts
+
+    async def fork(
+        self,
+        state: State,  # type: ignore[reportUnusedVariable]
+        target_id: str,  # type: ignore[reportUnusedVariable]
+        *,
+        parent_id: str = "",  # type: ignore[reportUnusedVariable]
+        group_name: str = "",  # type: ignore[reportUnusedVariable]
+        child_key: str = "",  # type: ignore[reportUnusedVariable]
+        pipeline: Any | None = None,  # type: ignore[reportUnusedVariable]
+    ) -> State:
+        raise NotImplementedError("fork not supported in test wrapper")
+
+
+def _stateful(tmp_path: pathlib.Path, gid: str = "test-id") -> GremlinProtocol:
     sf = tmp_path / "state.json"
     sf.write_text(json.dumps({"id": gid}), encoding="utf-8")
-    return build_state(
+    state = build_state(
         data=StateData(gremlin_id=gid, state_file=sf),
         client=FakeClaudeClient(),
         artifact_dir=tmp_path,
     )
+    return _GremlinWrapper(state)
 
 
 def _read_state(tmp_path: pathlib.Path) -> dict[str, Any]:
@@ -40,32 +62,32 @@ def _read_state(tmp_path: pathlib.Path) -> dict[str, Any]:
 
 
 def test_sequence_active_children_cleared_after_run(tmp_path: pathlib.Path) -> None:
-    state = _stateful(tmp_path)
+    gremlin = _stateful(tmp_path)
 
     class _Spy(Stage):
         captured: list[str] | None = None
 
-        async def run(self, state: State) -> Outcome:
+        async def run(self, gremlin: GremlinProtocol) -> Outcome:  # type: ignore[reportUnusedVariable]
             _Spy.captured = _read_state(tmp_path).get("active_children")
             return Done()
 
     seq = SequenceStage("seq", body=[_Spy("child-a")])
-    asyncio.run(seq.run(state))
+    asyncio.run(seq.run(gremlin))
 
     assert _Spy.captured == ["child-a"]
     assert "active_children" not in _read_state(tmp_path)
 
 
 def test_sequence_active_children_cleared_on_exception(tmp_path: pathlib.Path) -> None:
-    state = _stateful(tmp_path)
+    gremlin = _stateful(tmp_path)
 
     class _Boom(Stage):
-        async def run(self, state: State) -> Outcome:
+        async def run(self, gremlin: GremlinProtocol) -> Outcome:  # type: ignore[reportUnusedVariable]
             raise RuntimeError("boom")
 
     seq = SequenceStage("seq", body=[_Boom("child-a")])
     with pytest.raises(RuntimeError, match="boom"):
-        asyncio.run(seq.run(state))
+        asyncio.run(seq.run(gremlin))
 
     assert "active_children" not in _read_state(tmp_path)
 
@@ -76,31 +98,31 @@ def test_sequence_active_children_cleared_on_exception(tmp_path: pathlib.Path) -
 
 
 def test_loop_active_children_set_and_cleared(tmp_path: pathlib.Path) -> None:
-    state = _stateful(tmp_path)
+    gremlin = _stateful(tmp_path)
     captured: list[list[str] | None] = []
 
     class _Spy(Stage):
-        async def run(self, state: State) -> Outcome:
+        async def run(self, gremlin: GremlinProtocol) -> Outcome:  # type: ignore[reportUnusedVariable]
             captured.append(_read_state(tmp_path).get("active_children"))
             return Done()
 
     loop = LoopStage("lp", body=[_Spy("body-stage")], max_iterations=1)
-    asyncio.run(loop.run(state))
+    asyncio.run(loop.run(gremlin))
 
     assert captured == [["body-stage"]]
     assert "active_children" not in _read_state(tmp_path)
 
 
 def test_loop_active_children_cleared_on_exception(tmp_path: pathlib.Path) -> None:
-    state = _stateful(tmp_path)
+    gremlin = _stateful(tmp_path)
 
     class _Boom(Stage):
-        async def run(self, state: State) -> Outcome:
+        async def run(self, gremlin: GremlinProtocol) -> Outcome:  # type: ignore[reportUnusedVariable]
             raise RuntimeError("boom")
 
     loop = LoopStage("lp", body=[_Boom("body-stage")], max_iterations=1)
     with pytest.raises(RuntimeError, match="boom"):
-        asyncio.run(loop.run(state))
+        asyncio.run(loop.run(gremlin))
 
     assert "active_children" not in _read_state(tmp_path)
 
