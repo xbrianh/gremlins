@@ -4,42 +4,41 @@ stages:
   - name: resolve-plan-input
     type: exec
     in:
-      plan_arg: "plan_arg?"
+      plan: "plan?"
     options:
       cmds:
         - |
           if [ -s "{artifact_dir}/plan.md" ]; then exit 0; fi
-          if [ -z "$plan_arg" ]; then
-              printf 'resolve-plan-input: no plan_arg provided and plan.md does not exist\n' >&2
-              exit 1
-          fi
-          if [ -f "$plan_arg" ]; then
-              cp "$plan_arg" "{artifact_dir}/plan.md"
-          elif echo "$plan_arg" | grep -qE '^#[0-9]+$'; then
-              gh issue view "$plan_arg" --json body --jq .body \
+          if [ -z "$plan" ]; then exit 0; fi
+          if [ -f "$plan" ]; then
+              cp "$plan" "{artifact_dir}/plan.md"
+          elif echo "$plan" | grep -qE '^#[0-9]+$'; then
+              gh issue view "$plan" --json body --jq .body \
                 > "{artifact_dir}/plan.md"
               if ! head -1 "{artifact_dir}/plan.md" | grep -q '^# '; then
-                  title=$(gh issue view "$plan_arg" --json title --jq .title)
+                  title=$(gh issue view "$plan" --json title --jq .title)
                   { printf '# %s\n\n' "$title"; cat "{artifact_dir}/plan.md"; } > "{artifact_dir}/plan.md.tmp"
                   mv "{artifact_dir}/plan.md.tmp" "{artifact_dir}/plan.md"
               fi
-              gh issue view "$plan_arg" --json number --jq .number \
+              gh issue view "$plan" --json number --jq .number \
                 > "{artifact_dir}/plan-issue-number.txt"
           else
-              printf 'resolve-plan-input: unrecognized plan_arg: %s\n' "$plan_arg" >&2
+              printf 'resolve-plan-input: unrecognized plan: %s\n' "$plan" >&2
               exit 1
           fi
     out:
       plan-issue-number?: "file://session/plan-issue-number.txt"
-      plan?: "gh://issue/{read:plan-issue-number}"  # must follow plan-issue-number? — {read:plan-issue-number} interpolates it
+      plan-document?: "gh://issue/{read:plan-issue-number}"  # must follow plan-issue-number? — {read:plan-issue-number} interpolates it
 
   - name: plan
     type: agent
-    skip_if_exists: plan
+    skip_if_exists: plan-document
     prompt:
       - "{{prompt}}"
+    in:
+      instructions: "instructions?"
     out:
-      plan: "file://session/plan.md"
+      plan-document: "file://session/plan.md"
     options:
       idle_timeout: 600
 
@@ -62,7 +61,7 @@ stages:
           printf '%s' "${url##*/}" > "{artifact_dir}/plan-issue-number.txt"
     out:
       plan-issue-number: "file://session/plan-issue-number.txt"
-      plan?: "gh://issue/{read:plan-issue-number}"
+      plan-document?: "gh://issue/{read:plan-issue-number}"
 
   - name: update-description
     type: exec

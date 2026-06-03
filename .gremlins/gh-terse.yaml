@@ -7,7 +7,13 @@ inputs:
   in:
     INSTRUCTIONS: instructions?
     PLAN: plan?
-    PR: pr?
+  sources:
+    plan:
+      type: [filepath, string]
+      optional: true
+    instructions:
+      type: string
+      optional: true
 
 land:
   in:

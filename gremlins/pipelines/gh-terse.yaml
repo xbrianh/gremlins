@@ -7,8 +7,14 @@ github_integration: true
 inputs:
   in:
     INSTRUCTIONS: instructions?
-    PLAN: plan?
-    PR: pr?
+    PLAN: plan-document?
+  sources:
+    plan:
+      type: [filepath, string]
+      optional: true
+    instructions:
+      type: string
+      optional: true
 
 land:
   in:

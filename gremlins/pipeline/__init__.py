@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
 
 if TYPE_CHECKING:
+    from gremlins.pipeline.inputs import InputSources
     from gremlins.stages.base import Stage
     from gremlins.stages.exec import Exec
 
@@ -31,6 +32,7 @@ class Pipeline:
     default_client: Client | None = None
     base_ref: str = "current"
     inputs: Exec | None = None
+    input_sources: InputSources | None = None
     land: Exec | None = None
     github_integration: bool = False
 
@@ -75,15 +77,25 @@ class Pipeline:
 
         github_integration = bool(raw.get("github_integration", False))
 
+        from gremlins.pipeline.inputs import InputSources
         from gremlins.stages.exec import Exec
 
         stages = parse_stages(cast(list[dict[str, Any]], raw.get("stages") or []))
 
         inputs_stage: Exec | None = None
+        input_sources: InputSources | None = None
         inputs_raw = raw.get("inputs")
         if inputs_raw is not None:
             if not isinstance(inputs_raw, dict):
                 raise ValueError("'inputs' must be a mapping")
+            inputs_raw = cast(dict[str, Any], inputs_raw)
+            sources_raw = inputs_raw.get("sources")
+            if sources_raw is not None:
+                if not isinstance(sources_raw, dict):
+                    raise ValueError("'inputs.sources' must be a mapping")
+                input_sources = InputSources.from_yaml(
+                    cast(dict[str, Any], sources_raw)
+                )
             inputs_stage = Exec.with_dict({"name": "inputs", **inputs_raw})
 
         land_stage: Exec | None = None
@@ -107,6 +119,7 @@ class Pipeline:
             default_client=default_client,
             base_ref=pipeline_base_ref,
             inputs=inputs_stage,
+            input_sources=input_sources,
             land=land_stage,
             github_integration=github_integration,
         )

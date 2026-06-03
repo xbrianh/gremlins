@@ -117,7 +117,6 @@ def _build_state(spec: dict[str, Any]) -> State:
         artifact_dir=artifact_dir,
         pipeline_data=pipeline_data,
         repo=str(spec.get("repo") or ""),
-        instructions=str(spec.get("instructions") or ""),
         child_key=spec.get("child_key") or None,
         parent_stage=str(spec.get("parent_stage") or ""),
         worktree=worktree,

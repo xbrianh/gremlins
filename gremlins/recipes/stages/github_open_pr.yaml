@@ -13,7 +13,7 @@ stages:
     type: agent
     in:
       base_ref_to_open_pr: base_ref_to_open_pr
-      plan_uri:            plan.uri?
+      plan_uri:            plan-document.uri?
     out:
       pr_title:  "file://session/pr-title.txt"
       pr_body:   "file://session/pr-body.md"

@@ -4,31 +4,33 @@ stages:
   - name: resolve-plan-input
     type: exec
     in:
-      plan_arg: "plan_arg?"
+      plan: "plan?"
     options:
       cmds:
         - |
           if [ -s "{artifact_dir}/plan.md" ]; then exit 0; fi
-          if [ -z "$plan_arg" ]; then exit 0; fi
-          if [ -f "$plan_arg" ]; then
-              cp "$plan_arg" "{artifact_dir}/plan.md"
-          elif echo "$plan_arg" | grep -qE '^([^/]+/[^#]+)?#[0-9]+$'; then
-              gh issue view "$plan_arg" --json body --jq .body \
+          if [ -z "$plan" ]; then exit 0; fi
+          if [ -f "$plan" ]; then
+              cp "$plan" "{artifact_dir}/plan.md"
+          elif echo "$plan" | grep -qE '^([^/]+/[^#]+)?#[0-9]+$'; then
+              gh issue view "$plan" --json body --jq .body \
                 > "{artifact_dir}/plan.md"
           else
-              printf 'resolve-plan-input: unrecognized plan_arg: %s\n' "$plan_arg" >&2
+              printf 'resolve-plan-input: unrecognized plan: %s\n' "$plan" >&2
               exit 1
           fi
     out:
-      plan?: "file://session/plan.md"
+      plan-document?: "file://session/plan.md"
 
   - name: plan
     type: agent
-    skip_if_exists: plan
+    skip_if_exists: plan-document
     prompt:
       - "{{prompt}}"
+    in:
+      instructions: "instructions?"
     out:
-      plan: "file://session/plan.md"
+      plan-document: "file://session/plan.md"
     options:
       idle_timeout: 600
 

@@ -135,22 +135,9 @@ def _install_signal_handlers(clients: Sequence[Client], gremlin_id: str | None) 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--plan", dest="plan", default=None)
-    parser.add_argument("--spec", default=None)
     parser.add_argument("--client", dest="client", default=None)
     parser.add_argument("--resume-from", dest="resume_from", default=None)
-    parser.add_argument("instructions", nargs="*")
-    args = parser.parse_args(argv)
-    if args.plan and args.instructions:
-        die("--plan and positional instructions are mutually exclusive")
-    if (
-        not args.plan
-        and not args.instructions
-        and not args.resume_from
-        and not os.environ.get("GREMLINS_RESUME_FROM")
-    ):
-        die("one of --plan or positional instructions is required")
-    return args
+    return parser.parse_args(argv)
 
 
 def _unique_clients(stages: Sequence[StageProtocol]) -> list[Client]:
@@ -210,9 +197,6 @@ async def run_pipeline(
     worktree_dir = pathlib.Path(_workdir) if _workdir else None
     project_root = str(state_json.get("project_root") or "")
     stage_inputs: dict[str, Any] = dict(state_json.get("stage_inputs") or {})
-    instructions: str = str(
-        stage_inputs.get("instructions") or " ".join(args.instructions or [])
-    )
 
     # base_ref_sha and base_ref are bound in registry.json at launch time
     _registry_path = state_dir / "registry.json"
@@ -257,10 +241,7 @@ async def run_pipeline(
             if project_root
             else paths.project_root(),
             pipeline_ref=str(pipeline_path),
-            instructions=instructions,
             resume_from=resume_from,
-            spec=args.spec,
-            plan=args.plan,
             worktree_dir=worktree_dir,
             project_root=project_root,
             base_ref_sha=base_ref_sha,
@@ -307,8 +288,6 @@ async def run_pipeline(
         if shutil.which("claude") is None:
             die("claude not found on PATH")
 
-    plan_file = artifact_dir / "plan.md"
-
     if not gh and resume_from:
         _expanded_stage_names = [s.name for s in gremlin.stages]
 
@@ -323,9 +302,6 @@ async def run_pipeline(
             if resume_from in _expanded_stage_names
             else 0
         )
-        if start_idx >= _name_idx("implement"):
-            if not plan_file.exists() or plan_file.stat().st_size == 0:
-                die(f"--resume-from {resume_from} requires existing {plan_file}")
         if start_idx >= _name_idx("review-code"):
             if not has_dirty_worktree() and not has_commits():
                 die(

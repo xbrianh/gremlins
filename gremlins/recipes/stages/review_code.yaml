@@ -1,7 +1,7 @@
 stages:
   - name: review-code
     type: agent
-    in: { plan: plan }
+    in: { plan: plan-document }
     out: { "{name}": "file://session/{name}-{model}.md" }
     options: {}
     prompt:

@@ -28,8 +28,11 @@ def _local_pipeline_path(cwd):
 def test_local_main_plan_mode(tmp_path, monkeypatch):
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()
-    plan_file = tmp_path / "plan.md"
-    plan_file.write_text("# Plan\nDo stuff.\n")
+    # Pre-seed plan artifact so the plan stage is skipped (skip_if_exists)
+    (artifact_dir / "plan.md").write_text("# Plan\nDo stuff.\n")
+    (tmp_path / "registry.json").write_text(
+        json.dumps({"plan-document": "file://session/plan.md"})
+    )
 
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
@@ -48,7 +51,7 @@ def test_local_main_plan_mode(tmp_path, monkeypatch):
     result = asyncio.run(
         run_pipeline(
             _local_pipeline_path(tmp_path),
-            argv=["--plan", str(plan_file)],
+            argv=[],
             client=client,
         )
     )
@@ -66,8 +69,10 @@ def test_local_main_resume_from_review_code_requires_git_changes(
 ):
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()
-    plan_file = tmp_path / "plan.md"
-    plan_file.write_text("# Plan\nDo stuff.\n")
+    (artifact_dir / "plan.md").write_text("# Plan\nDo stuff.\n")
+    (tmp_path / "registry.json").write_text(
+        json.dumps({"plan-document": "file://session/plan.md"})
+    )
 
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
@@ -83,7 +88,7 @@ def test_local_main_resume_from_review_code_requires_git_changes(
         asyncio.run(
             run_pipeline(
                 _local_pipeline_path(tmp_path),
-                argv=["--plan", str(plan_file), "--resume-from", "review-code"],
+                argv=["--resume-from", "review-code"],
                 client=FakeClaudeClient(fixtures={}),
             )
         )
@@ -99,8 +104,10 @@ def test_local_main_resume_from_review_code_allows_existing_git_changes(
 ):
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()
-    plan_file = tmp_path / "plan.md"
-    plan_file.write_text("# Plan\nDo stuff.\n")
+    (artifact_dir / "plan.md").write_text("# Plan\nDo stuff.\n")
+    (tmp_path / "registry.json").write_text(
+        json.dumps({"plan-document": "file://session/plan.md"})
+    )
 
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
@@ -122,7 +129,7 @@ def test_local_main_resume_from_review_code_allows_existing_git_changes(
     result = asyncio.run(
         run_pipeline(
             _local_pipeline_path(tmp_path),
-            argv=["--plan", str(plan_file), "--resume-from", "review-code"],
+            argv=["--resume-from", "review-code"],
             client=client,
         )
     )
@@ -138,8 +145,11 @@ def test_local_main_client_specifier_model(tmp_path, monkeypatch):
     """Model from --client provider:model flows into stage run() calls."""
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()
-    plan_file = tmp_path / "plan.md"
-    plan_file.write_text("# Plan\nDo stuff.\n")
+    # Pre-seed plan artifact so plan stage is skipped
+    (artifact_dir / "plan.md").write_text("# Plan\nDo stuff.\n")
+    (tmp_path / "registry.json").write_text(
+        json.dumps({"plan-document": "file://session/plan.md"})
+    )
 
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
@@ -158,7 +168,7 @@ def test_local_main_client_specifier_model(tmp_path, monkeypatch):
     result = asyncio.run(
         run_pipeline(
             _local_pipeline_path(tmp_path),
-            argv=["--plan", str(plan_file), "--client", "copilot:gpt-4o"],
+            argv=["--client", "copilot:gpt-4o"],
             client=client,
         )
     )
@@ -192,8 +202,6 @@ def test_local_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir)
 
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()
-    plan_file = tmp_path / "plan.md"
-    plan_file.write_text("# Plan\nDo stuff.\n")
 
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
@@ -213,7 +221,7 @@ def test_local_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir)
     result = asyncio.run(
         run_pipeline(
             _local_pipeline_path(tmp_path),
-            argv=["--plan", str(plan_file)],
+            argv=[],
             client=client,
             gremlin_id=gremlin_id,
         )
@@ -230,8 +238,6 @@ def test_local_main_env_file_vars_reach_verify(tmp_path, monkeypatch):
 
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()
-    plan_file = tmp_path / "plan.md"
-    plan_file.write_text("# Plan\nDo stuff.\n")
 
     dot_gremlins = tmp_path / ".gremlins"
     dot_gremlins.mkdir()
@@ -267,7 +273,7 @@ def test_local_main_env_file_vars_reach_verify(tmp_path, monkeypatch):
     result = asyncio.run(
         run_pipeline(
             _local_pipeline_path(tmp_path),
-            argv=["--plan", str(plan_file)],
+            argv=[],
             client=client,
         )
     )
@@ -289,8 +295,6 @@ def test_local_main_env_file_sourced_with_overlay_dir_set(tmp_path, monkeypatch)
 
     proj_dir = tmp_path / "proj"
     proj_dir.mkdir()
-    plan_file = proj_dir / "plan.md"
-    plan_file.write_text("# Plan\nDo stuff.\n")
     (proj_dir / ".gremlins").mkdir()
     (proj_dir / ".gremlins" / "env").write_text(
         "export GREMLIN_ENV_TEST_SENTINEL=from_env_file\n"
@@ -333,7 +337,7 @@ def test_local_main_env_file_sourced_with_overlay_dir_set(tmp_path, monkeypatch)
     result = asyncio.run(
         run_pipeline(
             _local_pipeline_path(proj_dir),
-            argv=["--plan", str(plan_file)],
+            argv=[],
             client=client,
         )
     )
@@ -352,8 +356,11 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
     """
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()
-    plan_file = tmp_path / "plan.md"
-    plan_file.write_text("# Plan\nDo stuff.\n")
+    # Pre-seed plan artifact so plan stage is skipped
+    (artifact_dir / "plan.md").write_text("# Plan\nDo stuff.\n")
+    (tmp_path / "registry.json").write_text(
+        json.dumps({"plan-document": "file://session/plan.md"})
+    )
 
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
@@ -395,7 +402,7 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
     result = asyncio.run(
         run_pipeline(
             _local_pipeline_path(tmp_path),
-            argv=["--plan", str(plan_file)],
+            argv=[],
             client=client,
         )
     )
@@ -406,64 +413,13 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
     assert client.calls[1].model == "gpt-5.4"
 
 
-# ---------------------------------------------------------------------------
-# stage_inputs wiring: local pipeline reads instructions from state.json
-# ---------------------------------------------------------------------------
-
-
-def test_local_stage_inputs_instructions_reach_plan(
-    tmp_path, monkeypatch, make_state_dir
-):
-    """stage_inputs["instructions"] from state.json is passed to the plan agent stage
-    and takes precedence over the CLI positional argument."""
-    gremlin_id = "test-si-local"
-    state_dir = make_state_dir(gremlin_id)
-
-    sf = state_dir / "state.json"
-    state = json.loads(sf.read_text())
-    state["stage_inputs"] = {"instructions": "instr from state"}
-    sf.write_text(json.dumps(state))
-
-    artifact_dir = tmp_path / "artifacts"
-    artifact_dir.mkdir()
-
-    monkeypatch.chdir(tmp_path)
-    _common_patches(monkeypatch)
-    monkeypatch.setattr(
-        "gremlins.executor.run.resolve_artifact_dir",
-        lambda gremlin_id=None: artifact_dir,
-    )
-
-    client = _ReviewCreatingClient(
-        fixtures={
-            "plan": MINIMAL_EVENTS,
-            "implement": MINIMAL_EVENTS,
-            **{lbl: MINIMAL_EVENTS for lbl in _REVIEW_LABELS},
-            "address-code": MINIMAL_EVENTS,
-        }
-    )
-
-    result = asyncio.run(
-        run_pipeline(
-            _local_pipeline_path(tmp_path),
-            argv=["instr from cli"],
-            client=client,
-            gremlin_id=gremlin_id,
-        )
-    )
-
-    assert result == 0
-    plan_call = next(c for c in client.calls if c.label == "plan")
-    assert "instr from state" in plan_call.prompt
-
-
 def test_plan_skip_if_exists_on_resume(tmp_path, monkeypatch):
     """Resume: plan stage is skipped when plan artifact is already verified."""
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()
     (artifact_dir / "plan.md").write_text("# Plan\nDo stuff.\n", encoding="utf-8")
     (tmp_path / "registry.json").write_text(
-        json.dumps({"plan": "file://session/plan.md"})
+        json.dumps({"plan-document": "file://session/plan.md"})
     )
 
     monkeypatch.chdir(tmp_path)
@@ -483,7 +439,7 @@ def test_plan_skip_if_exists_on_resume(tmp_path, monkeypatch):
     result = asyncio.run(
         run_pipeline(
             _local_pipeline_path(tmp_path),
-            argv=["implement this feature"],
+            argv=[],
             client=client,
         )
     )
@@ -495,8 +451,6 @@ def test_plan_skip_if_exists_on_resume(tmp_path, monkeypatch):
 
 def test_startup_fails_in_non_git_dir(tmp_path, monkeypatch, capsys):
     """gremlins exits with a clear error when cwd is not a git repository."""
-    plan_file = tmp_path / "plan.md"
-    plan_file.write_text("# Plan\nDo stuff.\n")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         shutil, "which", lambda n: f"/fake/{n}" if n in ("claude", "git") else None
@@ -509,7 +463,7 @@ def test_startup_fails_in_non_git_dir(tmp_path, monkeypatch, capsys):
         asyncio.run(
             run_pipeline(
                 _local_pipeline_path(tmp_path),
-                argv=["--plan", str(plan_file)],
+                argv=[],
                 client=FakeClaudeClient(fixtures={}),
             )
         )
@@ -518,8 +472,6 @@ def test_startup_fails_in_non_git_dir(tmp_path, monkeypatch, capsys):
 
 def test_claude_probe_conditional_on_provider(tmp_path, monkeypatch, capsys):
     """claude missing errors only for claude provider."""
-    plan_file = tmp_path / "plan.md"
-    plan_file.write_text("# Plan\nDo stuff.\n")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         shutil,
@@ -549,7 +501,7 @@ def test_claude_probe_conditional_on_provider(tmp_path, monkeypatch, capsys):
     result = asyncio.run(
         gremlins.executor.run.run_pipeline(
             _local_pipeline_path(tmp_path),
-            argv=["--plan", str(plan_file)],
+            argv=[],
             client=Client("copilot", "gpt-4o"),
         )
     )
@@ -560,7 +512,7 @@ def test_claude_probe_conditional_on_provider(tmp_path, monkeypatch, capsys):
         asyncio.run(
             gremlins.executor.run.run_pipeline(
                 _local_pipeline_path(tmp_path),
-                argv=["--plan", str(plan_file)],
+                argv=[],
                 client=Client("claude", "sonnet"),
             )
         )
