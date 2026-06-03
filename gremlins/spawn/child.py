@@ -14,7 +14,6 @@ Spec file schema (JSON):
         "attempt":         <str|null>   attempt id for this child (overrides state.json)
         "parent_stage":    <str>        parent stage name for sub-stage tracking
         "repo":            <str>        "owner/repo" for gh API calls (from parent)
-        "instructions":    <str>        freeform instructions forwarded from parent
         "base_ref":        <str|null>   base branch/ref name for prompt template substitution (e.g. "main"); omitted or null → ""
     }
 
