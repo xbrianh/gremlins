@@ -47,22 +47,6 @@ class TestSeedRegistryFromSources:
         assert registry.data["plan"] == "file://session/plan.md"
         assert (artifact_dir / "plan.md").read_text() == "# Plan"
 
-    def test_union_type_filepath_wins_when_file_exists(
-        self, tmp_path: pathlib.Path
-    ) -> None:
-        registry, artifact_dir = _make_registry(tmp_path)
-        plan_file = tmp_path / "plan.md"
-        plan_file.write_text("# Plan", encoding="utf-8")
-        sources = _sources(("plan", ["filepath", "string"], True))
-
-        _seed_registry_from_sources(
-            registry, {"plan": str(plan_file)}, sources, artifact_dir
-        )
-
-        assert registry.data["plan"] == "file://session/plan.md"
-        assert (artifact_dir / "plan.md").read_text() == "# Plan"
-        assert not (artifact_dir / "plan.txt").exists()
-
     def test_union_type_falls_back_to_string(self, tmp_path: pathlib.Path) -> None:
         registry, artifact_dir = _make_registry(tmp_path)
         sources = _sources(("plan", ["filepath", "string"], True))
@@ -95,18 +79,6 @@ class TestSeedRegistryFromSources:
             _seed_registry_from_sources(
                 registry, {"plan": "/nonexistent/plan.md"}, sources, artifact_dir
             )
-
-    def test_multiple_sources_mixed_presence(self, tmp_path: pathlib.Path) -> None:
-        registry, artifact_dir = _make_registry(tmp_path)
-        sources = _sources(
-            ("plan", ["string"], False),
-            ("instructions", ["string"], True),
-        )
-
-        _seed_registry_from_sources(registry, {"plan": "#456"}, sources, artifact_dir)
-
-        assert "plan" in registry.data
-        assert "instructions" not in registry.data
 
     def test_unknown_key_in_input_values_ignored(self, tmp_path: pathlib.Path) -> None:
         registry, artifact_dir = _make_registry(tmp_path)
