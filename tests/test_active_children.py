@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State, StateData, build_state
+from gremlins.executor.state import GremlinWrapper, StateData, build_state
 from gremlins.fleet.render import build_row
 from gremlins.fleet.views import _gremlin_to_json  # type: ignore[reportPrivateUsage]
 from gremlins.protocols import GremlinProtocol
@@ -21,26 +21,6 @@ from gremlins.stages.parallel import ParallelStage
 from gremlins.stages.sequence import SequenceStage
 
 
-class _GremlinWrapper:
-    """Minimal wrapper to satisfy GremlinProtocol for testing."""
-
-    def __init__(self, state: State) -> None:
-        self.state = state
-        self.registry = state.artifacts
-
-    async def fork(
-        self,
-        state: State,  # type: ignore[reportUnusedVariable]
-        target_id: str,  # type: ignore[reportUnusedVariable]
-        *,
-        parent_id: str = "",  # type: ignore[reportUnusedVariable]
-        group_name: str = "",  # type: ignore[reportUnusedVariable]
-        child_key: str = "",  # type: ignore[reportUnusedVariable]
-        pipeline: Any | None = None,  # type: ignore[reportUnusedVariable]
-    ) -> State:
-        raise NotImplementedError("fork not supported in test wrapper")
-
-
 def _stateful(tmp_path: pathlib.Path, gid: str = "test-id") -> GremlinProtocol:
     sf = tmp_path / "state.json"
     sf.write_text(json.dumps({"id": gid}), encoding="utf-8")
@@ -49,7 +29,7 @@ def _stateful(tmp_path: pathlib.Path, gid: str = "test-id") -> GremlinProtocol:
         client=FakeClaudeClient(),
         artifact_dir=tmp_path,
     )
-    return _GremlinWrapper(state)
+    return GremlinWrapper(state)
 
 
 def _read_state(tmp_path: pathlib.Path) -> dict[str, Any]:

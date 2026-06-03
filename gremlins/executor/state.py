@@ -25,7 +25,7 @@ from gremlins.utils.state_file import locked_update
 if TYPE_CHECKING:
     from gremlins.pipeline import Pipeline
 
-from gremlins.protocols import StageProtocol
+from gremlins.protocols import GremlinProtocol, StageProtocol
 from gremlins.stages.outcome import Done
 
 logger = logging.getLogger(__name__)
@@ -450,14 +450,6 @@ class State:
     )
 
     @property
-    def state(self) -> State:
-        return self
-
-    @state.setter
-    def state(self, value: State) -> None:
-        pass
-
-    @property
     def registry(self) -> ArtifactRegistry:
         return self.artifacts
 
@@ -522,7 +514,7 @@ class State:
         scope: Sequence[StageProtocol] | None = None,
         *,
         record_stage: bool = True,
-        gremlin: Any,
+        gremlin: GremlinProtocol,
     ) -> Callable[[], Any]:
         base_state = self
         gremlin_id = self.data.gremlin_id

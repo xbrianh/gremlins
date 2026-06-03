@@ -871,7 +871,7 @@ def _exec_land_stage(
     import asyncio
 
     from gremlins.clients.client import PACKAGE_DEFAULT
-    from gremlins.executor.state import StateData, build_state
+    from gremlins.executor.state import GremlinWrapper, StateData, build_state
     from gremlins.stages.outcome import Bail
 
     state = build_state(
@@ -882,15 +882,7 @@ def _exec_land_stage(
         artifacts=registry,
     )
 
-    class _LandGremlinWrapper:
-        def __init__(self, st: Any) -> None:
-            self.state = st
-            self.registry = getattr(st, "artifacts", None)
-
-        async def fork(self) -> None:
-            raise NotImplementedError("fork not supported in land context")
-
-    wrapper = _LandGremlinWrapper(state)
+    wrapper = GremlinWrapper(state)
     try:
         asyncio.run(land_stage.run(wrapper))
         return True

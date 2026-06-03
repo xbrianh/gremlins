@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from gremlins.artifacts.uri import Uri
-from gremlins.executor.state import State as RuntimeState
+from gremlins.executor.state import GremlinWrapper, State as RuntimeState
 from gremlins.executor.state import StateData, build_state
 from gremlins.stages.exec import Exec as Cmd
 from gremlins.stages.loop import LoopStage, head_stable, max_iters
@@ -20,15 +20,6 @@ def _fake_client() -> Any:
     from gremlins.clients.fake import FakeClaudeClient
 
     return FakeClaudeClient(fixtures={})
-
-
-class _GremlinWrapper:
-    def __init__(self, state):
-        self.state = state
-        self.registry = state.artifacts
-
-    async def fork(self, *args, **kwargs):
-        raise NotImplementedError("fork not supported in tests")
 
 
 def _loop_state(tmp_path: Any) -> RuntimeState:
@@ -60,7 +51,7 @@ def test_loop_head_stable_exits_cleanly(tmp_path):
 
     loop = LoopStage("loop", body_runners=[runner], max_iterations=3)
     state = _loop_state(tmp_path)
-    outcome = asyncio.run(loop.run(_GremlinWrapper(state)))
+    outcome = asyncio.run(loop.run(GremlinWrapper(state)))
 
     assert outcome == Done()
     assert calls == ["run"]
@@ -82,7 +73,7 @@ def test_loop_cmd_failure_then_fix_then_green(tmp_path):
         return Done()
 
     loop = LoopStage("loop", body_runners=[check, fix], max_iterations=3)
-    asyncio.run(loop.run(_GremlinWrapper(loop_state)))
+    asyncio.run(loop.run(GremlinWrapper(loop_state)))
 
     assert attempt["attempt"] == 2
     assert attempt["fixed"]
@@ -101,7 +92,7 @@ def test_loop_fix_skipped_on_success(tmp_path):
 
     loop = LoopStage("loop", body_runners=[check, fix], max_iterations=3)
     state = _loop_state(tmp_path)
-    asyncio.run(loop.run(_GremlinWrapper(state)))
+    asyncio.run(loop.run(GremlinWrapper(state)))
 
     assert fix_calls == []
 
@@ -118,7 +109,7 @@ def test_loop_exhausted_returns_bail(tmp_path):
 
     loop = LoopStage("loop", body_runners=[check, fix], max_iterations=3)
     with pytest.raises(Bail):
-        asyncio.run(loop.run(_GremlinWrapper(loop_state)))
+        asyncio.run(loop.run(GremlinWrapper(loop_state)))
 
 
 def test_loop_fix_skipped_on_final_iteration(tmp_path):
@@ -138,7 +129,7 @@ def test_loop_fix_skipped_on_final_iteration(tmp_path):
 
     loop = LoopStage("loop", body_runners=[check, fix], max_iterations=3)
     with pytest.raises(Bail):
-        asyncio.run(loop.run(_GremlinWrapper(loop_state)))
+        asyncio.run(loop.run(GremlinWrapper(loop_state)))
     # fix ran for iterations 1 and 2, NOT 3
     assert fix_calls == [1, 2]
 
@@ -152,7 +143,7 @@ def test_loop_bail_propagates_immediately(tmp_path):
     loop = LoopStage("loop", body_runners=[bail_runner], max_iterations=3)
     with pytest.raises(Bail) as exc_info:
         state = _loop_state(tmp_path)
-        asyncio.run(loop.run(_GremlinWrapper(state)))
+        asyncio.run(loop.run(GremlinWrapper(state)))
     assert "bail_class=other" in exc_info.value.reason
 
 
@@ -181,7 +172,7 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
 
     loop = LoopStage("loop", body_runners=[check, fix], max_iterations=2)
     with pytest.raises(Bail):
-        asyncio.run(loop.run(_GremlinWrapper(loop_state)))
+        asyncio.run(loop.run(GremlinWrapper(loop_state)))
 
     bail_file = state_dir / f"bail_{attempt}.json"
     assert bail_file.exists()
@@ -227,7 +218,7 @@ def test_custom_until_predicate(tmp_path):
         until=max_iters(2),
     )
     state = _loop_state(tmp_path)
-    result = asyncio.run(loop.run(_GremlinWrapper(state)))
+    result = asyncio.run(loop.run(GremlinWrapper(state)))
     assert result == Done()
 
 
@@ -312,7 +303,7 @@ def test_loop_patches_loop_iteration_to_state(tmp_path, make_state_dir):
 
     loop = LoopStage("loop", body_runners=[runner], max_iterations=3)
     with pytest.raises(Bail):
-        asyncio.run(loop.run(_GremlinWrapper(loop_state)))
+        asyncio.run(loop.run(GremlinWrapper(loop_state)))
 
     assert seen_iterations == [1, 2, 3]
 
@@ -342,7 +333,7 @@ def test_loop_unbinds_out_keys_between_iterations(tmp_path):
         body_runners=[binder],
         max_iterations=3,
     )
-    asyncio.run(loop.run(_GremlinWrapper(state)))
+    asyncio.run(loop.run(GremlinWrapper(state)))
     assert bound_count[0] == 2
 
 
@@ -371,7 +362,7 @@ def test_loop_interval_sleeps_between_iterations(tmp_path, monkeypatch):
         return Done()
 
     loop = LoopStage("loop", body_runners=[runner], max_iterations=3, interval=5.0)
-    asyncio.run(loop.run(_GremlinWrapper(loop_state)))
+    asyncio.run(loop.run(GremlinWrapper(loop_state)))
 
     assert count[0] == 2
     assert sleep_calls == [5.0]
@@ -392,6 +383,6 @@ def test_loop_no_interval_no_sleep(tmp_path, monkeypatch):
 
     loop = LoopStage("loop", body_runners=[runner], max_iterations=3)
     state = _loop_state(tmp_path)
-    asyncio.run(loop.run(_GremlinWrapper(state)))
+    asyncio.run(loop.run(GremlinWrapper(state)))
 
     assert sleep_calls == []

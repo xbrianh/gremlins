@@ -10,7 +10,7 @@ import textwrap
 import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import StateData, build_state
+from gremlins.executor.state import GremlinWrapper, StateData, build_state
 from gremlins.pipeline import Pipeline
 from gremlins.stages.outcome import Bail
 
@@ -45,15 +45,6 @@ class _SignalClient(FakeClaudeClient):
         return await super().run(prompt, label=label, **kwargs)
 
 
-class _GremlinWrapper:
-    def __init__(self, state):
-        self.state = state
-        self.registry = state.artifacts
-
-    async def fork(self, *args, **kwargs):
-        raise NotImplementedError("fork not supported in tests")
-
-
 def _make_loop(tmp_path: pathlib.Path, worktree: pathlib.Path, signal: dict):
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -70,7 +61,7 @@ def _make_loop(tmp_path: pathlib.Path, worktree: pathlib.Path, signal: dict):
         artifact_dir=artifact_dir,
         worktree=worktree,
     )
-    return _GremlinWrapper(state), state, loop_stage
+    return GremlinWrapper(state), state, loop_stage
 
 
 def test_boss_chain_done_exits_loop(sandbox, tmp_path):
