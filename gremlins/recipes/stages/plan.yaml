@@ -20,17 +20,17 @@ stages:
               exit 1
           fi
     out:
-      plan?: "file://session/plan.md"
+      plan-document?: "file://session/plan.md"
 
   - name: plan
     type: agent
-    skip_if_exists: plan
+    skip_if_exists: plan-document
     prompt:
       - "{{prompt}}"
     in:
       instructions: "instructions?"
     out:
-      plan: "file://session/plan.md"
+      plan-document: "file://session/plan.md"
     options:
       idle_timeout: 600
 

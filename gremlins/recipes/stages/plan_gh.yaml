@@ -28,17 +28,17 @@ stages:
           fi
     out:
       plan-issue-number?: "file://session/plan-issue-number.txt"
-      plan?: "gh://issue/{read:plan-issue-number}"  # must follow plan-issue-number? — {read:plan-issue-number} interpolates it
+      plan-document?: "gh://issue/{read:plan-issue-number}"  # must follow plan-issue-number? — {read:plan-issue-number} interpolates it
 
   - name: plan
     type: agent
-    skip_if_exists: plan
+    skip_if_exists: plan-document
     prompt:
       - "{{prompt}}"
     in:
       instructions: "instructions?"
     out:
-      plan: "file://session/plan.md"
+      plan-document: "file://session/plan.md"
     options:
       idle_timeout: 600
 
@@ -61,7 +61,7 @@ stages:
           printf '%s' "${url##*/}" > "{artifact_dir}/plan-issue-number.txt"
     out:
       plan-issue-number: "file://session/plan-issue-number.txt"
-      plan?: "gh://issue/{read:plan-issue-number}"
+      plan-document?: "gh://issue/{read:plan-issue-number}"
 
   - name: update-description
     type: exec

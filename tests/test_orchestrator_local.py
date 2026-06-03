@@ -31,7 +31,7 @@ def test_local_main_plan_mode(tmp_path, monkeypatch):
     # Pre-seed plan artifact so the plan stage is skipped (skip_if_exists)
     (artifact_dir / "plan.md").write_text("# Plan\nDo stuff.\n")
     (tmp_path / "registry.json").write_text(
-        json.dumps({"plan": "file://session/plan.md"})
+        json.dumps({"plan-document": "file://session/plan.md"})
     )
 
     monkeypatch.chdir(tmp_path)
@@ -71,7 +71,7 @@ def test_local_main_resume_from_review_code_requires_git_changes(
     artifact_dir.mkdir()
     (artifact_dir / "plan.md").write_text("# Plan\nDo stuff.\n")
     (tmp_path / "registry.json").write_text(
-        json.dumps({"plan": "file://session/plan.md"})
+        json.dumps({"plan-document": "file://session/plan.md"})
     )
 
     monkeypatch.chdir(tmp_path)
@@ -106,7 +106,7 @@ def test_local_main_resume_from_review_code_allows_existing_git_changes(
     artifact_dir.mkdir()
     (artifact_dir / "plan.md").write_text("# Plan\nDo stuff.\n")
     (tmp_path / "registry.json").write_text(
-        json.dumps({"plan": "file://session/plan.md"})
+        json.dumps({"plan-document": "file://session/plan.md"})
     )
 
     monkeypatch.chdir(tmp_path)
@@ -148,7 +148,7 @@ def test_local_main_client_specifier_model(tmp_path, monkeypatch):
     # Pre-seed plan artifact so plan stage is skipped
     (artifact_dir / "plan.md").write_text("# Plan\nDo stuff.\n")
     (tmp_path / "registry.json").write_text(
-        json.dumps({"plan": "file://session/plan.md"})
+        json.dumps({"plan-document": "file://session/plan.md"})
     )
 
     monkeypatch.chdir(tmp_path)
@@ -359,7 +359,7 @@ def test_local_main_pipeline_default_client_model(tmp_path, monkeypatch):
     # Pre-seed plan artifact so plan stage is skipped
     (artifact_dir / "plan.md").write_text("# Plan\nDo stuff.\n")
     (tmp_path / "registry.json").write_text(
-        json.dumps({"plan": "file://session/plan.md"})
+        json.dumps({"plan-document": "file://session/plan.md"})
     )
 
     monkeypatch.chdir(tmp_path)
@@ -419,7 +419,7 @@ def test_plan_skip_if_exists_on_resume(tmp_path, monkeypatch):
     artifact_dir.mkdir()
     (artifact_dir / "plan.md").write_text("# Plan\nDo stuff.\n", encoding="utf-8")
     (tmp_path / "registry.json").write_text(
-        json.dumps({"plan": "file://session/plan.md"})
+        json.dumps({"plan-document": "file://session/plan.md"})
     )
 
     monkeypatch.chdir(tmp_path)

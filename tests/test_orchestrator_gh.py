@@ -182,7 +182,7 @@ def _patch_common(
     # this keeps publish-as-issue's bind idempotent (same URI, no DuplicateArtifact).
     registry_data: dict = {
         "spec": "file://session/spec.md",
-        "plan": "gh://issue/42",
+        "plan-document": "gh://issue/42",
         "plan-draft": "file://session/plan.md",
         "pr-url": "file://session/pr-url.txt",
         "pr-branch": "file://session/pr-branch.txt",
@@ -271,7 +271,7 @@ def _prepare_for_plan_stage(tmp_path: pathlib.Path) -> None:
     """Remove plan so skip_if_exists does not skip the plan stage."""
     reg_path = tmp_path / "registry.json"
     reg = json.loads(reg_path.read_text())
-    reg.pop("plan", None)
+    reg.pop("plan-document", None)
     reg_path.write_text(json.dumps(reg))
 
 
