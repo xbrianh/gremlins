@@ -278,14 +278,17 @@ class Gremlin:
         for nested in body:
             self._set_gremlin_recursive(nested)
 
-    def _collect_stages(
-        self, stages: Sequence[StageProtocol]
-    ) -> list[tuple[str, Callable[[], Awaitable[Any]]]]:
-        cwd = (
+    def _resolve_cwd(self) -> str:
+        return (
             str(self.worktree_dir)
             if self.worktree_dir is not None
             else (self.project_root or str(pathlib.Path.cwd()))
         )
+
+    def _collect_stages(
+        self, stages: Sequence[StageProtocol]
+    ) -> list[tuple[str, Callable[[], Awaitable[Any]]]]:
+        cwd = self._resolve_cwd()
         built: list[tuple[str, Callable[[], Awaitable[Any]]]] = []
         for e in stages:
             self._set_gremlin_recursive(e)
@@ -303,13 +306,12 @@ class Gremlin:
                 base_ref=self.base_ref,
             )
             base_runner = stage_state.make_runner(e, scope=stages)
-            gremlin_ref = self
 
             async def _set_state_and_run(
                 runner: Callable[[], Awaitable[Any]] = base_runner,
                 state: State = stage_state,
             ) -> Any:
-                gremlin_ref.state = state
+                self.state = state
                 return await runner()
 
             built.append((e.name, _set_state_and_run))
@@ -529,11 +531,7 @@ class Gremlin:
                 _git_mod.remove_worktree(self.project_root, worktree_created)
             raise
 
-        cwd = (
-            str(self.worktree_dir)
-            if self.worktree_dir is not None
-            else (self.project_root or str(pathlib.Path.cwd()))
-        )
+        cwd = self._resolve_cwd()
         self.state = build_state(
             data=StateData(gremlin_id=self.gremlin_id, state_file=self.state_file),
             client=resolved_client or PACKAGE_DEFAULT,

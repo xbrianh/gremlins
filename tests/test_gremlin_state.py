@@ -135,7 +135,6 @@ def test_gremlin_state_set_before_stage_run(project_dir, pipeline_yaml, sandbox)
     )
 
     stage = StateCapturingStage()
-    gremlin._set_gremlin_recursive(stage)
 
     collected = gremlin._collect_stages([stage])
     assert len(collected) > 0
