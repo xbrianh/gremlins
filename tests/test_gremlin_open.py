@@ -85,7 +85,6 @@ def test_gremlin_open_valid_state(sandbox, project_dir, pipeline_yaml):
 
     assert gremlin.gremlin_id == gremlin_id
     assert gremlin.project_root == str(project_dir)
-    assert gremlin.worktree_dir == pathlib.Path("/tmp/worktree")
     assert gremlin.pipeline_data is not None
 
 

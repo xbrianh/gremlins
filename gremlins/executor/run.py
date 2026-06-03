@@ -261,7 +261,7 @@ async def run_pipeline(
     _env_file = paths.project_overlay_dir(_project_root) / "env"
     if _env_file.is_file():
         os.environ["GREMLINS_WORKTREE_PATH"] = (
-            str(gremlin.worktree_dir) if gremlin.worktree_dir else ""
+            str(gremlin.worktree) if gremlin.worktree else ""
         )
         os.environ["GREMLINS_ARTIFACT_DIR"] = str(gremlin.artifact_dir)
         try:

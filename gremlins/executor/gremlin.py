@@ -140,7 +140,7 @@ class Gremlin:
         self.state_dir = state_dir
         self.gremlin_id = gremlin_id
         self.pipeline_data = pipeline_data
-        self.worktree_dir = worktree_dir
+        self._worktree_dir = worktree_dir
         self.worktree_parent = worktree_parent
         self.resume_from = resume_from
         self.repo = repo
@@ -332,8 +332,8 @@ class Gremlin:
     @property
     def _resolved_cwd(self) -> str:
         return (
-            str(self.worktree_dir)
-            if self.worktree_dir is not None
+            str(self._worktree_dir)
+            if self._worktree_dir is not None
             else (self.project_root or str(pathlib.Path.cwd()))
         )
 
@@ -357,7 +357,7 @@ class Gremlin:
                 pipeline_data=self.pipeline_data,
                 repo=self.repo,
                 cwd=self._resolved_cwd,
-                worktree=self.worktree_dir,
+                worktree=self._worktree_dir,
                 worktree_parent=self.worktree_parent,
                 artifacts=self.registry,
                 base_ref=self._base_ref_init,
@@ -541,7 +541,7 @@ class Gremlin:
 
         worktree_created: str | None = None
         try:
-            if self.worktree_dir is None and self.project_root and self.gremlin_id:
+            if self._worktree_dir is None and self.project_root and self.gremlin_id:
                 workdir = _git_mod.setup_workdir(
                     self.project_root,
                     self.base_ref_sha,
@@ -550,7 +550,7 @@ class Gremlin:
                     worktree_parent=self.worktree_parent,
                 )
                 worktree_created = workdir
-                self.worktree_dir = pathlib.Path(workdir)
+                self._worktree_dir = pathlib.Path(workdir)
                 st = StateData.load(self.gremlin_id)
                 st.patch(
                     workdir=workdir,
@@ -558,12 +558,12 @@ class Gremlin:
                     setup_kind="worktree-detached",
                 )
 
-            if self.worktree_dir is not None:
-                os.chdir(self.worktree_dir)
+            if self._worktree_dir is not None:
+                os.chdir(self._worktree_dir)
 
             self.registry = ArtifactRegistry(
                 artifact_dir=self.artifact_dir,
-                cwd=self.worktree_dir,
+                cwd=self._worktree_dir,
             )
             for key, value in (stage_inputs or {}).items():
                 if value is not None and not self.registry.produced(key):
@@ -571,7 +571,7 @@ class Gremlin:
             if not self.registry.produced("spec"):
                 self.registry.bind("spec", Uri.parse("file://session/spec.md"))
             if not self.registry.produced("base_sha"):
-                sha = _git_mod.head_sha(cwd=self.worktree_dir)
+                sha = _git_mod.head_sha(cwd=self._worktree_dir)
                 if sha:
                     self.registry.bind("base_sha", Uri.parse(f"git://commit/{sha}"))
 
@@ -582,7 +582,7 @@ class Gremlin:
                 pipeline_data=self.pipeline_data,
                 repo=self.repo,
                 cwd=self._resolved_cwd,
-                worktree=self.worktree_dir,
+                worktree=self._worktree_dir,
                 worktree_parent=self.worktree_parent,
                 artifacts=self.registry,
                 base_ref=base_ref,

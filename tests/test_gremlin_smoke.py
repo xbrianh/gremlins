@@ -84,7 +84,7 @@ def test_gremlin_run_in_process(project_dir, pipeline_yaml, sandbox):
             pipeline_ref=str(pipeline_yaml),
             project_root=str(project_dir),
         )
-        worktree = gremlin.worktree_dir
+        worktree = gremlin.worktree
         asyncio.run(gremlin.run())
         rc = 0
     finally:
@@ -148,30 +148,35 @@ def test_gremlin_state_delegates_after_initialize(project_dir, pipeline_yaml, sa
     gremlin_id = "state-delegates-abc123"
     sd = sandbox.state / gremlin_id
 
-    gremlin = Gremlin.initialize_with_runtime(
-        gremlin_id=gremlin_id,
-        state_dir=sd,
-        project_dir=project_dir,
-        pipeline_ref=str(pipeline_yaml),
-        project_root=str(project_dir),
-        base_ref="main",
-        repo="test/repo",
-    )
+    saved_cwd = os.getcwd()
+    worktree = None
+    try:
+        gremlin = Gremlin.initialize_with_runtime(
+            gremlin_id=gremlin_id,
+            state_dir=sd,
+            project_dir=project_dir,
+            pipeline_ref=str(pipeline_yaml),
+            project_root=str(project_dir),
+            base_ref="main",
+            repo="test/repo",
+        )
+        worktree = gremlin.worktree
 
-    # Test that state is initialized after initialize_with_runtime
-    assert gremlin.state is not None
-
-    # Test property delegates
-    assert isinstance(gremlin.artifact_dir, pathlib.Path)
-    assert gremlin.artifact_dir == sd / "artifacts"
-    assert gremlin.artifacts is not None
-    assert isinstance(gremlin.artifacts, ArtifactRegistry)
-    assert gremlin.client is not None
-    assert isinstance(gremlin.cwd, str)
-    assert gremlin.base_ref == "main"
-    assert gremlin.repo == "test/repo"
-    assert gremlin.loop_iteration == 1
-    assert gremlin.attempt == ""
+        assert gremlin.state is not None
+        assert isinstance(gremlin.artifact_dir, pathlib.Path)
+        assert gremlin.artifact_dir == sd / "artifacts"
+        assert gremlin.artifacts is not None
+        assert isinstance(gremlin.artifacts, ArtifactRegistry)
+        assert gremlin.client is not None
+        assert isinstance(gremlin.cwd, str)
+        assert gremlin.base_ref == "main"
+        assert gremlin.repo == "test/repo"
+        assert gremlin.loop_iteration == 1
+        assert gremlin.attempt == ""
+    finally:
+        os.chdir(saved_cwd)
+        if worktree and worktree.is_dir():
+            shutil.rmtree(worktree, ignore_errors=True)
 
 
 def test_gremlin_state_unchanged_after_run(project_dir, pipeline_yaml, sandbox):
@@ -191,9 +196,8 @@ def test_gremlin_state_unchanged_after_run(project_dir, pipeline_yaml, sandbox):
             base_ref="main",
             repo="test/repo",
         )
-        worktree = gremlin.worktree_dir
+        worktree = gremlin.worktree
 
-        # Capture state values before run()
         initial_client = gremlin.client
         initial_base_ref = gremlin.base_ref
         initial_repo = gremlin.repo
@@ -201,7 +205,6 @@ def test_gremlin_state_unchanged_after_run(project_dir, pipeline_yaml, sandbox):
         asyncio.run(gremlin.run())
         rc = 0
 
-        # Assert state still reflects canonical values after run()
         assert gremlin.client == initial_client
         assert gremlin.base_ref == initial_base_ref
         assert gremlin.repo == initial_repo
