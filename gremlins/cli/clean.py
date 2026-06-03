@@ -96,7 +96,7 @@ def clean_main(argv: list[str]) -> int:
     parser.add_argument(
         "--state",
         action="store_true",
-        help="enable deletion of state directories (required without --all/--failed/--finished)",
+        help="required to enable deletion when no filter (--all/--failed/--finished) is given",
     )
     parser.add_argument(
         "--all",
@@ -117,7 +117,7 @@ def clean_main(argv: list[str]) -> int:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="print what would be deleted without deleting anything",
+        help="print a summary of what would be deleted without deleting anything",
     )
     parser.add_argument(
         "--yes", "-y", action="store_true", help="skip the confirmation prompt"
