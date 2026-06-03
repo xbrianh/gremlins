@@ -767,3 +767,109 @@ def test_parallel_child_set_stage_with_sub_stage_payload_writes_parent_as_stage(
     data = _read_state(sf)
     assert data["stage"] == "reviews"
     assert data["sub_stage"] == "github-review-pull-request"
+
+
+def test_fanin_allows_child_worktree_mutations(tmp_path, sandbox, caplog):
+    """Child worktrees with mutations (commits or dirty files) should not crash
+    fan-in, and mutations should be logged before teardown."""
+    import logging
+
+    caplog.set_level(logging.WARNING)
+    gremlin_id = "gr-child-mutations"
+    _make_state(sandbox.state, gremlin_id)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "README.md"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "init"],
+        check=True,
+        capture_output=True,
+    )
+
+    def _make_ctx(name: str) -> State:
+        return build_state(
+            data=StateData(gremlin_id=gremlin_id),
+            client=FakeClaudeClient(),
+            artifact_dir=tmp_path / name,
+            child_key=name,
+        )
+
+    async def _noop() -> None:
+        pass
+
+    # Fan-out: create worktrees for two children.
+    stages_run1 = _make_parallel_stages(
+        "reviews",
+        [("a", _make_ctx("a"), _noop), ("b", _make_ctx("b"), _noop)],
+        max_concurrent=None,
+        set_stage_fn=lambda _n: None,
+        cancel_on_bail=False,
+        bail_policy="any",
+        parent_data=StateData.load(gremlin_id),
+        project_root=repo,
+    )
+    asyncio.run(stages_run1[0][1]())  # fan-out
+
+    # Get worktree paths from state.
+    sf = state_mod.resolve_state_file(gremlin_id)
+    assert sf is not None
+    persisted = (_read_state(sf).get("parallel_worktrees") or {}).get("reviews") or {}
+    paths = {k: pathlib.Path(p) for k, p in persisted.get("paths", {}).items()}
+    assert set(paths.keys()) == {"a", "b"}
+
+    # Mutate child "a": create a commit.
+    subprocess.run(
+        ["git", "-C", str(paths["a"]), "config", "user.email", "t@t.com"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(paths["a"]), "config", "user.name", "T"],
+        check=True,
+        capture_output=True,
+    )
+    (paths["a"] / "change.txt").write_text("child mutation")
+    subprocess.run(
+        ["git", "-C", str(paths["a"]), "add", "change.txt"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(paths["a"]), "commit", "-m", "child a mutation"],
+        check=True,
+        capture_output=True,
+    )
+
+    # Mutate child "b": leave dirty files.
+    (paths["b"] / "dirty.txt").write_text("uncommitted")
+
+    # Fan-in: should not crash and should log mutations.
+    stages_run2 = _make_parallel_stages(
+        "reviews",
+        [("a", _make_ctx("a"), _noop), ("b", _make_ctx("b"), _noop)],
+        max_concurrent=None,
+        set_stage_fn=lambda _n: None,
+        cancel_on_bail=False,
+        bail_policy="any",
+        parent_data=StateData.load(gremlin_id),
+        project_root=repo,
+    )
+    caplog.clear()
+    asyncio.run(stages_run2[2][1]())  # fan-in
+
+    # Verify mutations were logged.
+    assert any("child a mutated its worktree" in r.message for r in caplog.records)
+    assert any(
+        "child b has uncommitted changes" in r.message for r in caplog.records
+    )
+
+    # Verify worktrees were torn down.
+    for p in paths.values():
+        assert not p.is_dir()
+    assert "reviews" not in (_read_state(sf).get("parallel_worktrees") or {})

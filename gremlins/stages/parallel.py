@@ -336,8 +336,32 @@ class _ParallelExecutor:
             raise
         gs.persist()
 
+    async def _log_child_worktree_mutations(self) -> None:
+        gs = self._group_state
+        for child_key, _, _ in self._child_runners:
+            wt = gs.worktree_paths.get(child_key)
+            if wt is None or not wt.is_dir():
+                continue
+            child_head = await git.head_sha_async(cwd=str(wt))
+            dirty = (await git.status_porcelain_async(cwd=str(wt))).strip()
+            if child_head and child_head != gs.base_head:
+                logger.warning(
+                    "parallel child %s mutated its worktree (HEAD=%s, base=%s) "
+                    "— mutations will be discarded on teardown (fan-in merge not yet implemented)",
+                    child_key,
+                    child_head,
+                    gs.base_head,
+                )
+            if dirty:
+                logger.warning(
+                    "parallel child %s has uncommitted changes — "
+                    "changes will be discarded on teardown (fan-in merge not yet implemented)",
+                    child_key,
+                )
+
     async def _teardown_worktrees(self) -> None:
         gs = self._group_state
+        await self._log_child_worktree_mutations()
         await git.remove_worktrees_async(
             str(self._project_root), [str(p) for p in gs.worktree_paths.values()]
         )
@@ -524,7 +548,6 @@ class _ParallelExecutor:
 
     async def _do_fan_in(self) -> None:
         await git.prune_worktrees_async(str(self._project_root))
-
         state_dir, attempts = self._group_state.read_bail_scan_inputs()
         child_keys = [k for k, _, _ in self._child_runners]
         bailed = (
