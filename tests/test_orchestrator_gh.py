@@ -583,10 +583,11 @@ def test_plan_no_h1_issue_body(tmp_path, monkeypatch):
     # Clear plan.md so resolve-plan-input actually fetches the issue (tests H1 prepend logic).
     (artifact_dir / "plan.md").write_text("", encoding="utf-8")
 
-    # Wire up plan_arg so resolve-plan-input doesn't exit at the [ -z ] guard
+    # Seed plan as a file URI containing the raw issue ref so resolve-plan-input
+    # gets $plan="#42" (matching what inputs.sources would produce at launch time).
     registry_path = tmp_path / "registry.json"
     reg = json.loads(registry_path.read_text())
-    reg["plan_arg"] = "file://session/plan-arg.txt"
+    reg["plan"] = "file://session/plan-arg.txt"
     registry_path.write_text(json.dumps(reg))
     (artifact_dir / "plan-arg.txt").write_text("#42", encoding="utf-8")
 
