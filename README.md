@@ -316,21 +316,23 @@ stages:
 **Execution and failure:** The parallel group executes in three phases:
 1. **Fan-out** — each child stage starts independently as a subprocess
 2. **Concurrent execution** — all children run simultaneously (up to `max_concurrent`)
-3. **Fan-in** — when all children finish or any child bails, the group halts
+3. **Fan-in** — all children finish or one bails; siblings continue running until group completion
 
 If any child fails (raises `Bail`), the pipeline halts after the group finishes —
-siblings are not cancelled mid-run. Subsequent stages are skipped; the operator
-can resume or ack the group via CLI.
+siblings are not cancelled mid-run by default. This can be changed with `cancel_on_bail: true`
+to cancel outstanding tasks immediately. The bail is evaluated via `bail_policy` (default: `any`,
+meaning one failed child halts the group; set `bail_policy: all` to halt only when all children bail).
+Subsequent stages are skipped; the operator can resume or ack the group via CLI.
 
 **State isolation:** Each child gets its own state directory and subprocess. 
 Client overrides, worktree paths, and artifact bindings are isolated per-child.
-Children run in parallel without blocking each other, and parent-stage state is
-not modified by child progress until fan-in completes.
+Children run in parallel without blocking each other. Parent `state.json` is updated
+during the concurrent phase (e.g., `active_children` snapshot); copying child artifact
+bindings into the parent registry is deferred until fan-in completes.
 
-**Resume targeting:** `gremlins resume` accepts both the group name (`reviews`)
-and individual child names (`review-detail`). Resuming a group re-spawns all
-children that haven't landed; resuming a child resumes only that child from its
-last recorded stage.
+**Resume targeting:** Use the full child gremlin ID (form: `<parent-id>--<group-name>--<child-key>`,
+visible in fleet view) to resume a specific child. Resuming the parent group ID re-spawns all
+children that haven't landed.
 
 **Base ref propagation:** The `--base-ref` flag is automatically propagated from
 the parent to all child processes, ensuring consistent branching across the group.
@@ -405,10 +407,12 @@ stages:
     prompt: security_review.md
 ```
 
-Definitions provide `type`, `options`, and `prompt`. Call-sites own the
-`name:`, `in:`, and `out:` keys. When a definition is used, the preprocessor
-merges the call-site's keys onto the definition's dict, letting you reuse
-common configurations while varying per-call bindings.
+Definitions provide base `type`, `options`, and `prompt`. Call-sites can override
+`prompt` and `options` via YAML anchors (as shown above) or via template placeholders
+in multi-stage recipes. Call-sites own the `name:`, `in:`, and `out:` keys;
+`out:` is forbidden inside a definition, but `in:` can be declared and will be
+merged with call-site `in:` values. For single-stage definitions, only `name`, `in`,
+and `out` keys can be safely overridden; to vary `prompt` or `options`, use anchors.
 
 ### Artifact binding
 
@@ -420,31 +424,32 @@ stages:
   - name: scan
     type: exec
     options:
-      cmds: ["python scan.py > report.json"]
+      cmds: ["python scan.py > $ARTIFACTS/report.json"]
     out:
-      findings: session://findings
+      report: file://session/report
 
   - name: analyze
     type: agent
     in:
-      findings: session://findings
+      report: report
     prompt: |
-      The scanning report is in {{findings}}.
+      The scanning report is in {report}.
       Propose fixes.
 ```
 
-**Artifact schemes:**
-- `git://ref:path` — Git artifact: a file at `path` in the commit `ref` (e.g., `git://HEAD:report.json`)
-- `session://key` — Session artifact: a value stored in the gremlin's state (used for intermediate data)
+**Artifact URI schemes:**
+- `file://session/<name>` — Session artifact: a file created under the gremlin's `$ARTIFACTS` directory
+- `git://ref/<ref>` — Git ref name (e.g., `git://ref/main` returns the string `main`)
+- `git://commit/<sha>` — Commit SHA (e.g., `git://commit/abc123def` returns the full SHA)
+- `git://range/<base>..<head>` — Commit range/log between two refs
+- `gh://pulls/<number>/head` — GitHub PR head ref (and other `gh://` schemes for GitHub data)
+- `file://`, `git://`, `gh://` — File artifact resolvers support these base schemes
 
-**Artifact resolution:**
-- `in:` keys are optional. Artifacts are available as template variables in `prompt:` and `options:` fields.
-- `out:` keys define what the stage produces. Downstream stages can reference them with `<name>` in their `in:` map.
-- Dotted keys (e.g., `findings.critical`) are valid and follow the artifact's actual structure.
-
-**Call-site ownership:** Definitions never declare `in:` or `out:`; call-sites do.
-When a stage definition is used, the call-site's artifact bindings are merged onto
-the definition, letting you reuse stage logic while varying data flows.
+**Artifact binding semantics:**
+- `in:` values are registry key paths (e.g., `report` or `report.critical?default`) with optional dotted attribute access and `?default` fallback
+- `out:` values are URI strings that name what the stage produces; downstream stages reference the key name (not the URI) in their `in:` maps
+- Prompt/option substitution uses `{var}` tokens (not `{{var}}`); artifacts bound via `in:` become available for substitution
+- `in:` can be declared in a stage definition and will be merged with call-site `in:` values; `out:` cannot appear inside a definition
 
 ### Stage definitions and bundled recipes
 
@@ -476,14 +481,15 @@ Gremlins can fail or get stuck during execution. Understanding how to recover is
 
 ### Bail semantics
 
-When a stage detects an unrecoverable condition (e.g., a code review requests changes, secrets are detected, or a merge conflict blocks progress), it raises a `Bail` exception with a reason code:
+When a stage detects an unrecoverable condition (e.g., a code review requests changes, secrets are detected, or a merge conflict blocks progress), it raises a `Bail` exception with a detail string.
 
+By convention, agent-based stages emit a `BAIL: <class>: <detail>` marker at the end of their output. The `<class>` token is conventionally one of:
 - `reviewer_requested_changes` — code review found issues that must be addressed
 - `security` — security review detected problems
 - `secrets` — credentials or sensitive data detected in the code
 - `other` — stage-specific or unknown failure condition
 
-The bail reason is persisted to `state.json` and visible in the fleet view. When a stage bails, the entire pipeline halts — subsequent stages do not run, but the gremlin's state is preserved for recovery.
+The bail detail is written to a per-attempt `bail_<attempt>.json` file in the gremlin's state directory and is visible in the fleet view. When a stage bails, the entire pipeline halts — subsequent stages do not run, but the gremlin's state is preserved for recovery.
 
 ### Recovering from gremlin failures
 
@@ -507,10 +513,10 @@ in the fleet; the new attempt begins from the start.
 ### Handling parallel group failures
 
 When a child in a parallel group bails:
-- The group halts after all currently-running children finish (not mid-run)
+- The group halts after all currently-running children finish (not mid-run), unless `cancel_on_bail: true`
 - The bail reason is attributed to the child stage name
-- `gremlins resume <id>` re-spawns all children that haven't landed
-- `gremlins resume <id> <child-name>` resumes only that child
+- `gremlins resume <parent-id>` re-spawns all children that haven't landed
+- `gremlins resume <parent-id>--<group-name>--<child-key>` resumes only that child (use the full child ID from fleet view)
 
 If the cause was a transient failure affecting multiple children, `skip` the entire
 group and re-launch the pipeline to restart all children.
