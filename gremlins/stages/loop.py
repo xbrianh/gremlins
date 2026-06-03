@@ -6,7 +6,7 @@ import asyncio
 import logging
 import pathlib
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.executor.state import State
@@ -20,9 +20,6 @@ logger = logging.getLogger(__name__)
 
 # Called after a clean (no marker) iteration; returns True to exit the loop.
 UntilFn = Callable[[State, int, str], bool]
-
-if TYPE_CHECKING:
-    pass
 
 _MARKER_KEY = "status"
 _MARKER_VALUE = "needs_fix"

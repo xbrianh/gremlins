@@ -1,5 +1,3 @@
-"""Utility functions for state management and artifact directory resolution."""
-
 from __future__ import annotations
 
 import datetime

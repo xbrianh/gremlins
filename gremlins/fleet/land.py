@@ -887,6 +887,9 @@ def _exec_land_stage(
             self.state = st
             self.registry = st.artifacts
 
+        async def fork(self) -> None:
+            raise NotImplementedError("fork not supported in land context")
+
     wrapper = _LandGremlinWrapper(state)
     try:
         asyncio.run(land_stage.run(wrapper))

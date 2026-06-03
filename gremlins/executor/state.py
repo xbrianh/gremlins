@@ -512,7 +512,7 @@ class State:
         scope: Sequence[StageProtocol] | None = None,
         *,
         record_stage: bool = True,
-        gremlin: Any | None = None,
+        gremlin: Any,
     ) -> Callable[[], Any]:
         base_state = self
         gremlin_id = self.data.gremlin_id
@@ -544,11 +544,30 @@ class State:
             ):
                 return Done()
             prepared_state = _prepare()
-            if gremlin is not None:
-                gremlin.state = prepared_state
-            return await entry.run(gremlin if gremlin is not None else prepared_state)
+            gremlin.state = prepared_state
+            return await entry.run(gremlin)
 
         return _run_async
+
+
+class _GremlinWrapper:
+    """Minimal Gremlin-like wrapper for subprocess contexts."""
+
+    def __init__(self, state: State) -> None:
+        self.state = state
+        self.registry = state.artifacts
+
+    async def fork(
+        self,
+        state: State,
+        target_id: str,
+        *,
+        parent_id: str = "",
+        group_name: str = "",
+        child_key: str = "",
+        pipeline: Any | None = None,
+    ) -> State:
+        raise NotImplementedError("fork not supported in subprocess context")
 
 
 def build_state(

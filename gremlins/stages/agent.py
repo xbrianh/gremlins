@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 from gremlins.artifacts.resolve import resolve_in_map
 from gremlins.artifacts.uri import Uri
@@ -11,9 +11,6 @@ from gremlins.protocols import GremlinProtocol
 from gremlins.stages.agent_runner import run_agent
 from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.outcome import Bail, Done, Outcome
-
-if TYPE_CHECKING:
-    pass
 
 
 class Agent(Stage):

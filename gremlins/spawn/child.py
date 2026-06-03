@@ -45,7 +45,7 @@ from typing import Any, cast
 from gremlins import paths
 from gremlins.clients.client import Client
 from gremlins.clients.registry import CLIENT_FACTORIES
-from gremlins.executor.state import State, StateData, build_state
+from gremlins.executor.state import State, StateData, _GremlinWrapper, build_state
 from gremlins.executor.state_utils import validate_gremlin_id
 from gremlins.logging_setup import configure_logging
 from gremlins.permissions.loader import load_policy
@@ -139,26 +139,6 @@ def _build_state(spec: dict[str, Any]) -> State:
 def _write_result(result_path: pathlib.Path, payload: dict[str, Any]) -> None:
     result_path.parent.mkdir(parents=True, exist_ok=True)
     result_path.write_text(json.dumps(payload), encoding="utf-8")
-
-
-class _GremlinWrapper:
-    """Minimal Gremlin-like wrapper for spawn child subprocess."""
-
-    def __init__(self, state: State) -> None:
-        self.state = state
-        self.registry = state.artifacts
-
-    async def fork(
-        self,
-        state: State,
-        target_id: str,
-        *,
-        parent_id: str = "",
-        group_name: str = "",
-        child_key: str = "",
-        pipeline: Any | None = None,
-    ) -> State:
-        raise NotImplementedError("fork not supported in spawn child")
 
 
 def _try_write_terminal(state: State, rc: int) -> None:

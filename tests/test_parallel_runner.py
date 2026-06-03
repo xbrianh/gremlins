@@ -339,9 +339,11 @@ def test_build_parallel_stages_names() -> None:
 
 def test_parallel_sequence_child_worktree_flows() -> None:
     """SequenceStage inside a parallel group sees the fanout worktree in all sub-stages."""
+    from gremlins.executor.state import _GremlinWrapper
     from gremlins.stages.base import Stage
     from gremlins.stages.outcome import Done, Outcome
     from gremlins.stages.sequence import SequenceStage
+    from gremlins.protocols import GremlinProtocol
 
     observed: list[pathlib.Path | None] = []
 
@@ -349,8 +351,8 @@ def test_parallel_sequence_child_worktree_flows() -> None:
         def __init__(self, name: str) -> None:
             super().__init__(name)
 
-        async def run(self, state: State) -> Outcome:
-            observed.append(state.worktree)
+        async def run(self, gremlin: GremlinProtocol) -> Outcome:
+            observed.append(gremlin.state.worktree)
             return Done()
 
     seq_stage = SequenceStage("seq", body=[_CaptureStage("a"), _CaptureStage("b")])
@@ -363,7 +365,8 @@ def test_parallel_sequence_child_worktree_flows() -> None:
     )
 
     async def seq_runner() -> None:
-        await seq_stage.run(seq_ctx)
+        gremlin = _GremlinWrapper(seq_ctx)
+        await seq_stage.run(gremlin)
 
     project_root = pathlib.Path.cwd()
     stages = _make_parallel_stages(
@@ -401,48 +404,54 @@ def test_run_stages_async_callable_executes() -> None:
 
 
 def test_make_runner_returns_async_for_any_stage() -> None:
+    from gremlins.executor.state import _GremlinWrapper
     from gremlins.stages.base import Stage
     from gremlins.stages.outcome import Done, Outcome
+    from gremlins.protocols import GremlinProtocol
 
     class AStage(Stage):
         type = "a-test"
 
-        async def run(self, state: State) -> Outcome:
+        async def run(self, gremlin: GremlinProtocol) -> Outcome:
             return Done()
 
     state = build_state(
         data=StateData(), client=FakeClaudeClient(), artifact_dir=pathlib.Path("/tmp")
     )
-    runner = state.make_runner(AStage("a"))
+    gremlin = _GremlinWrapper(state)
+    runner = state.make_runner(AStage("a"), gremlin=gremlin)
     assert inspect.iscoroutinefunction(runner)
 
 
 def test_stages_run_in_order_via_make_runner() -> None:
+    from gremlins.executor.state import _GremlinWrapper
     from gremlins.stages.base import Stage
     from gremlins.stages.outcome import Done, Outcome
+    from gremlins.protocols import GremlinProtocol
 
     executed: list[str] = []
 
     class StageA(Stage):
         type = "stage-a"
 
-        async def run(self, state: State) -> Outcome:
+        async def run(self, gremlin: GremlinProtocol) -> Outcome:
             executed.append("a")
             return Done()
 
     class StageB(Stage):
         type = "stage-b"
 
-        async def run(self, state: State) -> Outcome:
+        async def run(self, gremlin: GremlinProtocol) -> Outcome:
             executed.append("b")
             return Done()
 
     base_state = build_state(
         data=StateData(), client=FakeClaudeClient(), artifact_dir=pathlib.Path("/tmp")
     )
+    gremlin = _GremlinWrapper(base_state)
     stages = [
-        ("a", base_state.make_runner(StageA("a"))),
-        ("b", base_state.make_runner(StageB("b"))),
+        ("a", base_state.make_runner(StageA("a"), gremlin=gremlin)),
+        ("b", base_state.make_runner(StageB("b"), gremlin=gremlin)),
     ]
     asyncio.run(run_stages(stages))
     assert executed == ["a", "b"]
