@@ -94,7 +94,9 @@ def clean_main(argv: list[str]) -> int:
         description="Delete completed gremlin state and artifacts.",
     )
     parser.add_argument(
-        "--state", action="store_true", help="enable deletion of state directories (required without --all/--failed/--finished)"
+        "--state",
+        action="store_true",
+        help="enable deletion of state directories (required without --all/--failed/--finished)",
     )
     parser.add_argument(
         "--all",
