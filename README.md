@@ -127,7 +127,7 @@ Common infrastructure flags (accepted by all pipelines):
 | `--parent <id>` | — | Parent gremlin ID (used by boss to track child ownership) |
 | `--print-id` | false | Print the gremlin ID to stdout after launch |
 | `-c`/`--instructions <text>` | — | Instructions string (mutually exclusive with `--plan`) |
-| `--base-ref <ref>` | `HEAD` | Git ref to branch the worktree from; ignored for gh pipelines (always anchors to origin default branch) |
+| `--base-ref <ref>` | `HEAD` | Git ref to branch the worktree from; ignored for gh pipelines (always anchors to origin default branch). In parallel pipelines, automatically propagated to all child processes. |
 | `--spec <path>` | — | Path to a coding-style spec file passed into stages |
 | `--bypass` | false | Skip permission checks; run in bypass mode |
 
@@ -313,9 +313,30 @@ stages:
     type: agent
 ```
 
-If any child fails, the pipeline halts after the group finishes — siblings
-are not cancelled mid-run. `gremlins resume` accepts both the group name
-(`reviews`) and individual child names (`review-detail`).
+**Execution and failure:** The parallel group executes in three phases:
+1. **Fan-out** — each child stage starts independently as a subprocess
+2. **Concurrent execution** — all children run simultaneously (up to `max_concurrent`)
+3. **Fan-in** — all children finish or one bails; siblings continue running until group completion
+
+If any child fails (raises `Bail`), the pipeline halts after the group finishes —
+siblings are not cancelled mid-run by default. This can be changed with `cancel_on_bail: true`
+to cancel outstanding tasks immediately. The bail is evaluated via `bail_policy` (default: `any`,
+meaning one failed child halts the group; set `bail_policy: all` to halt only when all children bail).
+Subsequent stages are skipped; the operator can resume or ack the group via CLI.
+
+**State isolation:** Each child gets its own state directory and subprocess. 
+Client overrides, worktree paths, and artifact bindings are isolated per-child.
+Children run in parallel without blocking each other. Parent `state.json` is updated
+during the concurrent phase (e.g., `active_children` snapshot); copying child artifact
+bindings into the parent registry is deferred until fan-in completes.
+
+**Resume targeting:** Use the full child gremlin ID (form: `<parent-id>--<group-name>--<child-key>`,
+visible in fleet view) to resume a specific child. Resuming the parent group ID re-spawns all
+children that haven't landed.
+
+**Base ref propagation:** The `--base-ref` flag is automatically propagated from
+the parent to all child processes, ensuring consistent branching across the group.
+Child worktrees are derived from the parent's base_ref as recorded in state.
 
 ### Worked example: project-local override
 
@@ -364,6 +385,72 @@ stages:
 Note: `review-code` does not currently support per-stage prompt overrides
 via YAML — both passes use the built-in detail lens.
 
+### Stage definitions
+
+YAML `stage-definitions:` lets you name and reuse stage patterns within a pipeline:
+
+```yaml
+stage-definitions:
+  review-base: &review-base
+    type: review-code
+    client: claude:sonnet
+    prompt: gremlins:code_style.md
+
+stages:
+  - { type: plan }
+  - { type: implement }
+  - name: review-detail
+    <<: *review-base
+    prompt: [gremlins:code_style.md, detail_review.md]
+  - name: review-security
+    <<: *review-base
+    prompt: security_review.md
+```
+
+Definitions provide base `type`, `options`, and `prompt`. Call-sites can override
+`prompt` and `options` via YAML anchors (as shown above) or via template placeholders
+in multi-stage recipes. Call-sites own the `name:`, `in:`, and `out:` keys;
+`out:` is forbidden inside a definition, but `in:` can be declared and will be
+merged with call-site `in:` values. For single-stage definitions, only `name`, `in`,
+and `out` keys can be safely overridden; to vary `prompt` or `options`, use anchors.
+
+### Artifact binding
+
+Stages can bind artifacts via `in:` and `out:` maps. These define what data
+flows between stages in the pipeline:
+
+```yaml
+stages:
+  - name: scan
+    type: exec
+    options:
+      cmds: ["python scan.py > $ARTIFACTS/report.json"]
+    out:
+      report: file://session/report
+
+  - name: analyze
+    type: agent
+    in:
+      report: report
+    prompt: |
+      The scanning report is in {report}.
+      Propose fixes.
+```
+
+**Artifact URI schemes:**
+- `file://session/<name>` — Session artifact: a file created under the gremlin's `$ARTIFACTS` directory
+- `git://ref/<ref>` — Git ref name (e.g., `git://ref/main` returns the string `main`)
+- `git://commit/<sha>` — Commit SHA (e.g., `git://commit/abc123def` returns the full SHA)
+- `git://range/<base>..<head>` — Commit range/log between two refs
+- `gh://pulls/<number>/head` — GitHub PR head ref (and other `gh://` schemes for GitHub data)
+- `file://`, `git://`, `gh://` — File artifact resolvers support these base schemes
+
+**Artifact binding semantics:**
+- `in:` values are registry key paths (e.g., `report` or `report.critical?default`) with optional dotted attribute access and `?default` fallback
+- `out:` values are URI strings that name what the stage produces; downstream stages reference the key name (not the URI) in their `in:` maps
+- Prompt/option substitution uses `{var}` tokens (not `{{var}}`); artifacts bound via `in:` become available for substitution
+- `in:` can be declared in a stage definition and will be merged with call-site `in:` values; `out:` cannot appear inside a definition
+
 ### Stage definitions and bundled recipes
 
 Some stage types are not built-in — they are provided as bundled YAML recipes and must be wired in via `stage-definitions:` before use:
@@ -387,6 +474,63 @@ The canonical reference pipelines:
 - [`gremlins/pipelines/gh-terse.yaml`](gremlins/pipelines/gh-terse.yaml) — `gremlins launch gh-terse`
 - [`gremlins/pipelines/pr-extend.yaml`](gremlins/pipelines/pr-extend.yaml) — `gremlins launch pr-extend`
 - [`gremlins/pipelines/boss.yaml`](gremlins/pipelines/boss.yaml) — `gremlins launch boss`
+
+## Error handling and recovery
+
+Gremlins can fail or get stuck during execution. Understanding how to recover is essential for running long-running pipelines.
+
+### Bail semantics
+
+When a stage detects an unrecoverable condition (e.g., a code review requests changes, secrets are detected, or a merge conflict blocks progress), it raises a `Bail` exception with a detail string.
+
+By convention, agent-based stages emit a `BAIL: <class>: <detail>` marker at the end of their output. The `<class>` token is conventionally one of:
+- `reviewer_requested_changes` — code review found issues that must be addressed
+- `security` — security review detected problems
+- `secrets` — credentials or sensitive data detected in the code
+- `other` — stage-specific or unknown failure condition
+
+The bail detail is written to a per-attempt `bail_<attempt>.json` file in the gremlin's state directory and is visible in the fleet view. When a stage bails, the entire pipeline halts — subsequent stages do not run, but the gremlin's state is preserved for recovery.
+
+### Recovering from gremlin failures
+
+When a gremlin bails and halts, you have three recovery options:
+
+**`gremlins resume <id>`** — Re-spawn the bailed gremlin from the stage where it
+bailed. Use this when the cause has been fixed externally (e.g., a code review
+fix has been merged, or a merge conflict has been resolved). The gremlin will
+restart from the bailed stage with the current worktree state.
+
+**`gremlins ack <id>`** — Acknowledge the gremlin without re-running. Use this
+when the bailed condition is acceptable (e.g., the review found minor style
+issues that don't block landing, or external work was already completed). The
+gremlin marks the bailed stage as complete and proceeds to subsequent stages.
+
+**`gremlins skip <id>`** — Create a new sibling attempt with the same parameters
+and a fresh ID, leaving the failed gremlin in place. Use this for transient
+failures (timeouts, CI hangs) that won't self-resolve. Both attempts are visible
+in the fleet; the new attempt begins from the start.
+
+### Handling parallel group failures
+
+When a child in a parallel group bails:
+- The group halts after all currently-running children finish (not mid-run), unless `cancel_on_bail: true`
+- The bail reason is attributed to the child stage name
+- `gremlins resume <parent-id>` re-spawns all children that haven't landed
+- `gremlins resume <parent-id>--<group-name>--<child-key>` resumes only that child (use the full child ID from fleet view)
+
+If the cause was a transient failure affecting multiple children, `skip` the entire
+group and re-launch the pipeline to restart all children.
+
+### Boss-chain recovery
+
+When a boss gremlin spawns child gremlins (`gremlins launch ... --parent <boss-id>`),
+the boss halts if a child bails. At this point:
+- The child's gremlin ID is visible in the fleet view as a child of the boss
+- Recover the child (`resume`, `ack`, or `skip`) independently
+- Once the child lands or is abandoned, resume the boss (`gremlins resume <boss-id>`)
+
+The boss resumes from its child-spawn stage and proceeds with the next iteration
+(re-planning, re-implementing, or wrapping up, depending on the pipeline).
 
 ## What can a gremlin do to my machine?
 
