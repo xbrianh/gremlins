@@ -34,7 +34,7 @@ class TestSeedRegistryFromSources:
         assert registry.data["instructions"] == "file://session/instructions.txt"
         assert (artifact_dir / "instructions.txt").read_text() == "do the thing"
 
-    def test_filepath_source_binds_uri(self, tmp_path: pathlib.Path) -> None:
+    def test_filepath_source_copies_to_session(self, tmp_path: pathlib.Path) -> None:
         registry, artifact_dir = _make_registry(tmp_path)
         plan_file = tmp_path / "plan.md"
         plan_file.write_text("# Plan", encoding="utf-8")
@@ -44,7 +44,8 @@ class TestSeedRegistryFromSources:
             registry, {"plan": str(plan_file)}, sources, artifact_dir
         )
 
-        assert registry.data["plan"] == f"file://{plan_file}"
+        assert registry.data["plan"] == "file://session/plan.md"
+        assert (artifact_dir / "plan.md").read_text() == "# Plan"
 
     def test_union_type_filepath_wins_when_file_exists(
         self, tmp_path: pathlib.Path
@@ -58,7 +59,8 @@ class TestSeedRegistryFromSources:
             registry, {"plan": str(plan_file)}, sources, artifact_dir
         )
 
-        assert registry.data["plan"] == f"file://{plan_file}"
+        assert registry.data["plan"] == "file://session/plan.md"
+        assert (artifact_dir / "plan.md").read_text() == "# Plan"
         assert not (artifact_dir / "plan.txt").exists()
 
     def test_union_type_falls_back_to_string(self, tmp_path: pathlib.Path) -> None:

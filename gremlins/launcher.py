@@ -386,7 +386,11 @@ def _seed_registry_from_sources(
             continue
         for t in source.types:
             if t == "filepath" and os.path.isfile(value):
-                registry.bind(key, Uri.parse(f"file://{value}"))
+                src = pathlib.Path(value)
+                ext = src.suffix or ".txt"
+                dest = artifacts_dir / f"{key}{ext}"
+                dest.write_bytes(src.read_bytes())
+                registry.bind(key, Uri.parse(f"file://session/{key}{ext}"))
                 break
             elif t == "string":
                 dest = artifacts_dir / f"{key}.txt"
