@@ -24,6 +24,7 @@ stages:
           poll_timeout: "1200"
           poll_interval: "30"
           startup_grace_secs: "60"
+          timeout: "1380"
           cmds:
             - |
               set -eu
@@ -131,7 +132,7 @@ stages:
                   run_id=$(printf '%s' "$details_url" \
                       | sed -n 's|.*/actions/runs/\([0-9]*\).*|\1|p')
                   if [ -n "$run_id" ]; then
-                      gh run view "$run_id" --log-failed 2>/dev/null | head -c 10000 \
+                      timeout 30 gh run view "$run_id" --log-failed 2>/dev/null | head -c 10000 \
                           || printf '(could not fetch run logs)\n'
                   else
                       printf '(no action run URL; details: %s)\n' "$details_url"
