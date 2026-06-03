@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import datetime
 import json
 import logging
 import math
@@ -547,7 +548,7 @@ class State:
         return _run_async
 
 
-class _GremlinWrapper:
+class GremlinWrapper:
     """Minimal Gremlin-like wrapper for subprocess contexts."""
 
     def __init__(self, state: State) -> None:

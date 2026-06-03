@@ -45,7 +45,7 @@ from typing import Any, cast
 from gremlins import paths
 from gremlins.clients.client import Client
 from gremlins.clients.registry import CLIENT_FACTORIES
-from gremlins.executor.state import State, StateData, _GremlinWrapper, build_state
+from gremlins.executor.state import GremlinWrapper, State, StateData, build_state
 from gremlins.executor.state_utils import validate_gremlin_id
 from gremlins.logging_setup import configure_logging
 from gremlins.permissions.loader import load_policy
@@ -183,7 +183,7 @@ async def _run(spec_path: pathlib.Path) -> int:
     if stage.client is None:
         stage.client = state.client
 
-    gremlin = _GremlinWrapper(state)
+    gremlin = GremlinWrapper(state)
     try:
         await stage.run(gremlin)
     except Bail as b:
