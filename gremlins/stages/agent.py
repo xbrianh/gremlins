@@ -65,7 +65,7 @@ class Agent(Stage):
         return stage
 
     async def run(self, gremlin: GremlinProtocol) -> Outcome:
-        state = gremlin.state
+        state = gremlin if isinstance(gremlin, State) else gremlin.state
         opts = dict(self.options)
         raw_model = cast(str | None, opts.pop("model", None))
 

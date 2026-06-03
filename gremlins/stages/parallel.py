@@ -171,7 +171,7 @@ class ParallelStage(Stage):
         ).runtime_stages()
 
     async def run(self, gremlin: GremlinProtocol) -> Outcome:
-        state = gremlin.state
+        state = gremlin if isinstance(gremlin, State) else gremlin.state
         parent_id = state.data.gremlin_id or ""
         group_state = dataclasses.replace(
             state, parent_stage=state.parent_stage or self.name

@@ -159,7 +159,9 @@ class LoopStage(Stage):
         return result
 
     async def run(self, gremlin: GremlinProtocol) -> Outcome:
-        state = gremlin.state
+        from gremlins.executor.state import State
+
+        state = gremlin if isinstance(gremlin, State) else gremlin.state
         for iteration in range(1, self._max_iterations + 1):
             state.record_state_field(loop_iteration=iteration)
             state.artifacts.unbind(_MARKER_KEY)

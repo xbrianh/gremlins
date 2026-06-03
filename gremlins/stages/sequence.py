@@ -35,7 +35,9 @@ class SequenceStage(Stage):
         return stage
 
     async def run(self, gremlin: GremlinProtocol) -> Outcome:
-        state = gremlin.state
+        from gremlins.executor.state import State
+
+        state = gremlin if isinstance(gremlin, State) else gremlin.state
         key = self.path or self.name
         done = state.done_for(key)
         for child in self.body:

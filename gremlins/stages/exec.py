@@ -75,7 +75,9 @@ class Exec(Stage):
         )
 
     async def run(self, gremlin: GremlinProtocol) -> Outcome:
-        state = gremlin.state
+        from gremlins.executor.state import State
+
+        state = gremlin if isinstance(gremlin, State) else gremlin.state
         try:
             extra_env = resolve_in_map(state.artifacts, self.in_map)
         except ValueError as exc:

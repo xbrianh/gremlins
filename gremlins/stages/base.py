@@ -53,8 +53,11 @@ class Stage:
         """Replace {var} tokens with framework subs, resolved in: vars, and
         string options (framework wins on conflict). Unknown tokens and
         non-word braces (shell ${x}, {read:k}, brace expansion) are left as-is."""
+        from gremlins.executor.state import State
+
         string_opts = {k: v for k, v in self.options.items() if isinstance(v, str)}
-        subs = {**string_opts, **(extra or {}), **gremlin.state.framework_subs(self)}  # type: ignore[arg-type]
+        state = gremlin if isinstance(gremlin, State) else gremlin.state
+        subs = {**string_opts, **(extra or {}), **state.framework_subs(self)}  # type: ignore[arg-type]
         return _VAR_SUB.sub(lambda m: subs.get(m.group(1), m.group(0)), text)
 
     @property
