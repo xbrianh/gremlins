@@ -101,6 +101,7 @@ async def run_stages(
 
 class Gremlin:
     registry: ArtifactRegistry
+    state: State | None
 
     def __init__(
         self,
@@ -146,10 +147,11 @@ class Gremlin:
         self.state_file = state_file
         self.project_root = project_root
         self.base_ref_sha = base_ref_sha
-        self.base_ref = base_ref
+        self._base_ref_init = base_ref
         self.fetch_worktree = fetch_worktree
         self.pipeline_path = pipeline_path
         self.pipeline_args = pipeline_args or []
+        self.state = None
 
     @property
     def artifact_dir(self) -> pathlib.Path:
@@ -162,6 +164,85 @@ class Gremlin:
     @property
     def finished(self) -> bool:
         return (self.state_dir / "finished").is_file()
+
+    @property
+    def client(self) -> Client:
+        if self.state is None:
+            raise RuntimeError("state not yet initialized")
+        return self.state.client
+
+    @property
+    def artifacts(self) -> ArtifactRegistry:
+        if self.state is None:
+            raise RuntimeError("state not yet initialized")
+        return self.state.artifacts
+
+    @property
+    def cwd(self) -> str:
+        if self.state is None:
+            raise RuntimeError("state not yet initialized")
+        return self.state.cwd
+
+    @property
+    def worktree(self) -> pathlib.Path | None:
+        if self.state is None:
+            raise RuntimeError("state not yet initialized")
+        return self.state.worktree
+
+    @property
+    def base_ref(self) -> str:
+        if self.state is None:
+            raise RuntimeError("state not yet initialized")
+        return self.state.base_ref
+
+    @property
+    def loop_iteration(self) -> int:
+        if self.state is None:
+            raise RuntimeError("state not yet initialized")
+        return self.state.data.loop_iteration
+
+    @property
+    def attempt(self) -> str:
+        if self.state is None:
+            raise RuntimeError("state not yet initialized")
+        return self.state.data.attempt
+
+    def framework_subs(self, stage: StageProtocol) -> dict[str, str]:
+        if self.state is None:
+            raise RuntimeError("state not yet initialized")
+        return self.state.framework_subs(stage)
+
+    def done_for(self, path: str) -> set[str]:
+        if self.state is None:
+            raise RuntimeError("state not yet initialized")
+        return self.state.done_for(path)
+
+    def mark_done(self, path: str, child_name: str) -> None:
+        if self.state is None:
+            raise RuntimeError("state not yet initialized")
+        self.state.mark_done(path, child_name)
+
+    def clear_done(self, path: str) -> None:
+        if self.state is None:
+            raise RuntimeError("state not yet initialized")
+        self.state.clear_done(path)
+
+    def record_bail(self, reason: str, *, kind: str = "other") -> None:
+        if self.state is None:
+            raise RuntimeError("state not yet initialized")
+        self.state.record_bail(reason, kind=kind)
+
+    def record_stage_progress(
+        self, name: str, sub_stage: object = None, *, parent_stage: str = ""
+    ) -> None:
+        if self.state is None:
+            raise RuntimeError("state not yet initialized")
+        self.state.record_stage_progress(name, sub_stage, parent_stage=parent_stage)
+
+    def record_state_field(self, **fields: Any) -> None:
+        if self.state is None:
+            raise RuntimeError("state not yet initialized")
+        self.state.record_state_field(**fields)
 
     async def fork(
         self,
@@ -298,8 +379,9 @@ class Gremlin:
                 worktree=self.worktree_dir,
                 worktree_parent=self.worktree_parent,
                 artifacts=self.registry,
-                base_ref=self.base_ref,
+                base_ref=self._base_ref_init,
             )
+            self.state = stage_state
             built.append((e.name, stage_state.make_runner(e, scope=stages)))
         return built
 
@@ -512,6 +594,24 @@ class Gremlin:
                 sha = _git_mod.head_sha(cwd=self.worktree_dir)
                 if sha:
                     self.registry.bind("base_sha", Uri.parse(f"git://commit/{sha}"))
+
+            cwd = (
+                str(self.worktree_dir)
+                if self.worktree_dir is not None
+                else (self.project_root or str(pathlib.Path.cwd()))
+            )
+            self.state = build_state(
+                data=StateData(gremlin_id=self.gremlin_id, state_file=None),
+                client=resolved_client or PACKAGE_DEFAULT,
+                artifact_dir=self.artifact_dir,
+                pipeline_data=self.pipeline_data,
+                repo=self.repo,
+                cwd=cwd,
+                worktree=self.worktree_dir,
+                worktree_parent=self.worktree_parent,
+                artifacts=self.registry,
+                base_ref=base_ref,
+            )
         except Exception:
             if worktree_created:
                 _git_mod.remove_worktree(self.project_root, worktree_created)

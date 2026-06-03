@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import pathlib
 import shutil
 import subprocess
 
@@ -141,3 +142,33 @@ def test_resume_unbind_only_affects_exec_stages(tmp_path):
     gremlin._unbind_stale_exec_artifacts()
     assert not gremlin.registry.produced("work-out")
     assert gremlin.registry.produced("non-exec-artifact")
+
+
+def test_gremlin_state_delegates_after_initialize(project_dir, pipeline_yaml, sandbox):
+    gremlin_id = "state-delegates-abc123"
+    sd = sandbox.state / gremlin_id
+
+    gremlin = Gremlin.initialize_with_runtime(
+        gremlin_id=gremlin_id,
+        state_dir=sd,
+        project_dir=project_dir,
+        pipeline_ref=str(pipeline_yaml),
+        project_root=str(project_dir),
+        base_ref="main",
+        repo="test/repo",
+    )
+
+    # Test that state is initialized after initialize_with_runtime
+    assert gremlin.state is not None
+
+    # Test property delegates
+    assert isinstance(gremlin.artifact_dir, pathlib.Path)
+    assert gremlin.artifact_dir == sd / "artifacts"
+    assert gremlin.artifacts is not None
+    assert isinstance(gremlin.artifacts, ArtifactRegistry)
+    assert gremlin.client is not None
+    assert isinstance(gremlin.cwd, str)
+    assert gremlin.base_ref == "main"
+    assert gremlin.repo == "test/repo"
+    assert gremlin.loop_iteration == 1
+    assert gremlin.attempt == ""
