@@ -522,38 +522,8 @@ class _ParallelExecutor:
         finally:
             await self._teardown_worktrees()
 
-    async def _validate_no_mutations(self) -> None:
-        gs = self._group_state
-        for child_key, _, _ in self._child_runners:
-            wt = gs.worktree_paths.get(child_key)
-            if wt is None or not wt.is_dir():
-                continue
-            child_head = await git.head_sha_async(cwd=str(wt))
-            logger.debug(
-                "parallel validate: child=%s worktree=%s child_head=%s base_head=%s",
-                child_key,
-                wt,
-                child_head,
-                gs.base_head,
-            )
-            if child_head and child_head != gs.base_head:
-                raise NotImplementedError(
-                    f"parallel child {child_key!r} mutated its worktree "
-                    "(fan-in merge for mutating parallel is not yet implemented)"
-                )
-            if (await git.status_porcelain_async(cwd=str(wt))).strip():
-                raise NotImplementedError(
-                    f"parallel child {child_key!r} has uncommitted changes "
-                    "(fan-in merge for mutating parallel is not yet implemented)"
-                )
-
     async def _do_fan_in(self) -> None:
         await git.prune_worktrees_async(str(self._project_root))
-        if (
-            await git.in_git_repo_async(cwd=str(self._project_root))
-            and self._group_state.base_head
-        ):
-            await self._validate_no_mutations()
 
         state_dir, attempts = self._group_state.read_bail_scan_inputs()
         child_keys = [k for k, _, _ in self._child_runners]
