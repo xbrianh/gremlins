@@ -94,12 +94,12 @@ def clean_main(argv: list[str]) -> int:
         description="Delete completed gremlin state and artifacts.",
     )
     parser.add_argument(
-        "--state", action="store_true", help="actually delete matched directories"
+        "--state", action="store_true", help="enable deletion of state directories (required without --all/--failed/--finished)"
     )
     parser.add_argument(
         "--all",
         action="store_true",
-        help="include all non-running gremlins, not just failed/finished",
+        help="allow deletion of all non-running gremlins (default scope when no filter is given)",
     )
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
