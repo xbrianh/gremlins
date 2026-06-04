@@ -16,7 +16,7 @@ from gremlins import paths as _paths
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
-from gremlins.executor.state import State, StateData, build_state, resolve_state_file
+from gremlins.executor.state import State, StateData, build_state
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.pipeline.loader import STAGE_TYPES
@@ -101,7 +101,6 @@ async def run_stages(
 
 class Gremlin:
     registry: ArtifactRegistry
-    state: State | None = None
 
     def __init__(
         self,
@@ -151,6 +150,7 @@ class Gremlin:
         self.fetch_worktree = fetch_worktree
         self.pipeline_path = pipeline_path
         self.pipeline_args = pipeline_args or []
+        self.state: State | None = None
 
     @property
     def artifact_dir(self) -> pathlib.Path:
@@ -517,9 +517,11 @@ class Gremlin:
                 if sha:
                     self.registry.bind("base_sha", Uri.parse(f"git://commit/{sha}"))
 
-            self.state_file = resolve_state_file(self.gremlin_id)
+            self.state_file = self.state_dir / "state.json"
+            state_data = StateData.load(self.gremlin_id)
+            state_data.state_file = self.state_file
             self.state = build_state(
-                data=StateData(gremlin_id=self.gremlin_id, state_file=self.state_file),
+                data=state_data,
                 client=resolved_client or PACKAGE_DEFAULT,
                 artifact_dir=self.artifact_dir,
                 pipeline_data=self.pipeline_data,

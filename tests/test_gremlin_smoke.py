@@ -146,20 +146,24 @@ def test_resume_unbind_only_affects_exec_stages(tmp_path):
 def test_gremlin_state_populated_after_initialize(project_dir, pipeline_yaml, sandbox):
     gremlin_id = "state-test-abc123"
     sd = sandbox.state / gremlin_id
+    saved_cwd = os.getcwd()
 
-    gremlin = Gremlin.initialize_with_runtime(
-        gremlin_id=gremlin_id,
-        state_dir=sd,
-        project_dir=project_dir,
-        pipeline_ref=str(pipeline_yaml),
-        project_root=str(project_dir),
-    )
+    try:
+        gremlin = Gremlin.initialize_with_runtime(
+            gremlin_id=gremlin_id,
+            state_dir=sd,
+            project_dir=project_dir,
+            pipeline_ref=str(pipeline_yaml),
+            project_root=str(project_dir),
+        )
 
-    assert gremlin.state is not None
-    assert gremlin.state.client is not None
-    assert gremlin.state.artifacts is not None
-    assert gremlin.state.artifacts is gremlin.registry
-    assert gremlin.state.artifact_dir is not None
-    assert gremlin.state.data is not None
-    assert gremlin.state.data.gremlin_id == gremlin_id
-    assert gremlin.state.data.state_file is not None
+        assert gremlin.state is not None
+        assert gremlin.state.client is not None
+        assert gremlin.state.artifacts is not None
+        assert gremlin.state.artifacts is gremlin.registry
+        assert gremlin.state.artifact_dir is not None
+        assert gremlin.state.data is not None
+        assert gremlin.state.data.gremlin_id == gremlin_id
+        assert gremlin.state.data.state_file is not None
+    finally:
+        os.chdir(saved_cwd)
