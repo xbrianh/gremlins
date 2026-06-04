@@ -158,6 +158,8 @@ def test_gremlin_state_populated_after_initialize(project_dir, pipeline_yaml, sa
     assert gremlin.state is not None
     assert gremlin.state.client is not None
     assert gremlin.state.artifacts is not None
+    assert gremlin.state.artifacts is gremlin.registry
     assert gremlin.state.artifact_dir is not None
     assert gremlin.state.data is not None
     assert gremlin.state.data.gremlin_id == gremlin_id
+    assert gremlin.state.data.state_file is not None
