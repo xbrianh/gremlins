@@ -7,6 +7,8 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -145,20 +147,22 @@ def test_resume_unbind_only_affects_exec_stages(tmp_path):
 
 def test_gremlin_state_populated_after_initialize(project_dir, pipeline_yaml):
     gremlin_id = "state-test-abc123"
-    import tempfile
-    with tempfile.TemporaryDirectory() as tmpdir:
-        from pathlib import Path
-        sd = Path(tmpdir) / gremlin_id
+    saved_cwd = os.getcwd()
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sd = Path(tmpdir) / gremlin_id
 
-        gremlin = Gremlin.initialize_with_runtime(
-            gremlin_id=gremlin_id,
-            state_dir=sd,
-            project_dir=project_dir,
-            pipeline_ref=str(pipeline_yaml),
-            project_root=str(project_dir),
-        )
+            gremlin = Gremlin.initialize_with_runtime(
+                gremlin_id=gremlin_id,
+                state_dir=sd,
+                project_dir=project_dir,
+                pipeline_ref=str(pipeline_yaml),
+                project_root=str(project_dir),
+            )
 
-        assert gremlin.state is not None
-        assert gremlin.state.client is not None
-        assert gremlin.state.artifacts is not None
-        assert gremlin.state.artifact_dir == gremlin.artifact_dir
+            assert gremlin.state is not None
+            assert gremlin.state.client is not None
+            assert gremlin.state.artifacts is not None
+            assert gremlin.state.artifact_dir == gremlin.artifact_dir
+    finally:
+        os.chdir(saved_cwd)

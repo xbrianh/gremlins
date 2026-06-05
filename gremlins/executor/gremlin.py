@@ -162,6 +162,14 @@ class Gremlin:
         return StateData.load(self.gremlin_id)
 
     @property
+    def _cwd(self) -> str:
+        return (
+            str(self.worktree_dir)
+            if self.worktree_dir is not None
+            else (self.project_root or str(pathlib.Path.cwd()))
+        )
+
+    @property
     def finished(self) -> bool:
         return (self.state_dir / "finished").is_file()
 
@@ -278,30 +286,31 @@ class Gremlin:
         for nested in body:
             self._set_gremlin_recursive(nested)
 
+    def _make_build_state_kwargs(
+        self, data: StateData, client: Client
+    ) -> dict[str, Any]:
+        return {
+            "data": data,
+            "client": client,
+            "artifact_dir": self.artifact_dir,
+            "pipeline_data": self.pipeline_data,
+            "repo": self.repo,
+            "cwd": self._cwd,
+            "worktree": self.worktree_dir,
+            "worktree_parent": self.worktree_parent,
+            "artifacts": self.registry,
+            "base_ref": self.base_ref,
+        }
+
     def _collect_stages(
         self, stages: Sequence[StageProtocol]
     ) -> list[tuple[str, Callable[[], Awaitable[Any]]]]:
-        cwd = (
-            str(self.worktree_dir)
-            if self.worktree_dir is not None
-            else (self.project_root or str(pathlib.Path.cwd()))
-        )
         built: list[tuple[str, Callable[[], Awaitable[Any]]]] = []
         for e in stages:
             self._set_gremlin_recursive(e)
             stage_client = e.client or PACKAGE_DEFAULT
-            stage_state = build_state(
-                data=StateData(gremlin_id=self.gremlin_id, state_file=self.state_file),
-                client=stage_client,
-                artifact_dir=self.artifact_dir,
-                pipeline_data=self.pipeline_data,
-                repo=self.repo,
-                cwd=cwd,
-                worktree=self.worktree_dir,
-                worktree_parent=self.worktree_parent,
-                artifacts=self.registry,
-                base_ref=self.base_ref,
-            )
+            stage_data = StateData(gremlin_id=self.gremlin_id, state_file=self.state_file)
+            stage_state = build_state(**self._make_build_state_kwargs(stage_data, stage_client))
             built.append((e.name, stage_state.make_runner(e, scope=stages)))
         return built
 
@@ -514,27 +523,14 @@ class Gremlin:
                 sha = _git_mod.head_sha(cwd=self.worktree_dir)
                 if sha:
                     self.registry.bind("base_sha", Uri.parse(f"git://commit/{sha}"))
+
+            state_data = StateData.load(self.gremlin_id)
+            self.state = build_state(
+                **self._make_build_state_kwargs(state_data, resolved_client or PACKAGE_DEFAULT)
+            )
         except Exception:
             if worktree_created:
                 _git_mod.remove_worktree(self.project_root, worktree_created)
             raise
-
-        cwd = (
-            str(self.worktree_dir)
-            if self.worktree_dir is not None
-            else (self.project_root or str(pathlib.Path.cwd()))
-        )
-        self.state = build_state(
-            data=StateData(gremlin_id=self.gremlin_id, state_file=self.state_file),
-            client=resolved_client or PACKAGE_DEFAULT,
-            artifact_dir=self.artifact_dir,
-            pipeline_data=self.pipeline_data,
-            repo=self.repo,
-            cwd=cwd,
-            worktree=self.worktree_dir,
-            worktree_parent=self.worktree_parent,
-            artifacts=self.registry,
-            base_ref=self.base_ref,
-        )
 
         return self
