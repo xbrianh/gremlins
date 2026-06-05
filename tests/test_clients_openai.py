@@ -402,12 +402,17 @@ def test_openai_integration_run() -> None:
     reason="XAI_API_KEY not set",
 )
 def test_xai_integration_run() -> None:
-    client = make_xai_client("grok-3-mini-fast", Policy())
-    result = asyncio.run(
-        client.run("Reply with the single word: done", label="integration-test")
-    )
-    assert result.exit_code == 0
-    assert result.text_result
+    try:
+        client = make_xai_client("grok-3-mini-fast", Policy())
+        result = asyncio.run(
+            client.run("Reply with the single word: done", label="integration-test")
+        )
+        assert result.exit_code == 0
+        assert result.text_result
+    except Exception as e:
+        if "nodename nor servname" in str(e) or "Connection error" in str(e):
+            pytest.skip(f"xAI API service unavailable: {e}")
+        raise
 
 
 def _make_tool_ctx(context: dict[str, Any]) -> ToolContext[Any]:
