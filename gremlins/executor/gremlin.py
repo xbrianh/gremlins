@@ -309,8 +309,12 @@ class Gremlin:
         for e in stages:
             self._set_gremlin_recursive(e)
             stage_client = e.client or PACKAGE_DEFAULT
-            stage_data = StateData(gremlin_id=self.gremlin_id, state_file=self.state_file)
-            stage_state = build_state(**self._make_build_state_kwargs(stage_data, stage_client))
+            stage_data = StateData(
+                gremlin_id=self.gremlin_id, state_file=self.state_file
+            )
+            stage_state = build_state(
+                **self._make_build_state_kwargs(stage_data, stage_client)
+            )
             built.append((e.name, stage_state.make_runner(e, scope=stages)))
         return built
 
@@ -526,7 +530,9 @@ class Gremlin:
 
             state_data = StateData.load(self.gremlin_id)
             self.state = build_state(
-                **self._make_build_state_kwargs(state_data, resolved_client or PACKAGE_DEFAULT)
+                **self._make_build_state_kwargs(
+                    state_data, resolved_client or PACKAGE_DEFAULT
+                )
             )
         except Exception:
             if worktree_created:
