@@ -8,7 +8,6 @@ import pathlib
 from typing import Any
 
 import pytest
-from conftest import _TestGremlin
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state
@@ -46,12 +45,12 @@ def test_sequence_active_children_cleared_after_run(tmp_path: pathlib.Path) -> N
     class _Spy(Stage):
         captured: list[str] | None = None
 
-        async def run(self, state: State) -> Outcome:
+        async def run(self, gremlin: State) -> Outcome:
             _Spy.captured = _read_state(tmp_path).get("active_children")
             return Done()
 
     seq = SequenceStage("seq", body=[_Spy("child-a")])
-    asyncio.run(seq.run(_TestGremlin(state)))
+    asyncio.run(seq.run(state))
 
     assert _Spy.captured == ["child-a"]
     assert "active_children" not in _read_state(tmp_path)
@@ -61,12 +60,12 @@ def test_sequence_active_children_cleared_on_exception(tmp_path: pathlib.Path) -
     state = _stateful(tmp_path)
 
     class _Boom(Stage):
-        async def run(self, state: State) -> Outcome:
+        async def run(self, gremlin: State) -> Outcome:
             raise RuntimeError("boom")
 
     seq = SequenceStage("seq", body=[_Boom("child-a")])
     with pytest.raises(RuntimeError, match="boom"):
-        asyncio.run(seq.run(_TestGremlin(state)))
+        asyncio.run(seq.run(state))
 
     assert "active_children" not in _read_state(tmp_path)
 
@@ -81,12 +80,12 @@ def test_loop_active_children_set_and_cleared(tmp_path: pathlib.Path) -> None:
     captured: list[list[str] | None] = []
 
     class _Spy(Stage):
-        async def run(self, state: State) -> Outcome:
+        async def run(self, gremlin: State) -> Outcome:
             captured.append(_read_state(tmp_path).get("active_children"))
             return Done()
 
     loop = LoopStage("lp", body=[_Spy("body-stage")], max_iterations=1)
-    asyncio.run(loop.run(_TestGremlin(state)))
+    asyncio.run(loop.run(state))
 
     assert captured == [["body-stage"]]
     assert "active_children" not in _read_state(tmp_path)
@@ -96,12 +95,12 @@ def test_loop_active_children_cleared_on_exception(tmp_path: pathlib.Path) -> No
     state = _stateful(tmp_path)
 
     class _Boom(Stage):
-        async def run(self, state: State) -> Outcome:
+        async def run(self, gremlin: State) -> Outcome:
             raise RuntimeError("boom")
 
     loop = LoopStage("lp", body=[_Boom("body-stage")], max_iterations=1)
     with pytest.raises(RuntimeError, match="boom"):
-        asyncio.run(loop.run(_TestGremlin(state)))
+        asyncio.run(loop.run(state))
 
     assert "active_children" not in _read_state(tmp_path)
 
