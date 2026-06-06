@@ -39,6 +39,7 @@ def _is_bail_set(artifacts: ArtifactRegistry) -> bool:
 
 
 def _do_bail(gremlin: Gremlin, artifacts: ArtifactRegistry) -> None:
+    assert gremlin.state is not None
     reason = str(artifacts.read(_BAIL_KEY)).strip()
     gremlin.state.record_bail(reason)
     raise Bail(reason)
@@ -46,6 +47,7 @@ def _do_bail(gremlin: Gremlin, artifacts: ArtifactRegistry) -> None:
 
 def head_stable(gremlin: Gremlin, iteration: int, head_before: str) -> bool:
     """Exit when HEAD hasn't changed across this iteration."""
+    assert gremlin.state is not None
     return _git.head_sha(pathlib.Path(gremlin.state.cwd)) == head_before
 
 
@@ -139,9 +141,11 @@ class LoopStage(Stage):
     def _build_runners(
         self, gremlin: Gremlin
     ) -> list[Callable[[], Awaitable[Outcome]]]:
+        assert gremlin.state is not None
+        state = gremlin.state
         result: list[Callable[[], Awaitable[Outcome]]] = []
         for child in self.body:
-            cs = _child_state(gremlin.state, child)
+            cs = _child_state(state, child)
             base: Callable[[], Awaitable[Any]] = cs.make_runner(
                 child, gremlin, scope=self.body, record_stage=False
             )
@@ -150,16 +154,17 @@ class LoopStage(Stage):
             async def _tracked(
                 r: Callable[[], Awaitable[Any]] = base, n: str = name
             ) -> Outcome:
-                gremlin.state.data.patch(active_children=[n])
+                state.data.patch(active_children=[n])
                 try:
                     return cast(Outcome, await r())
                 finally:
-                    gremlin.state.data.patch(_delete=("active_children",))
+                    state.data.patch(_delete=("active_children",))
 
             result.append(cast(Callable[[], Awaitable[Outcome]], _tracked))
         return result
 
     async def run(self, gremlin: Gremlin) -> Outcome:
+        assert gremlin.state is not None
         for iteration in range(1, self._max_iterations + 1):
             gremlin.state.record_state_field(loop_iteration=iteration)
             gremlin.state.artifacts.unbind(_MARKER_KEY)
