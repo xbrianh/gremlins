@@ -28,9 +28,7 @@ def test_handles_missing_path(tmp_path: pathlib.Path) -> None:
         "GIT_COMMITTER_NAME": "t",
         "GIT_COMMITTER_EMAIL": "t@t",
     }
-    subprocess.run(
-        ["git", "init", str(tmp_path)], check=True, capture_output=True
-    )
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
     subprocess.run(
         ["git", "-C", str(tmp_path), "commit", "--allow-empty", "-m", "init"],
         check=True,

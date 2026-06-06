@@ -49,9 +49,7 @@ def _make_state(client, artifact_dir, *, gremlin_id=None, base_ref_sha=""):
 
 def _init_git_repo(path: pathlib.Path) -> None:
     """Create a git repo with a first commit so HEAD exists and the tree is clean."""
-    subprocess.run(
-        ["git", "init"], cwd=path, check=True, capture_output=True
-    )
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
         cwd=path,

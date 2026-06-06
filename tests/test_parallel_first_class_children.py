@@ -170,9 +170,7 @@ def test_parallel_child_artifact_dir_is_full_copy(sandbox) -> None:
     # Create a temporary git repo
     tmp_repo = sandbox.root / "repo"
     tmp_repo.mkdir()
-    subprocess.run(
-        ["git", "init"], cwd=tmp_repo, check=True, capture_output=True
-    )
+    subprocess.run(["git", "init"], cwd=tmp_repo, check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "test@example.com"],
         cwd=tmp_repo,

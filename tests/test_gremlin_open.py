@@ -12,9 +12,7 @@ from gremlins.executor.gremlin import Gremlin
 
 
 def _init_git_repo(path: pathlib.Path) -> None:
-    subprocess.run(
-        ["git", "init"], cwd=str(path), check=True, capture_output=True
-    )
+    subprocess.run(["git", "init"], cwd=str(path), check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.name", "Test"],
         cwd=str(path),
