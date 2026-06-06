@@ -46,12 +46,12 @@ from gremlins import paths
 from gremlins.clients.client import Client
 from gremlins.clients.registry import CLIENT_FACTORIES
 from gremlins.executor.state import (
-    GremlinShim,
     State,
     StateData,
     build_state,
     validate_gremlin_id,
 )
+from gremlins.protocols import GremlinShim
 from gremlins.permissions.loader import load_policy
 from gremlins.permissions.validation import validate_policy_against_registry
 from gremlins.pipeline import Pipeline
