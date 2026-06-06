@@ -37,7 +37,10 @@ import os
 import pathlib
 import sys
 import traceback
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from gremlins.executor.gremlin import Gremlin
 
 from gremlins import paths
 from gremlins.clients.client import Client
@@ -165,7 +168,14 @@ async def _run(spec_path: pathlib.Path) -> int:
         stage.client = state.client
 
     try:
-        await stage.run(state)
+
+        class _Gremlin:
+            def __init__(self, state: State) -> None:
+                self.state = state
+                self.registry = state.artifacts
+
+        gremlin = cast("Gremlin", _Gremlin(state))
+        await stage.run(gremlin)
     except Bail as b:
         cost = getattr(state.client, "total_cost_usd", 0.0) or 0.0
         _write_result(
