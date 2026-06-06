@@ -104,6 +104,17 @@ def _read_state_json(sf: pathlib.Path | None) -> dict[str, Any]:
         return {}
 
 
+class GremlinShim:
+    """Minimal wrapper exposing state and registry for stage run() signatures.
+
+    Used to adapt State to the Gremlin protocol until all stages migrate.
+    """
+
+    def __init__(self, state: State) -> None:
+        self.state = state
+        self.registry = state.artifacts
+
+
 @dataclasses.dataclass
 class StateData:
     gremlin_id: str | None = None
@@ -583,6 +594,7 @@ class State:
                 return Done()
             child_gremlin = copy.copy(gremlin)
             child_gremlin.state = _prepare()
+            child_gremlin.registry = child_gremlin.state.artifacts
             return await entry.run(child_gremlin)
 
         return _run_async

@@ -16,6 +16,8 @@ from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, Outcome
 from gremlins.stages.sequence import SequenceStage
 
+from conftest import MockGremlin
+
 if TYPE_CHECKING:
     from gremlins.executor.gremlin import Gremlin
 
@@ -23,17 +25,6 @@ if TYPE_CHECKING:
 def _state(**kw) -> RuntimeState:
     kw.setdefault("artifact_dir", pathlib.Path("/tmp"))
     return build_state(data=StateData(), client=FakeClaudeClient(), **kw)
-
-
-def _make_gremlin_wrapper(state: RuntimeState):  # type: ignore[name-defined]
-    """Wrap a State in a _Gremlin object for passing to Stage.run()."""
-
-    class _Gremlin:  # noqa: N801
-        def __init__(self, state: RuntimeState) -> None:
-            self.state = state
-            self.registry = state.artifacts
-
-    return cast("Gremlin", _Gremlin(state))
 
 
 class _FakeStage(Stage):
@@ -150,13 +141,13 @@ def test_sequence_resume_skips_completed_children(sandbox) -> None:
     )
 
     with pytest.raises(Bail, match="b failed"):
-        asyncio.run(seq.run(_make_gremlin_wrapper(state)))
+        asyncio.run(seq.run(cast("Gremlin", MockGremlin(state))))
     assert ran == ["a", "b"]
 
     ran.clear()
     fail["b"] = False
 
-    asyncio.run(seq.run(_make_gremlin_wrapper(state)))
+    asyncio.run(seq.run(cast("Gremlin", MockGremlin(state))))
     assert ran == ["b", "c"]
 
 
@@ -180,8 +171,8 @@ def test_sibling_sequences_done_sets_are_independent(sandbox) -> None:
     # Mark "a" done in seq1's slot only.
     state.mark_done("pipeline/seq1", "a")
 
-    asyncio.run(seq1.run(_make_gremlin_wrapper(state)))
-    asyncio.run(seq2.run(_make_gremlin_wrapper(state)))
+    asyncio.run(seq1.run(cast("Gremlin", MockGremlin(state))))
+    asyncio.run(seq2.run(cast("Gremlin", MockGremlin(state))))
 
     # seq1/a was skipped; seq2/a was not.
     assert ran == ["a"]  # only seq2's "a"

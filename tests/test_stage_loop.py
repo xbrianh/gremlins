@@ -15,6 +15,8 @@ from gremlins.stages.exec import Exec as Cmd
 from gremlins.stages.loop import LoopStage, head_stable, max_iters
 from gremlins.stages.outcome import Bail, Done
 
+from conftest import MockGremlin
+
 if TYPE_CHECKING:
     from gremlins.executor.gremlin import Gremlin
 
@@ -34,16 +36,6 @@ def _loop_state(tmp_path: Any) -> RuntimeState:
         worktree=tmp_path,
     )
 
-
-def _make_gremlin_wrapper(state: RuntimeState) -> Gremlin:
-    """Wrap a State in a _Gremlin object for passing to Stage.run()."""
-
-    class _Gremlin:  # noqa: N801
-        def __init__(self, state: RuntimeState) -> None:
-            self.state = state
-            self.registry = state.artifacts
-
-    return cast("Gremlin", _Gremlin(state))
 
 
 def _set_marker(state: RuntimeState) -> None:
@@ -251,27 +243,27 @@ def _run_cmd_stage(tmp_path: Any, cmds: list[str]) -> tuple[Cmd, RuntimeState]:
 
 def test_run_cmd_success(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, ["true"])
-    outcome = asyncio.run(stage.run(_make_gremlin_wrapper(state)))
+    outcome = asyncio.run(stage.run(cast("Gremlin", MockGremlin(state))))
     assert outcome == Done()
 
 
 def test_run_cmd_failure_raises_bail(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, ["false"])
     with pytest.raises(Bail):
-        asyncio.run(stage.run(_make_gremlin_wrapper(state)))
+        asyncio.run(stage.run(cast("Gremlin", MockGremlin(state))))
 
 
 def test_run_cmd_failure_writes_log(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, ["echo boom >&2; false"])
     with pytest.raises(Bail):
-        asyncio.run(stage.run(_make_gremlin_wrapper(state)))
+        asyncio.run(stage.run(cast("Gremlin", MockGremlin(state))))
     log = tmp_path / "artifacts" / "exec-cmd.log"
     assert log.exists()
 
 
 def test_run_cmd_empty_cmds_is_noop(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, [])
-    outcome = asyncio.run(stage.run(_make_gremlin_wrapper(state)))
+    outcome = asyncio.run(stage.run(cast("Gremlin", MockGremlin(state))))
     assert outcome == Done()
     assert not (tmp_path / "artifacts" / "exec-cmd.log").exists()
 
@@ -279,7 +271,7 @@ def test_run_cmd_empty_cmds_is_noop(tmp_path):
 def test_run_cmd_output_written_to_log(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, ["echo hello_output; false"])
     with pytest.raises(Bail):
-        asyncio.run(stage.run(_make_gremlin_wrapper(state)))
+        asyncio.run(stage.run(cast("Gremlin", MockGremlin(state))))
     log = tmp_path / "artifacts" / "exec-cmd.log"
     assert "hello_output" in log.read_text()
 
@@ -343,7 +335,7 @@ def test_loop_unbinds_out_keys_between_iterations(tmp_path):
         body_runners=[binder],
         max_iterations=3,
     )
-    asyncio.run(loop.run(_make_gremlin_wrapper(state)))
+    asyncio.run(loop.run(cast("Gremlin", MockGremlin(state))))
     assert bound_count[0] == 2
 
 

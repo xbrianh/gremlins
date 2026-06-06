@@ -261,6 +261,11 @@ if str(TESTS_DIR) not in sys.path:
 @dataclasses.dataclass
 class MockGremlin:
     state: State | None = None
+    registry: Any = dataclasses.field(default=None)
+
+    def __post_init__(self) -> None:
+        if self.state is not None and self.registry is None:
+            self.registry = self.state.artifacts
 
 
 # Shared minimal event stream used across test modules.

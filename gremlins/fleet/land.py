@@ -9,13 +9,16 @@ import shutil
 import subprocess
 import sys
 import time
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from gremlins.executor.gremlin import Gremlin
 
 import gremlins.utils.git as _git
 from gremlins import paths
 from gremlins.artifacts.registry import ArtifactRegistry, MissingArtifact
 from gremlins.artifacts.resolve import resolve_in_map
-from gremlins.executor.state import landable_shape, resolve_artifact_dir
+from gremlins.executor.state import GremlinShim, landable_shape, resolve_artifact_dir
 from gremlins.fleet.resolve import resolve_gremlin
 from gremlins.fleet.state import (
     liveness_of_state_file,
@@ -882,7 +885,8 @@ def _exec_land_stage(
         artifacts=registry,
     )
     try:
-        asyncio.run(land_stage.run(state))
+        gremlin = cast("Gremlin", GremlinShim(state))
+        asyncio.run(land_stage.run(gremlin))
         return True
     except Bail as b:
         print(f"error: land: {b.reason}")

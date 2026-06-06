@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import pathlib
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from conftest import MockGremlin
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state
@@ -13,6 +14,9 @@ from gremlins.pipeline import Pipeline
 from gremlins.stages.agent import Agent
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Done, Outcome
+
+if TYPE_CHECKING:
+    from gremlins.executor.gremlin import Gremlin
 
 _PIPELINE = Pipeline(
     name="test",
@@ -29,7 +33,7 @@ class _SimpleStage(Stage):
         self.prompts = prompts
         self.options = options
 
-    async def run(self, state: State) -> Outcome:
+    async def run(self, gremlin: Gremlin) -> Outcome:  # type: ignore[override]
         return Done()
 
 
@@ -52,7 +56,8 @@ def test_stage_run_raises_not_implemented() -> None:
         pipeline_data=_PIPELINE,
     )
     with pytest.raises(NotImplementedError):
-        asyncio.run(stage.run(state))
+        gremlin = cast("Gremlin", MockGremlin(state))
+        asyncio.run(stage.run(gremlin))
 
 
 def test_default_with_dict_constructs_subclass() -> None:

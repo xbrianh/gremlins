@@ -48,7 +48,13 @@ if TYPE_CHECKING:
 from gremlins import paths
 from gremlins.clients.client import Client
 from gremlins.clients.registry import CLIENT_FACTORIES
-from gremlins.executor.state import State, StateData, build_state, validate_gremlin_id
+from gremlins.executor.state import (
+    State,
+    StateData,
+    GremlinShim,
+    build_state,
+    validate_gremlin_id,
+)
 from gremlins.logging_setup import configure_logging
 from gremlins.permissions.loader import load_policy
 from gremlins.permissions.validation import validate_policy_against_registry
@@ -186,13 +192,7 @@ async def _run(spec_path: pathlib.Path) -> int:
         stage.client = state.client
 
     try:
-
-        class _Gremlin:
-            def __init__(self, state: State) -> None:
-                self.state = state
-                self.registry = state.artifacts
-
-        gremlin = cast("Gremlin", _Gremlin(state))
+        gremlin = cast("Gremlin", GremlinShim(state))
         await stage.run(gremlin)
     except Bail as b:
         cost = getattr(state.client, "total_cost_usd", 0.0) or 0.0

@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from conftest import MockGremlin
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state
 from gremlins.stages.base import Stage
@@ -70,7 +71,7 @@ def _stage(name: str, timeout: float | None = None) -> Stage:
     class _Noop(Stage):
         type = "_proc_test_noop"
 
-        async def run(self, state: State) -> Outcome:
+        async def run(self, gremlin) -> Outcome:  # type: ignore[override]
             return Done()
 
     s = _Noop(name)
