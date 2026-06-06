@@ -13,8 +13,8 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-
 from conftest import make_parent_state
+
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state, write_state
 from gremlins.stages.base import Stage
@@ -142,8 +142,6 @@ def _run_parallel(
     )
     rt_by_name = {name: fn for name, fn in rt}
     return rt_by_name["g"]  # the parallel-executor stage (group_name)
-
-
 
 
 def _write_result(spec_path: pathlib.Path, status: str = "done") -> None:

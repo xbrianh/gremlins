@@ -7,8 +7,8 @@ import json
 import pathlib
 
 import pytest
-
 from conftest import make_parent_state
+
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state
 from gremlins.stages.outcome import Bail

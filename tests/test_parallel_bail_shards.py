@@ -19,9 +19,9 @@ import subprocess
 import threading
 
 import pytest
+from conftest import make_parent_state
 
 import gremlins.executor.state as state_mod
-from conftest import make_parent_state
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.gremlin import run_stages
 from gremlins.executor.state import State, StateData, build_state
@@ -162,8 +162,6 @@ def _make_simple_ctx(tmp_path: pathlib.Path, child_key: str) -> State:
         artifact_dir=tmp_path / child_key,
         child_key=child_key,
     )
-
-
 
 
 def _build_fanin_test(
