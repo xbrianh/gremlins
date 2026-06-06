@@ -8,7 +8,7 @@ import logging
 import pathlib
 from typing import Any
 
-from gremlins.executor.state import StateData, resolve_state_file
+from gremlins.executor.state import StateData
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ class ParallelGroupState:
     def hydrate(self) -> None:
         if self.worktree_paths:
             return
-        sf = resolve_state_file(self.parent_data.gremlin_id)
+        sf = self.parent_data.state_file
         if sf is None or not sf.exists():
             return
         try:
@@ -66,7 +66,7 @@ class ParallelGroupState:
         self.parent_data.patch(_delete=("parallel_attempts",))
 
     def write_bail(self, child_key: str, reason: str) -> None:
-        sf = resolve_state_file(self.parent_data.gremlin_id)
+        sf = self.parent_data.state_file
         if sf is None or not sf.exists():
             return
         try:
@@ -81,7 +81,7 @@ class ParallelGroupState:
             pass
 
     def read_bail_scan_inputs(self) -> tuple[pathlib.Path | None, dict[str, str]]:
-        sf = resolve_state_file(self.parent_data.gremlin_id)
+        sf = self.parent_data.state_file
         if sf is None or not sf.exists():
             return None, {}
         try:
