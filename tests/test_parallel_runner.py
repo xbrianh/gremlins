@@ -13,8 +13,9 @@ from typing import Any
 import pytest
 from conftest import MockGremlin, make_parent_state
 
+from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.gremlin import run_stages
-from gremlins.executor.state import State, StateData
+from gremlins.executor.state import State, StateData, build_state
 from gremlins.pipeline import Pipeline
 from gremlins.stages.parallel import ParallelStage
 
