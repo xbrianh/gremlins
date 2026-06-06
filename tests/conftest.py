@@ -382,8 +382,13 @@ def make_state_dir(sandbox):
 
 
 def make_parent_state(data: StateData) -> State:
-    """Shared helper to build a parent State from StateData for parallel tests."""
-    artifact_dir = data.state_file.parent if data.state_file else pathlib.Path("/tmp")
+    if data.state_file:
+        state_dir = data.state_file.parent
+        artifact_dir = state_dir / "artifacts"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        artifact_dir = pathlib.Path("/tmp") / "artifacts"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
     return build_state(
         data=data,
         client=FakeClaudeClient(),

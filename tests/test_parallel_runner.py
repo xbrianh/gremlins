@@ -11,11 +11,10 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-from conftest import MockGremlin
+from conftest import MockGremlin, make_parent_state
 
-from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.gremlin import run_stages
-from gremlins.executor.state import State, StateData, build_state
+from gremlins.executor.state import State, StateData
 from gremlins.pipeline import Pipeline
 from gremlins.stages.parallel import ParallelStage
 
@@ -57,11 +56,7 @@ def _make_parallel_stages(
     project_root: pathlib.Path | None = None,
 ) -> list[tuple[str, Callable[[], Any]]]:
     if parent_state is None:
-        parent_state = build_state(
-            data=StateData(),
-            client=FakeClaudeClient(),
-            artifact_dir=pathlib.Path("/tmp"),
-        )
+        parent_state = make_parent_state(StateData())
     return ParallelStage(
         group_name,
         [],
