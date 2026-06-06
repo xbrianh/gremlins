@@ -8,6 +8,7 @@ import pathlib
 
 import pytest
 
+from conftest import make_parent_state
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state
 from gremlins.stages.outcome import Bail
@@ -35,18 +36,10 @@ def _ctx(gremlin_id: str, sf: pathlib.Path, child_key: str) -> State:
     )
 
 
-def _make_parent_state(gremlin_id: str, sf: pathlib.Path) -> State:
-    return build_state(
-        data=StateData.load(gremlin_id),
-        client=FakeClaudeClient(),
-        artifact_dir=sf.parent,
-    )
-
-
-def _build_stages(group: str, runners: list, gremlin_id: str, sf: pathlib.Path) -> list:
+def _build_stages(group: str, runners: list, gremlin_id: str) -> list:
     return ParallelStage(group, []).build_runtime_stages(
         runners,
-        parent_state=_make_parent_state(gremlin_id, sf),
+        parent_state=make_parent_state(StateData.load(gremlin_id)),
         project_root=pathlib.Path.cwd(),
     )
 
@@ -78,7 +71,6 @@ def test_completed_child_skipped_on_resume(sandbox):
             ("b", _ctx(gremlin_id, sf, "b"), child_b),
         ],
         gremlin_id,
-        sf,
     )
     parallel_fn = stages[1][1]
 
@@ -121,7 +113,6 @@ def test_both_children_present_in_done_after_second_run(sandbox):
             ("b", _ctx(gremlin_id, sf, "b"), child_b),
         ],
         gremlin_id,
-        sf,
     )
     parallel_fn = stages[1][1]
 

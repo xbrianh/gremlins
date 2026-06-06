@@ -21,6 +21,7 @@ import threading
 import pytest
 
 import gremlins.executor.state as state_mod
+from conftest import make_parent_state
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.gremlin import run_stages
 from gremlins.executor.state import State, StateData, build_state
@@ -163,14 +164,6 @@ def _make_simple_ctx(tmp_path: pathlib.Path, child_key: str) -> State:
     )
 
 
-def _make_parent_state(gremlin_id: str) -> State:
-    data = StateData.load(gremlin_id)
-    artifact_dir = data.state_file.parent if data.state_file else pathlib.Path("/tmp")
-    return build_state(
-        data=data,
-        client=FakeClaudeClient(),
-        artifact_dir=artifact_dir,
-    )
 
 
 def _build_fanin_test(
@@ -211,7 +204,7 @@ def _build_fanin_test(
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy=bail_policy,
-        parent_state=_make_parent_state(gremlin_id),
+        parent_state=make_parent_state(StateData.load(gremlin_id)),
         project_root=project_root,
     )
     return sf, stages
@@ -365,7 +358,7 @@ def test_run_stages_resume_from_fanin_name(tmp_path, sandbox):
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",
-        parent_state=_make_parent_state(gremlin_id),
+        parent_state=make_parent_state(StateData.load(gremlin_id)),
         project_root=project_root,
     )
 
@@ -520,7 +513,7 @@ def test_fanout_persists_worktrees_and_fresh_fanin_can_clean_up(tmp_path, sandbo
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",
-        parent_state=_make_parent_state(gremlin_id),
+        parent_state=make_parent_state(StateData.load(gremlin_id)),
         project_root=repo,
     )
     asyncio.run(stages_run1[0][1]())  # fan-out only
@@ -544,7 +537,7 @@ def test_fanout_persists_worktrees_and_fresh_fanin_can_clean_up(tmp_path, sandbo
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",
-        parent_state=_make_parent_state(gremlin_id),
+        parent_state=make_parent_state(StateData.load(gremlin_id)),
         project_root=repo,
     )
     asyncio.run(stages_run2[2][1]())  # fan-in
@@ -583,7 +576,7 @@ def test_fanout_resume_tears_down_prior_worktrees(tmp_path, sandbox):
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",
-        parent_state=_make_parent_state(gremlin_id),
+        parent_state=make_parent_state(StateData.load(gremlin_id)),
         project_root=repo,
     )
     asyncio.run(stages_run1[0][1]())  # fan-out
@@ -603,7 +596,7 @@ def test_fanout_resume_tears_down_prior_worktrees(tmp_path, sandbox):
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",
-        parent_state=_make_parent_state(gremlin_id),
+        parent_state=make_parent_state(StateData.load(gremlin_id)),
         project_root=repo,
     )
     asyncio.run(stages_run2[0][1]())  # fan-out again
@@ -819,7 +812,7 @@ def test_fanin_allows_child_worktree_mutations(tmp_path, sandbox, caplog):
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",
-        parent_state=_make_parent_state(gremlin_id),
+        parent_state=make_parent_state(StateData.load(gremlin_id)),
         project_root=repo,
     )
     asyncio.run(stages_run1[0][1]())  # fan-out
@@ -865,7 +858,7 @@ def test_fanin_allows_child_worktree_mutations(tmp_path, sandbox, caplog):
         set_stage_fn=lambda _n: None,
         cancel_on_bail=False,
         bail_policy="any",
-        parent_state=_make_parent_state(gremlin_id),
+        parent_state=make_parent_state(StateData.load(gremlin_id)),
         project_root=repo,
     )
     caplog.clear()

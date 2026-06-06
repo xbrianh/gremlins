@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from conftest import make_parent_state
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state, write_state
 from gremlins.stages.base import Stage
@@ -143,13 +144,6 @@ def _run_parallel(
     return rt_by_name["g"]  # the parallel-executor stage (group_name)
 
 
-def _make_parent_state_from_data(data: StateData) -> State:
-    artifact_dir = data.state_file.parent if data.state_file else pathlib.Path("/tmp")
-    return build_state(
-        data=data,
-        client=FakeClaudeClient(),
-        artifact_dir=artifact_dir,
-    )
 
 
 def _write_result(spec_path: pathlib.Path, status: str = "done") -> None:
@@ -181,7 +175,7 @@ def test_external_kill_records_failure(
 
     stage = _child_stage("child-a")
     state = _child_state(tmp_path / "child-a")
-    parallel = _run_parallel([stage], [state], _make_parent_state_from_data(StateData()), tmp_path)
+    parallel = _run_parallel([stage], [state], make_parent_state(StateData()), tmp_path)
 
     with pytest.raises(RuntimeError, match=r"child-a.*SIGKILL.*no result file"):
         asyncio.run(parallel())  # type: ignore[operator]
@@ -212,7 +206,7 @@ def test_external_kill_siblings_continue(
     state_b = _child_state(tmp_path / "child-b")
     parent_data = StateData()
     parallel = _run_parallel(
-        [stage_a, stage_b], [state_a, state_b], _make_parent_state_from_data(parent_data), tmp_path
+        [stage_a, stage_b], [state_a, state_b], make_parent_state(parent_data), tmp_path
     )
 
     with pytest.raises(RuntimeError, match="child-a"):
@@ -234,7 +228,7 @@ def test_crash_before_result_records_failure(
 
     stage = _child_stage("child-a")
     state = _child_state(tmp_path / "child-a")
-    parallel = _run_parallel([stage], [state], _make_parent_state_from_data(StateData()), tmp_path)
+    parallel = _run_parallel([stage], [state], make_parent_state(StateData()), tmp_path)
 
     with pytest.raises(RuntimeError, match="exited 0 without writing result"):
         asyncio.run(parallel())  # type: ignore[operator]
@@ -258,7 +252,7 @@ def test_timeout_kills_child_and_records_failure(
         "timeout_seconds": 0.05,
     }
     state = _child_state(tmp_path / "child-a")
-    parallel = _run_parallel([stage], [state], _make_parent_state_from_data(StateData()), tmp_path)
+    parallel = _run_parallel([stage], [state], make_parent_state(StateData()), tmp_path)
 
     with pytest.raises(RuntimeError, match="timed out"):
         asyncio.run(parallel())  # type: ignore[operator]
@@ -281,7 +275,7 @@ def test_large_stderr_drains_without_deadlock(
 
     stage = _child_stage("child-a")
     state = _child_state(tmp_path / "child-a")
-    parallel = _run_parallel([stage], [state], _make_parent_state_from_data(StateData()), tmp_path)
+    parallel = _run_parallel([stage], [state], make_parent_state(StateData()), tmp_path)
 
     asyncio.run(parallel())  # type: ignore[operator]  # must not hang or raise
 
@@ -319,7 +313,7 @@ def test_cancellation_sigterm_then_sigkill(
 
     stage = _child_stage("child-a")
     state = _child_state(tmp_path / "child-a")
-    parallel = _run_parallel([stage], [state], _make_parent_state_from_data(StateData()), tmp_path)
+    parallel = _run_parallel([stage], [state], make_parent_state(StateData()), tmp_path)
 
     async def _run_and_cancel() -> None:
         task = asyncio.create_task(parallel())  # type: ignore[arg-type]
@@ -341,7 +335,7 @@ def test_subprocess_result_done_bail_error(
 ) -> None:
     stage = _child_stage("c")
     state = _child_state(tmp_path / "c")
-    p = _run_parallel([stage], [state], _make_parent_state_from_data(StateData()), tmp_path)
+    p = _run_parallel([stage], [state], make_parent_state(StateData()), tmp_path)
 
     async def mock_done(*args: Any, **_: Any) -> _FakeProcess:
         _write_result(pathlib.Path(args[-1]), "done")
@@ -352,7 +346,7 @@ def test_subprocess_result_done_bail_error(
 
     stage = _child_stage("c")
     state = _child_state(tmp_path / "c")
-    p = _run_parallel([stage], [state], _make_parent_state_from_data(StateData()), tmp_path)
+    p = _run_parallel([stage], [state], make_parent_state(StateData()), tmp_path)
 
     async def mock_bail(*args: Any, **_: Any) -> _FakeProcess:
         _write_result(pathlib.Path(args[-1]), "bail")
@@ -363,7 +357,7 @@ def test_subprocess_result_done_bail_error(
 
     stage = _child_stage("c")
     state = _child_state(tmp_path / "c")
-    p = _run_parallel([stage], [state], _make_parent_state_from_data(StateData()), tmp_path)
+    p = _run_parallel([stage], [state], make_parent_state(StateData()), tmp_path)
 
     async def mock_err(*args: Any, **_: Any) -> _FakeProcess:
         _write_result(pathlib.Path(args[-1]), "error")
