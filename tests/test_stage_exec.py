@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import pathlib
 
 import pytest
@@ -10,9 +11,14 @@ import pytest
 from gremlins.artifacts.registry import MissingArtifact
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import StateData, build_state
+from gremlins.executor.state import State, StateData, build_state
 from gremlins.stages.exec import Exec
 from gremlins.stages.outcome import Bail, Done
+
+
+@dataclasses.dataclass
+class _MockGremlin:
+    state: State | None = None
 
 
 def _make_state(tmp_path: pathlib.Path, **kw):
@@ -44,14 +50,14 @@ def _exec(name: str = "test", cmds=None, *, in_map=None, out_map=None, timeout=N
 def test_no_in_out_returns_done(tmp_path):
     state = _make_state(tmp_path)
     stage = _exec(cmds=["true"])
-    result = asyncio.run(stage.run(state))
+    result = asyncio.run(stage.run(_MockGremlin(state=state)))
     assert isinstance(result, Done)
 
 
 def test_no_cmds_returns_done(tmp_path):
     state = _make_state(tmp_path)
     stage = _exec(cmds=[])
-    result = asyncio.run(stage.run(state))
+    result = asyncio.run(stage.run(_MockGremlin(state=state)))
     assert isinstance(result, Done)
 
 
@@ -70,7 +76,7 @@ def test_in_map_injects_env_var(tmp_path):
         cmds=[f'echo "$MY_VAR" > {out_file}'],
         in_map={"MY_VAR": "my-key"},
     )
-    asyncio.run(stage.run(state))
+    asyncio.run(stage.run(_MockGremlin(state=state)))
     assert out_file.read_text().strip() == "hello"
 
 
@@ -78,7 +84,7 @@ def test_in_map_missing_artifact_raises(tmp_path):
     state = _make_state(tmp_path)
     stage = _exec(cmds=["true"], in_map={"X": "not-bound"})
     with pytest.raises(MissingArtifact):
-        asyncio.run(stage.run(state))
+        asyncio.run(stage.run(_MockGremlin(state=state)))
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +96,7 @@ def test_out_file_scheme_binds_and_verifies(tmp_path):
     state = _make_state(tmp_path)
     (state.artifact_dir / "out.txt").write_text("data")
     stage = _exec(cmds=["true"], out_map={"result": "file://session/out.txt"})
-    result = asyncio.run(stage.run(state))
+    result = asyncio.run(stage.run(_MockGremlin(state=state)))
     assert isinstance(result, Done)
     assert state.artifacts.produced("result")
     assert state.artifacts.resolve("result") == Uri.parse("file://session/out.txt")
@@ -100,7 +106,7 @@ def test_out_file_scheme_missing_file_raises(tmp_path):
     state = _make_state(tmp_path)
     stage = _exec(cmds=["true"], out_map={"result": "file://session/missing.txt"})
     with pytest.raises(FileNotFoundError):
-        asyncio.run(stage.run(state))
+        asyncio.run(stage.run(_MockGremlin(state=state)))
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +123,7 @@ def test_out_git_range_binds_commit_range(tmp_path, monkeypatch):
         "gremlins.artifacts.registry.git_utils.head_sha", lambda cwd=None: "def456"
     )
     stage = _exec(cmds=["true"], out_map={"commits": "git://range"})
-    result = asyncio.run(stage.run(state))
+    result = asyncio.run(stage.run(_MockGremlin(state=state)))
     assert isinstance(result, Done)
     assert state.artifacts.produced("commits")
     bound_uri = state.artifacts.resolve("commits")
@@ -134,7 +140,7 @@ def test_out_git_range_empty_diff_still_binds(tmp_path, monkeypatch):
         "gremlins.artifacts.registry.git_utils.head_sha", lambda cwd=None: "abc123"
     )
     stage = _exec(cmds=["true"], out_map={"commits": "git://range"})
-    result = asyncio.run(stage.run(state))
+    result = asyncio.run(stage.run(_MockGremlin(state=state)))
     assert isinstance(result, Done)
     assert state.artifacts.produced("commits")
 
@@ -154,7 +160,7 @@ def test_out_read_sub_resolves_uri(tmp_path):
             "bar": "gh://pr/{read:foo}",
         },
     )
-    result = asyncio.run(stage.run(state))
+    result = asyncio.run(stage.run(_MockGremlin(state=state)))
     assert isinstance(result, Done)
     assert state.artifacts.resolve("bar") == Uri.parse("gh://pr/42")
 
@@ -169,14 +175,14 @@ def test_out_read_sub_backward_ref_raises(tmp_path):
         },
     )
     with pytest.raises(MissingArtifact):
-        asyncio.run(stage.run(state))
+        asyncio.run(stage.run(_MockGremlin(state=state)))
 
 
 def test_out_read_sub_unbound_key_raises(tmp_path):
     state = _make_state(tmp_path)
     stage = _exec(cmds=["true"], out_map={"bar": "gh://pr/{read:nonexistent}"})
     with pytest.raises(MissingArtifact):
-        asyncio.run(stage.run(state))
+        asyncio.run(stage.run(_MockGremlin(state=state)))
 
 
 # ---------------------------------------------------------------------------
@@ -188,21 +194,21 @@ def test_nonzero_exit_raises_bail(tmp_path):
     state = _make_state(tmp_path)
     stage = _exec(cmds=["exit 1"])
     with pytest.raises(Bail):
-        asyncio.run(stage.run(state))
+        asyncio.run(stage.run(_MockGremlin(state=state)))
 
 
 def test_nonzero_exit_writes_log(tmp_path):
     state = _make_state(tmp_path)
     stage = _exec("myname", cmds=["echo oops; exit 1"])
     with pytest.raises(Bail):
-        asyncio.run(stage.run(state))
+        asyncio.run(stage.run(_MockGremlin(state=state)))
     assert (state.artifact_dir / "exec-myname.log").exists()
 
 
 def test_success_writes_log(tmp_path):
     state = _make_state(tmp_path)
     stage = _exec("myname", cmds=["echo hello"])
-    result = asyncio.run(stage.run(state))
+    result = asyncio.run(stage.run(_MockGremlin(state=state)))
     assert isinstance(result, Done)
     assert (state.artifact_dir / "exec-myname.log").exists()
 
@@ -219,7 +225,7 @@ def test_timeout_with_status_out_yields_needs_fix(tmp_path):
         out_map={"status": "file://session/status"},
         timeout=0.05,
     )
-    result = asyncio.run(stage.run(state))
+    result = asyncio.run(stage.run(_MockGremlin(state=state)))
     assert isinstance(result, Done)
     assert state.artifacts.read("status") == "needs_fix"
 
@@ -228,4 +234,4 @@ def test_timeout_without_status_out_raises_bail(tmp_path):
     state = _make_state(tmp_path)
     stage = _exec(cmds=["sleep 10"], timeout=0.05)
     with pytest.raises(Bail):
-        asyncio.run(stage.run(state))
+        asyncio.run(stage.run(_MockGremlin(state=state)))
