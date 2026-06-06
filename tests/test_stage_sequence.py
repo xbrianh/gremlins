@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import pathlib
-from typing import TYPE_CHECKING, cast
 
 import pytest
 from conftest import _TestGremlin
@@ -16,9 +15,6 @@ from gremlins.executor.state import StateData, build_state
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, Outcome
 from gremlins.stages.sequence import SequenceStage
-
-if TYPE_CHECKING:
-    from gremlins.executor.gremlin import Gremlin
 
 
 def _state(**kw) -> RuntimeState:
@@ -34,9 +30,8 @@ class _FakeStage(Stage):
         self.received: RuntimeState | None = None
         self._raises = raises
 
-    async def run(self, gremlin: Gremlin) -> Outcome:
-        state = cast(RuntimeState, gremlin.state)
-        self.received = state
+    async def run(self, gremlin: RuntimeState) -> Outcome:
+        self.received = gremlin
         if self._raises:
             raise self._raises
         return Done()
@@ -50,7 +45,7 @@ def test_sequence_runs_body_in_order() -> None:
             super().__init__(label)
             self._label = label
 
-        async def run(self, gremlin: Gremlin) -> Outcome:
+        async def run(self, gremlin: RuntimeState) -> Outcome:
             log.append(self._label)
             return Done()
 
@@ -68,7 +63,7 @@ def test_sequence_stops_on_exception() -> None:
             self._label = label
             self._fail = fail
 
-        async def run(self, gremlin: Gremlin) -> Outcome:
+        async def run(self, gremlin: RuntimeState) -> Outcome:
             log.append(self._label)
             if self._fail:
                 raise RuntimeError("boom")
@@ -129,7 +124,7 @@ def test_sequence_resume_skips_completed_children(sandbox) -> None:
         def __init__(self, label: str) -> None:
             super().__init__(label)
 
-        async def run(self, gremlin: Gremlin) -> Outcome:
+        async def run(self, gremlin: RuntimeState) -> Outcome:
             ran.append(self.name)
             if self.name == "b" and fail["b"]:
                 raise Bail("b failed")
@@ -158,7 +153,7 @@ def test_sibling_sequences_done_sets_are_independent(sandbox) -> None:
         def __init__(self, label: str) -> None:
             super().__init__(label)
 
-        async def run(self, gremlin: Gremlin) -> Outcome:
+        async def run(self, gremlin: RuntimeState) -> Outcome:
             ran.append(self.name)
             return Done()
 
