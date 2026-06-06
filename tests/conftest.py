@@ -13,7 +13,16 @@ import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.clients.registry import register_client_factory
+from gremlins.executor.state import State
 from gremlins.permissions.policy import Policy
+
+
+class _TestGremlin:
+    """Minimal Gremlin wrapper for unit tests."""
+
+    def __init__(self, state: State) -> None:
+        self.state = state
+
 
 os.environ.setdefault("GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME", "main")
 

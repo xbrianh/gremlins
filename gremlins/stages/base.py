@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from gremlins.clients.client import Client
+from gremlins.executor.state import State
 from gremlins.protocols import GremlinProtocol
 from gremlins.stages.outcome import Outcome
 
@@ -57,7 +58,7 @@ class Stage:
         string options (framework wins on conflict). Unknown tokens and
         non-word braces (shell ${x}, {read:k}, brace expansion) are left as-is."""
         string_opts = {k: v for k, v in self.options.items() if isinstance(v, str)}
-        state = getattr(gremlin, "state", gremlin)
+        state = cast(State, gremlin.state)
         subs = {**string_opts, **(extra or {}), **state.framework_subs(self)}  # type: ignore[arg-type]
         return _VAR_SUB.sub(lambda m: subs.get(m.group(1), m.group(0)), text)
 

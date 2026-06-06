@@ -130,7 +130,7 @@ def test_exec_dotted_key_injects_env_var(tmp_path):
         {"cmds": [f'echo "$branch" > {out_file}']},
         in_map={"branch": "pr.branch"},
     )
-    result = asyncio.run(stage.run(state))
+    result = asyncio.run(stage.run(_TestGremlin(state)))
     assert isinstance(result, Done)
     assert out_file.read_text().strip() == "my-branch"
 
@@ -152,7 +152,7 @@ def test_agent_dotted_key_substituted_into_prompt(tmp_path):
         {},
         in_map={"branch": "pr.branch"},
     )
-    asyncio.run(agent.run(state))
+    asyncio.run(agent.run(_TestGremlin(state)))
 
     assert len(client.calls) == 1
     assert "agent-branch" in client.calls[0].prompt

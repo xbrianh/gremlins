@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from conftest import _TestGremlin
 import asyncio
 import sys
 from dataclasses import dataclass, field
@@ -198,7 +199,7 @@ def test_run_smoke_captures_events(monkeypatch, mock_sdk):
     mock_sdk.query = _query
     client = AnthropicSdkClient("claude-sonnet-4-6")
     result: CompletedRun = asyncio.run(
-        client.run("do something", label="smoke", capture_events=True)
+        client.run(_TestGremlin("do something", label="smoke", capture_events=True))
     )
 
     assert result.exit_code == 0
@@ -212,7 +213,7 @@ def test_run_smoke_no_capture(monkeypatch, mock_sdk):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     client = AnthropicSdkClient("claude-sonnet-4-6")
     result: CompletedRun = asyncio.run(
-        client.run("do something", label="smoke", capture_events=False)
+        client.run(_TestGremlin("do something", label="smoke", capture_events=False))
     )
     assert result.exit_code == 0
     assert result.events is None
@@ -235,7 +236,7 @@ def test_run_error_result_sets_exit_code(monkeypatch, mock_sdk):
     mock_sdk.query = _error_query
     client = AnthropicSdkClient("claude-sonnet-4-6")
     result: CompletedRun = asyncio.run(
-        client.run("do something", label="err", capture_events=False)
+        client.run(_TestGremlin("do something", label="err", capture_events=False))
     )
     assert result.exit_code == 1
 
@@ -265,7 +266,7 @@ def test_run_tool_use_captured(monkeypatch, mock_sdk):
     mock_sdk.query = _query
     client = AnthropicSdkClient("claude-sonnet-4-6")
     result: CompletedRun = asyncio.run(
-        client.run("do something", label="t", capture_events=True)
+        client.run(_TestGremlin("do something", label="t", capture_events=True))
     )
 
     assert result.events is not None
@@ -305,7 +306,7 @@ def test_sdk_env_is_overlay_only(monkeypatch, mock_sdk):
     mock_sdk.query = _capturing_query(captured)
 
     client = AnthropicSdkClient("claude-sonnet-4-6")
-    asyncio.run(client.run("hello", label="t"))
+    asyncio.run(client.run(_TestGremlin("hello", label="t")))
 
     assert captured, "query was not called"
     env = captured[0].env
@@ -327,7 +328,7 @@ def test_sdk_env_overlay_file_loaded(monkeypatch, mock_sdk, tmp_path):
     mock_sdk.query = _capturing_query(captured)
 
     client = AnthropicSdkClient("claude-sonnet-4-6")
-    asyncio.run(client.run("hi", label="t"))
+    asyncio.run(client.run(_TestGremlin("hi", label="t")))
 
     assert captured[0].env.get("SDK_CUSTOM_VAR") == "hello"
 
@@ -340,7 +341,7 @@ def test_hermeticity_extra_env_layered(monkeypatch, mock_sdk):
     mock_sdk.query = _capturing_query(captured)
 
     client = AnthropicSdkClient("claude-sonnet-4-6")
-    asyncio.run(client.run("hello", label="t", extra_env={"MY_VAR": "42"}))
+    asyncio.run(client.run(_TestGremlin("hello", label="t", extra_env={"MY_VAR": "42"})))
 
     assert captured[0].env.get("MY_VAR") == "42"
 
@@ -352,7 +353,7 @@ def test_setting_sources_empty(monkeypatch, mock_sdk):
     mock_sdk.query = _capturing_query(captured)
 
     client = AnthropicSdkClient("claude-sonnet-4-6")
-    asyncio.run(client.run("hello", label="t"))
+    asyncio.run(client.run(_TestGremlin("hello", label="t")))
 
     assert captured[0].setting_sources == []
 
@@ -364,7 +365,7 @@ def test_permission_mode_bypass_true(monkeypatch, mock_sdk):
     mock_sdk.query = _capturing_query(captured)
 
     client = AnthropicSdkClient("claude-sonnet-4-6", bypass=True)
-    asyncio.run(client.run("hello", label="t"))
+    asyncio.run(client.run(_TestGremlin("hello", label="t")))
 
     assert captured[0].permission_mode == "bypassPermissions"
 
@@ -376,7 +377,7 @@ def test_permission_mode_bypass_false(monkeypatch, mock_sdk):
     mock_sdk.query = _capturing_query(captured)
 
     client = AnthropicSdkClient("claude-sonnet-4-6", bypass=False)
-    asyncio.run(client.run("hello", label="t"))
+    asyncio.run(client.run(_TestGremlin("hello", label="t")))
 
     assert captured[0].permission_mode == "default"
 
@@ -391,7 +392,7 @@ def test_allowed_tools_from_native_block(monkeypatch, mock_sdk):
         "claude-sonnet-4-6",
         native_block={"allowed_tools": ["Read", "Edit"]},
     )
-    asyncio.run(client.run("hello", label="t"))
+    asyncio.run(client.run(_TestGremlin("hello", label="t")))
 
     opts = captured[0]
     assert hasattr(opts, "allowed_tools")
@@ -405,7 +406,7 @@ def test_no_allowed_tools_when_not_in_native_block(monkeypatch, mock_sdk):
     mock_sdk.query = _capturing_query(captured)
 
     client = AnthropicSdkClient("claude-sonnet-4-6")
-    asyncio.run(client.run("hello", label="t"))
+    asyncio.run(client.run(_TestGremlin("hello", label="t")))
 
     opts = captured[0]
     assert getattr(opts, "allowed_tools", None) is None
@@ -421,7 +422,7 @@ def test_disallowed_tools_from_native_block(monkeypatch, mock_sdk):
         "claude-sonnet-4-6",
         native_block={"disallowed_tools": ["Bash(sudo:*)"]},
     )
-    asyncio.run(client.run("hello", label="t"))
+    asyncio.run(client.run(_TestGremlin("hello", label="t")))
 
     opts = captured[0]
     assert hasattr(opts, "disallowed_tools")
@@ -435,7 +436,7 @@ def test_no_disallowed_tools_when_not_in_native_block(monkeypatch, mock_sdk):
     mock_sdk.query = _capturing_query(captured)
 
     client = AnthropicSdkClient("claude-sonnet-4-6")
-    asyncio.run(client.run("hello", label="t"))
+    asyncio.run(client.run(_TestGremlin("hello", label="t")))
 
     assert getattr(captured[0], "disallowed_tools", None) is None
 
@@ -447,7 +448,7 @@ def test_no_mcp_servers_no_hooks(monkeypatch, mock_sdk):
     mock_sdk.query = _capturing_query(captured)
 
     client = AnthropicSdkClient("claude-sonnet-4-6")
-    asyncio.run(client.run("hello", label="t"))
+    asyncio.run(client.run(_TestGremlin("hello", label="t")))
 
     assert captured[0].mcp_servers == {}
     assert captured[0].hooks is None
@@ -482,7 +483,7 @@ def test_cost_known_model_from_tokens(monkeypatch, mock_sdk):
 
     mock_sdk.query = _query
     client = AnthropicSdkClient("claude-sonnet-4-6")
-    result = asyncio.run(client.run("test", label="cost"))
+    result = asyncio.run(client.run(_TestGremlin("test", label="cost")))
     assert result.cost_usd == pytest.approx(18.0)
 
 
@@ -495,7 +496,7 @@ def test_cost_known_model_partial_tokens(monkeypatch, mock_sdk):
 
     mock_sdk.query = _query
     client = AnthropicSdkClient("claude-sonnet-4-6")
-    result = asyncio.run(client.run("test", label="cost"))
+    result = asyncio.run(client.run(_TestGremlin("test", label="cost")))
     assert result.cost_usd == pytest.approx(3.0)
 
 
@@ -509,7 +510,7 @@ def test_cost_unknown_model_falls_back_to_sonnet(monkeypatch, mock_sdk):
 
     mock_sdk.query = _query
     client = AnthropicSdkClient("claude-unknown-99")
-    result = asyncio.run(client.run("test", label="cost"))
+    result = asyncio.run(client.run(_TestGremlin("test", label="cost")))
     assert result.cost_usd == pytest.approx(18.0)
 
 
@@ -522,7 +523,7 @@ def test_cost_falls_back_to_total_cost_usd(monkeypatch, mock_sdk):
 
     mock_sdk.query = _query
     client = AnthropicSdkClient("claude-sonnet-4-6")
-    result = asyncio.run(client.run("test", label="cost"))
+    result = asyncio.run(client.run(_TestGremlin("test", label="cost")))
     assert result.cost_usd == pytest.approx(0.042)
 
 
@@ -534,7 +535,7 @@ def test_cost_none_when_no_data(monkeypatch, mock_sdk):
 
     mock_sdk.query = _query
     client = AnthropicSdkClient("claude-sonnet-4-6")
-    result = asyncio.run(client.run("test", label="cost"))
+    result = asyncio.run(client.run(_TestGremlin("test", label="cost")))
     assert result.cost_usd is None
 
 
@@ -561,7 +562,7 @@ def test_retry_on_transient_error(monkeypatch, mock_sdk):
 
     mock_sdk.query = _query
     client = AnthropicSdkClient("claude-sonnet-4-6")
-    result = asyncio.run(client.run("test", label="retry", max_retries=2))
+    result = asyncio.run(client.run(_TestGremlin("test", label="retry", max_retries=2)))
     assert result.exit_code == 0
     assert call_count[0] == 2
 
@@ -579,7 +580,7 @@ def test_no_retry_on_non_transient_error(monkeypatch, mock_sdk):
     mock_sdk.query = _query
     client = AnthropicSdkClient("claude-sonnet-4-6")
     with pytest.raises(RuntimeError, match="authentication failed"):
-        asyncio.run(client.run("test", label="no-retry", max_retries=2))
+        asyncio.run(client.run(_TestGremlin("test", label="no-retry", max_retries=2)))
     assert call_count[0] == 1
 
 
@@ -598,7 +599,7 @@ def test_retry_exhaustion_raises(monkeypatch, mock_sdk):
     mock_sdk.query = _query
     client = AnthropicSdkClient("claude-sonnet-4-6")
     with pytest.raises(StreamTerminalError):
-        asyncio.run(client.run("test", label="exhaust", max_retries=2))
+        asyncio.run(client.run(_TestGremlin("test", label="exhaust", max_retries=2)))
 
 
 def test_on_timeout_prompt_switches_on_retry(monkeypatch, mock_sdk):

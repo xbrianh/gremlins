@@ -1,3 +1,4 @@
+from conftest import _TestGremlin
 import asyncio
 import subprocess
 
@@ -7,7 +8,7 @@ from gremlins.utils import proc
 
 
 def run(coro):  # type: ignore[no-untyped-def]
-    return asyncio.run(coro)
+    return asyncio.run(_TestGremlin(coro))
 
 
 # run_async

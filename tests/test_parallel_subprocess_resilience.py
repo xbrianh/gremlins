@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from conftest import _TestGremlin
 import asyncio
 import dataclasses
 import functools
@@ -10,7 +11,7 @@ import os
 import pathlib
 import signal
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -175,7 +176,7 @@ def test_external_kill_records_failure(
     parallel = _run_parallel([stage], [state], StateData(), tmp_path)
 
     with pytest.raises(RuntimeError, match=r"child-a.*SIGKILL.*no result file"):
-        asyncio.run(parallel())  # type: ignore[operator]
+        asyncio.run(_TestGremlin(parallel()))  # type: ignore[operator]
 
 
 def test_external_kill_siblings_continue(
@@ -207,7 +208,7 @@ def test_external_kill_siblings_continue(
     )
 
     with pytest.raises(RuntimeError, match="child-a"):
-        asyncio.run(parallel())  # type: ignore[operator]
+        asyncio.run(_TestGremlin(parallel()))  # type: ignore[operator]
 
     assert "child-b" in ran
 
@@ -228,7 +229,7 @@ def test_crash_before_result_records_failure(
     parallel = _run_parallel([stage], [state], StateData(), tmp_path)
 
     with pytest.raises(RuntimeError, match="exited 0 without writing result"):
-        asyncio.run(parallel())  # type: ignore[operator]
+        asyncio.run(_TestGremlin(parallel()))  # type: ignore[operator]
 
 
 def test_timeout_kills_child_and_records_failure(
@@ -252,7 +253,7 @@ def test_timeout_kills_child_and_records_failure(
     parallel = _run_parallel([stage], [state], StateData(), tmp_path)
 
     with pytest.raises(RuntimeError, match="timed out"):
-        asyncio.run(parallel())  # type: ignore[operator]
+        asyncio.run(_TestGremlin(parallel()))  # type: ignore[operator]
 
     assert fake_proc.returncode is not None  # process was killed
 
@@ -274,7 +275,7 @@ def test_large_stderr_drains_without_deadlock(
     state = _child_state(tmp_path / "child-a")
     parallel = _run_parallel([stage], [state], StateData(), tmp_path)
 
-    asyncio.run(parallel())  # type: ignore[operator]  # must not hang or raise
+    asyncio.run(_TestGremlin(parallel()))  # type: ignore[operator]  # must not hang or raise
 
 
 def test_cancellation_sigterm_then_sigkill(
@@ -321,7 +322,7 @@ def test_cancellation_sigterm_then_sigkill(
         except (asyncio.CancelledError, RuntimeError):
             pass
 
-    asyncio.run(_run_and_cancel())
+    asyncio.run(_TestGremlin(_run_and_cancel()))
 
     assert sigtermed
     assert fake_proc.returncode is not None  # SIGKILL was sent
@@ -339,7 +340,7 @@ def test_subprocess_result_done_bail_error(
         return _FakeProcess(0)
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_done)
-    asyncio.run(p())
+    asyncio.run(_TestGremlin(p()))
 
     stage = _child_stage("c")
     state = _child_state(tmp_path / "c")
@@ -350,7 +351,7 @@ def test_subprocess_result_done_bail_error(
         return _FakeProcess(0)
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_bail)
-    asyncio.run(p())
+    asyncio.run(_TestGremlin(p()))
 
     stage = _child_stage("c")
     state = _child_state(tmp_path / "c")
@@ -362,7 +363,7 @@ def test_subprocess_result_done_bail_error(
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_err)
     with pytest.raises(RuntimeError, match="error"):
-        asyncio.run(p())
+        asyncio.run(_TestGremlin(p()))
 
 
 def test_subprocess_cost_accumulated_in_state(
@@ -422,7 +423,7 @@ def test_subprocess_cost_accumulated_in_state(
         return _FakeProcess(exit_code=0)
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
-    asyncio.run(parallel_fn())
+    asyncio.run(_TestGremlin(parallel_fn()))
 
     data = json.loads(sf.read_text())
     assert data.get("subprocess_cost_usd") == pytest.approx(COST_A + COST_B)

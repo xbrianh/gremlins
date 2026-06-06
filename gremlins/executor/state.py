@@ -549,7 +549,7 @@ class State:
         scope: Sequence[StageProtocol] | None = None,
         *,
         record_stage: bool = True,
-        gremlin: Gremlin | None = None,
+        gremlin: Gremlin,
     ) -> Callable[[], Any]:
         base_state = self
         gremlin_id = self.data.gremlin_id
@@ -581,17 +581,8 @@ class State:
             ):
                 return Done()
             prepared = _prepare()
-            if gremlin is not None:
-                gremlin.state = prepared
-                stage_arg = gremlin
-            else:
-                class _GremlinWrapper:
-                    def __init__(self, state: State) -> None:
-                        self.state = state
-                    def __getattr__(self, name: str) -> Any:
-                        return getattr(self.state, name)
-                stage_arg = _GremlinWrapper(prepared)
-            return await entry.run(stage_arg)
+            gremlin.state = prepared
+            return await entry.run(gremlin)
 
         return _run_async
 

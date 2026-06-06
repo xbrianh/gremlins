@@ -5,7 +5,7 @@ Drives launcher.launch() and launcher.resume() directly with:
   finds the fake `claude` binary and the gremlins package).
 - Real throwaway git repos for worktree tests.
 
-Does NOT use subprocess.run([launch.sh, ...]) — this is the Python replacement.
+Does NOT use subprocess.run(_TestGremlin([launch.sh, ...])) — this is the Python replacement.
 """
 
 from __future__ import annotations

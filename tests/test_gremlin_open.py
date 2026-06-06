@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from conftest import _TestGremlin
 import json
 import pathlib
 import subprocess
@@ -12,7 +13,7 @@ from gremlins.executor.gremlin import Gremlin
 
 
 def _init_git_repo(path: pathlib.Path) -> None:
-    subprocess.run(["git", "init"], cwd=str(path), check=True, capture_output=True)
+    subprocess.run(_TestGremlin(["git", "init"], cwd=str(path), check=True, capture_output=True))
     subprocess.run(
         ["git", "config", "user.name", "Test"],
         cwd=str(path),

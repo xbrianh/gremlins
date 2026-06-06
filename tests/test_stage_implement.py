@@ -1,5 +1,6 @@
 """Tests for the YAML-based implement stage-definition.
 
+from conftest import _TestGremlin
 Covers:
 - Pipeline shape: type: implement expands to implement (agent) + require-impl-progress (exec)
 - The exec validator passes when commits exist since base_sha and HEAD is a fast-forward
@@ -99,7 +100,7 @@ def test_validator_passes_when_commits_exist(sandbox: Any) -> None:
 
     state = _make_state(sandbox.project, base_sha)
     stage = _require_impl_progress_exec()
-    result = asyncio.run(stage.run(state))
+    result = asyncio.run(stage.run(_TestGremlin(state)))
     from gremlins.stages.outcome import Done
 
     assert isinstance(result, Done)
@@ -117,7 +118,7 @@ def test_validator_raises_bail_when_no_commits(sandbox: Any) -> None:
     state = _make_state(sandbox.project, base_sha)
     stage = _require_impl_progress_exec()
     with pytest.raises(Bail, match="exec require-impl-progress: exited 1"):
-        asyncio.run(stage.run(state))
+        asyncio.run(stage.run(_TestGremlin(state)))
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +145,7 @@ def test_validator_raises_bail_when_head_diverges(sandbox: Any) -> None:
     state = _make_state(sandbox.project, base_sha)
     stage = _require_impl_progress_exec()
     with pytest.raises(Bail, match="exec require-impl-progress: exited 1"):
-        asyncio.run(stage.run(state))
+        asyncio.run(stage.run(_TestGremlin(state)))
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +162,7 @@ def test_validator_passes_on_resume_with_prior_commits(sandbox: Any) -> None:
     # State uses the original base_sha (before the impl commit).
     state = _make_state(sandbox.project, base_sha)
     stage = _require_impl_progress_exec()
-    result = asyncio.run(stage.run(state))
+    result = asyncio.run(stage.run(_TestGremlin(state)))
     from gremlins.stages.outcome import Done
 
     assert isinstance(result, Done)

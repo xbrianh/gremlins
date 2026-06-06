@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from conftest import _TestGremlin
 import pathlib
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -29,7 +30,7 @@ class _SimpleStage(Stage):
         self.prompts = prompts
         self.options = options
 
-    async def run(self, state: State) -> Outcome:
+    async def run(self, gremlin: State) -> Outcome:
         return Done()
 
 
@@ -52,7 +53,7 @@ def test_stage_run_raises_not_implemented() -> None:
         pipeline_data=_PIPELINE,
     )
     with pytest.raises(NotImplementedError):
-        asyncio.run(stage.run(state))
+        asyncio.run(stage.run(_TestGremlin(state)))
 
 
 def test_default_with_dict_constructs_subclass() -> None:
@@ -102,7 +103,7 @@ def test_substitute_vars_renders_shared_framework_keys() -> None:
     stage = _SimpleStage("st", [], {})
     state = _subs_state()
     text = "{name} {model} {artifact_dir} {repo} {cwd} {base_ref}"
-    assert stage.substitute_vars(text, state) == (
+    assert stage.substitute_vars(text, _TestGremlin(state)) == (
         "st fake /tmp/sess owner/proj /work trunk"
     )
 
@@ -111,7 +112,7 @@ def test_substitute_vars_framework_wins_over_options_and_extra() -> None:
     stage = _SimpleStage("st", [], {"repo": "from-opt", "x": "opt-x"})
     state = _subs_state()
     out = stage.substitute_vars(
-        "{repo} {x} {y}", state, extra={"repo": "from-extra", "y": "extra-y"}
+        "{repo} {x} {y}", _TestGremlin(state), extra={"repo": "from-extra", "y": "extra-y"}
     )
     # framework {repo} wins over both option and extra; extra wins over option for {y}.
     assert out == "owner/proj opt-x extra-y"
@@ -120,7 +121,7 @@ def test_substitute_vars_framework_wins_over_options_and_extra() -> None:
 def test_substitute_vars_extra_wins_over_options() -> None:
     stage = _SimpleStage("st", [], {"k": "opt"})
     state = _subs_state()
-    assert stage.substitute_vars("{k}", state, extra={"k": "resolved"}) == "resolved"
+    assert stage.substitute_vars("{k}", _TestGremlin(state), extra={"k": "resolved"}) == "resolved"
 
 
 def test_substitute_vars_unknown_and_nonword_braces_pass_through() -> None:
@@ -129,4 +130,4 @@ def test_substitute_vars_unknown_and_nonword_braces_pass_through() -> None:
     text = "{unknown} ${shell} {read:k} {{name}}"
     # unknown tokens, shell ${x}, {read:k}, and doubled braces are left verbatim;
     # the inner {name} of {{name}} is substituted (regex, not format_map semantics).
-    assert stage.substitute_vars(text, state) == "{unknown} ${shell} {read:k} {st}"
+    assert stage.substitute_vars(text, _TestGremlin(state)) == "{unknown} ${shell} {read:k} {st}"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from conftest import _TestGremlin
 import asyncio
 import json
 from typing import Any
@@ -50,7 +51,7 @@ def test_loop_head_stable_exits_cleanly(tmp_path):
         return Done()
 
     loop = LoopStage("loop", body_runners=[runner], max_iterations=3)
-    outcome = asyncio.run(loop.run(_loop_state(tmp_path)))
+    outcome = asyncio.run(loop.run(_TestGremlin(_loop_state(tmp_path))))
 
     assert outcome == Done()
     assert calls == ["run"]
@@ -72,7 +73,7 @@ def test_loop_cmd_failure_then_fix_then_green(tmp_path):
         return Done()
 
     loop = LoopStage("loop", body_runners=[check, fix], max_iterations=3)
-    asyncio.run(loop.run(loop_state))
+    asyncio.run(loop.run(_TestGremlin(loop_state)))
 
     assert attempt["attempt"] == 2
     assert attempt["fixed"]
@@ -90,7 +91,7 @@ def test_loop_fix_skipped_on_success(tmp_path):
         return Done()
 
     loop = LoopStage("loop", body_runners=[check, fix], max_iterations=3)
-    asyncio.run(loop.run(_loop_state(tmp_path)))
+    asyncio.run(loop.run(_TestGremlin(_loop_state(tmp_path))))
 
     assert fix_calls == []
 
@@ -107,7 +108,7 @@ def test_loop_exhausted_returns_bail(tmp_path):
 
     loop = LoopStage("loop", body_runners=[check, fix], max_iterations=3)
     with pytest.raises(Bail):
-        asyncio.run(loop.run(loop_state))
+        asyncio.run(loop.run(_TestGremlin(loop_state)))
 
 
 def test_loop_fix_skipped_on_final_iteration(tmp_path):
@@ -127,7 +128,7 @@ def test_loop_fix_skipped_on_final_iteration(tmp_path):
 
     loop = LoopStage("loop", body_runners=[check, fix], max_iterations=3)
     with pytest.raises(Bail):
-        asyncio.run(loop.run(loop_state))
+        asyncio.run(loop.run(_TestGremlin(loop_state)))
     # fix ran for iterations 1 and 2, NOT 3
     assert fix_calls == [1, 2]
 
@@ -140,7 +141,7 @@ def test_loop_bail_propagates_immediately(tmp_path):
 
     loop = LoopStage("loop", body_runners=[bail_runner], max_iterations=3)
     with pytest.raises(Bail) as exc_info:
-        asyncio.run(loop.run(_loop_state(tmp_path)))
+        asyncio.run(loop.run(_TestGremlin(_loop_state(tmp_path))))
     assert "bail_class=other" in exc_info.value.reason
 
 
@@ -169,7 +170,7 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
 
     loop = LoopStage("loop", body_runners=[check, fix], max_iterations=2)
     with pytest.raises(Bail):
-        asyncio.run(loop.run(loop_state))
+        asyncio.run(loop.run(_TestGremlin(loop_state)))
 
     bail_file = state_dir / f"bail_{attempt}.json"
     assert bail_file.exists()
@@ -214,7 +215,7 @@ def test_custom_until_predicate(tmp_path):
         max_iterations=5,
         until=max_iters(2),
     )
-    result = asyncio.run(loop.run(_loop_state(tmp_path)))
+    result = asyncio.run(loop.run(_TestGremlin(_loop_state(tmp_path))))
     assert result == Done()
 
 
@@ -237,27 +238,27 @@ def _run_cmd_stage(tmp_path: Any, cmds: list[str]) -> tuple[Cmd, RuntimeState]:
 
 def test_run_cmd_success(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, ["true"])
-    outcome = asyncio.run(stage.run(state))
+    outcome = asyncio.run(stage.run(_TestGremlin(state)))
     assert outcome == Done()
 
 
 def test_run_cmd_failure_raises_bail(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, ["false"])
     with pytest.raises(Bail):
-        asyncio.run(stage.run(state))
+        asyncio.run(stage.run(_TestGremlin(state)))
 
 
 def test_run_cmd_failure_writes_log(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, ["echo boom >&2; false"])
     with pytest.raises(Bail):
-        asyncio.run(stage.run(state))
+        asyncio.run(stage.run(_TestGremlin(state)))
     log = tmp_path / "artifacts" / "exec-cmd.log"
     assert log.exists()
 
 
 def test_run_cmd_empty_cmds_is_noop(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, [])
-    outcome = asyncio.run(stage.run(state))
+    outcome = asyncio.run(stage.run(_TestGremlin(state)))
     assert outcome == Done()
     assert not (tmp_path / "artifacts" / "exec-cmd.log").exists()
 
@@ -265,7 +266,7 @@ def test_run_cmd_empty_cmds_is_noop(tmp_path):
 def test_run_cmd_output_written_to_log(tmp_path):
     stage, state = _run_cmd_stage(tmp_path, ["echo hello_output; false"])
     with pytest.raises(Bail):
-        asyncio.run(stage.run(state))
+        asyncio.run(stage.run(_TestGremlin(state)))
     log = tmp_path / "artifacts" / "exec-cmd.log"
     assert "hello_output" in log.read_text()
 
@@ -299,7 +300,7 @@ def test_loop_patches_loop_iteration_to_state(tmp_path, make_state_dir):
 
     loop = LoopStage("loop", body_runners=[runner], max_iterations=3)
     with pytest.raises(Bail):
-        asyncio.run(loop.run(loop_state))
+        asyncio.run(loop.run(_TestGremlin(loop_state)))
 
     assert seen_iterations == [1, 2, 3]
 
@@ -329,7 +330,7 @@ def test_loop_unbinds_out_keys_between_iterations(tmp_path):
         body_runners=[binder],
         max_iterations=3,
     )
-    asyncio.run(loop.run(state))
+    asyncio.run(loop.run(_TestGremlin(state)))
     assert bound_count[0] == 2
 
 
@@ -358,7 +359,7 @@ def test_loop_interval_sleeps_between_iterations(tmp_path, monkeypatch):
         return Done()
 
     loop = LoopStage("loop", body_runners=[runner], max_iterations=3, interval=5.0)
-    asyncio.run(loop.run(loop_state))
+    asyncio.run(loop.run(_TestGremlin(loop_state)))
 
     assert count[0] == 2
     assert sleep_calls == [5.0]
@@ -378,6 +379,6 @@ def test_loop_no_interval_no_sleep(tmp_path, monkeypatch):
         return Done()
 
     loop = LoopStage("loop", body_runners=[runner], max_iterations=3)
-    asyncio.run(loop.run(_loop_state(tmp_path)))
+    asyncio.run(loop.run(_TestGremlin(_loop_state(tmp_path))))
 
     assert sleep_calls == []

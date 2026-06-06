@@ -137,12 +137,12 @@ class LoopStage(Stage):
         stage.client = get_client_from_dict(d)
         return stage
 
-    def _build_runners(self, state: State) -> list[Callable[[], Awaitable[Outcome]]]:
+    def _build_runners(self, state: State, gremlin: Gremlin) -> list[Callable[[], Awaitable[Outcome]]]:
         result: list[Callable[[], Awaitable[Outcome]]] = []
         for child in self.body:
             cs = _child_state(state, child)
             base: Callable[[], Awaitable[Any]] = cs.make_runner(
-                child, scope=self.body, record_stage=False
+                child, scope=self.body, record_stage=False, gremlin=gremlin
             )
             name = child.name
 
@@ -159,7 +159,7 @@ class LoopStage(Stage):
         return result
 
     async def run(self, gremlin: Gremlin) -> Outcome:
-        state = getattr(gremlin, "state", gremlin)
+        state = cast(State, gremlin.state)
         for iteration in range(1, self._max_iterations + 1):
             state.record_state_field(loop_iteration=iteration)
             state.artifacts.unbind(_MARKER_KEY)
@@ -171,7 +171,7 @@ class LoopStage(Stage):
             runners = (
                 self._body_runners
                 if self._body_runners is not None
-                else self._build_runners(state)
+                else self._build_runners(state, gremlin)
             )
             had_failure = await _dispatch_runners(
                 runners, iteration, self._max_iterations, state.artifacts

@@ -49,7 +49,7 @@ def test_agent_stage_e2e_reads_artifact_and_writes_output(tmp_path):
     class WritingClient(FakeClaudeClient):
         async def run(self, prompt, *, label, **kwargs):
             summary_file.write_text("# Summary\nHello World")
-            return await super().run(prompt, label=label, **kwargs)
+            return await super().run(_TestGremlin(prompt, label=label, **kwargs))
 
     client = WritingClient(fixtures={"summarise": MINIMAL_EVENTS})
     state = build_state(
@@ -60,7 +60,7 @@ def test_agent_stage_e2e_reads_artifact_and_writes_output(tmp_path):
         artifacts=registry,
     )
 
-    result = asyncio.run(stage.run(state))
+    result = asyncio.run(stage.run(_TestGremlin(state)))
 
     assert isinstance(result, Done)
     # Source content was substituted into the prompt

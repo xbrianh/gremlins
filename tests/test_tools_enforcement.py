@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from conftest import _TestGremlin
 import asyncio
 import json
 import pathlib
@@ -237,7 +238,7 @@ def test_wrap_invalid_json_writes_error(tmp_path: pathlib.Path) -> None:
     tools = build_tools(bypass=False, worktree_root=tmp_path, audit_log=log)
     read_tool = _ft(tools, "Read")
     ctx = _ctx()
-    result = asyncio.run(read_tool.on_invoke_tool(ctx, "not-json{{{"))
+    result = asyncio.run(_TestGremlin(read_tool.on_invoke_tool(ctx, "not-json{{{")))
     assert "Error" in result
     entry = json.loads(log.read_text())
     assert entry["status"] == "error"

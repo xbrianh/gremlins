@@ -7,7 +7,7 @@ import json
 import os
 import pathlib
 import signal
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -16,6 +16,9 @@ from gremlins.executor.state import State, StateData, build_state
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Done, Outcome
 from gremlins.utils import proc
+
+if TYPE_CHECKING:
+    from gremlins.executor.gremlin import Gremlin
 
 # ---------------------------------------------------------------------------
 # Fakes

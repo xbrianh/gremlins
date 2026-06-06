@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from conftest import _TestGremlin
 import asyncio
 import inspect
 import pathlib
 import threading
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -115,7 +116,7 @@ def test_run_stages_two_test_entries_both_execute() -> None:
         ("implement", _make_afn("implement", log)),
         ("test-post", _make_afn("test-post", log)),
     ]
-    asyncio.run(run_stages(stages))
+    asyncio.run(_TestGremlin(run_stages(stages)))
     assert log == ["test-pre", "implement", "test-post"]
 
 
@@ -126,7 +127,7 @@ def test_run_stages_resume_targets_first_test() -> None:
         ("implement", _make_afn("implement", log)),
         ("test-post", _make_afn("test-post", log)),
     ]
-    asyncio.run(run_stages(stages, resume_from="test-pre"))
+    asyncio.run(_TestGremlin(run_stages(stages, resume_from="test-pre")))
     assert log == ["test-pre", "implement", "test-post"]
 
 
@@ -137,7 +138,7 @@ def test_run_stages_resume_targets_second_test() -> None:
         ("implement", _make_afn("implement", log)),
         ("test-post", _make_afn("test-post", log)),
     ]
-    asyncio.run(run_stages(stages, resume_from="test-post"))
+    asyncio.run(_TestGremlin(run_stages(stages, resume_from="test-post")))
     assert log == ["test-post"]
     assert "test-pre" not in log
     assert "implement" not in log
@@ -161,7 +162,7 @@ def test_parallel_wrapper_runs_all_children() -> None:
 
     children = [("a", track("a")), ("b", track("b"))]
     wrapper = _parallel_wrapper(children)
-    asyncio.run(wrapper())  # type: ignore[operator]
+    asyncio.run(_TestGremlin(wrapper()))  # type: ignore[operator]
     assert sorted(log) == ["a", "b"]
 
 
@@ -186,7 +187,7 @@ def test_parallel_wrapper_children_overlap_in_time() -> None:
 
     children = [("a", make_timed("a")), ("b", make_timed("b"))]
     wrapper = _parallel_wrapper(children)
-    asyncio.run(wrapper())  # type: ignore[operator]
+    asyncio.run(_TestGremlin(wrapper()))  # type: ignore[operator]
 
     # Both started before either finished → overlapping execution
     assert timings["a"]["start"] < timings["b"]["end"]
@@ -211,7 +212,7 @@ def test_parallel_wrapper_sibling_runs_when_one_child_fails() -> None:
     children = [("fail", failing), ("sibling", sibling)]
     wrapper = _parallel_wrapper(children)
     with pytest.raises(RuntimeError, match="child failed"):
-        asyncio.run(wrapper())  # type: ignore[operator]
+        asyncio.run(_TestGremlin(wrapper()))  # type: ignore[operator]
     assert "sibling" in ran
 
 
@@ -230,7 +231,7 @@ def test_parallel_wrapper_runs_all_children_unconditionally() -> None:
         ("c", _make_afn("c", log)),
     ]
     wrapper = _parallel_wrapper(children)
-    asyncio.run(wrapper())  # type: ignore[operator]
+    asyncio.run(_TestGremlin(wrapper()))  # type: ignore[operator]
     assert sorted(log) == ["a", "b", "c"]
 
 
@@ -253,7 +254,7 @@ def test_run_stages_drives_parallel_group() -> None:
         *parallel_stages,
         ("address", _make_afn("address", log)),
     ]
-    asyncio.run(run_stages(stages))
+    asyncio.run(_TestGremlin(run_stages(stages)))
     assert log[0] == "plan"
     assert sorted(log[1:3]) == ["r1", "r2"]
     assert log[3] == "address"
@@ -273,7 +274,7 @@ def test_run_stages_resume_from_group_skips_before_group() -> None:
         *parallel_stages,
         ("address", _make_afn("address", log)),
     ]
-    asyncio.run(run_stages(stages, resume_from="reviews"))
+    asyncio.run(_TestGremlin(run_stages(stages, resume_from="reviews")))
     assert "plan" not in log
     assert "r1" in log
     assert "r2" in log
@@ -363,7 +364,7 @@ def test_parallel_sequence_child_worktree_flows() -> None:
     )
 
     async def seq_runner() -> None:
-        await seq_stage.run(seq_ctx)
+        await seq_stage.run(_TestGremlin(seq_ctx))
 
     project_root = pathlib.Path.cwd()
     stages = _make_parallel_stages(
@@ -376,7 +377,7 @@ def test_parallel_sequence_child_worktree_flows() -> None:
         for _, fn in stages:
             await fn()  # type: ignore[operator]
 
-    asyncio.run(_run_all())
+    asyncio.run(_TestGremlin(_run_all()))
 
     assert len(observed) == 2
     # Both sub-stages saw the same non-None worktree that is not the project root
@@ -396,7 +397,7 @@ def test_run_stages_async_callable_executes() -> None:
     async def async_fn() -> None:
         log.append("async")
 
-    asyncio.run(run_stages([("a", async_fn)]))
+    asyncio.run(_TestGremlin(run_stages([("a", async_fn)])))
     assert log == ["async"]
 
 
@@ -444,5 +445,5 @@ def test_stages_run_in_order_via_make_runner() -> None:
         ("a", base_state.make_runner(StageA("a"))),
         ("b", base_state.make_runner(StageB("b"))),
     ]
-    asyncio.run(run_stages(stages))
+    asyncio.run(_TestGremlin(run_stages(stages)))
     assert executed == ["a", "b"]

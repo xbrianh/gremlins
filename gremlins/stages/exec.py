@@ -77,7 +77,7 @@ class Exec(Stage):
         )
 
     async def run(self, gremlin: Gremlin) -> Outcome:
-        state = getattr(gremlin, "state", gremlin)
+        state = cast(State, gremlin.state)
         try:
             extra_env = resolve_in_map(state.artifacts, self.in_map)
         except ValueError as exc:

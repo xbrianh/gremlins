@@ -49,7 +49,7 @@ def _make_state(client, artifact_dir, *, gremlin_id=None, base_ref_sha=""):
 
 def _init_git_repo(path: pathlib.Path) -> None:
     """Create a git repo with a first commit so HEAD exists and the tree is clean."""
-    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
+    subprocess.run(_TestGremlin(["git", "init"], cwd=path, check=True, capture_output=True))
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
         cwd=path,
@@ -108,7 +108,7 @@ def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
         worktree=worktree,
         artifacts=ArtifactRegistry(artifact_dir),
     )
-    asyncio.run(stage.run(state))
+    asyncio.run(stage.run(_TestGremlin(state)))
     assert client.calls[0].cwd == worktree
 
 
@@ -127,5 +127,5 @@ def test_review_code_stage_includes_style_from_prompts(tmp_path):
     artifact_dir = tmp_path / "session"
     artifact_dir.mkdir()
     state = _make_state(client, artifact_dir)
-    asyncio.run(stage.run(state))
+    asyncio.run(stage.run(_TestGremlin(state)))
     assert "Be good." in client.calls[0].prompt

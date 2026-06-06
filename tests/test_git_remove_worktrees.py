@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from conftest import _TestGremlin
 import asyncio
 import os
 import pathlib
@@ -11,7 +12,7 @@ from gremlins.utils.git import remove_worktrees_async
 
 
 def test_noop_outside_git_repo(tmp_path: pathlib.Path) -> None:
-    asyncio.run(remove_worktrees_async(str(tmp_path), [str(tmp_path / "nonexistent")]))
+    asyncio.run(_TestGremlin(remove_worktrees_async(str(tmp_path), [str(tmp_path / "nonexistent")])))
 
 
 def test_handles_missing_path(tmp_path: pathlib.Path) -> None:
@@ -22,7 +23,7 @@ def test_handles_missing_path(tmp_path: pathlib.Path) -> None:
         "GIT_COMMITTER_NAME": "t",
         "GIT_COMMITTER_EMAIL": "t@t",
     }
-    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(_TestGremlin(["git", "init", str(tmp_path)], check=True, capture_output=True))
     subprocess.run(
         ["git", "-C", str(tmp_path), "commit", "--allow-empty", "-m", "init"],
         check=True,

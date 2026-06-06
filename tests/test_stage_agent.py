@@ -63,7 +63,7 @@ def test_in_content_substituted_into_prompt(tmp_path):
     state = _make_state(tmp_path, client, registry=registry)
     agent = _make_agent(prompts=["Process: {plan_text}"], in_map={"plan_text": "plan"})
 
-    asyncio.run(agent.run(state))
+    asyncio.run(agent.run(_TestGremlin(state)))
 
     assert len(client.calls) == 1
     assert "# My Plan" in client.calls[0].prompt
@@ -74,7 +74,7 @@ def test_missing_in_key_raises_missing_artifact(tmp_path):
     agent = _make_agent(in_map={"content": "unbound-key"})
 
     with pytest.raises(MissingArtifact):
-        asyncio.run(agent.run(state))
+        asyncio.run(agent.run(_TestGremlin(state)))
 
 
 def test_no_in_map_runs_prompt_unchanged(tmp_path):
@@ -82,7 +82,7 @@ def test_no_in_map_runs_prompt_unchanged(tmp_path):
     state = _make_state(tmp_path, client)
     agent = _make_agent(prompts=["Static prompt"], in_map=None)
 
-    result = asyncio.run(agent.run(state))
+    result = asyncio.run(agent.run(_TestGremlin(state)))
 
     assert isinstance(result, Done)
     assert client.calls[0].prompt == "Static prompt"
@@ -98,7 +98,7 @@ def test_verify_produced_passes_when_out_file_written(tmp_path):
     class WritingClient(FakeClaudeClient):
         async def run(self, prompt, *, label, **kwargs):
             output_file.write_text("# Output")
-            return await super().run(prompt, label=label, **kwargs)
+            return await super().run(_TestGremlin(prompt, label=label, **kwargs))
 
     client = WritingClient(fixtures={"my-agent": MINIMAL_EVENTS})
     state = _make_state(tmp_path, client)
@@ -107,7 +107,7 @@ def test_verify_produced_passes_when_out_file_written(tmp_path):
         out_map={"result": "file://session/output.md"},
     )
 
-    result = asyncio.run(agent.run(state))
+    result = asyncio.run(agent.run(_TestGremlin(state)))
 
     assert isinstance(result, Done)
     assert state.artifacts is not None
@@ -123,7 +123,7 @@ def test_verify_produced_fails_when_out_file_missing(tmp_path):
     )
 
     with pytest.raises(FileNotFoundError):
-        asyncio.run(agent.run(state))
+        asyncio.run(agent.run(_TestGremlin(state)))
 
 
 def test_out_uri_bound_in_registry_before_agent_runs(tmp_path):
@@ -139,7 +139,7 @@ def test_out_uri_bound_in_registry_before_agent_runs(tmp_path):
                 registry is not None and registry.produced("result")
             )
             output_file.write_text("# Output")
-            return await super().run(prompt, label=label, **kwargs)
+            return await super().run(_TestGremlin(prompt, label=label, **kwargs))
 
     client = CheckingClient(fixtures={"my-agent": MINIMAL_EVENTS})
     state = _make_state(tmp_path, client)
@@ -147,7 +147,7 @@ def test_out_uri_bound_in_registry_before_agent_runs(tmp_path):
         out_map={"result": "file://session/output.md"},
     )
 
-    asyncio.run(agent.run(state))
+    asyncio.run(agent.run(_TestGremlin(state)))
     assert seen_bound_before_run == [True]
 
 

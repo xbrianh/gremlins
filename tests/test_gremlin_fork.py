@@ -1,5 +1,6 @@
 """Tests for Gremlin.fork() method."""
 
+from conftest import _TestGremlin
 import asyncio
 import subprocess
 
@@ -19,7 +20,7 @@ def tmp_repo(tmp_path):
     """Create a minimal git repo for testing."""
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
-    subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(_TestGremlin(["git", "init"], cwd=repo_dir, check=True, capture_output=True))
     subprocess.run(
         ["git", "config", "user.email", "test@example.com"],
         cwd=repo_dir,
@@ -96,7 +97,7 @@ def test_fork_without_worktree(tmp_path, tmp_repo):
         assert state.data.gremlin_id == "gr-1"
         assert state.artifact_dir == artifact_dir
 
-    asyncio.run(_test())
+    asyncio.run(_TestGremlin(_test()))
 
 
 def test_fork_with_worktree(tmp_path, tmp_repo):
@@ -197,7 +198,7 @@ def test_fork_with_worktree(tmp_path, tmp_repo):
                     capture_output=True,
                 )
 
-    asyncio.run(_test())
+    asyncio.run(_TestGremlin(_test()))
 
 
 def test_fork_preserves_registry(tmp_path, tmp_repo):
@@ -246,7 +247,7 @@ def test_fork_preserves_registry(tmp_path, tmp_repo):
         assert "some_key" in forked.artifacts.data
         assert forked.artifacts.read("some_key") == {"data": "value"}
 
-    asyncio.run(_test())
+    asyncio.run(_TestGremlin(_test()))
 
 
 def test_fork_with_branch_pipeline_scopes_child(tmp_path, tmp_repo):
@@ -316,4 +317,4 @@ def test_fork_with_branch_pipeline_scopes_child(tmp_path, tmp_repo):
         # Parent state is not mutated
         assert state.data.pipeline_path == str(parent_pipeline_path)
 
-    asyncio.run(_test())
+    asyncio.run(_TestGremlin(_test()))

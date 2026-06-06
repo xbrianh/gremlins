@@ -1,5 +1,6 @@
 """Tests for the 'parallel children are first-class gremlins' feature.
 
+from conftest import _TestGremlin
 Covers:
 - FileArtifactResolver._path handles file:///absolute/path URIs
 - _snapshot_registry rewrites file://session/ URIs to absolute paths
@@ -116,7 +117,7 @@ def test_parallel_run_cleans_up_child_state_dirs(sandbox) -> None:
     child_b = _NoopStage("child-b")
     stage = ParallelStage("mygroup", [child_a, child_b])
 
-    asyncio.run(stage.run(parent))
+    asyncio.run(stage.run(_TestGremlin(parent)))
 
     state_root = paths.state_root()
     child_id_a = f"{gremlin_id}--mygroup--child-a"
@@ -148,7 +149,7 @@ def test_parallel_run_no_gremlin_id_uses_old_layout(sandbox) -> None:
 
     child = _NoopStage("child-x")
     stage = ParallelStage("grp", [child])
-    asyncio.run(stage.run(parent))
+    asyncio.run(stage.run(_TestGremlin(parent)))
 
     # Old layout: child artifact_dir = parent.artifact_dir / child.name
     assert (artifact_dir / "child-x").is_dir()
@@ -169,7 +170,7 @@ def test_parallel_child_artifact_dir_is_full_copy(sandbox) -> None:
     # Create a temporary git repo
     tmp_repo = sandbox.root / "repo"
     tmp_repo.mkdir()
-    subprocess.run(["git", "init"], cwd=tmp_repo, check=True, capture_output=True)
+    subprocess.run(_TestGremlin(["git", "init"], cwd=tmp_repo, check=True, capture_output=True))
     subprocess.run(
         ["git", "config", "user.email", "test@example.com"],
         cwd=tmp_repo,
@@ -255,7 +256,7 @@ def test_parallel_child_artifact_dir_is_full_copy(sandbox) -> None:
             child_key="child-z",
         )
 
-    forked = asyncio.run(test_fork())
+    forked = asyncio.run(_TestGremlin(test_fork()))
 
     # Verify child artifact dir is a full copy
     child_artifact_dir = forked.artifact_dir

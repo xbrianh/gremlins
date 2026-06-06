@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from conftest import _TestGremlin
 import os
 import pathlib
 import subprocess
@@ -19,7 +20,7 @@ _GIT_ENV = {
 
 
 def _init_repo(path: pathlib.Path) -> None:
-    subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
+    subprocess.run(_TestGremlin(["git", "init", str(path)], check=True, capture_output=True))
     subprocess.run(
         ["git", "-C", str(path), "commit", "--allow-empty", "-m", "init"],
         check=True,

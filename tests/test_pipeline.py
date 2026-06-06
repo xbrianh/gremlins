@@ -1,3 +1,4 @@
+from conftest import _TestGremlin
 import asyncio
 import pathlib
 
@@ -278,4 +279,4 @@ def test_stage_builders_registry_covers_all_known_types() -> None:
 def test_run_raises_without_initialize_with_runtime(tmp_path: pathlib.Path) -> None:
     gremlin = _local(_make_stages("plan"), tmp_path=tmp_path)
     with pytest.raises(RuntimeError, match="initialize_with_runtime"):
-        asyncio.run(gremlin.run())
+        asyncio.run(_TestGremlin()g_TestGremlin()r_TestGremlin()e_TestGremlin()m_TestGremlin()l_TestGremlin()i_TestGremlin()n_TestGremlin()._TestGremlin()r_TestGremlin()u_TestGremlin()n_TestGremlin()(_TestGremlin())_TestGremlin())

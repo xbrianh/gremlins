@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from conftest import _TestGremlin
 import asyncio as _asyncio
 import unittest.mock
 
@@ -58,7 +59,7 @@ def test_claude_client_raises_on_overrun() -> None:
     client = SubprocessClaudeClient()
     with pytest.raises(ValueError, match="max_retries"):
         _asyncio.run(
-            client.run("x", label="t", max_retries=len(STREAM_IDLE_BACKOFF) + 1)
+            client.run(_TestGremlin("x", label="t", max_retries=len(STREAM_IDLE_BACKOFF) + 1))
         )
 
 
@@ -68,7 +69,7 @@ def test_openai_client_raises_on_overrun() -> None:
     client = OpenAIAgentsClient("gpt-4o")
     with pytest.raises(ValueError, match="max_retries"):
         _asyncio.run(
-            client.run("x", label="t", max_retries=len(STREAM_IDLE_BACKOFF) + 1)
+            client.run(_TestGremlin("x", label="t", max_retries=len(STREAM_IDLE_BACKOFF) + 1))
         )
 
 
@@ -213,7 +214,7 @@ def test_retry_async_works() -> None:
             raise ValueError("async boom")
         return "async ok"
 
-    result = _asyncio.run(fn())
+    result = _asyncio.run(_TestGremlin(fn()))
     assert result == "async ok"
     assert calls[0] == 2
 
@@ -227,7 +228,7 @@ def test_retry_async_classify_false_no_retry() -> None:
         raise ValueError("not retryable")
 
     with pytest.raises(ValueError, match="not retryable"):
-        _asyncio.run(fn())
+        _asyncio.run(_TestGremlin(fn()))
     assert calls[0] == 1
 
 
@@ -243,7 +244,7 @@ def test_retry_async_on_retry_callback_args() -> None:
         raise ValueError("async x")
 
     with pytest.raises(ValueError):
-        _asyncio.run(fn())
+        _asyncio.run(_TestGremlin(fn()))
     assert len(received) == 1
     attempt, exc, wait = received[0]
     assert attempt == 0

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from conftest import _TestGremlin
 import asyncio
 import json
 import os
@@ -33,7 +34,7 @@ def project_dir(tmp_path):
     d = tmp_path / "project"
     d.mkdir()
     (d / "file.txt").write_text("hello")
-    subprocess.run(["git", "init"], cwd=str(d), check=True, capture_output=True)
+    subprocess.run(_TestGremlin(["git", "init"], cwd=str(d), check=True, capture_output=True))
     subprocess.run(
         ["git", "config", "user.name", "Test"],
         cwd=str(d),
@@ -84,7 +85,7 @@ def test_gremlin_run_in_process(project_dir, pipeline_yaml, sandbox):
             project_root=str(project_dir),
         )
         worktree = gremlin.worktree_dir
-        asyncio.run(gremlin.run())
+        asyncio.run(_TestGremlin()g_TestGremlin()r_TestGremlin()e_TestGremlin()m_TestGremlin()l_TestGremlin()i_TestGremlin()n_TestGremlin()._TestGremlin()r_TestGremlin()u_TestGremlin()n_TestGremlin()(_TestGremlin())_TestGremlin())
         rc = 0
     finally:
         os.chdir(saved_cwd)

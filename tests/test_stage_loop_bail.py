@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from conftest import _TestGremlin
 import asyncio
 import pathlib
 import subprocess
@@ -58,7 +59,7 @@ def test_bail_in_body_exec_terminates_loop(tmp_path: pathlib.Path) -> None:
     loop = LoopStage("loop", body=[exec_stage], max_iterations=3)
 
     with pytest.raises(Bail) as exc_info:
-        asyncio.run(loop.run(state))
+        asyncio.run(loop.run(_TestGremlin(state)))
 
     assert "bail reason" in exc_info.value.reason
 
@@ -78,7 +79,7 @@ def test_bail_message_matches_file_contents(tmp_path: pathlib.Path) -> None:
     loop = LoopStage("loop", body=[exec_stage], max_iterations=3)
 
     with pytest.raises(Bail) as exc_info:
-        asyncio.run(loop.run(state))
+        asyncio.run(loop.run(_TestGremlin(state)))
 
     assert exc_info.value.reason == "specific: assertion broken"
 
@@ -96,6 +97,6 @@ def test_bail_wins_over_needs_fix(tmp_path: pathlib.Path) -> None:
     loop = LoopStage("loop", body=[exec_stage], max_iterations=3)
 
     with pytest.raises(Bail) as exc_info:
-        asyncio.run(loop.run(state))
+        asyncio.run(loop.run(_TestGremlin(state)))
 
     assert exc_info.value.reason == "hard stop"

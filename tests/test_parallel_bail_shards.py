@@ -1,5 +1,6 @@
 """Tests for the parallel three-stage decomposition and related state fixes.
 
+from conftest import _TestGremlin
 Covers:
 - Per-child bail shards: children write to parallel_bails, not top-level.
 - bail_policy: 'any' and 'all' aggregation rules.
@@ -208,7 +209,7 @@ def test_bail_policy_any_one_bailed_sets_parent_bail(tmp_path, sandbox):
 
     # Run just the fanin stage.
     with pytest.raises(Bail, match="bailed"):
-        asyncio.run(stages[2][1]())  # fanin is index 2
+        asyncio.run(_TestGremlin(stages[2][1]()))  # fanin is index 2
 
     state_dir = sf.parent
     bail_path = state_dir / "bail_parent-attempt.json"
@@ -225,7 +226,7 @@ def test_bail_policy_all_one_bailed_no_parent_bail(tmp_path, sandbox):
     sf, stages = _build_fanin_test(tmp_path, sandbox.state, gremlin_id, shards, "all")
 
     # Only one bailed; policy=all requires all → no parent bail.
-    asyncio.run(stages[2][1]())  # fanin should not raise
+    asyncio.run(_TestGremlin(stages[2][1]()))  # fanin should not raise
 
     state_dir = sf.parent
     assert not (state_dir / "bail_parent-attempt.json").exists()
@@ -239,7 +240,7 @@ def test_bail_policy_all_both_bailed_sets_parent_bail(tmp_path, sandbox):
     sf, stages = _build_fanin_test(tmp_path, sandbox.state, gremlin_id, shards, "all")
 
     with pytest.raises(Bail, match="bailed"):
-        asyncio.run(stages[2][1]())
+        asyncio.run(_TestGremlin(stages[2][1]()))
 
     state_dir = sf.parent
     bail_path = state_dir / "bail_parent-attempt.json"
@@ -299,7 +300,7 @@ def test_cancel_on_bail_skips_unstarted_children():
 
     # Run just the parallel stage (index 1); skip fanout/fanin.
     with pytest.raises(RuntimeError, match="child-a bailed"):
-        asyncio.run(stages[1][1]())
+        asyncio.run(_TestGremlin(stages[1][1]()))
 
     # child-c should not have run (cancel flag set before it started).
     assert "c" not in ran
@@ -318,7 +319,7 @@ def test_fanin_resume_aggregates_existing_shards(tmp_path, sandbox):
     # Simulate resuming from fanin: only run the fanin stage.
     # Fanin raises because one child bailed; state must still be written.
     with pytest.raises(Bail, match="bailed"):
-        asyncio.run(run_stages(stages[2:], resume_from="reviews-fanin"))
+        asyncio.run(_TestGremlin(run_stages(stages[2:], resume_from="reviews-fanin")))
 
     state_dir = sf.parent
     assert (state_dir / "bail_parent-attempt.json").exists()
@@ -359,7 +360,7 @@ def test_run_stages_resume_from_fanin_name(tmp_path, sandbox):
 
     # run_stages with resume_from=reviews-fanin skips fanout and parallel.
     with pytest.raises(Bail, match="bailed"):
-        asyncio.run(run_stages(stages, resume_from="reviews-fanin"))
+        asyncio.run(_TestGremlin(run_stages(stages, resume_from="reviews-fanin")))
 
     assert (state_dir / "bail_fanin-resume-parent.json").exists()
     data = _read_state(sf)
@@ -435,7 +436,7 @@ def test_worktree_lifecycle_fanout_creates_and_fanin_removes(tmp_path):
     orig_cwd = os.getcwd()
     os.chdir(str(repo))
     try:
-        asyncio.run(stages[0][1]())  # fanout
+        asyncio.run(_TestGremlin(stages[0][1]()))  # fanout
         wt_list_after_fanout = subprocess.run(
             ["git", "worktree", "list", "--porcelain"],
             cwd=str(repo),
@@ -454,10 +455,10 @@ def test_worktree_lifecycle_fanout_creates_and_fanin_removes(tmp_path):
         assert ctx_b.worktree is not None and ctx_b.worktree.is_dir()
 
         # Parallel stage: noop children.
-        asyncio.run(stages[1][1]())  # parallel
+        asyncio.run(_TestGremlin(stages[1][1]()))  # parallel
 
         # Fan-in: worktrees should be removed.
-        asyncio.run(stages[2][1]())  # fanin (no bails, should not raise)
+        asyncio.run(_TestGremlin(stages[2][1]()))  # fanin (no bails, should not raise)
 
         wt_list_after_fanin = subprocess.run(
             ["git", "worktree", "list", "--porcelain"],
@@ -507,7 +508,7 @@ def test_fanout_persists_worktrees_and_fresh_fanin_can_clean_up(tmp_path, sandbo
         parent_data=StateData.load(gremlin_id),
         project_root=repo,
     )
-    asyncio.run(stages_run1[0][1]())  # fan-out only
+    asyncio.run(_TestGremlin(stages_run1[0][1]()))  # fan-out only
 
     # state.json should now record both worktree paths.
     sf = state_mod.resolve_state_file(gremlin_id)
@@ -531,7 +532,7 @@ def test_fanout_persists_worktrees_and_fresh_fanin_can_clean_up(tmp_path, sandbo
         parent_data=StateData.load(gremlin_id),
         project_root=repo,
     )
-    asyncio.run(stages_run2[2][1]())  # fan-in
+    asyncio.run(_TestGremlin(stages_run2[2][1]()))  # fan-in
 
     # Worktrees gone from disk and from state.json.
     for p in prior_paths:
@@ -570,7 +571,7 @@ def test_fanout_resume_tears_down_prior_worktrees(tmp_path, sandbox):
         parent_data=StateData.load(gremlin_id),
         project_root=repo,
     )
-    asyncio.run(stages_run1[0][1]())  # fan-out
+    asyncio.run(_TestGremlin(stages_run1[0][1]()))  # fan-out
 
     sf = state_mod.resolve_state_file(gremlin_id)
     assert sf is not None
@@ -590,7 +591,7 @@ def test_fanout_resume_tears_down_prior_worktrees(tmp_path, sandbox):
         parent_data=StateData.load(gremlin_id),
         project_root=repo,
     )
-    asyncio.run(stages_run2[0][1]())  # fan-out again
+    asyncio.run(_TestGremlin(stages_run2[0][1]()))  # fan-out again
 
     new_path_str = (_read_state(sf)["parallel_worktrees"]["reviews"]["paths"])["a"]
     assert new_path_str != prior_path_str
@@ -658,7 +659,7 @@ def test_parallel_all_children_complete_with_defaults():
         for _, fn in stages:
             await fn()
 
-    asyncio.run(_run_all())
+    asyncio.run(_TestGremlin(_run_all()))
 
     assert sorted(ran) == ["a", "b"]
 
@@ -743,7 +744,7 @@ def test_parallel_child_set_stage_writes_parent_as_stage(tmp_path, sandbox):
         ("github-address-pull-request-reviews", _noop),
     ]
     # Should not raise — this is what gremlins resume does.
-    asyncio.run(run_stages(pipeline_stages, resume_from=data["stage"]))
+    asyncio.run(_TestGremlin(run_stages(pipeline_stages, resume_from=data["stage"])))
 
 
 def test_parallel_child_set_stage_with_sub_stage_payload_writes_parent_as_stage(
@@ -806,7 +807,7 @@ def test_fanin_allows_child_worktree_mutations(tmp_path, sandbox, caplog):
         parent_data=StateData.load(gremlin_id),
         project_root=repo,
     )
-    asyncio.run(stages_run1[0][1]())  # fan-out
+    asyncio.run(_TestGremlin(stages_run1[0][1]()))  # fan-out
 
     # Get worktree paths from state.
     sf = state_mod.resolve_state_file(gremlin_id)
@@ -853,7 +854,7 @@ def test_fanin_allows_child_worktree_mutations(tmp_path, sandbox, caplog):
         project_root=repo,
     )
     caplog.clear()
-    asyncio.run(stages_run2[2][1]())  # fan-in
+    asyncio.run(_TestGremlin(stages_run2[2][1]()))  # fan-in
 
     # Verify mutations were logged.
     assert any("child a mutated its worktree" in r.message for r in caplog.records)

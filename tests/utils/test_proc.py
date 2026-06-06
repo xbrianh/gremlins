@@ -1,3 +1,4 @@
+from conftest import _TestGremlin
 import subprocess
 
 import pytest
@@ -6,27 +7,27 @@ from gremlins.utils import proc
 
 
 def test_run_success():
-    r = proc.run(["true"])
+    r = proc.run(_TestGremlin(["true"]))
     assert r.returncode == 0
 
 
 def test_run_failure_no_raise():
-    r = proc.run(["false"])
+    r = proc.run(_TestGremlin(["false"]))
     assert r.returncode != 0
 
 
 def test_run_check_raises():
     with pytest.raises(subprocess.CalledProcessError):
-        proc.run(["false"], check=True)
+        proc.run(_TestGremlin(["false"], check=True))
 
 
 def test_run_captures_stdout():
-    r = proc.run(["echo", "hello"])
+    r = proc.run(_TestGremlin(["echo", "hello"]))
     assert r.stdout.strip() == "hello"
 
 
 def test_run_captures_stderr():
-    r = proc.run(["sh", "-c", "echo err >&2"])
+    r = proc.run(_TestGremlin(["sh", "-c", "echo err >&2"]))
     assert "err" in r.stderr
 
 

@@ -1,5 +1,6 @@
 """Tests for skills/_lib/python.sh interpreter selection.
 
+from conftest import _TestGremlin
 The helper gates every shim entry point, so a regression here would break
 all skill invocations before any Python code starts. These tests exercise
 the candidate-selection and version-rejection logic by stubbing fake
@@ -112,6 +113,6 @@ def test_helper_exits_127_when_no_compatible_candidate(tmp_path):
 def test_real_helper_picks_compatible_interpreter():
     """End-to-end: source the actual helper and verify it picks an interpreter that runs Python >=3.11."""
     script = f'set -e; . "{HELPER}"; "$CLAUDE_PY" -c "import sys; assert sys.version_info >= (3, 11); print(sys.executable)"'
-    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    result = subprocess.run(_TestGremlin(["bash", "-c", script], capture_output=True, text=True))
     assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
     assert result.stdout.strip()

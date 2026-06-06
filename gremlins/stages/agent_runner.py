@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import pathlib
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from gremlins.clients.protocol import CompletedRun
+from gremlins.executor.state import State
 from gremlins.stages.outcome import Bail
 
 if TYPE_CHECKING:
@@ -35,7 +36,7 @@ async def run_agent(
     model: str | None = None,
     **kw: Any,
 ) -> CompletedRun:
-    state = getattr(gremlin, "state", gremlin)
+    state = cast(State, gremlin.state)
     resolved_model = model or state.client.model
     completed = await state.client.run(
         prompt,

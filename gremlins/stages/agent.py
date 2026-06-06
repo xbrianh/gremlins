@@ -67,7 +67,7 @@ class Agent(Stage):
         return stage
 
     async def run(self, gremlin: Gremlin) -> Outcome:
-        state = getattr(gremlin, "state", gremlin)
+        state = cast(State, gremlin.state)
         opts = dict(self.options)
         raw_model = cast(str | None, opts.pop("model", None))
 

@@ -410,7 +410,7 @@ class _CommittingClient(FakeClaudeClient):
                 check=True,
                 capture_output=True,
             )
-        return super().run(prompt, label=label, **kwargs)
+        return super().run(_TestGremlin(prompt, label=label, **kwargs))
 
 
 def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):

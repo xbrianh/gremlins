@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from conftest import _TestGremlin
 import json
 import os
 import re
@@ -55,19 +56,19 @@ def test_add_produces_distinct_timestamp_filenames(q):
 
 
 def test_run_empty_queue_exits_zero(q):
-    assert core.run(once=True) == 0
+    assert core.run(_TestGremlin(once=True)) == 0
 
 
 def test_run_refuses_stale_running(q, capsys):
     (q / "running" / "0000-item.cmd").write_text("echo hi")
-    rc = core.run(once=True)
+    rc = core.run(_TestGremlin(once=True))
     assert rc == 1
     assert "stale" in capsys.readouterr().err
 
 
 def test_run_progress_events_on_stdout(q, capsys):
     core.add("true")
-    assert core.run(once=True) == 0
+    assert core.run(_TestGremlin(once=True)) == 0
     captured = capsys.readouterr()
     assert "queue: running" in captured.out
     assert "queue: done" in captured.out
@@ -76,7 +77,7 @@ def test_run_progress_events_on_stdout(q, capsys):
 
 def test_run_failure_message_on_stderr(q, capsys):
     core.add("false")
-    assert core.run(once=True) == 1
+    assert core.run(_TestGremlin(once=True)) == 1
     captured = capsys.readouterr()
     assert "queue: failed" in captured.err
     assert "queue: failed" not in captured.out
@@ -84,7 +85,7 @@ def test_run_failure_message_on_stderr(q, capsys):
 
 def test_run_stale_error_on_stderr(q, capsys):
     (q / "running" / "0000-item.cmd").write_text("echo hi")
-    assert core.run(once=True) == 1
+    assert core.run(_TestGremlin(once=True)) == 1
     captured = capsys.readouterr()
     assert "queue: error" in captured.err
     assert "queue: error" not in captured.out
@@ -97,7 +98,7 @@ def test_run_stale_error_on_stderr(q, capsys):
 
 def test_run_plain_cmd_success(q):
     core.add("true")
-    rc = core.run(once=True)
+    rc = core.run(_TestGremlin(once=True))
     assert rc == 0
     done = list((q / "done").glob("*.cmd"))
     assert len(done) == 1
@@ -105,7 +106,7 @@ def test_run_plain_cmd_success(q):
 
 def test_run_plain_cmd_failure(q):
     core.add("false")
-    rc = core.run(once=True)
+    rc = core.run(_TestGremlin(once=True))
     assert rc == 1
     failed = list((q / "failed").glob("*.cmd"))
     assert len(failed) == 1
@@ -114,7 +115,7 @@ def test_run_plain_cmd_failure(q):
 def test_run_second_item_stays_pending_after_failure(q):
     core.add("false")
     core.add("echo second")
-    core.run(once=True)
+    core.run(_TestGremlin(once=True))
     pending = list((q / "pending").glob("*.cmd"))
     assert len(pending) == 1
     # second item's slug is derived from "echo" (first token), not "second"
@@ -132,7 +133,7 @@ def test_run_picks_up_item_added_while_watching(q):
 
     result: list[int] = []
     t = threading.Thread(
-        target=lambda: result.append(core.run(poll_interval=0.05, _stop_event=stop)),
+        target=lambda: result.append(core.run(_TestGremlin(poll_interval=0.05, _stop_event=stop))),
         daemon=True,
     )
     t.start()

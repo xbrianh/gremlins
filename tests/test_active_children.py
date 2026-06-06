@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from conftest import _TestGremlin
 import asyncio
 import json
 import pathlib
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -50,7 +51,7 @@ def test_sequence_active_children_cleared_after_run(tmp_path: pathlib.Path) -> N
             return Done()
 
     seq = SequenceStage("seq", body=[_Spy("child-a")])
-    asyncio.run(seq.run(state))
+    asyncio.run(seq.run(_TestGremlin(state)))
 
     assert _Spy.captured == ["child-a"]
     assert "active_children" not in _read_state(tmp_path)
@@ -65,7 +66,7 @@ def test_sequence_active_children_cleared_on_exception(tmp_path: pathlib.Path) -
 
     seq = SequenceStage("seq", body=[_Boom("child-a")])
     with pytest.raises(RuntimeError, match="boom"):
-        asyncio.run(seq.run(state))
+        asyncio.run(seq.run(_TestGremlin(state)))
 
     assert "active_children" not in _read_state(tmp_path)
 
@@ -85,7 +86,7 @@ def test_loop_active_children_set_and_cleared(tmp_path: pathlib.Path) -> None:
             return Done()
 
     loop = LoopStage("lp", body=[_Spy("body-stage")], max_iterations=1)
-    asyncio.run(loop.run(state))
+    asyncio.run(loop.run(_TestGremlin(state)))
 
     assert captured == [["body-stage"]]
     assert "active_children" not in _read_state(tmp_path)
@@ -100,7 +101,7 @@ def test_loop_active_children_cleared_on_exception(tmp_path: pathlib.Path) -> No
 
     loop = LoopStage("lp", body=[_Boom("body-stage")], max_iterations=1)
     with pytest.raises(RuntimeError, match="boom"):
-        asyncio.run(loop.run(state))
+        asyncio.run(loop.run(_TestGremlin(state)))
 
     assert "active_children" not in _read_state(tmp_path)
 
@@ -209,7 +210,7 @@ def test_parallel_active_children_set_and_cleared(tmp_path: pathlib.Path) -> Non
         captured.append(_read_state(tmp_path).get("active_children"))
 
     execute = _parallel_execute_stage(parent_data, [("child-a", child_fn)], tmp_path)
-    asyncio.run(execute())
+    asyncio.run(_TestGremlin(execute()))
 
     assert captured == [["child-a"]]
     assert "active_children" not in _read_state(tmp_path)
@@ -225,6 +226,6 @@ def test_parallel_active_children_cleared_on_exception(tmp_path: pathlib.Path) -
 
     execute = _parallel_execute_stage(parent_data, [("child-a", boom)], tmp_path)
     with pytest.raises(RuntimeError, match="boom"):
-        asyncio.run(execute())
+        asyncio.run(_TestGremlin(execute()))
 
     assert "active_children" not in _read_state(tmp_path)
