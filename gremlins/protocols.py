@@ -5,9 +5,22 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 
+class GremlinShim:
+    """Minimal wrapper exposing state and registry for stage run() signatures.
+
+    Used to adapt State to the Gremlin protocol when a full Gremlin instance
+    is not available (e.g., in child processes or transient contexts).
+    """
+
+    def __init__(self, state: Any) -> None:
+        self.state = state
+        self.registry = state.artifacts
+
+
 class GremlinProtocol(Protocol):
     """What stages need from a Gremlin."""
 
+    state: Any
     registry: Any
 
     async def fork(
@@ -36,6 +49,6 @@ class StageProtocol(Protocol):
     client: Any
     skip_if_exists: str
 
-    async def run(self, state: Any) -> Any:
-        """Run this stage with the given execution state."""
+    async def run(self, gremlin: Any) -> Any:
+        """Run this stage with the orchestrator."""
         ...

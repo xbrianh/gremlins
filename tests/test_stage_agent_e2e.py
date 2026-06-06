@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 
-from conftest import MINIMAL_EVENTS
+from conftest import MINIMAL_EVENTS, MockGremlin
 
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
@@ -60,7 +60,8 @@ def test_agent_stage_e2e_reads_artifact_and_writes_output(tmp_path):
         artifacts=registry,
     )
 
-    result = asyncio.run(stage.run(state))
+    gremlin = MockGremlin(state=state)
+    result = asyncio.run(stage.run(gremlin))
 
     assert isinstance(result, Done)
     # Source content was substituted into the prompt

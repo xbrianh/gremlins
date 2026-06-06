@@ -13,9 +13,10 @@ from __future__ import annotations
 import asyncio
 import pathlib
 import subprocess
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from conftest import MockGremlin
 
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
@@ -25,6 +26,9 @@ from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.stages.exec import Exec
 from gremlins.stages.outcome import Bail
+
+if TYPE_CHECKING:
+    from gremlins.executor.gremlin import Gremlin
 
 
 def _make_state(project: pathlib.Path, base_sha: str):
@@ -99,7 +103,7 @@ def test_validator_passes_when_commits_exist(sandbox: Any) -> None:
 
     state = _make_state(sandbox.project, base_sha)
     stage = _require_impl_progress_exec()
-    result = asyncio.run(stage.run(state))
+    result = asyncio.run(stage.run(cast("Gremlin", MockGremlin(state))))
     from gremlins.stages.outcome import Done
 
     assert isinstance(result, Done)
@@ -117,7 +121,7 @@ def test_validator_raises_bail_when_no_commits(sandbox: Any) -> None:
     state = _make_state(sandbox.project, base_sha)
     stage = _require_impl_progress_exec()
     with pytest.raises(Bail, match="exec require-impl-progress: exited 1"):
-        asyncio.run(stage.run(state))
+        asyncio.run(stage.run(cast("Gremlin", MockGremlin(state))))
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +148,7 @@ def test_validator_raises_bail_when_head_diverges(sandbox: Any) -> None:
     state = _make_state(sandbox.project, base_sha)
     stage = _require_impl_progress_exec()
     with pytest.raises(Bail, match="exec require-impl-progress: exited 1"):
-        asyncio.run(stage.run(state))
+        asyncio.run(stage.run(cast("Gremlin", MockGremlin(state))))
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +165,7 @@ def test_validator_passes_on_resume_with_prior_commits(sandbox: Any) -> None:
     # State uses the original base_sha (before the impl commit).
     state = _make_state(sandbox.project, base_sha)
     stage = _require_impl_progress_exec()
-    result = asyncio.run(stage.run(state))
+    result = asyncio.run(stage.run(cast("Gremlin", MockGremlin(state))))
     from gremlins.stages.outcome import Done
 
     assert isinstance(result, Done)

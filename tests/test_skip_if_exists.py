@@ -6,6 +6,8 @@ import asyncio
 import pathlib
 from typing import Any
 
+from conftest import MockGremlin
+
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
@@ -29,7 +31,7 @@ class _CountingStage(Stage):
         super().__init__(name)
         self.run_count = 0
 
-    async def run(self, state: State) -> Outcome:
+    async def run(self, gremlin) -> Outcome:
         self.run_count += 1
         return Done()
 
@@ -55,7 +57,8 @@ def test_skip_if_exists_skips_when_key_produced(tmp_path: pathlib.Path) -> None:
     stage = _CountingStage("s", [], {})
     stage.skip_if_exists = "my-artifact"
 
-    runner = state.make_runner(stage, record_stage=False)
+    gremlin = MockGremlin(state=state)
+    runner = state.make_runner(stage, gremlin, record_stage=False)
     asyncio.run(runner())
 
     assert stage.run_count == 0
@@ -67,7 +70,8 @@ def test_skip_if_exists_runs_when_key_absent(tmp_path: pathlib.Path) -> None:
     stage = _CountingStage("s", [], {})
     stage.skip_if_exists = "my-artifact"
 
-    runner = state.make_runner(stage, record_stage=False)
+    gremlin = MockGremlin(state=state)
+    runner = state.make_runner(stage, gremlin, record_stage=False)
     asyncio.run(runner())
 
     assert stage.run_count == 1
@@ -80,7 +84,8 @@ def test_no_skip_if_exists_always_runs(tmp_path: pathlib.Path) -> None:
     stage = _CountingStage("s", [], {})
     # skip_if_exists is "" by default — should not skip even when key is produced
 
-    runner = state.make_runner(stage, record_stage=False)
+    gremlin = MockGremlin(state=state)
+    runner = state.make_runner(stage, gremlin, record_stage=False)
     asyncio.run(runner())
 
     assert stage.run_count == 1

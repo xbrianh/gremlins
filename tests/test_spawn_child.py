@@ -13,7 +13,6 @@ import pytest
 import gremlins.spawn.child as _rc
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.clients.registry import CLIENT_FACTORIES, register_client_factory
-from gremlins.executor.state import State
 from gremlins.pipeline.loader import STAGE_TYPES
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, Outcome
@@ -28,29 +27,29 @@ class _SimpleStage(Stage):
 class _DoneStage(_SimpleStage):
     type = "_test_done"
 
-    async def run(self, state: State) -> Outcome:
+    async def run(self, gremlin) -> Outcome:  # type: ignore[no-untyped-def]
         return Done()
 
 
 class _BailStage(_SimpleStage):
     type = "_test_bail"
 
-    async def run(self, state: State) -> Outcome:
+    async def run(self, gremlin) -> Outcome:  # type: ignore[no-untyped-def]
         raise Bail("security concern")
 
 
 class _RaiseStage(_SimpleStage):
     type = "_test_raise"
 
-    async def run(self, state: State) -> Outcome:
+    async def run(self, gremlin) -> Outcome:  # type: ignore[no-untyped-def]
         raise RuntimeError("something went wrong")
 
 
 class _ArtifactStage(_SimpleStage):
     type = "_test_artifact"
 
-    async def run(self, state: State) -> Outcome:
-        state.data.append_artifact({"type": "branch", "name": "feat/test"})
+    async def run(self, gremlin) -> Outcome:  # type: ignore[no-untyped-def]
+        gremlin.state.data.append_artifact({"type": "branch", "name": "feat/test"})  # type: ignore[union-attr]
         return Done()
 
 

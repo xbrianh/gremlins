@@ -37,16 +37,25 @@ import os
 import pathlib
 import sys
 import traceback
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from gremlins.executor.gremlin import Gremlin
 
 from gremlins import paths
 from gremlins.clients.client import Client
 from gremlins.clients.registry import CLIENT_FACTORIES
-from gremlins.executor.state import State, StateData, build_state, validate_gremlin_id
+from gremlins.executor.state import (
+    State,
+    StateData,
+    build_state,
+    validate_gremlin_id,
+)
 from gremlins.permissions.loader import load_policy
 from gremlins.permissions.validation import validate_policy_against_registry
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.loader import parse_stage
+from gremlins.protocols import GremlinShim
 from gremlins.stages.outcome import Bail
 
 logger = logging.getLogger(__name__)
@@ -165,7 +174,8 @@ async def _run(spec_path: pathlib.Path) -> int:
         stage.client = state.client
 
     try:
-        await stage.run(state)
+        gremlin = cast("Gremlin", GremlinShim(state))
+        await stage.run(gremlin)
     except Bail as b:
         cost = getattr(state.client, "total_cost_usd", 0.0) or 0.0
         _write_result(

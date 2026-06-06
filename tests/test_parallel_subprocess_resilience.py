@@ -107,7 +107,7 @@ def _child_stage(name: str) -> Stage:
     class _Noop(Stage):
         type = "_resilience_noop"
 
-        async def run(self, state: State) -> Outcome:  # noqa: ARG002
+        async def run(self, gremlin) -> Outcome:  # type: ignore[override]
             return Done()
 
     s = _Noop(name)

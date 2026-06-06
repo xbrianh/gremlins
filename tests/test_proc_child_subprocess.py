@@ -70,7 +70,7 @@ def _stage(name: str, timeout: float | None = None) -> Stage:
     class _Noop(Stage):
         type = "_proc_test_noop"
 
-        async def run(self, state: State) -> Outcome:
+        async def run(self, gremlin) -> Outcome:  # type: ignore[override]
             return Done()
 
     s = _Noop(name)

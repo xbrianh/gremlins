@@ -5,14 +5,19 @@ from __future__ import annotations
 import asyncio
 import pathlib
 import subprocess
+from typing import TYPE_CHECKING, cast
 
 import pytest
+from conftest import MockGremlin
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import StateData, build_state
 from gremlins.stages.exec import Exec
 from gremlins.stages.loop import LoopStage
 from gremlins.stages.outcome import Bail
+
+if TYPE_CHECKING:
+    from gremlins.executor.gremlin import Gremlin
 
 
 def _make_state(tmp_path: pathlib.Path):
@@ -58,7 +63,7 @@ def test_bail_in_body_exec_terminates_loop(tmp_path: pathlib.Path) -> None:
     loop = LoopStage("loop", body=[exec_stage], max_iterations=3)
 
     with pytest.raises(Bail) as exc_info:
-        asyncio.run(loop.run(state))
+        asyncio.run(loop.run(cast("Gremlin", MockGremlin(state))))
 
     assert "bail reason" in exc_info.value.reason
 
@@ -78,7 +83,7 @@ def test_bail_message_matches_file_contents(tmp_path: pathlib.Path) -> None:
     loop = LoopStage("loop", body=[exec_stage], max_iterations=3)
 
     with pytest.raises(Bail) as exc_info:
-        asyncio.run(loop.run(state))
+        asyncio.run(loop.run(cast("Gremlin", MockGremlin(state))))
 
     assert exc_info.value.reason == "specific: assertion broken"
 
@@ -96,6 +101,6 @@ def test_bail_wins_over_needs_fix(tmp_path: pathlib.Path) -> None:
     loop = LoopStage("loop", body=[exec_stage], max_iterations=3)
 
     with pytest.raises(Bail) as exc_info:
-        asyncio.run(loop.run(state))
+        asyncio.run(loop.run(cast("Gremlin", MockGremlin(state))))
 
     assert exc_info.value.reason == "hard stop"

@@ -8,6 +8,7 @@ import pathlib
 import textwrap
 
 import pytest
+from conftest import MockGremlin
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import StateData, build_state
@@ -61,7 +62,8 @@ def _make_loop(tmp_path: pathlib.Path, worktree: pathlib.Path, signal: dict):
         artifact_dir=artifact_dir,
         worktree=worktree,
     )
-    return state, loop_stage
+    gremlin = MockGremlin(state=state)
+    return gremlin, loop_stage
 
 
 def test_boss_chain_done_exits_loop(sandbox, tmp_path):
@@ -71,9 +73,9 @@ def test_boss_chain_done_exits_loop(sandbox, tmp_path):
         "reason": None,
         "operator_followups": [],
     }
-    state, loop = _make_loop(tmp_path, sandbox.project, signal)
-    asyncio.run(loop.run(state))
-    assert state.artifacts.read("status") == "pass"
+    gremlin, loop = _make_loop(tmp_path, sandbox.project, signal)
+    asyncio.run(loop.run(gremlin))
+    assert gremlin.state.artifacts.read("status") == "pass"
 
 
 def test_boss_next_plan_needs_fix_and_plan_swap(sandbox, tmp_path):
@@ -87,10 +89,10 @@ def test_boss_next_plan_needs_fix_and_plan_swap(sandbox, tmp_path):
         "reason": None,
         "operator_followups": [],
     }
-    state, loop = _make_loop(tmp_path, sandbox.project, signal)
+    gremlin, loop = _make_loop(tmp_path, sandbox.project, signal)
     with pytest.raises(Bail):
-        asyncio.run(loop.run(state))
-    assert state.artifacts.read("status") == "needs_fix"
+        asyncio.run(loop.run(gremlin))
+    assert gremlin.state.artifacts.read("status") == "needs_fix"
     assert (artifact_dir / "plan.md").read_text(encoding="utf-8") == "# Next\n"
 
 
@@ -101,7 +103,7 @@ def test_boss_bail_raises_with_reason(sandbox, tmp_path):
         "reason": "bad state",
         "operator_followups": [],
     }
-    state, loop = _make_loop(tmp_path, sandbox.project, signal)
+    gremlin, loop = _make_loop(tmp_path, sandbox.project, signal)
     with pytest.raises(Bail, match="bad state"):
-        asyncio.run(loop.run(state))
-    assert state.artifacts.produced("bail")
+        asyncio.run(loop.run(gremlin))
+    assert gremlin.state.artifacts.produced("bail")

@@ -11,6 +11,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+from conftest import MockGremlin
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.gremlin import run_stages
@@ -349,8 +350,8 @@ def test_parallel_sequence_child_worktree_flows() -> None:
         def __init__(self, name: str) -> None:
             super().__init__(name)
 
-        async def run(self, state: State) -> Outcome:
-            observed.append(state.worktree)
+        async def run(self, gremlin) -> Outcome:
+            observed.append(gremlin.state.worktree)
             return Done()
 
     seq_stage = SequenceStage("seq", body=[_CaptureStage("a"), _CaptureStage("b")])
@@ -363,7 +364,8 @@ def test_parallel_sequence_child_worktree_flows() -> None:
     )
 
     async def seq_runner() -> None:
-        await seq_stage.run(seq_ctx)
+        gremlin = MockGremlin(state=seq_ctx)
+        await seq_stage.run(gremlin)
 
     project_root = pathlib.Path.cwd()
     stages = _make_parallel_stages(
@@ -407,13 +409,14 @@ def test_make_runner_returns_async_for_any_stage() -> None:
     class AStage(Stage):
         type = "a-test"
 
-        async def run(self, state: State) -> Outcome:
+        async def run(self, gremlin) -> Outcome:
             return Done()
 
     state = build_state(
         data=StateData(), client=FakeClaudeClient(), artifact_dir=pathlib.Path("/tmp")
     )
-    runner = state.make_runner(AStage("a"))
+    gremlin = MockGremlin(state=state)
+    runner = state.make_runner(AStage("a"), gremlin)
     assert inspect.iscoroutinefunction(runner)
 
 
@@ -426,23 +429,24 @@ def test_stages_run_in_order_via_make_runner() -> None:
     class StageA(Stage):
         type = "stage-a"
 
-        async def run(self, state: State) -> Outcome:
+        async def run(self, gremlin) -> Outcome:
             executed.append("a")
             return Done()
 
     class StageB(Stage):
         type = "stage-b"
 
-        async def run(self, state: State) -> Outcome:
+        async def run(self, gremlin) -> Outcome:
             executed.append("b")
             return Done()
 
     base_state = build_state(
         data=StateData(), client=FakeClaudeClient(), artifact_dir=pathlib.Path("/tmp")
     )
+    gremlin = MockGremlin(state=base_state)
     stages = [
-        ("a", base_state.make_runner(StageA("a"))),
-        ("b", base_state.make_runner(StageB("b"))),
+        ("a", base_state.make_runner(StageA("a"), gremlin)),
+        ("b", base_state.make_runner(StageB("b"), gremlin)),
     ]
     asyncio.run(run_stages(stages))
     assert executed == ["a", "b"]

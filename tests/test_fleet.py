@@ -4,10 +4,14 @@ import json
 import os
 import pathlib
 import subprocess
+from typing import TYPE_CHECKING
 
 import pytest
 
 import gremlins.cli.fleet as _fleet_cli
+
+if TYPE_CHECKING:
+    pass
 import gremlins.fleet.ack as _ack
 import gremlins.fleet.close as _close
 import gremlins.fleet.constants as _constants
@@ -932,10 +936,12 @@ def test_exec_land_stage_success(tmp_path, monkeypatch):
     import gremlins.executor.state as _state_mod
 
     class _OkStage:
-        async def run(self, state):
+        async def run(self, gremlin):  # type: ignore[no-untyped-def]
             pass
 
-    monkeypatch.setattr(_state_mod, "build_state", lambda **_: object())
+    mock_state = MagicMock()
+    mock_state.artifacts = MagicMock()
+    monkeypatch.setattr(_state_mod, "build_state", lambda **_: mock_state)
     result = _land._exec_land_stage(_OkStage(), MagicMock(), "", tmp_path)
     assert result is True
 
@@ -947,10 +953,12 @@ def test_exec_land_stage_bail(tmp_path, monkeypatch, capsys):
     from gremlins.stages.outcome import Bail
 
     class _BailStage:
-        async def run(self, state):
+        async def run(self, gremlin):  # type: ignore[no-untyped-def]
             raise Bail("structural")
 
-    monkeypatch.setattr(_state_mod, "build_state", lambda **_: object())
+    mock_state = MagicMock()
+    mock_state.artifacts = MagicMock()
+    monkeypatch.setattr(_state_mod, "build_state", lambda **_: mock_state)
     result = _land._exec_land_stage(_BailStage(), MagicMock(), "", tmp_path)
     assert result is False
     assert "structural" in capsys.readouterr().out
