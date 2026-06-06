@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import pathlib
 import re
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 from gremlins.artifacts.registry import (
     ArtifactRegistry,
@@ -17,9 +17,6 @@ from gremlins.executor.state import State
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, Outcome
 from gremlins.utils import proc as _proc
-
-if TYPE_CHECKING:
-    from gremlins.executor.gremlin import Gremlin
 
 _READ_SUB = re.compile(r"\{read:([-\w]+)\}")
 _STATUS_KEY = "status"
@@ -76,8 +73,8 @@ class Exec(Stage):
             out_map=dict(cast(dict[str, str], raw_out)),
         )
 
-    async def run(self, gremlin: Gremlin) -> Outcome:
-        state = cast(State, gremlin.state)
+    async def run(self, gremlin: State) -> Outcome:
+        state = gremlin
         try:
             extra_env = resolve_in_map(state.artifacts, self.in_map)
         except ValueError as exc:
@@ -88,7 +85,7 @@ class Exec(Stage):
             pre_sha = snapshot_head_before(cwd=pathlib.Path(state.cwd))
 
         cmds = [
-            self.substitute_vars(c.rstrip(), gremlin, extra_env)
+            self.substitute_vars(c.rstrip(), state, extra_env)
             for c in self.options.get("cmds", [])
             if c.strip()
         ]
@@ -120,7 +117,7 @@ class Exec(Stage):
                     raise Bail(f"exec {self.name}: exited {result.returncode}")
 
         for raw_key, raw_uri_str in self.out_map.items():
-            key = self.substitute_vars(raw_key, gremlin, extra_env)
+            key = self.substitute_vars(raw_key, state, extra_env)
             optional = key.endswith("?")
             if optional:
                 key = key[:-1]
@@ -131,7 +128,7 @@ class Exec(Stage):
                 continue
             try:
                 uri_str = self.substitute_vars(
-                    _sub_reads(raw_uri_str, state.artifacts), gremlin, extra_env
+                    _sub_reads(raw_uri_str, state.artifacts), state, extra_env
                 )
             except MissingArtifact:
                 if optional:
