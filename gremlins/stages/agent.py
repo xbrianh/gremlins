@@ -92,7 +92,7 @@ class Agent(Stage):
         raw_path = state.artifact_dir / f"stream-{self.name}.jsonl"
         model = self.substitute_vars(raw_model, state, resolved) if raw_model else None
         await run_agent(
-            gremlin, prompt, label=self.name, raw_path=raw_path, model=model, **opts
+            state, prompt, label=self.name, raw_path=raw_path, model=model, **opts
         )
 
         for key, uri_str in out_map.items():

@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import json
 import pathlib
 from typing import Any
 
 import pytest
 
+from conftest import MockGremlin
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State, StateData, build_state
+from gremlins.executor.state import StateData, build_state
 from gremlins.fleet.render import build_row
 from gremlins.fleet.views import _gremlin_to_json  # type: ignore[reportPrivateUsage]
 from gremlins.stages.base import Stage
@@ -21,12 +21,7 @@ from gremlins.stages.parallel import ParallelStage
 from gremlins.stages.sequence import SequenceStage
 
 
-@dataclasses.dataclass
-class _MockGremlin:
-    state: State | None = None
-
-
-def _stateful(tmp_path: pathlib.Path, gid: str = "test-id") -> _MockGremlin:
+def _stateful(tmp_path: pathlib.Path, gid: str = "test-id") -> MockGremlin:
     sf = tmp_path / "state.json"
     sf.write_text(json.dumps({"id": gid}), encoding="utf-8")
     state = build_state(
@@ -34,7 +29,7 @@ def _stateful(tmp_path: pathlib.Path, gid: str = "test-id") -> _MockGremlin:
         client=FakeClaudeClient(),
         artifact_dir=tmp_path,
     )
-    return _MockGremlin(state=state)
+    return MockGremlin(state=state)
 
 
 def _read_state(tmp_path: pathlib.Path) -> dict[str, Any]:

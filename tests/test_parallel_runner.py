@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import inspect
 import pathlib
 import threading
@@ -12,6 +11,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+from conftest import MockGremlin
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.gremlin import run_stages
@@ -20,9 +20,6 @@ from gremlins.pipeline import Pipeline
 from gremlins.stages.parallel import ParallelStage
 
 
-@dataclasses.dataclass
-class _MockGremlin:
-    state: State | None = None
 
 # ---------------------------------------------------------------------------
 # Fixtures helpers
@@ -369,7 +366,7 @@ def test_parallel_sequence_child_worktree_flows() -> None:
     )
 
     async def seq_runner() -> None:
-        gremlin = _MockGremlin(state=seq_ctx)
+        gremlin = MockGremlin(state=seq_ctx)
         await seq_stage.run(gremlin)
 
     project_root = pathlib.Path.cwd()
@@ -420,7 +417,7 @@ def test_make_runner_returns_async_for_any_stage() -> None:
     state = build_state(
         data=StateData(), client=FakeClaudeClient(), artifact_dir=pathlib.Path("/tmp")
     )
-    gremlin = _MockGremlin(state=state)
+    gremlin = MockGremlin(state=state)
     runner = state.make_runner(AStage("a"), gremlin)
     assert inspect.iscoroutinefunction(runner)
 
@@ -448,7 +445,7 @@ def test_stages_run_in_order_via_make_runner() -> None:
     base_state = build_state(
         data=StateData(), client=FakeClaudeClient(), artifact_dir=pathlib.Path("/tmp")
     )
-    gremlin = _MockGremlin(state=base_state)
+    gremlin = MockGremlin(state=base_state)
     stages = [
         ("a", base_state.make_runner(StageA("a"), gremlin)),
         ("b", base_state.make_runner(StageB("b"), gremlin)),

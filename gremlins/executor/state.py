@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import dataclasses
 import datetime
 import json
@@ -580,8 +581,9 @@ class State:
                 entry.skip_if_exists
             ):
                 return Done()
-            gremlin.state = _prepare()
-            return await entry.run(gremlin)
+            child_gremlin = copy.copy(gremlin)
+            child_gremlin.state = _prepare()
+            return await entry.run(child_gremlin)
 
         return _run_async
 

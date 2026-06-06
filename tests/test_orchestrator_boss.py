@@ -3,22 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import json
 import pathlib
 import textwrap
 
 import pytest
 
+from conftest import MockGremlin
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State, StateData, build_state
+from gremlins.executor.state import StateData, build_state
 from gremlins.pipeline import Pipeline
 from gremlins.stages.outcome import Bail
-
-
-@dataclasses.dataclass
-class _MockGremlin:
-    state: State | None = None
 
 _MINIMAL = [
     {"type": "system", "subtype": "init"},
@@ -67,7 +62,7 @@ def _make_loop(tmp_path: pathlib.Path, worktree: pathlib.Path, signal: dict):
         artifact_dir=artifact_dir,
         worktree=worktree,
     )
-    gremlin = _MockGremlin(state=state)
+    gremlin = MockGremlin(state=state)
     return gremlin, loop_stage
 
 

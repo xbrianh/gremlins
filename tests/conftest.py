@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import logging
 import os
@@ -13,6 +14,7 @@ import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.clients.registry import register_client_factory
+from gremlins.executor.state import State
 from gremlins.permissions.policy import Policy
 
 os.environ.setdefault("GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME", "main")
@@ -254,6 +256,11 @@ TESTS_DIR = pathlib.Path(__file__).resolve().parent
 
 if str(TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(TESTS_DIR))
+
+
+@dataclasses.dataclass
+class MockGremlin:
+    state: State | None = None
 
 # Shared minimal event stream used across test modules.
 MINIMAL_EVENTS = [
