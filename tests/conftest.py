@@ -40,18 +40,30 @@ class _TestGremlin:
     ) -> None:
         self.state = state_or_prompt if isinstance(state_or_prompt, State) else None
         self.prompt = state_or_prompt if isinstance(state_or_prompt, str) else None
-        self.label = label
-        self.max_retries = max_retries
-        self.idle_timeout = idle_timeout
-        self.extra_env = extra_env
-        self.capture_events = capture_events
-        self.model = model
-        self.raw_path = raw_path
-        self.cwd = cwd
-        self.bypass = bypass
-        self.native_block = native_block
-        self.instructions = instructions
-        self.model_settings = model_settings
+        if label is not None:
+            self.label = label
+        if max_retries is not None:
+            self.max_retries = max_retries
+        if idle_timeout is not None:
+            self.idle_timeout = idle_timeout
+        if extra_env is not None:
+            self.extra_env = extra_env
+        if capture_events is not None:
+            self.capture_events = capture_events
+        if model is not None:
+            self.model = model
+        if raw_path is not None:
+            self.raw_path = raw_path
+        if cwd is not None:
+            self.cwd = cwd
+        if bypass is not None:
+            self.bypass = bypass
+        if native_block is not None:
+            self.native_block = native_block
+        if instructions is not None:
+            self.instructions = instructions
+        if model_settings is not None:
+            self.model_settings = model_settings
         for key, value in extra.items():
             setattr(self, key, value)
 

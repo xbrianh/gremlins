@@ -133,9 +133,7 @@ def test_run_picks_up_item_added_while_watching(q):
 
     result: list[int] = []
     t = threading.Thread(
-        target=lambda: result.append(
-            core.run(_TestGremlin(poll_interval=0.05, _stop_event=stop))
-        ),
+        target=lambda: result.append(core.run(poll_interval=0.05, _stop_event=stop)),
         daemon=True,
     )
     t.start()

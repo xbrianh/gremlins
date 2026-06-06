@@ -56,6 +56,9 @@ class _GremlinWrapper:
     def __init__(self, state: State) -> None:
         self.state = state
 
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.state, name)
+
 
 logger = logging.getLogger(__name__)
 

@@ -98,7 +98,7 @@ def test_verify_produced_passes_when_out_file_written(tmp_path):
     class WritingClient(FakeClaudeClient):
         async def run(self, prompt, *, label, **kwargs):
             output_file.write_text("# Output")
-            return await super().run(_TestGremlin(prompt, label=label, **kwargs))
+            return await super().run(prompt, label=label, **kwargs)
 
     client = WritingClient(fixtures={"my-agent": MINIMAL_EVENTS})
     state = _make_state(tmp_path, client)
@@ -139,7 +139,7 @@ def test_out_uri_bound_in_registry_before_agent_runs(tmp_path):
                 registry is not None and registry.produced("result")
             )
             output_file.write_text("# Output")
-            return await super().run(_TestGremlin(prompt, label=label, **kwargs))
+            return await super().run(prompt, label=label, **kwargs)
 
     client = CheckingClient(fixtures={"my-agent": MINIMAL_EVENTS})
     state = _make_state(tmp_path, client)
