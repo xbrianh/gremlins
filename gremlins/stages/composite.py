@@ -14,6 +14,7 @@ def child_state(
     parent: State, child: Stage, *, fan_out: bool = False, child_id: str | None = None
 ) -> State:
     """Derive a child State from parent."""
+    parent = parent if isinstance(parent, State) else parent.state  # pyright: ignore[reportUnnecessaryIsInstance]
     client = parent.client
     if child.client is not None and child.client != PACKAGE_DEFAULT:
         client = child.client

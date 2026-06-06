@@ -170,7 +170,7 @@ class ParallelStage(Stage):
         ).runtime_stages()
 
     async def run(self, gremlin: State) -> Outcome:
-        state = gremlin
+        state = gremlin if isinstance(gremlin, State) else gremlin.state  # pyright: ignore[reportUnnecessaryIsInstance]
         parent_id = state.data.gremlin_id or ""
         group_state = dataclasses.replace(
             state, parent_stage=state.parent_stage or self.name
