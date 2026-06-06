@@ -16,7 +16,6 @@ from gremlins.utils import git as _git
 
 if TYPE_CHECKING:
     from gremlins.executor.gremlin import Gremlin
-    from gremlins.executor.state import State
 
 logger = logging.getLogger(__name__)
 
@@ -39,13 +38,13 @@ def _is_bail_set(artifacts: ArtifactRegistry) -> bool:
     return artifacts.produced(_BAIL_KEY)
 
 
-def _do_bail(gremlin: "Gremlin", artifacts: ArtifactRegistry) -> None:
+def _do_bail(gremlin: Gremlin, artifacts: ArtifactRegistry) -> None:
     reason = str(artifacts.read(_BAIL_KEY)).strip()
     gremlin.state.record_bail(reason)
     raise Bail(reason)
 
 
-def head_stable(gremlin: "Gremlin", iteration: int, head_before: str) -> bool:
+def head_stable(gremlin: Gremlin, iteration: int, head_before: str) -> bool:
     """Exit when HEAD hasn't changed across this iteration."""
     return _git.head_sha(pathlib.Path(gremlin.state.cwd)) == head_before
 
