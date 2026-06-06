@@ -9,7 +9,6 @@ import pathlib
 import sys
 
 import pytest
-from conftest import _TestGremlin
 
 from gremlins.clients.claude import (
     StreamTimeoutError,
@@ -290,11 +289,7 @@ def test_idle_timeout_raises_stream_timeout_error(tmp_path, monkeypatch):
 
     client = SubprocessClaudeClient()
     with pytest.raises(StreamTimeoutError):
-        asyncio.run(
-            client.run(
-                _TestGremlin("hello", label="test", idle_timeout=0.1, max_retries=0)
-            )
-        )
+        asyncio.run(client.run("hello", label="test", idle_timeout=0.1, max_retries=0))
 
 
 def test_on_timeout_prompt_used_on_retry(tmp_path, monkeypatch):
@@ -370,11 +365,7 @@ def test_max_retries_exceeds_schedule_raises_value_error():
     client = SubprocessClaudeClient()
     with pytest.raises(ValueError, match="max_retries"):
         asyncio.run(
-            client.run(
-                _TestGremlin(
-                    "hello", label="test", max_retries=len(STREAM_IDLE_BACKOFF) + 1
-                )
-            )
+            client.run("hello", label="test", max_retries=len(STREAM_IDLE_BACKOFF) + 1)
         )
 
 

@@ -7,17 +7,11 @@ import os
 import pathlib
 import subprocess
 
-from conftest import _TestGremlin
-
 from gremlins.utils.git import remove_worktrees_async
 
 
 def test_noop_outside_git_repo(tmp_path: pathlib.Path) -> None:
-    asyncio.run(
-        _TestGremlin(
-            remove_worktrees_async(str(tmp_path), [str(tmp_path / "nonexistent")])
-        )
-    )
+    asyncio.run(remove_worktrees_async(str(tmp_path), [str(tmp_path / "nonexistent")]))
 
 
 def test_handles_missing_path(tmp_path: pathlib.Path) -> None:

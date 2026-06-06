@@ -15,7 +15,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-from conftest import MINIMAL_EVENTS, _TestGremlin
+from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.run import _parse_args as _parse_gh_args
@@ -410,7 +410,7 @@ class _CommittingClient(FakeClaudeClient):
                 check=True,
                 capture_output=True,
             )
-        return super().run(_TestGremlin(prompt, label=label, **kwargs))
+        return super().run(prompt, label=label, **kwargs)
 
 
 def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
