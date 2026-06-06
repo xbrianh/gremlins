@@ -7,6 +7,7 @@ import json
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from conftest import MockGremlin
 
 from gremlins.artifacts.uri import Uri
 from gremlins.executor.state import State as RuntimeState
@@ -14,8 +15,6 @@ from gremlins.executor.state import StateData, build_state
 from gremlins.stages.exec import Exec as Cmd
 from gremlins.stages.loop import LoopStage, head_stable, max_iters
 from gremlins.stages.outcome import Bail, Done
-
-from conftest import MockGremlin
 
 if TYPE_CHECKING:
     from gremlins.executor.gremlin import Gremlin
@@ -35,7 +34,6 @@ def _loop_state(tmp_path: Any) -> RuntimeState:
         artifact_dir=tmp_path / "artifacts",
         worktree=tmp_path,
     )
-
 
 
 def _set_marker(state: RuntimeState) -> None:

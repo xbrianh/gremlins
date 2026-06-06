@@ -8,14 +8,13 @@ import subprocess
 from typing import TYPE_CHECKING, cast
 
 import pytest
+from conftest import MockGremlin
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State, StateData, build_state
+from gremlins.executor.state import StateData, build_state
 from gremlins.stages.exec import Exec
 from gremlins.stages.loop import LoopStage
 from gremlins.stages.outcome import Bail
-
-from conftest import MockGremlin
 
 if TYPE_CHECKING:
     from gremlins.executor.gremlin import Gremlin

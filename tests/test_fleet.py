@@ -4,15 +4,14 @@ import json
 import os
 import pathlib
 import subprocess
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import pytest
-from conftest import MockGremlin
 
 import gremlins.cli.fleet as _fleet_cli
 
 if TYPE_CHECKING:
-    from gremlins.executor.gremlin import Gremlin
+    pass
 import gremlins.fleet.ack as _ack
 import gremlins.fleet.close as _close
 import gremlins.fleet.constants as _constants

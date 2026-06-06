@@ -49,9 +49,9 @@ from gremlins import paths
 from gremlins.clients.client import Client
 from gremlins.clients.registry import CLIENT_FACTORIES
 from gremlins.executor.state import (
+    GremlinShim,
     State,
     StateData,
-    GremlinShim,
     build_state,
     validate_gremlin_id,
 )

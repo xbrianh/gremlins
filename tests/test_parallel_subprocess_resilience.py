@@ -13,7 +13,6 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-from conftest import MockGremlin
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state, write_state

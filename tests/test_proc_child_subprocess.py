@@ -11,7 +11,6 @@ from typing import Any
 
 import pytest
 
-from conftest import MockGremlin
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state
 from gremlins.stages.base import Stage
