@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import pathlib
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from gremlins.clients.protocol import CompletedRun
-from gremlins.executor.state import State
 from gremlins.stages.outcome import Bail
+
+if TYPE_CHECKING:
+    from gremlins.executor.gremlin import Gremlin
 
 _BAIL_RE = re.compile(r"^BAIL:\s*\S+:\s*(.*)$")
 
@@ -25,7 +27,7 @@ def _check_bail(completed: CompletedRun) -> None:
 
 
 async def run_agent(
-    state: State,
+    gremlin: Gremlin,
     prompt: str,
     *,
     label: str,
@@ -33,6 +35,7 @@ async def run_agent(
     model: str | None = None,
     **kw: Any,
 ) -> CompletedRun:
+    state = getattr(gremlin, "state", gremlin)
     resolved_model = model or state.client.model
     completed = await state.client.run(
         prompt,

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import re
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from gremlins.clients.client import Client
-from gremlins.executor.state import State
 from gremlins.protocols import GremlinProtocol
 from gremlins.stages.outcome import Outcome
+
+if TYPE_CHECKING:
+    from gremlins.executor.gremlin import Gremlin
 
 _VAR_SUB = re.compile(r"\{(\w+)\}")
 
@@ -49,12 +51,13 @@ class Stage:
         self.gremlin = None
 
     def substitute_vars(
-        self, text: str, state: State, extra: dict[str, str] | None = None
+        self, text: str, gremlin: Gremlin, extra: dict[str, str] | None = None
     ) -> str:
         """Replace {var} tokens with framework subs, resolved in: vars, and
         string options (framework wins on conflict). Unknown tokens and
         non-word braces (shell ${x}, {read:k}, brace expansion) are left as-is."""
         string_opts = {k: v for k, v in self.options.items() if isinstance(v, str)}
+        state = getattr(gremlin, "state", gremlin)
         subs = {**string_opts, **(extra or {}), **state.framework_subs(self)}  # type: ignore[arg-type]
         return _VAR_SUB.sub(lambda m: subs.get(m.group(1), m.group(0)), text)
 
@@ -78,5 +81,5 @@ class Stage:
     def orchestration_args(cls) -> list[StageInput]:
         return []
 
-    async def run(self, state: State) -> Outcome:  # noqa: ARG002
+    async def run(self, gremlin: Gremlin) -> Outcome:  # noqa: ARG002
         raise NotImplementedError

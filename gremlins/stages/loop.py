@@ -6,7 +6,7 @@ import asyncio
 import logging
 import pathlib
 from collections.abc import Awaitable, Callable
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.executor.state import State
@@ -14,6 +14,9 @@ from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.composite import child_state as _child_state
 from gremlins.stages.outcome import Bail, Done, Outcome
 from gremlins.utils import git as _git
+
+if TYPE_CHECKING:
+    from gremlins.executor.gremlin import Gremlin
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +158,8 @@ class LoopStage(Stage):
             result.append(cast(Callable[[], Awaitable[Outcome]], _tracked))
         return result
 
-    async def run(self, state: State) -> Outcome:
+    async def run(self, gremlin: Gremlin) -> Outcome:
+        state = getattr(gremlin, "state", gremlin)
         for iteration in range(1, self._max_iterations + 1):
             state.record_state_field(loop_iteration=iteration)
             state.artifacts.unbind(_MARKER_KEY)
