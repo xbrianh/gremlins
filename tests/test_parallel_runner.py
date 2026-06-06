@@ -116,7 +116,7 @@ def test_run_stages_two_test_entries_both_execute() -> None:
         ("implement", _make_afn("implement", log)),
         ("test-post", _make_afn("test-post", log)),
     ]
-    asyncio.run(_TestGremlin(run_stages(stages)))
+    asyncio.run(run_stages(stages))
     assert log == ["test-pre", "implement", "test-post"]
 
 
@@ -127,7 +127,7 @@ def test_run_stages_resume_targets_first_test() -> None:
         ("implement", _make_afn("implement", log)),
         ("test-post", _make_afn("test-post", log)),
     ]
-    asyncio.run(_TestGremlin(run_stages(stages, resume_from="test-pre")))
+    asyncio.run(run_stages(stages, resume_from="test-pre"))
     assert log == ["test-pre", "implement", "test-post"]
 
 
@@ -138,7 +138,7 @@ def test_run_stages_resume_targets_second_test() -> None:
         ("implement", _make_afn("implement", log)),
         ("test-post", _make_afn("test-post", log)),
     ]
-    asyncio.run(_TestGremlin(run_stages(stages, resume_from="test-post")))
+    asyncio.run(run_stages(stages, resume_from="test-post"))
     assert log == ["test-post"]
     assert "test-pre" not in log
     assert "implement" not in log
@@ -254,7 +254,7 @@ def test_run_stages_drives_parallel_group() -> None:
         *parallel_stages,
         ("address", _make_afn("address", log)),
     ]
-    asyncio.run(_TestGremlin(run_stages(stages)))
+    asyncio.run(run_stages(stages))
     assert log[0] == "plan"
     assert sorted(log[1:3]) == ["r1", "r2"]
     assert log[3] == "address"
@@ -274,7 +274,7 @@ def test_run_stages_resume_from_group_skips_before_group() -> None:
         *parallel_stages,
         ("address", _make_afn("address", log)),
     ]
-    asyncio.run(_TestGremlin(run_stages(stages, resume_from="reviews")))
+    asyncio.run(run_stages(stages, resume_from="reviews"))
     assert "plan" not in log
     assert "r1" in log
     assert "r2" in log
@@ -350,8 +350,8 @@ def test_parallel_sequence_child_worktree_flows() -> None:
         def __init__(self, name: str) -> None:
             super().__init__(name)
 
-        async def run(self, state: State) -> Outcome:
-            observed.append(state.worktree)
+        async def run(self, gremlin: State) -> Outcome:
+            observed.append(gremlin.worktree)
             return Done()
 
     seq_stage = SequenceStage("seq", body=[_CaptureStage("a"), _CaptureStage("b")])
@@ -397,7 +397,7 @@ def test_run_stages_async_callable_executes() -> None:
     async def async_fn() -> None:
         log.append("async")
 
-    asyncio.run(_TestGremlin(run_stages([("a", async_fn)])))
+    asyncio.run(run_stages([("a", async_fn)]))
     assert log == ["async"]
 
 
@@ -408,7 +408,7 @@ def test_make_runner_returns_async_for_any_stage() -> None:
     class AStage(Stage):
         type = "a-test"
 
-        async def run(self, state: State) -> Outcome:
+        async def run(self, gremlin: State) -> Outcome:
             return Done()
 
     state = build_state(
@@ -427,14 +427,14 @@ def test_stages_run_in_order_via_make_runner() -> None:
     class StageA(Stage):
         type = "stage-a"
 
-        async def run(self, state: State) -> Outcome:
+        async def run(self, gremlin: State) -> Outcome:
             executed.append("a")
             return Done()
 
     class StageB(Stage):
         type = "stage-b"
 
-        async def run(self, state: State) -> Outcome:
+        async def run(self, gremlin: State) -> Outcome:
             executed.append("b")
             return Done()
 
@@ -445,5 +445,5 @@ def test_stages_run_in_order_via_make_runner() -> None:
         ("a", base_state.make_runner(StageA("a"))),
         ("b", base_state.make_runner(StageB("b"))),
     ]
-    asyncio.run(_TestGremlin(run_stages(stages)))
+    asyncio.run(run_stages(stages))
     assert executed == ["a", "b"]

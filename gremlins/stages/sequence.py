@@ -35,7 +35,7 @@ class SequenceStage(Stage):
         return stage
 
     async def run(self, gremlin: State) -> Outcome:
-        state = gremlin
+        state = gremlin.state if hasattr(gremlin, "state") else gremlin  # type: ignore[union-attr]
         key = self.path or self.name
         done = state.done_for(key)
         for child in self.body:

@@ -22,7 +22,7 @@ class _TestGremlin:
 
     def __init__(
         self,
-        state_or_prompt: State | str | object,
+        state_or_prompt: State | str | object | None = None,
         *,
         label: str | None = None,
         max_retries: int | None = None,
@@ -36,6 +36,7 @@ class _TestGremlin:
         native_block: dict[str, object] | None = None,
         instructions: str | None = None,
         model_settings: object | None = None,
+        **extra: object,
     ) -> None:
         self.state = state_or_prompt if isinstance(state_or_prompt, State) else None
         self.prompt = state_or_prompt if isinstance(state_or_prompt, str) else None
@@ -51,6 +52,15 @@ class _TestGremlin:
         self.native_block = native_block
         self.instructions = instructions
         self.model_settings = model_settings
+        for key, value in extra.items():
+            setattr(self, key, value)
+
+    def __getattr__(self, name: str) -> object:
+        if self.state is not None:
+            return getattr(self.state, name)
+        raise AttributeError(
+            f"'{type(self).__name__}' object has no attribute '{name}'"
+        )
 
 
 os.environ.setdefault("GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME", "main")
