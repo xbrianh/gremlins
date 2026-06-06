@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import pathlib
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -15,10 +16,23 @@ from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, Outcome
 from gremlins.stages.sequence import SequenceStage
 
+if TYPE_CHECKING:
+    from gremlins.executor.gremlin import Gremlin
+
 
 def _state(**kw) -> RuntimeState:
     kw.setdefault("artifact_dir", pathlib.Path("/tmp"))
     return build_state(data=StateData(), client=FakeClaudeClient(), **kw)
+
+
+def _make_gremlin_wrapper(state: RuntimeState):  # type: ignore[name-defined]
+    """Wrap a State in a _Gremlin object for passing to Stage.run()."""
+    class _Gremlin:  # noqa: N801
+        def __init__(self, state: RuntimeState) -> None:
+            self.state = state
+            self.registry = state.artifacts
+
+    return cast("Gremlin", _Gremlin(state))
 
 
 class _FakeStage(Stage):
@@ -29,8 +43,8 @@ class _FakeStage(Stage):
         self.received: RuntimeState | None = None
         self._raises = raises
 
-    async def run(self, state: RuntimeState) -> Outcome:
-        self.received = state
+    async def run(self, gremlin) -> Outcome:  # type: ignore[no-untyped-def]
+        self.received = gremlin.state  # type: ignore[union-attr]
         if self._raises:
             raise self._raises
         return Done()
@@ -44,12 +58,12 @@ def test_sequence_runs_body_in_order() -> None:
             super().__init__(label)
             self._label = label
 
-        async def run(self, state: RuntimeState) -> Outcome:
+        async def run(self, gremlin) -> Outcome:  # type: ignore[no-untyped-def]
             log.append(self._label)
             return Done()
 
     stage = SequenceStage("seq", body=[_LogStage("a"), _LogStage("b"), _LogStage("c")])
-    asyncio.run(stage.run(_state()))
+    asyncio.run(stage.run(_make_gremlin_wrapper(_state())))
     assert log == ["a", "b", "c"]
 
 
@@ -62,7 +76,7 @@ def test_sequence_stops_on_exception() -> None:
             self._label = label
             self._fail = fail
 
-        async def run(self, state: RuntimeState) -> Outcome:
+        async def run(self, gremlin) -> Outcome:  # type: ignore[no-untyped-def]
             log.append(self._label)
             if self._fail:
                 raise RuntimeError("boom")
@@ -73,7 +87,7 @@ def test_sequence_stops_on_exception() -> None:
         body=[_LogStage("a"), _LogStage("b", fail=True), _LogStage("c")],
     )
     with pytest.raises(RuntimeError, match="boom"):
-        asyncio.run(stage.run(_state()))
+        asyncio.run(stage.run(_make_gremlin_wrapper(_state())))
     assert log == ["a", "b"]
 
 
@@ -81,7 +95,7 @@ def test_sequence_propagates_worktree() -> None:
     wt = pathlib.Path("/tmp/fake-worktree")
     child = _FakeStage("child")
     stage = SequenceStage("seq", body=[child])
-    asyncio.run(stage.run(_state(worktree=wt)))
+    asyncio.run(stage.run(_make_gremlin_wrapper(_state(worktree=wt))))
     assert child.received is not None
     assert child.received.worktree == wt
 
@@ -89,7 +103,7 @@ def test_sequence_propagates_worktree() -> None:
 def test_sequence_propagates_child_key() -> None:
     child = _FakeStage("child")
     stage = SequenceStage("seq", body=[child])
-    asyncio.run(stage.run(_state(child_key="my-child")))
+    asyncio.run(stage.run(_make_gremlin_wrapper(_state(child_key="my-child"))))
     assert child.received is not None
     assert child.received.child_key == "my-child"
 
@@ -98,7 +112,7 @@ def test_sequence_propagates_artifact_dir() -> None:
     shard_dir = pathlib.Path("/tmp/shard-session")
     child = _FakeStage("child")
     stage = SequenceStage("seq", body=[child])
-    asyncio.run(stage.run(_state(artifact_dir=shard_dir)))
+    asyncio.run(stage.run(_make_gremlin_wrapper(_state(artifact_dir=shard_dir))))
     assert child.received is not None
     assert child.received.artifact_dir == shard_dir
 
@@ -123,7 +137,7 @@ def test_sequence_resume_skips_completed_children(sandbox) -> None:
         def __init__(self, label: str) -> None:
             super().__init__(label)
 
-        async def run(self, s: RuntimeState) -> Outcome:
+        async def run(self, gremlin) -> Outcome:  # type: ignore[no-untyped-def]
             ran.append(self.name)
             if self.name == "b" and fail["b"]:
                 raise Bail("b failed")
@@ -135,13 +149,13 @@ def test_sequence_resume_skips_completed_children(sandbox) -> None:
     )
 
     with pytest.raises(Bail, match="b failed"):
-        asyncio.run(seq.run(state))
+        asyncio.run(seq.run(_make_gremlin_wrapper(state)))
     assert ran == ["a", "b"]
 
     ran.clear()
     fail["b"] = False
 
-    asyncio.run(seq.run(state))
+    asyncio.run(seq.run(_make_gremlin_wrapper(state)))
     assert ran == ["b", "c"]
 
 
@@ -152,7 +166,7 @@ def test_sibling_sequences_done_sets_are_independent(sandbox) -> None:
         def __init__(self, label: str) -> None:
             super().__init__(label)
 
-        async def run(self, s: RuntimeState) -> Outcome:
+        async def run(self, gremlin) -> Outcome:  # type: ignore[no-untyped-def]
             ran.append(self.name)
             return Done()
 
@@ -165,8 +179,8 @@ def test_sibling_sequences_done_sets_are_independent(sandbox) -> None:
     # Mark "a" done in seq1's slot only.
     state.mark_done("pipeline/seq1", "a")
 
-    asyncio.run(seq1.run(state))
-    asyncio.run(seq2.run(state))
+    asyncio.run(seq1.run(_make_gremlin_wrapper(state)))
+    asyncio.run(seq2.run(_make_gremlin_wrapper(state)))
 
     # seq1/a was skipped; seq2/a was not.
     assert ran == ["a"]  # only seq2's "a"

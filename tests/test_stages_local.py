@@ -1,15 +1,19 @@
 import asyncio
 import pathlib
 import subprocess
+from typing import TYPE_CHECKING, cast
 
 from conftest import MINIMAL_EVENTS, ReviewCreatingClient
 
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
-from gremlins.executor.state import StateData, build_state
+from gremlins.executor.state import State, StateData, build_state
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.stages.agent import Agent
+
+if TYPE_CHECKING:
+    from gremlins.executor.gremlin import Gremlin
 
 _BUNDLED_PROMPTS = (
     pathlib.Path(__file__).resolve().parent.parent / "gremlins" / "prompts"
@@ -45,6 +49,16 @@ def _make_state(client, artifact_dir, *, gremlin_id=None, base_ref_sha=""):
         artifacts=registry,
     )
     return state
+
+
+def _make_gremlin_wrapper(state: State):  # type: ignore[name-defined]
+    """Wrap a State in a _Gremlin object for passing to Stage.run()."""
+    class _Gremlin:  # noqa: N801
+        def __init__(self, state: State) -> None:
+            self.state = state
+            self.registry = state.artifacts
+
+    return cast("Gremlin", _Gremlin(state))
 
 
 def _init_git_repo(path: pathlib.Path) -> None:
@@ -108,7 +122,7 @@ def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
         worktree=worktree,
         artifacts=ArtifactRegistry(artifact_dir),
     )
-    asyncio.run(stage.run(state))
+    asyncio.run(stage.run(_make_gremlin_wrapper(state)))
     assert client.calls[0].cwd == worktree
 
 
@@ -127,5 +141,5 @@ def test_review_code_stage_includes_style_from_prompts(tmp_path):
     artifact_dir = tmp_path / "session"
     artifact_dir.mkdir()
     state = _make_state(client, artifact_dir)
-    asyncio.run(stage.run(state))
+    asyncio.run(stage.run(_make_gremlin_wrapper(state)))
     assert "Be good." in client.calls[0].prompt

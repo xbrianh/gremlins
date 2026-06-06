@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import pathlib
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from conftest import MINIMAL_EVENTS
@@ -14,6 +15,9 @@ from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state
 from gremlins.stages.agent import Agent
 from gremlins.stages.outcome import Done
+
+if TYPE_CHECKING:
+    from gremlins.executor.gremlin import Gremlin
 
 
 def _make_state(
@@ -50,6 +54,16 @@ def _make_agent(
     )
 
 
+def _make_gremlin_wrapper(state: State) -> Gremlin:
+    """Wrap a State in a _Gremlin object for passing to Stage.run()."""
+    class _Gremlin:  # noqa: N801
+        def __init__(self, state: State) -> None:
+            self.state = state
+            self.registry = state.artifacts
+
+    return cast("Gremlin", _Gremlin(state))
+
+
 # --- in: resolution and prompt interpolation ---
 
 
@@ -63,7 +77,7 @@ def test_in_content_substituted_into_prompt(tmp_path):
     state = _make_state(tmp_path, client, registry=registry)
     agent = _make_agent(prompts=["Process: {plan_text}"], in_map={"plan_text": "plan"})
 
-    asyncio.run(agent.run(state))
+    asyncio.run(agent.run(_make_gremlin_wrapper(state)))
 
     assert len(client.calls) == 1
     assert "# My Plan" in client.calls[0].prompt
@@ -74,7 +88,7 @@ def test_missing_in_key_raises_missing_artifact(tmp_path):
     agent = _make_agent(in_map={"content": "unbound-key"})
 
     with pytest.raises(MissingArtifact):
-        asyncio.run(agent.run(state))
+        asyncio.run(agent.run(_make_gremlin_wrapper(state)))
 
 
 def test_no_in_map_runs_prompt_unchanged(tmp_path):
@@ -82,7 +96,7 @@ def test_no_in_map_runs_prompt_unchanged(tmp_path):
     state = _make_state(tmp_path, client)
     agent = _make_agent(prompts=["Static prompt"], in_map=None)
 
-    result = asyncio.run(agent.run(state))
+    result = asyncio.run(agent.run(_make_gremlin_wrapper(state)))
 
     assert isinstance(result, Done)
     assert client.calls[0].prompt == "Static prompt"
@@ -107,7 +121,7 @@ def test_verify_produced_passes_when_out_file_written(tmp_path):
         out_map={"result": "file://session/output.md"},
     )
 
-    result = asyncio.run(agent.run(state))
+    result = asyncio.run(agent.run(_make_gremlin_wrapper(state)))
 
     assert isinstance(result, Done)
     assert state.artifacts is not None
@@ -123,7 +137,7 @@ def test_verify_produced_fails_when_out_file_missing(tmp_path):
     )
 
     with pytest.raises(FileNotFoundError):
-        asyncio.run(agent.run(state))
+        asyncio.run(agent.run(_make_gremlin_wrapper(state)))
 
 
 def test_out_uri_bound_in_registry_before_agent_runs(tmp_path):
@@ -147,7 +161,7 @@ def test_out_uri_bound_in_registry_before_agent_runs(tmp_path):
         out_map={"result": "file://session/output.md"},
     )
 
-    asyncio.run(agent.run(state))
+    asyncio.run(agent.run(_make_gremlin_wrapper(state)))
     assert seen_bound_before_run == [True]
 
 
