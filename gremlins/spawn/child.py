@@ -54,12 +54,12 @@ from gremlins.executor.state import (
     build_state,
     validate_gremlin_id,
 )
-from gremlins.protocols import GremlinShim
 from gremlins.logging_setup import configure_logging
 from gremlins.permissions.loader import load_policy
 from gremlins.permissions.validation import validate_policy_against_registry
 from gremlins.pipeline import Pipeline
 from gremlins.pipeline.loader import parse_stage
+from gremlins.protocols import GremlinShim
 from gremlins.stages.outcome import Bail
 
 logger = logging.getLogger(__name__)

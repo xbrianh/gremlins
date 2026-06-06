@@ -20,11 +20,11 @@ from gremlins.artifacts.registry import ArtifactRegistry, MissingArtifact
 from gremlins.artifacts.resolve import resolve_in_map
 from gremlins.executor.state import landable_shape, resolve_artifact_dir
 from gremlins.fleet.resolve import resolve_gremlin
-from gremlins.protocols import GremlinShim
 from gremlins.fleet.state import (
     liveness_of_state_file,
     load_state,
 )
+from gremlins.protocols import GremlinShim
 from gremlins.utils import proc
 
 
