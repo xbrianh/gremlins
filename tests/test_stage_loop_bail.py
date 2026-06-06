@@ -54,6 +54,7 @@ def _make_state(tmp_path: pathlib.Path):
 
 def _make_gremlin_wrapper(state: State):  # type: ignore[name-defined]
     """Wrap a State in a _Gremlin object for passing to Stage.run()."""
+
     class _Gremlin:  # noqa: N801
         def __init__(self, state: State) -> None:
             self.state = state

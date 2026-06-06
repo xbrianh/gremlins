@@ -13,7 +13,6 @@ import pytest
 import gremlins.spawn.child as _rc
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.clients.registry import CLIENT_FACTORIES, register_client_factory
-from gremlins.executor.state import State
 from gremlins.pipeline.loader import STAGE_TYPES
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, Outcome
