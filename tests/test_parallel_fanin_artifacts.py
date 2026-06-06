@@ -49,7 +49,6 @@ def _executor(
         set_stage_fn=lambda _: None,
         cancel_on_bail=False,
         bail_policy="any",
-        parent_data=parent_state.data,
         parent_state=parent_state,
         project_root=pathlib.Path("/nonexistent"),
     )

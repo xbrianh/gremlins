@@ -15,7 +15,7 @@ import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.clients.registry import register_client_factory
-from gremlins.executor.state import State
+from gremlins.executor.state import State, StateData, build_state
 from gremlins.permissions.policy import Policy
 
 os.environ.setdefault("GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME", "main")
@@ -379,3 +379,18 @@ def make_state_dir(sandbox):
         return state_dir
 
     return _factory
+
+
+def make_parent_state(data: StateData) -> State:
+    if data.state_file:
+        state_dir = data.state_file.parent
+        artifact_dir = state_dir / "artifacts"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        artifact_dir = pathlib.Path("/tmp") / "artifacts"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+    return build_state(
+        data=data,
+        client=FakeClaudeClient(),
+        artifact_dir=artifact_dir,
+    )

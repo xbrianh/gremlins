@@ -11,7 +11,7 @@ import pytest
 from conftest import MockGremlin
 
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import StateData, build_state
+from gremlins.executor.state import State, StateData, build_state
 from gremlins.fleet.render import build_row
 from gremlins.fleet.views import _gremlin_to_json  # type: ignore[reportPrivateUsage]
 from gremlins.stages.base import Stage
@@ -178,7 +178,7 @@ def test_gremlin_to_json_active_children_empty_when_absent() -> None:
 
 
 def _parallel_execute_stage(
-    parent_data: StateData,
+    parent_state: State,
     child_fns: list[tuple[str, Any]],
     tmp_path: pathlib.Path,
 ) -> Any:
@@ -196,7 +196,7 @@ def _parallel_execute_stage(
         for k, fn in child_fns
     ]
     stages = ParallelStage("grp", []).build_runtime_stages(
-        child_runners, parent_data=parent_data, project_root=pathlib.Path.cwd()
+        child_runners, parent_state=parent_state, project_root=pathlib.Path.cwd()
     )
     return stages[1][1]  # execute stage
 
@@ -205,12 +205,17 @@ def test_parallel_active_children_set_and_cleared(tmp_path: pathlib.Path) -> Non
     sf = tmp_path / "state.json"
     sf.write_text(json.dumps({"id": "test-id"}), encoding="utf-8")
     parent_data = StateData(gremlin_id="test-id", state_file=sf)
+    parent_state = build_state(
+        data=parent_data,
+        client=FakeClaudeClient(),
+        artifact_dir=sf.parent,
+    )
     captured: list[list[str] | None] = []
 
     async def child_fn() -> None:
         captured.append(_read_state(tmp_path).get("active_children"))
 
-    execute = _parallel_execute_stage(parent_data, [("child-a", child_fn)], tmp_path)
+    execute = _parallel_execute_stage(parent_state, [("child-a", child_fn)], tmp_path)
     asyncio.run(execute())
 
     assert captured == [["child-a"]]
@@ -221,11 +226,16 @@ def test_parallel_active_children_cleared_on_exception(tmp_path: pathlib.Path) -
     sf = tmp_path / "state.json"
     sf.write_text(json.dumps({"id": "test-id"}), encoding="utf-8")
     parent_data = StateData(gremlin_id="test-id", state_file=sf)
+    parent_state = build_state(
+        data=parent_data,
+        client=FakeClaudeClient(),
+        artifact_dir=sf.parent,
+    )
 
     async def boom() -> None:
         raise RuntimeError("boom")
 
-    execute = _parallel_execute_stage(parent_data, [("child-a", boom)], tmp_path)
+    execute = _parallel_execute_stage(parent_state, [("child-a", boom)], tmp_path)
     with pytest.raises(RuntimeError, match="boom"):
         asyncio.run(execute())
 

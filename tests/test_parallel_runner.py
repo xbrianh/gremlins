@@ -11,7 +11,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-from conftest import MockGremlin
+from conftest import MockGremlin, make_parent_state
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.gremlin import run_stages
@@ -53,9 +53,11 @@ def _make_parallel_stages(
     set_stage_fn: Callable[[str], None] | None = None,
     cancel_on_bail: bool = False,
     bail_policy: str = "any",
-    parent_data: StateData | None = None,
+    parent_state: State | None = None,
     project_root: pathlib.Path | None = None,
 ) -> list[tuple[str, Callable[[], Any]]]:
+    if parent_state is None:
+        parent_state = make_parent_state(StateData())
     return ParallelStage(
         group_name,
         [],
@@ -64,7 +66,7 @@ def _make_parallel_stages(
         bail_policy=bail_policy,
     ).build_runtime_stages(
         child_runners,
-        parent_data=parent_data,
+        parent_state=parent_state,
         project_root=project_root or pathlib.Path.cwd(),
         set_stage_fn=set_stage_fn,
     )

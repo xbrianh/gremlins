@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 from gremlins import paths
 from gremlins.artifacts.uri import Uri
 from gremlins.executor.parallel_state import ParallelGroupState
-from gremlins.executor.state import State, StateData
+from gremlins.executor.state import State
 from gremlins.stages.base import Stage
 from gremlins.stages.composite import child_state as _child_state
 from gremlins.stages.outcome import Bail, Done, Outcome
@@ -147,8 +147,7 @@ class ParallelStage(Stage):
         self,
         child_runners: list[tuple[str, State, Callable[[], Any]]],
         *,
-        parent_data: StateData | None = None,
-        parent_state: State | None = None,
+        parent_state: State,
         project_root: pathlib.Path | None = None,
         worktree_parent: pathlib.Path | None = None,
         set_stage_fn: Callable[[str], None] | None = None,
@@ -162,7 +161,6 @@ class ParallelStage(Stage):
             set_stage_fn=set_stage_fn or _noop_set_stage,
             cancel_on_bail=self._cancel_on_bail,
             bail_policy=self._bail_policy,
-            parent_data=parent_data or StateData(),
             parent_state=parent_state,
             project_root=project_root or paths.project_root(),
             worktree_parent=worktree_parent,
@@ -189,7 +187,6 @@ class ParallelStage(Stage):
             child_runners.append((child.name, cs, runner))
         for _, fn in self.build_runtime_stages(
             child_runners,
-            parent_data=state.data,
             parent_state=state,
             project_root=paths.project_root(),
             worktree_parent=state.worktree_parent,
@@ -212,8 +209,7 @@ class _ParallelExecutor:
         set_stage_fn: Callable[[str], None],
         cancel_on_bail: bool,
         bail_policy: str,
-        parent_data: StateData,
-        parent_state: State | None = None,
+        parent_state: State,
         project_root: pathlib.Path,
         worktree_parent: pathlib.Path | None = None,
         stage_path: str = "",
@@ -225,7 +221,7 @@ class _ParallelExecutor:
         self._set_stage = set_stage_fn
         self._cancel_on_bail = cancel_on_bail
         self._bail_policy = bail_policy
-        self._parent_data = parent_data
+        self._parent_data = parent_state.data
         self._parent_state = parent_state
         self._project_root = project_root
         self._worktree_parent = worktree_parent
@@ -233,7 +229,7 @@ class _ParallelExecutor:
         self._stages_by_key: dict[str, Stage] = (
             {st.name: st for st in child_stages} if child_stages else {}
         )
-        self._group_state = ParallelGroupState(self._group_name, parent_data)
+        self._group_state = ParallelGroupState(self._group_name, self._parent_data)
         self._tasks: list[asyncio.Task[None]] = []
         self._sem: asyncio.Semaphore | None = (
             asyncio.Semaphore(max_concurrent) if max_concurrent is not None else None
@@ -268,9 +264,7 @@ class _ParallelExecutor:
 
         # base_head must come from the parent worktree, not project_root:
         # GREMLINS_PROJECT_ROOT points to the original repo, which diverges from the fork once implement commits.
-        pstate_wt = (
-            self._parent_state.worktree if self._parent_state is not None else None
-        )
+        pstate_wt = self._parent_state.worktree
         base_ref = str(pstate_wt) if pstate_wt is not None else str(self._project_root)
         gs.base_head = await git.head_sha_async(cwd=base_ref)
         logger.debug(
@@ -285,11 +279,7 @@ class _ParallelExecutor:
 
         try:
             for child_key, child_state, _ in self._child_runners:
-                if (
-                    parent_gremlin is not None
-                    and parent_gid
-                    and parent_state is not None
-                ):
+                if parent_gremlin is not None and parent_gid:
                     gid = parent_gid
                     pstate = parent_state
                     child_id = f"{gid}--{self._group_name}--{child_key}"
@@ -489,7 +479,7 @@ class _ParallelExecutor:
         """Copy child artifact bindings into the parent registry before child dirs are removed."""
         parent_state = self._parent_state
         parent_gid = self._parent_data.gremlin_id
-        if parent_state is None or not parent_gid:
+        if not parent_gid:
             return
 
         sr = paths.state_root()

@@ -7,6 +7,7 @@ import json
 import pathlib
 
 import pytest
+from conftest import make_parent_state
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state
@@ -38,7 +39,7 @@ def _ctx(gremlin_id: str, sf: pathlib.Path, child_key: str) -> State:
 def _build_stages(group: str, runners: list, gremlin_id: str) -> list:
     return ParallelStage(group, []).build_runtime_stages(
         runners,
-        parent_data=StateData.load(gremlin_id),
+        parent_state=make_parent_state(StateData.load(gremlin_id)),
         project_root=pathlib.Path.cwd(),
     )
 
