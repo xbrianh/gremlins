@@ -69,7 +69,7 @@ def test_subprocess_client_sets_gremlin_skip_summary(tmp_path, monkeypatch):
     monkeypatch.delenv("GREMLIN_SKIP_SUMMARY", raising=False)
 
     client = SubprocessClaudeClient()
-    asyncio.run(client.run(_TestGremlin("hello", label="test")))
+    asyncio.run(client.run("hello", label="test"))
 
     assert env_out.exists(), "stub did not write env file"
     child_env = json.loads(env_out.read_text(encoding="utf-8"))
@@ -87,7 +87,7 @@ def test_subprocess_client_inherits_other_env_vars(tmp_path, monkeypatch):
     monkeypatch.setenv("MY_SENTINEL_VAR", sentinel)
 
     client = SubprocessClaudeClient()
-    asyncio.run(client.run(_TestGremlin("hello", label="test")))
+    asyncio.run(client.run("hello", label="test"))
 
     child_env = json.loads(env_out.read_text(encoding="utf-8"))
     assert child_env.get("MY_SENTINEL_VAR") == sentinel
@@ -105,7 +105,7 @@ def test_subprocess_client_sends_prompt_via_stdin_not_argv(tmp_path, monkeypatch
 
     prompt = "the prompt text"
     client = SubprocessClaudeClient()
-    asyncio.run(client.run(_TestGremlin(prompt, label="test")))
+    asyncio.run(client.run(prompt, label="test"))
 
     assert stdin_out.read_text(encoding="utf-8") == prompt
     child_argv = json.loads(argv_out.read_text(encoding="utf-8"))
@@ -121,7 +121,7 @@ def test_subprocess_client_bypass_true_uses_bypass_permissions(tmp_path, monkeyp
     monkeypatch.setenv("STUB_ARGV_OUT", str(argv_out))
 
     client = SubprocessClaudeClient(bypass=True)
-    asyncio.run(client.run(_TestGremlin("hello", label="test")))
+    asyncio.run(client.run("hello", label="test"))
 
     argv = json.loads(argv_out.read_text(encoding="utf-8"))
     idx = argv.index("--permission-mode")
@@ -137,7 +137,7 @@ def test_subprocess_client_bypass_false_uses_default_mode(tmp_path, monkeypatch)
     monkeypatch.setenv("STUB_ARGV_OUT", str(argv_out))
 
     client = SubprocessClaudeClient(bypass=False)
-    asyncio.run(client.run(_TestGremlin("hello", label="test")))
+    asyncio.run(client.run("hello", label="test"))
 
     argv = json.loads(argv_out.read_text(encoding="utf-8"))
     assert "--permission-mode" in argv
@@ -199,7 +199,7 @@ def test_retry_succeeds_on_second_attempt(tmp_path, monkeypatch):
     monkeypatch.setattr("asyncio.sleep", _noop_sleep)
 
     client = SubprocessClaudeClient()
-    result = asyncio.run(client.run(_TestGremlin("hello", label="test", max_retries=2)))
+    result = asyncio.run(client.run("hello", label="test", max_retries=2))
     assert result.exit_code == 0
     assert int(count_file.read_text()) == 2  # called twice
 
@@ -221,7 +221,7 @@ def test_retry_exhaustion_raises_stream_timeout_error(tmp_path, monkeypatch):
 
     client = SubprocessClaudeClient()
     with pytest.raises(StreamTimeoutError):
-        asyncio.run(client.run(_TestGremlin("hello", label="test", max_retries=2)))
+        asyncio.run(client.run("hello", label="test", max_retries=2))
     assert (
         int(count_file.read_text()) == 3
     )  # max_retries=2 → 3 total attempts (initial + 2 resumes)
@@ -357,7 +357,7 @@ def test_backoff_schedule_matches_stream_idle_backoff(tmp_path, monkeypatch):
 
     client = SubprocessClaudeClient()
     with pytest.raises(StreamTimeoutError):
-        asyncio.run(client.run(_TestGremlin("hello", label="test", max_retries=3)))
+        asyncio.run(client.run("hello", label="test", max_retries=3))
 
     # max_retries=3 → 4 total attempts (initial + 3 resumes) with 3 sleeps
     # between them. The initial attempt in run() is unconditional and consumes
@@ -408,7 +408,7 @@ def test_claude_config_dir_not_set_regardless_of_native_block(
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
 
     client = SubprocessClaudeClient(bypass=bypass, native_block=native_block)
-    asyncio.run(client.run(_TestGremlin("hello", label="test")))
+    asyncio.run(client.run("hello", label="test"))
 
     child_env = json.loads(env_out.read_text(encoding="utf-8"))
     assert "CLAUDE_CONFIG_DIR" not in child_env
@@ -428,7 +428,7 @@ def test_resume_uses_session_id_on_retry(tmp_path, monkeypatch):
     monkeypatch.setattr("asyncio.sleep", _noop_sleep)
 
     client = SubprocessClaudeClient()
-    result = asyncio.run(client.run(_TestGremlin("hello", label="test", max_retries=1)))
+    result = asyncio.run(client.run("hello", label="test", max_retries=1))
     assert result.exit_code == 0
 
     argv = json.loads(argv_out.read_text(encoding="utf-8"))
@@ -496,8 +496,6 @@ if stdin_out:
     monkeypatch.setattr("asyncio.sleep", _noop_sleep)
 
     client = SubprocessClaudeClient()
-    asyncio.run(
-        client.run(_TestGremlin("original-prompt", label="test", max_retries=1))
-    )
+    asyncio.run(client.run("original-prompt", label="test", max_retries=1))
     # No on_timeout_prompt, so _continue_prompt() returns original
     assert stdin_out.read_text(encoding="utf-8") == "original-prompt"

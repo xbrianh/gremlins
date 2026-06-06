@@ -7,7 +7,7 @@ import json
 import pathlib
 
 import pytest
-from conftest import MINIMAL_EVENTS, _TestGremlin
+from conftest import MINIMAL_EVENTS
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState
@@ -97,7 +97,5 @@ def test_raises_bail_when_sentinel_present_without_attempt(tmp_path):
 
 def test_model_kwarg_forwarded(tmp_path):
     state = _make_state(tmp_path)
-    asyncio.run(
-        _TestGremlin(run_agent(state, "hello", label="test-label", model="haiku"))
-    )
+    asyncio.run(run_agent(state, "hello", label="test-label", model="haiku"))
     assert state.client.calls[0].model == "haiku"

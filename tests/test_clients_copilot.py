@@ -9,7 +9,6 @@ import pathlib
 import sys
 
 import pytest
-from conftest import _TestGremlin
 
 from gremlins.clients.copilot import SubprocessCopilotClient, _strip_footer
 
@@ -88,7 +87,7 @@ def test_copilot_client_runs_and_returns_text(tmp_path, monkeypatch):
     monkeypatch.setenv("STUB_OUTPUT", "copilot response text")
 
     client = SubprocessCopilotClient()
-    result = asyncio.run(client.run(_TestGremlin("my prompt", label="test")))
+    result = asyncio.run(client.run("my prompt", label="test"))
 
     assert result.exit_code == 0
     assert result.text_result == "copilot response text"
@@ -105,7 +104,7 @@ def test_copilot_client_sends_prompt_via_argv(tmp_path, monkeypatch):
     monkeypatch.setenv("STUB_ARGV_OUT", str(argv_out))
 
     client = SubprocessCopilotClient()
-    asyncio.run(client.run(_TestGremlin("the prompt", label="test")))
+    asyncio.run(client.run("the prompt", label="test"))
 
     argv = json.loads(argv_out.read_text(encoding="utf-8"))
     p_idx = argv.index("-p")
@@ -121,7 +120,7 @@ def test_copilot_client_passes_allow_all_when_bypass(tmp_path, monkeypatch):
     monkeypatch.setenv("STUB_ARGV_OUT", str(argv_out))
 
     client = SubprocessCopilotClient(bypass=True)
-    asyncio.run(client.run(_TestGremlin("the-prompt", label="test")))
+    asyncio.run(client.run("the-prompt", label="test"))
 
     argv = json.loads(argv_out.read_text(encoding="utf-8"))
     assert "--allow-all" in argv
@@ -139,7 +138,7 @@ def test_copilot_client_no_allow_all_when_not_bypass(tmp_path, monkeypatch):
     monkeypatch.setenv("STUB_ARGV_OUT", str(argv_out))
 
     client = SubprocessCopilotClient(bypass=False)
-    asyncio.run(client.run(_TestGremlin("the-prompt", label="test")))
+    asyncio.run(client.run("the-prompt", label="test"))
 
     argv = json.loads(argv_out.read_text(encoding="utf-8"))
     assert "--allow-all" not in argv
@@ -154,7 +153,7 @@ def test_copilot_client_passes_model_when_specified(tmp_path, monkeypatch):
     monkeypatch.setenv("STUB_ARGV_OUT", str(argv_out))
 
     client = SubprocessCopilotClient()
-    asyncio.run(client.run(_TestGremlin("prompt", label="test", model="gpt-5.4")))
+    asyncio.run(client.run("prompt", label="test", model="gpt-5.4"))
 
     argv = json.loads(argv_out.read_text(encoding="utf-8"))
     assert "--model" in argv
@@ -170,7 +169,7 @@ def test_copilot_client_omits_model_when_none(tmp_path, monkeypatch):
     monkeypatch.setenv("STUB_ARGV_OUT", str(argv_out))
 
     client = SubprocessCopilotClient()
-    asyncio.run(client.run(_TestGremlin("prompt", label="test", model=None)))
+    asyncio.run(client.run("prompt", label="test", model=None))
 
     argv = json.loads(argv_out.read_text(encoding="utf-8"))
     assert "--model" not in argv
@@ -184,7 +183,7 @@ def test_copilot_client_raises_on_nonzero_exit(tmp_path, monkeypatch):
 
     client = SubprocessCopilotClient()
     with pytest.raises(RuntimeError, match="copilot -p.*exited 2"):
-        asyncio.run(client.run(_TestGremlin("prompt", label="test")))
+        asyncio.run(client.run("prompt", label="test"))
 
 
 def test_copilot_client_strips_footer(tmp_path, monkeypatch):
@@ -194,7 +193,7 @@ def test_copilot_client_strips_footer(tmp_path, monkeypatch):
     monkeypatch.setenv("STUB_OUTPUT", "response text\n⏺ Cost: $0.01 | Duration: 1s")
 
     client = SubprocessCopilotClient()
-    result = asyncio.run(client.run(_TestGremlin("prompt", label="test")))
+    result = asyncio.run(client.run("prompt", label="test"))
 
     assert result.text_result == "response text"
 
@@ -216,9 +215,7 @@ def test_copilot_run_accepts_extra_env_without_type_error(tmp_path, monkeypatch)
 
     client = SubprocessCopilotClient()
     # Must not raise TypeError
-    result = asyncio.run(
-        client.run(_TestGremlin("prompt", label="x", extra_env={"FOO": "bar"}))
-    )
+    result = asyncio.run(client.run("prompt", label="x", extra_env={"FOO": "bar"}))
     assert result.exit_code == 0
 
 
@@ -231,7 +228,7 @@ def test_copilot_extra_env_merged_into_subprocess_env(tmp_path, monkeypatch):
     monkeypatch.setenv("STUB_ENV_OUT", str(env_out))
 
     client = SubprocessCopilotClient()
-    asyncio.run(client.run(_TestGremlin("prompt", label="x", extra_env={"FOO": "bar"})))
+    asyncio.run(client.run("prompt", label="x", extra_env={"FOO": "bar"}))
 
     captured = json.loads(env_out.read_text(encoding="utf-8"))
     assert captured.get("FOO") == "bar"
@@ -256,7 +253,7 @@ def test_copilot_native_block_produces_base_argv(tmp_path, monkeypatch):
 
     native_block = {"allowed_tools": ["Read", "Edit", "Bash", "Write", "Grep", "Glob"]}
     client = SubprocessCopilotClient(bypass=False, native_block=native_block)
-    asyncio.run(client.run(_TestGremlin("the-prompt", label="test")))
+    asyncio.run(client.run("the-prompt", label="test"))
 
     argv = json.loads(argv_out.read_text(encoding="utf-8"))
     assert argv == ["-p", "the-prompt"]
@@ -273,7 +270,7 @@ def test_copilot_bypass_still_passes_allow_all_with_native_block(tmp_path, monke
 
     native_block = {"allowed_tools": ["Read", "Edit"]}
     client = SubprocessCopilotClient(bypass=True, native_block=native_block)
-    asyncio.run(client.run(_TestGremlin("the-prompt", label="test")))
+    asyncio.run(client.run("the-prompt", label="test"))
 
     argv = json.loads(argv_out.read_text(encoding="utf-8"))
     assert "--allow-all" in argv
@@ -289,7 +286,7 @@ def test_copilot_empty_block_runs_with_no_extra_flags(tmp_path, monkeypatch):
     monkeypatch.setenv("STUB_ARGV_OUT", str(argv_out))
 
     client = SubprocessCopilotClient(bypass=False, native_block={})
-    asyncio.run(client.run(_TestGremlin("the-prompt", label="test")))
+    asyncio.run(client.run("the-prompt", label="test"))
 
     argv = json.loads(argv_out.read_text(encoding="utf-8"))
     assert argv == ["-p", "the-prompt"]
@@ -319,7 +316,7 @@ sys.stdout.flush()
     # ContextVar holding the resume payload survives between them.
     async def _drive() -> object:
         client = SubprocessCopilotClient()
-        await client.run(_TestGremlin("first-prompt", label="test"))
+        await client.run("first-prompt", label="test")
         return await client.resume()
 
     result = asyncio.run(_drive())

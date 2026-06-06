@@ -55,7 +55,7 @@ def test_custom_instructions_passed_to_agent(monkeypatch: Any) -> None:
 
     custom = "Custom instructions here."
     client = OpenAIAgentsClient("gpt-4o", instructions=custom)
-    asyncio.run(client.run(_TestGremlin("do something", label="t")))
+    asyncio.run(client.run("do something", label="t"))
 
     assert captured_agents, "Runner.run_streamed was not called"
     assert captured_agents[0].instructions == custom
@@ -172,7 +172,7 @@ def test_streamed_run_produces_completed_run(monkeypatch: Any) -> None:
     monkeypatch.setattr("agents.run.Runner.run_streamed", lambda *a, **kw: fake_run)
 
     client = OpenAIAgentsClient("gpt-4o")
-    result = asyncio.run(client.run(_TestGremlin("do something", label="test")))
+    result = asyncio.run(client.run("do something", label="test"))
 
     assert isinstance(result, CompletedRun)
     assert result.exit_code == 0
@@ -194,7 +194,7 @@ def test_streamed_run_log_lines(
     monkeypatch.setattr("agents.run.Runner.run_streamed", lambda *a, **kw: fake_run)
 
     client = OpenAIAgentsClient("gpt-4o")
-    asyncio.run(client.run(_TestGremlin("ls", label="mylabel", cwd=tmp_path)))
+    asyncio.run(client.run("ls", label="mylabel", cwd=tmp_path))
 
     err = capsys.readouterr().err
     assert f"[mylabel] init model=gpt-4o cwd={tmp_path}" in err
@@ -215,7 +215,7 @@ def test_streamed_run_raw_path(monkeypatch: Any, tmp_path: pathlib.Path) -> None
 
     raw_path = tmp_path / "stream.jsonl"
     client = OpenAIAgentsClient("gpt-4o")
-    asyncio.run(client.run(_TestGremlin("read", label="t", raw_path=raw_path)))
+    asyncio.run(client.run("read", label="t", raw_path=raw_path))
 
     lines = raw_path.read_text().splitlines()
     assert len(lines) >= 2
@@ -235,9 +235,7 @@ def test_capture_events_tool_call_shape(monkeypatch: Any) -> None:
     monkeypatch.setattr("agents.run.Runner.run_streamed", lambda *a, **kw: fake_run)
 
     client = OpenAIAgentsClient("gpt-4o")
-    result = asyncio.run(
-        client.run(_TestGremlin("create pr", label="t", capture_events=True))
-    )
+    result = asyncio.run(client.run("create pr", label="t", capture_events=True))
 
     assert result.events is not None
     tool_evts = [
@@ -344,7 +342,7 @@ def test_model_settings_stored_and_passed_to_agent(monkeypatch: Any) -> None:
     settings = ModelSettings(temperature=0.5)
     client = OpenAIAgentsClient("gpt-4o", model_settings=settings)
     assert client._model_settings is settings
-    asyncio.run(client.run(_TestGremlin("do something", label="t")))
+    asyncio.run(client.run("do something", label="t"))
 
     assert captured_agents, "Runner.run_streamed was not called"
     assert captured_agents[0].model_settings.temperature == 0.5
@@ -494,9 +492,7 @@ def test_terminal_stream_error_transient_retries_and_succeeds(monkeypatch: Any) 
     monkeypatch.setattr("asyncio.sleep", _noop_sleep)
 
     client = OpenAIAgentsClient("gpt-4o")
-    result = asyncio.run(
-        client.run(_TestGremlin("do something", label="t", max_retries=2))
-    )
+    result = asyncio.run(client.run("do something", label="t", max_retries=2))
 
     assert call_count[0] == 2
     assert result.text_result == "done"
@@ -523,7 +519,7 @@ def test_terminal_stream_error_permanent_fails_immediately(monkeypatch: Any) -> 
 
     client = OpenAIAgentsClient("gpt-4o")
     with pytest.raises(StreamTerminalError):
-        asyncio.run(client.run(_TestGremlin("do something", label="t", max_retries=2)))
+        asyncio.run(client.run("do something", label="t", max_retries=2))
 
     assert call_count[0] == 1
 
@@ -544,7 +540,7 @@ def test_terminal_stream_error_cost_is_recorded(monkeypatch: Any) -> None:
 
     client = OpenAIAgentsClient("gpt-4o")
     with pytest.raises(StreamTerminalError):
-        asyncio.run(client.run(_TestGremlin("do something", label="t", max_retries=1)))
+        asyncio.run(client.run("do something", label="t", max_retries=1))
 
     assert client.total_cost_usd is None
 
@@ -561,7 +557,7 @@ def test_run_streamed_passes_max_turns(monkeypatch: Any) -> None:
     monkeypatch.setattr("agents.run.Runner.run_streamed", _fake_run_streamed)
 
     client = OpenAIAgentsClient("gpt-4o")
-    asyncio.run(client.run(_TestGremlin("do something", label="t")))
+    asyncio.run(client.run("do something", label="t"))
 
     assert captured_kwargs, "Runner.run_streamed was not called"
     assert captured_kwargs[0].get("max_turns") == OPENAI_AGENTS_MAX_TURNS
@@ -600,7 +596,7 @@ def test_native_block_tools_allowlist_filters_agent_tools(monkeypatch: Any) -> N
     client = OpenAIAgentsClient(
         "gpt-4o", native_block={"allowed_tools": ["Read", "Bash"]}
     )
-    asyncio.run(client.run(_TestGremlin("do something", label="t")))
+    asyncio.run(client.run("do something", label="t"))
 
     assert captured_agents, "Runner.run_streamed was not called"
     tool_names = {t.name for t in captured_agents[0].tools}
@@ -619,7 +615,7 @@ def test_native_block_absent_tools_uses_all(monkeypatch: Any) -> None:
     monkeypatch.setattr("agents.run.Runner.run_streamed", _fake_run_streamed)
 
     client = OpenAIAgentsClient("gpt-4o")
-    asyncio.run(client.run(_TestGremlin("do something", label="t")))
+    asyncio.run(client.run("do something", label="t"))
 
     assert captured_agents
     expected_tools = build_tools(
