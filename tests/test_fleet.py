@@ -939,7 +939,9 @@ def test_exec_land_stage_success(tmp_path, monkeypatch):
         async def run(self, gremlin):  # type: ignore[no-untyped-def]
             pass
 
-    monkeypatch.setattr(_state_mod, "build_state", lambda **_: object())
+    mock_state = MagicMock()
+    mock_state.artifacts = MagicMock()
+    monkeypatch.setattr(_state_mod, "build_state", lambda **_: mock_state)
     result = _land._exec_land_stage(_OkStage(), MagicMock(), "", tmp_path)
     assert result is True
 
@@ -954,7 +956,9 @@ def test_exec_land_stage_bail(tmp_path, monkeypatch, capsys):
         async def run(self, gremlin):  # type: ignore[no-untyped-def]
             raise Bail("structural")
 
-    monkeypatch.setattr(_state_mod, "build_state", lambda **_: object())
+    mock_state = MagicMock()
+    mock_state.artifacts = MagicMock()
+    monkeypatch.setattr(_state_mod, "build_state", lambda **_: mock_state)
     result = _land._exec_land_stage(_BailStage(), MagicMock(), "", tmp_path)
     assert result is False
     assert "structural" in capsys.readouterr().out
