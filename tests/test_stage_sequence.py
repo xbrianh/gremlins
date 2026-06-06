@@ -8,7 +8,7 @@ import pathlib
 from typing import TYPE_CHECKING, cast
 
 import pytest
-from conftest import MockGremlin
+from conftest import MockGremlin, _make_gremlin_wrapper
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State as RuntimeState

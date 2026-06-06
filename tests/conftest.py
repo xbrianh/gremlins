@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import types
+from typing import Any
 
 import pytest
 
@@ -266,6 +267,11 @@ class MockGremlin:
     def __post_init__(self) -> None:
         if self.state is not None and self.registry is None:
             self.registry = self.state.artifacts
+
+
+def _make_gremlin_wrapper(state: State) -> MockGremlin:
+    """Create a MockGremlin from a State for testing stages."""
+    return MockGremlin(state=state)
 
 
 # Shared minimal event stream used across test modules.

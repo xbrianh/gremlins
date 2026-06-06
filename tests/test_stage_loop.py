@@ -7,7 +7,7 @@ import json
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
-from conftest import MockGremlin
+from conftest import MockGremlin, _make_gremlin_wrapper
 
 from gremlins.artifacts.uri import Uri
 from gremlins.executor.state import State as RuntimeState
