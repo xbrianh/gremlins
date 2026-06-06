@@ -9,7 +9,6 @@ from collections.abc import Generator
 from typing import Any
 
 import pytest
-from conftest import _TestGremlin
 
 import gremlins.run_child as _rc
 from gremlins.clients.fake import FakeClaudeClient
@@ -154,7 +153,7 @@ def test_build_state_missing_artifact_dir() -> None:
 
 def test_run_done(tmp_path: pathlib.Path) -> None:
     spec_path = _write_spec(tmp_path, "_test_done")
-    rc = asyncio.run(_TestGremlin(_rc._run(spec_path)))
+    rc = asyncio.run(_rc._run(spec_path))
     assert rc == 0
     result = _read_result(spec_path)
     assert result["status"] == "done"
@@ -169,7 +168,7 @@ def test_run_done(tmp_path: pathlib.Path) -> None:
 
 def test_run_bail(tmp_path: pathlib.Path) -> None:
     spec_path = _write_spec(tmp_path, "_test_bail")
-    rc = asyncio.run(_TestGremlin(_rc._run(spec_path)))
+    rc = asyncio.run(_rc._run(spec_path))
     assert rc == 1
     result = _read_result(spec_path)
     assert result["status"] == "bail"
@@ -183,7 +182,7 @@ def test_run_bail(tmp_path: pathlib.Path) -> None:
 
 def test_run_stage_raises(tmp_path: pathlib.Path) -> None:
     spec_path = _write_spec(tmp_path, "_test_raise")
-    rc = asyncio.run(_TestGremlin(_rc._run(spec_path)))
+    rc = asyncio.run(_rc._run(spec_path))
     assert rc == 2
     result = _read_result(spec_path)
     assert result["status"] == "error"
@@ -215,7 +214,7 @@ def test_run_artifact_stage(
         "_test_artifact",
         extra={"gremlin_id": gremlin_id},
     )
-    rc = asyncio.run(_TestGremlin(_rc._run(spec_path)))
+    rc = asyncio.run(_rc._run(spec_path))
     assert rc == 0
     result = _read_result(spec_path)
     assert result["status"] == "done"
@@ -238,7 +237,7 @@ def test_run_bad_spec_missing_stage_dict(tmp_path: pathlib.Path) -> None:
         json.dumps({"client": "fake:fake", "artifact_dir": str(tmp_path)}),
         encoding="utf-8",
     )
-    rc = asyncio.run(_TestGremlin(_rc._run(spec_path)))
+    rc = asyncio.run(_rc._run(spec_path))
     assert rc == 2
     result = _read_result(spec_path)
     assert result["status"] == "error"

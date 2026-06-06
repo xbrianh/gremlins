@@ -162,7 +162,7 @@ def test_parallel_wrapper_runs_all_children() -> None:
 
     children = [("a", track("a")), ("b", track("b"))]
     wrapper = _parallel_wrapper(children)
-    asyncio.run(_TestGremlin(wrapper()))  # type: ignore[operator]
+    asyncio.run(wrapper())  # type: ignore[operator]
     assert sorted(log) == ["a", "b"]
 
 
@@ -187,7 +187,7 @@ def test_parallel_wrapper_children_overlap_in_time() -> None:
 
     children = [("a", make_timed("a")), ("b", make_timed("b"))]
     wrapper = _parallel_wrapper(children)
-    asyncio.run(_TestGremlin(wrapper()))  # type: ignore[operator]
+    asyncio.run(wrapper())  # type: ignore[operator]
 
     # Both started before either finished → overlapping execution
     assert timings["a"]["start"] < timings["b"]["end"]
@@ -212,7 +212,7 @@ def test_parallel_wrapper_sibling_runs_when_one_child_fails() -> None:
     children = [("fail", failing), ("sibling", sibling)]
     wrapper = _parallel_wrapper(children)
     with pytest.raises(RuntimeError, match="child failed"):
-        asyncio.run(_TestGremlin(wrapper()))  # type: ignore[operator]
+        asyncio.run(wrapper())  # type: ignore[operator]
     assert "sibling" in ran
 
 
@@ -231,7 +231,7 @@ def test_parallel_wrapper_runs_all_children_unconditionally() -> None:
         ("c", _make_afn("c", log)),
     ]
     wrapper = _parallel_wrapper(children)
-    asyncio.run(_TestGremlin(wrapper()))  # type: ignore[operator]
+    asyncio.run(wrapper())  # type: ignore[operator]
     assert sorted(log) == ["a", "b", "c"]
 
 
@@ -377,7 +377,7 @@ def test_parallel_sequence_child_worktree_flows() -> None:
         for _, fn in stages:
             await fn()  # type: ignore[operator]
 
-    asyncio.run(_TestGremlin(_run_all()))
+    asyncio.run(_run_all())
 
     assert len(observed) == 2
     # Both sub-stages saw the same non-None worktree that is not the project root

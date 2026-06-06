@@ -4,7 +4,6 @@ import asyncio
 import subprocess
 
 import pytest
-from conftest import _TestGremlin
 
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
@@ -97,7 +96,7 @@ def test_fork_without_worktree(tmp_path, tmp_repo):
         assert state.data.gremlin_id == "gr-1"
         assert state.artifact_dir == artifact_dir
 
-    asyncio.run(_TestGremlin(_test()))
+    asyncio.run(_test())
 
 
 def test_fork_with_worktree(tmp_path, tmp_repo):
@@ -198,7 +197,7 @@ def test_fork_with_worktree(tmp_path, tmp_repo):
                     capture_output=True,
                 )
 
-    asyncio.run(_TestGremlin(_test()))
+    asyncio.run(_test())
 
 
 def test_fork_preserves_registry(tmp_path, tmp_repo):
@@ -247,7 +246,7 @@ def test_fork_preserves_registry(tmp_path, tmp_repo):
         assert "some_key" in forked.artifacts.data
         assert forked.artifacts.read("some_key") == {"data": "value"}
 
-    asyncio.run(_TestGremlin(_test()))
+    asyncio.run(_test())
 
 
 def test_fork_with_branch_pipeline_scopes_child(tmp_path, tmp_repo):
@@ -317,4 +316,4 @@ def test_fork_with_branch_pipeline_scopes_child(tmp_path, tmp_repo):
         # Parent state is not mutated
         assert state.data.pipeline_path == str(parent_pipeline_path)
 
-    asyncio.run(_TestGremlin(_test()))
+    asyncio.run(_test())

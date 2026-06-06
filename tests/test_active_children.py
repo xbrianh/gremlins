@@ -210,7 +210,7 @@ def test_parallel_active_children_set_and_cleared(tmp_path: pathlib.Path) -> Non
         captured.append(_read_state(tmp_path).get("active_children"))
 
     execute = _parallel_execute_stage(parent_data, [("child-a", child_fn)], tmp_path)
-    asyncio.run(_TestGremlin(execute()))
+    asyncio.run(execute())
 
     assert captured == [["child-a"]]
     assert "active_children" not in _read_state(tmp_path)
@@ -226,6 +226,6 @@ def test_parallel_active_children_cleared_on_exception(tmp_path: pathlib.Path) -
 
     execute = _parallel_execute_stage(parent_data, [("child-a", boom)], tmp_path)
     with pytest.raises(RuntimeError, match="boom"):
-        asyncio.run(_TestGremlin(execute()))
+        asyncio.run(execute())
 
     assert "active_children" not in _read_state(tmp_path)

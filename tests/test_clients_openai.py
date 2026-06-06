@@ -443,7 +443,7 @@ def test_bash_invoke_passes_extra_env_to_subprocess() -> None:
     args_json = json.dumps({"command": "echo hi"})
 
     with patch("asyncio.create_subprocess_shell", return_value=fake_proc) as mock_spawn:
-        asyncio.run(_TestGremlin(_bash_invoke(ctx, args_json)))
+        asyncio.run(_bash_invoke(ctx, args_json))
 
     _call_kwargs = mock_spawn.call_args.kwargs
     assert "env" in _call_kwargs
@@ -582,7 +582,7 @@ def test_bypass_false_enforces_path_scoping(tmp_path: pathlib.Path) -> None:
     args_json = json.dumps(
         {"file_path": "/etc/passwd", "old_string": "x", "new_string": "y"}
     )
-    result = asyncio.run(_TestGremlin(edit_tool.on_invoke_tool(ctx, args_json)))
+    result = asyncio.run(edit_tool.on_invoke_tool(ctx, args_json))
     assert result.startswith("Error: path outside worktree")
 
 
@@ -637,7 +637,7 @@ def test_bash_invoke_no_extra_env_passes_none() -> None:
     args_json = json.dumps({"command": "echo hi"})
 
     with patch("asyncio.create_subprocess_shell", return_value=fake_proc) as mock_spawn:
-        asyncio.run(_TestGremlin(_bash_invoke(ctx, args_json)))
+        asyncio.run(_bash_invoke(ctx, args_json))
 
     _call_kwargs = mock_spawn.call_args.kwargs
     assert _call_kwargs.get("env") is None

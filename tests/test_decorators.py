@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from conftest import _TestGremlin
 
 from gremlins.utils.decorators import default_on_exception, swallow
 
@@ -40,7 +39,7 @@ def test_swallow_async_returns_none_on_match():
     async def boom():
         raise ValueError("oops")
 
-    assert asyncio.run(_TestGremlin(boom())) is None
+    assert asyncio.run(boom()) is None
 
 
 def test_swallow_async_passes_through_on_no_exception():
@@ -48,7 +47,7 @@ def test_swallow_async_passes_through_on_no_exception():
     async def fine():
         return 99
 
-    assert asyncio.run(_TestGremlin(fine())) == 99
+    assert asyncio.run(fine()) == 99
 
 
 def test_swallow_async_propagates_non_matching():
@@ -57,7 +56,7 @@ def test_swallow_async_propagates_non_matching():
         raise TypeError("nope")
 
     with pytest.raises(TypeError):
-        asyncio.run(_TestGremlin(boom()))
+        asyncio.run(boom())
 
 
 def test_swallow_preserves_metadata():
@@ -107,7 +106,7 @@ def test_default_async_returns_default_on_match():
     async def boom():
         raise RuntimeError("bad")
 
-    assert asyncio.run(_TestGremlin(boom())) == 0.0
+    assert asyncio.run(boom()) == 0.0
 
 
 def test_default_async_passes_through_on_no_exception():
@@ -115,7 +114,7 @@ def test_default_async_passes_through_on_no_exception():
     async def fine():
         return 1.5
 
-    assert asyncio.run(_TestGremlin(fine())) == 1.5
+    assert asyncio.run(fine()) == 1.5
 
 
 def test_default_async_propagates_non_matching():
@@ -124,7 +123,7 @@ def test_default_async_propagates_non_matching():
         raise TypeError("nope")
 
     with pytest.raises(TypeError):
-        asyncio.run(_TestGremlin(boom()))
+        asyncio.run(boom())
 
 
 def test_default_preserves_metadata():

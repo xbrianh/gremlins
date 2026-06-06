@@ -256,7 +256,7 @@ def test_parallel_child_artifact_dir_is_full_copy(sandbox) -> None:
             child_key="child-z",
         )
 
-    forked = asyncio.run(_TestGremlin(test_fork()))
+    forked = asyncio.run(test_fork())
 
     # Verify child artifact dir is a full copy
     child_artifact_dir = forked.artifact_dir

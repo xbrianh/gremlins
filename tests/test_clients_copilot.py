@@ -322,7 +322,7 @@ sys.stdout.flush()
         await client.run(_TestGremlin("first-prompt", label="test"))
         return await client.resume()
 
-    result = asyncio.run(_TestGremlin(_drive()))
+    result = asyncio.run(_drive())
 
     assert result.exit_code == 0
     assert result.text_result == "copilot response"

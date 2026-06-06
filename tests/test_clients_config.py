@@ -218,7 +218,7 @@ def test_retry_async_works() -> None:
             raise ValueError("async boom")
         return "async ok"
 
-    result = _asyncio.run(_TestGremlin(fn()))
+    result = _asyncio.run(fn())
     assert result == "async ok"
     assert calls[0] == 2
 
@@ -232,7 +232,7 @@ def test_retry_async_classify_false_no_retry() -> None:
         raise ValueError("not retryable")
 
     with pytest.raises(ValueError, match="not retryable"):
-        _asyncio.run(_TestGremlin(fn()))
+        _asyncio.run(fn())
     assert calls[0] == 1
 
 
@@ -248,7 +248,7 @@ def test_retry_async_on_retry_callback_args() -> None:
         raise ValueError("async x")
 
     with pytest.raises(ValueError):
-        _asyncio.run(_TestGremlin(fn()))
+        _asyncio.run(fn())
     assert len(received) == 1
     attempt, exc, wait = received[0]
     assert attempt == 0

@@ -20,8 +20,37 @@ from gremlins.permissions.policy import Policy
 class _TestGremlin:
     """Minimal Gremlin wrapper for unit tests."""
 
-    def __init__(self, state: State) -> None:
-        self.state = state
+    def __init__(
+        self,
+        state_or_prompt: State | str | object,
+        *,
+        label: str | None = None,
+        max_retries: int | None = None,
+        idle_timeout: float | None = None,
+        extra_env: dict[str, str] | None = None,
+        capture_events: bool | None = None,
+        model: str | None = None,
+        raw_path: str | None = None,
+        cwd: object | None = None,
+        bypass: bool | None = None,
+        native_block: dict[str, object] | None = None,
+        instructions: str | None = None,
+        model_settings: object | None = None,
+    ) -> None:
+        self.state = state_or_prompt if isinstance(state_or_prompt, State) else None
+        self.prompt = state_or_prompt if isinstance(state_or_prompt, str) else None
+        self.label = label
+        self.max_retries = max_retries
+        self.idle_timeout = idle_timeout
+        self.extra_env = extra_env
+        self.capture_events = capture_events
+        self.model = model
+        self.raw_path = raw_path
+        self.cwd = cwd
+        self.bypass = bypass
+        self.native_block = native_block
+        self.instructions = instructions
+        self.model_settings = model_settings
 
 
 os.environ.setdefault("GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME", "main")

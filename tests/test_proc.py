@@ -2,13 +2,12 @@ import asyncio
 import subprocess
 
 import pytest
-from conftest import _TestGremlin
 
 from gremlins.utils import proc
 
 
 def run(coro):  # type: ignore[no-untyped-def]
-    return asyncio.run(_TestGremlin(coro))
+    return asyncio.run(coro)
 
 
 # run_async

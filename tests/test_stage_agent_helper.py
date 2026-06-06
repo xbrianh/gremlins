@@ -56,13 +56,13 @@ def test_calls_client_run_with_expected_kwargs(tmp_path):
 
 def test_run_agent_with_attempt_set(tmp_path):
     state = _make_state(tmp_path, attempt="att1")
-    asyncio.run(_TestGremlin(run_agent(state, "hello", label="test-label")))
+    asyncio.run(run_agent(state, "hello", label="test-label"))
     assert len(state.client.calls) == 1
 
 
 def test_returns_completed_run_when_no_bail(tmp_path):
     state = _make_state(tmp_path, attempt="att1")
-    result = asyncio.run(_TestGremlin(run_agent(state, "hello", label="test-label")))
+    result = asyncio.run(run_agent(state, "hello", label="test-label"))
     assert result.exit_code == 0
 
 
@@ -70,7 +70,7 @@ def test_raises_bail_when_transcript_has_sentinel(tmp_path):
     bail_events = [{"type": "result", "result": "work done\nBAIL: other: timed out"}]
     state = _make_state(tmp_path, fixtures={"test-label": bail_events})
     with pytest.raises(Bail) as exc_info:
-        asyncio.run(_TestGremlin(run_agent(state, "hello", label="test-label")))
+        asyncio.run(run_agent(state, "hello", label="test-label"))
     assert "timed out" in exc_info.value.args[0]
 
 
@@ -78,13 +78,13 @@ def test_bail_detail_empty_when_sentinel_has_no_detail(tmp_path):
     bail_events = [{"type": "result", "result": "BAIL: other: "}]
     state = _make_state(tmp_path, fixtures={"test-label": bail_events})
     with pytest.raises(Bail) as exc_info:
-        asyncio.run(_TestGremlin(run_agent(state, "hello", label="test-label")))
+        asyncio.run(run_agent(state, "hello", label="test-label"))
     assert exc_info.value.args[0] == ""
 
 
 def test_no_bail_when_transcript_has_no_sentinel(tmp_path):
     state = _make_state(tmp_path)
-    result = asyncio.run(_TestGremlin(run_agent(state, "hello", label="test-label")))
+    result = asyncio.run(run_agent(state, "hello", label="test-label"))
     assert result.exit_code == 0
 
 
@@ -92,7 +92,7 @@ def test_raises_bail_when_sentinel_present_without_attempt(tmp_path):
     bail_events = [{"type": "result", "result": "BAIL: other: reason"}]
     state = _make_state(tmp_path, fixtures={"test-label": bail_events})
     with pytest.raises(Bail):
-        asyncio.run(_TestGremlin(run_agent(state, "hello", label="test-label")))
+        asyncio.run(run_agent(state, "hello", label="test-label"))
 
 
 def test_model_kwarg_forwarded(tmp_path):

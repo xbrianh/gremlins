@@ -659,7 +659,7 @@ def test_parallel_all_children_complete_with_defaults():
         for _, fn in stages:
             await fn()
 
-    asyncio.run(_TestGremlin(_run_all()))
+    asyncio.run(_run_all())
 
     assert sorted(ran) == ["a", "b"]
 
