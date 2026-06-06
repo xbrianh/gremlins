@@ -17,11 +17,11 @@ from typing import TYPE_CHECKING, Any, cast
 if TYPE_CHECKING:
     from gremlins.executor.gremlin import Gremlin
     from gremlins.pipeline import Pipeline
-    from gremlins.executor.state import State
 
 from gremlins import paths
 from gremlins.artifacts.uri import Uri
 from gremlins.executor.parallel_state import ParallelGroupState
+from gremlins.executor.state import State
 from gremlins.stages.base import Stage
 from gremlins.stages.composite import child_state as _child_state
 from gremlins.stages.outcome import Bail, Done, Outcome
