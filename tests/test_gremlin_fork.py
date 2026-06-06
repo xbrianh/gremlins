@@ -1,10 +1,10 @@
 """Tests for Gremlin.fork() method."""
 
-from conftest import _TestGremlin
 import asyncio
 import subprocess
 
 import pytest
+from conftest import _TestGremlin
 
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
@@ -20,7 +20,9 @@ def tmp_repo(tmp_path):
     """Create a minimal git repo for testing."""
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
-    subprocess.run(_TestGremlin(["git", "init"], cwd=repo_dir, check=True, capture_output=True))
+    subprocess.run(
+        ["git", "init"], cwd=repo_dir, check=True, capture_output=True
+    )
     subprocess.run(
         ["git", "config", "user.email", "test@example.com"],
         cwd=repo_dir,

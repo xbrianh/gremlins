@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from conftest import _TestGremlin
 import json
 import os
 import re
@@ -12,6 +11,7 @@ import types
 from unittest.mock import MagicMock
 
 import pytest
+from conftest import _TestGremlin
 
 import gremlins.queue.core as core
 from gremlins.cli import main
@@ -133,7 +133,9 @@ def test_run_picks_up_item_added_while_watching(q):
 
     result: list[int] = []
     t = threading.Thread(
-        target=lambda: result.append(core.run(_TestGremlin(poll_interval=0.05, _stop_event=stop))),
+        target=lambda: result.append(
+            core.run(_TestGremlin(poll_interval=0.05, _stop_event=stop))
+        ),
         daemon=True,
     )
     t.start()

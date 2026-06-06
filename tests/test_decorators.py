@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from conftest import _TestGremlin
 import asyncio
 
 import pytest
+from conftest import _TestGremlin
 
 from gremlins.utils.decorators import default_on_exception, swallow
 

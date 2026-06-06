@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from conftest import _TestGremlin
 import asyncio
 import pathlib
 
 import pytest
+from conftest import _TestGremlin
 
 from gremlins.artifacts.registry import MissingArtifact
 from gremlins.artifacts.uri import Uri

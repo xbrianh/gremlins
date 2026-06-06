@@ -1,6 +1,5 @@
 """Tests for the parallel three-stage decomposition and related state fixes.
 
-from conftest import _TestGremlin
 Covers:
 - Per-child bail shards: children write to parallel_bails, not top-level.
 - bail_policy: 'any' and 'all' aggregation rules.
@@ -20,6 +19,7 @@ import subprocess
 import threading
 
 import pytest
+from conftest import _TestGremlin
 
 import gremlins.executor.state as state_mod
 from gremlins.clients.fake import FakeClaudeClient

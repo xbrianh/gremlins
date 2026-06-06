@@ -15,7 +15,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-from conftest import MINIMAL_EVENTS
+from conftest import MINIMAL_EVENTS, _TestGremlin
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.run import _parse_args as _parse_gh_args

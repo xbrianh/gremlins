@@ -49,6 +49,13 @@ from gremlins.pipeline import Pipeline
 from gremlins.pipeline.loader import parse_stage
 from gremlins.stages.outcome import Bail
 
+
+class _GremlinWrapper:
+    """Minimal wrapper to satisfy stage.run(gremlin) signature."""
+
+    def __init__(self, state: State) -> None:
+        self.state = state
+
 logger = logging.getLogger(__name__)
 
 
@@ -165,7 +172,7 @@ async def _run(spec_path: pathlib.Path) -> int:
         stage.client = state.client
 
     try:
-        await stage.run(state)
+        await stage.run(_GremlinWrapper(state))  # type: ignore[arg-type]
     except Bail as b:
         cost = getattr(state.client, "total_cost_usd", 0.0) or 0.0
         _write_result(

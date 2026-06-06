@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from conftest import _TestGremlin
 import asyncio
 import json
 import os
@@ -15,6 +14,7 @@ from agents import ModelSettings, Usage
 from agents.items import MessageOutputItem, ToolCallItem, ToolCallOutputItem
 from agents.stream_events import RunItemStreamEvent
 from agents.tool_context import ToolContext
+from conftest import _TestGremlin
 
 from gremlins.clients.config import OPENAI_AGENTS_MAX_TURNS
 from gremlins.clients.protocol import CompletedRun
@@ -235,7 +235,9 @@ def test_capture_events_tool_call_shape(monkeypatch: Any) -> None:
     monkeypatch.setattr("agents.run.Runner.run_streamed", lambda *a, **kw: fake_run)
 
     client = OpenAIAgentsClient("gpt-4o")
-    result = asyncio.run(client.run(_TestGremlin("create pr", label="t", capture_events=True)))
+    result = asyncio.run(
+        client.run(_TestGremlin("create pr", label="t", capture_events=True))
+    )
 
     assert result.events is not None
     tool_evts = [
@@ -287,7 +289,11 @@ def test_idle_timeout_calls_run_cancel(monkeypatch: Any) -> None:
 
     client = OpenAIAgentsClient("gpt-4o")
     with pytest.raises(StreamTimeoutError):
-        asyncio.run(client.run(_TestGremlin("block", label="t", idle_timeout=0.05, max_retries=0)))
+        asyncio.run(
+            client.run(
+                _TestGremlin("block", label="t", idle_timeout=0.05, max_retries=0)
+            )
+        )
 
     assert cancel_called
 
@@ -317,7 +323,11 @@ def test_idle_timeout_raises_stream_timeout_error(monkeypatch: Any) -> None:
 
     client = OpenAIAgentsClient("gpt-4o")
     with pytest.raises(StreamTimeoutError):
-        asyncio.run(client.run(_TestGremlin("slow", label="t", idle_timeout=0.05, max_retries=0)))
+        asyncio.run(
+            client.run(
+                _TestGremlin("slow", label="t", idle_timeout=0.05, max_retries=0)
+            )
+        )
 
 
 def test_model_settings_stored_and_passed_to_agent(monkeypatch: Any) -> None:
@@ -392,7 +402,9 @@ def test_openai_client_missing_key(monkeypatch: Any) -> None:
 def test_openai_integration_run() -> None:
     client = make_openai_client("gpt-4o-mini", Policy())
     result = asyncio.run(
-        client.run(_TestGremlin("Reply with the single word: done", label="integration-test"))
+        client.run(
+            _TestGremlin("Reply with the single word: done", label="integration-test")
+        )
     )
     assert result.exit_code == 0
     assert result.text_result
@@ -405,7 +417,9 @@ def test_openai_integration_run() -> None:
 def test_xai_integration_run() -> None:
     client = make_xai_client("grok-3-mini-fast", Policy())
     result = asyncio.run(
-        client.run(_TestGremlin("Reply with the single word: done", label="integration-test"))
+        client.run(
+            _TestGremlin("Reply with the single word: done", label="integration-test")
+        )
     )
     assert result.exit_code == 0
     assert result.text_result
@@ -480,7 +494,9 @@ def test_terminal_stream_error_transient_retries_and_succeeds(monkeypatch: Any) 
     monkeypatch.setattr("asyncio.sleep", _noop_sleep)
 
     client = OpenAIAgentsClient("gpt-4o")
-    result = asyncio.run(client.run(_TestGremlin("do something", label="t", max_retries=2)))
+    result = asyncio.run(
+        client.run(_TestGremlin("do something", label="t", max_retries=2))
+    )
 
     assert call_count[0] == 2
     assert result.text_result == "done"

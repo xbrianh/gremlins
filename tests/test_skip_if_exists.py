@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from conftest import _TestGremlin
 import asyncio
 import pathlib
-from typing import Any, cast
+from typing import Any
+
+from conftest import _TestGremlin
 
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri

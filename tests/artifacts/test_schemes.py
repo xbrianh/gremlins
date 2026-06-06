@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from conftest import _TestGremlin
 import pathlib
 import subprocess
 
 import pytest
+from conftest import _TestGremlin
 
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.schemes import (
@@ -18,7 +18,9 @@ from gremlins.artifacts.uri import Uri
 
 
 def make_git_repo(tmp_path: pathlib.Path) -> tuple[str, str]:
-    subprocess.run(_TestGremlin(["git", "init"], cwd=tmp_path, check=True, capture_output=True))
+    subprocess.run(
+        _TestGremlin(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    )
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
         cwd=tmp_path,
@@ -32,12 +34,16 @@ def make_git_repo(tmp_path: pathlib.Path) -> tuple[str, str]:
         capture_output=True,
     )
     (tmp_path / "a.txt").write_text("a")
-    subprocess.run(_TestGremlin(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True))
+    subprocess.run(
+        _TestGremlin(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    )
     subprocess.run(
         ["git", "commit", "-m", "first"], cwd=tmp_path, check=True, capture_output=True
     )
     (tmp_path / "b.txt").write_text("b")
-    subprocess.run(_TestGremlin(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True))
+    subprocess.run(
+        _TestGremlin(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    )
     subprocess.run(
         ["git", "commit", "-m", "second"], cwd=tmp_path, check=True, capture_output=True
     )
@@ -110,7 +116,9 @@ def test_snapshot_and_bind_range(tmp_path: pathlib.Path) -> None:
     base = snapshot_head_before(cwd=tmp_path)
 
     (tmp_path / "c.txt").write_text("c")
-    subprocess.run(_TestGremlin(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True))
+    subprocess.run(
+        _TestGremlin(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    )
     subprocess.run(
         ["git", "commit", "-m", "third"], cwd=tmp_path, check=True, capture_output=True
     )

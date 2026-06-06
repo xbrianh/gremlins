@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from conftest import _TestGremlin
 import asyncio
 import pathlib
 import subprocess
 
 import pytest
+from conftest import _TestGremlin
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import StateData, build_state

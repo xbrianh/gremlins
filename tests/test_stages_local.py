@@ -2,7 +2,7 @@ import asyncio
 import pathlib
 import subprocess
 
-from conftest import MINIMAL_EVENTS, ReviewCreatingClient
+from conftest import MINIMAL_EVENTS, ReviewCreatingClient, _TestGremlin
 
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
@@ -49,7 +49,9 @@ def _make_state(client, artifact_dir, *, gremlin_id=None, base_ref_sha=""):
 
 def _init_git_repo(path: pathlib.Path) -> None:
     """Create a git repo with a first commit so HEAD exists and the tree is clean."""
-    subprocess.run(_TestGremlin(["git", "init"], cwd=path, check=True, capture_output=True))
+    subprocess.run(
+        ["git", "init"], cwd=path, check=True, capture_output=True
+    )
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
         cwd=path,

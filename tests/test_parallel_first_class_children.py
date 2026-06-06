@@ -1,6 +1,5 @@
 """Tests for the 'parallel children are first-class gremlins' feature.
 
-from conftest import _TestGremlin
 Covers:
 - FileArtifactResolver._path handles file:///absolute/path URIs
 - _snapshot_registry rewrites file://session/ URIs to absolute paths
@@ -15,6 +14,7 @@ import json
 import pathlib
 
 import pytest
+from conftest import _TestGremlin
 
 from gremlins import paths
 from gremlins.artifacts.registry import ArtifactRegistry
@@ -170,7 +170,9 @@ def test_parallel_child_artifact_dir_is_full_copy(sandbox) -> None:
     # Create a temporary git repo
     tmp_repo = sandbox.root / "repo"
     tmp_repo.mkdir()
-    subprocess.run(_TestGremlin(["git", "init"], cwd=tmp_repo, check=True, capture_output=True))
+    subprocess.run(
+        ["git", "init"], cwd=tmp_repo, check=True, capture_output=True
+    )
     subprocess.run(
         ["git", "config", "user.email", "test@example.com"],
         cwd=tmp_repo,

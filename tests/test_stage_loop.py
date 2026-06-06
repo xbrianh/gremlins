@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from conftest import _TestGremlin
 import asyncio
 import json
 from typing import Any
 
 import pytest
+from conftest import _TestGremlin
 
 from gremlins.artifacts.uri import Uri
 from gremlins.executor.state import State as RuntimeState

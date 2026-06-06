@@ -315,7 +315,9 @@ class Gremlin:
             stage_state = build_state(
                 **self._make_build_state_kwargs(stage_data, stage_client)
             )
-            built.append((e.name, stage_state.make_runner(e, scope=stages, gremlin=self)))
+            built.append(
+                (e.name, stage_state.make_runner(e, scope=stages, gremlin=self))
+            )
         return built
 
     def _unbind_stale_exec_artifacts(self) -> None:

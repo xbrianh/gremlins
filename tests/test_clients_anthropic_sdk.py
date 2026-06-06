@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from conftest import _TestGremlin
 import asyncio
 import sys
 from dataclasses import dataclass, field
@@ -8,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from conftest import _TestGremlin
 
 from gremlins.clients.client import Client
 from gremlins.clients.protocol import CompletedRun
@@ -341,7 +341,9 @@ def test_hermeticity_extra_env_layered(monkeypatch, mock_sdk):
     mock_sdk.query = _capturing_query(captured)
 
     client = AnthropicSdkClient("claude-sonnet-4-6")
-    asyncio.run(client.run(_TestGremlin("hello", label="t", extra_env={"MY_VAR": "42"})))
+    asyncio.run(
+        client.run(_TestGremlin("hello", label="t", extra_env={"MY_VAR": "42"}))
+    )
 
     assert captured[0].env.get("MY_VAR") == "42"
 

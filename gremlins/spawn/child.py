@@ -56,6 +56,13 @@ from gremlins.stages.outcome import Bail
 logger = logging.getLogger(__name__)
 
 
+class _GremlinWrapper:
+    """Minimal wrapper to satisfy stage.run(gremlin) signature."""
+
+    def __init__(self, state: State) -> None:
+        self.state = state
+
+
 def _load_spec(spec_path: pathlib.Path) -> dict[str, Any]:
     if not spec_path.exists():
         raise FileNotFoundError(f"spec file not found: {spec_path}")
@@ -183,7 +190,7 @@ async def _run(spec_path: pathlib.Path) -> int:
         stage.client = state.client
 
     try:
-        await stage.run(state)
+        await stage.run(_GremlinWrapper(state))  # type: ignore[arg-type]
     except Bail as b:
         cost = getattr(state.client, "total_cost_usd", 0.0) or 0.0
         _write_result(

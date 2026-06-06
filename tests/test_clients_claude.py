@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from conftest import _TestGremlin
 import asyncio
 import json
 import os
@@ -10,6 +9,7 @@ import pathlib
 import sys
 
 import pytest
+from conftest import _TestGremlin
 
 from gremlins.clients.claude import (
     StreamTimeoutError,
@@ -290,7 +290,11 @@ def test_idle_timeout_raises_stream_timeout_error(tmp_path, monkeypatch):
 
     client = SubprocessClaudeClient()
     with pytest.raises(StreamTimeoutError):
-        asyncio.run(client.run(_TestGremlin("hello", label="test", idle_timeout=0.1, max_retries=0)))
+        asyncio.run(
+            client.run(
+                _TestGremlin("hello", label="test", idle_timeout=0.1, max_retries=0)
+            )
+        )
 
 
 def test_on_timeout_prompt_used_on_retry(tmp_path, monkeypatch):
@@ -366,7 +370,11 @@ def test_max_retries_exceeds_schedule_raises_value_error():
     client = SubprocessClaudeClient()
     with pytest.raises(ValueError, match="max_retries"):
         asyncio.run(
-            client.run(_TestGremlin("hello", label="test", max_retries=len(STREAM_IDLE_BACKOFF) + 1))
+            client.run(
+                _TestGremlin(
+                    "hello", label="test", max_retries=len(STREAM_IDLE_BACKOFF) + 1
+                )
+            )
         )
 
 
@@ -488,6 +496,8 @@ if stdin_out:
     monkeypatch.setattr("asyncio.sleep", _noop_sleep)
 
     client = SubprocessClaudeClient()
-    asyncio.run(client.run(_TestGremlin("original-prompt", label="test", max_retries=1)))
+    asyncio.run(
+        client.run(_TestGremlin("original-prompt", label="test", max_retries=1))
+    )
     # No on_timeout_prompt, so _continue_prompt() returns original
     assert stdin_out.read_text(encoding="utf-8") == "original-prompt"

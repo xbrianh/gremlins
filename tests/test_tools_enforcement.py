@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from conftest import _TestGremlin
 import asyncio
 import json
 import pathlib
@@ -11,6 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from agents import FunctionTool
+from conftest import _TestGremlin
 
 from gremlins.clients.tools import (  # pyright: ignore[reportPrivateUsage]
     _audit,

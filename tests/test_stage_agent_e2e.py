@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 
-from conftest import MINIMAL_EVENTS
+from conftest import MINIMAL_EVENTS, _TestGremlin
 
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri

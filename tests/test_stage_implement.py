@@ -1,6 +1,5 @@
 """Tests for the YAML-based implement stage-definition.
 
-from conftest import _TestGremlin
 Covers:
 - Pipeline shape: type: implement expands to implement (agent) + require-impl-progress (exec)
 - The exec validator passes when commits exist since base_sha and HEAD is a fast-forward
@@ -17,6 +16,7 @@ import subprocess
 from typing import Any
 
 import pytest
+from conftest import _TestGremlin
 
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri

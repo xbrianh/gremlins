@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from conftest import _TestGremlin
 import asyncio
 import dataclasses
 import functools
@@ -11,9 +10,10 @@ import os
 import pathlib
 import signal
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
 
 import pytest
+from conftest import _TestGremlin
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state, write_state

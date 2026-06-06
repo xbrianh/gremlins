@@ -1,8 +1,8 @@
-from conftest import _TestGremlin
 import asyncio
 import subprocess
 
 import pytest
+from conftest import _TestGremlin
 
 from gremlins.utils import proc
 

@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-from conftest import _TestGremlin
 import asyncio
 import inspect
 import pathlib
 import threading
 import time
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
 
 import pytest
+from conftest import _TestGremlin
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.gremlin import run_stages

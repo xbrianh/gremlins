@@ -6,7 +6,7 @@ import asyncio
 import pathlib
 
 import pytest
-from conftest import MINIMAL_EVENTS
+from conftest import MINIMAL_EVENTS, _TestGremlin
 
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.resolve import resolve_in_map

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from conftest import _TestGremlin
 import asyncio
 import json
 import pathlib
-from typing import Any, cast
+from typing import Any
 
 import pytest
+from conftest import _TestGremlin
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state

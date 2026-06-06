@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from conftest import _TestGremlin
 import asyncio
 import json
 import os
@@ -10,6 +9,7 @@ import pathlib
 import sys
 
 import pytest
+from conftest import _TestGremlin
 
 from gremlins.clients.copilot import SubprocessCopilotClient, _strip_footer
 
@@ -216,7 +216,9 @@ def test_copilot_run_accepts_extra_env_without_type_error(tmp_path, monkeypatch)
 
     client = SubprocessCopilotClient()
     # Must not raise TypeError
-    result = asyncio.run(client.run(_TestGremlin("prompt", label="x", extra_env={"FOO": "bar"})))
+    result = asyncio.run(
+        client.run(_TestGremlin("prompt", label="x", extra_env={"FOO": "bar"}))
+    )
     assert result.exit_code == 0
 
 

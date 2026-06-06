@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from conftest import _TestGremlin
 import asyncio
 import json
 import pathlib
 from collections.abc import Generator
-from typing import Any, cast
+from typing import Any
 
 import pytest
+from conftest import _TestGremlin
 
 import gremlins.run_child as _rc
 from gremlins.clients.fake import FakeClaudeClient
