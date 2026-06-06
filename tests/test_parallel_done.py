@@ -151,7 +151,6 @@ def test_parallel_done_cleared_after_full_success(sandbox):
             ("b", _ctx(gremlin_id, sf, "b"), _noop),
         ],
         gremlin_id,
-        sf,
     )
     parallel_fn = stages[1][1]
     fanin_fn = stages[2][1]
@@ -192,7 +191,6 @@ def test_bail_aggregation_unaffected_by_done_tracking(sandbox):
             ("bail-child", _ctx(gremlin_id, sf, "bail-child"), child_bail),
         ],
         gremlin_id,
-        sf,
     )
     parallel_fn = stages[1][1]
     fanin_fn = stages[2][1]
@@ -226,7 +224,6 @@ def test_rm_child_state_dirs_includes_already_done_children(sandbox):
             ("b", _ctx(gremlin_id, sf, "b"), _noop),
         ],
         gremlin_id,
-        sf,
     )
     parallel_fn = stages[1][1]
     fanin_fn = stages[2][1]
