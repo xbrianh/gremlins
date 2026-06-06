@@ -7,6 +7,7 @@ import pathlib
 from typing import Any
 
 from conftest import MockGremlin
+
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
@@ -15,8 +16,6 @@ from gremlins.pipeline import Pipeline
 from gremlins.stages.agent import Agent
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Done, Outcome
-
-
 
 _PIPELINE = Pipeline(
     name="test",

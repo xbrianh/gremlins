@@ -14,11 +14,9 @@ from conftest import MINIMAL_EVENTS, MockGremlin
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State, StateData, build_state
+from gremlins.executor.state import StateData, build_state
 from gremlins.pipeline.loader import parse_stages
 from gremlins.stages.outcome import Done
-
-
 
 
 def test_agent_stage_e2e_reads_artifact_and_writes_output(tmp_path):

@@ -137,7 +137,9 @@ class LoopStage(Stage):
         stage.client = get_client_from_dict(d)
         return stage
 
-    def _build_runners(self, gremlin: Gremlin) -> list[Callable[[], Awaitable[Outcome]]]:
+    def _build_runners(
+        self, gremlin: Gremlin
+    ) -> list[Callable[[], Awaitable[Outcome]]]:
         state = cast(State, gremlin.state)
         result: list[Callable[[], Awaitable[Outcome]]] = []
         for child in self.body:

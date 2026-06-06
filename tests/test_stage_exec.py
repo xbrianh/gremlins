@@ -11,11 +11,9 @@ from conftest import MockGremlin
 from gremlins.artifacts.registry import MissingArtifact
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State, StateData, build_state
+from gremlins.executor.state import StateData, build_state
 from gremlins.stages.exec import Exec
 from gremlins.stages.outcome import Bail, Done
-
-
 
 
 def _make_state(tmp_path: pathlib.Path, **kw):

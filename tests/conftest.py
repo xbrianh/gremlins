@@ -262,6 +262,7 @@ if str(TESTS_DIR) not in sys.path:
 class MockGremlin:
     state: State | None = None
 
+
 # Shared minimal event stream used across test modules.
 MINIMAL_EVENTS = [
     {"type": "system", "subtype": "init"},

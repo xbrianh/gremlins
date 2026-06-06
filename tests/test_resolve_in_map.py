@@ -6,19 +6,16 @@ import asyncio
 import pathlib
 
 import pytest
-from conftest import MockGremlin
-from conftest import MINIMAL_EVENTS
+from conftest import MINIMAL_EVENTS, MockGremlin
 
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.resolve import resolve_in_map
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import State, StateData, build_state
+from gremlins.executor.state import StateData, build_state
 from gremlins.stages.agent import Agent
 from gremlins.stages.exec import Exec
 from gremlins.stages.outcome import Done
-
-
 
 
 def _make_registry(tmp_path: pathlib.Path) -> ArtifactRegistry:
