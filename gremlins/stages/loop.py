@@ -9,7 +9,6 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from gremlins.artifacts.registry import ArtifactRegistry
-from gremlins.executor.state import State
 from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.composite import child_state as _child_state
 from gremlins.stages.outcome import Bail, Done, Outcome
@@ -21,7 +20,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Called after a clean (no marker) iteration; returns True to exit the loop.
-UntilFn = Callable[[State, int, str], bool]
+UntilFn = Callable[["Gremlin", int, str], bool]
 
 _MARKER_KEY = "status"
 _MARKER_VALUE = "needs_fix"
@@ -39,14 +38,19 @@ def _is_bail_set(artifacts: ArtifactRegistry) -> bool:
     return artifacts.produced(_BAIL_KEY)
 
 
-def _do_bail(state: State, artifacts: ArtifactRegistry) -> None:
+def _do_bail(gremlin: Gremlin, artifacts: ArtifactRegistry) -> None:
+    if gremlin.state is None:
+        raise RuntimeError("gremlin.state is required for _do_bail")
     reason = str(artifacts.read(_BAIL_KEY)).strip()
-    state.record_bail(reason)
+    gremlin.state.record_bail(reason)
     raise Bail(reason)
 
 
-def head_stable(state: State, iteration: int, head_before: str) -> bool:
+def head_stable(gremlin: Gremlin, iteration: int, head_before: str) -> bool:
     """Exit when HEAD hasn't changed across this iteration."""
+    if gremlin.state is None:
+        raise RuntimeError("gremlin.state is required for head_stable")
+    state = gremlin.state
     return _git.head_sha(pathlib.Path(state.cwd)) == head_before
 
 
@@ -140,7 +144,9 @@ class LoopStage(Stage):
     def _build_runners(
         self, gremlin: Gremlin
     ) -> list[Callable[[], Awaitable[Outcome]]]:
-        state = cast(State, gremlin.state)
+        if gremlin.state is None:
+            raise RuntimeError("gremlin.state is required for _build_runners")
+        state = gremlin.state
         result: list[Callable[[], Awaitable[Outcome]]] = []
         for child in self.body:
             cs = _child_state(state, child)
@@ -162,28 +168,29 @@ class LoopStage(Stage):
         return result
 
     async def run(self, gremlin: Gremlin) -> Outcome:
-        state = cast(State, gremlin.state)
+        if gremlin.state is None:
+            raise RuntimeError("gremlin.state is required for LoopStage")
         for iteration in range(1, self._max_iterations + 1):
-            state.record_state_field(loop_iteration=iteration)
-            state.artifacts.unbind(_MARKER_KEY)
-            state.artifacts.unbind(_BAIL_KEY)
+            gremlin.state.record_state_field(loop_iteration=iteration)
+            gremlin.state.artifacts.unbind(_MARKER_KEY)
+            gremlin.state.artifacts.unbind(_BAIL_KEY)
             for child in self.body:
                 for key in getattr(child, "out_map", {}):
-                    state.artifacts.unbind(key)
-            head_before = _git.head_sha(pathlib.Path(state.cwd))
+                    gremlin.state.artifacts.unbind(key)
+            head_before = _git.head_sha(pathlib.Path(gremlin.state.cwd))
             runners = (
                 self._body_runners
                 if self._body_runners is not None
                 else self._build_runners(gremlin)
             )
             had_failure = await _dispatch_runners(
-                runners, iteration, self._max_iterations, state.artifacts
+                runners, iteration, self._max_iterations, gremlin.state.artifacts
             )
-            if _is_bail_set(state.artifacts):
-                _do_bail(state, state.artifacts)
+            if _is_bail_set(gremlin.state.artifacts):
+                _do_bail(gremlin, gremlin.state.artifacts)
 
             if not had_failure:
-                if self._until(state, iteration, head_before):
+                if self._until(gremlin, iteration, head_before):
                     return Done()
                 logger.info("loop iteration %d: continuing", iteration)
                 if iteration == self._max_iterations:
@@ -193,5 +200,5 @@ class LoopStage(Stage):
             if self._interval is not None:
                 await asyncio.sleep(self._interval)
 
-        state.record_bail(f"loop exhausted {self._max_iterations} iterations")
+        gremlin.state.record_bail(f"loop exhausted {self._max_iterations} iterations")
         raise Bail(f"loop exhausted {self._max_iterations} iterations")
