@@ -21,6 +21,7 @@ from gremlins.clients.client import Client
 from gremlins.utils.state_file import locked_update
 
 if TYPE_CHECKING:
+    from gremlins.executor.gremlin import Gremlin
     from gremlins.pipeline import Pipeline
 
 from gremlins.protocols import StageProtocol
@@ -545,6 +546,7 @@ class State:
     def make_runner(
         self,
         entry: StageProtocol,
+        gremlin: Gremlin,
         scope: Sequence[StageProtocol] | None = None,
         *,
         record_stage: bool = True,
@@ -578,7 +580,8 @@ class State:
                 entry.skip_if_exists
             ):
                 return Done()
-            return await entry.run(_prepare())
+            gremlin.state = _prepare()
+            return await entry.run(gremlin)
 
         return _run_async
 

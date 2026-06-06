@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import re
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from gremlins.clients.client import Client
 from gremlins.executor.state import State
 from gremlins.protocols import GremlinProtocol
 from gremlins.stages.outcome import Outcome
+
+if TYPE_CHECKING:
+    from gremlins.executor.gremlin import Gremlin
 
 _VAR_SUB = re.compile(r"\{(\w+)\}")
 
@@ -78,5 +81,5 @@ class Stage:
     def orchestration_args(cls) -> list[StageInput]:
         return []
 
-    async def run(self, state: State) -> Outcome:  # noqa: ARG002
+    async def run(self, gremlin: Gremlin) -> Outcome:  # noqa: ARG002
         raise NotImplementedError

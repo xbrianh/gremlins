@@ -15,6 +15,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
+    from gremlins.executor.gremlin import Gremlin
     from gremlins.pipeline import Pipeline
 
 from gremlins import paths
@@ -169,7 +170,8 @@ class ParallelStage(Stage):
             child_stages=child_stages,
         ).runtime_stages()
 
-    async def run(self, state: State) -> Outcome:
+    async def run(self, gremlin: Gremlin) -> Outcome:
+        state = cast(State, gremlin.state)
         parent_id = state.data.gremlin_id or ""
         group_state = dataclasses.replace(
             state, parent_stage=state.parent_stage or self.name
@@ -183,7 +185,7 @@ class ParallelStage(Stage):
             cs = _child_state(
                 group_state, child, fan_out=True, child_id=child_id or None
             )
-            runner = cs.make_runner(child, scope=self.body)
+            runner = cs.make_runner(child, gremlin, scope=self.body)
             child_runners.append((child.name, cs, runner))
         for _, fn in self.build_runtime_stages(
             child_runners,

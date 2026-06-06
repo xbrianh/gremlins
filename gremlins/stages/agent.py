@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from gremlins.artifacts.resolve import resolve_in_map
 from gremlins.artifacts.uri import Uri
@@ -10,6 +10,9 @@ from gremlins.executor.state import State
 from gremlins.stages.agent_runner import run_agent
 from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.outcome import Bail, Done, Outcome
+
+if TYPE_CHECKING:
+    from gremlins.executor.gremlin import Gremlin
 
 
 class Agent(Stage):
@@ -63,7 +66,8 @@ class Agent(Stage):
         stage.client = get_client_from_dict(d)
         return stage
 
-    async def run(self, state: State) -> Outcome:
+    async def run(self, gremlin: Gremlin) -> Outcome:
+        state = cast(State, gremlin.state)
         opts = dict(self.options)
         raw_model = cast(str | None, opts.pop("model", None))
 
@@ -88,7 +92,7 @@ class Agent(Stage):
         raw_path = state.artifact_dir / f"stream-{self.name}.jsonl"
         model = self.substitute_vars(raw_model, state, resolved) if raw_model else None
         await run_agent(
-            state, prompt, label=self.name, raw_path=raw_path, model=model, **opts
+            gremlin, prompt, label=self.name, raw_path=raw_path, model=model, **opts
         )
 
         for key, uri_str in out_map.items():

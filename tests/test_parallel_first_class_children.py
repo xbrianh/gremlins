@@ -10,6 +10,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import pathlib
 
@@ -22,6 +23,11 @@ from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state
 from gremlins.stages.parallel import ParallelStage
+
+
+@dataclasses.dataclass
+class _MockGremlin:
+    state: State | None = None
 
 # ---------------------------------------------------------------------------
 # FileArtifactResolver._path: absolute path URIs
@@ -109,14 +115,15 @@ def test_parallel_run_cleans_up_child_state_dirs(sandbox) -> None:
     class _NoopStage(Stage):
         type = "_test_noop_v2"
 
-        async def run(self, state: State) -> Outcome:
+        async def run(self, gremlin) -> Outcome:
             return Done()
 
     child_a = _NoopStage("child-a")
     child_b = _NoopStage("child-b")
     stage = ParallelStage("mygroup", [child_a, child_b])
 
-    asyncio.run(stage.run(parent))
+    gremlin = _MockGremlin(state=parent)
+    asyncio.run(stage.run(gremlin))
 
     state_root = paths.state_root()
     child_id_a = f"{gremlin_id}--mygroup--child-a"
@@ -143,12 +150,13 @@ def test_parallel_run_no_gremlin_id_uses_old_layout(sandbox) -> None:
     class _NoopStage(Stage):
         type = "_test_noop_v3"
 
-        async def run(self, state: State) -> Outcome:
+        async def run(self, gremlin) -> Outcome:
             return Done()
 
     child = _NoopStage("child-x")
     stage = ParallelStage("grp", [child])
-    asyncio.run(stage.run(parent))
+    gremlin = _MockGremlin(state=parent)
+    asyncio.run(stage.run(gremlin))
 
     # Old layout: child artifact_dir = parent.artifact_dir / child.name
     assert (artifact_dir / "child-x").is_dir()

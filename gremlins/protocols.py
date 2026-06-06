@@ -36,6 +36,6 @@ class StageProtocol(Protocol):
     client: Any
     skip_if_exists: str
 
-    async def run(self, state: Any) -> Any:
-        """Run this stage with the given execution state."""
+    async def run(self, gremlin: Any) -> Any:
+        """Run this stage with the orchestrator."""
         ...

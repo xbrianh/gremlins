@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import pathlib
 
 import pytest
@@ -12,10 +13,15 @@ from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.resolve import resolve_in_map
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import StateData, build_state
+from gremlins.executor.state import State, StateData, build_state
 from gremlins.stages.agent import Agent
 from gremlins.stages.exec import Exec
 from gremlins.stages.outcome import Done
+
+
+@dataclasses.dataclass
+class _MockGremlin:
+    state: State | None = None
 
 
 def _make_registry(tmp_path: pathlib.Path) -> ArtifactRegistry:
@@ -130,7 +136,8 @@ def test_exec_dotted_key_injects_env_var(tmp_path):
         {"cmds": [f'echo "$branch" > {out_file}']},
         in_map={"branch": "pr.branch"},
     )
-    result = asyncio.run(stage.run(state))
+    gremlin = _MockGremlin(state=state)
+    result = asyncio.run(stage.run(gremlin))
     assert isinstance(result, Done)
     assert out_file.read_text().strip() == "my-branch"
 
@@ -152,7 +159,8 @@ def test_agent_dotted_key_substituted_into_prompt(tmp_path):
         {},
         in_map={"branch": "pr.branch"},
     )
-    asyncio.run(agent.run(state))
+    gremlin = _MockGremlin(state=state)
+    asyncio.run(agent.run(gremlin))
 
     assert len(client.calls) == 1
     assert "agent-branch" in client.calls[0].prompt

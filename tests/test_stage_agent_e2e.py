@@ -8,15 +8,21 @@ prompts, which is what the runtime sees after preprocessing — same execution p
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 
 from conftest import MINIMAL_EVENTS
 
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.fake import FakeClaudeClient
-from gremlins.executor.state import StateData, build_state
+from gremlins.executor.state import State, StateData, build_state
 from gremlins.pipeline.loader import parse_stages
 from gremlins.stages.outcome import Done
+
+
+@dataclasses.dataclass
+class _MockGremlin:
+    state: State | None = None
 
 
 def test_agent_stage_e2e_reads_artifact_and_writes_output(tmp_path):
@@ -60,7 +66,8 @@ def test_agent_stage_e2e_reads_artifact_and_writes_output(tmp_path):
         artifacts=registry,
     )
 
-    result = asyncio.run(stage.run(state))
+    gremlin = _MockGremlin(state=state)
+    result = asyncio.run(stage.run(gremlin))
 
     assert isinstance(result, Done)
     # Source content was substituted into the prompt
