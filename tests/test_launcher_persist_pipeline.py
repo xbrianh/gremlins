@@ -12,12 +12,12 @@ from gremlins.cli.launch import launch_main
 from gremlins.pipeline import Pipeline
 
 # ---------------------------------------------------------------------------
-# _persist_expanded_pipeline — unit tests
+# persist_expanded_pipeline — unit tests
 # ---------------------------------------------------------------------------
 
 
 def test_persist_expanded_pipeline_writes_file(tmp_path):
-    """_persist_expanded_pipeline writes a valid YAML file to the state dir."""
+    """persist_expanded_pipeline writes a valid YAML file to the state dir."""
     from gremlins.launcher import persist_expanded_pipeline
 
     pipeline_yaml = tmp_path / "proj.yaml"

@@ -96,9 +96,14 @@ def main(argv):
         sys.stdout.write(f"{url}\n")
         return 0
     if sub == "pr" and len(argv) >= 2 and argv[1] == "view":
-        # Return a minimal PR view response with no checks for testing.
+        pr_num = argv[2] if len(argv) > 2 else "123"
         out = json.dumps(
             {
+                "number": int(pr_num) if pr_num.isdigit() else 123,
+                "url": os.environ.get("FAKE_GH_PR_URL", "https://github.com/owner/repo/pull/123"),
+                "headRefName": "feature-branch",
+                "state": "OPEN",
+                "mergeable": "MERGEABLE",
                 "statusCheckRollup": [],
                 "reviewDecision": None,
                 "headRefOid": "0000000000000000000000000000000000000000",

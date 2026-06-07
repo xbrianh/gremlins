@@ -2,11 +2,6 @@
 
 Public API:
     resume(gremlin_id, *, graft=None) -> None
-    prepare_state_dir(state_dir) -> None
-    persist_expanded_pipeline(state_dir, pipeline_path) -> str
-    resolve_inputs(...) -> _Inputs
-    seed_registry_from_sources(...) -> None
-    spawn(gremlin_id, inputs, state_dir) -> Any
 """
 
 from __future__ import annotations
@@ -73,7 +68,7 @@ def _build_spawn_env(gremlin_id: str) -> dict[str, str]:
 
 
 @dataclasses.dataclass
-class _Inputs:
+class Inputs:
     gremlin_id: str
     kind: str
     description: str
@@ -172,7 +167,7 @@ def resolve_inputs(
     base_ref: str | None,
     pipeline_args: tuple[str, ...],
     gremlin_id: str | None,
-) -> _Inputs:
+) -> Inputs:
     from gremlins.cli.pipeline_args import launch_client_label, resolve_pipeline
 
     pr = stage_inputs.pop("pr", None) or None
@@ -224,7 +219,7 @@ def resolve_inputs(
 
     client_label = launch_client_label(stored_args, loaded_pipeline)
 
-    return _Inputs(
+    return Inputs(
         gremlin_id=resolved_gremlin_id,
         kind=kind,
         description=desc,
@@ -332,7 +327,7 @@ def persist_expanded_pipeline(state_dir: pathlib.Path, pipeline_path: str) -> st
     return str(dest)
 
 
-def spawn(gremlin_id: str, inputs: _Inputs, state_dir: pathlib.Path) -> Any:
+def spawn(gremlin_id: str, inputs: Inputs, state_dir: pathlib.Path) -> Any:
     spawn_args = list(inputs.pipeline_args)
     cmd = [
         sys.executable,

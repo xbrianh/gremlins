@@ -390,7 +390,7 @@ def test_launch_sequential_with_explicit_ids(lenv):
 
 
 def test_launch_explicit_project_root(lenv):
-    """Explicit parent_id is recorded in state.json."""
+    """Explicit parent_id is recorded in state.json, and project_root is inferred correctly."""
     state_root = _gremlins_state_root(lenv)
     parent_id = "fake-parent-aabbcc"
     gremlin_id = f"test-{secrets.token_hex(3)}"
@@ -1154,7 +1154,7 @@ def test_launch_explicit_gremlin_id_stale_dir_refused(lenv, monkeypatch):
 
 
 def test_launch_pr_kwarg_sets_state_fields(lenv, monkeypatch):
-    """PR input is accepted and handled by the CLI."""
+    """PR input triggers setup_kind=worktree-detached and seeds registry.base_sha."""
     # Use a custom pipeline that declares pr as an input so launch_main accepts --pr.
     overlay_dir = lenv.repo / ".gremlins"
     overlay_dir.mkdir(parents=True, exist_ok=True)
@@ -1176,8 +1176,7 @@ stages:
         encoding="utf-8",
     )
     gremlin_id = f"test-{secrets.token_hex(3)}"
-    # Test that --pr flag is accepted (parsed successfully even if pipeline fails)
-    launch_main(
+    rc = launch_main(
         [
             "pr-pipeline",
             "--instructions",
@@ -1188,10 +1187,22 @@ stages:
             gremlin_id,
         ]
     )
-    # Verify that the pr input was recognized and launch state was created
-    # (Even though execution may fail due to missing git reference)
+    # PR handling should succeed at launch-time (before execution fails on missing PR)
+    assert rc == 0, f"launch should succeed to create state.json; got rc={rc}"
+
     state_dir = _gremlins_state_root(lenv) / gremlin_id
-    state_file = state_dir / "state.json"
-    assert state_file.exists(), (
-        "state.json should have been created even if execution fails"
+    state = _read_state(state_dir)
+
+    # PR input must trigger worktree-detached setup
+    assert state.get("setup_kind") == "worktree-detached", (
+        f"PR input should set setup_kind='worktree-detached', got {state.get('setup_kind')!r}"
+    )
+
+    # Registry must be seeded with base_sha from the PR commit
+    registry_data = json.loads(
+        (_gremlins_state_root(lenv) / gremlin_id / "registry.json").read_text()
+    )
+    base_sha = registry_data.get("base_sha", "")
+    assert base_sha.startswith("git://commit/") and len(base_sha.removeprefix("git://commit/")) == 40, (
+        f"PR should seed registry.base_sha with a git://commit/<sha>, got {base_sha!r}"
     )

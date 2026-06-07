@@ -200,7 +200,7 @@ def test_statedata_bypass_load(tmp_path, monkeypatch):
     assert sd.permissions_file == "/p.yaml"
 
 
-# --- launch() persists bypass + permissions_file into state.json ---
+# --- write_initial_state() persists bypass + permissions_file into state.json ---
 
 
 def test_launch_persists_bypass(tmp_path):
