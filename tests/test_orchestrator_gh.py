@@ -151,18 +151,19 @@ def _patch_common(
         lambda n: f"/fake/{n}" if n in ("claude", "gh", "git") else None,
     )
     monkeypatch.setattr(
-        "gremlins.executor.run._install_signal_handlers", lambda c, gid: None
+        "gremlins.executor.run._install_signal_handlers", lambda c, g: None
     )
     monkeypatch.setattr("gremlins.executor.run._get_repo", lambda: "owner/repo")
 
-    artifact_dir = tmp_path / "artifacts"
-    artifact_dir.mkdir()
+    artifact_dir = tmp_path / "gr-test" / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(
-        "gremlins.executor.run.resolve_artifact_dir",
-        lambda gremlin_id=None: artifact_dir,
+        "gremlins.paths.state_root",
+        lambda: tmp_path,
     )
 
-    state_file = tmp_path / "state.json"
+    state_file = tmp_path / "gr-test" / "state.json"
+    state_file.parent.mkdir(parents=True, exist_ok=True)
     head_r = _real_subprocess_run(
         ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True
     )
@@ -190,7 +191,7 @@ def _patch_common(
     }
     if base_ref_sha:
         registry_data["base_sha"] = f"git://commit/{base_ref_sha}"
-    registry_file = tmp_path / "registry.json"
+    registry_file = tmp_path / "gr-test" / "registry.json"
     registry_file.write_text(json.dumps(registry_data))
     # Create placeholder artifact files so file resolvers find them.
     (artifact_dir / "spec.md").write_text("", encoding="utf-8")
@@ -202,9 +203,6 @@ def _patch_common(
     )
     (artifact_dir / "pr-branch.txt").write_text("issue-42-fake-slug\n")
     (artifact_dir / "pr-number.txt").write_text(f"{fake_pr_number}\n")
-    monkeypatch.setattr(
-        "gremlins.executor.run.resolve_state_file", lambda gremlin_id=None: state_file
-    )
 
     import subprocess as _subprocess_mod
 
@@ -269,7 +267,7 @@ def _patch_common(
 
 def _prepare_for_plan_stage(tmp_path: pathlib.Path) -> None:
     """Remove plan so skip_if_exists does not skip the plan stage."""
-    reg_path = tmp_path / "registry.json"
+    reg_path = tmp_path / "gr-test" / "registry.json"
     reg = json.loads(reg_path.read_text())
     reg.pop("plan-document", None)
     reg_path.write_text(json.dumps(reg))
@@ -448,7 +446,9 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
     )
 
     result = asyncio.run(
-        run_pipeline(_gh_pipeline_path(tmp_path), argv=[], client=client)
+        run_pipeline(
+            _gh_pipeline_path(tmp_path), argv=[], gremlin_id="gr-test", client=client
+        )
     )
     assert result == 0
 
@@ -486,7 +486,9 @@ def test_plan_skip_if_exists_on_resume(tmp_path, monkeypatch):
     )
 
     result = asyncio.run(
-        run_pipeline(_gh_pipeline_path(tmp_path), argv=[], client=client)
+        run_pipeline(
+            _gh_pipeline_path(tmp_path), argv=[], gremlin_id="gr-test", client=client
+        )
     )
     assert result == 0
     labels = [c.label for c in client.calls]
@@ -504,7 +506,7 @@ def test_publish_as_issue_skip_if_exists(tmp_path, monkeypatch):
     (artifact_dir / "plan-issue-number.txt").write_text("42", encoding="utf-8")
 
     # Add plan-issue-number to registry so skip_if_exists fires.
-    registry_path = tmp_path / "registry.json"
+    registry_path = tmp_path / "gr-test" / "registry.json"
     reg = json.loads(registry_path.read_text())
     reg["plan-issue-number"] = "file://session/plan-issue-number.txt"
     registry_path.write_text(json.dumps(reg))
@@ -542,7 +544,9 @@ def test_publish_as_issue_skip_if_exists(tmp_path, monkeypatch):
     )
 
     result = asyncio.run(
-        run_pipeline(_gh_pipeline_path(tmp_path), argv=[], client=client)
+        run_pipeline(
+            _gh_pipeline_path(tmp_path), argv=[], gremlin_id="gr-test", client=client
+        )
     )
     assert result == 0
     assert not any("gh issue create" in cmd for cmd in shell_cmds)
@@ -585,7 +589,7 @@ def test_plan_no_h1_issue_body(tmp_path, monkeypatch):
 
     # Seed plan as a file URI containing the raw issue ref so resolve-plan-input
     # gets $plan="#42" (matching what inputs.sources would produce at launch time).
-    registry_path = tmp_path / "registry.json"
+    registry_path = tmp_path / "gr-test" / "registry.json"
     reg = json.loads(registry_path.read_text())
     reg["plan"] = "file://session/plan-arg.txt"
     registry_path.write_text(json.dumps(reg))
@@ -621,7 +625,9 @@ def test_plan_no_h1_issue_body(tmp_path, monkeypatch):
     )
 
     result = asyncio.run(
-        run_pipeline(_gh_pipeline_path(tmp_path), argv=[], client=client)
+        run_pipeline(
+            _gh_pipeline_path(tmp_path), argv=[], gremlin_id="gr-test", client=client
+        )
     )
     assert result == 0
     plan_content = (artifact_dir / "plan.md").read_text(encoding="utf-8")
@@ -660,7 +666,9 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
     )
 
     result = asyncio.run(
-        run_pipeline(_gh_pipeline_path(tmp_path), argv=[], client=client)
+        run_pipeline(
+            _gh_pipeline_path(tmp_path), argv=[], gremlin_id="gr-test", client=client
+        )
     )
     assert result == 0
 
@@ -702,6 +710,7 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
         run_pipeline(
             _gh_pipeline_path(tmp_path),
             argv=["--client", "claude:claude-opus-4-7"],
+            gremlin_id="gr-test",
             client=client,
         )
     )
@@ -747,7 +756,9 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
 
     # Invoke with NO --model.
     result = asyncio.run(
-        run_pipeline(_gh_pipeline_path(tmp_path), argv=[], client=client)
+        run_pipeline(
+            _gh_pipeline_path(tmp_path), argv=[], gremlin_id="gr-test", client=client
+        )
     )
     assert result == 0
 
@@ -795,6 +806,7 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
         run_pipeline(
             _gh_pipeline_path(tmp_path),
             argv=["--client", "copilot:gpt-4o"],
+            gremlin_id="gr-test",
             client=client,
         )
     )
@@ -835,6 +847,7 @@ def test_resume_from_implement(tmp_path, monkeypatch):
 
     client = _CommittingClient(
         git_dir=tmp_path,
+        artifact_dir=artifact_dir,
         fixtures={
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
@@ -848,6 +861,7 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         run_pipeline(
             _gh_pipeline_path(tmp_path),
             argv=["--resume-from", "implement"],
+            gremlin_id="gr-test",
             client=client,
         )
     )
@@ -888,6 +902,7 @@ def test_resume_from_github_review_pull_request(tmp_path, monkeypatch):
         run_pipeline(
             _gh_pipeline_path(tmp_path),
             argv=["--resume-from", "github-review-pull-request"],
+            gremlin_id="gr-test",
             client=client,
         )
     )
@@ -1015,7 +1030,9 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
         fixtures=fixtures,
     )
     result = asyncio.run(
-        run_pipeline(_gh_pipeline_path(tmp_path), argv=[], client=client)
+        run_pipeline(
+            _gh_pipeline_path(tmp_path), argv=[], gremlin_id="gr-test", client=client
+        )
     )
     assert result == 0
 
@@ -1081,6 +1098,7 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
         run_pipeline(
             _gh_pipeline_path(tmp_path),
             argv=["--resume-from", "open-pr"],
+            gremlin_id="gr-test",
             client=client,
         )
     )
@@ -1099,7 +1117,7 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
     assert len(review_calls) == 1
     assert "https://github.com/owner/repo/pull/101" in review_calls[0].prompt
     # Verify push-and-open wrote pr to registry.json
-    registry_path = tmp_path / "registry.json"
+    registry_path = tmp_path / "gr-test" / "registry.json"
     assert registry_path.exists(), "registry.json should have been written"
     assert json.loads(registry_path.read_text()).get("pr") == "gh://pr/101"
 
@@ -1146,6 +1164,7 @@ def test_github_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
         run_pipeline(
             _gh_pipeline_path(tmp_path),
             argv=["--client", "claude:claude-opus-4-7"],
+            gremlin_id="gr-test",
             client=client,
         )
     )
@@ -1156,7 +1175,7 @@ def test_github_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
     assert copilot_state.repo == "owner/repo"
     assert copilot_state.artifact_dir == artifact_dir
     # pr is written to registry.json by push-and-open
-    registry_path = tmp_path / "registry.json"
+    registry_path = tmp_path / "gr-test" / "registry.json"
     assert registry_path.exists(), "registry.json should have been written"
     assert json.loads(registry_path.read_text()).get("pr") == "gh://pr/77"
 
@@ -1205,6 +1224,7 @@ def test_github_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
         run_pipeline(
             _gh_pipeline_path(tmp_path),
             argv=["--client", "claude:claude-opus-4-7"],
+            gremlin_id="gr-test",
             client=client,
         )
     )
@@ -1214,7 +1234,7 @@ def test_github_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
     assert stage.client.model == "claude-opus-4-7"
     assert captured_stage["state"].artifact_dir == artifact_dir
     # pr is written to registry.json by push-and-open
-    registry_path = tmp_path / "registry.json"
+    registry_path = tmp_path / "gr-test" / "registry.json"
     assert registry_path.exists(), "registry.json should have been written"
     assert json.loads(registry_path.read_text()).get("pr") == "gh://pr/77"
 
@@ -1253,7 +1273,9 @@ def test_github_wait_ci_stage_ordering(tmp_path, monkeypatch):
     )
 
     result = asyncio.run(
-        run_pipeline(_gh_pipeline_path(tmp_path), argv=[], client=client)
+        run_pipeline(
+            _gh_pipeline_path(tmp_path), argv=[], gremlin_id="gr-test", client=client
+        )
     )
     assert result == 0
 
@@ -1359,6 +1381,7 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
         run_pipeline(
             _gh_pipeline_path(tmp_path),
             argv=["--client", "claude:claude-opus-4-7"],
+            gremlin_id="gr-test",
             client=client,
         )
     )
@@ -1416,6 +1439,7 @@ def test_resume_from_verify(tmp_path, monkeypatch):
         run_pipeline(
             _gh_pipeline_path(tmp_path),
             argv=["--resume-from", "verify"],
+            gremlin_id="gr-test",
             client=client,
         )
     )
@@ -1431,7 +1455,6 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    gremlin_id = "test-gr-id"
     artifact_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
     monkeypatch.setattr(
@@ -1458,7 +1481,7 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch):
         run_pipeline(
             _gh_pipeline_path(tmp_path),
             argv=[],
-            gremlin_id=gremlin_id,
+            gremlin_id="gr-test",
             client=client,
         )
     )
@@ -1468,16 +1491,11 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch):
     assert data.get("stage") == "ci-gate"
 
 
-def test_gh_main_state_client_tracks_effective_model(
-    tmp_path, monkeypatch, make_state_dir
-):
+def test_gh_main_state_client_tracks_effective_model(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    gremlin_id = "test-gr-id"
-    state_dir = make_state_dir(gremlin_id)
-
-    artifact_dir, _ = _patch_common(monkeypatch, tmp_path)
+    artifact_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
     monkeypatch.setattr(
         subprocess, "run", _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n")
@@ -1503,13 +1521,13 @@ def test_gh_main_state_client_tracks_effective_model(
         run_pipeline(
             _gh_pipeline_path(tmp_path),
             argv=["--client", "copilot:gpt-5.4"],
-            gremlin_id=gremlin_id,
+            gremlin_id="gr-test",
             client=client,
         )
     )
     assert result == 0
 
-    data = json.loads((state_dir / "state.json").read_text())
+    data = json.loads(state_file.read_text())
     assert "model" not in data
 
 
@@ -1570,7 +1588,9 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
     )
 
     result = asyncio.run(
-        run_pipeline(_gh_pipeline_path(tmp_path), argv=[], client=client)
+        run_pipeline(
+            _gh_pipeline_path(tmp_path), argv=[], gremlin_id="gr-test", client=client
+        )
     )
     assert result == 0
 

@@ -11,7 +11,7 @@ import os
 import pathlib
 import shutil
 from collections.abc import Awaitable, Callable, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 from gremlins import paths as _paths
 from gremlins.artifacts.registry import ArtifactRegistry
@@ -29,12 +29,10 @@ from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.pipeline.loader import STAGE_TYPES
 from gremlins.protocols import StageProtocol
+from gremlins.stages.base import Stage
 from gremlins.utils import git as _git_mod
 from gremlins.utils.yaml_io import YamlLoadError as _YamlLoadError
 from gremlins.utils.yaml_io import dump_yaml_text
-
-if TYPE_CHECKING:
-    from gremlins.stages.base import Stage
 
 logger = logging.getLogger(__name__)
 
@@ -548,6 +546,48 @@ class Gremlin:
             raise
 
         return self
+
+    @staticmethod
+    def validate_id(gremlin_id: str) -> None:
+        validate_gremlin_id(gremlin_id)
+
+    @staticmethod
+    def bail_info_for(gremlin_id: str) -> dict[str, str] | None:
+        validate_gremlin_id(gremlin_id)
+        return StateData.load(gremlin_id).read_bail_info()
+
+    @staticmethod
+    def patch_state_for(gremlin_id: str, **fields: Any) -> None:
+        validate_gremlin_id(gremlin_id)
+        StateData.load(gremlin_id).patch(**fields)
+
+    @classmethod
+    def ephemeral(
+        cls,
+        *,
+        client: Client,
+        artifact_dir: pathlib.Path,
+        cwd: str = "",
+        artifacts: ArtifactRegistry | None = None,
+    ) -> Gremlin:
+        """Build a minimal no-id Gremlin with state set."""
+        state_data = StateData()
+        state_obj = build_state(
+            data=state_data,
+            client=client,
+            artifact_dir=artifact_dir,
+            cwd=cwd,
+            artifacts=artifacts,
+        )
+        gremlin = cls(
+            [],
+            state_dir=artifact_dir.parent,
+            gremlin_id=None,
+            pipeline_data=_PipelineData(name="", path=pathlib.Path("."), stages=[]),
+        )
+        gremlin.state = state_obj
+        gremlin.registry = state_obj.artifacts
+        return gremlin
 
     @classmethod
     def from_subprocess(cls, spec: dict[str, Any]) -> Gremlin:

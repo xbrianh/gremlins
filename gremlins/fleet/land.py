@@ -9,23 +9,30 @@ import shutil
 import subprocess
 import sys
 import time
-from typing import TYPE_CHECKING, Any, cast
-
-if TYPE_CHECKING:
-    from gremlins.executor.gremlin import Gremlin
+from typing import Any, cast
 
 import gremlins.utils.git as _git
 from gremlins import paths
 from gremlins.artifacts.registry import ArtifactRegistry, MissingArtifact
 from gremlins.artifacts.resolve import resolve_in_map
-from gremlins.executor.state import landable_shape, resolve_artifact_dir
 from gremlins.fleet.resolve import resolve_gremlin
 from gremlins.fleet.state import (
     liveness_of_state_file,
     load_state,
 )
-from gremlins.protocols import GremlinShim
 from gremlins.utils import proc
+
+
+def landable_shape(state: dict[str, Any]) -> str:
+    """Classify artifact shape for land dispatch."""
+    artifacts = list(state.get("artifacts") or [])
+    prs = [art for art in artifacts if art.get("type") == "pr"]
+
+    if not prs:
+        return "empty"
+    if len(prs) == 1:
+        return "one_pr"
+    return "many_prs"
 
 
 def expected_branch(state: dict[str, Any], gremlin_id: str):
@@ -705,7 +712,8 @@ def _land_gh(
     project_root = _resolve_landing_cwd(state)
     cwd = project_root if project_root and os.path.isdir(project_root) else None
 
-    artifact_dir = resolve_artifact_dir(gremlin_id)
+    artifact_dir = paths.state_root() / gremlin_id / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
     registry = ArtifactRegistry(
         artifact_dir=artifact_dir,
         cwd=pathlib.Path(cwd) if cwd else None,
@@ -875,18 +883,16 @@ def _exec_land_stage(
     import asyncio
 
     from gremlins.clients.client import PACKAGE_DEFAULT
-    from gremlins.executor.state import StateData, build_state
+    from gremlins.executor.gremlin import Gremlin
     from gremlins.stages.outcome import Bail
 
-    state = build_state(
-        data=StateData(),
-        client=PACKAGE_DEFAULT,
-        artifact_dir=artifact_dir,
-        cwd=cwd,
-        artifacts=registry,
-    )
     try:
-        gremlin = cast("Gremlin", GremlinShim(state))
+        gremlin = Gremlin.ephemeral(
+            client=PACKAGE_DEFAULT,
+            artifact_dir=artifact_dir,
+            cwd=cwd,
+            artifacts=registry,
+        )
         asyncio.run(land_stage.run(gremlin))
         return True
     except Bail as b:
@@ -912,7 +918,8 @@ def _land_with_stage(
         print("you are inside this gremlin's worktree — cd elsewhere before landing")
         return False
 
-    artifact_dir = resolve_artifact_dir(gremlin_id)
+    artifact_dir = paths.state_root() / gremlin_id / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
     registry = ArtifactRegistry(
         artifact_dir=artifact_dir,
         cwd=pathlib.Path(cwd) if cwd else None,
@@ -957,7 +964,8 @@ def do_land(
     shape = landable_shape(state)
 
     if shape in ("empty", "one_branch"):
-        artifact_dir = resolve_artifact_dir(gremlin_id)
+        artifact_dir = paths.state_root() / gremlin_id / "artifacts"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
         registry = ArtifactRegistry(artifact_dir=artifact_dir)
         if registry.produced("pr"):
             shape = "one_pr"

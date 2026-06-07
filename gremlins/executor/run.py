@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import datetime
 import json
 import logging
 import math
 import os
 import pathlib
+import secrets
 import shutil
 import signal
 import types
@@ -21,11 +23,6 @@ from gremlins.clients.client import Client
 from gremlins.env_file import load_env_file
 from gremlins.errors import die
 from gremlins.executor.gremlin import Gremlin
-from gremlins.executor.state import (
-    StateData,
-    resolve_artifact_dir,
-    resolve_state_file,
-)
 from gremlins.logging_setup import configure_logging
 from gremlins.permissions.loader import load_policy
 from gremlins.permissions.policy import Policy
@@ -77,19 +74,17 @@ def _apply_policy_to_stages(stages: Sequence[StageProtocol], policy: Policy) -> 
             _apply_policy_to_stages(stage.body, policy)
 
 
-def _load_stage_attempt(gremlin_id: str | None) -> tuple[str, str]:
-    try:
-        sd = StateData.load(gremlin_id)
-        return sd.stage or "", sd.attempt or ""
-    except Exception:
-        return "", ""
+def _load_stage_attempt(gremlin: Gremlin) -> tuple[str, str]:
+    if gremlin.state and gremlin.state.data:
+        return gremlin.state.data.stage or "", gremlin.state.data.attempt or ""
+    return "", ""
 
 
-def _install_signal_handlers(clients: Sequence[Client], gremlin_id: str | None) -> None:
+def _install_signal_handlers(clients: Sequence[Client], gremlin: Gremlin) -> None:
     global _atexit_log_fn
 
     def handler(signum: int, _frame: types.FrameType | None) -> None:  # pyright: ignore[reportUnusedParameter]
-        stage, attempt = _load_stage_attempt(gremlin_id)
+        stage, attempt = _load_stage_attempt(gremlin)
         logger.warning(
             "received %s at stage=%s attempt=%s",
             signal.Signals(signum).name,
@@ -113,7 +108,7 @@ def _install_signal_handlers(clients: Sequence[Client], gremlin_id: str | None) 
         signal.signal(sig, handler)
 
     def _atexit_log() -> None:
-        stage, attempt = _load_stage_attempt(gremlin_id)
+        stage, attempt = _load_stage_attempt(gremlin)
         if not stage:
             return
         logger.warning(
@@ -158,10 +153,13 @@ def _unique_clients(stages: Sequence[StageProtocol]) -> list[Client]:
 
 
 def _read_state_json(gremlin_id: str | None) -> dict[str, Any]:
-    sf = resolve_state_file(gremlin_id)
+    sf = paths.state_root() / gremlin_id / "state.json" if gremlin_id else None
     if sf is None or not sf.exists():
         return {}
-    return json.loads(sf.read_text(encoding="utf-8"))
+    try:
+        return json.loads(sf.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
 
 
 async def run_pipeline(
@@ -191,7 +189,13 @@ async def run_pipeline(
         )
 
     state_json = _read_state_json(gremlin_id)
-    artifact_dir = resolve_artifact_dir(gremlin_id)
+    if gremlin_id:
+        artifact_dir = paths.state_root() / gremlin_id / "artifacts"
+    else:
+        ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        rand = secrets.token_hex(3)
+        artifact_dir = paths.state_root() / "direct" / f"{ts}-{rand}" / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
     state_dir = artifact_dir.parent
     _workdir = str(state_json.get("workdir") or "")
     worktree_dir = pathlib.Path(_workdir) if _workdir else None
@@ -279,7 +283,7 @@ async def run_pipeline(
     _apply_policy_to_stages(gremlin.stages, policy)
 
     if gh:
-        gremlin.state_file = resolve_state_file(gremlin_id)
+        gremlin.state_file = gremlin.state_dir / "state.json"
 
     _stage_clients = _unique_clients(gremlin.stages)
     _signal_clients = [client] if client is not None else _stage_clients
@@ -308,32 +312,38 @@ async def run_pipeline(
                     f"--resume-from {resume_from} requires implementation changes in the worktree"
                 )
 
-    _install_signal_handlers(_signal_clients, gremlin_id)
+    _install_signal_handlers(_signal_clients, gremlin)
     try:
         await gremlin.run()
     except Bail as b:
-        sd = StateData.load(gremlin_id)
-        sd.write_bail_file("other", b.reason, attempt=sd.attempt)
+        assert gremlin.state is not None
+        gremlin.state.data.write_bail_file(
+            "other", b.reason, attempt=gremlin.state.data.attempt
+        )
         return 1
     except Exception as exc:
-        sd = StateData.load(gremlin_id)
-        sd.write_bail_file(
-            "other", f"unexpected error: {exc}"[:200], attempt=sd.attempt
+        assert gremlin.state is not None
+        gremlin.state.data.write_bail_file(
+            "other",
+            f"unexpected error: {exc}"[:200],
+            attempt=gremlin.state.data.attempt,
         )
         raise
 
     total_cost = 0.0
     for c in [client] if client else _stage_clients:
         total_cost += getattr(c, "total_cost_usd", 0.0) or 0.0
-    sd = StateData.load(gremlin_id)
+    assert gremlin.state is not None
     try:
-        subprocess_cost = float(sd.read_str("subprocess_cost_usd") or 0.0)
+        subprocess_cost = float(
+            gremlin.state.data.read_str("subprocess_cost_usd") or 0.0
+        )
     except (ValueError, TypeError):
         subprocess_cost = 0.0
     if math.isfinite(subprocess_cost) and subprocess_cost >= 0:
         total_cost += subprocess_cost
     if total_cost > 0:
-        sd.patch(total_cost_usd=total_cost)
+        gremlin.state.data.patch(total_cost_usd=total_cost)
 
     if gh:
         pr_url = resolve_in_map(gremlin.registry, {"pr_url": "pr-url?(unknown)"})[
