@@ -403,10 +403,10 @@ class Gremlin:
     def open(cls, gremlin_id: str) -> Gremlin:
         """Reconstruct a Gremlin from a persisted state directory.
 
-        Loads state.json, resolves the pipeline, and returns a Gremlin instance
-        without any side effects (no directory creation, no worktree setup).
-        Raises FileNotFoundError if state directory is missing, ValueError if
-        state.json is malformed or pipeline cannot be loaded.
+        Loads state.json, resolves the pipeline, and returns a Gremlin instance.
+        Populates .registry unconditionally. Raises FileNotFoundError if state
+        directory is missing, ValueError if state.json is malformed or pipeline
+        cannot be loaded.
         """
         from gremlins.cli.pipeline_args import resolve_pipeline
 
@@ -480,7 +480,7 @@ class Gremlin:
         # Construct Gremlin
         worktree_dir = pathlib.Path(worktree_dir_str) if worktree_dir_str else None
 
-        return cls(
+        gremlin = cls(
             pipeline.stages,
             state_dir=state_dir,
             gremlin_id=gremlin_id,
@@ -490,6 +490,25 @@ class Gremlin:
             pipeline_path=pipeline_path,
             pipeline_args=pipeline_args,
         )
+
+        gremlin.registry = ArtifactRegistry(
+            artifact_dir=gremlin.artifact_dir,
+            cwd=pathlib.Path(gremlin._cwd),
+        )
+
+        return gremlin
+
+    def build_state_with_cwd(self, cwd: str) -> State:
+        """Build state with a custom cwd (for landing scenarios).
+
+        Used when the landing cwd differs from the default (e.g., when walking
+        up a chain of parent gremlins to find the topmost repository).
+        """
+        state_data = StateData.load(self.gremlin_id)
+        kwargs = self._make_build_state_kwargs(state_data, PACKAGE_DEFAULT)
+        kwargs["cwd"] = cwd
+        kwargs["worktree"] = None
+        return build_state(**kwargs)
 
     @classmethod
     def initialize_with_runtime(
@@ -617,34 +636,6 @@ class Gremlin:
     def patch_state_for(gremlin_id: str, **fields: Any) -> None:
         validate_gremlin_id(gremlin_id)
         StateData.load(gremlin_id).patch(**fields)
-
-    @classmethod
-    def ephemeral(
-        cls,
-        *,
-        client: Client,
-        artifact_dir: pathlib.Path,
-        cwd: str = "",
-        artifacts: ArtifactRegistry | None = None,
-    ) -> Gremlin:
-        """Build a minimal no-id Gremlin with state set."""
-        state_data = StateData()
-        state_obj = build_state(
-            data=state_data,
-            client=client,
-            artifact_dir=artifact_dir,
-            cwd=cwd,
-            artifacts=artifacts,
-        )
-        gremlin = cls(
-            [],
-            state_dir=artifact_dir.parent,
-            gremlin_id=None,
-            pipeline_data=_PipelineData(name="", path=pathlib.Path("."), stages=[]),
-        )
-        gremlin.state = state_obj
-        gremlin.registry = state_obj.artifacts
-        return gremlin
 
     @classmethod
     def from_subprocess(cls, spec: dict[str, Any]) -> Gremlin:
