@@ -100,7 +100,9 @@ def main(argv):
         out = json.dumps(
             {
                 "number": int(pr_num) if pr_num.isdigit() else 123,
-                "url": os.environ.get("FAKE_GH_PR_URL", "https://github.com/owner/repo/pull/123"),
+                "url": os.environ.get(
+                    "FAKE_GH_PR_URL", "https://github.com/owner/repo/pull/123"
+                ),
                 "headRefName": "feature-branch",
                 "state": "OPEN",
                 "mergeable": "MERGEABLE",

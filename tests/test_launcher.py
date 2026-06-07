@@ -1203,6 +1203,7 @@ stages:
         (_gremlins_state_root(lenv) / gremlin_id / "registry.json").read_text()
     )
     base_sha = registry_data.get("base_sha", "")
-    assert base_sha.startswith("git://commit/") and len(base_sha.removeprefix("git://commit/")) == 40, (
-        f"PR should seed registry.base_sha with a git://commit/<sha>, got {base_sha!r}"
-    )
+    assert (
+        base_sha.startswith("git://commit/")
+        and len(base_sha.removeprefix("git://commit/")) == 40
+    ), f"PR should seed registry.base_sha with a git://commit/<sha>, got {base_sha!r}"
