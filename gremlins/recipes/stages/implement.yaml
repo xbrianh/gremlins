@@ -9,13 +9,6 @@ stages:
     options:
       idle_timeout: 600
       capture_events: true
-  - name: git-commit
-    type: exec
-    options:
-      cmds:
-        - |
-          git add -u
-          git diff --cached --quiet || git commit -m "implement plan"
   - name: require-impl-progress
     type: exec
     in: { base_sha: base_sha }
