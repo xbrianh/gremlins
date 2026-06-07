@@ -933,32 +933,25 @@ def test_cli_fleet_json_drill_in(sandbox, tmp_path, monkeypatch, capsys):
 def test_exec_land_stage_success(tmp_path, monkeypatch):
     from unittest.mock import MagicMock
 
-    import gremlins.executor.state as _state_mod
-
     class _OkStage:
         async def run(self, gremlin):  # type: ignore[no-untyped-def]
             pass
 
-    mock_state = MagicMock()
-    mock_state.artifacts = MagicMock()
-    monkeypatch.setattr(_state_mod, "build_state", lambda **_: mock_state)
-    result = _land._exec_land_stage(_OkStage(), MagicMock(), "", tmp_path)
+    mock_gremlin = MagicMock()
+    result = _land._exec_land_stage(_OkStage(), mock_gremlin)
     assert result is True
 
 
 def test_exec_land_stage_bail(tmp_path, monkeypatch, capsys):
     from unittest.mock import MagicMock
 
-    import gremlins.executor.state as _state_mod
     from gremlins.stages.outcome import Bail
 
     class _BailStage:
         async def run(self, gremlin):  # type: ignore[no-untyped-def]
             raise Bail("structural")
 
-    mock_state = MagicMock()
-    mock_state.artifacts = MagicMock()
-    monkeypatch.setattr(_state_mod, "build_state", lambda **_: mock_state)
-    result = _land._exec_land_stage(_BailStage(), MagicMock(), "", tmp_path)
+    mock_gremlin = MagicMock()
+    result = _land._exec_land_stage(_BailStage(), mock_gremlin)
     assert result is False
     assert "structural" in capsys.readouterr().out

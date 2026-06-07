@@ -873,26 +873,13 @@ def _load_pipeline_land_stage(state: dict[str, Any]):
         return None
 
 
-def _exec_land_stage(
-    land_stage: Any,
-    registry: ArtifactRegistry,
-    cwd: str,
-    artifact_dir: pathlib.Path,
-) -> bool:
-    """Run an exec land stage against the given registry. Returns True on success."""
+def _exec_land_stage(land_stage: Any, gremlin: Any) -> bool:
+    """Run an exec land stage against the given gremlin. Returns True on success."""
     import asyncio
 
-    from gremlins.clients.client import PACKAGE_DEFAULT
-    from gremlins.executor.gremlin import Gremlin
     from gremlins.stages.outcome import Bail
 
     try:
-        gremlin = Gremlin.ephemeral(
-            client=PACKAGE_DEFAULT,
-            artifact_dir=artifact_dir,
-            cwd=cwd,
-            artifacts=registry,
-        )
         asyncio.run(land_stage.run(gremlin))
         return True
     except Bail as b:
@@ -910,6 +897,10 @@ def _land_with_stage(
     land_stage: Any,
 ) -> bool:
     """Run the pipeline's land: stage as the merge step, with shared teardown."""
+    from gremlins.clients.client import PACKAGE_DEFAULT
+    from gremlins.executor.gremlin import Gremlin
+    from gremlins.executor.state import StateData, build_state
+
     project_root = _resolve_landing_cwd(state)
     cwd = project_root if project_root and os.path.isdir(project_root) else None
 
@@ -918,16 +909,18 @@ def _land_with_stage(
         print("you are inside this gremlin's worktree — cd elsewhere before landing")
         return False
 
-    artifact_dir = paths.state_root() / gremlin_id / "artifacts"
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    registry = ArtifactRegistry(
-        artifact_dir=artifact_dir,
-        cwd=pathlib.Path(cwd) if cwd else None,
-    )
-
     _remove_worktree(wdir, state, cwd)
 
-    if not _exec_land_stage(land_stage, registry, cwd or "", artifact_dir):
+    gremlin = Gremlin.open(gremlin_id)
+    gremlin.state = build_state(
+        data=StateData.load(gremlin_id),
+        client=PACKAGE_DEFAULT,
+        artifact_dir=gremlin.artifact_dir,
+        artifacts=gremlin.registry,
+        cwd=cwd or "",
+    )
+
+    if not _exec_land_stage(land_stage, gremlin):
         return False
 
     print("Landed.")
