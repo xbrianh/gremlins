@@ -163,6 +163,8 @@ class _ChildSandbox:
 
 
 def _get_gh_token() -> str:
+    if os.environ.get("CI"):
+        return ""
     try:
         r = subprocess.run(
             ["gh", "auth", "token"],
