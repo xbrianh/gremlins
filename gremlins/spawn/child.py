@@ -64,7 +64,8 @@ def _write_result(result_path: pathlib.Path, payload: dict[str, Any]) -> None:
 def _try_write_terminal(gremlin: Gremlin, rc: int) -> None:
     try:
         state = gremlin.state
-        state.data.write_terminal_state(rc)
+        if state is not None:
+            state.data.write_terminal_state(rc)
     except Exception:
         logger.warning("write_terminal_state failed", exc_info=True)
 
@@ -102,6 +103,17 @@ async def _run(spec_path: pathlib.Path) -> int:
         return 2
 
     state = gremlin.state
+    if state is None:
+        _write_result(
+            result_path,
+            {
+                "status": "error",
+                "detail": "gremlin state not initialized",
+                "returncode": None,
+                "cost_usd": 0.0,
+            },
+        )
+        return 2
     if stage.client is None:
         stage.client = state.client
 

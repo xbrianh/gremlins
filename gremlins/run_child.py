@@ -91,6 +91,18 @@ async def _run(spec_path: pathlib.Path) -> int:
         return 2
 
     state = gremlin.state
+    if state is None:
+        result_path.write_text(
+            json.dumps(
+                {
+                    "status": "error",
+                    "detail": "gremlin state not initialized",
+                    "returncode": None,
+                    "cost_usd": 0.0,
+                }
+            )
+        )
+        return 2
     if stage.client is None:
         stage.client = state.client
 

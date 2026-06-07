@@ -13,7 +13,7 @@ import sys
 import traceback
 
 from gremlins.executor.gremlin import validate_gremlin_id
-from gremlins.executor.state import _StateData as StateData
+from gremlins.executor.state import StateData
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import pathlib
 import re
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from gremlins.artifacts.registry import (
     ArtifactRegistry,
@@ -13,11 +13,13 @@ from gremlins.artifacts.registry import (
 from gremlins.artifacts.resolve import resolve_in_map
 from gremlins.artifacts.schemes import snapshot_head_before
 from gremlins.artifacts.uri import Uri
-from gremlins.executor.gremlin import Gremlin
-from gremlins.executor.state import _State as State
+from gremlins.executor.state import State
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, Outcome
 from gremlins.utils import proc as _proc
+
+if TYPE_CHECKING:
+    from gremlins.executor.gremlin import Gremlin
 
 _READ_SUB = re.compile(r"\{read:([-\w]+)\}")
 _STATUS_KEY = "status"
@@ -76,6 +78,8 @@ class Exec(Stage):
 
     async def run(self, gremlin: Gremlin) -> Outcome:
         state = gremlin.state
+        if state is None:
+            raise RuntimeError("exec stage requires gremlin.state to be initialized")
         try:
             extra_env = resolve_in_map(state.artifacts, self.in_map)
         except ValueError as exc:

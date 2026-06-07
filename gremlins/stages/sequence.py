@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
-from gremlins.executor.gremlin import Gremlin
 from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.composite import child_state as _child_state
 from gremlins.stages.outcome import Done, Outcome
+
+if TYPE_CHECKING:
+    from gremlins.executor.gremlin import Gremlin
 
 
 class SequenceStage(Stage):
@@ -36,6 +38,10 @@ class SequenceStage(Stage):
 
     async def run(self, gremlin: Gremlin) -> Outcome:
         state = gremlin.state
+        if state is None:
+            raise RuntimeError(
+                "sequence stage requires gremlin.state to be initialized"
+            )
         key = self.path or self.name
         done = state.done_for(key)
         for child in self.body:

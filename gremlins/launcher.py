@@ -247,7 +247,7 @@ def _prepare_state_dir(state_dir: pathlib.Path) -> None:
 
 
 def _initial_state_data(inputs: _Inputs) -> Any:
-    from gremlins.executor.state import _StateData as StateData
+    from gremlins.executor.state import StateData
 
     now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     return StateData(

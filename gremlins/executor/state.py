@@ -84,7 +84,7 @@ def _read_state_json(sf: pathlib.Path | None) -> dict[str, Any]:
 
 
 @dataclasses.dataclass
-class _StateData:
+class StateData:
     gremlin_id: str | None = None
     state_file: pathlib.Path | None = None
     loop_iteration: int = 1
@@ -112,7 +112,7 @@ class _StateData:
     exit_code: int | None = None
 
     @classmethod
-    def load(cls, gremlin_id: str | None) -> _StateData:
+    def load(cls, gremlin_id: str | None) -> StateData:
         sf = resolve_state_file(gremlin_id)
         sd = _read_state_json(sf)
         return cls(
@@ -440,8 +440,8 @@ class _StateData:
 
 
 @dataclasses.dataclass
-class _State:
-    data: _StateData
+class State:
+    data: StateData
     client: Client
     artifact_dir: pathlib.Path
     artifacts: ArtifactRegistry
@@ -536,7 +536,7 @@ class _State:
         attempt = f"{entry.name}-{secrets.token_hex(4)}" if gremlin_id else ""
         scope_list = list(scope) if scope is not None else []
 
-        def _prepare() -> _State:
+        def _prepare() -> State:
             if record_stage:
                 base_state.data.set_stage(
                     entry.name, parent_stage=base_state.parent_stage
@@ -548,7 +548,7 @@ class _State:
                     )
                 else:
                     base_state.data.patch(attempt=attempt)
-            loaded = _StateData.load(gremlin_id)
+            loaded = StateData.load(gremlin_id)
             if attempt:
                 loaded = dataclasses.replace(loaded, attempt=attempt)
             return dataclasses.replace(
@@ -561,15 +561,16 @@ class _State:
             ):
                 return Done()
             child_gremlin = copy.copy(gremlin)
-            child_gremlin.state = _prepare()
-            child_gremlin.registry = child_gremlin.state.artifacts
+            prepared_state = _prepare()
+            child_gremlin.state = prepared_state
+            child_gremlin.registry = prepared_state.artifacts
             return await entry.run(child_gremlin)
 
         return _run_async
 
 
 def build_state(
-    data: _StateData,
+    data: StateData,
     client: Client,
     artifact_dir: pathlib.Path,
     *,
@@ -583,9 +584,9 @@ def build_state(
     child_key: str | None = None,
     parent_stage: str = "",
     base_ref: str = "",
-) -> _State:
+) -> State:
     reg = ArtifactRegistry(artifact_dir=artifact_dir, cwd=worktree)
-    return _State(
+    return State(
         data=data,
         client=client,
         artifact_dir=artifact_dir,
