@@ -1155,6 +1155,22 @@ def test_launch_explicit_gremlin_id_stale_dir_refused(lenv, monkeypatch):
 
 def test_launch_pr_kwarg_sets_state_fields(lenv, monkeypatch):
     """PR input triggers setup_kind=worktree-detached and seeds registry.base_sha."""
+    # Create a PR ref for testing
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=lenv.repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    head_sha = result.stdout.strip()
+
+    subprocess.run(
+        ["git", "update-ref", "refs/pull/697/head", head_sha],
+        cwd=lenv.repo,
+        check=True,
+    )
+
     # Use a custom pipeline that declares pr as an input so launch_main accepts --pr.
     overlay_dir = lenv.repo / ".gremlins"
     overlay_dir.mkdir(parents=True, exist_ok=True)

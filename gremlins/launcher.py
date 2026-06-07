@@ -207,7 +207,13 @@ def resolve_inputs(
 
         pr_ref = pr_arg_to_ref(pr.strip().lstrip("#"))
         base_ref_name = ""
-        base_ref_sha = pr_ref
+        if _git_mod.in_git_repo(cwd=project_root):
+            try:
+                _, base_ref_sha = _git_mod.resolve_base_ref(pr_ref, cwd=project_root)
+            except _git_mod.GitError:
+                base_ref_sha = pr_ref
+        else:
+            base_ref_sha = pr_ref
         fetch_worktree = True
     else:
         base_ref_name, base_ref_sha = _resolve_base_ref(
