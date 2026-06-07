@@ -1,16 +1,27 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import importlib
 import os
 import pathlib
+import shutil
 import sys
 import time
 from typing import Any
 
 from gremlins import paths as _paths
+from gremlins.artifacts.registry import ArtifactRegistry
+from gremlins.artifacts.uri import Uri
 from gremlins.clients.registry import CLIENT_FACTORIES
-from gremlins.launcher import launch
+from gremlins.executor.gremlin import Gremlin, write_initial_state
+from gremlins.launcher import (
+    _prepare_state_dir,
+    _persist_expanded_pipeline,
+    _resolve_inputs,
+    _seed_registry_from_sources,
+    _spawn,
+)
 from gremlins.permissions.loader import load_policy
 from gremlins.permissions.validation import validate_policy_against_registry
 from gremlins.pipeline import Pipeline
@@ -179,25 +190,78 @@ def _self_background_main(
 
     pipeline_args = ("--client", args.client) if args.client else ()
     try:
-        gremlin_id, proc = launch(
+        inputs = _resolve_inputs(
             pipeline_name,
-            stage_inputs=stage_inputs,
-            description=args.description,
-            parent_id=args.parent_id,
-            base_ref=args.base_ref,
-            pipeline_args=pipeline_args,
-            gremlin_id=args.gremlin_id,
-            bypass=policy.bypass,
-            permissions_file=str(args.permissions_file.resolve())
-            if args.permissions_file
-            else "",
+            dict(stage_inputs),
+            args.description,
+            args.parent_id,
+            None,
+            args.base_ref,
+            pipeline_args,
+            args.gremlin_id,
         )
+        state_root = _paths.state_root()
+        state_dir = state_root / inputs.gremlin_id
+        try:
+            _prepare_state_dir(state_dir)
+            inputs.pipeline_path = _persist_expanded_pipeline(
+                state_dir, inputs.pipeline_path
+            )
+            now_iso = datetime.datetime.now(datetime.UTC).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+            write_initial_state(
+                gremlin_id=inputs.gremlin_id,
+                kind=inputs.kind,
+                project_root=inputs.project_root,
+                started_at=now_iso,
+                description=inputs.description,
+                description_explicit=inputs.description_explicit,
+                parent_id=inputs.parent_id,
+                pipeline_args=inputs.pipeline_args,
+                client_label=inputs.client_label,
+                pipeline_path=inputs.pipeline_path,
+                stage_inputs=inputs.stage_inputs,
+                state_dir=state_dir,
+                bypass=policy.bypass,
+                permissions_file=str(args.permissions_file.resolve())
+                if args.permissions_file
+                else "",
+            )
+            artifact_dir = state_dir / "artifacts"
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            registry = ArtifactRegistry(artifact_dir=artifact_dir)
+            if inputs.base_ref_sha:
+                registry.bind("base_sha", Uri.parse(f"git://commit/{inputs.base_ref_sha}"))
+            if inputs.base_ref_name:
+                registry.bind("base_ref", Uri.parse(f"git://ref/{inputs.base_ref_name}"))
+            if (
+                inputs.loaded_pipeline is not None
+                and inputs.loaded_pipeline.input_sources is not None
+            ):
+                input_values = {
+                    k: v
+                    for k, v in inputs.stage_inputs.items()
+                    if isinstance(v, str) and v
+                }
+                _seed_registry_from_sources(
+                    registry,
+                    input_values,
+                    inputs.loaded_pipeline.input_sources.sources,
+                    artifact_dir,
+                )
+            proc = _spawn(inputs.gremlin_id, inputs, state_dir)
+        except Exception:
+            shutil.rmtree(state_dir, ignore_errors=True)
+            raise
+        gremlin_id = inputs.gremlin_id
     except (ValueError, RuntimeError) as exc:
         sys.stderr.write(f"error: {exc}\n")
         return 1
 
-    state_root = _paths.state_root()
-    state_dir = state_root / gremlin_id
+    (state_dir / "pid").write_text(str(proc.pid), encoding="utf-8")
+    Gremlin.patch_state_for(gremlin_id, pid=proc.pid)
+
     log_path = state_dir / "log"
     sf = state_dir / "state.json"
 

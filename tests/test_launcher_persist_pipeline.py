@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import pathlib
+import secrets
 
 import yaml
 
+from gremlins.cli.launch import launch_main
 from gremlins.pipeline import Pipeline
 
 # ---------------------------------------------------------------------------
@@ -83,11 +85,13 @@ stages:
 
 def test_launch_pipeline_path_points_to_state_dir(lenv):
     """After launch, state.pipeline_path points to <state_dir>/pipeline.yaml."""
-    from gremlins import launcher
-
-    gremlin_id, _ = launcher.launch(
-        "local", stage_inputs={"instructions": "persist pipeline test"}
-    )
+    gremlin_id = f"test-{secrets.token_hex(3)}"
+    rc = launch_main([
+        "local",
+        "--instructions", "persist pipeline test",
+        "--gremlin-id", gremlin_id,
+    ])
+    assert rc == 0
     state_dir = lenv.state_root / gremlin_id
     state = json.loads((state_dir / "state.json").read_text(encoding="utf-8"))
 
@@ -98,11 +102,13 @@ def test_launch_pipeline_path_points_to_state_dir(lenv):
 
 def test_launch_persisted_pipeline_is_valid_yaml(lenv):
     """<state_dir>/pipeline.yaml written at launch is a valid YAML mapping with stages."""
-    from gremlins import launcher
-
-    gremlin_id, _ = launcher.launch(
-        "local", stage_inputs={"instructions": "yaml validity test"}
-    )
+    gremlin_id = f"test-{secrets.token_hex(3)}"
+    rc = launch_main([
+        "local",
+        "--instructions", "yaml validity test",
+        "--gremlin-id", gremlin_id,
+    ])
+    assert rc == 0
     state_dir = lenv.state_root / gremlin_id
     text = (state_dir / "pipeline.yaml").read_text(encoding="utf-8")
     parsed = yaml.safe_load(text)
