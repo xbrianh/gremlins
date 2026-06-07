@@ -366,13 +366,12 @@ class Gremlin:
         }
 
     def build_state_for_landing(self, client: Client) -> State:
-        """Rebuild state with worktree cleared, for use in land stages.
-
-        Clears worktree_dir to ensure _cwd resolves to project_root instead,
-        suitable for land stage execution where the gremlin's worktree has
-        already been removed from disk.
-        """
+        """Rebuild state with worktree cleared for land stage execution."""
         self.worktree_dir = None
+        self.registry = ArtifactRegistry(
+            artifact_dir=self.artifact_dir,
+            cwd=pathlib.Path(self._cwd),
+        )
         return build_state(**self._make_build_state_kwargs(self.state_data, client))
 
     def _collect_stages(
