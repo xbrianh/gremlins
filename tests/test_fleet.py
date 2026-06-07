@@ -930,7 +930,7 @@ def test_cli_fleet_json_drill_in(sandbox, tmp_path, monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 
 
-def test_exec_land_stage_success(tmp_path, monkeypatch):
+def test_exec_land_stage_success():
     from unittest.mock import MagicMock
 
     class _OkStage:
@@ -942,7 +942,7 @@ def test_exec_land_stage_success(tmp_path, monkeypatch):
     assert result is True
 
 
-def test_exec_land_stage_bail(tmp_path, monkeypatch, capsys):
+def test_exec_land_stage_bail(capsys):
     from unittest.mock import MagicMock
 
     from gremlins.stages.outcome import Bail

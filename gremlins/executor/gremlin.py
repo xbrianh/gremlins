@@ -403,10 +403,10 @@ class Gremlin:
     def open(cls, gremlin_id: str, cwd_override: pathlib.Path | None = None) -> Gremlin:
         """Reconstruct a Gremlin from a persisted state directory.
 
-        Loads state.json, resolves the pipeline, and returns a Gremlin instance
-        without any side effects (no directory creation, no worktree setup).
-        Raises FileNotFoundError if state directory is missing, ValueError if
-        state.json is malformed or pipeline cannot be loaded.
+        Loads state.json, resolves the pipeline, and returns a Gremlin instance.
+        Populates .registry if artifact directory exists. Raises FileNotFoundError
+        if state directory is missing, ValueError if state.json is malformed or
+        pipeline cannot be loaded.
 
         If cwd_override is provided, it's used for ArtifactRegistry initialization
         instead of the default (worktree or project_root).
@@ -494,15 +494,13 @@ class Gremlin:
             pipeline_args=pipeline_args,
         )
 
-        # Populate registry if artifact directory already exists
-        if gremlin.artifact_dir.is_dir():
-            registry_cwd = (
-                cwd_override if cwd_override is not None else pathlib.Path(gremlin._cwd)
-            )
-            gremlin.registry = ArtifactRegistry(
-                artifact_dir=gremlin.artifact_dir,
-                cwd=registry_cwd,
-            )
+        registry_cwd = (
+            cwd_override if cwd_override is not None else pathlib.Path(gremlin._cwd)
+        )
+        gremlin.registry = ArtifactRegistry(
+            artifact_dir=gremlin.artifact_dir,
+            cwd=registry_cwd,
+        )
 
         return gremlin
 
@@ -515,6 +513,7 @@ class Gremlin:
         state_data = StateData.load(self.gremlin_id)
         kwargs = self._make_build_state_kwargs(state_data, PACKAGE_DEFAULT)
         kwargs["cwd"] = cwd
+        kwargs["worktree"] = None
         return build_state(**kwargs)
 
     @classmethod
