@@ -16,8 +16,8 @@ from typing import TYPE_CHECKING, Any, cast
 
 from gremlins import paths
 from gremlins.artifacts.uri import Uri
+from gremlins.executor.gremlin import State
 from gremlins.executor.parallel_state import ParallelGroupState
-from gremlins.executor.state import State
 
 if TYPE_CHECKING:
     from gremlins.executor.gremlin import Gremlin

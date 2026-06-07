@@ -12,8 +12,7 @@ import pathlib
 import sys
 import traceback
 
-from gremlins.executor.gremlin import validate_gremlin_id
-from gremlins.executor.state import StateData
+from gremlins.executor.gremlin import validate_gremlin_id, write_terminal_state
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -46,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
         traceback.print_exc()
     finally:
         validate_gremlin_id(gremlin_id)
-        StateData.load(gremlin_id).write_terminal_state(rc)
+        write_terminal_state(gremlin_id, rc)
     sys.exit(rc)
 
 

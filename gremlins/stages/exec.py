@@ -13,7 +13,7 @@ from gremlins.artifacts.registry import (
 from gremlins.artifacts.resolve import resolve_in_map
 from gremlins.artifacts.schemes import snapshot_head_before
 from gremlins.artifacts.uri import Uri
-from gremlins.executor.state import State
+from gremlins.executor.gremlin import FRAMEWORK_KEYS
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, Outcome
 from gremlins.utils import proc as _proc
@@ -65,7 +65,7 @@ class Exec(Stage):
         if not isinstance(raw_out, dict):
             raise ValueError(f"stage {name!r}: 'out' must be a mapping")
         for k in cast(dict[str, Any], d.get("options") or {}):
-            if k in State.FRAMEWORK_KEYS:
+            if k in FRAMEWORK_KEYS:
                 raise ValueError(
                     f"stage {name!r}: option key {k!r} collides with framework substitution variable"
                 )

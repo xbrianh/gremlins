@@ -48,6 +48,52 @@ def validate_gremlin_id(gremlin_id: str) -> None:
         raise ValueError(f"gremlin_id contains illegal characters: {gremlin_id!r}")
 
 
+def write_initial_state(
+    gremlin_id: str,
+    kind: str,
+    project_root: str,
+    started_at: str,
+    description: str,
+    description_explicit: bool,
+    parent_id: str,
+    pipeline_args: list[str],
+    client_label: str,
+    pipeline_path: str,
+    stage_inputs: dict[str, Any],
+    state_dir: pathlib.Path,
+    bypass: bool = False,
+    permissions_file: str = "",
+) -> None:
+    """Create and persist initial state data for a gremlin."""
+    state_data = StateData(
+        gremlin_id=gremlin_id,
+        kind=kind,
+        project_root=project_root,
+        workdir="",
+        setup_kind="worktree-detached",
+        worktree_base="",
+        status="running",
+        started_at=started_at,
+        description=description,
+        description_explicit=description_explicit,
+        parent_id=parent_id,
+        pipeline_args=pipeline_args,
+        client=client_label,
+        pipeline_path=pipeline_path,
+        stage="starting",
+        pid=None,
+        stage_inputs=stage_inputs,
+        bypass=bypass,
+        permissions_file=permissions_file,
+    )
+    state_data.persist(state_dir)
+
+
+def write_terminal_state(gremlin_id: str, exit_code: int) -> None:
+    """Write terminal state for a completed gremlin."""
+    StateData.load(gremlin_id).write_terminal_state(exit_code)
+
+
 def _apply_client_override(stages: Sequence[StageProtocol], cli: Client) -> None:
     for stage in stages:
         stage.client = cli
