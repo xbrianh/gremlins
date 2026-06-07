@@ -275,7 +275,6 @@ def _child_module_patches(mod_path: str, tmp_path: pathlib.Path) -> list:
 
 @pytest.mark.parametrize("mod_path,_label", _CHILD_MODULES)
 def test_child_build_state_bypass_policy(mod_path, _label, tmp_path):
-    import importlib
     from contextlib import ExitStack
 
     from gremlins.executor.gremlin import Gremlin
@@ -299,7 +298,9 @@ def test_child_build_state_bypass_policy(mod_path, _label, tmp_path):
             patch("gremlins.executor.gremlin.StateData.load", return_value=fake_data)
         )
         stack.enter_context(
-            patch("gremlins.executor.gremlin.Client.parse", side_effect=fake_client_parse)
+            patch(
+                "gremlins.executor.gremlin.Client.parse", side_effect=fake_client_parse
+            )
         )
         stack.enter_context(
             patch("gremlins.executor.gremlin.validate_policy_against_registry")
@@ -315,7 +316,6 @@ def test_child_build_state_bypass_policy(mod_path, _label, tmp_path):
 
 @pytest.mark.parametrize("mod_path,_label", _CHILD_MODULES)
 def test_child_build_state_project_permissions_blocks(mod_path, _label, tmp_path):
-    import importlib
     from contextlib import ExitStack
 
     from gremlins.executor.gremlin import Gremlin
@@ -345,7 +345,9 @@ def test_child_build_state_project_permissions_blocks(mod_path, _label, tmp_path
             patch("gremlins.executor.gremlin.StateData.load", return_value=fake_data)
         )
         stack.enter_context(
-            patch("gremlins.executor.gremlin.Client.parse", side_effect=fake_client_parse)
+            patch(
+                "gremlins.executor.gremlin.Client.parse", side_effect=fake_client_parse
+            )
         )
         stack.enter_context(
             patch("gremlins.executor.gremlin.validate_policy_against_registry")

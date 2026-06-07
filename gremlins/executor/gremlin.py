@@ -578,9 +578,13 @@ class Gremlin:
             data = StateData.load(gremlin_id)
 
         project_root = (
-            pathlib.Path(data.project_root) if data.project_root else _paths.project_root()
+            pathlib.Path(data.project_root)
+            if data.project_root
+            else _paths.project_root()
         )
-        perm_file = pathlib.Path(data.permissions_file) if data.permissions_file else None
+        perm_file = (
+            pathlib.Path(data.permissions_file) if data.permissions_file else None
+        )
         policy = load_policy(
             cli_bypass=data.bypass or None,
             cli_permissions_file=perm_file,
@@ -610,7 +614,9 @@ class Gremlin:
                 )
             except Exception:
                 logger.warning(
-                    "failed to load pipeline from %s", spec["pipeline_path"], exc_info=True
+                    "failed to load pipeline from %s",
+                    spec["pipeline_path"],
+                    exc_info=True,
                 )
 
         state = build_state(
@@ -631,7 +637,8 @@ class Gremlin:
             [],
             state_dir=state_dir,
             gremlin_id=gremlin_id,
-            pipeline_data=pipeline_data or _PipelineData(name="", path=pathlib.Path("."), stages=[]),
+            pipeline_data=pipeline_data
+            or _PipelineData(name="", path=pathlib.Path("."), stages=[]),
         )
         gremlin.state = state
         gremlin.registry = state.artifacts
