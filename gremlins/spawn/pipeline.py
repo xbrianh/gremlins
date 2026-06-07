@@ -12,7 +12,7 @@ import pathlib
 import sys
 import traceback
 
-from gremlins.executor.gremlin import Gremlin
+from gremlins.executor.state import StateData, validate_gremlin_id
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -26,7 +26,7 @@ def main(argv: list[str] | None = None) -> int:
 
     gremlin_id, pipeline_arg, *args = argv
     try:
-        Gremlin.validate_id(gremlin_id)
+        validate_gremlin_id(gremlin_id)
     except ValueError as exc:
         sys.stderr.write(f"run_pipeline: {exc}\n")
         return 1
@@ -44,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
         rc = 1
         traceback.print_exc()
     finally:
-        Gremlin.write_terminal_state_for(gremlin_id, rc)
+        StateData.load(gremlin_id).write_terminal_state(rc)
     sys.exit(rc)
 
 

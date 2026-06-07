@@ -549,24 +549,9 @@ class Gremlin:
 
         return self
 
-    @staticmethod
-    def validate_id(gremlin_id: str) -> None:
-        """Validate that gremlin_id is safe (no path traversal or special chars)."""
-        validate_gremlin_id(gremlin_id)
-
-    @classmethod
-    def write_terminal_state_for(cls, gremlin_id: str, rc: int) -> None:
-        """Write terminal state for a gremlin by ID."""
-        StateData.load(gremlin_id).write_terminal_state(rc)
-
     @classmethod
     def from_subprocess(cls, spec: dict[str, Any]) -> Gremlin:
-        """Create a Gremlin from a subprocess spec.
-
-        Handles both run_child.py and spawn/child.py spec schemas by checking
-        for the presence of "child_id" to distinguish them. Returns a minimal
-        Gremlin with state set and registry pointing to artifact directory.
-        """
+        """Create a Gremlin from a subprocess spec (run_child or spawn/child schema)."""
         importlib.import_module("gremlins.clients")
         from gremlins.clients.registry import CLIENT_FACTORIES
 
