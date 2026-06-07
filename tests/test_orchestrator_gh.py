@@ -1093,6 +1093,7 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
         run_pipeline(
             _gh_pipeline_path(tmp_path),
             argv=["--resume-from", "open-pr"],
+            gremlin_id="gr-test",
             client=client,
         )
     )
@@ -1158,6 +1159,7 @@ def test_github_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
         run_pipeline(
             _gh_pipeline_path(tmp_path),
             argv=["--client", "claude:claude-opus-4-7"],
+            gremlin_id="gr-test",
             client=client,
         )
     )
@@ -1217,6 +1219,7 @@ def test_github_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
         run_pipeline(
             _gh_pipeline_path(tmp_path),
             argv=["--client", "claude:claude-opus-4-7"],
+            gremlin_id="gr-test",
             client=client,
         )
     )
@@ -1373,6 +1376,7 @@ def test_verify_stage_argument_wiring(tmp_path, monkeypatch):
         run_pipeline(
             _gh_pipeline_path(tmp_path),
             argv=["--client", "claude:claude-opus-4-7"],
+            gremlin_id="gr-test",
             client=client,
         )
     )
