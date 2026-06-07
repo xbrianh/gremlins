@@ -6,7 +6,7 @@ import dataclasses
 
 from gremlins import paths as _paths
 from gremlins.clients.client import PACKAGE_DEFAULT
-from gremlins.executor.state import State
+from gremlins.executor.gremlin import State
 from gremlins.stages.base import Stage
 
 

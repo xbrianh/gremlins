@@ -14,14 +14,13 @@ import shutil
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
-if TYPE_CHECKING:
-    from gremlins.executor.gremlin import Gremlin
-    from gremlins.pipeline import Pipeline
-
 from gremlins import paths
 from gremlins.artifacts.uri import Uri
 from gremlins.executor.parallel_state import ParallelGroupState
-from gremlins.executor.state import State
+
+if TYPE_CHECKING:
+    from gremlins.executor.gremlin import Gremlin, State
+    from gremlins.pipeline import Pipeline
 from gremlins.stages.base import Stage
 from gremlins.stages.composite import child_state as _child_state
 from gremlins.stages.outcome import Bail, Done, Outcome
@@ -169,7 +168,11 @@ class ParallelStage(Stage):
         ).runtime_stages()
 
     async def run(self, gremlin: Gremlin) -> Outcome:
-        state = cast(State, gremlin.state)
+        state = gremlin.state
+        if state is None:
+            raise RuntimeError(
+                "parallel stage requires gremlin.state to be initialized"
+            )
         parent_id = state.data.gremlin_id or ""
         group_state = dataclasses.replace(
             state, parent_stage=state.parent_stage or self.name

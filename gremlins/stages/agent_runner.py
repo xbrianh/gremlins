@@ -7,7 +7,7 @@ import re
 from typing import Any
 
 from gremlins.clients.protocol import CompletedRun
-from gremlins.executor.state import State
+from gremlins.executor.gremlin import State
 from gremlins.stages.outcome import Bail
 
 _BAIL_RE = re.compile(r"^BAIL:\s*\S+:\s*(.*)$")

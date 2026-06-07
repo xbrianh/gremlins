@@ -6,9 +6,9 @@ from typing import TYPE_CHECKING, Any, cast
 
 from gremlins.artifacts.resolve import resolve_in_map
 from gremlins.artifacts.uri import Uri
-from gremlins.executor.state import State
 from gremlins.stages.agent_runner import run_agent
 from gremlins.stages.base import Stage, get_client_from_dict
+from gremlins.stages.constants import FRAMEWORK_KEYS
 from gremlins.stages.outcome import Bail, Done, Outcome
 
 if TYPE_CHECKING:
@@ -52,7 +52,7 @@ class Agent(Stage):
         if not isinstance(raw_out, dict):
             raise ValueError(f"stage {name!r}: 'out' must be a mapping")
         for k in cast(dict[str, Any], d.get("options") or {}):
-            if k in State.FRAMEWORK_KEYS - {"model"}:
+            if k in FRAMEWORK_KEYS - {"model"}:
                 raise ValueError(
                     f"stage {name!r}: option key {k!r} collides with framework substitution variable"
                 )
@@ -67,7 +67,9 @@ class Agent(Stage):
         return stage
 
     async def run(self, gremlin: Gremlin) -> Outcome:
-        state = cast(State, gremlin.state)
+        state = gremlin.state
+        if state is None:
+            raise RuntimeError("agent stage requires gremlin.state to be initialized")
         opts = dict(self.options)
         raw_model = cast(str | None, opts.pop("model", None))
 

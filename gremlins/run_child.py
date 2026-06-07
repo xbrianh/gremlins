@@ -35,14 +35,11 @@ import logging
 import pathlib
 import sys
 import traceback
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 from gremlins.executor.gremlin import Gremlin
 from gremlins.pipeline.loader import parse_stage
 from gremlins.stages.outcome import Bail
-
-if TYPE_CHECKING:
-    from gremlins.executor.state import State
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +90,19 @@ async def _run(spec_path: pathlib.Path) -> int:
         )
         return 2
 
-    state = cast("State", gremlin.state)
+    state = gremlin.state
+    if state is None:
+        result_path.write_text(
+            json.dumps(
+                {
+                    "status": "error",
+                    "detail": "gremlin state not initialized",
+                    "returncode": None,
+                    "cost_usd": 0.0,
+                }
+            )
+        )
+        return 2
     if stage.client is None:
         stage.client = state.client
 

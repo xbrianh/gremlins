@@ -11,7 +11,6 @@ import logging
 import math
 import os
 import pathlib
-import re
 import secrets
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, cast
@@ -19,6 +18,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 from gremlins import paths as _paths
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.clients.client import Client
+from gremlins.stages.constants import FRAMEWORK_KEYS
 from gremlins.utils.state_file import locked_update
 
 if TYPE_CHECKING:
@@ -30,18 +30,10 @@ from gremlins.stages.outcome import Done
 
 logger = logging.getLogger(__name__)
 
-_GREMLIN_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
-
 BAIL_CLASS_REVIEWER_REQUESTED_CHANGES = "reviewer_requested_changes"
 BAIL_CLASS_SECURITY = "security"
 BAIL_CLASS_SECRETS = "secrets"
 BAIL_CLASS_OTHER = "other"
-
-
-def validate_gremlin_id(gremlin_id: str) -> None:
-    """Raise ValueError if gremlin_id is not a safe, non-path-traversing identifier."""
-    if ".." in gremlin_id or not _GREMLIN_ID_RE.match(gremlin_id):
-        raise ValueError(f"gremlin_id contains illegal characters: {gremlin_id!r}")
 
 
 def resolve_state_file(gremlin_id: str | None) -> pathlib.Path | None:
@@ -465,17 +457,7 @@ class State:
     worktree_parent: pathlib.Path | None = None
     base_ref: str = ""
 
-    FRAMEWORK_KEYS: ClassVar[frozenset[str]] = frozenset(
-        {
-            "name",
-            "model",
-            "artifact_dir",
-            "repo",
-            "cwd",
-            "base_ref",
-            "loop_iteration",
-        }
-    )
+    FRAMEWORK_KEYS: ClassVar[frozenset[str]] = FRAMEWORK_KEYS
 
     def framework_subs(self, stage: StageProtocol) -> dict[str, str]:
         """Runtime-owned substitution vars. Stages must not assemble these themselves."""
@@ -570,8 +552,9 @@ class State:
             ):
                 return Done()
             child_gremlin = copy.copy(gremlin)
-            child_gremlin.state = _prepare()
-            child_gremlin.registry = child_gremlin.state.artifacts
+            prepared_state = _prepare()
+            child_gremlin.state = prepared_state
+            child_gremlin.registry = prepared_state.artifacts
             return await entry.run(child_gremlin)
 
         return _run_async
