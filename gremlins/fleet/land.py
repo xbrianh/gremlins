@@ -907,10 +907,9 @@ def _land_with_stage(
         print("you are inside this gremlin's worktree — cd elsewhere before landing")
         return False
 
-    _remove_worktree(wdir, state, cwd)
-
-    gremlin = Gremlin.open(gremlin_id, cwd_override=pathlib.Path(cwd) if cwd else None)
+    gremlin = Gremlin.open(gremlin_id)
     gremlin.state = gremlin.build_state_with_cwd(cwd or "")
+    _remove_worktree(wdir, state, cwd)
 
     if not _exec_land_stage(land_stage, gremlin):
         return False
