@@ -316,11 +316,13 @@ async def run_pipeline(
     try:
         await gremlin.run()
     except Bail as b:
+        assert gremlin.state is not None
         gremlin.state.data.write_bail_file(
             "other", b.reason, attempt=gremlin.state.data.attempt
         )
         return 1
     except Exception as exc:
+        assert gremlin.state is not None
         gremlin.state.data.write_bail_file(
             "other",
             f"unexpected error: {exc}"[:200],
@@ -331,6 +333,7 @@ async def run_pipeline(
     total_cost = 0.0
     for c in [client] if client else _stage_clients:
         total_cost += getattr(c, "total_cost_usd", 0.0) or 0.0
+    assert gremlin.state is not None
     try:
         subprocess_cost = float(
             gremlin.state.data.read_str("subprocess_cost_usd") or 0.0
