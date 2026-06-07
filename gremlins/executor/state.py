@@ -29,8 +29,6 @@ from gremlins.stages.outcome import Done
 
 logger = logging.getLogger(__name__)
 
-__all__: list[str] = []
-
 BAIL_CLASS_REVIEWER_REQUESTED_CHANGES = "reviewer_requested_changes"
 BAIL_CLASS_SECURITY = "security"
 BAIL_CLASS_SECRETS = "secrets"

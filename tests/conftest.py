@@ -31,10 +31,7 @@ def make_gremlin(
     artifact_dir: pathlib.Path | None = None,
     **state_kwargs: Any,
 ) -> Gremlin:
-    """Create a Gremlin with sensible test defaults.
-
-    Wraps Gremlin constructor with a pre-built State for simpler test setup.
-    """
+    """Create a Gremlin with sensible test defaults."""
     if artifact_dir is None:
         artifact_dir = pathlib.Path(tempfile.gettempdir()) / "test_artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
