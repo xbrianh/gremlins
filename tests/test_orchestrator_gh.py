@@ -191,7 +191,7 @@ def _patch_common(
     }
     if base_ref_sha:
         registry_data["base_sha"] = f"git://commit/{base_ref_sha}"
-    registry_file = tmp_path / "registry.json"
+    registry_file = tmp_path / "gr-test" / "registry.json"
     registry_file.write_text(json.dumps(registry_data))
     # Create placeholder artifact files so file resolvers find them.
     (artifact_dir / "spec.md").write_text("", encoding="utf-8")
@@ -506,7 +506,7 @@ def test_publish_as_issue_skip_if_exists(tmp_path, monkeypatch):
     (artifact_dir / "plan-issue-number.txt").write_text("42", encoding="utf-8")
 
     # Add plan-issue-number to registry so skip_if_exists fires.
-    registry_path = tmp_path / "registry.json"
+    registry_path = tmp_path / "gr-test" / "registry.json"
     reg = json.loads(registry_path.read_text())
     reg["plan-issue-number"] = "file://session/plan-issue-number.txt"
     registry_path.write_text(json.dumps(reg))

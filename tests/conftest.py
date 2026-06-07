@@ -316,7 +316,7 @@ def common_local_patches(monkeypatch):
         shutil, "which", lambda n: f"/fake/{n}" if n in ("claude", "git") else None
     )
     monkeypatch.setattr(
-        "gremlins.executor.run._install_signal_handlers", lambda c, gid: None
+        "gremlins.executor.run._install_signal_handlers", lambda c, g: None
     )
     monkeypatch.setattr("gremlins.executor.run.in_git_repo", lambda: True)
     monkeypatch.setattr(
