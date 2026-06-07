@@ -37,15 +37,12 @@ import logging
 import pathlib
 import sys
 import traceback
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
-from gremlins.executor.gremlin import Gremlin
+from gremlins.executor.gremlin import Gremlin, State
 from gremlins.logging_setup import configure_logging
 from gremlins.pipeline.loader import parse_stage
 from gremlins.stages.outcome import Bail
-
-if TYPE_CHECKING:
-    from gremlins.executor.state import State
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +63,7 @@ def _write_result(result_path: pathlib.Path, payload: dict[str, Any]) -> None:
 
 def _try_write_terminal(gremlin: Gremlin, rc: int) -> None:
     try:
-        state = cast("State", gremlin.state)
+        state = gremlin.state
         state.data.write_terminal_state(rc)
     except Exception:
         logger.warning("write_terminal_state failed", exc_info=True)
@@ -104,7 +101,7 @@ async def _run(spec_path: pathlib.Path) -> int:
         )
         return 2
 
-    state = cast("State", gremlin.state)
+    state = gremlin.state
     if stage.client is None:
         stage.client = state.client
 

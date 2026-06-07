@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator, Callable
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from gremlins.executor.state import State
+    from gremlins.executor.gremlin import State
     from gremlins.stages.base import Stage
 
 

@@ -24,8 +24,7 @@ from gremlins import paths as _paths
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.client import PACKAGE_DEFAULT
-from gremlins.executor.gremlin import Gremlin
-from gremlins.executor.state import StateData, validate_gremlin_id
+from gremlins.executor.gremlin import Gremlin, validate_gremlin_id
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.discovery import list_pipelines, resolve_pipeline_path
 from gremlins.utils import git as _git_mod
@@ -247,27 +246,6 @@ def _prepare_state_dir(state_dir: pathlib.Path) -> None:
     (state_dir / "artifacts").mkdir(exist_ok=True)
 
 
-def _initial_state_data(inputs: _Inputs) -> StateData:
-    now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return StateData(
-        gremlin_id=inputs.gremlin_id,
-        kind=inputs.kind,
-        project_root=inputs.project_root,
-        workdir="",
-        setup_kind="worktree-detached",
-        worktree_base="",
-        status="running",
-        started_at=now_iso,
-        description=inputs.description,
-        description_explicit=inputs.description_explicit,
-        parent_id=inputs.parent_id,
-        pipeline_args=inputs.pipeline_args,
-        client=inputs.client_label,
-        pipeline_path=inputs.pipeline_path,
-        stage="starting",
-        pid=None,
-        stage_inputs=inputs.stage_inputs,
-    )
 
 
 def _make_name_unique(stage: dict[str, Any], used: set[str]) -> None:
@@ -440,7 +418,18 @@ def launch(
         inputs.pipeline_path = _persist_expanded_pipeline(
             state_dir, inputs.pipeline_path
         )
-        sd = _initial_state_data(inputs)
+        sd = Gremlin.make_initial_state_data(
+            inputs.gremlin_id,
+            inputs.kind,
+            inputs.project_root,
+            inputs.description,
+            inputs.description_explicit,
+            inputs.parent_id,
+            inputs.pipeline_args,
+            inputs.client_label,
+            inputs.pipeline_path,
+            inputs.stage_inputs,
+        )
         sd.bypass = bypass
         sd.permissions_file = permissions_file
         sd.persist(state_dir)

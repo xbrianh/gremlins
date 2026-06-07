@@ -4,12 +4,11 @@ import re
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from gremlins.clients.client import Client
-from gremlins.executor.state import State
 from gremlins.protocols import GremlinProtocol
 from gremlins.stages.outcome import Outcome
 
 if TYPE_CHECKING:
-    from gremlins.executor.gremlin import Gremlin
+    from gremlins.executor.gremlin import Gremlin, State
 
 _VAR_SUB = re.compile(r"\{(\w+)\}")
 

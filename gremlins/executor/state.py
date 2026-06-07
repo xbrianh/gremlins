@@ -11,7 +11,6 @@ import logging
 import math
 import os
 import pathlib
-import re
 import secrets
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, cast
@@ -30,18 +29,12 @@ from gremlins.stages.outcome import Done
 
 logger = logging.getLogger(__name__)
 
-_GREMLIN_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+__all__: list[str] = []
 
 BAIL_CLASS_REVIEWER_REQUESTED_CHANGES = "reviewer_requested_changes"
 BAIL_CLASS_SECURITY = "security"
 BAIL_CLASS_SECRETS = "secrets"
 BAIL_CLASS_OTHER = "other"
-
-
-def validate_gremlin_id(gremlin_id: str) -> None:
-    """Raise ValueError if gremlin_id is not a safe, non-path-traversing identifier."""
-    if ".." in gremlin_id or not _GREMLIN_ID_RE.match(gremlin_id):
-        raise ValueError(f"gremlin_id contains illegal characters: {gremlin_id!r}")
 
 
 def resolve_state_file(gremlin_id: str | None) -> pathlib.Path | None:
@@ -93,7 +86,7 @@ def _read_state_json(sf: pathlib.Path | None) -> dict[str, Any]:
 
 
 @dataclasses.dataclass
-class StateData:
+class _StateData:
     gremlin_id: str | None = None
     state_file: pathlib.Path | None = None
     loop_iteration: int = 1
@@ -121,7 +114,7 @@ class StateData:
     exit_code: int | None = None
 
     @classmethod
-    def load(cls, gremlin_id: str | None) -> StateData:
+    def load(cls, gremlin_id: str | None) -> _StateData:
         sf = resolve_state_file(gremlin_id)
         sd = _read_state_json(sf)
         return cls(
@@ -449,8 +442,8 @@ class StateData:
 
 
 @dataclasses.dataclass
-class State:
-    data: StateData
+class _State:
+    data: _StateData
     client: Client
     artifact_dir: pathlib.Path
     artifacts: ArtifactRegistry
@@ -545,7 +538,7 @@ class State:
         attempt = f"{entry.name}-{secrets.token_hex(4)}" if gremlin_id else ""
         scope_list = list(scope) if scope is not None else []
 
-        def _prepare() -> State:
+        def _prepare() -> _State:
             if record_stage:
                 base_state.data.set_stage(
                     entry.name, parent_stage=base_state.parent_stage
@@ -557,7 +550,7 @@ class State:
                     )
                 else:
                     base_state.data.patch(attempt=attempt)
-            loaded = StateData.load(gremlin_id)
+            loaded = _StateData.load(gremlin_id)
             if attempt:
                 loaded = dataclasses.replace(loaded, attempt=attempt)
             return dataclasses.replace(
@@ -578,7 +571,7 @@ class State:
 
 
 def build_state(
-    data: StateData,
+    data: _StateData,
     client: Client,
     artifact_dir: pathlib.Path,
     *,
@@ -592,9 +585,9 @@ def build_state(
     child_key: str | None = None,
     parent_stage: str = "",
     base_ref: str = "",
-) -> State:
+) -> _State:
     reg = ArtifactRegistry(artifact_dir=artifact_dir, cwd=worktree)
-    return State(
+    return _State(
         data=data,
         client=client,
         artifact_dir=artifact_dir,

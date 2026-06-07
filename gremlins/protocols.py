@@ -5,10 +5,41 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 
+class _StateProtocol(Protocol):
+    """What stages need from a State object."""
+
+    data: Any
+    artifacts: Any
+    cwd: str
+    artifact_dir: Any
+    base_ref: str
+    client: Any
+    repo: str
+    parent_stage: str
+    worktree: Any
+    worktree_parent: Any
+
+    def done_for(self, path: str) -> set[str]: ...
+
+    def mark_done(self, path: str, child_name: str) -> None: ...
+
+    def record_bail(self, reason: str, *, kind: str = "other") -> None: ...
+
+    def record_stage_progress(
+        self, name: str, sub_stage: object = None, *, parent_stage: str = ""
+    ) -> None: ...
+
+    def record_state_field(self, **fields: Any) -> None: ...
+
+    def format(self, template: str) -> str: ...
+
+    def make_runner(self, entry: Any, gremlin: Any, scope: Any | None = None, *, record_stage: bool = True) -> Any: ...
+
+
 class GremlinProtocol(Protocol):
     """What stages need from a Gremlin."""
 
-    state: Any
+    state: _StateProtocol | None
     registry: Any
 
     async def fork(

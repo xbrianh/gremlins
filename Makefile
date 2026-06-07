@@ -22,3 +22,4 @@ $(TEST_FILES):
 	PYTHONPATH='' python -m pytest $@ || { code=$$?; [ $$code -eq 5 ] && exit 0 || exit $$code; }
 
 check: lint format typecheck
+	@grep -r 'from gremlins.executor.state' gremlins/ --include='*.py' | grep -v 'gremlins/executor/' && echo 'ERROR: state.py leak' && exit 1 || true
