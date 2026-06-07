@@ -267,7 +267,7 @@ def _patch_common(
 
 def _prepare_for_plan_stage(tmp_path: pathlib.Path) -> None:
     """Remove plan so skip_if_exists does not skip the plan stage."""
-    reg_path = tmp_path / "registry.json"
+    reg_path = tmp_path / "gr-test" / "registry.json"
     reg = json.loads(reg_path.read_text())
     reg.pop("plan-document", None)
     reg_path.write_text(json.dumps(reg))
@@ -589,7 +589,7 @@ def test_plan_no_h1_issue_body(tmp_path, monkeypatch):
 
     # Seed plan as a file URI containing the raw issue ref so resolve-plan-input
     # gets $plan="#42" (matching what inputs.sources would produce at launch time).
-    registry_path = tmp_path / "registry.json"
+    registry_path = tmp_path / "gr-test" / "registry.json"
     reg = json.loads(registry_path.read_text())
     reg["plan"] = "file://session/plan-arg.txt"
     registry_path.write_text(json.dumps(reg))
@@ -710,6 +710,7 @@ def test_model_forwarded_to_all_stages(tmp_path, monkeypatch):
         run_pipeline(
             _gh_pipeline_path(tmp_path),
             argv=["--client", "claude:claude-opus-4-7"],
+            gremlin_id="gr-test",
             client=client,
         )
     )
@@ -805,6 +806,7 @@ def test_gh_main_client_specifier_model(tmp_path, monkeypatch):
         run_pipeline(
             _gh_pipeline_path(tmp_path),
             argv=["--client", "copilot:gpt-4o"],
+            gremlin_id="gr-test",
             client=client,
         )
     )
@@ -845,6 +847,7 @@ def test_resume_from_implement(tmp_path, monkeypatch):
 
     client = _CommittingClient(
         git_dir=tmp_path,
+        artifact_dir=artifact_dir,
         fixtures={
             "implement": IMPL_EVENTS,
             "commit": IMPL_EVENTS,
@@ -858,6 +861,7 @@ def test_resume_from_implement(tmp_path, monkeypatch):
         run_pipeline(
             _gh_pipeline_path(tmp_path),
             argv=["--resume-from", "implement"],
+            gremlin_id="gr-test",
             client=client,
         )
     )
@@ -898,6 +902,7 @@ def test_resume_from_github_review_pull_request(tmp_path, monkeypatch):
         run_pipeline(
             _gh_pipeline_path(tmp_path),
             argv=["--resume-from", "github-review-pull-request"],
+            gremlin_id="gr-test",
             client=client,
         )
     )
@@ -1112,7 +1117,7 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
     assert len(review_calls) == 1
     assert "https://github.com/owner/repo/pull/101" in review_calls[0].prompt
     # Verify push-and-open wrote pr to registry.json
-    registry_path = tmp_path / "registry.json"
+    registry_path = tmp_path / "gr-test" / "registry.json"
     assert registry_path.exists(), "registry.json should have been written"
     assert json.loads(registry_path.read_text()).get("pr") == "gh://pr/101"
 
@@ -1170,7 +1175,7 @@ def test_github_wait_copilot_stage_argument_wiring(tmp_path, monkeypatch):
     assert copilot_state.repo == "owner/repo"
     assert copilot_state.artifact_dir == artifact_dir
     # pr is written to registry.json by push-and-open
-    registry_path = tmp_path / "registry.json"
+    registry_path = tmp_path / "gr-test" / "registry.json"
     assert registry_path.exists(), "registry.json should have been written"
     assert json.loads(registry_path.read_text()).get("pr") == "gh://pr/77"
 
@@ -1229,7 +1234,7 @@ def test_github_wait_ci_stage_argument_wiring(tmp_path, monkeypatch):
     assert stage.client.model == "claude-opus-4-7"
     assert captured_stage["state"].artifact_dir == artifact_dir
     # pr is written to registry.json by push-and-open
-    registry_path = tmp_path / "registry.json"
+    registry_path = tmp_path / "gr-test" / "registry.json"
     assert registry_path.exists(), "registry.json should have been written"
     assert json.loads(registry_path.read_text()).get("pr") == "gh://pr/77"
 
