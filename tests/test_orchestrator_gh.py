@@ -446,7 +446,9 @@ def test_plan_mode_skips_plan_stage(tmp_path, monkeypatch):
     )
 
     result = asyncio.run(
-        run_pipeline(_gh_pipeline_path(tmp_path), argv=[], gremlin_id="gr-test", client=client)
+        run_pipeline(
+            _gh_pipeline_path(tmp_path), argv=[], gremlin_id="gr-test", client=client
+        )
     )
     assert result == 0
 
@@ -484,7 +486,9 @@ def test_plan_skip_if_exists_on_resume(tmp_path, monkeypatch):
     )
 
     result = asyncio.run(
-        run_pipeline(_gh_pipeline_path(tmp_path), argv=[], gremlin_id="gr-test", client=client)
+        run_pipeline(
+            _gh_pipeline_path(tmp_path), argv=[], gremlin_id="gr-test", client=client
+        )
     )
     assert result == 0
     labels = [c.label for c in client.calls]
@@ -540,7 +544,9 @@ def test_publish_as_issue_skip_if_exists(tmp_path, monkeypatch):
     )
 
     result = asyncio.run(
-        run_pipeline(_gh_pipeline_path(tmp_path), argv=[], gremlin_id="gr-test", client=client)
+        run_pipeline(
+            _gh_pipeline_path(tmp_path), argv=[], gremlin_id="gr-test", client=client
+        )
     )
     assert result == 0
     assert not any("gh issue create" in cmd for cmd in shell_cmds)
@@ -619,7 +625,9 @@ def test_plan_no_h1_issue_body(tmp_path, monkeypatch):
     )
 
     result = asyncio.run(
-        run_pipeline(_gh_pipeline_path(tmp_path), argv=[], gremlin_id="gr-test", client=client)
+        run_pipeline(
+            _gh_pipeline_path(tmp_path), argv=[], gremlin_id="gr-test", client=client
+        )
     )
     assert result == 0
     plan_content = (artifact_dir / "plan.md").read_text(encoding="utf-8")
@@ -658,7 +666,9 @@ def test_plan_stage_uses_bundled_prompt_not_slash_command(tmp_path, monkeypatch)
     )
 
     result = asyncio.run(
-        run_pipeline(_gh_pipeline_path(tmp_path), argv=[], gremlin_id="gr-test", client=client)
+        run_pipeline(
+            _gh_pipeline_path(tmp_path), argv=[], gremlin_id="gr-test", client=client
+        )
     )
     assert result == 0
 
@@ -745,7 +755,9 @@ def test_gh_main_defaults_model_to_sonnet(tmp_path, monkeypatch):
 
     # Invoke with NO --model.
     result = asyncio.run(
-        run_pipeline(_gh_pipeline_path(tmp_path), argv=[], gremlin_id="gr-test", client=client)
+        run_pipeline(
+            _gh_pipeline_path(tmp_path), argv=[], gremlin_id="gr-test", client=client
+        )
     )
     assert result == 0
 
@@ -1013,7 +1025,9 @@ def test_plan_file_path_includes_plan_title_cost_in_total(tmp_path, monkeypatch)
         fixtures=fixtures,
     )
     result = asyncio.run(
-        run_pipeline(_gh_pipeline_path(tmp_path), argv=[], gremlin_id="gr-test", client=client)
+        run_pipeline(
+            _gh_pipeline_path(tmp_path), argv=[], gremlin_id="gr-test", client=client
+        )
     )
     assert result == 0
 
@@ -1251,7 +1265,9 @@ def test_github_wait_ci_stage_ordering(tmp_path, monkeypatch):
     )
 
     result = asyncio.run(
-        run_pipeline(_gh_pipeline_path(tmp_path), argv=[], gremlin_id="gr-test", client=client)
+        run_pipeline(
+            _gh_pipeline_path(tmp_path), argv=[], gremlin_id="gr-test", client=client
+        )
     )
     assert result == 0
 
@@ -1568,7 +1584,9 @@ def test_gh_main_pipeline_default_client_model(tmp_path, monkeypatch):
     )
 
     result = asyncio.run(
-        run_pipeline(_gh_pipeline_path(tmp_path), argv=[], gremlin_id="gr-test", client=client)
+        run_pipeline(
+            _gh_pipeline_path(tmp_path), argv=[], gremlin_id="gr-test", client=client
+        )
     )
     assert result == 0
 

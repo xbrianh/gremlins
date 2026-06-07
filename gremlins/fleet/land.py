@@ -12,7 +12,7 @@ import time
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
-    from gremlins.executor.gremlin import Gremlin
+    pass
 
 import gremlins.utils.git as _git
 from gremlins import paths
