@@ -82,13 +82,14 @@ def _require_impl_progress_exec() -> Exec:
 # ---------------------------------------------------------------------------
 
 
-def test_gh_pipeline_implement_expands_to_two_stages(tmp_path: pathlib.Path) -> None:
-    """type: implement in gh.yaml expands to implement (agent) + require-impl-progress (exec)."""
+def test_gh_pipeline_implement_expands_to_three_stages(tmp_path: pathlib.Path) -> None:
+    """type: implement in gh.yaml expands to implement (agent) + git-commit (exec) + require-impl-progress (exec)."""
     pipeline = Pipeline.from_yaml(resolve_pipeline_path("gh", tmp_path))
     names = [s.name for s in pipeline.stages]
     impl_idx = names.index("implement")
     assert names[impl_idx] == "implement"
-    assert names[impl_idx + 1] == "require-impl-progress"
+    assert names[impl_idx + 1] == "git-commit"
+    assert names[impl_idx + 2] == "require-impl-progress"
 
 
 # ---------------------------------------------------------------------------
