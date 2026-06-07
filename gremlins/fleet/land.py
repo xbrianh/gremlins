@@ -15,6 +15,8 @@ import gremlins.utils.git as _git
 from gremlins import paths
 from gremlins.artifacts.registry import ArtifactRegistry, MissingArtifact
 from gremlins.artifacts.resolve import resolve_in_map
+from gremlins.clients.client import PACKAGE_DEFAULT
+from gremlins.executor.state import build_state
 from gremlins.fleet.resolve import resolve_gremlin
 from gremlins.fleet.state import (
     liveness_of_state_file,
@@ -78,44 +80,6 @@ def _persist_land_cost(sf: str, state: dict[str, Any], additional_cost: float) -
         pass
 
 
-def _resolve_landing_cwd(state: dict[str, Any]) -> str:
-    """Return a project_root suitable as cwd for `gh pr merge --delete-branch`.
-
-    For boss-launched children, state.project_root is the boss's worktree, which
-    is on a detached HEAD. After --delete-branch, gh tries to switch off the
-    deleted branch and fails with "could not determine current branch: failed
-    to run git: not on any branch". Walk parent_id up to the topmost ancestor
-    (the user's actual repo, on a real branch) to avoid that.
-    """
-    own_root = state.get("project_root") or ""
-    parent_id = state.get("parent_id") or ""
-    if not parent_id:
-        return own_root
-
-    # Pre-seed cycle protection with the starting state's id so a pathological
-    # cycle that loops back through the starting gremlin trips on first revisit.
-    seen = {state.get("id") or ""}
-    current: dict[str, Any] = state
-    while True:
-        pid = current.get("parent_id") or ""
-        if not pid:
-            # Clean termination: reached the topmost ancestor. Note: if its
-            # project_root is empty/missing (e.g. corrupted boss state.json),
-            # the own_root fallback may still be detached — strictly no worse
-            # than the original failure mode.
-            return current.get("project_root") or own_root
-        if pid in seen:
-            # Cycle in parent chain — fall back to own_root rather than
-            # returning a possibly-detached intermediate ancestor.
-            return own_root
-        seen.add(pid)
-        parent_sf = os.path.join(str(paths.state_root()), pid, "state.json")
-        parent_state = load_state(parent_sf)
-        if not parent_state:
-            # Unreadable parent state — fall back to own_root rather than
-            # returning a possibly-detached intermediate ancestor.
-            return own_root
-        current = cast(dict[str, Any], parent_state)
 
 
 def _fast_forward_main(cwd: str | None):
@@ -709,7 +673,7 @@ def _land_gh(
     gremlin_id: str, wdir: str, state: dict[str, Any], force: bool = False
 ) -> bool:
     """Merge a gh gremlin's PR and clean up."""
-    project_root = _resolve_landing_cwd(state)
+    project_root = state.get("project_root") or ""
     cwd = project_root if project_root and os.path.isdir(project_root) else None
 
     artifact_dir = paths.state_root() / gremlin_id / "artifacts"
@@ -899,7 +863,7 @@ def _land_with_stage(
     """Run the pipeline's land: stage as the merge step, with shared teardown."""
     from gremlins.executor.gremlin import Gremlin
 
-    project_root = _resolve_landing_cwd(state)
+    project_root = state.get("project_root") or ""
     cwd = project_root if project_root and os.path.isdir(project_root) else None
 
     workdir = state.get("workdir") or ""
@@ -908,7 +872,8 @@ def _land_with_stage(
         return False
 
     gremlin = Gremlin.open(gremlin_id)
-    gremlin.state = gremlin.build_state_with_cwd(cwd or "")
+    gremlin.worktree_dir = None
+    gremlin.state = build_state(**gremlin._make_build_state_kwargs(gremlin.state_data, PACKAGE_DEFAULT))
     _remove_worktree(wdir, state, cwd)
 
     if not _exec_land_stage(land_stage, gremlin):
