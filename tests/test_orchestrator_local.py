@@ -137,6 +137,7 @@ def test_local_main_resume_from_review_code_allows_existing_git_changes(
         run_pipeline(
             _local_pipeline_path(tmp_path),
             argv=["--resume-from", "review-code"],
+            gremlin_id=gremlin_id,
             client=client,
         )
     )
@@ -206,18 +207,19 @@ def test_local_pipeline_stage_names(tmp_path):
     ]
 
 
-def test_local_main_writes_stage_to_state(tmp_path, monkeypatch, make_state_dir):
-    gremlin_id = "test-gr-id"
-    state_dir = make_state_dir(gremlin_id)
-    artifact_dir = state_dir / "artifacts"
-    artifact_dir.mkdir(exist_ok=True)
-
+def test_local_main_writes_stage_to_state(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
         "gremlins.paths.state_root",
         lambda: tmp_path,
     )
+    gremlin_id = "test-gr-id"
+    state_dir = tmp_path / gremlin_id
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "state.json").write_text(json.dumps({"id": gremlin_id, "stage": ""}))
+    artifact_dir = state_dir / "artifacts"
+    artifact_dir.mkdir(exist_ok=True)
     client = _ReviewCreatingClient(
         fixtures={
             "plan": MINIMAL_EVENTS,
