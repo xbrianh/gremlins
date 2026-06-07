@@ -14,7 +14,7 @@ stages:
     options:
       cmds:
         - |
-          git add -A
+          git add -u
           git diff --cached --quiet || git commit -m "implement plan"
   - name: require-impl-progress
     type: exec
