@@ -117,34 +117,42 @@ def test_load_spec_invalid_json(tmp_path: pathlib.Path) -> None:
 def test_build_state_propagates_repo(
     tmp_path: pathlib.Path,
 ) -> None:
-    state = _rc._build_state(
+    from gremlins.executor.gremlin import Gremlin
+
+    gremlin = Gremlin.from_subprocess(
         {
             "client": "fake:fake",
             "artifact_dir": str(tmp_path / "artifacts"),
             "repo": "owner/myrepo",
         }
     )
-    assert state.repo == "owner/myrepo"
+    assert gremlin.state.repo == "owner/myrepo"
 
 
 def test_build_state_repo_defaults_to_empty(tmp_path: pathlib.Path) -> None:
-    state = _rc._build_state(
+    from gremlins.executor.gremlin import Gremlin
+
+    gremlin = Gremlin.from_subprocess(
         {
             "client": "fake:fake",
             "artifact_dir": str(tmp_path / "artifacts"),
         }
     )
-    assert state.repo == ""
+    assert gremlin.state.repo == ""
 
 
 def test_build_state_missing_client() -> None:
+    from gremlins.executor.gremlin import Gremlin
+
     with pytest.raises(ValueError, match="client"):
-        _rc._build_state({"artifact_dir": "/tmp/x"})
+        Gremlin.from_subprocess({"artifact_dir": "/tmp/x"})
 
 
 def test_build_state_missing_artifact_dir() -> None:
+    from gremlins.executor.gremlin import Gremlin
+
     with pytest.raises(ValueError, match="artifact_dir"):
-        _rc._build_state({"client": "fake:fake"})
+        Gremlin.from_subprocess({"client": "fake:fake"})
 
 
 def test_run_done(tmp_path: pathlib.Path) -> None:
