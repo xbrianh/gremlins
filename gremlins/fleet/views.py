@@ -8,7 +8,7 @@ import sys
 import time
 from collections.abc import Iterator
 
-from gremlins.executor.state import StateData
+from gremlins.executor.gremlin import Gremlin
 from gremlins.fleet.duration import parse_duration
 from gremlins.fleet.render import FleetRow, build_row, print_table
 from gremlins.fleet.resolve import collect_gremlin_matches, resolve_gremlin
@@ -220,7 +220,7 @@ def do_drill_in(target: str) -> None:
     # immediately visible. bail_class is upstream-set by review/address stages.
     _gremlin_id_for_bail = str(state.get("id") or "")
     _bail_file = (
-        StateData.load(_gremlin_id_for_bail).read_bail_info()
+        Gremlin.bail_info_for(_gremlin_id_for_bail)
         if _gremlin_id_for_bail
         else None
     )
@@ -376,7 +376,7 @@ def do_drill_in_json(target: str) -> None:
 
     gremlin_id_for_bail = str(state.get("id") or "")
     bail_file = (
-        StateData.load(gremlin_id_for_bail).read_bail_info()
+        Gremlin.bail_info_for(gremlin_id_for_bail)
         if gremlin_id_for_bail
         else None
     )

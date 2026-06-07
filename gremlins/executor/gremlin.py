@@ -549,6 +549,49 @@ class Gremlin:
 
         return self
 
+    @staticmethod
+    def validate_id(gremlin_id: str) -> None:
+        """Raise ValueError if gremlin_id is not a safe identifier."""
+        validate_gremlin_id(gremlin_id)
+
+    @classmethod
+    def bail_info_for(cls, gremlin_id: str) -> dict[str, str] | None:
+        """Return bail info for gremlin_id, or None if not bailed."""
+        return StateData.load(gremlin_id).read_bail_info()
+
+    @classmethod
+    def patch_state_for(cls, gremlin_id: str, **fields: Any) -> None:
+        """Patch state.json for gremlin_id with the given fields."""
+        StateData.load(gremlin_id).patch(**fields)
+
+    @classmethod
+    def ephemeral(
+        cls,
+        *,
+        client: Client,
+        artifact_dir: pathlib.Path,
+        cwd: str = "",
+        artifacts: ArtifactRegistry | None = None,
+    ) -> Gremlin:
+        """Build a minimal no-id Gremlin with state set."""
+        state_data = StateData()
+        state_obj = build_state(
+            data=state_data,
+            client=client,
+            artifact_dir=artifact_dir,
+            cwd=cwd,
+            artifacts=artifacts,
+        )
+        gremlin = cls(
+            [],
+            state_dir=artifact_dir.parent,
+            gremlin_id=None,
+            pipeline_data=_PipelineData(name="", path=pathlib.Path("."), stages=[]),
+        )
+        gremlin.state = state_obj
+        gremlin.registry = state_obj.artifacts
+        return gremlin
+
     @classmethod
     def from_subprocess(cls, spec: dict[str, Any]) -> Gremlin:
         """Create a Gremlin from a subprocess spec (run_child or spawn/child schema)."""

@@ -72,18 +72,6 @@ def write_state(state_dir: pathlib.Path, data: dict[str, Any]) -> None:
     os.replace(tmp, sf)
 
 
-def landable_shape(state: dict[str, Any]) -> str:
-    """Classify artifact shape for land dispatch."""
-    artifacts = list(state.get("artifacts") or [])
-    prs = [art for art in artifacts if art.get("type") == "pr"]
-
-    if not prs:
-        return "empty"
-    if len(prs) == 1:
-        return "one_pr"
-    return "many_prs"
-
-
 def _stage_list() -> list[StageProtocol]:
     return []
 
