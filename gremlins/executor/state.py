@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 from gremlins import paths as _paths
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.clients.client import Client
+from gremlins.stages.constants import FRAMEWORK_KEYS
 from gremlins.utils.state_file import locked_update
 
 if TYPE_CHECKING:
@@ -456,17 +457,7 @@ class State:
     worktree_parent: pathlib.Path | None = None
     base_ref: str = ""
 
-    FRAMEWORK_KEYS: ClassVar[frozenset[str]] = frozenset(
-        {
-            "name",
-            "model",
-            "artifact_dir",
-            "repo",
-            "cwd",
-            "base_ref",
-            "loop_iteration",
-        }
-    )
+    FRAMEWORK_KEYS: ClassVar[frozenset[str]] = FRAMEWORK_KEYS
 
     def framework_subs(self, stage: StageProtocol) -> dict[str, str]:
         """Runtime-owned substitution vars. Stages must not assemble these themselves."""
