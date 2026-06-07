@@ -3,7 +3,7 @@ CI checks on this PR have failed. Read the failure output below and fix the code
 **Important constraints:**
 - Fix the implementation code only.
 - Do not modify CI configuration files (e.g. `.github/workflows/`).
-- Stage and commit your changes with a short descriptive message.
+- After fixing, stage the changed files by name and create a single git commit with a short descriptive message. Do not push.
 
 ---
 
