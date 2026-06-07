@@ -16,8 +16,7 @@ import pytest
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.clients.registry import register_client_factory
 from gremlins.executor.gremlin import Gremlin, State
-from gremlins.executor.state import _StateData as StateData
-from gremlins.executor.state import build_state
+from gremlins.executor.state import StateData, build_state
 from gremlins.permissions.policy import Policy
 
 os.environ.setdefault("GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME", "main")
