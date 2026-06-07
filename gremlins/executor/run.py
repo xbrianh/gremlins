@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import datetime
 import json
 import logging
 import math
 import os
 import pathlib
+import secrets
 import shutil
 import signal
 import types
@@ -73,12 +75,9 @@ def _apply_policy_to_stages(stages: Sequence[StageProtocol], policy: Policy) -> 
 
 
 def _load_stage_attempt(gremlin: Gremlin) -> tuple[str, str]:
-    try:
-        if gremlin.state and gremlin.state.data:
-            return gremlin.state.data.stage or "", gremlin.state.data.attempt or ""
-        return "", ""
-    except Exception:
-        return "", ""
+    if gremlin.state and gremlin.state.data:
+        return gremlin.state.data.stage or "", gremlin.state.data.attempt or ""
+    return "", ""
 
 
 def _install_signal_handlers(clients: Sequence[Client], gremlin: Gremlin) -> None:
@@ -157,7 +156,10 @@ def _read_state_json(gremlin_id: str | None) -> dict[str, Any]:
     sf = paths.state_root() / gremlin_id / "state.json" if gremlin_id else None
     if sf is None or not sf.exists():
         return {}
-    return json.loads(sf.read_text(encoding="utf-8"))
+    try:
+        return json.loads(sf.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
 
 
 async def run_pipeline(
@@ -190,8 +192,6 @@ async def run_pipeline(
     if gremlin_id:
         artifact_dir = paths.state_root() / gremlin_id / "artifacts"
     else:
-        import datetime
-        import secrets
         ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         rand = secrets.token_hex(3)
         artifact_dir = paths.state_root() / "direct" / f"{ts}-{rand}" / "artifacts"

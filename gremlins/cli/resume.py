@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from gremlins.executor.gremlin import Gremlin
+from gremlins.executor.state import validate_gremlin_id
 from gremlins.launcher import resume
 
 
@@ -21,7 +21,7 @@ def resume_main(argv: list[str]) -> int:
     args = p.parse_args(argv)
 
     try:
-        Gremlin.validate_id(args.gremlin_id)
+        validate_gremlin_id(args.gremlin_id)
         resume(args.gremlin_id, graft=args.graft or None)
     except (ValueError, RuntimeError) as exc:
         sys.stderr.write(f"error: {exc}\n")

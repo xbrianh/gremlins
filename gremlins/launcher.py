@@ -25,7 +25,7 @@ from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.client import PACKAGE_DEFAULT
 from gremlins.executor.gremlin import Gremlin
-from gremlins.executor.state import StateData
+from gremlins.executor.state import StateData, validate_gremlin_id
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.discovery import list_pipelines, resolve_pipeline_path
 from gremlins.utils import git as _git_mod
@@ -100,7 +100,7 @@ def _reject_pipeline_collision(gremlin_id: str) -> None:
 
 def _resolve_gremlin_id(slug: str, gremlin_id: str | None) -> str:
     if gremlin_id is not None:
-        Gremlin.validate_id(gremlin_id)
+        validate_gremlin_id(gremlin_id)
         _reject_pipeline_collision(gremlin_id)
         _existing = _state_root() / gremlin_id
         if _existing.exists():
@@ -470,7 +470,7 @@ def launch(
         raise
 
     (state_dir / "pid").write_text(str(p.pid), encoding="utf-8")
-    Gremlin.patch_state_for(inputs.gremlin_id, pid=p.pid)
+    StateData.load(inputs.gremlin_id).patch(pid=p.pid)
 
     return inputs.gremlin_id, p
 
@@ -522,8 +522,7 @@ def _patch_state_for_resume(
 
     now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    Gremlin.patch_state_for(
-        gremlin_id,
+    StateData.load(gremlin_id).patch(
         _delete=(
             "exit_code",
             "ended_at",
@@ -617,4 +616,4 @@ def resume(gremlin_id: str, *, graft: str | None = None) -> None:
         project_root,
     )
     (gremlin.state_dir / "pid").write_text(str(p.pid), encoding="utf-8")
-    Gremlin.patch_state_for(gremlin_id, pid=p.pid)
+    StateData.load(gremlin_id).patch(pid=p.pid)

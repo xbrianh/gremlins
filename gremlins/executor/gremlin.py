@@ -550,17 +550,12 @@ class Gremlin:
         return self
 
     @staticmethod
-    def validate_id(gremlin_id: str) -> None:
-        """Raise ValueError if gremlin_id is not a safe identifier."""
-        validate_gremlin_id(gremlin_id)
-
-    @classmethod
-    def bail_info_for(cls, gremlin_id: str) -> dict[str, str] | None:
+    def bail_info_for(gremlin_id: str) -> dict[str, str] | None:
         """Return bail info for gremlin_id, or None if not bailed."""
         return StateData.load(gremlin_id).read_bail_info()
 
-    @classmethod
-    def patch_state_for(cls, gremlin_id: str, **fields: Any) -> None:
+    @staticmethod
+    def patch_state_for(gremlin_id: str, **fields: Any) -> None:
         """Patch state.json for gremlin_id with the given fields."""
         StateData.load(gremlin_id).patch(**fields)
 

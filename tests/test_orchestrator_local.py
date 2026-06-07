@@ -37,8 +37,8 @@ def test_local_main_plan_mode(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _common_patches(monkeypatch)
     monkeypatch.setattr(
-        "gremlins.executor.run.resolve_artifact_dir",
-        lambda gremlin_id=None: artifact_dir,
+        "gremlins.paths.state_root",
+        lambda: tmp_path,
     )
     client = _ReviewCreatingClient(
         fixtures={

@@ -1,5 +1,6 @@
 import os
 import signal
+import types
 from unittest.mock import patch
 
 import pytest
@@ -30,7 +31,7 @@ def test_signal_handler_reaps_and_redelivers(sig):
     client = _TrackingClient()
     with patch("gremlins.executor.run.atexit.register"):
         # Create a mock gremlin with None state for testing
-        gremlin = type('MockGremlin', (), {'state': None})()
+        gremlin = types.SimpleNamespace(state=None)
         _install_signal_handlers([client], gremlin)
     handler = signal.getsignal(sig)
 
@@ -47,7 +48,7 @@ def test_signal_handler_reaps_and_redelivers(sig):
 def test_atexit_log_logs_when_stage_set(caplog):
     registered: list = []
     with patch("gremlins.executor.run.atexit.register", side_effect=registered.append):
-        gremlin = type('MockGremlin', (), {'state': None})()
+        gremlin = types.SimpleNamespace(state=None)
         _install_signal_handlers([], gremlin)
 
     assert len(registered) == 1
@@ -68,7 +69,7 @@ def test_atexit_log_logs_when_stage_set(caplog):
 def test_atexit_log_silent_on_clean_exit(caplog):
     registered: list = []
     with patch("gremlins.executor.run.atexit.register", side_effect=registered.append):
-        gremlin = type('MockGremlin', (), {'state': None})()
+        gremlin = types.SimpleNamespace(state=None)
         _install_signal_handlers([], gremlin)
 
     atexit_fn = registered[0]
