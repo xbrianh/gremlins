@@ -283,6 +283,7 @@ def _self_background_main(
 
     state_root = _paths.state_root()
     state_dir = state_root / gremlin_id
+    state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "pid").write_text(str(proc.pid), encoding="utf-8")
     Gremlin.patch_state_for(gremlin_id, pid=proc.pid)
 
