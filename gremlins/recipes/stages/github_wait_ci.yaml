@@ -1,4 +1,4 @@
-# Loop body: poll → fix → capture-head.
+# Loop body: poll → fix → push-fix → capture-head.
 # Iteration-1 detection: {artifact_dir}/fix-head absent means no prior fix push.
 # Post-fix SHA verification: fix-head present → wait for headRefOid to match.
 
@@ -146,7 +146,14 @@ stages:
           - "{{prompt}}"
         in:
           failure_output: ci_log
+
+      - name: push-fix
+        type: exec
+        in:
           pr_branch: pr-branch
+        options:
+          cmds:
+            - git push origin "HEAD:$pr_branch"
 
       - name: capture-head
         type: exec
