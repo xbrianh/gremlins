@@ -218,8 +218,15 @@ def test_launch_persists_bypass(tmp_path, monkeypatch):
         gid = "gr-bypass-test"
         inputs = MagicMock()
         inputs.gremlin_id = gid
+        inputs.kind = "some-kind"
+        inputs.description = ""
+        inputs.description_explicit = False
+        inputs.parent_id = ""
+        inputs.project_root = "/test/project"
         inputs.pipeline_path = "pipe.yaml"
-        inputs.pr_artifact = None
+        inputs.pipeline_args = []
+        inputs.client_label = "test-client"
+        inputs.stage_inputs = {}
         mock_ri.return_value = inputs
         proc = MagicMock()
         proc.pid = 99
@@ -228,10 +235,7 @@ def test_launch_persists_bypass(tmp_path, monkeypatch):
         state_dir = tmp_path / gid
         state_dir.mkdir(parents=True)
 
-        sd = StateData(gremlin_id=gid)
-
-        with patch.object(launcher_mod, "_initial_state_data", return_value=sd):
-            launcher_mod.launch("some-kind", bypass=True, permissions_file="/p.yaml")
+        launcher_mod.launch("some-kind", bypass=True, permissions_file="/p.yaml")
 
     raw = json.loads((state_dir / "state.json").read_text())
     assert raw["bypass"] is True
