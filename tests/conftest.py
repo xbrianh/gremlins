@@ -39,7 +39,9 @@ def make_gremlin(
     from gremlins.pipeline import Pipeline as PipelineData
 
     if client is None:
-        client = FakeClaudeClient(fixtures={}, model="fake", bypass=False, native_block={})
+        client = FakeClaudeClient(
+            fixtures={}, model="fake", bypass=False, native_block={}
+        )
 
     if state_data is None:
         state_data = StateData(gremlin_id=gremlin_id)
@@ -60,6 +62,7 @@ def make_gremlin(
     gremlin.state = state
     gremlin.registry = state.artifacts
     return gremlin
+
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 FIXTURES_DIR = pathlib.Path(__file__).resolve().parent / "fixtures"
