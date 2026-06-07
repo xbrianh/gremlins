@@ -1430,6 +1430,7 @@ def test_resume_from_verify(tmp_path, monkeypatch):
         run_pipeline(
             _gh_pipeline_path(tmp_path),
             argv=["--resume-from", "verify"],
+            gremlin_id="gr-test",
             client=client,
         )
     )
