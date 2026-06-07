@@ -1445,7 +1445,6 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    gremlin_id = "test-gr-id"
     artifact_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
     monkeypatch.setattr(
@@ -1472,7 +1471,7 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch):
         run_pipeline(
             _gh_pipeline_path(tmp_path),
             argv=[],
-            gremlin_id=gremlin_id,
+            gremlin_id="gr-test",
             client=client,
         )
     )
@@ -1483,15 +1482,12 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch):
 
 
 def test_gh_main_state_client_tracks_effective_model(
-    tmp_path, monkeypatch, make_state_dir
+    tmp_path, monkeypatch
 ):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    gremlin_id = "test-gr-id"
-    state_dir = make_state_dir(gremlin_id)
-
-    artifact_dir, _ = _patch_common(monkeypatch, tmp_path)
+    artifact_dir, state_file = _patch_common(monkeypatch, tmp_path)
 
     monkeypatch.setattr(
         subprocess, "run", _make_gh_subprocess(issue_body="# Plan\nDo stuff.\n")
@@ -1517,13 +1513,13 @@ def test_gh_main_state_client_tracks_effective_model(
         run_pipeline(
             _gh_pipeline_path(tmp_path),
             argv=["--client", "copilot:gpt-5.4"],
-            gremlin_id=gremlin_id,
+            gremlin_id="gr-test",
             client=client,
         )
     )
     assert result == 0
 
-    data = json.loads((state_dir / "state.json").read_text())
+    data = json.loads(state_file.read_text())
     assert "model" not in data
 
 
