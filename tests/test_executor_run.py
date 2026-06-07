@@ -30,7 +30,6 @@ def _restore_signals():
 def test_signal_handler_reaps_and_redelivers(sig):
     client = _TrackingClient()
     with patch("gremlins.executor.run.atexit.register"):
-        # Create a mock gremlin with None state for testing
         gremlin = types.SimpleNamespace(state=None)
         _install_signal_handlers([client], gremlin)
     handler = signal.getsignal(sig)
