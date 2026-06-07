@@ -1486,9 +1486,7 @@ def test_gh_main_writes_stage_to_state(tmp_path, monkeypatch):
     assert data.get("stage") == "ci-gate"
 
 
-def test_gh_main_state_client_tracks_effective_model(
-    tmp_path, monkeypatch
-):
+def test_gh_main_state_client_tracks_effective_model(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
