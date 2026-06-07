@@ -199,6 +199,7 @@ def test_local_pipeline_stage_names(tmp_path):
         "plan",
         "update-description",
         "implement",
+        "git-commit",
         "require-impl-progress",
         "review-code",
         "address-code",

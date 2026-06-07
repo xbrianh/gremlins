@@ -44,8 +44,8 @@ stages:
     parsed = yaml.safe_load((state_dir / "pipeline.yaml").read_text(encoding="utf-8"))
     assert isinstance(parsed, dict)
     stage_names = [s["name"] for s in parsed["stages"]]
-    # implement recipe expands to implement + require-impl-progress
-    assert stage_names == ["plan", "implement", "require-impl-progress"]
+    # implement recipe expands to implement + git-commit + require-impl-progress
+    assert stage_names == ["plan", "implement", "git-commit", "require-impl-progress"]
 
 
 def test_persist_expanded_pipeline_roundtrips_via_pipeline_from_yaml(tmp_path):

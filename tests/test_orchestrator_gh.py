@@ -351,6 +351,7 @@ def test_gh_pipeline_stage_names(tmp_path):
         "publish-as-issue",
         "update-description",
         "implement",
+        "git-commit",
         "require-impl-progress",
         "normalize",
         "verify",
