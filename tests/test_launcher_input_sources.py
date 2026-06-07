@@ -5,7 +5,7 @@ import pathlib
 import pytest
 
 from gremlins.artifacts.registry import ArtifactRegistry
-from gremlins.launcher import _seed_registry_from_sources
+from gremlins.launcher import seed_registry_from_sources
 from gremlins.pipeline.inputs import InputSource
 
 
@@ -27,7 +27,7 @@ class TestSeedRegistryFromSources:
         registry, artifact_dir = _make_registry(tmp_path)
         sources = _sources(("instructions", ["string"], False))
 
-        _seed_registry_from_sources(
+        seed_registry_from_sources(
             registry, {"instructions": "do the thing"}, sources, artifact_dir
         )
 
@@ -40,7 +40,7 @@ class TestSeedRegistryFromSources:
         plan_file.write_text("# Plan", encoding="utf-8")
         sources = _sources(("plan", ["filepath"], False))
 
-        _seed_registry_from_sources(
+        seed_registry_from_sources(
             registry, {"plan": str(plan_file)}, sources, artifact_dir
         )
 
@@ -51,7 +51,7 @@ class TestSeedRegistryFromSources:
         registry, artifact_dir = _make_registry(tmp_path)
         sources = _sources(("plan", ["filepath", "string"], True))
 
-        _seed_registry_from_sources(registry, {"plan": "#123"}, sources, artifact_dir)
+        seed_registry_from_sources(registry, {"plan": "#123"}, sources, artifact_dir)
 
         assert registry.data["plan"] == "file://session/plan.txt"
         assert (artifact_dir / "plan.txt").read_text() == "#123"
@@ -60,7 +60,7 @@ class TestSeedRegistryFromSources:
         registry, artifact_dir = _make_registry(tmp_path)
         sources = _sources(("instructions", ["string"], True))
 
-        _seed_registry_from_sources(registry, {}, sources, artifact_dir)
+        seed_registry_from_sources(registry, {}, sources, artifact_dir)
 
         assert "instructions" not in registry.data
 
@@ -69,14 +69,14 @@ class TestSeedRegistryFromSources:
         sources = _sources(("plan", ["string"], False))
 
         with pytest.raises(ValueError, match="required input source"):
-            _seed_registry_from_sources(registry, {}, sources, artifact_dir)
+            seed_registry_from_sources(registry, {}, sources, artifact_dir)
 
     def test_filepath_only_no_file_raises(self, tmp_path: pathlib.Path) -> None:
         registry, artifact_dir = _make_registry(tmp_path)
         sources = _sources(("plan", ["filepath"], False))
 
         with pytest.raises(ValueError, match="required input source"):
-            _seed_registry_from_sources(
+            seed_registry_from_sources(
                 registry, {"plan": "/nonexistent/plan.md"}, sources, artifact_dir
             )
 
@@ -84,7 +84,7 @@ class TestSeedRegistryFromSources:
         registry, artifact_dir = _make_registry(tmp_path)
         sources = _sources(("plan", ["string"], True))
 
-        _seed_registry_from_sources(
+        seed_registry_from_sources(
             registry, {"plan": "ref", "extra": "ignored"}, sources, artifact_dir
         )
 
