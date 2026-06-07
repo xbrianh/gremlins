@@ -86,11 +86,15 @@ stages:
 def test_launch_pipeline_path_points_to_state_dir(lenv):
     """After launch, state.pipeline_path points to <state_dir>/pipeline.yaml."""
     gremlin_id = f"test-{secrets.token_hex(3)}"
-    rc = launch_main([
-        "local",
-        "--instructions", "persist pipeline test",
-        "--gremlin-id", gremlin_id,
-    ])
+    rc = launch_main(
+        [
+            "local",
+            "--instructions",
+            "persist pipeline test",
+            "--gremlin-id",
+            gremlin_id,
+        ]
+    )
     assert rc == 0
     state_dir = lenv.state_root / gremlin_id
     state = json.loads((state_dir / "state.json").read_text(encoding="utf-8"))
@@ -103,11 +107,15 @@ def test_launch_pipeline_path_points_to_state_dir(lenv):
 def test_launch_persisted_pipeline_is_valid_yaml(lenv):
     """<state_dir>/pipeline.yaml written at launch is a valid YAML mapping with stages."""
     gremlin_id = f"test-{secrets.token_hex(3)}"
-    rc = launch_main([
-        "local",
-        "--instructions", "yaml validity test",
-        "--gremlin-id", gremlin_id,
-    ])
+    rc = launch_main(
+        [
+            "local",
+            "--instructions",
+            "yaml validity test",
+            "--gremlin-id",
+            gremlin_id,
+        ]
+    )
     assert rc == 0
     state_dir = lenv.state_root / gremlin_id
     text = (state_dir / "pipeline.yaml").read_text(encoding="utf-8")
