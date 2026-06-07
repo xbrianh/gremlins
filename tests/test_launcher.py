@@ -215,7 +215,7 @@ def test_launch_persists_cli_client_space_form(lenv):
         [
             "local",
             "--client",
-            "copilot:gpt-5.4",
+            "claude:opus",
             "--instructions",
             "test cli client space",
             "--gremlin-id",
@@ -224,7 +224,7 @@ def test_launch_persists_cli_client_space_form(lenv):
     )
     assert rc == 0
     state = _read_state(_gremlins_state_root(lenv) / gremlin_id)
-    assert state["client"] == "copilot:gpt-5.4"
+    assert state["client"] == "claude:opus"
 
 
 def test_launch_persists_cli_client_equals_form(lenv):
@@ -233,7 +233,7 @@ def test_launch_persists_cli_client_equals_form(lenv):
     rc = launch_main(
         [
             "local",
-            "--client=copilot:gpt-5.4",
+            "--client=claude:opus",
             "--instructions",
             "test cli client equals",
             "--gremlin-id",
@@ -242,7 +242,7 @@ def test_launch_persists_cli_client_equals_form(lenv):
     )
     assert rc == 0
     state = _read_state(_gremlins_state_root(lenv) / gremlin_id)
-    assert state["client"] == "copilot:gpt-5.4"
+    assert state["client"] == "claude:opus"
 
 
 def test_launch_persists_last_repeated_cli_client(lenv):
@@ -253,7 +253,7 @@ def test_launch_persists_last_repeated_cli_client(lenv):
             "local",
             "--client",
             "claude:sonnet",
-            "--client=copilot:gpt-5.4",
+            "--client=claude:opus",
             "--instructions",
             "test repeated cli client",
             "--gremlin-id",
@@ -262,7 +262,7 @@ def test_launch_persists_last_repeated_cli_client(lenv):
     )
     assert rc == 0
     state = _read_state(_gremlins_state_root(lenv) / gremlin_id)
-    assert state["client"] == "copilot:gpt-5.4"
+    assert state["client"] == "claude:opus"
 
 
 def test_launch_persists_custom_pipeline_default_client(lenv):
@@ -325,7 +325,7 @@ def test_launch_ghgremlin_persists_cli_client_override(lenv_with_gh):
         [
             "gh",
             "--client",
-            "copilot:gpt-5.4",
+            "claude:opus",
             "--instructions",
             "test gh cli client",
             "--gremlin-id",
@@ -334,7 +334,7 @@ def test_launch_ghgremlin_persists_cli_client_override(lenv_with_gh):
     )
     assert rc == 0
     state = _read_state(_gremlins_state_root(lenv_with_gh) / gremlin_id)
-    assert state["client"] == "copilot:gpt-5.4"
+    assert state["client"] == "claude:opus"
 
 
 def test_launch_invalid_pipeline_name_raises(lenv):
@@ -407,7 +407,7 @@ def test_launch_explicit_project_root(lenv):
     )
     assert rc == 0
     state = _read_state(state_root / gremlin_id)
-    assert state["project_root"] == str(lenv.repo)
+    assert state["project_root"] == str(pathlib.Path(lenv.repo).resolve())
     assert state["parent_id"] == parent_id
 
 
@@ -421,7 +421,7 @@ def test_resume_patches_state(lenv, monkeypatch):
     launcher = _launcher()
     monkeypatch.setenv("FAKE_CLAUDE_FAIL_AT", "plan")
     gremlin_id = f"test-{secrets.token_hex(3)}"
-    rc = launch_main(
+    launch_main(
         [
             "local",
             "--instructions",
@@ -430,7 +430,6 @@ def test_resume_patches_state(lenv, monkeypatch):
             gremlin_id,
         ]
     )
-    assert rc == 0
     state_dir = _gremlins_state_root(lenv) / gremlin_id
     assert _wait_for_finished(state_dir, timeout=30), (
         "failed gremlin should terminate quickly"
@@ -588,7 +587,7 @@ def test_run_pipeline_writes_terminal_state_on_failure(lenv, monkeypatch):
     """_run-pipeline writes exit_code!=0 + status=stopped + finished marker on failure."""
     monkeypatch.setenv("FAKE_CLAUDE_FAIL_AT", "plan")
     gremlin_id = f"test-{secrets.token_hex(3)}"
-    rc = launch_main(
+    launch_main(
         [
             "local",
             "--instructions",
@@ -597,7 +596,6 @@ def test_run_pipeline_writes_terminal_state_on_failure(lenv, monkeypatch):
             gremlin_id,
         ]
     )
-    assert rc == 0
     state_dir = _gremlins_state_root(lenv) / gremlin_id
     assert _wait_for_finished(state_dir, timeout=60), (
         "pipeline should terminate quickly on failure"

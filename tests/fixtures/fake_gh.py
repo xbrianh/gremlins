@@ -91,6 +91,21 @@ def main(argv):
         sys.stdout.write(out + "\n")
         return 0
 
+    if sub == "pr" and len(argv) >= 2 and argv[1] == "create":
+        url = os.environ.get("FAKE_GH_PR_URL", "https://github.com/owner/repo/pull/123")
+        sys.stdout.write(f"{url}\n")
+        return 0
+    if sub == "pr" and len(argv) >= 2 and argv[1] == "view":
+        # Return a minimal PR view response with no checks for testing.
+        out = json.dumps(
+            {
+                "statusCheckRollup": [],
+                "reviewDecision": None,
+                "headRefOid": "0000000000000000000000000000000000000000",
+            }
+        )
+        sys.stdout.write(out + "\n")
+        return 0
     if sub == "pr" and len(argv) >= 2 and argv[1] == "edit":
         return 0
     if sub == "pr" and len(argv) >= 2 and argv[1] == "diff":
