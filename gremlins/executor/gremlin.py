@@ -508,7 +508,6 @@ class Gremlin:
 
         return gremlin
 
-
     @classmethod
     def initialize_with_runtime(
         cls,
