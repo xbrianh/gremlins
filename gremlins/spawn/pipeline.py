@@ -44,7 +44,6 @@ def main(argv: list[str] | None = None) -> int:
         rc = 1
         traceback.print_exc()
     finally:
-        validate_gremlin_id(gremlin_id)
         write_terminal_state(gremlin_id, rc)
     sys.exit(rc)
 

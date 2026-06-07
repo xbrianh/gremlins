@@ -34,7 +34,14 @@ from gremlins.utils import git as _git_mod
 from gremlins.utils.yaml_io import YamlLoadError as _YamlLoadError
 from gremlins.utils.yaml_io import dump_yaml_text
 
-__all__ = ["Gremlin", "State", "validate_gremlin_id"]
+__all__ = [
+    "Gremlin",
+    "State",
+    "validate_gremlin_id",
+    "write_initial_state",
+    "write_terminal_state",
+    "FRAMEWORK_KEYS",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +72,7 @@ def write_initial_state(
     permissions_file: str = "",
 ) -> None:
     """Create and persist initial state data for a gremlin."""
+    validate_gremlin_id(gremlin_id)
     state_data = StateData(
         gremlin_id=gremlin_id,
         kind=kind,
@@ -91,6 +99,7 @@ def write_initial_state(
 
 def write_terminal_state(gremlin_id: str, exit_code: int) -> None:
     """Write terminal state for a completed gremlin."""
+    validate_gremlin_id(gremlin_id)
     StateData.load(gremlin_id).write_terminal_state(exit_code)
 
 

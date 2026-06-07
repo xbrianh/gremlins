@@ -13,6 +13,7 @@ from gremlins.artifacts.registry import (
 from gremlins.artifacts.resolve import resolve_in_map
 from gremlins.artifacts.schemes import snapshot_head_before
 from gremlins.artifacts.uri import Uri
+from gremlins.executor.gremlin import FRAMEWORK_KEYS
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Bail, Done, Outcome
 from gremlins.utils import proc as _proc
@@ -56,8 +57,6 @@ class Exec(Stage):
 
     @classmethod
     def with_dict(cls, d: dict[str, Any], depth: int = 0) -> Exec:
-        from gremlins.executor.gremlin import FRAMEWORK_KEYS
-
         name = d.get("name") or ""
         raw_in: object = d.get("in") or {}
         raw_out: object = d.get("out") or {}

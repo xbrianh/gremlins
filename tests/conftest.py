@@ -32,8 +32,11 @@ def make_gremlin(
 ) -> Gremlin:
     """Create a Gremlin with sensible test defaults."""
     if artifact_dir is None:
-        artifact_dir = pathlib.Path(tempfile.gettempdir()) / "test_artifacts"
+        temp_root = pathlib.Path(tempfile.mkdtemp())
+        artifact_dir = temp_root / "artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        temp_root = artifact_dir.parent
 
     from gremlins.pipeline import Pipeline as PipelineData
 
@@ -54,7 +57,7 @@ def make_gremlin(
 
     gremlin = Gremlin(
         [],
-        state_dir=artifact_dir.parent,
+        state_dir=temp_root,
         gremlin_id=gremlin_id,
         pipeline_data=PipelineData(name="test", path=pathlib.Path("."), stages=[]),
     )
