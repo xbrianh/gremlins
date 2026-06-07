@@ -312,17 +312,16 @@ def test_launch_spawned_process_detached(lenv):
         pass  # already exited; that's fine
 
 
-def test_launch_concurrent_no_collision(lenv):
-    """Concurrent launches produce distinct GREMLIN_IDs."""
+def test_launch_sequential_with_explicit_ids(lenv):
+    """Sequential launches with explicit IDs all succeed."""
     gremlin_ids = [f"test-{secrets.token_hex(3)}" for _ in range(5)]
     for i, gremlin_id in enumerate(gremlin_ids):
         rc = launch_main([
             "local",
-            "--instructions", f"concurrent {i}",
+            "--instructions", f"sequential {i}",
             "--gremlin-id", gremlin_id,
         ])
         assert rc == 0
-    assert len(set(gremlin_ids)) == len(gremlin_ids), f"GREMLIN_ID collision among: {gremlin_ids}"
     for gremlin_id in gremlin_ids:
         state_dir = _gremlins_state_root(lenv) / gremlin_id
         _wait_for_finished(state_dir)
@@ -965,8 +964,6 @@ def test_stage_inputs_survives_resume(lenv, monkeypatch):
 
 def test_launch_explicit_gremlin_id(lenv, monkeypatch):
     """launch_main(--gremlin-id=...) uses the supplied id verbatim."""
-    launcher = _launcher()
-    monkeypatch.setattr(launcher, "_spawn_logged_process", lambda *a, **kw: _FakeProc())
     rc = launch_main([
         "local",
         "--instructions", "explicit id test",
@@ -979,8 +976,6 @@ def test_launch_explicit_gremlin_id(lenv, monkeypatch):
 
 def test_launch_invalid_gremlin_id_rejected(lenv, monkeypatch):
     """launch_main(--gremlin-id=...) returns non-zero for ids that fail validate_gremlin_id."""
-    launcher = _launcher()
-    monkeypatch.setattr(launcher, "_spawn_logged_process", lambda *a, **kw: _FakeProc())
     rc = launch_main([
         "local",
         "--instructions", "bad id test",
@@ -991,8 +986,6 @@ def test_launch_invalid_gremlin_id_rejected(lenv, monkeypatch):
 
 def test_launch_gremlin_id_pipeline_name_rejected(lenv, monkeypatch):
     """launch_main(--gremlin-id=...) returns non-zero when id matches a pipeline name."""
-    launcher = _launcher()
-    monkeypatch.setattr(launcher, "_spawn_logged_process", lambda *a, **kw: _FakeProc())
     rc = launch_main([
         "local",
         "--instructions", "pipeline collision test",
@@ -1003,7 +996,6 @@ def test_launch_gremlin_id_pipeline_name_rejected(lenv, monkeypatch):
 
 def test_launch_explicit_gremlin_id_already_running(lenv, monkeypatch):
     """launch_main(--gremlin-id=...) returns non-zero when the id has a live process."""
-    launcher = _launcher()
     state_root = _gremlins_state_root(lenv)
     gremlin_id = "my-fixed-id"
     state_dir = state_root / gremlin_id
@@ -1022,7 +1014,6 @@ def test_launch_explicit_gremlin_id_already_running(lenv, monkeypatch):
 
 def test_launch_explicit_gremlin_id_stale_dir_refused(lenv, monkeypatch):
     """launch_main(--gremlin-id=...) returns non-zero when the state dir exists but the process is not running."""
-    launcher = _launcher()
     state_root = _gremlins_state_root(lenv)
     gremlin_id = "my-fixed-id"
     state_dir = state_root / gremlin_id
@@ -1056,8 +1047,6 @@ stages:
 """,
         encoding="utf-8",
     )
-    launcher = _launcher()
-    monkeypatch.setattr(launcher, "_spawn_logged_process", lambda *a, **kw: _FakeProc())
     gremlin_id = f"test-{secrets.token_hex(3)}"
     rc = launch_main([
         "local",

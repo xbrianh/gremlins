@@ -16,11 +16,11 @@ from gremlins.artifacts.uri import Uri
 from gremlins.clients.registry import CLIENT_FACTORIES
 from gremlins.executor.gremlin import Gremlin, write_initial_state
 from gremlins.launcher import (
-    _prepare_state_dir,
-    _persist_expanded_pipeline,
-    _resolve_inputs,
-    _seed_registry_from_sources,
-    _spawn,
+    prepare_state_dir,
+    persist_expanded_pipeline,
+    resolve_inputs,
+    seed_registry_from_sources,
+    spawn,
 )
 from gremlins.permissions.loader import load_policy
 from gremlins.permissions.validation import validate_policy_against_registry
@@ -190,7 +190,7 @@ def _self_background_main(
 
     pipeline_args = ("--client", args.client) if args.client else ()
     try:
-        inputs = _resolve_inputs(
+        inputs = resolve_inputs(
             pipeline_name,
             dict(stage_inputs),
             args.description,
@@ -203,8 +203,8 @@ def _self_background_main(
         state_root = _paths.state_root()
         state_dir = state_root / inputs.gremlin_id
         try:
-            _prepare_state_dir(state_dir)
-            inputs.pipeline_path = _persist_expanded_pipeline(
+            prepare_state_dir(state_dir)
+            inputs.pipeline_path = persist_expanded_pipeline(
                 state_dir, inputs.pipeline_path
             )
             now_iso = datetime.datetime.now(datetime.UTC).strftime(
@@ -244,13 +244,13 @@ def _self_background_main(
                     for k, v in inputs.stage_inputs.items()
                     if isinstance(v, str) and v
                 }
-                _seed_registry_from_sources(
+                seed_registry_from_sources(
                     registry,
                     input_values,
                     inputs.loaded_pipeline.input_sources.sources,
                     artifact_dir,
                 )
-            proc = _spawn(inputs.gremlin_id, inputs, state_dir)
+            proc = spawn(inputs.gremlin_id, inputs, state_dir)
         except Exception:
             shutil.rmtree(state_dir, ignore_errors=True)
             raise

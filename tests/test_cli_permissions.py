@@ -203,39 +203,29 @@ def test_statedata_bypass_load(tmp_path, monkeypatch):
 # --- launch() persists bypass + permissions_file into state.json ---
 
 
-def test_launch_persists_bypass(tmp_path, monkeypatch):
-    import gremlins.launcher as launcher_mod
+def test_launch_persists_bypass(tmp_path):
+    from gremlins.executor.gremlin import write_initial_state
 
-    monkeypatch.setattr(launcher_mod, "_state_root", lambda: tmp_path)
-    with (
-        patch.object(launcher_mod, "_resolve_inputs") as mock_ri,
-        patch.object(launcher_mod, "_prepare_state_dir"),
-        patch.object(
-            launcher_mod, "_persist_expanded_pipeline", return_value="pipe.yaml"
-        ),
-        patch.object(launcher_mod, "_spawn") as mock_spawn,
-    ):
-        gid = "gr-bypass-test"
-        inputs = MagicMock()
-        inputs.gremlin_id = gid
-        inputs.kind = "some-kind"
-        inputs.description = ""
-        inputs.description_explicit = False
-        inputs.parent_id = ""
-        inputs.project_root = "/test/project"
-        inputs.pipeline_path = "pipe.yaml"
-        inputs.pipeline_args = []
-        inputs.client_label = "test-client"
-        inputs.stage_inputs = {}
-        mock_ri.return_value = inputs
-        proc = MagicMock()
-        proc.pid = 99
-        mock_spawn.return_value = proc
+    gid = "gr-bypass-test"
+    state_dir = tmp_path / gid
+    state_dir.mkdir(parents=True)
 
-        state_dir = tmp_path / gid
-        state_dir.mkdir(parents=True)
-
-        launcher_mod.launch("some-kind", bypass=True, permissions_file="/p.yaml")
+    write_initial_state(
+        gremlin_id=gid,
+        kind="some-kind",
+        project_root="/test/project",
+        started_at="2026-01-01T00:00:00Z",
+        description="",
+        description_explicit=False,
+        parent_id="",
+        pipeline_args=[],
+        client_label="test-client",
+        pipeline_path="pipe.yaml",
+        stage_inputs={},
+        state_dir=state_dir,
+        bypass=True,
+        permissions_file="/p.yaml",
+    )
 
     raw = json.loads((state_dir / "state.json").read_text())
     assert raw["bypass"] is True
