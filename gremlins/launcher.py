@@ -470,7 +470,7 @@ def launch(
         raise
 
     (state_dir / "pid").write_text(str(p.pid), encoding="utf-8")
-    StateData.load(inputs.gremlin_id).patch(pid=p.pid)
+    Gremlin.patch_state_for(inputs.gremlin_id, pid=p.pid)
 
     return inputs.gremlin_id, p
 
@@ -522,7 +522,8 @@ def _patch_state_for_resume(
 
     now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    StateData.load(gremlin_id).patch(
+    Gremlin.patch_state_for(
+        gremlin_id,
         _delete=(
             "exit_code",
             "ended_at",
@@ -616,4 +617,4 @@ def resume(gremlin_id: str, *, graft: str | None = None) -> None:
         project_root,
     )
     (gremlin.state_dir / "pid").write_text(str(p.pid), encoding="utf-8")
-    StateData.load(gremlin_id).patch(pid=p.pid)
+    Gremlin.patch_state_for(gremlin_id, pid=p.pid)

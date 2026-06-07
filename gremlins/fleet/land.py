@@ -9,10 +9,7 @@ import shutil
 import subprocess
 import sys
 import time
-from typing import TYPE_CHECKING, Any, cast
-
-if TYPE_CHECKING:
-    pass
+from typing import Any, cast
 
 import gremlins.utils.git as _git
 from gremlins import paths

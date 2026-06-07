@@ -11,7 +11,7 @@ import os
 import pathlib
 import shutil
 from collections.abc import Awaitable, Callable, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 from gremlins import paths as _paths
 from gremlins.artifacts.registry import ArtifactRegistry
@@ -33,8 +33,7 @@ from gremlins.utils import git as _git_mod
 from gremlins.utils.yaml_io import YamlLoadError as _YamlLoadError
 from gremlins.utils.yaml_io import dump_yaml_text
 
-if TYPE_CHECKING:
-    from gremlins.stages.base import Stage
+from gremlins.stages.base import Stage
 
 logger = logging.getLogger(__name__)
 
@@ -550,13 +549,17 @@ class Gremlin:
         return self
 
     @staticmethod
+    def validate_id(gremlin_id: str) -> None:
+        validate_gremlin_id(gremlin_id)
+
+    @staticmethod
     def bail_info_for(gremlin_id: str) -> dict[str, str] | None:
-        """Return bail info for gremlin_id, or None if not bailed."""
+        validate_gremlin_id(gremlin_id)
         return StateData.load(gremlin_id).read_bail_info()
 
     @staticmethod
     def patch_state_for(gremlin_id: str, **fields: Any) -> None:
-        """Patch state.json for gremlin_id with the given fields."""
+        validate_gremlin_id(gremlin_id)
         StateData.load(gremlin_id).patch(**fields)
 
     @classmethod
