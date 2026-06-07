@@ -29,11 +29,10 @@ from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.pipeline.loader import STAGE_TYPES
 from gremlins.protocols import StageProtocol
+from gremlins.stages.base import Stage
 from gremlins.utils import git as _git_mod
 from gremlins.utils.yaml_io import YamlLoadError as _YamlLoadError
 from gremlins.utils.yaml_io import dump_yaml_text
-
-from gremlins.stages.base import Stage
 
 logger = logging.getLogger(__name__)
 
