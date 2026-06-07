@@ -267,18 +267,17 @@ def _child_module_patches(mod_path: str, tmp_path: pathlib.Path) -> list:
     """Return extra patches needed for the given child module."""
     if mod_path == "gremlins.spawn.child":
         # Patch paths.state_root so artifact_dir mkdir goes under tmp_path.
-        import gremlins.spawn.child as _cm
+        import gremlins.executor.gremlin as _gm
 
-        return [patch.object(_cm, "paths", **{"state_root.return_value": tmp_path})]
+        return [patch.object(_gm, "_paths", **{"state_root.return_value": tmp_path})]
     return []
 
 
 @pytest.mark.parametrize("mod_path,_label", _CHILD_MODULES)
 def test_child_build_state_bypass_policy(mod_path, _label, tmp_path):
-    import importlib
     from contextlib import ExitStack
 
-    mod = importlib.import_module(mod_path)
+    from gremlins.executor.gremlin import Gremlin
 
     fake_data = StateData(
         gremlin_id=None,
@@ -295,14 +294,20 @@ def test_child_build_state_bypass_policy(mod_path, _label, tmp_path):
         return MagicMock()
 
     with ExitStack() as stack:
-        stack.enter_context(patch(f"{mod_path}.StateData.load", return_value=fake_data))
         stack.enter_context(
-            patch(f"{mod_path}.Client.parse", side_effect=fake_client_parse)
+            patch("gremlins.executor.gremlin.StateData.load", return_value=fake_data)
         )
-        stack.enter_context(patch(f"{mod_path}.validate_policy_against_registry"))
+        stack.enter_context(
+            patch(
+                "gremlins.executor.gremlin.Client.parse", side_effect=fake_client_parse
+            )
+        )
+        stack.enter_context(
+            patch("gremlins.executor.gremlin.validate_policy_against_registry")
+        )
         for p in _child_module_patches(mod_path, tmp_path):
             stack.enter_context(p)
-        mod._build_state(spec)
+        Gremlin.from_subprocess(spec)
 
     assert len(captured_policy) == 1
     assert captured_policy[0] is not None
@@ -311,10 +316,9 @@ def test_child_build_state_bypass_policy(mod_path, _label, tmp_path):
 
 @pytest.mark.parametrize("mod_path,_label", _CHILD_MODULES)
 def test_child_build_state_project_permissions_blocks(mod_path, _label, tmp_path):
-    import importlib
     from contextlib import ExitStack
 
-    mod = importlib.import_module(mod_path)
+    from gremlins.executor.gremlin import Gremlin
 
     gremlins_dir = tmp_path / ".gremlins"
     gremlins_dir.mkdir()
@@ -337,14 +341,20 @@ def test_child_build_state_project_permissions_blocks(mod_path, _label, tmp_path
         return MagicMock()
 
     with ExitStack() as stack:
-        stack.enter_context(patch(f"{mod_path}.StateData.load", return_value=fake_data))
         stack.enter_context(
-            patch(f"{mod_path}.Client.parse", side_effect=fake_client_parse)
+            patch("gremlins.executor.gremlin.StateData.load", return_value=fake_data)
         )
-        stack.enter_context(patch(f"{mod_path}.validate_policy_against_registry"))
+        stack.enter_context(
+            patch(
+                "gremlins.executor.gremlin.Client.parse", side_effect=fake_client_parse
+            )
+        )
+        stack.enter_context(
+            patch("gremlins.executor.gremlin.validate_policy_against_registry")
+        )
         for p in _child_module_patches(mod_path, tmp_path):
             stack.enter_context(p)
-        mod._build_state(spec)
+        Gremlin.from_subprocess(spec)
 
     assert len(captured_policy) == 1
     policy = captured_policy[0]

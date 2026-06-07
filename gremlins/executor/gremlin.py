@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import importlib
 import json
 import logging
 import os
@@ -16,7 +17,14 @@ from gremlins import paths as _paths
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.client import PACKAGE_DEFAULT, Client
-from gremlins.executor.state import State, StateData, build_state
+from gremlins.executor.state import (
+    State,
+    StateData,
+    build_state,
+    validate_gremlin_id,
+)
+from gremlins.permissions.loader import load_policy
+from gremlins.permissions.validation import validate_policy_against_registry
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.discovery import resolve_pipeline_path
 from gremlins.pipeline.loader import STAGE_TYPES
@@ -540,3 +548,107 @@ class Gremlin:
             raise
 
         return self
+
+    @classmethod
+    def from_subprocess(cls, spec: dict[str, Any]) -> Gremlin:
+        """Create a Gremlin from a subprocess spec (run_child or spawn/child schema)."""
+        importlib.import_module("gremlins.clients")
+        from gremlins.clients.registry import CLIENT_FACTORIES
+
+        client_label = spec.get("client")
+        if not isinstance(client_label, str) or not client_label:
+            raise ValueError("spec missing required 'client' field")
+
+        child_id = spec.get("child_id") or None
+        if child_id:
+            validate_gremlin_id(child_id)
+            artifact_dir = _paths.state_root() / child_id / "artifacts"
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            gremlin_id = child_id
+            data = StateData.load(child_id)
+        else:
+            raw_artifact_dir = spec.get("artifact_dir")
+            if not isinstance(raw_artifact_dir, str) or not raw_artifact_dir:
+                raise ValueError("spec missing required 'artifact_dir' field")
+            artifact_dir = pathlib.Path(raw_artifact_dir)
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            gremlin_id = spec.get("gremlin_id") or None
+            if gremlin_id:
+                validate_gremlin_id(gremlin_id)
+            data = StateData.load(gremlin_id)
+
+        project_root = (
+            pathlib.Path(data.project_root)
+            if data.project_root
+            else _paths.project_root()
+        )
+        perm_file = (
+            pathlib.Path(data.permissions_file) if data.permissions_file else None
+        )
+        policy = load_policy(
+            cli_bypass=data.bypass or None,
+            cli_permissions_file=perm_file,
+            env=os.environ,
+            cwd=project_root,
+        )
+        validate_policy_against_registry(policy, set(CLIENT_FACTORIES))
+        client = Client.parse(client_label, policy=policy)
+
+        spec_attempt = spec.get("attempt") or ""
+        if spec_attempt:
+            data = dataclasses.replace(data, attempt=spec_attempt)
+
+        worktree: pathlib.Path | None = None
+        if spec.get("worktree"):
+            worktree = pathlib.Path(str(spec["worktree"]))
+
+        worktree_parent: pathlib.Path | None = None
+        if spec.get("worktree_parent"):
+            worktree_parent = pathlib.Path(str(spec["worktree_parent"]))
+
+        pipeline_data: _PipelineData | None = None
+        if spec.get("pipeline_path"):
+            try:
+                pipeline_data = _PipelineData.from_yaml(
+                    pathlib.Path(str(spec["pipeline_path"]))
+                )
+            except Exception:
+                logger.warning(
+                    "failed to load pipeline from %s",
+                    spec["pipeline_path"],
+                    exc_info=True,
+                )
+
+        state = build_state(
+            data=data,
+            client=client,
+            artifact_dir=artifact_dir,
+            pipeline_data=pipeline_data,
+            repo=str(spec.get("repo") or ""),
+            child_key=spec.get("child_key") or None,
+            parent_stage=str(spec.get("parent_stage") or ""),
+            worktree=worktree,
+            worktree_parent=worktree_parent,
+            base_ref=str(spec.get("base_ref") or ""),
+        )
+
+        if gremlin_id:
+            state_dir = _paths.state_root() / gremlin_id
+        else:
+            state_dir = artifact_dir.parent
+
+        gremlin = cls(
+            [],
+            state_dir=state_dir,
+            gremlin_id=gremlin_id,
+            pipeline_data=pipeline_data
+            or _PipelineData(name="", path=pathlib.Path("."), stages=[]),
+            worktree_dir=worktree,
+            worktree_parent=worktree_parent,
+            project_root=str(project_root),
+            repo=str(spec.get("repo") or ""),
+            base_ref=str(spec.get("base_ref") or ""),
+        )
+        gremlin.state = state
+        gremlin.registry = state.artifacts
+        return gremlin
