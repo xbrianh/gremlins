@@ -365,6 +365,16 @@ class Gremlin:
             "base_ref": self.base_ref,
         }
 
+    def build_state_for_landing(self, client: Client) -> State:
+        """Rebuild state with worktree cleared, for use in land stages.
+
+        Clears worktree_dir to ensure _cwd resolves to project_root instead,
+        suitable for land stage execution where the gremlin's worktree has
+        already been removed from disk.
+        """
+        self.worktree_dir = None
+        return build_state(**self._make_build_state_kwargs(self.state_data, client))
+
     def _collect_stages(
         self, stages: Sequence[StageProtocol]
     ) -> list[tuple[str, Callable[[], Awaitable[Any]]]]:
