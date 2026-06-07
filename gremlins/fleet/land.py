@@ -911,7 +911,9 @@ def _land_with_stage(
 
     _remove_worktree(wdir, state, cwd)
 
-    gremlin = Gremlin.open(gremlin_id, cwd_override=pathlib.Path(project_root) if project_root else None)
+    gremlin = Gremlin.open(
+        gremlin_id, cwd_override=pathlib.Path(project_root) if project_root else None
+    )
     gremlin.state = build_state(
         data=gremlin.state_data,
         client=PACKAGE_DEFAULT,

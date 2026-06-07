@@ -496,7 +496,9 @@ class Gremlin:
 
         # Populate registry if artifact directory already exists
         if gremlin.artifact_dir.is_dir():
-            registry_cwd = cwd_override if cwd_override is not None else pathlib.Path(gremlin._cwd)
+            registry_cwd = (
+                cwd_override if cwd_override is not None else pathlib.Path(gremlin._cwd)
+            )
             gremlin.registry = ArtifactRegistry(
                 artifact_dir=gremlin.artifact_dir,
                 cwd=registry_cwd,
