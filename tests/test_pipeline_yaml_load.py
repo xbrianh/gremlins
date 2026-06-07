@@ -20,6 +20,7 @@ _LOCAL_STAGE_NAMES = [
     "plan",
     "update-description",
     "implement",
+    "git-commit",
     "require-impl-progress",
     "review-code",
     "address-code",
@@ -460,9 +461,11 @@ def test_gremlins_prefix_type_resolves_directly(tmp_path: pathlib.Path) -> None:
         """,
     )
     expanded = expand_pipeline(p)
-    assert len(expanded["stages"]) == 2
+    assert len(expanded["stages"]) == 3
     assert expanded["stages"][0]["name"] == "impl-step"
     assert expanded["stages"][0]["type"] == "agent"
+    assert expanded["stages"][1]["name"] == "git-commit"
+    assert expanded["stages"][2]["name"] == "require-impl-progress"
 
 
 def test_gremlins_prefix_type_accepts_dashes(tmp_path: pathlib.Path) -> None:
@@ -533,11 +536,12 @@ def test_type_resolves_to_pipeline_file(tmp_path: pathlib.Path) -> None:
         """,
     )
     expanded = expand_pipeline(p, project_root=tmp_path)
-    assert len(expanded["stages"]) == 3
+    assert len(expanded["stages"]) == 4
     assert expanded["stages"][0]["type"] == "agent"
     assert expanded["stages"][1]["type"] == "agent"
     assert expanded["stages"][1].get("_auto_name") == "implement"
-    assert expanded["stages"][2]["name"] == "require-impl-progress"
+    assert expanded["stages"][2]["name"] == "git-commit"
+    assert expanded["stages"][3]["name"] == "require-impl-progress"
 
 
 def test_type_self_referencing_pipeline_does_not_recurse(
