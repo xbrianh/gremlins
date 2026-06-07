@@ -899,7 +899,7 @@ def _land_with_stage(
     """Run the pipeline's land: stage as the merge step, with shared teardown."""
     from gremlins.clients.client import PACKAGE_DEFAULT
     from gremlins.executor.gremlin import Gremlin
-    from gremlins.executor.state import StateData, build_state
+    from gremlins.executor.state import build_state
 
     project_root = _resolve_landing_cwd(state)
     cwd = project_root if project_root and os.path.isdir(project_root) else None
@@ -911,9 +911,9 @@ def _land_with_stage(
 
     _remove_worktree(wdir, state, cwd)
 
-    gremlin = Gremlin.open(gremlin_id)
+    gremlin = Gremlin.open(gremlin_id, cwd_override=pathlib.Path(project_root) if project_root else None)
     gremlin.state = build_state(
-        data=StateData.load(gremlin_id),
+        data=gremlin.state_data,
         client=PACKAGE_DEFAULT,
         artifact_dir=gremlin.artifact_dir,
         artifacts=gremlin.registry,
