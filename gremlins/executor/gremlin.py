@@ -506,6 +506,17 @@ class Gremlin:
 
         return gremlin
 
+    def build_state_with_cwd(self, cwd: str) -> State:
+        """Build state with a custom cwd (for landing scenarios).
+
+        Used when the landing cwd differs from the default (e.g., when walking
+        up a chain of parent gremlins to find the topmost repository).
+        """
+        state_data = StateData.load(self.gremlin_id)
+        kwargs = self._make_build_state_kwargs(state_data, PACKAGE_DEFAULT)
+        kwargs["cwd"] = cwd
+        return build_state(**kwargs)
+
     @classmethod
     def initialize_with_runtime(
         cls,
