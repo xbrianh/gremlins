@@ -13,9 +13,8 @@ stages:
     type: exec
     options:
       cmds:
-        - |
-          git add -A
-          git diff --cached --quiet || git commit -m "implement plan"
+        - git add -A
+        - git diff --cached --quiet || git commit -m "implement plan"
   - name: require-impl-progress
     type: exec
     in: { base_sha: base_sha }
