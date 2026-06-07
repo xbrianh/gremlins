@@ -632,13 +632,22 @@ class Gremlin:
             base_ref=str(spec.get("base_ref") or ""),
         )
 
-        state_dir = _paths.state_root() / (gremlin_id or "direct")
+        if gremlin_id:
+            state_dir = _paths.state_root() / gremlin_id
+        else:
+            state_dir = artifact_dir.parent
+
         gremlin = cls(
             [],
             state_dir=state_dir,
             gremlin_id=gremlin_id,
             pipeline_data=pipeline_data
             or _PipelineData(name="", path=pathlib.Path("."), stages=[]),
+            worktree_dir=worktree,
+            worktree_parent=worktree_parent,
+            project_root=str(project_root),
+            repo=str(spec.get("repo") or ""),
+            base_ref=str(spec.get("base_ref") or ""),
         )
         gremlin.state = state
         gremlin.registry = state.artifacts
