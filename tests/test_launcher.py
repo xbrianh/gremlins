@@ -1179,7 +1179,7 @@ stages:
     )
     gremlin_id = f"test-{secrets.token_hex(3)}"
     # Test that --pr flag is accepted (parsed successfully even if pipeline fails)
-    rc = launch_main(
+    launch_main(
         [
             "pr-pipeline",
             "--instructions",
@@ -1194,4 +1194,6 @@ stages:
     # (Even though execution may fail due to missing git reference)
     state_dir = _gremlins_state_root(lenv) / gremlin_id
     state_file = state_dir / "state.json"
-    assert state_file.exists(), "state.json should have been created even if execution fails"
+    assert state_file.exists(), (
+        "state.json should have been created even if execution fails"
+    )
