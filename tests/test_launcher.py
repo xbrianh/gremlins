@@ -248,6 +248,9 @@ def test_launch_custom_pipeline_default_client(lenv, tmp_path):
         """\
 name: custom
 default_client: copilot:gpt-5.4
+inputs:
+  in:
+    INSTRUCTIONS: instructions?
 stages:
   - type: exec
     options:

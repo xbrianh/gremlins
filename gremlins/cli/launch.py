@@ -13,6 +13,7 @@ from typing import Any
 from gremlins import paths as _paths
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
+from gremlins.cli.pipeline_args import resolve_pipeline
 from gremlins.clients.registry import CLIENT_FACTORIES
 from gremlins.executor.gremlin import Gremlin, write_initial_state
 from gremlins.launcher import (
@@ -25,7 +26,7 @@ from gremlins.launcher import (
 from gremlins.permissions.loader import load_policy
 from gremlins.permissions.validation import validate_policy_against_registry
 from gremlins.pipeline import Pipeline
-from gremlins.pipeline.discovery import list_pipelines, resolve_pipeline_name
+from gremlins.pipeline.discovery import list_pipelines
 from gremlins.utils.yaml_io import YamlLoadError
 
 _INFRA_ARGS = frozenset(
@@ -58,6 +59,33 @@ _INFRA_FLAG_NAMES = frozenset(
 )
 _LAUNCH_BRIEF = "usage: gremlins launch <name> [opts]\nLaunch a background gremlin by pipeline name. Run 'gremlins launch --list' to see available pipelines.\n"
 _LOG_TAIL_BYTES = 4096
+
+
+def _extract_pipeline_path(argv: list[str]) -> str | None:
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--pipeline":
+            if i + 1 < len(argv):
+                return argv[i + 1]
+            return None
+        elif argv[i].startswith("--pipeline="):
+            return argv[i][len("--pipeline=") :]
+        i += 1
+    return None
+
+
+def _filter_pipeline_arg(argv: list[str]) -> list[str]:
+    filtered: list[str] = []
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--pipeline":
+            i += 2 if i + 1 < len(argv) else 1
+        elif argv[i].startswith("--pipeline="):
+            i += 1
+        else:
+            filtered.append(argv[i])
+            i += 1
+    return filtered
 
 
 def build_launch_parser(
@@ -134,20 +162,35 @@ def launch_main(argv: list[str]) -> int:
             sys.stdout.write(f"{name}  {path.parent}  ({label})\n")
         return 0
 
-    if not argv or argv[0].startswith("-"):
+    if not argv:
+        sys.stdout.write(_LAUNCH_BRIEF)
+        return 1
+
+    pipeline_path_str = _extract_pipeline_path(argv)
+    remaining_argv = _filter_pipeline_arg(argv)
+    pipeline_args_tuple: tuple[str, ...] = ()
+
+    if pipeline_path_str:
+        name = pathlib.Path(pipeline_path_str).stem
+        pipeline_path = pipeline_path_str
+        pipeline_args_tuple = ("--pipeline", pipeline_path_str)
+    elif remaining_argv and not remaining_argv[0].startswith("-"):
+        name = remaining_argv[0]
+        remaining_argv = remaining_argv[1:]
+        try:
+            _, pipeline_path = resolve_pipeline(
+                name, tuple(remaining_argv), str(_paths.project_root())
+            )
+        except FileNotFoundError as exc:
+            sys.stderr.write(f"error: {exc}\n")
+            return 1
+        remaining_argv = _filter_pipeline_arg(remaining_argv)
+    else:
         sys.stdout.write(_LAUNCH_BRIEF)
         return 0 if ("--help" in argv or "-h" in argv) else 1
 
-    name = argv[0]
-
     try:
-        pipeline_path = resolve_pipeline_name(name, _paths.project_root())
-    except FileNotFoundError as exc:
-        sys.stderr.write(f"error: {exc}\n")
-        return 1
-
-    try:
-        pipeline = Pipeline.from_yaml(pipeline_path)
+        pipeline = Pipeline.from_yaml(pathlib.Path(pipeline_path))
     except (ValueError, YamlLoadError, FileNotFoundError) as exc:
         sys.stderr.write(
             f"error: pipeline '{name}' is invalid: {exc}\n  (file: {pipeline_path})\n"
@@ -157,7 +200,7 @@ def launch_main(argv: list[str]) -> int:
     parser = build_launch_parser(name, pipeline)
 
     try:
-        args = parser.parse_args(argv[1:])
+        args = parser.parse_args(remaining_argv)
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else 1
 
@@ -165,6 +208,7 @@ def launch_main(argv: list[str]) -> int:
     if stage_inputs.get("pr") and args.base_ref:
         sys.stderr.write("error: --pr and --base-ref are mutually exclusive\n")
         return 1
+    args.pipeline_args_tuple = pipeline_args_tuple
     return _self_background_main(name, args, stage_inputs)
 
 
@@ -188,7 +232,10 @@ def _self_background_main(
         sys.stderr.write(f"error: {exc}\n")
         return 1
 
-    pipeline_args = ("--client", args.client) if args.client else ()
+    pipeline_args_list: list[str] = list(getattr(args, "pipeline_args_tuple", ()))
+    if args.client:
+        pipeline_args_list.extend(("--client", str(args.client)))
+    pipeline_args: tuple[str, ...] = tuple(pipeline_args_list)
     try:
         inputs = resolve_inputs(
             pipeline_name,
