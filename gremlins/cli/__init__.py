@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Callable
 
@@ -65,6 +66,8 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
+
+    os.environ.setdefault("GREMLINS_CWD_OF_CLI_CMD", os.getcwd())
 
     sub = argv[0] if argv else ""
 

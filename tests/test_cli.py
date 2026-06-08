@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 from unittest.mock import MagicMock
 
@@ -430,3 +431,22 @@ def test_launch_no_name_brief_mentions_list_flag(capsys):
 def test_resume_rejects_invalid_gremlin_id(tmp_path, monkeypatch, bad_id):
     rc = main(["resume", bad_id])
     assert rc != 0
+
+
+# ---------------------------------------------------------------------------
+# GREMLINS_CWD_OF_CLI_CMD environment variable
+# ---------------------------------------------------------------------------
+
+
+def test_main_injects_cwd_when_absent(monkeypatch, tmp_path):
+    monkeypatch.delenv("GREMLINS_CWD_OF_CLI_CMD", raising=False)
+    monkeypatch.chdir(tmp_path)
+    captured_env = {}
+
+    def capture_env(argv):
+        captured_env.update(os.environ)
+        return 0
+
+    monkeypatch.setattr("gremlins.cli.fleet_main", capture_env)
+    main([])
+    assert captured_env.get("GREMLINS_CWD_OF_CLI_CMD") == str(tmp_path)
