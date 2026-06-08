@@ -107,14 +107,13 @@ def main(argv):
         argv_str = " ".join(argv)
         if any(x in argv_str for x in ["checkRuns", "check-runs", "checks"]):
             # Simulate CI completion with proper check status response
-            out = json.dumps({
-                "checkRuns": {
-                    "nodes": [{
-                        "status": "COMPLETED",
-                        "conclusion": "SUCCESS"
-                    }]
+            out = json.dumps(
+                {
+                    "checkRuns": {
+                        "nodes": [{"status": "COMPLETED", "conclusion": "SUCCESS"}]
+                    }
                 }
-            })
+            )
             sys.stdout.write(out + "\n")
             return 0
         # Default COPILOT_STATE for review status queries

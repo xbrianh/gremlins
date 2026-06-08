@@ -333,7 +333,10 @@ def test_launch_explicit_project_root(lenv):
     assert rc == 0
     state_root = _gremlins_state_root(lenv)
     state = _read_state(state_root / gremlin_id)
-    assert pathlib.Path(state["project_root"]).resolve() == pathlib.Path(lenv.repo).resolve()
+    assert (
+        pathlib.Path(state["project_root"]).resolve()
+        == pathlib.Path(lenv.repo).resolve()
+    )
     assert state["parent_id"] == parent_id
 
 
@@ -629,7 +632,9 @@ def test_full_localgremlin_pipeline(lenv, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(reason="fake gh does not properly simulate CI status completion for ci-gate stage")
+@pytest.mark.skip(
+    reason="fake gh does not properly simulate CI status completion for ci-gate stage"
+)
 def test_launch_ghgremlin_state_layout(lenv_with_gh):
     """ghgremlin creates a detached worktree off origin/<default> with correct state."""
     lenv = lenv_with_gh
