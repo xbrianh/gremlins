@@ -377,8 +377,6 @@ def _seed_registry_from_sources(
                 )
 
 
-
-
 def _check_resume_preconditions(gremlin: Gremlin, graft: str | None) -> None:
     state_data = gremlin.state_data
     status = state_data.status

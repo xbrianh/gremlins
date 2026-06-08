@@ -83,20 +83,7 @@ def _new_gremlin_id() -> str:
 class _FakeProc:
     pid = 12345
 
-    def wait(self):
-        return 0
 
-
-class _WaitableProc:
-    """Minimal proc-like object that waits for a gremlin's finished marker."""
-
-    def __init__(self, state_dir: pathlib.Path):
-        self._state_dir = state_dir
-
-    def wait(self, timeout: float = 120.0) -> int:
-        _wait_for_finished(self._state_dir, timeout=timeout)
-        state = _read_state(self._state_dir)
-        return state.get("exit_code", 1)
 
 
 # ---------------------------------------------------------------------------
@@ -300,8 +287,8 @@ def test_launch_spawned_process_detached(lenv):
         pass  # already exited; that's fine
 
 
-def test_launch_concurrent_no_collision(lenv):
-    """Concurrent launches produce distinct GREMLIN_IDs."""
+def test_launch_multiple_explicit_ids(lenv):
+    """Multiple launches with distinct explicit IDs succeed."""
     gremlin_ids = [_new_gremlin_id() for _ in range(5)]
     state_root = _gremlins_state_root(lenv)
     for i, gremlin_id in enumerate(gremlin_ids):
@@ -309,7 +296,7 @@ def test_launch_concurrent_no_collision(lenv):
         assert rc == 0
     assert len(set(gremlin_ids)) == len(gremlin_ids), f"GREMLIN_ID collision among: {gremlin_ids}"
     for gremlin_id in gremlin_ids:
-        _WaitableProc(state_root / gremlin_id).wait()
+        _wait_for_finished(state_root / gremlin_id)
 
 
 def test_launch_explicit_project_root(lenv):
@@ -927,8 +914,6 @@ def test_launch_explicit_gremlin_id(lenv, monkeypatch):
 
 def test_launch_invalid_gremlin_id_rejected(lenv, monkeypatch):
     """launch_main(--gremlin-id ...) returns non-zero for ids that fail validate_gremlin_id."""
-    launcher = _launcher()
-    monkeypatch.setattr(launcher, "_spawn_logged_process", lambda *a, **kw: _FakeProc())
     rc = launch_main([
         "local",
         "--instructions", "bad id test",
@@ -939,8 +924,6 @@ def test_launch_invalid_gremlin_id_rejected(lenv, monkeypatch):
 
 def test_launch_gremlin_id_pipeline_name_rejected(lenv, monkeypatch):
     """launch_main(--gremlin-id ...) returns non-zero when id matches a pipeline name."""
-    launcher = _launcher()
-    monkeypatch.setattr(launcher, "_spawn_logged_process", lambda *a, **kw: _FakeProc())
     rc = launch_main([
         "local",
         "--instructions", "pipeline collision test",
