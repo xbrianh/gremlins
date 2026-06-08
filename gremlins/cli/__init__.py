@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Callable
 
@@ -65,6 +66,15 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
+
+    if "GREMLINS_CWD_OF_CLI_CMD" in os.environ:
+        print(
+            "Warning: GREMLINS_CWD_OF_CLI_CMD is already set in the environment; "
+            "keeping existing value",
+            file=sys.stderr,
+        )
+    else:
+        os.environ["GREMLINS_CWD_OF_CLI_CMD"] = os.getcwd()
 
     sub = argv[0] if argv else ""
 

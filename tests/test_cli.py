@@ -430,3 +430,48 @@ def test_launch_no_name_brief_mentions_list_flag(capsys):
 def test_resume_rejects_invalid_gremlin_id(tmp_path, monkeypatch, bad_id):
     rc = main(["resume", bad_id])
     assert rc != 0
+
+
+# ---------------------------------------------------------------------------
+# GREMLINS_CWD_OF_CLI_CMD environment variable
+# ---------------------------------------------------------------------------
+
+
+def test_main_injects_cwd_when_absent(monkeypatch, tmp_path):
+    """When GREMLINS_CWD_OF_CLI_CMD is absent, main() sets it to os.getcwd()."""
+    import os
+
+    monkeypatch.delenv("GREMLINS_CWD_OF_CLI_CMD", raising=False)
+    original_cwd = os.getcwd()
+    try:
+        monkeypatch.chdir(tmp_path)
+        captured_env = {}
+
+        def capture_env(argv):
+            captured_env.update(os.environ)
+            return 0
+
+        monkeypatch.setattr("gremlins.cli.fleet_main", capture_env)
+        main([])
+        assert captured_env.get("GREMLINS_CWD_OF_CLI_CMD") == str(tmp_path)
+    finally:
+        monkeypatch.chdir(original_cwd)
+
+
+def test_main_preserves_cwd_when_present(monkeypatch, capsys):
+    """When GREMLINS_CWD_OF_CLI_CMD is already set, main() leaves it unchanged and warns."""
+    import os
+
+    original_value = "/some/original/path"
+    monkeypatch.setenv("GREMLINS_CWD_OF_CLI_CMD", original_value)
+
+    def no_op(argv):
+        return 0
+
+    monkeypatch.setattr("gremlins.cli.fleet_main", no_op)
+    main([])
+
+    assert os.environ.get("GREMLINS_CWD_OF_CLI_CMD") == original_value
+    stderr = capsys.readouterr().err
+    assert "GREMLINS_CWD_OF_CLI_CMD" in stderr
+    assert "already set" in stderr
