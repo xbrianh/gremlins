@@ -226,7 +226,6 @@ def _self_background_main(
                 else "",
             )
             artifact_dir = state_dir / "artifacts"
-            artifact_dir.mkdir(parents=True, exist_ok=True)
             registry = ArtifactRegistry(artifact_dir=artifact_dir)
             if inputs.base_ref_sha:
                 registry.bind(

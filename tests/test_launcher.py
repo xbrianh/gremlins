@@ -241,6 +241,36 @@ def test_launch_persists_last_repeated_cli_client(lenv):
     assert state["client"] == "copilot:gpt-5.4"
 
 
+def test_launch_custom_pipeline_default_client(lenv, tmp_path):
+    """A custom pipeline via --pipeline stores the effective provider/model label."""
+    pipeline_yaml = tmp_path / "custom.yaml"
+    pipeline_yaml.write_text(
+        """\
+name: custom
+default_client: copilot:gpt-5.4
+stages:
+  - type: exec
+    options:
+      cmds:
+        - "true"
+""",
+        encoding="utf-8",
+    )
+    gremlin_id = _new_gremlin_id()
+    rc = launch_main(
+        [
+            f"--pipeline={pipeline_yaml}",
+            "--instructions",
+            "test custom pipeline client",
+            "--gremlin-id",
+            gremlin_id,
+        ]
+    )
+    assert rc == 0
+    state = _read_state(_gremlins_state_root(lenv) / gremlin_id)
+    assert state["client"] == "copilot:gpt-5.4"
+
+
 def test_launch_ghgremlin_persists_pipeline_default_client(lenv_with_gh):
     """ghgremlin stores the default provider/model label."""
     gremlin_id = _new_gremlin_id()
@@ -632,9 +662,6 @@ def test_full_localgremlin_pipeline(lenv, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(
-    reason="fake gh does not properly simulate CI status completion for ci-gate stage"
-)
 def test_launch_ghgremlin_state_layout(lenv_with_gh):
     """ghgremlin creates a detached worktree off origin/<default> with correct state."""
     lenv = lenv_with_gh
@@ -879,12 +906,31 @@ def test_setup_workdir_non_git_raises(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_launch_persists_stage_inputs(lenv):
+def test_launch_persists_stage_inputs(lenv, tmp_path):
     """stage_inputs dict is written verbatim to state.json."""
+    pipeline_yaml = tmp_path / "test_pipeline.yaml"
+    pipeline_yaml.write_text(
+        """\
+name: test_pipeline
+default_client: claude:sonnet
+
+inputs:
+  in:
+    INSTRUCTIONS: instructions?
+    EXTRA_KEY: extra_key?
+
+stages:
+  - type: exec
+    options:
+      cmds:
+        - "true"
+""",
+        encoding="utf-8",
+    )
     gremlin_id = _new_gremlin_id()
     rc = launch_main(
         [
-            "local",
+            f"--pipeline={pipeline_yaml}",
             "--instructions",
             "do the thing",
             "--extra-key",
@@ -898,7 +944,6 @@ def test_launch_persists_stage_inputs(lenv):
     assert state["stage_inputs"] == {
         "instructions": "do the thing",
         "extra_key": "val",
-        "plan-document": None,
     }
 
 
@@ -951,10 +996,8 @@ def test_stage_inputs_survives_resume(lenv, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_launch_explicit_gremlin_id(lenv, monkeypatch):
+def test_launch_explicit_gremlin_id(lenv):
     """launch_main(--gremlin-id ...) uses the supplied id verbatim."""
-    launcher = _launcher()
-    monkeypatch.setattr(launcher, "_spawn_logged_process", lambda *a, **kw: _FakeProc())
     rc = launch_main(
         [
             "local",

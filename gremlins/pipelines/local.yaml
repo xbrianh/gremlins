@@ -6,7 +6,6 @@ inputs:
   in:
     INSTRUCTIONS: instructions?
     PLAN: plan-document?
-    EXTRA_KEY: extra_key?
 
 prompts:
   code-style: gremlins:code_style.md

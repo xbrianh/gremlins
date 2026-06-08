@@ -92,7 +92,18 @@ def main(argv):
         return 0
 
     if sub == "pr" and len(argv) >= 2 and argv[1] == "create":
-        sys.stdout.write("123\n")
+        url = f"https://github.com/{repo}/pull/123"
+        sys.stdout.write(url + "\n")
+        return 0
+    if sub == "pr" and len(argv) >= 2 and argv[1] == "view":
+        if "--json" in argv:
+            out = json.dumps({
+                "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+                "reviewDecision": "APPROVED",
+                "headRefOid": "abc123def456"
+            })
+            sys.stdout.write(out + "\n")
+            return 0
         return 0
     if sub == "pr" and len(argv) >= 2 and argv[1] == "edit":
         return 0

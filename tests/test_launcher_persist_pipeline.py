@@ -17,7 +17,7 @@ def _new_gremlin_id() -> str:
 
 
 # ---------------------------------------------------------------------------
-# _persist_expanded_pipeline — unit tests
+# persist_expanded_pipeline — unit tests
 # ---------------------------------------------------------------------------
 
 
