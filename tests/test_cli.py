@@ -439,7 +439,6 @@ def test_resume_rejects_invalid_gremlin_id(tmp_path, monkeypatch, bad_id):
 
 
 def test_main_injects_cwd_when_absent(monkeypatch, tmp_path):
-    """When GREMLINS_CWD_OF_CLI_CMD is absent, main() sets it to os.getcwd()."""
     monkeypatch.delenv("GREMLINS_CWD_OF_CLI_CMD", raising=False)
     monkeypatch.chdir(tmp_path)
     captured_env = {}
