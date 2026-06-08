@@ -215,10 +215,10 @@ def test_launch_short_help_flag_prints_help_exits_zero(capsys):
 
 
 def test_launch_unknown_kind_exits_nonzero_with_error(monkeypatch, capsys):
-    def _raise(name, root):
+    def _raise(name, argv, root):
         raise FileNotFoundError(f"pipeline {name!r} not found")
 
-    monkeypatch.setattr("gremlins.cli.launch.resolve_pipeline_name", _raise)
+    monkeypatch.setattr("gremlins.cli.launch.resolve_pipeline", _raise)
     rc = main(["launch", "bogus"])
     assert rc != 0
     assert "bogus" in capsys.readouterr().err
@@ -248,8 +248,8 @@ def _make_fake_pipeline():
 
 def test_launch_unified_dispatch_calls_launch(monkeypatch):
     monkeypatch.setattr(
-        "gremlins.cli.launch.resolve_pipeline_name",
-        lambda name, root: pathlib.Path(f"/fake/{name}.yaml"),
+        "gremlins.cli.launch.resolve_pipeline",
+        lambda name, argv, root: (name, f"/fake/{name}.yaml"),
     )
     monkeypatch.setattr(
         "gremlins.cli.launch.Pipeline.from_yaml", lambda path: _make_fake_pipeline()
@@ -308,10 +308,10 @@ def test_launch_unified_dispatch_help_no_name_exits_zero(capsys):
 
 
 def test_launch_unified_dispatch_unknown_name_exits_nonzero(monkeypatch, capsys):
-    def _raise(name, root):
+    def _raise(name, argv, root):
         raise FileNotFoundError(f"pipeline {name!r} not found; available: local, gh")
 
-    monkeypatch.setattr("gremlins.cli.launch.resolve_pipeline_name", _raise)
+    monkeypatch.setattr("gremlins.cli.launch.resolve_pipeline", _raise)
     rc = main(["launch", "bogus"])
     assert rc != 0
     assert "bogus" in capsys.readouterr().err
@@ -320,10 +320,10 @@ def test_launch_unified_dispatch_unknown_name_exits_nonzero(monkeypatch, capsys)
 def test_launch_unified_dispatch_unknown_name_with_help_exits_nonzero(
     monkeypatch, capsys
 ):
-    def _raise(name, root):
+    def _raise(name, argv, root):
         raise FileNotFoundError(f"pipeline {name!r} not found; available: local, gh")
 
-    monkeypatch.setattr("gremlins.cli.launch.resolve_pipeline_name", _raise)
+    monkeypatch.setattr("gremlins.cli.launch.resolve_pipeline", _raise)
     rc = main(["launch", "bogus", "--help"])
     assert rc != 0
     assert "bogus" in capsys.readouterr().err
@@ -339,8 +339,8 @@ def test_launch_unified_dispatch_unknown_name_with_help_exits_nonzero(
 )
 def test_launch_invalid_pipeline_exits_nonzero_with_message(monkeypatch, capsys, exc):
     monkeypatch.setattr(
-        "gremlins.cli.launch.resolve_pipeline_name",
-        lambda name, root: pathlib.Path(f"/fake/{name}.yaml"),
+        "gremlins.cli.launch.resolve_pipeline",
+        lambda name, argv, root: (name, f"/fake/{name}.yaml"),
     )
 
     def _raise(_path):
@@ -364,8 +364,8 @@ def test_launch_invalid_pipeline_exits_nonzero_with_message(monkeypatch, capsys,
 
 def test_launch_unified_dispatch_help_for_resolved_pipeline(monkeypatch, capsys):
     monkeypatch.setattr(
-        "gremlins.cli.launch.resolve_pipeline_name",
-        lambda name, root: pathlib.Path(f"/fake/{name}.yaml"),
+        "gremlins.cli.launch.resolve_pipeline",
+        lambda name, argv, root: (name, f"/fake/{name}.yaml"),
     )
     monkeypatch.setattr(
         "gremlins.cli.launch.Pipeline.from_yaml", lambda path: _make_fake_pipeline()
