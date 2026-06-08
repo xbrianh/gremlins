@@ -158,7 +158,7 @@ def _resolve_base_ref(
     return effective_base_ref, ""
 
 
-def _resolve_inputs(
+def resolve_inputs(
     kind: str,
     stage_inputs: dict[str, Any],
     description: str | None,
@@ -237,7 +237,7 @@ def _resolve_inputs(
     )
 
 
-def _prepare_state_dir(state_dir: pathlib.Path) -> None:
+def prepare_state_dir(state_dir: pathlib.Path) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "artifacts").mkdir(exist_ok=True)
 
@@ -316,7 +316,7 @@ def _append_graft(
     return name
 
 
-def _persist_expanded_pipeline(state_dir: pathlib.Path, pipeline_path: str) -> str:
+def persist_expanded_pipeline(state_dir: pathlib.Path, pipeline_path: str) -> str:
     from gremlins.pipeline.preprocess import expand_pipeline
     from gremlins.utils.yaml_io import dump_yaml_text
 
@@ -327,7 +327,7 @@ def _persist_expanded_pipeline(state_dir: pathlib.Path, pipeline_path: str) -> s
     return str(dest)
 
 
-def _spawn(gremlin_id: str, inputs: _Inputs, state_dir: pathlib.Path) -> Any:
+def spawn(gremlin_id: str, inputs: _Inputs, state_dir: pathlib.Path) -> Any:
     spawn_args = list(inputs.pipeline_args)
     cmd = [
         sys.executable,
@@ -342,7 +342,7 @@ def _spawn(gremlin_id: str, inputs: _Inputs, state_dir: pathlib.Path) -> Any:
     )
 
 
-def _seed_registry_from_sources(
+def seed_registry_from_sources(
     registry: ArtifactRegistry,
     input_values: dict[str, str],
     sources: dict[str, Any],
