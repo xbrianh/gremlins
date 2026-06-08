@@ -91,6 +91,9 @@ def main(argv):
         sys.stdout.write(out + "\n")
         return 0
 
+    if sub == "pr" and len(argv) >= 2 and argv[1] == "create":
+        sys.stdout.write("123\n")
+        return 0
     if sub == "pr" and len(argv) >= 2 and argv[1] == "edit":
         return 0
     if sub == "pr" and len(argv) >= 2 and argv[1] == "diff":
@@ -100,6 +103,21 @@ def main(argv):
         return 0
 
     if sub == "api":
+        # Return CI status as completed so ci-gate stage doesn't hang
+        argv_str = " ".join(argv)
+        if any(x in argv_str for x in ["checkRuns", "check-runs", "checks"]):
+            # Simulate CI completion with proper check status response
+            out = json.dumps({
+                "checkRuns": {
+                    "nodes": [{
+                        "status": "COMPLETED",
+                        "conclusion": "SUCCESS"
+                    }]
+                }
+            })
+            sys.stdout.write(out + "\n")
+            return 0
+        # Default COPILOT_STATE for review status queries
         state = os.environ.get("FAKE_GH_COPILOT_STATE", "APPROVED")
         sys.stdout.write(state + "\n")
         return 0

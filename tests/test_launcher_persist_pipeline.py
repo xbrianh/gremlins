@@ -22,8 +22,8 @@ def _new_gremlin_id() -> str:
 
 
 def test_persist_expanded_pipeline_writes_file(tmp_path):
-    """_persist_expanded_pipeline writes a valid YAML file to the state dir."""
-    from gremlins.launcher import _persist_expanded_pipeline
+    """persist_expanded_pipeline writes a valid YAML file to the state dir."""
+    from gremlins.launcher import persist_expanded_pipeline
 
     pipeline_yaml = tmp_path / "proj.yaml"
     pipeline_yaml.write_text(
@@ -43,7 +43,7 @@ stages:
 
     state_dir = tmp_path / "state"
     state_dir.mkdir()
-    dest = _persist_expanded_pipeline(state_dir, str(pipeline_yaml))
+    dest = persist_expanded_pipeline(state_dir, str(pipeline_yaml))
 
     assert dest == str(state_dir / "pipeline.yaml")
     assert (state_dir / "pipeline.yaml").is_file()
@@ -57,7 +57,7 @@ stages:
 
 def test_persist_expanded_pipeline_roundtrips_via_pipeline_from_yaml(tmp_path):
     """Pipeline.from_yaml on the persisted copy produces the same stages as the original."""
-    from gremlins.launcher import _persist_expanded_pipeline
+    from gremlins.launcher import persist_expanded_pipeline
 
     pipeline_yaml = tmp_path / "proj.yaml"
     pipeline_yaml.write_text(
@@ -74,7 +74,7 @@ stages:
 
     state_dir = tmp_path / "state"
     state_dir.mkdir()
-    dest = _persist_expanded_pipeline(state_dir, str(pipeline_yaml))
+    dest = persist_expanded_pipeline(state_dir, str(pipeline_yaml))
 
     original = Pipeline.from_yaml(pipeline_yaml)
     persisted = Pipeline.from_yaml(pathlib.Path(dest))
