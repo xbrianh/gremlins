@@ -37,9 +37,31 @@ def _args(**overrides):
 
 
 def _run(args, *, fake_id="gr-perm01"):
+    from unittest.mock import MagicMock
+
     proc = _fake_proc(poll_return=None)
+    fake_inputs = MagicMock()
+    fake_inputs.gremlin_id = fake_id
+    fake_inputs.kind = "local"
+    fake_inputs.project_root = "/tmp"
+    fake_inputs.description = ""
+    fake_inputs.description_explicit = False
+    fake_inputs.parent_id = ""
+    fake_inputs.pipeline_args = []
+    fake_inputs.client_label = ""
+    fake_inputs.pipeline_path = "pipeline.yaml"
+    fake_inputs.stage_inputs = {}
+    fake_inputs.base_ref_sha = ""
+    fake_inputs.base_ref_name = ""
+    fake_inputs.loaded_pipeline = None
     with (
-        patch("gremlins.cli.launch.launch", return_value=(fake_id, proc)),
+        patch("gremlins.cli.launch.resolve_inputs", return_value=fake_inputs),
+        patch("gremlins.cli.launch.prepare_state_dir"),
+        patch("gremlins.cli.launch.persist_expanded_pipeline"),
+        patch("gremlins.cli.launch.write_initial_state"),
+        patch("gremlins.cli.launch.Gremlin"),
+        patch("gremlins.cli.launch.ArtifactRegistry"),
+        patch("gremlins.cli.launch.spawn", return_value=proc),
         patch("gremlins.cli.launch.time.sleep"),
         patch("gremlins.cli.launch.time.time", side_effect=[0, 100]),
     ):
@@ -204,30 +226,55 @@ def test_statedata_bypass_load(tmp_path, monkeypatch):
 
 
 def test_launch_persists_bypass(tmp_path, monkeypatch):
-    import gremlins.launcher as launcher_mod
+    import argparse
 
-    monkeypatch.setattr(launcher_mod, "_state_root", lambda: tmp_path)
+    from gremlins.cli.launch import _self_background_main
+
+    monkeypatch.setattr("gremlins.paths.state_root", lambda: tmp_path)
+
+    gid = "gr-bypass-test"
+    fake_inputs = MagicMock()
+    fake_inputs.gremlin_id = gid
+    fake_inputs.kind = "some-kind"
+    fake_inputs.description = ""
+    fake_inputs.description_explicit = False
+    fake_inputs.parent_id = ""
+    fake_inputs.project_root = "/test/project"
+    fake_inputs.pipeline_path = "pipe.yaml"
+    fake_inputs.pipeline_args = []
+    fake_inputs.client_label = "test-client"
+    fake_inputs.stage_inputs = {}
+    fake_inputs.base_ref_sha = ""
+    fake_inputs.base_ref_name = ""
+    fake_inputs.loaded_pipeline = None
+
+    perm_file = tmp_path / "perms.yaml"
+    perm_file.write_text("bypass_permissions: true\n")
+
+    args = argparse.Namespace(
+        client=None,
+        description=None,
+        parent_id=None,
+        base_ref=None,
+        gremlin_id=None,
+        print_id_only=False,
+        print_id=False,
+        wait=False,
+        bypass=True,
+        permissions_file=perm_file,
+    )
+
     with (
-        patch.object(launcher_mod, "_resolve_inputs") as mock_ri,
-        patch.object(launcher_mod, "_prepare_state_dir"),
-        patch.object(
-            launcher_mod, "_persist_expanded_pipeline", return_value="pipe.yaml"
-        ),
-        patch.object(launcher_mod, "_spawn") as mock_spawn,
+        patch("gremlins.cli.launch.resolve_inputs", return_value=fake_inputs),
+        patch("gremlins.cli.launch.prepare_state_dir"),
+        patch("gremlins.cli.launch.persist_expanded_pipeline"),
+        patch("gremlins.cli.launch.write_initial_state") as mock_write,
+        patch("gremlins.cli.launch.Gremlin"),
+        patch("gremlins.cli.launch.ArtifactRegistry"),
+        patch("gremlins.cli.launch.spawn") as mock_spawn,
+        patch("gremlins.cli.launch.time.sleep"),
+        patch("gremlins.cli.launch.time.time", side_effect=[0, 100]),
     ):
-        gid = "gr-bypass-test"
-        inputs = MagicMock()
-        inputs.gremlin_id = gid
-        inputs.kind = "some-kind"
-        inputs.description = ""
-        inputs.description_explicit = False
-        inputs.parent_id = ""
-        inputs.project_root = "/test/project"
-        inputs.pipeline_path = "pipe.yaml"
-        inputs.pipeline_args = []
-        inputs.client_label = "test-client"
-        inputs.stage_inputs = {}
-        mock_ri.return_value = inputs
         proc = MagicMock()
         proc.pid = 99
         mock_spawn.return_value = proc
@@ -235,11 +282,12 @@ def test_launch_persists_bypass(tmp_path, monkeypatch):
         state_dir = tmp_path / gid
         state_dir.mkdir(parents=True)
 
-        launcher_mod.launch("some-kind", bypass=True, permissions_file="/p.yaml")
+        _self_background_main("some-kind", args, {})
 
-    raw = json.loads((state_dir / "state.json").read_text())
-    assert raw["bypass"] is True
-    assert raw["permissions_file"] == "/p.yaml"
+        mock_write.assert_called_once()
+        call_kwargs = mock_write.call_args.kwargs
+        assert call_kwargs["bypass"] is True
+        assert call_kwargs["permissions_file"] == str(perm_file.resolve())
 
 
 # --- child _build_state reconstructs policy from StateData ---

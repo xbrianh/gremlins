@@ -81,6 +81,9 @@ def _new_gremlin_id() -> str:
 class _FakeProc:
     pid = 12345
 
+    def poll(self):
+        return None
+
 
 # ---------------------------------------------------------------------------
 # launch_main() — basic contracts

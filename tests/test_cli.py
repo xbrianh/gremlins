@@ -254,25 +254,45 @@ def test_launch_unified_dispatch_calls_launch(monkeypatch):
     monkeypatch.setattr(
         "gremlins.cli.launch.Pipeline.from_yaml", lambda path: _make_fake_pipeline()
     )
-    launched = []
+    resolved_inputs = []
     fake_proc = MagicMock()
     fake_proc.poll.return_value = None
 
-    def _fake_launch(kind, **kw):
-        launched.append((kind, kw))
-        return "gr-abc123", fake_proc
+    def _fake_resolve_inputs(kind, stage_inputs, *args, **kw):
+        resolved_inputs.append((kind, stage_inputs))
+        inputs = MagicMock()
+        inputs.gremlin_id = "gr-abc123"
+        inputs.kind = kind
+        inputs.project_root = "/tmp"
+        inputs.description = ""
+        inputs.description_explicit = False
+        inputs.parent_id = ""
+        inputs.pipeline_args = []
+        inputs.client_label = ""
+        inputs.pipeline_path = "pipeline.yaml"
+        inputs.stage_inputs = stage_inputs
+        inputs.base_ref_sha = ""
+        inputs.base_ref_name = ""
+        inputs.loaded_pipeline = None
+        return inputs
 
-    monkeypatch.setattr("gremlins.cli.launch.launch", _fake_launch)
+    monkeypatch.setattr("gremlins.cli.launch.resolve_inputs", _fake_resolve_inputs)
+    monkeypatch.setattr("gremlins.cli.launch.prepare_state_dir", MagicMock())
+    monkeypatch.setattr("gremlins.cli.launch.persist_expanded_pipeline", MagicMock())
+    monkeypatch.setattr("gremlins.cli.launch.write_initial_state", MagicMock())
+    monkeypatch.setattr("gremlins.cli.launch.Gremlin", MagicMock())
+    monkeypatch.setattr("gremlins.cli.launch.ArtifactRegistry", MagicMock())
+    monkeypatch.setattr("gremlins.cli.launch.spawn", lambda *args, **kw: fake_proc)
     times = iter([0, 100])
     monkeypatch.setattr("gremlins.cli.launch.time.sleep", lambda x: None)
     monkeypatch.setattr("gremlins.cli.launch.time.time", lambda: next(times))
 
     rc = main(["launch", "local", "--instructions", "fix the bug"])
     assert rc == 0
-    assert len(launched) == 1
-    kind, kw = launched[0]
+    assert len(resolved_inputs) == 1
+    kind, stage_inputs = resolved_inputs[0]
     assert kind == "local"
-    assert kw["stage_inputs"].get("instructions") == "fix the bug"
+    assert stage_inputs.get("instructions") == "fix the bug"
 
 
 def test_launch_unified_dispatch_no_name_exits_nonzero(capsys):
@@ -327,9 +347,10 @@ def test_launch_invalid_pipeline_exits_nonzero_with_message(monkeypatch, capsys,
         raise exc
 
     monkeypatch.setattr("gremlins.cli.launch.Pipeline.from_yaml", _raise)
-    launched = []
+    resolved_inputs_calls = []
     monkeypatch.setattr(
-        "gremlins.cli.launch.launch", lambda *a, **kw: launched.append(1) or "gr-x"
+        "gremlins.cli.launch.resolve_inputs",
+        lambda *a, **kw: resolved_inputs_calls.append(1) or MagicMock(),
     )
 
     rc = main(["launch", "my-pipeline"])
@@ -338,7 +359,7 @@ def test_launch_invalid_pipeline_exits_nonzero_with_message(monkeypatch, capsys,
     err = capsys.readouterr().err
     assert "my-pipeline" in err
     assert "invalid" in err
-    assert not launched
+    assert not resolved_inputs_calls
 
 
 def test_launch_unified_dispatch_help_for_resolved_pipeline(monkeypatch, capsys):

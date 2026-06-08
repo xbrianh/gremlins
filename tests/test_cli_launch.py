@@ -23,6 +23,24 @@ def _pipeline_with_inputs(in_map: dict[str, str] | None) -> Pipeline:
     return p
 
 
+def _make_fake_inputs(gremlin_id: str = "gr-test01", stage_inputs: dict | None = None):
+    inputs = MagicMock()
+    inputs.gremlin_id = gremlin_id
+    inputs.kind = "local"
+    inputs.project_root = "/tmp"
+    inputs.description = ""
+    inputs.description_explicit = False
+    inputs.parent_id = ""
+    inputs.pipeline_args = []
+    inputs.client_label = ""
+    inputs.pipeline_path = "pipeline.yaml"
+    inputs.stage_inputs = stage_inputs or {}
+    inputs.base_ref_sha = ""
+    inputs.base_ref_name = ""
+    inputs.loaded_pipeline = None
+    return inputs
+
+
 def test_wait_blocks_and_returns_exit_code():
     fake_proc = MagicMock()
     fake_proc.poll.return_value = None
@@ -41,7 +59,16 @@ def test_wait_blocks_and_returns_exit_code():
         permissions_file=None,
     )
     with (
-        patch("gremlins.cli.launch.launch", return_value=(fake_id, fake_proc)),
+        patch(
+            "gremlins.cli.launch.resolve_inputs",
+            return_value=_make_fake_inputs(fake_id),
+        ),
+        patch("gremlins.cli.launch.prepare_state_dir"),
+        patch("gremlins.cli.launch.persist_expanded_pipeline"),
+        patch("gremlins.cli.launch.write_initial_state"),
+        patch("gremlins.cli.launch.Gremlin"),
+        patch("gremlins.cli.launch.ArtifactRegistry"),
+        patch("gremlins.cli.launch.spawn", return_value=fake_proc),
         patch("gremlins.cli.launch.time.sleep"),
         patch("gremlins.cli.launch.time.time", side_effect=[0, 100]),
     ):
@@ -51,7 +78,7 @@ def test_wait_blocks_and_returns_exit_code():
 
 
 def test_pr_flag_forwarded_to_launch():
-    """PR passed via --pr lands in stage_inputs, which launch reads from."""
+    """PR passed via --pr lands in stage_inputs, which resolve_inputs reads from."""
     fake_proc = MagicMock()
     fake_proc.poll.return_value = None
     fake_id = "gr-prtest1"
@@ -60,15 +87,21 @@ def test_pr_flag_forwarded_to_launch():
     stage_inputs = {"pr": args.pr}
     with (
         patch(
-            "gremlins.cli.launch.launch", return_value=(fake_id, fake_proc)
-        ) as mock_launch,
+            "gremlins.cli.launch.resolve_inputs",
+            return_value=_make_fake_inputs(fake_id, stage_inputs),
+        ) as mock_resolve,
+        patch("gremlins.cli.launch.prepare_state_dir"),
+        patch("gremlins.cli.launch.persist_expanded_pipeline"),
+        patch("gremlins.cli.launch.write_initial_state"),
+        patch("gremlins.cli.launch.Gremlin"),
+        patch("gremlins.cli.launch.ArtifactRegistry"),
+        patch("gremlins.cli.launch.spawn", return_value=fake_proc),
         patch("gremlins.cli.launch.time.sleep"),
         patch("gremlins.cli.launch.time.time", side_effect=[0, 100]),
     ):
         _self_background_main("some-pipeline", args, stage_inputs)
-    mock_launch.assert_called_once()
-    assert mock_launch.call_args.kwargs.get("stage_inputs", {}).get("pr") == "697"
-    assert mock_launch.call_args.kwargs.get("base_ref") is None
+    mock_resolve.assert_called_once()
+    assert mock_resolve.call_args[0][1].get("pr") == "697"
 
 
 def test_no_wait_returns_zero():
@@ -88,7 +121,16 @@ def test_no_wait_returns_zero():
         permissions_file=None,
     )
     with (
-        patch("gremlins.cli.launch.launch", return_value=(fake_id, fake_proc)),
+        patch(
+            "gremlins.cli.launch.resolve_inputs",
+            return_value=_make_fake_inputs(fake_id),
+        ),
+        patch("gremlins.cli.launch.prepare_state_dir"),
+        patch("gremlins.cli.launch.persist_expanded_pipeline"),
+        patch("gremlins.cli.launch.write_initial_state"),
+        patch("gremlins.cli.launch.Gremlin"),
+        patch("gremlins.cli.launch.ArtifactRegistry"),
+        patch("gremlins.cli.launch.spawn", return_value=fake_proc),
         patch("gremlins.cli.launch.time.sleep"),
         patch("gremlins.cli.launch.time.time", side_effect=[0, 100]),
     ):
@@ -113,7 +155,20 @@ def test_early_death_returns_exit_code(capsys):
         bypass=False,
         permissions_file=None,
     )
-    with patch("gremlins.cli.launch.launch", return_value=(fake_id, fake_proc)):
+    with (
+        patch(
+            "gremlins.cli.launch.resolve_inputs",
+            return_value=_make_fake_inputs(fake_id),
+        ),
+        patch("gremlins.cli.launch.prepare_state_dir"),
+        patch("gremlins.cli.launch.persist_expanded_pipeline"),
+        patch("gremlins.cli.launch.write_initial_state"),
+        patch("gremlins.cli.launch.Gremlin"),
+        patch("gremlins.cli.launch.ArtifactRegistry"),
+        patch("gremlins.cli.launch.spawn", return_value=fake_proc),
+        patch("gremlins.cli.launch.time.sleep"),
+        patch("gremlins.cli.launch.time.time", side_effect=[0, 100]),
+    ):
         rc = _self_background_main("some-pipeline", args, {})
     assert rc == 2
     assert "exited early with code 2" in capsys.readouterr().err
@@ -146,7 +201,16 @@ def test_self_background_main_populates_registry_before_validation(monkeypatch):
     )
     try:
         with (
-            patch("gremlins.cli.launch.launch", return_value=("gr-reg01", fake_proc)),
+            patch(
+                "gremlins.cli.launch.resolve_inputs",
+                return_value=_make_fake_inputs("gr-reg01"),
+            ),
+            patch("gremlins.cli.launch.prepare_state_dir"),
+            patch("gremlins.cli.launch.persist_expanded_pipeline"),
+            patch("gremlins.cli.launch.write_initial_state"),
+            patch("gremlins.cli.launch.Gremlin"),
+            patch("gremlins.cli.launch.ArtifactRegistry"),
+            patch("gremlins.cli.launch.spawn", return_value=fake_proc),
             patch("gremlins.cli.launch.time.sleep"),
             patch("gremlins.cli.launch.time.time", side_effect=[0, 100]),
         ):
