@@ -13,7 +13,6 @@ import os
 import pathlib
 import secrets
 import shutil
-import subprocess
 import sys
 from typing import Any, cast
 
@@ -21,7 +20,7 @@ from gremlins import paths as _paths
 from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.artifacts.uri import Uri
 from gremlins.clients.client import PACKAGE_DEFAULT
-from gremlins.executor.gremlin import Gremlin, validate_gremlin_id, write_initial_state
+from gremlins.executor.gremlin import Gremlin, validate_gremlin_id
 from gremlins.pipeline import Pipeline as _PipelineData
 from gremlins.pipeline.discovery import list_pipelines, resolve_pipeline_path
 from gremlins.utils import git as _git_mod

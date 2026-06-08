@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import os
 import pathlib
-import re
 import secrets
 import shutil
 import subprocess
@@ -25,7 +24,6 @@ from fixtures.shell_env import install_fake_bin
 
 import gremlins.utils.git as git_mod
 from gremlins.cli.launch import launch_main
-from gremlins.launcher import GremlinAlreadyRunning, GremlinStateDirExists
 
 FAKE_GH = pathlib.Path(__file__).resolve().parent / "fixtures" / "fake_gh.py"
 
@@ -84,8 +82,6 @@ class _FakeProc:
     pid = 12345
 
 
-
-
 # ---------------------------------------------------------------------------
 # launch_main() — basic contracts
 # ---------------------------------------------------------------------------
@@ -94,7 +90,9 @@ class _FakeProc:
 def test_launch_returns_gremlin_id(lenv):
     """launch_main() with a known --gremlin-id produces that id and a well-formed state dir."""
     gremlin_id = _new_gremlin_id()
-    rc = launch_main(["local", "--instructions", "test instructions", "--gremlin-id", gremlin_id])
+    rc = launch_main(
+        ["local", "--instructions", "test instructions", "--gremlin-id", gremlin_id]
+    )
     assert rc == 0, f"expected rc=0, got {rc}"
     state_dir = _gremlins_state_root(lenv) / gremlin_id
     assert _wait_for_finished(state_dir, timeout=60), (
@@ -105,7 +103,9 @@ def test_launch_returns_gremlin_id(lenv):
 def test_launch_creates_state_layout(lenv):
     """launch_main() creates state dir; initialize_runtime() fills in worktree and files."""
     gremlin_id = _new_gremlin_id()
-    rc = launch_main(["local", "--instructions", "test instructions", "--gremlin-id", gremlin_id])
+    rc = launch_main(
+        ["local", "--instructions", "test instructions", "--gremlin-id", gremlin_id]
+    )
     assert rc == 0
     state_dir = _gremlins_state_root(lenv) / gremlin_id
     assert state_dir.is_dir()
@@ -150,12 +150,17 @@ def test_launch_writes_worktree(lenv):
 def test_launch_persists_pipeline_args(lenv):
     """Pipeline-level flags are stored in state.json pipeline_args; pipeline path in pipeline_path."""
     gremlin_id = _new_gremlin_id()
-    rc = launch_main([
-        "local",
-        "--client", "claude:opus",
-        "--instructions", "test",
-        "--gremlin-id", gremlin_id,
-    ])
+    rc = launch_main(
+        [
+            "local",
+            "--client",
+            "claude:opus",
+            "--instructions",
+            "test",
+            "--gremlin-id",
+            gremlin_id,
+        ]
+    )
     assert rc == 0
     state = _read_state(_gremlins_state_root(lenv) / gremlin_id)
     assert state["pipeline_path"].endswith(".yaml")
@@ -165,7 +170,9 @@ def test_launch_persists_pipeline_args(lenv):
 def test_launch_persists_pipeline_default_client(lenv):
     """The resolved pipeline default client is stored in state.json."""
     gremlin_id = _new_gremlin_id()
-    rc = launch_main(["local", "--instructions", "test default client", "--gremlin-id", gremlin_id])
+    rc = launch_main(
+        ["local", "--instructions", "test default client", "--gremlin-id", gremlin_id]
+    )
     assert rc == 0
     state = _read_state(_gremlins_state_root(lenv) / gremlin_id)
     assert state["client"] == "claude:sonnet"
@@ -174,12 +181,17 @@ def test_launch_persists_pipeline_default_client(lenv):
 def test_launch_persists_cli_client_space_form(lenv):
     """A space-separated --client flag overrides the stored default client."""
     gremlin_id = _new_gremlin_id()
-    rc = launch_main([
-        "local",
-        "--client", "copilot:gpt-5.4",
-        "--instructions", "test cli client space",
-        "--gremlin-id", gremlin_id,
-    ])
+    rc = launch_main(
+        [
+            "local",
+            "--client",
+            "copilot:gpt-5.4",
+            "--instructions",
+            "test cli client space",
+            "--gremlin-id",
+            gremlin_id,
+        ]
+    )
     assert rc == 0
     state = _read_state(_gremlins_state_root(lenv) / gremlin_id)
     assert state["client"] == "copilot:gpt-5.4"
@@ -188,12 +200,16 @@ def test_launch_persists_cli_client_space_form(lenv):
 def test_launch_persists_cli_client_equals_form(lenv):
     """An equals-form --client flag overrides the stored default client."""
     gremlin_id = _new_gremlin_id()
-    rc = launch_main([
-        "local",
-        "--client=copilot:gpt-5.4",
-        "--instructions", "test cli client equals",
-        "--gremlin-id", gremlin_id,
-    ])
+    rc = launch_main(
+        [
+            "local",
+            "--client=copilot:gpt-5.4",
+            "--instructions",
+            "test cli client equals",
+            "--gremlin-id",
+            gremlin_id,
+        ]
+    )
     assert rc == 0
     state = _read_state(_gremlins_state_root(lenv) / gremlin_id)
     assert state["client"] == "copilot:gpt-5.4"
@@ -202,13 +218,18 @@ def test_launch_persists_cli_client_equals_form(lenv):
 def test_launch_persists_last_repeated_cli_client(lenv):
     """Repeated --client flags follow argparse's last-value-wins behavior."""
     gremlin_id = _new_gremlin_id()
-    rc = launch_main([
-        "local",
-        "--client", "claude:sonnet",
-        "--client=copilot:gpt-5.4",
-        "--instructions", "test repeated cli client",
-        "--gremlin-id", gremlin_id,
-    ])
+    rc = launch_main(
+        [
+            "local",
+            "--client",
+            "claude:sonnet",
+            "--client=copilot:gpt-5.4",
+            "--instructions",
+            "test repeated cli client",
+            "--gremlin-id",
+            gremlin_id,
+        ]
+    )
     assert rc == 0
     state = _read_state(_gremlins_state_root(lenv) / gremlin_id)
     assert state["client"] == "copilot:gpt-5.4"
@@ -228,12 +249,17 @@ stages:
         encoding="utf-8",
     )
     gremlin_id = _new_gremlin_id()
-    rc = launch_main([
-        "local",
-        "--pipeline", str(pipeline),
-        "--instructions", "test custom pipeline client",
-        "--gremlin-id", gremlin_id,
-    ])
+    rc = launch_main(
+        [
+            "local",
+            "--pipeline",
+            str(pipeline),
+            "--instructions",
+            "test custom pipeline client",
+            "--gremlin-id",
+            gremlin_id,
+        ]
+    )
     assert rc == 0
     state = _read_state(_gremlins_state_root(lenv) / gremlin_id)
     assert state["client"] == "copilot:gpt-5.4"
@@ -242,7 +268,9 @@ stages:
 def test_launch_ghgremlin_persists_pipeline_default_client(lenv_with_gh):
     """ghgremlin stores the default provider/model label."""
     gremlin_id = _new_gremlin_id()
-    rc = launch_main(["gh", "--instructions", "test gh default client", "--gremlin-id", gremlin_id])
+    rc = launch_main(
+        ["gh", "--instructions", "test gh default client", "--gremlin-id", gremlin_id]
+    )
     assert rc == 0
     state = _read_state(_gremlins_state_root(lenv_with_gh) / gremlin_id)
     assert state["client"] == "claude:sonnet"
@@ -251,12 +279,17 @@ def test_launch_ghgremlin_persists_pipeline_default_client(lenv_with_gh):
 def test_launch_ghgremlin_persists_cli_client_override(lenv_with_gh):
     """ghgremlin stores an explicit --client override."""
     gremlin_id = _new_gremlin_id()
-    rc = launch_main([
-        "gh",
-        "--client", "copilot:gpt-5.4",
-        "--instructions", "test gh cli client",
-        "--gremlin-id", gremlin_id,
-    ])
+    rc = launch_main(
+        [
+            "gh",
+            "--client",
+            "copilot:gpt-5.4",
+            "--instructions",
+            "test gh cli client",
+            "--gremlin-id",
+            gremlin_id,
+        ]
+    )
     assert rc == 0
     state = _read_state(_gremlins_state_root(lenv_with_gh) / gremlin_id)
     assert state["client"] == "copilot:gpt-5.4"
@@ -271,7 +304,9 @@ def test_launch_invalid_pipeline_name_raises(lenv):
 def test_launch_spawned_process_detached(lenv):
     """The spawned pipeline has a different process group than the parent."""
     gremlin_id = _new_gremlin_id()
-    rc = launch_main(["local", "--instructions", "pgid test", "--gremlin-id", gremlin_id])
+    rc = launch_main(
+        ["local", "--instructions", "pgid test", "--gremlin-id", gremlin_id]
+    )
     assert rc == 0
     state_dir = _gremlins_state_root(lenv) / gremlin_id
     state = _read_state(state_dir)
@@ -292,9 +327,13 @@ def test_launch_multiple_explicit_ids(lenv):
     gremlin_ids = [_new_gremlin_id() for _ in range(5)]
     state_root = _gremlins_state_root(lenv)
     for i, gremlin_id in enumerate(gremlin_ids):
-        rc = launch_main(["local", "--instructions", f"concurrent {i}", "--gremlin-id", gremlin_id])
+        rc = launch_main(
+            ["local", "--instructions", f"concurrent {i}", "--gremlin-id", gremlin_id]
+        )
         assert rc == 0
-    assert len(set(gremlin_ids)) == len(gremlin_ids), f"GREMLIN_ID collision among: {gremlin_ids}"
+    assert len(set(gremlin_ids)) == len(gremlin_ids), (
+        f"GREMLIN_ID collision among: {gremlin_ids}"
+    )
     for gremlin_id in gremlin_ids:
         _wait_for_finished(state_root / gremlin_id)
 
@@ -303,12 +342,17 @@ def test_launch_explicit_project_root(lenv):
     """Explicit parent_id is recorded in state.json."""
     gremlin_id = _new_gremlin_id()
     parent_id = "fake-parent-aabbcc"
-    rc = launch_main([
-        "local",
-        "--instructions", "child test",
-        "--parent", parent_id,
-        "--gremlin-id", gremlin_id,
-    ])
+    rc = launch_main(
+        [
+            "local",
+            "--instructions",
+            "child test",
+            "--parent",
+            parent_id,
+            "--gremlin-id",
+            gremlin_id,
+        ]
+    )
     assert rc == 0
     state_root = _gremlins_state_root(lenv)
     state = _read_state(state_root / gremlin_id)
@@ -326,7 +370,9 @@ def test_resume_patches_state(lenv, monkeypatch):
     launcher = _launcher()
     monkeypatch.setenv("FAKE_CLAUDE_FAIL_AT", "plan")
     gremlin_id = _new_gremlin_id()
-    rc = launch_main(["local", "--instructions", "test resume", "--gremlin-id", gremlin_id])
+    rc = launch_main(
+        ["local", "--instructions", "test resume", "--gremlin-id", gremlin_id]
+    )
     assert rc == 0
     state_dir = _gremlins_state_root(lenv) / gremlin_id
     assert _wait_for_finished(state_dir, timeout=30), (
@@ -477,7 +523,9 @@ def test_run_pipeline_writes_terminal_state_on_failure(lenv, monkeypatch):
     """_run-pipeline writes exit_code!=0 + status=stopped + finished marker on failure."""
     monkeypatch.setenv("FAKE_CLAUDE_FAIL_AT", "plan")
     gremlin_id = _new_gremlin_id()
-    rc = launch_main(["local", "--instructions", "fail test", "--gremlin-id", gremlin_id])
+    rc = launch_main(
+        ["local", "--instructions", "fail test", "--gremlin-id", gremlin_id]
+    )
     assert rc == 0
     state_dir = _gremlins_state_root(lenv) / gremlin_id
     assert _wait_for_finished(state_dir, timeout=60), (
@@ -571,7 +619,9 @@ def test_write_terminal_state_preserves_worktree_for_boss(lenv, monkeypatch, tmp
 def test_full_localgremlin_pipeline(lenv, monkeypatch):
     """plan → implement → review → address all run once in order."""
     gremlin_id = _new_gremlin_id()
-    rc = launch_main(["local", "--instructions", "test full pipeline", "--gremlin-id", gremlin_id])
+    rc = launch_main(
+        ["local", "--instructions", "test full pipeline", "--gremlin-id", gremlin_id]
+    )
     assert rc == 0
     state_dir = _gremlins_state_root(lenv) / gremlin_id
     assert _wait_for_finished(state_dir, timeout=120), (
@@ -606,7 +656,9 @@ def test_launch_ghgremlin_state_layout(lenv_with_gh):
     """ghgremlin creates a detached worktree off origin/<default> with correct state."""
     lenv = lenv_with_gh
     gremlin_id = _new_gremlin_id()
-    rc = launch_main(["gh", "--instructions", "test gh launch", "--gremlin-id", gremlin_id])
+    rc = launch_main(
+        ["gh", "--instructions", "test gh launch", "--gremlin-id", gremlin_id]
+    )
     assert rc == 0
     state_dir = _gremlins_state_root(lenv) / gremlin_id
     assert state_dir.is_dir()
@@ -659,12 +711,17 @@ def test_launch_passes_base_ref_to_worktree_setup(lenv):
     head_sha = r.stdout.strip()
 
     gremlin_id = _new_gremlin_id()
-    rc = launch_main([
-        "local",
-        "--instructions", "base_ref test",
-        "--base-ref", head_sha,
-        "--gremlin-id", gremlin_id,
-    ])
+    rc = launch_main(
+        [
+            "local",
+            "--instructions",
+            "base_ref test",
+            "--base-ref",
+            head_sha,
+            "--gremlin-id",
+            gremlin_id,
+        ]
+    )
     assert rc == 0
     state_dir = _gremlins_state_root(lenv) / gremlin_id
     assert _wait_for_finished(state_dir, timeout=60), (
@@ -714,11 +771,15 @@ def test_pipeline_survives_worktree_pipeline_rename(lenv, monkeypatch):
     monkeypatch.setenv("FAKE_CLAUDE_RENAME_GREMLINS", "1")
 
     gremlin_id = _new_gremlin_id()
-    rc = launch_main([
-        "local",
-        "--instructions", "test gremlins rename regression",
-        "--gremlin-id", gremlin_id,
-    ])
+    rc = launch_main(
+        [
+            "local",
+            "--instructions",
+            "test gremlins rename regression",
+            "--gremlin-id",
+            gremlin_id,
+        ]
+    )
     assert rc == 0
     state_dir = _gremlins_state_root(lenv) / gremlin_id
     log_path = state_dir / "log"
@@ -838,12 +899,17 @@ def test_setup_workdir_non_git_raises(tmp_path):
 def test_launch_persists_stage_inputs(lenv):
     """stage_inputs dict is written verbatim to state.json."""
     gremlin_id = _new_gremlin_id()
-    rc = launch_main([
-        "local",
-        "--instructions", "do the thing",
-        "--extra-key", "val",
-        "--gremlin-id", gremlin_id,
-    ])
+    rc = launch_main(
+        [
+            "local",
+            "--instructions",
+            "do the thing",
+            "--extra-key",
+            "val",
+            "--gremlin-id",
+            gremlin_id,
+        ]
+    )
     assert rc == 0
     state = _read_state(_gremlins_state_root(lenv) / gremlin_id)
     assert state["stage_inputs"] == {"instructions": "do the thing", "extra_key": "val"}
@@ -902,11 +968,15 @@ def test_launch_explicit_gremlin_id(lenv, monkeypatch):
     """launch_main(--gremlin-id ...) uses the supplied id verbatim."""
     launcher = _launcher()
     monkeypatch.setattr(launcher, "_spawn_logged_process", lambda *a, **kw: _FakeProc())
-    rc = launch_main([
-        "local",
-        "--instructions", "explicit id test",
-        "--gremlin-id", "my-explicit-id",
-    ])
+    rc = launch_main(
+        [
+            "local",
+            "--instructions",
+            "explicit id test",
+            "--gremlin-id",
+            "my-explicit-id",
+        ]
+    )
     assert rc == 0
     state = _read_state(_gremlins_state_root(lenv) / "my-explicit-id")
     assert state["id"] == "my-explicit-id"
@@ -914,21 +984,29 @@ def test_launch_explicit_gremlin_id(lenv, monkeypatch):
 
 def test_launch_invalid_gremlin_id_rejected(lenv, monkeypatch):
     """launch_main(--gremlin-id ...) returns non-zero for ids that fail validate_gremlin_id."""
-    rc = launch_main([
-        "local",
-        "--instructions", "bad id test",
-        "--gremlin-id", "bad id with spaces",
-    ])
+    rc = launch_main(
+        [
+            "local",
+            "--instructions",
+            "bad id test",
+            "--gremlin-id",
+            "bad id with spaces",
+        ]
+    )
     assert rc != 0
 
 
 def test_launch_gremlin_id_pipeline_name_rejected(lenv, monkeypatch):
     """launch_main(--gremlin-id ...) returns non-zero when id matches a pipeline name."""
-    rc = launch_main([
-        "local",
-        "--instructions", "pipeline collision test",
-        "--gremlin-id", "local",
-    ])
+    rc = launch_main(
+        [
+            "local",
+            "--instructions",
+            "pipeline collision test",
+            "--gremlin-id",
+            "local",
+        ]
+    )
     assert rc != 0
 
 
@@ -942,11 +1020,15 @@ def test_launch_explicit_gremlin_id_already_running(lenv, monkeypatch):
         json.dumps({"id": gremlin_id, "status": "running", "pid": os.getpid()}),
         encoding="utf-8",
     )
-    rc = launch_main([
-        "local",
-        "--instructions", "collision test",
-        "--gremlin-id", gremlin_id,
-    ])
+    rc = launch_main(
+        [
+            "local",
+            "--instructions",
+            "collision test",
+            "--gremlin-id",
+            gremlin_id,
+        ]
+    )
     assert rc != 0
 
 
@@ -960,11 +1042,15 @@ def test_launch_explicit_gremlin_id_stale_dir_refused(lenv, monkeypatch):
         json.dumps({"id": gremlin_id, "status": "running", "pid": 0}),
         encoding="utf-8",
     )
-    rc = launch_main([
-        "local",
-        "--instructions", "stale dir test",
-        "--gremlin-id", gremlin_id,
-    ])
+    rc = launch_main(
+        [
+            "local",
+            "--instructions",
+            "stale dir test",
+            "--gremlin-id",
+            gremlin_id,
+        ]
+    )
     assert rc != 0
 
 
@@ -973,12 +1059,17 @@ def test_launch_pr_kwarg_sets_state_fields(lenv, monkeypatch):
     launcher = _launcher()
     monkeypatch.setattr(launcher, "_spawn_logged_process", lambda *a, **kw: _FakeProc())
     gremlin_id = _new_gremlin_id()
-    rc = launch_main([
-        "local",
-        "--instructions", "pr kwarg test",
-        "--pr", "697",
-        "--gremlin-id", gremlin_id,
-    ])
+    rc = launch_main(
+        [
+            "local",
+            "--instructions",
+            "pr kwarg test",
+            "--pr",
+            "697",
+            "--gremlin-id",
+            gremlin_id,
+        ]
+    )
     assert rc == 0
     state = _read_state(_gremlins_state_root(lenv) / gremlin_id)
     assert state["setup_kind"] == "worktree-detached"

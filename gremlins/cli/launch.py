@@ -229,15 +229,21 @@ def _self_background_main(
             artifact_dir.mkdir(parents=True, exist_ok=True)
             registry = ArtifactRegistry(artifact_dir=artifact_dir)
             if inputs.base_ref_sha:
-                registry.bind("base_sha", Uri.parse(f"git://commit/{inputs.base_ref_sha}"))
+                registry.bind(
+                    "base_sha", Uri.parse(f"git://commit/{inputs.base_ref_sha}")
+                )
             if inputs.base_ref_name:
-                registry.bind("base_ref", Uri.parse(f"git://ref/{inputs.base_ref_name}"))
+                registry.bind(
+                    "base_ref", Uri.parse(f"git://ref/{inputs.base_ref_name}")
+                )
             if (
                 inputs.loaded_pipeline is not None
                 and inputs.loaded_pipeline.input_sources is not None
             ):
                 input_values = {
-                    k: v for k, v in inputs.stage_inputs.items() if isinstance(v, str) and v
+                    k: v
+                    for k, v in inputs.stage_inputs.items()
+                    if isinstance(v, str) and v
                 }
                 _seed_registry_from_sources(
                     registry,
