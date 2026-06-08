@@ -254,6 +254,7 @@ def _self_background_main(
         except Exception:
             shutil.rmtree(state_dir, ignore_errors=True)
             raise
+        state_dir.mkdir(parents=True, exist_ok=True)
         (state_dir / "pid").write_text(str(proc.pid), encoding="utf-8")
         Gremlin.patch_state_for(inputs.gremlin_id, pid=proc.pid)
         gremlin_id = inputs.gremlin_id
