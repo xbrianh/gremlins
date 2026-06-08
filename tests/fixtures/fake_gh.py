@@ -97,11 +97,15 @@ def main(argv):
         return 0
     if sub == "pr" and len(argv) >= 2 and argv[1] == "view":
         if "--json" in argv:
-            out = json.dumps({
-                "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
-                "reviewDecision": "APPROVED",
-                "headRefOid": "abc123def456"
-            })
+            out = json.dumps(
+                {
+                    "statusCheckRollup": [
+                        {"status": "COMPLETED", "conclusion": "SUCCESS"}
+                    ],
+                    "reviewDecision": "APPROVED",
+                    "headRefOid": "abc123def456",
+                }
+            )
             sys.stdout.write(out + "\n")
             return 0
         return 0
