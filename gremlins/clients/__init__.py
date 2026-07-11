@@ -33,6 +33,14 @@ def _make_xai_client(model: str | None, policy: Policy) -> object:
     return make_xai_client(model, policy)
 
 
+def _make_openrouter_client(
+    model: str | None, policy: Policy
+) -> object:
+    from gremlins.clients.providers.openai_agents import make_openrouter_client
+
+    return make_openrouter_client(model, policy)
+
+
 def _make_anthropic_client(model: str | None, policy: Policy) -> object:
     from gremlins.clients.providers.anthropic_sdk import make_anthropic_client
 
@@ -43,4 +51,5 @@ register_client_factory("anthropic", _make_anthropic_client)
 register_client_factory("claude", _make_claude_client)
 register_client_factory("copilot", _make_copilot_client, bypass_only=True)
 register_client_factory("openai", _make_openai_client)
+register_client_factory("openrouter", _make_openrouter_client)
 register_client_factory("xai", _make_xai_client)
