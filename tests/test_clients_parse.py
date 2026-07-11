@@ -28,8 +28,11 @@ def test_parse_claude_equals_default():
 
 def test_parse_roundtrips():
     for spec in (
-        "claude:sonnet", "copilot:gpt-4o", "openai:gpt-4o-mini",
-        "xai:grok-4", "openrouter:openai/gpt-4o",
+        "claude:sonnet",
+        "copilot:gpt-4o",
+        "openai:gpt-4o-mini",
+        "xai:grok-4",
+        "openrouter:openai/gpt-4o",
     ):
         assert str(Client.parse(spec)) == spec
 

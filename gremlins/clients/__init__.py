@@ -33,9 +33,7 @@ def _make_xai_client(model: str | None, policy: Policy) -> object:
     return make_xai_client(model, policy)
 
 
-def _make_openrouter_client(
-    model: str | None, policy: Policy
-) -> object:
+def _make_openrouter_client(model: str | None, policy: Policy) -> object:
     from gremlins.clients.providers.openai_agents import make_openrouter_client
 
     return make_openrouter_client(model, policy)

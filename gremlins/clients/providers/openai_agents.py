@@ -520,9 +520,7 @@ def make_xai_client(model: str | None, policy: Policy) -> OpenAIAgentsClient:
     )
 
 
-def make_openrouter_client(
-    model: str | None, policy: Policy
-) -> OpenAIAgentsClient:
+def make_openrouter_client(model: str | None, policy: Policy) -> OpenAIAgentsClient:
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         raise RuntimeError("OPENROUTER_API_KEY environment variable is not set")
@@ -532,6 +530,5 @@ def make_openrouter_client(
         api_key=api_key,
         model_settings=ModelSettings(temperature=_DEFAULT_TEMPERATURE),
         bypass=policy.bypass,
-        native_block=load_default_block("openrouter")
-        | policy.block_for("openrouter"),
+        native_block=load_default_block("openrouter") | policy.block_for("openrouter"),
     )
