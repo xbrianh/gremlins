@@ -10,3 +10,9 @@ plans/
 .at_venv
 .claude/
 .gremlins/env
+
+# Rust
+/target/
+*.so
+*.dylib
+*.dSYM/

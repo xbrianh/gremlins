@@ -66,17 +66,24 @@ can have running gremlins simultaneously without interference.
 uv venv
 source .venv/bin/activate  # or `.venv\Scripts\activate` on Windows
 uv pip install -e ".[dev]"
+make dev                    # build + install the Rust native extension
 ```
 
 ## Make targets
 
 | Target | What it runs |
 |---|---|
-| `make test` | `pytest` |
+| `make dev` | Build and install the native extension in dev mode (`maturin develop`) |
+
+**Note:** Run `uv pip install -e ".[dev]"` **before** `make dev` — the dev extra installs `maturin`, which `make dev` requires.
+| `make test` | `cargo test` (Rust) + `pytest` (Python, per-file in parallel) |
 | `make lint` | `ruff check .` |
 | `make format` | `ruff format --check .` (check only — does not rewrite files) |
 | `make typecheck` | `pyright` |
-| `make check` | lint + format + typecheck |
+| `make rust-test` | `cargo test -p gremlins-core --lib` |
+| `make rust-clippy` | `cargo clippy --all-targets -- -D warnings` |
+| `make rust-fmt-check` | `cargo fmt --all -- --check` |
+| `make check` | lint + format + typecheck + clippy + rustfmt |
 
 ## CLI subcommands
 

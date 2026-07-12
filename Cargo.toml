@@ -1,0 +1,9 @@
+[workspace]
+members = ["crates/gremlins-core"]
+resolver = "2"
+
+# Fast CI test builds — avoids full release optimizations.
+[profile.ci]
+inherits = "dev"
+opt-level = 1
+debug = false

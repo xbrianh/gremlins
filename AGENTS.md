@@ -26,6 +26,14 @@ gremlins/                    Python package — see gremlins/AGENTS.md
   executor/                  State class + pipeline.py (StageRunner), run.py
   fleet/                     Fleet manager (status, stop, land, close, log) — see gremlins/fleet/AGENTS.md
   utils/                     proc helpers etc.
+  _core.py                   Shim: from _gremlins_core import *
+Cargo.toml                   Rust workspace root
+crates/                      Rust crates
+  gremlins-core/             PyO3 native extension (maturin)
+    src/lib.rs               #[pymodule] _gremlins_core
+    src/core/                Pure Rust logic (future ports)
+    src/python/              PyO3 glue (future ports)
+    pyproject.toml           maturin build backend
 .gremlins/                   Project-overlay pipeline YAMLs (project-scoped, win over bundled)
 plans/                       Design notes, in-flight plan documents, per-feature sketches
 tests/                       Pytest suite (testpaths = ["tests"])
@@ -38,13 +46,20 @@ README.md                    Dev install + CLI usage
 ```sh
 uv venv && source .venv/bin/activate
 uv pip install -e ".[dev]"
+make dev           # build + install the Rust native extension (maturin develop)
 make -j8 test      # runs pytest per-file in parallel (Makefile splits the suite)
-make check         # ruff lint + ruff format check + pyright
+make check         # ruff lint + ruff format check + pyright + clippy + rustfmt
 ```
 
 **Always run tests with `make -j8 test`** (or `make -j$(sysctl -n hw.ncpu) test` / `make -j$(nproc) test`). The Makefile depends on each `tests/test_*.py` as its own sub-target, so `-jN` parallelizes cleanly and the suite finishes several times faster. Serial `make test` is leaving time on the floor — don't do it. Never use bare `-j` (means *unlimited*, spawns one pytest per file simultaneously, bad).
 
 **Never `uv run pytest`** — the project venv is the test target, not whatever `uv run` resolves. Bare `pytest` is fine for a single file; `make -j8 test` is the way to run the whole suite.
+
+The `Makefile` sets `MAKEFLAGS += -j$(shell sysctl -n hw.ncpu 2>/dev/null || nproc)` automatically, so `make test` is already parallel without explicit `-j`. Passing `-j8` or `-j$(nproc)` still works as an override.
+
+`make check` now includes Rust checks (clippy + rustfmt) alongside the Python checks.
+
+`make dev` is an alias for `cd crates/gremlins-core && maturin develop`.
 
 ## Project-wide conventions
 
