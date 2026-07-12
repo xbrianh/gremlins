@@ -48,3 +48,6 @@ typeCheckingMode = "strict"
 include = [
     "gremlins",
 ]
+exclude = [
+    "gremlins/_core.py",
+]

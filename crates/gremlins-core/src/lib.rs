@@ -15,6 +15,7 @@ fn __version__() -> &'static str {
 /// The `_gremlins_core` native extension module.
 #[pymodule(name = "_gremlins_core")]
 fn _gremlins_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("__all__", vec!["sum", "__version__"])?;
     m.add_function(wrap_pyfunction!(sum, m)?)?;
     m.add_function(wrap_pyfunction!(__version__, m)?)?;
     Ok(())

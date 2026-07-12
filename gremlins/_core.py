@@ -1,3 +1,3 @@
 import _gremlins_core as _core
 
-__all__ = ["sum", "__version__"]
+__all__ = _core
