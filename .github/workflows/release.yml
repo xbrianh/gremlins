@@ -43,18 +43,15 @@ jobs:
           done
 
       - name: Update Cargo.lock for stamped version
-        run: cargo update -p gremlins-core
+        run: cargo check
 
-      - name: Build gremlins-ai (pure Python)
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Build gremlins-ai (pure Python sdist)
         run: |
           rm -rf dist/
-          uv build
-
-      - name: Stamp gremlins-core version in requirements.txt
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          sed -i "s/^gremlins-core.*/gremlins-core==${VERSION}/" requirements.txt
-          grep -q "gremlins-core==${VERSION}" requirements.txt || { echo "::error::requirements stamp failed"; exit 1; }
+          uv build --sdist
 
       - name: Build gremlins-core (native extension sdist)
         run: |

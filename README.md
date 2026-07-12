@@ -65,8 +65,8 @@ can have running gremlins simultaneously without interference.
 ```sh
 uv venv
 source .venv/bin/activate  # or `.venv\Scripts\activate` on Windows
-make dev                    # build + install the Rust native extension
 uv pip install -e ".[dev]"
+make dev                    # build + install the Rust native extension
 ```
 
 ## Make targets
@@ -74,6 +74,8 @@ uv pip install -e ".[dev]"
 | Target | What it runs |
 |---|---|
 | `make dev` | Build and install the native extension in dev mode (`maturin develop`) |
+
+**Note:** Run `uv pip install -e ".[dev]"` **before** `make dev` — the dev extra installs `maturin`, which `make dev` requires.
 | `make test` | `cargo test` (Rust) + `pytest` (Python, per-file in parallel) |
 | `make lint` | `ruff check .` |
 | `make format` | `ruff format --check .` (check only — does not rewrite files) |

@@ -45,8 +45,8 @@ README.md                    Dev install + CLI usage
 
 ```sh
 uv venv && source .venv/bin/activate
-make dev           # build + install the Rust native extension (maturin develop)
 uv pip install -e ".[dev]"
+make dev           # build + install the Rust native extension (maturin develop)
 make -j8 test      # runs pytest per-file in parallel (Makefile splits the suite)
 make check         # ruff lint + ruff format check + pyright + clippy + rustfmt
 ```
@@ -55,7 +55,7 @@ make check         # ruff lint + ruff format check + pyright + clippy + rustfmt
 
 **Never `uv run pytest`** — the project venv is the test target, not whatever `uv run` resolves. Bare `pytest` is fine for a single file; `make -j8 test` is the way to run the whole suite.
 
-The `Makefile` sets `MAKEFLAGS += -j$(nproc)` automatically, so `make test` is already parallel without explicit `-j`. Passing `-j8` or `-j$(nproc)` still works as an override.
+The `Makefile` sets `MAKEFLAGS += -j$(shell sysctl -n hw.ncpu 2>/dev/null || nproc)` automatically, so `make test` is already parallel without explicit `-j`. Passing `-j8` or `-j$(nproc)` still works as an override.
 
 `make check` now includes Rust checks (clippy + rustfmt) alongside the Python checks.
 
