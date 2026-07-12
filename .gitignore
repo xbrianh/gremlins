@@ -9,7 +9,7 @@ build/
 plans/
 .at_venv
 .claude/
-.gremlins/env
+.gremlins/secret_env
 
 # Rust
 /target/

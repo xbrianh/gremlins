@@ -1,0 +1,13 @@
+# ---- Python venv ----
+# Ensure the project's virtual environment is active so that python,
+# ruff, pyright, pytest, and maturin are on PATH. The Makefile targets
+# (make check, make test) set PYTHONPATH='' and rely on the venv for imports.
+# When launched from AT, VIRTUAL_ENV is inherited — this block is a no-op.
+if [ -z "$VIRTUAL_ENV" ] && [ -f .venv/bin/activate ]; then
+    source .venv/bin/activate
+fi
+export GREMLINS_OPENAI_AGENTS_MAX_TURNS='1000'
+SECRET_ENV="$(dirname "${BASH_SOURCE[0]}")/secret_env"
+if [ -f "$SECRET_ENV" ]; then
+    source "$SECRET_ENV"
+fi
