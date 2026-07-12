@@ -1,1 +1,1 @@
-from _gremlins_core import *  # type: ignore[no-redef,wildcard-import]  # noqa: F403
+import _gremlins_core as _core  # type: ignore[import-untyped]
