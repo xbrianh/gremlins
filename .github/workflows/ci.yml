@@ -25,7 +25,7 @@ jobs:
       - name: Install
         run: uv pip install --system -e ".[dev]"
       - name: Build and install native extension
-        run: cd crates/gremlins-core && maturin build --profile ci && pip install --force-reinstall target/wheels/*.whl
+        run: (cd crates/gremlins-core && maturin build --profile ci) && pip install --force-reinstall target/wheels/*.whl
       - name: Lint, format, type-check, clippy, rustfmt
         run: make check
       - name: Test (Rust + Python)
