@@ -658,6 +658,12 @@ async def run_child_subprocess(
     group_name: str = "",
     child_id: str = "",
 ) -> tuple[str, float]:
+    """Spawn gremlins.spawn.child for one parallel child; return (status, cost_usd).
+
+    status is "done" or "bail". Raises RuntimeError on timeout, missing result,
+    or error status. Propagates CancelledError after cleaning up the child process.
+    on_bail is called with the bail detail string when status == "bail".
+    """
     spec_path = child_st.artifact_dir / f"spec_{attempt}.json"
     spec_path.write_text(
         json.dumps(
