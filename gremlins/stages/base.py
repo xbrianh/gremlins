@@ -10,7 +10,7 @@ from gremlins.stages.outcome import Outcome
 if TYPE_CHECKING:
     from gremlins.executor.gremlin import Gremlin, State
 
-_VAR_SUB = re.compile(r"\{(\w+)\}")
+_VAR_SUB = re.compile(r"\{([-\w]+)\}")
 
 
 def get_client_from_dict(d: dict[str, Any]) -> Client | None:
