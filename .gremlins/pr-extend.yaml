@@ -9,6 +9,10 @@ inputs:
     INSTRUCTIONS: instructions?
     PLAN: plan?
     PR: pr
+  sources:
+    plan:
+      type: filepath
+      optional: true
 
 land:
   in:

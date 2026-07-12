@@ -1,12 +1,12 @@
 Two code reviews of the most recent implementation follow. **Default: fix every actionable finding.** Severity language ("nit", "minor", "non-blocking", "fyi") is metadata, not a routing signal — fix it anyway. The only reason to skip a finding is if the reviewer is factually wrong (verify by re-reading the code first) or the comment is a question that needs no code change.
 
-## Code review
+## Code review one
 
-{review}
+{review-one}
 
-## Complexity review
+## Code review two
 
-{complexity}
+{review-two}
 
 ---
 

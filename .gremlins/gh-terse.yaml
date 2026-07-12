@@ -1,4 +1,4 @@
-default_client: claude:haiku
+default_client: openrouter:deepseek-v4-pro
 base_ref: main
 github_integration: true
 prompt_dir: prompts
@@ -73,36 +73,30 @@ stages:
   - { type: gremlins:implement, prompt: [code-style, terse, gremlins:implement_gh.md] }
 
   - parallel:
-      - name: local-review
+      - name: local-review-gpt
         type: agent
         prompt: [code-style, terse, local_review.md]
-        client: claude:sonnet
+        client: openrouter:gpt-5.6-sol
         out:
-          local-review: "file://session/local-review.md"
-      - name: local-review-complexity
+          local-review-gpt: "file://session/local-review-gpt.md"
+      - name: local-review-grok
         type: agent
-        prompt: [code-style, terse, local_review_complexity.md]
-        client: claude:sonnet
+        prompt: [code-style, terse, local_review.md]
+        client: openrouter:x-ai/grok-4.5
         out:
-          local-review-complexity: "file://session/local-review-complexity.md"
+          local-review-grok: "file://session/local-review-grok.md"
 
   - name: local-address
     type: agent
     prompt: [code-style, terse, local_address.md, gremlins:bail_section.md]
     in:
-      review: local-review
-      complexity: local-review-complexity
+      review-one: local-review-gpt
+      review-two: local-review-grok
 
   - { type: normalize-and-fix }
-
   - { type: gremlins:github-open-pr }
   - { type: gremlins:github-request-copilot-review }
-
-  - parallel:
-      - { type: gremlins:github-wait-copilot, in: {pr: pr} }
-      - { name: github-review-pull-request, type: agent, in: {pr: pr}, prompt: [code-style, terse, gremlins:github_review_pull_request.md], client: claude:sonnet }
-      - { name: github-review-pull-request-complexity, type: agent, in: {pr: pr}, prompt: [code-style, terse, complexity_review.md], client: claude:sonnet }
-
+  - { type: gremlins:github-wait-copilot, in: {pr: pr} }
   - { name: github-address-pull-request-reviews, type: agent, in: {pr: pr}, prompt: [code-style, terse, gremlins:github_address_pull_request_reviews.md, gremlins:bail_section.md] }
   - { type: normalize-and-fix }
   - { type: gremlins:github-wait-ci, in: {pr: pr}, prompt: [terse, gremlins:ci_fix.md, gremlins:bail_section_fix.md] }

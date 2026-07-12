@@ -1,4 +1,4 @@
-default_client: claude:sonnet
+default_client: openrouter:deepseek-v4-pro
 base_ref: current
 prompt_dir: prompts
 
@@ -6,6 +6,10 @@ inputs:
   in:
     INSTRUCTIONS: instructions?
     PLAN: plan?
+  sources:
+    plan:
+      type: filepath
+      optional: true
 
 prompts:
   code-style: gremlins:code_style.md
@@ -23,12 +27,12 @@ stage-definitions:
         - "git diff --cached --quiet || git commit -m 'normalize'"
 
 stages:
-  - { type: plan,               prompt: [code-style, terse, gremlins:plan.md] }
-  - { type: gremlins:implement, prompt: [code-style, terse, gremlins:implement_local.md] }
+  - { type: gremlins:plan,      prompt: [code-style, terse, gremlins:plan.md] }
+  - { type: gremlins:implement,  prompt: [code-style, terse, gremlins:implement_local.md] }
   - { type: normalize }
   - { name: check, type: verify, options: { cmds: ["make check"] }, prompt: verify }
 
-  - { type: review-code,  prompt: [code-style, terse, gremlins:review/detail.md] }
+  - { type: gremlins:review-code,  prompt: [code-style, terse, gremlins:review/detail.md] }
   - { name: address-code, type: agent, in: {text: review-code}, prompt: [code-style, terse, gremlins:address.md, gremlins:bail_section.md] }
 
   - { type: normalize }
