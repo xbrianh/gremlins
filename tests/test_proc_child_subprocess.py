@@ -1,4 +1,4 @@
-"""Focused tests for proc.run_child_subprocess and its helpers."""
+"""Focused tests for parallel.run_child_subprocess and its helpers."""
 
 from __future__ import annotations
 
@@ -13,9 +13,9 @@ import pytest
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state
+from gremlins.stages import parallel
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Done, Outcome
-from gremlins.utils import proc
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -108,29 +108,29 @@ def _write_result(spec_path: pathlib.Path, status: str, cost: float = 0.0) -> No
 def test_parse_child_timeout_none_when_no_raw_dict() -> None:
     s = _stage("x")
     s.raw_dict = None
-    assert proc._parse_child_timeout(s, "x") is None
+    assert parallel._parse_child_timeout(s, "x") is None
 
 
 def test_parse_child_timeout_none_when_missing_key() -> None:
-    assert proc._parse_child_timeout(_stage("x"), "x") is None
+    assert parallel._parse_child_timeout(_stage("x"), "x") is None
 
 
 def test_parse_child_timeout_returns_value() -> None:
     s = _stage("x", timeout=30.0)
-    assert proc._parse_child_timeout(s, "x") == 30.0
+    assert parallel._parse_child_timeout(s, "x") == 30.0
 
 
 def test_parse_child_timeout_zero_treated_as_none() -> None:
     s = _stage("x")
     s.raw_dict = {"timeout_seconds": 0}
-    assert proc._parse_child_timeout(s, "x") is None
+    assert parallel._parse_child_timeout(s, "x") is None
 
 
 def test_parse_child_timeout_invalid_raises() -> None:
     s = _stage("x")
     s.raw_dict = {"timeout_seconds": "bad"}
     with pytest.raises(ValueError, match="must be a number"):
-        proc._parse_child_timeout(s, "x")
+        parallel._parse_child_timeout(s, "x")
 
 
 # ---------------------------------------------------------------------------
@@ -139,23 +139,23 @@ def test_parse_child_timeout_invalid_raises() -> None:
 
 
 def test_missing_result_detail_exit_zero() -> None:
-    msg = proc._missing_result_detail("child-a", 0)
+    msg = parallel._missing_result_detail("child-a", 0)
     assert "exited 0 without writing result" in msg
 
 
 def test_missing_result_detail_signal() -> None:
-    msg = proc._missing_result_detail("child-a", -signal.SIGKILL)
+    msg = parallel._missing_result_detail("child-a", -signal.SIGKILL)
     assert "SIGKILL" in msg
     assert "no result file" in msg
 
 
 def test_missing_result_detail_nonzero() -> None:
-    msg = proc._missing_result_detail("child-a", 42)
+    msg = parallel._missing_result_detail("child-a", 42)
     assert "returncode 42" in msg
 
 
 def test_missing_result_detail_no_returncode() -> None:
-    msg = proc._missing_result_detail("child-a", None)
+    msg = parallel._missing_result_detail("child-a", None)
     assert "unavailable" in msg
 
 
@@ -178,7 +178,7 @@ def test_run_child_done_status(
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
 
     status, cost = asyncio.run(
-        proc.run_child_subprocess(
+        parallel.run_child_subprocess(
             stage, child_st, "c", "attempt-1", on_bail=bailed.append
         )
     )
@@ -200,7 +200,7 @@ def test_run_child_needs_fix_maps_to_done(
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
 
     status, _ = asyncio.run(
-        proc.run_child_subprocess(
+        parallel.run_child_subprocess(
             stage, child_st, "c", "attempt-1", on_bail=lambda _: None
         )
     )
@@ -230,7 +230,7 @@ def test_run_child_bail_calls_on_bail(
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
 
     status, _ = asyncio.run(
-        proc.run_child_subprocess(
+        parallel.run_child_subprocess(
             stage, child_st, "c", "attempt-1", on_bail=bailed.append
         )
     )
@@ -257,7 +257,7 @@ def test_run_child_error_status_raises(
 
     with pytest.raises(RuntimeError, match="error"):
         asyncio.run(
-            proc.run_child_subprocess(
+            parallel.run_child_subprocess(
                 stage, child_st, "c", "attempt-1", on_bail=lambda _: None
             )
         )
@@ -282,7 +282,7 @@ def test_missing_result_file_raises(
 
     with pytest.raises(RuntimeError, match="SIGKILL.*no result file"):
         asyncio.run(
-            proc.run_child_subprocess(
+            parallel.run_child_subprocess(
                 stage, child_st, "c", "attempt-1", on_bail=lambda _: None
             )
         )
@@ -301,7 +301,7 @@ def test_exit_zero_no_result_file_raises(
 
     with pytest.raises(RuntimeError, match="exited 0 without writing result"):
         asyncio.run(
-            proc.run_child_subprocess(
+            parallel.run_child_subprocess(
                 stage, child_st, "c", "attempt-1", on_bail=lambda _: None
             )
         )
@@ -331,7 +331,7 @@ def test_timeout_raises_and_kills_child(
 
     with pytest.raises(RuntimeError, match="timed out"):
         asyncio.run(
-            proc.run_child_subprocess(
+            parallel.run_child_subprocess(
                 stage, child_st, "c", "attempt-1", on_bail=lambda _: None
             )
         )
@@ -358,7 +358,7 @@ def test_signal_terminated_child_no_result_raises(
 
     with pytest.raises(RuntimeError, match="SIGTERM.*no result file"):
         asyncio.run(
-            proc.run_child_subprocess(
+            parallel.run_child_subprocess(
                 stage, child_st, "c", "attempt-1", on_bail=lambda _: None
             )
         )
@@ -374,7 +374,7 @@ def test_build_child_spec_dict_base_ref_propagated(tmp_path: pathlib.Path) -> No
         base_ref="main",
     )
     stage = _stage("c")
-    spec = proc._build_child_spec_dict(stage, child_st, "c", "attempt-1")
+    spec = parallel._build_child_spec_dict(stage, child_st, "c", "attempt-1")
     assert spec["base_ref"] == "main"
 
 
@@ -383,5 +383,5 @@ def test_build_child_spec_dict_base_ref_empty_by_default(
 ) -> None:
     child_st = _state(tmp_path / "c")
     stage = _stage("c")
-    spec = proc._build_child_spec_dict(stage, child_st, "c", "attempt-1")
+    spec = parallel._build_child_spec_dict(stage, child_st, "c", "attempt-1")
     assert spec["base_ref"] == ""

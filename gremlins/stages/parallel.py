@@ -11,6 +11,7 @@ import pathlib
 import re
 import secrets
 import shutil
+import signal
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
@@ -452,7 +453,7 @@ class _ParallelExecutor:
                 self._cancel_siblings()
             self._group_state.write_bail(child_key, detail)
 
-        status, cost = await proc.run_child_subprocess(
+        status, cost = await run_child_subprocess(
             stage_obj,
             child_st,
             child_key,
@@ -566,3 +567,144 @@ class _ParallelExecutor:
                 f"parallel group {self._group_name!r} bailed "
                 f"({len(bailed)} child(ren), policy={self._bail_policy!r})"
             )
+
+
+# ---------------------------------------------------------------------------
+# Child subprocess helpers
+# ---------------------------------------------------------------------------
+
+
+def _parse_child_timeout(stage_obj: Stage, child_key: str) -> float | None:
+    if not stage_obj.raw_dict:
+        return None
+    raw_t = stage_obj.raw_dict.get("timeout_seconds")
+    if raw_t is None:
+        return None
+    try:
+        parsed_t = float(raw_t)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"parallel child {child_key!r}: 'timeout_seconds' must be a number, "
+            f"got {raw_t!r}"
+        ) from exc
+    return parsed_t if parsed_t > 0 else None
+
+
+def _missing_result_detail(child_key: str, returncode: int | None) -> str:
+    if returncode is None:
+        return (
+            f"parallel child {child_key!r}: subprocess exited with no result file "
+            f"(returncode unavailable)"
+        )
+    if returncode == 0:
+        return f"parallel child {child_key!r} exited 0 without writing result"
+    if returncode < 0:
+        try:
+            sig_name = signal.Signals(-returncode).name
+        except ValueError:
+            sig_name = f"signal {-returncode}"
+        return (
+            f"parallel child {child_key!r} terminated by {sig_name} with no result file"
+        )
+    return f"parallel child {child_key!r} exited with returncode {returncode} and no result file"
+
+
+def _build_child_spec_dict(
+    stage_obj: Stage,
+    child_st: State,
+    child_key: str,
+    attempt: str,
+    group_name: str = "",
+    child_id: str = "",
+) -> dict[str, Any]:
+    parent_id = child_st.data.gremlin_id or ""
+    return {
+        "stage_dict": stage_obj.raw_dict,
+        "client": str(child_st.client),
+        "child_id": child_id,
+        "parent_id": parent_id,
+        "group_name": group_name,
+        "worktree": str(child_st.worktree) if child_st.worktree else None,
+        "worktree_parent": (
+            str(child_st.worktree_parent) if child_st.worktree_parent else None
+        ),
+        "pipeline_path": child_st.data.pipeline_path or None,
+        "child_key": child_key,
+        "attempt": attempt,
+        "parent_stage": child_st.parent_stage,
+        "repo": child_st.repo,
+        "base_ref": child_st.base_ref,
+    }
+
+
+def _read_child_result(
+    spec_path: pathlib.Path,
+    child_proc: asyncio.subprocess.Process,
+    child_key: str,
+) -> dict[str, Any]:
+    result_path = pathlib.Path(str(spec_path) + ".result")
+    if not result_path.exists():
+        raise RuntimeError(_missing_result_detail(child_key, child_proc.returncode))
+    return json.loads(result_path.read_text(encoding="utf-8"))
+
+
+async def run_child_subprocess(
+    stage_obj: Stage,
+    child_st: State,
+    child_key: str,
+    attempt: str,
+    *,
+    on_bail: Callable[[str], None],
+    group_name: str = "",
+    child_id: str = "",
+) -> tuple[str, float]:
+    spec_path = child_st.artifact_dir / f"spec_{attempt}.json"
+    spec_path.write_text(
+        json.dumps(
+            _build_child_spec_dict(
+                stage_obj, child_st, child_key, attempt, group_name, child_id
+            )
+        ),
+        encoding="utf-8",
+    )
+    timeout_s = _parse_child_timeout(stage_obj, child_key)
+    log_path = child_st.artifact_dir.parent / "log"
+    log_file = None
+    if log_path.parent.exists():
+        try:
+            log_file = log_path.open("a", buffering=1, encoding="utf-8")
+        except OSError:
+            pass
+    try:
+        child_proc, pumps = await proc.spawn_with_pumps(
+            spec_path, attempt, log_file=log_file
+        )
+        try:
+            await proc.wait_child_proc(child_proc, timeout_s, child_key)
+        except asyncio.CancelledError:
+            await proc.terminate_with_grace(child_proc)
+            for p in pumps:
+                p.cancel()
+            raise
+        finally:
+            await asyncio.shield(asyncio.gather(*pumps, return_exceptions=True))
+    finally:
+        if log_file is not None:
+            try:
+                log_file.close()
+            except OSError:
+                pass
+    result = _read_child_result(spec_path, child_proc, child_key)
+    try:
+        cost = float(result.get("cost_usd") or 0.0)
+    except (ValueError, TypeError):
+        cost = 0.0
+    status = result.get("status")
+    if status in ("done", "needs_fix"):
+        return "done", cost
+    if status == "bail":
+        on_bail(result.get("detail") or "")
+        return "bail", cost
+    raise RuntimeError(
+        f"parallel child {child_key!r} error: {result.get('detail') or ''}"
+    )
