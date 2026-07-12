@@ -24,6 +24,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install
         run: uv pip install --system -e ".[dev]"
+      - name: Build native extension
+        run: make dev
       - name: Lint, format, type-check, clippy, rustfmt
         run: make check
       - name: Test (Rust + Python)
