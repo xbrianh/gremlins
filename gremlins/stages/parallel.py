@@ -278,7 +278,6 @@ class _ParallelExecutor:
         )
 
         parent_gid = self._parent_data.gremlin_id
-        parent_state = self._parent_state
         parent_gremlin = self._parallel_stage.gremlin
 
         try:
