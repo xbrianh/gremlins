@@ -19,12 +19,9 @@ from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state, write_state
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Done, Outcome
+from gremlins.stages import parallel as _parallel_mod
 from gremlins.stages.parallel import ParallelStage
 from gremlins.utils import proc as _proc_mod
-
-# ---------------------------------------------------------------------------
-# Fake subprocess helpers
-# ---------------------------------------------------------------------------
 
 
 class _FakeStreamReader:
@@ -73,10 +70,6 @@ class _FakeProcess:
     def kill(self) -> None:
         self.send_signal(signal.SIGKILL)
 
-
-# ---------------------------------------------------------------------------
-# Test helpers
-# ---------------------------------------------------------------------------
 
 
 _FAKE_PROCS: dict[int, _FakeProcess] = {}
@@ -153,10 +146,6 @@ def _write_result(spec_path: pathlib.Path, status: str = "done") -> None:
         encoding="utf-8",
     )
 
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 
 
 def test_external_kill_records_failure(
@@ -432,3 +421,128 @@ def test_subprocess_cost_accumulated_in_state(
 
     data = json.loads(sf.read_text())
     assert data.get("subprocess_cost_usd") == pytest.approx(COST_A + COST_B)
+
+
+
+def test_parse_child_timeout_none_when_no_raw_dict() -> None:
+    s = _child_stage("x")
+    s.raw_dict = None
+    assert _parallel_mod._parse_child_timeout(s, "x") is None
+
+
+def test_parse_child_timeout_none_when_missing_key() -> None:
+    assert _parallel_mod._parse_child_timeout(_child_stage("x"), "x") is None
+
+
+def test_parse_child_timeout_returns_value() -> None:
+    s = _child_stage("x")
+    s.raw_dict = {"name": "x", "type": "_resilience_noop", "timeout_seconds": 30.0}
+    assert _parallel_mod._parse_child_timeout(s, "x") == 30.0
+
+
+def test_parse_child_timeout_zero_treated_as_none() -> None:
+    s = _child_stage("x")
+    s.raw_dict = {"timeout_seconds": 0}
+    assert _parallel_mod._parse_child_timeout(s, "x") is None
+
+
+def test_parse_child_timeout_invalid_raises() -> None:
+    s = _child_stage("x")
+    s.raw_dict = {"timeout_seconds": "bad"}
+    with pytest.raises(ValueError, match="must be a number"):
+        _parallel_mod._parse_child_timeout(s, "x")
+
+
+
+def test_missing_result_detail_exit_zero() -> None:
+    msg = _parallel_mod._missing_result_detail("child-a", 0)
+    assert "exited 0 without writing result" in msg
+
+
+def test_missing_result_detail_signal() -> None:
+    msg = _parallel_mod._missing_result_detail("child-a", -signal.SIGKILL)
+    assert "SIGKILL" in msg
+    assert "no result file" in msg
+
+
+def test_missing_result_detail_nonzero() -> None:
+    msg = _parallel_mod._missing_result_detail("child-a", 42)
+    assert "returncode 42" in msg
+
+
+def test_missing_result_detail_no_returncode() -> None:
+    msg = _parallel_mod._missing_result_detail("child-a", None)
+    assert "unavailable" in msg
+
+
+
+def test_run_child_needs_fix_maps_to_done(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    child_st = _child_state(tmp_path / "c")
+    stage = _child_stage("c")
+
+    async def _mock_exec(*args: Any, **_: Any) -> _FakeProcess:
+        _write_result(pathlib.Path(args[-1]), "needs_fix")
+        return _FakeProcess(0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
+
+    status, _ = asyncio.run(
+        _parallel_mod.run_child_subprocess(
+            stage, child_st, "c", "attempt-1", on_bail=lambda _: None
+        )
+    )
+    assert status == "done"
+
+
+def test_run_child_bail_calls_on_bail(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    child_st = _child_state(tmp_path / "c")
+    stage = _child_stage("c")
+    bailed: list[str] = []
+
+    async def _mock_exec(*args: Any, **_: Any) -> _FakeProcess:
+        result_path = pathlib.Path(str(args[-1]) + ".result")
+        result_path.write_text(
+            json.dumps({"status": "bail", "detail": "nope", "cost_usd": 0.0}),
+            encoding="utf-8",
+        )
+        return _FakeProcess(0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
+
+    status, _ = asyncio.run(
+        _parallel_mod.run_child_subprocess(
+            stage, child_st, "c", "attempt-1", on_bail=bailed.append
+        )
+    )
+    assert status == "bail"
+    assert bailed == ["nope"]
+
+
+
+def test_build_child_spec_dict_base_ref_propagated(
+    tmp_path: pathlib.Path,
+) -> None:
+    artifact_dir = tmp_path / "c"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    child_st = build_state(
+        data=StateData(),
+        client=FakeClaudeClient(),
+        artifact_dir=artifact_dir,
+        base_ref="main",
+    )
+    stage = _child_stage("c")
+    spec = _parallel_mod._build_child_spec_dict(stage, child_st, "c", "attempt-1")
+    assert spec["base_ref"] == "main"
+
+
+def test_build_child_spec_dict_base_ref_empty_by_default(
+    tmp_path: pathlib.Path,
+) -> None:
+    child_st = _child_state(tmp_path / "c")
+    stage = _child_stage("c")
+    spec = _parallel_mod._build_child_spec_dict(stage, child_st, "c", "attempt-1")
+    assert spec["base_ref"] == ""
