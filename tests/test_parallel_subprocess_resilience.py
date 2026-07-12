@@ -17,9 +17,9 @@ from conftest import make_parent_state
 
 from gremlins.clients.fake import FakeClaudeClient
 from gremlins.executor.state import State, StateData, build_state, write_state
+from gremlins.stages import parallel as _parallel_mod
 from gremlins.stages.base import Stage
 from gremlins.stages.outcome import Done, Outcome
-from gremlins.stages import parallel as _parallel_mod
 from gremlins.stages.parallel import ParallelStage
 from gremlins.utils import proc as _proc_mod
 
@@ -69,7 +69,6 @@ class _FakeProcess:
 
     def kill(self) -> None:
         self.send_signal(signal.SIGKILL)
-
 
 
 _FAKE_PROCS: dict[int, _FakeProcess] = {}
@@ -145,7 +144,6 @@ def _write_result(spec_path: pathlib.Path, status: str = "done") -> None:
         ),
         encoding="utf-8",
     )
-
 
 
 def test_external_kill_records_failure(
@@ -423,7 +421,6 @@ def test_subprocess_cost_accumulated_in_state(
     assert data.get("subprocess_cost_usd") == pytest.approx(COST_A + COST_B)
 
 
-
 def test_parse_child_timeout_none_when_no_raw_dict() -> None:
     s = _child_stage("x")
     s.raw_dict = None
@@ -453,7 +450,6 @@ def test_parse_child_timeout_invalid_raises() -> None:
         _parallel_mod._parse_child_timeout(s, "x")
 
 
-
 def test_missing_result_detail_exit_zero() -> None:
     msg = _parallel_mod._missing_result_detail("child-a", 0)
     assert "exited 0 without writing result" in msg
@@ -473,7 +469,6 @@ def test_missing_result_detail_nonzero() -> None:
 def test_missing_result_detail_no_returncode() -> None:
     msg = _parallel_mod._missing_result_detail("child-a", None)
     assert "unavailable" in msg
-
 
 
 def test_run_child_needs_fix_maps_to_done(
@@ -520,7 +515,6 @@ def test_run_child_bail_calls_on_bail(
     )
     assert status == "bail"
     assert bailed == ["nope"]
-
 
 
 def test_build_child_spec_dict_base_ref_propagated(
