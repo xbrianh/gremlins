@@ -38,7 +38,7 @@ from gremlins.permissions.policy import Policy
 from gremlins.utils.decorators import default_on_exception, swallow
 from gremlins.utils.yaml_io import load_bundled_prompt
 
-_DEFAULT_TEMPERATURE = 0.3
+_DEFAULT_TEMPERATURE = 0.4
 
 DEFAULT_INSTRUCTIONS = load_bundled_prompt("default_openai_agents_instructions.md")
 
@@ -497,7 +497,9 @@ def make_openai_client(model: str | None, policy: Policy) -> OpenAIAgentsClient:
     return OpenAIAgentsClient(
         model,
         api_key=api_key,
-        model_settings=ModelSettings(temperature=_DEFAULT_TEMPERATURE),
+        model_settings=ModelSettings(
+            temperature=_DEFAULT_TEMPERATURE, parallel_tool_calls=True
+        ),
         bypass=policy.bypass,
         native_block=load_default_block("openai") | policy.block_for("openai"),
     )
@@ -528,7 +530,11 @@ def make_openrouter_client(model: str | None, policy: Policy) -> OpenAIAgentsCli
         model,
         base_url="https://openrouter.ai/api/v1",
         api_key=api_key,
-        model_settings=ModelSettings(temperature=_DEFAULT_TEMPERATURE),
+        model_settings=ModelSettings(
+            temperature=_DEFAULT_TEMPERATURE,
+            parallel_tool_calls=True,
+            reasoning=Reasoning(effort="xhigh", summary="auto"),
+        ),
         bypass=policy.bypass,
         native_block=load_default_block("openrouter") | policy.block_for("openrouter"),
     )
