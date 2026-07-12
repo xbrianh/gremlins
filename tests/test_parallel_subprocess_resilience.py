@@ -6,7 +6,6 @@ import asyncio
 import dataclasses
 import functools
 import json
-import os
 import pathlib
 import signal
 from collections.abc import Callable
@@ -75,21 +74,42 @@ _FAKE_PROCS: dict[int, _FakeProcess] = {}
 
 
 @pytest.fixture(autouse=True)
-def _patch_killpg(monkeypatch: pytest.MonkeyPatch) -> Any:
-    """Route os.killpg in proc module to the fake process registered by pid.
+def _patch_proc(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Route proc.terminate_with_grace and proc.wait_child_proc to fake processes.
 
-    The real proc.py uses os.killpg() (POSIX, works on macOS and Linux). Tests
-    here use _FakeProcess instead of real subprocesses, so we intercept killpg
-    and forward to the fake's send_signal.
+    The Rust-backed proc module uses native killpg/waitpid, so we can't mock
+    os.killpg. Instead we mock at the Python proc level.
     """
 
-    def _fake_killpg(pgid: int, sig: int) -> None:
-        proc = _FAKE_PROCS.get(pgid)
+    async def _fake_terminate(p: Any, grace_s: float = 10.0) -> None:
+        proc = _FAKE_PROCS.get(p.pid)
         if proc is None:
-            raise ProcessLookupError(pgid)
-        proc.send_signal(sig)
+            return
+        proc.send_signal(signal.SIGTERM)
+        if proc.returncode is None:
+            await asyncio.sleep(grace_s)
+            if proc.returncode is None:
+                proc.send_signal(signal.SIGKILL)
 
-    monkeypatch.setattr(os, "killpg", _fake_killpg)
+    async def _fake_wait_child(
+        child_proc: Any, timeout_s: float | None, child_key: str
+    ) -> None:
+        proc = _FAKE_PROCS.get(child_proc.pid)
+        if proc is None:
+            return
+        if timeout_s is not None:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=timeout_s)
+            except TimeoutError:
+                await _fake_terminate(child_proc)
+                raise RuntimeError(
+                    f"parallel child {child_key!r} timed out after {timeout_s}s"
+                )
+        else:
+            await proc.wait()
+
+    monkeypatch.setattr(_proc_mod, "terminate_with_grace", _fake_terminate)
+    monkeypatch.setattr(_proc_mod, "wait_child_proc", _fake_wait_child)
     yield
     _FAKE_PROCS.clear()
 

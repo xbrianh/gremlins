@@ -1,3 +1,6 @@
+mod core;
+mod python;
+
 use pyo3::prelude::*;
 
 /// A placeholder function to verify the PyO3 module loads correctly.
@@ -17,6 +20,7 @@ fn __version__() -> &'static str {
 fn _gremlins_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sum, m)?)?;
     m.add_function(wrap_pyfunction!(__version__, m)?)?;
+    python::proc::register(m)?;
     Ok(())
 }
 

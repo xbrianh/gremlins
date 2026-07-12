@@ -3,6 +3,7 @@ import subprocess
 
 import pytest
 
+from gremlins._core import run as _rust_run
 from gremlins.utils import proc
 
 
@@ -176,3 +177,12 @@ def test_iter_lines_idle_timeout():
 
     with pytest.raises(TimeoutError):
         run(_go())
+
+
+# integration: confirm the Rust extension is serving calls
+
+
+def test_rust_extension_serves_sync_run():
+    r = _rust_run(["echo", "hello"])
+    assert r.returncode == 0
+    assert r.stdout.strip() == "hello"
