@@ -15,7 +15,7 @@ from agents.items import MessageOutputItem, ToolCallItem, ToolCallOutputItem
 from agents.stream_events import RunItemStreamEvent
 from agents.tool_context import ToolContext
 
-from gremlins.clients.config import OPENAI_AGENTS_MAX_TURNS
+from gremlins.clients.config import openai_agents_max_turns
 from gremlins.clients.protocol import CompletedRun
 from gremlins.clients.providers.openai_agents import (
     DEFAULT_INSTRUCTIONS,
@@ -582,7 +582,7 @@ def test_run_streamed_passes_max_turns(monkeypatch: Any) -> None:
     asyncio.run(client.run("do something", label="t"))
 
     assert captured_kwargs, "Runner.run_streamed was not called"
-    assert captured_kwargs[0].get("max_turns") == OPENAI_AGENTS_MAX_TURNS
+    assert captured_kwargs[0].get("max_turns") == openai_agents_max_turns()
 
 
 def test_bypass_false_enforces_path_scoping(tmp_path: pathlib.Path) -> None:

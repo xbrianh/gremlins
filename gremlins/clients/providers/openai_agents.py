@@ -23,10 +23,10 @@ from openai.types.shared import Reasoning
 
 from gremlins import paths
 from gremlins.clients.config import (
-    OPENAI_AGENTS_MAX_TURNS,
     STREAM_IDLE_BACKOFF,
     STREAM_IDLE_TIMEOUT,
     is_transient_stream_error,
+    openai_agents_max_turns,
     retry,
     validate_max_retries,
 )
@@ -312,7 +312,7 @@ class OpenAIAgentsClient:
             prompt,
             context=ctx,
             run_config=run_config,
-            max_turns=OPENAI_AGENTS_MAX_TURNS,
+            max_turns=openai_agents_max_turns(),
         )
         self._track(run)
 
