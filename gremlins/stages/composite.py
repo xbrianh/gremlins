@@ -25,8 +25,10 @@ def child_state(
     else:
         artifact_dir = parent.artifact_dir / child.name
         artifact_dir.mkdir(parents=True, exist_ok=True)
+    # Each child gets its own StateData copy so the persisted client is correct.
     return dataclasses.replace(
         parent,
+        data=dataclasses.replace(parent.data, client=str(client)),
         client=client,
         artifact_dir=artifact_dir,
         child_key=child.name,

@@ -285,12 +285,11 @@ class _ParallelExecutor:
             for child_key, child_state, _ in self._child_runners:
                 if parent_gremlin is not None and parent_gid:
                     gid = parent_gid
-                    pstate = parent_state
                     child_id = f"{gid}--{self._group_name}--{child_key}"
                     branch_stage = self._stages_by_key.get(child_key)
-                    branch_pipeline = _branch_pipeline(branch_stage, pstate)
+                    branch_pipeline = _branch_pipeline(branch_stage, child_state)
                     forked_state = await parent_gremlin.fork(
-                        pstate,
+                        child_state,
                         child_id,
                         parent_id=gid,
                         group_name=self._group_name,
