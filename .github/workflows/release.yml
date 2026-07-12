@@ -29,20 +29,48 @@ jobs:
         with:
           python-version: "3.11"
       - uses: astral-sh/setup-uv@v5
+      - uses: dtolnay/rust-toolchain@stable
 
       - name: Stamp version from tag
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           echo "Release version: ${VERSION}"
-          tmp=$(mktemp "${RUNNER_TEMP}/stamp.XXXXXX")
-          sed "s/^version = \"0.0.0\"$/version = \"${VERSION}\"/" pyproject.toml > "$tmp"
-          mv "$tmp" pyproject.toml
-          grep "^version = \"${VERSION}\"" pyproject.toml || { echo "::error::Version stamp failed"; exit 1; }
+          for f in pyproject.toml crates/gremlins-core/Cargo.toml crates/gremlins-core/pyproject.toml; do
+            tmp=$(mktemp)
+            sed "s/^version = \"0.0.0\"$/version = \"${VERSION}\"/" "$f" > "$tmp"
+            mv "$tmp" "$f"
+            grep -q "^version = \"${VERSION}\"" "$f" || { echo "::error::Version stamp failed for $f"; exit 1; }
+          done
 
-      - name: Build
+      - name: Update Cargo.lock for stamped version
+        run: cargo update -p gremlins-core
+
+      - name: Build gremlins-ai (pure Python)
         run: |
           rm -rf dist/
           uv build
+
+      - name: Stamp gremlins-core version in requirements.txt
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i "s/^gremlins-core.*/gremlins-core==${VERSION}/" requirements.txt
+          grep -q "gremlins-core==${VERSION}" requirements.txt || { echo "::error::requirements stamp failed"; exit 1; }
+
+      - name: Build gremlins-core (native extension sdist)
+        run: |
+          maturin sdist -o dist -m crates/gremlins-core/Cargo.toml
+
+      - name: Assert dist contains exactly two distributions
+        run: |
+          count=0
+          for f in dist/*.tar.gz dist/*.whl; do
+            [ -f "$f" ] && ((count++))
+          done
+          if [ "$count" != "2" ]; then
+            echo "::error::Expected exactly 2 distributions in dist/, found $count"
+            ls -la dist/
+            exit 1
+          fi
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

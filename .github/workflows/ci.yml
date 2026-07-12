@@ -18,9 +18,15 @@ jobs:
         with:
           python-version: "3.11"
       - uses: astral-sh/setup-uv@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
       - name: Install
         run: uv pip install --system -e ".[dev]"
-      - name: Lint, format, type-check
+      - name: Lint, format, type-check, clippy, rustfmt
         run: make check
-      - name: Test
+      - name: Test (Rust + Python)
         run: make test
+      - name: Verify native extension builds
+        run: cd crates/gremlins-core && maturin build --profile ci
