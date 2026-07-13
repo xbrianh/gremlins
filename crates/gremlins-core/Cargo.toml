@@ -9,6 +9,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 pyo3 = "0.29"
+libc = "0.2"
 
 [features]
 extension-module = ["pyo3/extension-module"]

@@ -22,10 +22,8 @@ def run(
     *,
     cwd: str | os.PathLike[str] | None = None,
     check: bool = False,
-    text: bool = True,
     timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    # text=True is always assumed on the Rust side
     return _run(cmd, cwd=_to_str(cwd), check=check, timeout=timeout)
 
 

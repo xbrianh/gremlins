@@ -36,7 +36,11 @@ pub fn run(
     check: bool,
     timeout: Option<f64>,
 ) -> PyResult<Py<PyAny>> {
-    match proc::run(&cmd, cwd.as_deref(), check, timeout) {
+    // Release the GIL so other Python threads can run while the child process
+    // executes (matching subprocess.run behavior).
+    let result = py.detach(|| proc::run(&cmd, cwd.as_deref(), check, timeout));
+
+    match result {
         Ok(r) => {
             let ty = subprocess_type(py, "CompletedProcess")?;
             let obj = ty.call1((cmd, r.returncode, r.stdout, r.stderr))?;
@@ -54,5 +58,10 @@ pub fn run(
         }
         Err(proc::ProcError::Io(e)) => Err(map_io_error(e)),
         Err(proc::ProcError::EmptyCommand) => Err(PyValueError::new_err("empty command")),
+        Err(proc::ProcError::InvalidTimeout(t)) => {
+            Err(PyValueError::new_err(format!(
+                "timeout must be a finite non-negative number, got {t}"
+            )))
+        }
     }
 }
