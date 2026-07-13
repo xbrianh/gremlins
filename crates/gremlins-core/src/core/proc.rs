@@ -439,7 +439,15 @@ mod tests {
 
     #[test]
     fn test_run_quiet_with_cwd() {
-        let r = run_quiet(&["pwd".to_string()], Some(Path::new("/"))).unwrap();
+        let r = run_quiet(
+            &[
+                "sh".to_string(),
+                "-c".to_string(),
+                r#"test "$(pwd)" = /"#.to_string(),
+            ],
+            Some(Path::new("/")),
+        )
+        .unwrap();
         assert_eq!(r.returncode, 0);
     }
 
