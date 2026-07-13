@@ -28,6 +28,23 @@ fn subprocess_type<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyTy
 }
 
 #[pyfunction]
+#[pyo3(signature = (cmd, cwd=None))]
+pub fn run_quiet(py: Python<'_>, cmd: Vec<String>, cwd: Option<PathBuf>) -> PyResult<Py<PyAny>> {
+    let result = py.detach(|| proc::run_quiet(&cmd, cwd.as_deref()));
+
+    match result {
+        Ok(r) => {
+            let ty = subprocess_type(py, "CompletedProcess")?;
+            let obj = ty.call1((cmd, r.returncode))?;
+            Ok(obj.into_any().unbind())
+        }
+        Err(proc::ProcError::Io(e)) => Err(map_io_error(e)),
+        Err(proc::ProcError::EmptyCommand) => Err(PyValueError::new_err("empty command")),
+        Err(_) => unreachable!(), // CalledProcessError and TimeoutExpired never produced by run_quiet
+    }
+}
+
+#[pyfunction]
 #[pyo3(signature = (cmd, cwd=None, check=false, timeout=None))]
 pub fn run(
     py: Python<'_>,
