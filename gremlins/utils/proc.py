@@ -9,7 +9,9 @@ import sys
 from collections.abc import AsyncIterator
 from typing import Any
 
-from _gremlins_core.utils.proc import run_ok  # noqa: F401
+from _gremlins_core.utils.proc import (
+    run_ok,  # noqa: F401  # pyright: ignore[reportUnusedImport]
+)
 
 
 def run(

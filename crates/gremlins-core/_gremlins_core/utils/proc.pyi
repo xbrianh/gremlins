@@ -1,0 +1,3 @@
+import os
+
+def run_ok(cmd: list[str], *, cwd: str | os.PathLike[str] | None = None) -> bool: ...
