@@ -54,6 +54,9 @@ ban-relative-imports = "all"
 
 [tool.pyright]
 typeCheckingMode = "strict"
+extraPaths = [
+    "crates/gremlins-core",
+]
 include = [
     "gremlins",
 ]
