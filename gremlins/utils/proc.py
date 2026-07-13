@@ -14,8 +14,6 @@ from _gremlins_core.utils.proc import (
 )
 from _gremlins_core.utils.proc import (
     run_ok,  # noqa: F401  # pyright: ignore[reportUnusedImport]
-)
-from _gremlins_core.utils.proc import (
     run_quiet,  # noqa: F401  # pyright: ignore[reportUnusedImport]
 )
 
