@@ -33,6 +33,7 @@ gremlins = "gremlins.cli:main"
 
 [tool.maturin]
 module-name = "_gremlins_core"
+python-packages = ["gremlins"]
 manifest-path = "crates/gremlins-core/Cargo.toml"
 features = ["extension-module"]
 
