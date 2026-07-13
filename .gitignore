@@ -13,6 +13,7 @@ plans/
 
 # Rust
 /target/
+/.cargo-gremlin-target/
 *.so
 *.dylib
 *.dSYM/
