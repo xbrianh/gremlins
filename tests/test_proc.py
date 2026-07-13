@@ -199,9 +199,7 @@ def test_wait_child_proc_normal_exit():
     """wait_child_proc returns after the child exits normally."""
 
     async def _go() -> None:
-        p = await asyncio.create_subprocess_exec(
-            "true", start_new_session=True
-        )
+        p = await asyncio.create_subprocess_exec("true", start_new_session=True)
         await proc.wait_child_proc(p, timeout_s=5.0, child_key="test")
         assert p.returncode == 0
 
@@ -213,9 +211,7 @@ def test_wait_child_proc_timeout_terminates():
     """wait_child_proc kills a hanging child and raises RuntimeError."""
 
     async def _go() -> None:
-        p = await asyncio.create_subprocess_exec(
-            "sleep", "60", start_new_session=True
-        )
+        p = await asyncio.create_subprocess_exec("sleep", "60", start_new_session=True)
         with pytest.raises(RuntimeError, match="timed out"):
             await proc.wait_child_proc(p, timeout_s=0.1, child_key="test")
         # Process must be reaped after timeout
@@ -229,9 +225,7 @@ def test_terminate_with_grace_kills_process():
     """terminate_with_grace kills a running process and leaves returncode set."""
 
     async def _go() -> None:
-        p = await asyncio.create_subprocess_exec(
-            "sleep", "60", start_new_session=True
-        )
+        p = await asyncio.create_subprocess_exec("sleep", "60", start_new_session=True)
         await proc.terminate_with_grace(p, grace_s=0.1)
         assert p.returncode is not None
 
@@ -260,9 +254,7 @@ def test_wait_child_proc_cancel_triggers_terminate():
     """Cancelling wait_child_proc terminates the child and sets returncode."""
 
     async def _go() -> None:
-        p = await asyncio.create_subprocess_exec(
-            "sleep", "60", start_new_session=True
-        )
+        p = await asyncio.create_subprocess_exec("sleep", "60", start_new_session=True)
         task = asyncio.create_task(
             proc.wait_child_proc(p, timeout_s=None, child_key="test")
         )
@@ -285,9 +277,7 @@ def test_terminate_with_grace_shielded_against_cancel():
     """terminate_with_grace completes even if the calling task is cancelled."""
 
     async def _go() -> None:
-        p = await asyncio.create_subprocess_exec(
-            "sleep", "60", start_new_session=True
-        )
+        p = await asyncio.create_subprocess_exec("sleep", "60", start_new_session=True)
         task = asyncio.create_task(proc.terminate_with_grace(p, grace_s=0.2))
         await asyncio.sleep(0.05)
         task.cancel()
@@ -306,9 +296,7 @@ def test_wait_child_proc_no_timeout_waits_forever():
     """wait_child_proc without timeout waits for normal exit."""
 
     async def _go() -> None:
-        p = await asyncio.create_subprocess_exec(
-            "echo", "done", start_new_session=True
-        )
+        p = await asyncio.create_subprocess_exec("echo", "done", start_new_session=True)
         await proc.wait_child_proc(p, timeout_s=None, child_key="test")
         assert p.returncode == 0
 
