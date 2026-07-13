@@ -15,6 +15,7 @@ fn _gremlins_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let utils = PyModule::new(m.py(), "utils")?;
     let proc = PyModule::new(m.py(), "proc")?;
     proc.add_function(wrap_pyfunction!(python::utils::proc::run_ok, &proc)?)?;
+    proc.add_function(wrap_pyfunction!(python::utils::proc::run, &proc)?)?;
     utils.add_submodule(&proc)?;
     m.add_submodule(&utils)?;
     let modules = m.py().import("sys")?.getattr("modules")?;
