@@ -9,6 +9,8 @@ import sys
 from collections.abc import AsyncIterator
 from typing import Any
 
+import _gremlins_core
+
 
 def run(
     cmd: list[str],
@@ -24,10 +26,7 @@ def run(
 
 
 def run_ok(cmd: list[str], *, cwd: str | os.PathLike[str] | None = None) -> bool:
-    r = subprocess.run(
-        cmd, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    )
-    return r.returncode == 0
+    return _gremlins_core.run_ok(cmd, cwd=cwd)
 
 
 def run_quiet(
