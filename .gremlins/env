@@ -7,6 +7,20 @@ if [ -z "$VIRTUAL_ENV" ] && [ -f .venv/bin/activate ]; then
     source .venv/bin/activate
 fi
 export GREMLINS_OPENAI_AGENTS_MAX_TURNS='1000'
+
+# ---- Rust build cache ----
+# Gremlin worktrees live in temp dirs, so cargo builds from scratch every
+# verify iteration without this. Two complementary strategies:
+#
+# 1. CARGO_TARGET_DIR — persistent location so cargo's incremental compilation
+#    survives across loop iterations. Also avoids filling the tmpdir with 1GB+.
+# 2. sccache (brew install sccache) — content-hash-based compiler cache that
+#    spans different git states, so changing source doesn't lose the cache.
+#
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$(dirname "$(dirname "${BASH_SOURCE[0]}")")/.cargo-gremlin-target}"
+if command -v sccache &>/dev/null; then
+    export RUSTC_WRAPPER="${RUSTC_WRAPPER:-sccache}"
+fi
 SECRET_ENV="$(dirname "${BASH_SOURCE[0]}")/secret_env"
 if [ -f "$SECRET_ENV" ]; then
     source "$SECRET_ENV"
