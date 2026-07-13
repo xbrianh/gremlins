@@ -135,3 +135,14 @@ def test_substitute_vars_unknown_and_nonword_braces_pass_through() -> None:
     # unknown tokens, shell ${x}, {read:k}, and doubled braces are left verbatim;
     # the inner {name} of {{name}} is substituted (regex, not format_map semantics).
     assert stage.substitute_vars(text, state) == "{unknown} ${shell} {read:k} {st}"
+
+
+def test_substitute_vars_hyphenated_keys() -> None:
+    stage = _SimpleStage("st", [], {"review-one": "done", "my-key": "val"})
+    state = _subs_state()
+    assert stage.substitute_vars("{review-one}", state) == "done"
+    assert stage.substitute_vars("{my-key}", state) == "val"
+    assert (
+        stage.substitute_vars("prefix {review-one} {my-key} suffix", state)
+        == "prefix done val suffix"
+    )

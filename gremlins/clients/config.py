@@ -13,8 +13,11 @@ R = TypeVar("R")
 
 STREAM_IDLE_TIMEOUT = int(os.environ.get("GREMLINS_STREAM_IDLE_TIMEOUT") or 600)
 STREAM_IDLE_BACKOFF = (60, 300, 600)
+
+
 def openai_agents_max_turns() -> int:
     return int(os.environ.get("GREMLINS_OPENAI_AGENTS_MAX_TURNS", "100"))
+
 
 # Substrings that identify transient provider errors (capacity, rate-limit, 5xx).
 # Permanent errors (auth, bad request, content policy) won't match any of these.
