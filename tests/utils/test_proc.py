@@ -65,5 +65,5 @@ def test_run_or_raise_raises_on_failure():
 
 
 def test_run_ok_missing_command_raises_oserror():
-    with pytest.raises(OSError):
+    with pytest.raises(FileNotFoundError):
         proc.run_ok(["_nonexistent_command_xyzzy_"])
