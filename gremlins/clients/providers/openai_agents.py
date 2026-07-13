@@ -533,7 +533,7 @@ def make_openrouter_client(model: str | None, policy: Policy) -> OpenAIAgentsCli
         model_settings=ModelSettings(
             temperature=_DEFAULT_TEMPERATURE,
             parallel_tool_calls=True,
-            reasoning=Reasoning(effort="xhigh", summary="auto"),
+            reasoning=Reasoning(effort="high", summary="auto"),
         ),
         bypass=policy.bypass,
         native_block=load_default_block("openrouter") | policy.block_for("openrouter"),

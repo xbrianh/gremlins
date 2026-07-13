@@ -1,4 +1,4 @@
-default_client: openrouter:deepseek-v4-pro
+default_client: openrouter:deepseek-v4-flash
 base_ref: main
 github_integration: true
 prompt_dir: prompts
@@ -76,7 +76,7 @@ stages:
       - name: local-review-gpt
         type: agent
         prompt: [code-style, terse, local_review.md]
-        client: openrouter:gpt-5.6-sol
+        client: openrouter:gpt-5.6-luna
         out:
           local-review-gpt: "file://session/local-review-gpt.md"
       - name: local-review-grok
