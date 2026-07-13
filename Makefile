@@ -1,7 +1,6 @@
 MAKEFLAGS += -j$(shell sysctl -n hw.ncpu 2>/dev/null || nproc)
 
 TEST_FILES := $(wildcard tests/test_*.py)
-CRATE_DIR := crates/gremlins-core
 
 .PHONY: lint format format-write typecheck test check \
         rust-test rust-fmt rust-fmt-check rust-clippy dev install \
@@ -41,10 +40,10 @@ rust-clippy:
 # --- Build ---
 
 dev: ## Build and install the native extension in dev mode
-	cd $(CRATE_DIR) && maturin develop
+	maturin develop
 
 install: ## Build and install the native extension in release mode
-	cd $(CRATE_DIR) && maturin develop --release
+	maturin develop --release
 
 check: lint format typecheck rust-fmt-check rust-clippy
 	@grep -r 'from gremlins.executor.state' gremlins/ --include='*.py' | grep -v 'gremlins/executor/' && echo 'ERROR: state.py leak' && exit 1 || true
