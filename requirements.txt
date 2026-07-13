@@ -1,5 +1,4 @@
 claude-agent-sdk>=0.1.59
-gremlins-core
 openai-agents
 platformdirs
 pyyaml
