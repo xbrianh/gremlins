@@ -9,7 +9,9 @@ import sys
 from collections.abc import AsyncIterator
 from typing import Any
 
-import _gremlins_core
+from _gremlins_core.utils.proc import (
+    run_ok,  # noqa: F401  # pyright: ignore[reportUnusedImport]
+)
 
 
 def run(
@@ -23,10 +25,6 @@ def run(
     return subprocess.run(
         cmd, cwd=cwd, capture_output=True, text=text, check=check, timeout=timeout
     )
-
-
-def run_ok(cmd: list[str], *, cwd: str | os.PathLike[str] | None = None) -> bool:
-    return _gremlins_core.run_ok(cmd, cwd=cwd)
 
 
 def run_quiet(

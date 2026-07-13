@@ -6,6 +6,7 @@ use pyo3::prelude::*;
 use crate::core::proc;
 
 #[pyfunction]
+#[pyo3(signature = (cmd, cwd=None))]
 pub fn run_ok(cmd: Vec<String>, cwd: Option<PathBuf>) -> PyResult<bool> {
     proc::run_ok(&cmd, cwd.as_deref()).map_err(|e| match e.raw_os_error() {
         Some(_) if e.kind() == std::io::ErrorKind::NotFound => {
