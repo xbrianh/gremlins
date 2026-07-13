@@ -57,10 +57,7 @@ fn raise_proc_error(py: Python<'_>, cmd: &[String], err: &ProcError) -> PyErr {
             // Always pass output as string for CalledProcessError (matches Python convention)
             let stdout_s = String::from_utf8_lossy(stdout).into_owned();
             let stderr_s = String::from_utf8_lossy(stderr).into_owned();
-            PyErr::from_value(
-                exc.call1((*returncode, args, stdout_s, stderr_s))
-                    .unwrap(),
-            )
+            PyErr::from_value(exc.call1((*returncode, args, stdout_s, stderr_s)).unwrap())
         }
         ProcError::TimeoutExpired { cmd, timeout } => {
             let subprocess = PyModule::import(py, "subprocess").unwrap();
@@ -150,7 +147,11 @@ fn run(
 
 #[pyfunction]
 #[pyo3(signature = (cmd, *, cwd=None))]
-fn run_ok(py: Python<'_>, cmd: &Bound<'_, PyAny>, cwd: Option<&Bound<'_, PyAny>>) -> PyResult<bool> {
+fn run_ok(
+    py: Python<'_>,
+    cmd: &Bound<'_, PyAny>,
+    cwd: Option<&Bound<'_, PyAny>>,
+) -> PyResult<bool> {
     let cmd = parse_cmd(cmd)?;
     let cwd = parse_cwd(cwd)?;
 

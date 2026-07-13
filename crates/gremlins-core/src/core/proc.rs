@@ -61,7 +61,7 @@ fn exit_status_to_rc(status: std::process::ExitStatus) -> i32 {
         #[cfg(unix)]
         {
             use std::os::unix::process::ExitStatusExt;
-            -(status.signal().unwrap_or(1) as i32)
+            -(status.signal().unwrap_or(1))
         }
         #[cfg(not(unix))]
         {
