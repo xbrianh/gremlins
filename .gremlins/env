@@ -19,7 +19,7 @@ export GREMLINS_OPENAI_AGENTS_MAX_TURNS='1000'
 #
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$(dirname "$(dirname "${BASH_SOURCE[0]}")")/.cargo-gremlin-target}"
 if command -v sccache &>/dev/null; then
-    export RUSTC_WRAPPER=sccache
+    export RUSTC_WRAPPER="${RUSTC_WRAPPER:-sccache}"
 fi
 SECRET_ENV="$(dirname "${BASH_SOURCE[0]}")/secret_env"
 if [ -f "$SECRET_ENV" ]; then
