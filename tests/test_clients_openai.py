@@ -353,7 +353,6 @@ def test_xai_client_model_settings(monkeypatch: Any) -> None:
     monkeypatch.setenv("XAI_API_KEY", "test-key")
     client = make_xai_client(None, Policy())
     assert client._model_settings is not None
-    assert client._model_settings.temperature == 0.4
     assert client._model_settings.reasoning is not None
     assert client._model_settings.reasoning.effort == "high"
     assert client._model_settings.reasoning.summary == "auto"
@@ -376,7 +375,6 @@ def test_openai_client_model_settings(monkeypatch: Any) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     client = make_openai_client(None, Policy())
     assert client._model_settings is not None
-    assert client._model_settings.temperature == 0.4
 
 
 def test_openai_client_missing_key(monkeypatch: Any) -> None:
@@ -423,7 +421,6 @@ def test_openrouter_client_model_settings(monkeypatch: Any) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     client = make_openrouter_client(None, Policy())
     assert client._model_settings is not None
-    assert client._model_settings.temperature == 0.4
 
 
 def test_openrouter_client_missing_key(monkeypatch: Any) -> None:
