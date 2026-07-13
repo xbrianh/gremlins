@@ -53,7 +53,7 @@ stages:
           printf "%s" "$(printf '%s' "$PR_JSON" | jq -r '.headRefName')" > "{artifact_dir}/pr-branch.txt" &&
           printf "%s" "$(printf '%s' "$PR_JSON" | jq -r '.number')" > "{artifact_dir}/pr-number.txt"
   - { type: gremlins:plan-gh, prompt: [code-style, terse, gremlins:plan_gh.md] }
-  - { type: gremlins:implement, prompt: [code-style, terse, implement_pr_extension.md] }
+  - { type: gremlins:implement, prompt: [code-style, terse, no_lint_in_implement.md, implement_pr_extension.md] }
   - { type: verify,             options: { cmds: ["make check", "make test"] }, prompt: verify }
   - { name: push, type: gremlins:github-push-to-pr-branch }
 

@@ -28,7 +28,7 @@ stage-definitions:
 
 stages:
   - { type: gremlins:plan,      prompt: [code-style, terse, gremlins:plan.md] }
-  - { type: gremlins:implement,  prompt: [code-style, terse, gremlins:implement_local.md] }
+  - { type: gremlins:implement,  prompt: [code-style, terse, no_lint_in_implement.md, gremlins:implement_local.md] }
   - { type: normalize }
   - { name: check, type: verify, options: { cmds: ["make check"] }, prompt: verify }
 

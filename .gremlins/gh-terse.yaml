@@ -70,7 +70,8 @@ stage-definitions:
 
 stages:
   - { type: gremlins:plan-gh, prompt: [code-style, terse, gremlins:plan_gh.md] }
-  - { type: gremlins:implement, prompt: [code-style, terse, gremlins:implement_gh.md] }
+  - { type: gremlins:implement, prompt: [code-style, terse, no_lint_in_implement.md, gremlins:implement_gh.md] }
+  - { type: normalize-and-fix }
 
   - parallel:
       - name: local-review-gpt
@@ -88,7 +89,7 @@ stages:
 
   - name: local-address
     type: agent
-    prompt: [code-style, terse, local_address.md, gremlins:bail_section.md]
+    prompt: [code-style, terse, local_address.md, no_lint_in_implement.md, gremlins:bail_section.md]
     in:
       review-one: local-review-gpt
       review-two: local-review-grok
