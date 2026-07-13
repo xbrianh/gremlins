@@ -64,6 +64,31 @@ def test_run_or_raise_raises_on_failure():
         proc.run_or_raise(["false"])
 
 
+def test_run_timeout_raises():
+    with pytest.raises(subprocess.TimeoutExpired) as exc:
+        proc.run(["sleep", "10"], timeout=0.05)
+    assert exc.exconly().startswith("subprocess.TimeoutExpired")
+
+
+def test_run_timeout_with_partial_output():
+    with pytest.raises(subprocess.TimeoutExpired) as exc:
+        proc.run(
+            ["sh", "-c", "echo start; sleep 10"],
+            timeout=0.1,
+        )
+    assert "start" in exc.value.stdout
+
+
+def test_run_timeout_large_output():
+    """Output larger than pipe buffer (~64KB) under timeout must not deadlock."""
+    with pytest.raises(subprocess.TimeoutExpired) as exc:
+        proc.run(
+            ["sh", "-c", "dd if=/dev/zero bs=131072 count=1 2>/dev/null; sleep 10"],
+            timeout=0.2,
+        )
+    assert len(exc.value.stdout) > 0
+
+
 def test_run_ok_missing_command_raises_oserror():
     with pytest.raises(FileNotFoundError):
         proc.run_ok(["_nonexistent_command_xyzzy_"])

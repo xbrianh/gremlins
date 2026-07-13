@@ -10,6 +10,9 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from _gremlins_core.utils.proc import (
+    run as _run,
+)
+from _gremlins_core.utils.proc import (
     run_ok,  # noqa: F401  # pyright: ignore[reportUnusedImport]
 )
 
@@ -22,9 +25,13 @@ def run(
     text: bool = True,
     timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        cmd, cwd=cwd, capture_output=True, text=text, check=check, timeout=timeout
-    )
+    return _run(cmd, cwd=_to_str(cwd), check=check, timeout=timeout)
+
+
+def _to_str(p: str | os.PathLike[str] | None) -> str | None:
+    if p is None:
+        return None
+    return os.fspath(p)
 
 
 def run_quiet(
