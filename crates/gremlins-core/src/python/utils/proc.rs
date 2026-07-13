@@ -58,10 +58,8 @@ pub fn run(
         }
         Err(proc::ProcError::Io(e)) => Err(map_io_error(e)),
         Err(proc::ProcError::EmptyCommand) => Err(PyValueError::new_err("empty command")),
-        Err(proc::ProcError::InvalidTimeout(t)) => {
-            Err(PyValueError::new_err(format!(
-                "timeout must be a finite non-negative number, got {t}"
-            )))
-        }
+        Err(proc::ProcError::InvalidTimeout(t)) => Err(PyValueError::new_err(format!(
+            "timeout must be a finite non-negative number, got {t}"
+        ))),
     }
 }
