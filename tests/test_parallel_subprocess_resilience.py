@@ -90,6 +90,10 @@ def _patch_proc(monkeypatch: pytest.MonkeyPatch) -> Any:
             await asyncio.sleep(grace_s)
             if proc.returncode is None:
                 proc.send_signal(signal.SIGKILL)
+        try:
+            await proc.wait()
+        except Exception:
+            pass
 
     async def _fake_wait_child(
         child_proc: Any, timeout_s: float | None, child_key: str

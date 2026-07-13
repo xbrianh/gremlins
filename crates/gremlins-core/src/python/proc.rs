@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::time::Duration;
 
 use pyo3::prelude::*;
@@ -55,8 +54,11 @@ fn raise_proc_error(py: Python<'_>, cmd: &[String], err: &ProcError) -> PyErr {
             let subprocess = PyModule::import(py, "subprocess").unwrap();
             let exc = subprocess.getattr("CalledProcessError").unwrap();
             let args: Vec<&str> = cmd.iter().map(|s| s.as_str()).collect();
+            // Always pass output as string for CalledProcessError (matches Python convention)
+            let stdout_s = String::from_utf8_lossy(stdout).into_owned();
+            let stderr_s = String::from_utf8_lossy(stderr).into_owned();
             PyErr::from_value(
-                exc.call1((*returncode, args, stdout.clone(), stderr.clone()))
+                exc.call1((*returncode, args, stdout_s, stderr_s))
                     .unwrap(),
             )
         }
@@ -76,7 +78,7 @@ fn raise_proc_error(py: Python<'_>, cmd: &[String], err: &ProcError) -> PyErr {
             }
         }
         ProcError::ProcessLookup => {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("ProcessLookupError")
+            PyErr::new::<pyo3::exceptions::PyProcessLookupError, _>("ProcessLookupError")
         }
     }
 }
@@ -105,40 +107,56 @@ fn parse_cwd(cwd: Option<&Bound<'_, PyAny>>) -> PyResult<Option<PathBuf>> {
     }
 }
 
+fn validate_timeout(timeout: Option<f64>) -> PyResult<Option<Duration>> {
+    match timeout {
+        None => Ok(None),
+        Some(t) => {
+            if t.is_nan() || t.is_infinite() || t < 0.0 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "timeout must be a non-negative finite number, got {t:?}"
+                )));
+            }
+            Ok(Some(Duration::from_secs_f64(t)))
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Sync functions
 // ---------------------------------------------------------------------------
 
 #[pyfunction]
 #[pyo3(signature = (cmd, *, cwd=None, check=false, text=true, timeout=None))]
-fn run<'py>(
-    py: Python<'py>,
-    cmd: &Bound<'py, PyAny>,
-    cwd: Option<&Bound<'py, PyAny>>,
+fn run(
+    py: Python<'_>,
+    cmd: &Bound<'_, PyAny>,
+    cwd: Option<&Bound<'_, PyAny>>,
     check: bool,
     text: bool,
     timeout: Option<f64>,
-) -> PyResult<Bound<'py, PyAny>> {
+) -> PyResult<Py<PyAny>> {
     let cmd = parse_cmd(cmd)?;
     let cwd = parse_cwd(cwd)?;
-    let timeout = timeout.map(Duration::from_secs_f64);
+    let timeout = validate_timeout(timeout)?;
 
-    match proc::spawn_sync(&cmd, cwd.as_deref(), true, check, timeout) {
-        Ok(result) => {
-            let obj = to_py_completed_process(py, &cmd, &result, text)?;
-            Ok(obj.into_bound(py))
-        }
+    let result = py.detach(|| proc::spawn_sync(&cmd, cwd.as_deref(), true, check, timeout));
+
+    Python::try_attach(|py| match result {
+        Ok(result) => to_py_completed_process(py, &cmd, &result, text),
         Err(err) => Err(raise_proc_error(py, &cmd, &err)),
-    }
+    })
+    .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("GIL not held"))?
 }
 
 #[pyfunction]
 #[pyo3(signature = (cmd, *, cwd=None))]
-fn run_ok(cmd: &Bound<'_, PyAny>, cwd: Option<&Bound<'_, PyAny>>) -> PyResult<bool> {
+fn run_ok(py: Python<'_>, cmd: &Bound<'_, PyAny>, cwd: Option<&Bound<'_, PyAny>>) -> PyResult<bool> {
     let cmd = parse_cmd(cmd)?;
     let cwd = parse_cwd(cwd)?;
 
-    match proc::spawn_sync(&cmd, cwd.as_deref(), false, false, None) {
+    let result = py.detach(|| proc::spawn_sync(&cmd, cwd.as_deref(), false, false, None));
+
+    match result {
         Ok(result) => Ok(result.returncode == 0),
         Err(_) => Ok(false),
     }
@@ -146,44 +164,50 @@ fn run_ok(cmd: &Bound<'_, PyAny>, cwd: Option<&Bound<'_, PyAny>>) -> PyResult<bo
 
 #[pyfunction]
 #[pyo3(signature = (cmd, *, cwd=None))]
-fn run_quiet<'py>(
-    py: Python<'py>,
-    cmd: &Bound<'py, PyAny>,
-    cwd: Option<&Bound<'py, PyAny>>,
-) -> PyResult<Bound<'py, PyAny>> {
+fn run_quiet(
+    py: Python<'_>,
+    cmd: &Bound<'_, PyAny>,
+    cwd: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Py<PyAny>> {
     let cmd = parse_cmd(cmd)?;
     let cwd = parse_cwd(cwd)?;
 
-    match proc::spawn_sync(&cmd, cwd.as_deref(), false, false, None) {
+    let result = py.detach(|| proc::spawn_sync(&cmd, cwd.as_deref(), false, false, None));
+
+    Python::try_attach(|py| match result {
         Ok(result) => {
             let subprocess = PyModule::import(py, "subprocess")?;
             let completed_process = subprocess.getattr("CompletedProcess")?;
             let args: Vec<&str> = cmd.iter().map(|s| s.as_str()).collect();
             let obj = completed_process.call1((args, result.returncode))?;
-            Ok(obj)
+            Ok(obj.unbind())
         }
         Err(err) => Err(raise_proc_error(py, &cmd, &err)),
-    }
+    })
+    .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("GIL not held"))?
 }
 
 #[pyfunction]
 #[pyo3(signature = (cmd, *, cwd=None))]
-fn run_or_raise(cmd: &Bound<'_, PyAny>, cwd: Option<&Bound<'_, PyAny>>) -> PyResult<String> {
+fn run_or_raise(
+    py: Python<'_>,
+    cmd: &Bound<'_, PyAny>,
+    cwd: Option<&Bound<'_, PyAny>>,
+) -> PyResult<String> {
     let cmd = parse_cmd(cmd)?;
     let cwd = parse_cwd(cwd)?;
 
-    match proc::spawn_sync(&cmd, cwd.as_deref(), true, true, None) {
+    let result = py.detach(|| proc::spawn_sync(&cmd, cwd.as_deref(), true, true, None));
+
+    match result {
         Ok(result) => {
             let stdout = String::from_utf8_lossy(result.stdout.as_ref().unwrap_or(&vec![]))
                 .trim()
                 .to_string();
             Ok(stdout)
         }
-        Err(err) => Err(raise_proc_error(
-            unsafe { Python::assume_attached() },
-            &cmd,
-            &err,
-        )),
+        Err(err) => Python::try_attach(|py| Err(raise_proc_error(py, &cmd, &err)))
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("GIL not held"))?,
     }
 }
 
@@ -203,7 +227,7 @@ fn _run_async<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let cmd = parse_cmd(cmd)?;
     let cwd = parse_cwd(cwd)?;
-    let timeout = timeout.map(Duration::from_secs_f64);
+    let timeout = validate_timeout(timeout)?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         match proc::spawn_async(&cmd, cwd.as_deref(), check, timeout).await {
@@ -224,7 +248,7 @@ fn _run_shell_async<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let cmd_str = cmd.to_string();
     let cwd = parse_cwd(cwd)?;
-    let timeout = timeout.map(Duration::from_secs_f64);
+    let timeout = validate_timeout(timeout)?;
 
     let env_map: Option<HashMap<String, String>> = env.map(|d| {
         let mut map = HashMap::new();
@@ -261,26 +285,9 @@ fn _run_ok_async<'py>(
     let cwd = parse_cwd(cwd)?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let mut command = tokio::process::Command::new(&cmd[0]);
-        command.args(&cmd[1..]);
-        command.stdout(Stdio::null());
-        command.stderr(Stdio::null());
-        command.kill_on_drop(true);
-        if let Some(cwd) = cwd {
-            command.current_dir(&cwd);
-        }
-        unsafe {
-            command.pre_exec(|| {
-                let _ = nix::unistd::setsid();
-                Ok(())
-            });
-        }
-
-        match command.spawn() {
-            Ok(mut child) => match child.wait().await {
-                Ok(status) => Ok(status.code().unwrap_or(-1) == 0),
-                Err(_) => Ok(false),
-            },
+        match proc::spawn_async_nullio(&cmd, cwd.as_deref()).await {
+            Ok(Some(code)) => Ok(code == 0),
+            Ok(None) => Ok(false),
             Err(_) => Ok(false),
         }
     })
@@ -297,26 +304,9 @@ fn _run_quiet_async<'py>(
     let cwd = parse_cwd(cwd)?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let mut command = tokio::process::Command::new(&cmd[0]);
-        command.args(&cmd[1..]);
-        command.stdout(Stdio::null());
-        command.stderr(Stdio::null());
-        command.kill_on_drop(true);
-        if let Some(cwd) = cwd {
-            command.current_dir(&cwd);
-        }
-        unsafe {
-            command.pre_exec(|| {
-                let _ = nix::unistd::setsid();
-                Ok(())
-            });
-        }
-
-        match command.spawn() {
-            Ok(mut child) => match child.wait().await {
-                Ok(status) => Ok(status.code().unwrap_or(-1)),
-                Err(_) => Ok(-1),
-            },
+        match proc::spawn_async_nullio(&cmd, cwd.as_deref()).await {
+            Ok(Some(code)) => Ok(code),
+            Ok(None) => Ok(-1),
             Err(_) => Ok(-1),
         }
     })
@@ -352,34 +342,15 @@ fn _terminate_with_grace<'py>(
     pid: i32,
     grace_s: f64,
 ) -> PyResult<Bound<'py, PyAny>> {
+    if grace_s.is_nan() || grace_s.is_infinite() || grace_s < 0.0 {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "grace_s must be a non-negative finite number, got {grace_s:?}"
+        )));
+    }
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         proc::terminate_with_grace(pid, grace_s)
             .await
             .map_err(|e| Python::attach(|py| raise_proc_error(py, &[], &e)))
-    })
-}
-
-#[pyfunction]
-#[pyo3(signature = (pid, timeout_s, child_key))]
-fn _wait_child_proc<'py>(
-    py: Python<'py>,
-    pid: i32,
-    timeout_s: Option<f64>,
-    child_key: &Bound<'py, PyString>,
-) -> PyResult<Bound<'py, PyAny>> {
-    let child_key = child_key.to_string();
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        match proc::wait_child_proc(pid, timeout_s, &child_key).await {
-            Ok(()) => Ok(()),
-            Err(ProcError::Io(e)) if e.kind() == std::io::ErrorKind::TimedOut => {
-                Python::attach(|_py| {
-                    Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                        e.to_string(),
-                    ))
-                })
-            }
-            Err(err) => Python::attach(|py| Err(raise_proc_error(py, &[], &err))),
-        }
     })
 }
 
@@ -398,6 +369,5 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_run_quiet_async, m)?)?;
     m.add_function(wrap_pyfunction!(_run_or_raise_async, m)?)?;
     m.add_function(wrap_pyfunction!(_terminate_with_grace, m)?)?;
-    m.add_function(wrap_pyfunction!(_wait_child_proc, m)?)?;
     Ok(())
 }

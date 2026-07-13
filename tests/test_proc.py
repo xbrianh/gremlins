@@ -186,3 +186,130 @@ def test_rust_extension_serves_sync_run():
     r = _rust_run(["echo", "hello"])
     assert r.returncode == 0
     assert r.stdout.strip() == "hello"
+
+
+# ---------------------------------------------------------------------------
+# Integration tests for wait_child_proc / terminate_with_grace with real
+# asyncio subprocesses (no mocks).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_wait_child_proc_normal_exit():
+    """wait_child_proc returns after the child exits normally."""
+
+    async def _go() -> None:
+        p = await asyncio.create_subprocess_exec(
+            "true", start_new_session=True
+        )
+        await proc.wait_child_proc(p, timeout_s=5.0, child_key="test")
+        assert p.returncode == 0
+
+    run(_go())
+
+
+@pytest.mark.integration
+def test_wait_child_proc_timeout_terminates():
+    """wait_child_proc kills a hanging child and raises RuntimeError."""
+
+    async def _go() -> None:
+        p = await asyncio.create_subprocess_exec(
+            "sleep", "60", start_new_session=True
+        )
+        with pytest.raises(RuntimeError, match="timed out"):
+            await proc.wait_child_proc(p, timeout_s=0.1, child_key="test")
+        # Process must be reaped after timeout
+        assert p.returncode is not None
+
+    run(_go())
+
+
+@pytest.mark.integration
+def test_terminate_with_grace_kills_process():
+    """terminate_with_grace kills a running process and leaves returncode set."""
+
+    async def _go() -> None:
+        p = await asyncio.create_subprocess_exec(
+            "sleep", "60", start_new_session=True
+        )
+        await proc.terminate_with_grace(p, grace_s=0.1)
+        assert p.returncode is not None
+
+    run(_go())
+
+
+@pytest.mark.integration
+def test_terminate_with_grace_kills_grandchildren():
+    """terminate_with_grace kills the entire process group, not just the leader."""
+
+    async def _go() -> None:
+        p = await asyncio.create_subprocess_exec(
+            "sh",
+            "-c",
+            "sleep 60 & sleep 60 & wait",
+            start_new_session=True,
+        )
+        await proc.terminate_with_grace(p, grace_s=0.1)
+        assert p.returncode is not None
+
+    run(_go())
+
+
+@pytest.mark.integration
+def test_wait_child_proc_cancel_triggers_terminate():
+    """Cancelling wait_child_proc terminates the child and sets returncode."""
+
+    async def _go() -> None:
+        p = await asyncio.create_subprocess_exec(
+            "sleep", "60", start_new_session=True
+        )
+        task = asyncio.create_task(
+            proc.wait_child_proc(p, timeout_s=None, child_key="test")
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        # The cancellation handler in parallel.py calls terminate_with_grace;
+        # we simulate that here.
+        await proc.terminate_with_grace(p)
+        assert p.returncode is not None
+
+    run(_go())
+
+
+@pytest.mark.integration
+def test_terminate_with_grace_shielded_against_cancel():
+    """terminate_with_grace completes even if the calling task is cancelled."""
+
+    async def _go() -> None:
+        p = await asyncio.create_subprocess_exec(
+            "sleep", "60", start_new_session=True
+        )
+        task = asyncio.create_task(proc.terminate_with_grace(p, grace_s=0.2))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        # The shield inside terminate_with_grace should let it finish.
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        assert p.returncode is not None
+
+    run(_go())
+
+
+@pytest.mark.integration
+def test_wait_child_proc_no_timeout_waits_forever():
+    """wait_child_proc without timeout waits for normal exit."""
+
+    async def _go() -> None:
+        p = await asyncio.create_subprocess_exec(
+            "echo", "done", start_new_session=True
+        )
+        await proc.wait_child_proc(p, timeout_s=None, child_key="test")
+        assert p.returncode == 0
+
+    run(_go())

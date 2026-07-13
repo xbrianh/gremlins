@@ -17,7 +17,6 @@ from gremlins._core import (  # noqa: F401
     _run_quiet_async,
     _run_shell_async,
     _terminate_with_grace,
-    _wait_child_proc,
     run,
     run_ok,
     run_or_raise,
@@ -71,7 +70,13 @@ async def terminate_with_grace(
 
     p must be a session leader (started with start_new_session=True).
     """
-    await _terminate_with_grace(p.pid, grace_s=grace_s)
+    # Signal the process group (shielded so cancellation doesn't interrupt it)
+    await asyncio.shield(_terminate_with_grace(p.pid, grace_s=grace_s))
+    # Reap the child through asyncio so the event loop stays consistent
+    try:
+        await asyncio.shield(p.wait())
+    except Exception:
+        pass
 
 
 async def wait_child_proc(
@@ -79,7 +84,17 @@ async def wait_child_proc(
     timeout_s: float | None,
     child_key: str,
 ) -> None:
-    await _wait_child_proc(child_proc.pid, timeout_s, child_key)
+    """Wait for child_proc with optional timeout. On timeout, terminate and raise."""
+    if timeout_s is not None:
+        try:
+            await asyncio.wait_for(child_proc.wait(), timeout=timeout_s)
+        except TimeoutError:
+            await terminate_with_grace(child_proc)
+            raise RuntimeError(
+                f"parallel child {child_key!r} timed out after {timeout_s}s"
+            ) from None
+    else:
+        await child_proc.wait()
 
 
 async def iter_lines(

@@ -19,8 +19,8 @@ pub struct ProcResult {
 pub enum ProcError {
     CalledProcessError {
         returncode: i32,
-        stdout: String,
-        stderr: String,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
     },
     TimeoutExpired {
         cmd: Vec<String>,
@@ -47,6 +47,48 @@ impl std::fmt::Display for ProcError {
             }
             ProcError::Io(e) => write!(f, "IO error: {}", e),
             ProcError::ProcessLookup => write!(f, "Process not found"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn exit_status_to_rc(status: std::process::ExitStatus) -> i32 {
+    status.code().unwrap_or_else(|| {
+        // Unix signal: return negative signal number
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            -(status.signal().unwrap_or(1) as i32)
+        }
+        #[cfg(not(unix))]
+        {
+            -1
+        }
+    })
+}
+
+/// Kills the process group on drop if not disarmed.
+struct ChildGuard {
+    pid: Option<i32>,
+}
+
+impl ChildGuard {
+    fn new(pid: Option<i32>) -> Self {
+        Self { pid }
+    }
+
+    fn disarm(&mut self) {
+        self.pid = None;
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.pid {
+            let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
         }
     }
 }
@@ -100,15 +142,13 @@ pub fn spawn_sync(
         child.wait_with_output()?
     };
 
-    let rc = output.status.code().unwrap_or(-1);
+    let rc = exit_status_to_rc(output.status);
 
     if check && rc != 0 {
-        let stdout_s = String::from_utf8_lossy(&output.stdout).into_owned();
-        let stderr_s = String::from_utf8_lossy(&output.stderr).into_owned();
         return Err(ProcError::CalledProcessError {
             returncode: rc,
-            stdout: stdout_s,
-            stderr: stderr_s,
+            stdout: output.stdout,
+            stderr: output.stderr,
         });
     }
 
@@ -123,7 +163,7 @@ pub fn spawn_sync(
 }
 
 // ---------------------------------------------------------------------------
-// Async spawn
+// Async spawn (capturing)
 // ---------------------------------------------------------------------------
 
 pub async fn spawn_async(
@@ -147,10 +187,12 @@ pub async fn spawn_async(
         });
     }
 
-    let child = command.spawn()?;
-    let pid = child.id().map(|id| id as i32);
+    let mut child = Some(command.spawn()?);
+    let pid = child.as_ref().and_then(|c| c.id()).map(|id| id as i32);
+    let mut guard = ChildGuard::new(pid);
 
     let output = if let Some(timeout) = timeout {
+        let child = child.take().unwrap();
         match tokio::time::timeout(timeout, child.wait_with_output()).await {
             Ok(result) => result?,
             Err(_elapsed) => {
@@ -164,18 +206,17 @@ pub async fn spawn_async(
             }
         }
     } else {
-        child.wait_with_output().await?
+        child.take().unwrap().wait_with_output().await?
     };
 
-    let rc = output.status.code().unwrap_or(-1);
+    guard.disarm();
+    let rc = exit_status_to_rc(output.status);
 
     if check && rc != 0 {
-        let stdout_s = String::from_utf8_lossy(&output.stdout).into_owned();
-        let stderr_s = String::from_utf8_lossy(&output.stderr).into_owned();
         return Err(ProcError::CalledProcessError {
             returncode: rc,
-            stdout: stdout_s,
-            stderr: stderr_s,
+            stdout: output.stdout,
+            stderr: output.stderr,
         });
     }
 
@@ -185,6 +226,42 @@ pub async fn spawn_async(
         stderr: Some(output.stderr),
     })
 }
+
+// ---------------------------------------------------------------------------
+// Async spawn (null io) — used by run_ok_async / run_quiet_async
+// ---------------------------------------------------------------------------
+
+pub async fn spawn_async_nullio(
+    cmd: &[String],
+    cwd: Option<&Path>,
+) -> Result<Option<i32>, ProcError> {
+    let mut command = tokio::process::Command::new(&cmd[0]);
+    command.args(&cmd[1..]);
+    command.stdout(Stdio::null());
+    command.stderr(Stdio::null());
+    command.kill_on_drop(true);
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    unsafe {
+        command.pre_exec(|| {
+            let _ = nix::unistd::setsid();
+            Ok(())
+        });
+    }
+
+    let mut child = command.spawn()?;
+    let pid = child.id().map(|id| id as i32);
+    let mut guard = ChildGuard::new(pid);
+
+    let status = child.wait().await?;
+    guard.disarm();
+    Ok(status.code())
+}
+
+// ---------------------------------------------------------------------------
+// Shell async
+// ---------------------------------------------------------------------------
 
 pub async fn spawn_shell_async(
     cmd: &str,
@@ -212,6 +289,7 @@ pub async fn spawn_shell_async(
         command.current_dir(cwd);
     }
     if let Some(env) = env {
+        command.env_clear();
         for (k, v) in env {
             command.env(k, v);
         }
@@ -225,8 +303,8 @@ pub async fn spawn_shell_async(
 
     let mut child = command.spawn()?;
     let pid = child.id().map(|id| id as i32);
+    let mut guard = ChildGuard::new(pid);
 
-    // Take stdout/stderr before any async operation that might move child
     let mut child_stdout = child.stdout.take().unwrap();
     let mut child_stderr = child.stderr.take().unwrap();
 
@@ -248,23 +326,52 @@ pub async fn spawn_shell_async(
         tokio::select! {
             status = child.wait() => {
                 let status = status?;
-                let stdout = read_stdout.await.unwrap()?;
-                let stderr = read_stderr.await.unwrap()?;
-                let rc = status.code().unwrap_or(-1);
-                Ok(ProcResult { returncode: rc, stdout: Some(stdout), stderr: Some(stderr) })
+                // Child exited; drain pipes with a secondary timeout so a
+                // background descendant holding a pipe open cannot extend us
+                // past the original deadline.
+                let drain = async {
+                    let stdout = read_stdout.await.unwrap()?;
+                    let stderr = read_stderr.await.unwrap()?;
+                    Ok::<_, ProcError>((stdout, stderr))
+                };
+                match tokio::time::timeout(timeout, drain).await {
+                    Ok(Ok((stdout, stderr))) => {
+                        guard.disarm();
+                        let rc = exit_status_to_rc(status);
+                        Ok(ProcResult { returncode: rc, stdout: Some(stdout), stderr: Some(stderr) })
+                    }
+                    Ok(Err(e)) => Err(e),
+                    Err(_) => {
+                        // Pipe drain timed out — kill and return what we have
+                        if let Some(pid) = pid {
+                            let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
+                        }
+                        let _ = child.wait().await;
+                        guard.disarm();
+                        let stderr_s = format!("timed out after {}s\n", timeout.as_secs_f64());
+                        Ok(ProcResult {
+                            returncode: 124,
+                            stdout: Some(vec![]),
+                            stderr: Some(stderr_s.into_bytes()),
+                        })
+                    }
+                }
             }
             _ = sleep => {
                 if let Some(pid) = pid {
                     let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
                 }
                 let _ = child.wait().await;
-                let stdout = read_stdout.await.unwrap().unwrap_or_default();
-                let stderr = read_stderr.await.unwrap().unwrap_or_default();
-                let mut stderr_s = String::from_utf8_lossy(&stderr).into_owned();
-                stderr_s.push_str(&format!("timed out after {}s\n", timeout.as_secs_f64()));
+                // Drain whatever is left with a short grace timeout
+                let _ = tokio::time::timeout(Duration::from_secs(2), async {
+                    let _ = read_stdout.await;
+                    let _ = read_stderr.await;
+                }).await;
+                guard.disarm();
+                let stderr_s = format!("timed out after {}s\n", timeout.as_secs_f64());
                 Ok(ProcResult {
                     returncode: 124,
-                    stdout: Some(stdout),
+                    stdout: Some(vec![]),
                     stderr: Some(stderr_s.into_bytes()),
                 })
             }
@@ -273,7 +380,8 @@ pub async fn spawn_shell_async(
         let status = child.wait().await?;
         let stdout = read_stdout.await.unwrap()?;
         let stderr = read_stderr.await.unwrap()?;
-        let rc = status.code().unwrap_or(-1);
+        guard.disarm();
+        let rc = exit_status_to_rc(status);
         Ok(ProcResult {
             returncode: rc,
             stdout: Some(stdout),
@@ -297,7 +405,7 @@ pub fn kill_process_group(pid: i32, sig: Signal) -> Result<(), ProcError> {
 }
 
 // ---------------------------------------------------------------------------
-// terminate_with_grace
+// terminate_with_grace — only signals the process group; caller must reap
 // ---------------------------------------------------------------------------
 
 pub async fn terminate_with_grace(pid: i32, grace_s: f64) -> Result<(), ProcError> {
@@ -308,69 +416,10 @@ pub async fn terminate_with_grace(pid: i32, grace_s: f64) -> Result<(), ProcErro
         Err(e) => return Err(ProcError::Io(std::io::Error::from_raw_os_error(e as i32))),
     }
 
-    let wait_fut =
-        tokio::task::spawn_blocking(move || nix::sys::wait::waitpid(Pid::from_raw(pid), None));
-
-    match tokio::time::timeout(Duration::from_secs_f64(grace_s), wait_fut).await {
-        Ok(Ok(Ok(_))) => return Ok(()),
-        Ok(Ok(Err(nix::errno::Errno::ECHILD))) => return Ok(()),
-        Ok(Ok(Err(e))) => {
-            return Err(ProcError::Io(std::io::Error::from_raw_os_error(e as i32)));
-        }
-        Ok(Err(_)) => {
-            return Err(ProcError::Io(std::io::Error::other(
-                "spawn_blocking join error",
-            )));
-        }
-        Err(_) => { /* timeout — escalate to SIGKILL */ }
-    }
+    tokio::time::sleep(Duration::from_secs_f64(grace_s)).await;
 
     let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
-
-    let _ = tokio::task::spawn_blocking(move || nix::sys::wait::waitpid(Pid::from_raw(pid), None))
-        .await;
-
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// wait_child_proc
-// ---------------------------------------------------------------------------
-
-pub async fn wait_child_proc(
-    pid: i32,
-    timeout_s: Option<f64>,
-    child_key: &str,
-) -> Result<(), ProcError> {
-    let wait_fut =
-        tokio::task::spawn_blocking(move || nix::sys::wait::waitpid(Pid::from_raw(pid), None));
-
-    if let Some(timeout_s) = timeout_s {
-        match tokio::time::timeout(Duration::from_secs_f64(timeout_s), wait_fut).await {
-            Ok(Ok(Ok(_))) => Ok(()),
-            Ok(Ok(Err(nix::errno::Errno::ECHILD))) => Ok(()),
-            Ok(Ok(Err(e))) => Err(ProcError::Io(std::io::Error::from_raw_os_error(e as i32))),
-            Ok(Err(_)) => Err(ProcError::Io(std::io::Error::other(
-                "spawn_blocking join error",
-            ))),
-            Err(_) => {
-                terminate_with_grace(pid, 10.0).await?;
-                Err(ProcError::Io(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!("parallel child {child_key:?} timed out after {timeout_s}s"),
-                )))
-            }
-        }
-    } else {
-        match wait_fut.await {
-            Ok(Ok(_)) => Ok(()),
-            Ok(Err(nix::errno::Errno::ECHILD)) => Ok(()),
-            Ok(Err(e)) => Err(ProcError::Io(std::io::Error::from_raw_os_error(e as i32))),
-            Err(_) => Err(ProcError::Io(std::io::Error::other(
-                "spawn_blocking join error",
-            ))),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -461,9 +510,11 @@ mod tests {
                 Ok(())
             });
         }
-        let child = command.spawn().unwrap();
+        let mut child = command.spawn().unwrap();
         let pid = child.id().unwrap() as i32;
 
         terminate_with_grace(pid, 0.1).await.unwrap();
+        // Reap the child ourselves since terminate_with_grace only signals
+        let _ = child.wait().await;
     }
 }
