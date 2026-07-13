@@ -445,11 +445,7 @@ mod tests {
 
     #[test]
     fn test_run_quiet_stdout_not_captured() {
-        let r = run_quiet(
-            &["echo".to_string(), "hello".to_string()],
-            None,
-        )
-        .unwrap();
+        let r = run_quiet(&["echo".to_string(), "hello".to_string()], None).unwrap();
         assert_eq!(r.returncode, 0);
         assert!(r.stdout.is_empty());
     }
