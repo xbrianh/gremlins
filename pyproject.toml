@@ -34,6 +34,7 @@ gremlins = "gremlins.cli:main"
 [tool.maturin]
 module-name = "_gremlins_core"
 manifest-path = "crates/gremlins-core/Cargo.toml"
+features = ["extension-module"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
