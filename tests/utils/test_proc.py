@@ -62,3 +62,8 @@ def test_run_or_raise_returns_stripped_stdout():
 def test_run_or_raise_raises_on_failure():
     with pytest.raises(subprocess.CalledProcessError):
         proc.run_or_raise(["false"])
+
+
+def test_run_ok_missing_command_raises_oserror():
+    with pytest.raises(OSError):
+        proc.run_ok(["_nonexistent_command_xyzzy_"])
