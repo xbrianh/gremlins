@@ -377,21 +377,18 @@ pub async fn run_async(
 /// Wait for process to exit by polling `waitpid` at 50ms intervals.
 /// Returns `true` if the process exited within the timeout, `false` otherwise.
 #[cfg(unix)]
-pub async fn wait_for_process(pid: u32, timeout: Duration) -> bool {
-    if pid > i32::MAX as u32 {
-        return true;
-    }
-    let pid_i32 = pid as i32;
+/// Poll whether a process with the given PID is still alive, without reaping it.
+/// Uses `kill(pid, 0)` which returns 0 if the process exists.
+async fn poll_process_alive(pid: i32, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
-        let mut status: i32 = 0;
-        let ret = unsafe { libc::waitpid(pid_i32, &mut status, libc::WNOHANG) };
-        if ret != 0 {
-            // ret > 0: reaped, ret == -1: already reaped or error — either way, process is gone.
-            return true;
+        // SAFETY: kill(pid, 0) is safe; only checks existence, sends no signal.
+        let alive = unsafe { libc::kill(pid, 0) == 0 };
+        if !alive {
+            return false;
         }
         if Instant::now() >= deadline {
-            return false;
+            return true; // still alive after timeout
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -408,20 +405,23 @@ pub async fn terminate_with_grace(pid: u32, grace_s: f64) {
     let grace = Duration::from_secs_f64(grace_s);
 
     let handle = tokio::spawn(async move {
-        // Send SIGTERM to the process group.
-        let ret = unsafe { libc::killpg(pid_i32, libc::SIGTERM) };
+        // Send SIGTERM to the specific process (not the whole process group,
+        // since the child was not spawned as a process-group leader).
+        let ret = unsafe { libc::kill(pid_i32, libc::SIGTERM) };
         if ret != 0 {
             // ESRCH (process already dead) or EPERM — nothing to do.
             return;
         }
 
-        if !wait_for_process(pid, grace).await {
+        // Wait for the grace period without reaping the child — the caller
+        // (e.g. a `Child` handle) will reap it via `waitpid`.
+        if poll_process_alive(pid_i32, grace).await {
             // Grace period expired; escalate to SIGKILL.
             unsafe {
-                libc::killpg(pid_i32, libc::SIGKILL);
+                libc::kill(pid_i32, libc::SIGKILL);
             }
-            // Give the kernel a moment to deliver the signal.
-            let _ = wait_for_process(pid, Duration::from_secs(5)).await;
+            // Give the kernel a moment to deliver the signal (again, no reap).
+            let _ = poll_process_alive(pid_i32, Duration::from_secs(5)).await;
         }
     });
 
