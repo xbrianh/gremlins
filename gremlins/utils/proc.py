@@ -19,10 +19,10 @@ from _gremlins_core.utils.proc import (
     run_ok as _run_ok,
 )
 from _gremlins_core.utils.proc import (
-    run_quiet as _run_quiet,
+    run_or_raise as _run_or_raise,
 )
 from _gremlins_core.utils.proc import (
-    run_or_raise as _run_or_raise,
+    run_quiet as _run_quiet,
 )
 
 
