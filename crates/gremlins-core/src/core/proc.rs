@@ -398,8 +398,8 @@ pub async fn terminate_with_grace(pid: u32, grace_s: f64) {
     let grace = Duration::from_secs_f64(grace_s);
 
     let handle = tokio::spawn(async move {
-        // Send SIGTERM to the process group.
-        let ret = unsafe { libc::killpg(pid as i32, libc::SIGTERM) };
+        // Send SIGTERM to the process.
+        let ret = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
         if ret != 0 {
             // ESRCH (process already dead) or EPERM — nothing to do.
             return;
@@ -408,7 +408,7 @@ pub async fn terminate_with_grace(pid: u32, grace_s: f64) {
         if !wait_for_process(pid, grace).await {
             // Grace period expired; escalate to SIGKILL.
             unsafe {
-                libc::killpg(pid as i32, libc::SIGKILL);
+                libc::kill(pid as i32, libc::SIGKILL);
             }
             // Give the kernel a moment to deliver the signal.
             let _ = wait_for_process(pid, Duration::from_secs(5)).await;
@@ -1126,6 +1126,9 @@ mod tests {
         let handle = tokio::spawn(async move {
             terminate_with_grace(pid, 0.5).await;
         });
+        // Yield so the spawned task has a chance to start and call
+        // terminate_with_grace, which spawns the inner kill-task.
+        tokio::task::yield_now().await;
         handle.abort();
         let _ = handle.await;
         // The child should still be killed even though we cancelled.

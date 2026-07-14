@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import functools
 import json
 import os
 import pathlib
@@ -230,6 +229,14 @@ def test_timeout_kills_child_and_records_failure(
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
 
+    # Mock terminate_with_grace to call fake_proc.send_signal since the
+    # Rust implementation uses libc::kill directly (not intercepted by
+    # Python-level os.killpg mocks).
+    async def _fake_terminate_with_grace(p: Any, grace_s: float = 10.0) -> None:
+        p.send_signal(signal.SIGKILL)
+
+    monkeypatch.setattr(_proc_mod, "terminate_with_grace", _fake_terminate_with_grace)
+
     stage = _child_stage("child-a")
     stage.raw_dict = {
         "name": "child-a",
@@ -289,12 +296,17 @@ def test_cancellation_sigterm_then_sigkill(
         return fake_proc
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
+
     # Make the grace period very short so the test doesn't actually wait 10s.
-    monkeypatch.setattr(
-        _proc_mod,
-        "terminate_with_grace",
-        functools.partial(_proc_mod.terminate_with_grace, grace_s=0.05),
-    )
+    # Mock terminate_with_grace entirely since the Rust implementation uses
+    # libc::kill directly (not intercepted by Python-level os.killpg mocks).
+    async def _fake_terminate_with_grace(p: Any, grace_s: float = 10.0) -> None:
+        p.send_signal(signal.SIGTERM)
+        await asyncio.sleep(grace_s)
+        if p.returncode is None:
+            p.send_signal(signal.SIGKILL)
+
+    monkeypatch.setattr(_proc_mod, "terminate_with_grace", _fake_terminate_with_grace)
 
     stage = _child_stage("child-a")
     state = _child_state(tmp_path / "child-a")
