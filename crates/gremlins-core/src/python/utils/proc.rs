@@ -122,11 +122,7 @@ pub fn run_ok_async(
 #[cfg(unix)]
 #[pyfunction]
 #[pyo3(signature = (pid, grace_s=10.0))]
-pub fn terminate_with_grace(
-    py: Python<'_>,
-    pid: u32,
-    grace_s: f64,
-) -> PyResult<Bound<'_, PyAny>> {
+pub fn terminate_with_grace(py: Python<'_>, pid: u32, grace_s: f64) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         proc::terminate_with_grace(pid, grace_s).await;
         Ok(())
@@ -136,11 +132,7 @@ pub fn terminate_with_grace(
 #[cfg(not(unix))]
 #[pyfunction]
 #[pyo3(signature = (pid, grace_s=10.0))]
-pub fn terminate_with_grace(
-    _py: Python<'_>,
-    _pid: u32,
-    _grace_s: f64,
-) -> PyResult<()> {
+pub fn terminate_with_grace(_py: Python<'_>, _pid: u32, _grace_s: f64) -> PyResult<()> {
     Ok(())
 }
 

@@ -18,6 +18,7 @@ def run(
 async def run_ok_async(
     cmd: list[str], *, cwd: str | os.PathLike[str] | None = None
 ) -> bool: ...
+async def terminate_with_grace(pid: int, *, grace_s: float = 10.0) -> None: ...
 async def run_async(
     cmd: list[str],
     *,
