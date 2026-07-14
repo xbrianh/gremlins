@@ -9,7 +9,12 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 pyo3 = "0.29"
+pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
 libc = "0.2"
+tokio = { version = "1", features = ["process", "time", "rt", "sync", "io-util", "macros"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
 
 [features]
 extension-module = ["pyo3/extension-module"]

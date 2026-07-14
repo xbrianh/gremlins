@@ -339,13 +339,21 @@ async def in_git_repo_async(cwd: str | os.PathLike[str] | None = None) -> bool:
 
 async def head_sha_async(cwd: str | os.PathLike[str] | None = None) -> str:
     r = await proc.run_async(["git", "rev-parse", "HEAD"], cwd=cwd)
-    return r.stdout.strip() if r.returncode == 0 else ""
+    if r.returncode != 0:
+        return ""
+    stdout = r.stdout
+    if isinstance(stdout, bytes):
+        return stdout.decode().strip()
+    return stdout.strip()
 
 
 async def status_porcelain_async(cwd: str | os.PathLike[str] | None = None) -> str:
     try:
         r = await proc.run_async(["git", "status", "--porcelain"], cwd=cwd)
-        return r.stdout
+        stdout = r.stdout
+        if isinstance(stdout, bytes):
+            return stdout.decode()
+        return stdout
     except OSError:
         return ""
 
@@ -363,7 +371,10 @@ async def setup_detached_worktree_async(
             ["git", "fetch", "origin", "--", base_ref], cwd=project_root
         )
         if r.returncode != 0:
-            raise GitError(r.returncode, r.stderr.strip())
+            stderr = r.stderr
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode()
+            raise GitError(r.returncode, stderr.strip())
         base_ref = "FETCH_HEAD"
     parent = worktree_parent if worktree_parent is not None else paths.work_root()
     parent.mkdir(parents=True, exist_ok=True)
@@ -372,7 +383,10 @@ async def setup_detached_worktree_async(
         ["git", "worktree", "add", "--detach", workdir, base_ref], cwd=project_root
     )
     if r.returncode != 0:
-        raise GitError(r.returncode, r.stderr.strip())
+        stderr = r.stderr
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode()
+        raise GitError(r.returncode, stderr.strip())
     return workdir
 
 

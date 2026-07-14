@@ -13,11 +13,16 @@ from _gremlins_core.utils.proc import (
     run as _run,
 )
 from _gremlins_core.utils.proc import (
-    run_ok,  # noqa: F401  # pyright: ignore[reportUnusedImport]
-    run_quiet,  # noqa: F401  # pyright: ignore[reportUnusedImport]
+    run_async as _run_async,
+)
+from _gremlins_core.utils.proc import (
+    run_ok as _run_ok,
 )
 from _gremlins_core.utils.proc import (
     run_or_raise as _run_or_raise,
+)
+from _gremlins_core.utils.proc import (
+    run_quiet as _run_quiet,
 )
 
 
@@ -29,7 +34,34 @@ def run(
     text: bool = True,
     timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    return _run(cmd, cwd=_to_str(cwd), check=check, timeout=timeout)
+    try:
+        r = _run(cmd, cwd=_to_str(cwd), check=check, timeout=timeout)
+    except subprocess.CalledProcessError as e:
+        if text:
+            raise subprocess.CalledProcessError(
+                e.returncode,
+                e.cmd,
+                e.stdout.decode() if isinstance(e.stdout, bytes) else e.stdout,
+                e.stderr.decode() if isinstance(e.stderr, bytes) else e.stderr,
+            ) from None
+        raise
+    except subprocess.TimeoutExpired as e:
+        if text:
+            raise subprocess.TimeoutExpired(
+                e.cmd,
+                e.timeout,
+                e.stdout.decode() if isinstance(e.stdout, bytes) else e.stdout,
+                e.stderr.decode() if isinstance(e.stderr, bytes) else e.stderr,
+            ) from None
+        raise
+    if text:
+        return subprocess.CompletedProcess(
+            r.args if r.args is not None else cmd,
+            r.returncode,
+            r.stdout.decode(),
+            r.stderr.decode(),
+        )
+    return r  # type: ignore[return-value]
 
 
 def _to_str(p: str | os.PathLike[str] | None) -> str | None:
@@ -42,6 +74,16 @@ def run_or_raise(cmd: list[str], *, cwd: str | os.PathLike[str] | None = None) -
     return _run_or_raise(cmd, cwd=_to_str(cwd))
 
 
+def run_ok(cmd: list[str], *, cwd: str | os.PathLike[str] | None = None) -> bool:
+    return _run_ok(cmd, cwd=_to_str(cwd))
+
+
+def run_quiet(
+    cmd: list[str], *, cwd: str | os.PathLike[str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    return _run_quiet(cmd, cwd=_to_str(cwd))
+
+
 async def run_async(
     cmd: list[str],
     *,
@@ -49,38 +91,10 @@ async def run_async(
     check: bool = False,
     text: bool = True,
     timeout: float | None = None,
-) -> subprocess.CompletedProcess[str]:
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        cwd=cwd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        start_new_session=True,
+) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+    return await _run_async(
+        cmd, cwd=_to_str(cwd), check=check, text=text, timeout=timeout
     )
-    try:
-        stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except TimeoutError:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        await proc.communicate()
-        raise subprocess.TimeoutExpired(cmd, timeout or 0)
-    except asyncio.CancelledError:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        await asyncio.shield(proc.communicate())
-        raise
-    assert proc.returncode is not None
-    rc = proc.returncode
-    stdout = stdout_b.decode() if text else stdout_b
-    stderr = stderr_b.decode() if text else stderr_b
-    result = subprocess.CompletedProcess(cmd, rc, stdout, stderr)
-    if check and rc != 0:
-        raise subprocess.CalledProcessError(rc, cmd, stdout, stderr)
-    return result  # type: ignore[return-value]
 
 
 async def run_shell_async(
@@ -158,7 +172,10 @@ async def run_or_raise_async(
     cmd: list[str], *, cwd: str | os.PathLike[str] | None = None
 ) -> str:
     r = await run_async(cmd, cwd=cwd, check=True)
-    return r.stdout.strip()
+    stdout = r.stdout
+    if isinstance(stdout, bytes):
+        return stdout.decode().strip()
+    return stdout.strip()
 
 
 async def iter_lines(
