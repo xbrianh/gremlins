@@ -16,6 +16,12 @@ from _gremlins_core.utils.proc import (
     run_async as _run_async,
 )
 from _gremlins_core.utils.proc import (
+    run_ok as _run_ok,
+)
+from _gremlins_core.utils.proc import (
+    run_quiet as _run_quiet,
+)
+from _gremlins_core.utils.proc import (
     run_or_raise as _run_or_raise,
 )
 
@@ -28,7 +34,20 @@ def run(
     text: bool = True,
     timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    r = _run(cmd, cwd=_to_str(cwd), check=check, timeout=timeout)
+    try:
+        r = _run(cmd, cwd=_to_str(cwd), check=check, timeout=timeout)
+    except subprocess.CalledProcessError as e:
+        if text and isinstance(e.stdout, bytes):
+            raise subprocess.CalledProcessError(
+                e.returncode, e.cmd, e.stdout.decode(), e.stderr.decode()
+            ) from None
+        raise
+    except subprocess.TimeoutExpired as e:
+        if text and isinstance(e.stdout, bytes):
+            raise subprocess.TimeoutExpired(
+                e.cmd, e.timeout, e.stdout.decode(), e.stderr.decode()
+            ) from None
+        raise
     if text and isinstance(r.stdout, bytes):
         return subprocess.CompletedProcess(
             r.args if r.args is not None else cmd,
@@ -50,20 +69,13 @@ def run_or_raise(cmd: list[str], *, cwd: str | os.PathLike[str] | None = None) -
 
 
 def run_ok(cmd: list[str], *, cwd: str | os.PathLike[str] | None = None) -> bool:
-    """Run a command and return True if it exits with code 0."""
-    try:
-        r = _run(cmd, cwd=_to_str(cwd), check=False)
-        return r.returncode == 0
-    except OSError:
-        return False
+    return _run_ok(cmd, cwd=_to_str(cwd))
 
 
-def run_quiet(cmd: list[str], *, cwd: str | os.PathLike[str] | None = None) -> None:
-    """Run a command silently, discarding output."""
-    try:
-        _run(cmd, cwd=_to_str(cwd), check=False)
-    except Exception:
-        pass
+def run_quiet(
+    cmd: list[str], *, cwd: str | os.PathLike[str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    return _run_quiet(cmd, cwd=_to_str(cwd))
 
 
 async def run_async(

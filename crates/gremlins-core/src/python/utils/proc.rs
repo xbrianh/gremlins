@@ -133,12 +133,24 @@ pub fn run_async(
             }
             Err(proc::ProcError::CalledProcessError(rc, stdout, stderr)) => {
                 let ty = subprocess_type(py, "CalledProcessError")?;
-                let obj = ty.call1((rc, cmd, stdout, stderr))?;
+                let obj = if text {
+                    let stdout = String::from_utf8_lossy(&stdout).into_owned();
+                    let stderr = String::from_utf8_lossy(&stderr).into_owned();
+                    ty.call1((rc, cmd, stdout, stderr))?
+                } else {
+                    ty.call1((rc, cmd, stdout, stderr))?
+                };
                 Err(PyErr::from_value(obj))
             }
             Err(proc::ProcError::TimeoutExpired(t, stdout, stderr)) => {
                 let ty = subprocess_type(py, "TimeoutExpired")?;
-                let obj = ty.call1((cmd, t, stdout, stderr))?;
+                let obj = if text {
+                    let stdout = String::from_utf8_lossy(&stdout).into_owned();
+                    let stderr = String::from_utf8_lossy(&stderr).into_owned();
+                    ty.call1((cmd, t, stdout, stderr))?
+                } else {
+                    ty.call1((cmd, t, stdout, stderr))?
+                };
                 Err(PyErr::from_value(obj))
             }
             Err(proc::ProcError::Io(e)) => Err(map_io_error(e)),

@@ -20,8 +20,8 @@ pub struct ProcResult {
 /// Error type for `run`.
 #[derive(Debug)]
 pub enum ProcError {
-    CalledProcessError(i32, String, String),
-    TimeoutExpired(f64, String, String),
+    CalledProcessError(i32, Vec<u8>, Vec<u8>),
+    TimeoutExpired(f64, Vec<u8>, Vec<u8>),
     Io(io::Error),
     EmptyCommand,
     InvalidTimeout(f64),
@@ -142,8 +142,8 @@ pub fn run(
     if check && output.returncode != 0 {
         return Err(ProcError::CalledProcessError(
             output.returncode,
-            String::from_utf8_lossy(&output.stdout).into_owned(),
-            String::from_utf8_lossy(&output.stderr).into_owned(),
+            output.stdout,
+            output.stderr,
         ));
     }
     Ok(output)
@@ -220,8 +220,8 @@ fn run_with_timeout(
                 .unwrap_or_default();
             Err(ProcError::TimeoutExpired(
                 timeout_s,
-                String::from_utf8_lossy(&stdout_buf).into_owned(),
-                String::from_utf8_lossy(&stderr_buf).into_owned(),
+                stdout_buf,
+                stderr_buf,
             ))
         }
     }
@@ -287,9 +287,9 @@ pub async fn run_async(
     }
 
     let mut child = command.spawn().map_err(ProcError::Io)?;
-    let pid = child
-        .id()
-        .expect("child process should have a pid after spawn");
+    let pid = child.id().ok_or_else(|| {
+        ProcError::Io(io::Error::new(io::ErrorKind::Other, "child process has no pid"))
+    })?;
     let mut cancel = CancelToken::new(pid);
 
     let mut stdout = child.stdout.take().unwrap();
@@ -330,8 +330,8 @@ pub async fn run_async(
                 cancel.disarm();
                 return Err(ProcError::TimeoutExpired(
                     t,
-                    String::from_utf8_lossy(&stdout_buf).into_owned(),
-                    String::from_utf8_lossy(&stderr_buf).into_owned(),
+                    stdout_buf,
+                    stderr_buf,
                 ));
             }
         },
@@ -353,8 +353,8 @@ pub async fn run_async(
     if check && rc != 0 {
         Err(ProcError::CalledProcessError(
             rc,
-            String::from_utf8_lossy(&result.stdout).into_owned(),
-            String::from_utf8_lossy(&result.stderr).into_owned(),
+            result.stdout,
+            result.stderr,
         ))
     } else {
         Ok(result)
@@ -472,8 +472,9 @@ mod tests {
         match err {
             ProcError::TimeoutExpired(_, stdout, _) => {
                 assert!(
-                    stdout.contains("start"),
-                    "partial stdout should contain 'start', got: {stdout}"
+                    stdout.windows(5).any(|w| w == b"start"),
+                    "partial stdout should contain 'start', got: {:?}",
+                    String::from_utf8_lossy(&stdout)
                 );
             }
             _ => panic!("expected TimeoutExpired, got {err}"),
@@ -809,8 +810,9 @@ mod tests {
         match err {
             ProcError::TimeoutExpired(_, stdout, _) => {
                 assert!(
-                    stdout.contains("start"),
-                    "partial stdout should contain 'start', got: {stdout}"
+                    stdout.windows(5).any(|w| w == b"start"),
+                    "partial stdout should contain 'start', got: {:?}",
+                    String::from_utf8_lossy(&stdout)
                 );
             }
             _ => panic!("expected TimeoutExpired, got {err}"),
@@ -945,7 +947,7 @@ mod tests {
         .unwrap_err();
         match err {
             ProcError::CalledProcessError(_, stdout, _) => {
-                assert!(stdout.contains("hi"));
+                assert!(stdout.windows(2).any(|w| w == b"hi"));
             }
             _ => panic!("expected CalledProcessError, got {err}"),
         }
