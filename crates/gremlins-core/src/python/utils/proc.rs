@@ -107,6 +107,19 @@ pub fn run(
 }
 
 #[pyfunction]
+#[pyo3(signature = (cmd, cwd=None))]
+pub fn run_ok_async(
+    py: Python<'_>,
+    cmd: Vec<String>,
+    cwd: Option<PathBuf>,
+) -> PyResult<Bound<'_, PyAny>> {
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let result = proc::run_ok_async(&cmd, cwd.as_deref()).await;
+        result.map_err(map_io_error)
+    })
+}
+
+#[pyfunction]
 #[pyo3(signature = (cmd, cwd=None, check=false, text=true, timeout=None))]
 pub fn run_async(
     py: Python<'_>,
