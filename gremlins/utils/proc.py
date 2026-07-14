@@ -19,6 +19,9 @@ from _gremlins_core.utils.proc import (
     run_ok as _run_ok,
 )
 from _gremlins_core.utils.proc import (
+    run_ok_async as _run_ok_async,
+)
+from _gremlins_core.utils.proc import (
     run_or_raise as _run_or_raise,
 )
 from _gremlins_core.utils.proc import (
@@ -142,15 +145,7 @@ async def run_shell_async(
 async def run_ok_async(
     cmd: list[str], *, cwd: str | os.PathLike[str] | None = None
 ) -> bool:
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        cwd=cwd,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    await proc.wait()
-    return proc.returncode == 0
+    return await _run_ok_async(cmd, cwd=_to_str(cwd))
 
 
 async def run_quiet_async(

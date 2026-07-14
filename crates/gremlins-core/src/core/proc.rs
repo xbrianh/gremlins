@@ -252,6 +252,27 @@ impl Drop for CancelToken {
     }
 }
 
+pub async fn run_ok_async(cmd: &[String], cwd: Option<&Path>) -> Result<bool, io::Error> {
+    if cmd.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty command"));
+    }
+    let mut c = tokio::process::Command::new(&cmd[0]);
+    c.args(&cmd[1..]);
+    c.stdout(std::process::Stdio::null());
+    c.stderr(std::process::Stdio::null());
+    c.kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        c.as_std_mut().process_group(0);
+    }
+    if let Some(dir) = cwd {
+        c.current_dir(dir);
+    }
+    let status = c.status().await?;
+    Ok(status.success())
+}
+
 pub async fn run_async(
     cmd: &[String],
     cwd: Option<&Path>,
@@ -656,6 +677,40 @@ mod tests {
     fn test_run_or_raise_with_cwd() {
         let out = run_or_raise(&["pwd".to_string()], Some(Path::new("/"))).unwrap();
         assert_eq!(out, "/");
+    }
+
+    // -- run_ok_async tests --
+
+    #[tokio::test]
+    async fn test_run_ok_async_success() {
+        assert!(run_ok_async(&["true".to_string()], None).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_run_ok_async_failure() {
+        assert!(!run_ok_async(&["false".to_string()], None).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_run_ok_async_missing_command() {
+        let err = run_ok_async(&["_nonexistent_command_xyzzy_".to_string()], None)
+            .await
+            .unwrap_err();
+        #[cfg(unix)]
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[tokio::test]
+    async fn test_run_ok_async_empty_cmd() {
+        let err = run_ok_async(&[], None).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn test_run_ok_async_with_cwd() {
+        assert!(run_ok_async(&["pwd".to_string()], Some(Path::new("/")))
+            .await
+            .unwrap());
     }
 
     // -- run_async tests --
