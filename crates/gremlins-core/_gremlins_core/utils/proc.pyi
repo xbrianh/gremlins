@@ -16,3 +16,11 @@ def run(
     text: bool = True,
     timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]: ...
+async def run_async(
+    cmd: list[str],
+    *,
+    cwd: str | os.PathLike[str] | None = None,
+    check: bool = False,
+    text: bool = True,
+    timeout: float | None = None,
+) -> subprocess.CompletedProcess[str]: ...

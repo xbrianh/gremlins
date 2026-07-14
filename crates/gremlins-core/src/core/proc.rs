@@ -233,7 +233,10 @@ struct CancelToken {
 
 impl CancelToken {
     fn new(pid: u32) -> Self {
-        CancelToken { pid, disarmed: false }
+        CancelToken {
+            pid,
+            disarmed: false,
+        }
     }
 
     fn disarm(&mut self) {
@@ -282,7 +285,9 @@ pub async fn run_async(
     }
 
     let mut child = command.spawn().map_err(ProcError::Io)?;
-    let pid = child.id().expect("child process should have a pid after spawn");
+    let pid = child
+        .id()
+        .expect("child process should have a pid after spawn");
     let mut cancel = CancelToken::new(pid);
 
     let mut stdout = child.stdout.take().unwrap();
@@ -655,19 +660,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_async_success() {
-        let r = run_async(&["true".to_string()], None, false, None).await.unwrap();
+        let r = run_async(&["true".to_string()], None, false, None)
+            .await
+            .unwrap();
         assert_eq!(r.returncode, 0);
     }
 
     #[tokio::test]
     async fn test_run_async_nonzero_exit() {
-        let r = run_async(&["false".to_string()], None, false, None).await.unwrap();
+        let r = run_async(&["false".to_string()], None, false, None)
+            .await
+            .unwrap();
         assert_ne!(r.returncode, 0);
     }
 
     #[tokio::test]
     async fn test_run_async_check_raises() {
-        let err = run_async(&["false".to_string()], None, true, None).await.unwrap_err();
+        let err = run_async(&["false".to_string()], None, true, None)
+            .await
+            .unwrap_err();
         match err {
             ProcError::CalledProcessError(..) => {}
             _ => panic!("expected CalledProcessError, got {err}"),
@@ -676,16 +687,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_async_captures_stdout() {
-        let r = run_async(&["echo".to_string(), "hello".to_string()], None, false, None)
-            .await
-            .unwrap();
+        let r = run_async(
+            &["echo".to_string(), "hello".to_string()],
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(r.stdout.trim(), "hello");
     }
 
     #[tokio::test]
     async fn test_run_async_captures_stderr() {
         let r = run_async(
-            &["sh".to_string(), "-c".to_string(), "echo err >&2".to_string()],
+            &[
+                "sh".to_string(),
+                "-c".to_string(),
+                "echo err >&2".to_string(),
+            ],
             None,
             false,
             None,
@@ -697,9 +717,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_async_timeout() {
-        let err = run_async(&["sleep".to_string(), "10".to_string()], None, false, Some(0.05))
-            .await
-            .unwrap_err();
+        let err = run_async(
+            &["sleep".to_string(), "10".to_string()],
+            None,
+            false,
+            Some(0.05),
+        )
+        .await
+        .unwrap_err();
         match err {
             ProcError::TimeoutExpired(..) => {}
             _ => panic!("expected TimeoutExpired, got {err}"),
