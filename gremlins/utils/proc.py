@@ -39,13 +39,13 @@ def run(
     except subprocess.CalledProcessError as e:
         if text and isinstance(e.stdout, bytes):
             raise subprocess.CalledProcessError(
-                e.returncode, e.cmd, e.stdout.decode(), e.stderr.decode()
+                e.returncode, e.cmd, e.stdout.decode(), e.stderr.decode() if isinstance(e.stderr, bytes) else None
             ) from None
         raise
     except subprocess.TimeoutExpired as e:
         if text and isinstance(e.stdout, bytes):
             raise subprocess.TimeoutExpired(
-                e.cmd, e.timeout, e.stdout.decode(), e.stderr.decode()
+                e.cmd, e.timeout, e.stdout.decode(), e.stderr.decode() if isinstance(e.stderr, bytes) else None
             ) from None
         raise
     if text and isinstance(r.stdout, bytes):

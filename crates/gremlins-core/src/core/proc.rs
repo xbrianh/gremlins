@@ -218,11 +218,7 @@ fn run_with_timeout(
             let stderr_buf = stderr_handle
                 .map(|h| h.join().unwrap_or_default())
                 .unwrap_or_default();
-            Err(ProcError::TimeoutExpired(
-                timeout_s,
-                stdout_buf,
-                stderr_buf,
-            ))
+            Err(ProcError::TimeoutExpired(timeout_s, stdout_buf, stderr_buf))
         }
     }
 }
@@ -287,9 +283,9 @@ pub async fn run_async(
     }
 
     let mut child = command.spawn().map_err(ProcError::Io)?;
-    let pid = child.id().ok_or_else(|| {
-        ProcError::Io(io::Error::new(io::ErrorKind::Other, "child process has no pid"))
-    })?;
+    let pid = child
+        .id()
+        .ok_or_else(|| ProcError::Io(io::Error::other("child process has no pid")))?;
     let mut cancel = CancelToken::new(pid);
 
     let mut stdout = child.stdout.take().unwrap();
@@ -328,11 +324,7 @@ pub async fn run_async(
                         .await
                         .unwrap_or_default();
                 cancel.disarm();
-                return Err(ProcError::TimeoutExpired(
-                    t,
-                    stdout_buf,
-                    stderr_buf,
-                ));
+                return Err(ProcError::TimeoutExpired(t, stdout_buf, stderr_buf));
             }
         },
         None => child.wait().await.map_err(ProcError::Io),
