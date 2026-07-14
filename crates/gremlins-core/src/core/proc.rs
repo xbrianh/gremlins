@@ -261,6 +261,11 @@ pub async fn run_ok_async(cmd: &[String], cwd: Option<&Path>) -> Result<bool, io
     c.stdout(std::process::Stdio::null());
     c.stderr(std::process::Stdio::null());
     c.kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        c.as_std_mut().process_group(0);
+    }
     if let Some(dir) = cwd {
         c.current_dir(dir);
     }
