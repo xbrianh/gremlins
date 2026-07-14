@@ -105,3 +105,39 @@ pub fn run(
         ))),
     }
 }
+
+#[pyfunction]
+#[pyo3(signature = (cmd, cwd=None, check=false, timeout=None))]
+pub fn run_async(
+    py: Python<'_>,
+    cmd: Vec<String>,
+    cwd: Option<PathBuf>,
+    check: bool,
+    timeout: Option<f64>,
+) -> PyResult<Bound<'_, PyAny>> {
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let result = proc::run_async(&cmd, cwd.as_deref(), check, timeout).await;
+        Python::attach(|py| match result {
+            Ok(r) => {
+                let ty = subprocess_type(py, "CompletedProcess")?;
+                let obj = ty.call1((cmd, r.returncode, r.stdout, r.stderr))?;
+                Ok(obj.into_any().unbind())
+            }
+            Err(proc::ProcError::CalledProcessError(rc, stdout, stderr)) => {
+                let ty = subprocess_type(py, "CalledProcessError")?;
+                let obj = ty.call1((rc, cmd, stdout, stderr))?;
+                Err(PyErr::from_value(obj))
+            }
+            Err(proc::ProcError::TimeoutExpired(t, stdout, stderr)) => {
+                let ty = subprocess_type(py, "TimeoutExpired")?;
+                let obj = ty.call1((cmd, t, stdout, stderr))?;
+                Err(PyErr::from_value(obj))
+            }
+            Err(proc::ProcError::Io(e)) => Err(map_io_error(e)),
+            Err(proc::ProcError::EmptyCommand) => Err(PyValueError::new_err("empty command")),
+            Err(proc::ProcError::InvalidTimeout(t)) => Err(PyValueError::new_err(format!(
+                "timeout must be a finite non-negative number, got {t}"
+            ))),
+        })
+    })
+}

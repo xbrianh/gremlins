@@ -4,6 +4,8 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use tokio::io::AsyncReadExt;
+
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 
@@ -221,6 +223,127 @@ fn run_with_timeout(
                 String::from_utf8_lossy(&stderr_buf).into_owned(),
             ))
         }
+    }
+}
+
+struct CancelToken {
+    pid: u32,
+    disarmed: bool,
+}
+
+impl CancelToken {
+    fn new(pid: u32) -> Self {
+        CancelToken { pid, disarmed: false }
+    }
+
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for CancelToken {
+    fn drop(&mut self) {
+        if !self.disarmed {
+            #[cfg(unix)]
+            unsafe {
+                libc::killpg(self.pid as i32, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+pub async fn run_async(
+    cmd: &[String],
+    cwd: Option<&Path>,
+    check: bool,
+    timeout: Option<f64>,
+) -> Result<ProcResult, ProcError> {
+    if cmd.is_empty() {
+        return Err(ProcError::EmptyCommand);
+    }
+    if let Some(t) = timeout {
+        if !t.is_finite() || t < 0.0 {
+            return Err(ProcError::InvalidTimeout(t));
+        }
+    }
+
+    let mut command = tokio::process::Command::new(&cmd[0]);
+    command.args(&cmd[1..]);
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+    command.kill_on_drop(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.as_std_mut().process_group(0);
+    }
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+
+    let mut child = command.spawn().map_err(ProcError::Io)?;
+    let pid = child.id().expect("child process should have a pid after spawn");
+    let mut cancel = CancelToken::new(pid);
+
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+
+    let stdout_handle = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf).await;
+        buf
+    });
+
+    let stderr_handle = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf).await;
+        buf
+    });
+
+    let wait_result = match timeout {
+        Some(t) => match tokio::time::timeout(Duration::from_secs_f64(t), child.wait()).await {
+            Ok(result) => result.map_err(ProcError::Io),
+            Err(_elapsed) => {
+                #[cfg(unix)]
+                unsafe {
+                    libc::killpg(pid as i32, libc::SIGKILL);
+                }
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                cancel.disarm();
+                let stdout_buf = stdout_handle.await.unwrap_or_default();
+                let stderr_buf = stderr_handle.await.unwrap_or_default();
+                return Err(ProcError::TimeoutExpired(
+                    t,
+                    String::from_utf8_lossy(&stdout_buf).into_owned(),
+                    String::from_utf8_lossy(&stderr_buf).into_owned(),
+                ));
+            }
+        },
+        None => child.wait().await.map_err(ProcError::Io),
+    };
+
+    let status = wait_result?;
+    cancel.disarm();
+
+    let stdout_buf = stdout_handle.await.unwrap_or_default();
+    let stderr_buf = stderr_handle.await.unwrap_or_default();
+
+    let rc = exit_code(&status);
+    let result = ProcResult {
+        returncode: rc,
+        stdout: String::from_utf8_lossy(&stdout_buf).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
+    };
+
+    if check && rc != 0 {
+        Err(ProcError::CalledProcessError(
+            rc,
+            result.stdout,
+            result.stderr,
+        ))
+    } else {
+        Ok(result)
     }
 }
 
@@ -526,5 +649,80 @@ mod tests {
     fn test_run_or_raise_with_cwd() {
         let out = run_or_raise(&["pwd".to_string()], Some(Path::new("/"))).unwrap();
         assert_eq!(out, "/");
+    }
+
+    // -- run_async tests --
+
+    #[tokio::test]
+    async fn test_run_async_success() {
+        let r = run_async(&["true".to_string()], None, false, None).await.unwrap();
+        assert_eq!(r.returncode, 0);
+    }
+
+    #[tokio::test]
+    async fn test_run_async_nonzero_exit() {
+        let r = run_async(&["false".to_string()], None, false, None).await.unwrap();
+        assert_ne!(r.returncode, 0);
+    }
+
+    #[tokio::test]
+    async fn test_run_async_check_raises() {
+        let err = run_async(&["false".to_string()], None, true, None).await.unwrap_err();
+        match err {
+            ProcError::CalledProcessError(..) => {}
+            _ => panic!("expected CalledProcessError, got {err}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_async_captures_stdout() {
+        let r = run_async(&["echo".to_string(), "hello".to_string()], None, false, None)
+            .await
+            .unwrap();
+        assert_eq!(r.stdout.trim(), "hello");
+    }
+
+    #[tokio::test]
+    async fn test_run_async_captures_stderr() {
+        let r = run_async(
+            &["sh".to_string(), "-c".to_string(), "echo err >&2".to_string()],
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(r.stderr.contains("err"));
+    }
+
+    #[tokio::test]
+    async fn test_run_async_timeout() {
+        let err = run_async(&["sleep".to_string(), "10".to_string()], None, false, Some(0.05))
+            .await
+            .unwrap_err();
+        match err {
+            ProcError::TimeoutExpired(..) => {}
+            _ => panic!("expected TimeoutExpired, got {err}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_async_empty_cmd() {
+        let err = run_async(&[], None, false, None).await.unwrap_err();
+        match err {
+            ProcError::EmptyCommand => {}
+            _ => panic!("expected EmptyCommand, got {err}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_async_invalid_timeout() {
+        let err = run_async(&["true".to_string()], None, false, Some(-1.0))
+            .await
+            .unwrap_err();
+        match err {
+            ProcError::InvalidTimeout(_) => {}
+            _ => panic!("expected InvalidTimeout, got {err}"),
+        }
     }
 }
