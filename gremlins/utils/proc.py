@@ -14,6 +14,7 @@ from _gremlins_core.utils.proc import (
 )
 from _gremlins_core.utils.proc import (
     run_ok,  # noqa: F401  # pyright: ignore[reportUnusedImport]
+    run_quiet,  # noqa: F401  # pyright: ignore[reportUnusedImport]
 )
 
 
@@ -32,15 +33,6 @@ def _to_str(p: str | os.PathLike[str] | None) -> str | None:
     if p is None:
         return None
     return os.fspath(p)
-
-
-def run_quiet(
-    cmd: list[str], *, cwd: str | os.PathLike[str] | None = None
-) -> subprocess.CompletedProcess[str]:
-    r = subprocess.run(
-        cmd, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    )
-    return subprocess.CompletedProcess(cmd, r.returncode)
 
 
 def run_or_raise(cmd: list[str], *, cwd: str | os.PathLike[str] | None = None) -> str:

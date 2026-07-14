@@ -58,6 +58,25 @@ fn exit_code(status: &std::process::ExitStatus) -> i32 {
     }
 }
 
+pub fn run_quiet(cmd: &[String], cwd: Option<&Path>) -> Result<ProcResult, ProcError> {
+    if cmd.is_empty() {
+        return Err(ProcError::EmptyCommand);
+    }
+    let mut c = Command::new(&cmd[0]);
+    c.args(&cmd[1..]);
+    c.stdout(std::process::Stdio::null());
+    c.stderr(std::process::Stdio::null());
+    if let Some(dir) = cwd {
+        c.current_dir(dir);
+    }
+    let status = c.status().map_err(ProcError::Io)?;
+    Ok(ProcResult {
+        returncode: exit_code(&status),
+        stdout: String::new(),
+        stderr: String::new(),
+    })
+}
+
 pub fn run_ok(cmd: &[String], cwd: Option<&Path>) -> Result<bool, io::Error> {
     if cmd.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty command"));
@@ -383,6 +402,60 @@ mod tests {
     fn test_run_with_cwd() {
         let r = run(&["pwd".to_string()], Some(Path::new("/")), false, None).unwrap();
         assert_eq!(r.stdout.trim(), "/");
+    }
+
+    #[test]
+    fn test_run_quiet_success() {
+        let r = run_quiet(&["true".to_string()], None).unwrap();
+        assert_eq!(r.returncode, 0);
+    }
+
+    #[test]
+    fn test_run_quiet_failure() {
+        let r = run_quiet(&["false".to_string()], None).unwrap();
+        assert_ne!(r.returncode, 0);
+    }
+
+    #[test]
+    fn test_run_quiet_missing_command() {
+        let err = run_quiet(&["_nonexistent_command_xyzzy_".to_string()], None).unwrap_err();
+        match err {
+            ProcError::Io(e) => {
+                #[cfg(unix)]
+                assert_eq!(e.kind(), io::ErrorKind::NotFound);
+            }
+            _ => panic!("expected Io error, got {err}"),
+        }
+    }
+
+    #[test]
+    fn test_run_quiet_empty_cmd() {
+        let err = run_quiet(&[], None).unwrap_err();
+        match err {
+            ProcError::EmptyCommand => {}
+            _ => panic!("expected EmptyCommand, got {err}"),
+        }
+    }
+
+    #[test]
+    fn test_run_quiet_with_cwd() {
+        let r = run_quiet(
+            &[
+                "sh".to_string(),
+                "-c".to_string(),
+                r#"test "$(pwd)" = /"#.to_string(),
+            ],
+            Some(Path::new("/")),
+        )
+        .unwrap();
+        assert_eq!(r.returncode, 0);
+    }
+
+    #[test]
+    fn test_run_quiet_stdout_not_captured() {
+        let r = run_quiet(&["echo".to_string(), "hello".to_string()], None).unwrap();
+        assert_eq!(r.returncode, 0);
+        assert!(r.stdout.is_empty());
     }
 
     #[test]
