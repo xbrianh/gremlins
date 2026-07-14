@@ -552,3 +552,46 @@ def test_build_child_spec_dict_base_ref_empty_by_default(
     stage = _child_stage("c")
     spec = _parallel_mod._build_child_spec_dict(stage, child_st, "c", "attempt-1")
     assert spec["base_ref"] == ""
+
+
+@pytest.mark.asyncio
+async def test_terminate_with_grace_kills_process_group(tmp_path: pathlib.Path) -> None:
+    """Real Rust terminate_with_grace kills a session-leader and its descendants."""
+    pid_file = tmp_path / "grandchild_pid"
+    pid_file.write_text("")
+
+    proc = await asyncio.create_subprocess_exec(
+        "sh",
+        "-c",
+        f"(sleep 999 & echo $! > {pid_file}) & sleep 999",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    pid = proc.pid
+    assert pid is not None
+
+    # Wait for grandchild to start and write its PID.
+    for _ in range(20):
+        gc_pid = pid_file.read_text().strip()
+        if gc_pid:
+            break
+        await asyncio.sleep(0.05)
+
+    assert gc_pid, "grandchild did not start in time"
+
+    # Call the real Rust binding.
+    await _proc_mod.terminate_with_grace(pid, grace_s=0.1)
+
+    # Parent should be dead.
+    ret = await proc.wait()
+    assert ret != 0
+
+    # Grandchild should also be dead (same process group).
+    gc_alive = await asyncio.create_subprocess_exec(
+        "kill", "-0", gc_pid,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    ret = await gc_alive.wait()
+    assert ret != 0, f"grandchild {gc_pid} is still alive"

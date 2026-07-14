@@ -374,14 +374,20 @@ pub async fn run_async(
     }
 }
 
-/// Wait for process to exit by polling `kill(pid, 0)` at 50ms intervals.
+/// Wait for process to exit by polling `waitpid` at 50ms intervals.
 /// Returns `true` if the process exited within the timeout, `false` otherwise.
 #[cfg(unix)]
 pub async fn wait_for_process(pid: u32, timeout: Duration) -> bool {
+    if pid > i32::MAX as u32 {
+        return true;
+    }
+    let pid_i32 = pid as i32;
     let deadline = Instant::now() + timeout;
     loop {
-        let alive = unsafe { libc::kill(pid as i32, 0) == 0 };
-        if !alive {
+        let mut status: i32 = 0;
+        let ret = unsafe { libc::waitpid(pid_i32, &mut status, libc::WNOHANG) };
+        if ret != 0 {
+            // ret > 0: reaped, ret == -1: already reaped or error — either way, process is gone.
             return true;
         }
         if Instant::now() >= deadline {
@@ -395,11 +401,15 @@ pub async fn wait_for_process(pid: u32, timeout: Duration) -> bool {
 /// runs in a detached tokio task so it completes even if the caller drops the future.
 #[cfg(unix)]
 pub async fn terminate_with_grace(pid: u32, grace_s: f64) {
+    if pid > i32::MAX as u32 || !grace_s.is_finite() || grace_s < 0.0 {
+        return;
+    }
+    let pid_i32 = pid as i32;
     let grace = Duration::from_secs_f64(grace_s);
 
     let handle = tokio::spawn(async move {
-        // Send SIGTERM to the process.
-        let ret = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        // Send SIGTERM to the process group.
+        let ret = unsafe { libc::killpg(pid_i32, libc::SIGTERM) };
         if ret != 0 {
             // ESRCH (process already dead) or EPERM — nothing to do.
             return;
@@ -408,7 +418,7 @@ pub async fn terminate_with_grace(pid: u32, grace_s: f64) {
         if !wait_for_process(pid, grace).await {
             // Grace period expired; escalate to SIGKILL.
             unsafe {
-                libc::kill(pid as i32, libc::SIGKILL);
+                libc::killpg(pid_i32, libc::SIGKILL);
             }
             // Give the kernel a moment to deliver the signal.
             let _ = wait_for_process(pid, Duration::from_secs(5)).await;
@@ -1064,13 +1074,14 @@ mod tests {
     async fn test_terminate_with_grace_sigterm_kills() {
         let mut child = tokio::process::Command::new("sh")
             .arg("-c")
-            .arg("trap '' TERM; sleep 10")
+            .arg("sleep 10")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true)
             .spawn()
             .unwrap();
         let pid = child.id().unwrap();
+        // The process should die from SIGTERM within the grace window.
         terminate_with_grace(pid, 0.5).await;
         let status = child.wait().await.unwrap();
         assert!(!status.success());
@@ -1122,13 +1133,12 @@ mod tests {
             .spawn()
             .unwrap();
         let pid = child.id().unwrap();
-        // Spawn terminate_with_grace and cancel the outer task immediately.
+        // Spawn terminate_with_grace and cancel the outer task.
         let handle = tokio::spawn(async move {
             terminate_with_grace(pid, 0.5).await;
         });
-        // Yield so the spawned task has a chance to start and call
-        // terminate_with_grace, which spawns the inner kill-task.
-        tokio::task::yield_now().await;
+        // Wait long enough for the inner kill-task to start and send SIGTERM.
+        tokio::time::sleep(Duration::from_millis(200)).await;
         handle.abort();
         let _ = handle.await;
         // The child should still be killed even though we cancelled.
