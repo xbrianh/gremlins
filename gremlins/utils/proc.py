@@ -37,29 +37,29 @@ def run(
     try:
         r = _run(cmd, cwd=_to_str(cwd), check=check, timeout=timeout)
     except subprocess.CalledProcessError as e:
-        if text and isinstance(e.stdout, bytes):
+        if text:
             raise subprocess.CalledProcessError(
                 e.returncode,
                 e.cmd,
-                e.stdout.decode(),
-                e.stderr.decode() if isinstance(e.stderr, bytes) else None,
+                e.stdout.decode() if isinstance(e.stdout, bytes) else e.stdout,
+                e.stderr.decode() if isinstance(e.stderr, bytes) else e.stderr,
             ) from None
         raise
     except subprocess.TimeoutExpired as e:
-        if text and isinstance(e.stdout, bytes):
+        if text:
             raise subprocess.TimeoutExpired(
                 e.cmd,
                 e.timeout,
-                e.stdout.decode(),
-                e.stderr.decode() if isinstance(e.stderr, bytes) else None,
+                e.stdout.decode() if isinstance(e.stdout, bytes) else e.stdout,
+                e.stderr.decode() if isinstance(e.stderr, bytes) else e.stderr,
             ) from None
         raise
-    if text and isinstance(r.stdout, bytes):
+    if text:
         return subprocess.CompletedProcess(
             r.args if r.args is not None else cmd,
             r.returncode,
             r.stdout.decode(),
-            r.stderr.decode() if isinstance(r.stderr, bytes) else r.stderr,
+            r.stderr.decode(),
         )
     return r  # type: ignore[return-value]
 
