@@ -58,6 +58,10 @@ fn exit_code(status: &std::process::ExitStatus) -> i32 {
     }
 }
 
+pub fn run_or_raise(cmd: &[String], cwd: Option<&Path>) -> Result<String, ProcError> {
+    Ok(run(cmd, cwd, true, None)?.stdout.trim().to_string())
+}
+
 pub fn run_quiet(cmd: &[String], cwd: Option<&Path>) -> Result<ProcResult, ProcError> {
     if cmd.is_empty() {
         return Err(ProcError::EmptyCommand);
@@ -474,5 +478,53 @@ mod tests {
             }
             _ => panic!("expected Io error, got {err}"),
         }
+    }
+
+    #[test]
+    fn test_run_or_raise_success() {
+        let out = run_or_raise(&["echo".to_string(), "hello".to_string()], None).unwrap();
+        assert_eq!(out, "hello");
+    }
+
+    #[test]
+    fn test_run_or_raise_trailing_newline_stripped() {
+        let out = run_or_raise(&["printf".to_string(), "hello\n".to_string()], None).unwrap();
+        assert_eq!(out, "hello");
+    }
+
+    #[test]
+    fn test_run_or_raise_nonzero_exit() {
+        let err = run_or_raise(&["false".to_string()], None).unwrap_err();
+        match err {
+            ProcError::CalledProcessError(..) => {}
+            _ => panic!("expected CalledProcessError, got {err}"),
+        }
+    }
+
+    #[test]
+    fn test_run_or_raise_missing_command() {
+        let err = run_or_raise(&["_nonexistent_command_xyzzy_".to_string()], None).unwrap_err();
+        match err {
+            ProcError::Io(e) => {
+                #[cfg(unix)]
+                assert_eq!(e.kind(), io::ErrorKind::NotFound);
+            }
+            _ => panic!("expected Io error, got {err}"),
+        }
+    }
+
+    #[test]
+    fn test_run_or_raise_empty_cmd() {
+        let err = run_or_raise(&[], None).unwrap_err();
+        match err {
+            ProcError::EmptyCommand => {}
+            _ => panic!("expected EmptyCommand, got {err}"),
+        }
+    }
+
+    #[test]
+    fn test_run_or_raise_with_cwd() {
+        let out = run_or_raise(&["pwd".to_string()], Some(Path::new("/"))).unwrap();
+        assert_eq!(out, "/");
     }
 }

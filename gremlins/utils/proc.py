@@ -16,6 +16,9 @@ from _gremlins_core.utils.proc import (
     run_ok,  # noqa: F401  # pyright: ignore[reportUnusedImport]
     run_quiet,  # noqa: F401  # pyright: ignore[reportUnusedImport]
 )
+from _gremlins_core.utils.proc import (
+    run_or_raise as _run_or_raise,
+)
 
 
 def run(
@@ -36,8 +39,7 @@ def _to_str(p: str | os.PathLike[str] | None) -> str | None:
 
 
 def run_or_raise(cmd: list[str], *, cwd: str | os.PathLike[str] | None = None) -> str:
-    r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=True)
-    return r.stdout.strip()
+    return _run_or_raise(cmd, cwd=_to_str(cwd))
 
 
 async def run_async(

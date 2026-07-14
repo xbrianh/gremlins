@@ -16,6 +16,7 @@ fn _gremlins_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let proc = PyModule::new(m.py(), "proc")?;
     proc.add_function(wrap_pyfunction!(python::utils::proc::run_ok, &proc)?)?;
     proc.add_function(wrap_pyfunction!(python::utils::proc::run_quiet, &proc)?)?;
+    proc.add_function(wrap_pyfunction!(python::utils::proc::run_or_raise, &proc)?)?;
     proc.add_function(wrap_pyfunction!(python::utils::proc::run, &proc)?)?;
     utils.add_submodule(&proc)?;
     m.add_submodule(&utils)?;

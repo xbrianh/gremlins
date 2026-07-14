@@ -45,6 +45,31 @@ pub fn run_quiet(py: Python<'_>, cmd: Vec<String>, cwd: Option<PathBuf>) -> PyRe
 }
 
 #[pyfunction]
+#[pyo3(signature = (cmd, cwd=None))]
+pub fn run_or_raise(py: Python<'_>, cmd: Vec<String>, cwd: Option<PathBuf>) -> PyResult<String> {
+    let result = py.detach(|| proc::run_or_raise(&cmd, cwd.as_deref()));
+
+    match result {
+        Ok(s) => Ok(s),
+        Err(proc::ProcError::CalledProcessError(rc, stdout, stderr)) => {
+            let ty = subprocess_type(py, "CalledProcessError")?;
+            let obj = ty.call1((rc, cmd, stdout, stderr))?;
+            Err(PyErr::from_value(obj))
+        }
+        Err(proc::ProcError::TimeoutExpired(t, stdout, stderr)) => {
+            let ty = subprocess_type(py, "TimeoutExpired")?;
+            let obj = ty.call1((cmd, t, stdout, stderr))?;
+            Err(PyErr::from_value(obj))
+        }
+        Err(proc::ProcError::Io(e)) => Err(map_io_error(e)),
+        Err(proc::ProcError::EmptyCommand) => Err(PyValueError::new_err("empty command")),
+        Err(proc::ProcError::InvalidTimeout(t)) => Err(PyValueError::new_err(format!(
+            "timeout must be a finite non-negative number, got {t}"
+        ))),
+    }
+}
+
+#[pyfunction]
 #[pyo3(signature = (cmd, cwd=None, check=false, timeout=None))]
 pub fn run(
     py: Python<'_>,
