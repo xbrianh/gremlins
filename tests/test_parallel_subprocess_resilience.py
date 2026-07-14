@@ -554,7 +554,9 @@ def test_build_child_spec_dict_base_ref_empty_by_default(
 
 
 @pytest.mark.anyio
-async def test_terminate_with_grace_does_not_kill_descendants(tmp_path: pathlib.Path) -> None:
+async def test_terminate_with_grace_does_not_kill_descendants(
+    tmp_path: pathlib.Path,
+) -> None:
     """Real Rust terminate_with_grace kills only the target PID — descendants survive."""
     pid_file = tmp_path / "grandchild_pid"
     pid_file.write_text("")
@@ -601,7 +603,9 @@ async def test_terminate_with_grace_does_not_kill_descendants(tmp_path: pathlib.
     finally:
         # Cleanup: kill the grandchild to avoid leaking a long-lived process.
         await asyncio.create_subprocess_exec(
-            "kill", "-9", gc_pid,
+            "kill",
+            "-9",
+            gc_pid,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
