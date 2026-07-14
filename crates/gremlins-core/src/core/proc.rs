@@ -374,11 +374,10 @@ pub async fn run_async(
     }
 }
 
-/// Wait for process to exit by polling `waitpid` at 50ms intervals.
-/// Returns `true` if the process exited within the timeout, `false` otherwise.
-#[cfg(unix)]
 /// Poll whether a process with the given PID is still alive, without reaping it.
 /// Uses `kill(pid, 0)` which returns 0 if the process exists.
+/// Returns `true` if the process is still alive after `timeout`, `false` if it has exited.
+#[cfg(unix)]
 async fn poll_process_alive(pid: i32, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
@@ -405,8 +404,7 @@ pub async fn terminate_with_grace(pid: u32, grace_s: f64) {
     let grace = Duration::from_secs_f64(grace_s);
 
     let handle = tokio::spawn(async move {
-        // Send SIGTERM to the specific process (not the whole process group,
-        // since the child was not spawned as a process-group leader).
+        // Send SIGTERM to the specific PID only (not the process group).
         let ret = unsafe { libc::kill(pid_i32, libc::SIGTERM) };
         if ret != 0 {
             // ESRCH (process already dead) or EPERM — nothing to do.
@@ -421,7 +419,7 @@ pub async fn terminate_with_grace(pid: u32, grace_s: f64) {
                 libc::kill(pid_i32, libc::SIGKILL);
             }
             // Give the kernel a moment to deliver the signal (again, no reap).
-            let _ = poll_process_alive(pid_i32, Duration::from_secs(5)).await;
+            let _ = poll_process_alive(pid_i32, Duration::from_millis(500)).await;
         }
     });
 

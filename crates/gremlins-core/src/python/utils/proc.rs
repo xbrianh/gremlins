@@ -121,7 +121,7 @@ pub fn run_ok_async(
 
 #[cfg(unix)]
 #[pyfunction]
-#[pyo3(signature = (pid, grace_s=10.0))]
+#[pyo3(signature = (pid, *, grace_s=10.0))]
 pub fn terminate_with_grace(py: Python<'_>, pid: u32, grace_s: f64) -> PyResult<Bound<'_, PyAny>> {
     if pid > i32::MAX as u32 {
         return Err(PyValueError::new_err(format!(
@@ -142,7 +142,7 @@ pub fn terminate_with_grace(py: Python<'_>, pid: u32, grace_s: f64) -> PyResult<
 
 #[cfg(not(unix))]
 #[pyfunction]
-#[pyo3(signature = (pid, grace_s=10.0))]
+#[pyo3(signature = (pid, *, grace_s=10.0))]
 pub fn terminate_with_grace(py: Python<'_>, pid: u32, grace_s: f64) -> PyResult<Bound<'_, PyAny>> {
     if pid > i32::MAX as u32 {
         return Err(PyValueError::new_err(format!(

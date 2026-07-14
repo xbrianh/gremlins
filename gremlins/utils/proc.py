@@ -198,6 +198,7 @@ async def iter_lines(
 async def terminate_with_grace(
     p: asyncio.subprocess.Process, grace_s: float = 10.0
 ) -> None:
+    """SIGTERM → wait grace_s → SIGKILL (targets only the specific PID, not the process group)."""
     await _terminate_with_grace(p.pid, grace_s=grace_s)
 
 
