@@ -11,9 +11,13 @@ from typing import Any
 
 from _gremlins_core.utils.proc import (
     run as _run,
+)
+from _gremlins_core.utils.proc import (
     run_ok,  # noqa: F401  # pyright: ignore[reportUnusedImport]
-    run_or_raise as _run_or_raise,
     run_quiet,  # noqa: F401  # pyright: ignore[reportUnusedImport]
+)
+from _gremlins_core.utils.proc import (
+    run_or_raise as _run_or_raise,
 )
 
 
