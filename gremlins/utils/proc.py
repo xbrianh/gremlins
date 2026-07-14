@@ -27,6 +27,9 @@ from _gremlins_core.utils.proc import (
 from _gremlins_core.utils.proc import (
     run_quiet as _run_quiet,
 )
+from _gremlins_core.utils.proc import (
+    terminate_with_grace as _terminate_with_grace,
+)
 
 
 def run(
@@ -195,29 +198,8 @@ async def iter_lines(
 async def terminate_with_grace(
     p: asyncio.subprocess.Process, grace_s: float = 10.0
 ) -> None:
-    """SIGTERM → wait grace_s → SIGKILL. Shielded so it completes under cancellation.
-
-    p must be a session leader (started with start_new_session=True).
-    """
-    try:
-        os.killpg(p.pid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
-        return
-    cancelled = False
-    try:
-        await asyncio.shield(asyncio.wait_for(p.wait(), timeout=grace_s))
-    except asyncio.CancelledError:
-        cancelled = True
-    except TimeoutError:
-        pass
-    if p.returncode is None:
-        try:
-            os.killpg(p.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        await asyncio.shield(p.wait())
-    if cancelled:
-        raise asyncio.CancelledError()
+    """SIGTERM → wait grace_s → SIGKILL (targets only the specific PID, not the process group)."""
+    await _terminate_with_grace(p.pid, grace_s=grace_s)
 
 
 async def _pump_prefixed(

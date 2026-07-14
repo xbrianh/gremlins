@@ -20,6 +20,10 @@ fn _gremlins_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     proc.add_function(wrap_pyfunction!(python::utils::proc::run_or_raise, &proc)?)?;
     proc.add_function(wrap_pyfunction!(python::utils::proc::run, &proc)?)?;
     proc.add_function(wrap_pyfunction!(python::utils::proc::run_async, &proc)?)?;
+    proc.add_function(wrap_pyfunction!(
+        python::utils::proc::terminate_with_grace,
+        &proc
+    )?)?;
     utils.add_submodule(&proc)?;
     m.add_submodule(&utils)?;
     let modules = m.py().import("sys")?.getattr("modules")?;

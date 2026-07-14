@@ -119,6 +119,45 @@ pub fn run_ok_async(
     })
 }
 
+#[cfg(unix)]
+#[pyfunction]
+#[pyo3(signature = (pid, *, grace_s=10.0))]
+pub fn terminate_with_grace(py: Python<'_>, pid: u32, grace_s: f64) -> PyResult<Bound<'_, PyAny>> {
+    if pid > i32::MAX as u32 {
+        return Err(PyValueError::new_err(format!(
+            "pid {pid} exceeds the maximum supported value {}",
+            i32::MAX
+        )));
+    }
+    if !grace_s.is_finite() || grace_s < 0.0 {
+        return Err(PyValueError::new_err(format!(
+            "grace_s must be a finite non-negative number, got {grace_s}"
+        )));
+    }
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        proc::terminate_with_grace(pid, grace_s).await;
+        Ok(())
+    })
+}
+
+#[cfg(not(unix))]
+#[pyfunction]
+#[pyo3(signature = (pid, *, grace_s=10.0))]
+pub fn terminate_with_grace(py: Python<'_>, pid: u32, grace_s: f64) -> PyResult<Bound<'_, PyAny>> {
+    if pid > i32::MAX as u32 {
+        return Err(PyValueError::new_err(format!(
+            "pid {pid} exceeds the maximum supported value {}",
+            i32::MAX
+        )));
+    }
+    if !grace_s.is_finite() || grace_s < 0.0 {
+        return Err(PyValueError::new_err(format!(
+            "grace_s must be a finite non-negative number, got {grace_s}"
+        )));
+    }
+    pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(()) })
+}
+
 #[pyfunction]
 #[pyo3(signature = (cmd, cwd=None, check=false, text=true, timeout=None))]
 pub fn run_async(

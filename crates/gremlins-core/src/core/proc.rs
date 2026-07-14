@@ -374,6 +374,64 @@ pub async fn run_async(
     }
 }
 
+/// Poll whether a process with the given PID is still alive, without reaping it.
+/// Uses `kill(pid, 0)` which returns 0 if the process exists.
+/// Returns `true` if the process is still alive after `timeout`, `false` if it has exited.
+#[cfg(unix)]
+async fn poll_process_alive(pid: i32, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        // SAFETY: kill(pid, 0) is safe; only checks existence, sends no signal.
+        let alive = unsafe { libc::kill(pid, 0) == 0 };
+        if !alive {
+            return false;
+        }
+        if Instant::now() >= deadline {
+            return true; // still alive after timeout
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Send SIGTERM → wait grace_s → SIGKILL. Cancellation-safe: the kill sequence
+/// runs in a detached tokio task so it completes even if the caller drops the future.
+#[cfg(unix)]
+pub async fn terminate_with_grace(pid: u32, grace_s: f64) {
+    if pid > i32::MAX as u32 || !grace_s.is_finite() || grace_s < 0.0 {
+        return;
+    }
+    let pid_i32 = pid as i32;
+    let grace = Duration::from_secs_f64(grace_s);
+
+    let handle = tokio::spawn(async move {
+        // Send SIGTERM to the specific PID only (not the process group).
+        let ret = unsafe { libc::kill(pid_i32, libc::SIGTERM) };
+        if ret != 0 {
+            // ESRCH (process already dead) or EPERM — nothing to do.
+            return;
+        }
+
+        // Wait for the grace period without reaping the child — the caller
+        // (e.g. a `Child` handle) will reap it via `waitpid`.
+        if poll_process_alive(pid_i32, grace).await {
+            // Grace period expired; escalate to SIGKILL.
+            unsafe {
+                libc::kill(pid_i32, libc::SIGKILL);
+            }
+            // Give the kernel a moment to deliver the signal (again, no reap).
+            let _ = poll_process_alive(pid_i32, Duration::from_millis(500)).await;
+        }
+    });
+
+    // Await the spawned task — if the caller is cancelled, the spawned task
+    // continues running independently.
+    let _ = handle.await;
+}
+
+/// No-op stub for non-Unix platforms.
+#[cfg(not(unix))]
+pub async fn terminate_with_grace(_pid: u32, _grace_s: f64) {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1005,5 +1063,87 @@ mod tests {
             }
             _ => panic!("expected CalledProcessError, got {err}"),
         }
+    }
+
+    // -- terminate_with_grace tests --
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_terminate_with_grace_sigterm_kills() {
+        let mut child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 10")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+        // The process should die from SIGTERM within the grace window.
+        terminate_with_grace(pid, 0.5).await;
+        let status = child.wait().await.unwrap();
+        assert!(!status.success());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_terminate_with_grace_already_dead() {
+        let mut child = tokio::process::Command::new("true")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+        let _ = child.wait().await;
+        // Should not panic or hang.
+        terminate_with_grace(pid, 0.1).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_terminate_with_grace_grace_expires_sigkill() {
+        let mut child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("trap '' TERM; sleep 10")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+        // Very short grace forces SIGKILL path.
+        terminate_with_grace(pid, 0.05).await;
+        let status = child.wait().await.unwrap();
+        // SIGKILL produces a signal exit, not a normal exit.
+        assert!(!status.success());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_terminate_with_grace_cancellation_safety() {
+        let mut child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("trap '' TERM; sleep 10")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+        // Spawn terminate_with_grace and cancel the outer task.
+        let handle = tokio::spawn(async move {
+            terminate_with_grace(pid, 0.5).await;
+        });
+        // Wait long enough for the inner kill-task to start and send SIGTERM.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        handle.abort();
+        let _ = handle.await;
+        // The child should still be killed even though we cancelled.
+        let status = tokio::time::timeout(Duration::from_secs(3), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!status.success());
     }
 }
