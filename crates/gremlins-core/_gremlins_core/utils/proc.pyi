@@ -15,6 +15,9 @@ def run(
     check: bool = False,
     timeout: float | None = None,
 ) -> subprocess.CompletedProcess[bytes]: ...
+async def run_ok_async(
+    cmd: list[str], *, cwd: str | os.PathLike[str] | None = None
+) -> bool: ...
 async def run_async(
     cmd: list[str],
     *,
