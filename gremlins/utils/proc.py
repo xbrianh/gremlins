@@ -41,6 +41,23 @@ def run_or_raise(cmd: list[str], *, cwd: str | os.PathLike[str] | None = None) -
     return _run_or_raise(cmd, cwd=_to_str(cwd))
 
 
+def run_ok(cmd: list[str], *, cwd: str | os.PathLike[str] | None = None) -> bool:
+    """Run a command and return True if it exits with code 0."""
+    try:
+        r = _run(cmd, cwd=_to_str(cwd), check=False)
+        return r.returncode == 0
+    except OSError:
+        return False
+
+
+def run_quiet(cmd: list[str], *, cwd: str | os.PathLike[str] | None = None) -> None:
+    """Run a command silently, discarding output."""
+    try:
+        _run(cmd, cwd=_to_str(cwd), check=False)
+    except Exception:
+        pass
+
+
 async def run_async(
     cmd: list[str],
     *,
@@ -129,7 +146,10 @@ async def run_or_raise_async(
     cmd: list[str], *, cwd: str | os.PathLike[str] | None = None
 ) -> str:
     r = await run_async(cmd, cwd=cwd, check=True)
-    return r.stdout.strip()
+    stdout = r.stdout
+    if isinstance(stdout, bytes):
+        return stdout.decode().strip()
+    return stdout.strip()
 
 
 async def iter_lines(

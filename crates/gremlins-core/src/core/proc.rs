@@ -234,7 +234,10 @@ struct CancelToken {
 
 impl CancelToken {
     fn new(pid: u32) -> Self {
-        CancelToken { pid, disarmed: false }
+        CancelToken {
+            pid,
+            disarmed: false,
+        }
     }
 
     fn disarm(&mut self) {
@@ -305,36 +308,33 @@ pub async fn run_async(
     });
 
     let wait_result = match timeout {
-        Some(t) => {
-            match tokio::time::timeout(Duration::from_secs_f64(t), child.wait()).await {
-                Ok(result) => result.map_err(ProcError::Io),
-                Err(_elapsed) => {
-                    #[cfg(unix)]
-                    unsafe {
-                        libc::killpg(pid as i32, libc::SIGKILL);
-                    }
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-
-                    let drain = async {
-                        let stdout_buf = stdout_handle.await.unwrap_or_default();
-                        let stderr_buf = stderr_handle.await.unwrap_or_default();
-                        (stdout_buf, stderr_buf)
-                    };
-                    let (stdout_buf, stderr_buf) =
-                        match tokio::time::timeout(Duration::from_secs(5), drain).await {
-                            Ok(r) => r,
-                            Err(_) => (Vec::new(), Vec::new()),
-                        };
-                    cancel.disarm();
-                    return Err(ProcError::TimeoutExpired(
-                        t,
-                        String::from_utf8_lossy(&stdout_buf).into_owned(),
-                        String::from_utf8_lossy(&stderr_buf).into_owned(),
-                    ));
+        Some(t) => match tokio::time::timeout(Duration::from_secs_f64(t), child.wait()).await {
+            Ok(result) => result.map_err(ProcError::Io),
+            Err(_elapsed) => {
+                #[cfg(unix)]
+                unsafe {
+                    libc::killpg(pid as i32, libc::SIGKILL);
                 }
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+
+                let drain = async {
+                    let stdout_buf = stdout_handle.await.unwrap_or_default();
+                    let stderr_buf = stderr_handle.await.unwrap_or_default();
+                    (stdout_buf, stderr_buf)
+                };
+                let (stdout_buf, stderr_buf): (Vec<u8>, Vec<u8>) =
+                    tokio::time::timeout(Duration::from_secs(5), drain)
+                        .await
+                        .unwrap_or_default();
+                cancel.disarm();
+                return Err(ProcError::TimeoutExpired(
+                    t,
+                    String::from_utf8_lossy(&stdout_buf).into_owned(),
+                    String::from_utf8_lossy(&stderr_buf).into_owned(),
+                ));
             }
-        }
+        },
         None => child.wait().await.map_err(ProcError::Io),
     };
 
@@ -776,9 +776,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_async_invalid_timeout_infinite() {
-        let err = run_async(&["true".to_string()], None, false, Some(f64::INFINITY), true)
-            .await
-            .unwrap_err();
+        let err = run_async(
+            &["true".to_string()],
+            None,
+            false,
+            Some(f64::INFINITY),
+            true,
+        )
+        .await
+        .unwrap_err();
         match err {
             ProcError::InvalidTimeout(_) => {}
             _ => panic!("expected InvalidTimeout, got {err}"),
@@ -836,9 +842,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_async_with_cwd() {
-        let r = run_async(&["pwd".to_string()], Some(Path::new("/")), false, None, true)
-            .await
-            .unwrap();
+        let r = run_async(
+            &["pwd".to_string()],
+            Some(Path::new("/")),
+            false,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
         assert_eq!(String::from_utf8_lossy(&r.stdout).trim(), "/");
     }
 
@@ -919,7 +931,11 @@ mod tests {
     #[tokio::test]
     async fn test_run_async_text_true_returns_strings_in_error() {
         let err = run_async(
-            &["sh".to_string(), "-c".to_string(), "echo hi; exit 1".to_string()],
+            &[
+                "sh".to_string(),
+                "-c".to_string(),
+                "echo hi; exit 1".to_string(),
+            ],
             None,
             true,
             None,
