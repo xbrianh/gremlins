@@ -13,8 +13,8 @@ use std::os::unix::process::ExitStatusExt;
 #[derive(Debug)]
 pub struct ProcResult {
     pub returncode: i32,
-    pub stdout: String,
-    pub stderr: String,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
 }
 
 /// Error type for `run`.
@@ -61,7 +61,8 @@ fn exit_code(status: &std::process::ExitStatus) -> i32 {
 }
 
 pub fn run_or_raise(cmd: &[String], cwd: Option<&Path>) -> Result<String, ProcError> {
-    Ok(run(cmd, cwd, true, None)?.stdout.trim().to_string())
+    let r = run(cmd, cwd, true, None)?;
+    Ok(String::from_utf8_lossy(&r.stdout).trim().to_string())
 }
 
 pub fn run_quiet(cmd: &[String], cwd: Option<&Path>) -> Result<ProcResult, ProcError> {
@@ -78,8 +79,8 @@ pub fn run_quiet(cmd: &[String], cwd: Option<&Path>) -> Result<ProcResult, ProcE
     let status = c.status().map_err(ProcError::Io)?;
     Ok(ProcResult {
         returncode: exit_code(&status),
-        stdout: String::new(),
-        stderr: String::new(),
+        stdout: Vec::new(),
+        stderr: Vec::new(),
     })
 }
 
@@ -132,8 +133,8 @@ pub fn run(
             let output = child.wait_with_output().map_err(ProcError::Io)?;
             ProcResult {
                 returncode: exit_code(&output.status),
-                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                stdout: output.stdout,
+                stderr: output.stderr,
             }
         }
     };
@@ -141,8 +142,8 @@ pub fn run(
     if check && output.returncode != 0 {
         return Err(ProcError::CalledProcessError(
             output.returncode,
-            output.stdout,
-            output.stderr,
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
         ));
     }
     Ok(output)
@@ -198,8 +199,8 @@ fn run_with_timeout(
                 .unwrap_or_default();
             Ok(ProcResult {
                 returncode: exit_code(&status),
-                stdout: String::from_utf8_lossy(&stdout_buf).into_owned(),
-                stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
+                stdout: stdout_buf,
+                stderr: stderr_buf,
             })
         }
         None => {
@@ -233,10 +234,7 @@ struct CancelToken {
 
 impl CancelToken {
     fn new(pid: u32) -> Self {
-        CancelToken {
-            pid,
-            disarmed: false,
-        }
+        CancelToken { pid, disarmed: false }
     }
 
     fn disarm(&mut self) {
@@ -260,12 +258,13 @@ pub async fn run_async(
     cwd: Option<&Path>,
     check: bool,
     timeout: Option<f64>,
+    _text: bool,
 ) -> Result<ProcResult, ProcError> {
     if cmd.is_empty() {
         return Err(ProcError::EmptyCommand);
     }
     if let Some(t) = timeout {
-        if !t.is_finite() || t < 0.0 {
+        if !t.is_finite() || t < 0.0 || t > Duration::MAX.as_secs_f64() {
             return Err(ProcError::InvalidTimeout(t));
         }
     }
@@ -274,7 +273,7 @@ pub async fn run_async(
     command.args(&cmd[1..]);
     command.stdout(std::process::Stdio::piped());
     command.stderr(std::process::Stdio::piped());
-    command.kill_on_drop(false);
+    command.kill_on_drop(true);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -306,46 +305,56 @@ pub async fn run_async(
     });
 
     let wait_result = match timeout {
-        Some(t) => match tokio::time::timeout(Duration::from_secs_f64(t), child.wait()).await {
-            Ok(result) => result.map_err(ProcError::Io),
-            Err(_elapsed) => {
-                #[cfg(unix)]
-                unsafe {
-                    libc::killpg(pid as i32, libc::SIGKILL);
+        Some(t) => {
+            match tokio::time::timeout(Duration::from_secs_f64(t), child.wait()).await {
+                Ok(result) => result.map_err(ProcError::Io),
+                Err(_elapsed) => {
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::killpg(pid as i32, libc::SIGKILL);
+                    }
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+
+                    let drain = async {
+                        let stdout_buf = stdout_handle.await.unwrap_or_default();
+                        let stderr_buf = stderr_handle.await.unwrap_or_default();
+                        (stdout_buf, stderr_buf)
+                    };
+                    let (stdout_buf, stderr_buf) =
+                        match tokio::time::timeout(Duration::from_secs(5), drain).await {
+                            Ok(r) => r,
+                            Err(_) => (Vec::new(), Vec::new()),
+                        };
+                    cancel.disarm();
+                    return Err(ProcError::TimeoutExpired(
+                        t,
+                        String::from_utf8_lossy(&stdout_buf).into_owned(),
+                        String::from_utf8_lossy(&stderr_buf).into_owned(),
+                    ));
                 }
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                cancel.disarm();
-                let stdout_buf = stdout_handle.await.unwrap_or_default();
-                let stderr_buf = stderr_handle.await.unwrap_or_default();
-                return Err(ProcError::TimeoutExpired(
-                    t,
-                    String::from_utf8_lossy(&stdout_buf).into_owned(),
-                    String::from_utf8_lossy(&stderr_buf).into_owned(),
-                ));
             }
-        },
+        }
         None => child.wait().await.map_err(ProcError::Io),
     };
 
     let status = wait_result?;
     cancel.disarm();
-
     let stdout_buf = stdout_handle.await.unwrap_or_default();
     let stderr_buf = stderr_handle.await.unwrap_or_default();
 
     let rc = exit_code(&status);
     let result = ProcResult {
         returncode: rc,
-        stdout: String::from_utf8_lossy(&stdout_buf).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
+        stdout: stdout_buf,
+        stderr: stderr_buf,
     };
 
     if check && rc != 0 {
         Err(ProcError::CalledProcessError(
             rc,
-            result.stdout,
-            result.stderr,
+            String::from_utf8_lossy(&result.stdout).into_owned(),
+            String::from_utf8_lossy(&result.stderr).into_owned(),
         ))
     } else {
         Ok(result)
@@ -413,7 +422,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(r.stdout.trim(), "hello");
+        assert_eq!(String::from_utf8_lossy(&r.stdout).trim(), "hello");
     }
 
     #[test]
@@ -429,7 +438,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(r.stderr.contains("err"));
+        assert!(String::from_utf8_lossy(&r.stderr).contains("err"));
     }
 
     #[test]
@@ -533,7 +542,7 @@ mod tests {
     #[test]
     fn test_run_with_cwd() {
         let r = run(&["pwd".to_string()], Some(Path::new("/")), false, None).unwrap();
-        assert_eq!(r.stdout.trim(), "/");
+        assert_eq!(String::from_utf8_lossy(&r.stdout).trim(), "/");
     }
 
     #[test]
@@ -660,7 +669,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_async_success() {
-        let r = run_async(&["true".to_string()], None, false, None)
+        let r = run_async(&["true".to_string()], None, false, None, true)
             .await
             .unwrap();
         assert_eq!(r.returncode, 0);
@@ -668,7 +677,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_async_nonzero_exit() {
-        let r = run_async(&["false".to_string()], None, false, None)
+        let r = run_async(&["false".to_string()], None, false, None, true)
             .await
             .unwrap();
         assert_ne!(r.returncode, 0);
@@ -676,7 +685,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_async_check_raises() {
-        let err = run_async(&["false".to_string()], None, true, None)
+        let err = run_async(&["false".to_string()], None, true, None, true)
             .await
             .unwrap_err();
         match err {
@@ -692,10 +701,11 @@ mod tests {
             None,
             false,
             None,
+            true,
         )
         .await
         .unwrap();
-        assert_eq!(r.stdout.trim(), "hello");
+        assert_eq!(String::from_utf8_lossy(&r.stdout).trim(), "hello");
     }
 
     #[tokio::test]
@@ -709,10 +719,11 @@ mod tests {
             None,
             false,
             None,
+            true,
         )
         .await
         .unwrap();
-        assert!(r.stderr.contains("err"));
+        assert!(String::from_utf8_lossy(&r.stderr).contains("err"));
     }
 
     #[tokio::test]
@@ -722,6 +733,7 @@ mod tests {
             None,
             false,
             Some(0.05),
+            true,
         )
         .await
         .unwrap_err();
@@ -733,7 +745,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_async_empty_cmd() {
-        let err = run_async(&[], None, false, None).await.unwrap_err();
+        let err = run_async(&[], None, false, None, true).await.unwrap_err();
         match err {
             ProcError::EmptyCommand => {}
             _ => panic!("expected EmptyCommand, got {err}"),
@@ -742,12 +754,184 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_async_invalid_timeout() {
-        let err = run_async(&["true".to_string()], None, false, Some(-1.0))
+        let err = run_async(&["true".to_string()], None, false, Some(-1.0), true)
             .await
             .unwrap_err();
         match err {
             ProcError::InvalidTimeout(_) => {}
             _ => panic!("expected InvalidTimeout, got {err}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_async_invalid_timeout_nan() {
+        let err = run_async(&["true".to_string()], None, false, Some(f64::NAN), true)
+            .await
+            .unwrap_err();
+        match err {
+            ProcError::InvalidTimeout(_) => {}
+            _ => panic!("expected InvalidTimeout, got {err}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_async_invalid_timeout_infinite() {
+        let err = run_async(&["true".to_string()], None, false, Some(f64::INFINITY), true)
+            .await
+            .unwrap_err();
+        match err {
+            ProcError::InvalidTimeout(_) => {}
+            _ => panic!("expected InvalidTimeout, got {err}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_async_timeout_accumulates_partial_output() {
+        let err = run_async(
+            &[
+                "sh".to_string(),
+                "-c".to_string(),
+                "echo start; sleep 10".to_string(),
+            ],
+            None,
+            false,
+            Some(0.1),
+            true,
+        )
+        .await
+        .unwrap_err();
+        match err {
+            ProcError::TimeoutExpired(_, stdout, _) => {
+                assert!(
+                    stdout.contains("start"),
+                    "partial stdout should contain 'start', got: {stdout}"
+                );
+            }
+            _ => panic!("expected TimeoutExpired, got {err}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_async_timeout_large_output() {
+        let err = run_async(
+            &[
+                "sh".to_string(),
+                "-c".to_string(),
+                "dd if=/dev/zero bs=131072 count=1 2>/dev/null; sleep 10".to_string(),
+            ],
+            None,
+            false,
+            Some(0.2),
+            true,
+        )
+        .await
+        .unwrap_err();
+        match err {
+            ProcError::TimeoutExpired(_, stdout, _) => {
+                assert!(!stdout.is_empty(), "large output should not block");
+            }
+            _ => panic!("expected TimeoutExpired, got {err}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_async_with_cwd() {
+        let r = run_async(&["pwd".to_string()], Some(Path::new("/")), false, None, true)
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&r.stdout).trim(), "/");
+    }
+
+    #[tokio::test]
+    async fn test_run_async_missing_command() {
+        let err = run_async(
+            &["_nonexistent_command_xyzzy_".to_string()],
+            None,
+            false,
+            None,
+            true,
+        )
+        .await
+        .unwrap_err();
+        match err {
+            ProcError::Io(e) => {
+                #[cfg(unix)]
+                assert_eq!(e.kind(), io::ErrorKind::NotFound);
+            }
+            _ => panic!("expected Io error, got {err}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_async_cancel_kills_process() {
+        let handle = tokio::spawn(async {
+            run_async(
+                &["sleep".to_string(), "10".to_string()],
+                None,
+                false,
+                None,
+                true,
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        handle.abort();
+        let result = handle.await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_run_async_cancel_kills_process_group() {
+        let handle = tokio::spawn(async {
+            run_async(
+                &[
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    "sleep 10 & sleep 10".to_string(),
+                ],
+                None,
+                false,
+                None,
+                true,
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        handle.abort();
+        let result = handle.await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_run_async_text_false_returns_bytes() {
+        let r = run_async(
+            &["echo".to_string(), "hello".to_string()],
+            None,
+            false,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(&r.stdout, b"hello\n");
+    }
+
+    #[tokio::test]
+    async fn test_run_async_text_true_returns_strings_in_error() {
+        let err = run_async(
+            &["sh".to_string(), "-c".to_string(), "echo hi; exit 1".to_string()],
+            None,
+            true,
+            None,
+            true,
+        )
+        .await
+        .unwrap_err();
+        match err {
+            ProcError::CalledProcessError(_, stdout, _) => {
+                assert!(stdout.contains("hi"));
+            }
+            _ => panic!("expected CalledProcessError, got {err}"),
         }
     }
 }

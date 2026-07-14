@@ -107,21 +107,29 @@ pub fn run(
 }
 
 #[pyfunction]
-#[pyo3(signature = (cmd, cwd=None, check=false, timeout=None))]
+#[pyo3(signature = (cmd, cwd=None, check=false, text=true, timeout=None))]
 pub fn run_async(
     py: Python<'_>,
     cmd: Vec<String>,
     cwd: Option<PathBuf>,
     check: bool,
+    text: bool,
     timeout: Option<f64>,
 ) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let result = proc::run_async(&cmd, cwd.as_deref(), check, timeout).await;
+        let result = proc::run_async(&cmd, cwd.as_deref(), check, timeout, text).await;
         Python::attach(|py| match result {
             Ok(r) => {
                 let ty = subprocess_type(py, "CompletedProcess")?;
-                let obj = ty.call1((cmd, r.returncode, r.stdout, r.stderr))?;
-                Ok(obj.into_any().unbind())
+                if text {
+                    let stdout = String::from_utf8_lossy(&r.stdout).into_owned();
+                    let stderr = String::from_utf8_lossy(&r.stderr).into_owned();
+                    let obj = ty.call1((cmd, r.returncode, stdout, stderr))?;
+                    Ok(obj.into_any().unbind())
+                } else {
+                    let obj = ty.call1((cmd, r.returncode, r.stdout, r.stderr))?;
+                    Ok(obj.into_any().unbind())
+                }
             }
             Err(proc::ProcError::CalledProcessError(rc, stdout, stderr)) => {
                 let ty = subprocess_type(py, "CalledProcessError")?;

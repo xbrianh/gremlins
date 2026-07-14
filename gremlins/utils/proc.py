@@ -13,11 +13,11 @@ from _gremlins_core.utils.proc import (
     run as _run,
 )
 from _gremlins_core.utils.proc import (
-    run_async as _run_async,  # noqa: F401  # pyright: ignore[reportUnusedImport]
+    run_async as _run_async,
 )
 from _gremlins_core.utils.proc import (
-    run_ok,  # noqa: F401  # pyright: ignore[reportUnusedImport]
-    run_quiet,  # noqa: F401  # pyright: ignore[reportUnusedImport]
+    run_ok,
+    run_quiet,
 )
 from _gremlins_core.utils.proc import (
     run_or_raise as _run_or_raise,
@@ -52,8 +52,8 @@ async def run_async(
     check: bool = False,
     text: bool = True,
     timeout: float | None = None,
-) -> subprocess.CompletedProcess[str]:
-    return await _run_async(cmd, cwd=_to_str(cwd), check=check, timeout=timeout)
+) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+    return await _run_async(cmd, cwd=_to_str(cwd), check=check, text=text, timeout=timeout)
 
 
 async def run_shell_async(
