@@ -28,7 +28,15 @@ def run(
     text: bool = True,
     timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    return _run(cmd, cwd=_to_str(cwd), check=check, timeout=timeout)
+    r = _run(cmd, cwd=_to_str(cwd), check=check, timeout=timeout)
+    if text and isinstance(r.stdout, bytes):
+        return subprocess.CompletedProcess(
+            r.args if r.args is not None else cmd,
+            r.returncode,
+            r.stdout.decode(),
+            r.stderr.decode() if isinstance(r.stderr, bytes) else r.stderr,
+        )
+    return r  # type: ignore[return-value]
 
 
 def _to_str(p: str | os.PathLike[str] | None) -> str | None:
