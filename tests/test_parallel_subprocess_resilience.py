@@ -589,7 +589,9 @@ async def test_terminate_with_grace_kills_process_group(tmp_path: pathlib.Path) 
 
     # Grandchild should also be dead (same process group).
     gc_alive = await asyncio.create_subprocess_exec(
-        "kill", "-0", gc_pid,
+        "kill",
+        "-0",
+        gc_pid,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )
