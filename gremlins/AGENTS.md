@@ -16,7 +16,7 @@ review / address pipelines, the fleet manager
 - `fleet/` — fleet manager package: status listing + `stop` / `land` / `close` / `rm` / `log` ops. See [`fleet/AGENTS.md`](fleet/AGENTS.md) for the per-module breakdown.
 - `clients/protocol.py` — `CompletedRun` dataclass.
 - `clients/stream.py` — `stream_events` + `_emit_event` (stream-json parser and stderr renderer).
-- `pipeline/` — `Pipeline` dataclass + `Pipeline.from_yaml(path)` classmethod; `resolve_pipeline_path`; supports parallel stage groups. `pipeline/loader.py` holds `STAGE_TYPES`, the explicit dispatch table mapping type-name strings to Stage classes. `pipeline/preprocess.py` handles YAML expansion: resolves `include:`, `prompt:`, and `type: <name>` macros before the pipeline reaches the loader.
+- `pipeline/` — `Pipeline` dataclass + `Pipeline.from_yaml(path)` classmethod; `resolve_pipeline_path`; supports parallel stage groups. `pipeline/loader.py` holds `STAGE_TYPES`, the explicit dispatch table mapping type-name strings to Stage classes. YAML expansion (resolving `include:`, `prompt:`, and `type: <name>` macros) is handled by the Rust `expand_pipeline` in `_gremlins_core.schemas`.
 - `pipelines/` — bundled YAML pipeline files (`local.yaml`, `gh.yaml`); lookup target for `resolve_pipeline_path`.
 - `stages/base.py` — `Stage` Protocol + `StageContext` dataclass: shared `client`, `artifact_dir`, `gremlin_id` threaded into every stage.
 - `stages/` — per-stage bodies: `plan`, `review_code`, `github_address_pull_request_reviews`, `verify`, `github_wait_copilot`, `github_wait_ci`, `handoff`.

@@ -7,9 +7,17 @@ import textwrap
 from typing import Any
 
 import pytest
+from _gremlins_core.discovery import resolve_pipeline_name as _resolve_pipeline_name
+from _gremlins_core.schemas import expand_pipeline as _expand_pipeline
 
 from gremlins.pipeline import Pipeline
-from gremlins.pipeline.preprocess import expand_pipeline
+from gremlins.pipelines import BUNDLED_PIPELINE_DIR
+from gremlins.prompts import BUNDLED_PROMPT_DIR
+from gremlins.recipes import BUNDLED_STAGE_DEF_DIR
+
+
+def _resolve(n, pr):
+    return _resolve_pipeline_name(n, pr, BUNDLED_PIPELINE_DIR)
 
 
 def _make_pipeline(tmp_path: pathlib.Path, verify_entry: str) -> dict[str, Any]:
@@ -24,7 +32,13 @@ def _make_pipeline(tmp_path: pathlib.Path, verify_entry: str) -> dict[str, Any]:
         """),
         encoding="utf-8",
     )
-    return expand_pipeline(p)
+    return _expand_pipeline(
+        str(p),
+        None,
+        str(BUNDLED_STAGE_DEF_DIR),
+        str(BUNDLED_PROMPT_DIR),
+        _resolve,
+    )
 
 
 def test_verify_recipe_expands_to_loop(tmp_path: pathlib.Path) -> None:

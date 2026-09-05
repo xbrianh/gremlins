@@ -24,10 +24,15 @@ impl PipelineResolver for PyResolver<'_> {
                     SchemaError::Generic(e.to_string())
                 }
             })?;
-        let path: String = result.extract().map_err(|e| {
-            SchemaError::Generic(format!("pipeline resolver returned non-string: {e}"))
-        })?;
-        Ok(PathBuf::from(path))
+        if let Ok(s) = result.extract::<String>() {
+            Ok(PathBuf::from(s))
+        } else if let Ok(p) = result.extract::<PathBuf>() {
+            Ok(p)
+        } else {
+            Err(SchemaError::Generic(
+                "pipeline resolver returned non-string, non-path".to_string(),
+            ))
+        }
     }
 }
 

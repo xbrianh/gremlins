@@ -56,8 +56,8 @@ All Python call sites import `list_pipelines`, `resolve_pipeline_name`, and
 ### `_gremlins_core.schemas.*`
 
 All functions and classes in `_gremlins_core.schemas` are exposed at the
-Rust layer but **none of them are imported or called from Python**.
-The Python implementations in `gremlins/pipeline/` are the active ones.
+Rust layer. `expand_pipeline` is now **active** — all Python call sites
+use the Rust implementation. The remaining functions are still Python-only.
 
 | Rust export | Status |
 |---|---|
@@ -65,7 +65,7 @@ The Python implementations in `gremlins/pipeline/` are the active ones.
 | `parse_stages` | Exposed but **not called**. Active: `gremlins/pipeline/loader.py:parse_stages`. |
 | `fill_names` | Exposed but **not called**. Active: `gremlins/pipeline/loader.py:fill_names`. |
 | `check_duplicate_producers` | Exposed but **not called**. Active: `gremlins/pipeline/loader.py:check_duplicate_producers`. |
-| `expand_pipeline` | Exposed at `_gremlins_core.schemas.expand_pipeline` but **not called**. Active: `gremlins/pipeline/preprocess.py:expand_pipeline`. |
+| `expand_pipeline` | Exposed at `_gremlins_core.schemas.expand_pipeline` — **active**. All Python call sites use the Rust implementation. |
 | `Pipeline` class | Exposed at `_gremlins_core.schemas.Pipeline` but **not used**. Active: `gremlins/pipeline/__init__.py:Pipeline`. |
 | `InputSource` / `InputSources` | Exposed but **not called** from Python bootstrap code. |
 
@@ -81,22 +81,9 @@ The Python implementations in `gremlins/pipeline/` are the active ones.
 
 The Rust `expand_pipeline` in `crates/pyext/src/schemas/preprocess.rs`
 takes `bundled_prompt_dir`, `bundled_stage_def_dir`, and
-`bundled_pipeline_dir` as explicit `PathBuf` parameters. The model saw
-these fields and tried to trace how Python's `BUNDLED_PROMPT_DIR` gets
-passed into the Rust function — searching for
-`_gremlins_core.schemas.expand_pipeline`, `schemas.expand_pipeline`,
-`from _gremlins_core import expand_pipeline`, etc.
-
-None of these searches matched, because **the Rust `expand_pipeline` is
-not yet called from Python**. The Python `expand_pipeline` in
-`gremlins/pipeline/preprocess.py` is the active one, and it reads
-`BUNDLED_PROMPT_DIR` directly from the Python import
-`gremlins.prompts.BUNDLED_PROMPT_DIR` — no FFI boundary involved.
-
-When it goes live, the Python `expand_pipeline` call sites (currently in
-`gremlins/pipeline/__init__.py` and `gremlins/launcher.py`) will be
-updated to call `_gremlins_core.schemas.expand_pipeline` instead, and
-the Python-side bundled directories will be baked into the Rust call.
+`bundled_pipeline_dir` as explicit `PathBuf` parameters. The Python call
+sites pass `BUNDLED_PROMPT_DIR`, `BUNDLED_STAGE_DEF_DIR`, and a resolver
+callback to the Rust function at each call site.
 
 ### The discovery name resolution trap
 
@@ -113,10 +100,9 @@ The Python `gremlins/pipeline/discovery.py` has been deleted.
 | `gremlins/utils/proc.py` | Re-exports `_gremlins_core.utils.proc.*` — **active** |
 | `gremlins/clients/__init__.py` | Wraps `_gremlins_core.clients.RustClient` — **active** |
 | `gremlins/pipeline/discovery.py` | ~~Pure Python `list_pipelines`, `resolve_pipeline_name`, `resolve_pipeline_path` — **active**~~ **deleted** — replaced by `_gremlins_core.discovery.*` |
-| `gremlins/pipeline/preprocess.py` | Python `expand_pipeline` — **active** |
 | `gremlins/pipeline/loader.py` | Pure Python `parse_stage`, `parse_stages`, `fill_names`, `check_duplicate_producers` — **active** (Rust equivalents at `_gremlins_core.schemas.*` exist but are **not wired** into any Python call site) |
 | `crates/pyext/src/python/discovery.rs` | Rust `list_pipelines`, `resolve_pipeline_name`, `resolve_pipeline_path` (wraps `crates/gremlins/src/core/discovery/mod.rs`) — **active** |
 | `crates/gremlins/src/core/discovery/mod.rs` | Rust discovery implementation — **active** |
 | `crates/pyext/src/schemas/loader.rs` | Rust `parse_stage`, `parse_stages`, `fill_names`, `check_duplicate_producers` — **NOT yet active** (parallel implementations; Python originals in `gremlins/pipeline/loader.py` are the active ones) |
-| `crates/pyext/src/schemas/preprocess.rs` | Rust `expand_pipeline` — **NOT yet active** |
+| `crates/pyext/src/schemas/preprocess.rs` | Rust `expand_pipeline` — **active** |
 | `crates/pyext/src/lib.rs` | `#[pymodule]` — registers all `_gremlins_core.*` submodules |

@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
 use crate::schemas::error::SchemaError;
 use crate::schemas::prompts;
@@ -39,11 +40,21 @@ pub fn load_bundled_recipe(
 ) -> Result<serde_yaml::Value, SchemaError> {
     let name = raw_name.replace('-', "_");
     let recipe_path = bundled_stage_def_dir.join(format!("{}.yaml", name));
-    let recipe_path = recipe_path.canonicalize().unwrap_or(recipe_path);
     let bundled_dir = bundled_stage_def_dir
         .canonicalize()
         .unwrap_or_else(|_| bundled_stage_def_dir.clone());
 
+    // Reject path traversal even when the file doesn't exist
+    if recipe_path
+        .components()
+        .any(|c| c == std::path::Component::ParentDir)
+    {
+        return Err(SchemaError::Generic(format!(
+            "invalid bundled recipe name: {raw_name:?}"
+        )));
+    }
+
+    let recipe_path = recipe_path.canonicalize().unwrap_or(recipe_path);
     if !recipe_path.starts_with(&bundled_dir) {
         return Err(SchemaError::Generic(format!(
             "invalid bundled recipe name: {raw_name:?}"
@@ -117,12 +128,15 @@ pub fn parse_stage_definitions(
                             Ok(recipe) => {
                                 defs.insert(name, recipe);
                             }
-                            Err(e) => {
-                                return Err(SchemaError::StageDef {
-                                    name: name.clone(),
-                                    msg: e.to_string(),
-                                });
-                            }
+                            Err(err) => match &err {
+                                SchemaError::BundledRecipeNotFound { .. } => return Err(err),
+                                _ => {
+                                    return Err(SchemaError::StageDef {
+                                        name: name.clone(),
+                                        msg: err.to_string(),
+                                    });
+                                }
+                            },
                         }
                     } else {
                         return Err(SchemaError::StageDef {
@@ -194,11 +208,37 @@ pub fn substitute_recipe(
                     Ok(resolved) => Ok(resolved),
                     Err(e) => Err(SchemaError::Generic(e)),
                 }
+            } else if s.contains("{{") {
+                static INLINE_RE: LazyLock<regex::Regex> =
+                    LazyLock::new(|| regex::Regex::new(r"\{\{([^}]+)\}\}").unwrap());
+                let result = INLINE_RE.replace_all(s, |caps: &regex::Captures| {
+                    let key = caps[1].trim();
+                    match resolve_placeholder(key, ctx) {
+                        Ok(serde_yaml::Value::Sequence(seq)) => seq
+                            .iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" && "),
+                        Ok(val) => val_to_string(&val),
+                        Err(_) => caps[0].to_string(),
+                    }
+                });
+                Ok(serde_yaml::Value::String(result.into_owned()))
             } else {
                 Ok(node.clone())
             }
         }
         _ => Ok(node.clone()),
+    }
+}
+
+fn val_to_string(val: &serde_yaml::Value) -> String {
+    match val {
+        serde_yaml::Value::String(s) => s.clone(),
+        serde_yaml::Value::Number(n) => n.to_string(),
+        serde_yaml::Value::Bool(b) => b.to_string(),
+        serde_yaml::Value::Null => "null".to_string(),
+        other => format!("{other:?}"),
     }
 }
 
@@ -650,10 +690,10 @@ fn _expand_stage_def(
                 msg: "'stages' must be a non-empty list".to_string(),
             });
         }
-        if def_map.contains_key("out") {
+        if def_map.contains_key("bind") {
             return Err(SchemaError::StageDef {
                 name: def_name.to_string(),
-                msg: "must not declare 'out:' keys; declare them at each call site instead"
+                msg: "must not declare 'bind:' keys; declare them at each call site instead"
                     .to_string(),
             });
         }
@@ -776,9 +816,9 @@ fn _expand_stage_def(
                         client.clone(),
                     );
                 }
-                if let Some(in_val) = call_site_map.get("in") {
-                    let mut merged_in = inner_map
-                        .get("in")
+                if let Some(interpolation_val) = call_site_map.get("interpolation") {
+                    let mut merged_interpolation = inner_map
+                        .get("interpolation")
                         .and_then(|v| v.as_mapping())
                         .map(|m| {
                             m.iter()
@@ -786,30 +826,30 @@ fn _expand_stage_def(
                                 .collect::<serde_yaml::Mapping>()
                         })
                         .unwrap_or_default();
-                    if let Some(cs_in) = in_val.as_mapping() {
-                        for (k, v) in cs_in {
-                            merged_in.insert(k.clone(), v.clone());
+                    if let Some(cs_interpolation) = interpolation_val.as_mapping() {
+                        for (k, v) in cs_interpolation {
+                            merged_interpolation.insert(k.clone(), v.clone());
                         }
                     }
                     inner_map.insert(
-                        serde_yaml::Value::String("in".to_string()),
-                        serde_yaml::Value::Mapping(merged_in),
+                        serde_yaml::Value::String("interpolation".to_string()),
+                        serde_yaml::Value::Mapping(merged_interpolation),
                     );
                 }
             }
             if i == last_idx {
-                if let Some(out_val) = call_site_map.get("out") {
-                    if inner_map.contains_key("out") {
+                if let Some(bind_val) = call_site_map.get("bind") {
+                    if inner_map.contains_key("bind") {
                         return Err(SchemaError::StageDef {
                             name: def_name.to_string(),
                             msg: format!(
-                                "inner stage {i} declares 'out:'; call-site must not also declare 'out:'"
+                                "inner stage {i} declares 'bind:'; call-site must not also declare 'bind:'"
                             ),
                         });
                     }
                     inner_map.insert(
-                        serde_yaml::Value::String("out".to_string()),
-                        out_val.clone(),
+                        serde_yaml::Value::String("bind".to_string()),
+                        bind_val.clone(),
                     );
                 }
             }
@@ -832,17 +872,18 @@ fn _expand_stage_def(
     }
 
     // Single-primitive definition
-    if def_map.contains_key("out") {
+    if def_map.contains_key("bind") {
         return Err(SchemaError::StageDef {
             name: def_name.to_string(),
-            msg: "must not declare 'out:' keys; declare them at each call site instead".to_string(),
+            msg: "must not declare 'bind:' keys; declare them at each call site instead"
+                .to_string(),
         });
     }
 
     let mut merged = definition.clone();
     let merged_map = merged.as_mapping_mut().unwrap();
 
-    for key in &["name", "in", "out"] {
+    for key in &["name", "interpolation", "bind"] {
         if let Some(v) = call_site_map.get(*key) {
             merged_map.insert(serde_yaml::Value::String(key.to_string()), v.clone());
         }
@@ -921,5 +962,56 @@ mod tests {
     fn test_parse_default_unquoted() {
         let result = parse_default("hello");
         assert_eq!(result.as_str().unwrap(), "hello");
+    }
+
+    #[test]
+    fn test_substitute_recipe_inline() {
+        let mut ctx_map = serde_yaml::Mapping::new();
+        ctx_map.insert(
+            serde_yaml::Value::String("options".to_string()),
+            serde_yaml::Value::Mapping({
+                let mut m = serde_yaml::Mapping::new();
+                m.insert(
+                    serde_yaml::Value::String("key".to_string()),
+                    serde_yaml::Value::String("value".to_string()),
+                );
+                m
+            }),
+        );
+        let ctx = serde_yaml::Value::Mapping(ctx_map);
+        let input = serde_yaml::Value::String("foo {{options.key}} bar".to_string());
+        let result = substitute_recipe(&input, &ctx).unwrap();
+        assert_eq!(result.as_str().unwrap(), "foo value bar");
+    }
+
+    #[test]
+    fn test_substitute_recipe_list_join() {
+        let mut ctx_map = serde_yaml::Mapping::new();
+        ctx_map.insert(
+            serde_yaml::Value::String("options".to_string()),
+            serde_yaml::Value::Mapping({
+                let mut m = serde_yaml::Mapping::new();
+                m.insert(
+                    serde_yaml::Value::String("cmds".to_string()),
+                    serde_yaml::Value::Sequence(vec![
+                        serde_yaml::Value::String("cmd1".to_string()),
+                        serde_yaml::Value::String("cmd2".to_string()),
+                    ]),
+                );
+                m
+            }),
+        );
+        let ctx = serde_yaml::Value::Mapping(ctx_map);
+        let input = serde_yaml::Value::String("run {{options.cmds}} please".to_string());
+        let result = substitute_recipe(&input, &ctx).unwrap();
+        assert_eq!(result.as_str().unwrap(), "run cmd1 && cmd2 please");
+    }
+
+    #[test]
+    fn test_substitute_recipe_unresolved_verbatim() {
+        let ctx = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+        let input = serde_yaml::Value::String("hello {{missing}} world".to_string());
+        let result = substitute_recipe(&input, &ctx).unwrap();
+        assert_eq!(result.as_str().unwrap(), "hello {{missing}} world");
     }
 }

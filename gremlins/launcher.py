@@ -273,10 +273,12 @@ def _append_graft(
     state_dir: pathlib.Path, graft_pipeline_name: str, project_root: str
 ) -> str:
     from _gremlins_core.discovery import resolve_pipeline_name
+    from _gremlins_core.schemas import expand_pipeline as _expand_pipeline
     from _gremlins_core.schemas import fill_names
 
-    from gremlins.pipeline.preprocess import expand_pipeline
     from gremlins.pipelines import BUNDLED_PIPELINE_DIR
+    from gremlins.prompts import BUNDLED_PROMPT_DIR
+    from gremlins.recipes import BUNDLED_STAGE_DEF_DIR
     from gremlins.utils.yaml_io import dump_yaml_text, load_yaml_file
 
     hermetic = state_dir / "pipeline.yaml"
@@ -286,7 +288,17 @@ def _append_graft(
     graft_path = resolve_pipeline_name(
         graft_pipeline_name, pathlib.Path(project_root), BUNDLED_PIPELINE_DIR
     )
-    expanded = expand_pipeline(graft_path, pathlib.Path(project_root))
+
+    def _resolve(n, pr):
+        return resolve_pipeline_name(n, pr, BUNDLED_PIPELINE_DIR)
+
+    expanded = _expand_pipeline(
+        str(graft_path),
+        str(project_root),
+        str(BUNDLED_STAGE_DEF_DIR),
+        str(BUNDLED_PROMPT_DIR),
+        _resolve,
+    )
     graft_stages = list(expanded.get("stages") or [])
     if not graft_stages:
         raise RuntimeError(f"graft pipeline {graft_pipeline_name!r} has no stages")
@@ -359,8 +371,8 @@ def _bake_prefix_clients_into_stage(
                 stage["client"] = best_client
     # Recurse into child containers. The authoritative set of container
     # keys is defined by the stage-type-to-container mapping; see
-    # gremlins/pipeline/loader.py (STAGE_TYPES) and preprocess.py
-    # for the canonical list of stage types and their child fields.
+    # gremlins/pipeline/loader.py (STAGE_TYPES) for the canonical
+    # list of stage types and their child fields.
     for key in ("parallel", "body"):
         for child in cast(list[dict[str, Any]], stage.get(key) or []):
             _bake_prefix_clients_into_stage(child, exact_map, prefix_map)
@@ -368,12 +380,25 @@ def _bake_prefix_clients_into_stage(
 
 def _persist_expanded_pipeline(state_dir: pathlib.Path, pipeline_path: str) -> str:
     from _gremlins_core.config import get_config as _get_config
+    from _gremlins_core.discovery import resolve_pipeline_name as _resolve_pipeline_name
+    from _gremlins_core.schemas import expand_pipeline as _expand_pipeline
 
     from gremlins.cli.pipeline_args import load_prefix_clients
-    from gremlins.pipeline.preprocess import expand_pipeline
+    from gremlins.pipelines import BUNDLED_PIPELINE_DIR
+    from gremlins.prompts import BUNDLED_PROMPT_DIR
+    from gremlins.recipes import BUNDLED_STAGE_DEF_DIR
     from gremlins.utils.yaml_io import dump_yaml_text
 
-    expanded = expand_pipeline(pathlib.Path(pipeline_path))
+    def _resolve(n, pr):
+        return _resolve_pipeline_name(n, pr, BUNDLED_PIPELINE_DIR)
+
+    expanded = _expand_pipeline(
+        str(pipeline_path),
+        None,
+        str(BUNDLED_STAGE_DEF_DIR),
+        str(BUNDLED_PROMPT_DIR),
+        _resolve,
+    )
 
     # Bake global config prefix rules into the persisted pipeline so the
     # child subprocess doesn't need to read the config file at runtime.
