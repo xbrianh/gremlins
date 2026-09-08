@@ -43,7 +43,7 @@ stages:
                   local decision="$1"
                   if [ "$decision" = "REVIEW_REQUIRED" ]; then
                       printf 'ci-gate: PR blocked by required human review\n' \
-                          > "$GREMLINS_ARTIFACT_DIR/bail"
+                          > "{bail}"
                       exit 2
                   fi
               }
@@ -64,8 +64,8 @@ stages:
                   done
                   if [ "$rollup_len" -eq 0 ]; then
                       printf 'ci-gate: no check-runs after %ss grace; skipping\n' {startup_grace_secs}
-                      printf 'skipped' > "$GREMLINS_ARTIFACT_DIR/status"
-                      printf 'passed' > "$GREMLINS_ARTIFACT_DIR/done"
+                      printf 'skipped' > "{status}"
+                      printf 'passed' > "{done}"
                       exit 0
                   fi
               else
@@ -81,7 +81,7 @@ stages:
                       fi
                       if [ "$(date +%s)" -ge "$push_deadline" ]; then
                           printf 'ci-gate: timed out waiting for GitHub to reflect pushed SHA\n' \
-                              > "$GREMLINS_ARTIFACT_DIR/bail"
+                              > "{bail}"
                           exit 2
                       fi
                       sleep {poll_interval}
@@ -111,7 +111,7 @@ stages:
               done
 
               if [ "$all_done" != "true" ]; then
-                  printf 'ci-gate: checks incomplete after timeout\n' > "$GREMLINS_ARTIFACT_DIR/bail"
+                  printf 'ci-gate: checks incomplete after timeout\n' > "{bail}"
                   exit 2
               fi
 
@@ -126,13 +126,13 @@ stages:
 
               if [ "$failed_count" -eq 0 ]; then
                   printf 'ci-gate: all checks passed\n'
-                  printf 'passed' > "$GREMLINS_ARTIFACT_DIR/status"
-                  printf 'passed' > "$GREMLINS_ARTIFACT_DIR/done"
+                  printf 'passed' > "{status}"
+                  printf 'passed' > "{done}"
                   exit 0
               fi
 
               # Collect failure logs for the fix agent.
-              printf 'failed' > "$GREMLINS_ARTIFACT_DIR/status"
+              printf 'failed' > "{status}"
               printf '%s' "$failed_json" | jq -c '.[]' | while read -r check_json; do
                   check_name=$(printf '%s' "$check_json" | jq -r '.name // .context // "unknown"')
                   details_url=$(printf '%s' "$check_json" | jq -r '.detailsUrl // .targetUrl // empty')
@@ -145,7 +145,7 @@ stages:
                   else
                       printf '(no action run URL; details: %s)\n' "$details_url"
                   fi
-              done > "$GREMLINS_ARTIFACT_DIR/ci_failure.txt" 2>&1
+              done > "{ci_log}" 2>&1
               exit 1
 
       - name: fix

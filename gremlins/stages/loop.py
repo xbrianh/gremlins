@@ -162,6 +162,18 @@ class LoopStage(Stage):
                 )
             for iteration in range(1, self._max_iterations + 1):
                 state.set_loop_iteration(iteration)
+
+                # Clear any stale per-iteration bail artifact from a prior
+                # attempt/resume so it doesn't pollute the current iteration.
+                scoped_bail = f"artifact://{state.loop_iter}/bail"
+                if state.artifacts.is_registered(scoped_bail):
+                    bail_path = state.artifacts.data_uri(scoped_bail)
+                    if isinstance(bail_path, str):
+                        try:
+                            pathlib.Path(bail_path).unlink(missing_ok=True)
+                        except OSError:
+                            pass
+
                 logger.info(
                     "loop %s: iteration %d/%d starting (%d body runners)",
                     self.name,

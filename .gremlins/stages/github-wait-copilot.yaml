@@ -24,5 +24,5 @@ stages:
               review=$(gh api "repos/$repo/pulls/$pr_number/reviews" \
                 --jq '.[] | select(.user.login | test("[Cc]opilot")) | .state | select(. != "PENDING")')
               if [ -n "$review" ]; then
-                printf '%s' "$review" > "$GREMLINS_ARTIFACT_DIR/status"
+                printf '%s' "$review" > "{status}"
               fi
