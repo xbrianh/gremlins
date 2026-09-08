@@ -6,6 +6,7 @@ TEST_FILES := $(wildcard tests/test_*.py)
 
 .PHONY: lint format format-write autoformat typecheck test check \
         rust-test rust-fmt rust-fmt-check rust-clippy install release \
+        validate-gremlin-overlays \
         $(TEST_FILES)
 
 lint:
@@ -53,3 +54,13 @@ release: ## Build and install the native extension in release mode
 
 check: lint format typecheck rust-fmt-check rust-clippy
 	@grep -r 'from gremlins.executor.state' gremlins/ --include='*.py' | grep -v 'gremlins/executor/' && echo 'ERROR: state.py leak' && exit 1 || true
+
+# --- Validate ---
+
+GREMLIN_DEFS := $(wildcard .gremlins/*.yaml .gremlins/*.yml)
+
+validate-gremlin-overlays: install $(GREMLIN_DEFS)
+
+.PHONY: $(GREMLIN_DEFS)
+$(GREMLIN_DEFS): install
+	$(PYTHON) -m gremlins validate $@
