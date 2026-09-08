@@ -179,12 +179,6 @@ class ArtifactRegistry:
     def keys(self) -> Iterable[str]:
         return self.data.keys()
 
-    def unbind(self, key: str) -> None:
-        if key not in self.data:
-            return
-        del self.data[key]
-        self._persist()
-
     def merge_from(
         self,
         other: ArtifactRegistry,

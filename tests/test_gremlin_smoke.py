@@ -9,12 +9,9 @@ import shutil
 import subprocess
 
 import pytest
-from _gremlins_core.schemas import Pipeline
 
-from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.executor.gremlin import Gremlin
 from gremlins.executor.state import StateData
-from gremlins.stages.exec import Exec
 
 TRIVIAL_PIPELINE = """\
 default_client: openai:gpt-4o
@@ -96,51 +93,6 @@ def test_gremlin_run_in_process(project_dir, pipeline_yaml, sandbox):
     data = json.loads((sd / "state.json").read_text())
     assert data.get("status") == "done"
     assert data.get("stage") == "smoke"
-
-
-def test_resume_unbinds_stale_exec_out_keys(tmp_path):
-    artifact_dir = tmp_path / "artifacts"
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-
-    stage = Exec("normalize", {}, bind_map={"normalize-commits": "git://range"})
-    pipeline = Pipeline(name="test", path=tmp_path, stages=[stage])
-    gremlin = Gremlin(
-        [stage],
-        state_dir=state_dir,
-        gremlin_id=None,
-        pipeline_data=pipeline,
-        resume_from="normalize",
-    )
-    gremlin.registry = ArtifactRegistry(artifact_dir=artifact_dir)
-    gremlin.registry.data["artifact://normalize-commits"] = "git://range/old..stale"
-
-    assert gremlin.registry.exists("artifact://normalize-commits")
-    gremlin._unbind_stale_exec_artifacts()
-    assert not gremlin.registry.exists("artifact://normalize-commits")
-
-
-def test_resume_unbind_only_affects_exec_stages(tmp_path):
-    artifact_dir = tmp_path / "artifacts"
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-
-    exec_stage = Exec("work", {}, bind_map={"work-out": "git://range"})
-    pipeline = Pipeline(name="test", path=tmp_path, stages=[exec_stage])
-    gremlin = Gremlin(
-        [exec_stage],
-        state_dir=state_dir,
-        gremlin_id=None,
-        pipeline_data=pipeline,
-        resume_from="work",
-    )
-    gremlin.registry = ArtifactRegistry(artifact_dir=artifact_dir)
-    gremlin.registry.data["artifact://work-out"] = "git://range/a..b"
-    gremlin.registry.data["non-exec-artifact"] = "git://range/x..y"
-
-    gremlin._unbind_stale_exec_artifacts()
-    assert not gremlin.registry.exists("artifact://work-out")
-    assert gremlin.registry.exists("non-exec-artifact")
 
 
 def test_gremlin_state_populated_after_initialize(project_dir, pipeline_yaml, sandbox):

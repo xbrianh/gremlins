@@ -270,7 +270,7 @@ def test_loop_patches_loop_iteration_to_state(tmp_path, make_state_dir):
 
 
 def test_loop_registers_artifacts_across_iterations(tmp_path):
-    """register across iterations — overwrite=True means no unbind needed."""
+    """register across iterations — overwrite=True ensures clean re-registration."""
     from gremlins.stages.exec import Exec
 
     (tmp_path / "artifacts").mkdir(exist_ok=True)
@@ -356,6 +356,52 @@ def test_stop_when_exists_resolves_loop_iter(tmp_path):
     )
     outcome = asyncio.run(loop.run(_make_gremlin_wrapper(loop_state)))
     assert outcome == Done()
+
+
+def test_loop_iter_scoping_with_exec_isolates_iterations(tmp_path, monkeypatch):
+    """Exec bind URIs with {loop_iter} isolate artifacts per iteration."""
+    import pathlib
+    import subprocess
+
+    from gremlins.stages.exec import Exec
+
+    (tmp_path / "artifacts").mkdir()
+    loop_state = _loop_state(tmp_path)
+
+    shell_calls: list[str] = []
+
+    async def controlled_shell(cmd, **kwargs):
+        shell_calls.append(cmd)
+        if len(shell_calls) >= 2:
+            for key in loop_state.artifacts.keys():
+                if key.endswith("/done"):
+                    p = pathlib.Path(loop_state.artifacts.data_uri(key))
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    p.write_text("done")
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    monkeypatch.setattr("gremlins.stages.exec._proc.run_shell_async", controlled_shell)
+
+    exec_stage = Exec(
+        "cmd",
+        {"cmds": ["true"]},
+        bind_map={"done?": "artifact://{loop_iter}/done"},
+    )
+
+    loop = LoopStage(
+        "verify",
+        body=[exec_stage],
+        max_iterations=3,
+        stop_when_exists="artifact://{loop_iter}/done",
+    )
+
+    outcome = asyncio.run(loop.run(_make_gremlin_wrapper(loop_state)))
+
+    assert outcome == Done()
+    assert len(shell_calls) == 2
+    assert loop_state.artifacts.is_registered("artifact://verify~1/done")
+    assert loop_state.artifacts.is_registered("artifact://verify~2/done")
+    assert not loop_state.artifacts.is_registered("artifact://verify~3/done")
 
 
 def test_loop_iter_not_in_framework_subs(tmp_path):

@@ -111,7 +111,7 @@ def test_verify_fix_has_skip_if_exists(tmp_path: pathlib.Path) -> None:
         "- { type: verify, options: { cmds: ['make check'] }, prompt: verify }",
     )
     fix_stage = result["stages"][0]["body"][1]
-    assert fix_stage.get("skip_if_exists") == "artifact://done"
+    assert fix_stage.get("skip_if_exists") == "artifact://{loop_iter}/done"
     assert isinstance(fix_stage.get("prompt"), list)
     assert len(fix_stage["prompt"]) >= 1
 

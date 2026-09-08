@@ -20,14 +20,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _is_bail_set(artifacts: ArtifactRegistry) -> bool:
-    return artifacts.exists(_BAIL_KEY)
+def _is_bail_set(artifacts: ArtifactRegistry, loop_iter: str) -> bool:
+    return artifacts.exists(f"artifact://{loop_iter}/bail") or artifacts.exists(
+        _BAIL_KEY
+    )
 
 
-def _do_bail(gremlin: Gremlin, artifacts: ArtifactRegistry) -> None:
+def _do_bail(gremlin: Gremlin, artifacts: ArtifactRegistry, loop_iter: str) -> None:
     if gremlin.state is None:
         raise RuntimeError("gremlin.state is required for _do_bail")
-    raw = artifacts.data_uri(_BAIL_KEY)
+    scoped_key = f"artifact://{loop_iter}/bail"
+    if artifacts.exists(scoped_key):
+        raw = artifacts.data_uri(scoped_key)
+    else:
+        raw = artifacts.data_uri(_BAIL_KEY)
     if isinstance(raw, str) and raw.startswith("/"):
         # It's a filesystem path — read the content
         try:
@@ -156,7 +162,18 @@ class LoopStage(Stage):
                 )
             for iteration in range(1, self._max_iterations + 1):
                 state.set_loop_iteration(iteration)
-                state.artifacts.unbind(_BAIL_KEY)
+
+                # Clear any stale per-iteration bail artifact from a prior
+                # attempt/resume so it doesn't pollute the current iteration.
+                scoped_bail = f"artifact://{state.loop_iter}/bail"
+                if state.artifacts.is_registered(scoped_bail):
+                    bail_path = state.artifacts.data_uri(scoped_bail)
+                    if isinstance(bail_path, str):
+                        try:
+                            pathlib.Path(bail_path).unlink(missing_ok=True)
+                        except OSError:
+                            pass
+
                 logger.info(
                     "loop %s: iteration %d/%d starting (%d body runners)",
                     self.name,
@@ -172,13 +189,13 @@ class LoopStage(Stage):
                 for runner in runners:
                     await runner()
 
-                if _is_bail_set(state.artifacts):
+                if _is_bail_set(state.artifacts, state.loop_iter):
                     logger.info(
                         "loop %s: iteration %d hit bail artifact",
                         self.name,
                         iteration,
                     )
-                    _do_bail(gremlin, state.artifacts)
+                    _do_bail(gremlin, state.artifacts, state.loop_iter)
 
                 if self._stop_when_exists is not None:
                     resolved = self._stop_when_exists.replace(

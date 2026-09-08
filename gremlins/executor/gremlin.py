@@ -416,24 +416,9 @@ class Gremlin:
             built.append((e.name, stage_state.make_runner(e, self, scope=stages)))
         return built
 
-    def _unbind_stale_exec_artifacts(self) -> None:
-        assert self.resume_from is not None
-        names = [s.name for s in self.stages]
-        start_idx = names.index(self.resume_from)
-        for stage in self.stages[start_idx:]:
-            if stage.type == "exec":
-                # bind_map is {logical_key: uri_template}; register() stores
-                # under the full artifact:// URI key, so derive that here.
-                for bind_key in stage.bind_map:
-                    artifact_key = f"artifact://{bind_key}"
-                    if self.registry.is_registered(artifact_key):
-                        self.registry.unbind(artifact_key)
-
     async def run(self) -> None:
         if not hasattr(self, "registry"):
             raise RuntimeError("call initialize_with_runtime() before run()")
-        if self.resume_from is not None:
-            self._unbind_stale_exec_artifacts()
         logger.info("collecting %d stages", len(self.stages))
         built = self._collect_stages(self.stages)
         logger.info("running %d stages (resume_from=%s)", len(built), self.resume_from)
