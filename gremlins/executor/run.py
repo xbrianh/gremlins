@@ -126,6 +126,17 @@ def _unique_clients(stages: Sequence[StageProtocol]) -> list[Client]:
     return result
 
 
+def _prepend_overlay_bin_to_path(overlay_dir: str) -> None:
+    overlay_bin = pathlib.Path(overlay_dir) / "bin"
+    if overlay_bin.is_dir():
+        existing_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = (
+            f"{overlay_bin}{os.pathsep}{existing_path}"
+            if existing_path
+            else str(overlay_bin)
+        )
+
+
 def _read_state_json(gremlin_id: str | None) -> dict[str, Any]:
     sf = pathlib.Path(state_root()) / gremlin_id / "state.json" if gremlin_id else None
     if sf is None or not sf.exists():
@@ -279,16 +290,7 @@ async def run_pipeline(
     os.environ.update(_system)
     # --- end env isolation ---
 
-    # Prepend project overlay bin/ to PATH so exec stages can call
-    # helper scripts by name.
-    _overlay_bin = pathlib.Path(_system["GREMLINS_OVERLAY_DIR"]) / "bin"
-    if _overlay_bin.is_dir():
-        _existing_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = (
-            f"{_overlay_bin}{os.pathsep}{_existing_path}"
-            if _existing_path
-            else str(_overlay_bin)
-        )
+    _prepend_overlay_bin_to_path(_system["GREMLINS_OVERLAY_DIR"])
 
     os.environ["GREMLINS_SCRATCH_DIR"] = str(
         pathlib.Path(scratch_root(gremlin.gremlin_id))

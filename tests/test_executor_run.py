@@ -9,7 +9,11 @@ from unittest.mock import patch
 
 import pytest
 
-from gremlins.executor.run import _HANDLED_SIGS, _install_signal_handlers
+from gremlins.executor.run import (
+    _HANDLED_SIGS,
+    _install_signal_handlers,
+    _prepend_overlay_bin_to_path,
+)
 from tests.fake_client import FakeClient
 
 
@@ -143,16 +147,6 @@ os.environ.clear()
 os.environ.update(_env)
 os.environ.update(_system)
 
-# PATH injection (mirrors run_pipeline logic)
-_overlay_bin = pathlib.Path(_system["GREMLINS_OVERLAY_DIR"]) / "bin"
-if _overlay_bin.is_dir():
-    _existing_path = os.environ.get("PATH", "")
-    os.environ["PATH"] = (
-        f"{{_overlay_bin}}{{os.pathsep}}{{_existing_path}}"
-        if _existing_path
-        else str(_overlay_bin)
-    )
-
 json.dump(dict(os.environ), open({str(result_file)!r}, "w"))
 """
 
@@ -232,31 +226,25 @@ def test_system_vars_cannot_be_unset(sandbox, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_gremlins_bin_prepended_to_path(sandbox, tmp_path):
+def test_gremlins_bin_prepended_to_path(sandbox):
     """When .gremlins/bin exists, it is prepended to PATH."""
-    bin_dir = sandbox.state / "test-gremlin" / ".gremlins" / "bin"
+    overlay_dir = str(sandbox.state / "test-gremlin" / ".gremlins")
+    bin_dir = pathlib.Path(overlay_dir) / "bin"
     bin_dir.mkdir(parents=True)
 
-    result = _run_isolation_subprocess(
-        tmp_path,
-        project_root=str(sandbox.project),
-        state_root=str(sandbox.state),
-        env_script=None,
-    )
-    # Resolve both paths to handle macOS /var -> /private/var symlink
-    first_entry = result["PATH"].split(os.pathsep)[0]
+    os.environ["PATH"] = "/usr/bin:/bin"
+    _prepend_overlay_bin_to_path(overlay_dir)
+
+    first_entry = os.environ["PATH"].split(os.pathsep)[0]
     assert pathlib.Path(first_entry).resolve() == bin_dir.resolve()
 
 
-def test_gremlins_bin_absent_no_path_change(sandbox, tmp_path):
+def test_gremlins_bin_absent_no_path_change(sandbox):
     """When .gremlins/bin doesn't exist, PATH is unaffected."""
-    assert not (sandbox.state / ".gremlins" / "bin").exists()
+    overlay_dir = str(sandbox.state / "test-gremlin" / ".gremlins")
+    assert not (pathlib.Path(overlay_dir) / "bin").exists()
 
-    result = _run_isolation_subprocess(
-        tmp_path,
-        project_root=str(sandbox.project),
-        state_root=str(sandbox.state),
-        env_script=None,
-        extra_parent_vars={"PATH": "/usr/bin:/bin"},
-    )
-    assert result["PATH"] == "/usr/bin:/bin"
+    os.environ["PATH"] = "/usr/bin:/bin"
+    _prepend_overlay_bin_to_path(overlay_dir)
+
+    assert os.environ["PATH"] == "/usr/bin:/bin"
