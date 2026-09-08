@@ -999,7 +999,9 @@ def test_gather_commit_inputs_missing_spec_does_not_crash(tmp_path, monkeypatch)
         )
     )
 
-    monkeypatch.setattr(_land._git, "log_oneline", lambda *a, **kw: "abc123 Do the thing")
+    monkeypatch.setattr(
+        _land._git, "log_oneline", lambda *a, **kw: "abc123 Do the thing"
+    )
     monkeypatch.setattr(_land._git, "diff_stat", lambda *a, **kw: "file.py | 5 +++++")
 
     inputs = _land._gather_commit_inputs(

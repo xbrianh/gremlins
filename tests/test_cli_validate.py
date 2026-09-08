@@ -7,7 +7,6 @@ from unittest.mock import MagicMock, patch
 
 import gremlins.cli.validate as validate_mod
 
-
 # ---------------------------------------------------------------------------
 # validate_main — positive cases
 # ---------------------------------------------------------------------------
