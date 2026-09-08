@@ -1,5 +1,4 @@
 base_ref: current
-default_client: 'openai:gpt-4o'
 prompt_dir: prompts
 
 bootstrap:

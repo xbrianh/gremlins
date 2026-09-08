@@ -92,3 +92,5 @@ def test_validate_resolves_relative_path(tmp_path):
         assert rc == 0
     finally:
         os.chdir(orig_cwd)
+
+    mock_pipeline.from_yaml.assert_called_once_with(yaml_file.resolve())

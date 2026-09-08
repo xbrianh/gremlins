@@ -26,7 +26,6 @@ bootstrap:
     export UV_PROJECT_ENVIRONMENT="${GREMLINS_WORKTREE_PATH}/.venv"
     export PATH="${GREMLINS_WORKTREE_PATH}/.venv/bin:${PATH}"
 
-default_client: 'openai:gpt-4o'
 land:
   interpolation:
     PR_URL: content("artifact://pr-url.txt")
