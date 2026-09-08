@@ -9,7 +9,11 @@ from unittest.mock import patch
 
 import pytest
 
-from gremlins.executor.run import _HANDLED_SIGS, _install_signal_handlers
+from gremlins.executor.run import (
+    _HANDLED_SIGS,
+    _install_signal_handlers,
+    _prepend_overlay_bin_to_path,
+)
 from tests.fake_client import FakeClient
 
 
@@ -215,3 +219,32 @@ def test_system_vars_cannot_be_unset(sandbox, tmp_path):
     # System vars are re-injected after sourcing, so the var is still present.
     assert "GREMLINS_PROJECT_ROOT" in result
     assert result["GREMLINS_PROJECT_ROOT"] == str(sandbox.project)
+
+
+# ---------------------------------------------------------------------------
+# .gremlins/bin PATH injection tests
+# ---------------------------------------------------------------------------
+
+
+def test_gremlins_bin_prepended_to_path(sandbox):
+    """When .gremlins/bin exists, it is prepended to PATH."""
+    overlay_dir = str(sandbox.state / "test-gremlin" / ".gremlins")
+    bin_dir = pathlib.Path(overlay_dir) / "bin"
+    bin_dir.mkdir(parents=True)
+
+    os.environ["PATH"] = "/usr/bin:/bin"
+    _prepend_overlay_bin_to_path(overlay_dir)
+
+    first_entry = os.environ["PATH"].split(os.pathsep)[0]
+    assert pathlib.Path(first_entry).resolve() == bin_dir.resolve()
+
+
+def test_gremlins_bin_absent_no_path_change(sandbox):
+    """When .gremlins/bin doesn't exist, PATH is unaffected."""
+    overlay_dir = str(sandbox.state / "test-gremlin" / ".gremlins")
+    assert not (pathlib.Path(overlay_dir) / "bin").exists()
+
+    os.environ["PATH"] = "/usr/bin:/bin"
+    _prepend_overlay_bin_to_path(overlay_dir)
+
+    assert os.environ["PATH"] == "/usr/bin:/bin"
