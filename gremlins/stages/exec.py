@@ -20,11 +20,14 @@ if TYPE_CHECKING:
     from gremlins.executor.gremlin import Gremlin
 
 
-def _is_bail_uri(uri_str: str) -> bool:
-    """True when *uri_str* names a bail artifact (scoped or unscoped)."""
+def _is_bail_uri(uri_str: str, loop_iter: str = "") -> bool:
+    """True when *uri_str* names a reserved bail artifact."""
     if uri_str == _BAIL_KEY:
         return True
-    return uri_str.startswith("artifact://") and uri_str.rstrip("/").endswith("/bail")
+    if not loop_iter:
+        return False
+    expected = f"artifact://{loop_iter}/bail"
+    return uri_str == expected or uri_str == f"artifact://{{loop_iter}}/bail"
 
 
 class Exec(Stage):
@@ -194,7 +197,7 @@ class Exec(Stage):
                         shell_rc,
                         tail,
                     )
-                if any(_is_bail_uri(v) for v in self.bind_map.values()):
+                if any(_is_bail_uri(v, counter) for v in self.bind_map.values()):
                     bail_triggered = True
                 else:
                     raise Bail(f"exec {self.name}: exited {shell_rc}")
@@ -208,13 +211,13 @@ class Exec(Stage):
                 key = key[:-1]
             uri_str = self.substitute_vars(raw_uri_str, state, interpolation_map)
             uri_str = uri_str.replace("{loop_iter}", counter)
-            if _is_bail_uri(uri_str) and not bail_triggered:
+            if _is_bail_uri(uri_str, counter) and not bail_triggered:
                 continue
             uri = Uri.parse(uri_str)
             if not state.artifacts.exists(str(uri)):
                 if optional:
                     continue
-                if _is_bail_uri(uri_str):
+                if _is_bail_uri(uri_str, counter):
                     if bail_triggered:
                         continue
                     msg = f"exec {self.name}: exited {shell_rc}"

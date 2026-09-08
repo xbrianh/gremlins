@@ -359,12 +359,7 @@ def test_stop_when_exists_resolves_loop_iter(tmp_path):
 
 
 def test_loop_iter_scoping_with_exec_isolates_iterations(tmp_path, monkeypatch):
-    """Exec bind URIs with {loop_iter} isolate artifacts per iteration.
-
-    If {loop_iter} substitution breaks anywhere, the done artifact from one
-    iteration would collide with another, causing the loop to terminate early
-    or never stop.
-    """
+    """Exec bind URIs with {loop_iter} isolate artifacts per iteration."""
     import pathlib
     import subprocess
 
