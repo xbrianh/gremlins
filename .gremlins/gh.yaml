@@ -35,12 +35,6 @@ land:
       - git fetch origin
       - git branch -f main origin/main 2>/dev/null || git merge --ff-only origin/main
 
-prompts:
-  code-style: gremlins:code_style.md
-  terse: terse_style.md
-  dev-env: dev-env-howto.md
-  review: review.md
-
 stage-definitions:
   plan-gh: plan-gh
   github-open-pr: github-open-pr
@@ -65,7 +59,7 @@ stage-definitions:
           cmds:
             - "make -j8 check && make -j8 test"
           max_iterations: 7
-        prompt: [dev-env-howto.md, gremlins:verify_fix.md, gremlins:bail_section_fix.md]
+        prompt: [style_guide.md, dev-env-howto.md, gremlins:verify_fix.md, gremlins:bail_section_fix.md]
       - name: commit
         type: exec
         options:
@@ -74,8 +68,8 @@ stage-definitions:
             - git diff --cached --quiet || git commit -m "fix checks"
 
 stages:
-  - { type: plan-gh, prompt: [code-style, terse, plan_gh.md] }
-  - { type: gremlins:implement, prompt: [code-style, terse, dev-env, no_lint_in_implement.md, implement_gh.md] }
+  - { type: plan-gh, prompt: [style_guide.md, plan_gh.md] }
+  - { type: gremlins:implement, prompt: [style_guide.md, dev-env-howto.md, implement_gh.md] }
   - { type: check-and-fix }
 
   - name: compute-diff
@@ -94,7 +88,7 @@ stages:
         interpolation:
           plan: content("artifact://plan.md")
           diff: content("artifact://diff.txt")
-        prompt: [code-style, terse, dev-env, review]
+        prompt: [style_guide.md, dev-env-howto.md, review.md]
         bind:
           filepath: "artifact://review-one.md"
       - name: review-two
@@ -102,13 +96,13 @@ stages:
         interpolation:
           plan: content("artifact://plan.md")
           diff: content("artifact://diff.txt")
-        prompt: [code-style, terse, dev-env, review]
+        prompt: [style_guide.md, dev-env-howto.md, review.md]
         bind:
           filepath: "artifact://review-two.md"
 
   - name: address
     type: agent
-    prompt: [code-style, terse, dev-env, address.md, no_lint_in_implement.md, gremlins:bail_section.md]
+    prompt: [style_guide.md, dev-env-howto.md, address.md, no_lint_in_implement.md, gremlins:bail_section.md]
     interpolation:
       review_one: content("artifact://review-one.md")
       review_two: content("artifact://review-two.md")
@@ -175,10 +169,9 @@ stages:
       pr: content("artifact://pr-url.txt")
       content: content("artifact://github-review-content.md")
     prompt:
-      - code-style
-      - terse
-      - dev-env
+      - style_guide.md
+      - dev-env-howto.md
       - github_address_pull_request_reviews.md
       - gremlins:bail_section.md
   - { type: check-and-fix }
-  - { type: github-wait-ci, prompt: [terse, dev-env, gremlins:ci_fix.md, gremlins:bail_section_fix.md] }
+  - { type: github-wait-ci, prompt: [style_guide.md, dev-env-howto.md, gremlins:ci_fix.md, gremlins:bail_section_fix.md] }

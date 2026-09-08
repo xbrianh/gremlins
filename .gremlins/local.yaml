@@ -30,13 +30,6 @@ bootstrap:
     export UV_PROJECT_ENVIRONMENT="${GREMLINS_WORKTREE_PATH}/.venv"
     export PATH="${GREMLINS_WORKTREE_PATH}/.venv/bin:${PATH}"
 
-prompts:
-  code-style: gremlins:code_style.md
-  terse: terse_style.md
-  review: review.md
-  verify: [dev-env-howto.md, gremlins:verify_fix.md, gremlins:bail_section_fix.md]
-  dev-env: dev-env-howto.md
-
 stage-definitions:
   check-and-fix:
     type: sequence
@@ -65,8 +58,8 @@ stage-definitions:
             - git diff --cached --quiet || git commit -m "fix checks"
 
 stages:
-  - { type: gremlins:plan,      prompt: [code-style, terse, gremlins:plan.md] }
-  - { type: gremlins:implement,  prompt: [code-style, terse, dev-env, no_lint_in_implement.md, gremlins:implement_local.md] }
+  - { type: gremlins:plan,      prompt: [style_guide.md, gremlins:plan.md] }
+  - { type: gremlins:implement,  prompt: [style_guide.md, dev-env-howto.md, no_lint_in_implement.md, gremlins:implement_local.md] }
   - { type: check-and-fix }
   - name: compute-diff
     type: exec
@@ -83,7 +76,7 @@ stages:
         interpolation:
           plan: content("artifact://plan.md")
           diff: content("artifact://diff.txt")
-        prompt: [code-style, terse, dev-env, review]
+        prompt: [style_guide.md, dev-env-howto.md, review.md]
         bind:
           filepath: "artifact://review-one.md"
       - name: review-two
@@ -91,12 +84,12 @@ stages:
         interpolation:
           plan: content("artifact://plan.md")
           diff: content("artifact://diff.txt")
-        prompt: [code-style, terse, dev-env, review]
+        prompt: [style_guide.md, dev-env-howto.md, review.md]
         bind:
           filepath: "artifact://review-two.md"
   - name: address
     type: agent
-    prompt: [code-style, terse, dev-env, address.md, no_lint_in_implement.md, gremlins:bail_section.md]
+    prompt: [style_guide.md, dev-env-howto.md, address.md, no_lint_in_implement.md, gremlins:bail_section.md]
     interpolation:
       review_one: content("artifact://review-one.md")
       review_two: content("artifact://review-two.md")
