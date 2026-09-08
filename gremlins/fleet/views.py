@@ -302,7 +302,7 @@ def _gremlin_to_json(
         "description": str(
             state.get("description")
             or state.get("instructions")
-            or read_description_artifact(wdir)
+            or read_description_artifact(gremlin_id)
         ),
         "started_at": started_at,
         "project_root": str(state.get("project_root") or ""),

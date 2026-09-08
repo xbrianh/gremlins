@@ -12,6 +12,9 @@ from _gremlins_core.config import (
     project_root as _project_root,
 )
 from _gremlins_core.config import (
+    scratch_root as _scratch_root,
+)
+from _gremlins_core.config import (
     state_root as _state_root,
 )
 
@@ -223,13 +226,11 @@ def atomic_patch_state(sf: str, patch: dict[str, object]) -> bool:
         return False
 
 
-def read_description_artifact(wdir: str) -> str:
-    """Read artifacts/description.txt from a gremlin state directory.
-
-    Returns the trimmed contents, or empty string if the file doesn't exist
-    or can't be read.
-    """
-    desc_file = os.path.join(wdir, "artifacts", "description.txt")
+def read_description_artifact(gremlin_id: str) -> str:
+    """Read artifacts/description.txt from a gremlin scratch directory."""
+    desc_file = os.path.join(
+        str(_scratch_root(gremlin_id)), "artifacts", "description.txt"
+    )
     if os.path.isfile(desc_file):
         try:
             with open(desc_file, encoding="utf-8") as _fh:
