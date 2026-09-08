@@ -21,7 +21,9 @@ logger = logging.getLogger(__name__)
 
 
 def _is_bail_set(artifacts: ArtifactRegistry, loop_iter: str) -> bool:
-    return artifacts.exists(f"artifact://{loop_iter}/bail") or artifacts.exists(_BAIL_KEY)
+    return artifacts.exists(f"artifact://{loop_iter}/bail") or artifacts.exists(
+        _BAIL_KEY
+    )
 
 
 def _do_bail(gremlin: Gremlin, artifacts: ArtifactRegistry, loop_iter: str) -> None:
