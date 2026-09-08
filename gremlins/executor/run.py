@@ -279,6 +279,17 @@ async def run_pipeline(
     os.environ.update(_system)
     # --- end env isolation ---
 
+    # Prepend project overlay bin/ to PATH so exec stages can call
+    # helper scripts by name.
+    _overlay_bin = pathlib.Path(_system["GREMLINS_OVERLAY_DIR"]) / "bin"
+    if _overlay_bin.is_dir():
+        _existing_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = (
+            f"{_overlay_bin}{os.pathsep}{_existing_path}"
+            if _existing_path
+            else str(_overlay_bin)
+        )
+
     os.environ["GREMLINS_SCRATCH_DIR"] = str(
         pathlib.Path(scratch_root(gremlin.gremlin_id))
     )
