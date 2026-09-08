@@ -349,26 +349,36 @@ fn validate_stage_keys_for_stage(stage: &serde_yaml::Value, errors: &mut Vec<Sch
         return;
     }
 
-    // Check for collisions: keys appearing in both bind: and interpolation:
+    // Check for collisions: keys appearing in both bind: and interpolation:.
+    // The trailing `?` on optional bind keys is stripped by the runtime, so
+    // `foo?` in bind collides with `foo` in interpolation.
     let mut colliding_keys: HashSet<String> = HashSet::new();
     if let (Some(bind), Some(interp)) = (&bind_map, &interp_map) {
-        let bind_keys: HashSet<&str> = bind.keys().filter_map(|k| k.as_str()).collect();
+        let bind_keys: HashSet<String> = bind
+            .keys()
+            .filter_map(|k| k.as_str())
+            .map(|k| k.strip_suffix('?').unwrap_or(k).to_string())
+            .collect();
         let interp_keys: HashSet<&str> = interp.keys().filter_map(|k| k.as_str()).collect();
-        for key in bind_keys.intersection(&interp_keys) {
-            colliding_keys.insert(key.to_string());
-            errors.push(SchemaError::DuplicateStageKey {
-                stage: stage_name.to_string(),
-                key: key.to_string(),
-            });
+        for interp_key in &interp_keys {
+            if bind_keys.contains(*interp_key) {
+                colliding_keys.insert(interp_key.to_string());
+                errors.push(SchemaError::DuplicateStageKey {
+                    stage: stage_name.to_string(),
+                    key: interp_key.to_string(),
+                });
+            }
         }
     }
 
-    // Collect keys from both bind: and interpolation: — all must be referenced
+    // Collect keys from both bind: and interpolation: — all must be referenced.
+    // Skip keys that contain `{...}` templates (these are framework substitution
+    // variables resolved at runtime, e.g. `{name}`, `{model}`).
     let mut keys: Vec<(String, String)> = Vec::new(); // (key, map_name)
     if let Some(interp) = interp_map {
         for key in interp.keys() {
             if let Some(k) = key.as_str() {
-                if !colliding_keys.contains(k) {
+                if !colliding_keys.contains(k) && !k.contains('{') {
                     keys.push((k.to_string(), "interpolation".to_string()));
                 }
             }
@@ -377,7 +387,7 @@ fn validate_stage_keys_for_stage(stage: &serde_yaml::Value, errors: &mut Vec<Sch
     if let Some(bind) = bind_map {
         for key in bind.keys() {
             if let Some(k) = key.as_str() {
-                if !colliding_keys.contains(k) {
+                if !colliding_keys.contains(k) && !k.contains('{') {
                     keys.push((k.to_string(), "bind".to_string()));
                 }
             }
@@ -424,35 +434,14 @@ fn validate_stage_keys_for_stage(stage: &serde_yaml::Value, errors: &mut Vec<Sch
     }
 
     for (key_str, map_name) in &keys {
-        // Check for {KEY}
-        let brace_form = format!("{{{key_str}}}");
-        // Check for ${KEY} and all shell parameter expansion forms
-        let dollar_brace_form = String::from("${") + key_str;
-
-        if text.contains(&brace_form) || text.contains(&dollar_brace_form) {
+        if key_referenced_in_text(key_str, &text) {
             continue;
         }
-
-        // Check $KEY — must not be followed by an identifier-continuation character
-        let dollar_form = format!("${key_str}");
-        if text.contains(&dollar_form) {
-            let mut found = false;
-            let mut pos = 0;
-            while let Some(idx) = text[pos..].find(&dollar_form) {
-                let abs_idx = pos + idx;
-                let after = abs_idx + dollar_form.len();
-                if after >= text.len()
-                    || !text
-                        .as_bytes()
-                        .get(after)
-                        .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
-                {
-                    found = true;
-                    break;
-                }
-                pos = after;
-            }
-            if found {
+        // For bind keys with trailing `?`, the exec stage runtime strips the
+        // `?` before substitution, so also check the un-suffixed form.
+        if map_name == "bind" && key_str.ends_with('?') {
+            let stripped = &key_str[..key_str.len() - 1];
+            if key_referenced_in_text(stripped, &text) {
                 continue;
             }
         }
@@ -463,6 +452,39 @@ fn validate_stage_keys_for_stage(stage: &serde_yaml::Value, errors: &mut Vec<Sch
             map: map_name.clone(),
         });
     }
+}
+
+/// Check whether a key appears in the stage's text as `{KEY}`, `$KEY`, or `${KEY}`.
+fn key_referenced_in_text(key_str: &str, text: &str) -> bool {
+    // Check for {KEY}
+    let brace_form = format!("{{{key_str}}}");
+    if text.contains(&brace_form) {
+        return true;
+    }
+    // Check for ${KEY}
+    let dollar_brace_form = String::from("${") + key_str;
+    if text.contains(&dollar_brace_form) {
+        return true;
+    }
+    // Check $KEY — must not be followed by an identifier-continuation character
+    let dollar_form = format!("${key_str}");
+    if text.contains(&dollar_form) {
+        let mut pos = 0;
+        while let Some(idx) = text[pos..].find(&dollar_form) {
+            let abs_idx = pos + idx;
+            let after = abs_idx + dollar_form.len();
+            if after >= text.len()
+                || !text
+                    .as_bytes()
+                    .get(after)
+                    .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+            {
+                return true;
+            }
+            pos = after;
+        }
+    }
+    false
 }
 
 /// Recursively collect all prompt and command text from a stage and its descendants.
@@ -1452,7 +1474,8 @@ stages:
     }
 
     #[test]
-    fn test_bind_key_with_trailing_question_mark() {
+    fn test_bind_key_with_trailing_question_mark_in_prompt() {
+        // Agent stages use the literal key (with ?) in prompts.
         let yaml = serde_yaml::from_str::<serde_yaml::Value>(
             r#"
 stages:
@@ -1465,5 +1488,50 @@ stages:
         )
         .unwrap();
         assert!(validate_stage_keys(&yaml).is_ok());
+    }
+
+    #[test]
+    fn test_bind_key_with_trailing_question_mark_in_cmd() {
+        // Exec stages strip the `?` before substitution, so commands reference
+        // the un-suffixed key.
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+stages:
+  - name: test
+    bind:
+      foo?: artifact://x
+    options:
+      cmds:
+        - "echo {foo}"
+"#,
+        )
+        .unwrap();
+        assert!(validate_stage_keys(&yaml).is_ok());
+    }
+
+    #[test]
+    fn test_collision_bind_qmark_interpolation() {
+        // `foo?` in bind collides with `foo` in interpolation (runtime strips `?`).
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+stages:
+  - name: test
+    bind:
+      foo?: artifact://x
+    interpolation:
+      foo: content(...)
+    prompt:
+      - "use {foo}"
+"#,
+        )
+        .unwrap();
+        let errs = validate_stage_keys(&yaml).unwrap_err();
+        assert_eq!(errs.len(), 1);
+        match &errs[0] {
+            SchemaError::DuplicateStageKey { key, .. } => {
+                assert_eq!(key, "foo");
+            }
+            _ => panic!("expected DuplicateStageKey"),
+        }
     }
 }

@@ -758,11 +758,17 @@ stages:
   - name: stage-a
     type: exec
     bind:
-      artifact.plan: "artifact://plan.md"
+      artifact.plan: artifact://plan.md
+    options:
+      cmds:
+        - echo ok > "{artifact.plan}"
   - name: stage-b
     type: exec
     bind:
-      artifact.plan: "artifact://plan.md"
+      artifact.plan: artifact://plan.md
+    options:
+      cmds:
+        - echo ok > "{artifact.plan}"
 """,
     )
     with pytest.raises(
@@ -782,11 +788,17 @@ stages:
   - name: stage-a
     type: exec
     bind:
-      artifact.plan: "file://session/plan.md"
+      artifact.plan: file://session/plan.md
+    options:
+      cmds:
+        - echo ok > "{artifact.plan}"
   - name: stage-b
     type: exec
     bind:
-      artifact.plan: "file://session/plan.md"
+      artifact.plan: file://session/plan.md
+    options:
+      cmds:
+        - echo ok > "{artifact.plan}"
 """,
     )
     pipeline = Pipeline.from_yaml(yaml_path)
@@ -804,11 +816,17 @@ stages:
   - name: stage-a
     type: exec
     bind:
-      artifact.plan?: "file://session/plan-a.md"
+      artifact.plan?: file://session/plan-a.md
+    options:
+      cmds:
+        - echo ok > "{artifact.plan}"
   - name: stage-b
     type: exec
     bind:
-      artifact.plan?: "file://session/plan-b.md"
+      artifact.plan?: file://session/plan-b.md
+    options:
+      cmds:
+        - echo ok > "{artifact.plan}"
 """,
     )
     pipeline = Pipeline.from_yaml(yaml_path)
@@ -826,12 +844,18 @@ stages:
   - name: plan
     type: exec
     bind:
-      artifact.plan: "file://session/plan.md"
+      artifact.plan: file://session/plan.md
+    options:
+      cmds:
+        - echo ok > "{artifact.plan}"
   - name: publish-as-issue
     type: exec
     skip_if_exists: plan-issue-number
     bind:
-      artifact.plan: "opaque://issue/123"
+      artifact.plan: opaque://issue/123
+    options:
+      cmds:
+        - echo ok > "{artifact.plan}"
 """,
     )
     pipeline = Pipeline.from_yaml(yaml_path)

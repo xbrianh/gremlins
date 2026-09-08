@@ -35,8 +35,6 @@ stages:
     options:
       cmds:
         - "ruff format . && ruff check --fix . && git add -A && (git diff --cached --quiet || git commit -m 'normalize')"
-    bind:
-      normalize_commits?: "artifact://normalize-commits"
   - { name: verify-check, type: verify, options: { cmds: ["make check"] }, prompt: verify }
   - { name: verify-test,  type: verify, options: { cmds: ["make test"] },  prompt: verify }
   - { name: open-pr,    type: gremlins:github-open-pr }
@@ -49,7 +47,7 @@ stages:
       pr_diff: "artifact://diff.txt"
     options:
       cmds:
-        - "gh pr diff --name-only \"{pr}\" > \"$GREMLINS_ARTIFACT_DIR/diff.txt\""
+        - "gh pr diff --name-only \"{pr}\" > \"{pr_diff}\""
   - { name: github-review-pull-request,                 type: agent, interpolation: {pr: content("artifact://pr-url.txt"), plan: content("artifact://plan.md"), diff: content("artifact://diff.txt")}, prompt: [code-style, gremlins:github_review_pull_request.md] }
   - { type: gremlins:github-wait-copilot }
   - name: gather-github-review-content
@@ -95,7 +93,7 @@ stages:
             echo "## Issue Comments"
             echo
             gh pr view "$PR_URL" --comments --json comments --jq '.comments[] | "### Comment by \(.author.login) (\(.createdAt))\n\n\(.body)\n\n---\n"'
-          } > "$GREMLINS_ARTIFACT_DIR/github-review-content.md"
+          } > "{github_review_content}"
   - name: github-address-pull-request-reviews
     type: agent
     interpolation:

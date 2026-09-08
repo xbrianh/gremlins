@@ -39,8 +39,6 @@ stages:
   - { type: gremlins:implement, prompt: [code-style, gremlins:implement_gh.md] }
   - name: normalize
     type: normalize
-    bind:
-      normalize_commits?: "artifact://normalize-commits"
   - { name: verify-check, type: verify, options: { cmds: ["make check"] }, prompt: verify }
   - { name: verify-test,  type: verify, options: { cmds: ["make test"] },  prompt: verify }
   - { name: open-pr,   type: gremlins:github-open-pr }

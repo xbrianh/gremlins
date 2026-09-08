@@ -28,7 +28,5 @@ stages:
     options:
       cmds:
         - "ruff format . && ruff check --fix . && git add -A && (git diff --cached --quiet || git commit -m 'normalize')"
-    bind:
-      normalize_commits?: "artifact://normalize-commits"
   - { name: verify-check, type: verify, options: { cmds: ["make check"] }, prompt: verify }
   - { name: verify-test,  type: verify, options: { cmds: ["make test"] },  prompt: verify }
