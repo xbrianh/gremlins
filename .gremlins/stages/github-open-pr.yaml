@@ -65,8 +65,7 @@ stages:
     options:
       cmds:
         - |
-          SUFFIX=$([ "{loop_iteration}" -gt 1 ] && echo "-iter{loop_iteration}" || echo "") &&
-          BRANCH="$(printf '%s' "${pr_branch}")${SUFFIX}" &&
+          BRANCH="$(printf '%s' "${pr_branch}")" &&
           git push origin "HEAD:refs/heads/$BRANCH" &&
           URL="$(gh pr create --head "$BRANCH" --base "$base_ref_to_open_pr" --title "$(printf '%s' "$pr_title")" --body-file "$GREMLINS_ARTIFACT_DIR/pr-body.md")" &&
           printf "%s" "${URL##*/}" > "$GREMLINS_ARTIFACT_DIR/pr-number.txt" &&
