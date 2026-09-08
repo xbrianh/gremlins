@@ -308,9 +308,10 @@ pub fn parse_default(raw: &str) -> serde_yaml::Value {
 /// Validate that every key declared in each stage's `bind:` or `interpolation:`
 /// map is actually referenced as `{KEY}`, `$KEY`, or `${KEY}` somewhere in the
 /// stage's prompts or commands. Also catches keys declared in both maps.
-/// Stages whose `type` is a bundled recipe (gremlins:xxx or a bare name that
-/// resolves to a bundled recipe) are skipped because their keys are used
-/// internally by the recipe.
+///
+/// By the time this runs, all bundled recipe call-sites have already been
+/// inlined by `_expand_stage_def`, so the validator only ever sees fully
+/// expanded stages — no recipe-skipping logic is needed.
 pub fn validate_stage_keys(expanded_yaml: &serde_yaml::Value) -> Result<(), Vec<SchemaError>> {
     let mut errors = Vec::new();
 
