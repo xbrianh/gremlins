@@ -311,9 +311,7 @@ pub fn parse_default(raw: &str) -> serde_yaml::Value {
 /// Stages whose `type` is a bundled recipe (gremlins:xxx or a bare name that
 /// resolves to a bundled recipe) are skipped because their keys are used
 /// internally by the recipe.
-pub fn validate_stage_keys(
-    expanded_yaml: &serde_yaml::Value,
-) -> Result<(), Vec<SchemaError>> {
+pub fn validate_stage_keys(expanded_yaml: &serde_yaml::Value) -> Result<(), Vec<SchemaError>> {
     let mut errors = Vec::new();
 
     // Validate the `land` stage if present
