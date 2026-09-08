@@ -98,15 +98,15 @@ def test_read_description_artifact_reads_from_scratch_root(tmp_path, monkeypatch
     """read_description_artifact resolves via scratch_root, not state_root."""
     gremlin_id = "test-desc-artifact01"
     scratch = tmp_path / "scratch"
-    monkeypatch.setattr(_state, "_scratch_root", lambda gid: str(scratch))
-    arts = scratch / "artifacts"
+    monkeypatch.setattr(_state, "_scratch_root", lambda gid: str(scratch / gid))
+    arts = scratch / gremlin_id / "artifacts"
     arts.mkdir(parents=True)
     (arts / "description.txt").write_text("hello world\n")
     assert _state.read_description_artifact(gremlin_id) == "hello world"
 
 
 def test_read_description_artifact_missing(tmp_path, monkeypatch):
-    monkeypatch.setattr(_state, "_scratch_root", lambda gid: str(tmp_path / "scratch"))
+    monkeypatch.setattr(_state, "_scratch_root", lambda gid: str(tmp_path / "scratch" / gid))
     assert _state.read_description_artifact("nonexistent") == ""
 
 
