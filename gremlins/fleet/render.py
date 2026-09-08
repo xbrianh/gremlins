@@ -45,7 +45,7 @@ def build_row(
     sub = state.get("sub_stage")
     desc = state.get("description") or state.get("instructions") or ""
     if not desc:
-        desc = read_description_artifact(wdir)
+        desc = read_description_artifact(gremlin_id)
     started_at = state.get("started_at") or ""
 
     sub_disp = render_sub_stage(sub)

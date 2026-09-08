@@ -135,7 +135,7 @@ def _collect_gremlins(
         description = (
             state.get("description")
             or state.get("instructions")
-            or read_description_artifact(wdir)
+            or read_description_artifact(gremlin_id)
             or ""
         )
         log = os.path.join(wdir, "log")
