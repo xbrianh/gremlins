@@ -129,13 +129,22 @@ stages:
           set -e
           set -o pipefail
           PR_URL="{pr}"
-          PR_NUMBER="$(gh pr view "$PR_URL" --json number --jq '.number')"
+          {
+            IFS= read -r -d '' PR_NUMBER
+            IFS= read -r -d '' PR_TITLE
+            IFS= read -r -d '' PR_BODY
+            IFS= read -r -d '' PR_AUTHOR
+            IFS= read -r -d '' PR_HEAD_REF
+            IFS= read -r -d '' PR_BASE_REF
+          } < <(gh pr view "$PR_URL" --json number,title,body,author,headRefName,baseRefName --jq '
+            .number, "\u0000",
+            .title, "\u0000",
+            .body, "\u0000",
+            .author.login, "\u0000",
+            .headRefName, "\u0000",
+            .baseRefName, "\u0000"
+          ')
           OWNER_REPO="$(echo "$PR_URL" | sed 's|https://github.com/||; s|/pull/.*||')"
-          PR_TITLE="$(gh pr view "$PR_URL" --json title --jq '.title')"
-          PR_BODY="$(gh pr view "$PR_URL" --json body --jq '.body')"
-          PR_AUTHOR="$(gh pr view "$PR_URL" --json author --jq '.author.login')"
-          PR_HEAD_REF="$(gh pr view "$PR_URL" --json headRefName --jq '.headRefName')"
-          PR_BASE_REF="$(gh pr view "$PR_URL" --json baseRefName --jq '.baseRefName')"
           {
             echo "# PR Review Comments"
             echo
