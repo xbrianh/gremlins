@@ -2,21 +2,31 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use regex::Regex;
+use thiserror::Error;
 
 use crate::artifacts::registry::{ArtifactRegistry, MissingArtifact};
 
 static CONTENT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"^content\("([^"]+)"(?:,\s*"([^"]+)")?\)\s*$"#).unwrap());
 
+#[derive(Error, Debug)]
+pub enum ResolveError {
+    #[error("artifact not bound: {0:?}")]
+    MissingArtifact(String),
+    #[error(transparent)]
+    Other(Box<dyn std::error::Error>),
+}
+
 pub fn resolve_interpolation_map(
     artifacts: &ArtifactRegistry,
     interpolation_map: &HashMap<String, String>,
     loop_iter: &str,
-) -> Result<HashMap<String, String>, MissingArtifact> {
+) -> Result<HashMap<String, String>, ResolveError> {
     let mut result = HashMap::new();
     for (var, raw) in interpolation_map {
-        let optional = raw.ends_with('?');
-        let raw_clean = raw.trim_end_matches('?');
+        let trimmed = raw.trim_end();
+        let optional = trimmed.ends_with('?');
+        let raw_clean = trimmed.trim_end_matches('?');
 
         if let Some(caps) = CONTENT_RE.captures(raw_clean) {
             let mut uri_str = caps.get(1).unwrap().as_str().to_string();
@@ -28,29 +38,27 @@ pub fn resolve_interpolation_map(
                 Ok(val) => {
                     result.insert(var.clone(), val);
                 }
-                Err(_) if optional => {
+                Err(e) if optional && e.downcast_ref::<MissingArtifact>().is_some() => {
                     result.insert(var.clone(), String::new());
+                }
+                Err(e) if optional => {
+                    return Err(ResolveError::Other(e));
                 }
                 Err(e) => {
                     if let Some(ma) = e.downcast_ref::<MissingArtifact>() {
-                        return Err(MissingArtifact {
-                            key: ma.key.clone(),
-                        });
+                        return Err(ResolveError::MissingArtifact(ma.key.clone()));
                     }
-                    return Err(MissingArtifact {
-                        key: uri_str.clone(),
-                    });
+                    return Err(ResolveError::Other(e));
                 }
             }
             continue;
         }
 
-        // Use raw (not raw_clean) for partition — '?' is the key/default separator
-        let raw_str: &str = raw;
-        let (key, default): (&str, Option<&str>) = if let Some(pos) = raw_str.find('?') {
-            (&raw_str[..pos], Some(&raw_str[pos + 1..]))
+        // '?' is the key/default separator
+        let (key, default): (&str, Option<&str>) = if let Some(pos) = raw.find('?') {
+            (&raw[..pos], Some(&raw[pos + 1..]))
         } else {
-            (raw_str, None)
+            (raw, None)
         };
         let mut key = key.to_string();
         if !loop_iter.is_empty() {
@@ -63,7 +71,9 @@ pub fn resolve_interpolation_map(
             Err(_) if default.is_some() => {
                 result.insert(var.clone(), default.unwrap_or("").to_string());
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                return Err(ResolveError::MissingArtifact(e.key.clone()));
+            }
         }
     }
     Ok(result)
@@ -85,6 +95,13 @@ mod tests {
         (tmp, reg)
     }
 
+    fn unwrap_result<T>(r: Result<T, ResolveError>) -> T {
+        match r {
+            Ok(v) => v,
+            Err(e) => panic!("unexpected error: {e}"),
+        }
+    }
+
     #[test]
     fn test_resolve_bound_key() {
         let mut data = HashMap::new();
@@ -94,7 +111,7 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("var".to_string(), "mykey".to_string());
 
-        let result = resolve_interpolation_map(&reg, &map, "").unwrap();
+        let result = unwrap_result(resolve_interpolation_map(&reg, &map, ""));
         assert_eq!(result.get("var").unwrap(), "myval");
     }
 
@@ -106,7 +123,7 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("var".to_string(), "missing?default_val".to_string());
 
-        let result = resolve_interpolation_map(&reg, &map, "").unwrap();
+        let result = unwrap_result(resolve_interpolation_map(&reg, &map, ""));
         assert_eq!(result.get("var").unwrap(), "default_val");
     }
 
@@ -118,7 +135,7 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("var".to_string(), r#"content("missing.txt")?"#.to_string());
 
-        let result = resolve_interpolation_map(&reg, &map, "").unwrap();
+        let result = unwrap_result(resolve_interpolation_map(&reg, &map, ""));
         assert_eq!(result.get("var").unwrap(), "");
     }
 
@@ -139,7 +156,7 @@ mod tests {
             "var".to_string(),
             r#"content("artifact://data.json", "x.y")"#.to_string(),
         );
-        let result = resolve_interpolation_map(&reg, &map, "").unwrap();
+        let result = unwrap_result(resolve_interpolation_map(&reg, &map, ""));
         assert_eq!(result.get("var").unwrap(), "z");
         let _ = tmp;
     }
@@ -154,7 +171,7 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("var".to_string(), "key_{loop_iter}".to_string());
 
-        let result = resolve_interpolation_map(&reg, &map, "1").unwrap();
+        let result = unwrap_result(resolve_interpolation_map(&reg, &map, "1"));
         assert_eq!(result.get("var").unwrap(), "val1");
     }
 }

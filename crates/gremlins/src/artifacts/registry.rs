@@ -142,7 +142,7 @@ impl ArtifactRegistry {
     ) -> Result<String, Box<dyn std::error::Error>> {
         let raw = self.data_uri(uri_str)?;
         let text = if raw.starts_with("file://session/") {
-            let name = raw.trim_start_matches("file://session/");
+            let name = raw.strip_prefix("file://session/").unwrap_or(raw);
             let p = self.artifact_dir.join(name);
             if !p.exists() {
                 return Err(Box::new(MissingArtifact {
@@ -151,7 +151,7 @@ impl ArtifactRegistry {
             }
             fs::read_to_string(&p)?
         } else if raw.starts_with("file://") {
-            let p = PathBuf::from(raw.trim_start_matches("file://"));
+            let p = PathBuf::from(raw.strip_prefix("file://").unwrap_or(raw));
             if !p.exists() {
                 return Err(Box::new(MissingArtifact {
                     key: uri_str.to_string(),
@@ -203,10 +203,10 @@ impl ArtifactRegistry {
         // Non-string values are considered existing
         // For string values, resolve to filesystem path
         let p = if value.starts_with("file://session/") {
-            let name = value.trim_start_matches("file://session/");
+            let name = value.strip_prefix("file://session/").unwrap_or(value);
             self.artifact_dir.join(name)
         } else if value.starts_with("file://") {
-            PathBuf::from(value.trim_start_matches("file://"))
+            PathBuf::from(value.strip_prefix("file://").unwrap_or(value))
         } else {
             PathBuf::from(value)
         };
@@ -253,10 +253,10 @@ impl ArtifactRegistry {
                 uri_str.starts_with("file://") || Path::new(uri_str).is_absolute();
             if copy_files && is_file_artifact {
                 let src_path = if uri_str.starts_with("file://session/") {
-                    let name = uri_str.trim_start_matches("file://session/");
+                    let name = uri_str.strip_prefix("file://session/").unwrap_or(uri_str);
                     other.artifact_dir.join(name)
                 } else if uri_str.starts_with("file://") {
-                    PathBuf::from(uri_str.trim_start_matches("file://"))
+                    PathBuf::from(uri_str.strip_prefix("file://").unwrap_or(uri_str))
                 } else {
                     PathBuf::from(uri_str)
                 };

@@ -137,8 +137,18 @@ impl ArtifactRegistry {
             })
     }
 
-    fn exists(&self, uri: &str) -> bool {
-        self.inner.lock().unwrap().exists(uri)
+    #[pyo3(signature = (uri))]
+    fn exists(&self, uri: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let s = if let Ok(s) = uri.extract::<&str>() {
+            s.to_string()
+        } else if let Ok(uri_obj) = uri.extract::<PyRef<'_, Uri>>() {
+            uri_obj.inner.to_string()
+        } else {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "expected str or Uri",
+            ));
+        };
+        Ok(self.inner.lock().unwrap().exists(&s))
     }
 
     fn is_registered(&self, key: &str) -> bool {
@@ -204,8 +214,16 @@ fn resolve_interpolation_map(
     loop_iter: &str,
 ) -> PyResult<HashMap<String, String>> {
     let inner = artifacts.inner.lock().unwrap();
-    rust_resolve::resolve_interpolation_map(&inner, &interpolation_map, loop_iter)
-        .map_err(|e| MissingArtifact::new_err(e.to_string()))
+    rust_resolve::resolve_interpolation_map(&inner, &interpolation_map, loop_iter).map_err(|e| {
+        match &e {
+            rust_resolve::ResolveError::MissingArtifact(key) => {
+                MissingArtifact::new_err(format!("artifact not bound: {:?}", key))
+            }
+            rust_resolve::ResolveError::Other(src) => {
+                pyo3::exceptions::PyValueError::new_err(src.to_string())
+            }
+        }
+    })
 }
 
 // --- Module registration ---
