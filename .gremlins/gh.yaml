@@ -59,7 +59,7 @@ stage-definitions:
           cmds:
             - "make -j8 check && make -j8 test"
           max_iterations: 7
-        prompt: [dev-env-howto.md, gremlins:verify_fix.md, gremlins:bail_section_fix.md]
+        prompt: [style_guide.md, dev-env-howto.md, gremlins:verify_fix.md, gremlins:bail_section_fix.md]
       - name: commit
         type: exec
         options:
