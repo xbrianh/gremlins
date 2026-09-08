@@ -35,9 +35,7 @@ jobs:
       - name: Validate pipeline overlays
         run: |
           source .venv/bin/activate
-          for f in .gremlins/*.yaml .gremlins/*.yml; do
-            [ -f "$f" ] && python -m gremlins validate "$f"
-          done
+          make validate-gremlin-overlays
       - name: Lint, format, type-check, clippy, rustfmt
         run: |
           source .venv/bin/activate
