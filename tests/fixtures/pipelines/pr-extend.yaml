@@ -45,9 +45,9 @@ stages:
         - |
           PR_NUM="${pr_input##*/}" &&
           PR_JSON="$(gh pr view "$PR_NUM" --json url,headRefName,number)" &&
-          printf "%s" "$(printf '%s' "$PR_JSON" | jq -r '.url')" > "$GREMLINS_ARTIFACT_DIR/pr-url.txt" &&
-          printf "%s" "$(printf '%s' "$PR_JSON" | jq -r '.headRefName')" > "$GREMLINS_ARTIFACT_DIR/pr-branch.txt" &&
-          printf "%s" "$(printf '%s' "$PR_JSON" | jq -r '.number')" > "$GREMLINS_ARTIFACT_DIR/pr-number.txt"
+          printf "%s" "$(printf '%s' "$PR_JSON" | jq -r '.url')" > "{pr_url}" &&
+          printf "%s" "$(printf '%s' "$PR_JSON" | jq -r '.headRefName')" > "{pr_branch}" &&
+          printf "%s" "$(printf '%s' "$PR_JSON" | jq -r '.number')" > "{pr_number}"
   - { type: gremlins:plan-gh,                    prompt: [code-style, gremlins:plan_gh.md] }
   - { type: gremlins:implement,                 prompt: [code-style, gremlins:implement_gh.md] }
   - name: normalize
@@ -55,8 +55,6 @@ stages:
     options:
       cmds:
         - "ruff format . && ruff check --fix . && git add -A && (git diff --cached --quiet || git commit -m 'normalize')"
-    bind:
-      normalize_commits?: "artifact://normalize-commits"
   - { name: verify-check, type: verify, options: { cmds: ["make check"] }, prompt: verify }
   - { name: verify-test,  type: verify, options: { cmds: ["make test"] },  prompt: verify }
   - { name: push,      type: gremlins:github-push-to-pr-branch }
@@ -69,7 +67,7 @@ stages:
       pr_diff: "artifact://diff.txt"
     options:
       cmds:
-        - "gh pr diff --name-only \"{pr}\" > \"$GREMLINS_ARTIFACT_DIR/diff.txt\""
+        - "gh pr diff --name-only \"{pr}\" > \"{pr_diff}\""
   - { name: github-review-pull-request,                             type: agent, interpolation: {pr: content("artifact://pr-url.txt"), plan: content("artifact://plan.md"), diff: content("artifact://diff.txt")}, prompt: [code-style, gremlins:github_review_pull_request.md] }
   - { type: gremlins:github-wait-copilot }
   - { name: github-address-pull-request-reviews,                    type: agent, interpolation: {pr: content("artifact://pr-url.txt")}, prompt: [code-style, gremlins:github_address_pull_request_reviews.md, gremlins:bail_section.md] }

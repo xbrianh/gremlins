@@ -10,7 +10,7 @@ stages:
         - |
           prev_branch=""
           if [ -n "$prev_branch_path" ] && [ -f "$prev_branch_path" ]; then prev_branch=$(cat "$prev_branch_path"); fi
-          printf '%s' "${prev_branch:-{base_ref}}" > "$GREMLINS_ARTIFACT_DIR/pr-base-ref.txt"
+          printf '%s' "${prev_branch:-{base_ref}}" > "{base_ref_to_open_pr}"
 
   - name: diff-summary
     type: exec
@@ -35,7 +35,7 @@ stages:
             echo ""
             echo "Files changed:"
             git diff --stat "$RANGE" 2>/dev/null || echo "(no diff)"
-          } > "$GREMLINS_ARTIFACT_DIR/diff-summary.txt"
+          } > "{diff_summary}"
 
   - name: compose-pr
     type: agent
@@ -61,13 +61,11 @@ stages:
     bind:
       pr_number: "artifact://pr-number.txt"
       pr_url:    "artifact://pr-url.txt"
-      pr_branch: "artifact://pr-branch.txt"
     options:
       cmds:
         - |
           BRANCH="$(printf '%s' "${pr_branch}")" &&
           git push origin "HEAD:refs/heads/$BRANCH" &&
           URL="$(gh pr create --head "$BRANCH" --base "$base_ref_to_open_pr" --title "$(printf '%s' "$pr_title")" --body-file "$GREMLINS_ARTIFACT_DIR/pr-body.md")" &&
-          printf "%s" "${URL##*/}" > "$GREMLINS_ARTIFACT_DIR/pr-number.txt" &&
-          printf "%s" "$URL" > "$GREMLINS_ARTIFACT_DIR/pr-url.txt" &&
-          printf "%s" "$BRANCH" > "$GREMLINS_ARTIFACT_DIR/pr-branch.txt"
+          printf "%s" "${URL##*/}" > "{pr_number}" &&
+          printf "%s" "$URL" > "{pr_url}"

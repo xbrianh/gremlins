@@ -19,4 +19,4 @@ stages:
       description?: "artifact://description.txt"
     options:
       cmds:
-        - "head -1 \"{plan}\" | sed 's/^#\\+ *//' > \"$GREMLINS_ARTIFACT_DIR/description.txt\""
+        - "head -1 \"{plan}\" | sed 's/^#\\+ *//' > \"{description}\""

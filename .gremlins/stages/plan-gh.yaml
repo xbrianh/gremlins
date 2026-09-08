@@ -39,7 +39,7 @@ stages:
             '#'*) printf '%s\n' "$body" > "$plan_file" ;;
             *) printf '# %s\n\n%s\n' "$title" "$body" > "$plan_file" ;;
           esac
-          printf '%s' "$number" > "$GREMLINS_ARTIFACT_DIR/plan-source-issue-number.txt"
+          printf '%s' "$number" > "{plan_source_issue_number}"
     bind:
       plan_source_issue_number?: "artifact://plan-source-issue-number.txt"
 
@@ -61,7 +61,7 @@ stages:
           url=$(gh issue create \
               --body-file "{plan}" \
               --title "$title")
-          printf '%s' "${url##*/}" > "$GREMLINS_ARTIFACT_DIR/plan-issue-number.txt"
+          printf '%s' "${url##*/}" > "{plan_issue_number}"
     bind:
       plan_issue_number: "artifact://plan-issue-number.txt"
 
@@ -73,4 +73,4 @@ stages:
       description?: "artifact://description.txt"
     options:
       cmds:
-        - "head -1 \"{plan}\" | sed 's/^#\\+ *//' > \"$GREMLINS_ARTIFACT_DIR/description.txt\""
+        - "head -1 \"{plan}\" | sed 's/^#\\+ *//' > \"{description}\""
