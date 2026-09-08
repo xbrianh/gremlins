@@ -17,6 +17,7 @@ import types
 from collections.abc import Callable, Sequence
 from typing import Any
 
+from _gremlins_core.artifacts import ArtifactRegistry
 from _gremlins_core.clients import RustClient as Client
 from _gremlins_core.config import (
     project_root,
@@ -24,7 +25,6 @@ from _gremlins_core.config import (
     state_root,
 )
 
-from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.env_file import source_env_string
 from gremlins.errors import die
 from gremlins.executor.gremlin import Gremlin

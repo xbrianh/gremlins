@@ -8,7 +8,8 @@ import pathlib
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, cast
 
-from gremlins.artifacts.registry import ArtifactRegistry
+from _gremlins_core.artifacts import ArtifactRegistry
+
 from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.composite import child_state as _child_state
 from gremlins.stages.constants import _BAIL_KEY

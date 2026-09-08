@@ -12,12 +12,11 @@ import asyncio
 import json
 import pathlib
 
-from _gremlins_core.artifacts import Uri
+from _gremlins_core.artifacts import ArtifactRegistry, Uri
 from _gremlins_core.config import scratch_root
 from _gremlins_core.config import state_root as _state_root_func
 from conftest import MockGremlin
 
-from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.executor.state import State, StateData, build_state
 from gremlins.stages.parallel import ParallelStage
 from tests.fake_client import FakeClient

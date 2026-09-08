@@ -87,7 +87,7 @@ def test_loop_active_children_set_and_cleared(tmp_path: pathlib.Path) -> None:
         async def run(self, gremlin: Any) -> Outcome:
             captured.append(_read_state(tmp_path).get("active_children"))
 
-            gremlin.state.artifacts.data["done"] = "registered"
+            gremlin.state.artifacts._set("done", "registered")
             return Done()
 
     # Set stop_when_exists so the loop doesn't exhaust

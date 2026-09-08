@@ -6,12 +6,11 @@ import json
 import pathlib
 
 import pytest
-from _gremlins_core.artifacts import Uri
-
-from gremlins.artifacts.registry import (
+from _gremlins_core.artifacts import (
     ArtifactRegistry,
     DuplicateArtifact,
     MissingArtifact,
+    Uri,
 )
 
 
@@ -23,7 +22,7 @@ def test_data_uri_unbound_raises_missing_artifact(tmp_path: pathlib.Path) -> Non
     r = make_registry(tmp_path)
     with pytest.raises(MissingArtifact) as exc_info:
         r.data_uri("nope")
-    assert exc_info.value.key == "nope"
+    assert "nope" in str(exc_info.value)
 
 
 def test_missing_artifact_is_key_error(tmp_path: pathlib.Path) -> None:

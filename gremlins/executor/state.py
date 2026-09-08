@@ -15,10 +15,10 @@ import secrets
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from _gremlins_core.artifacts import ArtifactRegistry
 from _gremlins_core.clients import RustClient as Client
 from _gremlins_core.config import project_root, scratch_root, state_root
 
-from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.stages.constants import FRAMEWORK_KEYS
 from gremlins.utils.state_file import locked_update
 

@@ -12,13 +12,12 @@ import shutil
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, cast
 
-from _gremlins_core.artifacts import Uri
+from _gremlins_core.artifacts import ArtifactRegistry, Uri
 from _gremlins_core.clients import RustClient as Client
 from _gremlins_core.config import project_root, scratch_root, state_root
 from _gremlins_core.discovery import resolve_pipeline_path
 from _gremlins_core.schemas import Pipeline as _PipelineData
 
-from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.executor.state import (
     State,
     StateData,
