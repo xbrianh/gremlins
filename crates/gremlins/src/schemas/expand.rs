@@ -349,15 +349,37 @@ fn validate_stage_keys_for_stage(stage: &serde_yaml::Value, errors: &mut Vec<Sch
         return;
     }
 
-    // Collect keys from interpolation: (inputs) — these MUST be referenced
-    // in the stage's own prompts or commands.  Keys from bind: (outputs) are
-    // exempt because they are produced for downstream stages and may not
-    // appear in this stage's own text.
+    // Check for collisions: keys appearing in both bind: and interpolation:
+    let mut colliding_keys: HashSet<String> = HashSet::new();
+    if let (Some(bind), Some(interp)) = (&bind_map, &interp_map) {
+        let bind_keys: HashSet<&str> = bind.keys().filter_map(|k| k.as_str()).collect();
+        let interp_keys: HashSet<&str> = interp.keys().filter_map(|k| k.as_str()).collect();
+        for key in bind_keys.intersection(&interp_keys) {
+            colliding_keys.insert(key.to_string());
+            errors.push(SchemaError::DuplicateStageKey {
+                stage: stage_name.to_string(),
+                key: key.to_string(),
+            });
+        }
+    }
+
+    // Collect keys from both bind: and interpolation: — all must be referenced
     let mut keys: Vec<(String, String)> = Vec::new(); // (key, map_name)
     if let Some(interp) = interp_map {
         for key in interp.keys() {
             if let Some(k) = key.as_str() {
-                keys.push((k.to_string(), "interpolation".to_string()));
+                if !colliding_keys.contains(k) {
+                    keys.push((k.to_string(), "interpolation".to_string()));
+                }
+            }
+        }
+    }
+    if let Some(bind) = bind_map {
+        for key in bind.keys() {
+            if let Some(k) = key.as_str() {
+                if !colliding_keys.contains(k) {
+                    keys.push((k.to_string(), "bind".to_string()));
+                }
             }
         }
     }
@@ -1309,8 +1331,6 @@ stages:
 
     #[test]
     fn test_bind_key_not_referenced() {
-        // bind: keys are outputs — they don't need to be referenced in
-        // the stage's own prompts/commands.
         let yaml = serde_yaml::from_str::<serde_yaml::Value>(
             r#"
 stages:
@@ -1322,7 +1342,15 @@ stages:
 "#,
         )
         .unwrap();
-        assert!(validate_stage_keys(&yaml).is_ok());
+        let errs = validate_stage_keys(&yaml).unwrap_err();
+        assert_eq!(errs.len(), 1);
+        match &errs[0] {
+            SchemaError::UnusedStageKey { key, map, .. } => {
+                assert_eq!(key, "orphan");
+                assert_eq!(map, "bind");
+            }
+            _ => panic!("expected UnusedStageKey"),
+        }
     }
 
     #[test]
@@ -1351,8 +1379,6 @@ stages:
 
     #[test]
     fn test_collision_between_bind_and_interpolation() {
-        // A key in both bind: and interpolation: is allowed as a passthrough
-        // (read via interpolation, write back via bind).
         let yaml = serde_yaml::from_str::<serde_yaml::Value>(
             r#"
 stages:
@@ -1366,7 +1392,14 @@ stages:
 "#,
         )
         .unwrap();
-        assert!(validate_stage_keys(&yaml).is_ok());
+        let errs = validate_stage_keys(&yaml).unwrap_err();
+        assert_eq!(errs.len(), 1);
+        match &errs[0] {
+            SchemaError::DuplicateStageKey { key, .. } => {
+                assert_eq!(key, "key");
+            }
+            _ => panic!("expected DuplicateStageKey"),
+        }
     }
 
     #[test]
