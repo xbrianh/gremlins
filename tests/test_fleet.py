@@ -106,7 +106,9 @@ def test_read_description_artifact_reads_from_scratch_root(tmp_path, monkeypatch
 
 
 def test_read_description_artifact_missing(tmp_path, monkeypatch):
-    monkeypatch.setattr(_state, "_scratch_root", lambda gid: str(tmp_path / "scratch" / gid))
+    monkeypatch.setattr(
+        _state, "_scratch_root", lambda gid: str(tmp_path / "scratch" / gid)
+    )
     assert _state.read_description_artifact("nonexistent") == ""
 
 
