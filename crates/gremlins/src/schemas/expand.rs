@@ -305,26 +305,26 @@ pub fn parse_default(raw: &str) -> serde_yaml::Value {
     serde_yaml::Value::String(s.to_string())
 }
 
-/// Validate that every key declared in each stage's `interpolation:` map is
-/// actually referenced as `{KEY}`, `$KEY`, or `${KEY}` somewhere in the
-/// stage's prompts or commands. Stages whose `type` is a bundled recipe
-/// (gremlins:xxx or a bare name that resolves to a bundled recipe) are
-/// skipped because their interpolation keys are used internally by the recipe.
-pub fn validate_interpolation_keys(
+/// Validate that every key declared in each stage's `bind:` or `interpolation:`
+/// map is actually referenced as `{KEY}`, `$KEY`, or `${KEY}` somewhere in the
+/// stage's prompts or commands. Also catches keys declared in both maps.
+/// Stages whose `type` is a bundled recipe (gremlins:xxx or a bare name that
+/// resolves to a bundled recipe) are skipped because their keys are used
+/// internally by the recipe.
+pub fn validate_stage_keys(
     expanded_yaml: &serde_yaml::Value,
 ) -> Result<(), Vec<SchemaError>> {
     let mut errors = Vec::new();
 
     // Validate the `land` stage if present
     if let Some(land) = expanded_yaml.get("land") {
-        validate_stage_interpolation(land, &mut errors);
+        validate_stage_keys_for_stage(land, &mut errors);
     }
 
-    // Validate each stage in `stages` — only top-level stages, not recipe-internal
-    // children (those inside body/parallel of recipe-expanded stages).
+    // Validate each stage in `stages`
     if let Some(stages) = expanded_yaml.get("stages").and_then(|v| v.as_sequence()) {
         for stage in stages {
-            validate_stage_interpolation(stage, &mut errors);
+            validate_stage_keys_for_stage(stage, &mut errors);
         }
     }
 
@@ -335,22 +335,54 @@ pub fn validate_interpolation_keys(
     }
 }
 
-fn validate_stage_interpolation(stage: &serde_yaml::Value, errors: &mut Vec<SchemaError>) {
+fn validate_stage_keys_for_stage(stage: &serde_yaml::Value, errors: &mut Vec<SchemaError>) {
     let mapping = match stage.as_mapping() {
-        Some(m) => m,
-        None => return,
-    };
-
-    // Only leaf stages with an interpolation map need checking
-    let interp = match mapping.get("interpolation").and_then(|v| v.as_mapping()) {
         Some(m) => m,
         None => return,
     };
 
     let stage_name = mapping.get("name").and_then(|v| v.as_str()).unwrap_or("?");
 
-    // Collect all text to search: this stage's prompts + commands,
-    // plus all text from descendant stages (body, parallel, etc.)
+    let bind_map = mapping.get("bind").and_then(|v| v.as_mapping());
+    let interp_map = mapping.get("interpolation").and_then(|v| v.as_mapping());
+
+    // Nothing to check if neither map exists
+    if bind_map.is_none() && interp_map.is_none() {
+        return;
+    }
+
+    // Check for collisions: same key in both bind: and interpolation:
+    if let (Some(bind), Some(interp)) = (bind_map, interp_map) {
+        for key in bind.keys() {
+            if interp.contains_key(key) {
+                if let Some(key_str) = key.as_str() {
+                    errors.push(SchemaError::DuplicateStageKey {
+                        stage: stage_name.to_string(),
+                        key: key_str.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Merge all keys into a single set with their source map name
+    let mut keys: Vec<(String, String)> = Vec::new(); // (key, map_name)
+    if let Some(bind) = bind_map {
+        for key in bind.keys() {
+            if let Some(k) = key.as_str() {
+                keys.push((k.to_string(), "bind".to_string()));
+            }
+        }
+    }
+    if let Some(interp) = interp_map {
+        for key in interp.keys() {
+            if let Some(k) = key.as_str() {
+                keys.push((k.to_string(), "interpolation".to_string()));
+            }
+        }
+    }
+
+    // Collect all text to search
     let mut text = String::new();
 
     // Own prompts
@@ -375,7 +407,7 @@ fn validate_stage_interpolation(stage: &serde_yaml::Value, errors: &mut Vec<Sche
         }
     }
 
-    // Collect text from body children (loop stages)
+    // Collect text from body children
     if let Some(body) = mapping.get("body").and_then(|v| v.as_sequence()) {
         for child in body {
             collect_stage_text(child, &mut text);
@@ -389,16 +421,10 @@ fn validate_stage_interpolation(stage: &serde_yaml::Value, errors: &mut Vec<Sche
         }
     }
 
-    for key in interp.keys() {
-        let key_str = match key.as_str() {
-            Some(k) => k,
-            None => continue,
-        };
-
+    for (key_str, map_name) in &keys {
         // Check for {KEY}
         let brace_form = format!("{{{key_str}}}");
-        // Check for ${KEY} and all shell parameter expansion forms:
-        // ${KEY}, ${KEY:-default}, ${KEY-default}, ${KEY+alt}, ${KEY?err}, ${KEY=val}
+        // Check for ${KEY} and all shell parameter expansion forms
         let dollar_brace_form = String::from("${") + key_str;
 
         if text.contains(&brace_form) || text.contains(&dollar_brace_form) {
@@ -429,9 +455,10 @@ fn validate_stage_interpolation(stage: &serde_yaml::Value, errors: &mut Vec<Sche
             }
         }
 
-        errors.push(SchemaError::UnusedInterpolationKey {
+        errors.push(SchemaError::UnusedStageKey {
             stage: stage_name.to_string(),
             key: key_str.to_string(),
+            map: map_name.clone(),
         });
     }
 }
@@ -485,8 +512,8 @@ pub fn parse_pipeline_file(
     let resolver = BuiltinResolver;
     let expanded = expand_pipeline(yaml_path, Some(project_root), &resolver)?;
 
-    // Validate interpolation keys are referenced
-    if let Err(errors) = validate_interpolation_keys(&expanded) {
+    // Validate bind: and interpolation: keys are referenced
+    if let Err(errors) = validate_stage_keys(&expanded) {
         return Err(errors.into_iter().next().unwrap());
     }
 
@@ -1263,5 +1290,178 @@ stages:
         let input = serde_yaml::Value::String("hello {{missing}} world".to_string());
         let result = substitute_recipe(&input, &ctx).unwrap();
         assert_eq!(result.as_str().unwrap(), "hello {{missing}} world");
+    }
+
+    // --- validate_stage_keys tests ---
+
+    #[test]
+    fn test_bind_key_found_in_prompt() {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+stages:
+  - name: test
+    bind:
+      foo: artifact://x
+    prompt:
+      - "use {foo}"
+"#,
+        )
+        .unwrap();
+        assert!(validate_stage_keys(&yaml).is_ok());
+    }
+
+    #[test]
+    fn test_interpolation_key_found_in_command() {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+stages:
+  - name: test
+    interpolation:
+      bar: content(...)
+    options:
+      cmds:
+        - "echo ${bar}"
+"#,
+        )
+        .unwrap();
+        assert!(validate_stage_keys(&yaml).is_ok());
+    }
+
+    #[test]
+    fn test_bind_key_not_referenced() {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+stages:
+  - name: test
+    bind:
+      orphan: artifact://z
+    prompt:
+      - "hello"
+"#,
+        )
+        .unwrap();
+        let errs = validate_stage_keys(&yaml).unwrap_err();
+        assert_eq!(errs.len(), 1);
+        match &errs[0] {
+            SchemaError::UnusedStageKey { key, map, .. } => {
+                assert_eq!(key, "orphan");
+                assert_eq!(map, "bind");
+            }
+            _ => panic!("expected UnusedStageKey"),
+        }
+    }
+
+    #[test]
+    fn test_interpolation_key_not_referenced() {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+stages:
+  - name: test
+    interpolation:
+      orphan: content(...)
+    prompt:
+      - "hello"
+"#,
+        )
+        .unwrap();
+        let errs = validate_stage_keys(&yaml).unwrap_err();
+        assert_eq!(errs.len(), 1);
+        match &errs[0] {
+            SchemaError::UnusedStageKey { key, map, .. } => {
+                assert_eq!(key, "orphan");
+                assert_eq!(map, "interpolation");
+            }
+            _ => panic!("expected UnusedStageKey"),
+        }
+    }
+
+    #[test]
+    fn test_collision_between_bind_and_interpolation() {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+stages:
+  - name: test
+    bind:
+      key: artifact://x
+    interpolation:
+      key: content(...)
+    prompt:
+      - "use {key}"
+"#,
+        )
+        .unwrap();
+        let errs = validate_stage_keys(&yaml).unwrap_err();
+        assert_eq!(errs.len(), 1);
+        match &errs[0] {
+            SchemaError::DuplicateStageKey { key, .. } => {
+                assert_eq!(key, "key");
+            }
+            _ => panic!("expected DuplicateStageKey"),
+        }
+    }
+
+    #[test]
+    fn test_bind_key_in_body_child_text() {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+stages:
+  - name: parent
+    bind:
+      foo: artifact://x
+    body:
+      - name: child
+        prompt:
+          - "use {foo}"
+"#,
+        )
+        .unwrap();
+        assert!(validate_stage_keys(&yaml).is_ok());
+    }
+
+    #[test]
+    fn test_bind_key_referenced_as_dollar_key() {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+stages:
+  - name: test
+    bind:
+      foo: artifact://x
+    options:
+      cmds:
+        - "echo $foo"
+"#,
+        )
+        .unwrap();
+        assert!(validate_stage_keys(&yaml).is_ok());
+    }
+
+    #[test]
+    fn test_stage_with_no_bind_or_interpolation() {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+stages:
+  - name: test
+    prompt:
+      - "hello"
+"#,
+        )
+        .unwrap();
+        assert!(validate_stage_keys(&yaml).is_ok());
+    }
+
+    #[test]
+    fn test_bind_key_with_trailing_question_mark() {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+stages:
+  - name: test
+    bind:
+      foo?: artifact://x
+    prompt:
+      - "use {foo?}"
+"#,
+        )
+        .unwrap();
+        assert!(validate_stage_keys(&yaml).is_ok());
     }
 }

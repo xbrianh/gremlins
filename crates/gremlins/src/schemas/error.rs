@@ -29,8 +29,11 @@ pub enum SchemaError {
     #[error("input source {name}: {msg}")]
     InputSource { name: String, msg: String },
 
-    #[error("stage {stage}: interpolation key {key:?} is not referenced in any prompt or command")]
-    UnusedInterpolationKey { stage: String, key: String },
+    #[error("stage {stage}: key {key:?} declared in {map:?} is not referenced in any prompt or command")]
+    UnusedStageKey { stage: String, key: String, map: String },
+
+    #[error("stage {stage}: key {key:?} declared in both bind: and interpolation: — a stage cannot both produce and consume the same key")]
+    DuplicateStageKey { stage: String, key: String },
 
     #[error("stage {stage}: artifact {uri:?} is consumed via interpolation but never produced by any prior stage's bind, bootstrap bind_artifact, cli_out, or implicit artifact (base_sha, base_ref)")]
     UnresolvedArtifactConsumer { stage: String, uri: String },
