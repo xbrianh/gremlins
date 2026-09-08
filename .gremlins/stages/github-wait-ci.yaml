@@ -8,7 +8,7 @@ stages:
   - name: github-wait-ci
     type: loop
     max-iterations: 3
-    stop_when_exists: "artifact://done"
+    stop_when_exists: "artifact://{loop_iter}/done"
     body:
       - name: poll
         type: exec
@@ -16,8 +16,8 @@ stages:
           pr_url: content("artifact://pr-url.txt")
         bind:
           status?: "artifact://status"
-          done?: "artifact://done"
-          bail: "artifact://bail"
+          done?: "artifact://{loop_iter}/done"
+          bail: "artifact://{loop_iter}/bail"
           ci_log: "artifact://ci_failure.txt"
         options:
           poll_timeout: "1200"
@@ -150,7 +150,7 @@ stages:
 
       - name: fix
         type: agent
-        skip_if_exists: "artifact://done"
+        skip_if_exists: "artifact://{loop_iter}/done"
         prompt:
           - "{{prompt}}"
         interpolation:
@@ -158,7 +158,7 @@ stages:
 
       - name: push-fix
         type: exec
-        skip_if_exists: "artifact://done"
+        skip_if_exists: "artifact://{loop_iter}/done"
         interpolation:
           pr_branch: content("artifact://pr-branch.txt")
         options:
@@ -167,7 +167,7 @@ stages:
 
       - name: capture-head
         type: exec
-        skip_if_exists: "artifact://done"
+        skip_if_exists: "artifact://{loop_iter}/done"
         bind:
           fix_head: "artifact://fix-head"
         options:

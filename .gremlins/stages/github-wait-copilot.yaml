@@ -6,7 +6,7 @@ stages:
   - name: github-wait-copilot
     type: loop
     max-iterations: "{{options.max_iterations | default(40)}}"
-    stop_when_exists: "artifact://status"
+    stop_when_exists: "artifact://{loop_iter}/status"
     options:
       interval: "{{options.interval | default(20)}}"
     body:
@@ -16,7 +16,7 @@ stages:
           pr_number: content("artifact://pr-number.txt")
           repo: content("artifact://repo.txt")
         bind:
-          status?: "artifact://status"
+          status?: "artifact://{loop_iter}/status"
         options:
           timeout: 30
           cmds:

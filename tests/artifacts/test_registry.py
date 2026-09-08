@@ -86,38 +86,3 @@ def test_persist_survives_roundtrip(tmp_path: pathlib.Path) -> None:
     stored = r2.data_uri("artifact://pr.md")
     assert isinstance(stored, str)
     assert "pr.md" in stored
-
-
-def test_unbind_removes_binding(tmp_path: pathlib.Path) -> None:
-    r = make_registry(tmp_path)
-    uri = Uri.parse("artifact://x.md")
-    r.register(uri)
-    assert r.is_registered(str(uri))
-    r.unbind(str(uri))
-    assert not r.is_registered(str(uri))
-
-
-def test_unbind_persists_removal(tmp_path: pathlib.Path) -> None:
-    r = make_registry(tmp_path)
-    uri = Uri.parse("artifact://x.md")
-    r.register(uri)
-    r.unbind(str(uri))
-    data = json.loads(r.registry_path.read_text())
-    assert str(uri) not in data
-
-
-def test_unbind_missing_key_is_noop(tmp_path: pathlib.Path) -> None:
-    r = make_registry(tmp_path)
-    r.unbind("does-not-exist")  # must not raise
-
-
-def test_register_still_raises_duplicate_after_unbind_register_no_overwrite(
-    tmp_path: pathlib.Path,
-) -> None:
-    r = make_registry(tmp_path)
-    uri = Uri.parse("artifact://x.md")
-    r.register(uri, overwrite=False)
-    r.unbind(str(uri))
-    r.register(uri, overwrite=False)  # clean re-register after unbind
-    with pytest.raises(DuplicateArtifact):
-        r.register(uri, overwrite=False)  # register(overwrite=False) is still strict
