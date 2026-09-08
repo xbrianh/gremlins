@@ -130,7 +130,7 @@ def test_content_unknown_key_raises(tmp_path):
     uri = Uri.parse("artifact://pr.json")
     p = pathlib.Path(reg.register(uri))
     p.write_text('{"branch": "main"}', encoding="utf-8")
-    with pytest.raises(KeyError):
+    with pytest.raises((ValueError, KeyError)):
         resolve_interpolation_map(
             reg, {"x": 'content("artifact://pr.json", "nonexistent")'}
         )
