@@ -978,6 +978,77 @@ def test_exec_land_stage_bail(capsys):
 
 
 # ---------------------------------------------------------------------------
+# _gather_commit_inputs — MissingArtifact handling
+# ---------------------------------------------------------------------------
+
+
+def test_gather_commit_inputs_missing_spec_does_not_crash(tmp_path, monkeypatch):
+    """When spec.md is missing, _gather_commit_inputs sets spec to '' without error."""
+    from gremlins.artifacts.registry import ArtifactRegistry
+
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+
+    plan_path = artifact_dir / "plan.md"
+    plan_path.write_text("# Plan\n\nDo the thing.")
+
+    registry = ArtifactRegistry(artifact_dir=artifact_dir)
+    registry.register(
+        __import__("_gremlins_core.artifacts", fromlist=["Uri"]).Uri.parse(
+            "artifact://plan.md"
+        )
+    )
+
+    monkeypatch.setattr(_land._git, "log_oneline", lambda *a, **kw: "abc123 Do the thing")
+    monkeypatch.setattr(_land._git, "diff_stat", lambda *a, **kw: "file.py | 5 +++++")
+
+    inputs = _land._gather_commit_inputs(
+        registry=registry,
+        state={"description": "test"},
+        branch="feat",
+        merge_base="main",
+        cwd=str(tmp_path),
+    )
+
+    assert inputs["plan"] == "# Plan\n\nDo the thing."
+    assert inputs["spec"] == ""
+    assert inputs["description"] == "test"
+    assert inputs["git_log"] == "abc123 Do the thing"
+    assert inputs["git_stat"] == "file.py | 5 +++++"
+
+
+def test_gather_commit_inputs_spec_present_reads_content(tmp_path, monkeypatch):
+    """When spec.md exists, its content is included."""
+    from gremlins.artifacts.registry import ArtifactRegistry
+
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+
+    plan_path = artifact_dir / "plan.md"
+    plan_path.write_text("# Plan")
+    spec_path = artifact_dir / "spec.md"
+    spec_path.write_text("# Spec\n\nDo this.")
+
+    Uri = __import__("_gremlins_core.artifacts", fromlist=["Uri"]).Uri
+    registry = ArtifactRegistry(artifact_dir=artifact_dir)
+    registry.register(Uri.parse("artifact://plan.md"))
+    registry.register(Uri.parse("artifact://spec.md"))
+
+    monkeypatch.setattr(_land._git, "log_oneline", lambda *a, **kw: "")
+    monkeypatch.setattr(_land._git, "diff_stat", lambda *a, **kw: "")
+
+    inputs = _land._gather_commit_inputs(
+        registry=registry,
+        state={},
+        branch="feat",
+        merge_base="main",
+        cwd=str(tmp_path),
+    )
+
+    assert inputs["spec"] == "# Spec\n\nDo this."
+
+
+# ---------------------------------------------------------------------------
 # compose_commit_message — plan.md → commit subject/body
 # ---------------------------------------------------------------------------
 
