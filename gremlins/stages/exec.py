@@ -27,7 +27,7 @@ def _is_bail_uri(uri_str: str, loop_iter: str = "") -> bool:
     if not loop_iter:
         return False
     expected = f"artifact://{loop_iter}/bail"
-    return uri_str == expected or uri_str == f"artifact://{{loop_iter}}/bail"
+    return uri_str == expected or uri_str == "artifact://{loop_iter}/bail"
 
 
 class Exec(Stage):
