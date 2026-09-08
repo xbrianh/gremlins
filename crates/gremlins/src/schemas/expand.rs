@@ -1120,6 +1120,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_serde_yaml_preserves_loop_iter_in_quoted_string() {
+        // Regression: serde_yaml 0.9 (YAML 1.2) must preserve {loop_iter}
+        // inside double-quoted strings.
+        let yaml_str = r#"
+stages:
+  - name: verify
+    type: loop
+    stop_when_exists: "artifact://{loop_iter}/done"
+    body:
+      - name: fix
+        type: agent
+        skip_if_exists: "artifact://{loop_iter}/done"
+"#;
+        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml_str).unwrap();
+        let stages = parsed["stages"].as_sequence().unwrap();
+        let loop_stage = &stages[0];
+        let sw = loop_stage["stop_when_exists"].as_str().unwrap();
+        assert_eq!(
+            sw, "artifact://{loop_iter}/done",
+            "stop_when_exists should preserve {{loop_iter}}"
+        );
+        let body = loop_stage["body"].as_sequence().unwrap();
+        let fix = &body[0];
+        let skip = fix["skip_if_exists"].as_str().unwrap();
+        assert_eq!(
+            skip, "artifact://{loop_iter}/done",
+            "skip_if_exists should preserve {{loop_iter}}"
+        );
+    }
+
+    #[test]
+    fn test_verify_recipe_skip_if_exists_preserves_loop_iter() {
+        let recipe = load_bundled_recipe("verify").unwrap();
+        let stages = recipe["stages"].as_sequence().unwrap();
+        let loop_stage = &stages[0];
+        let body = loop_stage["body"].as_sequence().unwrap();
+        let fix = &body[1];
+        let skip = fix["skip_if_exists"].as_str().unwrap();
+        assert_eq!(
+            skip, "artifact://{loop_iter}/done",
+            "Raw verify recipe skip_if_exists should preserve {{loop_iter}}"
+        );
+    }
+
+    #[test]
     fn test_substitute_recipe_simple() {
         let mut ctx_map = serde_yaml::Mapping::new();
         ctx_map.insert(
