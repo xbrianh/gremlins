@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from _gremlins_core.artifacts import ArtifactRegistry
 from _gremlins_core.clients import RustClient as Client
 from _gremlins_core.config import project_root, scratch_root, state_root
-from _gremlins_core.stages import FRAMEWORK_KEYS
+from _gremlins_core.stages import FRAMEWORK_KEYS, Done
 
 from gremlins.utils.state_file import locked_update
 
@@ -26,8 +26,6 @@ if TYPE_CHECKING:
     from _gremlins_core.schemas import Pipeline
 
     from gremlins.executor.gremlin import Gremlin
-
-from _gremlins_core.stages import Done
 
 from gremlins.protocols import StageProtocol
 
